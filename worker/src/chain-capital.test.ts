@@ -36,6 +36,7 @@ describe("what the node's refusal means", () => {
   it("tells a result-cap apart from a rate limit apart from neither", () => {
     assert.equal(classifyRpcError(new Error("-32000: logs matched by query exceeds limit of 10000")), "too-many-results");
     assert.equal(classifyRpcError(new Error("query returned more than 10000 results")), "too-many-results");
+    assert.equal(classifyRpcError(new Error("query spans 77462366 blocks (0 to 77462365), but only 10000000 are allowed for this request; narrow the block range")), "too-many-results");
     assert.equal(classifyRpcError(new Error("429: Too Many Requests")), "rate-limited");
     assert.equal(classifyRpcError(new Error("rate limit exceeded")), "rate-limited");
     assert.equal(classifyRpcError(new Error("connection reset")), "unknown");
@@ -111,6 +112,23 @@ describe("the fleet sweep", () => {
     });
     assert.ok(s.calls() > 2, "it narrowed rather than giving up");
     assert.equal(out.get(ACCT)!.complete, true, "and the coverage is still complete");
+    assert.equal(out.get(ACCT)!.totals.grossContributionsRaw, "10000000");
+  });
+
+  it("SPLITS Robinhood's block-span cap and keeps full coverage", async () => {
+    const s = spy((from, to) =>
+      to - from + 1n > 10_000_000n
+        ? new Error(`query spans ${to - from + 1n} blocks (${from} to ${to}), but only 10000000 are allowed for this request; narrow the block range`)
+        : from === 0n ? [DEPOSIT] : [],
+    );
+    const out = await scanFleetCapital(s.rpc, {
+      accounts: [ACCT],
+      usdgToken: USDG,
+      fromBlock: 0n,
+      toBlock: 24_000_000n,
+    });
+    assert.ok(s.calls() > 2, "the oversized range was split for both directions");
+    assert.equal(out.get(ACCT)!.complete, true, "every split range was read");
     assert.equal(out.get(ACCT)!.totals.grossContributionsRaw, "10000000");
   });
 
@@ -231,5 +249,57 @@ describe("energy purchases in the fleet sweep", () => {
     assert.equal(cap.totals.grossReservePurchasesRaw, "0");
     assert.equal(cap.totals.tradeLegs, 1);
     assert.equal(cap.totals.netContributionsRaw, "10000000");
+  });
+});
+
+describe("historical capital timestamps", () => {
+  const first = transferLog({ from: OWNER, to: ACCT, amount: 299_000_000n, tx: "0xfund1", block: 100, idx: 0 });
+  const second = transferLog({ from: OWNER, to: ACCT, amount: 299_000_000n, tx: "0xfund2", block: 200, idx: 1 });
+  const sameBlock = transferLog({ from: OWNER, to: ACCT, amount: 5_000_000n, tx: "0xfund3", block: 200, idx: 2 });
+  const makeRpc = (block: (number: string) => unknown) => {
+    const blockReads: string[] = [];
+    const rpc: RpcCall = async (method, params) => {
+      if (method === "eth_getBlockByNumber") {
+        assert.equal(params[1], false);
+        blockReads.push(String(params[0]));
+        return block(String(params[0]));
+      }
+      if (method === "eth_getTransactionReceipt") return {
+        logs: [first, second, sameBlock].filter((l) => l.transactionHash === params[0]),
+      };
+      assert.equal(method, "eth_getLogs");
+      const p = params[0] as { topics: (string | string[] | null)[] };
+      return [first, second, sameBlock].filter((l) => p.topics.every((want, i) =>
+        want === null || (Array.isArray(want) ? want : [want]).includes(l.topics[i]!)));
+    };
+    return { rpc, blockReads };
+  };
+  const args = { accounts: [ACCT], usdgToken: USDG, fromBlock: 0n, toBlock: 1000n };
+
+  it("reads each capital block once and gives equal-sized deposits their own actual times", async () => {
+    const s = makeRpc((number) => ({ number, timestamp: `0x${(Number(BigInt(number)) * 10).toString(16)}` }));
+    const out = await scanFleetCapital(s.rpc, { ...args, includeCapitalTimestamps: true });
+    assert.equal(out.get(ACCT)!.complete, true);
+    assert.deepEqual(out.get(ACCT)!.movements.map((m) => m.at), [1000, 2000, 2000]);
+    assert.deepEqual(s.blockReads, ["0x64", "0xc8"], "a shared block is fetched only once");
+  });
+
+  it("ordinary capital scans remain read-compatible and do not fetch block timestamps", async () => {
+    const s = makeRpc(() => { throw new Error("not requested"); });
+    const out = await scanFleetCapital(s.rpc, args);
+    assert.equal(out.get(ACCT)!.complete, true);
+    assert.ok(out.get(ACCT)!.movements.every((m) => m.at === undefined));
+    assert.deepEqual(s.blockReads, []);
+  });
+
+  it("a missing timestamp or a response for another block makes reconstruction incomplete", async () => {
+    for (const response of [null, { number: "0x64" }, { number: "0x65", timestamp: "0x3e8" },
+      { number: "0x64", timestamp: "0x0" }, { number: "0x64", timestamp: "1000" }]) {
+      const s = makeRpc(() => response);
+      const out = await scanFleetCapital(s.rpc, { ...args, includeCapitalTimestamps: true });
+      assert.equal(out.get(ACCT)!.complete, false);
+      assert.ok(out.get(ACCT)!.notes.some((n) => n.includes("unreadable capital timestamp")));
+      assert.equal(out.get(ACCT)!.movements[0]!.at, undefined, "repair time never substitutes for an unread block");
+    }
   });
 });

@@ -11,7 +11,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const hosted = isHostedMode();
-  if (hosted && !tenantOf(req)) {
+  const tenant = hosted ? tenantOf(req) : null;
+  if (hosted && !tenant) {
     return NextResponse.json({ reply: null, why: "not signed in" }, { status: 401 });
   }
   let body: AgentChatBody;
@@ -20,6 +21,17 @@ export async function POST(req: Request) {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("bad body");
   } catch {
     return NextResponse.json({ reply: null, why: "bad body" }, { status: 400 });
+  }
+  // The shell may still be showing A's confirmed account after another tab
+  // signed in as B. Its state and history belong to A, while this request's
+  // cookie now belongs to B. Refuse before any account, model or history read.
+  if (hosted && (typeof body.expectedTenant !== "string" ||
+    !/^0x[0-9a-fA-F]{40}$/.test(body.expectedTenant) ||
+    body.expectedTenant.toLowerCase() !== tenant)) {
+    return NextResponse.json(
+      { reply: null, why: "session-changed", error: "Your sign-in changed. Reload your agent and try again." },
+      { status: 409 },
+    );
   }
   // THE AGENT'S ENERGY, FROM ITS WORKER — read here, on the server, and never
   // taken from the body. The browser's `state` is the browser's own account of

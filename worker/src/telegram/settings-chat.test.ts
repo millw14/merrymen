@@ -49,8 +49,8 @@ describe("proposeSettingChange — a question, never a change", () => {
 
   it("posting on X is dashboard-only: the warning naming the X account is shown there, never in a chat", () => {
     const text =
-      "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out.";
-    for (const [setting, value] of [["xPosting", "on"], ["post on X", "yes"], ["twitter", "on"], ["tweets", "off"], ["posting on x", "off"], ["posting on x", ""]] as const) {
+      "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out. On the dashboard you can also choose what it posts there: the coins it buys, passing thoughts, and how many a day.";
+    for (const [setting, value] of [["xPosting", "on"], ["post on X", "yes"], ["twitter", "on"], ["tweets", "off"], ["posting on x", "off"], ["posting on x", ""], ["X settings", "change"]] as const) {
       const p = proposeSettingChange(setting, value, ctx);
       assert.deepEqual(p, { kind: "reply", text, button: "dashboard" }, setting);
     }

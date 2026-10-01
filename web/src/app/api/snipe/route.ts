@@ -182,7 +182,7 @@ export async function POST(req: Request) {
       say:
         `Found it — ${t.symbol} at ${shortAddress(t.address)}. I cannot buy it yet: the permission ` +
         `you signed names the tokens I may touch, and this one is not on it. Add it to your ` +
-        `watchlist and re-sign — one signature, free, nothing moves on-chain — and I can go after ` +
+        `watchlist and review renewal at /grant; revocation requires network fees. Once the replacement is active, I can evaluate ` +
         `it on the next tick.`,
     });
   }

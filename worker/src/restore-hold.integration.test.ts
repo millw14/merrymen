@@ -910,20 +910,26 @@ describe("a held tenant is stood down like any other", () => {
     });
   });
 
-  it("A HOLD PROCESS THAT GOES WHEN IT IS TOLD IS STOOD DOWN AS BEFORE: NO ALERT, AND THE TENANT FREE A PASS LATER", async () => {
+  it("a responsive hold exits before its replacement can take the lease, without an alert", async () => {
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
       const hold = holds()[0]!;
+      let oldExited = false;
+      hold.once("exit", () => { oldExited = true; });
       loseLeaseForTest(TENANT);
       mock.timers.tick(15_000);
       await reconcile();
-      await waitFor(() => !isHeldForTest(TENANT), "its exit is seen");
+      // The early lease-loss check can observe this exit while the same pass
+      // awaits its roster, then safely acquire a replacement. The invariant is
+      // exit-before-replacement, not an empty global held map between passes.
+      await waitFor(() => oldExited, "the old process exit is seen");
       assert.equal(hold.signals[0], "SIGTERM");
       mock.timers.tick(15_000);
       await reconcile();
       await settle();
-      assert.equal(holds().length, 2, `the next pass takes the lease again and holds it afresh:\n${said.join("\n")}`);
+      assert.equal(holds().length, 2, `a fresh hold takes the lease once its predecessor has exited:\n${said.join("\n")}`);
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "hold-spawn"], "two hold processes never overlap");
       assert.ok(!said.some((l) => l.includes("[alert]") && l.includes(`pid ${hold.pid}`)), said.join("\n"));
     });
   });

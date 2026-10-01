@@ -234,9 +234,9 @@ export function preflight(input: PreflightInput): Check[] {
       title: "this key was signed before a wall fix and CANNOT trade",
       detail:
         "It seals a rate-limit policy whose contract has no code on this chain, so Kernel has " +
-        "nothing to call and every operation fails validation. A signature is frozen: no deploy, " +
-        "no funding and no setting fixes it. Re-signing is free and instant — open the wallet page " +
-        "and use 're-sign this key'. Your funds are untouched, and Paper still works.",
+        "nothing to call and every operation fails validation. A signature is frozen: deployment, " +
+        "funding or settings alone cannot fix it. Open the wallet page to renew. Revoking the old " +
+        "permissions requires network fees before you sign the replacement. Paper still works.",
     });
   }
 

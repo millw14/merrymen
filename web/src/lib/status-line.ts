@@ -228,7 +228,7 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   if (a.testnet) {
     return {
       headline: `${name} is on the testnet, so none of this is real money.`,
-      next: "Re-sign its key for Robinhood Chain from the wallet page when you are ready — it is free and takes one signature.",
+      next: "Re-sign its key for Robinhood Chain from the wallet page when you are ready — revoking the old permissions requires network fees.",
       tone: "waiting",
     };
   }
@@ -246,7 +246,7 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   // ── Live ─────────────────────────────────────────────────────────────────
   const expiring = a.daysLeft !== null && a.daysLeft <= 2;
   const expiryNote = expiring
-    ? ` Its key expires in ${a.daysLeft === 0 ? "under a day" : `${a.daysLeft} day${a.daysLeft === 1 ? "" : "s"}`} — renew it on the wallet page, it's free.`
+    ? ` Its key expires in ${a.daysLeft === 0 ? "under a day" : `${a.daysLeft} day${a.daysLeft === 1 ? "" : "s"}`} — review renewal on the wallet page; revocation requires network fees.`
     : "";
 
   if (a.positionCount > 0) {

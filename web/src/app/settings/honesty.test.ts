@@ -250,7 +250,7 @@ describe("every control survives the restyle", () => {
     // unguarded they would write whatever the form held for every owner who
     // saved anything — silently taking a bot out of its groups, or switching
     // coin-looking off, by visiting a page.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 26);
+    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 26);
   });
 });
 
@@ -356,8 +356,9 @@ describe("nothing is left behind after a save", () => {
     const save = code.slice(code.indexOf("async function save("));
     const saved = save.indexOf('setStatus("Changes saved")');
     const refetch = save.indexOf('const fresh = await fetch("/api/settings")');
-    assert.ok(saved > 0 && refetch > saved, "the post-save block was not found");
-    const reset = save.slice(saved, refetch);
+    const resetEnd = save.indexOf("void loadTelegram();", saved);
+    assert.ok(refetch > 0 && saved > refetch && resetEnd > saved, "saved values must be read back before clearing the draft");
+    const reset = save.slice(saved, resetEnd);
     const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
     assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
     const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));

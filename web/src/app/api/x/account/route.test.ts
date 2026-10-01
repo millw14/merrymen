@@ -127,6 +127,8 @@ describe("GET", () => {
       xUserId: null,
       status: null,
       postingEnabled: false,
+      prefs: { buys: true, casual: true, perDay: null },
+      perDayMax: 3,
       replyEnabled: false,
       repliesAvailable: false,
       upcoming: [],
@@ -307,6 +309,82 @@ describe("disable", () => {
     assert.deepEqual(await read(res), { ok: true, postingEnabled: false });
     assert.equal((await getAccount(w.db, OWNER_A))?.posting, false);
     assert.equal(statusOf(waiting), "cancelled");
+  });
+});
+
+describe("prefs — what it posts", () => {
+  it("reads back the defaults: coins it buys and passing thoughts on, the server's number a day", async () => {
+    await connect(OWNER_A);
+    const body = await read<XAccountBody>(await get(OWNER_A));
+    assert.deepEqual(body.prefs, { buys: true, casual: true, perDay: null });
+    assert.equal(body.perDayMax, 3);
+  });
+
+  it("changes only the choices given, and reads them back", async () => {
+    await connect(OWNER_A);
+    assert.deepEqual(await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, casual: false })), {
+      ok: true,
+      prefs: { buys: true, casual: false, perDay: null },
+    });
+    assert.deepEqual(await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, perDay: 1 })), {
+      ok: true,
+      prefs: { buys: true, casual: false, perDay: 1 },
+    });
+    assert.deepEqual((await getAccount(w.db, OWNER_A))?.prefs, { buys: true, casual: false, perDay: 1 });
+    assert.deepEqual((await read<XAccountBody>(await get(OWNER_A))).prefs, { buys: true, casual: false, perDay: 1 });
+    // null goes back to the server's number.
+    assert.deepEqual((await read<{ prefs: unknown }>(await post(OWNER_A, { action: "prefs", owner: OWNER_A, perDay: null }))).prefs, {
+      buys: true,
+      casual: false,
+      perDay: null,
+    });
+  });
+
+  it("a kind turned off takes its drafts out of Coming up, and leaves the other kinds' alone", async () => {
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
+    const buy = await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d1" });
+    const casual = await draft(OWNER_A);
+    const intro = await draft(OWNER_A, { kind: "intro" });
+    await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
+    assert.equal(statusOf(buy), "cancelled");
+    assert.equal((w.raw.prepare("SELECT reason FROM xpost_posts WHERE id = ?").get(buy) as { reason: string }).reason, "kind-off");
+    assert.equal(statusOf(casual), "scheduled");
+    assert.equal(statusOf(intro), "scheduled", "the hello is not a kind the owner turns off");
+    assert.equal((await getAccount(w.db, OWNER_A))?.posting, true, "posting itself stays on");
+  });
+
+  it("Coming up never lists a kind turned off, even a draft planned as it changed", async () => {
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
+    await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
+    // Planned by a pass that read the account before the change landed.
+    await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d9", body: "grabbed some frog on paper" });
+    await draft(OWNER_A, { body: "a thought that stays" });
+    const body = await read<XAccountBody>(await get(OWNER_A));
+    assert.deepEqual(body.upcoming.map((p) => p.body), ["a thought that stays"]);
+  });
+
+  it("works without the X app, like the off switch", async () => {
+    await connect(OWNER_A);
+    delete w.env.MERRYMEN_X_CLIENT_ID;
+    assert.equal((await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false })).status, 200);
+  });
+
+  it("refuses with nothing connected, a choice that is not one, a number past the most, and an empty change", async () => {
+    assert.equal((await read<{ error: string }>(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }), 409)).error, X_COPY.notConnected);
+    await connect(OWNER_A);
+    for (const bad of [{ buys: "no" }, { casual: 0 }, { perDay: 0 }, { perDay: 4 }, { perDay: 1.5 }, { perDay: "2" }, {}]) {
+      assert.equal((await post(OWNER_A, { action: "prefs", owner: OWNER_A, ...bad })).status, 400, JSON.stringify(bad));
+    }
+    assert.deepEqual((await getAccount(w.db, OWNER_A))?.prefs, { buys: true, casual: true, perDay: null }, "nothing changed");
+  });
+
+  it("another owner's choices are theirs alone", async () => {
+    await connect(OWNER_A);
+    await connect(OWNER_B, { id: "999", username: "other_one" });
+    await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, casual: false }));
+    assert.deepEqual((await getAccount(w.db, OWNER_B))?.prefs, { buys: true, casual: true, perDay: null });
   });
 });
 

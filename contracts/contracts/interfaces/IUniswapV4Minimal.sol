@@ -76,8 +76,10 @@ interface IUnlockCallback {
     function unlockCallback(bytes calldata data) external returns (bytes memory);
 }
 
-/// @notice Only the one ERC-20 call this contract makes. Return value is
-/// deliberately declared — see V4SelfSwap._pull for how a missing one is handled.
+/// @notice ERC-20 calls used to settle input and verify actual output delivery.
+/// transferFrom's return value is deliberately declared — see V4SelfSwap._pull
+/// for how a missing one is handled.
 interface IERC20Minimal {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
 }

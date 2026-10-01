@@ -66,6 +66,7 @@ import {
   profileShown,
   realCashOf,
 } from "./account-read";
+import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
@@ -100,19 +101,20 @@ export function App() {
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
   const setScreen = (next: Screen) => router.push(pathForScreen(next));
   const [account, setAccount] = useState<AccountState|null>(null);
+  /** Last complete account read, used to spot a cookie changed in another tab. */
+  const confirmedSession = useRef<AccountState["session"] | null>(null);
   /**
    * DID THE LAST ACCOUNT READ FAIL? `account` alone cannot say: it is null both
    * before the first read answers and after it failed, and the screens rendered
    * "Loading your account…" for both — for ever, after a failure.
    */
   const [accountFailed, setAccountFailed] = useState(false);
-  /** Bumped by sign-out, which starts every clock again from nothing — see resetLive. */
+  /** Bumped by a session transition, which starts every clock again from nothing. */
   const [epoch, setEpoch] = useState(0);
   /**
-   * EVERYTHING, FROM NOTHING — for a sign-out. The reads in flight belong to
-   * the owner leaving, so restarting the clocks (useShellClocks, below, is
-   * keyed on `epoch`) drops their answers rather than letting one land after
-   * the reset.
+   * EVERYTHING, FROM NOTHING — after the owner signs in or out. The clocks
+   * restart on this epoch; invalidateOwnerView below stops the old reads before
+   * React has a chance to run the effect cleanup.
    */
   const resetLive = () => {
     setSources(seedSources());
@@ -166,6 +168,7 @@ export function App() {
    * has to be deleted.
    */
   const chatKey = chatKeyFor(account?.session ?? null);
+  const ownerFeedReady = feedMatchesAccount(account?.session ?? null, live.feedTenant);
   /**
    * THE CHAT, MOUNTED ONCE, HERE — see chat-controller.ts.
    *
@@ -181,7 +184,7 @@ export function App() {
   const chat = useChatController({
     chatKey,
     open: (screen.kind === "tab" && screen.tab === "agent") || (desktop && chatDocked),
-    moves: chatTape({ agentExists: account?.status.exists, read: live.reads.mine, moves: live.mine?.moves }),
+    moves: chatTape({ agentExists: account?.status.exists, read: ownerFeedReady ? live.reads.mine : "unreadable", moves: ownerFeedReady ? live.mine?.moves : undefined }),
     // The account and the owner's book, read again now: the same two reads
     // sign-in and a new agent ask for (refreshAccount, below).
     onOutcome: () => refreshAccount(),
@@ -235,17 +238,41 @@ export function App() {
         const first = firstAccount;
         firstAccount = false;
         try {
-          const [session,status]=await Promise.all([requestJson<AccountState["session"]>("/api/auth/session"),requestJson<AccountState["status"]>("/api/grants")]);
+          const result = await readAccountForSession(
+            confirmedSession.current,
+            () => requestJson<AccountState["session"]>("/api/auth/session"),
+            () => requestJson<AccountState["status"]>("/api/grants"),
+          );
           if(!alive()) return;
+          if (result.kind === "changed") {
+            // The cookie changed elsewhere. The old tenant's account and book
+            // cannot stay visible while the new tenant's grants read fails.
+            invalidateOwnerView();
+            return;
+          }
+          if (result.kind === "unverified") {
+            // With no session answer, the owner of this browser is unknown.
+            // Fail closed once, then let the new clock retry with its backoff.
+            if (confirmedSession.current) {
+              invalidateOwnerView();
+              setAccountFailed(true);
+              return;
+            }
+            throw result.error;
+          }
+          if (result.kind === "failed") throw result.error;
+          const { session, status } = result.account;
+          confirmedSession.current = session;
           setAccount({session,status});
           setAccountFailed(false);
           // Not on the first pass: there is no conversation of this session's to
           // clear yet, and a draft typed while the page loaded is the owner's.
           if(!first && session.hosted && !session.address){setTurns([]);setChatDraft("");}
         } catch (error) {
+          if (!alive()) return;
           // The reader gets one plain sentence (LoadFailure); the cause goes here.
           console.warn("[merrymen] account read failed:", error);
-          if (alive()) setAccountFailed(true);
+          setAccountFailed(true);
           throw error;
         }
       },
@@ -258,6 +285,22 @@ export function App() {
   const accountBusy = clockShell.shell.accountBusy;
   /** The account and the owner's book, again, now — see ShellClocksHandle.refreshAccount. */
   const refreshAccount = clockShell.refreshAccount;
+  /**
+   * A successful sign-in makes the previous account answer untrustworthy. It
+   * may have been a signed-out `{exists:false}` result, and merely retrying
+   * leaves that result and the previous owner's book on screen if grants fails.
+   * Stop old requests synchronously, then show loading until this session and
+   * its grant have both been read. The same reset is used for sign-out.
+   */
+  const invalidateOwnerView = () => {
+    clockShell.invalidate();
+    confirmedSession.current = null;
+    setAccount(null);
+    setAccountFailed(false);
+    resetLive();
+    setTurns([]);
+    setChatDraft("");
+  };
 
   /**
    * A REAL-MONEY TRADE LANDING, SAID — see live-news.ts.
@@ -396,7 +439,7 @@ export function App() {
         ? account.status.grant.grantedAt > account.status.workerAliveAt
         : false,
   });
-  const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy} : null;
+  const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
    *
@@ -420,9 +463,10 @@ export function App() {
   // than a placeholder every surface then has to special-case.
   const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
-  // THE BOOK'S OWN READ, as it stands. It is on its own clock now, so "unread"
-  // means its first answer has not come back and nothing else — see live-clocks.ts.
-  const portfolioRead = live.reads.mine;
+  // The grants read can finish before the first feed read. In that window the
+  // feed has no tenant yet because it has no answer; keep its loading state.
+  // Once it answers, a wrong-tenant feed is never shown as this owner's book.
+  const portfolioRead = accountFeedRead(account?.session ?? null, live.feedTenant, live.reads.mine);
   /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
   const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
 
@@ -483,10 +527,10 @@ export function App() {
             openScreen(next);
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
-        {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
+        {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
+        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
-        {screen.kind === "grant" && <Wallet/>}
+        {screen.kind === "grant" && <Wallet key={epoch}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
             tokens={live.tokens}
@@ -517,7 +561,7 @@ export function App() {
             onDesk={() => goTab("agent")}
           />
         )}
-        {screen.kind === "tab" && screen.tab === "agent" && (
+        {screen.kind === "tab" && screen.tab === "agent" && mine && (
           <Agent
             mine={mine}
             tokens={live.tokens}
@@ -580,10 +624,7 @@ export function App() {
                 </span>
                 <SignOut
                   after={() => {
-                    resetLive();
-                    setAccount(null);
-                    setTurns([]);
-                    setChatDraft("");
+                    invalidateOwnerView();
                   }}
                 />
               </>
@@ -713,7 +754,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (

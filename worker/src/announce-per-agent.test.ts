@@ -25,36 +25,49 @@ const A = "0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5";
 const B = "0x69ae6200000000000000000000000000000000b2";
 const C = "0x9b9e7c00000000000000000000000000000000c3";
 const D = "0xdddddd00000000000000000000000000000000d4";
+const botId = (tenant: string) => String(Number.parseInt(tenant.slice(2, 4), 16));
+const chats: [string, number][] = [[A, 1001], [B, 1002], [C, 1003], [D, 1004]];
 
 /** A store with four linked tenants, all eligible. */
 const store = (): SettingsReader => ({
   listTenants: async () => [A, B, C, D] as `0x${string}`[],
   get: async (t) => ({
-    telegramBotToken: `SECRET-TOKEN-FOR-${t.slice(0, 8)}`,
+    telegramBotToken: `${botId(t)}:SECRET-TOKEN-FOR-${t.slice(0, 8)}`,
     telegramEnabled: true,
     telegramNotifyEnabled: true,
-    telegramAllowlist: [111],
+    telegramAllowlist: [chats.find(([tenant]) => tenant === t)![1]],
   }),
 });
 
 /** Postgres with a chat for each, and a blocker + name for two of them. */
 function db(sent: { announce_id: string; tenant: string }[] = []): PgClientLike & { writes: unknown[][] } {
   const writes: unknown[][] = [];
+  const attempts = new Set<string>();
   return {
     writes,
     async query(sql: string, params?: unknown[]) {
+      if (/^INSERT INTO announcement_attempts/i.test(sql)) {
+        const tenant = String(params?.[1]);
+        if (attempts.has(tenant) || sent.some((s) => s.announce_id === params?.[0] && s.tenant === tenant)) return { rows: [] };
+        attempts.add(tenant);
+        return { rows: [{ tenant }] };
+      }
+      if (/^SELECT tenant FROM announcement_attempts/i.test(sql)) {
+        return { rows: [...attempts].map((tenant) => ({ tenant })) };
+      }
+      if (/^SELECT bot_id, tenant FROM telegram_bot_claims/i.test(sql)) {
+        return { rows: chats.map(([tenant]) => ({ bot_id: botId(tenant), tenant })) };
+      }
+      if (sql.includes("AS bot_owned")) {
+        const chat = chats.some(([tenant, owner_id]) =>
+          tenant === params?.[1] && owner_id === params?.[2] && botId(tenant) === params?.[0]);
+        return { rows: [{ bot_owned: chat, chat_current: chat }] };
+      }
       if (/FROM announcements/i.test(sql)) {
         return { rows: sent.filter((s) => s.announce_id === params?.[0]).map((s) => ({ tenant: s.tenant })) };
       }
-      if (/FROM tenant_telegram/i.test(sql)) {
-        return {
-          rows: [
-            { tenant: A, owner_id: 1001 },
-            { tenant: B, owner_id: 1002 },
-            { tenant: C, owner_id: 1003 },
-            { tenant: D, owner_id: 1004 },
-          ],
-        };
+      if (/^SELECT tenant, owner_id, bot_id FROM tenant_telegram/i.test(sql)) {
+        return { rows: chats.map(([tenant, owner_id]) => ({ tenant, owner_id, bot_id: botId(tenant) })) };
       }
       if (/FROM grants/i.test(sql)) {
         return {
@@ -65,7 +78,7 @@ function db(sent: { announce_id: string; tenant: string }[] = []): PgClientLike 
           ],
         };
       }
-      if (/INSERT INTO announcements/i.test(sql)) writes.push(params ?? []);
+      if (/^INSERT INTO announcements/i.test(sql)) writes.push(params ?? []);
       return { rows: [] };
     },
   };

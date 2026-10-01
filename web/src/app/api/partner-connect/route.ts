@@ -16,9 +16,16 @@ export async function POST(req: Request) {
     const origin = req.headers.get("origin");
     if (origin && origin !== partnerAppOrigin()) throw new PartnerError(403, "forbidden", "Open this page on Merrymen to connect your agent");
     const body = objectBody(await readPartnerBody(req, 4096));
-    onlyFields(body, ["action", "token", "id"]);
-    const store = getPartnerStore();
+    onlyFields(body, ["action", "token", "id", "expectedTenant"]);
     const tenant = tenantOf(req);
+    if (body.action === "connect") {
+      if (!tenant) throw new PartnerError(401, "unauthorized", "Sign in before connecting your Merryman");
+      if (typeof body.expectedTenant !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(body.expectedTenant) ||
+          body.expectedTenant.toLowerCase() !== tenant.toLowerCase()) {
+        throw new PartnerError(409, "session_changed", "Your sign-in changed. Reload your account before connecting this app.");
+      }
+    }
+    const store = getPartnerStore();
     if (body.action === "disconnect") {
       if (!tenant) throw new PartnerError(401, "unauthorized", "Sign in first");
       if (typeof body.id !== "string" || !await store.revokeByTenant(body.id, tenant)) throw new PartnerError(404, "not_found", "Connection not found");

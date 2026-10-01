@@ -530,6 +530,21 @@ export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null
   };
 }
 
+/** Current chat identity for a one-target operator notice. No updates are read. */
+export async function getChat(
+  opts: TelegramOpts,
+  chatId: number,
+): Promise<{ chat: { id: number; title: string; type: TgChatType; isForum: boolean } | null; reason?: string }> {
+  const { result, reason } = await call(opts, "getChat", { chat_id: chatId });
+  if (!result || typeof result !== "object") return { chat: null, reason: reason ?? "getChat returned no chat" };
+  const r = result as { id?: unknown; title?: unknown; type?: unknown; is_forum?: unknown };
+  const type = chatTypeOf(r.type);
+  if (!Number.isSafeInteger(r.id) || typeof r.title !== "string" || !type) {
+    return { chat: null, reason: "getChat returned invalid chat identity" };
+  }
+  return { chat: { id: r.id as number, title: r.title, type, isForum: r.is_forum === true } };
+}
+
 /**
  * The update kinds the bot asks for. Telegram keeps this list server-side
  * until it is changed, so anything left out here is never delivered at all.

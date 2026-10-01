@@ -258,8 +258,8 @@ export const ENERGY_NOT_MAINNET =
 
 /** A mainnet grant signed without the energy route (GRANT_ENERGY). */
 export const ENERGY_RESIGN =
-  "My signed key has no route to buy my own energy yet — re-sign at /grant (it's free, and nothing moves " +
-  `on-chain). ${WAY_ROUND}`;
+  "My signed key has no route to buy my own energy yet — re-sign at /grant (revoking the old permissions requires network fees). " +
+  `${WAY_ROUND}`;
 
 /** Not trading live: the energy buy spends real USDG only on the live rail. `blocker` is liveBlockerText's clause. */
 export function energyNeedsLiveLine(blocker: string | null): string {

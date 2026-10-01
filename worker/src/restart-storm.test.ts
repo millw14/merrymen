@@ -55,12 +55,13 @@ describe("there is exactly one restart policy", () => {
 
   it("and so does an exit — of a child that is still its own", () => {
     const src = orch();
-    assert.match(src, /scheduleRestart\(tenant, freshRestarts, `exit \$\{code\}`\)/);
+    assert.match(src, /scheduleRestart\(tenant, freshRestarts, restartReason\)/);
     // An exit whose entry is gone or replaced was stood down by somebody who
     // already decided (stop-the-loop.test.ts, A2).
-    const exitAt = src.indexOf('proc.on("exit"');
-    const handler = src.slice(exitAt, src.indexOf("});", exitAt));
+    const stoppedAt = src.indexOf("const childStopped = (", src.indexOf("async function spawnChild("));
+    const handler = src.slice(stoppedAt, src.indexOf('proc.on("error"', stoppedAt));
     const standAside = handler.indexOf("if (!ours) {");
+    assert.match(src, /proc\.on\("exit", \(code, signal\) => childStopped\(`exited \(\$\{code\}\)`, `exit \$\{code\}`/);
     assert.ok(
       standAside > 0 && handler.indexOf("return;", standAside) < handler.indexOf("scheduleRestart(tenant, freshRestarts"),
       "only its own child's exit reaches the policy",
@@ -240,7 +241,19 @@ describe("a tenant being spawned is not a tenant that isn't running", () => {
     const late = calls(spawn, "lateSpawnRefusal")[0];
     const started = calls(spawn, "spawn")[0];
     assert.ok(late && started, "spawnChild asks again, and spawns");
-    for (const a of all(spawn, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "after every await");
+    const lateAwaits = all(spawn, ts.isAwaitExpression).filter((a) => a.getEnd() > late.getStart());
+    const capRefusal = all(spawn, ts.isIfStatement).find(
+      (node): node is ts.IfStatement => ts.isIfStatement(node) && node.expression.getText() === "localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES",
+    );
+    assert.ok(capRefusal, "the only post-guard await belongs to the process-cap refusal");
+    assert.deepEqual(lateAwaits.map((a) => a.getText()), ["await releaseLease(tenant)"], "no await that can reach spawn follows the final guard");
+    const release = lateAwaits[0];
+    assert.ok(release);
+    assert.ok(
+      release.getStart() > capRefusal.thenStatement.getStart() && release.getEnd() < capRefusal.thenStatement.getEnd() &&
+      /return;/.test(capRefusal.thenStatement.getText()),
+      "the lease release returns instead of continuing to spawn",
+    );
     assert.ok(late.getEnd() < started.getStart(), "and before the worker starts");
     const refusal = fn("lateSpawnRefusal").body!.getText();
     for (const asked of ["stopping", "haltRequested()", "leases.get(tenant) !== lease", "lease.healthy()", "killRequested(childHome(tenant))"]) {
@@ -275,12 +288,12 @@ describe("a stood-down tenant's home goes with it", () => {
   const AST = ts.createSourceFile("orchestrator.ts", orch(), ts.ScriptTarget.Latest, true);
   const rec = AST.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === "reconcile")!;
 
-  it("RECONCILE WALKS THE HOMES ON DISK, AND SKIPS ONLY THE WANTED, THE RUNNING AND THE PREPARING", () => {
+  it("RECONCILE WALKS THE HOMES ON DISK, AND KEEPS HOMES WITH AN EXIT OR EXPIRY DRAIN", () => {
     const text = rec.body!.getText();
     const walk = text.indexOf("for (const tenant of childHomeTenants())");
     assert.ok(walk > 0, "the homes on disk, not the running set");
     const loop = text.slice(walk);
-    assert.match(loop, /if \(wanted\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\)\) continue;/);
+    assert.match(loop, /if \(wanted\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\) \|\| retiringExpired\.has\(tenant\) \|\| exitingChildren\.has\(tenant\) \|\| holders\.has\(tenant\)\) continue;/);
     // Its restart is cancelled before anything awaits, so no timer starts a
     // spawn in the home while it is being read and wiped.
     const cancel = loop.indexOf("cancelRestart(tenant);");
@@ -288,7 +301,7 @@ describe("a stood-down tenant's home goes with it", () => {
     const wipe = loop.indexOf("rmSync(childHome(tenant)");
     assert.ok(cancel > 0 && cancel < firstAwait && firstAwait < wipe, "cancel, carry the ledger up, then wipe");
     // Asked again after the await: a spawn that started meanwhile keeps its home.
-    const recheck = loop.indexOf("if (children.has(tenant) || spawning.has(tenant)) continue;", firstAwait);
+    const recheck = loop.indexOf("if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;", firstAwait);
     assert.ok(recheck > firstAwait && recheck < wipe, "and it looks again before the wipe");
   });
 

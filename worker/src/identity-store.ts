@@ -308,8 +308,43 @@ function isUniqueViolation(e: unknown): boolean {
   return code === "23505" || code === 23505;
 }
 
+/** Only this schema's slug constraint makes minting a different slug safe. */
+function isSlugCollision(e: unknown): boolean {
+  return isUniqueViolation(e) &&
+    (e as { constraint?: unknown } | null)?.constraint === "agent_identity_slug_key";
+}
+
 interface PgClientLike {
   query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
+  end?(): Promise<void>;
+  on?(event: "error" | "end", cb: () => void): void;
+}
+
+/** A socket error must not throw from its event handler while we clean up. */
+async function closePgIdentity(c: PgClientLike): Promise<void> {
+  try {
+    await c.end?.();
+  } catch {
+    // The failed operation still rejects; cleanup is best effort.
+  }
+}
+
+/** Opens an identity-store connection. Tests supply a stand-in for failures. */
+export type PgIdentityConnect = (url: string) => Promise<PgClientLike>;
+
+async function connectPgIdentity(url: string): Promise<PgClientLike> {
+  // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
+  const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
+    Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void> };
+  };
+  const c = new pg.Client({ connectionString: url });
+  try {
+    await c.connect();
+    return c;
+  } catch (e) {
+    await closePgIdentity(c);
+    throw e;
+  }
 }
 
 interface Row {
@@ -411,10 +446,12 @@ async function backfillClaims(c: PgClientLike): Promise<ClaimState> {
       if (acc === null || acc === undefined) continue;
       observed.push({ account: String(acc), tenant: String(r.tenant ?? ""), source: "installed-grant" });
     }
-  } catch {
+  } catch (e) {
     // The grants table lives in the same database but is owned by another
     // store, and a deployment that has not created it yet is a fresh install
-    // with nothing to backfill.
+    // with nothing to backfill. A connection or permission failure cannot
+    // prove there are no grant claims, so it must refuse this backfill.
+    if ((e as { code?: unknown } | null)?.code !== "42P01") throw e;
   }
 
   const { rows: claimRows } = await c.query(`SELECT smart_account, tenant FROM agent_account`);
@@ -455,72 +492,112 @@ type ClaimState = ClaimPlan;
 
 export class PgIdentityStore implements IdentityStore {
   private ready: Promise<PgClientLike> | null = null;
+  /** A pg.Client has one transaction state. Keep every operation off it while
+   * another operation owns a BEGIN/COMMIT span, including ordinary reads. */
+  private operationTail: Promise<void> = Promise.resolve();
   /** Set by the backfill. `ok: false` makes every new claim refuse. */
   private claims: ClaimState = { ok: true, insert: [], alreadyHeld: 0 };
-  constructor(private url: string) {}
+  constructor(private url: string, private connect: PgIdentityConnect = connectPgIdentity) {}
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
-      this.ready = (async () => {
-        // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
-        const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
-          Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void> };
+      const started = (this.ready = (async () => {
+        const c = await this.connect(this.url);
+        let alive = true;
+        const lost = () => {
+          alive = false;
+          if (this.ready === started) this.ready = null;
         };
-        const c = new pg.Client({ connectionString: this.url });
-        await c.connect();
-        await c.query(
-          `CREATE TABLE IF NOT EXISTS agent_identity (
-             tenant TEXT PRIMARY KEY,
-             slug TEXT NOT NULL UNIQUE,
-             accounts JSONB NOT NULL DEFAULT '[]'::jsonb,
-             privy_did TEXT UNIQUE,
-             provider TEXT,
-             subject TEXT,
-             handle TEXT,
-             display_name TEXT,
-             avatar_url TEXT,
-             created_at BIGINT NOT NULL,
-             updated_at BIGINT NOT NULL
-           )`,
-        );
-        await c.query(`CREATE INDEX IF NOT EXISTS agent_identity_slug ON agent_identity (slug)`);
-        // Uniqueness on the PROVIDER'S OWN id, never on the handle — a handle
-        // can be released and re-registered by somebody else.
-        await c.query(
-          `CREATE UNIQUE INDEX IF NOT EXISTS agent_identity_subject
-             ON agent_identity (provider, subject) WHERE provider IS NOT NULL`,
-        );
-        // AN ACCOUNT BELONGS TO ONE IDENTITY, EVER. See account-claim.ts for
-        // why this is a table rather than a unique index over the newest entry
-        // in the history array.
-        await c.query(
-          `CREATE TABLE IF NOT EXISTS agent_account (
-             smart_account TEXT PRIMARY KEY,
-             tenant TEXT NOT NULL,
-             claimed_at BIGINT NOT NULL
-           )`,
-        );
-        await c.query(`CREATE INDEX IF NOT EXISTS agent_account_tenant ON agent_account (tenant)`);
-        this.claims = await backfillClaims(c);
-        if (this.claims.ok === false) {
-          // LOUD, AND READS STAY UP. A public page must still render; what must
-          // not happen is a new claim landing on top of a dispute nobody has
-          // resolved. `ensure` refuses while this is set.
-          console.error(`[identity] ACCOUNT CLAIM CONFLICT — ${this.claims.why}`);
-          for (const c2 of this.claims.conflicts) {
-            console.error(`[identity]   ${c2.account} claimed by ${c2.tenants.join(" and ")} (${c2.sources.join(", ")})`);
+        c.on?.("error", () => {
+          lost();
+          void closePgIdentity(c);
+        });
+        c.on?.("end", lost);
+        try {
+          await c.query(
+            `CREATE TABLE IF NOT EXISTS agent_identity (
+               tenant TEXT PRIMARY KEY,
+               slug TEXT NOT NULL UNIQUE,
+               accounts JSONB NOT NULL DEFAULT '[]'::jsonb,
+               privy_did TEXT UNIQUE,
+               provider TEXT,
+               subject TEXT,
+               handle TEXT,
+               display_name TEXT,
+               avatar_url TEXT,
+               created_at BIGINT NOT NULL,
+               updated_at BIGINT NOT NULL
+             )`,
+          );
+          await c.query(`CREATE INDEX IF NOT EXISTS agent_identity_slug ON agent_identity (slug)`);
+          // Uniqueness on the PROVIDER'S OWN id, never on the handle — a handle
+          // can be released and re-registered by somebody else.
+          await c.query(
+            `CREATE UNIQUE INDEX IF NOT EXISTS agent_identity_subject
+               ON agent_identity (provider, subject) WHERE provider IS NOT NULL`,
+          );
+          // AN ACCOUNT BELONGS TO ONE IDENTITY, EVER. See account-claim.ts for
+          // why this is a table rather than a unique index over the newest entry
+          // in the history array.
+          await c.query(
+            `CREATE TABLE IF NOT EXISTS agent_account (
+               smart_account TEXT PRIMARY KEY,
+               tenant TEXT NOT NULL,
+               claimed_at BIGINT NOT NULL
+             )`,
+          );
+          await c.query(`CREATE INDEX IF NOT EXISTS agent_account_tenant ON agent_account (tenant)`);
+          this.claims = await backfillClaims(c);
+          if (!alive) throw new Error("identity store connection ended during setup");
+          if (this.claims.ok === false) {
+            // LOUD, AND READS STAY UP. A public page must still render; what must
+            // not happen is a new claim landing on top of a dispute nobody has
+            // resolved. `ensure` refuses while this is set.
+            console.error(`[identity] ACCOUNT CLAIM CONFLICT — ${this.claims.why}`);
+            for (const c2 of this.claims.conflicts) {
+              console.error(`[identity]   ${c2.account} claimed by ${c2.tenants.join(" and ")} (${c2.sources.join(", ")})`);
+            }
           }
+          return c;
+        } catch (e) {
+          // Do not leak a connected client when schema setup or backfill fails.
+          await closePgIdentity(c);
+          throw e;
         }
-        return c;
-      })();
+      })());
+      // A refused connection or failed schema setup can recover on the next
+      // independent call. The failed operation itself is never replayed.
+      started.catch(() => {
+        if (this.ready === started) this.ready = null;
+      });
     }
     return this.ready;
   }
+  private async withClient<T>(operation: (c: PgClientLike) => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => { release = resolve; });
+    const prior = this.operationTail;
+    this.operationTail = turn;
+    await prior;
+    try {
+      return await operation(await this.client());
+    } finally {
+      release();
+    }
+  }
+  /** A failed ROLLBACK leaves transaction state unknown. Retire that session
+   * before another owner's operation may use it. Never retry the failed write. */
+  private async rollback(c: PgClientLike): Promise<boolean> {
+    try {
+      await c.query("ROLLBACK");
+      return true;
+    } catch {
+      this.ready = null;
+      await closePgIdentity(c);
+      return false;
+    }
+  }
   async get(tenant: `0x${string}`): Promise<PublicIdentity | null> {
-    const c = await this.client();
-    const { rows } = await c.query(`SELECT * FROM agent_identity WHERE tenant = $1`, [
-      tenant.toLowerCase(),
-    ]);
-    return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
+    return this.withClient((c) => this.getWithin(c, tenant));
   }
   /**
    * Claim the account and update the identity IN ONE TRANSACTION.
@@ -538,7 +615,9 @@ export class PgIdentityStore implements IdentityStore {
    * silently overwrites.
    */
   async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
-    const c = await this.client();
+    return this.withClient((c) => this.ensureWithin(c, tenant, account));
+  }
+  private async ensureWithin(c: PgClientLike, tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
     const t = tenant.toLowerCase();
     const a = account.toLowerCase();
     if (this.claims.ok === false) {
@@ -555,14 +634,7 @@ export class PgIdentityStore implements IdentityStore {
          VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
         [a, t, now()],
       );
-      const { rows: held } = await c.query(`SELECT tenant FROM agent_account WHERE smart_account = $1`, [a]);
-      const holder = held[0] ? String(held[0].tenant).toLowerCase() : null;
-      if (holder && holder !== t) {
-        // NOT AN ERROR TO SWALLOW. Every ledger table keys on this address, so
-        // letting a second tenant through would merge two books.
-        await c.query("ROLLBACK");
-        throw new AccountAlreadyClaimed(a, holder);
-      }
+      await this.assertAccountClaim(c, a, t);
 
       const existing = await this.getWithin(c, tenant);
       if (existing) {
@@ -593,22 +665,26 @@ export class PgIdentityStore implements IdentityStore {
             return fromRow(rows[0] as unknown as Row);
           }
         } catch (e) {
-          // A failed statement poisons the transaction, so the retry needs a
-          // savepoint rather than another attempt on a dead one.
-          if (attempt === 2) throw e;
-          await c.query("ROLLBACK");
+          // A failed statement poisons the transaction. Reopen it, then
+          // recheck ownership: another tenant could claim the account between
+          // ROLLBACK and BEGIN, and ON CONFLICT DO NOTHING would hide that.
+          // A lost write/COMMIT response is not proof that it failed. Retrying
+          // it could replay an identity claim. Only a confirmed slug collision
+          // can be retried with a newly minted slug.
+          if (attempt === 2 || !isSlugCollision(e)) throw e;
+          if (!(await this.rollback(c))) throw e;
           await c.query("BEGIN");
           await c.query(
             `INSERT INTO agent_account (smart_account, tenant, claimed_at)
              VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
             [a, t, now()],
           );
+          await this.assertAccountClaim(c, a, t);
         }
       }
-      await c.query("ROLLBACK");
       throw new Error("could not mint a public id");
     } catch (e) {
-      await c.query("ROLLBACK").catch(() => {});
+      await this.rollback(c);
       throw e;
     }
   }
@@ -618,19 +694,31 @@ export class PgIdentityStore implements IdentityStore {
     const { rows } = await c.query(`SELECT * FROM agent_identity WHERE tenant = $1`, [tenant.toLowerCase()]);
     return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
   }
+  /** Check the claim after every INSERT, including a retry after ROLLBACK. */
+  private async assertAccountClaim(c: PgClientLike, account: string, tenant: string): Promise<void> {
+    const { rows } = await c.query(`SELECT tenant FROM agent_account WHERE smart_account = $1`, [account]);
+    const holder = rows[0] ? String(rows[0].tenant).toLowerCase() : null;
+    if (!holder) throw new Error("account claim could not be verified");
+    if (holder !== tenant) throw new AccountAlreadyClaimed(account, holder);
+  }
   async all(): Promise<PublicIdentity[]> {
-    const c = await this.client();
-    const { rows } = await c.query(`SELECT * FROM agent_identity`);
-    return rows.map((r) => fromRow(r as unknown as Row));
+    return this.withClient(async (c) => {
+      const { rows } = await c.query(`SELECT * FROM agent_identity`);
+      return rows.map((r) => fromRow(r as unknown as Row));
+    });
   }
   async bySlug(slug: string): Promise<PublicIdentity | null> {
     if (!SLUG_RE.test(slug)) return null;
-    const c = await this.client();
-    const { rows } = await c.query(`SELECT * FROM agent_identity WHERE slug = $1`, [slug]);
-    return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
+    return this.withClient(async (c) => {
+      const { rows } = await c.query(`SELECT * FROM agent_identity WHERE slug = $1`, [slug]);
+      return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
+    });
   }
   async byDid(did: string): Promise<PublicIdentity | null> {
-    const c = await this.client();
+    return this.withClient((c) => this.byDidWithin(c, did));
+  }
+  /** Called inside resolveOrClaimDid's serialized transaction; never take the queue again. */
+  private async byDidWithin(c: PgClientLike, did: string): Promise<PublicIdentity | null> {
     const { rows } = await c.query(`SELECT * FROM agent_identity WHERE privy_did = $1`, [did]);
     return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
   }
@@ -656,7 +744,9 @@ export class PgIdentityStore implements IdentityStore {
     // holds this", and a malformed request is a different fact.
     const problem = socialIdentityProblem(social);
     if (problem) throw new Error(`refusing to link a social identity: ${problem}`);
-    const c = await this.client();
+    return this.withClient((c) => this.linkSocialWithin(c, tenant, social));
+  }
+  private async linkSocialWithin(c: PgClientLike, tenant: `0x${string}`, social: SocialIdentity): Promise<boolean> {
     let rowCount: number | null | undefined;
     try {
       ({ rowCount } = await c.query(
@@ -701,7 +791,13 @@ export class PgIdentityStore implements IdentityStore {
   ): Promise<{ ok: true; tenant: `0x${string}`; created: boolean } | { ok: false; why: string }> {
     const problem = socialIdentityProblem(social);
     if (problem) return { ok: false, why: problem };
-    const c = await this.client();
+    return this.withClient((c) => this.resolveOrClaimDidWithin(c, tenant, social));
+  }
+  private async resolveOrClaimDidWithin(
+    c: PgClientLike,
+    tenant: `0x${string}`,
+    social: SocialIdentity,
+  ): Promise<{ ok: true; tenant: `0x${string}`; created: boolean } | { ok: false; why: string }> {
     const t = tenant.toLowerCase() as `0x${string}`;
 
     await c.query("BEGIN");
@@ -747,12 +843,12 @@ export class PgIdentityStore implements IdentityStore {
       await c.query("COMMIT");
       return { ok: true, tenant: t, created: !mine[0] };
     } catch (e) {
-      await c.query("ROLLBACK").catch(() => {});
-      if (isUniqueViolation(e)) {
+      const rolledBack = await this.rollback(c);
+      if (isUniqueViolation(e) && rolledBack) {
         // Lost a race, or this (provider, subject) belongs elsewhere. Read the
         // winner rather than reporting a failure: the caller's question was
         // "whose is this DID", and now there is an answer.
-        const winner = await this.byDid(social.did);
+        const winner = await this.byDidWithin(c, social.did);
         if (winner) return { ok: true, tenant: winner.tenant, created: false };
         return { ok: false, why: "this social identity is already linked to another merryman" };
       }
@@ -761,8 +857,9 @@ export class PgIdentityStore implements IdentityStore {
   }
 
   async remove(tenant: `0x${string}`): Promise<void> {
-    const c = await this.client();
-    await c.query(`DELETE FROM agent_identity WHERE tenant = $1`, [tenant.toLowerCase()]);
+    return this.withClient(async (c) => {
+      await c.query(`DELETE FROM agent_identity WHERE tenant = $1`, [tenant.toLowerCase()]);
+    });
   }
 }
 

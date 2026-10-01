@@ -9,8 +9,12 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { translateQuery, translateSchema, wrapSqlite, type Db } from "../db";
 import {
+  DEFAULT_PREFS,
+  OWNER_PER_DAY_MAX,
+  XPOST_ALTERS,
   XPOST_SCHEMA,
   cancelPost,
+  cancelDisabledKind,
   cancelScheduled,
   claimPost,
   claimSpan,
@@ -27,6 +31,7 @@ import {
   markPosted,
   markRevoked,
   ownerCancel,
+  ownerSendTimesSince,
   postingAccounts,
   postsOf,
   postsOfXUser,
@@ -40,6 +45,7 @@ import {
   returnAllowance,
   schedulePost,
   setPosting,
+  setPrefs,
   setReplying,
   repliesEnabledFor,
   repliesOptedOut,
@@ -50,6 +56,7 @@ import {
   skipScheduled,
   swapTokens,
   takeAllowance,
+  takeOwnerAllowance,
   takePending,
   upsertAccount,
   writeMeta,
@@ -477,6 +484,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await duePosts(db, [OWNER_A], 6.5, 10.5);
   await duePosts(db, [OWNER_A], 6.5, 10.5, { dueAtMs: 1.5, id: 1 });
   await claimPost(db, id, 7.5);
+  await cancelDisabledKind(db, id, 7.5);
   await reschedulePost(db, id, 8.5, 8.5);
   await claimPost(db, id, 9.5);
   await markPosted(db, id, "1", 10.5);
@@ -494,6 +502,8 @@ test("every statement the store sends translates to Postgres with matching, bind
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
   await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
+  await takeOwnerAllowance(db, OWNER_A, "owner-day", 3.5, 14.5);
+  await ownerSendTimesSince(db, OWNER_A, 0.5);
   const span = await claimSpan(db, "gap:111", 20.5, 10.5);
   await claimSpan(db, "gap:111", 21.5, 10.5);
   if (span.ok) await releaseSpan(db, "gap:111", 20.5, span.prev, 22.5);
@@ -514,6 +524,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await optOutReplies(db, "222", "333", 24.5);
   await setReplying(db, OWNER_A, false, "222", 25.5);
   await setPosting(db, OWNER_A, { enabled: false }, 16.5);
+  await setPrefs(db, OWNER_A, { buys: false, casual: false, perDay: 2 }, 16.7);
   await markRevoked(db, OWNER_A, 3, 17.5);
   await cancelScheduled(db, OWNER_A, 18.5, "turned-off");
   await deleteAccount(db, DEK, OWNER_A, 19.5);
@@ -584,6 +595,103 @@ test("a span of an X account's clock is claimed by exactly one of two racing cla
   assert.equal(await readMeta(db, "fold:111:pepe"), null);
 });
 
+// ── what the owner lets it post ─────────────────────────────────────────────
+
+test("an older table without the owner's choices gets them: both kinds on, the server's number a day", async (t) => {
+  const raw = new DatabaseSync(":memory:");
+  t.after(() => raw.close());
+  // The table as it was before the choices existed.
+  raw.exec(XPOST_SCHEMA.replace(/,\n  post_buys[\s\S]*?per_day INTEGER[^\n]*\n\);/, "\n);"));
+  assert.ok(!(raw.prepare("PRAGMA table_info(xpost_accounts)").all() as { name: string }[]).some((c) => c.name === "post_buys"));
+  const db = wrapSqlite(raw);
+  // A connection made before the upgrade.
+  raw
+    .prepare(
+      `INSERT INTO xpost_accounts (tenant, x_user_id, username, sealed_access, access_expires_at_ms, scope, connected_at_ms, updated_at_ms)
+       VALUES (?, '111', 'r', 'sealed', 1, 'tweet.write', 1, 1)`,
+    )
+    .run(OWNER_A.toLowerCase());
+  await ensureXpostSchema(db, "sqlite");
+  await ensureXpostSchema(wrapSqlite(raw), "sqlite");
+  const cols = (raw.prepare("PRAGMA table_info(xpost_accounts)").all() as { name: string }[]).map((c) => c.name);
+  for (const c of ["post_buys", "post_casual", "per_day"]) assert.ok(cols.includes(c), c);
+  assert.deepEqual((await getAccount(db, OWNER_A))?.prefs, DEFAULT_PREFS, "the connection made before: what it had");
+  await upsertAccount(db, DEK, { tenant: OWNER_B, xUserId: "222", username: "r", tokens: TOKENS, nowMs: 2 });
+  assert.deepEqual((await getAccount(db, OWNER_B))?.prefs, DEFAULT_PREFS);
+});
+
+test("on Postgres the added columns run in a transaction of their own, after the schema's, and only the missing ones", async () => {
+  // A fake Postgres Db that records transactions: the real ALTER takes an
+  // ACCESS EXCLUSIVE lock on xpost_accounts even as a no-op, and the schema
+  // transaction already holds xpost_posts, so the two together deadlocked an
+  // owner's Off (accounts, then posts) on a process's first query.
+  const run = async (have: string[]) => {
+    const log: string[] = [];
+    let n = 0;
+    const db = (tx: number | null): Db => ({
+      prepare: (sql: string) => ({
+        run: async () => ({ changes: 0, lastInsertRowid: 0 }) as never,
+        get: async () => undefined,
+        all: async () => (/information_schema/.test(sql) ? have.map((c) => ({ column_name: c })) : []),
+      }),
+      exec: async (sql: string) => {
+        log.push(`${tx}: ${/CREATE TABLE/.test(sql) ? "schema" : sql}`);
+      },
+      tx: async <T>(fn: (d: Db) => Promise<T>): Promise<T> => {
+        const id = ++n;
+        log.push(`begin ${id}`);
+        const out = await fn(db(id));
+        log.push(`commit ${id}`);
+        return out;
+      },
+    });
+    await ensureXpostSchema(db(null), "postgres");
+    return log;
+  };
+  assert.deepEqual(await run([]), ["begin 1", "1: schema", "commit 1", "begin 2", ...XPOST_ALTERS.map((d) => `2: ${d}`), "commit 2"]);
+  assert.deepEqual(await run(["post_buys", "post_casual", "per_day"]), ["begin 1", "1: schema", "commit 1", "begin 2", "commit 2"], "a restart takes no exclusive lock");
+  assert.deepEqual(await run(["post_buys"]), ["begin 1", "1: schema", "commit 1", "begin 2", ...XPOST_ALTERS.slice(1).map((d) => `2: ${d}`), "commit 2"]);
+});
+
+test("the added columns translate to Postgres as ADD COLUMN IF NOT EXISTS", () => {
+  for (const ddl of XPOST_ALTERS) {
+    assert.match(translateSchema(ddl), /^ALTER TABLE xpost_accounts ADD COLUMN IF NOT EXISTS \w+ BIGINT/);
+  }
+});
+
+test("the owner's choices: only what is given changes, a kind turned off leaves Coming up, and none without a connection", async (t) => {
+  const { db, raw } = await open(t);
+  assert.equal(await setPrefs(db, OWNER_A, { buys: false }, 1), null, "nothing connected");
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await upsertAccount(db, DEK, { tenant: OWNER_B, xUserId: "222", username: "q", tokens: TOKENS, nowMs: 1 });
+  assert.deepEqual((await getAccount(db, OWNER_A))?.prefs, { buys: true, casual: true, perDay: null });
+  const buy = (await schedulePost(db, post({ kind: "buy", dedupeKey: "buy:d1", coin: "frog", decisionId: "d1" })))!;
+  const casual = (await schedulePost(db, post({ kind: "casual", dedupeKey: "casual:x" })))!;
+  const intro = (await schedulePost(db, post({ kind: "intro", dedupeKey: "intro:x" })))!;
+  const theirs = (await schedulePost(db, post({ tenant: OWNER_B, xUserId: "222", kind: "buy", dedupeKey: "buy:d2" })))!;
+
+  assert.deepEqual(await setPrefs(db, OWNER_A, { buys: false }, 2), { buys: false, casual: true, perDay: null });
+  const status = (id: number) => raw.prepare("SELECT status, reason FROM xpost_posts WHERE id = ?").get(id) as { status: string; reason: string | null };
+  assert.deepEqual({ ...status(buy) }, { status: "cancelled", reason: "kind-off" });
+  assert.equal(status(casual).status, "scheduled");
+  assert.equal(status(intro).status, "scheduled", "the hello is not a kind");
+  assert.equal(status(theirs).status, "scheduled", "another owner's draft");
+  // A save of one field leaves the others as stored, whatever the caller last read.
+  await db.prepare("UPDATE xpost_accounts SET post_casual = 0 WHERE tenant = ?").run(OWNER_A.toLowerCase());
+  assert.deepEqual(await setPrefs(db, OWNER_A, { perDay: 1 }, 2), { buys: false, casual: false, perDay: 1 }, "the other save's casual=off stays");
+  await db.prepare("UPDATE xpost_accounts SET post_casual = 1, per_day = NULL WHERE tenant = ?").run(OWNER_A.toLowerCase());
+
+  assert.deepEqual(await setPrefs(db, OWNER_A, { perDay: 2 }, 3), { buys: false, casual: true, perDay: 2 });
+  assert.deepEqual(await setPrefs(db, OWNER_A, { casual: false, perDay: null }, 4), { buys: false, casual: false, perDay: null });
+  assert.equal(status(casual).status, "cancelled");
+  // A number past the most, or not a count, is not a choice: the stored one stays.
+  assert.deepEqual(await setPrefs(db, OWNER_A, { perDay: OWNER_PER_DAY_MAX + 1 }, 5), { buys: false, casual: false, perDay: null });
+  assert.deepEqual((await getAccount(db, OWNER_A))?.prefs, { buys: false, casual: false, perDay: null });
+  assert.deepEqual((await getAccount(db, OWNER_B))?.prefs, DEFAULT_PREFS);
+  // A reconnect keeps them: they are the owner's, not the X account's.
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "333", username: "s", tokens: TOKENS, nowMs: 6 });
+  assert.deepEqual((await getAccount(db, OWNER_A))?.prefs, { buys: false, casual: false, perDay: null });
+});
 
 async function replySetup(db: Db): Promise<NewPost> {
   await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
@@ -679,4 +787,103 @@ test("thread and author reply limits are checked inside the scheduling transacti
   ]);
   assert.equal(race.filter((id) => id !== null).length, 1);
   assert.equal((await postsOf(db, OWNER_A, 0)).filter((x) => x.kind === "reply").length, 2);
+});
+
+test("owner day reservations use the current limit and keep owners of one X account independent", async (t) => {
+  const { db } = await open(t);
+  const dayA = `xownerday:${OWNER_A.toLowerCase()}:2026-10-01`;
+  const dayB = `xownerday:${OWNER_B.toLowerCase()}:2026-10-01`;
+  for (const tenant of [OWNER_A, OWNER_B]) {
+    await upsertAccount(db, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+    await setPosting(db, tenant, { enabled: true, xUserId: "111" }, 2);
+  }
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, dayA, 3, 3), true, "Usual still records the owner's first send");
+  await setPrefs(db, OWNER_A, { perDay: 1 }, 4);
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, dayA, 3, 5), false, "a lower limit includes the earlier reservation");
+  await setPrefs(db, OWNER_B, { perDay: 1 }, 6);
+  assert.equal(await takeOwnerAllowance(db, OWNER_B, dayB, 3, 7), true, "the other owner's post does not consume this owner's limit");
+  assert.equal(await takeOwnerAllowance(db, OWNER_B, dayB, 3, 8), false);
+  await returnAllowance(db, dayB, 9);
+  assert.equal(await takeOwnerAllowance(db, OWNER_B, dayB, 3, 10), true, "a definite refusal returns only its owner's unit");
+  assert.equal((await readMeta(db, dayA))?.n, 1);
+  await setPrefs(db, OWNER_A, { perDay: 3 }, 11);
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, dayA, 1, 12), false, "the owner's choice cannot raise the server limit");
+  await setPosting(db, OWNER_A, { enabled: false }, 13);
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, `${dayA}:next`, 3, 14), false, "an account switched off cannot reserve");
+});
+
+test("two racing owner reservations cannot take the same last unit, and a queued preference save is observed", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setPrefs(db, OWNER_A, { perDay: 2 }, 3);
+  const key = `xownerday:${OWNER_A.toLowerCase()}:2026-10-01`;
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, key, 3, 4), true);
+  const race = await Promise.all([
+    takeOwnerAllowance(db, OWNER_A, key, 3, 5),
+    takeOwnerAllowance(db, OWNER_A, key, 3, 5),
+  ]);
+  assert.equal(race.filter(Boolean).length, 1);
+  await returnAllowance(db, key, 6);
+  const [saved, reserved] = await Promise.all([
+    setPrefs(db, OWNER_A, { perDay: 1 }, 7),
+    takeOwnerAllowance(db, OWNER_A, key, 3, 8),
+  ]);
+  assert.equal(saved?.perDay, 1);
+  assert.equal(reserved, false);
+  assert.equal((await readMeta(db, key))?.n, 1);
+});
+
+test("turning a kind off while sending permanently prevents its refused send being retried", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  for (const [kind, field] of [["buy", "buys"], ["casual", "casual"]] as const) {
+    const id = (await schedulePost(db, post({ kind, dedupeKey: `${kind}:off-during-send` })))!;
+    assert.equal(await claimPost(db, id, 1000), true);
+    await setPrefs(db, OWNER_A, { [field]: false }, 1001);
+    let saved = (await postsOf(db, OWNER_A, 0)).find((p) => p.id === id)!;
+    assert.equal(saved.status, "sending", "the in-flight claim remains consumed until X answers");
+    assert.equal(saved.reason, "kind-off");
+    await setPrefs(db, OWNER_A, { [field]: true }, 1002);
+    assert.equal(await reschedulePost(db, id, 9000, 1003), false);
+    saved = (await postsOf(db, OWNER_A, 0)).find((p) => p.id === id)!;
+    assert.equal(saved.status, "cancelled");
+    assert.equal(saved.reason, "kind-off");
+    assert.equal(await claimPost(db, id, 9001), false);
+  }
+});
+
+test("claiming a draft created after a concurrent kind-off save checks the current preference", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPrefs(db, OWNER_A, { buys: false, casual: false }, 2);
+  for (const kind of ["buy", "casual"] as const) {
+    const id = (await schedulePost(db, post({ kind, dedupeKey: `${kind}:stale-plan` })))!;
+    assert.equal(await claimPost(db, id, 1000), false);
+  }
+});
+
+test("a new owner counter includes earlier send history, including old drafts sent today and uncertain sends", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  const old = (await schedulePost(db, post({ kind: "intro", dedupeKey: "intro:old", nowMs: 3 })))!;
+  await claimPost(db, old, 2000);
+  await markPosted(db, old, "901", 2001);
+  const uncertain = (await schedulePost(db, post({ dedupeKey: "casual:uncertain", nowMs: 4 })))!;
+  await claimPost(db, uncertain, 2002);
+  await markFailed(db, uncertain, "uncertain", 2003);
+  const refused = (await schedulePost(db, post({ dedupeKey: "casual:refused", nowMs: 5 })))!;
+  await claimPost(db, refused, 2004);
+  await markFailed(db, refused, "forbidden", 2005);
+  assert.deepEqual((await ownerSendTimesSince(db, OWNER_A, 1000)).sort(), [2001, 2003]);
+  assert.deepEqual(await ownerSendTimesSince(db, OWNER_B, 1000), []);
+  await setPrefs(db, OWNER_A, { perDay: 2 }, 2006);
+  const key = `xownerday:${OWNER_A.toLowerCase()}:2026-10-01`;
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, key, 3, 2007, 2), false, "the new counter starts with the sends already made");
+  assert.equal((await readMeta(db, key))?.n, 2);
+  await setPrefs(db, OWNER_A, { perDay: 3 }, 2008);
+  assert.equal(await takeOwnerAllowance(db, OWNER_A, key, 3, 2009, 99), true, "a later seed never overwrites the live count");
+  assert.equal((await readMeta(db, key))?.n, 3);
 });

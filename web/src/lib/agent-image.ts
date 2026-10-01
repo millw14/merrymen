@@ -52,6 +52,17 @@
  */
 const DECODABLE = new Set(["jpeg", "png", "webp"]);
 
+// Reject other containers before handing any bytes to a native decoder.
+// metadata() itself parses the input, so its format result is only a second
+// check. These signatures select a decoder; they do not validate the image.
+function hasAllowedSignature(bytes: Uint8Array): boolean {
+  const matches = (offset: number, signature: readonly number[]) =>
+    signature.every((byte, index) => bytes[offset + index] === byte);
+  return matches(0, [0xff, 0xd8, 0xff]) ||
+    matches(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) ||
+    (matches(0, [0x52, 0x49, 0x46, 0x46]) && matches(8, [0x57, 0x45, 0x42, 0x50]));
+}
+
 /**
  * What a stored image is sized to.
  *
@@ -93,10 +104,11 @@ export type NormalisedImage =
 export async function normaliseImage(bytes: Uint8Array, kind: "avatar" | "banner"): Promise<NormalisedImage> {
   if (bytes.byteLength === 0) return { ok: false, refusal: "empty" };
   if (bytes.byteLength > IMAGE_LIMITS[kind].maxBytes) return { ok: false, refusal: "too-large" };
+  if (!hasAllowedSignature(bytes)) return { ok: false, refusal: "unsupported-format" };
 
-  let sharp: typeof import("sharp");
+  let sharp: typeof import("sharp")["default"];
   try {
-    sharp = (await import("sharp")).default as unknown as typeof import("sharp");
+    sharp = (await import("sharp")).default;
   } catch {
     return { ok: false, refusal: "processing-unavailable" };
   }

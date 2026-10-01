@@ -44,11 +44,11 @@
  * READ docs/owner-runbook-class-v2.md BEFORE RUNNING THIS.
  */
 import hre from "hardhat";
-import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { concat, encodeAbiParameters, keccak256 } from "viem";
 import { MAX_CAP, UI_ONE, rawCapFor } from "./lib/quote-caps";
+import { recordDeployment } from "./lib/deployment-manifest";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -418,27 +418,17 @@ async function main() {
   console.log(`  deploy() simulates to the same address, so this factory can actually make a vault`);
 
   const file = path.join(__dirname, "..", "deployments.json");
-  let book: Record<string, Record<string, unknown>> = {};
-  try {
-    book = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    /* first deployment on this chain */
-  }
   const chainKey = String(chainId);
-  book[chainKey] = {
-    ...(book[chainKey] ?? {}),
-    PonsClassVaultFactoryV2: {
-      address: factory.address,
-      deployedAt: new Date().toISOString(),
-      codeBytes: (code.length - 2) / 2,
-      // WHAT WAS SEALED, recorded beside the address: the caps are not readable
-      // as dollars on chain, and "what did we seed, and at what price" is the
-      // first question anyone asks six months later.
-      seed: seed.map(({ symbol, usd }, i) => ({ symbol, usd, address: quotes[i], capRaw: caps[i]!.toString() })),
-      vaultInitCodeHash: onChainHash,
-    },
-  };
-  writeFileSync(file, JSON.stringify(book, null, 2) + "\n");
+  await recordDeployment(file, chainId, "PonsClassVaultFactoryV2", {
+    address: factory.address,
+    deployedAt: new Date().toISOString(),
+    codeBytes: (code.length - 2) / 2,
+    // WHAT WAS SEALED, recorded beside the address: the caps are not readable
+    // as dollars on chain, and "what did we seed, and at what price" is the
+    // first question anyone asks six months later.
+    seed: seed.map(({ symbol, usd }, i) => ({ symbol, usd, address: quotes[i], capRaw: caps[i]!.toString() })),
+    vaultInitCodeHash: onChainHash,
+  }, { replaceExisting: true });
 
   console.log("");
   console.log(`✓ PonsClassVaultFactoryV2 deployed at ${factory.address}`);

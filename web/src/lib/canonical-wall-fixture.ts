@@ -24,6 +24,7 @@ import {
   decodeFunctionData,
   encodeAbiParameters,
   encodeErrorResult,
+  encodeFunctionResult,
   keccak256,
   toHex,
   type Address,
@@ -31,7 +32,7 @@ import {
   type LocalAccount,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { createKernelAccount } from "@zerodev/sdk";
+import { createKernelAccount, KernelV3_3AccountAbi } from "@zerodev/sdk";
 import { getEntryPoint, KERNEL_V3_3 } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { serializePermissionAccount, toPermissionValidator } from "@zerodev/permissions";
@@ -70,14 +71,34 @@ type RpcAnswer = { result: unknown } | { error: { code: number; message: string;
 const reverted = (data?: Hex): RpcAnswer => ({ error: { code: 3, message: "execution reverted", ...(data ? { data } : {}) } });
 
 /** One JSON-RPC answer from a chain whose Kernel factory deploys to `account`. */
-function answer(account: Address, method: string, params: unknown[]): RpcAnswer {
+export interface KernelState {
+  currentNonce: number | "unreadable";
+  installedNonce?: number | "unreadable";
+  unreadableCode?: boolean;
+}
+function answer(account: Address, method: string, params: unknown[], kernel?: KernelState): RpcAnswer {
   if (method === "eth_chainId") return { result: toHex(robinhoodChain.id) };
   if (method === "eth_getCode") {
+    if (kernel && String(params[0]).toLowerCase() === account.toLowerCase()) {
+      return kernel.unreadableCode ? reverted() : { result: "0x6000" };
+    }
     return { result: String(params[0]).toLowerCase() === TRENCHER_FACTORY ? TRENCHER_CODE : "0x" };
   }
   if (method === "eth_call") {
     const { to, data } = params[0] as { to: string; data: Hex };
     const target = to.toLowerCase();
+    if (kernel && target === account.toLowerCase()) {
+      try {
+        const call = decodeFunctionData({ abi: KernelV3_3AccountAbi, data });
+        if (call.functionName === "currentNonce") return kernel.currentNonce === "unreadable" ? reverted() : {
+          result: encodeFunctionResult({ abi: KernelV3_3AccountAbi, functionName: "currentNonce", result: kernel.currentNonce }),
+        };
+        if (call.functionName === "validationConfig") return kernel.installedNonce === "unreadable" ? reverted() : {
+          result: encodeFunctionResult({ abi: KernelV3_3AccountAbi, functionName: "validationConfig", result: { nonce: kernel.installedNonce ?? 0, hook: "0x0000000000000000000000000000000000000000" } }),
+        };
+      } catch { /* Other account metadata reads keep the ordinary fixture behavior. */ }
+      return reverted();
+    }
     if (target === ENTRY_POINT.address.toLowerCase()) {
       return reverted(encodeErrorResult({ abi: SENDER_ADDRESS_RESULT, errorName: "SenderAddressResult", args: [account] }));
     }
@@ -112,7 +133,7 @@ function answer(account: Address, method: string, params: unknown[]): RpcAnswer 
 }
 
 /** Run `fn` with global fetch answering JSON-RPC as that chain, and only then. */
-async function withStubChain<T>(account: Address, fn: () => Promise<T>): Promise<T> {
+export async function withStubChain<T>(account: Address, fn: () => Promise<T>, kernel?: KernelState): Promise<T> {
   const real = globalThis.fetch;
   globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
     const request = JSON.parse(String(init?.body)) as
@@ -121,7 +142,7 @@ async function withStubChain<T>(account: Address, fn: () => Promise<T>): Promise
     const one = (r: { id: number; method: string; params?: unknown[] }) => ({
       jsonrpc: "2.0",
       id: r.id,
-      ...answer(account, r.method, r.params ?? []),
+      ...answer(account, r.method, r.params ?? [], kernel),
     });
     const body = Array.isArray(request) ? request.map(one) : one(request);
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
@@ -144,6 +165,7 @@ export interface SignerOptions {
   v4AdapterAddress?: `0x${string}`;
   ponsAdapterAddress?: `0x${string}`;
   trencher?: boolean;
+  kernel?: KernelState;
 }
 
 /** A grant exactly as the real signer mints it. */
@@ -160,6 +182,7 @@ export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGran
       ponsAdapterAddress: o.ponsAdapterAddress,
       trencherFactory: o.trencher ? TRENCHER_FACTORY : undefined,
     }),
+    o.kernel,
   );
   return { grant, owner };
 }

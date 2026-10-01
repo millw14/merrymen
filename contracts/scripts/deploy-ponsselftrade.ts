@@ -35,9 +35,9 @@
  * verify — and the deployment one less thing to get wrong.
  */
 import hre from "hardhat";
-import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { recordDeployment } from "./lib/deployment-manifest";
 
 // ESM has no __dirname; deployments.json sits beside contracts/scripts.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -127,22 +127,12 @@ async function main() {
   // Keyed by chain id, because one flat value cannot serve two chains that
   // produce different addresses and /grant offers a two-click chain switch.
   const file = path.join(__dirname, "..", "deployments.json");
-  let book: Record<string, Record<string, { address: string; deployedAt: string; codeBytes: number }>> = {};
-  try {
-    book = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    /* first deployment on any chain */
-  }
   const chainKey = String(chainId);
-  book[chainKey] = {
-    ...(book[chainKey] ?? {}),
-    PonsSelfTrade: {
-      address: adapter.address,
-      deployedAt: new Date().toISOString(),
-      codeBytes: (code.length - 2) / 2,
-    },
-  };
-  writeFileSync(file, JSON.stringify(book, null, 2) + "\n");
+  await recordDeployment(file, chainId, "PonsSelfTrade", {
+    address: adapter.address,
+    deployedAt: new Date().toISOString(),
+    codeBytes: (code.length - 2) / 2,
+  }, { replaceExisting: true });
 
   console.log("");
   console.log(`✓ PonsSelfTrade deployed at ${adapter.address}`);

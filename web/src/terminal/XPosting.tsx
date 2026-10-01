@@ -55,12 +55,24 @@
  * after the consent. A list read once and left open would show "Nothing
  * waiting" while the hello was queued, and a Skip on a post that already went.
  *
+ * ── WHAT IT POSTS IS THE OWNER'S CHOICE, NOT A PROMISE OF MORE ───────────
+ *
+ * Beside the switch the owner picks what goes out: the coins it bought (and
+ * why), passing thoughts, and how many a day (never more than the server's
+ * number). Coin posts are only ever about coins it really bought — the
+ * section says so, and points at Trencher mode for an owner who wants it to
+ * hunt memecoins — never ones it is only watching (docs/x-posting.md rule 3).
+ * The hello is not a choice: it is the post that says an AI agent posts here,
+ * and it can still be skipped under Coming up. Like the switch, a choice moves
+ * only when the server confirmed it, and turning a kind off takes its drafts
+ * out of Coming up. An older server that sends no choices shows none.
+ *
  * Hosted only: renders nothing anywhere else. Literal English, like the rest
  * of the Settings screen, which is not in the translated set.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { shortDateTime } from "@/lib/format";
-import type { XAccountBody, XRecentPost, XUpcomingPost } from "@/lib/x-connect";
+import type { XAccountBody, XPostPrefs, XRecentPost, XUpcomingPost } from "@/lib/x-connect";
 import { xHandleTag } from "@/lib/x-handle";
 import { Switch } from "./ui";
 
@@ -88,6 +100,17 @@ const COPY = {
   notNow: "Not now",
   unread: "Couldn't check your X connection just now.",
   signedOut: "Sign in to connect an X account.",
+  whatItPosts: "What it posts",
+  helloAlways: "A hello first, so people know an AI agent posts here. You can skip it under Coming up.",
+  buys: "Coins it buys, and why",
+  buysHint: "Only coins it actually bought, never ones it's just watching. To have it hunt memecoins, turn on",
+  trencher: "Trencher mode",
+  casual: "The odd passing thought",
+  casualHint: "A short line in its own words, most days.",
+  perDay: "Posts a day, at most",
+  perDayUsual: "Usual",
+  perDayHint: "The hello counts. Usual is merrymen's own number, and merrymen may allow fewer than you pick.",
+  notSaved: "merrymen didn't confirm that, so nothing changed.",
 } as const;
 
 const connectedAs = (handle: string) => `Connected as ${handle}`;
@@ -145,19 +168,31 @@ const AFTER_ENABLE_MS = 70_000;
 
 // ── talking to the routes ───────────────────────────────────────────────────
 
+/** The account as this section shows it: `prefs` is null when the server sent no choices (an older one). */
+type Shown = Omit<XAccountBody, "prefs"> & { prefs: XPostPrefs | null };
+
 type Read =
   | { kind: "checking" }
   | { kind: "failed" }
   | { kind: "signed-out" }
-  | { kind: "ready"; account: XAccountBody };
+  | { kind: "ready"; account: Shown };
 
 type Sent = { ok: true; data: Record<string, unknown> } | { ok: false; status: number; message: string };
 
 const UNREACHABLE = "Couldn't reach merrymen just now. Try again in a moment.";
 const REFRESH_FAILED = "Couldn't refresh this just now.";
 
+/** The owner's choices, only when the answer carries all of them in shape. */
+function prefsOf(v: unknown): XPostPrefs | null {
+  if (!v || typeof v !== "object") return null;
+  const p = v as Partial<XPostPrefs>;
+  if (typeof p.buys !== "boolean" || typeof p.casual !== "boolean") return null;
+  const perDay = typeof p.perDay === "number" && Number.isSafeInteger(p.perDay) && p.perDay >= 1 ? p.perDay : null;
+  return { buys: p.buys, casual: p.casual, perDay };
+}
+
 /** A 200 is only an answer if it is the shape the route promises; anything else is unread. */
-function accountOf(data: unknown): XAccountBody | null {
+function accountOf(data: unknown): Shown | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Partial<XAccountBody>;
   if (typeof d.available !== "boolean" || typeof d.connected !== "boolean" || typeof d.postingEnabled !== "boolean") return null;
@@ -169,6 +204,8 @@ function accountOf(data: unknown): XAccountBody | null {
     xUserId: typeof d.xUserId === "string" ? d.xUserId : null,
     status: d.status === "ok" || d.status === "revoked" ? d.status : null,
     postingEnabled: d.postingEnabled,
+    prefs: prefsOf(d.prefs),
+    perDayMax: typeof d.perDayMax === "number" && Number.isSafeInteger(d.perDayMax) && d.perDayMax >= 1 && d.perDayMax <= 10 ? d.perDayMax : 3,
     replyEnabled: d.replyEnabled === true,
     repliesAvailable: d.repliesAvailable === true,
     upcoming: d.upcoming.filter(
@@ -371,7 +408,7 @@ export function XPosting({
 
   const account = read.account;
   const handle = xHandleTag(account.username);
-  const patch = (change: Partial<XAccountBody>) =>
+  const patch = (change: Partial<Shown>) =>
     setRead((r) => (r.kind === "ready" ? { kind: "ready", account: { ...r.account, ...change } } : r));
 
   const connect = async () => {
@@ -471,6 +508,26 @@ export function XPosting({
     setBusy(false);
     if (r.ok) patch({ upcoming: account.upcoming.filter((p) => p.id !== id) });
     else setNote({ text: r.message, alert: true });
+    void load(true);
+  };
+
+  /**
+   * ONE CHOICE, SAVED. Like the switch, nothing on screen moves until the
+   * server says it did; a kind turned off takes its drafts out of Coming up,
+   * so the list is read again.
+   */
+  const savePrefs = async (change: Partial<XPostPrefs>) => {
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    const r = await send("POST", "/api/x/account", { action: "prefs", owner, ...change });
+    setBusy(false);
+    const saved = r.ok ? prefsOf(r.data.prefs) : null;
+    if (!saved) {
+      setNote({ text: r.ok ? COPY.notSaved : r.message, alert: true });
+      return;
+    }
+    patch({ prefs: saved });
     void load(true);
   };
 
@@ -593,6 +650,50 @@ export function XPosting({
       ) : null}
       {!account.repliesAvailable && <p className="mm-hint">{COPY.repliesUnavailable}</p>}
       {noteLine}
+
+      {account.prefs && (
+        <section className="xpost-list-block" aria-label={COPY.whatItPosts}>
+          <h3 className="xpost-list-title">{COPY.whatItPosts}</h3>
+          <p className="mm-hint">{COPY.helloAlways}</p>
+          <div className="xpost-switch">
+            <div>
+              <strong>{COPY.buys}</strong>
+              <small className="mm-hint">
+                {COPY.buysHint} <a href="/settings#trencher-mode">{COPY.trencher}</a>.
+              </small>
+            </div>
+            <Switch on={account.prefs.buys} onChange={(next) => void savePrefs({ buys: next })} label={COPY.buys} />
+          </div>
+          <div className="xpost-switch">
+            <div>
+              <strong>{COPY.casual}</strong>
+              <small className="mm-hint">{COPY.casualHint}</small>
+            </div>
+            <Switch on={account.prefs.casual} onChange={(next) => void savePrefs({ casual: next })} label={COPY.casual} />
+          </div>
+          <div className="xpost-row" role="group" aria-label={COPY.perDay}>
+            <span>{COPY.perDay}</span>
+            {[null, ...Array.from({ length: account.perDayMax }, (_, i) => i + 1)].map((n) => {
+              const chosen = (account.prefs?.perDay ?? null) === n;
+              return (
+                <button
+                  key={n ?? "usual"}
+                  type="button"
+                  aria-pressed={chosen}
+                  className={chosen ? "mm-btn primary" : "mm-btn"}
+                  disabled={busy}
+                  onClick={() => {
+                    if (!chosen) void savePrefs({ perDay: n });
+                  }}
+                >
+                  {n ?? COPY.perDayUsual}
+                </button>
+              );
+            })}
+          </div>
+          <small className="mm-hint">{COPY.perDayHint}</small>
+        </section>
+      )}
 
       {account.postingEnabled && (
         <section className="xpost-list-block" aria-label={COPY.comingUp}>

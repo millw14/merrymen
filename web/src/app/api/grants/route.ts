@@ -46,6 +46,8 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 
 export interface AgentStatus {
   exists: boolean;
+  /** Hosted GET only: the authenticated tenant this status was read for. */
+  tenant?: `0x${string}` | null;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
@@ -433,6 +435,12 @@ export async function DELETE(req: Request) {
     // — the server never held the owner key to begin with.
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+    // A tab can switch logins while the owner's stop request is in flight.
+    const body = await req.json().catch(() => null) as { expectedTenant?: unknown } | null;
+    if (body?.expectedTenant !== undefined &&
+        (typeof body.expectedTenant !== "string" || body.expectedTenant.toLowerCase() !== tenant.toLowerCase())) {
+      return NextResponse.json({ error: "The signed-in account changed. Check the account before stopping it." }, { status: 409 });
+    }
     await getGrantStore().remove(tenant);
     return NextResponse.json({ ok: true });
   }
@@ -449,11 +457,11 @@ export async function DELETE(req: Request) {
 
 export async function GET(req: Request) {
   let grant: StoredGrant;
-  if (isHostedMode()) {
-    const tenant = tenantOf(req);
-    if (!tenant) return NextResponse.json({ exists: false } satisfies AgentStatus);
-    const g = await getGrantStore().get(tenant);
-    if (!g) return NextResponse.json({ exists: false } satisfies AgentStatus);
+  const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
+  if (hostedTenant !== undefined) {
+    if (!hostedTenant) return NextResponse.json({ exists: false, tenant: null } satisfies AgentStatus);
+    const g = await getGrantStore().get(hostedTenant);
+    if (!g) return NextResponse.json({ exists: false, tenant: hostedTenant } satisfies AgentStatus);
     grant = g;
   } else {
     try {
@@ -541,6 +549,8 @@ export async function GET(req: Request) {
 
   const status: AgentStatus = {
     exists: true,
+    // From the verified cookie, never a browser-declared owner or grant field.
+    ...(hostedTenant !== undefined ? { tenant: hostedTenant } : {}),
     grant: publicGrant,
     balances,
     workerAliveAt,

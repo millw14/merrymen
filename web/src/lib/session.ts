@@ -6,49 +6,23 @@ import { GRANT_TRENCHER } from "@merrymen/core";
 /**
  * The permission wall — creating an agent account and granting it a scoped key.
  *
- * NO EXTERNAL WALLET OWNS THE FUNDS. The account's owner key is generated in
- * the browser — you create the wallet, back up its owner key, and fund the
- * account address. Hosted adds ONE wallet popup on top of that, and only to
- * link the account to your login (see step 5); the wallet never owns the
- * account and never signs a trade. The flow (all counterfactual — nothing is
- * deployed until the agent's first trade):
- *  1. A fresh OWNER keypair is generated → it's the Kernel account's sudo
- *     validator (ECDSA). The smart-account address derives from it.
- *  2. A fresh SESSION keypair is generated for the agent.
- *  3. The session key is wrapped in a permission validator whose policies are
- *     enforced BY THE ACCOUNT CONTRACT on every UserOp:
- *       - call policy: only approve(USDG→allowed targets) with capped amounts,
- *         only vault.deposit with capped assets, only the Rialto router
- *       - rate limit: bounded ops per day
- *       - timestamp: hard expiry
- *  4. The owner key signs the grant locally (no popup); the serialized grant is
- *     what the worker uses to act. Revocation = expiry (or nonce invalidation).
- *  5. HOSTED ONLY — the account is bound to the signed-in tenant by two
- *     signatures over one server-issued nonce: the wallet authorizes the pair
- *     (intent) and the owner key co-signs it (possession). Both personal_sign,
- *     so no chain switch is ever required. Without step 5 the server has no way
- *     to tell whose account this is, because `owner` is a key minted here and
- *     can never equal the signed-in wallet.
+ * New mainnet accounts use an embedded or external owner signer. Merrymen
+ * does not receive that owner's private key. The same Kernel account and
+ * permission wall wrap a fresh session key, with contract-enforced call,
+ * amount, rate and expiry limits. Hosted binding proves the tenant and owner
+ * using the explicitly selected legacy or Privy identity model.
  *
- * WHERE THE KEYS ACTUALLY LIVE, on every deployment including hosted mainnet.
- *
- * Both private keys are kept in this browser's localStorage. That is not a
- * testnet demo caveat — it is the shipped arrangement, and :308 below makes
- * this key load-bearing for hosted custody and for client-side recovery.
- * Whoever holds the owner key controls the funds; the UI forces a backup
- * before funding for exactly that reason.
- *
- * This block used to say production owner keys live in a Turnkey TEE and
- * never touch a browser. No such thing is shipped — no dependency, no code
- * path, no vendor. README.md is accurate that TEE custody is on the roadmap.
- * The comment mattered because a TEE is precisely what someone would cite to
- * argue that server-side custody is already fine here. It is not. Drawdown breaker
- * is worker-enforced until the breaker contract ships (Phase 2).
+ * Existing legacy accounts and testnet-generated accounts still have owner
+ * keys in browser storage. Their recovery, renewal and archives must remain
+ * usable: erasing those keys would strand existing funds. New mainnet key
+ * generation is refused before any key is made or stored; this does not
+ * retroactively encrypt or migrate previously saved keys. The session key
+ * still lives in the browser grant and, for hosted agents, the worker store.
  */
 
 import { createPublicClient, erc20Abi, http, parseAbi, type Address, type LocalAccount } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { createKernelAccount } from "@zerodev/sdk";
+import { createKernelAccount, getPluginsEnableTypedData, KernelV3_3AccountAbi } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import {
@@ -88,6 +62,7 @@ import {
   PONS_CLASS_VAULT_FACTORY,
   PONS_CLASS_VAULT_FACTORY_V2,
   robinhoodChain,
+  robinhoodTestnet,
   
   GRANT_V4,
   GRANT_V4_ADAPTER,
@@ -295,7 +270,8 @@ async function prepareGrantCore(
    */
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
-): Promise<Grant> {
+  preflightOnly = false,
+): Promise<Grant | null> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -355,10 +331,6 @@ async function prepareGrantCore(
     entryPoint,
     kernelVersion,
   });
-
-  const sessionPrivateKey = generatePrivateKey();
-  const sessionAccount = privateKeyToAccount(sessionPrivateKey);
-  const sessionSigner = await toECDSASigner({ signer: sessionAccount });
 
   // THE ACCOUNT ADDRESS, BEFORE THE WALL — because the wall now pins value to
   // it. The Kernel address derives from the SUDO validator alone; the
@@ -646,6 +618,15 @@ async function prepareGrantCore(
     ...wallOpts,
   });
 
+  // Renewal checks the exact same wall before stopping or revoking anything.
+  // Return no prepared grant: key generation, nonce reads and owner signing
+  // must run afresh only after the revocation receipt is confirmed.
+  if (preflightOnly) return null;
+
+  const sessionPrivateKey = generatePrivateKey();
+  const sessionAccount = privateKeyToAccount(sessionPrivateKey);
+  const sessionSigner = await toECDSASigner({ signer: sessionAccount });
+
   const permissionValidator = await toPermissionValidator(publicClient, {
     entryPoint,
     kernelVersion,
@@ -682,7 +663,49 @@ async function prepareGrantCore(
   }
 
   onStatus("sealing the permission grant…");
-  const serialized = await serializePermissionAccount(account, sessionPrivateKey);
+  // The SDK's getKernelV3Nonce catches any RPC failure and silently returns 1.
+  // After nonce revocation that would seal an unusable replacement. Read the
+  // state strictly and supply the SDK serializer an explicit owner signature,
+  // so it never performs that fallback read behind the signing boundary.
+  // Read the raw response: viem's getCode normalizes a legitimate "0x" to
+  // undefined, making it indistinguishable from a malformed missing result.
+  const code = await publicClient.request({ method: "eth_getCode", params: [account.address, "latest"] });
+  if (typeof code !== "string" || !/^0x(?:[0-9a-f]{2})*$/i.test(code)) {
+    throw new Error("Could not confirm the account's permission nonce. Nothing was signed; try again when the network is available.");
+  }
+  let validatorNonce = 1;
+  let enableData = await getPluginsEnableTypedData({
+    accountAddress: account.address,
+    chainId: chain.id,
+    kernelVersion,
+    action: account.kernelPluginManager.getAction(),
+    validator: permissionValidator,
+    validatorNonce,
+  });
+  if (code !== "0x") {
+    const validationId = (enableData.message as { validationId: `0x${string}` }).validationId;
+    const current = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "currentNonce" });
+    const installed = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "validationConfig", args: [validationId] });
+    if (!Number.isInteger(current) || !Number.isInteger(installed.nonce) || installed.nonce > current) {
+      throw new Error("The account's permission nonce could not be verified. Nothing was signed.");
+    }
+    // Kernel v3.3 _enableDigest advances only an identifier already installed
+    // at the current generation. This also handles currentNonce=0 correctly.
+    validatorNonce = installed.nonce === current ? current + 1 : current;
+    if (validatorNonce < 1 || validatorNonce > 0xffff_ffff) {
+      throw new Error("The account's permission nonce cannot be safely used. Nothing was signed.");
+    }
+    enableData = await getPluginsEnableTypedData({
+      accountAddress: account.address,
+      chainId: chain.id,
+      kernelVersion,
+      action: account.kernelPluginManager.getAction(),
+      validator: permissionValidator,
+      validatorNonce,
+    });
+  }
+  const enableSignature = await ecdsaValidator.signTypedData(enableData);
+  const serialized = await serializePermissionAccount(account, sessionPrivateKey, enableSignature);
 
   const grant: Grant = {
     smartAccount: account.address,
@@ -784,10 +807,12 @@ async function mintGrant(
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
 ): Promise<MintedGrant> {
+  const previousLocal = localStorage.getItem(STORAGE_KEY);
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
   );
+  if (!grant) throw new Error("Grant preparation returned no signed permission.");
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
@@ -816,6 +841,11 @@ async function mintGrant(
   // silently strands any funds in the old account, so the outgoing grant is
   // copied aside under its own address, the same safety net archiveCurrentGrant
   // gives the self-hosted file (web/src/app/api/grants/route.ts).
+  // Owner approval can take minutes. A wallet saved by another tab during
+  // that wait must not be replaced by this older signing attempt.
+  if (localStorage.getItem(STORAGE_KEY) !== previousLocal) {
+    throw new Error("The saved wallet changed while signing. That wallet was kept. Reload before trying again.");
+  }
   archivePreviousGrant();
   // The browser copy, which ALWAYS carries the owner key, hosted or not. Kept in
   // a named local so it can be returned as well as stored -- the UI needs the
@@ -1002,19 +1032,21 @@ export function listSavedWallets(): SavedWallet[] {
 /**
  * Copy the grant currently in localStorage aside before it is overwritten.
  *
- * Best-effort and deliberately silent: this must never be able to stop someone
- * creating a wallet. Keyed by smart account, so re-creating over the same
- * account just refreshes its copy while a different account gets its own slot.
+ * Fail closed: if archiving fails, the caller must not overwrite or remove the
+ * only owner-key copy. Keyed by smart account, so a different wallet retains
+ * its own recovery slot.
  */
 function archivePreviousGrant(): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
     const prev = JSON.parse(raw) as Partial<Grant>;
-    if (typeof prev?.smartAccount !== "string") return;
+    if (typeof prev?.smartAccount !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(prev.smartAccount)) {
+      throw new Error("unreadable wallet address");
+    }
     localStorage.setItem(`${ARCHIVE_PREFIX}${prev.smartAccount.toLowerCase()}`, raw);
   } catch {
-    /* unreadable or storage full — never block the create */
+    throw new Error("Could not preserve the current wallet's recovery copy. Your saved wallet was kept. Back it up and restore browser storage access before trying again.");
   }
 }
 
@@ -1172,11 +1204,25 @@ export interface MintOptions {
  */
 export type PrepareAgentOptions = Omit<MintOptions, "hostedAs">;
 
+/** Check a renewal's canonical wall without signing, saving, or handing it off. */
+export async function preflightAgentGrant(owner: LocalAccount, o: MintOptions): Promise<void> {
+  if (!owner || !/^0x[0-9a-fA-F]{40}$/.test(owner.address) || typeof owner.signMessage !== "function") {
+    throw new Error("An explicit wallet signer is required to check a Merryman permission.");
+  }
+  if (!o.expectAccount) throw new Error("A renewal preflight requires the existing account address.");
+  await prepareGrantCore(
+    { account: owner, binding: "external-owner" },
+    o.caps, o.onStatus, o.chainId ?? robinhoodChain.id, o.extraTokens ?? [],
+    o.v4AdapterAddress, o.ponsAdapterAddress, undefined, o.expectAccount,
+    o.ponsClassVaultFactory, o.trencherFactory, true,
+  );
+}
+
 export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOptions): Promise<StoredGrant> {
   if (!owner || !/^0x[0-9a-fA-F]{40}$/.test(owner.address) || typeof owner.signMessage !== "function") {
     throw new Error("An explicit wallet signer is required to prepare a Merryman.");
   }
-  return prepareGrantCore(
+  const grant = await prepareGrantCore(
     { account: owner, binding: "external-owner" },
     o.caps,
     o.onStatus,
@@ -1189,9 +1235,17 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
     o.ponsClassVaultFactory,
     o.trencherFactory,
   );
+  if (!grant) throw new Error("Grant preparation returned no signed permission.");
+  return grant;
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
+  // An unrestricted owner key in localStorage bypasses every session limit
+  // if page script is compromised. Keep the old-key restore/recovery path,
+  // but require an external or embedded owner signer for new real-fund wallets.
+  if ((o.chainId ?? robinhoodChain.id) !== robinhoodTestnet.id) {
+    throw new Error("New mainnet wallets require an embedded or external owner wallet. Sign in to create one; existing recovery keys can still be restored.");
+  }
   o.onStatus("minting your agent's owner key…");
   const key = generatePrivateKey();
   return mintGrant(
@@ -1219,12 +1273,9 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
  * executor, and no Privy account abstraction anywhere in the path.
  *
  * WHAT IS GONE, DELIBERATELY: `demoOwnerPrivateKey`. A Privy owner has no key
- * for merrymen to hold, back up, strip at the boundary, or lose — which
- * removes the localStorage custody this file's header has always flagged as
- * the weak point, and replaces it with Privy's own recovery. The consequence
- * to be honest about is the mirror image: merrymen cannot sweep this account
- * from a backed-up key, because there is no such key. Recovery for a
- * Privy-owned Merryman is signer-based and is NOT yet built.
+ * for merrymen to hold, back up, strip at the boundary, or lose. Recovery for
+ * a Privy-owned Merryman uses that same wallet signer in RecoverPanel; it
+ * does not require a private key pasted into Merrymen.
  */
 export async function createPrivyOwnedWallet(
   owner: LocalAccount,

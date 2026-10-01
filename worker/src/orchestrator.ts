@@ -74,7 +74,7 @@ import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -94,6 +94,7 @@ import {
 } from "./telegram-claims";
 import { getMe as telegramGetMe } from "./telegram/api";
 import { parseLinkedChatAt, parsePollHealth, tokenTagOf, type PollHealth } from "./telegram/state";
+import { conditionAlertTimes } from "./telegram/condition-alert-state";
 import { linksToPromote } from "./telegram/link";
 import { livenessAlertLine, telegramLivenessVerdict } from "./telegram-liveness";
 import { makePgDb, translateSchema, type Db } from "./db";
@@ -104,6 +105,7 @@ import { planReconstruction, reconstructionLines } from "./accounting-reconstruc
 import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
+import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -120,6 +122,7 @@ import {
   publishTelegramRuntime,
   publishTenantChildState,
   readTenantTelegram,
+  readTenantConditionAlerts,
 } from "./telegram-store";
 import { UNCLASSIFIED_BLOCK, clearRestoreBlocked, isNamedBlock, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
 import { notifyHoldOnce, type HoldNoticeOutcome } from "./hold-notice";
@@ -217,6 +220,51 @@ export function firstBeatGraceSec(tickSeconds: number): number {
 }
 /** Cap a child's heap well below the container so an OOM kills the offender, not the box. */
 const CHILD_MAX_OLD_SPACE_MB = 384;
+/** 48 Node children leave headroom under the hosted container's 1000 PID/thread limit. */
+const MAX_LOCAL_CHILD_PROCESSES = 48;
+/** Space process creation across the fleet instead of forking every tenant at boot. */
+const SPAWN_SPACING_MS = 2_000;
+/** Resource exhaustion affects the whole container, not just the tenant that hit it. */
+const SPAWN_PRESSURE_FIRST_MS = 30_000;
+const SPAWN_PRESSURE_MAX_MS = 2 * 60_000;
+let spawnPacingForTest = false;
+let spawnSpacingMs = SPAWN_SPACING_MS;
+let spawnPressureFirstMs = SPAWN_PRESSURE_FIRST_MS;
+let nextSpawnAt = 0;
+let spawnPressureUntil = 0;
+let spawnPressureFailures = 0;
+
+function spawnErrorCode(error: unknown): string {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "unknown";
+}
+
+function noteSpawnPressure(error: unknown): void {
+  const code = spawnErrorCode(error);
+  if (code !== "EAGAIN" && code !== "EMFILE" && code !== "ENFILE" && code !== "ENOMEM") return;
+  spawnPressureFailures += 1;
+  const delay = Math.min(SPAWN_PRESSURE_MAX_MS, spawnPressureFirstMs * 2 ** Math.min(spawnPressureFailures - 1, 3));
+  spawnPressureUntil = Math.max(spawnPressureUntil, Date.now() + delay);
+  log(`[alert] process creation refused (${code}); pausing all new children for ${Math.round(delay / 1000)}s`);
+}
+
+/**
+ * Reserve a process-creation slot before the final lease/kill check. Restarts
+ * and the normal roster pass share this clock. If a different child receives
+ * EAGAIN while we wait, observe its new cooldown before trying to fork.
+ */
+async function waitForSpawnSlot(): Promise<void> {
+  // Existing integration tests substitute fake processes and mock timers.
+  // Exercise the real pacing only in its dedicated test.
+  if (spawn !== nodeSpawn && !spawnPacingForTest) return;
+  for (;;) {
+    const at = Math.max(Date.now(), nextSpawnAt, spawnPressureUntil);
+    nextSpawnAt = at + spawnSpacingMs;
+    if (at > Date.now()) await new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()));
+    if (Date.now() >= spawnPressureUntil) return;
+  }
+}
 /** Give up restarting a child that keeps dying right after start. */
 const MAX_RESTARTS = 8;
 
@@ -307,6 +355,7 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  */
 function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
   if (stopping) return;
+  if (accountingTenantHeld(tenant)) return;
   if (restarts > MAX_RESTARTS) {
     gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
     log(
@@ -560,6 +609,21 @@ export function staleThresholdSec(tickSeconds: number): number {
 
 const children = new Map<string, Child>();
 
+/** Count processes still alive, including ones that have been told to exit. */
+function localChildProcessCount(): number {
+  const processes = new Set<ChildProcess>();
+  for (const child of children.values()) processes.add(child.proc);
+  for (const held of holders.values()) {
+    if (held.proc) processes.add(held.proc);
+    if (held.leaving) processes.add(held.leaving);
+  }
+  for (const exiting of exitingChildren.values()) for (const proc of exiting) processes.add(proc);
+  return processes.size;
+}
+export function localChildProcessCountForTest(): number {
+  return localChildProcessCount();
+}
+
 /**
  * TENANTS WHOSE spawnChild IS STILL PREPARING — claimed before its first await.
  *
@@ -600,15 +664,18 @@ function flagStuckSpawn(tenant: string): void {
 
 /**
  * Test seam: count a child as running without spawning a worker, so a test
- * can drive the real reconcile() over it. The fake needs only `kill`.
+ * can drive the real reconcile() over it. A supplied lease lets a test drive
+ * the immediate socket-loss path without a live database.
  */
 export function adoptChildForTest(
   tenant: `0x${string}`,
   smartAccount: `0x${string}`,
   proc: Pick<ChildProcess, "kill">,
+  lease?: TenantLease,
 ): void {
   const lc = tenant.toLowerCase() as `0x${string}`;
   children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+  if (lease) leases.set(lc, lease);
 }
 
 /**
@@ -622,6 +689,16 @@ let spawn: (command: string, args: readonly string[], options: SpawnOptions) => 
 /** Test seam: start children with `fn` instead of node's `spawn`. */
 export function setSpawnForTest(fn: typeof spawn): void {
   spawn = fn;
+}
+
+/** Test seam: run the production spawn gate with short, real waits. */
+export function setSpawnPacingForTest(spacingMs: number, pressureMs: number): void {
+  spawnPacingForTest = true;
+  spawnSpacingMs = spacingMs;
+  spawnPressureFirstMs = pressureMs;
+  nextSpawnAt = 0;
+  spawnPressureUntil = 0;
+  spawnPressureFailures = 0;
 }
 
 /**
@@ -789,9 +866,52 @@ export function hasLeaseForTest(tenant: string): boolean {
  */
 const leases = new Map<string, TenantLease>();
 let stopping = false;
+/** A lease-lost child must exit before THIS replica may arm the tenant again. */
+const leaseLossDraining = new Set<string>();
+/** An expired grant's process must exit and its final ledger must settle before re-sign can arm. */
+const retiringExpired = new Map<string, { mirror: boolean; lease: TenantLease | null }>();
+export function isRetiringExpiredForTest(tenant: string): boolean {
+  return retiringExpired.has(tenant.toLowerCase());
+}
+let lastRosterLog: { active: number; expired: number; at: number } | null = null;
+let lastCapacityLog: { deferred: number; at: number } | null = null;
+/** Includes children already removed by the watchdog or another stand-down. */
+const exitingChildren = new Map<string, Set<ChildProcess>>();
+
+/** A repair must not act beside any local incarnation, including one still exiting. */
+const accountingMaintenanceLocalState = (tenant: string) => ({
+  processPresent: children.has(tenant) || holders.has(tenant) || spawning.has(tenant) ||
+    restartPending.has(tenant) || exitingChildren.has(tenant) || retiringExpired.has(tenant) || leaseLossDraining.has(tenant),
+  localHomePresent: existsSync(childHome(tenant)),
+});
 
 function log(msg: string): void {
   console.log(`[orchestrator] ${msg}`);
+}
+
+function trackExitingChild(tenant: string, proc: ChildProcess): void {
+  // adoptChildForTest also accepts a kill-only fake for older integration
+  // tests; real ChildProcess instances always emit exit.
+  if (typeof proc.once !== "function") return;
+  let pending = exitingChildren.get(tenant);
+  if (!pending) {
+    pending = new Set();
+    exitingChildren.set(tenant, pending);
+  }
+  if (pending.has(proc)) return;
+  pending.add(proc);
+  const exited = () => {
+    const current = exitingChildren.get(tenant);
+    current?.delete(proc);
+    if (current?.size === 0) {
+      exitingChildren.delete(tenant);
+      leaseLossDraining.delete(tenant);
+    }
+  };
+  proc.once("exit", exited);
+  // A child that never spawned can emit `error` without `exit`. Its failed
+  // process cannot still be trading, so it must not hold the local barrier.
+  proc.once("error", () => { if (proc.pid === undefined) exited(); });
 }
 
 /** Release and forget a tenant's lease. Best-effort; safe if none is held. */
@@ -842,6 +962,7 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
   linkCode: string | null;
   ownerId: number | null;
   linkedAt: number | null;
+  firedAlerts: Record<string, number>;
   linkedChats: number[];
   /** When each of `linkedChats` last linked (telegram/state.ts linkedChatAt). */
   linkedChatAt: Record<string, number>;
@@ -858,6 +979,7 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
       linkCode: typeof t.linkCode === "string" && t.linkCode ? t.linkCode : null,
       ownerId: typeof t.ownerId === "number" ? t.ownerId : null,
       linkedAt: typeof t.linkedAt === "number" ? t.linkedAt : null,
+      firedAlerts: conditionAlertTimes(t.firedAlerts, nowSec),
       linkedChats: Array.isArray(t.linkedChats)
         ? (t.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
         : [],
@@ -946,7 +1068,9 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
   const url = process.env.DATABASE_URL;
   if (!url && !shared) return;
   try {
-    const tg = await readTenantTelegram(shared ?? (await makePgDb(url!)), tenant);
+    const db = shared ?? (await makePgDb(url!));
+    const tg = await readTenantTelegram(db, tenant);
+    if (tg) tg.firedAlerts = await readTenantConditionAlerts(db, tenant, tg.ownerId);
     let ownerId = tg?.ownerId ?? null;
 
     // THE MIRROR IS USUALLY EMPTY TOO, so fall back to the allowlist.
@@ -1013,14 +1137,18 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
  * what keeps a replayed backlog from running.
  */
 export function restoredTelegramFile(
-  tg: { linkCode: string | null; linkedAt: number | null } | null,
+  tg: { linkCode: string | null; linkedAt: number | null; ownerId?: number | null; firedAlerts?: Record<string, number> } | null,
   ownerId: number | null,
-): { linkCode?: string; ownerId?: number; linkedAt?: number } | null {
-  const out: { linkCode?: string; ownerId?: number; linkedAt?: number } = {};
+): { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } | null {
+  const out: { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } = {};
   if (tg?.linkCode) out.linkCode = tg.linkCode;
   if (ownerId) {
     out.ownerId = ownerId;
     if (typeof tg?.linkedAt === "number") out.linkedAt = tg.linkedAt;
+    if (tg?.ownerId === ownerId) {
+      const firedAlerts = conditionAlertTimes(tg.firedAlerts);
+      if (Object.keys(firedAlerts).length) out.firedAlerts = firedAlerts;
+    }
   }
   return Object.keys(out).length > 0 ? out : null;
 }
@@ -1052,7 +1180,7 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childStat
     const failed = await publishTelegramRuntime(
       shared,
       tenant,
-      { linkCode: tg.linkCode, ownerId: tg.ownerId, linkedAt: tg.linkedAt },
+      { linkCode: tg.linkCode, ownerId: tg.ownerId, linkedAt: tg.linkedAt, firedAlerts: tg.firedAlerts },
       liveness,
     );
     livenessPublished(tenant, failed);
@@ -1151,7 +1279,7 @@ function livenessPublished(tenant: string, failed: unknown): void {
   }
   if (livenessPublishFailing) return;
   livenessPublishFailing = true;
-  log(`telegram liveness: could not publish (${tenant}) — ${failed instanceof Error ? failed.message : String(failed)}; said once until it works`);
+  log(`telegram runtime: could not publish (${tenant}) — ${failed instanceof Error ? failed.message : String(failed)}; said once until it works`);
 }
 
 /**
@@ -1339,7 +1467,7 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
 }
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
-async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
+async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount: `0x${string}`; expiresAt: number } | null> {
   // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
   if (killRequested(childHome(tenant))) return null;
   const grant = await getGrantStore().get(tenant);
@@ -1378,7 +1506,7 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
   // ledger table is on, the caller needs it to derive the accounting anchor, and
   // the grant is the only place the orchestrator can learn it without a second
   // decrypting read.
-  return grant.smartAccount as `0x${string}`;
+  return { smartAccount: grant.smartAccount as `0x${string}`, expiresAt: grant.expiresAt };
 }
 
 /**
@@ -2322,7 +2450,11 @@ export async function writeBootstrapForChild(
  */
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
+  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
   if (haltRequested()) return "FLEET_HALT is present";
+  if (retiringExpired.has(tenant)) return "the expired grant's previous process is still retiring";
+  if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
+  if (exitingChildren.has(tenant)) return "the previous child is still exiting";
   if (leases.get(tenant) !== lease || !lease.healthy()) return "its lease was lost";
   if (killRequested(childHome(tenant))) return "a Telegram kill is pending";
   if (children.has(tenant)) return "a child is already running";
@@ -2331,6 +2463,8 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
+  if (accountingTenantHeld(tenant)) return;
+  if (retiringExpired.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
   // Checking `children` is not enough: this function awaits a dozen times
   // before the child exists, and a second caller arriving in that window saw
@@ -2360,6 +2494,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
       return;
     }
+    if (exitingChildren.has(tenant)) {
+      log(`${tenant}: previous child still exiting — not spawning a second`);
+      return;
+    }
     // FLEET_HALT means spawn none, and a restart timer can fire in the pass
     // before the main loop gets round to releasing the leases.
     if (haltRequested()) {
@@ -2372,14 +2510,19 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: a Telegram kill is pending — not spawning`);
       return;
     }
-    const smartAccount = await writeGrantForChild(tenant);
-    if (!smartAccount) {
-      log(`${tenant}: no grant in the store — not spawning`);
+    const grantForChild = await writeGrantForChild(tenant);
+    if (!grantForChild) {
+      log(`${tenant}: no usable signed grant in the store — not spawning`);
       // THE GRANT IS GONE, and its group memory goes with it now. A crash
       // restart lands here with no reconcile kill branch to do it, because the
       // tenant is no longer in `children`. The sweep would also catch it on the
       // next pass.
       await forgetTgGroups(tenant);
+      return;
+    }
+    const { smartAccount } = grantForChild;
+    if (!Number.isFinite(grantForChild.expiresAt) || grantForChild.expiresAt <= Math.floor(Date.now() / 1000)) {
+      log(`${tenant}: signed grant expired or has no valid expiry — not starting a worker; re-sign required`);
       return;
     }
     // The settings the child will actually read, so the watchdog can size its
@@ -2437,6 +2580,13 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
     // restoreTgGroupsForChild.
     await restoreTgGroupsForChild(tenant);
+    // This wait is shared by the roster and crash-restart paths. It also lets
+    // a resource failure in another tenant pause forks across the container.
+    await waitForSpawnSlot();
+    if (grantForChild.expiresAt <= Math.floor(Date.now() / 1000)) {
+      log(`${tenant}: signed grant expired during worker preparation — not spawning`);
+      return;
+    }
     // THE LAST AWAIT IS ABOVE THIS LINE, so what is true here is still true at
     // `spawn()`. See lateSpawnRefusal.
     const late = lateSpawnRefusal(tenant, lease);
@@ -2444,18 +2594,60 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: ${late} — not spawning (it changed while the child was being prepared)`);
       return;
     }
+    if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
+      log(`[alert] ${tenant}: worker deferred; local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached`);
+      await releaseLease(tenant);
+      return;
+    }
     void writeHistoryForChild(tenant, smartAccount);
     const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
     const staleSec = staleThresholdSec(tickSeconds);
     const firstBeatSec = firstBeatGraceSec(tickSeconds);
-    const proc = spawn(
-      process.execPath,
-      [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
-      // Groups held off when the restore above could not put them back.
-      { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
-    );
+    let proc: ChildProcess;
+    try {
+      proc = spawn(
+        process.execPath,
+        [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
+        // Groups held off when the restore above could not put them back.
+        { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (error) {
+      noteSpawnPressure(error);
+      log(`${tenant}: worker spawn threw (${spawnErrorCode(error)}) — ${error instanceof Error ? error.message : String(error)}`);
+      scheduleRestart(tenant, restarts + 1, `spawn ${spawnErrorCode(error)}`);
+      return;
+    }
     const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
     children.set(tenant, child);
+    let stopped = false;
+    const childStopped = (reason: string, restartReason: string, stoodDownReason: string): void => {
+      // A failed spawn emits `error`, and some ChildProcess implementations
+      // also emit `exit`. Only the first event may release the entry or queue
+      // a restart. Keep the identity guard for watchdog and stand-down races.
+      if (stopped) return;
+      stopped = true;
+      const ours = children.get(tenant) === child;
+      if (ours) children.delete(tenant);
+      if (stopping) return;
+      if (!ours) {
+        log(`${tenant} stood-down child (pid ${proc.pid}) ${stoodDownReason} — no restart from its exit`);
+        return;
+      }
+      log(`${tenant} ${reason}`);
+      const freshRestarts = nextRung(child, Date.now());
+      scheduleRestart(tenant, freshRestarts, restartReason);
+    };
+    proc.on("error", (error: Error) => {
+      // `kill()` can also emit an error while a real process is still alive.
+      // Never release that child's slot and start a second trader beside it.
+      if (proc.pid !== undefined) {
+        log(`[alert] ${tenant}: child process error with pid ${proc.pid} — ${error.message}; waiting for its exit`);
+        return;
+      }
+      noteSpawnPressure(error);
+      childStopped(`worker spawn failed (${spawnErrorCode(error)}): ${error.message}`, `spawn ${spawnErrorCode(error)}`, `failed to spawn (${spawnErrorCode(error)})`);
+    });
+    proc.on("exit", (code, signal) => childStopped(`exited (${code})`, `exit ${code}`, `exited with ${code ?? signal}`));
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -2467,43 +2659,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     pipe(proc.stdout, process.stdout);
     pipe(proc.stderr, process.stderr);
 
-    proc.on("exit", (code, signal) => {
-      // ONLY IF THIS ENTRY IS STILL OURS.
-      //
-      // `children.delete(tenant)` unconditionally was a double-spawn generator.
-      // The watchdog deletes, SIGKILLs, and spawns a replacement which installs a
-      // NEW entry under the same key — and then this handler, running for the
-      // corpse, deleted the replacement. A second later the `!children.has`
-      // guard below was true and a SECOND child spawned. The first replacement
-      // was orphaned: still ticking, still hitting the RPC, invisible to the
-      // watchdog, never mirrored, sharing one home and one sqlite file with its
-      // own replacement. Measured: 105 spawns against 61 exits in one window.
-      //
-      // AND ONLY THEN IS THE RESTART OURS. An entry that is gone or replaced was
-      // stood down by someone who has already decided what happens next: the
-      // watchdog scheduled its own restart on the rung it judged, and
-      // killChild's callers — the kill switch, a lost lease, FLEET_HALT — want
-      // none. This handler used to schedule another one regardless, usually at
-      // one second with the ladder back at zero, so the watchdog's backoff and
-      // the MAX_RESTARTS ceiling never applied; and two timers for one tenant
-      // are two chances to spawn it twice.
-      const ours = children.get(tenant) === child;
-      if (ours) children.delete(tenant);
-      if (stopping) return;
-      if (!ours) {
-        // SAID, AND NOTHING MORE. This line is the only record that a child
-        // somebody stood down really went: one that ignored SIGTERM and kept
-        // the home or its sqlite file open shows up as a stand-down with no
-        // exit after it, and the signal says whether SIGKILL was needed.
-        log(`${tenant} stood-down child (pid ${proc.pid}) exited with ${code ?? signal} — no restart from its exit`);
-        return;
-      }
-      log(`${tenant} exited (${code})`);
-      // A long healthy run that then dies is a fresh incident, not a crash loop.
-      const freshRestarts = nextRung(child, Date.now());
-      scheduleRestart(tenant, freshRestarts, `exit ${code}`);
-    });
-    log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+    log(`${tenant} spawn requested (pid ${proc.pid ?? "pending"}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
   } finally {
     spawning.delete(tenant);
   }
@@ -2723,6 +2879,7 @@ async function spawnHolder(
   lease: TenantLease,
   honour: HeldHonour | null,
 ): Promise<void> {
+  if (accountingTenantHeld(tenant)) return;
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
@@ -2758,7 +2915,7 @@ async function spawnHolder(
     log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${Math.round((held.nextRetryAt - Date.now()) / 1000)}s`);
     return;
   }
-  startHolderProcess(held);
+  await startHolderProcess(held);
 }
 
 /**
@@ -2775,14 +2932,30 @@ function keepResetOffer(held: Holder, settings: MerrymenSettings): void {
   if (block) writeRestoreBlocked(home, { ...block, resettable });
 }
 
-/** Start the hold process for a held tenant. Its caller has checked the lease and the rest. */
-function startHolderProcess(held: Holder): void {
+/** Start the hold process for a held tenant, under the shared spawn pace. */
+async function startHolderProcess(held: Holder): Promise<void> {
   const tenant = held.tenant;
-  const holderProc = spawn(
-    process.execPath,
-    [`--max-old-space-size=${HOLDER_MAX_OLD_SPACE_MB}`, "--import", "tsx", HOLD_ENTRY],
-    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  await waitForSpawnSlot();
+  const lease = leases.get(tenant);
+  if (holders.get(tenant) !== held || held.proc || held.leaving || held.stoodDown || !lease || lateSpawnRefusal(tenant, lease)) return;
+  if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
+    log(`[alert] ${tenant}: hold process deferred; local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached`);
+    return;
+  }
+  let holderProc: ChildProcess;
+  try {
+    holderProc = spawn(
+      process.execPath,
+      [`--max-old-space-size=${HOLDER_MAX_OLD_SPACE_MB}`, "--import", "tsx", HOLD_ENTRY],
+      { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    noteSpawnPressure(error);
+    if (holders.get(tenant) === held) holders.delete(tenant);
+    log(`${tenant}: hold process spawn threw (${spawnErrorCode(error)}) — ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  watchHolder(held, holderProc);
   const tag = `[${tenant.slice(0, 8)} hold]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
     stream?.on("data", (c: Buffer) =>
@@ -2793,8 +2966,7 @@ function startHolderProcess(held: Holder): void {
     );
   pipe(holderProc.stdout, process.stdout);
   pipe(holderProc.stderr, process.stderr);
-  watchHolder(held, holderProc);
-  log(`${tenant} held (pid ${holderProc.pid}) — trading stays off, the bot answers`);
+  log(`${tenant} held (pid ${holderProc.pid ?? "pending"}) — trading stays off, the bot answers`);
 }
 
 /**
@@ -2814,8 +2986,13 @@ function startHolderProcess(held: Holder): void {
 function watchHolder(held: Holder, proc: ChildProcess): void {
   const tenant = held.tenant;
   held.proc = proc;
-  held.exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
-  proc.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+  let resolveExited!: () => void;
+  held.exited = new Promise<void>((resolve) => { resolveExited = resolve; });
+  let stopped = false;
+  const holderStopped = (code: number | null, signal: NodeJS.Signals | null): void => {
+    if (stopped) return;
+    stopped = true;
+    resolveExited();
     const ours = holders.get(tenant) === held && held.proc === proc;
     if (ours) holders.delete(tenant);
     // Gone at last: nothing polls the bot for this tenant now. A stand-down
@@ -2829,7 +3006,7 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
         // And the lease kept for as long as it might poll (reconcile's last
         // loop, honourFleetHalt): a grant signed again takes it afresh, and a
         // lost lease is already gone.
-        void releaseLease(tenant);
+        if (!retiringExpired.has(tenant)) void releaseLease(tenant);
       }
     }
     if (stopping) return;
@@ -2851,7 +3028,17 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
     }
     holderCrashes.set(tenant, recent);
     log(`${tenant} hold process exited (${code ?? signal}) — the next pass tries the restore again`);
+  };
+  proc.on("error", (error: Error) => {
+    if (proc.pid !== undefined) {
+      log(`[alert] ${tenant}: hold process error with pid ${proc.pid} — ${error.message}; waiting for its exit`);
+      return;
+    }
+    noteSpawnPressure(error);
+    log(`${tenant}: hold process spawn failed (${spawnErrorCode(error)}): ${error.message}`);
+    holderStopped(null, null);
   });
+  proc.on("exit", holderStopped);
 }
 
 /**
@@ -2884,7 +3071,12 @@ function standDownHolder(tenant: string): void {
     held.leaving = proc;
     held.leftAt = Date.now();
     held.leftBot = homeBotKey(tenant);
-    proc.kill("SIGTERM");
+    try {
+      proc.kill("SIGTERM");
+    } catch (error) {
+      log(`${tenant}: hold SIGTERM failed — ${error instanceof Error ? error.message : String(error)}; retrying SIGKILL`);
+      try { proc.kill("SIGKILL"); } catch { /* retried below and by pressLeaving */ }
+    }
     setTimeout(() => {
       try {
         proc.kill("SIGKILL");
@@ -2924,8 +3116,9 @@ function scheduleHoldRetry(held: Holder, cls: string): void {
  * refuse, which would leave the bot unanswered until the next pass.
  */
 function holdMayLeave(tenant: `0x${string}`): boolean {
+  if (accountingTenantHeld(tenant)) return false;
   const lease = leases.get(tenant);
-  return !stopping && !haltRequested() && !!lease && lease.healthy() && !killRequested(childHome(tenant));
+  return !stopping && !haltRequested() && !retiringExpired.has(tenant) && !!lease && lease.healthy() && !killRequested(childHome(tenant));
 }
 
 /**
@@ -3271,8 +3464,14 @@ function envTickSeconds(): number {
 function killChild(tenant: string): void {
   const child = children.get(tenant);
   if (!child) return;
+  trackExitingChild(tenant, child.proc);
   children.delete(tenant); // delete first so the exit handler treats it as intentional
-  child.proc.kill("SIGTERM");
+  try {
+    child.proc.kill("SIGTERM");
+  } catch (error) {
+    log(`${tenant}: child SIGTERM failed — ${error instanceof Error ? error.message : String(error)}; retrying SIGKILL`);
+    try { child.proc.kill("SIGKILL"); } catch { /* retried below */ }
+  }
   setTimeout(() => {
     try {
       child.proc.kill("SIGKILL");
@@ -3281,6 +3480,145 @@ function killChild(tenant: string): void {
     }
   }, 3_000);
 }
+
+let retirementMirrorForTest: ((tenant: string) => Promise<boolean>) | null = null;
+
+/** Test seam for a failed or delayed final mirror, without a production database. */
+export function setRetirementMirrorForTest(fn: ((tenant: string) => Promise<boolean>) | null): void {
+  retirementMirrorForTest = fn;
+}
+
+/** A stopped worker's local ledger must be durable before its expiry barrier can leave. */
+async function mirrorRetiredWorker(tenant: string, lease: TenantLease): Promise<boolean> {
+  if (retirementMirrorForTest) return retirementMirrorForTest(tenant);
+  const file = path.join(childHome(tenant), "merrymen.db");
+  if (!existsSync(file)) return true;
+  const url = process.env.DATABASE_URL;
+  // A file-only deployment keeps this home as its ledger. There is no shared
+  // destination to copy to, and expiry never deletes the home.
+  if (!url) return true;
+  const handle = openChildLedger(childHome(tenant));
+  if (!handle) {
+    log(`[alert] ${tenant}: expired worker's ledger exists but cannot be opened; retaining its lease and home`);
+    return false;
+  }
+  try {
+    const shared = await makePgDb(url);
+    await applyLedgerSchema(shared);
+    await shared.exec(translateSchema(MIRROR_STATE_DDL));
+    try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+    if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+    if (r.failed) {
+      log(`[alert] ${tenant}: expired worker's final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
+      return false;
+    }
+    if (r.hasMore) {
+      log(`${tenant}: expired worker's final mirror has another source batch; retaining its lease for the next pass`);
+      return false;
+    }
+    const counts = mirrorCountsLine(tenant, r);
+    if (counts) log(`${counts} (expired worker's final pass)`);
+    return true;
+  } catch (error) {
+    log(`[alert] ${tenant}: expired worker's final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
+    return false;
+  } finally {
+    handle.close();
+  }
+}
+
+/** Stop expired processes, then wait for exit and a complete final ledger copy. */
+async function retireExpiredGrants(
+  tenants: readonly `0x${string}`[],
+  expiries: Map<string, number | null>,
+  nowSec: number,
+): Promise<void> {
+  for (const tenant of tenants) {
+    const lc = tenant.toLowerCase() as `0x${string}`;
+    const expiry = expiries.get(lc);
+    if (typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec) continue;
+    if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
+    // A re-sign may have landed since listTenantExpiries. Do not retire that
+    // fresh grant just because the roster snapshot was old.
+    try {
+      const latest = (await getGrantStore().get(lc))?.expiresAt;
+      if (typeof latest === "number" && Number.isFinite(latest) && latest > nowSec) {
+        expiries.set(lc, latest);
+        continue;
+      }
+    } catch (error) {
+      log(`${lc}: expiry recheck failed — ${error instanceof Error ? error.message : String(error)}; standing down on the expired roster`);
+    }
+    if (!retiringExpired.has(lc)) {
+      // A held practice book may leave a sqlite file from the worker that
+      // preceded the hold. Its restore failed, so copying its snapshots here
+      // could erase the durable book. The hold marker survives a bot crash.
+      const wasHeld = holders.has(lc) || readRestoreBlocked(childHome(lc)) !== null;
+      retiringExpired.set(lc, {
+        mirror: children.has(lc) || exitingChildren.has(lc) || (!wasHeld && existsSync(path.join(childHome(lc), "merrymen.db"))),
+        lease: leases.get(lc) ?? null,
+      });
+      log(`${lc}: signed grant expired — retiring its process before freeing capacity; grant and home remain stored`);
+    }
+    cancelRestart(lc);
+    killChild(lc);
+    standDownHolder(lc);
+  }
+
+  for (const [tenant, retirement] of [...retiringExpired]) {
+    cancelRestart(tenant);
+    // Even a re-sign in the middle of retirement cannot start in this home.
+    // Wait for the old process and any preparing spawn to finish first.
+    if (children.has(tenant)) killChild(tenant);
+    if (holders.has(tenant)) standDownHolder(tenant);
+    if (children.has(tenant) || exitingChildren.has(tenant) || spawning.has(tenant) || holders.has(tenant)) continue;
+    const lease = leases.get(tenant);
+    if (retirement.mirror) {
+      if (!lease || lease !== retirement.lease || !lease.healthy()) {
+        log(`[alert] ${tenant}: expired worker's lease unavailable before its final mirror; keeping the local re-arm barrier`);
+        continue;
+      }
+      if (!(await mirrorRetiredWorker(tenant, lease))) continue;
+      if (leases.get(tenant) !== lease || !lease.healthy()) continue;
+    }
+    if (lease && lease !== retirement.lease) continue;
+    await releaseLease(tenant);
+    retiringExpired.delete(tenant);
+    log(`${tenant}: expired process exited and final mirror pass completed — capacity released; stored grant can be re-signed`);
+  }
+}
+
+/**
+ * A shard session losing its socket releases all its Postgres locks at once.
+ * Signal every affected process in the same event turn, not up to one reconcile
+ * interval later. A local child that has not exited remains a spawn barrier even
+ * if a fresh DB session can already take a new lock. Another replica cannot see
+ * that barrier; execution-side fencing is needed to eliminate that last gap.
+ */
+function standDownLostLeasesNow(): void {
+  for (const [tenant, lease] of [...leases]) {
+    if (lease.healthy()) continue;
+    log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
+    const child = children.get(tenant);
+    if (child || exitingChildren.has(tenant)) leaseLossDraining.add(tenant);
+    try {
+      if (child) killChild(tenant);
+      standDownHolder(tenant);
+      cancelRestart(tenant);
+      void releaseLease(tenant);
+    } catch (error) {
+      // One process refusing a signal must not leave the other tenants on this
+      // lost shard running. Keep this lease unhealthy for reconcile to retry.
+      log(`${tenant}: lease-loss stand-down failed — ${error instanceof Error ? error.message : String(error)}`);
+      try { child?.proc.kill("SIGKILL"); } catch { /* retry on reconcile */ }
+      try { holders.get(tenant)?.leaving?.kill("SIGKILL"); } catch { /* retry on reconcile */ }
+    }
+  }
+}
+
+/** Test seam for the same handler registered on the production lease socket. */
+export { standDownLostLeasesNow as standDownLostLeasesForTest };
 
 /**
  * Tell the owner a Telegram kill is DONE: the stored grant is deleted. Sent
@@ -3374,13 +3712,26 @@ export async function honourPendingKills(): Promise<void> {
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
 export async function reconcile(): Promise<void> {
   if (stopping) return;
+  // The socket handler normally does this immediately. Its retry path must
+  // also run before remote reads: a broken grant-store connection cannot keep
+  // a child whose lease was lost alive indefinitely.
+  standDownLostLeasesNow();
+  const accountingHolds = accountingHoldTenants(process.env);
   const store = getGrantStore();
   let tenants: `0x${string}`[];
+  let expiresAtByTenant: Map<string, number | null>;
   // Before the listing is asked for: the group-memory sweep below judges only
   // rows written before this, never one a newer grant's child has published.
   const listedAtMs = Date.now();
   try {
-    tenants = await store.listTenants();
+    const roster = store.listTenantExpiries
+      ? await store.listTenantExpiries()
+      : await Promise.all((await store.listTenants()).map(async (tenant) => ({
+          tenant,
+          expiresAt: (await store.get(tenant))?.expiresAt ?? null,
+        })));
+    tenants = roster.map((entry) => entry.tenant);
+    expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -3401,29 +3752,47 @@ export async function reconcile(): Promise<void> {
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  // Remain wanted: a maintenance hold must not revoke the grant or wipe its
+  // home. A fresh held deployment starts no process for these tenants. Also
+  // stand down a local incarnation if a hold is introduced during a test or
+  // by an in-process operator; its retained state will refuse repair commit.
+  for (const tenant of accountingHolds) {
+    cancelRestart(tenant);
+    killChild(tenant);
+    standDownHolder(tenant);
+  }
+  await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
+  // A stored but expired key is still wanted for revocation, home and Telegram
+  // memory cleanup. It cannot sign another operation, so it does not need an
+  // OS worker. The worker enforces this same expiry when it arms; the fetched
+  // grant is checked again in spawnChild after this roster snapshot.
+  const eligibleToSpawn = tenants.filter((tenant) => {
+    const expiry = expiresAtByTenant.get(tenant.toLowerCase());
+    return typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec;
+  });
+  const eligible = new Set(eligibleToSpawn.map((tenant) => tenant.toLowerCase()));
+  const expiredCount = tenants.length - eligibleToSpawn.length;
+  if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
+    log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
+    lastRosterLog = { active: eligibleToSpawn.length, expired: expiredCount, at: Date.now() };
+  }
 
   // A lease whose connection dropped no longer protects its tenant — Postgres
   // has released the lock and another replica may hold it. Stand the child down
   // and drop the lease; the acquire below will try to re-take it (or find the
   // other replica now owns it). This is what makes the lock a live guarantee and
   // not just a start-time check.
-  for (const [tenant, lease] of [...leases]) {
-    if (!lease.healthy()) {
-      log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
-      if (children.has(tenant)) killChild(tenant);
-      // A held tenant's bot is not ours to answer either once the lease is
-      // gone: the replica that takes it will hold it, or start it.
-      standDownHolder(tenant);
-      await releaseLease(tenant);
-    }
-  }
+  standDownLostLeasesNow();
 
   // Spawn any wanted tenant that isn't running — but only behind a lease. Acquire
   // one first (unless we already hold it from a previous reconcile / across a
   // crash restart); if another replica holds it, skip this tenant and try again
   // next reconcile.
-  for (const tenant of tenants) {
+  let capacityDeferred = 0;
+  for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
+    if (accountingHolds.has(lc)) continue;
+    if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
     // restart already scheduled is the timer's to make, on its rung, not this
@@ -3458,6 +3827,13 @@ export async function reconcile(): Promise<void> {
       gaveUpUntil.delete(lc);
       log(`${lc}: stand-down over — trying once more`);
     }
+    if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
+      capacityDeferred += 1;
+      // A tenant that cannot run here must not keep a lease that would keep
+      // another replica with free capacity from taking it.
+      await releaseLease(lc);
+      continue;
+    }
     if (!leases.has(lc)) {
       let lease: TenantLease | null;
       try {
@@ -3474,6 +3850,12 @@ export async function reconcile(): Promise<void> {
     }
     await spawnChild(lc, cool?.restarts ?? 0);
   }
+  if (capacityDeferred > 0 && (!lastCapacityLog || lastCapacityLog.deferred !== capacityDeferred || Date.now() - lastCapacityLog.at > 60_000)) {
+    log(`[alert] local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached: ${capacityDeferred} unexpired grants deferred; capacity review required`);
+    lastCapacityLog = { deferred: capacityDeferred, at: Date.now() };
+  } else if (capacityDeferred === 0) {
+    lastCapacityLog = null;
+  }
   // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when
   // it takes. See retryHold.
   //
@@ -3485,8 +3867,9 @@ export async function reconcile(): Promise<void> {
   // refused does not put the restore back on every pass. Counted only once
   // the retry has really run: one that holdMayLeave turned away looked at
   // nothing, and the press is still owed its early look on the next pass.
-  const asked = await heldResetsAsked([...holders.values()].filter((h) => wanted.has(h.tenant)).map((h) => h.smartAccount));
+  const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
+    if (accountingHolds.has(held.tenant)) { pressLeaving(held); continue; }
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
     // tenant, stood down or not, until its exit is seen.
@@ -3497,14 +3880,14 @@ export async function reconcile(): Promise<void> {
     // AND ONCE IT HAS, THE HANDOVER IT HELD UP. Decided already: the restore
     // took, or the gate let the tenant go, and spawnChild asks both again.
     if (held.handingBack) {
-      if (!wanted.has(held.tenant) || held.retrying || !holdMayLeave(held.tenant)) continue;
+      if (!eligible.has(held.tenant) || retiringExpired.has(held.tenant) || held.retrying || !holdMayLeave(held.tenant)) continue;
       log(`${held.tenant}: its hold process has gone — handing the bot back to trading`);
       await handHoldBack(held);
       continue;
     }
     const ask = asked.get(held.smartAccount);
     const early = ask !== undefined && ask !== held.resetSeen;
-    if (!wanted.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
+    if (!eligible.has(held.tenant) || retiringExpired.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
     if ((await retryHold(held)) && early) held.resetSeen = ask;
   }
   // Refresh every running child's settings.json so a tenant's config change
@@ -3554,7 +3937,7 @@ export async function reconcile(): Promise<void> {
     // not refreshed, its token claims no bot beyond what its process may
     // still be polling (counted above), and no hold process is started only
     // to be killed a few lines later in a home that is about to be wiped.
-    if (!wanted.has(tenant)) continue;
+    if (!eligible.has(tenant) || retiringExpired.has(tenant)) continue;
     // STOOD DOWN, waiting only for a process that would not go: its lease is
     // gone, the fleet halted or its grant removed, so nothing is ours to write
     // or claim for it beyond the bot that process reads (counted above).
@@ -3591,7 +3974,7 @@ export async function reconcile(): Promise<void> {
     if (held.proc || !lease || !holderBotReady(stored)) continue;
     const late = lateSpawnRefusal(tenant as `0x${string}`, lease);
     if (late) continue;
-    startHolderProcess(held);
+    await startHolderProcess(held);
   }
   for (const tenant of children.keys()) {
     await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
@@ -3679,7 +4062,7 @@ export async function reconcile(): Promise<void> {
    * regardless, as the spawn path derives its anchor regardless.
    */
   for (const tenant of childHomeTenants()) {
-    if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant)) continue;
+    if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
     // Before the await, so no restart timer can start a spawn in this home
     // while its ledger is being read.
     cancelRestart(tenant);
@@ -3693,7 +4076,7 @@ export async function reconcile(): Promise<void> {
         log(`${tenant}: last mirror before wiping its home failed — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (children.has(tenant) || spawning.has(tenant)) continue;
+    if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
     log(`${tenant} grant removed — wiping the home it left with no child running`);
     try {
       rmSync(childHome(tenant), { recursive: true, force: true });
@@ -3716,7 +4099,7 @@ export async function reconcile(): Promise<void> {
   // lease is what stops another replica, in a deploy overlap say, from arming
   // a grant signed again beside it. It goes when the exit does (watchHolder).
   for (const tenant of [...leases.keys()]) {
-    if (!wanted.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
+    if (!wanted.has(tenant) && !retiringExpired.has(tenant) && !exitingChildren.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
   }
 }
 
@@ -4288,6 +4671,9 @@ export async function ferryForChild(
  * Cheap and best-effort: one grouped count against a table the mirror has just
  * written, and a failure here must never take the fleet loop down.
  */
+export const AUTONOMY_TRADE_FUNNEL_SQL = `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
+  FROM trades WHERE created_at >= ? GROUP BY status, rule`;
+
 async function fleetHealth(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return;
@@ -4362,10 +4748,7 @@ async function fleetHealth(): Promise<void> {
     try {
       const since = Math.floor(Date.now() / 1000) - 3600;
       const t = (await shared
-        .prepare(
-          `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
-             FROM trades WHERE at >= ? GROUP BY status, rule`,
-        )
+        .prepare(AUTONOMY_TRADE_FUNNEL_SQL)
         .all(since)) as { status: string; rule: string; n: number | string }[];
       const h = (await shared
         .prepare(
@@ -4779,17 +5162,17 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * This exists because an operator away from their machine has no shell — and
  * Railway's own dashboard, which sets these variables, works from a phone.
  *
- * TWO KEYS, DELIBERATELY. `MERRYMEN_ANNOUNCE_ID` arms a DRY RUN, which resolves
+ * THREE KEYS, DELIBERATELY. `MERRYMEN_ANNOUNCE_ID` arms a DRY RUN, which resolves
  * every recipient, builds every message and contacts Telegram zero times.
  * Sending additionally requires `MERRYMEN_ANNOUNCE_CONFIRM` to equal that same
- * id, so the difference between a rehearsal and messaging every beta tester is
- * never one variable set by muscle memory.
+ * id AND `MERRYMEN_ANNOUNCE_BODY_SHA256` to equal the dry-run payload digest.
+ * A changed file cannot turn an earlier approval into a different message.
  *
  * SAFE TO LEAVE SET. This runs on the reconcile loop and Railway restarts
- * services freely, so it must be harmless to re-enter: `runAnnouncement` skips
- * anyone already recorded in `announcements`, per recipient, so a redeploy
- * re-runs and sends nothing new. The body ships in the repo because there is no
- * other way to hand this process a file.
+ * services freely. `runAnnouncement` claims each recipient durably before
+ * sending, so a redeploy cannot replay a send whose result was uncertain.
+ * The body ships in the repo because there is no other way to hand this
+ * process a file.
  */
 /**
  * GRANT LIVE INTENT TO THE PEOPLE WHO ALREADY HAD IT, ONCE, BEFORE ENFORCEMENT.
@@ -6446,7 +6829,7 @@ async function runAnnouncementIfAsked(): Promise<void> {
   }
   try {
     const { readFileSync, existsSync, readdirSync } = await import("node:fs");
-    const { illegalTags, runAnnouncement } = await import("./announce");
+    const { announcementConfirmation, illegalTags, RECOVERY_ANNOUNCE_ID, runAnnouncement } = await import("./announce");
     // ── A PER-AGENT CAMPAIGN IS A DIRECTORY, A BROADCAST IS A FILE ─────────
     //
     // `docs/announcements/<id>.html`            one body for everyone
@@ -6497,12 +6880,18 @@ async function runAnnouncementIfAsked(): Promise<void> {
     const client = new pg.Client({ connectionString: url });
     await client.connect();
     try {
-      const confirmed = (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim() === id;
+      const payload = perAgent ? JSON.stringify(Object.entries(bodies).sort(([a], [b]) => a.localeCompare(b))) : body;
+      const { confirmed, bodySha256 } = announcementConfirmation(
+        id, payload, (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim(),
+        (process.env.MERRYMEN_ANNOUNCE_BODY_SHA256 ?? "").trim(),
+      );
+      log(`announcement ${id}: payload SHA-256 ${bodySha256} — confirm this exact digest before sending`);
       const out = await runAnnouncement({
         client,
         announceId: id,
         body,
         confirmed,
+        appendPersonalLine: id !== RECOVERY_ANNOUNCE_ID,
         ...(perAgent ? { bodies, tenants: Object.keys(bodies) } : {}),
       });
       // THE DRY RUN HAS TO SHOW THE TEXT, not a count. An operator approving a
@@ -6522,7 +6911,8 @@ async function runAnnouncementIfAsked(): Promise<void> {
           `${out.personalised} with their own reason · ` +
           `${out.withAllowlist} have linked at some point, ${out.withBotToken} hold a bot token · ` +
           `skipped: ${out.skippedNoChat} no chat, ${out.skippedNoToken} no bot, ${out.skippedDisabled} tg off, ${out.skippedNotifyOff} pushes off, ` +
-          `${out.skippedAlreadySent} already had it · ${out.failed.length} failed`,
+          `${out.skippedNotAllowed} no longer linked, ${out.skippedNoClaim} bot unclaimed/moved, ` +
+          `${out.skippedAlreadySent} already delivered, ${out.skippedAlreadyAttempted} already attempted, ${out.skippedChanged} changed before send · ${out.failed.length} failed`,
       );
       // "Nobody is blocked" and "the join broke" are the same empty map and
       // opposite facts. Only one of them is safe to send on.
@@ -6534,7 +6924,7 @@ async function runAnnouncementIfAsked(): Promise<void> {
       // Reasons without recipients: enough to act on, never enough to identify
       // anyone or reconstruct a credential.
       for (const [reason, n] of tally) log(`announcement ${id}:   ${n}× ${reason}`);
-      if (out.dryRun) log(`announcement ${id}: to send, set MERRYMEN_ANNOUNCE_CONFIRM=${id}`);
+      if (out.dryRun) log(`announcement ${id}: to send, set MERRYMEN_ANNOUNCE_CONFIRM=${id} and MERRYMEN_ANNOUNCE_BODY_SHA256=${bodySha256}`);
     } finally {
       await client.end();
     }
@@ -6542,6 +6932,68 @@ async function runAnnouncementIfAsked(): Promise<void> {
     // The message only. A pg or fetch error object can carry request context,
     // and in this process that context can include a bot token.
     log(`announcement ${id} failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** One Shogun-approved Merrymen room, dry-run unless campaign and exact chat id are confirmed. */
+async function runTgGroupRecoveryNoticeIfAsked(): Promise<void> {
+  const id = (process.env.MERRYMEN_TG_RECOVERY_ID ?? "").trim();
+  if (!id) return;
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
+    log("tg recovery notice: invalid campaign id — refusing");
+    return;
+  }
+  if (!process.env.DATABASE_URL || !process.env.MERRYMEN_STORE_DEK) {
+    log("tg recovery notice: hosted database or store key missing — refusing");
+    return;
+  }
+  const rawChatId = (process.env.MERRYMEN_TG_RECOVERY_CHAT_ID ?? "").trim();
+  if (rawChatId && !/^-\d+$/.test(rawChatId)) {
+    log("tg recovery notice: chat id is not an exact negative number — refusing");
+    return;
+  }
+  const chatId = rawChatId ? Number(rawChatId) : null;
+  if (chatId !== null && !Number.isSafeInteger(chatId)) {
+    log("tg recovery notice: chat id is outside the safe integer range — refusing");
+    return;
+  }
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { runTgGroupRecoveryNotice } = await import("./tg-group-recovery-notice");
+    const body = readFileSync(path.resolve(ROOT, "docs/announcements", `tg-group-${id}.html`), "utf8");
+    // @ts-expect-error pg is runtime-only here, as in announce-cli.ts
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      const out = await runTgGroupRecoveryNotice({
+        client, campaignId: id, body, selectedChatId: chatId,
+        confirmCampaignId: (process.env.MERRYMEN_TG_RECOVERY_CONFIRM ?? "").trim(),
+        confirmBodySha256: (process.env.MERRYMEN_TG_RECOVERY_BODY_SHA256 ?? "").trim(),
+      });
+      // Approved metadata only: the sealed state also holds private chat
+      // history, which the notice path never returns or logs.
+      log(`tg recovery notice ${id}: ${out.status}${out.dryRun ? " (DRY RUN — nothing sent)" : ""} · ${out.rooms.length} approved Merrymen room(s)`);
+      log(`tg recovery notice ${id}: prepared body SHA-256 ${out.bodySha256}`);
+      for (const room of out.rooms) log(`tg recovery notice ${id}: candidate chat ${room.chatId} · ${room.title} · ${room.kind}${room.isForum ? " · forum" : ""}`);
+      if (out.reason) log(`tg recovery notice ${id}: ${out.reason}`);
+      if (out.dryRun) {
+        for (const line of out.body.split("\n")) log(`tg recovery notice ${id}: prepared | ${line}`);
+        log(`tg recovery notice ${id}: to send, set MERRYMEN_TG_RECOVERY_CHAT_ID to exactly one candidate id, MERRYMEN_TG_RECOVERY_CONFIRM=${id}, and MERRYMEN_TG_RECOVERY_BODY_SHA256=${out.bodySha256}`);
+      }
+    } finally {
+      await client.end();
+    }
+  } catch {
+    // pg/fetch exceptions can embed URLs and tokens. The status alone is safe
+    // for deployment logs; troubleshoot inside the service without printing it.
+    log(`tg recovery notice ${id}: failed; nothing sent unless an at-most-once claim was recorded`);
   }
 }
 
@@ -6643,6 +7095,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // is — no chain history, no rows to remove, nothing to do — recorded rather
     // than absent.
     const tenantByAccount = new Map<string, string>();
+    const ambiguousAccounts = new Set<string>();
     const byAccount = new Map<string, Record<string, unknown>>();
     /** account → the class vault holding its assets, for the classifier. */
     const custodyVaults = new Map<string, readonly string[]>();
@@ -6659,6 +7112,8 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
           log(`recon| tenant ${tenant} holds a grant with no smart account — it cannot be planned`);
           continue;
         }
+        const previousTenant = tenantByAccount.get(acct.toLowerCase());
+        if (previousTenant && previousTenant.toLowerCase() !== tenant.toLowerCase()) ambiguousAccounts.add(acct.toLowerCase());
         tenantByAccount.set(acct.toLowerCase(), tenant);
         // FROM THE GRANT, which is the only place a class vault can honestly
         // come from: it is CREATE2-salted with one smart account, so there is no
@@ -6689,8 +7144,22 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       `recon| roster: ${agents.length} account(s) — ${ledgerAgents.length} from the ledger, ` +
         `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead}`,
     );
+    const repairOptions = parseRepairOptions(process.env);
+    if (repairOptions?.mode === "commit") {
+      const refusal = !rosterRead ? "grant roster unreadable" :
+        repairOptions.accounts.some((account) => ambiguousAccounts.has(account)) ? "selected account resolves to multiple tenants" : accountingCommitRefusal({
+        ...repairOptions,
+        plans: agents.map((agent) => ({
+          smartAccount: String(agent.smart_account),
+          tenant: tenantByAccount.get(String(agent.smart_account).toLowerCase()) ?? null,
+        })),
+        env: process.env,
+        localState: accountingMaintenanceLocalState,
+      });
+      if (refusal) { log(`repair| refusing commit before reconstruction: ${refusal}`); return; }
+    }
     const flows = (await shared
-      .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, at FROM flows")
+      .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, chain_id, block_number, log_index, at FROM flows")
       .all()) as unknown as Record<string, unknown>[];
     const equityRows = (await shared
       .prepare("SELECT agent_id, epoch, equity_usdg, at FROM equity ORDER BY agent_id, epoch, at DESC, id DESC")
@@ -6760,6 +7229,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       usdgToken,
       fromBlock: 0n,
       toBlock: head,
+      includeCapitalTimestamps: true,
       // WITHOUT THIS EVERY CLASS BUY READS AS A WITHDRAWAL.
       //
       // A class buy moves USDG account→vault and the token curve→vault, so the
@@ -6858,12 +7328,28 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
     return;
   }
 
+  const maintenanceRefusal = accountingCommitRefusal({
+    ...opts, plans, env: process.env, localState: accountingMaintenanceLocalState,
+  });
+  if (maintenanceRefusal) {
+    log(`repair| refusing commit: ${maintenanceRefusal}`);
+    return;
+  }
+  if (opts.mode === "commit" && (stopping || haltRequested())) {
+    log("repair| refusing commit: orchestrator is stopping or FLEET_HALT is present");
+    return;
+  }
+
   const chainId = Number(process.env.MERRYMEN_CHAIN_ID ?? 4663);
-  const results = await runRepair(shared, plans, opts, chainId, (r) =>
-    log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+  const results = await runRepair(shared, plans, opts, chainId,
+    (r) => log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+    () => stopping || haltRequested() ? "orchestrator is stopping or FLEET_HALT is present" : null,
   );
   for (const line of repairLines(opts.runId, opts.mode, results)) log(`repair| ${line}`);
 }
+
+/** Test seam: exercise the actual operator entry point with an isolated ledger. */
+export { runRepairIfAsked as runAccountingRepairForTest };
 
 
 // ── THE NEWS DESK ──────────────────────────────────────────────────────────
@@ -7741,6 +8227,7 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
       // a little slower each time, and nine weeks on be stood down as "keeps
       // dying right after start".
       const rung = nextRung(child, beat === null ? child.startedAt : beat * 1000);
+      trackExitingChild(tenant, child.proc);
       children.delete(tenant);
       try {
         child.proc.kill("SIGKILL");
@@ -7868,7 +8355,7 @@ function haltRequested(): boolean {
 export async function honourFleetHalt(): Promise<void> {
   // A lease kept for a hold process that has not exited (below) is waited
   // for, like its process, and not a reason to say all this again.
-  const kept = (t: string) => !!holders.get(t)?.leaving;
+  const kept = (t: string) => !!holders.get(t)?.leaving || retiringExpired.has(t);
   if (children.size > 0 || [...holders.values()].some((h) => !h.stoodDown) || [...leases.keys()].some((t) => !kept(t))) {
     log("FLEET_HALT present — standing every child down and releasing leases");
     for (const t of [...children.keys()]) killChild(t);
@@ -7891,9 +8378,13 @@ export async function runOrchestrator(): Promise<void> {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
+  // Validate the complete operator list before any diagnosis, mutation or
+  // child starts. A malformed entry must never silently drop from a hold.
+  const accountingHolds = accountingHoldTenants(process.env);
+  if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
+  setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   await runAccountingDiagnosisIfAsked();
-  await runReconstructionDryRunIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror
   // empties and refills per agent, so at startup it would be reading a table
@@ -7928,6 +8419,16 @@ export async function runOrchestrator(): Promise<void> {
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+
+  // A held target has no child here. Its potentially long historical scan
+  // must not delay unrelated tenants. Install shutdown handling first, and
+  // recheck shutdown/hold/fresh-state at the commit boundary inside the job.
+  await runAccountingReconstructionAtStartup({
+    heldTenants: accountingHolds,
+    reconstruct: runReconstructionDryRunIfAsked,
+    onError: (error) => log(`accounting reconstruction failed — ${error instanceof Error ? error.message : String(error)}`),
+  });
+  if (stopping) return;
 
   // ORDERS ON THEIR OWN CLOCK, beside the reconcile loop below rather than
   // inside it: that loop's pass is only as fast as its slowest step.
@@ -8012,6 +8513,7 @@ export async function runOrchestrator(): Promise<void> {
       // and a dry run that appears twenty minutes later reads as nothing having
       // happened. It is idempotent, so running early costs nothing.
       if (cohortPasses === 1) await runAnnouncementIfAsked();
+      if (cohortPasses === 1) await runTgGroupRecoveryNoticeIfAsked();
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();

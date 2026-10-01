@@ -196,10 +196,11 @@ describe("what ships to the browser", () => {
     }
   });
 
-  it("the callback path is sent no-referrer and may not be framed", () => {
-    const config = readFileSync(new URL("../../../../next.config.mjs", import.meta.url), "utf8");
-    assert.match(config, /\{\s*source:\s*"\/connect\/x",\s*headers:\s*noFrame\s*\}/);
-    assert.match(config, /const noFrame = \[[\s\S]*?"Referrer-Policy", value: "no-referrer"[\s\S]*?\];/);
-    assert.match(config, /const noFrame = \[[\s\S]*?"frame-ancestors 'none'"[\s\S]*?\];/);
+  it("the callback path is sent no-referrer and may not be framed", async () => {
+    const { default: config } = await import("../../../../next.config.mjs");
+    const rules = await config.headers!();
+    const headers = rules.filter(r => r.source === "/:path*" || r.source === "/connect/x").flatMap(r => r.headers);
+    assert.ok(headers.some(h => h.key === "Referrer-Policy" && h.value === "no-referrer"));
+    assert.ok(headers.some(h => h.key === "Content-Security-Policy" && h.value.includes("frame-ancestors 'none'")));
   });
 });

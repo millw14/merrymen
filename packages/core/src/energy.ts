@@ -39,7 +39,7 @@ export const ENERGY = Object.freeze({
   /**
    * The HOUSE baseline for new trades per day. The low allowance is a tenth of
    * min(the grant's own maxOpsPerDay, this) — never of the grant alone, because
-   * the grant is signed by the very owner being throttled and re-signing is free.
+   * the grant is signed by the very owner being throttled and can be replaced at renewal.
    */
   baselineOpsPerDay: 24,
   /**

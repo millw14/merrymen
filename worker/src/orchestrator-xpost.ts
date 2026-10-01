@@ -62,6 +62,7 @@ import {
   lastOutAt,
   postingAccounts,
   postsOfXUser,
+  ownerSendTimesSince,
   optOutReplies,
   repliesEnabledFor,
   replyConsentAt,
@@ -74,6 +75,7 @@ import {
   schedulePost,
   skipScheduled,
   takeAllowance,
+  takeOwnerAllowance,
   writeMeta,
   type XAccount,
 } from "./xpost/store";
@@ -496,14 +498,17 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
  * is the seed, and no coin. An agent that is not trading, or has nothing to
  * say about how it trades (no strategy, no habit, no coin), never has a
  * trade-talk day. `habitSeed` draws which habit that day is handed, so the
- * same line does not come back every trade-talk day. Exported for tests.
+ * same line does not come back every trade-talk day. An owner who turned off
+ * posts about the coins it buys (`coins: false`) is never offered a coin here
+ * either: a trade-talk day is then only how it trades. Exported for tests.
  */
 export function casualInputs(
   f: AgentFacts,
   day: string,
+  o: { coins?: boolean } = {},
 ): { subject: string; seed: string; tradeTalk: boolean; recentCoins: { label: string; paper: boolean }[]; habitSeed: string } {
   const habitSeed = `${f.tenant}|${day}`;
-  const coins = recentCoins(f);
+  const coins = o.coins === false ? [] : recentCoins(f);
   const own = writerFacts(f, day, []);
   const something = own.strategy !== null || own.flavour !== null || own.traits.length > 0 || coins.length > 0;
   if (f.mode !== "idle" && something && tradeTalkDay(f.tenant, day)) {
@@ -584,7 +589,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const tenants = [...byTenant.keys()];
         if (tenants.length === 0) return { log: null };
         const accounts = (await postingAccounts(shared, tenants)).filter((a) => byTenant.has(a.tenant));
-        const accountOf = new Map(accounts.map((a) => [a.tenant, a] as const));
 
         // The owner's zone, once per pass: the room's, or else the one the
         // owner's device reported when they turned posting on — so an owner
@@ -661,7 +665,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 continue;
               }
             }
-            const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
+            // A pass can spend minutes polling or sending. Use the current
+            // consent and kinds, not the planning snapshot from its start.
+            const account: XAccount | null = await getAccount(shared, post.tenant);
             let asleep = false;
             let dayOf: ((ms: number) => string) | undefined;
             if (account?.posting && account.xUserId === post.xUserId) {
@@ -727,14 +733,33 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               }
               release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
             }
-            // The day is the owner's own, as the planner counts it; the hello counts too.
-            const accountDayKey = `xday:${post.xUserId}:${dayOf ? dayOf(t) : utcDay(t)}`;
+            // All owners share the server's X-account ceiling. The owner's
+            // smaller choice has its own counter, so someone else's post
+            // cannot spend it. Both count the hello and reply posts too.
+            const localDayKey = dayOf ? dayOf(t) : utcDay(t);
+            const accountDayKey = `xday:${post.xUserId}:${localDayKey}`;
             if (!(await takeAllowance(shared, accountDayKey, perDay, t))) {
               await giveBack();
               bump("account-day-cap");
               continue;
             }
             release.push(() => returnAllowance(shared, accountDayKey, at()));
+            const ownerDayKey = `xownerday:${post.tenant}:${localDayKey}`;
+            // On rollout this counter does not exist yet, but earlier sends
+            // today still count. Include uncertain claims as possible sends.
+            let initialOwnerUsed = 0;
+            if ((await readMeta(shared, ownerDayKey)) === null) {
+              const earlier = await ownerSendTimesSince(shared, post.tenant, t - 2 * DAY);
+              initialOwnerUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
+            }
+            // Reads the latest stored choice under the same account row lock
+            // as a preference save, then reserves one unit atomically.
+            if (!(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, perDay, t, initialOwnerUsed))) {
+              await giveBack();
+              bump("owner-day-cap");
+              continue;
+            }
+            release.push(() => returnAllowance(shared, ownerDayKey, at()));
             if (post.kind === "buy" && post.coin) {
               const foldKey = `fold:${post.xUserId}:${post.coin}`;
               const fold = await claimSpan(shared, foldKey, t, BUY_COIN_FOLD_MS);
@@ -917,8 +942,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           intros,
           posts,
           calls: f.calls,
+          // Shared server cap and tenant preference are counted separately.
           perDay,
+          ownerPerDay: account.prefs.perDay,
           model,
+          kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
         const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
         for (const intent of intents) {
@@ -983,7 +1011,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const dedupeKey = `reply:${account.xUserId}:${comment.id}`;
       if (await keyStatus(shared, dedupeKey) !== null) continue;
       const dueAtMs = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
-        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay });
+        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay, ownerPerDay: account.prefs.perDay });
       if (dueAtMs === null) continue;
       if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
       const facts = writerFacts(f, localDay(tz, nowMs), recentOwn);
@@ -998,7 +1026,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Recheck time-sensitive planning rules in case drafting crossed a limit.
       const finishedAt = at();
       const finalDueAt = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
-        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs: finishedAt, tz, clock: PLAN_CLOCK, perDay });
+        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs: finishedAt, tz, clock: PLAN_CLOCK, perDay, ownerPerDay: account.prefs.perDay });
       const body = finalDueAt !== null && verdict?.ok ? verdict.text : null;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "reply", dedupeKey, body: body ?? "",
@@ -1093,7 +1121,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
-      const casual = casualInputs(f, intent.day);
+      const casual = casualInputs(f, intent.day, { coins: account.prefs.buys });
       gate.coins = casual.recentCoins.map((c) => c.label);
       gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
       gate.seeds = casual.seed ? [casual.seed] : [];

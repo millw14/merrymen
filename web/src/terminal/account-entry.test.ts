@@ -43,6 +43,23 @@ async function create(props: Record<string, unknown>): Promise<string> {
 }
 
 describe("the account entry", () => {
+  it("offers agent creation only after this signed-in account is confirmed", async () => {
+    const confirmed: AccountState = {
+      session: { hosted: true, address: "0x" + "a".repeat(40) },
+      status: { exists: false },
+    };
+    const ready = await entry({ account: confirmed });
+    assert.match(ready, /href="\/create"/);
+
+    // On sign-in App discards the earlier signed-out result. A grants timeout
+    // must leave this loading/error state, not recreate the old empty account.
+    for (const failed of [false, true]) {
+      const html = await entry({ account: null, accountFailed: failed });
+      assert.doesNotMatch(html, /href="\/create"|Fund an agent/);
+      assert.doesNotMatch(text(html), /Your agent starts here/);
+    }
+  });
+
   it("draws a skeleton while the account is loading, and claims nothing", async () => {
     const html = await entry({ account: null, accountFailed: false });
     assert.match(html, /aria-busy="true"/);
@@ -55,6 +72,13 @@ describe("the account entry", () => {
     assert.doesNotMatch(html, /aria-busy/);
     assert.match(text(html), /couldn.t load your account/i);
     assert.match(html, /<button[^>]*>Try again<\/button>/);
+  });
+
+  it("does not reuse an earlier no-agent result after a failed refresh", async () => {
+    const stale: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
+    const html = await entry({ account: stale, accountFailed: true });
+    assert.match(text(html), /couldn.t load your account/i);
+    assert.doesNotMatch(text(html), /Your agent starts here|Create an agent/);
   });
 
   it("does not call a portfolio still in flight 'not available'", async () => {
@@ -78,6 +102,21 @@ describe("the account entry", () => {
 });
 
 describe("the create screen", () => {
+  it("does not offer new mainnet creation before a protected signer is ready", async () => {
+    const account: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
+    const html = await create({ account });
+    assert.match(text(html), /Use a protected signing wallet/);
+    assert.match(text(html), /owner key is not stored in this browser/);
+    assert.match(html, /href="\/grant"/);
+    assert.doesNotMatch(html, /id="agent-name"|Set trading limits/);
+  });
+
+  it("does not offer creation from a stale no-agent result", async () => {
+    const stale: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
+    const html = await create({ account: stale, accountFailed: true });
+    assert.match(text(html), /couldn.t load your account/i);
+    assert.doesNotMatch(text(html), /Set trading limits|Meet your next agent/);
+  });
   it("does not say 'Loading your account' about a read that failed", async () => {
     const html = await create({ account: null, accountFailed: true });
     assert.doesNotMatch(text(html), /Loading/i);

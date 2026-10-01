@@ -547,6 +547,35 @@ describe("the clocks, mounted as the shell mounts them", () => {
     }
   });
 
+  it("a successful sign-in invalidates the previous owner's in-flight book before React cleans up", async () => {
+    const late: Array<() => void> = [];
+    const s = mounted({
+      answer: (key, epoch) =>
+        key === "feed" && epoch === 0
+          ? new Promise<RawRead>((resolve) => late.push(() => resolve(ok(BODIES.feed))))
+          : ok(BODIES[key]),
+    });
+    try {
+      await s.render(0);
+      await s.settle();
+      assert.equal(s.live().reads.mine, "unread");
+      assert.equal(late.length, 1);
+
+      // The sign-in callback runs before the epoch state update is committed.
+      await s.press((h) => h.invalidate());
+      assert.equal(s.alive(0), false, "the old read is rejected immediately");
+      late[0]!();
+      await s.settle();
+      assert.equal(s.live().reads.mine, "unread", "the pre-login book cannot repopulate the cleared view");
+
+      await s.render(1);
+      await s.settle();
+      assert.equal(s.live().reads.mine, "ok", "the new session's book can load normally");
+    } finally {
+      await s.t.close();
+    }
+  });
+
   it("a tab coming back into view reads what went stale while it was hidden", async () => {
     let hidden = false;
     const s = mounted({ hidden: () => hidden });

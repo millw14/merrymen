@@ -293,6 +293,8 @@ export function tokenMissingOf(
 export interface ShellClocksHandle {
   /** What the shell draws from the clocks, published only when it changes. */
   shell: ShellClocks;
+  /** Stop this session's reads immediately, before React mounts the next clock epoch. */
+  invalidate(): void;
   /** Ask these reads again now; every other clock stays on its own schedule. */
   refreshReads(...keys: LiveClockKey[]): void;
   /**
@@ -337,6 +339,7 @@ export function useShellClocks(
 ): ShellClocksHandle {
   const [shell, setShell] = useState<ShellClocks>(QUIET_SHELL);
   const clocks = useRef<ReturnType<typeof startClocks> | null>(null);
+  const stopCurrent = useRef<(() => void) | null>(null);
   const latest = useRef({ depsFor, timers });
   latest.current = { depsFor, timers };
   useEffect(() => {
@@ -359,14 +362,19 @@ export function useShellClocks(
       latest.current.timers,
     );
     clocks.current = running;
+    const stop = () => {
+      alive = false;
+      running.stop();
+      if (clocks.current === running) clocks.current = null;
+    };
+    stopCurrent.current = stop;
     const onVisible = () => {
       if (!document.hidden) running.wake();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      alive = false;
-      running.stop();
-      if (clocks.current === running) clocks.current = null;
+      stop();
+      if (stopCurrent.current === stop) stopCurrent.current = null;
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [epoch]);
@@ -375,6 +383,12 @@ export function useShellClocks(
   };
   return {
     shell,
+    invalidate: () => {
+      // A successful sign-in changes who owns the book. React's effect cleanup
+      // happens after the event, so stop the old reads before clearing state.
+      stopCurrent.current?.();
+      setShell(QUIET_SHELL);
+    },
     refreshReads,
     refreshAccount: () => refreshReads(...ACCOUNT_READS),
     retryFailing: () => clocks.current?.retryNow(),

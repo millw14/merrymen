@@ -87,6 +87,16 @@ jobs:
       - name: Production build
         run: npm run build
 
+      - name: Pack runtime release
+        run: node cli/pack-runtime.mjs --out-dir "$RUNNER_TEMP/merrymen-release"
+
+      # A consumer does not apply this repository's npm overrides. Inspect the
+      # actual installed packages, without trusting a shipped shrinkwrap.
+      - name: Verify isolated global install
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/merrymen-global" --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/merrymen-release/merrymen-*.tgz
+          node cli/verify-installed.mjs "$RUNNER_TEMP/merrymen-global/lib/node_modules/merrymen"
+
   app-test:
     name: app · tests ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
@@ -113,7 +123,7 @@ jobs:
 
       - name: Test
         # The same file set as `npm test` (package.json), one shard of it.
-        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts"
+        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs"
 
   app:
     name: app

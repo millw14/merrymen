@@ -490,7 +490,7 @@ const REGISTRY: ChatCommand[] = [
     via: "navigate",
     to: "/grant#resign",
     weighty: true,
-    say: () => `Take you to re-sign my trading permission — free, one signature, nothing moves on-chain.`,
+    say: () => `Take you to review renewal of my trading permission. Revoking the old permission requires network fees before you sign the replacement.`,
   },
 ];
 

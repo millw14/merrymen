@@ -78,14 +78,14 @@ describe("the re-sign button's promise reaches the screen it opens", () => {
     assert.match(SRC, /searchParams|URLSearchParams/, "and it arrives as a query");
   });
 
-  it("BOTH mount arms honour it — not just the localStorage one", () => {
+  it("every mount arm honours it, including verified stopped-wallet recovery", () => {
     // The second arm serves a hosted Privy owner signed in from a browser that
     // did not mint the agent, which is most of them and exactly the cohort with
     // no other way to re-sign. An intent applied to one arm would miss them.
     assert.equal(
       (SRC.match(/requestedChain\(\) \?\?/g) ?? []).length,
-      2,
-      "the stored-grant arm AND the server-grant arm",
+      3,
+      "the stored-grant, verified recovery, and server-grant arms",
     );
   });
 
@@ -96,8 +96,8 @@ describe("the re-sign button's promise reaches the screen it opens", () => {
     // real money, which is a worse bug than the one being fixed.
     assert.match(
       SRC,
-      /disabled=\{renewing \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
-      "the acknowledgement gate must survive",
+      /disabled=\{renewing \|\| securityBusy \|\| !renewalAck \|\| capsInputInvalid \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
+      "fee consent, cap validation, operation locking and real-funds acknowledgment must survive",
     );
     assert.match(SRC, /checked=\{chainId !== grant\.chainId\}/, "and the move stays visible as a tick");
   });

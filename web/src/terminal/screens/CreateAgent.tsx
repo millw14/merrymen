@@ -11,10 +11,13 @@ import {
   type CustomToken,
   isWallTooWide,
 } from "@merrymen/core";
-import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
+import { createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { requestJson, RetryButton, SignIn, type AccountState } from "../HostedControls";
+import { loadRecoveryGrants, trustedSavedGrant } from "@/lib/saved-grant-binding";
+import { needsPermissionReplacement } from "@/lib/permission-replacement";
+import { requestJson, RetryButton, SignIn, PRIVY_BETA, type AccountState } from "../HostedControls";
+import { fetchAccountForSession } from "../account-session";
 import { Face } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
@@ -55,7 +58,7 @@ const EXAMPLES:Record<string,string>={
   "llm-strategist":"For example, assess current market information, explain a proposed move, and check it against your limits.",
 };
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
-export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
+export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onSignedIn,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
   const t = useT();
   const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
@@ -105,6 +108,23 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   const [busy,setBusy]=useState(false);
   const [status,setStatus]=useState("");
   const [error,setError]=useState("");
+  const savedContext=account ? `${account.session.hosted}:${account.session.address?.toLowerCase()??""}:${account.status.exists}` : "";
+  const [savedRecovery,setSavedRecovery]=useState<{context:string;grant:Grant|null;failed:boolean}|null>(null);
+  async function recoverableFor(session:AccountState["session"]):Promise<Grant|null>{
+    for(const candidate of [loadGrant(),...loadRecoveryGrants()]){
+      if(candidate&&await trustedSavedGrant(candidate,session,window.location.origin))return candidate;
+    }
+    return null;
+  }
+  useEffect(()=>{
+    let active=true;
+    if(!account){setSavedRecovery(null);return;}
+    setSavedRecovery(null);
+    void recoverableFor(account.session).then(saved=>{
+      if(active)setSavedRecovery({context:savedContext,grant:saved,failed:false});
+    }).catch(()=>{if(active)setSavedRecovery({context:savedContext,grant:null,failed:true});});
+    return()=>{active=false;};
+  },[account,savedContext]);
   useEffect(()=>{
     if(!account?.status.grant)return;
     void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(!(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
@@ -124,13 +144,22 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   // A FAILED READ IS NOT A SLOW ONE. Both leave `account` null, and this line
   // said "Loading your account…" for either — for ever, after a failure, with
   // nothing to press. See AccountEntry.
-  if(!account)return accountFailed
+  if(!account || accountFailed)return accountFailed
     ? <section className="create-agent"><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="create-agent"><SkeletonRows rows={3} label="Loading your account"/></section>;
-  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onRefresh}/></section>;
+  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onSignedIn}/></section>;
   if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;
+  const recovery=savedRecovery?.context===savedContext?savedRecovery:null;
+  if((grant&&needsPermissionReplacement(grant))||(!account.status.exists&&recovery?.grant))return <section className="create-agent"><h1>Resume your saved wallet.</h1><p>This account already has a wallet. Open Wallet &amp; permissions to finish any pending revocation and review its next permission before trading resumes.</p><a href="/grant#resign">Resume wallet setup</a></section>;
+  // This wizard always creates a mainnet account, including in paper mode.
+  // Do not write settings or generate a key while the protected signer is
+  // unavailable. Existing grants keep their backup, renew and recovery paths.
+  if(!grant&&!privyOwner)return <section className="create-agent"><h1>Use a protected signing wallet.</h1><p>New mainnet agents require a Privy wallet so their owner key is not stored in this browser.</p>{PRIVY_BETA?<><p>Sign in with X or email, then wait for your signing wallet to become ready.</p><SignIn onDone={onSignedIn}/><RetryButton retrying={retrying} onRetry={onRefresh}/></>:<p>Protected wallet sign-in is not enabled on this installation. Enable it before creating a mainnet agent, or use testnet from Wallet &amp; permissions.</p>}<a href="/grant">Manage an existing wallet or use testnet</a></section>;
+  if(!grant&&!account.status.exists&&!recovery)return <section className="create-agent"><SkeletonRows rows={3} label="Checking your saved wallet"/></section>;
+  if(!grant&&recovery?.failed)return <section className="create-agent"><h1>Couldn&apos;t check your saved wallet.</h1><p>Restore access to browser storage and reload before creating or replacing a permission.</p><a href="/grant#resign">Open Wallet &amp; permissions</a><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
   async function create() {
-    if(busy || grant)return;
+    if(busy || grant || !account)return;
+    if(!privyOwner){setError("Your signing wallet is not ready. Sign in with X or email and try again.");return;}
     // WAS `validAmount`, which took a dot decimal and nothing else — while the
     // field above is `inputMode="decimal"`, which renders a COMMA key on a
     // Spanish, German, French, Portuguese, Turkish or Indonesian keyboard. The
@@ -162,14 +191,26 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     if(!paper&&!ack){setError(t("create.errAck"));return;}
     setBusy(true);setError("");
     try {
-      const current=await requestJson<AccountState["status"]>("/api/grants");
-      if(current.exists){throw new Error("An agent is already active. Open your agent instead of creating another wallet.");}
+      // The account prop may have been loaded before another tab changed login.
+      // Confirm this tenant and its no-agent status before any settings write.
+      const current=await fetchAccountForSession(account.session);
+      if(current.kind!=="ready"){
+        onRefresh();
+        throw new Error("We couldn't confirm your account. Try again after it reloads.");
+      }
+      if(current.account.status.exists){throw new Error("An agent is already active. Open your agent instead of creating another wallet.");}
+      if(current.account.session.hosted&&privyOwner.account.address.toLowerCase()!==current.account.session.address?.toLowerCase())throw new Error("Your signing wallet changed. Wait for the wallet for this signed-in account, then try again.");
+      // A stop may have removed the server grant while another tab retained
+      // its revocation journal. Re-check immediately before any settings write
+      // or new signature; the initial UI check is not an authorization cache.
+      const saved=await recoverableFor(current.account.session);
+      if(saved){setSavedRecovery({context:savedContext,grant:saved,failed:false});throw new Error("Resume your saved wallet from Wallet & permissions before creating another permission.");}
       const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>("/api/settings");
       const address=(value?:string)=>value&&/^0x[0-9a-fA-F]{40}$/.test(value) ? value as `0x${string}` : undefined;
       const pons=await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
       // The market answers ride the settings write that was already happening —
       // one round trip, not four.
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
+      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({owner:account.session.hosted?account.session.address:undefined,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
       /**
        * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
        * undo the whole point of the step.
@@ -184,19 +225,23 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       // The PARSED values, not `Number(trade)`. The raw string is what the
       // owner typed, and `Number("10,50")` is NaN while `Number("1.000")` is 1.
       const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
-      // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
-      // wallet it signed in with; everything else keeps the browser-generated
-      // key. Same Kernel, same wall, same session key either way.
-      const result=privyOwner ? await createPrivyOwnedWallet(privyOwner.account,privyOwner.did,mintOptions) : await createAgentWallet(mintOptions);
+      const result=await createPrivyOwnedWallet(privyOwner.account,privyOwner.did,mintOptions);
       setGrant(result.local);setArmed(result.handoff.ok);setStep("backup");setStatus("");
       if(!result.handoff.ok)setError(result.handoff.error ?? "Your wallet was created, but the service could not activate your agent. Save its recovery key before retrying.");
     }catch(e){setError(e instanceof Error ? e.message : "Could not create your agent. Try again.");}
     finally{setBusy(false);}
   }
   async function retryActivation(){
-    if(!grant || busy)return;
+    if(!grant || busy || !account)return;
     setBusy(true);setError("");
     try{
+      if(needsPermissionReplacement(grant))throw new Error("This permission was selected for revocation. Resume it from Wallet & permissions instead of activating it again.");
+      const current=await fetchAccountForSession(account.session);
+      if(current.kind!=="ready"||!await trustedSavedGrant(grant,current.account.session,window.location.origin)){
+        onRefresh();throw new Error("This saved wallet could not be verified for your current account. Open Wallet & permissions.");
+      }
+      if(current.account.status.exists&&current.account.status.grant?.smartAccount.toLowerCase()!==grant.smartAccount.toLowerCase())throw new Error("A different agent is active for this account. Reload before continuing.");
+      if(needsPermissionReplacement(grant))throw new Error("This permission is awaiting replacement. Resume it from Wallet & permissions.");
       const {demoOwnerPrivateKey:owner,...publicGrant}=grant;
       await requestJson("/api/grants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(account?.session.hosted ? publicGrant : grant)});
       setArmed(true);onRefresh();

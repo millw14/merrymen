@@ -8,6 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { NextRequest } from "next/server";
 import { afterEach, describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import { PRODUCTION_DIRECTORY_URL, assistantSetupMarkdown, llmsTxt } from "./assistant-setup";
@@ -250,7 +251,7 @@ describe("/llms.txt on the dedicated MCP host", () => {
     for (const headers of [PAGE_LOAD, { accept: "text/plain, */*" }, {}] as Record<string, string>[]) assert.equal(at("/llms.txt", headers), null, JSON.stringify(headers));
   });
 
-  it("never reaches the middleware at all (a file extension is outside its matcher)", async () => {
+  it("passes the middleware unchanged as an exact public text endpoint", async () => {
     // Next's own matcher compiler, as middleware.test.ts uses it.
     const nextRequire = createRequire(import.meta.url);
     const { getMiddlewareMatchers } = nextRequire("next/dist/build/analysis/get-page-static-info.js") as {
@@ -259,9 +260,17 @@ describe("/llms.txt on the dedicated MCP host", () => {
     const { getMiddlewareRouteMatcher } = nextRequire("next/dist/shared/lib/router/utils/middleware-route-matcher.js") as {
       getMiddlewareRouteMatcher: (m: unknown[]) => (pathname: string, req: { headers: Record<string, string> }, query: Record<string, string>) => boolean;
     };
-    const { config } = await import("@/middleware");
+    const { config, middleware } = await import("@/middleware");
     const runs = getMiddlewareRouteMatcher(getMiddlewareMatchers(config.matcher, {}));
-    assert.equal(runs("/llms.txt", { headers: {} }, {}), false);
+    assert.equal(runs("/llms.txt", { headers: {} }, {}), true);
+    for (const headers of [PAGE_LOAD, { accept: "text/plain, */*" }, {}] as Record<string, string>[]) {
+      const result = middleware(new NextRequest("https://mcp.merrymen.dev/llms.txt", { headers: { host: "mcp.merrymen.dev", ...headers } }));
+      assert.equal(result.headers.get("x-middleware-next"), "1");
+      assert.equal(result.headers.get("location"), null, "public text remains on the MCP host");
+      assert.equal(result.headers.get("content-security-policy"), null, "no document nonce policy for text");
+      assert.equal(result.headers.get("cache-control"), null, "the route keeps its public text cache policy");
+    }
+    assert.equal(runs("/a/alice.eth", { headers: {} }, {}), true, "dotted application routes still receive document protection");
     assert.equal(runs("/connect/mcp", { headers: {} }, {}), true, "the control: pages do reach it");
   });
 });

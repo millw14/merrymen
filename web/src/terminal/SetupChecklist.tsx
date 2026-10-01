@@ -2,11 +2,35 @@ import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import type { AgentStatus } from "@/app/api/grants/route";
 import { setupStep } from "@/lib/can-start";
-import { requestJson } from "./HostedControls";
+import { fetchAccountForSession } from "./account-session";
+import { SIGNED_IN_EVENT } from "@/lib/resign-anchor";
+import type { AccountState } from "./HostedControls";
 
 export default function SetupChecklist({onFund,paper}:{onFund:()=>void;paper:boolean}) {
   const [status,setStatus]=useState<AgentStatus|null>(null);
-  useEffect(()=>{let active=true;requestJson<AgentStatus>("/api/grants").then(value=>{if(active)setStatus(value);}).catch(()=>{});return()=>{active=false;};},[]);
+  useEffect(()=>{
+    let active=true;
+    let previous:AccountState["session"]|null=null;
+    let generation=0;
+    const load=async()=>{
+      const current=++generation;
+      let result=await fetchAccountForSession(previous);
+      if(!active||current!==generation)return;
+      if(result.kind==="changed"){
+        setStatus(null);previous=null;
+        result=await fetchAccountForSession(null);
+      }
+      if(!active||current!==generation)return;
+      if(result.kind!=="ready"){setStatus(null);previous=null;return;}
+      previous=result.account.session;
+      setStatus(result.account.status as AgentStatus);
+    };
+    const signedIn=()=>{generation++;previous=null;setStatus(null);void load();};
+    void load();
+    const id=setInterval(()=>void load(),15_000);
+    window.addEventListener(SIGNED_IN_EVENT,signedIn);
+    return()=>{active=false;clearInterval(id);window.removeEventListener(SIGNED_IN_EVENT,signedIn);};
+  },[]);
   if(!status) return null;
   return <SetupProgress status={status} paper={paper} onFund={onFund}/>;
 }

@@ -20,6 +20,8 @@ import { distinctTrades, OP_COPY_REACH_SEC, tradeOpKey } from "./distinct-trades
 import { OP_KEY, readEvidencedSells } from "./profile-trades";
 
 export interface DeskTradeRow {
+  /** Canonical ledger row for an owner-only P&L image lookup. */
+  id?: number;
   kind: string;
   sell_token: string | null;
   buy_token: string | null;
@@ -43,6 +45,8 @@ export interface DeskTradeRow {
   /** Why the agent did it, in its decision's words. The owner's own desk only. */
   reason?: string | null;
   realized_pnl_usdg?: number | null;
+  /** Executed sale proceeds, when the ledger records them. Used to price a P&L image. */
+  fill_cash_usdg?: number | null;
   /**
    * Whether `realized_pnl_usdg` is a MEASUREMENT: true only on a filled sell
    * whose proceeds and whose cost were both read — its own fill evidenced (a
@@ -92,7 +96,7 @@ export async function readDeskTrades(
   try {
     rows = (await db
       .prepare(
-        `SELECT t.kind, t.sell_token, t.buy_token, t.amount_usdg, t.tx_hash, t.status, t.reject_rule,
+        `SELECT t.id, t.kind, t.sell_token, t.buy_token, t.amount_usdg, t.tx_hash, t.status, t.reject_rule,
                 t.sim_quote_out, t.sim_min_out, t.sim_fee_tier, t.sim_gas, t.created_at,
                 t.fill_side, COALESCE(t.fill_symbol, d.symbol) AS symbol, d.display_name, d.action, d.reason,
                 t.realized_pnl_usdg, ${OP_KEY} AS op_key
@@ -109,7 +113,7 @@ export async function readDeskTrades(
   } catch {
     return (await db
       .prepare(
-        `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
+        `SELECT id, kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
                 sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, created_at
            FROM trades WHERE agent_id = ?${run.replace("t.", "")} AND created_at > ?
           ORDER BY created_at DESC, id DESC LIMIT ?`,
@@ -131,8 +135,19 @@ export async function readDeskTrades(
       /* fill quantities and provenance arrive with worker migrations */
     }
   }
+  // Cash was added after the rich tape. Read it separately so an old ledger
+  // still keeps its coin names and reasons when only this field is absent.
+  const cash = new Map<number, number | null>();
+  const ids = rows.map((r) => r.id).filter((id): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0);
+  if (ids.length > 0) {
+    try {
+      const fills = await db.prepare(`SELECT id, fill_cash_usdg FROM trades WHERE agent_id = ? AND id IN (${ids.map(() => "?").join(",")})`)
+        .all(account, ...ids) as { id: number; fill_cash_usdg: number | null }[];
+      for (const fill of fills) cash.set(fill.id, fill.fill_cash_usdg);
+    } catch { /* a ledger predating executed cash still has a useful tape */ }
+  }
   // The key the replay matched on stays here: it is not part of the tape.
-  return rows.map(({ op_key, ...r }) => ({ ...r, realized_vouched: typeof op_key === "string" && vouched.has(op_key) }));
+  return rows.map(({ op_key, ...r }) => ({ ...r, fill_cash_usdg: r.id === undefined ? null : cash.get(r.id) ?? null, realized_vouched: typeof op_key === "string" && vouched.has(op_key) }));
 }
 
 /**

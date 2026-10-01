@@ -147,7 +147,7 @@ function hoursLeft(expiresAt: number, now: number): number {
  *
  * No "grant", "policy", "wall" or "session key": the owner signed something
  * that lets the agent trade, and that is what it is called here. Every variant
- * says the signature is free, because "sign" next to money reads as "pay".
+ * explains the network fees for revoking old permissions before replacement.
  */
 export function signPromptText(reason: SignReason, i: SignInputs, name: string): string {
   const who = name.trim() || "your agent";
@@ -156,34 +156,34 @@ export function signPromptText(reason: SignReason, i: SignInputs, name: string):
       return (
         `✍️ <b>${escHtml(who)} needs a fresh signature to keep trading.</b>\n` +
         `An update changed how trading permission works, and the one you signed before can't be used anymore. ` +
-        `Signing again is free and takes a few seconds. Nothing else needs doing.`
+        `Renewal first revokes old permissions on-chain and requires network fees. Review the renewal steps on the wallet page.`
       );
     case "wrong-chain":
       return (
         `✍️ <b>${escHtml(who)} can't trade: your permission was signed for a different network.</b>\n` +
-        `Sign a new one on Robinhood Chain. It's free, and your funds stay where they are.`
+        `Review renewal on Robinhood Chain. Revoking old permissions requires network fees on both networks; balances do not transfer between networks.`
       );
     case "grant-too-wide":
       return (
         `✍️ <b>${escHtml(who)} can't place its first trade.</b>\n` +
         `The permission you signed covers too many tokens and exchanges to switch on. ` +
-        `Sign again with fewer of them. It's free.`
+        `Review fewer tokens or exchanges and renew. Revoking old permissions requires network fees.`
       );
     case "expiring":
       return (
         `⏳ <b>${escHtml(who)}'s trading permission runs out in about ${hoursLeft(i.grantExpiresAt ?? i.now, i.now)}h.</b>\n` +
-        `Sign a new one to keep it trading. It's free, and it doesn't touch your funds.`
+        `Review renewal to keep it trading. Revoking old permissions requires network fees before you sign the replacement.`
       );
     case "expired":
       return (
         `⛔ <b>${escHtml(who)}'s trading permission ran out, so it has stopped trading.</b>\n` +
-        `Sign a new one to start it again. It's free, and your funds are untouched.`
+        `Review renewal to start it again. Revoking old permissions requires network fees before you sign the replacement.`
       );
     case "update":
       return (
         `✍️ <b>${escHtml(who)} needs a fresh signature.</b>\n` +
         `We updated what your agent is allowed to do, and the permission you signed is from before that update, ` +
-        `so parts of it won't work until you sign again. It's free, takes a few seconds, and your funds don't move.`
+        `so parts of it won't work until you renew. Revoking old permissions requires network fees before you sign the replacement.`
       );
   }
 }

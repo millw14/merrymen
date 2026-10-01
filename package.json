@@ -1,7 +1,7 @@
 {
   "name": "merrymen",
   "version": "0.21.0",
-  "description": "Trading agents you never have to trust — self-hosted, inside hard caps. On-chain trading is non-custodial: keys stay on your machine, caps enforced by the account contract itself. For Robinhood Chain; Telegram control; write-your-own strategies.",
+  "description": "Autonomous trading agents with signed on-chain call permissions and expiry, plus worker-enforced daily budgets and drawdown checks. For Robinhood Chain; hosted or self-hosted.",
   "license": "MIT",
   "homepage": "https://merrymen.dev",
   "repository": {
@@ -21,6 +21,7 @@
     "cli",
     "web",
     "worker",
+    "pnl/PNL.jpg",
     "packages/core",
     "sdk",
     "strategies",
@@ -30,7 +31,10 @@
     "!web/.next/trace",
     "!web/tsconfig.tsbuildinfo",
     "!web/public/merrymenlogo.png",
-    "!**/*.test.ts"
+    "!**/.env",
+    "!**/.env.*",
+    "!**/*.test.ts",
+    "!**/*.test.mjs"
   ],
   "scripts": {
     "onboard": "node cli/bin.mjs onboard",
@@ -44,40 +48,52 @@
     "start:web": "cd web && next start -H 0.0.0.0 -p ${PORT:-3100}",
     "start:orchestrator": "node --import tsx worker/src/orchestrator.ts",
     "prepare": "node cli/build.mjs",
-    "prepublishOnly": "node sdk/build.mjs && node cli/prepublish.mjs",
+    "prepublishOnly": "node cli/publish-guard.mjs",
+    "pack:release": "node sdk/build.mjs && node cli/prepublish.mjs && node cli/pack-runtime.mjs",
     "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
-    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\" \"sdk/*.test.ts\"",
+    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\" \"sdk/*.test.ts\" \"cli/*.test.mjs\"",
     "test:contracts": "cd contracts && npm test",
-    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser && tsc --noEmit -p sdk"
+    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser && tsc --noEmit -p sdk",
+    "prepack": "node cli/publish-guard.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@modelcontextprotocol/server": "^2.1.0",
     "@noble/hashes": "^1.8.0",
     "@privy-io/node": "^0.34.0",
-    "@privy-io/react-auth": "^3.40.0",
+    "@privy-io/react-auth": "^3.46.0",
     "@stripe/stripe-js": "^9.15.0",
+    "@tanstack/react-query": "^5.104.0",
     "@zerodev/ecdsa-validator": "^5.4.9",
     "@zerodev/permissions": "^5.6.3",
     "@zerodev/sdk": "^5.5.10",
     "@zerodev/webauthn-key": "^5.5.0",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^1.41.0",
-    "next": "^15.1.0",
+    "next": "^15.5.27",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "viem": "^2.28.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@npmcli/arborist": "9.9.2",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "npm-packlist": "10.0.4"
+  },
+  "overrides": {
+    "postcss": "^8.5.28",
+    "ws@^8.0.0": "^8.22.0",
+    "bn.js@^4.0.0": "^4.12.5",
+    "uuid@>=8 <11.1.1": "^11.1.1",
+    "@walletconnect/utils@~2.21.0": "2.21.9"
   }
 }

@@ -220,6 +220,17 @@ const SETTINGS_VIEW: SettingsView = {
 const count = (method: string, path: string) => calls.filter((c) => c.method === method && c.url.split("?")[0] === path).length;
 
 describe("sending feels instant", () => {
+  it("binds a hosted chat request to the account whose confirmed thread supplied its history", async () => {
+    const owner = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    routes["POST /api/chat"] = () => json({ reply: "Aye." });
+    await ui.render(h({ chatKey: `merrymen.chat.${owner}` }));
+    await settle();
+    await typeAndSend("How is my agent?");
+    await until(() => /Aye\./.test(text()), "reply");
+    const sent = calls.find((c) => c.method === "POST" && c.url === "/api/chat")?.body;
+    assert.equal(sent?.expectedTenant, owner);
+  });
+
   it("THE OWNER'S LINE AND A TYPING BUBBLE APPEAR AT ONCE, AND THE DRAFT CLEARS", async () => {
     const s = stream();
     routes["POST /api/chat"] = () => s.response;

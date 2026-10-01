@@ -15,6 +15,7 @@ import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { getGrantStore } from "@merrymen/grant-store";
 import { tenantOf } from "@/lib/auth";
+import { expectedTenantMatches } from "@/lib/expected-tenant";
 import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
 import { GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { queuePaperReset, startOver } from "@/lib/start-over";
@@ -25,6 +26,9 @@ export async function POST(req: Request) {
   if (isHostedMode()) {
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+    if (!(await expectedTenantMatches(req, tenant))) {
+      return NextResponse.json({ error: "Your sign-in changed. Reload your agent and try again." }, { status: 409 });
+    }
     const paperReset = await startOver({
       account: () => hostedAgentFor(req),
       remove: () => getGrantStore().remove(tenant),

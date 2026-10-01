@@ -393,6 +393,7 @@ const COIN_ADVICE =
 
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
+const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
 
 /**
  * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
@@ -855,7 +856,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (vocab) return refuse(vocab);
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
-  if (ctx.kind === "reply" && REPLY_CURRENT_OR_ACTION.test(own)) return refuse("reply-current-or-action");
+  if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   if (shouts(own)) return refuse("caps");
   if (ctx.kind !== "reply" && POINTS_BACK.test(own.trim())) return refuse("points-back");
 

@@ -54,8 +54,8 @@ describe("re-signing lands on the account it claims", () => {
     // so, and every entry point forwards it.
     assert.equal(
       (SESSION.match(/o\.expectAccount,/g) ?? []).length,
-      4,
-      "prepareAgentGrant, createAgentWallet, createPrivyOwnedWallet and restoreAgentWallet must all forward it",
+      5,
+      "preflightAgentGrant, prepareAgentGrant, createAgentWallet, createPrivyOwnedWallet and restoreAgentWallet must all forward it",
     );
     assert.match(SESSION, /expectAccount\?: Address;/, "and MintOptions carries it");
   });
@@ -73,7 +73,8 @@ describe("a Privy agent can re-sign at all", () => {
     // has, by design — so the cohort CreateAgent mints had no re-sign path.
     assert.match(WALLET, /const resignBy: "owner-key" \| "privy" \| null/);
     assert.match(WALLET, /isPrivyOwned\(grant\) && privyOwner/);
-    assert.match(WALLET, /if \(!grant \|\| !resignBy\) return;/);
+    assert.match(WALLET, /if \(!grant \|\| !resignBy \|\| renewing \|\| securityBusy \|\| !renewalAck \|\| capsInputInvalid \|\|/,
+      "both owner types remain eligible, but invalid limits, missing consent or concurrent operations cannot sign");
     assert.match(WALLET, /createPrivyOwnedWallet\(privyOwner!\.account, privyOwner!\.did, options\)/);
   });
 
@@ -85,8 +86,9 @@ describe("a Privy agent can re-sign at all", () => {
     // The fresh settings, the selected chain, the current caps and the adapter
     // verification are the conditions; branching before them would be two
     // signing controls wearing one name.
-    const opts = WALLET.indexOf("const options = {");
-    const branch = WALLET.indexOf('resignBy === "privy"');
+    const renew = WALLET.slice(WALLET.indexOf("async function renewKey()"));
+    const opts = renew.indexOf("const options = {");
+    const branch = renew.indexOf('resignBy === "privy"');
     assert.ok(opts > 0 && branch > opts, "the branch comes after the options are built");
   });
 

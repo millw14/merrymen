@@ -1,11 +1,11 @@
 /**
- * THE RECOVERY RELAY — a withdrawal submit path, not a bundler proxy.
+ * THE RECOVERY RELAY — owner withdrawal and permission-revocation submission.
  *
  * Hosted, the browser can SIGN a withdrawal but cannot SUBMIT one: the Pimlico
  * key is a house secret, and `pimlicoBundlerUrl` and `pimlicoPaymasterUrl` are
  * the byte-identical string, so handing it to a browser would hand out
  * house-sponsored gas along with it. This route closes that gap by adding the
- * key server-side and forwarding only what a withdrawal needs.
+ * key server-side and forwarding only withdrawals and exact self-revocations.
  *
  * The engine needs no changes: `recoverFunds` takes `bundlerUrl` as an opaque
  * string, so the browser passes `${origin}/api/bundler/4663` and everything else
@@ -17,7 +17,7 @@
  * 1. METHOD ALLOWLIST, deny by default. Seven methods, listed below.
  * 2. THE TICKET names WHOSE account may be relayed; `userOp.sender` must equal
  *    it. See recovery-ticket.ts for what that does and does not prove.
- * 3. THE OPERATION MUST BE A WITHDRAWAL. Validating method, sender, entryPoint
+ * 3. THE OPERATION MUST BE A WITHDRAWAL OR A SINGLE SELF invalidateNonce CALL. Validating method, sender, entryPoint
  *    and paymaster fields never looks at what the operation DOES — without
  *    isRecoveryShape, any ticket holder could push swaps, approvals or arbitrary
  *    contract calls through app.merrymen.dev as a free transaction service on
@@ -49,7 +49,7 @@
 import { NextResponse } from "next/server";
 import { pimlicoBundlerUrl, robinhoodChain, robinhoodTestnet, ENTRYPOINT } from "@merrymen/core";
 import { readTicket } from "@/lib/recovery-ticket";
-import { isRecoveryShape } from "@/lib/recovery-shape";
+import { isRecoveryShape, isPermissionRevocationShape } from "@/lib/recovery-shape";
 
 export const runtime = "nodejs";
 
@@ -206,8 +206,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ chainId: strin
 
     const callData = typeof op.callData === "string" ? (op.callData as `0x${string}`) : "0x";
     const shape = isRecoveryShape(callData, { classVaults: ticket.classVaults });
-    if (!shape.ok) {
-      return refuse(rpc.id, `this relay only carries withdrawals — ${shape.why}`);
+    if (!shape.ok && !isPermissionRevocationShape(callData, ticket.smartAccount)) {
+      return refuse(rpc.id, `this relay only carries withdrawals or permission revocation for your own account — ${shape.why}`);
     }
   }
 

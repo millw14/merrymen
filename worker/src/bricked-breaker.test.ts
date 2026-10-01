@@ -54,7 +54,8 @@ describe("so the worker says it", () => {
     // concatenation before matching rather than guessing where the break falls.
     const flat = src.replace(/"\s*\+\s*\n?\s*"/g, "");
     assert.match(flat, /adding funds will not help/);
-    assert.match(src, /Re-sign the permission \(free\)/);
+    assert.match(src, /Review the permission at \/grant/);
+    assert.match(src, /renewing it revokes old permissions and requires network fees/);
   });
 
   it("ONCE PER CHANGE, NOT ONCE PER TICK", () => {

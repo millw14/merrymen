@@ -192,7 +192,8 @@ describe("POST /api/grants/discard", () => {
       const res = await POST(
         new Request("https://app.merrymen.dev/api/grants/discard", {
           method: "POST",
-          headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(wallet)}` },
+          headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(wallet)}`, "content-type": "application/json" },
+          body: JSON.stringify({ expectedTenant: wallet }),
         }),
       );
       // No Postgres here, so no row: said, and not thrown.
@@ -215,4 +216,33 @@ describe("POST /api/grants/discard", () => {
     assert.equal(res.status, 401);
     assert.ok(await grants.getGrantStore().get(wallet), "still stored");
   });
+
+  it("HOSTED START OVER: A STALE OR MISSING EXPECTED TENANT DOES NOT READ OR REMOVE A GRANT", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    grants.resetGrantStoreForTest();
+    const store = grants.getGrantStore();
+    const wallet = "0x00000000000000000000000000000000000000e9" as const;
+    const other = "0x00000000000000000000000000000000000000ea" as const;
+    await store.put(wallet, grant());
+    const get = mock.method(store, "get");
+    const remove = mock.method(store, "remove");
+    try {
+      for (const body of [undefined, { expectedTenant: other }]) {
+        const res = await POST(new Request("https://app.merrymen.dev/api/grants/discard", {
+          method: "POST",
+          headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(wallet)}`, "content-type": "application/json" },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        }));
+        assert.equal(res.status, 409);
+      }
+      assert.equal(get.mock.callCount(), 0, "the server did not even read the stale page's account");
+      assert.equal(remove.mock.callCount(), 0, "no grant was removed");
+      assert.deepEqual(commands(), [], "no reset was queued");
+    } finally {
+      get.mock.restore();
+      remove.mock.restore();
+    }
+    assert.ok(await store.get(wallet), "the grant remains armed");
+  });
+
 });

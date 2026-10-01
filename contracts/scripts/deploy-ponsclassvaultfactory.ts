@@ -23,9 +23,9 @@
  * reasons not to, and they are real.
  */
 import hre from "hardhat";
-import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { recordDeployment } from "./lib/deployment-manifest";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,22 +95,12 @@ async function main() {
   console.log(`  vaultFor(${probeOwner.slice(0, 10)}…) → ${predicted}`);
 
   const file = path.join(__dirname, "..", "deployments.json");
-  let book: Record<string, Record<string, { address: string; deployedAt: string; codeBytes: number }>> = {};
-  try {
-    book = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    /* first deployment on any chain */
-  }
   const chainKey = String(chainId);
-  book[chainKey] = {
-    ...(book[chainKey] ?? {}),
-    PonsClassVaultFactory: {
-      address: factory.address,
-      deployedAt: new Date().toISOString(),
-      codeBytes: (code.length - 2) / 2,
-    },
-  };
-  writeFileSync(file, JSON.stringify(book, null, 2) + "\n");
+  await recordDeployment(file, chainId, "PonsClassVaultFactory", {
+    address: factory.address,
+    deployedAt: new Date().toISOString(),
+    codeBytes: (code.length - 2) / 2,
+  }, { replaceExisting: true });
 
   console.log("");
   console.log(`✓ PonsClassVaultFactory deployed at ${factory.address}`);

@@ -26,8 +26,10 @@
  * DRY RUN IS THE DEFAULT. It resolves every recipient, builds every message and
  * reports exactly what would happen, without contacting Telegram at all.
  */
+import { createHash } from "node:crypto";
 import { getSettingsStore } from "./settings-store";
 import { esc, sendMessage } from "./telegram/api";
+import { botIdOf } from "./telegram/state";
 import { liveBlockerText } from "../../packages/core/src/index";
 
 /**
@@ -90,8 +92,8 @@ export function illegalTags(body: string): string[] {
 export interface AnnounceRecipient {
   tenant: string;
   chatId: number;
-  /** Present only in memory, never returned, logged or persisted. */
-  token: string;
+  /** Public numeric bot identity; the secret is fetched again just before send. */
+  botId: string;
   /** `agents.live_blocker` for this tenant, when known. */
   blocker: string | null;
   /** `agents.name` — what the OWNER called it. Null when the join found none. */
@@ -106,7 +108,15 @@ export interface AnnounceOutcome {
   skippedDisabled: number;
   /** Telegram on, but notifications explicitly turned off. Their answer stands. */
   skippedNotifyOff: number;
+  /** The chat was removed from the tenant's durable allowlist. */
+  skippedNotAllowed: number;
+  /** Missing, moved, or invalid bot claim: no tenant may speak through it. */
+  skippedNoClaim: number;
   skippedAlreadySent: number;
+  /** A previous attempt may have reached Telegram; it must not be replayed. */
+  skippedAlreadyAttempted: number;
+  /** Settings, chat, or claim changed after recipient resolution. */
+  skippedChanged: number;
   /** Eligible, but outside this campaign's tenant allowlist. */
   skippedNotSelected: number;
   /** Selected for a per-agent campaign with no prepared body. Never defaulted. */
@@ -155,6 +165,49 @@ export const ANNOUNCE_DDL = `
     PRIMARY KEY (announce_id, tenant)
   );`;
 
+/** A pre-send claim closes the crash window between Telegram and `announcements`. */
+export const ANNOUNCE_ATTEMPTS_DDL = `
+  CREATE TABLE IF NOT EXISTS announcement_attempts (
+    announce_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    claimed_at BIGINT NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (announce_id, tenant)
+  );`;
+
+async function ensureAnnouncementAttempts(client: PgClientLike): Promise<void> {
+  try {
+    await client.query(ANNOUNCE_ATTEMPTS_DDL);
+  } catch (e) {
+    // Two orchestrator replicas may run the one-shot on the same deployment.
+    // Postgres can report a catalog conflict even for IF NOT EXISTS when both
+    // create a table concurrently. Accept only a table that now exists.
+    if (!["23505", "42P07", "42710"].includes(String((e as { code?: unknown } | null)?.code))) throw e;
+    const probe = await client.query("SELECT to_regclass('announcement_attempts') AS table_name");
+    if (!probe.rows[0]?.table_name) throw e;
+  }
+}
+
+/** The outage notice has no cached per-agent status line. */
+export const RECOVERY_ANNOUNCE_ID = "recovery-2026-10-01";
+
+/** Approve the exact source body or prepared-body set, rather than a reusable campaign name.
+ * Older generic campaigns may append a live blocker line after this digest;
+ * the recovery campaign disables that line, so its digest covers all sent text.
+ */
+export function announcementConfirmation(
+  announceId: string,
+  payload: string,
+  confirmId: string | undefined,
+  confirmBodySha256: string | undefined,
+): { confirmed: boolean; bodySha256: string } {
+  const bodySha256 = createHash("sha256").update(payload).digest("hex");
+  return {
+    bodySha256,
+    confirmed: confirmId === announceId && confirmBodySha256 === bodySha256,
+  };
+}
+
 /**
  * Who would receive this, with what.
  *
@@ -173,11 +226,20 @@ export async function resolveRecipients(
   // One query rather than one per tenant. `owner_id` is the chat of whoever
   // ran /link first; `link_code` in the same table is a BEARER CREDENTIAL and
   // is deliberately NOT selected.
-  const chats = new Map<string, number>();
+  const chats = new Map<string, { chatId: number; botId: string | null }>();
   const { rows } = await client.query(
-    `SELECT tenant, owner_id FROM tenant_telegram WHERE owner_id IS NOT NULL`,
+    `SELECT tenant, owner_id, bot_id FROM tenant_telegram WHERE owner_id IS NOT NULL`,
   );
-  for (const r of rows) chats.set(String(r.tenant).toLowerCase(), Number(r.owner_id));
+  for (const r of rows) chats.set(String(r.tenant).toLowerCase(), {
+    chatId: Number(r.owner_id), botId: typeof r.bot_id === "string" ? r.bot_id : null,
+  });
+
+  // The claim is authoritative. A copied token can remain in another tenant's
+  // sealed settings after its bot was moved; sending through that copy would
+  // speak to the wrong owner's linked chat. Missing claims fail closed too.
+  const claims = new Map<string, string>();
+  const claimRows = await client.query(`SELECT bot_id, tenant FROM telegram_bot_claims`);
+  for (const r of claimRows.rows) claims.set(String(r.bot_id), String(r.tenant).toLowerCase());
 
   // THE PER-AGENT REASON — and the join that carries it.
   //
@@ -240,8 +302,8 @@ export async function resolveRecipients(
     if (s?.telegramBotToken) out.withBotToken += 1;
     if (Array.isArray(s?.telegramAllowlist) && s.telegramAllowlist.length > 0) out.withAllowlist += 1;
 
-    const chatId = chats.get(key);
-    if (chatId === undefined) {
+    const chat = chats.get(key);
+    if (!chat || !Number.isSafeInteger(chat.chatId) || chat.chatId <= 0) {
       out.skippedNoChat += 1;
       continue;
     }
@@ -251,7 +313,7 @@ export async function resolveRecipients(
     }
     // Their setting, not ours. An owner who switched the bot off has said what
     // they want; a platform announcement does not outrank that.
-    if (s.telegramEnabled === false) {
+    if (s.telegramEnabled !== true) {
       out.skippedDisabled += 1;
       continue;
     }
@@ -263,10 +325,19 @@ export async function resolveRecipients(
       out.skippedNotifyOff += 1;
       continue;
     }
+    if (!Array.isArray(s.telegramAllowlist) || !s.telegramAllowlist.includes(chat.chatId)) {
+      out.skippedNotAllowed += 1;
+      continue;
+    }
+    const botId = botIdOf(s.telegramBotToken);
+    if (!botId || claims.get(botId) !== key || chat.botId !== botId) {
+      out.skippedNoClaim += 1;
+      continue;
+    }
     recipients.push({
       tenant: key,
-      chatId,
-      token: s.telegramBotToken,
+      chatId: chat.chatId,
+      botId,
       blocker: blockers.get(key) ?? null,
       name: names.get(key) ?? null,
     });
@@ -296,6 +367,8 @@ export async function runAnnouncement(opts: {
   announceId: string;
   body: string;
   confirmed: boolean;
+  /** Service updates can omit a cached agent blocker that may no longer be current. */
+  appendPersonalLine?: boolean;
   /**
    * ONE FULLY-RESOLVED MESSAGE PER TENANT, keyed by lowercased tenant.
    *
@@ -333,7 +406,11 @@ export async function runAnnouncement(opts: {
     skippedNoToken: 0,
     skippedDisabled: 0,
     skippedNotifyOff: 0,
+    skippedNotAllowed: 0,
+    skippedNoClaim: 0,
     skippedAlreadySent: 0,
+    skippedAlreadyAttempted: 0,
+    skippedChanged: 0,
     skippedNotSelected: 0,
     skippedNoBody: 0,
     sent: 0,
@@ -346,14 +423,22 @@ export async function runAnnouncement(opts: {
     preview: [],
   };
   await opts.client.query(ANNOUNCE_DDL);
+  await ensureAnnouncementAttempts(opts.client);
   const already = new Set<string>();
   const prior = await opts.client.query(
     `SELECT tenant FROM announcements WHERE announce_id = $1`,
     [opts.announceId],
   );
   for (const r of prior.rows) already.add(String(r.tenant).toLowerCase());
+  const attempted = new Set<string>();
+  const attempts = await opts.client.query(
+    `SELECT tenant FROM announcement_attempts WHERE announce_id = $1`,
+    [opts.announceId],
+  );
+  for (const r of attempts.rows) attempted.add(String(r.tenant).toLowerCase());
 
-  const recipients = await resolveRecipients(opts.client, out, opts.store ?? getSettingsStore());
+  const store = opts.store ?? getSettingsStore();
+  const recipients = await resolveRecipients(opts.client, out, store);
   const send = opts.send ?? sendMessage;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
@@ -371,6 +456,10 @@ export async function runAnnouncement(opts: {
       out.skippedAlreadySent += 1;
       continue;
     }
+    if (attempted.has(r.tenant)) {
+      out.skippedAlreadyAttempted += 1;
+      continue;
+    }
     // A PREPARED BODY WINS, AND ITS ABSENCE IS A REFUSAL.
     //
     // `opts.bodies` present means this is a per-agent campaign, so every
@@ -382,10 +471,11 @@ export async function runAnnouncement(opts: {
       out.skippedNoBody += 1;
       continue;
     }
-    const text = prepared ?? opts.body + personalLine(r.blocker);
+    const includePersonal = opts.appendPersonalLine !== false;
+    const text = prepared ?? opts.body + (includePersonal ? personalLine(r.blocker) : "");
     // A prepared body already carries its own reason; the canned line would
     // only repeat it, worse.
-    if (!prepared && r.blocker) out.personalised += 1;
+    if (!prepared && includePersonal && r.blocker) out.personalised += 1;
     if (out.dryRun) {
       out.sent += 1;
       out.preview.push({
@@ -398,21 +488,89 @@ export async function runAnnouncement(opts: {
       });
       continue;
     }
-    const res = await send({ token: r.token }, r.chatId, text);
+    // A settings save may revoke consent or replace the token while this pass
+    // works through other tenants. Re-read it for this recipient, then reserve
+    // the send with one Postgres statement checking the CURRENT claim and chat.
+    const fresh = await store.get(r.tenant as `0x${string}`);
+    const token = fresh?.telegramBotToken;
+    if (!token || botIdOf(token) !== r.botId || fresh.telegramEnabled !== true ||
+        fresh.telegramNotifyEnabled === false || !fresh.telegramAllowlist?.includes(r.chatId)) {
+      out.skippedChanged += 1;
+      continue;
+    }
+    const claimed = await opts.client.query(
+      `INSERT INTO announcement_attempts (announce_id, tenant, claimed_at, state)
+       SELECT $1, $2, $5, 'claimed'
+       WHERE EXISTS (SELECT 1 FROM telegram_bot_claims WHERE bot_id = $3 AND LOWER(tenant) = $2)
+         AND EXISTS (SELECT 1 FROM tenant_telegram WHERE tenant = $2 AND owner_id = $4 AND bot_id = $3)
+         AND NOT EXISTS (SELECT 1 FROM announcements WHERE announce_id = $1 AND tenant = $2)
+       ON CONFLICT DO NOTHING RETURNING tenant`,
+      [opts.announceId, r.tenant, r.botId, r.chatId, Math.floor(Date.now() / 1000)],
+    );
+    if (claimed.rows.length !== 1) {
+      out.skippedChanged += 1;
+      continue;
+    }
+    // Settings live outside this SQL transaction. One last read narrows the
+    // remaining save-to-send race and refuses if consent or token changed.
+    const final = await store.get(r.tenant as `0x${string}`);
+    if (final?.telegramBotToken !== token || final.telegramEnabled !== true ||
+        final.telegramNotifyEnabled === false || !final.telegramAllowlist?.includes(r.chatId)) {
+      out.skippedChanged += 1;
+      await opts.client.query(
+        `UPDATE announcement_attempts SET state = 'aborted' WHERE announce_id = $1 AND tenant = $2`,
+        [opts.announceId, r.tenant],
+      );
+      continue;
+    }
+    const finalDb = await opts.client.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM telegram_bot_claims WHERE bot_id = $1 AND LOWER(tenant) = $2) AS bot_owned,
+         EXISTS (SELECT 1 FROM tenant_telegram WHERE tenant = $2 AND bot_id = $1 AND owner_id = $3) AS chat_current`,
+      [r.botId, r.tenant, r.chatId],
+    );
+    if (finalDb.rows[0]?.bot_owned !== true || finalDb.rows[0]?.chat_current !== true) {
+      out.skippedChanged += 1;
+      await opts.client.query(
+        `UPDATE announcement_attempts SET state = 'aborted' WHERE announce_id = $1 AND tenant = $2`,
+        [opts.announceId, r.tenant],
+      );
+      continue;
+    }
+    let res: Awaited<ReturnType<typeof send>>;
+    try {
+      res = await send({ token }, r.chatId, text);
+    } catch {
+      // A transport failure can arrive after Telegram accepted the message.
+      // Keep the claim; an operator can investigate instead of replaying it.
+      out.failed.push({ tenant: r.tenant, reason: "send outcome unknown" });
+      await opts.client.query(
+        `UPDATE announcement_attempts SET state = 'uncertain' WHERE announce_id = $1 AND tenant = $2`,
+        [opts.announceId, r.tenant],
+      );
+      await sleep(SEND_GAP_MS);
+      continue;
+    }
     if (res.ok) {
       out.sent += 1;
-      // Recorded IMMEDIATELY, per recipient. Batching this at the end means a
-      // crash halfway re-sends to everyone already reached.
       await opts.client.query(
         `INSERT INTO announcements (announce_id, tenant, sent_at) VALUES ($1, $2, $3)
            ON CONFLICT DO NOTHING`,
         [opts.announceId, r.tenant, Math.floor(Date.now() / 1000)],
       );
+      await opts.client.query(
+        `UPDATE announcement_attempts SET state = 'sent' WHERE announce_id = $1 AND tenant = $2`,
+        [opts.announceId, r.tenant],
+      );
     } else {
       // sendMessage never throws — a blocked user, a deleted chat or a revoked
       // token comes back as {ok:false}. Collected, because otherwise nobody
       // ever learns who did not receive it.
-      out.failed.push({ tenant: r.tenant, reason: res.reason ?? "unknown" });
+      out.failed.push({ tenant: r.tenant, reason: res.reason?.replaceAll(token, "[redacted]") ?? "unknown" });
+      await opts.client.query(
+        `UPDATE announcement_attempts SET state = 'uncertain' WHERE announce_id = $1 AND tenant = $2`,
+        [opts.announceId, r.tenant],
+      );
     }
     await sleep(SEND_GAP_MS);
   }

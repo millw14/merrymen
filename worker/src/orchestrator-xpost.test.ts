@@ -809,6 +809,99 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(v.db, "buy:pepe-b"), "skipped");
   });
 
+  it("the owner's choices reach the pass: coins it buys off plans no buy post and cancels one waiting; their number a day holds at send time", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    const waiting = await store.schedulePost(w.db, {
+      tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:d-old", body: BUY, coin: "pepe", decisionId: "d-old", dueAtMs: T0 + HOUR, nowMs: T0 - 30 * MIN,
+    });
+    // Planned by a pass that read the account before the owner's change landed.
+    await store.setPrefs(w.db, TENANT, { buys: false }, T0 - 10 * MIN);
+    await w.db.prepare("UPDATE xpost_posts SET status = 'scheduled', reason = NULL WHERE id = ?").run(waiting!);
+    const p = poster(w, { calls: [call({ decisionId: "d-new", atSec: (T0 - 5 * MIN) / 1000 })] });
+    const log = (await p.step(w.db, ROSTER, new Map(), T0 + HOUR)).log;
+    assert.equal(await store.keyStatus(w.db, "buy:d-new"), null, "a fresh buy is not posted about");
+    assert.equal(await store.keyStatus(w.db, "buy:d-old"), "cancelled", "the waiting one is cancelled at send time, never sent");
+    assert.equal(w.tweets.length, 0);
+    assert.match(log ?? "", /cancelled 1/);
+
+    // One post a day chosen, three allowed by the server: the second casual post of the day is held.
+    const v = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(v);
+    await store.setPrefs(v.db, TENANT, { perDay: 1, casual: true }, T0 - 10 * MIN);
+    await dueCasual(v, "casual:morning");
+    await dueCasual(v, "casual:later", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(v, { perDay: 3 }).step(v.db, ROSTER, new Map(), T0);
+    const second = (await poster(v, { perDay: 3 }).step(v.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(v.tweets.length, 1, "the owner's one post today");
+    assert.match(second ?? "", /owner-day-cap 1/);
+  });
+
+  it("each owner's smaller allowance is separate while the X account keeps its shared server ceiling", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w, "111");
+    await store.setPrefs(w.db, TENANT, { perDay: 1 }, T0 - 10 * MIN);
+    await store.setPrefs(w.db, OTHER, { perDay: 1 }, T0 - 10 * MIN);
+    await dueCasual(w, "casual:other-owner-first", { tenant: OTHER });
+    await dueCasual(w, "casual:my-first", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await dueCasual(w, "casual:my-second", { dueAtMs: T0 + 8 * HOUR - MIN });
+    await poster(w).step(w.db, BOTH, new Map(), T0);
+    await poster(w).step(w.db, BOTH, new Map(), T0 + 4 * HOUR);
+    assert.equal(w.tweets.length, 2, "both owners can use their own first slot");
+    const later = (await poster(w).step(w.db, BOTH, new Map(), T0 + 8 * HOUR)).log;
+    assert.equal(w.tweets.length, 2, "this owner's second post stays held");
+    assert.match(later ?? "", /owner-day-cap 1/);
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 2, "holding the owner returns the shared unit");
+    assert.equal((await store.readMeta(w.db, `xownerday:${TENANT}:2026-09-28`))?.n, 1);
+    assert.equal((await store.readMeta(w.db, `xownerday:${OTHER}:2026-09-28`))?.n, 1);
+  });
+
+  it("a lower owner limit saved during the pass is enforced before reserving the next send", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await store.setPrefs(w.db, TENANT, { perDay: 3 }, T0 - 10 * MIN);
+    await dueCasual(w, "casual:before-lowering");
+    await dueCasual(w, "casual:after-lowering", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(w).step(w.db, ROSTER, new Map(), T0);
+    const later = poster(w, { member: async () => {
+      // Both the pass's account list and this send's account read happened.
+      // The reservation must still use this newly confirmed preference.
+      await store.setPrefs(w.db, TENANT, { perDay: 1 }, T0 + 4 * HOUR);
+      return { tz: null };
+    } });
+    const log = (await later.step(w.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(w.tweets.length, 1);
+    assert.equal(await store.keyStatus(w.db, "casual:after-lowering"), "scheduled");
+    assert.match(log ?? "", /owner-day-cap 1/);
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 1);
+  });
+
+  it("a new owner counter includes sends recorded before the owner-cap rollout", async (t) => {
+    const w = await world(t, T0 - 8 * HOUR);
+    await introDealtWith(w);
+    await wentOut(w, "casual:before-upgrade", { atMs: T0 - 4 * HOUR });
+    await store.takeAllowance(w.db, "xday:111:2026-09-28", 3, T0 - 4 * HOUR);
+    await store.setPrefs(w.db, TENANT, { perDay: 1 }, T0 - MIN);
+    await dueCasual(w, "casual:after-upgrade");
+    const log = (await poster(w).step(w.db, ROSTER, new Map(), T0)).log;
+    assert.equal(w.tweets.length, 0, "the earlier recorded send already consumed the owner's slot");
+    assert.match(log ?? "", /owner-day-cap 1/);
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 1);
+  });
+
+  it("an owner can choose fewer posts a day than the server allows, never more", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await store.setPrefs(w.db, TENANT, { perDay: 3 }, T0 - 10 * MIN);
+    await dueCasual(w, "casual:morning");
+    await dueCasual(w, "casual:later", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(w, { perDay: 1 }).step(w.db, ROSTER, new Map(), T0);
+    const second = (await poster(w, { perDay: 1 }).step(w.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(w.tweets.length, 1, "the server's one a day holds over the owner's three");
+    assert.match(second ?? "", /account-day-cap 1/);
+  });
+
   it("a send X surely refused gives the account's gap, day and fold back", async (t) => {
     const w = await world(t, T0 - 3 * HOUR);
     await introDealtWith(w);
@@ -1112,6 +1205,25 @@ describe("what a casual post starts from", () => {
     assert.ok(seen.trade > 0 && seen.other > 0, JSON.stringify(seen));
   });
 
+  it("with posts about the coins it buys turned off, a passing thought never names one, trade-talk day or not", async (t) => {
+    const START = Date.UTC(2026, 8, 1);
+    const w = await world(t, START);
+    const hello = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`, body: "hello", dueAtMs: START, nowMs: START });
+    await store.ownerCancel(w.db, TENANT, hello!, START);
+    await store.setPrefs(w.db, TENANT, { buys: false }, START);
+    const p = poster(w, { calls: [call({ decisionId: "d-old", atSec: (START - HOUR) / 1000 })] });
+    let talkDays = 0;
+    for (let d = 0; d < 30; d++) {
+      const day = START + d * 24 * HOUR;
+      const before = w.prompts.length;
+      for (let m = 14 * 60; m < 22 * 60 && w.prompts.length === before; m += 30) await p.step(w.db, ROSTER, new Map(), day + m * MIN);
+      if (w.prompts.length === before) continue;
+      if (tradeTalkDay(TENANT, new Date(day).toISOString().slice(0, 10))) talkDays++;
+      assert.doesNotMatch(w.prompts.at(-1)!, /\bPepe\b/);
+    }
+    assert.ok(talkDays > 0, "a trade-talk day was among them");
+  });
+
   it("a trade-talk day is how it trades and its coins, and no seed; any other day the seed, and no coin — decided here", () => {
     const agent = (mode: AgentFacts["mode"], over: Partial<AgentFacts> = {}): AgentFacts => ({
       tenant: TENANT,
@@ -1141,6 +1253,9 @@ describe("what a casual post starts from", () => {
       }
       // An agent that is not trading never has one; nor one with nothing to say about it.
       assert.equal(casualInputs(agent("idle"), day).tradeTalk, false);
+      // Posts about the coins it buys turned off: a trade-talk day offers none, and names none to the gate.
+      const noCoins = casualInputs(agent("paper"), day, { coins: false });
+      assert.deepEqual(noCoins.recentCoins, []);
       assert.equal(casualInputs(agent("live", { strategy: null, traits: [], calls: [] }), day).tradeTalk, false);
     }
     assert.ok(talk > 0);

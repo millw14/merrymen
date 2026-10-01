@@ -127,7 +127,7 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
    * switch — and that a waiting post can be skipped there.
    */
   xPosting:
-    "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out.",
+    "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out. On the dashboard you can also choose what it posts there: the coins it buys, passing thoughts, and how many a day.",
   /**
    * TELEGRAM GROUPS, never by text (docs/tg-groups.md "Settings"): whether it
    * hangs out in groups at all (`telegramGroupsEnabled`), whether it looks at

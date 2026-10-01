@@ -49,6 +49,23 @@ describe("public replies preserve the X safeguards and require an opt-out", () =
     const lines = ["trust me, it is worth a look", "i am still holding it because i liked the pool", "i own pepe because i liked the pool", "i will buy more because i liked the pool", "my balance has 100 dollars in it", "my wallet was broken when i tried it", "go buy some pepe while it is early"];
     for (const line of lines) assert.notEqual(reason(`${line}. Say stop to opt out.`, reply), "ok", line);
   });
+  it("rejects current positions described as possession rather than holding", () => {
+    const lines = [
+      "I have a position in Pepe because the early curve caught my attention",
+      "i currently have a stake in pepe because the early curve caught my attention",
+      "i maintain a position in pepe because the early curve caught my attention",
+      "i've got a bag of pepe because the early curve caught my attention",
+      "we have exposure to pepe because the early curve caught our attention",
+      "my position remains open because the early curve caught my attention",
+    ];
+    for (const line of lines) assert.equal(reason(`${line}. Say stop to opt out.`, reply), "reply-current-or-action", line);
+  });
+  it("preserves historical buy explanations and ordinary opinions", () => {
+    for (const line of [
+      "i took a position in pepe because the early curve caught my attention",
+      "i have a preference for early activity, which was the reason i mentioned",
+    ]) assert.equal(reason(`${line}. Say stop to opt out.`, reply), "ok", line);
+  });
   it("does not mistake the required footer for repeated content, but still rejects copied replies", () => {
     const body = "the pool was the reason i mentioned. Say stop to opt out.";
     assert.equal(reason(body, { ...reply, recentFleet: ["i liked the early activity when i picked it. Say stop to opt out."] }), "ok");

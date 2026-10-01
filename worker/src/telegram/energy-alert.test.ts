@@ -149,7 +149,8 @@ describe("energyAlert — what it says", () => {
     assert.match(paper, /Paper mode/);
     assert.doesNotMatch(paper, /send USDG/, "practising, it will not spend real USDG on it");
     const resign = energyAlert(inputs({ buy: "resign" }), PUBLIC, NOW)!.text;
-    assert.match(resign, /re-sign my permission/);
+    assert.match(resign, /renew my permission/);
+    assert.match(resign, /revocation requires network fees/);
     const notMainnet = energyAlert(inputs({ buy: "not-mainnet", agentTokens: null }, { energyChainId: 46630 }), PUBLIC, NOW)!.text;
     assert.ok(!notMainnet.includes(ACCOUNT), "tokens sent to an account on another network would not count");
     assert.match(notMainnet, /in your own wallet/);

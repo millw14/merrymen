@@ -56,7 +56,7 @@ describe("simulated money never wears the label real money wears", () => {
   });
 });
 
-describe("an owner is told when a free signature is the whole remedy", () => {
+describe("an owner is told when permission renewal is the remedy", () => {
   it("dead-policy, wrong-chain and not-armed all raise an OWNER SIGNATURE", () => {
     // The three the worker cannot fix at any price. Nine agents sat in practice
     // mode on these without the product ever saying a signature would end it.
@@ -171,7 +171,7 @@ describe("the remedy offered must be able to fix the cause", () => {
     assert.equal(a.needsOwnerAction, true);
     assert.ok(a.headline, "a blocked owner must get a headline");
     assert.ok(
-      !/free permission renewal/i.test(a.headline!),
+      !/permission renewal/i.test(a.headline!),
       "renewing on the same network is a no-op — it must not be the headline",
     );
     assert.match(a.headline!, /different network/i);
@@ -183,14 +183,15 @@ describe("the remedy offered must be able to fix the cause", () => {
     // exec-mode.ts: "re-signing the same wall changes nothing, so the owner has
     // to sign a smaller one."
     const a = blocked("grant-too-wide");
-    assert.ok(!/free permission renewal/i.test(a.headline!));
+    assert.ok(!/permission renewal/i.test(a.headline!));
     assert.match(a.action!.label, /smaller/i);
   });
 
   it("DOES offer a renewal for the two rules a renewal actually fixes", () => {
     for (const rule of ["dead-policy", "not-armed"]) {
       const a = blocked(rule);
-      assert.match(a.headline!, /free permission renewal/i, `${rule} is fixed by renewing`);
+      assert.match(a.headline!, /permission renewal/i, `${rule} is fixed by renewing`);
+      assert.doesNotMatch(a.headline!, /\bfree\b/i);
       assert.equal(a.action!.label, "Renew permission");
     }
     const expired = autonomyOf({ mode: "paper", liveBlocker: null, expired: true, realCashUsd: 0 });

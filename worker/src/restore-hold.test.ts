@@ -24,6 +24,7 @@ import { describe, it } from "node:test";
 import ts from "typescript";
 import { wrapSqlite } from "./db";
 import {
+  TELEGRAM_CONDITION_ALERTS_DDL,
   TELEGRAM_HOLD_NOTIFIED_DDL,
   TELEGRAM_LIVENESS_DDL,
   TELEGRAM_STATE_DDL,
@@ -84,7 +85,17 @@ describe("the restore gate holds instead of returning", () => {
     // Under the lease spawnChild checked, asked again after the last await.
     const late = calls(hold, "lateSpawnRefusal")[0];
     assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());
-    for (const a of all(hold, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "no await after the late check");
+    for (const a of all(hold, ts.isAwaitExpression)) {
+      if (ts.isAwaitExpression(a) && a.expression.getText() === "startHolderProcess(held)") continue;
+      assert.ok(a.getEnd() < late.getStart(), "preparation finishes before the first late check");
+    }
+    // Pacing adds a wait inside startHolderProcess. It checks the same lease,
+    // halt and kill conditions again after that wait and before the OS fork.
+    const started = fn("startHolderProcess");
+    const slot = calls(started, "waitForSpawnSlot")[0];
+    const last = calls(started, "lateSpawnRefusal")[0];
+    const fork = calls(started, "spawn")[0];
+    assert.ok(slot && last && fork && slot.getEnd() < last.getStart() && last.getEnd() < fork.getStart());
     // A tenant with no bot is still recorded, so reconcile stops retrying it every pass.
     const recorded = all(hold, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.set")[0];
     const noBot = all(hold, (n) => ts.isIfStatement(n) && n.expression.getText() === "!holderBotReady(settings)")[0];
@@ -130,15 +141,19 @@ describe("held tenants reach only the loops they belong in", () => {
       "handHoldBack",
       "honourFleetHalt",
       "isHeldForTest",
+      "localChildProcessCount",
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
+      "retireExpiredGrants",
       "retryHold",
       "runOrchestrator",
       "scheduleRestart",
       "spawnChild",
       "spawnHolder",
       "standDownHolder",
+      "standDownLostLeasesNow",
+      "startHolderProcess",
       "watchHolder",
     ]);
   });
@@ -193,8 +208,13 @@ describe("held tenants reach only the loops they belong in", () => {
 
   it("EVERY STAND-DOWN STANDS A HOLD PROCESS DOWN TOO", () => {
     const rec = fn("reconcile").body!.getText();
-    // The lease loss.
-    assert.match(rec, /if \(children\.has\(tenant\)\) killChild\(tenant\);\s*(\/\/[^\n]*\n\s*)*standDownHolder\(tenant\);/);
+    // The lease loss now runs immediately on the socket callback, with
+    // reconcile repeating it as a fallback. Both process types are signaled.
+    assert.match(rec, /standDownLostLeasesNow\(\);/);
+    const leaseLoss = fn("standDownLostLeasesNow").body!.getText();
+    assert.match(leaseLoss, /for \(const \[tenant, lease\] of \[\.\.\.leases\]\)/);
+    assert.ok(leaseLoss.indexOf("killChild(tenant)") >= 0 && leaseLoss.indexOf("killChild(tenant)") < leaseLoss.indexOf("standDownHolder(tenant)"));
+    assert.match(leaseLoss, /standDownHolder\(tenant\);/);
     // The kill switch, with the home.
     const kill = loopsOver(fn("reconcile"), "holders").find((l) => /standDownHolder/.test(l.statement.getText()));
     assert.ok(kill && /rmSync\(childHome\(tenant\)/.test(kill.statement.getText()) && /wanted\.has\(tenant\)/.test(kill.statement.getText()));
@@ -236,11 +256,15 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.ok(childRefresh && childRefresh.getEnd() < release.getStart(), "after the children's refresh, which would strip the worker's own token");
   });
 
-  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER WANTED, AND ASKS THE GATE AGAIN", () => {
+  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER ELIGIBLE, AND ASKS THE GATE AGAIN", () => {
     const refresh = loopsOver(fn("reconcile"), "holders").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
     assert.ok(refresh && ts.isBlock(refresh.statement));
     const first = refresh.statement.statements[0]!;
-    assert.equal(first.getText(), "if (!wanted.has(tenant)) continue;", "before its settings are written or its token claims a bot");
+    assert.equal(
+      first.getText(),
+      "if (!eligible.has(tenant) || retiringExpired.has(tenant)) continue;",
+      "a revoked or expired grant, including one still retiring, claims no bot before its settings are written",
+    );
     assert.match(refresh.statement.getText(), /if \(stored && stored\.paperTradingEnabled !== true\) \{\s*released\.push\(held\);/);
     // The same test spawnChild's gate makes, or the two would disagree about who is held.
     assert.ok(all(fn("spawnChild"), (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true").length === 1);
@@ -490,12 +514,17 @@ describe("the durable notice record", () => {
     try {
       assert.deepEqual(await ensureTelegramSchema(db), [], "a fresh database: the table and every column, nothing failed");
       const cols = (raw.prepare("PRAGMA table_info(tenant_telegram)").all() as { name: string }[]).map((c) => c.name);
-      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state"]) assert.ok(cols.includes(c), c);
+      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state", "condition_alerts"]) assert.ok(cols.includes(c), c);
       await db.prepare("INSERT INTO tenant_telegram (tenant, owner_id, updated_at) VALUES (?, ?, 0)").run("0xabc", 4242);
       // sqlite's ADD COLUMN has no IF NOT EXISTS: each ALTER fails, and is handed back, not thrown.
       const again = await ensureTelegramSchema(db);
-      assert.equal(again.length, 1 + TELEGRAM_LIVENESS_DDL.length);
+      const migrations = [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL];
+      assert.equal(again.length, migrations.length);
       assert.ok(again.every((e) => /duplicate column/i.test(String(e))), again.map(String).join("; "));
+      for (const ddl of migrations) {
+        const column = /ADD COLUMN (\w+)/.exec(ddl)?.[1];
+        assert.ok(column && again.some((e) => String(e).includes(column)), `duplicate-column result for ${column}`);
+      }
       assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM tenant_telegram").get() as { n: number }).n, 1, "and the rows survive it");
     } finally {
       raw.close();

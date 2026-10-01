@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DESK_TAPE_ROWS, isTrade, pnlChip, sizeText, swapItems, swapRowsOfDesk, swapRowsOfProfile, triedLine, type SwapItem, type SwapRow } from "./swaps";
+import { canOfferPnlCard, DESK_TAPE_ROWS, isTrade, pnlCardName, pnlChip, sizeText, swapItems, swapRowsOfDesk, swapRowsOfProfile, triedLine, type SwapItem, type SwapRow } from "./swaps";
 import type { Thesis } from "./live";
 
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
@@ -97,6 +97,35 @@ describe("the owner's tape becomes table rows without inventing anything", () =>
 const row = (id: string, over: Partial<SwapRow>): SwapRow => ({
   id, op: "trade", side: "buy", status: "filled", symbol: "X", displayName: null, at: S(NOON), paper: false, sizeUsdg: 5,
   realizedBps: null, realizedUsd: null, reason: null, why: null, ...over,
+});
+
+describe("P&L images use an evidenced fill, never the requested trade size", () => {
+  const sale = (over: Partial<SwapRow> = {}) => row("timestamp-index", {
+    tradeId: 731, fillCashUsdg: 12.5, side: "sell", realizedUsd: 2.5, ...over,
+  });
+  it("admits gains, flat trades and losses, including zero sale proceeds with real cost", () => {
+    assert.equal(canOfferPnlCard(sale()), true);
+    assert.equal(canOfferPnlCard(sale({ realizedUsd: 0 })), true);
+    assert.equal(canOfferPnlCard(sale({ fillCashUsdg: 0, realizedUsd: -10 })), true);
+    assert.equal(canOfferPnlCard(sale({ fillCashUsdg: 0.001, realizedUsd: -0.999 })), true);
+    assert.equal(canOfferPnlCard(sale({ fillCashUsdg: 0.01, realizedUsd: 0 })), true);
+  });
+  it("a big requested order cannot manufacture a cost basis or replace absent proceeds", () => {
+    for (const over of [
+      { fillCashUsdg: null }, { fillCashUsdg: undefined }, { fillCashUsdg: Number.NaN }, { fillCashUsdg: Infinity },
+      { realizedUsd: null }, { realizedUsd: Number.NaN }, { realizedUsd: Infinity },
+      { fillCashUsdg: 2.509 }, { fillCashUsdg: 2.5 },
+    ]) assert.equal(canOfferPnlCard(sale({ sizeUsdg: 100_000, ...over })), false, JSON.stringify(over));
+  });
+  it("names the card from recorded printable text and never from a token address or generated ID", () => {
+    assert.equal(pnlCardName(sale({ symbol: " T3139F043B88 ", displayName: " Cash Cat " })), "Cash Cat");
+    assert.equal(pnlCardName(sale({ symbol: "0xabc", displayName: "Cash Cat" })), "Cash Cat");
+    assert.equal(pnlCardName(sale({ symbol: null, displayName: "Cash Cat" })), "Cash Cat");
+    assert.equal(pnlCardName(sale({ symbol: "CAT", displayName: "Cash Cat" })), "CAT");
+    for (const name of ["", "   ", "T3139F043B88", "0xabc", "\u0007", "x".repeat(65)]) {
+      assert.equal(pnlCardName(sale({ symbol: name, displayName: name })), null, JSON.stringify(name));
+    }
+  });
 });
 
 describe("dollars and P&L, only where they may be shown", () => {

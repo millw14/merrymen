@@ -838,7 +838,7 @@ button { font: inherit; cursor: pointer; }
 }
 .switch-note b { color: var(--text); }
 .switch-note .mono { color: var(--text); }
-/* key-expiry banner — renewal is free & local, so keep it calm, not alarming */
+/* key-expiry banner — point to the wallet page for renewal steps and fees */
 .renew-note {
   font-size: 12px; line-height: 1.6; color: var(--gold);
   background: color-mix(in srgb, var(--gold) 7%, transparent);

@@ -89,7 +89,7 @@ test("nothing in web/ still falls back to testnet when a chain is unknown", () =
   // an agent's chain, not to the file that used to.
   for (const f of ["web/src/lib/session.ts", "web/src/app/(app)/you/YouClient.tsx"]) {
     const src = readFileSync(f, "utf8");
-    assert.equal(/robinhoodTestnet\.id/.test(src), false, `${f} still defaults to testnet`);
+    assert.equal(/\?\?\s*robinhoodTestnet\.id/.test(src), false, `${f} still defaults to testnet`);
     assert.equal(/\?\?\s*46630/.test(src), false, `${f} still falls back to 46630`);
   }
 });

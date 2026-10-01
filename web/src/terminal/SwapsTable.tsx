@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { PnlCardDialog } from "./PnlCardDialog";
 import { Coin, Empty } from "./ui";
 import { elapsed, useNow } from "./clock";
 import { dayLabel, fullDateTime } from "@/lib/format";
 import type { LiveToken } from "./live";
-import { OP_WORDS, pnlChip, sizeText, swapItems, triedLine, type SwapRow, type SwapTab } from "./swaps";
+import { canOfferPnlCard, OP_WORDS, pnlCardName, pnlChip, sizeText, swapItems, triedLine, type SwapRow, type SwapTab } from "./swaps";
 
 const TABS: { id: SwapTab; label: string; empty: string }[] = [
   { id: "all", label: "All", empty: "" },
@@ -28,6 +29,7 @@ export function SwapsTable({
   tapeFull = false,
   limit = 8,
   onToken,
+  allowPnlCards = false,
 }: {
   rows: SwapRow[];
   tokens: LiveToken[];
@@ -38,9 +40,17 @@ export function SwapsTable({
   tapeFull?: boolean;
   limit?: number;
   onToken?: (id: string) => void;
+  /** Authenticated owner's desk only; public dollars do not grant export access. */
+  allowPnlCards?: boolean;
 }) {
   const [tab, setTab] = useState<SwapTab>("all");
   const [expanded, setExpanded] = useState(false);
+  const [card, setCard] = useState<{ tradeId: number; symbol: string } | null>(null);
+  const cardAvailable = !!card && allowPnlCards && showMoney
+    && rows.some((row) => row.tradeId === card.tradeId && canOfferPnlCard(row));
+  useEffect(() => {
+    if (!cardAvailable) setCard(null);
+  }, [cardAvailable]);
   // Ages print seconds under a minute ("55s"), so the clock steps at the pace
   // the feed's rows do (wire.tsx), not once in thirty seconds of a stale "55s".
   const nowMs = useNow(5_000);
@@ -68,7 +78,8 @@ export function SwapsTable({
                 <Age at={item.newestAt} nowMs={nowMs} />
               </li>
             ) : (
-              <SwapLine key={item.row.id} row={item.row} tokens={tokens} showMoney={showMoney} nowMs={nowMs} onToken={onToken} />
+              <SwapLine key={item.row.id} row={item.row} tokens={tokens} showMoney={showMoney} nowMs={nowMs} onToken={onToken}
+                onPnlCard={allowPnlCards && showMoney ? setCard : undefined} />
             ),
           )}
         </ul>
@@ -78,6 +89,7 @@ export function SwapsTable({
           {expanded ? "Show fewer" : `Show all ${items.length}`}
         </button>
       )}
+      {card && cardAvailable && <PnlCardDialog key={card.tradeId} {...card} onClose={() => setCard(null)} />}
     </div>
   );
 }
@@ -88,12 +100,14 @@ function SwapLine({
   showMoney,
   nowMs,
   onToken,
+  onPnlCard,
 }: {
   row: SwapRow;
   tokens: LiveToken[];
   showMoney: boolean;
   nowMs: number;
   onToken?: (id: string) => void;
+  onPnlCard?: (card: { tradeId: number; symbol: string }) => void;
 }) {
   const size = sizeText(row, showMoney);
   if (row.op !== "trade") {
@@ -143,6 +157,10 @@ function SwapLine({
       <span className="swap-figures">
         {size && <strong>{size}</strong>}
         {chip && <span className={`swap-pnl ${chip.tone}`}>{chip.text}</span>}
+        {onPnlCard && canOfferPnlCard(row) && (
+          <button type="button" className="swap-pnl-image" aria-label={`P&L image for ${pnlCardName(row)}`}
+            onClick={() => onPnlCard({ tradeId: row.tradeId!, symbol: pnlCardName(row)! })}>P&amp;L image</button>
+        )}
       </span>
       <span className="swap-meta">
         {row.status === "pending" && <em>Pending</em>}

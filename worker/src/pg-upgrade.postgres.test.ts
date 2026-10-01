@@ -44,6 +44,7 @@ import { backfillHolderClaims } from "./holder-claims";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { TELEGRAM_STATE_DDL } from "./telegram-store";
 import { ANNOUNCE_DDL, runAnnouncement } from "./announce";
+import { TELEGRAM_BOT_CLAIMS_DDL } from "./telegram-claims";
 import {
   ENERGY_DAYS_SCHEMA,
   claimEnergyDay,
@@ -136,8 +137,8 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
       await (await connect(scoped("fixture"))).query(readFileSync(FIXTURE, "utf8"));
       const seal = (s: unknown) => sealSecret(JSON.stringify(s), Buffer.from(process.env.MERRYMEN_STORE_DEK!, "base64"));
       for (const [tenant, settings] of [
-        [T1, { holderProof: { address: W1, at: now - DAY_MS }, telegramBotToken: "111:AAA", telegramEnabled: true }],
-        [T2, { telegramBotToken: "222:BBB" }],
+        [T1, { holderProof: { address: W1, at: now - DAY_MS }, telegramBotToken: "111:AAA", telegramEnabled: true, telegramAllowlist: [424242] }],
+        [T2, { telegramBotToken: "222:BBB", telegramEnabled: true, telegramAllowlist: [515151] }],
         [T3, { holderProof: { address: W1, at: now - 3_600_000 } }],
       ] as const) {
         await shared.prepare("INSERT INTO tenant_settings (tenant, sealed, updated_at) VALUES (?, ?, ?)").run(tenant, seal(settings), nowSec - 86_400);
@@ -589,6 +590,10 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
 
     await t.test("THE ANNOUNCEMENT, DRY RUN ONLY: the recipients join works on the migrated schema and nothing is sent", async () => {
       const c = await connect(scoped("announce"));
+      await c.query("ALTER TABLE tenant_telegram ADD COLUMN IF NOT EXISTS bot_id TEXT");
+      await c.query("UPDATE tenant_telegram SET bot_id = CASE tenant WHEN $1 THEN '111' WHEN $2 THEN '222' END WHERE tenant IN ($1, $2)", [T1, T2]);
+      await c.query(TELEGRAM_BOT_CLAIMS_DDL);
+      await c.query("INSERT INTO telegram_bot_claims (bot_id, tenant, claimed_at) VALUES ('111', $1, 1), ('222', $2, 1)", [T1, T2]);
       const out = await runAnnouncement({
         client: c,
         announceId: "energy-daily-cap-2026-09-28",

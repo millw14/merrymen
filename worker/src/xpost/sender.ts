@@ -51,6 +51,7 @@
 import type { Db } from "../db";
 import { createPost, readMentions, refreshTokens, type FetchLike, type XApp, type XReplyBatch, type XResult } from "./client";
 import {
+  cancelDisabledKind,
   claimPost,
   markFailed,
   markPosted,
@@ -246,6 +247,7 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
     // Targets are read from storage, never trusted from the in-memory queue.
     // Recheck after refresh too: an owner or recipient may opt out in flight.
     const postNow = async () => {
+      if (await cancelDisabledKind(db, post.id, now)) return null;
       const target = post.kind === "reply" ? await replyTargetFor(db, post) : null;
       if (post.kind === "reply" && !target) return null;
       return createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now,

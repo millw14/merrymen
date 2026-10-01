@@ -87,6 +87,7 @@ describe("Start over", () => {
         discarding: false,
         funding: null,
         grant: null,
+        session: { hosted: false, address: null },
         loadGrant: () => stored,
         fetch: async () => {
           steps.push("request");

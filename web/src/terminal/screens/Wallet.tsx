@@ -3,16 +3,20 @@
 import Link from "next/link";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
+import { revokeFromBrowser } from "@/lib/revoke-client";
+import { stopAgent } from "@/lib/stop-agent";
+import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
+import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
 import { parseAmount, type AmountField } from "@/lib/parse-amount";
 import { fullDateTime } from "@/lib/format";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPublicClient, erc20Abi, formatEther, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
-  grantHasV4,
   grantTrencher,
   TRENCHER_VAULT_ABI,
   CASH,
@@ -34,6 +38,7 @@ import {
   isPrivyOwned,
   loadGrant,
   previewOwnerAccount,
+  preflightAgentGrant,
   readFunding,
   refusalMessage,
   restoreAgentWallet,
@@ -45,7 +50,9 @@ import {
   type SavedWallet,
 } from "@/lib/session";
 import { SignOut } from "../SignOut";
+import { fetchAccountForSession } from "../account-session";
 import { conceptTooltip } from "@merrymen/core";
+import { V4PermissionLine } from "../V4PermissionLine";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResign, shouldReloadAfterSignIn } from "@/lib/resign-anchor";
@@ -200,36 +207,7 @@ const sameCaps = (a: GrantCaps, b: GrantCaps) =>
 const BACKUP_KEY = "merrymen.grant.backedup.v1";
 const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
 
-/**
- * VERIFY AN ADAPTER ADDRESS BEFORE IT IS SEALED, not after.
- *
- * WHY THIS IS NOT PARANOIA. Sealing an adapter does two things, and the second
- * is easy to miss: `allowedSpenders()` appends the address to the spender ONE_OF
- * of EVERY approve permission in the grant (packages/core/src/wall.ts), and the
- * non-USDG approves pass `null` as the amount condition — which wall.ts itself
- * calls "a standing licence to move every share the agent holds". So one wrong
- * or stale value typed into one dashboard field becomes an unbounded pull target
- * across the whole token book, sealed into a signature, unseen.
- *
- * The worker already checks this — and too late. Its `eth_getCode` gate runs at
- * ARM time, which is after the owner has signed, after the grant is stored, and
- * after the only cheap moment to say no has passed. The cost of catching it
- * there is a wasted re-sign; the cost of not catching it at all is the paragraph
- * above.
- *
- * TWO CHECKS, because they fail differently:
- *   1. code exists at the address on THIS chain — catches a typo, an address
- *      from the other chain, an EOA pasted by mistake, and a contract that was
- *      never actually deployed;
- *   2. the code answers the shape we expect — `tradeExactIn` is present. Catches
- *      a real, live, wrong contract, which check 1 waves straight through. The
- *      deploy script performs the same ABI check for the same reason.
- *
- * REFUSES RATHER THAN SEALING SOMETHING UNVERIFIED. Returning `undefined` on
- * failure would mint a grant with no curve route, quietly — the owner would
- * think they had sealed it and find out at the first trade. Throwing puts the
- * failure where the owner is already looking.
- */
+/** Adapter verification uses the canonical allowlist before signing permissions. */
 
 const MAINNET = robinhoodChain.id; // 4663 — real funds
 
@@ -372,9 +350,8 @@ export default function GrantPage() {
     nobody has deposited yet. The outlaw's 50/trade x 48 ops is a four-figure
     ceiling to hand someone who has not yet seen the thing trade once.
 
-    Raising a cap is a free, instant re-sign from the panel further down, so
-    the cost of starting small is one click later. The cost of starting large
-    is not symmetric.
+    Start conservatively. Raising a cap later requires an owner-authorized
+    revocation transaction and a replacement signature.
   */
   const [caps, setCaps] = useState<GrantCaps>(PRESETS[0]!.caps);
   /*
@@ -414,6 +391,9 @@ export default function GrantPage() {
   // deletes the server file but not this localStorage — so the dashboard shows
   // "no merryman" while this page would happily show a wallet the worker ignores.
   const [serverArmed, setServerArmed] = useState<boolean | null>(null);
+  const [accountReadFailed, setAccountReadFailed] = useState(false);
+  const [accountReadVersion, setAccountReadVersion] = useState(0);
+  const accountReadGeneration = useRef(0);
   /** {hosted,address} from /api/auth/session. null until it resolves. */
   const [session, setSession] = useState<{ hosted: boolean; address: `0x${string}` | null } | null>(null);
   /** Every agent account this browser holds a key for — current and superseded. */
@@ -423,9 +403,19 @@ export default function GrantPage() {
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("restore");
   const [restoreKey, setRestoreKey] = useState("");
+  const [restoreRevocationAck, setRestoreRevocationAck] = useState(false);
   const [preview, setPreview] = useState<OwnerPreview | null>(null);
   const [previewFunding, setPreviewFunding] = useState<Funding | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const restorePreviewGeneration = useRef(0);
+  useEffect(() => {
+    ++restorePreviewGeneration.current;
+    setPreview(null);
+    setPreviewFunding(null);
+    setPreviewing(false);
+    setRestoreRevocationAck(false);
+    return () => { ++restorePreviewGeneration.current; };
+  }, [chainId]);
   // Swapping the ACTIVE wallet for another one you own. Without this you'd have
   // to "discard" a funded wallet just to reach the restore tab — the exact scary
   // click that strands people. Switching archives the outgoing wallet instead.
@@ -447,8 +437,9 @@ export default function GrantPage() {
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
 
   useEffect(() => {
+    let active = true;
+    const generation = ++accountReadGeneration.current;
     const stored = loadGrant();
-    setGrant(stored);
     setSavedWallets(listSavedWallets());
     // The chain selector FOLLOWS the loaded grant. renewKey now signs on the
     // SELECTED chain (so the page cannot lie), which makes this sync load-
@@ -463,11 +454,43 @@ export default function GrantPage() {
       setCapText({});
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
-    fetch("/api/grants")
-      .then((r) => (r.ok ? r.json() : { exists: false }))
-      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant }) => {
-        setServerArmed(!!s.exists);
-        if (s.exists && !stored) {
+    void fetchAccountForSession(null)
+      .then(async (result) => {
+        if (!active || generation !== accountReadGeneration.current) return;
+        if (result.kind !== "ready") throw result.kind === "changed" ? new Error("Account changed while loading.") : result.error;
+        const { session: verifiedSession } = result.account;
+        const s = result.account.status as { exists: boolean; gasSponsored?: boolean | null; grant?: Grant };
+        // A browser's saved key may belong to a different hosted login. Keep it
+        // for recovery, but never display or sign it as this tenant's agent.
+        const matchesServerGrant = stored && s.grant?.smartAccount?.toLowerCase() === stored.smartAccount.toLowerCase() &&
+          s.grant.chainId === stored.chainId &&
+          (!s.grant.sessionKeyAddress || !stored.sessionKeyAddress || s.grant.sessionKeyAddress.toLowerCase() === stored.sessionKeyAddress.toLowerCase());
+        // Another browser may have replaced a permission for this same account.
+        // Adopt the current server grant, retaining the old full key for recovery.
+        let trustedStored = s.exists ? (matchesServerGrant ? stored : null) : (!verifiedSession.hosted ? stored : null);
+        if (!s.exists && !trustedStored) {
+          // Stopping deliberately deletes the server grant. Historical signed
+          // bindings preserve this tenant's renewal path across a refresh;
+          // an address or DID merely claimed in localStorage is insufficient.
+          for (const candidate of [stored, ...loadRecoveryGrants()]) {
+            if (await trustedSavedGrant(candidate, verifiedSession, window.location.origin)) {
+              trustedStored = candidate;
+              break;
+            }
+          }
+        }
+        if (!active || generation !== accountReadGeneration.current) return;
+        setGrant(trustedStored);
+        if (trustedStored && !s.exists) {
+          setChainId(requestedChain() ?? trustedStored.chainId);
+          setCaps(trustedStored.caps);
+          setCapText({});
+          setBackedUp(true);
+        }
+        setSession({ hosted: verifiedSession.hosted, address: verifiedSession.address as `0x${string}` | null });
+        setServerArmed(s.exists);
+        setAccountReadFailed(false);
+        if (s.exists && !trustedStored) {
           /**
            * A SECOND BROWSER IS NOT A LOST WALLET.
            *
@@ -523,9 +546,20 @@ export default function GrantPage() {
            *
            * NEVER WRITTEN TO localStorage — the paragraph above is why. State
            * for the life of the screen, and nowhere else.
-           */
+          */
           if (s.grant) {
-            setGrant(s.grant);
+            // Retain a proven legacy owner while adopting the current public
+            // permission. Never copy the stale serialized grant/session secret.
+            let currentGrant = s.grant;
+            if (stored?.demoOwnerPrivateKey && stored.smartAccount.toLowerCase() === s.grant.smartAccount.toLowerCase()) {
+              try {
+                const owner = privateKeyToAccount(stored.demoOwnerPrivateKey as `0x${string}`);
+                if (owner.address.toLowerCase() === s.grant.owner.toLowerCase()) {
+                  currentGrant = { ...s.grant, demoOwnerPrivateKey: stored.demoOwnerPrivateKey };
+                }
+              } catch { /* A mismatched or invalid saved key cannot authorize this grant. */ }
+            }
+            setGrant(currentGrant);
             // THE SAME INTENT ON THE OTHER ARM. This branch serves a hosted
             // Privy owner signed in from any browser that did not mint the
             // agent — which is most of them — so an intent applied only to the
@@ -548,18 +582,7 @@ export default function GrantPage() {
         }
         setGasSponsored(s.gasSponsored === true);
       })
-      .catch(() => setServerArmed(null));
-    // THE ONLY TRUSTWORTHY hosted signal on the client. isHostedMode() reads
-    // process.env, which Next does not inline into the browser bundle, so it is
-    // false in every browser regardless of how the server is configured. Left
-    // null until this resolves, and creating is blocked meanwhile — signing with
-    // the wrong assumption mints a grant the server will refuse.
-    fetch("/api/auth/session", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((s: { hosted?: boolean; address?: string | null } | null) =>
-        setSession(s ? { hosted: !!s.hosted, address: (s.address ?? null) as `0x${string}` | null } : null),
-      )
-      .catch(() => setSession(null));
+      .catch(() => { if (active && generation === accountReadGeneration.current) { setServerArmed(null); setSession(null); setGrant(null); setAccountReadFailed(true); } });
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
@@ -585,12 +608,39 @@ export default function GrantPage() {
         setCustomTokens([]);
         setBasketSymbols([]);
       });
-  }, []);
+    return () => { active = false; };
+  }, [accountReadVersion]);
+
+  async function verifyCurrentAccount() {
+    const expected = session;
+    const generation = accountReadGeneration.current;
+    if (serverArmed === null || !expected) throw new Error("We couldn't confirm this account. Try again after it reloads.");
+    const result = await fetchAccountForSession(expected);
+    const freshGrant = result.kind === "ready" ? result.account.status.grant as { smartAccount?: string; chainId?: number; sessionKeyAddress?: string } | undefined : undefined;
+    if (generation !== accountReadGeneration.current || result.kind !== "ready" ||
+        (grant && result.account.status.exists &&
+          (freshGrant?.smartAccount?.toLowerCase() !== grant.smartAccount.toLowerCase() ||
+           freshGrant?.chainId !== grant.chainId ||
+           (freshGrant?.sessionKeyAddress && grant.sessionKeyAddress && freshGrant.sessionKeyAddress.toLowerCase() !== grant.sessionKeyAddress.toLowerCase())))) {
+      accountReadGeneration.current++;
+      setServerArmed(null);
+      setSession(null);
+      setGrant(null);
+      setAccountReadFailed(true);
+      throw new Error("This account changed. Check the wallet again before signing or discarding.");
+    }
+    return result.account;
+  }
 
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
+    try { await verifyCurrentAccount(); } catch (e) { setError(e instanceof Error ? e.message : "Could not confirm this account."); return; }
     const stored = loadGrant();
-    if (!stored) {
+    if (stored && needsPermissionReplacement(stored)) {
+      setError("This saved permission was selected for revocation and cannot be re-armed. Review and renew below; your owner recovery access is kept.");
+      return;
+    }
+    if (!stored?.serialized) {
       // THE BUTTON THAT DID NOTHING, second edition. Re-arming re-POSTs the
       // browser's own grant, and this browser may be holding an ADOPTED one —
       // read from the server for display and re-signing, with the session key
@@ -686,6 +736,11 @@ export default function GrantPage() {
   const [capText, setCapText] = useState<Partial<Record<keyof GrantCaps, string>>>({});
   const [capError, setCapError] = useState("");
   const capShown = (k: keyof GrantCaps) => capText[k] ?? String(caps[k]);
+  // Validate every displayed cap, including an invalid legacy grant loaded
+  // untouched. Raw edits also cannot renew using a last-valid hidden number.
+  const capsInputInvalid = (Object.keys(CAP_FIELDS) as (keyof GrantCaps)[]).some(key =>
+    !parseAmount(capShown(key), CAP_FIELDS[key]).ok,
+  );
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
     setCapText((t) => ({ ...t, [k]: raw }));
@@ -734,10 +789,13 @@ export default function GrantPage() {
 
   const isMainnet = chainId === MAINNET;
   // Mainnet is real money — the create button stays locked until the user
-  // explicitly owns that (keys are plaintext-local; caps are the seatbelt).
+  // explicitly acknowledges real funds and the owner-key custody risk.
   const createBlocked = isMainnet && !mainnetAck;
+  const restoreCurrentGrant = preview && grant?.smartAccount.toLowerCase() === preview.smartAccount.toLowerCase() ? grant : null;
+  const restoreNetworks = [...(restoreCurrentGrant && restoreCurrentGrant.chainId !== chainId ? [restoreCurrentGrant.chainId] : []), chainId];
 
   async function onCreate() {
+    if (status !== null || createBlocked) return;
     setError(null);
     if (!grant && !switching) {
       window.location.href = "/create";
@@ -756,7 +814,21 @@ export default function GrantPage() {
     }
     setStatus("starting…");
     try {
-      const { local: g, handoff } = await createAgentWallet({
+      await verifyCurrentAccount();
+      if (chainId === MAINNET && privyOwner) {
+        for (const candidate of [grant, loadGrant(), ...loadRecoveryGrants()]) {
+          if (candidate?.owner.toLowerCase() === privyOwner.account.address.toLowerCase() &&
+              await trustedSavedGrant(candidate, session, window.location.origin)) {
+            setSwitching(false);
+            setGrant(candidate);
+            setBackedUp(true);
+            setError("This signing wallet already owns this account. Review and renew its existing permission below instead of creating another grant.");
+            setStatus(null);
+            return;
+          }
+        }
+      }
+      const options = {
         caps,
         onStatus: setStatus,
         chainId,
@@ -765,7 +837,13 @@ export default function GrantPage() {
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         ponsClassVaultFactory: classFactory,
         hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
-      });
+      };
+      if (chainId === MAINNET && !privyOwner) {
+        throw new Error("New mainnet wallets require your signed-in embedded owner wallet. Sign in to create one; existing recovery keys can still restore their original wallets.");
+      }
+      const { local: g, handoff } = chainId === MAINNET
+        ? await createPrivyOwnedWallet(privyOwner!.account, privyOwner!.did, options)
+        : await createAgentWallet(options);
       setGrant(g);
       // Take the ARMED state from what the server actually said. This used to be
       // left at whatever the mount-time fetch found — which is `false` on a first
@@ -784,41 +862,71 @@ export default function GrantPage() {
 
   /** Which account does this owner key control, and what's in it? Read-only. */
   async function checkOwnerKey() {
+    const generation = ++restorePreviewGeneration.current;
     setError(null);
     setPreview(null);
     setPreviewFunding(null);
+    setRestoreRevocationAck(false);
     const key = restoreKey.trim();
+    const selectedChain = chainId;
     if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
       setError("that isn't an owner key — expected 0x followed by 64 hex characters.");
       return;
     }
     setPreviewing(true);
     try {
-      const p = await previewOwnerAccount(key as `0x${string}`, chainId);
+      const p = await previewOwnerAccount(key as `0x${string}`, selectedChain);
+      if (generation !== restorePreviewGeneration.current) return;
+      const balance = await readFunding(p.smartAccount, selectedChain).catch(() => null);
+      if (generation !== restorePreviewGeneration.current) return;
       setPreview(p);
-      setPreviewFunding(await readFunding(p.smartAccount, chainId).catch(() => null));
+      setPreviewFunding(balance);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (generation === restorePreviewGeneration.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (generation === restorePreviewGeneration.current) setPreviewing(false);
     }
-    setPreviewing(false);
   }
 
-  /** Re-arm the funded account with a fresh session key under the caps above. */
+  /** Invalidate earlier permissions before restoring an owner-authorized grant. */
   async function onRestore() {
+    if (status !== null || !preview || !restoreRevocationAck || createBlocked) return;
+    const ownerKey = restoreKey.trim() as `0x${string}`;
+    const expectedAccount = preview.smartAccount as `0x${string}`;
+    const selectedChain = chainId;
+    const previousGrant = grant?.smartAccount.toLowerCase() === expectedAccount.toLowerCase() ? grant : null;
     setError(null);
     setRenewed(false);
     setStatus("starting…");
     try {
-      const { local: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
+      await verifyCurrentAccount();
+      const options = {
         caps,
         onStatus: setStatus,
-        chainId,
+        chainId: selectedChain,
         extraTokens: customTokens,
         v4AdapterAddress: v4Adapter,
-        ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
+        ponsAdapterAddress: await verifiedAdapter(ponsAdapter, selectedChain, setStatus),
         ponsClassVaultFactory: classFactory,
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
-      });
+        expectAccount: expectedAccount,
+      };
+      // The preview account is immutable for this operation; a changed input
+      // cannot revoke one wallet and then sign for another.
+      if (previousGrant) {
+        saveRecoveryGrant(previousGrant);
+        markPermissionForReplacement(previousGrant);
+        setReplacementRequired(true);
+      }
+      await stopAgent(session?.hosted ? session.address : undefined);
+      setServerArmed(false);
+      // A network move leaves funds and copied session keys on the old chain.
+      // Both chains must confirm revocation before replacement can overwrite it.
+      if (previousGrant && previousGrant.chainId !== selectedChain) {
+        await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: previousGrant.chainId }, setStatus);
+      }
+      await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: selectedChain }, setStatus);
+      const { local: g, handoff } = await restoreAgentWallet(ownerKey, options);
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
       localStorage.setItem(BACKUP_KEY, "1");
@@ -839,18 +947,26 @@ export default function GrantPage() {
     }
   }
 
-  /**
-   * One-click key renewal: re-sign the SAME wallet (same owner key, same caps,
-   * same address, same funds) with a fresh session key and a fresh expiry.
-   * A grant is a local signature — nothing goes on-chain, no gas is spent, and
-   * it works in paper and live mode alike. This exists so expiry never forces
-   * anyone through discard/restore.
-   *
-   * It is ALSO how a newly-added token becomes tradable: the tradable set is
-   * sealed into the signed key, so the current `customTokens` are baked in here.
-   */
+  /** Replace permissions only after owner-authorized on-chain revocation confirms. */
   const [renewing, setRenewing] = useState(false);
   const [renewed, setRenewed] = useState(false);
+  const [renewalAck, setRenewalAck] = useState(false);
+  const [replacementRequired, setReplacementRequired] = useState(false);
+  useEffect(() => {
+    setReplacementRequired(grant ? needsPermissionReplacement(grant) : false);
+  }, [grant]);
+  const [securityBusy, setSecurityBusy] = useState(false);
+  const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [securityError, setSecurityError] = useState<string | null>(null);
+  const [revokeAck, setRevokeAck] = useState(false);
+  const renewalFocus = useRef<"complete" | "form" | null>(null);
+  useEffect(() => {
+    if (!renewalFocus.current) return;
+    const target = document.getElementById(renewalFocus.current === "complete" ? "renewal-complete" : RESIGN_ANCHOR);
+    renewalFocus.current = null;
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ block: "center" });
+  }, [renewed]);
   const privyOwner = usePrivyOwner();
   /**
    * CAN THIS BROWSER RE-SIGN THIS AGENT, and by which owner.
@@ -874,13 +990,62 @@ export default function GrantPage() {
       ? "privy"
       : null;
 
+  function ownerWallet(forChain = grant!.chainId) {
+    return {
+      smartAccount: grant!.smartAccount as `0x${string}`,
+      chainId: forChain,
+      ...(resignBy === "privy" ? { ownerAccount: privyOwner!.account } : { ownerKey: grant!.demoOwnerPrivateKey as `0x${string}` }),
+    };
+  }
+
+  async function stopOrRevoke(revoke: boolean) {
+    if (!grant || securityBusy || renewing || (revoke && (!resignBy || !revokeAck))) return;
+    setSecurityBusy(true);
+    setSecurityError(null);
+    setSecurityMessage(null);
+    try {
+      try { saveRecoveryGrant(grant); } catch (e) {
+        if (revoke) throw e;
+        setSecurityError("Browser recovery details could not be saved. Keep this page open to manage this wallet after stopping.");
+      }
+      if (revoke) {
+        markPermissionForReplacement(grant);
+        setReplacementRequired(true);
+      }
+      // A service outage must not veto the owner’s separate on-chain authority.
+      try {
+        await verifyCurrentAccount();
+        await stopAgent(session?.hosted ? session.address : undefined);
+        setServerArmed(false);
+        setSecurityMessage("Stop request accepted. The worker stops on its next check; earlier session keys are not yet revoked on-chain.");
+      } catch (e) {
+        if (!revoke) throw e;
+        setSecurityError(`The service stop was not confirmed: ${e instanceof Error ? e.message : String(e)}. On-chain revocation is being attempted separately.`);
+      }
+      if (revoke) {
+        const result = await revokeFromBrowser(ownerWallet(), setSecurityMessage);
+        setSecurityMessage(`Earlier permissions on ${chainLabel(grant.chainId)} are revoked on-chain. Transaction: ${result.transactionHash}. Your wallet and withdrawal access are kept.`);
+        setRevokeAck(false);
+      }
+    } catch (e) {
+      setSecurityError(e instanceof Error ? e.message : "Could not confirm this action. Your wallet was kept.");
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
   async function renewKey() {
-    if (!grant || !resignBy) return;
+    if (!grant || !resignBy || renewing || securityBusy || !renewalAck || capsInputInvalid ||
+        (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)) return;
+    let stopped = false;
+    let revoked = false;
+    let preflightPassed = false;
     setError(null);
     setRenewed(false);
     setStatus("checking your permission…");
     setRenewing(true);
     try {
+      await verifyCurrentAccount();
       const priorTrencher = grantTrencher(grant);
       if (priorTrencher && (!autonomousTrencher || chainId !== grant.chainId || (TRENCHER_FACTORY && TRENCHER_FACTORY.toLowerCase() !== priorTrencher.factory))) {
         const client = createPublicClient({chain: grant.chainId === MAINNET ? robinhoodChain : robinhoodTestnet, transport: http()});
@@ -899,36 +1064,42 @@ export default function GrantPage() {
       // address in /settings — and the mount-time fetch predates that save, so
       // re-signing from stale state silently sealed a wall WITHOUT the thing
       // they just added, with nothing failing until the first no-exit reject.
-      let freshTokens = customTokens;
-      let freshAdapter = v4Adapter;
-      let freshPons = ponsAdapter;
-      // Re-read at CLICK time like its siblings. The mount fetch predates
-      // anything the owner just saved, and re-signing from stale state seals a
-      // wall without the thing they added thirty seconds ago.
-      let freshClassFactory = classFactory;
+      let freshTokens: CustomToken[];
+      let freshAdapter: `0x${string}` | undefined;
+      let freshPons: `0x${string}` | undefined;
+      let freshClassFactory: `0x${string}` | undefined;
       try {
-        const r = await fetch("/api/settings");
-        if (r.ok) {
-          const v = (await r.json()) as {
-            values?: { customTokens?: unknown[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string };
-          };
-          freshTokens = (v?.values?.customTokens ?? []).filter(isValidCustomToken) as CustomToken[];
-          const a = v?.values?.v4AdapterAddress;
-          freshAdapter = typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined;
-          const pa = v?.values?.ponsAdapterAddress;
-          freshPons = typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined;
-          // Same missing assignment as the mount fetch. The variable and the
-          // comment above it were both already here; only the line that fills
-          // it was not, so a renewal could never add a class vault either.
-          const cf = v?.values?.ponsClassVaultFactory;
-          freshClassFactory = typeof cf === "string" && /^0x[0-9a-fA-F]{40}$/.test(cf) ? (cf as `0x${string}`) : undefined;
-          setCustomTokens(freshTokens);
-          setV4Adapter(freshAdapter);
-          setPonsAdapter(freshPons);
-          setClassFactory(freshClassFactory);
+        const r = await fetch("/api/settings", { cache: "no-store" });
+        if (!r.ok) throw new Error("settings unavailable");
+        const body: unknown = await r.json();
+        if (!body || typeof body !== "object" || !("values" in body) ||
+            !body.values || typeof body.values !== "object" || Array.isArray(body.values)) {
+          throw new Error("invalid settings response");
         }
+        const v = body.values as Record<string, unknown>;
+        if (v.customTokens !== undefined &&
+            (!Array.isArray(v.customTokens) || !v.customTokens.every(isValidCustomToken))) {
+          throw new Error("invalid custom tokens");
+        }
+        const addressSetting = (value: unknown): `0x${string}` | undefined => {
+          if (value === undefined || value === "") return undefined;
+          if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) {
+            throw new Error("invalid adapter settings");
+          }
+          return value as `0x${string}`;
+        };
+        freshTokens = (v.customTokens ?? []) as CustomToken[];
+        freshAdapter = addressSetting(v.v4AdapterAddress);
+        freshPons = addressSetting(v.ponsAdapterAddress);
+        freshClassFactory = addressSetting(v.ponsClassVaultFactory);
+        setCustomTokens(freshTokens);
+        setV4Adapter(freshAdapter);
+        setPonsAdapter(freshPons);
+        setClassFactory(freshClassFactory);
       } catch {
-        /* unreachable settings: sign with what the page already had, as before */
+        // An unavailable response is not an empty settings record: signing
+        // stale mount state could silently leave out the adapter just saved.
+        throw new Error("Could not refresh your trading settings. Retry when settings are available.");
       }
       // The SELECTED chain and the CURRENT caps — not the old grant's. The old
       // behaviour reused grant.chainId and grant.caps, so renewing while the
@@ -958,6 +1129,24 @@ export default function GrantPage() {
          */
         expectAccount: grant.smartAccount as `0x${string}`,
       };
+      // Check the canonical replacement before any persistent mutation, stop,
+      // or revocation. This produces no key/signature to reuse after revoking.
+      await preflightAgentGrant(
+        resignBy === "privy" ? privyOwner!.account : privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`),
+        options,
+      );
+      preflightPassed = true;
+      // Invalidate first: a new grant signed before this receipt would carry
+      // the old enable nonce and be invalidated along with the old permission.
+      // Preserve only public recovery inputs for an adopted second-browser grant.
+      saveRecoveryGrant(grant);
+      markPermissionForReplacement(grant);
+      setReplacementRequired(true);
+      await stopAgent(session?.hosted ? session.address : undefined);
+      stopped = true;
+      await revokeFromBrowser(ownerWallet(), setStatus);
+      if (chainId !== grant.chainId) await revokeFromBrowser(ownerWallet(chainId), setStatus);
+      revoked = true;
       // TWO OWNERS, ONE CONTROL. Everything above — the fresh settings, the
       // selected chain, the current caps, the adapter verification — is shared;
       // only where the signature comes from differs.
@@ -970,9 +1159,12 @@ export default function GrantPage() {
       // renewed key that the server refused doesn't read as a renewed agent.
       setServerArmed(handoff.ok);
       if (!handoff.ok) setError(handoff.error ?? "the server refused the renewed grant");
+      if (handoff.ok) renewalFocus.current = "complete";
       setRenewed(handoff.ok);
+      setRenewalAck(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (stopped) setServerArmed(false);
+      setError(`${revoked ? "Earlier permissions were revoked, but a replacement was not activated. " : stopped ? "The service accepted the stop request. " : !preflightPassed ? "This attempt kept your existing permission unchanged. " : ""}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setStatus(null);
       setRenewing(false);
@@ -1063,7 +1255,9 @@ export default function GrantPage() {
     setDiscarding(true);
     setError(null);
     try {
-      const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true });
+      const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedTenant: session?.hosted ? session.address : undefined }) });
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null;
         setError(body?.error ?? `The server did not discard the grant (${res.status}). Your wallet is still saved here; try again.`);
@@ -1082,9 +1276,15 @@ export default function GrantPage() {
       setError("The saved wallet changed while the kill was pending. The newer wallet and its backup were kept; check its status before trying again.");
       return;
     }
-    clearGrant();
+    try {
+      clearGrant();
+      localStorage.removeItem(BACKUP_KEY);
+    } catch (e) {
+      setServerArmed(false);
+      setError(`The service accepted the stop, but browser cleanup failed. Your recovery data was kept. ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
     setRenewed(false);
-    localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);
     setReveal(false);
@@ -1182,7 +1382,7 @@ export default function GrantPage() {
     // Instant, like a real anchor jump: a smooth scroll is driven by animation
     // frames, which a hidden tab or an in-app browser may never deliver.
     document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "start" });
-  }, [wizStep, grant, serverArmed]);
+  }, [wizStep, grant, serverArmed, replacementRequired]);
 
   // SIGNED IN ON THIS SCREEN. It loads the grant once, on mount, as whoever
   // was signed in then — so an owner who opened a "Sign now" link signed out
@@ -1192,6 +1392,25 @@ export default function GrantPage() {
   // Guarded against a reload loop — resign-anchor.ts `shouldReloadAfterSignIn`.
   const hasGrantRef = useRef(false);
   hasGrantRef.current = grant !== null;
+  useEffect(() => {
+    // Returning from another tab may mean the hosted cookie now belongs to a
+    // different owner. Remove the old signing surface before re-reading it.
+    const revalidate = () => {
+      accountReadGeneration.current++;
+      setServerArmed(null);
+      setSession(null);
+      setGrant(null);
+      setAccountReadFailed(false);
+      setAccountReadVersion((n) => n + 1);
+    };
+    const visible = () => { if (document.visibilityState === "visible") revalidate(); };
+    window.addEventListener(SIGNED_IN_EVENT, revalidate);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.removeEventListener(SIGNED_IN_EVENT, revalidate);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, []);
   useEffect(() => {
     const again = () => {
       let lastAt: number | null = null;
@@ -1213,6 +1432,24 @@ export default function GrantPage() {
   }, []);
   const RAIL = ["Wallet", "Backup", "Funds", "Ready"] as const;
   const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
+
+  // An HTTP error cannot establish that the server discarded this wallet.
+  // Hide server actions until the authenticated status is known, but keep
+  // locally saved recovery keys available during an outage. They need no DB.
+  if (serverArmed === null) return <AppShell><PageHeader title="Wallet & permissions" />
+    <section className="grant-shell" role="status">
+      {accountReadFailed ? <><h1>Couldn&rsquo;t check your agent</h1><p>We can&rsquo;t confirm this wallet&rsquo;s status right now.</p>
+        <button className="flow-secondary" type="button" onClick={() => { accountReadGeneration.current++; setAccountReadFailed(false); setAccountReadVersion((n) => n + 1); }}>Try again</button></>
+        : <p>Checking your agent…</p>}
+      {securityMessage && <p role="status">{securityMessage}</p>}
+      {securityError && <p role="alert">{securityError}</p>}
+      {savedWallets.length > 0 && <div className="saved-wallets">
+        <h2>Wallets saved in this browser</h2>
+        <p>These recovery keys are stored on this device and remain available while the service is down.</p>
+        {savedWallets.map((w) => <WalletRow key={w.smartAccount} w={w} />)}
+      </div>}
+    </section>
+  </AppShell>;
 
   return (
     /*
@@ -1262,6 +1499,17 @@ export default function GrantPage() {
       )}
 
         <div className="grant-shell">
+        {grant && !switching && <section id="permission-security" className="grant-summary" style={{ marginBottom: 16 }}>
+          <h2>Stop or revoke permissions</h2>
+          <p>Stopping this service needs no wallet signature. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>
+          <button className="copy-btn" disabled={securityBusy || renewing} onClick={() => void stopOrRevoke(false)}>Stop agent now</button>
+          {resignBy ? <>
+            <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={revokeAck} disabled={securityBusy || renewing} onChange={e => setRevokeAck(e.target.checked)} /><span>I understand revocation uses ETH for network fees on this network and stops all earlier permissions for this account.</span></label>
+            <button className="grant-btn" disabled={securityBusy || renewing || !revokeAck} onClick={() => void stopOrRevoke(true)}>{securityBusy ? "Checking…" : "Stop & revoke on-chain"}</button>
+          </> : <p>Sign in as the owner or restore the recovery key to revoke on-chain. You can still stop the service now.</p>}
+          {securityMessage && <p role="status">{securityMessage}</p>}
+          {securityError && <p role="alert">{securityError}</p>}
+        </section>}
         {/* ─── WHO YOU ARE SIGNED IN AS, AND THE WAY OUT ──────────────────────
             This page is titled "Wallet & permissions" and is where anyone looking
             to change accounts arrives — it had neither the signed-in address nor
@@ -1309,10 +1557,13 @@ export default function GrantPage() {
                 ))}
             </div>
             <div className="fund-actions" style={{ display: "flex", gap: 10 }}>
-              <button className="grant-btn" onClick={() => void reArm()} disabled={reArming} style={{ flex: 1 }}>
-                {reArming ? "re-arming…" : "re-arm this wallet"}
+              <button className="grant-btn" onClick={() => {
+                if (session?.hosted || replacementRequired) document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "center" });
+                else void reArm();
+              }} disabled={reArming || renewing || securityBusy} style={{ flex: 1 }}>
+                {reArming ? "re-arming…" : session?.hosted || replacementRequired ? "review and renew permission" : "re-arm this wallet"}
               </button>
-              <button className="btn-kill" onClick={() => void discard()} disabled={discarding} style={{ flex: 1 }}>
+              <button className="btn-kill" onClick={() => void discard()} disabled={discarding || renewing || securityBusy} style={{ flex: 1 }}>
                 {discarding ? "discarding…" : "discard & start fresh"}
               </button>
             </div>
@@ -1342,6 +1593,7 @@ export default function GrantPage() {
         {/* ─── phase 1: pick a chain, set caps, create the wallet ────────── */}
         {(!grant || switching) && (
           <div className="grant-panel">
+            <fieldset className="grant-renewal-fields" disabled={status !== null || previewing}>
             {switching && grant && (
               <div className="switch-note">
                 Restoring replaces your active wallet, <span className="mono">{short(grant.smartAccount)}</span>. You can still access it under saved wallets.
@@ -1437,8 +1689,7 @@ export default function GrantPage() {
                     onChange={(e) => setMainnetAck(e.target.checked)}
                   />
                   <span>
-                    I understand — real funds, keys stored locally in plain text, and my caps are my
-                    protection.
+                    I understand — real funds. Anyone with my owner recovery key can bypass every cap and control my funds.
                   </span>
                 </label>
               </div>
@@ -1452,10 +1703,11 @@ export default function GrantPage() {
                   type="password"
                   placeholder="0x… (the key you backed up when you created it)"
                   value={restoreKey}
-                  onChange={(e) => setRestoreKey(e.target.value)}
+                  disabled={status !== null}
+                  onChange={(e) => { ++restorePreviewGeneration.current; setRestoreKey(e.target.value); setPreview(null); setPreviewFunding(null); setPreviewing(false); setRestoreRevocationAck(false); }}
                   autoComplete="off"
                 />
-                <button className="copy-btn" onClick={() => void checkOwnerKey()} disabled={previewing}>
+                <button className="copy-btn" onClick={() => void checkOwnerKey()} disabled={previewing || status !== null}>
                   {previewing ? "checking…" : "check this wallet"}
                 </button>
 
@@ -1603,12 +1855,24 @@ export default function GrantPage() {
                   This signs the limits shown above — <b>{caps.perTradeUsdg} USDG</b> a trade,{" "}
                   <b>{caps.dailyUsdg}</b> a day, key for <b>{caps.expiryDays} days</b>. Your old
                   limits lived in the key you lost, so nothing can read them back; set them here
-                  if they mattered. Your funds are untouched either way.
+                  if they mattered. Revocation spends ETH for network fees; it does not move your trading balances.
                 </p>
+                {preview && <div className="grant-note" data-restore-funding style={{ marginTop: 12 }}>
+                  <b>ETH for revocation fees</b>
+                  <p>Restore revokes earlier permissions on {restoreNetworks.length > 1 ? "both networks below, starting with the current network" : "the network below"} before signing a replacement. Fund this same account address on {restoreNetworks.length > 1 ? "each network" : "this network"}:</p>
+                  <code style={{ display: "block", overflowWrap: "anywhere" }}>{preview.smartAccount}</code>
+                  <CopyBtn value={preview.smartAccount} label="copy restore funding address" />
+                  <ul>{restoreNetworks.map(network => <li key={network}>
+                    <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                  </li>)}</ul>
+                  {restoreNetworks.includes(TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
+                  <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty destination account also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+                </div>}
+                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>I understand restore first stops the service and revokes earlier permissions on {restoreNetworks.map(network => network === MAINNET ? "Robinhood Chain (4663)" : "Robinhood Chain testnet (46630)").join(" and ")}. The account needs ETH for network fees on {restoreNetworks.length > 1 ? "both networks" : "this network"} before a new permission can be signed.</span></label>
                 <button
                   className="grant-btn"
                   onClick={() => void onRestore()}
-                  disabled={status !== null || createBlocked || !preview}
+                  disabled={status !== null || createBlocked || !preview || !restoreRevocationAck}
                 >
                   {status ??
                     (createBlocked
@@ -1620,7 +1884,7 @@ export default function GrantPage() {
               </>
             )}
             {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
-
+            </fieldset>
           </div>
         )}
 
@@ -1687,7 +1951,7 @@ export default function GrantPage() {
         )}
 
         {/* ─── phase 3: fund the account ───────────────────────────────── */}
-        {grant && backedUp && !desynced && !switching && (
+        {grant && backedUp && (!desynced || replacementRequired || session?.hosted) && !switching && (
           <div className="grant-panel">
             {/* Tokens added in settings after this key was signed. The wall can't
                 widen without a signature — that's the point — so say it plainly
@@ -1712,7 +1976,7 @@ export default function GrantPage() {
                 you re-sign — buying something it can&apos;t sell back would leave you holding a
                 position with no way out, and no cap protects you from that.
                 <br />
-                Re-signing fixes it: same wallet, same funds, same caps, free and instant.
+                Review and renew your permission below; network fees apply to revoking earlier keys.
                 {watchedNotTraded.length > 0 && (
                   /* AND WHAT RE-SIGNING WILL NOT FIX. Coverage and selection are
                      two different gates; this panel only ever spoke about the
@@ -1750,8 +2014,7 @@ export default function GrantPage() {
                 </button>
               </div>
             )}
-            {/* Key expiry — renewal is one click, free (a local signature; no
-                gas, nothing moves, same wallet). Applies in paper AND live mode. */}
+            {/* Key renewal first revokes the earlier generation on-chain. */}
             {(() => {
               const secsLeft = grant.expiresAt - Math.floor(Date.now() / 1000);
               // `resignBy`, not the owner key: a Privy agent's key expires on
@@ -1784,7 +2047,7 @@ export default function GrantPage() {
                     style={{ marginTop: 10, width: "100%" }}
                     onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
                   >
-                    re-sign the key (free) →
+                    review and renew permission →
                   </button>
                 </div>
               );
@@ -2008,16 +2271,7 @@ export default function GrantPage() {
                 <li>
                   <b>Withdrawals</b> — use your recovery key in Profile. Renewing removes any older agent transfer permission.
                 </li>
-                <li>
-                  <b>Uniswap v4</b> —{" "}
-                  {grantHasV4(grant) ? (
-                    <span style={{ color: "var(--red)" }}>
-                      unrestricted transfer access. <b>Renew below</b> to remove it.
-                    </span>
-                  ) : (
-                    "not granted."
-                  )}
-                </li>
+                <V4PermissionLine grant={grant} configuredAdapter={v4Adapter} />
                 {/*
                   TWO VENUES THIS LIST NEVER MENTIONED. The block above says
                   "capability drift you cannot see is capability drift you
@@ -2073,19 +2327,27 @@ export default function GrantPage() {
               a re-sign that silently keeps the old numbers would send owners
               back through the side door for the other half of the job.
             */}
-            <div id="resign" className="grant-summary" style={{ marginTop: 14 }}>
-              <b>Re-sign this key.</b> Free, instant, and nothing is sent on-chain — it is a
-              signature, not a transaction. <b>Same wallet, same address, same funds:</b> your
-              balances are held by the account, not by the key, so they do not move.
-              <br />
-              <br />
-              What changes is the key itself. The new one is signed against <b>today&apos;s wall</b>,
-              so its permissions can differ from the old one&apos;s — the list above says what the
-              current key carries, and anything it names as worth removing goes away here. The caps
-              below are sealed into the signature too, so this is the moment to change them; the old
-              key stops working as soon as the new one is armed.
+            <div id="resign" tabIndex={-1} aria-label="Trading permission renewal" className="grant-summary" style={{ marginTop: 14 }}>
+              {renewed && !renewing && !error ? (
+                <section id="renewal-complete" data-testid="renewal-complete" tabIndex={-1} aria-labelledby="renewal-complete-title" className="grant-renewal-complete">
+                  <div role="status">
+                    <h2 id="renewal-complete-title">Permission renewed</h2>
+                    <p>Earlier permissions were revoked on-chain. The server saved your new permission for <b>{chainLabel(grant.chainId)}</b>.</p>
+                    <p>You&apos;re done signing. Open your agent to see whether it has accepted this permission and any remaining setup steps.</p>
+                  </div>
+                  <Link href="/chat" className="grant-btn" style={{ display: "block", textAlign: "center", textDecoration: "none" }}>View agent status</Link>
+                  <button className="copy-btn" style={{ marginTop: 12 }} onClick={() => {
+                    setChainId(grant.chainId); setCaps(grant.caps); setCapText({}); setCapError("");
+                    setMainnetAck(false); setRenewalAck(false); renewalFocus.current = "form"; setRenewed(false);
+                  }}>Edit permissions again</button>
+                </section>
+              ) : <>
+              <b>Renew your permission.</b> First, stop the service and revoke earlier permissions on-chain; then sign a replacement with the limits below. Your account address stays the same.
+              <p>Revocation uses ETH for network fees. When moving networks, it runs on both the current and selected networks. Trading stays stopped if revocation or the replacement fails; your recovery access is kept.</p>
+              <p>The replacement uses today&apos;s permission rules. Review the network, assets, and limits before continuing. The owner key bypasses these limits and must stay private.</p>
               {resignBy ? (
                 <>
+                  <fieldset className="grant-renewal-fields" disabled={renewing || securityBusy}>
                   <div className="grant-fields" style={{ marginTop: 12 }}>
                     <label className="field">
                       <span className="field-label">Autonomous Trencher permission</span>
@@ -2127,7 +2389,21 @@ export default function GrantPage() {
                         <span className="field-unit">days</span>
                       </span>
                     </label>
+                    <label className="field">
+                      <span className="field-label">drawdown limit</span>
+                      <span className="field-input">
+                        <input type="text" inputMode="numeric" value={capShown("maxDrawdownPct")}
+                          onChange={set("maxDrawdownPct")} disabled={renewing}
+                          aria-invalid={!parseAmount(capShown("maxDrawdownPct"), CAP_FIELDS.maxDrawdownPct).ok} />
+                        <span className="field-unit">%</span>
+                      </span>
+                      <small>
+                        New buys pause when drawdown is at or above this percentage below the account&apos;s recorded peak. Selling remains allowed by this limit.
+                        Raising it allows a larger loss before buys pause; it does not recover losses or reset the peak. Choose a whole percentage from 1 to 50.
+                      </small>
+                    </label>
                   </div>
+                  {capsInputInvalid && <p className="grant-cap-error" role="alert">{capError || "Enter valid limits before signing."}</p>}
                   {/*
                     MOVING A KEY BETWEEN CHAINS, as a first-class action.
 
@@ -2186,8 +2462,7 @@ export default function GrantPage() {
                           onChange={(e) => setMainnetAck(e.target.checked)}
                         />
                         <span>
-                          I understand — real funds, keys stored locally in plain text, and my caps
-                          are my protection.
+                          I understand — real funds, a recovery key stored in this browser can bypass every cap. I must keep it private.
                         </span>
                       </label>
                     </div>
@@ -2209,11 +2484,25 @@ export default function GrantPage() {
                     wondering what they did wrong; a disabled one sits directly
                     under the checkbox that enables it.
                   */}
+                  <div className="grant-note" data-renewal-funding style={{ marginTop: 12 }}>
+                    <b>ETH for revocation fees</b>
+                    <p>Before continuing, fund this same account address on {chainId !== grant.chainId ? "each network below" : "this network"}:</p>
+                    <code style={{ display: "block", overflowWrap: "anywhere" }}>{grant.smartAccount}</code>
+                    <CopyBtn value={grant.smartAccount} label="copy revocation funding address" />
+                    <ul>
+                      {[grant.chainId, ...(chainId !== grant.chainId ? [chainId] : [])].map(network => <li key={network}>
+                        <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                      </li>)}
+                    </ul>
+                    {(grant.chainId === TESTNET || chainId === TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
+                    <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty account on the destination network also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+                  </div>
+                  <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={renewalAck} onChange={e => setRenewalAck(e.target.checked)} /><span>I authorize revoking earlier permissions on-chain before signing the replacement and understand network fees apply.</span></label>
                   <button
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}
                     onClick={() => void renewKey()}
-                    disabled={renewing || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
+                    disabled={renewing || securityBusy || !renewalAck || capsInputInvalid || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
                   >
                     {renewing
                       ? "re-signing…"
@@ -2221,11 +2510,12 @@ export default function GrantPage() {
                         ? chainId === MAINNET
                           ? "move to Robinhood Chain & re-sign"
                           : "move to the testnet & re-sign"
-                        : "re-sign this key (free)"}
+                        : "revoke earlier permissions & re-sign"}
                   </button>
+                  </fieldset>
                   {renewing && <p className="field-lead" role="status">{status ?? "re-signing…"}</p>}
-                  {/* A pre-signing refusal leaves this active grant intact, so
-                      neither the create nor desync error panel is visible. */}
+                  {/* A preflight refusal leaves the prior permission unchanged,
+                      including any earlier pending revocation/recovery state. */}
                   {error && (
                     <div className="grant-error mono" role="alert">
                       {error}
@@ -2233,15 +2523,11 @@ export default function GrantPage() {
                         <p>
                           Lower spending limits do not shrink the permission list. {" "}
                           <a href="/settings">Review custom tokens</a> and follow the changes described above.
-                          If it is too large even without custom tokens, contact support with this error.
+                          If it is too large even without custom tokens, the selected trading routes
+                          need a narrower permission; contact support before changing those routes.
                         </p>
                       )}
                     </div>
-                  )}
-                  {renewed && !renewing && !error && (
-                    <p className="field-lead" role="status">
-                      Permission renewed. Your agent will check the new key shortly.
-                    </p>
                   )}
                 </>
               ) : (
@@ -2269,15 +2555,20 @@ export default function GrantPage() {
                   )}
                 </p>
               )}
+              </>}
             </div>
 
-            <div className="grant-actions">
-              <Link href="/" className="grant-btn" style={{ textAlign: "center", textDecoration: "none" }}>
-                back to the band
-              </Link>
+            {!renewed && <div className="grant-actions">
+              <Link href="/chat" className="grant-btn" style={{ textAlign: "center", textDecoration: "none" }}>View agent status</Link>
+            </div>}
+            <details className="grant-wallet-options">
+              <summary>More wallet options</summary>
+              <p>Switch wallets or stop using this permission. Neither option is needed to finish renewing. Discarding stops this service but does not revoke copied session keys on-chain.</p>
+              <div className="grant-actions">
               <button
                 className="copy-btn"
                 style={{ padding: "10px 16px" }}
+                disabled={renewing || securityBusy}
                 onClick={() => {
                   setRenewed(false);
                   setSwitching(true);
@@ -2287,10 +2578,11 @@ export default function GrantPage() {
               >
                 switch to another wallet
               </button>
-              <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={() => void discard()} disabled={discarding}>
+              <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={() => void discard()} disabled={discarding || renewing || securityBusy}>
                 {discarding ? "discarding…" : "discard & start over"}
               </button>
-            </div>
+              </div>
+            </details>
           </div>
         )}
         </div>

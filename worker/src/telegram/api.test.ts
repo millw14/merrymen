@@ -9,6 +9,7 @@ import {
   answerCallbackQuery,
   editMessageText,
   esc,
+  getChat,
   getChatMember,
   getMe,
   getUpdates,
@@ -95,6 +96,21 @@ describe("getMe", () => {
       throw new Error("ECONNRESET");
     };
     assert.deepEqual(await getMe({ token: "123:abc", fetchFn: boom }), { bot: null, reason: "request failed: ECONNRESET" });
+  });
+});
+
+describe("getChat for a targeted operator notice", () => {
+  it("checks the current numeric id, title, type and forum flag", async () => {
+    const f = fakeFetch(200, OK({ id: -1001234, title: "Merrymen", type: "supergroup", is_forum: false }));
+    const r = await getChat({ token: "123:abc", fetchFn: f }, -1001234);
+    assert.deepEqual(r, { chat: { id: -1001234, title: "Merrymen", type: "supergroup", isForum: false } });
+    assert.match(f.lastUrl!, /\/bot123:abc\/getChat$/);
+    assert.equal(JSON.parse(f.lastBody!).chat_id, -1001234);
+  });
+
+  it("refuses incomplete identity or a failed lookup", async () => {
+    assert.equal((await getChat({ token: "123:abc", fetchFn: fakeFetch(200, OK({ id: -1, type: "private" })) }, -1)).chat, null);
+    assert.equal((await getChat({ token: "123:abc", fetchFn: fakeFetch(403, { ok: false, description: "Forbidden" }) }, -1)).chat, null);
   });
 });
 

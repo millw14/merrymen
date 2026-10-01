@@ -32,7 +32,7 @@
  * Proposed as 'chain-log' it would collide with a different source and fail
  * verification; left out, contributions would disagree with the ledger.
  */
-import type { Db } from "./db";
+import { createHash } from "node:crypto";
 import { isEvidencedFlow } from "./accounting-scope";
 import type { AccountCapital } from "./chain-capital";
 
@@ -49,6 +49,8 @@ export interface ProposedFlowRow {
   txHash: string;
   blockNumber: number;
   logIndex: number;
+  /** Original chain block time. Required to insert a receipt that is not already stored. */
+  at?: number;
 }
 
 /** A row the repair would MOVE to quarantine. Never deleted. */
@@ -68,6 +70,8 @@ export interface AccountPlan {
   mode: string | null;
   isPaper: boolean;
   epoch: number;
+  /** Exact pre-repair ledger state. Legacy previews may omit it; mutation may not. */
+  flowFingerprint?: string | null;
 
   /** On-chain USDG right now, decimal. Null when the balance could not be read. */
   onchainCashUsdg: number | null;
@@ -117,6 +121,51 @@ const num = (v: unknown): number => {
 /** Base units to decimal USDG. Six places, which is all the column can hold. */
 const toUsdg = (raw: string): number => Number(BigInt(raw)) / 1e6;
 
+/** Every stored flow column, including receipt identity and original timestamp. */
+export const FLOW_SNAPSHOT_COLUMNS =
+  "id, agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at";
+
+/**
+ * Hash the complete account history, not just its net contribution. A replaced
+ * receipt or two offsetting new rows must invalidate a plan too. Normalize only
+ * the representation differences between SQLite numbers and Postgres BIGINT
+ * strings; never round amounts or lowercase stored identities.
+ *
+ * Incomplete legacy inputs remain usable for read-only previews, but cannot
+ * produce the fingerprint required by the mutation path.
+ */
+export function flowFingerprintOf(rows: readonly Record<string, unknown>[]): string | null {
+  const columns = FLOW_SNAPSHOT_COLUMNS.split(", ");
+  try {
+    const integer = (value: unknown): string | null => {
+      if (value === null) return null;
+      if (typeof value === "number" && !Number.isSafeInteger(value)) throw new Error("unsafe integer");
+      if (typeof value !== "number" && typeof value !== "string" && typeof value !== "bigint") {
+        throw new Error("missing integer");
+      }
+      return BigInt(value).toString();
+    };
+    const canonical = rows.map((r) => {
+      if (columns.some((c) => !Object.hasOwn(r, c))) throw new Error("incomplete row");
+      const amount = Number(r.amount_usdg);
+      if (r.amount_usdg === null || !Number.isFinite(amount)) throw new Error("invalid amount");
+      if (typeof r.agent_id !== "string" || typeof r.direction !== "string" || typeof r.source !== "string" ||
+          (r.tx_hash !== null && typeof r.tx_hash !== "string")) throw new Error("invalid identity");
+      const id = integer(r.id);
+      const epoch = integer(r.epoch);
+      const at = integer(r.at);
+      if (id === null || epoch === null || at === null) throw new Error("missing required integer");
+      return [id, r.agent_id, r.direction, amount, r.tx_hash, integer(r.block_number),
+        integer(r.log_index), r.source, epoch, integer(r.chain_id), at];
+    });
+    canonical.sort((a, b) => BigInt(a[0] as string) < BigInt(b[0] as string) ? -1 :
+      BigInt(a[0] as string) > BigInt(b[0] as string) ? 1 : 0);
+    return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Build the plan. PURE with respect to the world — it takes the chain scan and
  * the database rows and decides, so the decision can be tested without either.
@@ -138,9 +187,8 @@ export function planReconstruction(args: {
     const mode = typeof a.mode === "string" ? a.mode : null;
     const cap = args.chain.get(key);
 
-    const rows = args.flows.filter(
-      (f) => String(f.agent_id ?? "").toLowerCase() === key && num(f.epoch) === epoch,
-    );
+    const allAccountRows = args.flows.filter((f) => String(f.agent_id ?? "").toLowerCase() === key);
+    const rows = allAccountRows.filter((f) => num(f.epoch) === epoch);
     const inferredRows = rows.filter(
       (f) => !(isEvidencedFlow(String(f.source ?? "")) || (typeof f.tx_hash === "string" && f.tx_hash)),
     );
@@ -175,6 +223,7 @@ export function planReconstruction(args: {
           txHash: m.txHash,
           blockNumber: m.blockNumber,
           logIndex: m.logIndex,
+          ...(m.at === undefined ? {} : { at: m.at }),
         });
       }
     }
@@ -191,7 +240,9 @@ export function planReconstruction(args: {
     // WHAT WOULD BLOCK THE MUTATION. Each of these leaves the account in a state
     // the repair cannot justify, so it is skipped rather than half-corrected.
     let blocked: string | null = null;
-    if (!cap) {
+    if (epoch !== 1) {
+      blocked = "lifetime chain reconstruction requires epoch 1; later epochs need an evidenced boundary before repair";
+    } else if (!cap) {
       blocked = "no chain scan result for this account";
     } else if (!cap.complete) {
       blocked =
@@ -221,6 +272,7 @@ export function planReconstruction(args: {
       mode,
       isPaper,
       epoch,
+      flowFingerprint: flowFingerprintOf(allAccountRows),
       onchainCashUsdg: onchainCash,
       navUsdg: args.equityByAccountEpoch.get(`${key}#${epoch}`) ?? null,
       chainGrossInUsdg: chainIn,
@@ -296,7 +348,8 @@ export function reconstructionLines(plans: readonly AccountPlan[]): string[] {
     );
     for (const r of p.insert) {
       L.push(
-        `${t} INSERT ${r.direction} ${f(r.amountUsdg)} src ${r.source} tx ${r.txHash} blk ${r.blockNumber} log ${r.logIndex}`,
+        `${t} INSERT ${r.direction} ${f(r.amountUsdg)} src ${r.source} tx ${r.txHash} blk ${r.blockNumber} log ${r.logIndex}` +
+          ` at ${r.at ?? "UNKNOWN (new receipt insertion will refuse)"}`,
       );
     }
     for (const q of p.quarantine) {

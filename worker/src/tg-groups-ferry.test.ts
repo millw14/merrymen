@@ -1527,7 +1527,7 @@ describe("the orchestrator ferries it where the contract says", () => {
     const refusal = spawnFn.indexOf("no healthy lease — not spawning");
     const link = spawnFn.indexOf("await writeTelegramForChild(tenant);");
     const restore = spawnFn.indexOf("await restoreTgGroupsForChild(tenant);");
-    const proc = spawnFn.indexOf("const proc = spawn(");
+    const proc = spawnFn.indexOf("proc = spawn(");
     assert.ok(refusal > 0 && link > refusal, "the lease refusal comes first");
     assert.ok(restore > link, "beside the link restore");
     assert.ok(proc > restore, "before the child starts");
@@ -1619,19 +1619,21 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.ok(forgetOnKill < kill.indexOf("\n  }\n", removed), "only in the branch whose DELETE removed the grant");
 
     const spawnFn = body("async function spawnChild(");
-    const noGrant = spawnFn.indexOf("no grant in the store — not spawning");
+    const noGrant = spawnFn.indexOf("no usable signed grant in the store — not spawning");
     const ret = spawnFn.indexOf("return;", noGrant);
     const forgetOnSpawn = spawnFn.indexOf("await forgetTgGroups(tenant);", noGrant);
     assert.ok(noGrant > 0 && forgetOnSpawn > noGrant && forgetOnSpawn < ret, "a spawn that finds no grant forgets before it returns");
 
     const rec = body("export async function reconcile(");
     const stamp = rec.indexOf("const listedAtMs = Date.now();");
-    const list = rec.indexOf("tenants = await store.listTenants();");
+    const list = rec.indexOf("const roster = store.listTenantExpiries");
     const unreadable = rec.indexOf("store unreadable, skipping this reconcile");
     const wanted = rec.indexOf("const wanted = new Set(");
     const killBranch = rec.indexOf("grant removed — standing it down");
     const sweep = rec.indexOf("await sweepTgGroups(wanted, listedAtMs);");
     assert.ok(stamp > 0 && list > stamp, "the bound is taken before the listing is asked for");
+    assert.match(rec.slice(list, unreadable), /await store\.listTenantExpiries\(\)/, "the expiry-aware roster is read after the bound");
+    assert.match(rec.slice(list, unreadable), /await store\.listTenants\(\)/, "the fallback roster is read after the bound");
     assert.ok(unreadable > list && wanted > unreadable, "an unreadable store returns before anything is judged");
     assert.ok(sweep > wanted && sweep > killBranch, "after the listing, beside the kill switch");
     assert.equal(ORCH.split("sweepTgGroups(").length - 1, 2, "defined once, called once");

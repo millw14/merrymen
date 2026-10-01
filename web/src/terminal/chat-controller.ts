@@ -180,7 +180,7 @@ export type Asked =
  * "unreadable" is kept for a 2xx body that could not be read.
  */
 export async function askAgent(
-  payload: { message: string; state: string; history: { role: "user" | "assistant"; content: string }[] },
+  payload: { message: string; state: string; history: { role: "user" | "assistant"; content: string }[]; expectedTenant: string | null },
   onText: (visible: string) => void,
   timeoutMs = CHAT_TIMEOUT_MS,
 ): Promise<Asked> {
@@ -462,7 +462,7 @@ export function useChatController(o: {
           perDay: ctx.perDay,
           stopped: ctx.stopped,
         });
-        const out = await askAgent({ message: q, state: JSON.stringify(state), history }, (visible) => {
+        const out = await askAgent({ message: q, state: JSON.stringify(state), history, expectedTenant: ownerOfChatKey(key) }, (visible) => {
           if (keyRef.current === key && mounted.current) setStreaming(visible);
         });
         if (keyRef.current !== key || !mounted.current) return false;

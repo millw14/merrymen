@@ -26,7 +26,7 @@ budgets, drawdown checks and operation limits. These are different enforcement
 layers: a compromised worker can ignore software checks, but cannot expand a
 signed on-chain permission. Bad trades remain possible within those bounds.
 
-**The five promises:** your keys, your caps · bounded worst case · every trade
+**The five promises:** your keys, your permissions · explicit risk limits · every trade
 simulated first · fees only on profit above the high-water mark · an honest
 scoreboard.
 
@@ -67,13 +67,15 @@ below.
   external services. Hosted at
   app.merrymen.dev the worker and the ledger are ours — what does not change is
   the next line.
-- **Owner authority and agent authority are separate.** Supported wallet flows
-  include a browser-generated owner key and a Privy embedded owner wallet.
-  Browser-generated keys require a backup and are stored in browser local
-  storage; embedded-wallet recovery follows that wallet's flow. Hosted workers
+- **Owner authority and agent authority are separate.** New mainnet wallets use
+  an embedded or external owner signer. Browser-generated owners are available
+  only on testnet. Existing browser-generated owners remain accessible for
+  renewal and recovery: their keys require a backup and are stored in browser
+  local storage. Anyone who obtains an owner key can bypass all agent caps;
+  these existing wallets have not been migrated by an app update. Hosted workers
   receive the restricted session grant, not the owner key. Session credentials
   can still authorize trades inside their permissions, so protecting them matters.
-- **The chain enforces the caps that bound a loss.** The session key may only
+- **The chain enforces the signed call permissions.** The session key may only
   call contracts it names, may only move assets you sealed into it, may not send
   native ETH beyond its signed call permissions, and dies on schedule — all in the account contract. A
   compromised agent cannot reach an asset you did not name or a contract you did
@@ -208,9 +210,11 @@ trusted LAN (your phone on home WiFi), start with
 
 ## 2 · Create & fund your agent wallet
 
-Open `localhost:3100/grant`. There's nothing to connect — merrymen generates a
-fresh account, shows you the owner key to **back up** (lose it and the funds are
-gone), and lets you fund it. **Pick your ground:**
+Open `localhost:3100/grant`. New mainnet accounts require an embedded owner
+wallet through sign-in, or an external signer through the SDK. A self-hosted
+dashboard without an embedded signer can create a testnet account or restore
+an existing owner key. Testnet browser-generated keys must be backed up before
+funding. **Pick your ground:**
 
 - **testnet · 46630** — the sandbox, one click away and no longer the default. Free **gas** from the faucet, and
   the grant, the caps, the policy checks, the live prices and the journal all run
@@ -219,18 +223,20 @@ gone), and lets you fund it. **Pick your ground:**
   aren't deployed there, so swaps simulate and no-route by design. Send gas, not
   capital — paper mode is already trading a simulated book at live prices.
 - **mainnet · 4663** (default) — **real funds.** Real USDG, real Stock Tokens, real
-  execution. The page makes you acknowledge it first: keys are generated and
-  stored **in plain text on your machine** (TEE custody is on the roadmap), so
-  treat the account like a hot wallet — your caps are the seatbelt, start small.
+  execution. The page requires an acknowledgment before signing. New mainnet
+  owners are not generated and stored in browser local storage. Existing legacy
+  owner keys remain there for recovery and can bypass every agent permission
+  if stolen. Session credentials also need protection.
   No faucet: send ETH (gas) + USDG (capital) from your own wallet or an exchange.
 
 Per-call size, the asset and contract permissions, signed native-value limits and
 the key's expiry are enforced **by the account contract on every operation**.
 The daily total, the drawdown breaker and the trades-per-day count live in the
 worker — they tighten what the chain already allows, and a compromised worker
-could ignore them, which is why the chain-side ceiling is the honest number to
-plan against: **per-trade size, until the key expires**. The worker can tighten
-within the wall but can never widen it without a new signed grant.
+could ignore them. Repeated permitted calls can spend more than the daily budget:
+**per-call size is not a total-loss limit**. Funds in permitted assets remain at
+risk until expiry or confirmed on-chain revocation. The worker can tighten within
+the wall but cannot widen it without a new owner signature.
 
 Trades-per-day was on the on-chain list here until 2026-08-30. It rested on
 ZeroDev's rate-limit policy, and `eth_getCode` shows that contract has no code on
@@ -253,9 +259,15 @@ merrymen start      # dashboard (localhost:3100) + the 24/7 worker
 merrymen doctor     # node / keys / RPC / bundler / grant / db diagnostics
 merrymen status     # heartbeat, grant, trades, equity
 merrymen selftest   # one policy-legal no-op through the full pipeline
-merrymen kill       # kill switch from the terminal (destroys the grant)
+merrymen kill       # stop this service by removing its active grant
 merrymen recover    # sweep the account's funds to a wallet you control
 ```
+
+Stopping the service does not invalidate copied session keys. To revoke earlier
+permissions on-chain, open `/grant` and choose **Stop & revoke on-chain** with
+the account's owner wallet. Confirmation requires network fees; recovery access
+remains available. Renewing a permission also revokes its earlier generation
+before signing the replacement.
 
 > **Getting your funds back out.** The address you funded is an ERC-4337 **smart
 > account**, not a plain wallet — its owner key derives a *different* address, so
@@ -615,8 +627,8 @@ Two ways to top up:
    most it may spend; it sizes the buy to **cover the shortfall, with a small margin for price
    movement (at least $1.00)**, over one pinned route (Uniswap v2, USDG → VIRTUAL → $MERRYMEN) —
    the pool fees and the token's own tax are paid out of the USDG — one trade at a time, inside your
-   signed per-trade and daily caps.
-   The permission for this is sealed into your key when you sign (re-sign once, free, if your key
+   signed per-trade limit and worker-enforced daily budget.
+   The permission for this is sealed into your key when you sign (renew if your key
    predates it) and it is **buy-only**: the key can turn USDG into $MERRYMEN in its own account
    and can never sell or send it. It moves out only with your owner key (`merrymen recover` /
    Withdraw). Paper-mode agents do not spend real USDG on energy — send $MERRYMEN instead, or turn
@@ -676,6 +688,23 @@ npm run onboard && npm start
 # or run halves separately: npm run dev:web · npm run dev:worker
 npm run typecheck && npm test
 ```
+
+### Package a release
+
+```bash
+npm ci
+npm run pack:release
+# After reviewing and testing the generated release/merrymen-<version>.tgz:
+npm publish ./release/merrymen-<version>.tgz
+```
+
+The release command builds the SDK and dashboard, then stages a tarball with the
+patched runtime dependency tree. Native optional packages are installed for the
+consumer's platform. Publish that tarball: direct directory `npm pack` and
+`npm publish` are blocked because consumers do not inherit this repository's npm
+overrides. CI checks an isolated global install, executes its native modules and
+audits the packages actually installed. Development installs still use the normal
+`package.json` and `package-lock.json`.
 
 ### Configuration
 The dashboard `/settings` is the source of truth (Anthropic/Rialto/Telegram keys,

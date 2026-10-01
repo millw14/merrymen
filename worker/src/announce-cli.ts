@@ -7,17 +7,16 @@
  *   node --import tsx worker/src/announce-cli.ts <body.html> <announce-id>
  *
  * DRY RUN UNLESS CONFIRMED. Telegram is contacted only when
- * MERRYMEN_ANNOUNCE_CONFIRM is set to the SAME announce id passed on the
- * command line. Two independent statements of the same value, because the
- * difference between a rehearsal and messaging every beta tester should not be
- * one flag anyone can set by muscle memory.
+ * MERRYMEN_ANNOUNCE_CONFIRM must equal the announce id AND
+ * MERRYMEN_ANNOUNCE_BODY_SHA256 must equal the dry-run body digest. A changed
+ * file cannot inherit an earlier approval.
  *
  * Prints counts and failure REASONS. Never a token, never a chat id, never the
  * link code — a fleet's worth of live bot credentials passes through this
  * process and none of it belongs in a terminal scrollback or a CI log.
  */
 import { readFileSync } from "node:fs";
-import { illegalTags, runAnnouncement, type PgClientLike } from "./announce";
+import { announcementConfirmation, illegalTags, RECOVERY_ANNOUNCE_ID, runAnnouncement, type PgClientLike } from "./announce";
 
 async function main(): Promise<void> {
   const [bodyPath, announceId] = process.argv.slice(2);
@@ -56,7 +55,10 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
-  const confirmed = process.env.MERRYMEN_ANNOUNCE_CONFIRM === announceId;
+  const { confirmed, bodySha256 } = announcementConfirmation(
+    announceId, body, process.env.MERRYMEN_ANNOUNCE_CONFIRM, process.env.MERRYMEN_ANNOUNCE_BODY_SHA256,
+  );
+  console.log(`[announce] body SHA-256 ${bodySha256}`);
 
   // @ts-expect-error pg is runtime-only here, exactly as settings-store.ts has it
   const pg = (await import("pg")) as unknown as {
@@ -65,7 +67,7 @@ async function main(): Promise<void> {
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
-    const out = await runAnnouncement({ client, announceId, body, confirmed });
+    const out = await runAnnouncement({ client, announceId, body, confirmed, appendPersonalLine: announceId !== RECOVERY_ANNOUNCE_ID });
     console.log(
       `[announce] ${out.dryRun ? "DRY RUN — nothing was sent" : "SENT"} · id ${announceId}\n` +
         `  tenants considered : ${out.considered}\n` +
@@ -74,6 +76,10 @@ async function main(): Promise<void> {
         `  skipped, no chat   : ${out.skippedNoChat}\n` +
         `  skipped, no bot    : ${out.skippedNoToken}\n` +
         `  skipped, tg off    : ${out.skippedDisabled}\n` +
+        `  skipped, unlinked  : ${out.skippedNotAllowed}\n` +
+        `  skipped, no claim  : ${out.skippedNoClaim}\n` +
+        `  skipped, changed   : ${out.skippedChanged}\n` +
+        `  skipped, attempted : ${out.skippedAlreadyAttempted}\n` +
         `  skipped, had it    : ${out.skippedAlreadySent}\n` +
         `  with their own reason: ${out.personalised} of ${out.sent}
 ` +
@@ -97,7 +103,7 @@ async function main(): Promise<void> {
     }
     if (out.dryRun) {
       console.log(
-        `\n  To send for real: set MERRYMEN_ANNOUNCE_CONFIRM=${announceId} and run the same command again.`,
+        `\n  To send for real: set MERRYMEN_ANNOUNCE_CONFIRM=${announceId} and MERRYMEN_ANNOUNCE_BODY_SHA256=${bodySha256} and run the same command again.`,
       );
     }
   } finally {

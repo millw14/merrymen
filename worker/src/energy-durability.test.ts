@@ -167,7 +167,7 @@ describe("seedEnergyForChild's place in spawnChild", () => {
     const guard = src.indexOf("log(`${tenant}: no healthy lease — not spawning");
     const basis = src.indexOf("await seedBasisForChild(tenant, smartAccount);");
     const energy = src.indexOf("await seedEnergyForChild(tenant, smartAccount);");
-    const spawned = src.indexOf("const proc = spawn(", energy);
+    const spawned = src.indexOf("proc = spawn(", energy);
     assert.ok(guard > 0 && basis > guard, "the basis seed still sits below the lease refusal");
     assert.ok(energy > basis, "the energy seed follows the basis seed");
     assert.ok(spawned > energy, "and both land before the child exists");

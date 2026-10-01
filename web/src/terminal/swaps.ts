@@ -62,6 +62,9 @@ export const OP_WORDS: Record<Exclude<SwapOp, "trade">, { pill: string; line: st
 
 export interface SwapRow {
   id: string;
+  /** Only the owner's tape supplies the actual ledger ID and fill proceeds. */
+  tradeId?: number | null;
+  fillCashUsdg?: number | null;
   /** A trade, or a move of cash that is not one — see SwapOp. */
   op: SwapOp;
   /** Null when nothing recorded which way it went — a "Swap", never a guess. */
@@ -139,6 +142,8 @@ export function swapRowsOfDesk(moves: readonly Thesis[]): SwapRow[] {
     const realized = typeof m.realizedPnlUsdg === "number" && Number.isFinite(m.realizedPnlUsdg) ? m.realizedPnlUsdg : null;
     return {
       id: `${at ?? "t"}-${i}`,
+      tradeId: m.tradeId,
+      fillCashUsdg: m.fillCashUsdg,
       op: opOfKind(m.head),
       side,
       status,
@@ -156,6 +161,25 @@ export function swapRowsOfDesk(moves: readonly Thesis[]): SwapRow[] {
       why: m.reason ?? null,
     };
   });
+}
+
+/** Offer images only for measured live sells. The API checks the ledger again. */
+export function canOfferPnlCard(row: SwapRow): boolean {
+  return row.op === "trade" && row.side === "sell" && row.status === "filled" && !row.paper
+    && typeof row.tradeId === "number" && Number.isSafeInteger(row.tradeId) && row.tradeId > 0
+    && typeof row.realizedUsd === "number" && Number.isFinite(row.realizedUsd)
+    && typeof row.fillCashUsdg === "number" && Number.isFinite(row.fillCashUsdg) && row.fillCashUsdg >= 0
+    && Math.round(row.fillCashUsdg * 1e6) - Math.round(row.realizedUsd * 1e6) >= 10_000
+    && pnlCardName(row) !== null;
+}
+
+/** The recorded human name can stand in for a generated token identifier. */
+export function pnlCardName(row: SwapRow): string | null {
+  for (const value of [row.symbol, row.displayName]) {
+    const name = value?.trim();
+    if (name && name.length <= 64 && /^[\x20-\x7e]+$/.test(name) && !/^(0x|T[0-9A-F]{11}$)/i.test(name)) return name;
+  }
+  return null;
 }
 
 /**

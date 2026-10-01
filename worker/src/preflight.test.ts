@@ -76,7 +76,8 @@ describe("preflight — the things that stop a trade", () => {
     assert.equal(verdict(checks).ready, false);
     // The remedy is the whole value of the message: an owner who reads a
     // funding instruction and acts on it has spent money on a dead account.
-    assert.match(dead.detail!, /re-sign/i);
+    assert.match(dead.detail!, /wallet page to renew/i);
+    assert.match(dead.detail!, /revoking the old permissions requires network fees/i);
   });
 
   it("an expired grant is a blocker", () => {

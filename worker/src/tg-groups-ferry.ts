@@ -767,6 +767,43 @@ function openRow(tenant: string, sealed: unknown, dek: Buffer): string | null {
   return text;
 }
 
+/**
+ * A deliberately small view of an owner's approved rooms for an operator
+ * notice. Never return the lines, people, summaries or coins in the sealed
+ * file to the notice path. Null means the row could not be authenticated for
+ * this tenant, not that it had no approved rooms.
+ */
+export function approvedTgRoomsFromSealed(
+  tenant: string,
+  sealed: unknown,
+  dek: Buffer,
+): { chatId: number; title: string; kind: string; isForum: boolean }[] | null {
+  const key = tenantKey(tenant);
+  if (!key) return null;
+  const text = openRow(key, sealed, dek);
+  if (text === null) return null;
+  try {
+    const state = parseTgGroupsState(JSON.parse(text) as unknown);
+    return Object.values(state.rooms)
+      .filter((room) => room.status === "approved")
+      .map((room) => ({ chatId: room.chatId, title: room.title, kind: room.kind, isForum: room.isForum === true }));
+  } catch {
+    return null;
+  }
+}
+
+/** Keep the shared row's only read boundary in this ferry. */
+export async function approvedTgRoomsForTenant(
+  client: { query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> },
+  tenant: string,
+  dek: Buffer,
+): Promise<ReturnType<typeof approvedTgRoomsFromSealed>> {
+  const key = tenantKey(tenant);
+  if (!key) return null;
+  const row = await client.query("SELECT sealed FROM tenant_tg_groups WHERE tenant = $1", [key]);
+  return row.rows.length === 1 ? approvedTgRoomsFromSealed(key, row.rows[0]?.sealed, dek) : null;
+}
+
 /** Anything at the path — a plain file, a link, anything — counts as there. An unreadable path counts too: never write over what cannot be seen. */
 async function exists(file: string, log: TgGroupsLog, tenant: string): Promise<boolean> {
   try {

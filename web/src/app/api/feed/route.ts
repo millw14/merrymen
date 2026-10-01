@@ -126,6 +126,8 @@ export interface AgentFinancials {
 export type AgentIdentity = FeedIdentity;
 export interface FeedResponse {
   source: "sqlite" | "none";
+  /** Hosted only: the authenticated tenant this private feed belongs to. */
+  tenant?: `0x${string}` | null;
   events: FeedEvent[];
   equity: EquityPoint[];
   positions: PositionRow[];
@@ -175,6 +177,7 @@ export interface FeedResponse {
 async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedResponse> {
   return {
     source: "none",
+    ...(isHostedMode() ? { tenant } : {}),
     events: [],
     equity: [],
     positions: [],
@@ -440,6 +443,7 @@ export async function GET(req: Request) {
     }
     return NextResponse.json({
       source: "sqlite",
+      ...(isHostedMode() ? { tenant } : {}),
       events,
       equity,
       positions,

@@ -108,6 +108,27 @@ test("the ten-minute preview begins after a slow model finishes", async (t) => {
   assert.equal(reply!.dueAtMs, NOW + 20_000 + 10 * MIN);
 });
 
+test("reply planning and sending honor the owner's cap without charging them for another owner's post", async (t) => {
+  const held = await world(t);
+  await store.setPrefs(held.db, TENANT, { perDay: 1 }, NOW - MIN);
+  await held.step(held.poster());
+  assert.equal((await held.replies()).length, 0, "the owner's parent buy already used their one post today");
+  assert.equal(held.prompts.length, 0, "no model spend on a reply the owner cap blocks");
+
+  const w = await world(t), p = w.poster();
+  await store.upsertAccount(w.db, w.dek, { tenant: OTHER, xUserId: "111", username: "pine_stoat",
+    tokens: { accessToken: "other-access", refreshToken: null, accessExpiresAtMs: NOW + DAY, scope: "tweet.write" }, nowMs: NOW - DAY });
+  await store.setPosting(w.db, OTHER, { enabled: true, xUserId: "111" }, NOW - DAY);
+  await w.seed("intro", "888", NOW - HOUR, OTHER);
+  await store.setPrefs(w.db, TENANT, { perDay: 2 }, NOW - MIN);
+  await w.step(p);
+  assert.equal((await w.replies())[0]?.status, "scheduled", "the other owner's hello does not spend this owner's second slot");
+  w.setInbox([]);
+  await w.step(p, NOW + 30 * MIN);
+  assert.equal(w.sends.length, 1);
+  assert.equal((await store.readMeta(w.db, `xownerday:${TENANT}:2026-09-30`))?.n, 2, "the reply and pre-existing buy both count");
+});
+
 test("initial polling covers the earliest active consent on a shared X account", async (t) => {
   const w = await world(t);
   await store.upsertAccount(w.db, w.dek, { tenant: OTHER, xUserId: "111", username: "pine_stoat",

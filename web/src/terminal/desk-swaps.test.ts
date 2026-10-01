@@ -161,6 +161,19 @@ it("an empty tape says so", async () => {
   assert.match(ui.container.querySelector(".desk-trades")!.textContent!, /No trades yet\./);
 });
 
+it("the owner's actual Trades screen mounts the P&L image action on a measured live sell", async () => {
+  await render([
+    move({ action: "sell", tradeId: 731, fillCashUsdg: 6.25, realizedPnlUsdg: 1.25, realizedVouched: true }),
+    move({ action: "sell", tradeId: 732, fillCashUsdg: 6.25, realizedPnlUsdg: 1.25, realizedVouched: false }),
+    move({ action: "sell", tradeId: 733, fillCashUsdg: 6.25, realizedPnlUsdg: 1.25, realizedVouched: true, paper: true }),
+  ]);
+  const tab = Array.from(ui.container.querySelectorAll("button")).find((button) => /^Trades · /.test(button.textContent ?? ""))!;
+  await act(async () => { tab.click(); });
+  const actions = ui.container.querySelectorAll(".desk-trades .swap-pnl-image");
+  assert.equal(actions.length, 1, "public-table defaults do not accidentally suppress the owner action");
+  assert.equal(actions[0]?.getAttribute("aria-label"), "P&L image for CASHCAT");
+});
+
 it("an age in seconds moves on while it is being read", async () => {
   // The table prints "55s" but re-rendered every thirty seconds, so a fill
   // read "55s" for half a minute and then jumped. The feed's rows tick every

@@ -20,6 +20,11 @@
  *           {action:"skip", id, owner} — the owner's Skip on one draft; only
  *           their own, only while it is still scheduled (a post already
  *           claimed for sending cannot be half-skipped).
+ *           {action:"prefs", owner, buys?, casual?, perDay?} — what it may
+ *           post: coins it bought, passing thoughts (booleans), and posts a
+ *           day (1..perDayMax, or null for the server's number). A kind
+ *           turned off takes its drafts out of Coming up. Like the switch,
+ *           only here: works without the X app, needs a connection.
  *   DELETE  {owner} — forget the connection: the row goes, every draft is
  *           cancelled, and X is asked to revoke the tokens, best effort (not
  *           at all when this process has no X app or no DEK to open them).
@@ -57,7 +62,18 @@ import {
   xpostTz,
 } from "@/lib/x-connect";
 import { revokeToken } from "../../../../../../worker/src/xpost/client";
-import { deleteAccount, getAccount, ownerCancel, postsOf, repliesEnabledFor, setPosting, setReplying } from "../../../../../../worker/src/xpost/store";
+import {
+  deleteAccount,
+  getAccount,
+  ownerCancel,
+  ownerPerDay,
+  postsOf,
+  repliesEnabledFor,
+  setPosting,
+  setReplying,
+  setPrefs,
+  type XPostPrefs,
+} from "../../../../../../worker/src/xpost/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -159,6 +175,23 @@ export async function POST(req: Request) {
       // owner's: either way there is nothing left here to stop.
       if (!skipped) return refuse(409, X_COPY.alreadySending);
       return json({ ok: true });
+    }
+    if (input.action === "prefs") {
+      const change: Partial<XPostPrefs> = {};
+      for (const k of ["buys", "casual"] as const) {
+        if (input[k] === undefined) continue;
+        if (typeof input[k] !== "boolean") return refuse(400, "Say on or off.");
+        change[k] = input[k];
+      }
+      if (input.perDay !== undefined) {
+        if (input.perDay !== null && ownerPerDay(input.perDay) === null) return refuse(400, "Pick how many posts a day.");
+        change.perDay = input.perDay === null ? null : ownerPerDay(input.perDay);
+      }
+      if (Object.keys(change).length === 0) return refuse(400, "Say what to change.");
+      const prefs = await withXpostDb(async (db) => (db ? setPrefs(db, tenant, change, now) : undefined));
+      if (prefs === undefined) return refuse(503, X_COPY.unavailable);
+      if (prefs === null) return refuse(409, X_COPY.notConnected);
+      return json({ ok: true, prefs });
     }
   } catch {
     console.warn("[x-account] could not save the change");

@@ -44,6 +44,8 @@ const CONNECTED: XAccountBody = {
   xUserId: X_ID,
   status: "ok",
   postingEnabled: false,
+  prefs: { buys: true, casual: true, perDay: null },
+  perDayMax: 3,
   replyEnabled: false,
   repliesAvailable: false,
   upcoming: [],
@@ -316,6 +318,96 @@ describe("the switch and the warning", () => {
   });
 });
 
+describe("what it posts: the owner's choices beside the switch", () => {
+  const switches = () => Array.from(ui.container.querySelectorAll<HTMLButtonElement>('button[role="switch"]'));
+  const switchNamed = (label: string) => switches().find((b) => b.getAttribute("aria-label") === label) ?? null;
+  const dayButtons = () => Array.from(ui.container.querySelectorAll<HTMLButtonElement>('[aria-label="Posts a day, at most"] button'));
+
+  it("shows the hello note, the two kinds and the number a day, with Usual chosen when the owner picked none", async () => {
+    await shown();
+    assert.match(text(), /What it posts/);
+    assert.match(text(), /A hello first, so people know an AI agent posts here\. You can skip it under Coming up\./);
+    assert.equal(switchNamed("Coins it buys, and why")?.getAttribute("aria-checked"), "true");
+    assert.equal(switchNamed("The odd passing thought")?.getAttribute("aria-checked"), "true");
+    assert.deepEqual(dayButtons().map((r) => [r.textContent, r.getAttribute("aria-pressed")]), [["Usual", "true"], ["1", "false"], ["2", "false"], ["3", "false"]]);
+  });
+
+  it("says coin posts are only coins it bought, and points at Trencher mode to hunt memecoins", async () => {
+    await shown();
+    assert.match(text(), /Only coins it actually bought, never ones it's just watching\. To have it hunt memecoins, turn on Trencher mode\./);
+    const link = Array.from(ui.container.querySelectorAll("a")).find((a) => a.textContent === "Trencher mode");
+    assert.equal(link?.getAttribute("href"), "/settings#trencher-mode");
+  });
+
+  it("a switch writes that one choice with the owner, and moves only when the server confirms it", async () => {
+    let buys = true;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, prefs: { buys, casual: true, perDay: null } });
+    routes["POST /api/x/account"] = (_u, init) => {
+      const body = JSON.parse(String(init?.body)) as { buys?: boolean };
+      buys = body.buys ?? buys;
+      return json({ ok: true, prefs: { buys, casual: true, perDay: null } });
+    };
+    await shown();
+    await press(switchNamed("Coins it buys, and why"), "the buys switch");
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "prefs", owner: OWNER, buys: false } }]);
+    await until(() => switchNamed("Coins it buys, and why")?.getAttribute("aria-checked") === "false", "buys off");
+    assert.equal(theSwitch()?.getAttribute("aria-label"), "Let my Merryman post on X", "the posting switch is still the first one");
+  });
+
+  it("a save the server refused changes nothing on screen, and says why", async () => {
+    routes["POST /api/x/account"] = () => json({ error: "Connect an X account first." }, 409);
+    await shown();
+    await press(switchNamed("The odd passing thought"), "the casual switch");
+    assert.equal(switchNamed("The odd passing thought")?.getAttribute("aria-checked"), "true");
+    assert.match(text(), /Connect an X account first\./);
+  });
+
+  it("a number a day: pressing another writes perDay, Usual writes null, and pressing the chosen one writes nothing", async () => {
+    let perDay: number | null = null;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, prefs: { buys: true, casual: true, perDay } });
+    routes["POST /api/x/account"] = (_u, init) => {
+      perDay = (JSON.parse(String(init?.body)) as { perDay: number }).perDay;
+      return json({ ok: true, prefs: { buys: true, casual: true, perDay } });
+    };
+    await shown();
+    await press(dayButtons()[0], "Usual, already chosen");
+    assert.deepEqual(writes(), []);
+    await press(dayButtons()[3], "3");
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "prefs", owner: OWNER, perDay: 3 } }]);
+    await until(() => dayButtons()[3]?.getAttribute("aria-pressed") === "true", "3 chosen");
+    await press(dayButtons()[0], "Usual");
+    assert.deepEqual(writes().at(-1), { method: "POST", url: "/api/x/account", body: { action: "prefs", owner: OWNER, perDay: null } });
+    await until(() => dayButtons()[0]?.getAttribute("aria-pressed") === "true", "Usual chosen again");
+  });
+
+  it("turning a kind off reads Coming up again: its drafts are gone", async () => {
+    let buys = true;
+    routes["GET /api/x/account"] = () =>
+      json({
+        ...CONNECTED,
+        postingEnabled: true,
+        prefs: { buys, casual: true, perDay: null },
+        upcoming: buys ? [{ id: 9, kind: "buy", body: "grabbed some frog on paper", dueAt: DUE_SOON() }] : [],
+      });
+    routes["POST /api/x/account"] = () => {
+      buys = false;
+      return json({ ok: true, prefs: { buys, casual: true, perDay: null } });
+    };
+    await shown();
+    assert.match(text(), /grabbed some frog on paper/);
+    await press(switchNamed("Coins it buys, and why"), "the buys switch");
+    await until(() => !text().includes("grabbed some frog on paper"), "the buy draft gone");
+  });
+
+  it("an older server that sends no choices shows none", async () => {
+    const { prefs: _p, perDayMax: _m, ...old } = CONNECTED;
+    routes["GET /api/x/account"] = () => json(old);
+    await shown();
+    assert.doesNotMatch(text(), /What it posts/);
+    assert.equal(switches().length, 1);
+  });
+});
+
 describe("an unread status is not 'not connected'", () => {
   for (const [what, answer] of [
     ["an unscripted route (404)", null],
@@ -473,7 +565,7 @@ describe("the lists", () => {
     assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "skip", id: 7, owner: OWNER } }]);
     await until(() => !text().includes("picked up some paper TSLA"), "the skipped post gone");
     assert.match(text(), /Posted/);
-    const links = Array.from(ui.container.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    const links = Array.from(ui.container.querySelectorAll('section[aria-label="Posted"] a')).map((a) => a.getAttribute("href"));
     assert.deepEqual(links, [`https://x.com/${HANDLE}/status/1111`], "only an x.com status URL becomes a link");
   });
 

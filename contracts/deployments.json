@@ -23,6 +23,22 @@
         }
       ],
       "vaultInitCodeHash": "0xd2400cf02926bb782633b677ea2bf445d354652c1d03a05e6006014b47afdd52"
+    },
+    "V4SelfSwap": {
+      "address": "0xe0ce6bd81a472f021a9e85392a8008b8786f9218",
+      "transactionHash": "0x62932948639c6740bd6e9eab4afee19781f78e629154bcb0b65787515be08316",
+      "blockNumber": "77643415",
+      "deployedAt": "2026-10-01T19:58:39.316Z",
+      "codeBytes": 4201,
+      "poolManager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+      "runtimeHash": "0x971f1a74d5b0057d541e8d5329cc161479846e14fa4ab963ce48651c953981f6",
+      "compiler": "0.8.28+commit.7893614a",
+      "compilerInputSha256": "3e41b0cdd496e39c3b7e10a8956aba3997c02ef90f07227cd68d885761bc45e1",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "evmVersion": "cancun"
     }
   }
 }

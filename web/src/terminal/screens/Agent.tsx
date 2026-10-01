@@ -65,7 +65,7 @@ export function Agent({
   account,
   chainId,
 }: {
-  mine: LiveMine | null;
+  mine: LiveMine;
   tokens: LiveToken[];
   perTrade: number | null;
   perDay: number | null;
@@ -194,23 +194,9 @@ export function Agent({
     if (expanded && !dialog?.open) dialog?.showModal();
     if (!expanded && dialog?.open) dialog.close();
   }, [expanded]);
-  // NO RELEASE NOTICE HERE.
-  //
-  // `TrencherAnnouncement` used to render in this branch — an announcement
-  // about a trading mode, stacked directly on top of the empty state whose
-  // whole job is to get this reader to create an agent in the first place.
-  // It also fired a one-shot desktop notification and marked it spent, so a
-  // visitor who never had an agent consumed the notification meant for the
-  // owner they might become. The component now refuses that case itself;
-  // not mounting it here is the other half.
-  if (!mine)
-    return (
-      <Empty
-        kind="chat"
-        title="Your agent starts here."
-        action={{ label: "Fund an agent", onClick: onDeposit }}
-      />
-    );
+  // App mounts this screen only after it has a confirmed agent and a readable
+  // owner book. Loading and failed account reads remain on AccountEntry; neither
+  // is evidence that the owner has no agent.
   /**
    * THE WORKER'S WORD ON ENERGY, and what the desk makes of it (energy-view.ts).
    *
@@ -745,9 +731,11 @@ export function Agent({
                     and still says why — folded into one line per reason, so
                     thirty ops-cap refusals no longer push the fills away. */}
                 <SwapsTable
+                  key={account ?? mine.slug ?? mine.name}
                   rows={swapRowsOfDesk(mine.moves)}
                   tokens={tokens}
                   showMoney
+                  allowPnlCards
                   tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
                   emptyTitle="No trades yet."
                   onToken={onToken}

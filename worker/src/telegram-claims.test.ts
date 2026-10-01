@@ -419,7 +419,7 @@ describe("the orchestrator asks the claims on every path that writes a settings.
     const fn = body("async function spawnChild(");
     const write = fn.indexOf("const settings = await writeSettingsForChild(tenant);");
     const hold = fn.indexOf("await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour);");
-    const start = fn.indexOf("const proc = spawn(");
+    const start = fn.indexOf("proc = spawn(");
     assert.ok(write > 0 && hold > write, "a hold is started with the gated settings");
     assert.ok(start > hold, "and a worker only after them");
     assert.equal(fn.split("writeSettingsForChild(").length - 1, 1, "one write, and it is the gated one");

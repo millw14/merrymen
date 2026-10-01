@@ -114,10 +114,12 @@ import {IPoolManager, IUnlockCallback, IERC20Minimal, PoolKey, SwapParams} from 
  *   never from the argument: settling `amountIn` when the pool only took part of
  *   it would over-pay the pool by the difference.
  *
- * - FEE-ON-TRANSFER TOKENS DO NOT WORK. `settle()` credits what actually
- *   arrived; if a token skims the transfer, the debt is not cleared and the
- *   PoolManager reverts the whole unlock with CurrencyNotSettled. It fails
- *   closed, loudly, every time — it just never works.
+ * - INPUT TRANSFER TAXES ARE REFUSED. `settle()` credits what actually
+ *   arrived; if the input token skims the transfer, SettleMismatch reverts the
+ *   whole swap. Output is measured from the caller's actual balance increase,
+ *   so an output tax cannot silently deliver less than minAmountOut or inflate
+ *   the returned amount and SelfSwap event. This does not make a taxed token
+ *   sellable: its input leg can still fail on a later sale.
  *
  * - TRANSIENT STORAGE. The re-entrancy flag uses solc 0.8.28's `transient`, so
  *   this needs a Cancun-capable chain. That is not a new requirement: v4's
@@ -279,6 +281,9 @@ contract V4SelfSwap is IUnlockCallback {
         if (!inFlight) revert NoSwapInFlight();
 
         CallbackData memory c = abi.decode(data, (CallbackData));
+        // Include the entire swap, including hooks, in the caller's delivery
+        // measurement. A pre-existing holding must never subsidise minAmountOut.
+        uint256 outputBefore = IERC20Minimal(c.tokenOut).balanceOf(c.account);
 
         // v4 requires currency0 < currency1, and `zeroForOne` is defined against
         // that order. Deriving both from the two token addresses is why this
@@ -354,7 +359,16 @@ contract V4SelfSwap is IUnlockCallback {
             poolManager.take(c.tokenOut, c.account, received);
         }
 
-        return abi.encode(owed, received);
+        // The PoolManager's delta describes its nominal transfer, not what a
+        // taxed/rebasing token actually credited. Enforce the signed floor on
+        // the account's net increase and report that same delivered amount.
+        uint256 outputAfter = IERC20Minimal(c.tokenOut).balanceOf(c.account);
+        if (outputAfter < outputBefore) revert InsufficientOutput();
+        uint256 delivered = outputAfter - outputBefore;
+        if (delivered < c.minAmountOut) revert InsufficientOutput();
+        if (delivered == 0) revert NoOutput();
+
+        return abi.encode(owed, delivered);
     }
 
     /**

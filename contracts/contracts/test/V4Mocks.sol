@@ -44,7 +44,7 @@ contract MockERC20 {
         return true;
     }
 
-    function transfer(address to, uint256 amount) public returns (bool) {
+    function transfer(address to, uint256 amount) public virtual returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
         return true;
@@ -93,6 +93,22 @@ contract MockFeeOnTransferERC20 is MockERC20 {
         if (a != type(uint256).max) allowance[from][msg.sender] = a - amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount - (amount / 100); // 1% skim, burned
+        return true;
+    }
+}
+
+/** Taxes the PoolManager's output transfer, unlike the input-only mock above. */
+contract MockOutputTaxERC20 is MockERC20 {
+    uint256 public taxBps = 100;
+
+    function setTaxBps(uint256 value) external {
+        require(value <= 10_000);
+        taxBps = value;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount - amount * taxBps / 10_000;
         return true;
     }
 }

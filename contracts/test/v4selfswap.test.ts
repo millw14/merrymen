@@ -219,6 +219,72 @@ describe("V4SelfSwap", () => {
     ], getAddress(caller.account.address))).to.equal("SettleMismatch");
   });
 
+  it("enforces minOut after output transfer tax, even with an existing holding", async () => {
+    const { caller, pm, adapter } = await deploy();
+    const tokenIn = await hre.viem.deployContract("MockERC20");
+    const tokenOut = await hre.viem.deployContract("MockOutputTaxERC20");
+    const me = getAddress(caller.account.address);
+    await tokenIn.write.mint([me, 1_000_000n]);
+    await tokenIn.write.approve([adapter.address, 1_000_000n]);
+    await tokenOut.write.mint([me, 9_000_000n]);
+    await tokenOut.write.mint([pm.address, 5_000_000n]);
+    await pm.write.setNextDelta(BigInt(tokenIn.address) < BigInt(tokenOut.address)
+      ? [-1_000_000n, 4_000_000n] : [4_000_000n, -1_000_000n]);
+
+    // Nominal output clears the floor, but the 1% transfer tax delivers only
+    // 3,960,000. The existing 9,000,000 cannot count toward this swap's floor.
+    expect(await revertName(adapter, [
+      tokenIn.address, tokenOut.address, FEE, SPACING, NO_HOOKS, 1_000_000n, 4_000_000n, DEADLINE,
+    ], me)).to.equal("InsufficientOutput");
+    expect(await tokenIn.read.balanceOf([me])).to.equal(1_000_000n);
+    expect(await tokenOut.read.balanceOf([me])).to.equal(9_000_000n);
+  });
+
+  it("returns and emits actual output delivery when a tax stays within minOut", async () => {
+    const { caller, pm, adapter, publicClient } = await deploy();
+    const tokenIn = await hre.viem.deployContract("MockERC20");
+    const tokenOut = await hre.viem.deployContract("MockOutputTaxERC20");
+    const me = getAddress(caller.account.address);
+    await tokenIn.write.mint([me, 1_000_000n]);
+    await tokenIn.write.approve([adapter.address, 1_000_000n]);
+    await tokenOut.write.mint([me, 9_000_000n]);
+    await tokenOut.write.mint([pm.address, 5_000_000n]);
+    await pm.write.setNextDelta(BigInt(tokenIn.address) < BigInt(tokenOut.address)
+      ? [-1_000_000n, 4_000_000n] : [4_000_000n, -1_000_000n]);
+    const args = [tokenIn.address, tokenOut.address, FEE, SPACING, NO_HOOKS,
+      1_000_000n, 3_950_000n, DEADLINE] as const;
+
+    const { result } = await publicClient.simulateContract({
+      address: adapter.address, abi: adapter.abi, functionName: "swapExactIn", args, account: me,
+    });
+    expect(result).to.equal(3_960_000n);
+    const hash = await adapter.write.swapExactIn(args);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    const logs = parseEventLogs({ abi: adapter.abi, logs: receipt.logs, eventName: "SelfSwap" });
+    expect(logs.length).to.equal(1);
+    expect(logs[0]!.args.amountOut).to.equal(3_960_000n);
+    expect(await tokenOut.read.balanceOf([me])).to.equal(12_960_000n);
+    expect(await tokenIn.read.balanceOf([adapter.address])).to.equal(0n);
+    expect(await tokenOut.read.balanceOf([adapter.address])).to.equal(0n);
+  });
+
+  it("refuses zero actual delivery even when the nominal output and minOut permit it", async () => {
+    const { caller, pm, adapter } = await deploy();
+    const tokenIn = await hre.viem.deployContract("MockERC20");
+    const tokenOut = await hre.viem.deployContract("MockOutputTaxERC20");
+    const me = getAddress(caller.account.address);
+    await tokenIn.write.mint([me, 1_000_000n]);
+    await tokenIn.write.approve([adapter.address, 1_000_000n]);
+    await tokenOut.write.mint([pm.address, 5_000_000n]);
+    await tokenOut.write.setTaxBps([10_000n]);
+    await pm.write.setNextDelta(BigInt(tokenIn.address) < BigInt(tokenOut.address)
+      ? [-1_000_000n, 4_000_000n] : [4_000_000n, -1_000_000n]);
+
+    expect(await revertName(adapter, [
+      tokenIn.address, tokenOut.address, FEE, SPACING, NO_HOOKS, 1_000_000n, 0n, DEADLINE,
+    ], me)).to.equal("NoOutput");
+  });
+
   it("accepts the non-standard ERC-20s this chain's memecoins are full of", async () => {
     for (const kind of ["noReturn", "dirtyBool"] as const) {
       const { caller, pm, adapter } = await deploy();

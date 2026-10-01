@@ -9,6 +9,7 @@ import {
   type AccountState,
 } from "@/terminal/HostedControls";
 import { CreateAgent } from "@/terminal/screens/CreateAgent";
+import { fetchAccountForSession, readAccountForSession } from "@/terminal/account-session";
 import { loadGrant, type Grant } from "@/lib/session";
 
 const TOKEN_STORAGE = "merrymen.partner-connect";
@@ -47,11 +48,14 @@ async function connectRequest<T>(body: Record<string, string>): Promise<T> {
 }
 
 async function readAccount(): Promise<AccountState> {
-  const [session, status] = await Promise.all([
-    requestJson<AccountState["session"]>("/api/auth/session"),
-    requestJson<AccountState["status"]>("/api/grants"),
-  ]);
-  return { session, status };
+  const result = await readAccountForSession(
+    null,
+    () => requestJson<AccountState["session"]>("/api/auth/session"),
+    () => requestJson<AccountState["status"]>("/api/grants"),
+  );
+  if (result.kind === "ready") return result.account;
+  if (result.kind === "changed") throw new Error("Your sign-in changed while loading. Try again.");
+  throw result.error;
 }
 
 // A grant can already be on the server while its owner is still at the backup
@@ -73,6 +77,7 @@ export function ConnectClient() {
   const [showFunding, setShowFunding] = useState(false);
   const [removeConfirm, setRemoveConfirm] = useState(false);
   const requestVersion = useRef(0);
+  const accountReadVersion = useRef(0);
 
   useEffect(() => {
     // Fragments are not sent to the server. Keep the credential in this tab
@@ -114,6 +119,8 @@ export function ConnectClient() {
       }
     } catch (cause) {
       if (version === requestVersion.current) {
+        setConnection(null);
+        setAccount(null);
         setError(cause instanceof Error ? cause.message : "Could not load this connection. Try again.");
       }
     } finally {
@@ -127,17 +134,37 @@ export function ConnectClient() {
   }, [token, refresh]);
 
   const refreshAccount = useCallback(() => {
-    void readAccount().then(setAccount).catch(() => {
-      setError("Could not refresh your agent. Try again before connecting the app.");
+    const version = ++accountReadVersion.current;
+    void readAccount().then((next) => {
+      if (version === accountReadVersion.current) setAccount(next);
+    }).catch(() => {
+      if (version === accountReadVersion.current) {
+        setAccount(null);
+        setError("Could not refresh your agent. Try again before connecting the app.");
+      }
     });
   }, []);
+
+  const onSignedIn = () => {
+    // A prior signed-out/no-agent read is no longer this session's answer. An
+    // older account request must not put it back while inspect runs again.
+    accountReadVersion.current += 1;
+    setAccount(null);
+    void refresh();
+  };
 
   async function allowAccess() {
     if (!token || !connection || busy || loading) return;
     setBusy(true);
     setError("");
     try {
-      await connectRequest<{ connected: true; id: string }>({ action: "connect", token });
+      if (!account?.session.hosted || !account.session.address) throw new Error("Confirm your sign-in again before connecting this app.");
+      const confirmed = await fetchAccountForSession(account.session);
+      if (confirmed.kind !== "ready" || !confirmed.account.status.exists || !confirmed.account.session.address) {
+        setAccount(null);
+        throw new Error("Your account changed. Reload it before connecting this app.");
+      }
+      await connectRequest<{ connected: true; id: string }>({ action: "connect", token, expectedTenant: confirmed.account.session.address });
       setConnection({ ...connection, status: "linked" });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not connect this app. Try again.");
@@ -215,7 +242,7 @@ export function ConnectClient() {
             <span className="connect-step-label">01 · SIGN IN</span>
             <h2>Make it your agent.</h2>
             <p>Sign in to choose your existing Merrymen agent or set up a new one. You’ll approve {appName}’s access afterward.</p>
-            <SignIn onDone={() => void refresh()} />
+            <SignIn onDone={onSignedIn} />
           </>}
 
           {needsRenewal && <>
@@ -235,7 +262,7 @@ export function ConnectClient() {
 
           {setup && (showFunding && account
             ? <><FundingPanel mode="deposit" account={account} onClose={finishSetup} /><button className="flow-primary" disabled={loading} onClick={finishSetup}>Continue to app access <ArrowRight size={16} aria-hidden /></button></>
-            : <><div className="connect-setup-note">Setting up your agent for {appName}. You’ll review app access next.</div><CreateAgent account={account} onRefresh={refreshAccount} onBack={() => setShowSetup(false)} onDone={finishSetup} onFund={openFunding} /></>)}
+            : <><div className="connect-setup-note">Setting up your agent for {appName}. You’ll review app access next.</div><CreateAgent account={account} onRefresh={refreshAccount} onSignedIn={onSignedIn} onBack={() => setShowSetup(false)} onDone={finishSetup} onFund={openFunding} /></>)}
 
           {pending && connection.signed_in && connection.has_agent && !showSetup && <>
             <span className="connect-step-label">03 · ALLOW ACCESS</span>

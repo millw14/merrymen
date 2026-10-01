@@ -261,6 +261,9 @@ export interface Thesis {
   txHash?: string | null;
   realizedPnlUsdg?: number | null;
   realizedVouched?: boolean;
+  /** The canonical owner-ledger fill, used for an authenticated P&L image. */
+  tradeId?: number | null;
+  fillCashUsdg?: number | null;
 }
 
 export interface ChainHolder {
@@ -332,6 +335,8 @@ export interface LiveState {
   agents: LiveAgent[];
   theses: Thesis[];
   mine: FeedMine | null;
+  /** Hosted /api/feed tenant; undefined means an unbound or self-hosted feed. */
+  feedTenant?: string | null;
   /**
    * How many accounts the leaderboard folded into a count instead of a row, or
    * null when it could not tell (or did not say). The board prints the count
@@ -502,6 +507,7 @@ export function seedLive(): LiveState {
     agents: [],
     theses: [],
     mine: null,
+    feedTenant: undefined,
     retired: null,
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
@@ -940,6 +946,7 @@ export function liveOf(s: LiveSources): LiveState {
     agents,
     theses,
     mine,
+    feedTenant: feed?.tenant,
     // THE ROWS THE BOARD FOLDED, which this dropped: the fold shipped, the
     // count did not reach a screen, and folded agents left the board without
     // a word. A number only when the server sent one.
@@ -1218,6 +1225,8 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         // sell and the route carries it; dropped here, the desk withheld the
         // dollars of every sell, vouched ones too. Only an explicit true.
         realizedVouched:t.realized_vouched === true,
+        tradeId:typeof t.id === "number" && Number.isSafeInteger(t.id) && t.id > 0 ? t.id : null,
+        fillCashUsdg:ledgerNumber(t.fill_cash_usdg),
       };
     }),
     glance: {
@@ -1422,6 +1431,7 @@ interface Disc {
 }
 
 interface Feed {
+  tenant?: string | null;
   /** "none" means the ledger could not be read — see readStateOf. */
   source?: string;
   /**
@@ -1449,6 +1459,7 @@ interface Feed {
   events?: { level?: string; message?: string; created_at?: string }[];
   agent?: { name?: string; nameSource?: string; strategy?: string; slug?: string | null } | null;
   trades?: {
+    id?: number;
     kind: string;
     buy_token: string | null;
     sell_token: string | null;
@@ -1477,6 +1488,7 @@ interface Feed {
     reason?: string | null;
     /** Whole USDG, booked on a sell. A driver may hand a NUMERIC back as text. */
     realized_pnl_usdg?: number | string | null;
+    fill_cash_usdg?: number | string | null;
     /** The tape checked both halves of that figure — see lib/desk-trades.ts. */
     realized_vouched?: boolean;
     /** The fill's transaction; null for a refusal and for a paper fill. */

@@ -20,6 +20,7 @@ import {
   readTokens,
   schedulePost,
   setPosting,
+  setPrefs,
   setReplying,
   optOutReplies,
   swapTokens,
@@ -474,4 +475,55 @@ test("a revoked mentions token gets one stored refresh and one fresh read", asyn
   if (!r.ok) assert.equal(r.failure, "auth");
   assert.equal(seen.length, 3);
   assert.equal((await getAccount(db, OWNER))?.status, "revoked");
+});
+
+test("turning buys off and on during an in-flight refusal does not resurrect the post", async (t) => {
+  const { db, post } = await setup(t);
+  const seen: Seen[] = [];
+  const offThenOn: Reply = async () => {
+    await setPrefs(db, OWNER, { buys: false }, NOW + 1);
+    await setPrefs(db, OWNER, { buys: true }, NOW + 2);
+    return { status: 429, body: {} };
+  };
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([offThenOn], seen), nowMs: NOW }), "cancelled");
+  assert.equal((await row(db)).status, "cancelled");
+  assert.equal((await row(db)).reason, "kind-off");
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([created()], seen), nowMs: NOW + 900000 }), "lost");
+  assert.equal(seen.length, 1);
+
+  const refresh = await setup(t, EXPIRING);
+  const offDuringRefresh: Reply = async () => {
+    await setPrefs(refresh.db, OWNER, { buys: false }, NOW + 1);
+    await setPrefs(refresh.db, OWNER, { buys: true }, NOW + 2);
+    return { status: 503, body: {} };
+  };
+  assert.equal(await sendOne(refresh.db, DEK, APP, refresh.post, { fetch: scripted([offDuringRefresh]), nowMs: NOW }), "cancelled");
+  assert.equal((await row(refresh.db)).reason, "kind-off");
+});
+
+test("a kind-off change preserves an in-flight successful post as sent, never retryable", async (t) => {
+  const { db, post } = await setup(t);
+  const accepted: Reply = async () => {
+    await setPrefs(db, OWNER, { buys: false }, NOW + 1);
+    return created();
+  };
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([accepted]), nowMs: NOW }), "posted");
+  assert.equal((await row(db)).status, "posted");
+  assert.equal((await row(db)).reason, null);
+});
+
+test("a successful refresh cannot retry a buy across a kind-off transition", async (t) => {
+  const { db, post } = await setup(t);
+  const seen: Seen[] = [];
+  const offDuringRefresh: Reply = async () => {
+    await setPrefs(db, OWNER, { buys: false }, NOW + 1);
+    await setPrefs(db, OWNER, { buys: true }, NOW + 2);
+    return token("access-two", "refresh-two");
+  };
+  assert.equal(await sendOne(db, DEK, APP, post, {
+    fetch: scripted([{ status: 401, body: {} }, offDuringRefresh, created()], seen), nowMs: NOW,
+  }), "cancelled");
+  assert.equal(seen.length, 2, "the first post was refused; after refresh there is no second post call");
+  assert.equal((await row(db)).status, "cancelled");
+  assert.equal((await row(db)).reason, "kind-off");
 });

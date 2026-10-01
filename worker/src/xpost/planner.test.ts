@@ -458,6 +458,71 @@ describe("one casual post at the account's own afternoon slot, most days", () =>
 
 // ── sending ─────────────────────────────────────────────────────────────────
 
+describe("what the owner lets it post", () => {
+  const fresh = (nowMs: number) => [call({ atSec: Math.floor((nowMs - 20 * MIN) / 1000) })];
+  /** A moment inside this account's own casual slot today, found by asking the planner. */
+  function slotNow(tenant: string): number | null {
+    for (let m = 14 * 60; m < 22 * 60; m++) {
+      const nowMs = DAY0 + m * MIN;
+      if (planPosts(input({ tenant, nowMs })).some((p) => p.kind === "casual")) return nowMs;
+    }
+    return null;
+  }
+
+  it("coins it buys turned off: no buy post, and the rest as before", () => {
+    const nowMs = DAY0 + 10 * HOUR;
+    assert.equal(planPosts(input({ nowMs, calls: fresh(nowMs) })).filter((p) => p.kind === "buy").length, 1, "on: planned");
+    assert.deepEqual(planPosts(input({ nowMs, calls: fresh(nowMs), kinds: { buys: false } })), []);
+  });
+
+  it("passing thoughts turned off: no casual post at its slot", () => {
+    let tenant = "";
+    let at: number | null = null;
+    for (let i = 0; i < 20 && at === null; i++) {
+      tenant = `0x${(i + 1).toString(16).padStart(40, "0")}`;
+      at = slotNow(tenant);
+    }
+    assert.ok(at !== null, "some account posts a casual line today");
+    assert.equal(planPosts(input({ tenant, nowMs: at, kinds: { casual: false } })).filter((p) => p.kind === "casual").length, 0);
+    assert.equal(planPosts(input({ tenant, nowMs: at, kinds: { casual: true } })).filter((p) => p.kind === "casual").length, 1);
+  });
+
+  it("the hello is not a kind they can turn off", () => {
+    const plan = planPosts(input({ intros: [], kinds: { buys: false, casual: false } }));
+    assert.deepEqual(plan.map((p) => p.kind), ["intro"]);
+  });
+
+  it("one post a day: the second buy of the day waits for tomorrow", () => {
+    const nowMs = DAY0 + 10 * HOUR;
+    const calls = [call({ atSec: Math.floor((nowMs - 30 * MIN) / 1000), name: "Pepe" }), call({ atSec: Math.floor((nowMs - 20 * MIN) / 1000), name: "Frog" })];
+    assert.equal(planPosts(input({ nowMs, calls, perDay: 3 })).filter((p) => p.kind === "buy").length, 2);
+    assert.equal(planPosts(input({ nowMs, calls, perDay: 1 })).filter((p) => p.kind === "buy").length, 1);
+    assert.equal(planPosts(input({ nowMs, calls, perDay: 3, ownerPerDay: 1 })).filter((p) => p.kind === "buy").length, 1);
+  });
+
+  it("the owner's allowance counts only their posts while the server cap still counts the shared X account", () => {
+    const nowMs = DAY0 + 10 * HOUR;
+    const other = post({ tenant: "another-owner", kind: "intro", sentAtMs: nowMs - HOUR });
+    const base = input({ nowMs, calls: fresh(nowMs), posts: [other], perDay: 3, ownerPerDay: 1 });
+    assert.equal(buys(planPosts(base)).length, 1, "another owner's post leaves this owner's slot");
+    assert.equal(buys(planPosts({ ...base, posts: [{ ...other, tenant: TENANT }] })).length, 0, "this owner's hello spends their slot");
+    assert.equal(buys(planPosts({ ...base, perDay: 1 })).length, 0, "the shared server cap still holds");
+  });
+
+  it("a draft of a kind turned off since it was planned is cancelled at send time, never sent", () => {
+    const now = DAY0 + 12 * HOUR;
+    const on = { xUserId: "111", posting: true };
+    const buy = { kind: "buy" as const, xUserId: "111", createdAtMs: now - HOUR, dueAtMs: now - MIN };
+    const casual = { ...buy, kind: "casual" as const };
+    const intro = { ...buy, kind: "intro" as const };
+    assert.deepEqual(sendDecision(buy, { ...on, prefs: { buys: false, casual: true } }, now, false), { action: "cancel", reason: "kind-off" });
+    assert.deepEqual(sendDecision(casual, { ...on, prefs: { buys: true, casual: false } }, now, false), { action: "cancel", reason: "kind-off" });
+    assert.deepEqual(sendDecision(intro, { ...on, prefs: { buys: false, casual: false } }, now, false), { action: "send" });
+    assert.deepEqual(sendDecision(buy, { ...on, prefs: { buys: true, casual: false } }, now, false), { action: "send" });
+    assert.deepEqual(sendDecision(buy, on, now, false), { action: "send" }, "no choices given: every kind is on");
+  });
+});
+
 describe("selective replies share the account cadence and cannot restart a spent thread", () => {
   const now = DAY0 + 12 * HOUR;
   type ReplyInput = Parameters<typeof replyDueAt>[0];
@@ -505,6 +570,15 @@ describe("selective replies share the account cadence and cannot restart a spent
     assert.equal(replyDueAt({ ...base, tz: "UTC" }), null, "both posts count on the UTC day");
     const today = post({ kind: "intro", sentAtMs: later - HOUR });
     assert.equal(replyDueAt({ ...base, tz: "Test/Minus5", posts: [parent, today] }), null, "an intro still spends the account's daily allowance");
+  });
+
+  it("reply plans also separate the owner's smaller allowance from other owners' posts", () => {
+    const base = replyInput({ ownerPerDay: 2 });
+    const other = post({ tenant: "another-owner", kind: "intro", sentAtMs: now - HOUR });
+    assert.equal(replyDueAt({ ...base, posts: [base.parent, other] }), now + MIN_LEAD_MS);
+    assert.equal(replyDueAt({ ...base, posts: [base.parent, { ...other, tenant: TENANT }] }), null);
+    assert.equal(replyDueAt({ ...base, perDay: 2, posts: [base.parent, other] }), null, "the shared cap still counts both owners");
+    assert.equal(replyDueAt({ ...base, ownerPerDay: 1 }), null, "the owner's parent buy spends their slot");
   });
 
   it("every attempted reply spends its author and thread slot regardless of status", () => {
