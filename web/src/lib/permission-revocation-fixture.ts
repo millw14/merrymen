@@ -4,7 +4,7 @@ import { getEntryPoint, KERNEL_V3_3 } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { createPublicClient, custom, encodeFunctionData, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { robinhoodChain } from "@merrymen/core";
+import { assertDerivedAccount, robinhoodChain } from "@merrymen/core";
 import { KERNEL_REVOCATION_ABI } from "./permission-revocation";
 
 export async function sdkRevocationCall(accountAddress: Address, nonce = 2) {
@@ -24,6 +24,7 @@ export async function sdkRevocationCall(accountAddress: Address, nonce = 2) {
   const account = await createKernelAccount(client, {
     address: accountAddress, entryPoint, kernelVersion: KERNEL_V3_3, plugins: { sudo },
   });
+  assertDerivedAccount(account.address, "revocation encoding fixture");
   return account.encodeCalls([{
     to: accountAddress, value: 0n,
     data: encodeFunctionData({ abi: KERNEL_REVOCATION_ABI, functionName: "invalidateNonce", args: [nonce] }),
