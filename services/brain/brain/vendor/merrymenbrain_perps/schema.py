@@ -33,10 +33,13 @@ def number(value: Any, name: str, minimum: float, maximum: float) -> float:
     return float(value)
 
 
-def price(value: Any, name: str) -> float:
+def price(value: Any, name: str) -> int:
     if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", value):
         raise InputError(f"invalid {name}: expected positive integer price text")
-    return float(value)
+    # Keep raw prices exact through OHLC validation and differences. Converting
+    # first to float can collapse distinct 20-digit prices and accept a high
+    # below its close (or a low above it).
+    return int(value)
 
 
 def identifier(value: Any, name: str) -> str:
@@ -48,10 +51,10 @@ def identifier(value: Any, name: str) -> str:
 @dataclass(frozen=True)
 class Candle:
     t: int
-    o: float
-    h: float
-    low: float
-    c: float
+    o: int
+    h: int
+    low: int
+    c: int
 
 
 def validate(req: dict, now_ms: int) -> list[Candle]:

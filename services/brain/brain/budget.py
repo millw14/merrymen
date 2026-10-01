@@ -148,12 +148,27 @@ class RunBudget:
 
     def record(self, node: str, provider: str, model: str, tin: int, tout: int) -> None:
         self.model_calls += 1
+        self.models.append(ModelUse(node=node, provider=provider, model=model))
+        self.by_node[node] = self.by_node.get(node, 0) + 1
+        self.record_usage(node, model, tin, tout)
+
+    def record_usage(self, node: str, model: str, tin: int, tout: int) -> None:
+        """Attach usage to an already counted request, without counting it twice."""
+        if any(type(value) is not int or not 0 <= value <= 2**53 - 1 for value in (tin, tout)):
+            raise ValueError("invalid provider usage")
         self.tokens_in += tin
         self.tokens_out += tout
         self.usd += price_of(model, tin, tout)
-        self.models.append(ModelUse(node=node, provider=provider, model=model))
-        self.by_node[node] = self.by_node.get(node, 0) + 1
         self.by_node_tokens[node] = self.by_node_tokens.get(node, 0) + tin + tout
+
+    def check_after(self) -> None:
+        """An exhausted final call must not publish an otherwise valid decision."""
+        if self.tokens_in + self.tokens_out > self.limits.max_tokens:
+            raise BudgetExceeded("provider response exceeded the run token limit", self.cost())
+        if self.model_calls > self.limits.max_calls:
+            raise BudgetExceeded("provider requests exceeded the run call limit", self.cost())
+        if self.elapsed >= self.limits.max_seconds:
+            raise BudgetExceeded("provider response exceeded the run deadline", self.cost())
 
 
 class AgentConcurrency:

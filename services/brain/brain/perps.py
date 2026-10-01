@@ -58,7 +58,24 @@ class PerpsDecideRequest(BaseModel):
 class LensReview(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     verdict: Literal["accept", "veto"]
-    reason: str = Field(min_length=1, max_length=500)
+    reason: str = Field(min_length=1, max_length=500, pattern=r"\S")
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("ambiguous committee JSON")
+        result[key] = value
+    return result
+
+
+def _parse_review(raw: str) -> LensReview:
+    # A duplicate verdict is not a majority vote: never let last-key-wins JSON
+    # parsing silently turn an earlier veto into an acceptance.
+    if not isinstance(raw, str) or len(raw) > 16_000:
+        raise ValueError("invalid committee output")
+    return LensReview.model_validate(json.loads(raw, object_pairs_hook=_unique_object))
 
 
 PERPS_REVIEW_LIMITS = TierLimits(max_calls=3, max_tokens=12000, max_seconds=25)
@@ -104,7 +121,10 @@ async def review_perps(req: PerpsDecideRequest, llm: Llm, numerical: dict | None
                             "Accept only if the supplied evidence supports proceeding; veto when a material concern remains."),
                     user=material, json_schema=LensReview.model_json_schema(),
                 )
-                review = LensReview.model_validate_json(raw)
+                # asyncio's timeout cancellation can be swallowed by a provider
+                # adapter. Check the monotonic budget after every await too.
+                budget.check_after()
+                review = _parse_review(raw)
                 reviews.append({"lens": lens, **review.model_dump()})
                 if review.verdict == "veto":
                     result["action"] = "hold"

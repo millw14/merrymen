@@ -19,6 +19,7 @@ export const EVALUATION_LIMITS = [
   "A supplied freeze timestamp is metadata, not independent proof that a strategy was fixed in advance.",
   "Each test interval starts flat with identical capital and risk limits. No position is force-closed at its end.",
   "Completed-trade wins include entry/exit fees and booked funding. Open tails are never counted as wins.",
+  "Strategy comparisons also include marked P&L on every open tail; leaving a loss unclosed cannot improve the comparison.",
   "Sampled replay cannot establish live profitability; latency, impact and intrabar crossings remain unmodelled.",
   "Historical LLM tests may leak outcomes through pretrained knowledge. Newly captured forward evidence is required.",
   "Sample sufficiency is not statistical significance or a deployment/promotion decision.",
@@ -68,6 +69,15 @@ export function evaluatePerpsWalkForward(args: {
   const pooled = (side: "baseline" | "candidate") => replayTradeMetrics({ completed: completed(side), open: folds.flatMap(f => f[side]?.openTrades ?? []),
     initialCashMicro: 0n, curve: [], complete: folds.every(f => f[side]?.complete) });
   const baseline = pooled("baseline"), candidate = pooled("candidate");
+  // A completed-only ranking can reward a strategy for keeping losers open,
+  // or miss gains the baseline has not realized yet. Compare whole accounts
+  // at the same fold boundaries, without pretending those marks are fills.
+  const marked = (side: "baseline" | "candidate") => {
+    const reports = folds.map(f => f[side]);
+    if (reports.some(report => !report?.complete || report.finalEquityMicro === null)) return null;
+    return reports.reduce((sum, report) => sum + report!.finalEquityMicro! - report!.initialCashMicro, 0n);
+  };
+  const baselineMarkedMicro = marked("baseline"), candidateMarkedMicro = marked("candidate");
   const reasons: string[] = [];
   if (plan.provenance !== "forward-capture") reasons.push("no-forward-capture-evidence");
   if (folds.some(f => f.status === "incomplete")) reasons.push("incomplete-replay");
@@ -75,6 +85,9 @@ export function evaluatePerpsWalkForward(args: {
   if (folds.length < 3) reasons.push("fewer-than-three-independent-test-intervals");
   if (candidate.netCompletedMicro <= 0n) reasons.push("candidate-net-expectancy-not-positive");
   if (candidate.netCompletedMicro <= baseline.netCompletedMicro) reasons.push("candidate-did-not-improve-net-completed-pnl");
+  if (candidateMarkedMicro !== null && candidateMarkedMicro <= 0n) reasons.push("candidate-marked-return-not-positive");
+  if (candidateMarkedMicro !== null && baselineMarkedMicro !== null && candidateMarkedMicro <= baselineMarkedMicro)
+    reasons.push("candidate-did-not-improve-marked-net-pnl");
   return {
     status: reasons.length ? "insufficient-evidence" : "requires-forward-risk-review",
     /** This report is never automatic authority to enable or promote live trading. */
@@ -85,5 +98,6 @@ export function evaluatePerpsWalkForward(args: {
       baseline: { ...baseline, maxDrawdownBps: null }, candidate: { ...candidate, maxDrawdownBps: null },
       drawdown: "reported per fold; independent resets cannot form one continuous equity curve",
     },
+    pooledMarkedNetMicro: { baseline: baselineMarkedMicro, candidate: candidateMarkedMicro },
   };
 }

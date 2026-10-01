@@ -18,19 +18,32 @@ import os
 import secrets
 import time
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .budget import AgentConcurrency, persist_usage, RunBudget, TIERS
-from .credential import CredentialRefused, resolve as resolve_credential
+from .budget import TIERS, AgentConcurrency, RunBudget, persist_usage
+from .credential import CredentialRefused
+from .credential import resolve as resolve_credential
 from .graph import BrainGraph
 from .llm import Llm, LlmConfig
-from .schemas import BrainDecision, DecideRequest, Refusal, SCHEMA_VERSION
 from .perps import PerpsDecideRequest, numerical_review, review_perps
+from .schemas import SCHEMA_VERSION, BrainDecision, DecideRequest, Refusal
 
 app = FastAPI(title="Merrymen Brain", version=SCHEMA_VERSION)
 
 _concurrency = AgentConcurrency()
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request: Request, exc: RequestValidationError):
+    if request.url.path == "/v1/perps/decide":
+        # FastAPI's default handler echoes invalid input, including NaN/Infinity,
+        # which JSONResponse cannot encode. Bad evidence is a bounded refusal,
+        # not a 500 while attempting to describe the validation error.
+        return JSONResponse(status_code=422, content={"ok": False, "detail": "invalid perps evidence"})
+    return await request_validation_exception_handler(request, exc)
 
 # LAZY, AND DELIBERATELY SO.
 #
@@ -70,7 +83,7 @@ def _require_token(authorization: str | None) -> None:
     if not want:
         raise HTTPException(status_code=503, detail="BRAIN_TOKEN is not configured; refusing every request")
     got = (authorization or "").removeprefix("Bearer ").strip()
-    if not secrets.compare_digest(got, want):
+    if not secrets.compare_digest(got.encode("utf-8"), want.encode("utf-8")):
         raise HTTPException(status_code=401, detail="bad token")
 
 

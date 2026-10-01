@@ -132,7 +132,8 @@ The adapter rebuilds the request from the source frame and the replay's causal,
 risk-sized candidate, then verifies the snapshot hash, account, run, market and
 closed candle. Changing capital, settings or previous trades can invalidate a
 later archived request; `producerDiagnostics` exposes these mismatches. A run
-contains one account/context and uniquely ordered request clocks. The
+contains one account/context, uniquely ordered request clocks, and no overlapping
+reviews, matching the live worker's single-flight behavior. The
 model may approve the same candidate or veto it. Its response is usable only on
 a **later frame**, after completion and before expiry. At use, the market,
 closed candle, side, price drift, maximum size and leverage are checked again;
@@ -179,7 +180,13 @@ This command performs no fitting or parameter search. Each held-out interval
 starts flat and compares the frozen trend baseline with the recorded candidate
 under identical capital, caps, fees, funding and book execution. It reports all
 folds and marked tails. It never concatenates independently reset equity curves
-into a misleading aggregate drawdown. `minimumCompletedTrades` defaults to 100
+into a misleading aggregate drawdown. `pooledMarkedNetMicro` sums ending equity
+minus starting equity across folds, including open positions at their final
+observed marks, fees and booked funding. Comparisons require improvement in
+both completed-trade P&L and this whole-account result: leaving a loss open or
+realizing a smaller gain before the baseline cannot manufacture improvement.
+Marked results are null if any fold is empty or incomplete; marks are not
+claims of executable closing prices. `minimumCompletedTrades` defaults to 100
 **per variant per fold**. Incomplete input, too few trades, fewer than three
 test intervals or synthetic/historical-only data yield insufficient evidence.
 Sample sufficiency is not significance: even a report requiring forward risk

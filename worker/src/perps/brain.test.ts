@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { gzipSync } from "node:zlib";
 import { brainFingerprint, brainMarketStillQualified, buildPerpsBrainRequest, perpsBrainEstimatedCostBps, PerpsBrainReview, requestPerpsBrain, validatePerpsBrainResponse, PERPS_BRAIN_TTL_MS, type PerpsBrainResponse, type PerpsBrainRequest } from "./brain";
 import { perpTrendTick } from "./perp-trend";
 import { NOW_SEC, ctx, settings, view } from "./testkit-perps";
@@ -13,7 +14,9 @@ function fixture(key: "BTC-PERP" | "ETH-PERP" | "SOL-PERP" = "BTC-PERP", halfSpr
   assert.ok(trend.entry);
   const c = trend.entry, m = v.markets.get(c.market)!;
   const markets = new Map(v.markets);
-  markets.set(c.market, { ...m, bestBid: m.markPrice - halfSpread, bestAsk: m.markPrice + halfSpread });
+  const first = m.closed4h![0]!;
+  const history = [...Array.from({ length: 100 }, (_, i) => ({ ...first, t: first.t - (100 - i) * 14_400_000 })), ...m.closed4h!];
+  markets.set(c.market, { ...m, closed4h: history, bestBid: m.markPrice - halfSpread, bestAsk: m.markPrice + halfSpread });
   const feed = { markets: new Map([[c.marketId, { fresh: true, bookFresh: true, takerFeePpm: 100,
     bids: [{ price: m.markPrice - halfSpread, baseAmount: 10000000n }], asks: [{ price: m.markPrice + halfSpread, baseAmount: 10000000n }] }]]) } as unknown as LighterFeedRead;
   const args = { agentId: "agent-a", runId: "run-a", nowMs: NOW_SEC * 1000, context: "settings-grant-a", view: { ...v, markets }, candidate: c, candleT: trend.entryCandleT!, feed };
@@ -24,7 +27,7 @@ function approval(r: PerpsBrainRequest): PerpsBrainResponse {
   return { schema_version: r.schema_version, run_id: r.run_id, agent_id: r.agent_id, snapshot_id: r.snapshot_id, market: r.market, as_of_ms: r.as_of_ms, expires_at_ms: r.expires_at_ms,
     strategy_version: "merrymenbrain-perps-analogs-v1", candidate_bar_t: r.candidate.bar_t, candidate_side: r.candidate.side, action: r.candidate.side, reason_codes: ["evidence-qualified"], features: {},
     forecast: { method: "causal-regime-analogs-v1", horizon_bars: 3, target: "signed-mark-return-after-estimated-costs", samples: 40,
-      win_probability: .7, lower_95: .55, upper_95: .85, mean_net_bps: 60, mean_lower_95_bps: 10, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
+      win_probability: .7, lower_95: 0.5456998118185507, upper_95: 0.8192515477025347, mean_net_bps: 60, mean_lower_95_bps: 10, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
     committee: ["bull", "bear", "risk"].map(lens => ({ lens, verdict: "accept", reason: "measured evidence supports candidate" })) };
 }
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -88,6 +91,39 @@ describe("MerrymenBrain perps binding and measured material", () => {
       { candidate: { ...r.candidate, stop_bps: r.candidate.stop_bps + 1 } }])
       assert.equal(brainMarketStillQualified(r, { ...r, ...over }), false, JSON.stringify(over));
   });
+  it("cannot widen numeric market guards with invented response volatility", () => {
+    const { request: r } = fixture();
+    const altered = { ...r, index_price: String(BigInt(r.index_price) / 2n) };
+    const fake = { ...approval(r), features: { atr_bps: 100_000 } };
+    assert.equal(brainMarketStillQualified(r, altered, fake), false,
+      "the service's feature labels cannot permit a 100% mark/index dislocation");
+    const moved = { ...r, mark_price: String(BigInt(r.mark_price) * 995n / 1000n) };
+    assert.equal(brainMarketStillQualified(r, moved, fake), false,
+      "favorable entry cost cannot hide a signal already displaced by 50bp");
+    assert.equal(validatePerpsBrainResponse({ ...approval(altered), features: fake.features }, altered, r.as_of_ms), null,
+      "forged approval must fail before entering the ready queue");
+  });
+  it("requires feasible analog sample counts and statistically coherent forecasts, including HOLD", () => {
+    const { request: r } = fixture();
+    const good = approval(r);
+    for (const action of [r.candidate.side, "hold"] as const) {
+      for (const over of [
+        { samples: 41 }, // At most 40 non-overlapping outcomes after the 100-bar warmup.
+        { win_probability: .701 },
+        { lower_95: .69 }, { upper_95: .99 },
+        { mean_net_bps: null }, { mean_lower_95_bps: 61 },
+        { cost_bps: good.forecast.cost_bps + 1 },
+      ]) assert.equal(validatePerpsBrainResponse({ ...good, action, forecast: { ...good.forecast, ...over } }, r, r.as_of_ms), null,
+        `${action}: ${JSON.stringify(over)}`);
+    }
+    const noHistory = { ...r, candles: r.candles.slice(-100) };
+    assert.equal(validatePerpsBrainResponse(approval(noHistory), noHistory, r.as_of_ms), null,
+      "a fresh warmup with no outcome history never supports an entry");
+    const empty = { ...good, action: "hold", forecast: { ...good.forecast, samples: 0,
+      win_probability: null, lower_95: null, upper_95: null, mean_net_bps: null, mean_lower_95_bps: null } };
+    assert.ok(validatePerpsBrainResponse(empty, noHistory, r.as_of_ms));
+    assert.equal(validatePerpsBrainResponse({ ...empty, forecast: { ...empty.forecast, win_probability: .8 } }, noHistory, r.as_of_ms), null);
+  });
   it("realistic next-frame BTC, ETH and SOL candidates retain approval within the frozen risk and cost budget", () => {
     for (const key of ["BTC-PERP", "ETH-PERP", "SOL-PERP"] as const) {
       const f = fixture(key, 2n), m = f.args.view.markets.get(key)!;
@@ -114,6 +150,19 @@ describe("MerrymenBrain perps binding and measured material", () => {
       { candidate_side: "short" }, { action: "short" }]) assert.equal(validatePerpsBrainResponse({ ...good, ...over }, r, r.as_of_ms + 1), null, JSON.stringify(over));
     assert.equal(validatePerpsBrainResponse(good, r, r.expires_at_ms), null);
     assert.equal(validatePerpsBrainResponse(good, r, r.as_of_ms - 1), null);
+    for (const clock of [NaN, Infinity, -Infinity, r.as_of_ms + .5]) assert.equal(validatePerpsBrainResponse(good, r, clock), null);
+  });
+  it("malformed JSON field types never coerce into authority or throw", () => {
+    const { request: r } = fixture();
+    const good = approval(r);
+    const malformed: unknown[] = [null, true, false, 0, [], {}, { toString: null }];
+    for (const key of ["schema_version", "run_id", "agent_id", "snapshot_id", "market", "strategy_version", "candidate_side", "action"] as const)
+      for (const value of malformed) assert.equal(validatePerpsBrainResponse({ ...good, [key]: value }, r, r.as_of_ms), null, key);
+    for (const key of ["lens", "verdict", "reason"] as const)
+      for (const value of malformed) assert.equal(validatePerpsBrainResponse({ ...good, committee: [{ ...good.committee![0], [key]: value }, ...good.committee!.slice(1)] }, r, r.as_of_ms), null, key);
+    for (const key of ["samples", "win_probability", "lower_95", "upper_95", "mean_net_bps", "mean_lower_95_bps", "cost_bps"] as const)
+      for (const value of [null, true, false, [], {}, "1", { toString: null }])
+        assert.equal(validatePerpsBrainResponse({ ...good, forecast: { ...good.forecast, [key]: value } }, r, r.as_of_ms), null, key);
   });
   it("a malformed forecast, unsupported probability, or incomplete/vetoed committee never approves", () => {
     const { request: r } = fixture(); const good = approval(r);
@@ -150,6 +199,28 @@ describe("background perps Brain review", () => {
         f.args.candleT, kind === "drift" ? f.mark * 101n / 100n : f.mark), null, kind);
     }
   });
+  it("hundreds of overlapping launches and context changes still yield one current, one-use approval", async () => {
+    const f = fixture(); let clock = f.request.as_of_ms, calls = 0;
+    const review = new PerpsBrainReview(() => clock);
+    let finish!: (r: PerpsBrainResponse | null) => void;
+    const run = () => { calls++; return new Promise<PerpsBrainResponse | null>(resolve => { finish = resolve; }); };
+    for (let i = 0; i < 200; i++) review.launch(`grant-${Math.floor(i / 10)}`, f.request, f.candidate, run, () => {});
+    assert.equal(calls, 1, "context changes never start overlapping provider work");
+    finish(approval(f.request)); await flush();
+    assert.equal(review.take("grant-19", f.candidate, f.args.candleT, f.mark, f.request), null, "old generation cannot approve the latest grant");
+    for (let i = 0; i < 200; i++) review.launch("grant-19", f.request, f.candidate, run, () => {});
+    assert.equal(calls, 2, "latest context can recover once stale work settles");
+    finish(approval(f.request)); await flush();
+    assert.equal(Array.from({ length: 100 }, () => review.take("grant-19", f.candidate, f.args.candleT, f.mark, f.request)).filter(Boolean).length, 1);
+    clock += 300_000;
+    const current = { ...f.request, as_of_ms: clock, expires_at_ms: clock + PERPS_BRAIN_TTL_MS };
+    review.launch("grant-19", current, f.candidate, async () => { throw new Error("offline provider"); }, () => {}); await flush();
+    assert.equal(review.take("grant-19", f.candidate, f.args.candleT, f.mark, current), null);
+    clock += 300_000;
+    const recovered = { ...current, as_of_ms: clock, expires_at_ms: clock + PERPS_BRAIN_TTL_MS };
+    review.launch("grant-19", recovered, f.candidate, async () => approval(recovered), () => {}); await flush();
+    assert.ok(review.take("grant-19", f.candidate, f.args.candleT, f.mark, recovered), "a failed provider does not strand the review state");
+  });
   it("late in-flight result is rejected after settings change", async () => {
     const f = fixture(); const review = new PerpsBrainReview(() => f.request.as_of_ms);
     let finish!: (r: PerpsBrainResponse) => void;
@@ -168,5 +239,38 @@ it("HTTP client is authenticated, response-bounded and keeps its deadline throug
     const addr = server.address(); assert.ok(addr && typeof addr !== "string");
     assert.equal(await requestPerpsBrain({ url: `http://127.0.0.1:${addr.port}`, token: "test-token", timeoutMs: 1000 }, request), null);
     assert.equal(hits, 1, "never retries");
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+
+it("HTTP failures, adversarial payloads and decompressed byte limits fail closed without poisoning the next review", async () => {
+  const f = fixture(), now = Date.now();
+  const request = { ...f.request, as_of_ms: now, expires_at_ms: now + PERPS_BRAIN_TTL_MS };
+  let mode = "good", hits = 0;
+  const oversized = JSON.stringify({ ok: true, decision: { ...approval(request), features: { text: "🔥".repeat(40_000) } } });
+  const server = createServer((req, res) => {
+    hits++;
+    assert.equal(req.headers.authorization, "Bearer isolated-test-token");
+    if (mode === "unavailable") { res.writeHead(503); res.end(); return; }
+    if (mode === "disconnect") { res.writeHead(200); res.write('{"ok":'); res.destroy(); return; }
+    if (mode === "gzip-limit") { res.writeHead(200, { "content-encoding": "gzip" }); res.end(gzipSync(oversized)); return; }
+    res.writeHead(200, { "content-type": "application/json" });
+    if (mode === "invalid-json") res.end('{"ok":true');
+    else if (mode === "byte-limit") res.end(oversized);
+    else if (mode === "wrong-run") res.end(JSON.stringify({ ok: true, decision: { ...approval(request), run_id: "unrelated" } }));
+    else if (mode === "wrong-envelope") res.end(JSON.stringify({ ok: "true", decision: approval(request) }));
+    else res.end(JSON.stringify({ ok: true, decision: approval(request) }));
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  try {
+    const addr = server.address(); assert.ok(addr && typeof addr !== "string");
+    const cfg = { url: `http://127.0.0.1:${addr.port}`, token: "isolated-test-token", timeoutMs: 2000 };
+    for (const failure of ["unavailable", "disconnect", "invalid-json", "byte-limit", "gzip-limit", "wrong-run", "wrong-envelope"]) {
+      mode = failure;
+      assert.equal(await requestPerpsBrain(cfg, request), null, failure);
+      mode = "good";
+      assert.ok(await requestPerpsBrain(cfg, request), `recovers after ${failure}`);
+    }
+    assert.equal(hits, 14, "one request per review; malformed responses do not trigger retries");
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });

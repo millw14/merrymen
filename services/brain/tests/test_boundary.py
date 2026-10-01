@@ -757,8 +757,8 @@ def test_the_reasoning_hint_cannot_break_the_call_it_improves():
     repair producing a broader version of the fault it was written for.
 
     So the 400 is read, the field is dropped, and the call is made again. The
-    retry does not spend the attempt budget, because the first request never
-    reached a model.
+    retry spends the attempt and run budgets, because every dispatched request
+    must remain bounded even when a provider rejects it.
     """
     import asyncio
 
@@ -780,7 +780,7 @@ def test_the_reasoning_hint_cannot_break_the_call_it_improves():
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": '{"direction":"buy","confidence":0.7}'}}],
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"direction":"buy","confidence":0.7}'}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
             },
         )

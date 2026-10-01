@@ -70,7 +70,7 @@ const u = (n: number) => BigInt(Math.round(n * 1e6));
 let clock = T_LAST + H4 + 3_600_000;
 const CANDLES = breakout("BTC-PERP", 2_000n); // 119 flat bars at 80,000.0, then a close at 80,200.0: a long breakout
 
-function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, bigint][] }): void {
+function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, bigint][]; candles?: typeof CANDLES }): void {
   const lastHour = Math.floor((clock / 1000 - 1800) / 3600) * 3600;
   const m: LighterFeedFileMarket = {
     observedAt: clock - 1_000,
@@ -87,7 +87,7 @@ function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, b
     asks: v.asks.map(([p, s]) => [p.toString(), s.toString()]),
     bookObservedAt: clock - 1_000,
     bookSource: "ws",
-    closed4h: CANDLES.map((c) => ({ t: c.t, o: c.o.toString(), h: c.h.toString(), l: c.l.toString(), c: c.c.toString() })),
+    closed4h: (v.candles ?? CANDLES).map((c) => ({ t: c.t, o: c.o.toString(), h: c.h.toString(), l: c.l.toString(), c: c.c.toString() })),
     candlesObservedAt: T_LAST + H4 + 60_000,
     // 0.0010 %/h paid by longs: 10 ppm, inside perp-trend's 50 ppm limit.
     fundings1h: Array.from({ length: 8 }, (_, i) => ({ t: lastHour - (7 - i) * 3600, rate: "0.0010", direction: "long" as const })),
@@ -710,7 +710,7 @@ function approvedBrain(r: PerpsBrainRequest): PerpsBrainResponse {
     market: r.market, as_of_ms: r.as_of_ms, expires_at_ms: r.expires_at_ms, strategy_version: "merrymenbrain-perps-analogs-v1",
     candidate_bar_t: r.candidate.bar_t, candidate_side: r.candidate.side, action: r.candidate.side, reason_codes: ["evidence-qualified"], features: {},
     forecast: { method: "causal-regime-analogs-v1", horizon_bars: 3, target: "signed-mark-return-after-estimated-costs", samples: 40,
-      win_probability: .7, lower_95: .55, upper_95: .85, mean_net_bps: 60, mean_lower_95_bps: 10, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
+      win_probability: .7, lower_95: 0.5456998118185507, upper_95: 0.8192515477025347, mean_net_bps: 60, mean_lower_95_bps: 10, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
     committee: ["bull", "bear", "risk"].map(lens => ({ lens, verdict: "accept", reason: "fixture evidence only" })) };
 }
 const flushBrain = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -718,7 +718,7 @@ const flushBrain = () => new Promise<void>(resolve => setImmediate(resolve));
 describe("MerrymenBrain route through the real paper lane and ledger", () => {
   it("protects while research is pending, then journals and executes one unchanged capped candidate", async () => {
     clock = T_LAST + H4 + 3_600_000;
-    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]] });
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]], candles: breakout("BTC-PERP", 2_000n, 200n, 220) });
     let finish!: () => void; let reviews = 0;
     const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true, configKey: () => "test", admit: async () => true,
       review: request => { reviews++; return new Promise(resolve => { finish = () => resolve(approvedBrain(request)); }); },
@@ -752,7 +752,7 @@ describe("MerrymenBrain route through the real paper lane and ledger", () => {
   });
   it("expires after a queued process call and never reaches the paper settlement", async () => {
     clock = T_LAST + H4 + 3_600_000;
-    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]] });
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]], candles: breakout("BTC-PERP", 2_000n, 200n, 220) });
     const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true, configKey: () => "test", admit: async () => true,
       review: async request => approvedBrain(request) } });
     const start = await equityOf(a), h = hooks(a, start.equity);
@@ -766,7 +766,7 @@ describe("MerrymenBrain route through the real paper lane and ledger", () => {
   });
   it("a saved settings change discards an outstanding approval", async () => {
     clock = T_LAST + H4 + 3_600_000;
-    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]] });
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]], candles: breakout("BTC-PERP", 2_000n, 200n, 220) });
     const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true, configKey: () => "test", admit: async () => true,
       review: async request => approvedBrain(request) } });
     const start = await equityOf(a), h = hooks(a, start.equity);

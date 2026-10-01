@@ -26,11 +26,20 @@ from typing import Any
 import httpx
 
 from .budget import RunBudget
-from .credential import Credential, CredentialRefused, resolve as resolve_credential
+from .credential import resolve as resolve_credential
 
 
 class ProviderError(RuntimeError):
     pass
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate provider response field")
+        result[key] = value
+    return result
 
 
 #: Families that emit chain-of-thought unless told not to. Substring match on
@@ -174,8 +183,10 @@ class Llm:
         while attempt < max_attempts:
             # EVERY ATTEMPT IS A CALL. Counting only successes is how a
             # rate-limited run comes in "under budget" while costing more.
-            if attempt:
-                budget.check_before(f"{node}#retry{attempt}")
+            budget.check_before(f"{node}#retry{attempt}" if attempt else node)
+            # Count at dispatch, including timeouts, bad JSON and rate limits.
+            # Those requests must not vanish just because no usage came back.
+            budget.record(node, self.cfg.provider, model, 0, 0)
             try:
                 r = await client.post(
                     f"{self.cfg.base_url}/chat/completions",
@@ -190,8 +201,8 @@ class Llm:
                 # `provider-failed` on every single call — the fix causing a
                 # worse version of the fault it was written for. So: drop it,
                 # remember that this endpoint refuses it, and try again. The
-                # retry is free of the attempt budget because the first request
-                # never reached the model.
+                # compatibility retry remains bounded by both attempt and run
+                # budgets; perps explicitly allows no retry on a failed lens.
                 if (
                     r.status_code == 400
                     and REASONING_FIELD in payload
@@ -199,15 +210,21 @@ class Llm:
                 ):
                     _REASONING_HINT_REFUSED.add(self.cfg.base_url)
                     payload.pop(REASONING_FIELD, None)
+                    last = ProviderError("provider rejected reasoning hint")
+                    attempt += 1
                     continue
                 if r.status_code == 429:
                     last = ProviderError("rate limited")
                     # Bounded, and only if the budget still allows it.
-                    await asyncio.sleep(1.5 * (attempt + 1))
                     attempt += 1
+                    if attempt < max_attempts:
+                        await asyncio.sleep(1.5 * attempt)
                     continue
                 r.raise_for_status()
-                body = r.json()
+                try:
+                    body = r.json(object_pairs_hook=_unique_object)
+                except ValueError as e:
+                    raise ProviderError("provider returned invalid JSON") from e
             except httpx.HTTPError as e:
                 last = ProviderError(f"{type(e).__name__}: {e}")
                 attempt += 1
@@ -216,18 +233,32 @@ class Llm:
                 await asyncio.sleep(1.0)
                 continue
 
-            usage = body.get("usage") or {}
-            budget.record(
-                node=node,
-                provider=self.cfg.provider,
-                model=model,
-                tin=int(usage.get("prompt_tokens", 0)),
-                tout=int(usage.get("completion_tokens", 0)),
-            )
-            choices = body.get("choices") or []
-            if not choices:
-                raise ProviderError("provider returned no choices")
-            return str(choices[0].get("message", {}).get("content") or "")
+            if not isinstance(body, dict) or not isinstance(body.get("usage"), dict):
+                raise ProviderError("provider returned no usable usage")
+            usage = body["usage"]
+            try:
+                budget.record_usage(node, model, usage.get("prompt_tokens"), usage.get("completion_tokens"))
+            except ValueError as e:
+                raise ProviderError("provider returned invalid usage") from e
+            if "total_tokens" in usage and (
+                type(usage["total_tokens"]) is not int or
+                usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]
+            ):
+                raise ProviderError("provider returned inconsistent usage")
+            budget.check_after()
+            choices = body.get("choices")
+            if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+                raise ProviderError("provider returned ambiguous choices")
+            choice = choices[0]
+            message = choice.get("message")
+            if choice.get("finish_reason") != "stop" or not isinstance(message, dict):
+                raise ProviderError("provider did not finish its response")
+            if message.get("refusal") or message.get("tool_calls") or message.get("function_call"):
+                raise ProviderError("provider refused or returned an unexpected tool call")
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise ProviderError("provider returned no text response")
+            return content
 
         raise ProviderError(f"{node} failed after {max_attempts} attempts: {last}")
 

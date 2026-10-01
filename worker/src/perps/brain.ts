@@ -117,9 +117,40 @@ export function perpsBrainEstimatedCostBps(r: PerpsBrainRequest): number {
   return 2 * (r.taker_fee_bps + r.slippage_bps + r.spread_bps) +
     Math.max(0, side * r.funding_ppm_per_hour) / 100 * 12 + Math.max(0, side * drift);
 }
+/** The engine's Wilder ATR uses the same trailing 100-bar window for every
+ * historical and current feature. Re-derive the execution guard from evidence;
+ * service-supplied feature labels must never widen it. */
+export function perpsBrainEvidenceAtrBps(r: PerpsBrainRequest): number | null {
+  const window = r.candles.slice(-100);
+  if (window.length !== 100) return null;
+  const bars = window.map(b => ({ h: Number(b.h), l: Number(b.l), c: Number(b.c) }));
+  if (bars.some(b => ![b.h, b.l, b.c].every(x => Number.isFinite(x) && x > 0) || b.l > b.c || b.c > b.h)) return null;
+  const ranges = bars.slice(1).map((b, i) => Math.max(b.h - b.l, Math.abs(b.h - bars[i]!.c), Math.abs(b.l - bars[i]!.c)));
+  let atr = ranges.slice(0, 14).reduce((sum, n) => sum + n, 0) / 14;
+  for (const tr of ranges.slice(14)) atr = (13 * atr + tr) / 14;
+  return atr / bars.at(-1)!.c * 10_000;
+}
+const withinNumericTolerance = (a: number, b: number) => Math.abs(a - b) <= 1e-9;
+/** The forecast contract names a specific estimator, not arbitrary confidence.
+ * Validate mathematical necessities for HOLD too: saved refusals are scored. */
+function coherentPerpsForecast(f: Record<string, unknown>, req: PerpsBrainRequest): boolean {
+  const n = Number(f.samples), stats = [f.win_probability, f.lower_95, f.upper_95, f.mean_net_bps, f.mean_lower_95_bps];
+  if (n > Math.max(0, Math.floor((req.candles.length - 100) / 3)) ||
+      !withinNumericTolerance(Number(f.cost_bps), perpsBrainEstimatedCostBps(req))) return false;
+  if (n === 0) return stats.every(x => x === null);
+  if (!finite(f.win_probability) || !finite(f.lower_95) || !finite(f.upper_95) || !finite(f.mean_net_bps)) return false;
+  if (n === 1 ? f.mean_lower_95_bps !== null : !finite(f.mean_lower_95_bps) || f.mean_lower_95_bps > f.mean_net_bps) return false;
+  const wins = Math.round(f.win_probability * n);
+  if (!withinNumericTolerance(f.win_probability * n, wins)) return false;
+  const p = wins / n, z = 1.959963984540054, denominator = 1 + z * z / n;
+  const center = (p + z * z / (2 * n)) / denominator;
+  const radius = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator;
+  return withinNumericTolerance(f.lower_95, wins === 0 ? 0 : Math.max(0, center - radius)) &&
+    withinNumericTolerance(f.upper_95, wins === n ? 1 : Math.min(1, center + radius));
+}
 /** Strict executable boundary: malformed economics or mismatched identity is never approval. */
 export function validatePerpsBrainResponse(raw: unknown, req: PerpsBrainRequest, nowMs: number): PerpsBrainResponse | null {
-  if (!record(raw) || nowMs < req.as_of_ms || nowMs >= req.expires_at_ms) return null;
+  if (!record(raw) || !Number.isSafeInteger(nowMs) || nowMs < req.as_of_ms || nowMs >= req.expires_at_ms) return null;
   for (const key of ["schema_version", "run_id", "agent_id", "snapshot_id", "market", "as_of_ms", "expires_at_ms"] as const)
     if (raw[key] !== req[key]) return null;
   if (raw.candidate_bar_t !== req.candidate.bar_t || raw.candidate_side !== req.candidate.side ||
@@ -131,13 +162,13 @@ export function validatePerpsBrainResponse(raw: unknown, req: PerpsBrainRequest,
   if (f.method !== "causal-regime-analogs-v1" || f.horizon_bars !== 3 || f.target !== "signed-mark-return-after-estimated-costs" || f.calibrated !== false ||
       !Number.isSafeInteger(f.samples) || Number(f.samples) < 0 || Number(f.samples) > 500 ||
       ![f.win_probability, f.lower_95, f.upper_95].every(boundedProbability) ||
-      ![f.mean_net_bps, f.mean_lower_95_bps].every(x => x === null || finite(x)) || !finite(f.cost_bps) || f.cost_bps < 0) return null;
-  if (raw.action !== "hold" && (f.win_probability === null || f.lower_95 === null || f.upper_95 === null ||
+      ![f.mean_net_bps, f.mean_lower_95_bps].every(x => x === null || finite(x)) || !finite(f.cost_bps) || f.cost_bps < 0 || !coherentPerpsForecast(f, req)) return null;
+  if (raw.action !== "hold" && (!brainMarketStillQualified(req, req) || f.win_probability === null || f.lower_95 === null || f.upper_95 === null ||
       !finite(f.mean_net_bps) || !finite(f.mean_lower_95_bps) || f.mean_lower_95_bps <= 0 || f.mean_lower_95_bps > f.mean_net_bps ||
       f.cost_bps + 1e-9 < perpsBrainEstimatedCostBps(req) || f.cost_bps > req.candidate.stop_bps * .15 || Number(f.samples) < 20 || Number(f.lower_95) <= 0.5 ||
       Number(f.lower_95) > Number(f.win_probability) || Number(f.win_probability) > Number(f.upper_95))) return null;
   if (raw.committee !== undefined && (!Array.isArray(raw.committee) || raw.committee.length > 3 || raw.committee.some(x => !record(x) ||
-      !["bull", "bear", "risk"].includes(String(x.lens)) || !["accept", "veto"].includes(String(x.verdict)) || typeof x.reason !== "string" || x.reason.length > 500))) return null;
+      typeof x.lens !== "string" || !["bull", "bear", "risk"].includes(x.lens) || typeof x.verdict !== "string" || !["accept", "veto"].includes(x.verdict) || typeof x.reason !== "string" || x.reason.length > 500))) return null;
   if (raw.action !== "hold" && (!Array.isArray(raw.committee) || raw.committee.length !== 3 ||
       new Set(raw.committee.map(x => x.lens)).size !== 3 || raw.committee.some(x => x.verdict !== "accept"))) return null;
   return raw as unknown as PerpsBrainResponse;
@@ -167,11 +198,12 @@ export interface PerpsBrainRecording {
   completedAtMs: number;
 }
 /** A review cannot cover worse costs/liquidity or a widened stop after it completed. */
-export function brainMarketStillQualified(reviewed: PerpsBrainRequest, current: PerpsBrainRequest, response?: PerpsBrainResponse): boolean {
+export function brainMarketStillQualified(reviewed: PerpsBrainRequest, current: PerpsBrainRequest, _response?: PerpsBrainResponse): boolean {
   const driftBps = (r: PerpsBrainRequest) => (Number(r.mark_price) / Number(r.candles.at(-1)!.c) - 1) * 10_000;
   const basisBps = (r: PerpsBrainRequest) => Math.abs(Number(r.mark_price) / Number(r.index_price) - 1) * 10_000;
   const cost = perpsBrainEstimatedCostBps;
-  const atr = typeof response?.features.atr_bps === "number" && Number.isFinite(response.features.atr_bps) ? response.features.atr_bps : 0;
+  const atr = perpsBrainEvidenceAtrBps(reviewed);
+  if (atr === null) return false;
   const currentCost = cost(current);
   return reviewed.market === current.market && reviewed.candidate.side === current.candidate.side && reviewed.candidate.bar_t === current.candidate.bar_t &&
     brainFingerprint(reviewed.candles) === brainFingerprint(current.candles) &&

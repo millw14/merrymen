@@ -35,6 +35,10 @@ export function recordedBrainProducer(records: readonly RecordedPerpsBrainDecisi
     if (before.request.agent_id !== after.request.agent_id || before.context !== after.context ||
         after.request.as_of_ms <= before.request.as_of_ms)
       throw new Error("recorded runs must share one account/context and unique ordered request clocks");
+    // Live reviews are single-flight. Admitting an impossible overlap would
+    // let an older approval arrive after a newer HOLD and regain authority.
+    if (before.completedAtMs > after.request.as_of_ms)
+      throw new Error("recorded reviews cannot overlap the runtime's single-flight boundary");
   }
   const observations: { runId: string; atMs: number; result: string }[] = [];
   let previous = -1;

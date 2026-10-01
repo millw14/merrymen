@@ -82,6 +82,10 @@ later frames; an approval alone does not establish an outcome. Inspect net
 return, drawdown, costs, sample size and uncertainty as well as win rate.
 Synthetic tests verify controls and accounting, not investment performance.
 
+The [adversarial test report](perps-brain-stress-tests.md) records the numerical,
+service, worker and evaluation failures found and fixed during the offline
+stress pass, with the suites actually run.
+
 There is no demonstrated improvement in win rate yet, and this driver does not
 automatically promote itself to live trading. The existing
 [mainnet acceptance checklist](perps-mainnet-checklist.md) still applies.

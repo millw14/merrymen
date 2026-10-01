@@ -53,7 +53,10 @@ def _wilson(wins: int, n: int) -> tuple[float, float]:
     denominator = 1 + z * z / n
     center = (p + z * z / (2 * n)) / denominator
     radius = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
-    return max(0.0, center - radius), min(1.0, center + radius)
+    # Floating subtraction can put the zero-win lower bound slightly above
+    # zero (or the all-win upper bound below one). Preserve the exact endpoints.
+    return (0.0 if wins == 0 else max(0.0, center - radius),
+            1.0 if wins == n else min(1.0, center + radius))
 
 
 def analyze(req: dict, *, now_ms: int | None = None) -> dict:

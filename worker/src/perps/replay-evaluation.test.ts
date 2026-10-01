@@ -5,21 +5,30 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { runPerpsReplay, type PerpsReplayProducer } from "./backtest";
-import { buildPerpsBrainRequest, PERPS_BRAIN_STRATEGY_VERSION, type PerpsBrainRequest, type PerpsBrainResponse } from "./brain";
+import { buildPerpsBrainRequest, perpsBrainEstimatedCostBps, PERPS_BRAIN_STRATEGY_VERSION, type PerpsBrainRequest, type PerpsBrainResponse } from "./brain";
 import { mergeBrainSourceFrames, recordedBrainProducer, verifiedBrainRunIds, type RecordedPerpsBrainDecision } from "./replay-brain";
 import { captureFeedSample, framesFromRecording, parseFeedRecording, recordPublicFeed, replayFrameHash } from "./replay-recorder";
 import { evaluatePerpsWalkForward, type ReplayEvaluationPlan } from "./replay-evaluation";
 import { scoreRecordedPerpsForecasts } from "./replay-forecast";
-import { replayTestFrame as frame, REPLAY_TEST_START as start } from "./testkit-replay";
+import { replayTestFrame, REPLAY_TEST_START as start } from "./testkit-replay";
+import { breakout } from "./testkit-perps";
 import { buildExitDraft } from "./drafts";
 import { FEED_CANDLE_MS, type LighterFeedFile } from "./feed-reader";
 
 const version = PERPS_BRAIN_STRATEGY_VERSION;
 const config = { initialCashUsdg: 100, settings: { perpsMarkets: ["BTC-PERP" as const] } };
-function decision(): RecordedPerpsBrainDecision {
+function frame(atMs = start, mark = 805000n) {
+  const f = replayTestFrame(atMs, mark);
+  // Thirty three-bar, non-overlapping analogs require a full 100-bar
+  // feature warmup plus ninety outcome bars.
+  (f.feed as LighterFeedFile).markets["1"]!.closed4h = breakout("BTC-PERP", 5000n, 200n, 190)
+    .map(c => ({ t: c.t, o: String(c.o), h: String(c.h), l: String(c.l), c: String(c.c) }));
+  return f;
+}
+function decision(atMs = start): RecordedPerpsBrainDecision {
   let request: PerpsBrainRequest | null = null;
   const context = "recorded-context";
-  runPerpsReplay(config, [frame()], { id: "capture", tick({ frame, feed, view, trend }) {
+  runPerpsReplay(config, [frame(atMs)], { id: "capture", tick({ frame, feed, view, trend }) {
     assert.ok(view && trend.entry && trend.entryCandleT !== null);
     request = buildPerpsBrainRequest({ agentId: "0x1111111111111111111111111111111111111111", runId: "recorded-run", nowMs: frame.atMs,
       context, view, candidate: trend.entry, candleT: trend.entryCandleT, feed });
@@ -33,10 +42,11 @@ function decision(): RecordedPerpsBrainDecision {
     candidate_bar_t: r.candidate.bar_t, candidate_side: r.candidate.side, action: r.candidate.side,
     reason_codes: ["fixture-approval"], features: {},
     forecast: { method: "causal-regime-analogs-v1", horizon_bars: 3, target: "signed-mark-return-after-estimated-costs",
-      samples: 30, win_probability: 0.8, lower_95: 0.6, upper_95: 0.9, mean_net_bps: 20, mean_lower_95_bps: 5, cost_bps: 10, calibrated: false },
+      samples: 30, win_probability: 0.8, lower_95: 0.6269430358685175, upper_95: 0.9049489282271013,
+      mean_net_bps: 20, mean_lower_95_bps: 5, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
     committee: ["bull", "bear", "risk"].map(lens => ({ lens, verdict: "accept", reason: "Synthetic acceptance for boundary tests" })),
   };
-  return { sourceFrameSha256: replayFrameHash(frame()), context, request: r, response, completedAtMs: start + 5_000 };
+  return { sourceFrameSha256: replayFrameHash(frame(atMs)), context, request: r, response, completedAtMs: atMs + 5_000 };
 }
 
 test("recorded approval waits for a later frame after completion and uses that frame's price", () => {
@@ -77,6 +87,19 @@ test("HOLD, missing approval and changed market never fall back to an ungated en
   assert.equal(runPerpsReplay(config, [frame(), frame(start + 6_000)], recordedBrainProducer([d], version)).tailPositions.length, 0);
   assert.equal(runPerpsReplay(config, [frame(), frame(start + 6_000)], recordedBrainProducer([], version)).tailPositions.length, 0);
   assert.equal(runPerpsReplay(config, [frame(), frame(start + 6_000, 810000n)], recordedBrainProducer([decision()], version)).tailPositions.length, 0);
+});
+
+test("an impossible overlapping review cannot resurrect an old approval after a newer HOLD", () => {
+  const old = decision(), newer = decision(start + 1_000);
+  old.completedAtMs = start + 8_000;
+  newer.request.run_id = newer.response!.run_id = "newer-hold";
+  newer.response!.action = "hold";
+  newer.completedAtMs = start + 3_000;
+  assert.throws(() => recordedBrainProducer([old, newer], version), /cannot overlap/);
+  const sequential = decision(start + 8_000);
+  sequential.request.run_id = sequential.response!.run_id = "sequential-hold";
+  sequential.response!.action = "hold";
+  assert.doesNotThrow(() => recordedBrainProducer([old, sequential], version));
 });
 
 test("exact journal source frames join polling captures without overwriting different observations", () => {
@@ -188,6 +211,54 @@ test("walk-forward requires chronological purged frozen folds and reports insuff
   assert.throws(() => evaluatePerpsWalkForward({ ...args, producer: () => ({ id: "other", tick: i => i.trend }) }), /version/);
 });
 
+test("comparison includes the baseline's open gains instead of rewarding an earlier, smaller realized gain", () => {
+  let ticks = 0;
+  const report = evaluatePerpsWalkForward({ config, frames: [frame(), frame(start + 1_000, 806000n), frame(start + 2_000, 808000n)],
+    plan: plan(), producer: () => ({ id: version, tick({ trend, view, settings }) {
+      if (++ticks === 1) return trend;
+      const position = view!.positions.get("BTC-PERP");
+      const exit = position ? buildExitDraft({ market: view!.markets.get("BTC-PERP")!, position,
+        effect: "close", maxSlippageBps: settings.perpsMaxSlippageBps }) : null;
+      return { ...trend, entry: null, entryCandleT: null, exits: exit ? [exit] : [] };
+    } }) });
+  const fold = report.folds[0]!;
+  assert.equal(fold.baseline!.metrics.completedTrades, 0);
+  assert.equal(fold.baseline!.metrics.openTrades, 1);
+  assert.equal(fold.candidate!.metrics.completedTrades, 1);
+  assert.equal(fold.candidate!.metrics.wins, 1);
+  assert.ok(report.pooledCompleted.candidate.netCompletedMicro > report.pooledCompleted.baseline.netCompletedMicro);
+  assert.ok(report.pooledMarkedNetMicro.candidate! < report.pooledMarkedNetMicro.baseline!);
+  assert.ok(report.reasons.includes("candidate-did-not-improve-marked-net-pnl"));
+  for (const side of ["baseline", "candidate"] as const) {
+    const replay = fold[side]!;
+    assert.equal(report.pooledMarkedNetMicro[side], replay.realizedMicro + replay.fundingMicro - replay.feesMicro + replay.curve.at(-1)!.unrealizedMicro);
+  }
+});
+
+test("incomplete or empty folds cannot supply partial marked returns to a comparison", () => {
+  for (const frames of [[], [frame(), { atMs: start + 1_000, feed: null }]]) {
+    const report = evaluatePerpsWalkForward({ config, frames, plan: plan(), producer: () => recordedBrainProducer([], version) });
+    assert.equal(report.status, "insufficient-evidence");
+    assert.deepEqual(report.pooledMarkedNetMicro, { baseline: null, candidate: null });
+    assert.equal(report.promotionAuthorized, false);
+  }
+});
+
+test("approval timing matrix never spends a future, expired or already consumed response", () => {
+  for (const delay of [0, 1, 2_000, 5_000, 119_999, 120_000, 121_000]) {
+    for (const sampleOffset of [1, 2_000, 6_000, 119_999, 120_000, 121_000]) {
+      const d = decision();
+      d.completedAtMs = start + delay;
+      const frames = [frame(), frame(start + sampleOffset), frame(start + sampleOffset + 1)];
+      const result = runPerpsReplay(config, frames, recordedBrainProducer([d], version));
+      const opens = result.events.filter(e => e.kind === "open");
+      const expected = frames.slice(1).find(f => f.atMs >= d.completedAtMs && f.atMs < d.request.expires_at_ms);
+      assert.equal(opens.length, expected ? 1 : 0, `delay=${delay} sample=${sampleOffset}`);
+      if (expected) assert.equal(opens[0]!.atMs, expected.atMs);
+    }
+  }
+});
+
 test("proxy forecasts need a later closed target and remain separate from realized wins", () => {
   const d = decision();
   const initialFrames = [frame(), frame(start + 6_000)];
@@ -210,6 +281,61 @@ test("proxy forecasts need a later closed target and remain separate from realiz
   (smallGain.feed as LighterFeedFile).markets["1"]!.closed4h!.at(-1)!.c = "805100";
   const costly = scoreRecordedPerpsForecasts([d], [...initialFrames, smallGain], verified);
   assert.equal(costly.outcomes[0]!.positive, false, "the frozen proxy cost can turn a rising price into a negative target");
+});
+
+function forecastTarget(d: RecordedPerpsBrainDecision, close: bigint, observedOffset = 1_000) {
+  const targetT = d.request.candidate.bar_t + 3 * FEED_CANDLE_MS;
+  const future = frame(targetT + FEED_CANDLE_MS + observedOffset, close);
+  const candles = (future.feed as LighterFeedFile).markets["1"]!.closed4h!;
+  const high = close > 805000n ? close : 805000n, low = close < 805000n ? close : 805000n;
+  for (let i = 1; i <= 3; i++) candles.push({ t: d.request.candidate.bar_t + i * FEED_CANDLE_MS,
+    o: "805000", h: String(high), l: String(low), c: String(close) });
+  return future;
+}
+
+test("forecast scoring keeps the first observed target even when a later candle revision reverses the outcome", () => {
+  const d = decision(), verified = new Set([d.request.run_id]);
+  const first = forecastTarget(d, 803000n), revised = forecastTarget(d, 820000n, 2_000);
+  const scored = scoreRecordedPerpsForecasts([d], [frame(), first, revised], verified);
+  assert.equal(scored.samples, 1);
+  assert.equal(scored.outcomes[0]!.positive, false);
+  assert.equal(scored.outcomes[0]!.observedAtMs, first.atMs);
+  assert.deepEqual(scored, scoreRecordedPerpsForecasts([d], [frame(), first], verified));
+});
+
+test("future-stamped target data is ignored and a missing target is never forward-filled", () => {
+  const d = decision(), verified = new Set([d.request.run_id]);
+  const honest = forecastTarget(d, 803000n, 2_000), future = forecastTarget(d, 820000n);
+  (future.feed as LighterFeedFile).observedAt = future.atMs + 1;
+  const scored = scoreRecordedPerpsForecasts([d], [frame(), future, honest], verified);
+  assert.equal(scored.samples, 1);
+  assert.equal(scored.outcomes[0]!.positive, false);
+  assert.equal(scored.outcomes[0]!.observedAtMs, honest.atMs);
+  const missing = forecastTarget(d, 820000n);
+  (missing.feed as LighterFeedFile).markets["1"]!.closed4h!.pop();
+  assert.equal(scoreRecordedPerpsForecasts([d], [frame(), missing], verified).samples, 0);
+});
+
+test("HOLD forecasts remain measurable, but fabricated confidence or omitted costs cannot improve calibration", () => {
+  const d = decision(); d.response!.action = "hold";
+  const future = forecastTarget(d, 820000n), frames = [frame(), future], verified = new Set([d.request.run_id]);
+  assert.equal(scoreRecordedPerpsForecasts([d], frames, verified).samples, 1);
+  const mutations: ((f: PerpsBrainResponse["forecast"]) => void)[] = [
+    f => { f.samples = 0; },
+    f => { f.samples = 100; },
+    f => { f.lower_95 = null; },
+    f => { f.lower_95 = 0.99; },
+    f => { f.win_probability = 0.98765; },
+    f => { f.mean_net_bps = null; },
+    f => { f.mean_lower_95_bps = f.mean_net_bps! + 1; },
+    f => { f.cost_bps = 0; },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(d); mutate(changed.response!.forecast);
+    const score = scoreRecordedPerpsForecasts([changed], frames, verified);
+    assert.equal(score.samples, 0);
+    assert.equal(score.brierScore, null);
+  }
 });
 
 test("offline CLI loads a hash-verified recording and exits 2 for insufficient evaluation evidence", () => {

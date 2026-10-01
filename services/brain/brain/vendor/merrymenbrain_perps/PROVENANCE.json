@@ -3,11 +3,11 @@
     "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
     "README.md": "41b7c26c49b378a6d1ffad0f8e35800d8c8db1e62207b785c417585d6f960c08",
     "__init__.py": "01b94f8f0fdb6707a3be8aaf1314f4c51342080c690728b833c16dd07d2a8f3b",
-    "analysis.py": "3f9ed41436742fd6e118cf41b3b8730cd47e515964ae80ec5c0c2df8462fef29",
-    "schema.py": "14a3acdfa11294fe6a45f8304aa5b087d64690d047acd9a19a56ff825e537b5c"
+    "analysis.py": "6c46960cb0c014f903f42ffc8c43088ba0ce4e3d8ed4b4c71b420c4c841aeafe",
+    "schema.py": "7005bdd5a56880dc1b837a80a3cf618d44abaeb48e9bec66f8cb0b2331ee963c"
   },
   "license": "Apache-2.0",
   "repository": "https://github.com/millw14/merrymenbrain",
-  "source_commit": "8a48ca0faf96cc2af31a240dbe25e0f96ee1f27c",
+  "source_commit": "a352780148badae003cf923d20e989d7d5c592da",
   "source_directory": "tradingagents/perps"
 }
