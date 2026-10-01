@@ -27,7 +27,7 @@ const SHOGUN = "0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487";
 const OTHER = "0x0000000000000000000000000000000000000b0b";
 const CASHCAT = "0x020bfc650a365f8bb26819deaabf3e21291018b4";
 const USDG = CASH.USDG;
-const NOW = Math.floor(Date.now() / 1000);
+const NOW = Date.parse("2026-10-01T12:00:00Z") / 1000;
 
 function ctx(agentId: string | null) {
   return {
@@ -63,7 +63,14 @@ before(async () => {
   await addTrade({ agent_id: OTHER, kind: "swap", target: "0x1", sell_token: USDG, buy_token: "0x000000000000000000000000000000000000c0de", amount_usdg: 77.77, status: "landed", tx_hash: "0xcc" });
   await addEvent(OTHER, "ok", "OTHER_SECRET_EVENT");
   const db = new DatabaseSync(homePaths.db());
-  db.prepare("INSERT OR REPLACE INTO discovered_pools (address, symbol, liquidity_usd) VALUES (?, 'CASHCAT', 1234)").run(CASHCAT);
+  db.prepare("INSERT OR REPLACE INTO discovered_pools (address, symbol, liquidity_usd, first_seen) VALUES (?, 'CASHCAT', 1234, ?)").run(CASHCAT, NOW);
+  // Store helpers use SQLite's wall clock, while readers use ctx.now. Align
+  // this fixture with its fixed clock so slow setup cannot put fills after
+  // the observation time (or move them into a different UTC day).
+  db.prepare("UPDATE trades SET created_at = ?").run(NOW);
+  db.prepare("UPDATE decisions SET at = ?").run(NOW);
+  db.prepare("UPDATE events SET created_at = ?").run(NOW);
+  db.prepare("UPDATE equity SET at = ?").run(NOW);
   db.close();
 });
 
