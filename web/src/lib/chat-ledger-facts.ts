@@ -3,6 +3,7 @@ import { calculateChatMath, chatPeriodStart, parseChatMath } from "@merrymen/cor
 import { readTradeFacts, type ChatTradeFact } from "../../../worker/src/chat-trades";
 import type { Db } from "../../../worker/src/db";
 import type { AgentChatBody } from "./agent-chat";
+import { decimalAmount } from "./format";
 import { withReadDb } from "./ledger";
 
 type ReadDb = <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
@@ -37,7 +38,7 @@ function tradeQuestion(message: string, history: unknown): TradeQuestion | null 
 }
 
 const words = (s: string) => s.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/<<\s*CMD/gi, "‹quoted CMD").replace(/0x[0-9a-f]{40,64}/gi, "[recorded reference]").trim();
-const amount = (n: number) => Number.isFinite(n) ? n.toLocaleString("en-US", { maximumFractionDigits: 8 }) : "unknown";
+const amount = (n: number) => Number.isFinite(n) ? decimalAmount(n) : "unknown";
 
 /** Quotes recorded reasons as evidence; missing reasons never become a new explanation. */
 export function formatOwnerTrades(trades: ChatTradeFact[], complete: boolean, period: string, why: boolean): string {

@@ -294,6 +294,12 @@ export function count(n: number | null): string {
   return nf({}).format(n);
 }
 
+/** A token amount, grouped without losing its eight-place ledger precision. */
+export function decimalAmount(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return DASH;
+  return nf({ maximumFractionDigits: 8 }).format(n);
+}
+
 /**
  * A percentage with a sign this product chose, rather than the one the locale
  * would have picked.
