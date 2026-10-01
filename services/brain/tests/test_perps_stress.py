@@ -251,6 +251,34 @@ async def test_real_client_complete_success_is_still_three_metered_lenses(tmp_pa
     assert row["model_calls"] == 3 and row["tokens_in"] + row["tokens_out"] == 90
 
 
+async def test_groq_gpt_oss_perps_lenses_use_supported_reasoning_effort(tmp_path):
+    from brain.llm import REASONING_FIELD
+
+    seen = []
+    def handler(req):
+        body = json.loads(req.content)
+        seen.append(body)
+        if body.get(REASONING_FIELD) != "low":
+            return httpx.Response(400, json={"error": {"message": "unsupported reasoning_effort"}})
+        return httpx.Response(200, json=response_body())
+
+    llm = Llm(LlmConfig(
+        base_url="https://groq-supported-effort.invalid/v1", api_key="offline-test-key",
+        deep_model="openai/gpt-oss-120b", quick_model="openai/gpt-oss-20b",
+        provider="groq",
+    ), client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    try:
+        out = await review_perps(request(), llm)
+    finally:
+        await llm._client.aclose()
+    assert out["action"] == "long"
+    assert [review["lens"] for review in out["committee"]] == ["bull", "bear", "risk"]
+    assert len(seen) == 3
+    assert all(body[REASONING_FIELD] == "low" for body in seen)
+    row = json.loads((tmp_path / "usage.jsonl").read_text())
+    assert row["model_calls"] == 3
+
+
 async def test_provider_duplicate_usage_cannot_hide_spend():
     raw = json.dumps(response_body()).replace('"prompt_tokens": 20', '"prompt_tokens": 20000, "prompt_tokens": 20')
     calls = 0

@@ -53,6 +53,16 @@ def _is_reasoning_model(model: str) -> bool:
     return any(f in m for f in _REASONING_FAMILIES)
 
 
+def _reasoning_effort(model: str, provider: str) -> str:
+    # Groq's GPT-OSS models reject "none" with HTTP 400; their least costly
+    # supported setting is "low". Keep the generic hint for other endpoints.
+    if provider.lower() == "groq" and model.lower() in {
+        "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+    }:
+        return "low"
+    return "none"
+
+
 #: The field that asks a reasoning model to put its answer in `content`.
 REASONING_FIELD = "reasoning_effort"
 
@@ -162,20 +172,18 @@ class Llm:
         if json_schema is not None:
             payload["response_format"] = {"type": "json_object"}
 
-        # ASK A REASONING MODEL TO PUT ITS ANSWER IN `content`.
+        # ASK A REASONING MODEL TO PUT ITS FINAL ANSWER IN `content`.
         #
-        # The configured models ARE reasoning models — gpt-oss-120b and -20b —
-        # and this payload had no opinion about that. So the model spent its
-        # completion budget thinking, `content` came back empty or as prose, and
-        # every analyst's verdict parsed as nothing. Five lenses reported "I
-        # have nothing" while the technical one held 400 oracle rounds.
+        # Groq's GPT-OSS models support "low", "medium", and "high", but reject
+        # "none". Sending the least costly supported setting avoids a first-lens
+        # HTTP 400 in perps, where a failed lens has no retry.
         #
         # Best effort by construction: a provider that does not know the field
         # ignores it. It is not the correctness fix — that is `parse_view`
         # naming the failure instead of calling it `no-data` — it is the fix
         # that stops the failure happening.
         if _is_reasoning_model(model) and self.cfg.base_url not in _REASONING_HINT_REFUSED:
-            payload[REASONING_FIELD] = "none"
+            payload[REASONING_FIELD] = _reasoning_effort(model, self.cfg.provider)
 
         client = await self._http()
         last: Exception | None = None
