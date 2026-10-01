@@ -36,6 +36,7 @@ describe("what the node's refusal means", () => {
   it("tells a result-cap apart from a rate limit apart from neither", () => {
     assert.equal(classifyRpcError(new Error("-32000: logs matched by query exceeds limit of 10000")), "too-many-results");
     assert.equal(classifyRpcError(new Error("query returned more than 10000 results")), "too-many-results");
+    assert.equal(classifyRpcError(new Error("query spans 77462366 blocks (0 to 77462365), but only 10000000 are allowed for this request; narrow the block range")), "too-many-results");
     assert.equal(classifyRpcError(new Error("429: Too Many Requests")), "rate-limited");
     assert.equal(classifyRpcError(new Error("rate limit exceeded")), "rate-limited");
     assert.equal(classifyRpcError(new Error("connection reset")), "unknown");
@@ -111,6 +112,23 @@ describe("the fleet sweep", () => {
     });
     assert.ok(s.calls() > 2, "it narrowed rather than giving up");
     assert.equal(out.get(ACCT)!.complete, true, "and the coverage is still complete");
+    assert.equal(out.get(ACCT)!.totals.grossContributionsRaw, "10000000");
+  });
+
+  it("SPLITS Robinhood's block-span cap and keeps full coverage", async () => {
+    const s = spy((from, to) =>
+      to - from + 1n > 10_000_000n
+        ? new Error(`query spans ${to - from + 1n} blocks (${from} to ${to}), but only 10000000 are allowed for this request; narrow the block range`)
+        : from === 0n ? [DEPOSIT] : [],
+    );
+    const out = await scanFleetCapital(s.rpc, {
+      accounts: [ACCT],
+      usdgToken: USDG,
+      fromBlock: 0n,
+      toBlock: 24_000_000n,
+    });
+    assert.ok(s.calls() > 2, "the oversized range was split for both directions");
+    assert.equal(out.get(ACCT)!.complete, true, "every split range was read");
     assert.equal(out.get(ACCT)!.totals.grossContributionsRaw, "10000000");
   });
 

@@ -66,7 +66,8 @@ export type SweepRefusal = "too-many-results" | "rate-limited" | "unknown";
 
 export function classifyRpcError(e: unknown): SweepRefusal {
   const m = (e instanceof Error ? e.message : String(e)).toLowerCase();
-  if (m.includes("exceeds limit") || m.includes("too many results") || m.includes("query returned more than"))
+  if (m.includes("exceeds limit") || m.includes("too many results") || m.includes("query returned more than") ||
+      (m.includes("query spans") && m.includes("blocks") && m.includes("only") && m.includes("allowed for this request")))
     return "too-many-results";
   if (m.includes("429") || m.includes("too many requests") || m.includes("rate limit")) return "rate-limited";
   return "unknown";
