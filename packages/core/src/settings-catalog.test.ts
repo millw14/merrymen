@@ -114,6 +114,13 @@ describe("parseCatalogValue — the owner's words in, the stored value out", () 
     assert.equal(parse("tickSeconds", "5").ok, false, "15 seconds is the floor");
   });
 
+  it("holds the agent's name to the rule /name applies", () => {
+    assert.equal(value("agentName", "  Will   Scarlet "), "Will Scarlet");
+    assert.equal(parse("agentName", "007").ok, false, "at least one letter");
+    assert.equal(parse("agentName", "a name far longer than twenty-four").ok, false, "24 characters at most");
+    assert.equal(validCatalogValue("agentName", "<b>x</b>"), false);
+  });
+
   it("never takes a secret from a message", () => {
     const r = parse("llmApiKey", "sk-ant-api03-very-secret");
     assert.equal(r.ok, false);

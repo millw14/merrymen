@@ -54,6 +54,7 @@ import { SETTING_CONFIRM_TTL_SEC, executeCommand, type CommandDeps, type KillRes
 import {
   appliedManyText,
   appliedText,
+  chatMayApply,
   proposeManyChanges,
   proposeSettingChange,
   requestedChanges,
@@ -741,6 +742,18 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     };
 
     const statusCtx = () => deps.buildStatusContext();
+    // The /name command's write, shared with a name approved among several
+    // settings (applySettings), so both store and announce it the same way.
+    const applyName = (name: string) => {
+      const r = setSoulName(name);
+      if (r.ok) {
+        patchSettingsFile({ agentName: r.name });
+        rememberChatSetting(stateRef, { agentName: r.name }, now());
+        deps.onNameChange?.(r.name);
+        deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
+      }
+      return r;
+    };
     const cmdDeps: CommandDeps = {
       controlEnabled: cfg.telegramControlEnabled,
       hosted: isHostedMode(),
@@ -848,18 +861,30 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // memory for up to ten minutes — and one that no longer holds stops
         // the whole set, so a half-applied "be more careful" never happens.
         for (const { key, value } of changes) {
-          if (!specFor(key) || !validStoredSetting(key, value)) return "one of those changes is no longer valid — nothing changed. Ask me again.";
+          if (!chatMayApply(key, value)) return "one of those changes is no longer valid — nothing changed. Ask me again.";
         }
         const strategy = changes.find((c) => c.key === "strategy");
         if (strategy) {
           const r = deps.setStrategy(strategy.value as string);
           if (!r.ok) return `can't switch strategy: ${esc(r.reason ?? "unknown")} — nothing changed.`;
         }
-        const patch = Object.fromEntries(changes.map((c) => [c.key, c.value]));
-        patchSettingsFile(patch as never);
-        rememberChatSetting(stateRef, patch, now());
+        // The name goes through /name's own write (the soul holds it too); it
+        // passed the same rule just above, so it is not refused here.
+        let done = changes;
+        const name = changes.find((c) => c.key === "agentName");
+        if (name) {
+          const r = applyName(name.value as string);
+          if (!r.ok) return `can't take that name: ${esc(r.reason ?? "invalid")} — nothing changed.`;
+          done = changes.map((c) => (c.key === "agentName" ? { key: c.key, value: r.name } : c));
+        }
+        const rest = changes.filter((c) => c.key !== "agentName");
+        if (rest.length) {
+          const patch = Object.fromEntries(rest.map((c) => [c.key, c.value]));
+          patchSettingsFile(patch as never);
+          rememberChatSetting(stateRef, patch, now());
+        }
         deps.note("ok", `Telegram: ${changes.map((c) => `${c.key} → ${JSON.stringify(c.value)}`).join(", ")} (confirmed in chat ${msg.chatId})`);
-        return appliedManyText(changes, isHostedMode());
+        return appliedManyText(done, isHostedMode());
       },
       /**
        * BOTH FILES, FOR THE REASON /link ALREADY LEARNED.
@@ -946,16 +971,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
        * input would leave cfg.agentName !== getName() true for ever, which
        * is the every-tick rewrite this fix exists to stop.
        */
-      setName: (name) => {
-        const r = setSoulName(name);
-        if (r.ok) {
-          patchSettingsFile({ agentName: r.name });
-          rememberChatSetting(stateRef, { agentName: r.name }, now());
-          deps.onNameChange?.(r.name);
-          deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
-        }
-        return r;
-      },
+      setName: applyName,
       remember: (fact) => rememberOwnerFact(fact, now()),
       soulInfo: () => {
         const st = stateRef.get();

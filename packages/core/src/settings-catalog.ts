@@ -28,6 +28,7 @@
  * PURE. No I/O and no imports beyond core, so the worker, the web route and
  * the Settings page all read the same names, ranges and parsers.
  */
+import { AGENT_NAME_RE, normalizeAgentName } from "./agent-name";
 import { RISK_PROFILES, type RiskLevel } from "./risk-level";
 
 export type SettingRoute = "chat" | "dashboard" | "sealed" | "secret";
@@ -256,8 +257,11 @@ export function parseCatalogValue(entry: CatalogEntry, raw: string, ctx: { symbo
       return hit ? { ok: true, value: hit } : { ok: false, reason: `${entry.label} can be ${entry.values!.join(", ")}` };
     }
     case "text": {
-      const t = text.replace(/\s+/g, " ").slice(0, 40);
-      return /^[\p{L}\p{N} ._'-]{1,40}$/u.test(t) ? { ok: true, value: t } : { ok: false, reason: `that isn't a usable ${entry.label}` };
+      // The only text setting is the agent's name, held to the rule /name and
+      // the web route already apply (agent-name.ts): up to 24 characters, at
+      // least one letter, normalised the same way.
+      const t = normalizeAgentName(text);
+      return AGENT_NAME_RE.test(t) ? { ok: true, value: t } : { ok: false, reason: `that isn't a usable ${entry.label} — up to 24 letters, numbers, spaces, ' . or -, with at least one letter` };
     }
     case "symbols": {
       const list = text.toUpperCase().split(/[\s,;+&]+|\band\b/i).map((s) => s.trim()).filter(Boolean);
@@ -319,7 +323,7 @@ export function validCatalogValue(key: string, v: unknown): boolean {
     case "enum":
       return typeof v === "string" && s.values!.includes(v);
     case "text":
-      return typeof v === "string" && /^[\p{L}\p{N} ._'-]{1,40}$/u.test(v);
+      return typeof v === "string" && AGENT_NAME_RE.test(normalizeAgentName(v));
     case "symbols":
       return Array.isArray(v) && v.length >= 1 && v.length <= 10 && v.every((x) => typeof x === "string" && /^[A-Z0-9.]{1,12}$/.test(x));
     default:

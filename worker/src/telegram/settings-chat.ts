@@ -22,9 +22,11 @@ import {
   type SettingSpec,
 } from "./setting-spec";
 import {
+  AGENT_NAME_RE,
   buildProposal,
   catalogEntry,
   encodeProposalLink,
+  normalizeAgentName,
   proposalRoute,
   riskWarning,
   understandSettingsText,
@@ -283,11 +285,26 @@ export function requestedChanges(setting: string, value: string, changes?: strin
   return out;
 }
 
-/** Use the several-at-once path: more than one change, or a dashboard setting named by its real key. */
+/**
+ * Use the several-at-once path: more than one change, a dashboard setting
+ * named by its real key, or the agent's name — the single path has no spec for
+ * it (the /name command is its other way in).
+ */
 export function wantsManyPath(requested: readonly RequestedChange[]): boolean {
   if (requested.length > 1) return true;
   const only = requested[0];
-  return !!only && catalogEntry(only.key)?.route === "dashboard";
+  return !!only && (only.key === "agentName" || catalogEntry(only.key)?.route === "dashboard");
+}
+
+/**
+ * May the chat apply this value itself? The chat's own spec decides, exactly
+ * as for a single change; the name has no spec and is held to the rule /name
+ * already applies (soul.ts setName). Checked when the change is proposed and
+ * again when it is applied.
+ */
+export function chatMayApply(key: string, value: unknown): boolean {
+  if (key === "agentName") return typeof value === "string" && AGENT_NAME_RE.test(normalizeAgentName(value));
+  return validStoredSetting(key, value);
 }
 
 /**
@@ -316,7 +333,7 @@ export function proposeManyChanges(requested: readonly RequestedChange[], ctx: P
   const rows: ProposalRow[] = p.rows.map((r) => {
     if (r.route !== "chat") return r;
     if (r.key === "strategy" && ctx.hosted && !ctx.strategies.includes(String(r.after))) return { ...r, route: "dashboard" };
-    return validStoredSetting(r.key, r.after) ? r : { ...r, route: "dashboard" };
+    return chatMayApply(r.key, r.after) ? r : { ...r, route: "dashboard" };
   });
   const notes = p.refused.map((r) => `• ${esc(r.phrase)} — ${esc(r.reason)}`);
   const sign = p.refused.some((r) => r.route === "sealed");
@@ -354,7 +371,8 @@ export function proposeManyChanges(requested: readonly RequestedChange[], ctx: P
 export function appliedManyText(changes: readonly { key: string; value: unknown }[], hosted: boolean): string {
   const lines = changes.map(({ key, value }) => {
     const spec = specFor(key);
-    return `• ${esc(spec ? spec.label : key)}: <b>${esc(spec ? formatSettingValue(spec, value) : String(value))}</b>`;
+    const label = spec ? spec.label : (catalogEntry(key)?.label ?? key);
+    return `• ${esc(label)}: <b>${esc(spec ? formatSettingValue(spec, value) : String(value))}</b>`;
   });
   const when = hosted ? "They take effect within a minute." : "They take effect on my next check.";
   return [`✅ Done — ${changes.length === 1 ? "1 setting" : `${changes.length} settings`} changed:`, ...lines, when].join("\n");

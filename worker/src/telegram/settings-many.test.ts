@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 import { describe, it } from "node:test";
 
 import { decodeProposalLink, RISK_PROFILES } from "../../../packages/core/src/index";
-import { appliedManyText, proposeManyChanges, proposeSettingChange, requestedChanges, singleChange, wantsManyPath, type ProposalContext } from "./settings-chat";
+import { appliedManyText, chatMayApply, proposeManyChanges, proposeSettingChange, requestedChanges, singleChange, wantsManyPath, type ProposalContext } from "./settings-chat";
 
 const ctx: ProposalContext = {
   current: { buyPerTickUsdg: 25, strategistStopLossBps: 0, takeProfitBps: 0, liveTradingEnabled: false, assetMode: "all", classMaxPositions: 3, strategy: "trencher" },
@@ -129,6 +129,40 @@ describe("what is never approved here", () => {
   });
 });
 
+describe("the agent's name, among the changes or on its own", () => {
+  const named: ProposalContext = { ...ctx, current: { ...ctx.current, agentName: "Shogun" } };
+
+  it("is asked about with a ✅ — not answered with the list, and not sent to the dashboard", () => {
+    const alone = requestedChanges("unknown", "", "agentName=Will Scarlet");
+    assert.equal(wantsManyPath(alone), true, "the single path has no spec for the name");
+    const p = proposeManyChanges(alone, named);
+    assert.equal(p.kind, "ask-many");
+    if (p.kind !== "ask-many") return;
+    assert.deepEqual(p.changes, [{ key: "agentName", value: "Will Scarlet" }]);
+    assert.match(p.text, /agent name<\/b>: Shogun → <b>Will Scarlet/);
+
+    const both = proposeManyChanges(requestedChanges("unknown", "", "agentName=Marian; buyPerTickUsdg=$20"), named);
+    assert.equal(both.kind, "ask-many", "a name and a chat setting are both the chat's to make");
+  });
+
+  it("is held to the rule /name applies, so a name it refuses is refused here too", () => {
+    for (const bad of ["007", "a name far longer than twenty-four"]) {
+      const p = proposeManyChanges(requestedChanges("unknown", "", `agentName=${bad}`), named);
+      assert.equal(p.kind, "reply", bad);
+      if (p.kind !== "reply") return;
+      assert.equal(p.approve, undefined, `${bad} is not carried to the dashboard either`);
+      assert.match(p.text, /isn't a usable agent name/);
+    }
+    assert.equal(chatMayApply("agentName", "  José  "), true);
+    assert.equal(chatMayApply("agentName", "007"), false);
+    assert.equal(chatMayApply("agentName", 7), false);
+  });
+
+  it("reads back by its label once applied", () => {
+    assert.match(appliedManyText([{ key: "agentName", value: "Marian" }], true), /agent name: <b>Marian/);
+  });
+});
+
 describe("the done message", () => {
   it("lists what changed", () => {
     const t = appliedManyText([{ key: "buyPerTickUsdg", value: 20 }, { key: "strategistStopLossBps", value: 800 }], true);
@@ -147,10 +181,17 @@ describe("the service wires it", () => {
 
   it("applies several ALL OR NONE: every change is re-checked before anything is written", () => {
     const i = src.indexOf("applySettings: (changes) =>");
-    const body = src.slice(i, i + 1800);
-    const check = body.indexOf("validStoredSetting(key, value)");
-    assert.ok(check > 0 && check < body.indexOf("patchSettingsFile("), "validated before the write");
-    assert.ok(body.indexOf("deps.setStrategy(") < body.indexOf("patchSettingsFile("), "the strategy switch can still refuse before anything is written");
+    const body = src.slice(i, i + 2600);
+    const check = body.indexOf("chatMayApply(key, value)");
+    const strategy = body.indexOf("deps.setStrategy(");
+    const name = body.indexOf("applyName(");
+    const write = body.indexOf("patchSettingsFile(");
+    assert.ok(check > 0 && check < strategy, "validated before anything is written");
+    assert.ok(strategy < name && name < write, "the strategy switch, the one write that can still refuse, goes first");
     assert.match(body, /rememberChatSetting\(stateRef, patch, now\(\)\)/, "and hosted, it survives the reconcile");
+  });
+
+  it("a name approved among several is written exactly as /name writes it", () => {
+    assert.match(src, /setName: applyName,/);
   });
 });
