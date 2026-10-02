@@ -297,7 +297,7 @@ describe("the worker reconciles a rename whatever state the grant is in", () => 
     for (const [what, marker] of [
       ["kill", "if (!grant) {"],
       ["expiry", "grantExpired("],
-      ["unchanged short-circuit", "if (unchanged) return true;"],
+      ["unchanged short-circuit", "if (unchanged && !tradingSponsorNeedsRearm(cfg, active)) return true;"],
     ] as const) {
       const at = sync.indexOf(marker);
       assert.ok(at > 0, `sanity: the ${what} return still exists`);
