@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { tradeDigestLine, tradeLine } from "./notifier";
+import {
+  REFUSAL_KEYS_KEPT,
+  REFUSAL_REMIND_LATER_SEC,
+  REFUSAL_REMIND_SEC,
+  refusalCountLine,
+  refusalKey,
+  refusalVerdict,
+  sweepRefusals,
+  tradeDigestLine,
+  tradeLine,
+} from "./notifier";
+import { parseRefusalRepeats, type RefusalRepeat } from "./state";
 
 test("tradeDigestLine summarises only the non-empty status buckets", () => {
   const line = tradeDigestLine(
@@ -292,4 +303,111 @@ test("with no coin, a ping says what KIND of move it was — a transfer is never
   assert.match(tradeLine(transfer, null), /A transfer out of your account went through — \$20\.00/);
   const deposit = { ...transfer, kind: "vault-deposit" };
   assert.match(tradeLine(deposit, null), /move into your savings vault/);
+});
+
+/**
+ * TWO HUNDRED OF THE SAME LINE. Reported 2026-10-02: "⛽ a buy of LARP wasn't
+ * sent — its permission set is too wide to install together with this trade
+ * … (enable-too-wide)", once per tick. Repeats of one refusal are counted, and
+ * the count is what reaches the chat.
+ */
+const LARP = "0x00000000000000000000000000000000000000aa";
+const larpRefusal = {
+  id: 20, kind: "swap", amount_usdg: 20, status: "rejected", reject_rule: "enable-too-wide", tx_hash: null,
+  target: "0xRouter", sell_token: "0xUSDG", buy_token: LARP,
+};
+const rec = (over: Partial<RefusalRepeat> = {}): RefusalRepeat => ({
+  rule: "enable-too-wide", what: "buy of LARP", pushedAt: 1_000, lastAt: 1_000, held: 0, reminded: 0, ...over,
+});
+
+test("the same refusal re-sized next tick is still the same refusal", () => {
+  const k = refusalKey(larpRefusal);
+  assert.ok(k);
+  assert.equal(refusalKey({ ...larpRefusal, id: 21, amount_usdg: 19.4 }), k, "size is not part of it");
+  assert.equal(refusalKey({ ...larpRefusal, buy_token: LARP.replace("aa", "AA") }), k, "address case is not");
+  assert.notEqual(refusalKey({ ...larpRefusal, reject_rule: "no-exit" }), k, "another rule is another refusal");
+  assert.notEqual(refusalKey({ ...larpRefusal, buy_token: "0xbb" }), k, "another coin is another refusal");
+  assert.notEqual(
+    refusalKey({ ...larpRefusal, sell_token: LARP, buy_token: "0xUSDG" }),
+    k,
+    "selling it is not buying it",
+  );
+});
+
+test("only a refusal is ever counted — fills and reverts are each sent", () => {
+  for (const status of ["landed", "paper", "reverted", "submitted"]) {
+    assert.equal(refusalKey({ ...larpRefusal, status }), null, status);
+  }
+});
+
+test("the first row is sent; repeats are counted until the run has been quiet an hour", () => {
+  assert.equal(refusalVerdict(undefined, 1_000), "send");
+  assert.equal(refusalVerdict(rec(), 1_001), "count");
+  // A slow strategist's next window is still the same run: counted, not re-sent.
+  assert.equal(refusalVerdict(rec(), 1_000 + 40 * 60), "count");
+  assert.equal(refusalVerdict(rec({ held: 3 }), 1_000 + 5 * REFUSAL_REMIND_SEC), "count", "an unsaid count is never dropped");
+  assert.equal(refusalVerdict(rec(), 1_000 + REFUSAL_REMIND_SEC), "send", "nothing counted, an hour quiet: a new run");
+});
+
+test("a count is due an hour after the first line, then every six hours", () => {
+  const at = (now: number, r: RefusalRepeat) => sweepRefusals({ k: r }, now);
+
+  assert.deepEqual(at(1_000 + REFUSAL_REMIND_SEC - 1, rec({ held: 59 })).due, [], "not yet");
+  const first = at(1_000 + REFUSAL_REMIND_SEC, rec({ held: 59, lastAt: 1_000 + REFUSAL_REMIND_SEC - 30 }));
+  assert.deepEqual(first.due.map((r) => r.held), [59]);
+  assert.deepEqual(first.keep.k, {
+    ...rec({ lastAt: 1_000 + REFUSAL_REMIND_SEC - 30 }),
+    pushedAt: 1_000 + REFUSAL_REMIND_SEC,
+    reminded: 1,
+  }, "reset, and the next one waits longer");
+
+  const later = rec({ held: 7, reminded: 1, lastAt: 2_000 });
+  assert.deepEqual(at(1_000 + REFUSAL_REMIND_SEC, later).due, [], "six hours after the last count, not one");
+  assert.deepEqual(at(1_000 + REFUSAL_REMIND_LATER_SEC, later).due.map((r) => r.held), [7]);
+});
+
+test("a record with nothing to say is forgotten after a quiet hour; one with a count never is", () => {
+  const now = 1_000 + 10 * REFUSAL_REMIND_SEC;
+  const { keep } = sweepRefusals(
+    {
+      fresh: rec({ lastAt: now - 60, pushedAt: now - 60 }),
+      quiet: rec({ lastAt: now - REFUSAL_REMIND_SEC }),
+      owed: rec({ held: 2, reminded: 1, pushedAt: now - 60 }),
+    },
+    now,
+  );
+  assert.deepEqual(Object.keys(keep).sort(), ["fresh", "owed"]);
+});
+
+test("past the cap the oldest count is said, not lost", () => {
+  const recs: Record<string, RefusalRepeat> = {};
+  for (let i = 0; i <= REFUSAL_KEYS_KEPT; i += 1) recs[`k${i}`] = rec({ held: 1, lastAt: 10_000 + i, pushedAt: 10_000 });
+  const { keep, due } = sweepRefusals(recs, 10_000 + REFUSAL_KEYS_KEPT + 1);
+  assert.equal(Object.keys(keep).length, REFUSAL_KEYS_KEPT);
+  assert.ok(!("k0" in keep), "the oldest goes");
+  assert.equal(due.length, 1, "and its count is said");
+});
+
+test("the count line says how many, over how long, how recently — and how to fix it", () => {
+  const now = 1_000 + REFUSAL_REMIND_SEC;
+  const line = refusalCountLine(rec({ held: 59, lastAt: now - 20 }), now);
+  assert.ok(
+    line.startsWith("↻ the buy of LARP was refused 59 more times in the last 60 min (enable-too-wide), the last just now. "),
+    line,
+  );
+  assert.match(line, /Re-sign at \/grant with fewer custom tokens or capabilities/);
+  const stopped = refusalCountLine(rec({ held: 1, lastAt: 1_000 + 5 * 60 }), 1_000 + REFUSAL_REMIND_LATER_SEC);
+  assert.match(stopped, /refused 1 more time in the last 6 hours \(enable-too-wide\), the last 6 hours ago\./);
+  assert.doesNotMatch(
+    refusalCountLine(rec({ held: 2, rule: "gas-absurd", what: "buy of ORBIO" }), now),
+    /\/grant/,
+    "no fix is invented for a rule that has none",
+  );
+});
+
+test("a counted record read back from a file keeps only well-formed entries", () => {
+  const good = rec({ held: 4 });
+  assert.deepEqual(parseRefusalRepeats({ a: good, b: { ...good, held: -1 }, c: { ...good, what: 7 }, d: null }), { a: good });
+  assert.deepEqual(parseRefusalRepeats(undefined), {});
+  assert.deepEqual(parseRefusalRepeats([good]), {});
 });

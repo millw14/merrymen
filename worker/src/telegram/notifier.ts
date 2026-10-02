@@ -45,7 +45,7 @@ import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
 import { ENERGY_BUY_KIND, ENERGY_LABEL, dollars, isEnergyRow } from "./trade-rows";
-import { tokenTagOf, type StateRef, type Watcher } from "./state";
+import { tokenTagOf, type RefusalRepeat, type StateRef, type Watcher } from "./state";
 
 /**
  * The energy fields (`energy`, `energyAccount`, `energyChainId`,
@@ -412,7 +412,7 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     if (isGasRefusal(t.reject_rule)) {
       const label = rejectRuleLabel(t.reject_rule);
       const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
-      const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+      const thing = subjectOf(t, coin);
       return (
         `⛽ a ${thing} wasn't sent — ${esc(label ?? "its network fee could not be justified")}. Nothing was spent.` +
         `${fix ? ` ${esc(fix)}` : ""}` +
@@ -438,7 +438,7 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     const label = rejectRuleLabel(t.reject_rule);
     const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
     const slug = t.reject_rule ?? "policy";
-    const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+    const thing = subjectOf(t, coin);
     if (!label) {
       return `🛡 the wall turned back a ${thing} (${esc(slug)}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
     }
@@ -460,7 +460,7 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
       ? ` — ${esc(revertLabel)} (${esc(t.reject_rule)})`
       : ` — ${esc(t.reject_rule)}`
     : "";
-  const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+  const thing = subjectOf(t, coin);
   return `⚠️ a ${thing} for ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
 }
 
@@ -491,6 +491,112 @@ export function tradeDigestLine(rows: TradeAgg[], periodMin: number): string {
   if (by.reverted) parts.push(`⚠️ ${by.reverted.c}× didn't go through`);
   const label = periodLabel(periodMin);
   return `📊 <b>last ${label}</b> — ${parts.join(" · ") || "quiet"}\n<i>you're on a ${label} summary; /status or /trades for detail.</i>`;
+}
+
+/**
+ * ONE REFUSAL IS ONE LINE, THEN A COUNT — NOT ONE PUSH PER TICK.
+ *
+ * Reported 2026-10-02: an owner's bot sent "⛽ a buy of LARP wasn't sent — its
+ * permission set is too wide to install together with this trade … 20.00 USDG
+ * stayed home (enable-too-wide)" more than two hundred times. The strategist
+ * re-proposed the same buy every tick, the executor refused it before signing
+ * every tick, and every refused row became its own push. The remedy was
+ * already held to once per rule; the line it rode on was not.
+ *
+ * The line used to go out every time on the grounds that a suppressed refusal
+ * is a lie about how often it is happening. Counting keeps that honest without
+ * the flood: the first row of a refusal is sent in full, repeats of the SAME
+ * refusal are counted, and the count goes out as one line an hour after that
+ * (then every six hours) with the fix attached. Every refused attempt is still
+ * accounted for in the chat, and /trades still lists each row.
+ *
+ * The count is said on a clock, never because the repeats seem to have stopped.
+ * "Stopped" can only be guessed from a gap, and a strategist on a slow window
+ * would be told the run was over, then sent a fresh first line, once per
+ * window: more pushes than before, not fewer.
+ *
+ * Only `rejected` rows are counted. Nothing was signed for those. A `reverted`
+ * row can mean an operation reached the chain, so each one is still sent.
+ */
+export const REFUSAL_REMIND_SEC = 3600;
+export const REFUSAL_REMIND_LATER_SEC = 6 * 3600;
+/** Distinct refusals tracked at once. Past this the oldest is said and dropped, never silently lost. */
+export const REFUSAL_KEYS_KEPT = 32;
+
+/**
+ * Which refusal a row is: the same rule turning back the same move on the same
+ * coin. Null for a row that is not a refusal. The size is left out on purpose —
+ * the strategist re-sizes a leg from tick to tick, and that is still the same
+ * buy being refused for the same reason.
+ */
+export function refusalKey(t: TradeRowLite): string | null {
+  if (t.status !== "rejected") return null;
+  const a = (v: string | null | undefined) => (v ?? "").toLowerCase();
+  return [t.reject_rule ?? "policy", t.kind, a(t.target), a(t.sell_token), a(t.buy_token)].join("|");
+}
+
+/** What a row moved, for a sentence: "buy of LARP", or the kind when there is no coin. Escaped. */
+function subjectOf(t: TradeRowLite, coin: TradeCoin | null): string {
+  return coin?.label && coin.side ? `${coin.side} of ${esc(coin.label)}` : esc(t.kind);
+}
+
+/**
+ * Send this refusal in full, or count it. `prev` is what is held for its key.
+ * A record with nothing counted and no repeat for an hour is a run that ended;
+ * the next row of it starts a new one.
+ */
+export function refusalVerdict(prev: RefusalRepeat | undefined, now: number): "send" | "count" {
+  if (!prev) return "send";
+  return prev.held === 0 && now - prev.lastAt >= REFUSAL_REMIND_SEC ? "send" : "count";
+}
+
+/**
+ * Which counts are due, and the record to keep. A count is due an hour after
+ * the run's first line, then every six hours, for as long as there is one to
+ * say. A record with nothing counted and nothing new for an hour is dropped.
+ * `due` holds the records as they were, for the line; `keep` has them reset.
+ */
+export function sweepRefusals(
+  recs: Record<string, RefusalRepeat>,
+  now: number,
+): { keep: Record<string, RefusalRepeat>; due: RefusalRepeat[] } {
+  const live: [string, RefusalRepeat][] = [];
+  const due: RefusalRepeat[] = [];
+  for (const [key, r] of Object.entries(recs)) {
+    const gap = r.reminded === 0 ? REFUSAL_REMIND_SEC : REFUSAL_REMIND_LATER_SEC;
+    if (r.held > 0 && now - r.pushedAt >= gap) {
+      due.push(r);
+      live.push([key, { ...r, held: 0, pushedAt: now, reminded: r.reminded + 1 }]);
+    } else if (r.held > 0 || now - r.lastAt < REFUSAL_REMIND_SEC) {
+      live.push([key, r]);
+    }
+  }
+  live.sort((x, y) => y[1].lastAt - x[1].lastAt);
+  for (const [, r] of live.slice(REFUSAL_KEYS_KEPT)) if (r.held > 0) due.push(r);
+  return { keep: Object.fromEntries(live.slice(0, REFUSAL_KEYS_KEPT)), due };
+}
+
+function spanLabel(sec: number): string {
+  const min = Math.max(1, Math.round(sec / 60));
+  return min < 120 ? `${min} min` : `${Math.round(min / 60)} hours`;
+}
+
+/** Under the first line about a refusal: what the owner will hear if it repeats. */
+export const REFUSAL_FIRST_NOTE =
+  "<i>If this keeps happening, repeats are counted rather than sent: one line with the count after an hour, then every six hours.</i>";
+
+/**
+ * The count, with the fix. The fix rides on every count, not once per rule:
+ * the count is already rate-limited, and the first line may have scrolled away.
+ */
+export function refusalCountLine(r: RefusalRepeat, now: number): string {
+  const n = `${r.held} more time${r.held === 1 ? "" : "s"}`;
+  const last = now - r.lastAt < 60 ? "just now" : `${spanLabel(now - r.lastAt)} ago`;
+  const fix = rejectRuleRemedy(r.rule);
+  return (
+    `↻ the ${r.what} was refused ${n} in the last ${spanLabel(now - r.pushedAt)} (${esc(r.rule)}), the last ${last}.` +
+    `${fix ? ` ${esc(fix)}` : ""}`
+  );
 }
 
 export interface NotifierHandle {
@@ -552,15 +658,27 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             )
             .all(state.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
           for (const t of rows) {
-            // THE REMEDY ON CHANGE, THE REFUSAL EVERY TIME. A strategist that
-            // keeps proposing the same uncovered leg produces one rejected row
-            // per tick; the owner needs to see that it is still happening, and
-            // needs to be told how to fix it once.
+            // THE REMEDY ON CHANGE, THE REFUSAL ONCE AND THEN COUNTED. A
+            // strategist that keeps proposing the same uncovered leg produces
+            // one rejected row per tick; the owner needs to know it is still
+            // happening and how often, and needs to be told how to fix it once.
+            // See REFUSAL_REMIND_SEC.
             const prev = deps.stateRef.get();
+            const key = refusalKey(t);
+            const repeat = key ? prev.refusalRepeats?.[key] : undefined;
+            if (key && repeat && refusalVerdict(repeat, now()) === "count") {
+              deps.stateRef.set({
+                ...prev,
+                lastNotifiedTradeId: t.id,
+                refusalRepeats: { ...prev.refusalRepeats, [key]: { ...repeat, held: repeat.held + 1, lastAt: now() } },
+              });
+              continue;
+            }
             const rule = t.status === "rejected" ? t.reject_rule : null;
             const withRemedy = rule !== null && rule !== prev.lastRemedyRule;
             const coin = await coinFor(db, t, agentId, cfg);
-            const receipt = tradeLine(t, explorer, withRemedy, coin);
+            const line = tradeLine(t, explorer, withRemedy, coin);
+            const receipt = key ? `${line}\n${REFUSAL_FIRST_NOTE}` : line;
             /**
              * AND THEN, FOR A TRADE THAT ACTUALLY HAPPENED, WHY.
              *
@@ -592,10 +710,26 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // P&L. After the receipt on purpose: the text is the record and
             // goes out whatever happens to the image.
             await sendCardFor(t, token, chatId, false, coin?.label);
+            const after = deps.stateRef.get();
             deps.stateRef.set({
-              ...deps.stateRef.get(),
+              ...after,
               lastNotifiedTradeId: t.id,
               ...(withRemedy ? { lastRemedyRule: rule } : {}),
+              ...(key
+                ? {
+                    refusalRepeats: {
+                      ...after.refusalRepeats,
+                      [key]: {
+                        rule: t.reject_rule ?? "policy",
+                        what: subjectOf(t, coin),
+                        pushedAt: now(),
+                        lastAt: now(),
+                        held: 0,
+                        reminded: 0,
+                      },
+                    },
+                  }
+                : {}),
             });
           }
         } else {
@@ -635,6 +769,17 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       } finally {
         db.close();
       }
+    }
+
+    // ── counted refusals whose count is due ─────────────────────────────────
+    // After this pass's rows, so a backlog read after a restart lands in the
+    // count it belongs to. In either mode: counted rows are already behind the
+    // cursor, so no digest will count them. See REFUSAL_REMIND_SEC.
+    const counted = deps.stateRef.get().refusalRepeats ?? {};
+    const swept = sweepRefusals(counted, now());
+    for (const r of swept.due) await sendMessage({ token }, chatId, refusalCountLine(r, now()));
+    if (swept.due.length > 0 || Object.keys(swept.keep).length !== Object.keys(counted).length) {
+      deps.stateRef.set({ ...deps.stateRef.get(), refusalRepeats: swept.keep });
     }
 
     // ── condition alerts (six-hour reminders) ──────────────────────────────
