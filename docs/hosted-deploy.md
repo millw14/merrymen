@@ -31,7 +31,7 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 - **Bundler** — `MERRYMEN_BUNDLER_API_KEY` (a **Pimlico** key). The worker builds the URL per chain as `https://api.pimlico.io/v2/<chainId>/rpc?apikey=…`; Pimlico supports Robinhood testnet **46630** (listed as `robinhood-testnet`). Get a key at <https://dashboard.pimlico.io> (free tier is fine for the slice). Alternatively set `MERRYMEN_BUNDLER_URL` to a full 4337 RPC from any bundler that supports 46630.
 - **RPC** — `MERRYMEN_RPC_TESTNET`. The public endpoint is **`https://rpc.testnet.chain.robinhood.com`** (already the chain's built-in default in `packages/core/src/chain.ts`; set it explicitly, or point at a private endpoint for reliability). `MERRYMEN_RPC_MAINNET` = `https://rpc.mainnet.chain.robinhood.com` for 4663 later.
 - **LLM** (optional, for the strategist) — `GROQ_API_KEY` (free tier) or `ANTHROPIC_API_KEY`.
-- **Gas** — set `MERRYMEN_SPONSOR_GAS=1` on both the **orchestrator** (trading operations) and **web** (owner revocations, network migration, withdrawals and recovery). Web also needs `MERRYMEN_BUNDLER_API_KEY` and a `MERRYMEN_SPONSORSHIP_POLICY_ID` (`sp_…`). Configure separate Pimlico policies for trading and owner recovery on both Robinhood networks where you offer coverage, with per-sender and monthly spending caps. Separate policies keep trading from exhausting the owner recovery allocation.
+- **Gas** — set `MERRYMEN_SPONSOR_GAS=1` on both the **orchestrator** (trading operations) and **web** (owner revocations, network migration, withdrawals and recovery). Web also needs `MERRYMEN_BUNDLER_API_KEY` and a `MERRYMEN_SPONSORSHIP_POLICY_ID` (`sp_…`). Configure separate Pimlico policies for trading and owner recovery with chain allowlists and separate global monthly spending caps on both Robinhood networks where you offer coverage. Separate policies keep trading from exhausting the owner recovery allocation.
   - [Pimlico manages the paymaster and bills usage](https://docs.pimlico.io/guides/pricing); no paymaster top-up is required. Mainnet gas has a 10% surcharge, so leave headroom when setting a total gas budget. API-credit fees are separate and are not capped by sponsorship policies. Keep the billing account in good standing.
   - Trading coverage requires the house key and pinned trading policy. Missing configuration blocks live trading; paper practice and read-only access remain available without a live executor. A refused startup probe does not remove the sponsor: each actual operation must still obtain a quote, and refusal cannot switch the worker to spending the owner's ETH. Provision both policies before deploying or enabling this coverage.
   - Owner coverage is restricted to an owner-proven canonical account in a previously enrolled Merrymen wallet family, including stopped wallets and the destination network during migration. Paying for Pimlico alone does not attach a paymaster to every operation.
@@ -56,7 +56,7 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 | `GROQ_API_KEY` *(or `ANTHROPIC_API_KEY`)* | **the dashboard chat's brain.** Not optional if you want the chat to think — see below |
 | `MERRYMEN_SPONSOR_GAS` | `1` for owner-action gas coverage |
 | `MERRYMEN_BUNDLER_API_KEY` | House Pimlico key, held only on the server |
-| `MERRYMEN_SPONSORSHIP_POLICY_ID` | Required owner sponsorship policy (`sp_…`), with chain, per-sender and monthly caps |
+| `MERRYMEN_SPONSORSHIP_POLICY_ID` | Required owner sponsorship policy (`sp_…`), with a chain allowlist and global monthly spending cap |
 
 > **The chat needs a key on the WEB service, not just the orchestrator.**
 > `/api/chat` resolves a model from the web container's own environment, so
@@ -563,7 +563,7 @@ trading. Disconnecting app access leaves the owner's worker and grant in place.
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.
 - Open the dashboard, **sign in** (SIWE — your wallet signs a free challenge), create/**sign a testnet grant** (session-key-only; the owner key never leaves your browser).
 - The orchestrator logs `... spawned (pid …)` for your tenant within ~15s and writes `children/<you>/grant.json` (session key only) + `settings.json`.
-- **Fund** the smart account on testnet (ETH for gas). The child arms and trades on 46630.
+- Verify the web owner-action coverage check and the worker's trading coverage heartbeat after both policies are configured. For house-sponsored testnet trading, fund the smart account with USDG; the owner does not need ETH for gas. An explicitly self-paid deployment needs ETH as well. Missing house coverage must leave live trading unarmed.
 
 ## 7. Known limits of the slice (closed in Phase B)
 - **The dashboard feed now reads the shared Postgres** — the ledger→Postgres port (B2) has landed, so `/api/feed` and `/api/scoreboard` show a child's live numbers in hosted mode. (`pg` is a runtime-only dependency the `Dockerfile` installs into the image; it is deliberately absent from `package.json` so self-hosted stays lean.)
