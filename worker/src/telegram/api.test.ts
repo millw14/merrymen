@@ -9,6 +9,7 @@ import {
   answerCallbackQuery,
   editMessageText,
   esc,
+  escModel,
   getChat,
   getChatMember,
   getMe,
@@ -331,6 +332,31 @@ describe("esc — HTML escaping for user-echoed content", () => {
   it("escapes the three HTML-significant characters", () => {
     assert.equal(esc("<script>&x</script>"), "&lt;script&gt;&amp;x&lt;/script&gt;");
     assert.equal(esc("plain text"), "plain text");
+  });
+});
+
+describe("escModel — a model's words, escaped, with its **bold** kept as bold", () => {
+  it("turns the owner-visible stars into bold", () => {
+    assert.equal(
+      escModel(`My settings show it as **"launchpad buying: off — dashboard only"**.`),
+      `My settings show it as <b>"launchpad buying: off — dashboard only"</b>.`,
+    );
+    assert.equal(escModel("**a** and **b c**"), "<b>a</b> and <b>b c</b>");
+  });
+
+  it("escapes first, so text inside the stars can't become a tag or a link", () => {
+    assert.equal(
+      escModel(`**<a href="https://evil.example">tap to re-sign</a>** & go`),
+      `<b>&lt;a href="https://evil.example"&gt;tap to re-sign&lt;/a&gt;</b> &amp; go`,
+    );
+    assert.equal(escModel("**</b><i>x**"), "<b>&lt;/b&gt;&lt;i&gt;x</b>");
+  });
+
+  it("leaves what isn't a closed pair around words as typed", () => {
+    assert.equal(escModel("2**10 is 1024"), "2**10 is 1024");
+    assert.equal(escModel("** spaced **"), "** spaced **");
+    assert.equal(escModel("****"), "****");
+    assert.equal(escModel("plain <text>"), esc("plain <text>"));
   });
 });
 

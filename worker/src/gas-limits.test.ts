@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   FIRST_ENABLE_GAS_BOUNDS,
   GAS_BOUNDS,
+  TRENCHER_DEPLOY_GAS_BOUNDS,
   boundGas,
   checkPrefund,
   totalGas,
@@ -520,7 +521,13 @@ test("THE CALL SITE: the ceiling is keyed on the OPERATION, and the deploy state
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   assert.doesNotMatch(code, /!accountLive/, "the deploy state must not gate the ceiling");
   assert.doesNotMatch(code, /accountLive &&|&& accountLive/, "nor in any conjunction");
-  assert.doesNotMatch(code, /DEPLOY_GAS_BOUNDS/, "the undeployed-only ceiling is gone");
+  // The ACCOUNT-deployment ceiling, keyed on the account having no code. Word-
+  // bounded so it does not match TRENCHER_DEPLOY_GAS_BOUNDS, which is a
+  // different thing: keyed on the batch decoding as the vault's own
+  // deploy(self), never on whether the account is deployed (asserted below).
+  assert.doesNotMatch(code, /\bDEPLOY_GAS_BOUNDS\b/, "the undeployed-only ceiling is gone");
+  assert.match(code, /const trencherDeploy = !firstEnable && isTrencherVaultDeploy\(calls, hooks\?\.trencherDeployFactory, account\.address\)/,
+    "the vault deployment's ceiling is keyed on the decoded batch and the caller's factory");
   assert.match(src, /!accountLive && isFirstEnable\(nonce\)/, "and the old gate is on the record");
 
   // THE STRONG FORM: every READ of accountLive must be inside the log line.
@@ -755,4 +762,51 @@ test("A ZERO PAYMASTER FIELD IS AN ANSWER, NOT A MISSING ESTIMATE", () => {
   const s = boundGas(sneaky, sneaky, FIRST_ENABLE_GAS_BOUNDS);
   assert.equal(s.ok, false);
   assert.equal(s.ok === false ? s.rule : null, "gas-paymaster-unexpected");
+});
+
+// ── THE TRENCHER VAULT'S ONE-TIME DEPLOYMENT ────────────────────────────────
+
+test("the vault deployment has its own measured ceiling, and the ordinary one does not move", () => {
+  // Live, 2026-10-01, agent 0x4b6dcd, key already installed: deploy + approve +
+  // buy estimated call 2128793 + verif 289003 + preVerif 56602, twice. Signed
+  // it is 4,736,048, refused every tick against the ordinary 3,000,000 — so
+  // the vault was never deployed and no Trencher trade could ever happen.
+  const live: UserOpGas = {
+    ...est(2_128_793n, 289_003n, 56_602n),
+    paymasterVerificationGasLimit: 30_000n,
+    paymasterPostOpGasLimit: 16_457n,
+  };
+  const ordinary = boundGas(live, live, GAS_BOUNDS, true);
+  assert.equal(ordinary.ok, false, "the ordinary ceiling still refuses it — it is not widened");
+  assert.equal(GAS_BOUNDS.absoluteMax, 3_000_000n);
+
+  const deploy = boundGas(live, live, TRENCHER_DEPLOY_GAS_BOUNDS, true);
+  assert.equal(deploy.ok, true, deploy.ok === false ? deploy.detail : "");
+  assert.ok(deploy.ok);
+  // Signed exactly as it always would have been: the call keeps its full 2x.
+  assert.equal(deploy.gas.callGasLimit, 4_257_586n);
+  assert.equal(deploy.total, 4_736_048n, "the exact figure production refused");
+
+  // And it is still a ceiling, on what is SIGNED.
+  const fat = est(3_000_000n, 300_000n, 60_000n);
+  assert.equal(boundGas(fat, fat, TRENCHER_DEPLOY_GAS_BOUNDS).ok, false, "6.45M signed is past 6M");
+});
+
+test("the deployment ceiling is used only when the batch really is deploy(self) on the named factory", async () => {
+  const { isTrencherVaultDeploy } = await import("./executor");
+  const { encodeFunctionData } = await import("viem");
+  const { TRENCHER_FACTORY_ABI } = await import("../../packages/core/src/index");
+  const SELF = "0x1111111111111111111111111111111111111111";
+  const OTHER = "0x2222222222222222222222222222222222222222";
+  const FACTORY = "0x3333333333333333333333333333333333333333";
+  const deployData = (owner: string) =>
+    encodeFunctionData({ abi: TRENCHER_FACTORY_ABI, functionName: "deploy", args: [owner as `0x${string}`] });
+  const rest = [{ to: OTHER, data: "0x" }, { to: OTHER, data: "0x" }];
+
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(SELF) }, ...rest], FACTORY, SELF), true);
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(SELF) }, ...rest], undefined, SELF), false, "no factory named, no allowance");
+  assert.equal(isTrencherVaultDeploy([{ to: OTHER, data: deployData(SELF) }, ...rest], FACTORY, SELF), false, "a different target");
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(OTHER) }, ...rest], FACTORY, SELF), false, "a vault for somebody else");
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: "0xdeadbeef" }, ...rest], FACTORY, SELF), false, "not a deploy");
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(SELF) }, ...rest, ...rest], FACTORY, SELF), false, "a longer batch than a deploy + approve + buy");
 });

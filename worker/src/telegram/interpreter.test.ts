@@ -709,3 +709,44 @@ describe("settings by text — the classifier names, the code decides", () => {
     assert.match(src, /"use the brain"/);
   });
 });
+
+// ── several settings in one message ─────────────────────────────────────────
+
+describe("several settings at once", () => {
+  it("/set takes key=value pairs", () => {
+    assert.deepEqual(parseSlash("/set buyPerTickUsdg=20; takeProfitBps=25%"), {
+      kind: "set",
+      setting: "unknown",
+      value: "",
+      changes: "buyPerTickUsdg=20; takeProfitBps=25%",
+    });
+  });
+
+  it("the model's changes are carried, bounded, and only on kind=set", () => {
+    const c = coerceLlmCommand({ kind: "set", setting: "unknown", value: "", changes: "buyPerTickUsdg=$20; strategistStopLossBps=8%" });
+    assert.deepEqual(c, { kind: "set", setting: "unknown", value: "", changes: "buyPerTickUsdg=$20; strategistStopLossBps=8%" });
+    const long = coerceLlmCommand({ kind: "set", setting: "unknown", value: "", changes: "x".repeat(5_000) }) as { changes?: string };
+    assert.equal(long.changes?.length, 600);
+    assert.equal("changes" in coerceLlmCommand({ kind: "status", changes: "liveTradingEnabled=on" }), false);
+  });
+
+  it("is handed to the proposer, which parks one action for all of them", async () => {
+    let seen: unknown[] = [];
+    const d = deps({ proposeSetting: (s, v, c) => { seen = [s, v, c]; return "PROPOSED"; } });
+    assert.equal(await executeCommand({ kind: "set", setting: "unknown", value: "", changes: "a=1; b=2" }, d), "PROPOSED");
+    assert.deepEqual(seen, ["unknown", "", "a=1; b=2"]);
+  });
+
+  it("confirming applies them together, and re-checks the control switch first", async () => {
+    const applied: unknown[] = [];
+    const parked = { kind: "settings" as const, changes: [{ key: "buyPerTickUsdg", value: 20 }], expiresAt: Number.MAX_SAFE_INTEGER };
+    const on = deps({ applySettings: (c) => { applied.push(c); return "APPLIED"; } });
+    on.setPending(parked);
+    assert.equal(await executeCommand({ kind: "confirm" }, on), "APPLIED");
+    assert.deepEqual(applied, [parked.changes]);
+
+    const off = deps({ controlEnabled: false, applySettings: () => { throw new Error("must not apply"); } });
+    off.setPending(parked);
+    assert.match(await executeCommand({ kind: "confirm" }, off), /control was turned off/);
+  });
+});

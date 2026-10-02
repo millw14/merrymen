@@ -59,6 +59,13 @@ describe("the five tabs", () => {
     assert.match(feedArm, /<LogoMark/, "the mark belongs to the centre tab");
   });
 
+  it("shows every tab name instead of asking readers to decode icons", () => {
+    const app = at("./App.tsx");
+    const bar = app.slice(app.indexOf('<nav className="tabbar"'), app.indexOf("</nav>", app.indexOf('<nav className="tabbar"')));
+    assert.match(bar, /className="tab-label"/);
+    assert.match(bar, /\{t\.label\}/);
+  });
+
   it("and the desktop BRAND does not borrow it from the bar", () => {
     // The silent one. The wordmark rendered `<TabIcon id="agent"/>`, which
     // happened to be the logo — so moving the logo to feed would have turned

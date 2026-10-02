@@ -186,11 +186,31 @@ That re-sign-per-token loop is structural, not an inconvenience to engineer
 away: the wall cannot widen itself, which is the product's core promise. Two
 minutes per token is what "the chain enforces the wall" costs.
 
+## What fits beside it
+
+Every capability you turn on adds to the permission your first operation has to
+install, and there is one ceiling for all of it (14M gas, `first-enable-gas.ts`).
+Signatures made since `scoped-spenders` name each contract only on the tokens it
+actually pulls, so the v4 adapter now fits beside the rest:
+
+| Your permission | Custom tokens that fit |
+|---|---|
+| class vault + Autonomous Trencher + v4 adapter | up to 4 |
+| class vault + Autonomous Trencher | up to 6 |
+
+If you were told to choose between the Trencher, v4 and your tokens, renew at
+`/grant` once: the same settings now seal a narrower permission set. If the
+signer still refuses, it says how many tokens fit with what you have on.
+
+The v4 adapter trades USDG against your own coins. Stocks always trade on
+Uniswap v3, where every tradeable stock has depth.
+
 ## What the wall now guarantees on v4
 
 - Output of every adapter swap lands in YOUR account — not a policy
   condition, a fact of the bytecode.
-- Both legs of every adapter swap must be assets you named at signing.
+- Both legs of every adapter swap must be assets you named at signing — USDG
+  and your own coins, never a stock, so no v4 pool can be handed your shares.
 - No Permit2, no UniversalRouter, no standing approvals: each trade approves
   exactly its own input amount, consumed by the swap.
 - A hooked pool that won't quote the exit is never entered; an empty fill

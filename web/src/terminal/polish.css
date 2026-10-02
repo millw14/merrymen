@@ -8,14 +8,30 @@
   .terminal-host .app > .tabbar {
     display: grid;
     z-index: 20;
-    width: min(300px, calc(100% - 40px));
-    height: 52px;
-    padding: 3px;
+    width: min(360px, calc(100% - 24px));
+    height: 64px;
+    padding: 4px;
     box-sizing: border-box;
     bottom: max(10px, env(safe-area-inset-bottom));
   }
-  .terminal-host .tabbar .tab { min-height: 44px; padding: 0; gap: 0; }
-  .terminal-host .app > .body { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
+  .terminal-host .tabbar .tab {
+    grid-template-rows: 24px auto;
+    align-content: center;
+    min-height: 56px;
+    padding: 4px 2px;
+    gap: 3px;
+  }
+  .terminal-host .tabbar .tab-label {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .terminal-host .app > .body { padding-bottom: calc(116px + env(safe-area-inset-bottom)); }
 }
 .terminal-host .tabbar .tab:focus-visible,
 .terminal-host .feed-views button:focus-visible,

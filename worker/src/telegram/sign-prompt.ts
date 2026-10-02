@@ -166,8 +166,9 @@ export function signPromptText(reason: SignReason, i: SignInputs, name: string):
     case "grant-too-wide":
       return (
         `✍️ <b>${escHtml(who)} can't place its first trade.</b>\n` +
-        `The permission you signed covers too many tokens and exchanges to switch on. ` +
-        `Review fewer tokens or exchanges and renew. Revoking old permissions requires network fees.`
+        `The permission you signed is too large to switch on. Renew it with the button below — signing on the web seals a narrower ` +
+        `permission set that usually fits; if it is still too large, drop a token or an exchange. ` +
+        `Revoking old permissions requires network fees.`
       );
     case "expiring":
       return (

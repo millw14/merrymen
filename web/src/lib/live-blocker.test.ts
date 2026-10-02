@@ -214,6 +214,17 @@ describe("the owner is told on the screen they actually open", () => {
     assert.match(a.say, /funds sent here will sit unused/);
   });
 
+  it("WRONG-CHAIN NEVER PROMISES THE STUCK FUNDS BACK", () => {
+    // Reported from X, Oct 2026: an owner funded $5 on ETH mainnet instead of
+    // Robinhood Chain. A re-sign routes future deposits; it moves nothing
+    // already sent elsewhere — and the sentence must say so, or it reads as
+    // the fix for money it cannot touch.
+    const a = blockerAdvice("wrong-chain");
+    assert.ok(a);
+    assert.match(a.say, /not recovered by that new grant/);
+    assert.match(a.say, /routes future deposits only/);
+  });
+
   it("the shell hands it the child's verdict, not one it worked out itself", () => {
     const app = at("../terminal/App.tsx");
     assert.match(app, /liveBlocker=\{account\?\.status\.liveBlocker\}/);
@@ -313,5 +324,31 @@ describe("the chat is not instructed to deny the switch it now has", () => {
     assert.equal(state({ values: { liveTradingEnabled: true }, defaults: { liveTradingEnabled: false } }).liveTradingEnabled, true);
     assert.equal(state({ values: {}, defaults: { liveTradingEnabled: false } }).liveTradingEnabled, false);
     assert.equal(state(null).liveTradingEnabled, null, "an unread switch is not an off one");
+  });
+});
+
+describe("the funding screens warn the chain, not just name it", () => {
+  it("THE DEPOSIT PANEL SAYS STUCK, NEXT TO THE ADDRESS", () => {
+    // Reported from X, Oct 2026: $5 funded on ETH mainnet to an agent address.
+    // The panel named the chain once in small print beside a big copy button.
+    // Naming is not warning — the stuck-funds sentence sits in the same breath.
+    const src = readFileSync(new URL("../terminal/HostedControls.tsx", import.meta.url), "utf8");
+    assert.match(src, /and only there/);
+    assert.match(src, /funds sent there are stuck/);
+  });
+
+  it("THE WALLET NOTE NAMES ITS OWN CHAIN", () => {
+    // "Deposit to the account address above" named no chain at all — the label
+    // sat a block away in small type. The sentence that takes the money names
+    // the network it must arrive on.
+    const src = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
+    assert.match(src, /on \{chainLabel\(grant\.chainId\)\} only/);
+    assert.match(src, /stuck beyond any re-sign/);
+  });
+
+  it("THE PARTNER PROMPT NEVER IMPLIES A RE-SIGN MOVES STUCK FUNDS", () => {
+    const src = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
+    assert.match(src, /routes future deposits only/);
+    assert.match(src, /never imply a re-sign moves them/);
   });
 });

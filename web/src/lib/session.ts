@@ -68,6 +68,7 @@ import {
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
+  GRANT_SCOPED_SPENDERS,
   resolveClassVault,
   probeClassFactory,
   bindingMessage,
@@ -547,6 +548,11 @@ async function prepareGrantCore(
     ...trenchScope,
     extraTokens: sealedTokens,
     allowUniswapV4,
+    // EACH SPENDER ONLY ON THE TOKENS IT PULLS (WallOptions.scopedSpenders),
+    // always, and GRANT_SCOPED_SPENDERS below is minted from this same field.
+    // It is what lets class + Trencher + the v4 adapter + a few coins fit the
+    // first-enable maximum at all; unscoped, three coins came to ~15.75M.
+    scopedSpenders: true as boolean,
     v4AdapterAddress,
     ponsAdapterAddress: sealedPonsAdapter,
     ponsClassVaultAddress,
@@ -758,6 +764,9 @@ async function prepareGrantCore(
       // above — never from the chain id or a setting. A marker the wall does
       // not back sends the worker building an energy buy the chain refuses.
       ...(wallOpts.energyBuy ? [GRANT_ENERGY] : []),
+      // From the field that scoped the wall above. Without it the server and
+      // the executor rebuild the UNSCOPED wall, which is not what was signed.
+      ...(wallOpts.scopedSpenders ? [GRANT_SCOPED_SPENDERS] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),

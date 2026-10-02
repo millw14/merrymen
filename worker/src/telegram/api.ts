@@ -1007,6 +1007,22 @@ export function esc(s: string): string {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/**
+ * A model's words, for Telegram HTML: escaped exactly as esc() does, and then
+ * the one piece of markdown models write anyway, `**bold**`, made bold.
+ *
+ * Escaped model text showed the asterisks: an owner read
+ * `**"launchpad buying: off — dashboard only"**` with the stars in it. The
+ * conversion runs AFTER escaping and only ever adds a bare <b></b> around text
+ * that is already escaped, so it can't turn quoted text into a link or any
+ * other tag — the reason model text is escaped at all. A pair that doesn't
+ * close is left as typed; a <b> cut short by clip() fails the HTML send and
+ * sendMessage retries plain.
+ */
+export function escModel(s: string): string {
+  return esc(s).replace(/\*\*(?=\S)([^*]*?\S)\*\*/g, "<b>$1</b>");
+}
+
 /** Telegram's wire shape for an inline keyboard. */
 function markup(keyboard: InlineKeyboard): { inline_keyboard: unknown[][] } {
   return {

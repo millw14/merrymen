@@ -28,6 +28,7 @@ import {
   STOCK_TOKENS,
   isEvidencedFlow,
   conceptsFor,
+  grantPonsClassVault,
   liveBlockerText,
   renderConcepts,
   type StoredGrant,
@@ -1035,6 +1036,66 @@ const tokenReport: ChatTool = {
   },
 };
 
+/**
+ * WHAT STILL STANDS BETWEEN THIS OWNER AND A LAUNCHPAD BUY, in the words and
+ * places of the Settings page. Empty when nothing this can see is in the way.
+ *
+ * The switch is the one gate an owner knows about, and the one the agent
+ * pointed at. The others are each enough on their own to make a switched-on
+ * route buy nothing, with nothing said (inspect-tenant.ts lists the same
+ * gates for operators; quarantine.ts `scoutAllows` is the scout pair). The
+ * owner who asked had $50 per launch coin and scout's per-token cap at its
+ * default $25: ticking the switch would have changed nothing they could see.
+ *
+ * AND THE KEY, NOT ONLY ITS CONTENTS. A class vault sealed into a key that has
+ * run out buys nothing (syncGrant retires an expired grant and the worker is
+ * left unarmed), and neither does a key the worker has refused (`blocker`, the
+ * agent row's live_blocker, the same one agent_status reads) or an agent on
+ * the pause button. Without these, "nothing I can see is stopping it" could
+ * be said of an agent that cannot trade at all.
+ */
+export function launchpadStillNeeded(
+  c: Pick<
+    ResolvedConfig,
+    | "classSnipeEnabled"
+    | "classPerEntryUsdg"
+    | "liveTradingEnabled"
+    | "assetMode"
+    | "discoveryEnabled"
+    | "scoutEnabled"
+    | "scoutBudgetUsdg"
+    | "scoutPerTokenUsdg"
+  >,
+  grant: StoredGrant | null,
+  live: {
+    now: number;
+    paused?: boolean;
+    /** The agent row's live_blocker; null while a just-signed key settles (settledNeed). */
+    blocker?: string | null;
+  },
+): string[] {
+  const usd = (n: number) => `$${n.toFixed(2)}`;
+  const entry = c.classPerEntryUsdg;
+  const need: string[] = [];
+  if (!c.classSnipeEnabled) need.push(`the "launchpad buying (class route)" tick is off`);
+  if (!(entry > 0)) need.push("its per-entry amount is $0");
+  if (!c.liveTradingEnabled) need.push("live trading is off, and practice mode can't buy launch coins (Settings → Trading mode)");
+  if (c.assetMode === "stocks") need.push("asset mode is stocks only (Settings → What it trades)");
+  if (c.discoveryEnabled === false) need.push(`"watch for new pairs" is off, so no new launch is found (same section)`);
+  if (!c.scoutEnabled) need.push("scout mode is off (same section)");
+  if (!(c.scoutBudgetUsdg > 0)) need.push("the scout budget is $0 (same section)");
+  else if (entry > 0 && c.scoutBudgetUsdg < entry) need.push(`the scout budget ${usd(c.scoutBudgetUsdg)} is less than one buy of ${usd(entry)} (same section)`);
+  if (entry > 0 && c.scoutPerTokenUsdg < entry) need.push(`scout "max per token" ${usd(c.scoutPerTokenUsdg)} is less than one buy of ${usd(entry)}, so every buy is refused (same section)`);
+  if (!grantPonsClassVault(grant)) need.push(`the signed key has no launchpad vault: a "Class vault factory contract" under Advanced settings → Connections, then re-sign`);
+  else if (grant && grant.expiresAt <= live.now) need.push("the signed trading key has run out, so nothing is bought until it is re-signed");
+  // "live-not-enabled" is the live-trading line above, said once.
+  if (live.blocker && live.blocker !== "live-not-enabled") {
+    need.push(`I can't trade for real right now: ${liveBlockerText(live.blocker as never) || live.blocker}`);
+  }
+  if (live.paused) need.push("the pause button is on");
+  return need;
+}
+
 const settingsTool: ChatTool = {
   spec: {
     name: "settings",
@@ -1043,13 +1104,46 @@ const settingsTool: ChatTool = {
   },
   async run(_input, ctx) {
     const c = ctx.cfg;
+    // WHERE, NOT JUST "DASHBOARD ONLY". Without the place, an owner asked
+    // where launchpad buying was and the agent made one up ("near the real
+    // money switch"). These are the names and sections the web page shows.
+    //
+    // FIRST, NOT AFTER THE LIST. cap() keeps the head of this; the list is
+    // long, and these lines are the ones the owner was told to go and find.
+    const live = { now: ctx.now, paused: ctx.paused };
+    let missing = launchpadStillNeeded(c, ctx.grant, live);
+    // THE LEDGER ONLY TO BACK "NOTHING IS STOPPING IT". The worker's refusal
+    // (live_blocker) is on the agent row, and reading it opens the ledger,
+    // which this tool otherwise never does (answer-session.integration.test.ts
+    // "opens nothing"). It can only overturn that one claim, so it is read only
+    // when about to make it; a list that already names a gap stays ledger-free.
+    if (!missing.length) {
+      const blocker = withLedger(
+        ctx,
+        (db, who) => {
+          try {
+            const r = db.prepare("SELECT live_blocker FROM agents WHERE smart_account = ?").get(who) as { live_blocker: string | null } | undefined;
+            return r?.live_blocker?.trim() || null;
+          } catch {
+            return null;
+          }
+        },
+        null as string | null,
+        false,
+      );
+      // A just-signed key's blocker still describes the OLD key (settledNeed).
+      if (blocker && settledNeed(blocker, ctx) !== "just-signed") missing = launchpadStillNeeded(c, ctx.grant, { ...live, blocker });
+    }
     const extra = [
-      `live trading (real money): ${c.liveTradingEnabled ? "on" : "off"} — changed only on the dashboard`,
+      `live trading (real money): ${c.liveTradingEnabled ? "on" : "off"} — dashboard only: Settings → Trading mode → "live trading"`,
       `practice mode: ${c.paperTradingEnabled ? "on" : "off"}`,
-      `launchpad buying: ${c.classSnipeEnabled && c.classPerEntryUsdg > 0 ? "on" : "off"} — dashboard only`,
-      `memecoin strategy with real money: ${c.trencherLiveEnabled ? "on" : "off"} — dashboard only`,
+      `launchpad buying: ${c.classSnipeEnabled && c.classPerEntryUsdg > 0 ? "on" : "off"} — dashboard only: Settings → Custom tokens & discovery (a section that starts closed) → "launchpad buying (class route)", with the scout settings just above it`,
+      missing.length
+        ? `launchpad buying still needs, before it buys anything: ${missing.join("; ")}`
+        : "launchpad buying: nothing I can see is stopping it",
+      `memecoin strategy with real money: ${c.trencherLiveEnabled ? "on" : "off"} — dashboard only: Settings → What it trades → Trencher mode → "let trencher trade for real"`,
     ];
-    return cap(`${strip(settingsListText(c as unknown as Record<string, unknown>))}\n${extra.join("\n")}`);
+    return cap(`${extra.join("\n")}\n${strip(settingsListText(c as unknown as Record<string, unknown>))}`);
   },
 };
 
