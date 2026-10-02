@@ -25,7 +25,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
-import { PC_CAPABILITIES, isHostedMode } from "../../../packages/core/src/index";
+import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths } from "../home";
@@ -51,7 +51,17 @@ import {
 } from "./api";
 import { runAgentTask } from "./agent";
 import { SETTING_CONFIRM_TTL_SEC, executeCommand, type CommandDeps, type KillResult, type PendingAction } from "./executor";
-import { appliedText, proposeSettingChange, settingsListText } from "./settings-chat";
+import {
+  appliedManyText,
+  appliedText,
+  chatMayApply,
+  proposeManyChanges,
+  proposeSettingChange,
+  requestedChanges,
+  settingsListText,
+  singleChange,
+  wantsManyPath,
+} from "./settings-chat";
 import { specFor, stockSymbols, validStoredSetting } from "./setting-spec";
 import { signKeyboard, signUrl } from "./sign-prompt";
 import { confirmKeyboard, mintNonce, parseConfirmData } from "./buttons";
@@ -732,6 +742,18 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     };
 
     const statusCtx = () => deps.buildStatusContext();
+    // The /name command's write, shared with a name approved among several
+    // settings (applySettings), so both store and announce it the same way.
+    const applyName = (name: string) => {
+      const r = setSoulName(name);
+      if (r.ok) {
+        patchSettingsFile({ agentName: r.name });
+        rememberChatSetting(stateRef, { agentName: r.name }, now());
+        deps.onNameChange?.(r.name);
+        deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
+      }
+      return r;
+    };
     const cmdDeps: CommandDeps = {
       controlEnabled: cfg.telegramControlEnabled,
       hosted: isHostedMode(),
@@ -774,15 +796,37 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         settings: () => settingsListText(cfg as unknown as Record<string, unknown>),
       },
       // ── settings by text: ask first, change on confirm ────────────────────
-      proposeSetting: (setting, value) => {
-        const p = proposeSettingChange(setting, value, {
-          current: cfg as unknown as Record<string, unknown>,
+      proposeSetting: (setting, value, changes) => {
+        const ctx = {
+          current: { ...(cfg as unknown as Record<string, unknown>), agentName: getName() },
           allowedSymbols: [...stockSymbols(), ...cfg.customTokens.map((t) => t.symbol.toUpperCase())],
           strategies: [...BUILTIN_STRATEGIES],
           hosted: isHostedMode(),
           signedPerTradeUsdg: deps.grantPerTradeUsdg(),
           agentName: getName(),
-        });
+        };
+        // SEVERAL AT ONCE, OR A SETTING ONLY THE DASHBOARD CHANGES: one
+        // proposal, one approval — here if every change is the chat's to make,
+        // otherwise one button that opens Settings with all of them filled in.
+        const requested = requestedChanges(setting, value, changes);
+        if (wantsManyPath(requested)) {
+          const m = proposeManyChanges(requested, ctx);
+          if (m.kind === "ask-many") {
+            pending.set(`${msg.chatId}:${msg.fromId}`, {
+              kind: "settings",
+              changes: m.changes,
+              expiresAt: now() + SETTING_CONFIRM_TTL_SEC,
+            });
+            return m.text;
+          }
+          const rows: InlineKeyboard = [];
+          if (m.approve) rows.push([{ text: "✅ Review & approve", url: `${dashboardBase()}/settings?${PROPOSAL_PARAM}=${m.approve}#proposal` }]);
+          if (m.sign) rows.push(...signKeyboard(signUrl(dashboardBase(), "expiring")));
+          if (rows.length) extras.keyboard = rows;
+          return m.text;
+        }
+        const one = singleChange(setting, value, requested);
+        const p = proposeSettingChange(one.setting, one.value, ctx);
         if (p.kind === "reply") {
           if (p.button === "sign") extras.keyboard = signKeyboard(signUrl(dashboardBase(), "expiring"));
           if (p.button === "dashboard") extras.keyboard = [[{ text: "⚙️ Open Settings", url: `${dashboardBase()}/settings${p.anchor ? `#${p.anchor}` : ""}` }]];
@@ -811,6 +855,36 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         rememberChatSetting(stateRef, { [key]: value }, now());
         deps.note("ok", `Telegram: ${key} → ${JSON.stringify(value)} (confirmed in chat ${msg.chatId})`);
         return appliedText(key, value, isHostedMode());
+      },
+      applySettings: (changes) => {
+        // ALL OR NONE. Every change is checked again first — the values sat in
+        // memory for up to ten minutes — and one that no longer holds stops
+        // the whole set, so a half-applied "be more careful" never happens.
+        for (const { key, value } of changes) {
+          if (!chatMayApply(key, value)) return "one of those changes is no longer valid — nothing changed. Ask me again.";
+        }
+        const strategy = changes.find((c) => c.key === "strategy");
+        if (strategy) {
+          const r = deps.setStrategy(strategy.value as string);
+          if (!r.ok) return `can't switch strategy: ${esc(r.reason ?? "unknown")} — nothing changed.`;
+        }
+        // The name goes through /name's own write (the soul holds it too); it
+        // passed the same rule just above, so it is not refused here.
+        let done = changes;
+        const name = changes.find((c) => c.key === "agentName");
+        if (name) {
+          const r = applyName(name.value as string);
+          if (!r.ok) return `can't take that name: ${esc(r.reason ?? "invalid")} — nothing changed.`;
+          done = changes.map((c) => (c.key === "agentName" ? { key: c.key, value: r.name } : c));
+        }
+        const rest = changes.filter((c) => c.key !== "agentName");
+        if (rest.length) {
+          const patch = Object.fromEntries(rest.map((c) => [c.key, c.value]));
+          patchSettingsFile(patch as never);
+          rememberChatSetting(stateRef, patch, now());
+        }
+        deps.note("ok", `Telegram: ${changes.map((c) => `${c.key} → ${JSON.stringify(c.value)}`).join(", ")} (confirmed in chat ${msg.chatId})`);
+        return appliedManyText(done, isHostedMode());
       },
       /**
        * BOTH FILES, FOR THE REASON /link ALREADY LEARNED.
@@ -897,16 +971,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
        * input would leave cfg.agentName !== getName() true for ever, which
        * is the every-tick rewrite this fix exists to stop.
        */
-      setName: (name) => {
-        const r = setSoulName(name);
-        if (r.ok) {
-          patchSettingsFile({ agentName: r.name });
-          rememberChatSetting(stateRef, { agentName: r.name }, now());
-          deps.onNameChange?.(r.name);
-          deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
-        }
-        return r;
-      },
+      setName: applyName,
       remember: (fact) => rememberOwnerFact(fact, now()),
       soulInfo: () => {
         const st = stateRef.get();
@@ -1253,7 +1318,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // parked for this sender is a settings change: a transfer, a kill or a
       // shell command still needs /confirm or its button.
       const parked = pending.get(`${msg.chatId}:${msg.fromId}`);
-      if (parked?.kind === "setting" && answerableNow) {
+      if ((parked?.kind === "setting" || parked?.kind === "settings") && answerableNow) {
         const t = msg.text.trim();
         if (/^(yes|y|yep|yeah|ok|okay|sure|do it|confirm|go ahead|please do)[.!\s]*$/i.test(t)) cmd = { kind: "confirm" };
         else if (/^(no|n|nope|cancel|never ?mind|don'?t|leave it)[.!\s]*$/i.test(t)) cmd = { kind: "cancel" };
@@ -1457,7 +1522,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (meta && sent.messageId !== undefined) meta.messageId = sent.messageId;
     // A typed "yes" may answer the NEXT message only if this reply was the
     // settings question itself.
-    if (meta?.action.kind === "setting") typedAnswerable.add(pendingKey);
+    if (meta?.action.kind === "setting" || meta?.action.kind === "settings") typedAnswerable.add(pendingKey);
   };
 
   /**

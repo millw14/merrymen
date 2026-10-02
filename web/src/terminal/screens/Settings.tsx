@@ -16,6 +16,7 @@ import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
+import { SettingsProposal } from "../SettingsProposal";
 import { count, shortDateTime } from "@/lib/format";
 import { unreadableSetting } from "@/lib/parse-amount";
 import { providerChange, providerModelChange, providerModelValue } from "@/lib/settings-llm-model";
@@ -719,6 +720,22 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           the only way back. */}
       <PageHeader title="Settings" />
 
+      {/* SAY IT, THEN APPROVE IT. The first thing on the page is the way most
+          owners will change anything: describe it, see the before and after,
+          tap Approve. It is also where the agent's "Review & approve" button
+          from Telegram and Chat lands (#proposal, ?propose=…). The form below
+          is unchanged for anyone who would rather set a dial by hand. */}
+      <div id="proposal">
+        <SettingsProposal
+          values={view.values as Record<string, unknown>}
+          defaults={view.defaults as unknown as Record<string, unknown>}
+          owner={view.owner}
+          symbols={[...view.knownSymbols, ...(view.values.customTokens ?? []).map((tk) => tk.symbol.toUpperCase())]}
+          hosted={view.owner !== null}
+          onApplied={() => setLoadAttempt((x) => x + 1)}
+        />
+      </div>
+
       <fieldset className="mm-wrap" disabled={status === "saving…"} style={{ border: 0, minWidth: 0, margin: 0, padding: 0 }}>
         <p className="mm-note">
             Leave an API key blank to keep the saved key.
@@ -922,6 +939,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           )}
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
+          {/* GROUPED AND CLOSED, like the groups below it. An owner said the
+              page should be "wayyyy easier"; most of this block is the AI
+              provider's plumbing, and the parts most owners change — the
+              strategy, the name — can be changed by saying so at the top. */}
+          <details className="settings-group" id="agent-settings"><summary>{t("settings.section.agentSettings")} — name, picture, strategy and AI provider</summary>
           <div className="mm-section">{t("settings.section.agentSettings")}</div>
           <div className="mm-grid">
             {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
@@ -1127,6 +1149,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               You can still type a model name below and save; the list is a convenience, not a requirement.
             </p>
           )}
+          </details>
+          <details className="settings-group" id="trading-basket"><summary>{t("settings.section.tradingBasket")} — which stocks it may buy</summary>
           <div className="mm-section">{t("settings.section.tradingBasket")}</div>
           {/* GROUPED, because one undifferentiated run of chips is what an owner
               meant by "trading basket in settings is full of all stocks". It was
@@ -1179,6 +1203,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               Update your <Link href="/grant">trading permissions</Link> to buy or sell <b>{unsellable.join(", ")}</b>.
             </div>
           )}
+          </details>
 
           {/* ── OWNER-ADDED TOKENS (memecoins) ─────────────────────────────
               Deliberately separate from the basket: those are issuer-backed

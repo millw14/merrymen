@@ -291,11 +291,15 @@ describe("INVARIANT: a press answers only the question parked for the presser", 
   });
 
   it("typed yes/no only ever confirms a SETTINGS question", () => {
+    // One setting or several approved together ("be more careful") — both are
+    // settings questions. A transfer, a kill or a shell command still needs
+    // /confirm or its button.
     const i = src.indexOf('"YES" ANSWERS A SETTINGS QUESTION');
     const shortcut = src.slice(i, i + 1200);
-    assert.match(shortcut, /parked\?\.kind === "setting" && answerableNow/);
+    assert.match(shortcut, /\(parked\?\.kind === "setting" \|\| parked\?\.kind === "settings"\) && answerableNow/);
     assert.match(src, /typedAnswerable\.delete\(senderKey\)/, "every new message uses up the eligibility");
-    assert.match(src, /if \(meta\?\.action\.kind === "setting"\) typedAnswerable\.add\(pendingKey\)/);
+    assert.match(src, /if \(meta\?\.action\.kind === "setting" \|\| meta\?\.action\.kind === "settings"\) typedAnswerable\.add\(pendingKey\)/);
+    assert.doesNotMatch(shortcut, /"transfer"|"kill"|"shell"/, "and nothing else");
   });
 
   it("a press never wipes another member's live question", () => {
