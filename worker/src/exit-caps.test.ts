@@ -42,7 +42,9 @@ describe("what the chain actually sizes", () => {
     // exemption is wrong and this test is how you find out.
     const sellApprove = WALL.slice(WALL.indexOf("approve the TRADEABLE stock tokens"), WALL.indexOf("Owner-added tokens, same shape"));
     assert.match(sellApprove, /No amount condition/);
-    assert.match(sellApprove, /args: \[\{ condition: ParamCondition\.ONE_OF, value: spenders \}, null\]/);
+    // `stockSpenders`: the scoped list on a scoped wall, `spenders` otherwise
+    // (WallOptions.scopedSpenders) — either way, no amount word.
+    assert.match(sellApprove, /args: \[\{ condition: ParamCondition\.ONE_OF, value: stockSpenders \}, null\]/);
   });
 
   it("and a TRANSFER genuinely is capped, which is why it stays capped here", () => {

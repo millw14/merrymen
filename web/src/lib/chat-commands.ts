@@ -81,6 +81,13 @@ export interface ChatCommand {
    */
   say: (args: Record<string, CommandArg>) => string;
   /**
+   * For an ORDER: what was placed, once it has been — the receipt's half of
+   * `say`. `say` is written before the owner confirms and ends "I'll place
+   * it"; prefixed with "Placed it —" it read "Placed it — Spend $10.00 buying
+   * UBIK. I'll place it — …", promising the act it had just reported.
+   */
+  placed?: (args: Record<string, CommandArg>) => string;
+  /**
    * How it happens: which existing authenticated surface performs it.
    *
    * `settings` writes through PUT /api/settings, which is tenant-authorised and
@@ -348,6 +355,7 @@ const REGISTRY: ChatCommand[] = [
     say: (a) =>
       `Spend ${money(a.usdgAmount)} buying ${String(a.symbol).toUpperCase()}. ` +
       `I'll place it — my key's limits still decide whether it goes through.`,
+    placed: (a) => `a buy of ${String(a.symbol).toUpperCase()} for ${money(a.usdgAmount)}.`,
   },
   /**
    * SNIPE — "get me into PEPE with $20", where PEPE may be a coin this agent
@@ -390,6 +398,9 @@ const REGISTRY: ChatCommand[] = [
       `Sell ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()}. ` +
       `If that is more than you hold I sell what is there, and if it is a coin on a bonding curve I have to sell the whole position — ` +
       `I'll tell you which happened. I'll place it; my key's limits still decide.`,
+    placed: (a) =>
+      `a sell of ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()} — or the whole position, if that is ` +
+      `less or it is a coin on a bonding curve; I'll tell you which.`,
   },
   /**
    * GET-ENERGY — "get your $MERRYMEN": the agent buys the $MERRYMEN it is short
@@ -444,6 +455,7 @@ const REGISTRY: ChatCommand[] = [
       `small margin for price movement (at least $1.00); the pool fees and the token's own tax are paid out of the USDG. ` +
       `It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide ` +
       `whether it goes through.`,
+    placed: (a) => `a buy of up to ${money(a.usdgAmount)} of $MERRYMEN, kept as energy.`,
   },
   // ── the ones that only take you somewhere ────────────────────────────────
   {

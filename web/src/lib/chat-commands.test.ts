@@ -387,6 +387,23 @@ describe("the two commands that spend money", () => {
     }
   });
 
+  it("once placed, the receipt says what was placed — not the promise to place it", () => {
+    // Reported: "Placed it — Spend $10.00 buying UBIK. I'll place it — my key's
+    // limits still decide whether it goes through. It is with my key now; …".
+    // The card's sentence, prefixed with "Placed it —", promised the act it
+    // had just reported and said the limits sentence twice.
+    const agent = readFileSync(join(import.meta.dirname, "../terminal/screens/Agent.tsx"), "utf8");
+    assert.match(agent, /`Placed it — \$\{\(cmd\.placed \?\? cmd\.say\)\(proposal\.args\)\}/);
+    for (const id of ["buy", "sell", "get-energy"]) {
+      const placed = commandFor(id)!.placed;
+      assert.ok(placed, `${id} says what it placed`);
+      const receipt = placed({ symbol: "UBIK", usdgAmount: 10 });
+      assert.doesNotMatch(receipt, /I'll place it|limits/i, `${id}: the receipt neither promises the act nor repeats the limits`);
+      assert.ok(!/\b(bought|sold|filled)\b/i.test(receipt), `${id} still claims no fill`);
+    }
+    assert.equal(commandFor("buy")!.placed!({ symbol: "ubik", usdgAmount: 10 }), "a buy of UBIK for $10.00.");
+  });
+
   it("and the SELL card warns that the size can come out different EITHER WAY", () => {
     // This used to check for "or all of it, if that is less than you hold",
     // which is only half true and the half that flatters. A stock sell clamps

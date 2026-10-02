@@ -72,6 +72,22 @@ export function grantHasMultihop(grant: Pick<StoredGrant, "grantFeatures"> | nul
 export const GRANT_V4_ADAPTER = "v4-adapter";
 
 /**
+ * grantFeatures marker meaning "this wall names each spender only on the
+ * tokens it actually pulls" — WallOptions.scopedSpenders (wall.ts).
+ *
+ * A VERSION OF THE WALL'S SHAPE, not a capability, and it can only narrow:
+ * every call a scoped wall permits, an unscoped one permits too. It exists so
+ * the two rebuilds that must reproduce a signed wall byte for byte — the hosted
+ * POST /api/grants comparison (web/src/lib/canonical-wall.ts) and the
+ * executor's first-enable sizing (worker/src/index.ts) — know which shape was
+ * signed. Every grant without it keeps rebuilding as the unscoped wall it is.
+ *
+ * Minted by both signers unconditionally, from the same boolean that scoped
+ * the wall they built (signer-lockstep.test.ts).
+ */
+export const GRANT_SCOPED_SPENDERS = "scoped-spenders";
+
+/**
  * The adapter address this signature can actually call, or null.
  *
  * BOTH the marker and a valid address are required — the GRANT_TRANSFER

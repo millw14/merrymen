@@ -19,7 +19,7 @@
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { explorerFor, type PriceQuote } from "../../../packages/core/src/index";
-import { isGasRefusal, rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
+import { isGasRefusal, isMarketRefusal, rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { homePaths, merrymenHome } from "../home";
 import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
@@ -415,6 +415,21 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
       const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
       return (
         `⛽ a ${thing} wasn't sent — ${esc(label ?? "its network fee could not be justified")}. Nothing was spent.` +
+        `${fix ? ` ${esc(fix)}` : ""}` +
+        ` ${t.amount_usdg.toFixed(2)} USDG stayed home (${esc(t.reject_rule!)})`
+      );
+    }
+    /**
+     * NOR IS THE MARKET. "🛡 the wall turned back a buy of UBIK — no route to
+     * trade it" sent an owner through the permissions they signed for a refusal
+     * that was about where the coin trades, not what their key may do.
+     */
+    if (isMarketRefusal(t.reject_rule)) {
+      const label = rejectRuleLabel(t.reject_rule);
+      const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
+      const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+      return (
+        `🚫 a ${thing} didn't go out — ${esc(label ?? "it could not be traded")}. Nothing was spent.` +
         `${fix ? ` ${esc(fix)}` : ""}` +
         ` ${t.amount_usdg.toFixed(2)} USDG stayed home (${esc(t.reject_rule!)})`
       );

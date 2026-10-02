@@ -50,25 +50,48 @@ describe("read-only grant renewal preflight", () => {
     }
   });
 
-  it("rejects the exact synthetic 27-permission wall after adding v4", async () => {
+  it("admits the 27-permission wall with v4 added — the owner who could not have all of it", async () => {
+    // Class + Trencher + three coins, plus the v4 adapter: 15,749,392 bounded
+    // unscoped, and this test used to pin the refusal ("Remove at least 3
+    // custom tokens"). Each spender is now named only on the tokens it pulls
+    // (WallOptions.scopedSpenders), and the same wall fits.
     const { preflightAgentGrant } = await import("./session");
     const signer = ownerThatMustNotSign();
     const extraTokens = Array.from({ length: 3 }, (_, i) => ({
       symbol: `TEST${i}`, address: `0x${(100 + i).toString(16).padStart(40, "0")}` as Hex, decimals: 18,
     }));
-    const original = wallShape(buildCallPermissions(TEST_CAPS, ACCOUNT, {
+    const wall = (scopedSpenders: boolean) => wallShape(buildCallPermissions(TEST_CAPS, ACCOUNT, {
       extraTokens, ponsClassVaultAddress: CLASS_VAULT, ponsClassVaultFactoryAddress: CLASS_FACTORY,
       trencherVaultAddress: TRENCHER_VAULT, trencherFactoryAddress: TRENCHER_FACTORY,
+      v4AdapterAddress: V4_ADAPTER, scopedSpenders,
     }));
-    assert.equal(original.permissions, 27);
-    assert.equal(firstEnableEnvelope(original, { deploying: false }).expectedBounded, 13_734_820n);
+    assert.equal(wall(false).permissions, 28);
+    assert.equal(firstEnableEnvelope(wall(false), { deploying: false }).expectedBounded, 15_749_392n, "refused before");
+    assert.equal(firstEnableEnvelope(wall(true), { deploying: false }).expectedBounded, 13_110_586n, "fits now");
+    await withStubChain(ACCOUNT, async () => {
+      const result = await preflightAgentGrant(signer.owner, {
+        ...options, extraTokens, trencherFactory: TRENCHER_FACTORY, v4AdapterAddress: V4_ADAPTER,
+      });
+      assert.equal(result, undefined);
+    }, { currentNonce: 8 });
+    assert.equal(signer.calls(), 0);
+  });
+
+  it("still refuses a wall past the maximum, and says how many coins fit", async () => {
+    // The 14M ceiling did not move; the wall got smaller. Six coins beside
+    // class + Trencher + v4 is still over it, and the owner is told the number.
+    const { preflightAgentGrant } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    const extraTokens = Array.from({ length: 6 }, (_, i) => ({
+      symbol: `TEST${i}`, address: `0x${(100 + i).toString(16).padStart(40, "0")}` as Hex, decimals: 18,
+    }));
     await withStubChain(ACCOUNT, async () => {
       await assert.rejects(preflightAgentGrant(signer.owner, {
         ...options, extraTokens, trencherFactory: TRENCHER_FACTORY, v4AdapterAddress: V4_ADAPTER,
       }), error => {
         assert.ok(error instanceof Error);
-        assert.match(error.message, /15,749,392 gas against a limit of 14,000,000/);
-        assert.match(error.message, /Remove at least 3 custom tokens/);
+        assert.match(error.message, /against a limit of 14,000,000/);
+        assert.match(error.message, /the most that fits with the features you have enabled is 4\. Remove at least 2 custom tokens/);
         return true;
       });
     }, { currentNonce: 8 });

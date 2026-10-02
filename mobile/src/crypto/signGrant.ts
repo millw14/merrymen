@@ -10,6 +10,7 @@ import {
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
+  GRANT_SCOPED_SPENDERS,
   resolveClassVault,
   TRADEABLE_V2,
   buildWallPolicies,
@@ -220,6 +221,9 @@ export async function signGrant(args: {
   const wallOpts = {
     extraTokens: sealedTokens,
     allowUniswapV4,
+    // Scoped, exactly as web/src/lib/session.ts scopes it, and the marker below
+    // is minted from this same field.
+    scopedSpenders: true as boolean,
     v4AdapterAddress: args.v4AdapterAddress,
     ponsAdapterAddress: sealedPonsAdapter,
     ponsClassVaultAddress,
@@ -332,6 +336,9 @@ export async function signGrant(args: {
         // From the SAME boolean that built the router permission above —
         // identical to web/src/lib/session.ts.
         ...(wallOpts.energyBuy ? [GRANT_ENERGY] : []),
+        // From the field that scoped the wall above — identical to
+        // web/src/lib/session.ts.
+        ...(wallOpts.scopedSpenders ? [GRANT_SCOPED_SPENDERS] : []),
       ],
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
       ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
