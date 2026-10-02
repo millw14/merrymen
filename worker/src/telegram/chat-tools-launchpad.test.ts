@@ -21,7 +21,6 @@ const { launchpadStillNeeded, toolByName, TOOL_OUTPUT_MAX } = await import("./ch
 const { GRANT_PONS_CLASS, SETTINGS_DEFAULTS } = await import("../../../packages/core/src/index");
 
 const VAULT = `0x${"c1".repeat(20)}`;
-const sealed = { grantFeatures: [GRANT_PONS_CLASS], ponsClassVaultAddress: VAULT } as never;
 
 /** The owner from the DM: switch off, $50 a launch coin, no ceiling, everything else as shipped. */
 function theOwner(over: Record<string, unknown> = {}) {
@@ -50,7 +49,10 @@ const ready = (over: Record<string, unknown> = {}) =>
     ...over,
   });
 
-const needs = (cfg: Record<string, unknown>, grant: unknown = sealed) => launchpadStillNeeded(cfg as never, grant as never);
+const NOW = 1_800_000_000;
+const sealed = { grantFeatures: [GRANT_PONS_CLASS], ponsClassVaultAddress: VAULT, grantedAt: NOW - 86_400, expiresAt: NOW + 30 * 86_400 } as never;
+const needs = (cfg: Record<string, unknown>, grant: unknown = sealed, live: { paused?: boolean; blocker?: string | null } = {}) =>
+  launchpadStillNeeded(cfg as never, grant as never, { now: NOW, ...live });
 
 describe("launchpadStillNeeded — what stands between this owner and a launch buy", () => {
   it("the owner who asked: the switch, scout mode, its budget, its per-token cap, and the vault", () => {
@@ -84,6 +86,30 @@ describe("launchpadStillNeeded — what stands between this owner and a launch b
     assert.match(only({}, { grantFeatures: [], ponsClassVaultAddress: VAULT }), /no launchpad vault/, "a vault address without the feature is not sealed");
   });
 
+  it("a key that ran out, a key the worker refused, or the pause button each stop it too", () => {
+    // Review: an expired grant still carries its class vault, so the vault
+    // check alone said "nothing is stopping it" of an agent that cannot trade.
+    const expired = { grantFeatures: [GRANT_PONS_CLASS], ponsClassVaultAddress: VAULT, grantedAt: NOW - 40 * 86_400, expiresAt: NOW - 1 };
+    assert.deepEqual(needs(ready(), expired), ["the signed trading key has run out, so nothing is bought until it is re-signed"]);
+    const atExpiry = { ...expired, expiresAt: NOW };
+    assert.equal(needs(ready(), atExpiry).length, 1, "a key is out AT its expiry, as signNeed reads it");
+
+    const refused = needs(ready(), sealed, { blocker: "dead-policy" });
+    assert.equal(refused.length, 1);
+    assert.match(refused[0]!, /^I can't trade for real right now: this trading key was signed before a fix/);
+    assert.match(needs(ready(), sealed, { blocker: "not-armed" })[0]!, /trading key is not active yet/);
+    assert.match(needs(ready(), sealed, { blocker: "some-new-rule" })[0]!, /some-new-rule/, "an unknown blocker is still named");
+
+    assert.deepEqual(needs(ready(), sealed, { paused: true }), ["the pause button is on"]);
+  });
+
+  it("live-not-enabled is the live-trading line, not a second one", () => {
+    const said = needs(ready({ liveTradingEnabled: false }), sealed, { blocker: "live-not-enabled" });
+    assert.equal(said.length, 1);
+    assert.match(said[0]!, /live trading is off/);
+    assert.deepEqual(needs(ready(), sealed, { blocker: "live-not-enabled" }), []);
+  });
+
   it("a $0 entry is named once, not again as a scout shortfall", () => {
     const said = needs(ready({ classPerEntryUsdg: 0 }));
     assert.deepEqual(said, ["its per-entry amount is $0"]);
@@ -95,8 +121,8 @@ describe("launchpadStillNeeded — what stands between this owner and a launch b
 });
 
 describe("the settings tool says where launchpad buying is", () => {
-  const settings = (cfg: Record<string, unknown>, grant: unknown = null) =>
-    toolByName("settings")!.run({}, { cfg, grant, paused: false, book: [], client: null, now: 0, status: {} } as never);
+  const settings = (cfg: Record<string, unknown>, grant: unknown = null, paused = false) =>
+    toolByName("settings")!.run({}, { cfg, grant, paused, book: [], client: null, now: NOW, status: { agentId: null } } as never);
 
   it("names the section and the switch's label, never just 'dashboard only'", async () => {
     const out = await settings(theOwner());
@@ -116,6 +142,16 @@ describe("the settings tool says where launchpad buying is", () => {
     const out = await settings(ready(), sealed);
     assert.match(out, /launchpad buying: on — dashboard only/);
     assert.match(out, /launchpad buying: nothing I can see is stopping it/);
+  });
+
+  it("never says nothing is stopping it of a key that ran out, or of a paused agent", async () => {
+    const expired = { grantFeatures: [GRANT_PONS_CLASS], ponsClassVaultAddress: VAULT, grantedAt: NOW - 40 * 86_400, expiresAt: NOW - 60 };
+    const out = await settings(ready(), expired);
+    assert.doesNotMatch(out, /nothing I can see is stopping it/);
+    assert.match(out, /still needs, before it buys anything: the signed trading key has run out/);
+    const paused = await settings(ready(), sealed, true);
+    assert.doesNotMatch(paused, /nothing I can see is stopping it/);
+    assert.match(paused, /the pause button is on/);
   });
 
   it("keeps the where-and-what lines when the whole answer is cut to size", async () => {

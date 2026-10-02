@@ -1046,6 +1046,13 @@ const tokenReport: ChatTool = {
  * gates for operators; quarantine.ts `scoutAllows` is the scout pair). The
  * owner who asked had $50 per launch coin and scout's per-token cap at its
  * default $25: ticking the switch would have changed nothing they could see.
+ *
+ * AND THE KEY, NOT ONLY ITS CONTENTS. A class vault sealed into a key that has
+ * run out buys nothing (syncGrant retires an expired grant and the worker is
+ * left unarmed), and neither does a key the worker has refused (`blocker`, the
+ * agent row's live_blocker, the same one agent_status reads) or an agent on
+ * the pause button. Without these, "nothing I can see is stopping it" could
+ * be said of an agent that cannot trade at all.
  */
 export function launchpadStillNeeded(
   c: Pick<
@@ -1060,6 +1067,12 @@ export function launchpadStillNeeded(
     | "scoutPerTokenUsdg"
   >,
   grant: StoredGrant | null,
+  live: {
+    now: number;
+    paused?: boolean;
+    /** The agent row's live_blocker; null while a just-signed key settles (settledNeed). */
+    blocker?: string | null;
+  },
 ): string[] {
   const usd = (n: number) => `$${n.toFixed(2)}`;
   const entry = c.classPerEntryUsdg;
@@ -1074,6 +1087,12 @@ export function launchpadStillNeeded(
   else if (entry > 0 && c.scoutBudgetUsdg < entry) need.push(`the scout budget ${usd(c.scoutBudgetUsdg)} is less than one buy of ${usd(entry)} (same section)`);
   if (entry > 0 && c.scoutPerTokenUsdg < entry) need.push(`scout "max per token" ${usd(c.scoutPerTokenUsdg)} is less than one buy of ${usd(entry)}, so every buy is refused (same section)`);
   if (!grantPonsClassVault(grant)) need.push(`the signed key has no launchpad vault: a "Class vault factory contract" under Advanced settings → Connections, then re-sign`);
+  else if (grant && grant.expiresAt <= live.now) need.push("the signed trading key has run out, so nothing is bought until it is re-signed");
+  // "live-not-enabled" is the live-trading line above, said once.
+  if (live.blocker && live.blocker !== "live-not-enabled") {
+    need.push(`I can't trade for real right now: ${liveBlockerText(live.blocker as never) || live.blocker}`);
+  }
+  if (live.paused) need.push("the pause button is on");
   return need;
 }
 
@@ -1091,7 +1110,30 @@ const settingsTool: ChatTool = {
     //
     // FIRST, NOT AFTER THE LIST. cap() keeps the head of this; the list is
     // long, and these lines are the ones the owner was told to go and find.
-    const missing = launchpadStillNeeded(c, ctx.grant);
+    const live = { now: ctx.now, paused: ctx.paused };
+    let missing = launchpadStillNeeded(c, ctx.grant, live);
+    // THE LEDGER ONLY TO BACK "NOTHING IS STOPPING IT". The worker's refusal
+    // (live_blocker) is on the agent row, and reading it opens the ledger,
+    // which this tool otherwise never does (answer-session.integration.test.ts
+    // "opens nothing"). It can only overturn that one claim, so it is read only
+    // when about to make it; a list that already names a gap stays ledger-free.
+    if (!missing.length) {
+      const blocker = withLedger(
+        ctx,
+        (db, who) => {
+          try {
+            const r = db.prepare("SELECT live_blocker FROM agents WHERE smart_account = ?").get(who) as { live_blocker: string | null } | undefined;
+            return r?.live_blocker?.trim() || null;
+          } catch {
+            return null;
+          }
+        },
+        null as string | null,
+        false,
+      );
+      // A just-signed key's blocker still describes the OLD key (settledNeed).
+      if (blocker && settledNeed(blocker, ctx) !== "just-signed") missing = launchpadStillNeeded(c, ctx.grant, { ...live, blocker });
+    }
     const extra = [
       `live trading (real money): ${c.liveTradingEnabled ? "on" : "off"} — dashboard only: Settings → Trading mode → "live trading"`,
       `practice mode: ${c.paperTradingEnabled ? "on" : "off"}`,
