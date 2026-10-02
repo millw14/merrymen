@@ -38,6 +38,7 @@ describe("who may read the carried history", () => {
       "telegram/history-overlay.ts",
       "telegram/chat-tools.ts",
       "telegram/reads.ts",
+      "tg-trade-facts.ts", // public projection only; private amounts/reasons never leave it
     ]);
     const files = walk(WORKER_SRC);
     assert.ok(files.length > 100, "the walk found the worker at all");
@@ -46,6 +47,13 @@ describe("who may read the carried history", () => {
       .map((f) => path.relative(WORKER_SRC, f).split(path.sep).join("/"))
       .filter((f) => !allowed.has(f));
     assert.deepEqual(guilty, [], "something outside the chat reads the carried history");
+  });
+
+  it("the group history adapter is a read-only public projection",()=> {
+    const projection=readFileSync(path.join(WORKER_SRC,"tg-trade-facts.ts"),"utf8");
+    assert.match(projection,/readTradeFacts/);
+    assert.doesNotMatch(projection,/\.exec\(|\.run\(|setBasis|setAgent|addTrade|trade\(/);
+    assert.doesNotMatch(projection,/t\.(?:reason|executedUsdg|requestedUsdg|realizedPnlUsdg|realizedPnlBps|token)\b/);
   });
 
   it("and the Telegram reads that do are not the notifier's", () => {

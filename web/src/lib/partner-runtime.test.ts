@@ -45,6 +45,18 @@ function dependencies() {
 }
 
 describe("consented partner runtime", () => {
+  it("uses the consented agent's exact ledger reply instead of caller-supplied trade state", async () => {
+    const adapter = createPartnerRuntime({ ...dependencies(), reply: generateAgentReply,
+      facts: async (body, account) => {
+        assert.equal(account, ACCOUNT);
+        assert.doesNotMatch(JSON.stringify(body.state), /FAKE|999999/);
+        return "I bought PRISM in paper mode; its recorded reason was momentum.";
+      },
+    });
+    const result = await adapter.replyToPartner(TENANT, { message: "What did you trade today?" });
+    assert.equal(result.reply, "I bought PRISM in paper mode; its recorded reason was momentum.");
+    assert.equal(result.command, undefined);
+  });
   it("grounds the model in the verified account and ignores financial state supplied by the caller", async () => {
     let captured: AgentChatBody | undefined;
     const adapter = createPartnerRuntime({ ...dependencies(), reply: async (body, options) => {

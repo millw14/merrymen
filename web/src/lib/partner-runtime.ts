@@ -8,6 +8,7 @@ import { isHostedMode } from "../../../packages/core/src/index";
 import { mintSession, SESSION_COOKIE } from "./auth";
 import { generateAgentReply, type AgentReply } from "./agent-chat";
 import { fitChatState } from "./chat-state";
+import { ledgerChatReply } from "./chat-ledger-facts";
 import type { FeedResponse } from "../app/api/feed/route";
 import type { AgentStatus } from "../app/api/grants/route";
 import type { SettingsView } from "../app/api/settings/route";
@@ -45,6 +46,7 @@ interface RuntimeDependencies {
   feed: Reader;
   settings: Reader;
   reply: typeof generateAgentReply;
+  facts: typeof ledgerChatReply;
   session: typeof mintSession;
   hosted: () => boolean;
   now: () => number;
@@ -57,6 +59,7 @@ const defaults: RuntimeDependencies = {
   feed: async (req) => (await import("../app/api/feed/route")).GET(req),
   settings: async (req) => (await import("../app/api/settings/route")).GET(req),
   reply: generateAgentReply,
+  facts: ledgerChatReply,
   session: mintSession,
   hosted: isHostedMode,
   now: Date.now,
@@ -170,10 +173,16 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
     const trades = exists ? [...(feed?.trades ?? [])].sort((a, b) => timestamp(b.created_at) - timestamp(a.created_at)) : [];
     const moves = trades.slice(0, 8).reverse().map((trade) => ({
       at: trade.created_at,
-      action: trade.kind,
+      action: trade.fill_side ?? trade.kind,
+      tradeId: trade.id ?? null,
+      symbol: trade.symbol ?? null,
+      displayName: trade.display_name ?? null,
+      paper: trade.status === "paper",
+      reason: trade.reason?.slice(0, 400) ?? null,
       sellToken: trade.sell_token,
       buyToken: trade.buy_token,
       sizeUsdg: numberOrNull(trade.amount_usdg),
+      realizedPnlUsdg: trade.realized_vouched ? numberOrNull(trade.realized_pnl_usdg) : null,
       outcome: trade.status,
       outcomeText: trade.reject_rule,
     }));
@@ -237,7 +246,9 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
       const { runtime, state } = await snapshot(tenant);
       let answer: AgentReply;
       try {
-        answer = await deps.reply({ message: input.message, history: input.history, state }, { surface: "partner" });
+        const body = { message: input.message, history: input.history, state };
+        const factualReply = await deps.facts(body, runtime.smart_account, Math.floor(deps.now() / 1000));
+        answer = await deps.reply(body, { surface: "partner", factualReply });
       } catch {
         answer = { reply: null, why: "llm-error" };
       }

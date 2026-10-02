@@ -130,6 +130,7 @@ function ledgerCount(): number {
 before(() => {
   initStore();
   const db = new DatabaseSync(homePaths.db());
+  db.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(SHOGUN);
   // What the arm-time reconciler writes back after a redeploy: no legs, no
   // decision, the account itself as target, stamped at the restart.
   db.prepare(
@@ -166,14 +167,15 @@ after(() => {
 describe("trades from before the redeploy", () => {
   it("list_trades shows them by name at their real time, and the restart copy is replaced, not doubled", async () => {
     const out = await run("list_trades", { limit: 15, since_hours: 720 });
-    assert.match(out, /bought MUSE for \$13\.30/, "the original replaces the nameless copy");
-    assert.match(out, /sold MUSE for \$14\.10 \(\+\$0\.80\)/, "a sale only the shared ledger saw");
-    assert.match(out, /bought FILLSYM for \$1\.00/, "named from the receipt's symbol");
-    assert.match(out, /bought PAPERCOIN for \$2\.00 \(practice\)/);
+    assert.match(out, /bought MUSE \(Musebook\) \(executed amount not verified\)/, "the original replaces the nameless copy");
+    assert.match(out, /sold MUSE \(Musebook\) \(executed amount not verified\)/, "a sale only the shared ledger saw");
+    assert.match(out, /bought FILLSYM \(executed amount not verified\)/, "named from the receipt's symbol");
+    assert.match(out, /bought PAPERCOIN .*\(practice\)/);
     assert.doesNotMatch(out, /after a restart/, "no row should still be the bare copy");
     assert.doesNotMatch(out, /a coin I can't name/);
     assert.equal(out.match(/bought MUSE/g)?.length, 1, "one row per operation");
-    assert.equal(out.match(/for \$3\.00/g)?.length, 1, "the ledger's own fill is not shown twice");
+    assert.equal(out.match(/bought NEW/g)?.length, 1, "the ledger's own fill is not shown twice");
+    assert.doesNotMatch(out,/realized \+\$0\.80|for \$13\.30|for \$14\.10/,"an archived cash figure without provenance is not a measured result");
   });
 
   it("/trades sees them too", async () => {
@@ -193,13 +195,14 @@ describe("trades from before the redeploy", () => {
     assert.match(d, /LOCAL_REASON/);
     assert.doesNotMatch(d, /STALE_COPY_REASON/, "the ledger's own decision wins over a carried one with its id");
     const r = await run("token_report", { coin: MUSE });
-    assert.match(r, /My trades in it: 2 \(bought \$13\.30, sold \$14\.10, closed result \+\$0\.80\)/);
+    assert.match(r, /My trades in it: 2 this run \(bought cash not fully verified, sold cash not fully verified, closed result not fully verified\)/);
     assert.match(r, /HIST_(SELL|BUY)_REASON/);
   });
 
-  it("pnl_breakdown books the closed trade by coin, and says its account-value readings start later", async () => {
+  it("pnl_breakdown withholds unverified archived returns, and says its account-value readings start later", async () => {
     const out = await run("pnl_breakdown", { period: "7d" });
-    assert.match(out, /MUSE: \+\$0\.80 over 1 sale/);
+    assert.match(out,/1 sale had no verifiable realized result/);
+    assert.doesNotMatch(out,/MUSE: \+\$0\.80/);
     assert.match(out, /Network fees paid: about \$0\.04/);
     assert.match(out, /account-value readings only go back to/);
   });
@@ -216,10 +219,10 @@ describe("trades from before the redeploy", () => {
 
   it("a trade sent just before the redeploy shows how it really ended, not 'waiting to confirm'", async () => {
     const out = await run("list_trades", { limit: 15, since_hours: 720 });
-    assert.match(out, /✅ bought LATE for \$4\.00/, "the ledger's copy knows it landed");
+    assert.match(out, /bought LATE \(executed amount not verified\).*landed/, "the ledger's copy knows it landed");
     assert.doesNotMatch(out, /waiting to confirm/);
     const all = await run("list_trades", { filter: "all", limit: 15, since_hours: 720 });
-    assert.match(all, /tried to buy GHOST for \$6\.00 \(sent before a restart — how it ended isn't on record\)/);
+    assert.match(all, /attempted buy GHOST \(requested \$6\.00; no confirmed fill\).*final outcome not recorded/);
   });
 
   it("find_token finds a coin /trades named from its receipt", async () => {
@@ -260,7 +263,7 @@ describe("trades from before the redeploy", () => {
     assert.equal(readHistory(HOME, "0x0000000000000000000000000000000000000b0b"), null);
     writeFileSync(historyFilePath(HOME), "{not json");
     const out = await run("list_trades");
-    assert.match(out, /bought NEW for \$3\.00/, "the plain ledger still answers");
+    assert.match(out, /bought NEW \(executed amount not verified\)/, "the plain ledger still answers");
     assert.doesNotMatch(out, /MUSE/);
     writeHistoryFile(HOME, HISTORY);
     assert.equal(path.basename(historyFilePath(HOME)), HISTORY_FILE);

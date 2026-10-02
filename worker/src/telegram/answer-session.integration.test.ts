@@ -71,13 +71,16 @@ function trade(p: Partial<HistoryTrade> & Pick<HistoryTrade, "created_at">): His
 function addLocalFill(tokenIdx: number, at: number): void {
   const w = new DatabaseSync(homePaths.db());
   w.prepare(
-    `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, fill_side, fill_cash_usdg, created_at) VALUES (?, 'swap', ?, ?, ?, 7, 'landed', 'buy', 7, ?)`,
+    `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, fill_side, fill_cash_usdg, fill_qty_raw, basis_source, created_at) VALUES (?, 'swap', ?, ?, ?, 7, 'landed', 'buy', 7, '100', 'receipt', ?)`,
   ).run(SHOGUN, VAULT, USDG, coin(tokenIdx), at);
   w.close();
 }
 
 before(async () => {
   await initStore();
+  const active=new DatabaseSync(homePaths.db());
+  active.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(SHOGUN);
+  active.close();
   addLocalFill(900, RESTART + 60);
   writeHistoryFile(HOME, {
     schema: 1,
@@ -109,7 +112,7 @@ describe("one ledger connection per answer", () => {
         if (n > 0) seenOpen.push(toolSessionStatsForTest().open);
       },
     );
-    const a = await answerQuestion({ question: "what did you buy", name: "Shogun", identity: "", memory: "", gap: "", history: [], tools: tools(), creds, turn });
+    const a = await answerQuestion({ question: "check my records", name: "Shogun", identity: "", memory: "", gap: "", history: [], tools: tools(), creds, turn });
     assert.equal(a?.text, "done");
     assert.equal(a?.used.length, 6);
     assert.deepEqual(seenOpen, [1, 1, 1], "open across the whole answer, one connection");

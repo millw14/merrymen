@@ -9,6 +9,7 @@ import {
   compactUsd,
   count,
   dayLabel,
+  decimalAmount,
   displayLocale,
   fullDateTime,
   pct,
@@ -53,6 +54,7 @@ describe("a figure we do not have is never a figure of zero", () => {
       ["pctPts", pctPts(null)],
       ["pctBps", pctBps(null)],
       ["count", count(null)],
+      ["decimalAmount", decimalAmount(null)],
       ["usdAdaptive", usdAdaptive(null)],
       ["subCentUsd", subCentUsd(null)],
       ["usdFixed", usdFixed(null, 2)],
@@ -70,12 +72,14 @@ describe("a figure we do not have is never a figure of zero", () => {
       assert.equal(usd(bad), DASH);
       assert.equal(compactUsd(bad), DASH);
       assert.equal(count(bad), DASH);
+      assert.equal(decimalAmount(bad), DASH);
     }
   });
 
   it("but a real zero is a real measurement and still renders", () => {
     assert.equal(usd(0), "$0.00");
     assert.equal(count(0), "0");
+    assert.equal(decimalAmount(0), "0");
     assert.equal(pct(0), "0.0%");
   });
 });
@@ -106,6 +110,13 @@ describe("what an English reader sees, pinned", () => {
     // so the number is formatted unsigned and this sign is prefixed.
     assert.equal(pctBps(-1234), "−12.3%");
     assert.ok(!pctBps(-1234).includes("-"), "a hyphen is not a minus here");
+  });
+
+  it("token amounts preserve eight fractional places without inventing trailing zeroes", () => {
+    assert.equal(decimalAmount(1234.12345678), "1,234.12345678");
+    assert.equal(decimalAmount(0.00000001), "0.00000001");
+    assert.equal(decimalAmount(-0.00000001), "-0.00000001");
+    assert.equal(decimalAmount(1234.5), "1,234.5");
   });
 
   it("compact notation rounds to something a reader can act on", () => {

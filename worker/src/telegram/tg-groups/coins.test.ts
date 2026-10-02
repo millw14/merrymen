@@ -26,6 +26,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { COIN_FLOW, CoinFlow, type CoinFlowDeps, type CoinIntent, type CoinPostInfo, type CoinSpeakOpts } from "./coins";
 import { extractCaHits, extractCashtags, hasForeignMint, hasOtherChainLink } from "./detect";
+import { publicFactLine } from "./facts";
 import { TG_GROUPS_FILE, TgGroupsStore } from "./store";
 import type {
   CoinKind,
@@ -365,6 +366,109 @@ describe("a CA in another chain's link", () => {
 // ─── Claims, staleness, rooms ──────────────────────────────────────────────
 
 describe("claims", () => {
+  it("an untagged coin is nominated but a buy is only reported after the actual outcome", async () => {
+    const flow = makeFlow();
+    port!.ready = { kind: "ready-live", ownerReason: "ready" };
+    const first = await post(flow, CHAT, `joining this one ${CA1}`, { id: 510, addressed: false });
+    assert.deepEqual(port!.nominations, [{ address: CA1, chatId: CHAT, messageId: first.line.messageId, senderId: ANN, atMs: clock }]);
+    assert.deepEqual(intents(), [{ kind: "coin-ack" }], "a nomination is not a buy");
+    await flow.onOutcome({ kind: "bought", address: CA1, chatId: CHAT, messageId: 510,
+      paper: false, decisionId: "filled-live", notes: ["real buyers were showing up"] });
+    assert.deepEqual(intents().at(-1), { kind: "coin-bought", paper: false, notes: ["real buyers were showing up"] });
+    assert.equal(memoOf(CA1)!.paper, undefined);
+    assert.deepEqual(memoOf(CA1)!.notes, ["real buyers were showing up"]);
+    await flow.onPost(CHAT, first.line, first.info);
+    assert.equal(port!.nominations.length, 1, "redelivery never buys twice");
+  });
+
+  it("an addressed coin research question gets its observed facts while keeping the ordinary nomination", async () => {
+    port!.looks.set(CA1, { kind: "candidate", name: "PRISM", source: "geckoterminal",
+      research: { source: "geckoterminal", observedAtMs: clock - MIN, liquidityUsd: 250_000, volume24hUsd: 500_000 } });
+    const flow = makeFlow();
+    await post(flow, CHAT, `shogun how's this ${CA1}`, { addressed: true });
+    assert.equal(port!.nominations.length, 1);
+    const intent = intents()[0]!;
+    assert.equal(intent.kind, "public-fact");
+    if (intent.kind !== "public-fact" || intent.fact.kind !== "coin") assert.fail("expected public coin facts");
+    assert.equal(intent.fact.look.kind, "candidate");
+    assert.deepEqual(intent.fact.look.research, port!.looks.get(CA1)!.research);
+    assert.equal(intent.fact.nowMs, clock);
+    assert.equal(memoOf(CA1)!.verdict, "candidate", "no claimed Brain verdict or completed fill");
+  });
+
+  it("missing FDV or creation time still yields observed research without making an unknown look tradable or memorable", async () => {
+    const ready = mock.method(port!, "readiness");
+    const flow = makeFlow();
+    for (const [index, missing] of ["fdv", "creation"].entries()) {
+      const address = ca(0x710 + index);
+      // The index's missing values are omitted from research, while its other
+      // observations survive the unknown screen (tg-coin-look.test.ts).
+      const research = { source: "geckoterminal" as const, observedAtMs: clock - MIN,
+        liquidityUsd: 200_000, volume24hUsd: 500_000, priceChange24hPct: 5,
+        ...(missing === "fdv" ? { ageMinutes: 60 } : { fdvUsd: 1_000_000 }) };
+      port!.looks.set(address, { kind: "unknown", name: "PRISM", source: "geckoterminal", research });
+      const result = await post(flow, CHAT, `shogun how's this ${address}`, { addressed: true });
+      const said = spoken.at(-1)!;
+      assert.equal(said.intent.kind, "public-fact", missing);
+      if (said.intent.kind !== "public-fact" || said.intent.fact.kind !== "coin") assert.fail("expected public coin facts");
+      assert.equal(said.intent.fact.look.kind, "unknown", "available facts do not upgrade the quick screen");
+      assert.deepEqual(said.intent.fact.look.research, research);
+      const text = publicFactLine(said.intent.fact)!;
+      assert.match(text, /GeckoTerminal snapshot 11:59 UTC \(cached\): liquidity \$200k, 24h volume \$500k, 24h change \+5%/);
+      assert.match(text, /couldn't verify enough to give it a take/);
+      assert.doesNotMatch(text, /clears the quick screen|bought|can't pull/);
+      assert.equal(said.o.replyTo, result.line.messageId);
+      assert.deepEqual(said.o.mention, { id: ANN, name: "ann" });
+      assert.equal(memoOf(address), undefined);
+
+      await post(flow, CHAT, `shogun thoughts on this ${address}`, { addressed: true });
+      assert.equal(port!.lookCalls.filter((a) => a === address).length, 2, "a later post gets a fresh look rather than an unknown memo");
+    }
+    assert.equal(spoken.length, 4, "each question gets facts, without an extra unavailable line");
+    assert.equal(ready.mock.callCount(), 0, "partial research never enters readiness or owner permission paths");
+    assert.equal(port!.nominations.length + dms.length + reacts.length, 0);
+    assert.equal(store.room(CHAT)!.lastReadyAskAtMs, undefined);
+    assert.equal(store.room(CHAT)!.lastCoinUnknownAtMs, undefined);
+  });
+
+  it("an unaddressed unknown remains quiet even when its partial public snapshot is available", async () => {
+    port!.looks.set(CA1, { kind: "unknown", name: "PRISM", research: {
+      source: "geckoterminal", observedAtMs: clock, liquidityUsd: 200_000, volume24hUsd: 500_000,
+    } });
+    const ready = mock.method(port!, "readiness");
+    const result = await begin(makeFlow(), CHAT, `thoughts on this ${CA1}`, { addressed: false });
+    assert.deepEqual(await result.done, { acted: false, quiet: "coin-unknown", looks: ["unknown"] });
+    assert.equal(spoken.length + reacts.length + dms.length + port!.nominations.length, 0);
+    assert.equal(ready.mock.callCount(), 0);
+    assert.equal(memoOf(CA1), undefined);
+  });
+
+  it("an addressed unknown with unusable research retains the unavailable fallback", async () => {
+    port!.looks.set(CA1, { kind: "unknown", name: "PRISM", research: {
+      source: "geckoterminal", observedAtMs: Number.NaN, liquidityUsd: 200_000,
+    } });
+    const ready = mock.method(port!, "readiness");
+    await post(makeFlow(), CHAT, `shogun how's this ${CA1}`, { addressed: true });
+    assert.deepEqual(intents(), [{ kind: "coin-unknown" }]);
+    assert.equal(port!.nominations.length + dms.length + reacts.length, 0);
+    assert.equal(ready.mock.callCount(), 0);
+    assert.equal(memoOf(CA1), undefined);
+  });
+
+  it("malformed public figures never reach the factual writer", async () => {
+    port!.looks.set(CA1, { kind: "too-thin", name: "PRISM", research: {
+      source: "geckoterminal", observedAtMs: clock, liquidityUsd: -1,
+      priceUsd: Number.NaN, volume24hUsd: Number.POSITIVE_INFINITY,
+      buys24h: 1.5, sells24h: -1, priceChange24hPct: -101,
+    } });
+    await post(makeFlow(), CHAT, `shogun thoughts on this ${CA1}`, { addressed: true });
+    const intent = intents()[0]!;
+    assert.equal(intent.kind, "public-fact");
+    if (intent.kind !== "public-fact" || intent.fact.kind !== "coin") assert.fail("expected public coin facts");
+    assert.deepEqual(intent.fact.look.research, { source: "geckoterminal", observedAtMs: clock });
+    assert.equal(port!.nominations.length, 0, "a fact reply never changes a refused screen into a candidate");
+  });
+
   it("the claim is on disk before the look, and a replayed post is silent", async () => {
     const flow = makeFlow();
     const { line, info } = msg(CHAT, `ape this ${CA1}`, { id: 500 });
@@ -1639,6 +1743,7 @@ describe("outcomes", () => {
       notes: ["up 5x today", "costs $ to get in", "ninety percent held by 0xabc", "the same few wallets trade it", 7 as unknown as string],
     });
     assert.deepEqual(intents(), [{ kind: "coin-passed", notes: ["the same few wallets trade it"] }]);
+    assert.deepEqual(memoOf(CA1)!.notes, ["the same few wallets trade it"], "only sanitized reviewed notes survive for later why questions");
   });
 
   it("coins switched off after the nomination: the verdict is kept, nothing is said", async () => {

@@ -32,7 +32,7 @@ const tools = {
 } as unknown as ToolContext;
 
 const base = (turn: AnswerInput["turn"]): AnswerInput => ({
-  question: "what did you buy",
+  question: "hello",
   name: "Shogun",
   identity: "YOUR IDENTITY: You are Shogun.",
   memory: "",
@@ -152,5 +152,18 @@ describe("the Sign now button keeps its reason", () => {
     // No ledger in this test, so no blocker: the old grant is flagged by the update marker.
     assert.equal(a!.needsSignature, true);
     assert.equal(a!.signReason, "update");
+  });
+});
+
+describe("factual answers cannot be skipped by a model",()=> {
+  it("a plain trade-history question reads before narration and never calls the model",async()=> {
+    let called=false;const turn=(async()=>{called=true;return {text:"I bought imaginary coins",toolUses:[]};}) as never;
+    const a=await answerQuestion({...base(turn),question:"what did you trade today?"});
+    assert.equal(called,false);assert.match(a!.text,/No agent is set up/);assert.deepEqual(a!.used,["list_trades"]);
+  });
+  it("a supplied trade arithmetic question is deterministic and labelled hypothetical",async()=> {
+    let called=false;const turn=(async()=>{called=true;return {text:"1000 percent",toolUses:[]};}) as never;
+    const a=await answerQuestion({...base(turn),question:"I bought for $5 and sold for $6, what is my profit?"});
+    assert.equal(called,false);assert.match(a!.text,/1 P&L \(20%/);assert.match(a!.text,/not a verified trade/);
   });
 });

@@ -28,6 +28,9 @@ const g = globalThis as { ResizeObserver?: unknown; self?: unknown };
 const realObserver = g.ResizeObserver;
 const realSelf = g.self;
 beforeEach(() => {
+  // These scenarios describe today's rows. Keep them away from the real
+  // midnight boundary, where a five-minute-old refusal belongs to yesterday.
+  mock.method(Date, "now", () => new Date(2026, 9, 1, 12).getTime());
   ui = testDom();
   // The desk asks for the owner's tier on mount; nothing here depends on it.
   globalThis.fetch = (async () => json({}, 404)) as typeof fetch;
@@ -41,6 +44,7 @@ afterEach(async () => {
   globalThis.fetch = realFetch;
   g.ResizeObserver = realObserver;
   g.self = realSelf;
+  mock.restoreAll();
 });
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -179,6 +183,7 @@ it("an age in seconds moves on while it is being read", async () => {
   // read "55s" for half a minute and then jumped. The feed's rows tick every
   // five seconds (wire.tsx); the table now keeps the same pace.
   const start = 1_900_000_000_000;
+  mock.restoreAll();
   mock.timers.enable({ apis: ["setInterval", "Date"], now: start });
   try {
     const rows = swapRowsOfProfile([{ id: "1", action: "sell", symbol: "CASHCAT", displayName: null, at: start / 1000 - 55, paper: false, sizeUsdg: null, realizedPnlUsdg: null, realizedPnlBps: null }]);

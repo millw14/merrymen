@@ -66,10 +66,12 @@
  */
 
 import type { TgGroupsStore } from "./store";
+import { asksAboutCoin } from "./detect";
 import type {
   CoinKind,
   CoinLook,
   CoinLookSource,
+  CoinResearch,
   CoinOutcome,
   CoinVerdict,
   NominateRefusal,
@@ -80,6 +82,7 @@ import type {
   TgLine,
   TgRoom,
   TrencherReadiness,
+  TgPublicFact,
 } from "./types";
 
 const MIN = 60_000;
@@ -171,6 +174,7 @@ export const COIN_FLOW = {
  */
 export type CoinIntent =
   | { kind: "coin-ack" }
+  | { kind: "public-fact"; fact: TgPublicFact }
   | { kind: "coin-look"; look: CoinKind }
   | { kind: "coin-seen"; verdict: CoinVerdict }
   | { kind: "coin-bought"; paper: boolean; notes: string[] }
@@ -499,6 +503,22 @@ function cleanNotes(v: unknown): string[] {
   return out;
 }
 
+/** The read-only public figures a port may hand to the factual writer. */
+function cleanResearch(v: unknown): CoinResearch | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const x = v as Record<string, unknown>;
+  if (!isNum(x.observedAtMs) || x.observedAtMs < 0 || (x.source !== "geckoterminal" && x.source !== "dexscreener")) return undefined;
+  const out: CoinResearch = { observedAtMs: x.observedAtMs, source: x.source };
+  for (const key of ["priceUsd", "liquidityUsd", "fdvUsd", "volume24hUsd", "ageMinutes"] as const) {
+    if (isNum(x[key]) && x[key] >= 0) out[key] = x[key];
+  }
+  for (const key of ["buys24h", "sells24h"] as const) {
+    if (isInt(x[key]) && x[key] >= 0) out[key] = x[key];
+  }
+  if (isNum(x.priceChange24hPct) && x.priceChange24hPct >= -100) out.priceChange24hPct = x.priceChange24hPct;
+  return out;
+}
+
 /** Well-formed CAs, lowercased, unique, in order, at most `max`. */
 function cleanCas(v: unknown, max: number): string[] {
   if (!Array.isArray(v)) return [];
@@ -703,8 +723,9 @@ export class CoinFlow {
 
   /**
    * SOMEONE ASKED ABOUT A POST'S COIN WHILE ITS LOOK WAS STILL OUT ("wdyt
-   * about this pine" seconds after the CA). The handler answers them now, as
-   * chatter; this makes sure they also hear how the look went: a post nobody
+   * about this pine" seconds after the CA). The handler can answer through
+   * its detached factual lane; this makes sure they also hear how the look
+   * went from the coin flow: a post nobody
    * addressed whose look comes back `unknown` gets "can't pull that one up
    * rn" tagging the first of them (still at most once per chat per
    * COIN_FLOW.unknownLineMs), where it would otherwise be silence. A verdict
@@ -887,6 +908,7 @@ export class CoinFlow {
             verdict: "bought",
             ...(out.decisionId ? { decisionId: out.decisionId } : {}),
             paper: out.paper ? true : undefined,
+            notes: out.notes,
           });
           if (ack) await ack;
           if (!quiet) await this.say(chatId, { kind: "coin-bought", paper: out.paper, notes: out.notes }, opts);
@@ -895,6 +917,7 @@ export class CoinFlow {
           this.d.store.updateCoin(chatId, address, {
             verdict: "passed",
             ...(out.decisionId ? { decisionId: out.decisionId } : {}),
+            notes: out.notes,
           });
           if (ack) await ack;
           if (!quiet) await this.say(chatId, { kind: "coin-passed", notes: out.notes }, opts);
@@ -1052,12 +1075,27 @@ export class CoinFlow {
     // nothing is ever said from it and a repost gets a fresh look. A look
     // that could not be made is noted: an addressed post whose looks all
     // failed gets "can't pull that one up rn" (cannotLook), never a verdict.
+    // A partial index snapshot can still answer an explicit research question;
+    // it never makes the unknown classification eligible for nomination or a memo.
     if (look.kind === "unknown") {
       ctx.unknown = true;
+      if (m.addressed === true && asksAboutCoin(line.text) && look.research) {
+        const tag = tagSender();
+        await say({ kind: "public-fact", fact: { kind: "coin", look, nowMs: d.now() } }, {
+          replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...(look.name ? { coinName: look.name } : {}),
+          stillWanted: () => this.coinsOn() && !gone(),
+        });
+      }
       return hush("coin-unknown");
     }
     if (NOT_A_COIN_HERE.has(look.kind)) return hush("coin-not-here");
     const coinName = look.name ? { coinName: look.name } : {};
+    // An explicit research question deserves the public observations the look
+    // actually read. A candidate is still nominated through the same path,
+    // and this reply never claims a Brain verdict or a fill.
+    const intentOf = (fallback: CoinIntent): CoinIntent => m.addressed === true && asksAboutCoin(line.text) && look.research
+      ? { kind: "public-fact", fact: { kind: "coin", look, nowMs: d.now() } }
+      : fallback;
 
     // A CHART LINK CARRIES THE POOL. When the look proved the posted address
     // is the pool of a coin, that coin is the one remembered, answered from
@@ -1081,13 +1119,13 @@ export class CoinFlow {
     if (look.kind === "held") {
       d.store.rememberCoin(chatId, memo("held", look.name, coin));
       const tag = tagSender();
-      await say({ kind: "coin-seen", verdict: "held" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      await say(intentOf({ kind: "coin-seen", verdict: "held" }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
     }
     if (look.kind !== "candidate") {
       d.store.rememberCoin(chatId, memo(look.kind, look.name, coin));
       const tag = tagSender();
-      await say({ kind: "coin-look", look: look.kind }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      await say(intentOf({ kind: "coin-look", look: look.kind }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
     }
 
@@ -1122,7 +1160,7 @@ export class CoinFlow {
       d.store.rememberCoin(chatId, memo("candidate", look.name, coin));
       const tag = tagSender();
       const k = `${chatId}:${coin}`;
-      const ack = say({ kind: "coin-ack" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      const ack = say(intentOf({ kind: "coin-ack" }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       this.acks.set(k, ack);
       try {
         await ack;
@@ -1413,11 +1451,13 @@ export class CoinFlow {
       const name = cleanName(l.name);
       // The coin a posted pool trades: well-formed like any CA, or not passed on.
       const coin = typeof l.address === "string" ? l.address.toLowerCase() : "";
+      const research = cleanResearch(l.research);
       return {
         kind: l.kind,
         ...(name ? { name } : {}),
         ...(ADDRESS.test(coin) && coin !== address ? { address: coin } : {}),
         ...(typeof l.source === "string" && SOURCES.has(l.source) ? { source: l.source } : {}),
+        ...(research ? { research } : {}),
       };
     } catch (e) {
       this.fail("look", e);

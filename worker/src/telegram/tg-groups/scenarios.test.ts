@@ -916,17 +916,19 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     make({
       timer: (ms) =>
         new Promise<void>((fire) => {
+          const due = clock + ms;
           waits.push(() => {
-            clock += ms;
+            clock = Math.max(clock, due);
             fire();
           });
         }),
       log: (l) => logs.push(l),
     });
     approve();
+    const pending = new Promise<CoinLook>(() => {});
     port.look = (address: string) => {
       port.lookCalls.push(address);
-      return new Promise<CoinLook>(() => {});
+      return pending;
     };
     // When each answer went out, by the message it replies to.
     const sentAt = new Map<number, number>();
@@ -962,15 +964,21 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     await until(() => port.lookCalls.length > 0);
     assert.deepEqual(port.lookCalls, [CA]);
 
-    // "didnt you see", a reply to the CA: answered while the look is still out.
+    // "didnt you see", a reply to the CA: its factual answer joins the same
+    // unreadable look and answers honestly by the deadline, never with vibes.
     const didnt = milla("@pinebot didnt you see", { replyTo: { messageId: post.messageId!, fromId: OWNER, fromIsBot: false } });
     const didntAt = clock;
     groups.onMessage(didnt);
+    await until(() => waits.length === 2);
+    assert.equal(waits.length, 2, "both lanes have a bounded read");
+    assert.ok(!sentAt.has(didnt.messageId!), "no coin opinion before evidence or its read deadline");
+    for (const fire of waits) fire();
     await until(() => sentAt.has(didnt.messageId!));
     assert.ok(sentAt.has(didnt.messageId!), "answered, not dropped as stale");
     assert.ok(sentAt.get(didnt.messageId!)! - didntAt < 20 * SEC, `promptly: ${sentAt.get(didnt.messageId!)! - didntAt} ms`);
 
-    // A minute later, "??": answered too, the look still out.
+    // A minute later, "??": answered too, even though the underlying read
+    // never answered. The timed-out lookup cannot hold this chat's queue.
     clock += MIN;
     const nudge = milla("@pinebot ??");
     const nudgeAt = clock;
@@ -983,19 +991,18 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     groups.onMessage(byName);
     await until(() => sentAt.has(byName.messageId!));
     assert.ok(sentAt.has(byName.messageId!), "its name calls it too");
-    assert.equal(waits.length, 1, "all the while, the look was out");
+    assert.equal(waits.length, 2, "chatter did not start any extra coin reads");
 
     // The look's bound passes: unknown. The CA was not said to it, but her
     // "didnt you see" asked about it while the look was out, so she hears
     // "can't pull that one up rn" on the post, tagged — once — and nothing
     // is remembered or nominated.
-    waits[0]!();
     await groups.drain();
     assert.deepEqual(
-      tg.sends(CHAT).map(replyOf),
-      [...asked, didnt, nudge, byName, post].map((m) => m.messageId),
+      new Set(tg.sends(CHAT).map(replyOf)),
+      new Set([...asked, didnt, nudge, byName, post].map((m) => m.messageId)),
     );
-    const cant = String(tg.sends(CHAT).at(-1)?.body.text);
+    const cant = String(tg.sends(CHAT).find((s) => replyOf(s) === post.messageId)?.body.text);
     assert.match(cant, new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `));
     assert.match(plain(cant), /can't|won't|not loading|blank/);
     assert.deepEqual(tg.reactions(CHAT), []);
@@ -1090,11 +1097,14 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.match(tg.texts(OWNER).at(-1) ?? "", /Trencher mode is off/, "and told why in their DM");
   });
 
-  it("…a coin it already looked at → answered from memory, no new look, and everyone who asks gets the answer, not only the first", async () => {
+  it("…a remembered coin → explicit follow-ups read public facts for each asker; a bare repost keeps its memory pacing", async () => {
     make();
     approve();
     port.ready = { kind: "off", ownerReason: "off" };
-    port.looks.set(CA1, { kind: "too-thin", name: "Vrax" });
+    port.looks.set(CA1, { kind: "too-thin", name: "Vrax", research: {
+      source: "geckoterminal", observedAtMs: clock, liquidityUsd: 1_000,
+      volume24hUsd: 2_000, priceChange24hPct: -3,
+    } });
     const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
     await said(post);
     assert.equal(tg.sends(CHAT).length, 1, "its grounded fade");
@@ -1104,11 +1114,21 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     const second = under("pine is it any good", CAT, "Cat");
     const third = under("@pinebot this?", OWNER, "Milla");
     for (const m of [first, second, third]) await said(m);
-    assert.deepEqual(port.lookCalls, [CA1], "no new look: the memo answers");
+    assert.deepEqual(port.lookCalls, [CA1, CA1, CA1, CA1], "explicit questions read the same remembered coin through the public port");
     assert.deepEqual(tg.sends(CHAT).slice(1).map(replyOf), [first, second, third].map((m) => m.messageId), "each one who asked, answered");
-    // A bare repost inside the hour is still a repost: one 👀, not a fourth line.
+    for (const sent of tg.sends(CHAT).slice(1)) {
+      assert.match(plain(String(sent.body.text)), /Vrax — GeckoTerminal snapshot/);
+      assert.match(plain(String(sent.body.text)), /liquidity \$1k, 24h volume \$2k, 24h change -3%/);
+      assert.match(plain(String(sent.body.text)), /listed liquidity is thin/);
+    }
+    assert.deepEqual(port.nominations, [], "a research answer is not another nomination");
+    // Explicit facts use normal answer pacing. A bare repost keeps the coin
+    // memory lane: one memory line, then a 👀, without another market read.
     await said(msg(CA1, { fromId: BOB, fromFirstName: "Bob" }));
-    assert.equal(tg.sends(CHAT).length, 4);
+    assert.equal(tg.sends(CHAT).length, 5);
+    await said(msg(CA1, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, 5);
+    assert.equal(port.lookCalls.length, 4, "a bare repost adds no market read");
     assert.deepEqual(tg.reactions(CHAT), ["👀"]);
   });
 
@@ -1182,7 +1202,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.deepEqual(tg.reactions(CHAT), ["👀"], "the fourth one asking gets a 👀, the fifth nothing");
   });
 
-  it("…a reply asking while the post's own look is still out → answered now, as chatter; and when that look fails, 'can't pull that one up rn' tags the one who asked", async () => {
+  it("…a reply asking during a pending look waits for facts off the queue; timeout answers honestly and tags the asker", async () => {
     const waits: Array<() => void> = [];
     make({
       timer: (ms) =>
@@ -1194,25 +1214,40 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
         }),
     });
     approve();
+    const pending = new Promise<CoinLook>(() => {});
     port.look = (address: string) => {
+      // The real look deduplicates concurrent reads for this address. The
+      // addressed factual lane may join it without making a second request.
       port.lookCalls.push(address);
-      return new Promise<CoinLook>(() => {});
+      return pending;
     };
-    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
-    groups.onMessage(post);
-    for (let i = 0; i < 200 && port.lookCalls.length === 0; i++) await new Promise((r) => setImmediate(r));
-    const wdyt = msg("wdyt about this pine", { fromId: OWNER, fromFirstName: "Milla", replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
-    groups.onMessage(wdyt);
-    for (let i = 0; i < 200 && tg.sends(CHAT).length === 0; i++) await new Promise((r) => setImmediate(r));
-    assert.deepEqual(tg.sends(CHAT).map(replyOf), [wdyt.messageId], "answered now, not queued behind the look");
-    assert.deepEqual(port.lookCalls, [CA1], "one look, the post's");
-    waits[0]!();
-    await groups.drain();
-    const s = tg.sends(CHAT);
-    assert.deepEqual(s.map(replyOf), [wdyt.messageId, post.messageId]);
-    assert.match(String(s[1]?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `), "tagging who asked, not who posted");
-    assert.match(plain(String(s[1]?.body.text)), /can't|won't|not loading|blank/);
-    assert.equal(port.nominations.length, 0);
+    try {
+      const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+      groups.onMessage(post);
+      for (let i = 0; i < 200 && port.lookCalls.length === 0; i++) await new Promise((r) => setImmediate(r));
+      assert.deepEqual(port.lookCalls, [CA1]);
+      const wdyt = msg("wdyt about this pine", { fromId: OWNER, fromFirstName: "Milla", replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
+      groups.onMessage(wdyt);
+      const hello = msg("@pinebot hi", { fromId: CAT, fromFirstName: "Cat" });
+      groups.onMessage(hello);
+      for (let i = 0; i < 200 && !tg.sends(CHAT).some((s) => replyOf(s) === hello.messageId); i++) await new Promise((r) => setImmediate(r));
+      assert.deepEqual(tg.sends(CHAT).map(replyOf), [hello.messageId], "a later greeting answers immediately; no coin facts are invented while reads hang");
+      assert.deepEqual(port.lookCalls, [CA1, CA1], "both lanes join the same underlying read promise");
+      assert.equal(waits.length, 2, "both the coin lane and detached factual answer have a deadline");
+      for (const fire of waits) fire();
+      await groups.drain();
+      const s = tg.sends(CHAT);
+      assert.deepEqual(new Set(s.map(replyOf)), new Set([hello.messageId, wdyt.messageId, post.messageId]));
+      const failedPost = s.find((sent) => replyOf(sent) === post.messageId);
+      assert.match(String(failedPost?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `), "tagging who asked, not who posted");
+      assert.match(plain(String(failedPost?.body.text)), /can't|won't|not loading|blank/);
+      const facts = s.find((sent) => replyOf(sent) === wdyt.messageId);
+      assert.match(plain(String(facts?.body.text)), /can't verify|couldn't verify/);
+      assert.doesNotMatch(plain(String(facts?.body.text)), /bought|liquidity|volume|vibing/);
+      assert.equal(port.nominations.length, 0);
+    } finally {
+      for (const fire of waits) fire();
+    }
   });
 
   it("…a different ticker in a reply never nominates the quoted coin; the matching ticker can use its quoted CA", async () => {
@@ -1229,21 +1264,11 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
 
   it("…the asker runs /forgetme while the failed-look response is typing under someone else's post: no tag or line is sent", async () => {
     let releaseLook!: (look: CoinLook) => void;
-    let sawLook!: () => void;
-    const lookStarted = new Promise<void>((resolve) => { sawLook = resolve; });
-    let sawReply!: () => void;
-    const replySent = new Promise<void>((resolve) => { sawReply = resolve; });
     let sawTyping!: () => void;
     const typingStarted = new Promise<void>((resolve) => { sawTyping = resolve; });
     let releaseTyping!: () => void;
     const typingHeld = new Promise<void>((resolve) => { releaseTyping = resolve; });
     let holdTyping = false;
-    const fetchTg = tg.fetchFn;
-    tg.fetchFn = async (url, init) => {
-      const result = await fetchTg(url, init);
-      if (url.endsWith("/sendMessage")) sawReply();
-      return result;
-    };
     make({
       timer: () => new Promise<void>(() => {}),
       sleep: async (ms) => {
@@ -1256,28 +1281,37 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
       },
     });
     approve();
+    const pending = new Promise<CoinLook>((resolve) => { releaseLook = resolve; });
     port.look = (address) => {
       port.lookCalls.push(address);
-      sawLook();
-      return new Promise<CoinLook>((resolve) => { releaseLook = resolve; });
+      return pending;
     };
-    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
-    groups.onMessage(post);
-    await lookStarted;
-    const ask = msg("wdyt about this pine", { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
-    groups.onMessage(ask);
-    await replySent;
-    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the immediate chatter already answered the asker");
-    holdTyping = true;
-    releaseLook({ kind: "unknown" });
-    await typingStarted;
-    await groups.forgetMe(CHAT, ANN, undefined, { late: true });
-    releaseTyping();
-    await groups.drain();
-    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the later response cannot publish the forgotten asker's tag");
-    assert.equal(store.person(CHAT, ANN), undefined);
-    assert.ok(!store.room(CHAT)!.lines.some((line) => line.fromId === ANN));
-    assert.deepEqual(port.nominations, []);
+    try {
+      const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+      groups.onMessage(post);
+      for (let i = 0; i < 200 && port.lookCalls.length === 0; i++) await new Promise((r) => setImmediate(r));
+      assert.deepEqual(port.lookCalls, [CA1]);
+      const ask = msg("wdyt about this pine", { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
+      groups.onMessage(ask);
+      const hello = msg("@pinebot hi", { fromId: CAT, fromFirstName: "Cat" });
+      groups.onMessage(hello);
+      for (let i = 0; i < 200 && !tg.sends(CHAT).some((s) => replyOf(s) === hello.messageId); i++) await new Promise((r) => setImmediate(r));
+      assert.deepEqual(tg.sends(CHAT).map(replyOf), [hello.messageId], "the read does not block the chat or invent an immediate coin opinion");
+      assert.deepEqual(port.lookCalls, [CA1, CA1], "the factual answer joins the existing promise without replacing its resolver");
+      holdTyping = true;
+      releaseLook({ kind: "unknown" });
+      await typingStarted;
+      await groups.forgetMe(CHAT, ANN, undefined, { late: true });
+      releaseTyping();
+      await groups.drain();
+      assert.deepEqual(tg.sends(CHAT).map(replyOf), [hello.messageId], "neither delayed response can publish the forgotten asker's tag or line");
+      assert.equal(store.person(CHAT, ANN), undefined);
+      assert.ok(!store.room(CHAT)!.lines.some((line) => line.fromId === ANN));
+      assert.deepEqual(port.nominations, []);
+    } finally {
+      releaseLook({ kind: "unknown" });
+      releaseTyping();
+    }
   });
 
   it("every coin post has its log line, and the heartbeat counts coin posts", async () => {

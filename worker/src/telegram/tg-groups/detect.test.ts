@@ -835,6 +835,7 @@ describe("asksAboutCoin: a reply under a coin post that asks about that coin", (
     "wdyt about this shogun", "@shogun_merry_bot thoughts?", "shogun is it any good", "shogun you in?", "@shogun_merry_bot didnt you see",
     "@shogun_merry_bot ??", "shogun?", "shogun this?", "shogun ape or nah?", "what do you think shogun", "shogun what about this one",
     "shogun rate it", "shogun would you buy", "shogun worth it?", "shogun is this legit", "shogun check this out", "shogun?? wdyt",
+    "shogun how's this 0x20024e485c0b22b42855589700721b28320000001", "hows that PRISM", "how is this coin?",
     "shogun what u make of this", "shogun it?", "shogun that?", "shogun this coin?", "shogun is it good?",
   ];
   const no = [

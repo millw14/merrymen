@@ -1483,6 +1483,222 @@ describe("a coin look that never answers", () => {
   });
 });
 
+describe("linked public research and factual replies", () => {
+  function seedAck(chatId = CHAT): void {
+    approveRoom(chatId);
+    store.addLine(chatId, { messageId: 80, fromId: ANN, name: "Ann", text: `Pine how's this ${CA1}`, atMs: clock });
+    store.addLine(chatId, { messageId: 81, fromId: BOT.id, name: BOT.name, text: "oh PRISM huh, let me see what this one got", atMs: clock, own: true, replyTo: 80 });
+    store.rememberCoin(chatId, { address: CA1, name: "PRISM", messageId: 80, atMs: clock, byId: ANN, byName: "Ann", verdict: "candidate" });
+  }
+
+  it("the screenshot's wdyt reply to her ack researches that exact coin without re-nominating", async () => {
+    const prompts = fakeModel(() => "haven't really dug into the chart yet, just vibing with the name for now");
+    make();
+    seedAck();
+    const read: string[] = [];
+    port.look = async (address) => {
+      read.push(address);
+      return { kind: "too-thin", name: "PRISM", research: { observedAtMs: clock, source: "geckoterminal", liquidityUsd: 8_000, volume24hUsd: 12_000, priceChange24hPct: -7 } };
+    };
+    await said(msg("wdyt", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true, text: "oh PRISM huh, let me see what this one got" } }));
+    assert.deepEqual(read, [CA1]);
+    assert.equal(port.nominations.length, 0);
+    assert.equal(prompts.length, 0, "the model cannot replace measured evidence with a vibe");
+    assert.match(tg.texts(CHAT)[0]!, /PRISM.*GeckoTerminal snapshot.*liquidity \$8k/);
+    assert.match(tg.texts(CHAT)[0]!, /liquidity is thin/);
+    assert.doesNotMatch(tg.texts(CHAT)[0]!, /vibing|haven't really|safe|bought/);
+  });
+
+  it("why below a recorded paper buy gives the reviewed reason and paper label", async () => {
+    make();
+    seedAck();
+    store.updateCoin(CHAT, CA1, { verdict: "bought", decisionId: "decision-1", paper: true, notes: ["activity was improving"] });
+    port.looks.set(CA1, { kind: "held", name: "PRISM" });
+    await said(msg("why?", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    assert.match(tg.texts(CHAT)[0]!, /bought it on paper because activity was improving/);
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("an unavailable lookup answers honestly and doesn't nominate or invent metrics", async () => {
+    make();
+    seedAck();
+    port.look = async () => { throw new Error("private provider problem"); };
+    await said(msg("wdyt", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    assert.match(tg.texts(CHAT)[0]!, /can't verify.*market data/);
+    assert.doesNotMatch(tg.texts(CHAT)[0]!, /private provider|volume|liquidity/);
+    assert.equal(port.nominations.length, 0);
+    assert.ok(logs.every((l) => !l.includes("private provider problem")));
+  });
+
+  it("never resolves a reply using another group's memo with the same message id", async () => {
+    make();
+    approveRoom(CHAT);
+    seedAck(OTHER);
+    let reads = 0;
+    port.look = async () => { reads++; return { kind: "candidate", name: "PRISM" }; };
+    await said(msg("wdyt", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    assert.equal(reads, 0);
+    assert.ok(tg.texts(CHAT).every((s) => !s.includes("PRISM")));
+  });
+
+  it("durable same-room PRISM names and cashtags still resolve after restart", async () => {
+    make();
+    seedAck();
+    store.updateCoin(CHAT, CA1, { verdict: "passed", decisionId: "decision-1", notes: ["activity was fading"] });
+    groups.stop();
+    await groups.drain();
+    store.close();
+    store = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+    make();
+    const read: string[] = [];
+    port.look = async (address) => { read.push(address); return { kind: "too-quiet", name: "PRISM" }; };
+    await said(msg("@pinebot wdyt about PRISM?"));
+    assert.deepEqual(read, [CA1]);
+    assert.match(tg.texts(CHAT)[0]!, /i passed because activity was fading/);
+    clock += 16 * SEC;
+    await said(msg("@pinebot thoughts on $PRISM?"));
+    assert.deepEqual(read, [CA1, CA1]);
+    assert.ok(tg.texts(CHAT).every((s) => !/drop.*ca/i.test(s)));
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("an explicit different coin below PRISM's ack never silently researches PRISM", async () => {
+    make();
+    seedAck();
+    const other = ca(0xb2);
+    store.rememberCoin(CHAT, { address: other, name: "FROG", messageId: 90, atMs: clock, byId: BOB, byName: "Bob", verdict: "candidate" });
+    const read: string[] = [];
+    port.look = async (address) => { read.push(address); return { kind: "too-thin", name: address === other ? "FROG" : "PRISM" }; };
+    await said(msg("wdyt about $FROG?", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    assert.deepEqual(read, [other]);
+    assert.match(tg.texts(CHAT)[0]!, /FROG/);
+    assert.doesNotMatch(tg.texts(CHAT)[0]!, /PRISM/);
+    clock += 16 * SEC;
+    await said(msg("wdyt about $UNKNOWN?", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    assert.deepEqual(read, [other], "an unknown requested ticker needs its own CA");
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("coins switched off suppresses remembered opinions and reads, while literal math still works", async () => {
+    make();
+    seedAck();
+    cfg.telegramGroupCoinsEnabled = false;
+    let reads = 0;
+    port.look = async () => { reads++; return { kind: "candidate", name: "PRISM" }; };
+    await said(msg("wdyt", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    assert.equal(reads, 0);
+    assert.equal(tg.sends(CHAT).length, 0);
+    assert.ok(logs.some((s) => s.includes("coin-off")));
+    clock += 16 * SEC;
+    await said(msg("@pinebot what's 0.1 + 0.2?"));
+    assert.match(tg.texts(CHAT)[0]!, /0.1 \+ 0.2 = 0.3/);
+  });
+
+  it("switching coin questions off during a read cancels its eventual opinion", async () => {
+    const timer = handTimer();
+    make({ timer: timer.timer });
+    seedAck();
+    let finish!: (look: CoinLook) => void;
+    port.look = () => new Promise<CoinLook>((resolve) => { finish = resolve; });
+    groups.onMessage(msg("wdyt", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } }));
+    await until(() => !!finish);
+    cfg.telegramGroupCoinsEnabled = false;
+    finish({ kind: "candidate", name: "PRISM", research: { observedAtMs: clock, source: "geckoterminal", liquidityUsd: 100_000 } });
+    await groups.drain();
+    assert.equal(tg.sends(CHAT).length, 0);
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("switching coins off during typing cancels a partial unknown research reply before Telegram sends it", async () => {
+    make();
+    approveRoom();
+    port.looks.set(CA1, { kind: "unknown", name: "PRISM", research: {
+      source: "geckoterminal", observedAtMs: clock, liquidityUsd: 200_000, volume24hUsd: 500_000,
+    } });
+    let readinessReads = 0;
+    port.readiness = () => { readinessReads++; return port.ready; };
+    let switched = false;
+    onSleep = () => {
+      assert.ok(tg.of("sendChatAction").length > 0, "the setting changes after typing began, rather than before the lookup");
+      switched = true;
+      cfg.telegramGroupCoinsEnabled = false;
+    };
+    await said(msg(`@pinebot how's this ${CA1}`));
+    assert.ok(switched, "the partial fact reply reached the handler's typing delay");
+    assert.equal(tg.sends().length, 0, "neither research, an unavailable fallback nor an owner prompt may land after coins are disabled");
+    assert.equal(tg.reactions().length, 0);
+    assert.equal(port.nominations.length, 0);
+    assert.equal(readinessReads, 0);
+    assert.deepEqual(store.room(CHAT)!.coins, []);
+    assert.equal(store.room(CHAT)!.lastCoinUnknownAtMs, undefined);
+  });
+
+  it("trade history and a bare why reload the same public fill facts; owner amounts stay private", async () => {
+    let reads = 0;
+    make({ facts: () => ({ tradesToday: async () => { reads++; return { day: "2026-09-28", complete: true, trades: [{ side: "buy", symbol: "PRISM", paper: false, why: "brain" }, { side: "sell", symbol: "FROG", paper: true, why: "strategy" }] }; } }) });
+    approveRoom();
+    await said(msg("@pinebot what did you trade today?"));
+    assert.match(tg.texts(CHAT)[0]!, /today \(UTC\): bought PRISM; sold FROG \(paper\)/);
+    const own = store.room(CHAT)?.lines.filter((l) => l.own).at(-1)!;
+    clock += 16 * SEC;
+    await said(msg("why?", { replyTo: { messageId: own.messageId, fromId: BOT.id, fromIsBot: true } }));
+    assert.match(tg.texts(CHAT)[1]!, /recorded Brain decision/);
+    assert.match(tg.texts(CHAT)[1]!, /recorded strategy decision/);
+    assert.equal(reads, 2);
+    clock += 16 * SEC;
+    await said(msg("@pinebot what's your pnl today?"));
+    assert.equal(reads, 2, "private finance asks never get the public facts numeric exception");
+    assert.ok(tg.texts(CHAT).every((s) => !/\$|balance|profit|loss|pnl/i.test(s)));
+  });
+
+  it("public trade why joins the exact reviewed decision, never an old reason for the same symbol", async () => {
+    const oldDecision = "old-private-decision", decision = "new-private-decision";
+    make({ facts: () => ({ tradesToday: async () => ({ day: "2026-09-28", complete: true, trades: [{ side: "buy", symbol: "PRISM", paper: false, why: "brain", decisionId: decision }] }) }) });
+    seedAck();
+    store.updateCoin(CHAT, CA1, { verdict: "bought", decisionId: oldDecision, notes: ["activity was improving"] });
+    await said(msg("@pinebot why did you buy PRISM?"));
+    assert.match(tg.texts(CHAT)[0]!, /recorded Brain decision/);
+    assert.doesNotMatch(tg.texts(CHAT)[0]!, /activity was improving/);
+    clock += 16 * SEC;
+    store.updateCoin(CHAT, CA1, { verdict: "bought", decisionId: decision, notes: ["activity was improving"] });
+    await said(msg("@pinebot why did you buy PRISM?"));
+    assert.match(tg.texts(CHAT)[1]!, /activity was improving/);
+    assert.ok(tg.texts(CHAT).every((s) => !s.includes(decision) && !s.includes(oldDecision)), "internal ids are never rendered");
+    clock += 16 * SEC;
+    store.updateCoin(CHAT, CA1, { paper: true });
+    await said(msg("@pinebot why did you buy PRISM?"));
+    assert.doesNotMatch(tg.texts(CHAT)[2]!, /activity was improving/, "paper and live decisions cannot be mixed");
+  });
+
+  it("public trade why never borrows another group's private conversation or outcome", async () => {
+    make({ facts: () => ({ tradesToday: async () => ({ day: "2026-09-28", complete: true, trades: [{ side: "buy", symbol: "PRISM", paper: false, why: "brain", decisionId: "reviewed-1" }] }) }) });
+    approveRoom(CHAT);
+    seedAck(OTHER);
+    store.updateCoin(OTHER, CA1, { verdict: "bought", decisionId: "reviewed-1", notes: ["activity was improving"] });
+    await said(msg("@pinebot why did you buy PRISM?"));
+    assert.match(tg.texts(CHAT)[0]!, /recorded Brain decision/);
+    assert.doesNotMatch(tg.texts(CHAT)[0]!, /activity was improving|reviewed-1/);
+  });
+
+  it("research never holds the chat queue; a second member's greeting still answers", async () => {
+    const timer = handTimer();
+    make({ timer: timer.timer });
+    seedAck();
+    port.look = () => new Promise<CoinLook>(() => {});
+    const ask = msg("wdyt", { replyTo: { messageId: 81, fromId: BOT.id, fromIsBot: true } });
+    groups.onMessage(ask);
+    await until(() => timer.waits.length > 0);
+    const hi = msg("@pinebot hi", { fromId: BOB, fromFirstName: "Bob" });
+    groups.onMessage(hi);
+    await until(() => tg.sends(CHAT).length > 0);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [hi.messageId]);
+    timer.waits[0]!.fire();
+    await groups.drain();
+    assert.match(tg.texts(CHAT)[1]!, /can't verify/);
+    assert.equal(port.nominations.length, 0);
+  });
+});
+
 describe("a backlog on the coin lane", () => {
   it("a shill's CAs while the reads hang do not bury the owner's '@bot what about <CA>': served next, inside the send window; posts past theirs are not looked at", async () => {
     // Every look waits out its whole bound on the test's clock.
