@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, isComplete, modelArgsFor, splitCommand } from "./chat-commands";
-import { RISK_PROFILES } from "@merrymen/core";
+import { RISK_PROFILES, decodeProposalLink } from "@merrymen/core";
 
 describe("what the model actually says, and what survives it", () => {
   it("A PROPOSAL IS LIFTED OUT AND THE MARKER NEVER REACHES A PERSON", () => {
@@ -243,10 +243,19 @@ describe("a command that takes you somewhere takes you somewhere real", () => {
   it("and a fragment target is one the page actually has", () => {
     // `resign` points at /grant#resign. If the anchor is renamed, the command
     // lands at the top of a long wallet page with no sign of what it promised.
-    const wallet = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
+    // Each command's anchor is looked for in THE PAGE IT POINTS AT. This read
+    // only Wallet.tsx while every fragment target was on /grant; `change-settings`
+    // points at /settings#proposal, and a path with no mapped source fails here
+    // rather than passing for want of a page to search.
+    const pageSource: Record<string, string> = {
+      "/grant": "../terminal/screens/Wallet.tsx",
+      "/settings": "../terminal/screens/Settings.tsx",
+    };
     for (const cmd of CHAT_COMMANDS.filter((c) => c.to?.includes("#"))) {
-      const id = cmd.to!.split("#")[1]!;
-      assert.match(wallet, new RegExp(`id="${id}"`), `${cmd.id} points at #${id}, which no longer exists`);
+      const [path, id] = cmd.to!.split("#") as [string, string];
+      assert.ok(pageSource[path], `${cmd.id} points at ${path}, which this test has no page source for`);
+      const page = readFileSync(new URL(pageSource[path]!, import.meta.url), "utf8");
+      assert.match(page, new RegExp(`id="${id}"`), `${cmd.id} points at #${id}, which no longer exists`);
     }
   });
 });
@@ -596,5 +605,36 @@ describe("the risk level writes settings, never the word", () => {
     const said = commandFor("set-risk")!.say({ level: "bold" });
     assert.match(said, /per-trade and per-day caps/i);
     assert.match(said, /only a new signature/i);
+  });
+});
+
+
+describe("change-settings — any setting, in the owner's words, approved on Settings", () => {
+  const cmd = commandFor("change-settings")!;
+
+  it("navigates to Settings with the changes filled in, and writes nothing itself", () => {
+    assert.equal(cmd.via, "navigate");
+    assert.equal(cmd.writes, undefined);
+    const href = cmd.toFor!({ changes: "strategistStopLossBps=10%; telegramNotifyEveryMin=60" });
+    assert.match(href, /^\/settings\?propose=[A-Za-z0-9_-]+#proposal$/);
+    const param = new URL(href, "https://app.example.test").searchParams.get("propose");
+    assert.deepEqual(decodeProposalLink(param), [
+      { key: "strategistStopLossBps", value: 1000 },
+      { key: "telegramNotifyEveryMin", value: 60 },
+    ]);
+  });
+
+  it("says what it will put in front of them, from the catalog, not from the model", () => {
+    const said = cmd.say({ changes: "classSnipeEnabled=on; classPerEntryUsdg=$10" });
+    assert.match(said, /launchpad buying → on; amount per launch coin → \$10\.00/);
+    assert.match(said, /Nothing changes until you tap Approve/);
+  });
+
+  it("carries no secret and nothing it cannot read", () => {
+    const href = cmd.toFor!({ changes: "llmApiKey=sk-ant-12345; notASetting=3; takeProfitBps=25%" });
+    assert.doesNotMatch(href, /sk-ant/);
+    const param = new URL(href, "https://app.example.test").searchParams.get("propose");
+    assert.deepEqual(decodeProposalLink(param), [{ key: "takeProfitBps", value: 2500 }]);
+    assert.equal(cmd.toFor!({ changes: "" }), "/settings#proposal");
   });
 });

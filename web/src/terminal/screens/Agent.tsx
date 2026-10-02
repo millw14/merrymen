@@ -372,7 +372,7 @@ export function Agent({
     if (!cmd) return;
     try {
       if (cmd.via === "navigate") {
-        window.location.href = cmd.to!;
+        window.location.href = cmd.toFor ? cmd.toFor(proposal.args) : cmd.to!;
         return;
       }
       if (cmd.via === "snipe") {
