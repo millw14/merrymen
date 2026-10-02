@@ -50,6 +50,32 @@ test("a sponsor failure is not reported as the wall refusing", () => {
   }
 });
 
+test("OUR GAS CHECK IS NOT THE WALL — the ORBIO line an owner was sent", () => {
+  // Reported: "🛡 the wall turned back a buy of ORBIO (gas-absurd) — 5.00 USDG
+  // stayed home". The product declining to sign, blamed on the owner's own
+  // sealed policy, with the slug as the whole explanation.
+  const row = { id: 9, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "gas-absurd", tx_hash: null };
+  const line = tradeLine(row, null, false, { label: "ORBIO", side: "buy" });
+  assert.doesNotMatch(line, /the wall/, "not the owner's wall");
+  assert.match(line, /^⛽ a buy of ORBIO wasn't sent — its network fee estimate was far above what this trade should cost\. Nothing was spent\./);
+  assert.match(line, /5\.00 USDG stayed home \(gas-absurd\)$/, "the slug survives for support");
+
+  for (const rule of ["gas-unstable", "gas-unreadable", "gas-paymaster-unexpected", "enable-replayed", "enable-redundant", "enable-unverified", "prefund-unverified"]) {
+    const l = tradeLine({ ...row, reject_rule: rule }, null, true);
+    assert.doesNotMatch(l, /the wall/, rule);
+    assert.doesNotMatch(l, /\/grant/, `${rule} has no owner remedy, so none is invented`);
+    assert.match(l, new RegExp(`\\(${rule}\\)$`), rule);
+  }
+});
+
+test("a wall too wide to install with its trade says to re-sign narrower, once", () => {
+  const row = { id: 10, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "enable-too-wide", tx_hash: null };
+  const first = tradeLine(row, null, true, { label: "ORBIO", side: "buy" });
+  assert.match(first, /too wide to install together with this trade/);
+  assert.match(first, /Re-sign at \/grant with fewer custom tokens or capabilities/);
+  assert.doesNotMatch(tradeLine(row, null, false), /\/grant/, "repeats carry no instruction");
+});
+
 test("a real wall refusal still says so, and now says WHAT", () => {
   // The unsponsored path, and the overwhelmingly common one. It must still
   // blame the wall — but it used to interpolate the raw rule, so this assertion

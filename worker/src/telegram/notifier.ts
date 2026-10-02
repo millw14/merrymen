@@ -19,7 +19,7 @@
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { explorerFor, type PriceQuote } from "../../../packages/core/src/index";
-import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
+import { isGasRefusal, rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { homePaths, merrymenHome } from "../home";
 import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
@@ -402,6 +402,22 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     // somebody looking through their own settings for a fault that is ours.
     if (t.reject_rule?.startsWith("sponsor-")) {
       return `⛽ a ${esc(t.kind)} didn't go out — the gas sponsor declined it (${esc(t.reject_rule)}), which is ours to fix. ${t.amount_usdg.toFixed(2)} USDG stayed home`;
+    }
+    /**
+     * OUR GAS CHECK IS NOT THE WALL EITHER. "🛡 the wall turned back a buy of
+     * ORBIO (gas-absurd)" reached an owner: the product declining to sign an
+     * operation whose gas it could not justify, worded as their own sealed
+     * policy refusing, and with the slug as the only explanation.
+     */
+    if (isGasRefusal(t.reject_rule)) {
+      const label = rejectRuleLabel(t.reject_rule);
+      const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
+      const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+      return (
+        `⛽ a ${thing} wasn't sent — ${esc(label ?? "its network fee could not be justified")}. Nothing was spent.` +
+        `${fix ? ` ${esc(fix)}` : ""}` +
+        ` ${t.amount_usdg.toFixed(2)} USDG stayed home (${esc(t.reject_rule!)})`
+      );
     }
     /**
      * THE SLUG IS NOT AN EXPLANATION, AND THIS IS THE CHANNEL IT REACHED HIM ON.

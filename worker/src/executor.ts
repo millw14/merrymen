@@ -631,7 +631,9 @@ export async function createAgentExecutor(opts: {
       // A deployed account's ordinary operations are untouched: they take
       // GAS_BOUNDS exactly as before, so nothing here can widen a steady-state
       // ceiling. The enlarged allowance belongs to the enable and expires with
-      // it — the next operation this account signs is judged at 3,000,000.
+      // it — the next operation this account signs is judged at 3,000,000, on
+      // its estimate (GasBounds.totalJudgedOn: a first enable's call may carry
+      // nothing an ordinary day's could not).
       //
       // AND THE WALL'S ALLOWANCE IS JUDGED AGAINST THE WALL, NOT AGAINST THE
       // WALL PLUS WHATEVER IS RIDING ALONG. `allowedMaxBounded` is a prediction

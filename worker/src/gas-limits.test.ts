@@ -67,10 +67,51 @@ test("REFUSES rather than clamps when the estimate is absurd", () => {
   // under-provisioned — the OOG case, on purpose. An approve plus an
   // exactInputSingle does not approach 3M, so crossing it means this is not the
   // operation we think it is.
-  const v = boundGas(est(2_000_000n, 500_000n, 100_000n), null);
+  //
+  // RECALIBRATED: this was a 2,000,000 call, absurd only once our own 2x
+  // doubled it. The ordinary ceiling now asks the ESTIMATE (see boundGas), and
+  // a 2.1M call is a real operation — deploy + approve + buy, measured below.
+  // 3,200,000 estimated is past the ceiling before any headroom.
+  const v = boundGas(est(3_200_000n, 500_000n, 100_000n), null);
   assert.equal(v.ok, false);
   assert.equal(v.rule, "gas-absurd");
   assert.match(v.detail, /nothing was spent/i);
+  assert.match(v.detail, /estimates 3950000 gas/, "and it names the figure it judged");
+});
+
+test("A FIRST TRENCHER BUY ON AN INSTALLED KEY IS NOT ABSURD BECAUSE WE DOUBLED IT", () => {
+  // Live, 2026-10-01, agent 0x4b6dcd, key already installed (an ordinary op):
+  //   estimate1 call 2128793 + verif 289003 + preVerif 56602 = 2520855
+  //   estimate2 identical  ·  signed refused (gas-absurd) at 4,736,048
+  // Deploy + approve + buy. A CREATE2 of fixed bytecode is deterministic, the
+  // same 2,128,793 the first-enable note records for Shogun.
+  const live: UserOpGas = {
+    ...est(2_128_793n, 289_003n, 56_602n),
+    paymasterVerificationGasLimit: 30_000n,
+    paymasterPostOpGasLimit: 16_457n,
+  };
+  const v = boundGas(live, live, GAS_BOUNDS, true);
+  assert.equal(v.ok, true, v.ok === false ? v.detail : "");
+  assert.ok(v.ok);
+  // The SIGNED limits are what they always were: the call keeps its full 2x.
+  assert.equal(v.gas.callGasLimit, 4_257_586n);
+  assert.equal(v.gas.verificationGasLimit, 361_253n);
+  assert.equal(v.gas.preVerificationGas, 70_752n);
+  assert.equal(v.total, 4_736_048n, "the exact figure production refused");
+});
+
+test("a call a first enable may carry is a call any other day may carry", () => {
+  // `callMax` is derived from GAS_BOUNDS.absoluteMax on the promise that a
+  // first enable never carries a call this account could not make on any
+  // other day. With the payload judged on its estimate and the ordinary total
+  // judged on padding, that promise was false for every call between ~1.3M
+  // and 3M. Now the two agree: up to the ceiling's room, both sign.
+  for (const call of [1_300_000n, 2_000_000n, 2_500_000n]) {
+    const ordinary = boundGas(est(call, 200_000n, 50_000n), null);
+    assert.equal(ordinary.ok, true, `${call} on an ordinary day`);
+  }
+  // And past it, both refuse.
+  assert.equal(boundGas(est(3_000_001n, 200_000n, 50_000n), null).ok, false);
 });
 
 test("two estimates far apart is a refusal — the estimator disagreeing with itself", () => {
@@ -290,15 +331,17 @@ test("PAYMASTER GAS CANNOT WALK UNDER THE CEILING", () => {
 
   // And the ceiling is enforced against the total INCLUDING them: the same
   // three fields alone clear 3M, and refuse once the sponsor's are counted.
-  const ours = est(600_000n, 800_000n, 160_000n); // bounded 1.2M + 1M + 200k = 2.4M
-  assert.equal(boundGas(ours, ours).ok, true, "2.4M alone clears the 3M ceiling");
+  // (Judged as the ordinary ceiling judges: the call at its estimate, the rest
+  // bounded — so 400k + 1.5M + 250k = 2.15M.)
+  const ours = est(400_000n, 1_200_000n, 200_000n);
+  assert.equal(boundGas(ours, ours).ok, true, "2.15M alone clears the 3M ceiling");
   const big: UserOpGas = {
     ...ours,
     paymasterVerificationGasLimit: 500_000n,
     paymasterPostOpGasLimit: 500_000n,
   };
   const refused = boundGas(big, big, GAS_BOUNDS, true);
-  assert.equal(refused.ok, false, "3.4M does not");
+  assert.equal(refused.ok, false, "3.15M does not");
   assert.equal(refused.ok === false ? refused.rule : null, "gas-absurd");
 });
 

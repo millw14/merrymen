@@ -155,6 +155,26 @@ export interface GasBounds {
    * to the wall.
    */
   callMax?: bigint;
+  /**
+   * WHICH TOTAL `absoluteMax` IS ASKED OF: the operation's own estimate, or
+   * what we would sign once our headroom is added.
+   *
+   * "estimate" counts the call at its RAW estimate (verification and
+   * pre-verification keep their 1.25x, which is what every ceiling here was
+   * measured against). It is the ordinary ceiling's question, because Vex's
+   * 3,000,000 is a claim about what an operation COSTS — "an approve plus an
+   * exactInputSingle does not approach it, so crossing it means the operation
+   * is not the operation we think it is" — and the call's 2x is our safety
+   * margin, not part of what the operation costs. See boundGas.
+   *
+   * "signed" holds the padded total, headroom included. It is the first
+   * enable's question, because `FIRST_ENABLE_HARD_MAX_BOUNDED` is a policy cap
+   * on what is SIGNED, set at half a measured failure point of a signed
+   * envelope, and first-enable-headroom.test.ts pins "an envelope that
+   * genuinely exceeds 14,000,000 is still refused" as the property no proposal
+   * may weaken.
+   */
+  totalJudgedOn: "estimate" | "signed";
 }
 
 export const GAS_BOUNDS: GasBounds = {
@@ -192,6 +212,7 @@ export const GAS_BOUNDS: GasBounds = {
   preVerificationHeadroomBps: 12_500,
   disagreementBps: 40_000, // 4x
   absoluteMax: 3_000_000n,
+  totalJudgedOn: "estimate",
 };
 
 /**
@@ -254,6 +275,8 @@ export const GAS_BOUNDS: GasBounds = {
 export const FIRST_ENABLE_GAS_BOUNDS: GasBounds = {
   ...GAS_BOUNDS,
   absoluteMax: 12_000_000n,
+  // The first enable's maximum caps what is SIGNED. See `totalJudgedOn`.
+  totalJudgedOn: "signed",
 };
 
 
@@ -265,7 +288,7 @@ export type GasVerdict =
    */
   | {
       ok: false;
-      rule: "gas-absurd" | "gas-unstable" | "gas-unreadable" | "gas-paymaster-unexpected";
+      rule: "gas-absurd" | "gas-unstable" | "gas-unreadable" | "gas-paymaster-unexpected" | "enable-too-wide";
       detail: string;
     };
 
@@ -484,15 +507,62 @@ export function boundGas(
   }
   // Counts the paymaster fields too, because the prefund does.
   const total = totalGas(gas);
-  if (total > bounds.absoluteMax) {
+  // ── THE ORDINARY CEILING, ASKED OF THE ESTIMATE TOO ─────────────────────
+  //
+  // The rule above ("judged on the estimate, not on our own padding") was
+  // applied to a first enable's payload and nowhere else, and that broke the
+  // promise `callMax` is derived from: "a first enable may not carry a call
+  // this account could not make on any other day". Since 2026-09-20 a first
+  // enable may carry up to 3,000,000 of ESTIMATED call gas, while any other day
+  // judged the PADDED total — so the same call was signable on the day the key
+  // was installed and refused on every day after it.
+  //
+  // MEASURED, 2026-10-01, agent 0x4b6dcd on an already-installed key: a first
+  // Trencher buy, deploy + approve + buy, estimated call 2,128,793 + verif
+  // 289,003 + preVerif 56,602 = 2,520,855 raw, TWICE, identically. Signed with
+  // headroom it is 4,736,048 and was refused `gas-absurd` against 3,000,000,
+  // every tick; asked of the estimate it is 2,607,255 (sponsor gas included)
+  // and fits. The same number the 2026-09-20 note above records for Shogun.
+  //
+  // WHAT THIS DOES AND DOES NOT CHANGE. The SIGNED limits are untouched: the
+  // call still carries its full 2x. What moves is the most an ordinary
+  // operation can sign for — up to the ceiling plus its own estimated call,
+  // under 2x the ceiling — which is gas the EntryPoint holds as prefund and
+  // refunds unused, and which the simulation's balance override
+  // (`absoluteMax * fee * 2`, executor.ts) already covers. An estimate that is
+  // itself past the ceiling is refused exactly as before.
+  const judged = bounds.totalJudgedOn === "estimate" ? total - gas.callGasLimit + first.callGasLimit : total;
+  if (judged > bounds.absoluteMax) {
+    // A WALL TOO WIDE TO INSTALL WITH ITS TRADE IS THE OWNER'S TO NARROW.
+    //
+    // Only a sized first enable reaches this with `enableMax` set, and by then
+    // its wall has passed its own envelope and its payload the ordinary
+    // ceiling. What is left over the product maximum is the two together: a
+    // wall wide enough that the trade riding on its install no longer fits
+    // under what we will sign. No estimate will change that, and calling it
+    // `gas-absurd` — "this estimate is larger than we will sign for" — sent
+    // owners looking for a fault that was not there (live, 2026-10-01: two
+    // agents refused every tick at 14.7M and 18.3M). A narrower wall leaves
+    // room for the trade, so it is named for that, with that remedy.
+    if (bounds.enableMax !== undefined) {
+      return {
+        ok: false,
+        rule: "enable-too-wide",
+        detail:
+          `installing this key's permission wall together with the trade riding on it wants ${total} gas ` +
+          `(the wall ${gas.verificationGasLimit + gas.preVerificationGas}, the trade ${gas.callGasLimit}), ` +
+          `past the ${bounds.absoluteMax} we will sign for a first operation. Refused before signing — nothing ` +
+          "was spent. A narrower permission set (fewer custom tokens or capabilities) leaves room for the trade.",
+      };
+    }
     return {
       ok: false,
       rule: "gas-absurd",
       detail:
-        `this operation wants ${total} gas, past the ${bounds.absoluteMax} ceiling. Refused before ` +
-        "signing — nothing was spent. A ceiling is crossed either because the operation is not the " +
-        "one it is meant to be, or because it genuinely needs more than we are willing to sign for; " +
-        "both are reasons to stop rather than to sign.",
+        `this operation ${bounds.totalJudgedOn === "estimate" ? "estimates" : "wants"} ${judged} gas, past the ` +
+        `${bounds.absoluteMax} ceiling. Refused before signing — nothing was spent. A ceiling is crossed ` +
+        "either because the operation is not the one it is meant to be, or because it genuinely needs more " +
+        "than we are willing to sign for; both are reasons to stop rather than to sign.",
     };
   }
   return { ok: true, gas, total };

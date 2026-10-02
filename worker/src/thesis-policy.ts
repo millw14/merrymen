@@ -843,7 +843,48 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // capital leaving the book, and this one would have left nothing, or too
   // little, contributed. Said as capital, never as performance.
   "would-exhaust-contributions": "spending that much on energy would have used up all, or nearly all, the capital put into it",
+  // ── OUR OWN CHECKS BEFORE SIGNING, NOT THE WALL ─────────────────────────
+  //
+  // gas-limits.ts `boundGas` and executor.ts's `GasRefused`. None of these is
+  // the owner's sealed policy: they are the product declining to sign an
+  // operation whose gas it cannot justify, before anything is sent. They were
+  // absent here, so an owner was handed "🛡 the wall turned back a buy of
+  // ORBIO (gas-absurd)" — the bare slug, blamed on their own signature.
+  // `isGasRefusal` below is what keeps the Telegram line from saying "wall".
+  "gas-absurd": "its network fee estimate was far above what this trade should cost",
+  "gas-unstable": "two network fee estimates for the same trade disagreed too far to trust either",
+  "gas-unreadable": "its network fee could not be estimated",
+  "gas-paymaster-unexpected": "its fee estimate did not match how the trade is paid for",
+  "enable-too-wide": "its permission set is too wide to install together with this trade",
+  "enable-replayed": "it tried to install permissions that had already been installed",
+  "enable-redundant": "its permissions were already installed, so the install was not repeated",
+  "enable-unverified": "the chain could not confirm whether its permissions needed installing",
+  // gas-limits.ts `checkPrefund`: the fee the network holds up front.
+  "prefund-short": "the account did not hold enough to cover the network fee up front",
+  "prefund-unverified": "the up-front network fee could not be checked against the account's balance",
 });
+
+/**
+ * Refusals that are the product's own gas checks before signing — never the
+ * owner's wall. A surface that would say "the wall turned it back" says "it
+ * wasn't sent" for these instead, as it already does for the gas sponsor.
+ */
+const GAS_REFUSALS: ReadonlySet<string> = new Set([
+  "gas-absurd",
+  "gas-unstable",
+  "gas-unreadable",
+  "gas-paymaster-unexpected",
+  "enable-too-wide",
+  "enable-replayed",
+  "enable-redundant",
+  "enable-unverified",
+  "prefund-short",
+  "prefund-unverified",
+]);
+
+export function isGasRefusal(rule: string | null | undefined): boolean {
+  return !!rule && GAS_REFUSALS.has(rule);
+}
 
 /**
  * The rule slugs this product recognises, for a reader that needs to GROUP by
@@ -907,10 +948,18 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
       return "Re-sign your trading permission at /grant — renewal revokes old permissions on-chain and requires network fees.";
     case "grant-too-wide":
       return "Re-sign at /grant with fewer tokens or fewer venues; the current set is too large to install on-chain.";
+    // The first operation of a key carries its whole wall plus a trade; this
+    // one's wall leaves no room for the trade under what we will sign.
+    case "enable-too-wide":
+      return "Re-sign at /grant with fewer custom tokens or capabilities — a narrower permission set leaves room for the trade that installs it. Renewal revokes old permissions on-chain and requires network fees.";
     case "no-cash":
       return "Send USDG to the agent's account.";
     case "no-gas":
       return "Send a little ETH to the agent's account — every operation pays a fee before it reaches the chain.";
+    // The network holds the whole fee limit up front and returns what is not
+    // used, so the account needs more on hand than one trade ends up costing.
+    case "prefund-short":
+      return "Send a little ETH to the agent's account — the network holds the fee up front and returns the unused part.";
     case "wrong-chain":
       return "Re-sign at /grant on Robinhood Chain; the current key is for a different network.";
     case "live-not-enabled":
