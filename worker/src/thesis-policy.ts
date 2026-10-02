@@ -967,18 +967,18 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     case "not-armed":
       return "Re-sign your trading permission at /grant — renewal revokes old permissions on-chain and requires network fees.";
     case "grant-too-wide":
-      return "Re-sign at /grant — a new signature seals a narrower permission set that usually fits; if it is still too large, drop a custom token or a venue.";
+      return "Re-sign at /grant on the web — a new signature there seals a narrower permission set that usually fits; if it is still too large, drop a custom token or a venue.";
     // The first operation of a key carries its whole wall plus a trade; this
     // one's wall leaves no room for the trade under what we will sign.
     case "enable-too-wide":
-      return "Re-sign at /grant — a new signature seals a narrower permission set that leaves room for the trade that installs it; if it is still refused, drop a custom token or capability. Renewal revokes old permissions on-chain and requires network fees.";
+      return "Re-sign at /grant on the web — a new signature there seals a narrower permission set that leaves room for the trade that installs it; if it is still refused, drop a custom token or capability. Renewal revokes old permissions on-chain and requires network fees.";
     case "no-cash":
       return "Send USDG to the agent's account.";
     // Most often a coin whose only market is a Uniswap v4 pool, on a key that
     // does not carry the v4 adapter. Conditional, because a coin with no pool
     // anywhere gets the same slug and no setting fixes that.
     case "no-route":
-      return "If it trades only on Uniswap v4, save the V4SelfSwap adapter in /settings and re-sign at /grant so your agent can reach it.";
+      return "If it trades only on Uniswap v4 and your key doesn't carry the v4 adapter yet, save the V4SelfSwap adapter in /settings and re-sign at /grant so your agent can reach it.";
     case "no-gas":
       return "Send a little ETH to the agent's account — every operation pays a fee before it reaches the chain.";
     // The network holds the whole fee limit up front and returns what is not

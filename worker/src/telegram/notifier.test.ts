@@ -72,7 +72,7 @@ test("a wall too wide to install with its trade says to re-sign narrower, once",
   const row = { id: 10, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "enable-too-wide", tx_hash: null };
   const first = tradeLine(row, null, true, { label: "ORBIO", side: "buy" });
   assert.match(first, /too wide to install together with this trade/);
-  assert.match(first, /Re-sign at \/grant — a new signature seals a narrower permission set/);
+  assert.match(first, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
   assert.doesNotMatch(tradeLine(row, null, false), /\/grant/, "repeats carry no instruction");
 });
 
@@ -85,7 +85,7 @@ test("NOR IS THE MARKET — the UBIK line an owner was sent", () => {
   const first = tradeLine(row, null, true, { label: "UBIK", side: "buy" });
   assert.doesNotMatch(first, /the wall/, "not the owner's wall");
   assert.match(first, /^🚫 a buy of UBIK didn't go out — no route to trade it\. Nothing was spent\./);
-  assert.match(first, /If it trades only on Uniswap v4, save the V4SelfSwap adapter in \/settings and re-sign at \/grant/);
+  assert.match(first, /If it trades only on Uniswap v4 and your key doesn't carry the v4 adapter yet, save the V4SelfSwap adapter in \/settings and re-sign at \/grant/);
   assert.match(first, /10\.00 USDG stayed home \(no-route\)$/);
   assert.doesNotMatch(tradeLine(row, null, false, { label: "UBIK", side: "buy" }), /\/grant/, "repeats carry no instruction");
 

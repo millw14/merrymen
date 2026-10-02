@@ -371,6 +371,8 @@ test("the worker never quotes a v4 leg the wall does not cover", () => {
   const gates = [...INDEX.matchAll(/\bv4:\s*\n?[^,]*?grantV4Adapter\(active\.grant\) !== null[\s\S]{0,160}/g)].map((m) => m[0]);
   assert.equal(gates.length, 2, "the quote gate and the impact-probe gate");
   for (const g of gates) {
-    assert.match(g, /grantV4AdapterReaches\(active\.grant, intent\.sellToken, intent\.buyToken\)/);
+    // When the adapter will execute, its legs decide — the legacy marker is
+    // only the fallback for a grant with no live adapter, never an OR beside it.
+    assert.match(g, /!== null\s*\?\s*grantV4AdapterReaches\(active\.grant, intent\.sellToken, intent\.buyToken\)\s*:\s*grantHasV4\(active\.grant\)/);
   }
 });
