@@ -2086,7 +2086,7 @@ export default function GrantPage() {
             </div>
 
             <div className="grant-note" style={{ marginTop: 12 }}>
-              Deposit to the account address above. Use <Link href="/profile">Withdraw in Profile</Link> to move funds out.
+              Deposit to the account address above, on {chainLabel(grant.chainId)} only — the same address on any other network is not this agent, and funds sent there are stuck beyond any re-sign. Use <Link href="/profile">Withdraw in Profile</Link> to move funds out.
             </div>
 
             <div className="fund-balances">

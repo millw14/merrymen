@@ -79,7 +79,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     fault: true,
   },
   "wrong-chain": {
-    say: "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused.",
+    say: "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused. And funds already sent to this address on another network are not recovered by that new grant — it routes future deposits only, never moves what is stuck elsewhere.",
     funding: false,
     resign: true,
     fault: true,
