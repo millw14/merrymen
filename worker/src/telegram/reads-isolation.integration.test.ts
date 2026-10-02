@@ -18,6 +18,7 @@ import { after, describe, it } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-iso-"));
 process.env.MERRYMEN_HOME = HOME;
@@ -25,6 +26,7 @@ process.env.MERRYMEN_HOSTED = "1";
 
 const { closeStoreForTest, initStore, addTrade, addEvent, addEquity, setPositions, addDecision, newDecisionId } =
   await import("../store");
+const {homePaths}=await import("../home");
 const { readTrades, readPositions, readRecentEvents, readWhyEvidence, readStatus, readReport } =
   await import("./reads");
 
@@ -50,10 +52,13 @@ const ctx = (agentId: string | null) => ({
 
 async function seed() {
   initStore();
+  const active=new DatabaseSync(homePaths.db());
+  for(const who of [ALICE,BOB])active.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(who);
+  active.close();
   // Alice: a $11.11 AAPL buy with reasoning, a position, equity, an event.
   const aDec = newDecisionId();
   await addDecision({ id: aDec, agent_id: ALICE, source: "strategist", symbol: "AAPL", action: "buy", size_usdg: 11.11, reason: "ALICE_REASONING_gap_open" });
-  await addTrade({ agent_id: ALICE, kind: "swap", target: "0x0000000000000000000000000000000000000001", amount_usdg: 11.11, status: "landed", tx_hash: "0xa11ce", decision_id: aDec });
+  await addTrade({ agent_id: ALICE, kind: "swap", target: "0x0000000000000000000000000000000000000001", amount_usdg: 11.11, fill_cash_usdg:11.11, basis_source:"receipt", fill_side:"buy", fill_qty_raw:"100", status: "landed", tx_hash: "0xa11ce", decision_id: aDec });
   await setPositions(ALICE, [{ symbol: "AAPL", token: "0x0000000000000000000000000000000000000001", rawBalance: 1n, uiMultiplier: 1n, priceUsd: 1, priceStale: false, priceSource: "chainlink", valueUsdg: 111.0 }]);
   await addEquity(ALICE, { mode: "live", ethWei: 0n, cashUsdg: 111, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 111.11 });
   await addEvent(ALICE, "ok", "ALICE_SECRET_EVENT");
@@ -61,7 +66,7 @@ async function seed() {
   // Bob: a $22.22 TSLA buy with different reasoning, position, equity, event.
   const bDec = newDecisionId();
   await addDecision({ id: bDec, agent_id: BOB, source: "strategist", symbol: "TSLA", action: "buy", size_usdg: 22.22, reason: "BOB_REASONING_momentum" });
-  await addTrade({ agent_id: BOB, kind: "swap", target: "0x0000000000000000000000000000000000000002", amount_usdg: 22.22, status: "landed", tx_hash: "0xb0b", decision_id: bDec });
+  await addTrade({ agent_id: BOB, kind: "swap", target: "0x0000000000000000000000000000000000000002", amount_usdg: 22.22, fill_cash_usdg:22.22, basis_source:"receipt", fill_side:"buy", fill_qty_raw:"100", status: "landed", tx_hash: "0xb0b", decision_id: bDec });
   await setPositions(BOB, [{ symbol: "TSLA", token: "0x0000000000000000000000000000000000000002", rawBalance: 1n, uiMultiplier: 1n, priceUsd: 1, priceStale: false, priceSource: "chainlink", valueUsdg: 222.0 }]);
   await addEquity(BOB, { mode: "live", ethWei: 0n, cashUsdg: 222, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 222.22 });
   await addEvent(BOB, "ok", "BOB_SECRET_EVENT");

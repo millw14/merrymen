@@ -417,12 +417,17 @@ describe("tg-groups reaches nothing that trades", () => {
     assert.deepEqual(guilty, [], "tg-groups' production code reaches a trading module");
   });
 
-  it("only coins.ts hands anything to the port's look or nominate", () => {
+  it("only coins.ts nominates; the handler may only re-read a replied coin", () => {
     // THE ONE DOOR. The coin flow builds the nomination from the claimed
     // address and ids; a second caller is a second place message text could
     // be put on the wire into trading.
-    const callers = TG_SOURCES.filter((f) => /\.\s*(?:look|nominate)\s*\(/.test(lexFile(f).code)).map((f) => path.basename(f));
-    assert.deepEqual(callers, ["coins.ts"]);
+    const nominators = TG_SOURCES.filter((f) => /\.\s*nominate\s*\(/.test(lexFile(f).code)).map((f) => path.basename(f));
+    assert.deepEqual(nominators, ["coins.ts"]);
+    const readers = TG_SOURCES.filter((f) => /\.\s*look\s*\(/.test(lexFile(f).code)).map((f) => path.basename(f));
+    assert.deepEqual(readers, ["coins.ts", "handler.ts"]);
+    const handler = lexFile(path.join(HERE, "handler.ts")).code;
+    assert.match(handler, /look\(context\.address\)/);
+    assert.doesNotMatch(handler, /look\((?:j|line|text|msg)\b/);
   });
 });
 

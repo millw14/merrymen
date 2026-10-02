@@ -30,6 +30,9 @@ import {
   type LabelDb,
 } from "../token-label";
 import { esc } from "./api";
+import { distinctTrades } from "../distinct-trades";
+import { OP_KEY, readEvidencedSells } from "../trade-evidence";
+import { currentTradeEpochSync, readOnlyFactsDb } from "../chat-trades";
 
 export interface TradeView {
   id: number;
@@ -74,6 +77,9 @@ interface RawRow {
   tx_hash: string | null;
   decision_id: string | null;
   created_at: number;
+  basis_source?: string | null;
+  op_key?: string;
+  realized_vouched?: boolean;
 }
 
 export interface TradeViewOpts {
@@ -146,14 +152,26 @@ export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewO
     args.push(tokenAddr, tokenAddr);
   }
   try {
-    rows = db
-      .prepare(
-        `SELECT id, agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_cash_usdg, fill_side,
-                realized_pnl_usdg, status, reject_rule, tx_hash, decision_id, created_at
-           FROM trades WHERE ${where.join(" AND ")}
-          ORDER BY created_at DESC, id DESC LIMIT ?`,
-      )
-      .all(...args, o.token ? 200 : limit * 3) as unknown as RawRow[];
+    const cols=db.prepare("PRAGMA table_info(trades)").all() as {name:string}[];
+    const modern=cols.some(c=>c.name==="user_op_hash") && cols.some(c=>c.name==="basis_source");
+    if(modern) {
+      const epoch=currentTradeEpochSync(db,agentId);
+      const outer=where.slice(1).map(w=>w.replace(/\bagent_id\b/g,"t.agent_id"));
+      rows=db.prepare(`SELECT t.id,t.agent_id,t.kind,t.target,t.sell_token,t.buy_token,t.amount_usdg,t.fill_cash_usdg,t.fill_side,t.realized_pnl_usdg,t.status,t.reject_rule,t.tx_hash,t.decision_id,t.created_at,t.basis_source,${OP_KEY} AS op_key
+        FROM ${distinctTrades(`LOWER(t.agent_id) = LOWER(?)${epoch===null?"":" AND t.epoch = ?"}`)} WHERE ${outer.join(" AND ")} ORDER BY t.created_at DESC,t.id DESC LIMIT ?`)
+        .all(agentId,...(epoch===null?[]:[epoch]),...args.slice(1),o.token?200:limit*3) as unknown as RawRow[];
+      const vouched=new Set<string>();
+      for(const book of ["landed","paper"] as const) {
+        const sells=rows.filter(r=>r.status===book&&r.fill_side==="sell"&&r.sell_token&&r.op_key).map(r=>({op:r.op_key!,token:r.sell_token!}));
+        try { for(const op of await readEvidencedSells(readOnlyFactsDb(db),agentId,book,sells))vouched.add(op); }catch { /* unknown costs stay unknown */ }
+      }
+      for(const r of rows)r.realized_vouched=typeof r.op_key==="string"&&vouched.has(r.op_key);
+    }else {
+      rows = db.prepare(`SELECT id, agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_cash_usdg, fill_side,
+          realized_pnl_usdg, status, reject_rule, tx_hash, decision_id, created_at
+          FROM trades WHERE ${where.join(" AND ")} ORDER BY created_at DESC, id DESC LIMIT ?`)
+        .all(...args, o.token ? 200 : limit * 3) as unknown as RawRow[];
+    }
   } catch {
     return [];
   }
@@ -189,7 +207,9 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
   const copy = isRestartCopy(r);
   let token = nonCashLeg(r);
   let side = sideOf(r);
-  let usdg: number | null = r.fill_cash_usdg ?? r.amount_usdg;
+  const filled = r.status === "landed" || r.status === "paper";
+  const ownEvidence=r.status === "paper" ? r.basis_source === "paper" : r.status === "landed" && r.basis_source === "receipt";
+  let usdg: number | null = filled ? ownEvidence ? r.fill_cash_usdg : null : r.amount_usdg;
   let at = r.created_at;
   let atIsRestart = copy;
   // A copy has no legs. Its receipt still says what moved, and when.
@@ -235,7 +255,7 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
               : "a coin I can't name",
     trusted: energy || equityTicker ? true : (lbl?.trusted ?? false),
     usdg: Number.isFinite(usdg as number) ? usdg : null,
-    realized: r.realized_pnl_usdg,
+    realized: ownEvidence && r.realized_vouched === true && Number.isFinite(r.realized_pnl_usdg) ? r.realized_pnl_usdg : null,
     status: r.status,
     refusal: REFUSED.has(r.status) ? rejectRuleLabel(r.reject_rule) ?? r.reject_rule : null,
     at,

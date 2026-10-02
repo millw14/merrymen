@@ -567,12 +567,14 @@ describe("buildPrompt", () => {
     assert.ok(!/\p{N}/u.test(system), "the persona holds no digit to repeat");
   });
 
-  it("asked what it thinks, it has its own take: never rules, permission or advice talk", () => {
+  it("a coin take needs verified evidence, never a name-based opinion or invented trade", () => {
     const { system, prompt } = buildPrompt({ kind: "answer", mood: "normal" }, ctx())!;
     assert.match(system, /YOUR OWN TAKE/);
-    assert.match(system, /honest view in the first person/);
-    assert.match(system, /Never refuse to have an opinion, and never mention rules, your owner's rules, what you're allowed to do, or advice/);
-    assert.match(system, /A take is an opinion, never a trade: never say you bought, sold, aped, got in or hold a coin here/);
+    assert.match(system, /coin questions are answered from verified research/);
+    assert.match(system, /never vibe off its name or invent an analysis/);
+    assert.match(system, /never guess those from chat memory/);
+    assert.match(system, /Never claim you looked, checked, bought, sold, aped or got in without recorded evidence/);
+    assert.match(system, /never describe a coin's chart, volume, liquidity or safety from its name/);
     assert.match(prompt, /If they ask what you think, give your own take/);
   });
 

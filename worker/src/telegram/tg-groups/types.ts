@@ -11,6 +11,8 @@
  */
 
 /** Where a group stands with this agent. See "Which groups it talks in". */
+import type { ChatMathInput } from "../../../../packages/core/src/index";
+
 export type TgRoomStatus = "approved" | "pending" | "left" | "blocked";
 
 /** How much it joins in unprompted. Settings key `telegramGroupsChattiness`. */
@@ -71,6 +73,8 @@ export interface TgCoinMemo {
   decisionId?: string;
   /** Paper when the buy was on paper. */
   paper?: boolean;
+  /** Public, figure-free Brain clauses retained for an addressed follow-up. */
+  notes?: string[];
   /** True once an exit line was said for it. */
   exitSaid?: boolean;
 }
@@ -190,7 +194,55 @@ export interface CoinLook {
    * when nothing answered (`unknown`).
    */
   source?: CoinLookSource;
+  /** Public index snapshot only. A quick look is not a Brain decision or a safety check. */
+  research?: CoinResearch;
 }
+
+export interface CoinResearch {
+  /** When the index answered. Caches retain this timestamp. */
+  observedAtMs: number;
+  source: "geckoterminal" | "dexscreener";
+  priceUsd?: number;
+  liquidityUsd?: number;
+  fdvUsd?: number;
+  volume24hUsd?: number;
+  priceChange24hPct?: number;
+  buys24h?: number;
+  sells24h?: number;
+  ageMinutes?: number;
+}
+
+/** A projection of confirmed fills, with owner money and raw private reasoning omitted. */
+export interface TgPublicTradeFact {
+  side: "buy" | "sell";
+  symbol: string;
+  paper: boolean;
+  /** Internal exact join to this chat's reviewed outcome. Never rendered. */
+  decisionId?: string;
+  /** Only a reviewed, group-safe rationale or a fixed provenance category. */
+  why?: string;
+}
+
+export interface TgPublicTradesToday {
+  /** UTC date YYYY-MM-DD. */
+  day: string;
+  /** False when a bounded read may omit earlier fills. */
+  complete: boolean;
+  trades: TgPublicTradeFact[];
+}
+
+/** Read-only owner-ledger projection, implemented outside the group boundary. */
+export interface TgGroupFactsPort {
+  tradesToday(): Promise<TgPublicTradesToday | null>;
+}
+
+/** Only these structured facts can bypass the generative voice's no-money rule. */
+export type TgPublicFact =
+  | { kind: "coin"; look: CoinLook; nowMs: number; reviewed?: { verdict: "bought" | "passed" | "skipped"; paper?: boolean; notes?: string[] } }
+  | { kind: "trades"; data: TgPublicTradesToday; why: boolean; symbol?: string; side?: "buy" | "sell" }
+  | { kind: "calculation"; input: ChatMathInput }
+  | { kind: "site"; topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" }
+  | { kind: "unavailable"; topic: "coin" | "trades" | "calculation" };
 
 /** See CoinLook.source. */
 export type CoinLookSource = "free" | "cache" | "chain" | "geckoterminal" | "dexscreener";

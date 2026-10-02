@@ -418,7 +418,10 @@ describe("the Shogun exchange: a Robinhood coin while the chain AND GeckoTermina
     await said(wdyt);
     assert.equal(sends.length, 2);
     assert.equal(replyOf(sends[1]), wdyt.messageId, "the question gets its answer");
-    assert.ok(logs.includes("[tg-groups] coin post (reply to a coin post): answered"), logs.join("\n"));
+    assert.match(words(sends[1]), /VRAX — DexScreener snapshot \d{2}:\d{2} UTC/, "the factual reply names the actual observed coin and source");
+    assert.match(words(sends[1]), /liquidity \$190k, 24h volume \$410k, 24h change \+12\.5%/, "the Robinhood pair's observations reach the reply, not the other chain's liquidity");
+    assert.match(words(sends[1]), /clears the quick screen; that's not a buy decision/);
+    assert.doesNotMatch(words(sends[1]), /bought|vibing|haven't.*chart/, "an acknowledgement is not a fill or a fabricated opinion");
     for (const s of sends) assert.doesNotMatch(words(s), /rules|allowed|advice|should you buy/, words(s));
     assert.ok(prompts >= 1, "the model was asked, and its dodge was refused");
     assert.equal(nominations.length, 1, "one coin, one nomination");

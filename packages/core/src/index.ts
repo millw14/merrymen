@@ -68,3 +68,5 @@ export * from "./grant-installable";
 // WAS THIS GRANT SIGNED AGAINST AN OLDER WALL? A release date, enforced by a
 // fingerprint test, because `serialized` never leaves the browser that minted it.
 export * from "./wall-release";
+
+export * from "./chat-math";

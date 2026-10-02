@@ -42,19 +42,28 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    `discovered_pools`, curve provenance, v4 key books, `posts`,
    `peers.json`, research files or the soul.
 
-2. **No line carries a figure about money.** No sizes, prices, amounts,
-   percentages, multipliers, balances or P&L, in digits or words. No
+2. **No line carries the owner's private money figures.** No trade sizes,
+   balances, limits or wallet P&L, in digits or words. Deterministic factual
+   replies may report public indexed coin metrics with their source and
+   observation time, or calculate from numbers explicitly supplied in the
+   question. Hypothetical arithmetic is never presented as a verified trade.
+   Generic model-written chatter retains the no-money gate. No
    "bought 50 USDG of X", no "🚨 BUY", no "entered", no "new position". A buy
    is said the way a person says it ("ok grabbed a little 🤝"), and only
    after the fill is `landed` or `paper`. Paper is said out loud.
 
 3. **Nothing private reaches a group.** Never: OWNER.md facts, NOTES,
-   JOURNAL, `readLlmState` (status, positions with sizes, P&L, trades,
+   JOURNAL, `readLlmState` (status, positions with sizes, P&L, full trades,
    events), balances, wallet / smart-account / vault addresses, Telegram ids
    or link codes, settings, refusal or remedy reasons (not armed, no cash,
    live switch off, energy, limits), errors or provider failures, model or
    key names. The group persona is built from a fixed, group-safe context
-   (below) and never from the DM prompt builders.
+   (below) and never from the DM prompt builders. A separate read-only port
+   may project today's completed coin actions as side, safe symbol and
+   paper/live, plus a closed reason category. An internal decision identifier
+   can match the fill to an already-public, safe Brain rationale remembered
+   in that same group; identifiers are never printed. It never supplies an address,
+   size, raw decision reason, private refusal reason or account identifier.
 
 4. **Only the owner shapes the agent.** Group members cannot write owner
    facts, bump the relationship, rename it, change settings, confirm
@@ -64,8 +73,12 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
 
 5. **Say nothing rather than something wrong.** Every model line passes the
    group gate (`gate.ts`); a refused line is dropped, never repaired, and the
-   fallback is a template or silence. Failures of any kind (model, chain,
-   Brain, Telegram) are silent in the group and at most logged.
+   fallback is a template or silence. Structured research, arithmetic and
+   trade-history replies have their own strict factual gate; arbitrary text
+   cannot use it to bypass the generative gate. An addressed factual question
+   can report unavailable evidence without exposing provider details.
+   Unprompted failures (model, chain, Brain, Telegram) are silent in the group
+   and at most logged.
 
 6. **Honest about what it is.** It talks like a person, but if someone
    sincerely asks whether it is a bot or an AI it says yes ("yeah, i'm an AI
@@ -199,25 +212,24 @@ this pine", "thoughts?", "is it any good", "you in?", "didnt you see", a bare
 "??" or a short question like "this?" under someone's CA — `asksAboutCoin` in
 `detect.ts`) asks about that post's coin: its own words name none, so the
 coin is read off the post it answers (the whole text Telegram quoted with the
-reply, else the remembered line's first 400 characters), and the reply goes
-through the coin flow as a post of that coin by whoever asked — claimed under
-the reply's own message id — with every rule a CA said to it gets: an answer
-from memory, a fresh look, the owner ask, a nomination, "can't pull that one
-up rn", or silence for another chain's coin. Everything else under a coin
+reply, else the remembered reply chain). The question gets a bounded public
+research read and an answer from the available evidence; this follow-up does
+not nominate another trade. Everything else under a coin
 post is chatter: a reply that does not call it, "gm gm", a question about
 something else (including "who won?" or "where next?"), and anything telling
 it not to act ("don't touch this one pls", "skip it"). An explicit ticker in
 the reply uses the quoted CA only when the quote names that same ticker;
-otherwise it asks for the ticker's own CA. Never a distress post's coin. While that post is still on
-the coin lane its own answer is on its way: the reply is answered now, as
-chatter ("@bot didnt you see" while its look hangs), and the flow is told who
-asked, so a look that comes back `unknown` gets them "can't pull that one up
-rn" on the post (tagged, once per chat per 10 minutes) instead of silence.
-If the asker uses `/forgetme` while that response is pending, it is cancelled.
+otherwise it asks for the ticker's own CA. Never a distress post's coin. While
+that post is still on the coin lane, a follow-up can share its pending lookup.
+Other conversation continues off-queue. If the read fails or reaches its
+deadline, the answer says it could not pull up current facts. If the asker
+uses `/forgetme` while either response is pending, both delayed lines are
+cancelled.
 
 **Its own take.** Asked what it thinks ("wdyt", "thoughts?", "is this
-good?"), it answers with its own first-person view — whether it would go for
-it, what it likes or doesn't, or that it hasn't looked yet — and never tells
+good?"), a remembered coin gets dated research and a first-person quick-screen
+take. Without an identifiable coin it asks for the CA or says what evidence
+is missing. It never tells
 anyone else to buy or sell. It never hides behind rules: a line citing
 someone's rules or its permission, or refusing to give a take or advice ("my
 owner's rules say i don't do 'should you buy this' talks", "cant give ya
@@ -325,6 +337,35 @@ to someone in distress goes out shushed or not.
 * Anything that reads as self-harm or real distress switches off banter: a
   short kind line and nothing clever, even in a shushed chat and even when
   the line also carries a coin (that coin is not claimed or nominated).
+
+## Factual questions
+
+An addressed coin question receives a dated public index snapshot and a
+quick-screen take. It never claims a chart was analysed or a Brain decision
+was made without that evidence. A reply such as "wdyt" to its own coin
+acknowledgement follows the remembered reply chain to that group's original
+coin; a name or cashtag resolves only to one unambiguous remembered coin.
+An explicit different coin never inherits the previous coin's research.
+These reads have a deadline and run outside the chat queue. The coins switch
+still suppresses both the lookup and the opinion. Held coins keep their local
+held classification while their public snapshots refresh under the same
+read limits; protected wallet, cash, stock and energy addresses remain free
+classifications.
+
+"What did you trade today?" reads the current agent's current-run operation
+ledger, since midnight UTC, through the public projection. Paper is explicit,
+pending/refused attempts are not fills, restart copies do not create new
+trades, and partial or unreadable history is never reported as no trades.
+"Why?" can use the safe rationale from a matching decision already remembered
+in that same group; otherwise it identifies the recorded decision source and
+directs the owner to DM for the full private reason. Private DM and web chat
+share the same operation deduplication, fill provenance and sold-cost replay.
+
+Literal arithmetic, percentage changes and P&L calculations use bounded
+decimal arithmetic and only the supplied operands. They never become a
+verified account result. Product questions use fixed, code-backed answers
+for the web's trade history, P&L images, wallet steps, permissions and group
+delivery; model-written banter cannot invent those facts.
 
 ## The coin flow
 
@@ -907,15 +948,15 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | Someone posts a Robinhood Chain coin, not trencher mode | Looked at first. A candidate: tags owner politely (12 h), DMs owner the reason + button. Any other kind: its grounded line, no ask, no DM |
 | Someone posts a Robinhood Chain coin, trencher ready | Tags sender, thinks out loud, Brain decides, then a casual buy line or a grounded fade |
 | A Robinhood Chain GeckoTerminal pool / DexScreener pair link | Looked at as the coin that pool trades when the canonical factory names the pool; otherwise silence |
-| Same CA posted again | Answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing. Someone asking about it (said to it) gets the answer too, once an hour each: the owner always, at most 3 others per coin per hour |
-| "wdyt about this pine" as a reply to a coin post | About that post's coin: from memory, or a fresh look (tags them and thinks out loud / the owner ask / "can't pull that one up rn"). Asked while the post's own look is out: answered now as chatter, and "can't pull that one up rn" if that look fails. "gm gm", "don't touch this one" or a reply that does not call it: chatter. Never a distress post's coin |
-| "wdyt?" / "is it good?" said to it | Its own first-person take; never "my owner's rules", "not allowed" or "can't give advice" (refused as `dodge`), and never a claimed trade ("aped in", refused as `claim`); a template answers instead |
+| Same CA posted again | A bare repost answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing. An addressed factual follow-up uses ordinary answer pacing and the public research port without another nomination |
+| "wdyt about this pine" as a reply to a coin post or its own acknowledgement | Resolves that group's coin and returns dated public research, with an honest unavailable answer by the deadline. A pending lookup is shared; other conversation stays responsive. No second nomination. "gm gm", "don't touch this one" or a reply that does not call it: chatter. Never a distress post's coin |
+| "wdyt?" / "is it good?" said to it | An unambiguous remembered coin gets a factual quick-screen take; otherwise it asks for the CA. It never claims a buy without a recorded fill |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |
 | A CA posted while GeckoTerminal is in cooldown (chain up or down) | DexScreener's Robinhood Chain pairs stand in, by the same rules (bar the buyer count it does not publish); nothing there → silence |
 | A CA said to it ("@bot 0x…?") whose look could not be made | "can't pull that one up rn 🤷", tagging them, once per chat per 10 min; never a verdict |
-| A read that never answers | The look is `unknown` after 10 s; the chat's other lines ("@bot didnt you see?") are answered meanwhile |
+| A read that never answers | The look is `unknown` after 10 s; coin follow-ups report missing evidence by their deadline, while other conversation is answered meanwhile |
 | The owner posting bonding-curve CA after CA | Every one gets its curve line; the lines recur rather than run dry |
 | A backlog of CAs while the reads hang, then the owner asks about one | Hers is looked at next and answered inside the send window; posts whose window ran out are not looked at |
 | A Telegram call that never answers | Given up after 10 s; that line is lost, the chat's next lines go out |

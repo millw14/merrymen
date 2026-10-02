@@ -9,6 +9,9 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
+import { distinctTrades } from "../distinct-trades";
+import { currentTradeEpochSync } from "../chat-trades";
+import { OP_KEY, readEvidencedSellsSync } from "../trade-evidence";
 import { gasQualifier } from "../equity";
 import { overlayHistory } from "./history-overlay";
 import { loadTradeViews, renderTradeList, when, type TradeViewOpts } from "./trade-rows";
@@ -394,20 +397,20 @@ export function readPnl(passedId?: string | null): string {
     // contains P&L we can actually defend.
     let realizedLine: string | null = null;
     try {
-      const rows = db
-        .prepare(
-          `SELECT status, COALESCE(SUM(realized_pnl_usdg),0) AS pnl, COUNT(*) AS n
-             FROM trades WHERE agent_id = ? AND realized_pnl_usdg IS NOT NULL
-               AND status IN ('paper','landed')
-            GROUP BY status`,
-        )
-        .all(agentId) as { status: string; pnl: number; n: number }[];
-      const parts = rows
-        .filter((r) => r.n > 0)
-        .map(
-          (r) =>
-            `• realized${r.status === "paper" ? " (📜 paper)" : ""}: ${usd(r.pnl)} over ${r.n} closing trade${r.n === 1 ? "" : "s"}`,
-        );
+      const rows = db.prepare(`SELECT t.status,t.realized_pnl_usdg AS pnl,t.sell_token AS token,${OP_KEY} AS op_key
+        FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?) AND t.epoch = ?")}
+        WHERE t.fill_side = 'sell' AND t.realized_pnl_usdg IS NOT NULL AND t.fill_cash_usdg IS NOT NULL
+          AND t.status IN ('paper','landed') AND t.kind IN ('swap','curve-trade','equity-order')
+          AND t.basis_source = CASE WHEN t.status = 'paper' THEN 'paper' ELSE 'receipt' END
+        ORDER BY t.created_at DESC,t.id DESC LIMIT 5001`).all(agentId,epoch) as {status:string;pnl:number;token:string;op_key:string}[];
+      const parts:string[]=[];
+      for(const book of ["landed","paper"] as const) {
+        const candidates=rows.slice(0,5000).filter(r=>r.status===book&&typeof r.token==="string"&&Number.isFinite(r.pnl));
+        const vouched=readEvidencedSellsSync(db,agentId,book,candidates.map(r=>({op:r.op_key,token:r.token})));
+        const known=candidates.filter(r=>vouched.has(r.op_key));
+        if(known.length)parts.push(`• verified realized${book==="paper"?" (📜 paper)":""}: ${usd(known.reduce((n,r)=>n+r.pnl,0))} over ${known.length} closing trade${known.length===1?"":"s"}`);
+      }
+      if(rows.length>5000)parts.push("• closed result covers only the newest 5,000 sales; it is not this run's total.");
       if (parts.length) realizedLine = parts.join("\n");
     } catch {
       /* pre-migration ledger — no realized column yet */
@@ -841,9 +844,11 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
     overlayHistory(db, who);
     const t = db
       .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
+        `SELECT t.kind,t.amount_usdg,t.status,t.reject_rule,t.tx_hash,t.created_at,t.decision_id
+          FROM ${distinctTrades(`LOWER(t.agent_id) = LOWER(?)${currentTradeEpochSync(db,who)===null?"":" AND t.epoch = ?"}`)}
+          ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,
       )
-      .get(who) as
+      .get(who,...(currentTradeEpochSync(db,who)===null?[]:[currentTradeEpochSync(db,who)])) as
       | { kind: string; amount_usdg: number; status: string; reject_rule: string | null; tx_hash: string | null; created_at: string | number; decision_id: string | null }
       | undefined;
     if (!t) return nothingYet();
@@ -852,7 +857,7 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
       // "my last move" is the one an owner asks after a refusal, so it is the
       // worst place of all to answer with the slug. Remedy included: unlike the
       // push, this fires only when he asks, so it cannot become noise.
-      `• ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG — ${esc(t.status)}${t.reject_rule ? ` — ${esc(rejectRuleLabel(t.reject_rule) ?? t.reject_rule)} (${esc(t.reject_rule)})` : ""}`,
+      `• ${esc(t.kind)} (requested ${t.amount_usdg.toFixed(2)} USDG) — ${esc(t.status)}${t.reject_rule ? ` — ${esc(rejectRuleLabel(t.reject_rule) ?? t.reject_rule)} (${esc(t.reject_rule)})` : ""}`,
       ...(t.reject_rule && rejectRuleRemedy(t.reject_rule)
         ? [`• ${esc(rejectRuleRemedy(t.reject_rule)!)}`]
         : []),
@@ -888,7 +893,7 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
           )
           .all(who, tradeUnix - 900, tradeUnix + 900) as { message: string }[];
         if (evs.length) {
-          lines.push(`• what was on my mind (approx):`);
+          lines.push(`• nearby log (context only; the trade’s reason was not recorded):`);
           for (const e of evs) lines.push(`  · ${esc(e.message.slice(0, 140))}`);
         }
       } catch {
@@ -896,6 +901,8 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
       }
     }
     return { text: lines.join("\n"), hasTrade: true };
+  } catch {
+    return {text:"I couldn't verify the latest move or its recorded reason right now.",hasTrade:false};
   } finally {
     db.close();
   }
