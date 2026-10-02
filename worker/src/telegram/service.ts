@@ -34,6 +34,7 @@ import {
   answerCallbackQuery,
   editMessageText,
   esc,
+  escModel,
   getFileUrl,
   getMe,
   getUpdates,
@@ -768,7 +769,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           const plain = redactAddresses(
             ev.text.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"),
           );
-          return esc(await narrateWhy(plain, llm));
+          return escModel(await narrateWhy(plain, llm));
         },
         settings: () => settingsListText(cfg as unknown as Record<string, unknown>),
       },
@@ -784,7 +785,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         });
         if (p.kind === "reply") {
           if (p.button === "sign") extras.keyboard = signKeyboard(signUrl(dashboardBase(), "expiring"));
-          if (p.button === "dashboard") extras.keyboard = [[{ text: "⚙️ Open Settings", url: `${dashboardBase()}/settings` }]];
+          if (p.button === "dashboard") extras.keyboard = [[{ text: "⚙️ Open Settings", url: `${dashboardBase()}/settings${p.anchor ? `#${p.anchor}` : ""}` }]];
           if (p.awaitKey) awaitingValue.set(`${msg.chatId}:${msg.fromId}`, { key: p.awaitKey, expiresAt: now() + SETTING_CONFIRM_TTL_SEC });
           return p.text;
         }
@@ -1142,7 +1143,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         chatId: msg.chatId,
         // Model text is HTML-escaped here — it must never inject parse-mode markup.
         send: async (text) => {
-          await sendMessage({ token }, msg.chatId, esc(text));
+          await sendMessage({ token }, msg.chatId, escModel(text));
         },
         note: deps.note,
         remember: (n) => rememberNote(n, now()),
@@ -1368,8 +1369,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // loop reads text strangers wrote (a coin's own description, news):
         // quoted faithfully, `<a href="…">tap to re-sign</a>` would render as a
         // live, disguised link in the bot's own voice. No reply here asks for
-        // markup, so escaping costs nothing.
-        if (cmd.kind === "chat") cmd = { kind: "chat", reply: esc(cmd.reply) };
+        // markup, so escaping costs nothing. escModel keeps a model's **bold**
+        // as bold rather than showing the stars, and adds no other tag.
+        if (cmd.kind === "chat") cmd = { kind: "chat", reply: escModel(cmd.reply) };
       } else {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }

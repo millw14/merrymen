@@ -25,7 +25,7 @@ import {
 export type SettingProposal =
   | { kind: "ask"; key: string; value: unknown; text: string }
   /** `awaitKey`: the reply asked for a value — the next short message answers it. */
-  | { kind: "reply"; text: string; button?: "sign" | "dashboard"; awaitKey?: string };
+  | { kind: "reply"; text: string; button?: "sign" | "dashboard"; anchor?: string; awaitKey?: string };
 
 export interface ProposalContext {
   /** Current resolved settings (ResolvedConfig), read by key. */
@@ -73,6 +73,10 @@ const ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   // Posting on X is dashboard-only (DASHBOARD_ONLY.xPosting): these words
   // reach the refusal and its Settings button, never a change.
   xPosting: ["post on x", "posting on x", "x posting", "posts on x", "post on twitter", "twitter", "tweets", "tweeting", "x account", "x settings"],
+  // Launchpad buying is dashboard-only (DASHBOARD_ONLY.launchSniping). The
+  // agent calls it "launchpad buying" and the web page called it "class
+  // route", so an owner may use either, or what the iOS app called it.
+  launchSniping: ["launchpad buying", "launchpad sniping", "launch buying", "launch sniping", "launchpad", "class route", "class sniping", "classSnipeEnabled"],
   // Telegram groups are dashboard-only (DASHBOARD_ONLY.telegramGroups). "group
   // chats" is how owners say it even though the product never does — the
   // public web room owns that name — so it has to reach the refusal too. The
@@ -111,6 +115,19 @@ export function resolveSettingName(phrase: string): string | null {
   for (const [k, words] of Object.entries(ALIASES)) if (words.some((w) => norm(w) === p)) return k;
   return null;
 }
+
+/**
+ * Where on /settings the "Open Settings" button lands, for the dashboard-only
+ * asks whose control has an id there (web Settings.tsx opens the closed group a
+ * link points into). One missing here still gets the button, to the page top.
+ */
+const DASHBOARD_ANCHORS: Readonly<Record<string, string>> = Object.freeze({
+  launchSniping: "launchpad-buying",
+  memecoinLive: "trencher-mode",
+  telegram: "telegram",
+  telegramGroups: "telegram-groups",
+  xPosting: "x-posting",
+});
 
 /** Keys of the sealed limits the old /cap path also clamps against. */
 const SEALED_SENTENCE =
@@ -153,7 +170,9 @@ export function proposeSettingChange(setting: string, value: string, ctx: Propos
     return { kind: "reply", text: `Your ${SEALED_ASKS[key]} can't be changed by text. ${SEALED_SENTENCE}`, button: "sign" };
   }
   if (DASHBOARD_ONLY[key]) {
-    return { kind: "reply", text: DASHBOARD_ONLY[key]!, button: "dashboard" };
+    // Sent as Telegram HTML, and the text names "Custom tokens & discovery".
+    const anchor = DASHBOARD_ANCHORS[key];
+    return { kind: "reply", text: esc(DASHBOARD_ONLY[key]!), button: "dashboard", ...(anchor ? { anchor } : {}) };
   }
 
   const spec = specFor(key)!;

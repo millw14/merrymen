@@ -41,6 +41,28 @@ describe("parseSettingValue — owner words in, stored value out", () => {
     assert.equal(formatSettingValue(spec("classMaxHoldSec"), 21_600), "6h");
   });
 
+  it("a 0 that means 'no limit' is said so — 'max launch coins held: 0' read as 'none allowed'", () => {
+    // The agent read "0" off /settings and told an owner to raise it before
+    // launchpad buying could buy. class-active.ts ceilingBlocks: 0 never blocks.
+    assert.equal(formatSettingValue(spec("classMaxPositions"), 0), "no limit");
+    assert.equal(formatSettingValue(spec("classMaxPositions"), 3), "3");
+    assert.equal(formatSettingValue(spec("memecoinMinFdvUsd"), 0), "no limit");
+    assert.equal(formatSettingValue(spec("memecoinMinFdvUsd"), 50_000), "$50000.00");
+    assert.equal(formatSettingValue(spec("telegramNotifyEveryMin"), 0), "off (a message per trade)");
+    assert.equal(formatSettingValue(spec("classPerEntryUsdg"), 0), "$0.00 (launchpad buying buys nothing)");
+    assert.equal(formatSettingValue(spec("classPerEntryUsdg"), 50), "$50.00");
+  });
+
+  it("a range refusal names the bound as a number, never as what 0 means", () => {
+    const r = parseSettingValue(spec("classMaxPositions"), "0");
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /can't go below 1 /);
+    const big = parseSettingValue(spec("telegramNotifyEveryMin"), "5000");
+    assert.match((big as { reason: string }).reason, /can't go above 1440 /);
+    const tiny = { ...spec("memecoinMinFdvUsd"), min: 10 };
+    assert.match((parseSettingValue(tiny, "5") as { reason: string }).reason, /can't go below \$10\.00/);
+  });
+
   it("a whole-number setting refuses a fraction", () => {
     assert.equal(parseSettingValue(spec("classExitAtGraduationPct"), "2.5").ok, false);
   });

@@ -116,6 +116,21 @@ describe("it names the blocker rather than leaving it to be inferred", () => {
     assert.match(out, /every gate this module can see is OPEN/);
   });
 
+  it("never calls classMaxPositions 0 a blocker: 0 is no ceiling at all (class-active.ts ceilingBlocks)", () => {
+    const out = describeTenant(
+      facts({
+        grantClassVault: "0xC8776FAFf15212C359b23BAe531fF3aC7d760E0F",
+        classSnipeEnabled: true,
+        classPerEntryUsdg: 5,
+        classMaxPositions: 0,
+        liveTradingEnabled: true,
+        assetMode: "all",
+      }),
+    ).join("\n");
+    assert.doesNotMatch(out, /classMaxPositions is 0/);
+    assert.match(out, /every gate this module can see is OPEN/);
+  });
+
   it("and counts assetMode 'stocks' as a blocker, because it excludes the route", () => {
     const out = describeTenant(facts({ assetMode: "stocks" })).join("\n");
     assert.match(out, /assetMode is "stocks"/);

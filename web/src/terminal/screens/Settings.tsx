@@ -254,6 +254,35 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     })();
   }, [loadAttempt]);
 
+  // A LINK TO ONE SETTING OPENS THE GROUP IT SITS IN. The chat's "Open
+  // Settings" button and the pages that point here link to a control by its
+  // id (#launchpad-buying, #trencher-mode, #telegram, #x-posting). A control
+  // inside a collapsed group made that a link to a page that seemed not to have
+  // it: an owner told launchpad buying was "on the dashboard" could not find
+  // it, because it sat closed inside "Custom tokens & discovery". Run once the
+  // form is on screen (the ids do not exist before), and on every later hash.
+  const formShown = view !== null;
+  useEffect(() => {
+    if (!formShown) return;
+    const reveal = () => {
+      let id = "";
+      try {
+        id = decodeURIComponent(window.location.hash.slice(1));
+      } catch {
+        return;
+      }
+      if (!id) return;
+      const target = document.getElementById(id);
+      if (!target) return;
+      const group = target.closest("details");
+      if (group && !group.open) group.open = true;
+      target.scrollIntoView?.({ block: "start" });
+    };
+    reveal();
+    window.addEventListener("hashchange", reveal);
+    return () => window.removeEventListener("hashchange", reveal);
+  }, [formShown]);
+
   // Debounced model fetch — triggers when provider, key, or custom URL changes.
   // No client-side gate on key presence: the server may still serve the list
   // from the shared house key, which the client cannot see. A response with no
@@ -1413,12 +1442,20 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
               Deliberately BELOW the scout block and after its warning: a class
               buy is gated by the scout budget, so an owner who has not read
-              that paragraph is not ready to read this one. */}
-          <div className="mm-subtle mono">class route · buying a coin nobody listed</div>
+              that paragraph is not ready to read this one.
+
+              CALLED WHAT THE CHAT CALLS IT. The agent says "launchpad buying"
+              (chat-tools.ts settings, setting-spec.ts DASHBOARD_ONLY) and the
+              iOS app says it too; this block said only "class route", so an
+              owner sent here looking for launchpad buying found nothing by
+              that name. #launchpad-buying is where the chat's button lands,
+              and the effect above opens this group for it. */}
+          <div className="mm-subtle mono" id="launchpad-buying">launchpad buying · class route · buying a coin nobody listed</div>
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold
-            again. Needs a class vault factory in Connections and a re-signed key — and the scout
-            budget above still bounds it.
+            Buy a coin straight off a Pons launchpad&apos;s bonding curve, held in your own vault so
+            it can be sold again. It buys nothing until scout mode above is on, with its budget and max
+            per token each at least one entry; live trading is on; and a class vault factory is set in
+            Connections, with your key re-signed after.
           </p>
           <div className="mm-grid">
             <label className="mm-field">

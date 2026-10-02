@@ -31,7 +31,7 @@ struct SettingsScreen: View {
         ("telegramGroupsEnabled", "Hang out in Telegram groups"), ("telegramGroupCoinsEnabled", "Look at coins people post"),
         ("trencherLiveEnabled", "Live Trencher"),
         ("trencherFastEnabled", "Fast Trencher review"), ("deskEnabled", "Trading desk"),
-        ("scoutEnabled", "Scout"), ("classSnipeEnabled", "Class sniping")
+        ("scoutEnabled", "Scout"), ("classSnipeEnabled", "Launchpad buying")
     ]
     private let numbers: [(String, String)] = [
         ("tickSeconds", "Decision interval (seconds)"), ("slippageBps", "Slippage (basis points)"),

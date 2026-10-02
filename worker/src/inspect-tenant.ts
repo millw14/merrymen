@@ -175,7 +175,9 @@ export function describeTenant(f: TenantFacts): string[] {
   if (f.grantClassVault === null) blockers.push("no class vault sealed in the grant (needs a re-sign)");
   if (f.classSnipeEnabled !== true) blockers.push("classSnipeEnabled is not true");
   if ((f.classPerEntryUsdg ?? 0) <= 0) blockers.push("classPerEntryUsdg is 0");
-  if ((f.classMaxPositions ?? 0) <= 0) blockers.push("classMaxPositions is 0");
+  // Not `classMaxPositions` 0: that is NO ceiling (class-active.ts
+  // ceilingBlocks returns false for it), and naming it here sent the same
+  // advice the chat once gave an owner, to raise a limit that was not there.
   if (f.liveTradingEnabled !== true) blockers.push("liveTradingEnabled is not true");
   if (f.assetMode === "stocks") blockers.push('assetMode is "stocks", which excludes the whole route');
   // EXPLICIT FALSE, not falsy. Every other test above reads an unset field as
