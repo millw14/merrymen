@@ -123,6 +123,27 @@ function sponsoredFields(r: Record<string, unknown>, final: boolean) {
   return { paymaster: r.paymaster as `0x${string}`, paymasterData: r.paymasterData as `0x${string}` };
 }
 
+/** Provider errors reach logs and owner events; URL credentials must not follow them. */
+function sponsorFailureDetail(error: unknown, providerUrl: string): string {
+  const providerReason = error && typeof error === "object" && "details" in error ? error.details : null;
+  let detail = typeof providerReason === "string" && providerReason
+    ? providerReason : error instanceof Error ? error.message : String(error);
+  let secrets: Array<string | null | undefined>;
+  try {
+    const url = new URL(providerUrl);
+    secrets = [url.username, url.password,
+      ...["apikey", "apiKey", "api_key", "key", "token"].map(key => url.searchParams.get(key))];
+  } catch { return "the provider could not supply a quote"; }
+  // Replace values too: an upstream error can repeat a key without its URL.
+  for (const secret of secrets) {
+    if (secret) detail = detail.split(secret).join("<redacted>").split(encodeURIComponent(secret)).join("<redacted>");
+  }
+  return detail.split(providerUrl).join("<paymaster>")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "<paymaster>")
+    .replace(/apikey=[^&\s"'<>]+/gi, "apikey=<redacted>")
+    .slice(0, 300);
+}
+
 /** Build the sponsor. `url` is Pimlico's — the same endpoint as the bundler. */
 export function createSponsor(opts: { url: string; policyId?: string; credentials?: RequestCredentials }): Sponsor {
   const pm = createPaymasterClient({
@@ -150,7 +171,7 @@ export function createSponsor(opts: { url: string; policyId?: string; credential
       throw new SponsorRefused(
         "sponsor-unreachable",
         `the gas sponsor did not answer (pm_getPaymasterStubData): ${
-          e instanceof Error ? e.message : String(e)
+          sponsorFailureDetail(e, opts.url)
         }. That is a refusal to quote, not a quote of zero.`,
       );
     }
@@ -177,7 +198,7 @@ export function createSponsor(opts: { url: string; policyId?: string; credential
       throw new SponsorRefused(
         "sponsor-refused",
         `the gas sponsor declined this operation (pm_getPaymasterData): ${
-          e instanceof Error ? e.message : String(e)
+          sponsorFailureDetail(e, opts.url)
         }. Nothing was signed and nothing was sent.`,
       );
     }
@@ -205,18 +226,10 @@ export function createSponsor(opts: { url: string; policyId?: string; credential
 /**
  * WILL THIS SPONSOR ACTUALLY PAY? Asked ONCE, at arm time, before any trade.
  *
- * WHY THIS IS NOT PARANOIA. A sponsor refusal is not a fallback — index.ts
- * books the trade `rejected` with `reject_rule: sponsor-refused` and nothing is
- * sent. So an unfunded deposit or an exhausted policy does not degrade an agent
- * to self-paying; it stops it trading entirely, once per tick, silently as far
- * as the owner can tell. Turning sponsorship on for a fleet without knowing the
- * answer to this question is therefore strictly more dangerous than leaving it
- * off, because the agents it would break are the ones that currently WORK.
- *
- * Asking once at arm converts that into the opposite: if the sponsor will not
- * quote, the agent runs exactly as it does today — self-paying, with `no-gas`
- * refusing the ones that hold no ETH. Enabling the switch can then only ever
- * help, which is what makes it a safe thing for an operator to turn on.
+ * A refusal warns that live operations may be unavailable. It never permits
+ * the caller to remove sponsorship and spend owner ETH instead. The worker
+ * keeps the sponsor attached and records a typed rejection when an actual
+ * operation cannot obtain coverage.
  *
  * A QUOTE, NOT A COMMITMENT. `pm_getPaymasterStubData` is the same read the
  * executor's own gas probe makes. Nothing is signed, nothing is broadcast, and
@@ -224,10 +237,9 @@ export function createSponsor(opts: { url: string; policyId?: string; credential
  * operation later — a per-op refusal is still possible and still handled where
  * it always was.
  *
- * DEFAULTS TO USABLE ON AN UNREADABLE ANSWER. A network blip at arm must not
- * cost an agent its sponsorship for the life of the process: the per-op path
- * already refuses correctly, so the conservative direction here is to proceed
- * and let the real call decide.
+ * This empty-call probe is advisory: a policy can reject it while allowing a
+ * real trade. Unreachable answers return `ok: false`, and the per-operation
+ * quote remains mandatory regardless of the probe result.
  */
 export async function sponsorWillQuote(
   sponsor: Sponsor,
@@ -250,8 +262,8 @@ export async function sponsorWillQuote(
     return { ok: true };
   } catch (e) {
     // SponsorRefused is what our own wrapper throws; anything else is a
-    // transport problem. Both mean the same thing to the caller — do not rely
-    // on this sponsor — and the message is what tells an operator which.
+    // transport problem. Both mean coverage was not confirmed by this probe,
+    // without changing who must pay for a subsequent operation.
     return { ok: false, why: e instanceof Error ? e.message : String(e) };
   }
 }

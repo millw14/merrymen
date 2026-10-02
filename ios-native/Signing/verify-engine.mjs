@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -18,7 +19,11 @@ const recording = process.argv.includes('--record');
 const trencher = process.argv.includes('--trencher');
 const legacy = process.argv.includes('--legacy');
 const tenant = privateKeyToAccount('0x' + '22'.repeat(32));
-let restoring = false, checkingRecovery = false, sponsorAvailable = true, ownershipProofs = 0;
+let restoring = false, checkingRecovery = false, sponsorAvailable = true, ownershipProofs = 0, challengeVariant = 'valid';
+// The server's real nonce format, signed with a PUBLIC test-only secret.
+// No production nonce, credential or live backend is used by this fixture.
+const nonceBody = `${Buffer.alloc(16, 1).toString('base64url')}.1790287500000.${Buffer.from('https://app.merrymen.dev|recovery-owner-actions-v2').toString('base64url')}`;
+const recoveryNonce = `${nonceBody}.${createHmac('sha256', 'PUBLIC_MERRYMEN_OFFLINE_TEST_ONLY_SECRET').update(nonceBody).digest('base64url')}`;
 const cache = new Map();
 const storage = new Map();
 const timers = new Map();
@@ -65,13 +70,14 @@ const handle = async (op, args) => {
   if (url.host === 'app.merrymen.dev') {
     if (url.pathname === '/api/auth/challenge' && args.method === 'GET') return { status: 200, body: JSON.stringify({ origin: url.origin, nonce: 'fixture_nonce' }) };
     if (url.pathname === '/api/recover/ticket') {
-      const nonce = 'fee_check';
-      const message = ['https://app.merrymen.dev — recover your merrymen account.', '', 'This proves you control the owner key so the site can relay withdrawals and permission revocations.', 'It moves no funds by itself and grants no permissions: each operation', 'is a separate operation you sign next.', '', 'URI: https://app.merrymen.dev', `Nonce: ${nonce}`].join('\n');
+      const nonce = challengeVariant === 'malformed-nonce' ? 'fee_check' : recoveryNonce;
+      const message = challengeVariant === 'spending-message' ? 'Approve spending all assets to this requester.' : ['https://app.merrymen.dev — recover your merrymen account.', '', 'This proves you control the owner key so the site can relay withdrawals and permission revocations.', 'It moves no funds by itself and grants no permissions: each operation', 'is a separate operation you sign next.', '', 'URI: https://app.merrymen.dev', `Nonce: ${nonce}`].join('\n');
       if (args.method === 'GET') {
         assert.equal(url.search, '?scope=owner-actions', 'New native recovery requests the versioned owner-actions proof');
         return { status: 200, body: JSON.stringify({ nonce, message }) };
       }
       assert.equal(args.method, 'POST');
+      assert.equal(challengeVariant, 'valid', 'Invalid ownership challenges must never be posted');
       assert.equal(url.search, '', 'The proof scope belongs to the signed POST body');
       const proof = JSON.parse(args.body);
       assert.equal(proof.nonce, nonce); assert.equal(proof.chainId, 4663);
@@ -166,6 +172,16 @@ try {
     assert.equal(unavailable.sponsorshipReason, 'House sponsorship is unavailable.');
     assert.equal(signatures, before + 2);
     assert.equal(ownershipProofs, 2);
+    for (const [index, variant] of ['spending-message', 'malformed-nonce'].entries()) {
+      challengeVariant = variant;
+      complete = new Promise((resolve,reject) => { finish = resolve; fail = reject; });
+      context.__runWallet(5 + index, 'plan', JSON.stringify({ owner: owner.address, smartAccount: expected, grantTokens: [] }));
+      const refused = await complete;
+      assert.equal(refused.gasSponsored, false);
+      assert.match(refused.sponsorshipReason, variant === 'spending-message' ? /unexpected recovery message/ : /invalid.*recovery nonce/);
+      assert.equal(signatures, before + 2, 'Native recovery must reject arbitrary challenges before the owner signs');
+      assert.equal(ownershipProofs, 2, 'Invalid challenges cannot mint a recovery ticket');
+    }
   }
   assert.equal(result.handoff.ok, true); assert.deepEqual(result.caps, caps);
   assert.equal(posted.chainId, 4663); assert.ok(posted.serialized); assert.ok(signatures >= 2);

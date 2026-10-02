@@ -20,7 +20,10 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { encodeErrorResult, encodeFunctionResult, formatUnits, parseAbi, toFunctionSelector } from "viem";
 import { formatUserOperation, getUserOperationHash, type RpcUserOperation } from "viem/account-abstraction";
 import { preflightRevocationFromBrowser, revokeFromBrowser } from "./revoke-client";
-import { ownerGasError, planFromBrowser, sweepFromBrowser, type BrowserWallet } from "./recover-client";
+import { getRecoveryTicket, ownerGasError, planFromBrowser, sweepFromBrowser, type BrowserWallet } from "./recover-client";
+import { privateKeyToAccount } from "viem/accounts";
+import { issueChallengeNonce } from "./auth";
+import { recoveryChallengeMessage } from "./recovery-ticket";
 
 /** A throwaway owner key. The derived account comes from the stub below. */
 const OWNER_KEY = ("0x" + "31".repeat(32)) as `0x${string}`;
@@ -51,6 +54,15 @@ let sponsorRefuses = false;
 let quoteCount = 0;
 let nativeBalance = 0n;
 const balanceReads = new Set<string>();
+const ORIGIN = "https://app.merrymen.test";
+let challenge: unknown;
+let ticketPosts = 0;
+const ticketRequests: string[] = [];
+const oldSessionSecret = process.env.MERRYMEN_SESSION_SECRET;
+function validChallenge(origin = ORIGIN, ownerActions = true) {
+  const nonce = issueChallengeNonce(ownerActions ? `${origin}|recovery-owner-actions-v2` : origin);
+  return { nonce, message: recoveryChallengeMessage(origin, nonce, ownerActions) };
+}
 
 /** One JSON-RPC answer, for the chain and the bundler relay alike. */
 function answer(method: string, params: unknown[]): { result?: unknown; error?: unknown } {
@@ -143,9 +155,10 @@ const json = (body: unknown, status = 200) =>
 const realFetch = globalThis.fetch;
 const g = globalThis as { window?: unknown };
 before(() => {
+  process.env.MERRYMEN_SESSION_SECRET = "recovery-client-test-only-secret-never-production";
   // The page's origin, which `relayUrl` builds the bundler relay from. Without
   // one it is a relative URL, which only a browser can resolve.
-  g.window = { location: { origin: "https://app.merrymen.test" } };
+  g.window = { location: { origin: ORIGIN } };
   globalThis.localStorage = { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => { storage.set(k, v); }, removeItem: (k: string) => { storage.delete(k); } } as Storage;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -153,7 +166,14 @@ before(() => {
     else if (url.includes("/api/bundler/4663") || url.includes("rpc.mainnet.chain")) activeChain = 4663;
     // The relay ticket: a challenge to sign, then the account the server derived.
     if (url.includes("/api/recover/ticket")) {
-      return init?.method === "POST" ? json({ smartAccount: ACCOUNT }) : json({ nonce: "n", message: "recover" });
+      ticketRequests.push(url);
+      if (init?.method === "POST") {
+        ticketPosts++;
+        assert.equal(JSON.parse(String(init.body)).scope, "owner-actions");
+        return json({ smartAccount: ACCOUNT });
+      }
+      assert.ok(url.endsWith("?scope=owner-actions"));
+      return json(challenge);
     }
     if (url.includes("/api/bundler/") && !init?.body) return json({ gasSponsored, sponsorshipEnabled: gasSponsored, reason: gasSponsored ? null : "Merrymen gas coverage is unavailable." });
     const parsed = JSON.parse(String(init?.body ?? (input as Request).body)) as unknown;
@@ -162,14 +182,95 @@ before(() => {
     return json(Array.isArray(parsed) ? out : out[0]);
   }) as typeof fetch;
 });
-beforeEach(() => { gasSponsored = true; sponsorRefuses = false; submitted.length = 0; quoteCount = 0; nativeBalance = 0n; storage.clear(); sentHashes.clear(); receiptReads.length = 0; activeChain = 4663; });
+beforeEach(() => { gasSponsored = true; sponsorRefuses = false; submitted.length = 0; quoteCount = 0; nativeBalance = 0n; storage.clear(); sentHashes.clear(); receiptReads.length = 0; activeChain = 4663; challenge = validChallenge(); ticketPosts = 0; ticketRequests.length = 0; });
 after(() => {
   globalThis.fetch = realFetch;
   delete g.window;
+  if (oldSessionSecret === undefined) delete process.env.MERRYMEN_SESSION_SECRET;
+  else process.env.MERRYMEN_SESSION_SECRET = oldSessionSecret;
 });
 
 /** A signed-out browser wallet, exactly as RecoverPanel builds it from the stored grant. */
 const wallet: BrowserWallet = { smartAccount: ACCOUNT, ownerKey: OWNER_KEY, chainId: 4663, grantTokens: [MEME, MUTE] };
+
+describe("owner recovery challenge authorization", () => {
+  function countedSigner() {
+    const owner = privateKeyToAccount(OWNER_KEY);
+    const messages: unknown[] = [];
+    return { messages, account: { ...owner, signMessage: async (p: Parameters<typeof owner.signMessage>[0]) => {
+      messages.push(p.message); return owner.signMessage(p);
+    } } };
+  }
+
+  it("signs only the server's exact v2 challenge bound to the actual page origin", async () => {
+    const signer = countedSigner();
+    await getRecoveryTicket({ ...wallet, ownerAccount: signer.account });
+    assert.deepEqual(signer.messages, [(challenge as { message: string }).message]);
+    assert.deepEqual(ticketRequests, [`${ORIGIN}/api/recover/ticket?scope=owner-actions`, `${ORIGIN}/api/recover/ticket`]);
+    assert.equal(ticketPosts, 1);
+  });
+
+  it("refuses changed spending text, structured raw messages and attacker origins before signing or posting", async () => {
+    const good = validChallenge();
+    for (const attack of [
+      { ...good, message: "Authorize spending all assets to the requester" },
+      { ...good, message: { raw: `0x${"ab".repeat(32)}` } },
+      { ...good, message: `${good.message}\n` },
+      { ...good, message: good.message.replaceAll(ORIGIN, "https://attacker.example") },
+      validChallenge("https://attacker.example"), validChallenge(ORIGIN, false),
+      { nonce: good.nonce }, null, [], "recover",
+    ]) {
+      challenge = attack;
+      const signer = countedSigner();
+      await assert.rejects(getRecoveryTicket({ ...wallet, ownerAccount: signer.account }));
+      assert.equal(signer.messages.length, 0);
+      assert.equal(ticketPosts, 0);
+    }
+  });
+
+  it("rejects malformed or misbound nonces before signing even when the message repeats them", async () => {
+    const good = validChallenge().nonce;
+    const parts = good.split(".");
+    for (const nonce of [
+      undefined, null, 123, {}, "n", "x".repeat(513), `${good}\n`, `${good}.extra`,
+      ["!".repeat(22), ...parts.slice(1)].join("."),
+      [parts[0], "1e15", ...parts.slice(2)].join("."),
+      [parts[0], "9007199254740992", ...parts.slice(2)].join("."),
+      [...parts.slice(0, 3), "a".repeat(43)].join("."),
+    ]) {
+      challenge = { nonce, message: recoveryChallengeMessage(ORIGIN, String(nonce), true) };
+      const signer = countedSigner();
+      await assert.rejects(getRecoveryTicket({ ...wallet, ownerAccount: signer.account }));
+      assert.equal(signer.messages.length, 0);
+      assert.equal(ticketPosts, 0);
+    }
+  });
+
+  it("requires a canonical explicit origin and rejects browser cross-origin overrides before fetching", async () => {
+    for (const apiOrigin of ["https://attacker.example", "https://user:pass@app.merrymen.test", `${ORIGIN}/path`, `${ORIGIN}?x=1`, `${ORIGIN}#x`, "http://app.merrymen.test", "/", "javascript:alert(1)", ` ${ORIGIN}`]) {
+      const signer = countedSigner();
+      await assert.rejects(getRecoveryTicket({ ...wallet, ownerAccount: signer.account, apiOrigin }));
+      assert.equal(signer.messages.length, 0);
+      assert.equal(ticketRequests.length, 0);
+    }
+    await getRecoveryTicket({ ...wallet, apiOrigin: "https://APP.MERRYMEN.TEST:443/" });
+    assert.equal(ticketPosts, 1, "equivalent canonical origins remain compatible");
+  });
+
+  it("supports a trusted native origin without browser globals and leaves expiry enforcement to the server", async () => {
+    const previousWindow = g.window;
+    delete g.window;
+    try {
+      await assert.rejects(getRecoveryTicket(wallet), /trusted application origin/);
+      assert.equal(ticketRequests.length, 0);
+      const nonce = validChallenge().nonce.split(".");
+      nonce[1] = "1000"; // A skewed local clock is not the authority for expiry.
+      challenge = { nonce: nonce.join("."), message: recoveryChallengeMessage(ORIGIN, nonce.join("."), true) };
+      await getRecoveryTicket({ ...wallet, apiOrigin: ORIGIN });
+      assert.equal(ticketPosts, 1);
+    } finally { g.window = previousWindow; }
+  });
+});
 
 describe("grantTokens reach the browser recovery", () => {
   it("planFromBrowser reads and discloses a grantTokens memecoin", async () => {
@@ -264,7 +365,7 @@ describe("sponsored permission revocations", () => {
     for (const chainId of [46630, 4663]) await preflightRevocationFromBrowser({ ...wallet, chainId, ownerAccount });
     assert.equal(submitted.length, 0);
     assert.equal(storage.size, 0);
-    assert.deepEqual(signedMessages, ["recover", "recover"], "only the fee eligibility proof is signed before approval");
+    assert.deepEqual(signedMessages, [(challenge as { message: string }).message, (challenge as { message: string }).message], "only the exact fee eligibility proof is signed before approval");
     assert.equal(quoteCount, 2, "both networks must obtain an actual final quote");
   });
   it("revokes a zero-ETH account on each network with owner-signed sponsorship", async () => {

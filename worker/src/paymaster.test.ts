@@ -9,6 +9,7 @@ import {
   SponsorRefused,
   assertBoundsHeld,
   createSponsor,
+  sponsorWillQuote,
 } from "./paymaster";
 
 /**
@@ -169,6 +170,39 @@ describe("a configured sponsor cannot turn into self-paid gas", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("redacts the provider URL, encoded credentials and bare API key before failures reach logs or owner events", async () => {
+    const key = "public-test-key/A+B=";
+    let url = "";
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", chunk => body += chunk);
+      req.on("end", () => {
+        const { id } = JSON.parse(body);
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000,
+          message: `policy budget exhausted at ${url}; bare key ${key}; encoded key ${encodeURIComponent(key)}` } }));
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/rpc?apikey=${encodeURIComponent(key)}`;
+    const safe = (message: string) => {
+      assert.ok(!message.includes(key) && !message.includes(encodeURIComponent(key)) && !message.includes(url));
+      assert.ok(!message.includes("127.0.0.1"));
+      assert.match(message, /policy budget exhausted/);
+    };
+    try {
+      const sponsor = createSponsor({ url });
+      for (const method of [sponsor.paymaster.getPaymasterStubData, sponsor.paymaster.getPaymasterData, sponsor.estimateOnly.getPaymasterData]) {
+        await assert.rejects(method(args), (e: unknown) => {
+          assert.ok(e instanceof SponsorRefused); safe(e.message); return true;
+        });
+      }
+      const probe = await sponsorWillQuote(sponsor, { sender: args.sender, entryPoint: args.entryPointAddress, chainId: args.chainId });
+      assert.equal(probe.ok, false);
+      safe(probe.why ?? "");
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 });
 

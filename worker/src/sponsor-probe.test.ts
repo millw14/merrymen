@@ -1,23 +1,4 @@
-/**
- * TURNING GAS SPONSORSHIP ON MUST NOT BE ABLE TO MAKE THINGS WORSE.
- *
- * The whole feature already existed and was measured against chain 4663 before
- * it was written — `paymaster.ts` says so, and a live probe with the production
- * key answers `{paymaster, paymasterData, paymasterPostOpGasLimit}` today. It
- * has simply never been switched on: `sponsorGasEnabled` defaults false and
- * `MERRYMEN_SPONSOR_GAS` is unset in production, which is why twelve agents in
- * the fleet are blocked by `no-gas` while holding USDG they cannot spend.
- *
- * THE REASON THE SWITCH WAS DANGEROUS. A sponsor refusal is not a fallback.
- * index.ts books the trade `rejected` with `reject_rule: sponsor-refused` and
- * nothing is sent — so an unfunded deposit or an exhausted policy does not
- * degrade an agent to self-paying, it stops it trading. And the agents that
- * breaks are precisely the ones that currently WORK, because they are the ones
- * holding ETH. Flipped blind, the switch is strictly worse than leaving it off.
- *
- * The arm-time probe inverts that: no quote, no sponsorship, and the agent runs
- * exactly as it does today. That is what makes it operable.
- */
+/** An advisory arm probe must never turn required sponsorship into self-pay. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
@@ -80,9 +61,7 @@ describe("the probe answers the one question that decides the switch", () => {
     });
   });
 
-  it("IT NEVER THROWS — the caller decides, and arming must not fail on it", async () => {
-    // A sponsor problem is a reason to run unsponsored, never a reason for an
-    // agent not to arm at all.
+  it("IT NEVER THROWS — the actual operation still needs its own quote", async () => {
     for (const boom of [
       async () => {
         throw new SponsorRefused("sponsor-unreachable", "nope");
@@ -98,21 +77,22 @@ describe("the probe answers the one question that decides the switch", () => {
 });
 
 describe("what the worker does with the answer", () => {
-  it("NO QUOTE MEANS NO SPONSOR, for the whole session", () => {
-    // `sponsor` had to stop being a const for this. The alternative — leaving
-    // it set and letting every trade discover the refusal — is the behaviour
-    // this exists to prevent, once per tick, forever.
-    assert.match(INDEX, /let sponsor: Sponsor \| undefined =/);
-    assert.match(INDEX, /if \(!quote\.ok\) \{\s*\n\s*sponsor = undefined;/);
+  it("a declined probe keeps sponsorship attached to the executor", () => {
+    const probe = INDEX.indexOf("const quote = await sponsorWillQuote(sponsor");
+    const executor = INDEX.indexOf("executor = await createAgentExecutor({", probe);
+    const arm = INDEX.slice(probe, executor);
+    assert.ok(probe > 0 && executor > probe);
+    assert.doesNotMatch(arm, /sponsor\s*=/);
+    assert.match(INDEX.slice(executor, executor + 300), /\n\s*sponsor,/);
   });
 
   it("and it is probed BEFORE the executor is built", () => {
     const probe = INDEX.indexOf("sponsorWillQuote(sponsor");
-    const created = INDEX.indexOf("createSponsor({");
+    const created = INDEX.indexOf("const sponsorship = tradingSponsorArm(cfg, grant.chainId);");
     assert.ok(created > 0 && probe > created, "probe the sponsor we actually built");
     // Nothing may trade between building the sponsor and knowing whether it
     // will pay.
-    const exec = INDEX.indexOf("const agentId = await ensureAgent(grant);", probe);
+    const exec = INDEX.indexOf("executor = await createAgentExecutor({", probe);
     assert.ok(exec > probe, "the probe resolves before the arm continues");
   });
 
@@ -120,8 +100,26 @@ describe("what the worker does with the answer", () => {
     // The owner's agent silently paying its own gas when the house said it
     // would cover it is exactly the kind of quiet divergence this codebase
     // refuses. And it is ours, so the sentence says so.
-    assert.match(INDEX, /gas sponsor will not quote — self-paying this session/);
-    assert.match(INDEX, /That is ours to fix, not yours/);
+    assert.match(INDEX, /sponsored operations remain required/);
+    assert.match(INDEX, /will be refused if the sponsor declines; this agent will not spend your ETH/);
+    assert.doesNotMatch(INDEX, /self-paying this session/);
+  });
+
+  it("restores the financial anchor before a missing sponsor configuration can stop arming", () => {
+    const create = INDEX.indexOf("const sponsorship = tradingSponsorArm(cfg, grant.chainId);");
+    const restored = INDEX.lastIndexOf("await restoreAnchoredHighWaterMark(agentId);", create);
+    assert.ok(restored > 0 && restored < create);
+    const failure = INDEX.slice(create, INDEX.indexOf("if (sponsor)", create));
+    assert.match(failure, /await setAgentStatus\(agentId, "error"\);/);
+    assert.match(failure, /if \(lastArmFailure !== why\)/);
+    assert.match(failure, /active = null;\s*return false;/);
+  });
+
+  it("a missing-config paper arm creates no live executor and revisits the guard when consent changes", () => {
+    assert.match(INDEX, /sponsorBlockedPaperOnly = sponsorship\.paperOnly;/);
+    assert.match(INDEX, /if \(bundlerUrl && !sponsorBlockedPaperOnly\) \{/);
+    assert.match(INDEX, /if \(unchanged && !tradingSponsorNeedsRearm\(cfg, active\)\) return true;/);
+    assert.match(INDEX, /active = \{\s*sponsorBlockedPaperOnly,/);
   });
 
   it("the switch itself still defaults OFF", () => {

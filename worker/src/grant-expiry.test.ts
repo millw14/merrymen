@@ -78,7 +78,7 @@ test("syncGrant refuses an expired grant BEFORE its unchanged short-circuit", ()
   const src = readFileSync(fileURLToPath(new URL("index.ts", import.meta.url)), "utf8");
   const sync = src.slice(src.indexOf("async function syncGrant()"));
   const guard = sync.indexOf("grantExpired(");
-  const shortCircuit = sync.indexOf("if (unchanged) return true;");
+  const shortCircuit = sync.indexOf("if (unchanged && !tradingSponsorNeedsRearm(cfg, active)) return true;");
   assert.ok(guard > 0, "syncGrant must check grantExpired at all");
   assert.ok(shortCircuit > 0, "sanity: the unchanged short-circuit still exists");
   assert.ok(

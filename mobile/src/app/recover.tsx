@@ -31,6 +31,8 @@ import { C } from "@/ui/tokens";
  */
 
 type Stage = "restore" | "plan" | "sent";
+// Only Merrymen's canonical service offers house recovery. Custom feed builds
+// retain the standalone bundler field and explicitly pay recovery from ETH.
 const API_ORIGIN = recoveryOrigin(feedOrigin);
 
 /**
@@ -348,7 +350,7 @@ export default function Recover() {
                     spellCheck={false}
                   />
                   <Text style={styles.hint}>
-                    This standalone build uses your own bundler and this account&apos;s ETH. Hosted builds use Merrymen&apos;s service and fee coverage.
+                    This standalone recovery uses your own bundler and this account&apos;s ETH. A custom feed does not provide Merrymen&apos;s recovery service or fee coverage.
                   </Text>
                   </>}
 

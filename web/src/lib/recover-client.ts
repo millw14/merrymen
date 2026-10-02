@@ -37,7 +37,7 @@
 
 import { privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
-import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { base64url, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import { createSponsor } from "../../../worker/src/paymaster";
 import {
   ownerFromPrivateKey,
@@ -84,9 +84,62 @@ function ownerOf(w: BrowserWallet): RecoveryOwner {
 
 const chainOf = (id: number) => (id === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain);
 
+/** Native's URL adapter has no .origin getter; reconstruct only a checked origin. */
+function canonicalOrigin(value: string): string {
+  if (typeof value !== "string" || !/^https?:\/\/[^/?#\\\s]+\/?$/i.test(value)) throw new Error("recovery needs a trusted application origin, without a path or credentials");
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("recovery application origin is invalid"); }
+  const protocol = url.protocol.toLowerCase();
+  const host = url.hostname.toLowerCase();
+  const port = url.port ?? "";
+  if (!host || url.username || url.password || (url.pathname && url.pathname !== "/") || url.search ||
+      (port && (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535))) {
+    throw new Error("recovery needs a trusted application origin, without a path or credentials");
+  }
+  if (protocol !== "https:" && !(protocol === "http:" && ["localhost", "127.0.0.1", "[::1]", "::1"].includes(host))) {
+    throw new Error("recovery needs HTTPS, except for a local application");
+  }
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const defaultPort = protocol === "https:" ? "443" : "80";
+  return `${protocol}//${authority}${port && port !== defaultPort ? `:${port}` : ""}`;
+}
+
+function recoveryOrigin(apiOrigin?: string): string {
+  const page = typeof window === "undefined" ? undefined : window.location?.origin;
+  const browserOrigin = typeof page === "string" && /^https?:/i.test(page) ? canonicalOrigin(page) : null;
+  if (apiOrigin !== undefined) {
+    const explicit = canonicalOrigin(apiOrigin);
+    if (browserOrigin && explicit !== browserOrigin) throw new Error("recovery application origin does not match this page");
+    return explicit;
+  }
+  if (!browserOrigin) throw new Error("recovery needs a trusted application origin");
+  return browserOrigin;
+}
+
 /** This origin's relay, which holds the house bundler key so the browser cannot. */
 export const relayUrl = (chainId: number, apiOrigin?: string) =>
-  `${apiOrigin ?? (typeof window === "undefined" ? "" : window.location.origin)}/api/bundler/${chainId}`;
+  `${recoveryOrigin(apiOrigin)}/api/bundler/${chainId}`;
+
+function ownerChallenge(origin: string, nonce: unknown): string {
+  if (typeof nonce !== "string" || nonce.length > 512) throw new Error("the site returned an invalid recovery nonce");
+  const parts = nonce.split(".");
+  const [random, expiry, namespace, mac] = parts;
+  const expectedNamespace = base64url(new TextEncoder().encode(`${origin}|recovery-owner-actions-v2`));
+  if (parts.length !== 4 || !/^[A-Za-z0-9_-]{21}[AQgw]$/.test(random ?? "") ||
+      !/^[1-9][0-9]{0,15}$/.test(expiry ?? "") || !Number.isSafeInteger(Number(expiry)) ||
+      namespace !== expectedNamespace || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(mac ?? "")) {
+    throw new Error("the site returned an invalid or misbound recovery nonce");
+  }
+  // The server enforces expiry. A device clock offset must not strand recovery.
+  // Keep this exact protocol text browser-safe: recovery-ticket.ts imports crypto.
+  return [
+    `${origin} — recover your merrymen account.`, "",
+    "This proves you control the owner key so the site can relay withdrawals and permission revocations.",
+    "It moves no funds by itself and grants no permissions: each operation",
+    "is a separate operation you sign next.", "",
+    `URI: ${origin}`, `Nonce: ${nonce}`,
+  ].join("\n");
+}
 
 /**
  * Strip anything that could carry a key or an upstream URL out of an error.
@@ -127,17 +180,22 @@ export function ownerGasError(e: unknown, ownerKey?: string): string {
  * and no script on the page can read it back out.
  */
 export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
-  const ticketUrl = `${w.apiOrigin ?? ""}/api/recover/ticket`;
+  const origin = recoveryOrigin(w.apiOrigin);
+  const ticketUrl = `${origin}/api/recover/ticket`;
   const chal = await fetch(`${ticketUrl}?scope=owner-actions`, { cache: "no-store", credentials: "include" });
   if (!chal.ok) throw new Error("could not start recovery — the site did not issue a challenge");
-  const { nonce, message } = (await chal.json()) as { nonce: string; message: string };
+  const challenge = await chal.json() as unknown;
+  if (!challenge || typeof challenge !== "object" || Array.isArray(challenge)) throw new Error("the site returned an invalid recovery challenge");
+  const { nonce, message } = challenge as { nonce?: unknown; message?: unknown };
+  const expectedMessage = ownerChallenge(origin, nonce);
+  if (typeof message !== "string" || message !== expectedMessage) throw new Error("the site returned an unexpected recovery message — refusing to sign");
 
   // Signed HERE. A browser key never leaves this function's scope, let alone the
   // tab; a Privy embedded wallet signs inside its own iframe and this code never
   // sees key material at all. Either way the signature is produced locally.
   const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
   if (!signer) throw new Error("no owner signer: nothing here can sign the recovery challenge.");
-  const signature = await signer.signMessage({ message });
+  const signature = await signer.signMessage({ message: expectedMessage });
 
   const res = await fetch(ticketUrl, {
     method: "POST",

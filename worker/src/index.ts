@@ -54,7 +54,6 @@ import {
   chainForId,
   effectivePerfFeeBps,
   pimlicoBundlerUrl,
-  pimlicoPaymasterUrl,
   ENTRYPOINT,
   robinhoodTestnet,
   robinhoodChain,
@@ -99,7 +98,8 @@ import {
   type ExecuteHooks,
   type ExecutionResult,
 } from "./executor";
-import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
+import { sponsorWillQuote, type Sponsor } from "./paymaster";
+import { tradingSponsorNeedsRearm, tradingSponsorArm } from "./trading-sponsor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
@@ -608,6 +608,8 @@ function selfTestIntent(cfg: ResolvedConfig): TradeIntent {
 
 /** Everything tied to the currently armed grant — dies with the kill switch. */
 interface ActiveAgent {
+  /** No live executor was built because sponsorship was incomplete during explicit paper practice. */
+  sponsorBlockedPaperOnly: boolean;
   grant: StoredGrant;
   agentId: string;
   client: PublicClient;
@@ -1212,7 +1214,7 @@ async function main() {
    * asked in places that run before an executor exists — including the refusal
    * below that used to make sponsorship unreachable.
    */
-  const gasSponsored = () => cfg.sponsorGasEnabled && !!cfg.bundlerApiKey;
+  const gasSponsored = () => cfg.sponsorGasEnabled && !!cfg.bundlerApiKey?.trim() && !!cfg.sponsorshipPolicyId?.trim();
   function paperPriceOf(
     token: `0x${string}`,
   ): { priceUsd: number; stale: boolean; source: PriceQuote["source"] } | null {
@@ -6439,7 +6441,9 @@ async function main() {
       active.grant.smartAccount === grant.smartAccount &&
       active.grant.grantedAt === grant.grantedAt;
 
-    if (unchanged) return true;
+    // A paper-only arm made without fee service must revisit the guard if the
+    // owner later enables live trading. It never inherits a self-paid executor.
+    if (unchanged && !tradingSponsorNeedsRearm(cfg, active)) return true;
 
     const chain = chainForId(grant.chainId);
     const rpc = chain.id === robinhoodTestnet.id ? cfg.rpcTestnet : cfg.rpcMainnet;
@@ -6448,48 +6452,6 @@ async function main() {
     // id, so it is always pointed at the right chain.
     const bundlerUrl =
       cfg.bundlerUrl || (cfg.bundlerApiKey ? pimlicoBundlerUrl(grant.chainId, cfg.bundlerApiKey) : undefined);
-    // GAS SPONSORSHIP, from the SAME key and the SAME chain id as the bundler.
-    // Derived rather than configurable for the reason the bundler URL is: the
-    // chain id is stamped from the grant, so a testnet grant can never reach a
-    // mainnet sponsor. Absent unless the house turned it on AND there is a key
-    // to build it from.
-    let sponsor: Sponsor | undefined =
-      cfg.sponsorGasEnabled && cfg.bundlerApiKey
-        ? createSponsor({
-            url: pimlicoPaymasterUrl(grant.chainId, cfg.bundlerApiKey),
-            policyId: cfg.sponsorshipPolicyId,
-          })
-        : undefined;
-
-    // ASKED ONCE, BEFORE ANY TRADE — see sponsorWillQuote.
-    //
-    // A sponsor refusal is NOT a fallback: the trade books `rejected` with
-    // `reject_rule: sponsor-refused` and nothing is sent. So an unfunded
-    // deposit or an exhausted policy would not degrade an agent to
-    // self-paying — it would stop it trading entirely, and the agents that
-    // breaks are the ones that currently WORK, because they are the ones
-    // holding ETH. Turning the switch on would then be strictly worse than
-    // leaving it off, which is not a switch anybody can safely operate.
-    //
-    // Asking here makes it the opposite: no quote, no sponsorship, and the
-    // agent runs exactly as it does today.
-    if (sponsor) {
-      const quote = await sponsorWillQuote(sponsor, {
-        sender: grant.smartAccount as `0x${string}`,
-        entryPoint: ENTRYPOINT.v07 as `0x${string}`,
-        chainId: grant.chainId,
-      });
-      if (!quote.ok) {
-        sponsor = undefined;
-        console.log(`[live] gas sponsor will not quote — self-paying this session: ${quote.why ?? "no reason given"}`);
-        await addEvent(
-          await ensureAgent(grant),
-          "warn",
-          `Gas sponsorship is switched on but the sponsor would not quote, so this agent pays its own ` +
-            `fees this session — exactly as it did before. That is ours to fix, not yours.`,
-        );
-      }
-    }
     const agentId = await ensureAgent(grant);
 
     // THE PEAK COMES BACK IMMEDIATELY AFTER THE ROW EXISTS, and before anything
@@ -6509,6 +6471,49 @@ async function main() {
     // durable truth. (The mirror's own upsert is monotonic now, so that second
     // half is closed too; this is the first half.)
     await restoreAnchoredHighWaterMark(agentId);
+
+    // An enabled sponsor must have its key and budget policy. Missing house
+    // configuration cannot become an owner-paid executor, even with ETH held.
+    let sponsor: Sponsor | undefined;
+    let sponsorBlockedPaperOnly = false;
+    try {
+      const sponsorship = tradingSponsorArm(cfg, grant.chainId);
+      sponsor = sponsorship.sponsor;
+      sponsorBlockedPaperOnly = sponsorship.paperOnly;
+      if (sponsorship.reason) {
+        await addEvent(agentId, "warn", `${sponsorship.reason} Paper practice and read-only access remain available.`);
+      }
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      await setAgentStatus(agentId, "error");
+      if (lastArmFailure !== why) {
+        lastArmFailure = why;
+        console.log(`[worker] CANNOT ARM — ${why}`);
+        await addEvent(agentId, "err", `this agent CANNOT START and is not trading: ${why}`);
+      }
+      active = null;
+      return false;
+    }
+
+    // This empty-call probe is advisory: a policy may refuse it but quote a
+    // permitted trade. Keep sponsorship attached either way. Every actual
+    // operation must obtain its own quote or the executor refuses before send.
+    if (sponsor) {
+      const quote = await sponsorWillQuote(sponsor, {
+        sender: grant.smartAccount as `0x${string}`,
+        entryPoint: ENTRYPOINT.v07 as `0x${string}`,
+        chainId: grant.chainId,
+      });
+      if (!quote.ok) {
+        console.log("[live] gas sponsor did not quote the arm probe — sponsored operations remain required");
+        await addEvent(
+          agentId,
+          "warn",
+          "Gas coverage could not be confirmed at startup. Every live operation still requires sponsorship " +
+            "and will be refused if the sponsor declines; this agent will not spend your ETH on fees instead.",
+        );
+      }
+    }
 
     // The soul's name is the source of truth — mirror it onto the roster. The
     // configured name was reconciled into the soul at the top of syncGrant, so
@@ -6607,7 +6612,7 @@ async function main() {
       }
     })();
     let executor: AgentExecutor | null = null;
-    if (bundlerUrl) {
+    if (bundlerUrl && !sponsorBlockedPaperOnly) {
       try {
         executor = await createAgentExecutor({
           chain,
@@ -6657,26 +6662,30 @@ async function main() {
         return false;
       }
     } else {
-      console.log(
-        cfg.paperTradingEnabled
-          ? "[worker] PAPER MODE — fills simulate at live oracle prices, nothing signs. Add a Pimlico key in /settings to trade live."
-          : "[worker] no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
-      );
-      // SAY IT WHERE THE OWNER WILL LOOK, not only on a console nobody is
-      // tailing. Without a bundler NOTHING can ever be signed, so every intent
-      // from here is a simulation — and the tape does not show that. It shows
-      // "paper" fills and, once the day's ops allowance is spent on them,
-      // page after page of cap rejections, which point at the cap instead of
-      // the missing key. An audit of 1,311 intents and zero fills read as a
-      // broken execution path; the truth was that execution had never been
-      // configured. One durable line at arm time is the difference.
-      await addEvent(
-        agentId,
-        "warn",
-        `no bundler key — this agent CANNOT trade live, and nothing it does will reach the chain. ` +
-          `${cfg.paperTradingEnabled ? "Fills below are simulated at live prices." : "Policy and simulation still run."} ` +
-          `Add a Pimlico key in /settings to trade for real.`,
-      );
+      if (sponsorBlockedPaperOnly) {
+        console.log("[worker] PAPER / READ-ONLY — live sponsorship configuration is missing; no live executor was created");
+      } else {
+        console.log(
+          cfg.paperTradingEnabled
+            ? "[worker] PAPER MODE — fills simulate at live oracle prices, nothing signs. Add a Pimlico key in /settings to trade live."
+            : "[worker] no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
+        );
+        // SAY IT WHERE THE OWNER WILL LOOK, not only on a console nobody is
+        // tailing. Without a bundler NOTHING can ever be signed, so every intent
+        // from here is a simulation — and the tape does not show that. It shows
+        // "paper" fills and, once the day's ops allowance is spent on them,
+        // page after page of cap rejections, which point at the cap instead of
+        // the missing key. An audit of 1,311 intents and zero fills read as a
+        // broken execution path; the truth was that execution had never been
+        // configured. One durable line at arm time is the difference.
+        await addEvent(
+          agentId,
+          "warn",
+          `no bundler key — this agent CANNOT trade live, and nothing it does will reach the chain. ` +
+            `${cfg.paperTradingEnabled ? "Fills below are simulated at live prices." : "Policy and simulation still run."} ` +
+            `Add a Pimlico key in /settings to trade for real.`,
+        );
+      }
     }
 
     const client = createPublicClient({ chain, transport: chainRead(rpc) });
@@ -6979,6 +6988,7 @@ async function main() {
     }
 
     active = {
+      sponsorBlockedPaperOnly,
       grant,
       agentId,
       client,

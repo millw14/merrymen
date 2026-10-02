@@ -19,9 +19,10 @@ const options = { owner, apiOrigin: "https://app.merrymen.dev", rpcUrl: "https:/
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(deriveRecoveryAccountAddress).mockResolvedValue(account); vi.mocked(planRecovery).mockResolvedValue(base); vi.mocked(planFromBrowser).mockResolvedValue(base); });
 
 describe("mobile recovery fee coverage", () => {
-  it("uses the configured secure origin and refuses credential-bearing or non-origin URLs", () => {
+  it("pins house recovery to the canonical service and rejects custom secure origins", () => {
     expect(recoveryOrigin("https://app.merrymen.dev")).toBe("https://app.merrymen.dev");
-    for (const url of ["mock", "http://192.168.1.2:3000", "https://key@app.merrymen.dev", "https://app.merrymen.dev/api/bundler/4663", "https://app.merrymen.dev?apikey=private", "https://app.merrymen.dev#fragment", "https://app.merrymen.dev:8443"]) expect(recoveryOrigin(url)).toBeNull();
+    expect(recoveryOrigin("https://app.merrymen.dev/")).toBe("https://app.merrymen.dev");
+    for (const url of ["mock", "http://192.168.1.2:3000", "https://self-hosted.example", "https://evil.example", "https://app.merrymen.dev.evil.example", "https://merrymen.dev", "https://key@app.merrymen.dev", "https://app.merrymen.dev/api/bundler/4663", "https://app.merrymen.dev?apikey=private", "https://app.merrymen.dev?", "https://app.merrymen.dev#fragment", "https://app.merrymen.dev#", "https://app.merrymen.dev:8443"]) expect(recoveryOrigin(url)).toBeNull();
   });
 
   it("derives and pins the account before requesting house eligibility with only its local signer", async () => {
@@ -63,6 +64,32 @@ describe("mobile recovery fee coverage", () => {
     expect(recoverFunds).toHaveBeenCalledWith(expect.objectContaining({ expectedSmartAccount: account, bundlerUrl: "https://own-bundler.invalid", approvedClass: { vault, tokens: [token], destination: recipient }, requireApprovedClassSweep: true }));
     expect(vi.mocked(recoverFunds).mock.calls[0][0].sponsor).toBeUndefined();
     expect(sweepFromBrowser).not.toHaveBeenCalled();
+  });
+
+  it("keeps a custom HTTPS feed standalone without requesting any ownership proof", async () => {
+    vi.mocked(planRecovery).mockResolvedValue({ ...base, gasWei: 10n, nativeRecoverableWei: 8n, nativeReserveWei: 2n });
+    const custom = { ...options, apiOrigin: "https://self-hosted.example" };
+    const plan = await planMobileRecovery({ ...custom, expectedSmartAccount: account });
+    expect(plan).toMatchObject({ gasSponsored: false, needsGas: false, nativeReserveWei: 2n });
+    expect(plan.sponsorshipReason).toMatch(/custom feed does not provide Merrymen fee coverage/);
+    expect(planFromBrowser).not.toHaveBeenCalled();
+    expect(deriveRecoveryAccountAddress).not.toHaveBeenCalled();
+    expect(planRecovery).toHaveBeenCalledWith(expect.objectContaining({ expectedSmartAccount: account, rpcUrl: options.rpcUrl }));
+
+    await expect(sweepMobileRecovery({ ...custom, plan, to: recipient })).rejects.toThrow("Standalone recovery needs your own bundler URL");
+    expect(recoverFunds).not.toHaveBeenCalled();
+    await sweepMobileRecovery({ ...custom, plan, to: recipient, bundlerUrl: "https://own-bundler.invalid", approvedClass: { vault, tokens: [token] } });
+    expect(recoverFunds).toHaveBeenCalledWith(expect.objectContaining({ bundlerUrl: "https://own-bundler.invalid", expectedSmartAccount: account, requireApprovedClassSweep: true }));
+    expect(vi.mocked(recoverFunds).mock.calls[0][0].sponsor).toBeUndefined();
+    expect(sweepFromBrowser).not.toHaveBeenCalled();
+  });
+
+  it("does not contact custom origins or downgrade a sponsored plan to self-paying", async () => {
+    for (const apiOrigin of ["https://evil.example", "https://app.merrymen.dev.evil.example", null]) {
+      await expect(sweepMobileRecovery({ ...options, apiOrigin, plan: base, to: recipient, bundlerUrl: "https://own-bundler.invalid" })).rejects.toThrow("prepared for Merrymen fee coverage");
+    }
+    expect(sweepFromBrowser).not.toHaveBeenCalled();
+    expect(recoverFunds).not.toHaveBeenCalled();
   });
 
   it("rejects zero/self recipients before either recovery path can sign", async () => {
