@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   FIRST_ENABLE_GAS_BOUNDS,
   GAS_BOUNDS,
+  TRENCHER_DEPLOY_GAS_BOUNDS,
   boundGas,
   checkPrefund,
   totalGas,
@@ -67,51 +68,10 @@ test("REFUSES rather than clamps when the estimate is absurd", () => {
   // under-provisioned — the OOG case, on purpose. An approve plus an
   // exactInputSingle does not approach 3M, so crossing it means this is not the
   // operation we think it is.
-  //
-  // RECALIBRATED: this was a 2,000,000 call, absurd only once our own 2x
-  // doubled it. The ordinary ceiling now asks the ESTIMATE (see boundGas), and
-  // a 2.1M call is a real operation — deploy + approve + buy, measured below.
-  // 3,200,000 estimated is past the ceiling before any headroom.
-  const v = boundGas(est(3_200_000n, 500_000n, 100_000n), null);
+  const v = boundGas(est(2_000_000n, 500_000n, 100_000n), null);
   assert.equal(v.ok, false);
   assert.equal(v.rule, "gas-absurd");
   assert.match(v.detail, /nothing was spent/i);
-  assert.match(v.detail, /estimates 3950000 gas/, "and it names the figure it judged");
-});
-
-test("A FIRST TRENCHER BUY ON AN INSTALLED KEY IS NOT ABSURD BECAUSE WE DOUBLED IT", () => {
-  // Live, 2026-10-01, agent 0x4b6dcd, key already installed (an ordinary op):
-  //   estimate1 call 2128793 + verif 289003 + preVerif 56602 = 2520855
-  //   estimate2 identical  ·  signed refused (gas-absurd) at 4,736,048
-  // Deploy + approve + buy. A CREATE2 of fixed bytecode is deterministic, the
-  // same 2,128,793 the first-enable note records for Shogun.
-  const live: UserOpGas = {
-    ...est(2_128_793n, 289_003n, 56_602n),
-    paymasterVerificationGasLimit: 30_000n,
-    paymasterPostOpGasLimit: 16_457n,
-  };
-  const v = boundGas(live, live, GAS_BOUNDS, true);
-  assert.equal(v.ok, true, v.ok === false ? v.detail : "");
-  assert.ok(v.ok);
-  // The SIGNED limits are what they always were: the call keeps its full 2x.
-  assert.equal(v.gas.callGasLimit, 4_257_586n);
-  assert.equal(v.gas.verificationGasLimit, 361_253n);
-  assert.equal(v.gas.preVerificationGas, 70_752n);
-  assert.equal(v.total, 4_736_048n, "the exact figure production refused");
-});
-
-test("a call a first enable may carry is a call any other day may carry", () => {
-  // `callMax` is derived from GAS_BOUNDS.absoluteMax on the promise that a
-  // first enable never carries a call this account could not make on any
-  // other day. With the payload judged on its estimate and the ordinary total
-  // judged on padding, that promise was false for every call between ~1.3M
-  // and 3M. Now the two agree: up to the ceiling's room, both sign.
-  for (const call of [1_300_000n, 2_000_000n, 2_500_000n]) {
-    const ordinary = boundGas(est(call, 200_000n, 50_000n), null);
-    assert.equal(ordinary.ok, true, `${call} on an ordinary day`);
-  }
-  // And past it, both refuse.
-  assert.equal(boundGas(est(3_000_001n, 200_000n, 50_000n), null).ok, false);
 });
 
 test("two estimates far apart is a refusal — the estimator disagreeing with itself", () => {
@@ -331,17 +291,15 @@ test("PAYMASTER GAS CANNOT WALK UNDER THE CEILING", () => {
 
   // And the ceiling is enforced against the total INCLUDING them: the same
   // three fields alone clear 3M, and refuse once the sponsor's are counted.
-  // (Judged as the ordinary ceiling judges: the call at its estimate, the rest
-  // bounded — so 400k + 1.5M + 250k = 2.15M.)
-  const ours = est(400_000n, 1_200_000n, 200_000n);
-  assert.equal(boundGas(ours, ours).ok, true, "2.15M alone clears the 3M ceiling");
+  const ours = est(600_000n, 800_000n, 160_000n); // bounded 1.2M + 1M + 200k = 2.4M
+  assert.equal(boundGas(ours, ours).ok, true, "2.4M alone clears the 3M ceiling");
   const big: UserOpGas = {
     ...ours,
     paymasterVerificationGasLimit: 500_000n,
     paymasterPostOpGasLimit: 500_000n,
   };
   const refused = boundGas(big, big, GAS_BOUNDS, true);
-  assert.equal(refused.ok, false, "3.15M does not");
+  assert.equal(refused.ok, false, "3.4M does not");
   assert.equal(refused.ok === false ? refused.rule : null, "gas-absurd");
 });
 
@@ -563,7 +521,13 @@ test("THE CALL SITE: the ceiling is keyed on the OPERATION, and the deploy state
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   assert.doesNotMatch(code, /!accountLive/, "the deploy state must not gate the ceiling");
   assert.doesNotMatch(code, /accountLive &&|&& accountLive/, "nor in any conjunction");
-  assert.doesNotMatch(code, /DEPLOY_GAS_BOUNDS/, "the undeployed-only ceiling is gone");
+  // The ACCOUNT-deployment ceiling, keyed on the account having no code. Word-
+  // bounded so it does not match TRENCHER_DEPLOY_GAS_BOUNDS, which is a
+  // different thing: keyed on the batch decoding as the vault's own
+  // deploy(self), never on whether the account is deployed (asserted below).
+  assert.doesNotMatch(code, /\bDEPLOY_GAS_BOUNDS\b/, "the undeployed-only ceiling is gone");
+  assert.match(code, /const trencherDeploy = !firstEnable && isTrencherVaultDeploy\(calls, hooks\?\.trencherDeployFactory, account\.address\)/,
+    "the vault deployment's ceiling is keyed on the decoded batch and the caller's factory");
   assert.match(src, /!accountLive && isFirstEnable\(nonce\)/, "and the old gate is on the record");
 
   // THE STRONG FORM: every READ of accountLive must be inside the log line.
@@ -798,4 +762,51 @@ test("A ZERO PAYMASTER FIELD IS AN ANSWER, NOT A MISSING ESTIMATE", () => {
   const s = boundGas(sneaky, sneaky, FIRST_ENABLE_GAS_BOUNDS);
   assert.equal(s.ok, false);
   assert.equal(s.ok === false ? s.rule : null, "gas-paymaster-unexpected");
+});
+
+// ── THE TRENCHER VAULT'S ONE-TIME DEPLOYMENT ────────────────────────────────
+
+test("the vault deployment has its own measured ceiling, and the ordinary one does not move", () => {
+  // Live, 2026-10-01, agent 0x4b6dcd, key already installed: deploy + approve +
+  // buy estimated call 2128793 + verif 289003 + preVerif 56602, twice. Signed
+  // it is 4,736,048, refused every tick against the ordinary 3,000,000 — so
+  // the vault was never deployed and no Trencher trade could ever happen.
+  const live: UserOpGas = {
+    ...est(2_128_793n, 289_003n, 56_602n),
+    paymasterVerificationGasLimit: 30_000n,
+    paymasterPostOpGasLimit: 16_457n,
+  };
+  const ordinary = boundGas(live, live, GAS_BOUNDS, true);
+  assert.equal(ordinary.ok, false, "the ordinary ceiling still refuses it — it is not widened");
+  assert.equal(GAS_BOUNDS.absoluteMax, 3_000_000n);
+
+  const deploy = boundGas(live, live, TRENCHER_DEPLOY_GAS_BOUNDS, true);
+  assert.equal(deploy.ok, true, deploy.ok === false ? deploy.detail : "");
+  assert.ok(deploy.ok);
+  // Signed exactly as it always would have been: the call keeps its full 2x.
+  assert.equal(deploy.gas.callGasLimit, 4_257_586n);
+  assert.equal(deploy.total, 4_736_048n, "the exact figure production refused");
+
+  // And it is still a ceiling, on what is SIGNED.
+  const fat = est(3_000_000n, 300_000n, 60_000n);
+  assert.equal(boundGas(fat, fat, TRENCHER_DEPLOY_GAS_BOUNDS).ok, false, "6.45M signed is past 6M");
+});
+
+test("the deployment ceiling is used only when the batch really is deploy(self) on the named factory", async () => {
+  const { isTrencherVaultDeploy } = await import("./executor");
+  const { encodeFunctionData } = await import("viem");
+  const { TRENCHER_FACTORY_ABI } = await import("../../packages/core/src/index");
+  const SELF = "0x1111111111111111111111111111111111111111";
+  const OTHER = "0x2222222222222222222222222222222222222222";
+  const FACTORY = "0x3333333333333333333333333333333333333333";
+  const deployData = (owner: string) =>
+    encodeFunctionData({ abi: TRENCHER_FACTORY_ABI, functionName: "deploy", args: [owner as `0x${string}`] });
+  const rest = [{ to: OTHER, data: "0x" }, { to: OTHER, data: "0x" }];
+
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(SELF) }, ...rest], FACTORY, SELF), true);
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(SELF) }, ...rest], undefined, SELF), false, "no factory named, no allowance");
+  assert.equal(isTrencherVaultDeploy([{ to: OTHER, data: deployData(SELF) }, ...rest], FACTORY, SELF), false, "a different target");
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(OTHER) }, ...rest], FACTORY, SELF), false, "a vault for somebody else");
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: "0xdeadbeef" }, ...rest], FACTORY, SELF), false, "not a deploy");
+  assert.equal(isTrencherVaultDeploy([{ to: FACTORY, data: deployData(SELF) }, ...rest, ...rest], FACTORY, SELF), false, "a longer batch than a deploy + approve + buy");
 });

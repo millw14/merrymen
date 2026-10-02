@@ -155,26 +155,6 @@ export interface GasBounds {
    * to the wall.
    */
   callMax?: bigint;
-  /**
-   * WHICH TOTAL `absoluteMax` IS ASKED OF: the operation's own estimate, or
-   * what we would sign once our headroom is added.
-   *
-   * "estimate" counts the call at its RAW estimate (verification and
-   * pre-verification keep their 1.25x, which is what every ceiling here was
-   * measured against). It is the ordinary ceiling's question, because Vex's
-   * 3,000,000 is a claim about what an operation COSTS — "an approve plus an
-   * exactInputSingle does not approach it, so crossing it means the operation
-   * is not the operation we think it is" — and the call's 2x is our safety
-   * margin, not part of what the operation costs. See boundGas.
-   *
-   * "signed" holds the padded total, headroom included. It is the first
-   * enable's question, because `FIRST_ENABLE_HARD_MAX_BOUNDED` is a policy cap
-   * on what is SIGNED, set at half a measured failure point of a signed
-   * envelope, and first-enable-headroom.test.ts pins "an envelope that
-   * genuinely exceeds 14,000,000 is still refused" as the property no proposal
-   * may weaken.
-   */
-  totalJudgedOn: "estimate" | "signed";
 }
 
 export const GAS_BOUNDS: GasBounds = {
@@ -212,7 +192,6 @@ export const GAS_BOUNDS: GasBounds = {
   preVerificationHeadroomBps: 12_500,
   disagreementBps: 40_000, // 4x
   absoluteMax: 3_000_000n,
-  totalJudgedOn: "estimate",
 };
 
 /**
@@ -275,8 +254,41 @@ export const GAS_BOUNDS: GasBounds = {
 export const FIRST_ENABLE_GAS_BOUNDS: GasBounds = {
   ...GAS_BOUNDS,
   absoluteMax: 12_000_000n,
-  // The first enable's maximum caps what is SIGNED. See `totalJudgedOn`.
-  totalJudgedOn: "signed",
+};
+
+/**
+ * THE TRENCHER VAULT'S ONE-TIME DEPLOYMENT, AND NOTHING ELSE.
+ *
+ * An autonomous Trencher's first buy is deploy + approve + buy in one batch:
+ * the factory CREATE2s the owner's vault, then the vault makes the trade. It
+ * is deterministic — fixed bytecode — and it happens once per vault. Measured
+ * live, 2026-10-01, agent 0x4b6dcd, key already installed (an ordinary op):
+ *
+ *   estimate  call 2,128,793 + verif 289,003 + preVerif 56,602 = 2,520,855
+ *   signed    call 4,257,586 + verif 361,253 + preVerif 70,752
+ *             + sponsor 46,457                                  = 4,736,048
+ *
+ * — refused `gas-absurd` against GAS_BOUNDS' 3,000,000 every tick, so the vault
+ * was never deployed and the agent could never make a Trencher trade at all.
+ * The same 2,128,793 the first-enable note above records for Shogun.
+ *
+ * NOT A WIDER ORDINARY CEILING. Judging every ordinary operation on its
+ * estimate was tried and is the wrong fix: for a self-paying account the
+ * signed total IS what the wallet can be charged, and 3,000,000 is the stated
+ * bound on that (review, PR #233). So the ordinary ceiling is untouched and
+ * this one applies only when the executor itself decodes the batch's first
+ * call as `deploy(self)` on the Trencher factory the caller verified
+ * (executor.ts isTrencherVaultDeploy) — which, once the vault exists, is
+ * never again.
+ *
+ * 6,000,000 = the measured 4,736,048 plus 27%: room for the two-hop buy
+ * through WETH (one more pool, ~150,000 raw, doubled) and for the sponsor's
+ * own limits, which paymaster.ts allows up to 500,000 each and which this
+ * total counts.
+ */
+export const TRENCHER_DEPLOY_GAS_BOUNDS: GasBounds = {
+  ...GAS_BOUNDS,
+  absoluteMax: 6_000_000n,
 };
 
 
@@ -507,32 +519,7 @@ export function boundGas(
   }
   // Counts the paymaster fields too, because the prefund does.
   const total = totalGas(gas);
-  // ── THE ORDINARY CEILING, ASKED OF THE ESTIMATE TOO ─────────────────────
-  //
-  // The rule above ("judged on the estimate, not on our own padding") was
-  // applied to a first enable's payload and nowhere else, and that broke the
-  // promise `callMax` is derived from: "a first enable may not carry a call
-  // this account could not make on any other day". Since 2026-09-20 a first
-  // enable may carry up to 3,000,000 of ESTIMATED call gas, while any other day
-  // judged the PADDED total — so the same call was signable on the day the key
-  // was installed and refused on every day after it.
-  //
-  // MEASURED, 2026-10-01, agent 0x4b6dcd on an already-installed key: a first
-  // Trencher buy, deploy + approve + buy, estimated call 2,128,793 + verif
-  // 289,003 + preVerif 56,602 = 2,520,855 raw, TWICE, identically. Signed with
-  // headroom it is 4,736,048 and was refused `gas-absurd` against 3,000,000,
-  // every tick; asked of the estimate it is 2,607,255 (sponsor gas included)
-  // and fits. The same number the 2026-09-20 note above records for Shogun.
-  //
-  // WHAT THIS DOES AND DOES NOT CHANGE. The SIGNED limits are untouched: the
-  // call still carries its full 2x. What moves is the most an ordinary
-  // operation can sign for — up to the ceiling plus its own estimated call,
-  // under 2x the ceiling — which is gas the EntryPoint holds as prefund and
-  // refunds unused, and which the simulation's balance override
-  // (`absoluteMax * fee * 2`, executor.ts) already covers. An estimate that is
-  // itself past the ceiling is refused exactly as before.
-  const judged = bounds.totalJudgedOn === "estimate" ? total - gas.callGasLimit + first.callGasLimit : total;
-  if (judged > bounds.absoluteMax) {
+  if (total > bounds.absoluteMax) {
     // A WALL TOO WIDE TO INSTALL WITH ITS TRADE IS THE OWNER'S TO NARROW.
     //
     // Only a sized first enable reaches this with `enableMax` set, and by then
@@ -559,10 +546,10 @@ export function boundGas(
       ok: false,
       rule: "gas-absurd",
       detail:
-        `this operation ${bounds.totalJudgedOn === "estimate" ? "estimates" : "wants"} ${judged} gas, past the ` +
-        `${bounds.absoluteMax} ceiling. Refused before signing — nothing was spent. A ceiling is crossed ` +
-        "either because the operation is not the one it is meant to be, or because it genuinely needs more " +
-        "than we are willing to sign for; both are reasons to stop rather than to sign.",
+        `this operation wants ${total} gas, past the ${bounds.absoluteMax} ceiling. Refused before ` +
+        "signing — nothing was spent. A ceiling is crossed either because the operation is not the " +
+        "one it is meant to be, or because it genuinely needs more than we are willing to sign for; " +
+        "both are reasons to stop rather than to sign.",
     };
   }
   return { ok: true, gas, total };
