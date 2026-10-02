@@ -8656,7 +8656,12 @@ async function main() {
             return;
           }
         }
-        exec = await send(calls);
+        // The vault's one-time deployment rides with its first buy; the
+        // executor checks the batch really is deploy(self) on this factory
+        // before it uses the deployment's own gas ceiling.
+        exec = await (custody && !custody.deployed
+          ? executor.execute(calls, { ...submitHooks, trencherDeployFactory: custody.factory })
+          : send(calls));
         const venue = quote.v4
           ? active.v4AdapterLive && grantV4Adapter(active.grant)
             ? "v4 (adapter)"

@@ -32,7 +32,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { REJECT_RULES, rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
+import { REJECT_RULES, isGasRefusal, rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const read = (f: string) => readFileSync(path.join(__dirname, f), "utf8");
@@ -111,6 +111,38 @@ describe("every rule the wall can return has been looked at", () => {
       if (Object.prototype.hasOwnProperty.call(UNPUBLISHED, rule)) continue;
       assert.ok(REJECT_RULES.includes(rule), `the battery expects ${rule}; the vocabulary has no words for it`);
     }
+  });
+});
+
+/**
+ * THE SAME DRIFT, ONE MODULE OVER. `gas-absurd` reached an owner as "🛡 the
+ * wall turned back a buy of ORBIO (gas-absurd)": every refusal the executor
+ * makes BEFORE SIGNING — gas-limits.ts's verdicts and executor.ts's
+ * GasRefused — was missing from the vocabulary, and this file only read
+ * policy.ts. These are never withheld: they reach the owner's own tape.
+ */
+function preSignRules(): string[] {
+  const found = new Set<string>();
+  for (const m of read("gas-limits.ts").matchAll(/rule:\s*[^,}\n]*/g)) {
+    for (const q of m[0].matchAll(/"([a-z][a-z-]+)"/g)) found.add(q[1]!);
+  }
+  for (const m of read("executor.ts").matchAll(/new GasRefused\(\s*"([a-z][a-z-]+)"/g)) found.add(m[1]!);
+  assert.ok(found.size >= 8, `expected the pre-sign refusals, parsed ${[...found].join(", ")}`);
+  return [...found].sort();
+}
+
+describe("every refusal made before signing has words, and is not blamed on the wall", () => {
+  it("IS PUBLISHED", () => {
+    for (const rule of preSignRules()) {
+      assert.ok(REJECT_RULES.includes(rule), `${rule} has no sentence in thesis-policy.ts's map`);
+      assert.ok(!(rejectRuleLabel(rule) ?? "").includes(rule), `${rule}: never the slug echoed back`);
+    }
+  });
+
+  it("IS KNOWN TO BE OURS, so no surface says the wall turned it back", () => {
+    for (const rule of preSignRules()) assert.ok(isGasRefusal(rule), rule);
+    // And the wall's own rules are not mistaken for ours.
+    for (const rule of wallRules()) assert.equal(isGasRefusal(rule), false, rule);
   });
 });
 
