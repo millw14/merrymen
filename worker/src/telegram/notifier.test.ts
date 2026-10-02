@@ -416,7 +416,7 @@ test("the count line says how many, over how long, how recently — and how to f
     line.startsWith("↻ the buy of LARP was refused 59 more times in the last 60 min (enable-too-wide), the last just now. "),
     line,
   );
-  assert.match(line, /Re-sign at \/grant with fewer custom tokens or capabilities/);
+  assert.match(line, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
   const stopped = refusalCountLine(rec({ held: 1, lastAt: 1_000 + 5 * 60 }), 1_000 + REFUSAL_REMIND_LATER_SEC);
   assert.match(stopped, /refused 1 more time in the last 6 hours \(enable-too-wide\), the last 6 hours ago\./);
   assert.doesNotMatch(
