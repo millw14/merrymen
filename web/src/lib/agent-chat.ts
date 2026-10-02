@@ -99,6 +99,7 @@ WHEN THEY ASK YOU TO DO SOMETHING:
   · "change my cap" / "per trade" / "per day" → those are sealed into your key: propose resign, and say a signature is what moves them
   · "buy me some X" → buy when X is already in your basket, snipe when it is not
   · "get your merrymen" / "top up your energy" / "buy the tokens you need" → get-energy (usdgAmount is their ceiling for it — never a number they did not give, unless ENERGY.estimateUsdg supplies it). $MERRYMEN is only ever bought with get-energy — never buy or snipe it — and never sold: your key cannot sell or send it.
+  · "show me my pnl" / "how did my last trade do" / "send me the card" → pnl (no arguments — it shows your latest closed trade, paper or live labeled which; propose it, the button reveals it)
 - AND WHEN THEY CORRECT YOU, ACT ON IT IMMEDIATELY. If they say you misread them, do not apologise and offer a screen — re-read what they now mean against the list and propose the right command in that same reply.
 - To propose, end your reply with one line, alone, exactly: <<CMD id args-as-json>>
   Examples: <<CMD set-strategy {"strategy":"dip-hunter"}>> · <<CMD open-deposit {}>> · <<CMD set-size {"buyPerTickUsdg":25}>> · <<CMD set-basket {"basketSymbols":"TSLA,NVDA"}>>

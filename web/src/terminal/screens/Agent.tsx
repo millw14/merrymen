@@ -375,6 +375,71 @@ export function Agent({
         window.location.href = cmd.to!;
         return;
       }
+      if (cmd.via === "show") {
+        // DISPLAY, not action: resolve the owner's latest closed trade and
+        // show its card inline. Read-only end to end — no write, no order,
+        // no navigation. The picture comes from GET /api/pnl (the same
+        // renderer Telegram sends); this branch only finds WHICH trade.
+        on.say({ role: "owner", text: "✓ Confirmed" });
+        // FOR THE OWNER WHO CONFIRMED, like fetchOpenOrder: the lookup names
+        // the owner who tapped, so a session another tab switched meanwhile
+        // is refused rather than read (see OWNER_CHANGED_PNL_LOOKUP).
+        const latest = (await fetch(
+          on.owner ? `/api/pnl/latest?owner=${encodeURIComponent(on.owner)}` : "/api/pnl/latest",
+          {
+            headers: { "content-type": "application/json" },
+          },
+        )
+          .then((r) => r.json().catch(() => null))
+          .catch(() => null)) as {
+          none?: boolean;
+          incomplete?: boolean;
+          unavailable?: boolean;
+          error?: string;
+          tradeId?: number;
+          symbol?: string;
+          status?: string | null;
+          realizedPnlUsdg?: number;
+        } | null;
+        if (!latest || latest.unavailable) {
+          on.say({
+            role: "agent",
+            text: "I couldn't read your trades just now — the ledger didn't answer. Try again in a moment; this is me not seeing, not you having none.",
+          });
+          return;
+        }
+        if (typeof latest.error === "string" && latest.error) {
+          on.say({ role: "agent", text: latest.error });
+          return;
+        }
+        if (latest.incomplete) {
+          on.say({
+            role: "agent",
+            text: "I looked back through your recent closes and couldn't reach one with a card to draw — there's more history than I searched. Ask again later or check the trades screen for the older ones.",
+          });
+          return;
+        }
+        if (latest.none || typeof latest.tradeId !== "number") {
+          on.say({
+            role: "agent",
+            text: "No closed trades with a card to draw yet — closes land here with their picture once they happen.",
+          });
+          return;
+        }
+        const paper = latest.status === "paper";
+        const pnl = typeof latest.realizedPnlUsdg === "number" ? latest.realizedPnlUsdg : 0;
+        // money() owns signs and symbols (see format.test.ts) — no hand-placed "$" anywhere.
+        const signed = pnl < 0 ? money(pnl) : `+${money(pnl)}`;
+        on.say({
+          role: "agent",
+          text: `${latest.symbol ?? "Position"} closed${paper ? " (📜 paper — simulated, nothing signed)" : ""}: ${signed}. Tap the picture to save it.`,
+          image: {
+            src: `/api/pnl?trade=${latest.tradeId}`,
+            alt: `P&L card for closed ${latest.symbol ?? "position"}${paper ? " (paper)" : ""}`,
+          },
+        });
+        return;
+      }
       if (cmd.via === "snipe") {
         // A SNIPE ANSWERS IN FOUR WAYS AND ONLY ONE OF THEM IS A TRADE.
         //
@@ -968,7 +1033,13 @@ export function Agent({
             <p className="desk-confirm-say">{commandFor(pending.id)!.say(pending.args)}</p>
             <div className="desk-confirm-row">
               <button type="button" onClick={confirm} disabled={running}>
-                {running ? "Doing it…" : commandFor(pending.id)!.via === "navigate" ? "Take me there" : "Yes, do it"}
+                {running
+                  ? "Doing it…"
+                  : commandFor(pending.id)!.via === "navigate"
+                    ? "Take me there"
+                    : commandFor(pending.id)!.via === "show"
+                      ? "Show it"
+                      : "Yes, do it"}
               </button>
               <button
                 type="button"
@@ -1116,6 +1187,22 @@ function ChatLine({
           {receipt && <ReceiptRow {...receiptParts(receipt)} />}
           {card}
           <p>{m.text}</p>
+          {m.image && (
+            <a href={m.image.src} download>
+              <img
+                src={m.image.src}
+                alt={m.image.alt}
+                className="desk-turn-image"
+                loading="lazy"
+                // The lookup gates cardability and /api/pnl re-validates
+                // before drawing — but if the image still fails, hide it
+                // rather than showing a torn icon; the caption stands alone.
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                }}
+              />
+            </a>
+          )}
           {m.failed ? (
             <div className="chat-failed-actions">
               {m.retry && onRetry && (

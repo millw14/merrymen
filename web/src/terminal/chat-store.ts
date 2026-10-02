@@ -115,6 +115,21 @@ function messageOf(x: unknown): ChatMessage | null {
     if (typeof at === "number" && Number.isFinite(at) && at > 0) out.order.serverPlacedAt = at;
   }
   if (typeof m.tradeKey === "string" && m.tradeKey.length <= 200) out.tradeKey = m.tradeKey;
+  // Chat-attached images persist ONLY as our own card URLs: same-origin,
+  // exact route shape, numeric trade id. Anything else (model text can never
+  // produce these — the client builds them — but storage is read back through
+  // this same gate) is dropped rather than rendered.
+  const image = m.image as { src?: unknown; alt?: unknown } | null | undefined;
+  if (
+    image &&
+    typeof image === "object" &&
+    typeof image.src === "string" &&
+    /^\/api\/pnl\?trade=\d+$/.test(image.src) &&
+    typeof image.alt === "string" &&
+    image.alt.length <= 200
+  ) {
+    out.image = { src: image.src, alt: image.alt };
+  }
   if (typeof m.failed === "string" && FAILURES.has(m.failed as ChatFailure)) out.failed = m.failed as ChatFailure;
   return out;
 }
