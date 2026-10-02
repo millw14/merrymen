@@ -278,8 +278,36 @@ describe("what must not regress", () => {
 
     const v = boundGas(huge, huge, firstEnableBounds(wide.allowedMaxBounded), false);
     assert.equal(v.ok, false, "so it must be refused");
-    assert.equal(v.ok === false ? v.rule : null, "gas-absurd");
+    // Named for what the owner can do about it, not `gas-absurd`: the wall and
+    // the trade each fit their own ceiling, and only the two together do not.
+    assert.equal(v.ok === false ? v.rule : null, "enable-too-wide");
     assert.match(v.ok === false ? v.detail : "", /14000000/, "by the hard maximum, named");
+    assert.match(v.ok === false ? v.detail : "", /narrower permission set/, "with the remedy");
+  });
+
+  it("THE LIVE REFUSALS OF 2026-10-01 ARE STILL REFUSED, AND NOW SAY WHY", () => {
+    // Two agents, every tick, on their first operation with a new key:
+    //   0x4b6dcd  call 614145 + verif 10443666 + preVerif 330621 -> signed 14,742,605
+    //   0xbba115  call 2233531 + verif 10720521 + preVerif 336803 -> signed 18,335,173
+    // Both walls are past what the 14,000,000 product maximum leaves room for
+    // once their trade rides along. The maximum is policy and stays; what
+    // changes is that the owner is told it is their wall, and how to narrow it.
+    const wide = firstEnableEnvelope(wallOfWidth(15));
+    for (const [call, verif, pre] of [
+      [614_145n, 10_443_666n, 330_621n],
+      [2_233_531n, 10_720_521n, 336_803n],
+    ] as const) {
+      const g: UserOpGas = {
+        callGasLimit: call,
+        verificationGasLimit: verif,
+        preVerificationGas: pre,
+        paymasterVerificationGasLimit: 30_000n,
+        paymasterPostOpGasLimit: 16_457n,
+      };
+      const v = boundGas(g, g, firstEnableBounds(wide.allowedMaxBounded), true);
+      assert.equal(v.ok, false, `${call}`);
+      assert.equal(v.ok === false ? v.rule : null, "enable-too-wide");
+    }
   });
 
   it("STEADY STATE IS UNTOUCHED: neither new ceiling exists outside an enable", () => {

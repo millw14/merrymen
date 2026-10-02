@@ -33,6 +33,10 @@ const ATTACKER = "0x000000000000000000000000000000000000bad1" as const;
 const V4_ADAPTER = "0x0000000000000000000000000000000000000a4a" as const;
 const PONS_ADAPTER = "0x0000000000000000000000000000000000000b0b" as const;
 const EXTRA = { symbol: "CATE", address: "0x0000000000000000000000000000000000ca7e00" as const, decimals: 18 };
+const EXTRA2 = { symbol: "UBIK", address: "0x0000000000000000000000000000000000ca7e02" as const, decimals: 18 };
+const EXTRA3 = { symbol: "NEON", address: "0x0000000000000000000000000000000000ca7e03" as const, decimals: 18 };
+/** The fullest wall a signer seals: class + Trencher + the v4 adapter + three coins — no room for the energy buy. */
+const FULL = { account: ACCOUNT, extraTokens: [EXTRA, EXTRA2, EXTRA3], trencher: true, v4AdapterAddress: V4_ADAPTER };
 
 const verdict = (g: unknown) => checkCanonicalWall(g as Record<string, unknown>);
 const refusedWith = (g: unknown, code: string) => {
@@ -71,14 +75,23 @@ describe("grants from the real signer pass", () => {
     const { grant: adapters } = await signerGrant({ account: ACCOUNT, v4AdapterAddress: V4_ADAPTER, ponsAdapterAddress: PONS_ADAPTER });
     assert.deepEqual(verdict(adapters), { ok: true });
 
-    // NEITHER carries the energy buy, and legitimately: a class+Trencher wall
-    // with a token, and a class wall with both adapters, have no room for it
-    // on a first install. They sign exactly the wall they signed before it
-    // existed — which is the point of sealing it only when it fits.
-    assert.ok(!trench.grantFeatures?.includes(GRANT_ENERGY), "no room for the energy buy beside Trencher and a token");
-    assert.ok(!adapters.grantFeatures?.includes(GRANT_ENERGY), "no room for the energy buy beside both adapters");
+    // BOTH carry the energy buy now. Before GRANT_SCOPED_SPENDERS neither had
+    // room for it on a first install; scoping each spender to the tokens it
+    // pulls freed ~1.4M+ of the first-enable budget, and the energy buy is
+    // sealed exactly when it fits.
+    assert.ok(trench.grantFeatures?.includes(GRANT_ENERGY), "room for the energy buy beside Trencher and a token");
+    assert.ok(adapters.grantFeatures?.includes(GRANT_ENERGY), "room for the energy buy beside both adapters");
 
-    // So the default mint is what carries GRANT_ENERGY into the union.
+    // THE OWNER WHO COULD NOT HAVE ALL OF IT: class + Trencher + the v4 adapter
+    // + three coins was ~15.75M against the 14M maximum and refused at signing.
+    // Scoped, the real signer seals it and the server accepts what it sealed —
+    // without the energy buy, which still has no room beside all of that.
+    const { grant: everything } = await signerGrant(FULL);
+    assert.deepEqual(verdict(everything), { ok: true });
+    assert.deepEqual(everything.grantTokens?.slice().sort(), [EXTRA.address, EXTRA2.address, EXTRA3.address].sort());
+    assert.ok(everything.grantFeatures?.includes(core.GRANT_SCOPED_SPENDERS));
+    assert.ok(!everything.grantFeatures?.includes(GRANT_ENERGY), "no room for the energy buy beside all of it");
+
     const { grant: plain } = await signerGrant({ account: ACCOUNT });
     const minted = new Set([
       ...(trench.grantFeatures ?? []),
@@ -177,7 +190,7 @@ describe("an owner-enabled permission that is not the Merrymen wall is refused",
     // the signer minted without it (no room).
     const bare = await resealed(grant, owner, { energyBuy: false });
     refusedWith(bare, "invalid_wall");
-    const { grant: full } = await signerGrant({ account: ACCOUNT, extraTokens: [EXTRA], trencher: true });
+    const { grant: full } = await signerGrant(FULL);
     assert.ok(!full.grantFeatures?.includes(GRANT_ENERGY), "premise: no room, no marker");
     refusedWith({ ...full, grantFeatures: [...(full.grantFeatures ?? []), GRANT_ENERGY] }, "invalid_wall");
   });
@@ -190,7 +203,7 @@ describe("an owner-enabled permission that is not the Merrymen wall is refused",
     assert.match(v.ok ? "" : v.why, /only on Robinhood Chain mainnet/);
     refusedWith({ ...grant, chainId: undefined }, "invalid_grant");
     // And a testnet grant WITHOUT the marker is not this check's business.
-    const { grant: full } = await signerGrant({ account: ACCOUNT, extraTokens: [EXTRA], trencher: true });
+    const { grant: full } = await signerGrant(FULL);
     assert.deepEqual(verdict({ ...full, chainId: 46630 }), { ok: true });
   });
 
@@ -365,6 +378,9 @@ describe("the accepted markers are exactly what the signers can mint", () => {
         // Rebuilt from the GRANT_ENERGY marker by grantWallOptions — a
         // versioned route, so the marker is the whole sealed fact.
         "energyBuy",
+        // Rebuilt from the GRANT_SCOPED_SPENDERS marker by grantWallOptions —
+        // a shape version, so again the marker is the whole sealed fact.
+        "scopedSpenders",
       ]);
       for (const key of keys) assert.ok(modelled.has(key), `${who} passes ${key} to the wall, which canonical-wall.ts does not rebuild`);
       assert.doesNotMatch(block[1], /withdrawalAddresses|allowRialto/, `${who} must not widen the wall with a transfer or Rialto`);

@@ -1,7 +1,7 @@
 /** Shared narration for the dashboard and consented partner integrations. */
 import Anthropic from "@anthropic-ai/sdk";
 import { fitChatState } from "./chat-state";
-import { ENERGY, conceptsFor, llmProviderById, renderConcepts, type EnergyStatus } from "../../../packages/core/src/index";
+import { ENERGY, SETTINGS_CATALOG, conceptsFor, llmProviderById, renderConcepts, type EnergyStatus } from "../../../packages/core/src/index";
 import { COMMAND_SPEC, splitCommand } from "./chat-commands";
 import { sseEvent, streamSafe } from "./chat-stream";
 import { count } from "./format";
@@ -82,6 +82,11 @@ WHEN THEY ASK WHAT SOMETHING MEANS:
 - Where the block names what something is COMMONLY CONFUSED WITH, lead with that. Most of these questions are not a missing definition — they are a wrong one, and correcting it is the whole answer.
 - Never tell them their money is fine or gone unless the STATE actually says so. "I can see X" and "I cannot see X" are different sentences and only one of them is usually true.`;
 
+/** Every setting change-settings may name, compactly: the catalog's own keys and labels. */
+const SETTINGS_KEYS = SETTINGS_CATALOG.filter((s) => (s.route === "chat" || s.route === "dashboard") && s.kind !== "special")
+  .map((s) => `${s.key} — ${s.label}`)
+  .join(" · ");
+
 /**
  * WHAT THE MODEL MAY ASK FOR, and the shape it has to ask in.
  *
@@ -96,6 +101,7 @@ WHEN THEY ASK YOU TO DO SOMETHING:
 - BEFORE YOU SAY YOU CANNOT DO SOMETHING, READ THE LIST BELOW. This is the single most common way you let an owner down: they ask for something that IS on the list and you answer "I can't do that myself, but I can take you to the Settings screen". That is wrong and it wastes their time — you can propose it, and the button does it. Taking somebody to a screen is the answer ONLY when there is genuinely no command for what they asked. Some plain-English asks and the command they mean:
   · "change what coins you trade" / "add X to your basket" / "drop Y" / "only trade these" / "too many coins" / "fewer names" → set-basket (send the WHOLE new list, comma-separated — it replaces, it does not append, so include the ones they are keeping)
   · "trade bigger" / "smaller size" / "put more in each trade" → set-size · "risk" in general terms → set-risk
+  · ANY OTHER SETTING, or several at once, or how they want you to work ("be careful and message me less", "stop loss at 10%", "turn on launchpad buying", "only trade memecoins", "use real money") → change-settings, with "changes" as key=value pairs separated by ";" using the SETTINGS KEYS below and their own value words (e.g. {"changes":"strategistStopLossBps=10%; telegramNotifyEveryMin=60"}). It opens Settings with those filled in for them to approve — so it is never a reason to say you can't change a setting.
   · "change my cap" / "per trade" / "per day" → those are sealed into your key: propose resign, and say a signature is what moves them
   · "buy me some X" → buy when X is already in your basket, snipe when it is not
   · "get your merrymen" / "top up your energy" / "buy the tokens you need" → get-energy (usdgAmount is their ceiling for it — never a number they did not give, unless ENERGY.estimateUsdg supplies it). $MERRYMEN is only ever bought with get-energy — never buy or snipe it — and never sold: your key cannot sell or send it.
@@ -103,6 +109,7 @@ WHEN THEY ASK YOU TO DO SOMETHING:
 - To propose, end your reply with one line, alone, exactly: <<CMD id args-as-json>>
   Examples: <<CMD set-strategy {"strategy":"dip-hunter"}>> · <<CMD open-deposit {}>> · <<CMD set-size {"buyPerTickUsdg":25}>> · <<CMD set-basket {"basketSymbols":"TSLA,NVDA"}>>
 - The ONLY commands that exist, with the EXACT argument names each one takes: ${COMMAND_SPEC}
+- SETTINGS KEYS for change-settings (key — what it is (value)): ${SETTINGS_KEYS}
   Use those names verbatim. A name you invent is dropped, so a buy proposed with the wrong key for its size arrives with no size and is refused — say the words you like, but spell the keys as written here. Naming an id that is not on this list does nothing at all, so do not invent one; say plainly that you cannot do that yet instead.
 - Arguments are FLAT: a string, a number or true/false. Never an object, never a list — a basket is one comma-separated string. Several ids carry their own value and take no arguments at all; pass {} and do not try to steer them.
 - Propose ONE, only when they actually asked for it, and only when you are confident which. If they were vague, ask which they meant rather than guessing — a confirmation card for the wrong thing is worse than a question.

@@ -256,6 +256,41 @@ export const FIRST_ENABLE_GAS_BOUNDS: GasBounds = {
   absoluteMax: 12_000_000n,
 };
 
+/**
+ * THE TRENCHER VAULT'S ONE-TIME DEPLOYMENT, AND NOTHING ELSE.
+ *
+ * An autonomous Trencher's first buy is deploy + approve + buy in one batch:
+ * the factory CREATE2s the owner's vault, then the vault makes the trade. It
+ * is deterministic — fixed bytecode — and it happens once per vault. Measured
+ * live, 2026-10-01, agent 0x4b6dcd, key already installed (an ordinary op):
+ *
+ *   estimate  call 2,128,793 + verif 289,003 + preVerif 56,602 = 2,520,855
+ *   signed    call 4,257,586 + verif 361,253 + preVerif 70,752
+ *             + sponsor 46,457                                  = 4,736,048
+ *
+ * — refused `gas-absurd` against GAS_BOUNDS' 3,000,000 every tick, so the vault
+ * was never deployed and the agent could never make a Trencher trade at all.
+ * The same 2,128,793 the first-enable note above records for Shogun.
+ *
+ * NOT A WIDER ORDINARY CEILING. Judging every ordinary operation on its
+ * estimate was tried and is the wrong fix: for a self-paying account the
+ * signed total IS what the wallet can be charged, and 3,000,000 is the stated
+ * bound on that (review, PR #233). So the ordinary ceiling is untouched and
+ * this one applies only when the executor itself decodes the batch's first
+ * call as `deploy(self)` on the Trencher factory the caller verified
+ * (executor.ts isTrencherVaultDeploy) — which, once the vault exists, is
+ * never again.
+ *
+ * 6,000,000 = the measured 4,736,048 plus 27%: room for the two-hop buy
+ * through WETH (one more pool, ~150,000 raw, doubled) and for the sponsor's
+ * own limits, which paymaster.ts allows up to 500,000 each and which this
+ * total counts.
+ */
+export const TRENCHER_DEPLOY_GAS_BOUNDS: GasBounds = {
+  ...GAS_BOUNDS,
+  absoluteMax: 6_000_000n,
+};
+
 
 export type GasVerdict =
   | { ok: true; gas: UserOpGas; total: bigint }
@@ -265,7 +300,7 @@ export type GasVerdict =
    */
   | {
       ok: false;
-      rule: "gas-absurd" | "gas-unstable" | "gas-unreadable" | "gas-paymaster-unexpected";
+      rule: "gas-absurd" | "gas-unstable" | "gas-unreadable" | "gas-paymaster-unexpected" | "enable-too-wide";
       detail: string;
     };
 
@@ -485,6 +520,28 @@ export function boundGas(
   // Counts the paymaster fields too, because the prefund does.
   const total = totalGas(gas);
   if (total > bounds.absoluteMax) {
+    // A WALL TOO WIDE TO INSTALL WITH ITS TRADE IS THE OWNER'S TO NARROW.
+    //
+    // Only a sized first enable reaches this with `enableMax` set, and by then
+    // its wall has passed its own envelope and its payload the ordinary
+    // ceiling. What is left over the product maximum is the two together: a
+    // wall wide enough that the trade riding on its install no longer fits
+    // under what we will sign. No estimate will change that, and calling it
+    // `gas-absurd` — "this estimate is larger than we will sign for" — sent
+    // owners looking for a fault that was not there (live, 2026-10-01: two
+    // agents refused every tick at 14.7M and 18.3M). A narrower wall leaves
+    // room for the trade, so it is named for that, with that remedy.
+    if (bounds.enableMax !== undefined) {
+      return {
+        ok: false,
+        rule: "enable-too-wide",
+        detail:
+          `installing this key's permission wall together with the trade riding on it wants ${total} gas ` +
+          `(the wall ${gas.verificationGasLimit + gas.preVerificationGas}, the trade ${gas.callGasLimit}), ` +
+          `past the ${bounds.absoluteMax} we will sign for a first operation. Refused before signing — nothing ` +
+          "was spent. A narrower permission set (fewer custom tokens or capabilities) leaves room for the trade.",
+      };
+    }
     return {
       ok: false,
       rule: "gas-absurd",

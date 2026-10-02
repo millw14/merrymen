@@ -37,8 +37,23 @@ import { encodeFunctionData, erc20Abi, parseAbi, type Hex, type PublicClient } f
 import { UNISWAP, UNISWAP_SWAP_ROUTER_ABI } from "../../../packages/core/src/index";
 import { buildV4AdapterSwapCalls, buildV4SwapCalls, findV4Pool, quoteV4, type PoolKey } from "./uniswap-v4";
 
-/** Fee tiers to scan, most-likely-liquid first. */
-export const FEE_TIERS = [500, 3000, 10000] as const;
+/**
+ * Fee tiers to scan.
+ *
+ * 100 (0.01%) IS WHERE THIS CHAIN'S MAIN PAIR LIVES, and it was missing. The
+ * scout's own trending read reports "USDG/WETH 0.01% … the 26.1M pool"
+ * (2026-10-02), so every price or route that hops through WETH could not see
+ * the deepest WETH/USDG pool on the chain. Meanwhile the autonomous Trencher's
+ * discovery verifies pools against the factory at the fee each pool REPORTS
+ * (trencher-discovery.ts), so it admitted pools this list could never find:
+ * the same agents logged "passing on T6F99D9422EB — no venue gave a usable
+ * price" every tick for coins discovery had just proved were canonical v3
+ * pools against USDG or WETH. A coin nothing can price is a coin it never buys.
+ *
+ * The wall does not pin a tier (wall.ts: "fee — any tier the pool actually
+ * has"), so a 0.01% route is one the owner's signature already allows.
+ */
+export const FEE_TIERS = [100, 500, 3000, 10000] as const;
 
 export const QUOTER_V2_ABI = parseAbi([
   "struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }",
