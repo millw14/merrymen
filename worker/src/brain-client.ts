@@ -58,6 +58,12 @@ export interface BrainDecision {
   bear_case: string;
   risks: string[];
   invalidation: string[];
+  /**
+   * What is driving the instrument NOW, as the manager named it — the half of
+   * a thesis that says why this week and not any other. Optional because an
+   * older Brain build does not send it; absent is carried as absent.
+   */
+  catalysts?: string[];
   time_horizon: string;
   tier: string;
   depth_used: string;
@@ -153,6 +159,7 @@ function carriesExecutable(d: BrainDecision): string | null {
     ["time_horizon", d.time_horizon],
     ...d.risks.map((r, i) => [`risks[${i}]`, r] as [string, string]),
     ...d.invalidation.map((r, i) => [`invalidation[${i}]`, r] as [string, string]),
+    ...(d.catalysts ?? []).map((r, i) => [`catalysts[${i}]`, r] as [string, string]),
     ...d.evidence.flatMap((e, i) => [
       [`evidence[${i}].source`, e.source],
       [`evidence[${i}].ref`, e.ref],
@@ -185,6 +192,12 @@ export interface DecideArgs {
   };
   persona?: string;
   memory?: string[];
+  /**
+   * The agent's durable taste, in the three words the service already
+   * understands (schemas.py `risk_appetite`). Omitted = the service's default,
+   * which is `balanced` — the same as every run before this field was sent.
+   */
+  riskAppetite?: "conservative" | "balanced" | "aggressive";
   tier?: "pulse" | "research" | "deep";
 }
 
@@ -211,6 +224,7 @@ export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainR
     portfolio: snapshotToRequest(args.snapshot),
     market: args.market,
     persona: args.persona ?? "",
+    ...(args.riskAppetite ? { risk_appetite: args.riskAppetite } : {}),
     memory: args.memory ?? [],
     tier: args.tier ?? "research",
     // ADAPTIVE IS THE DEFAULT, on measured evidence: on 36 scenarios it scored
