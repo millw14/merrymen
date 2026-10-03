@@ -8,8 +8,9 @@ import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { assertDerivedAccount, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import { userOpGasConfig } from "../../../worker/src/gas";
-import { getRecoveryTicket, relayUrl, redact, type BrowserWallet } from "./recover-client";
-import { invalidatePermissions, KERNEL_REVOCATION_ABI, type PendingRevocation } from "./permission-revocation";
+import { createSponsor } from "../../../worker/src/paymaster";
+import { getRecoveryTicket, ownerGasError, relayUrl, type BrowserWallet } from "./recover-client";
+import { invalidatePermissions, nextRevocationNonce, KERNEL_REVOCATION_ABI, type PendingRevocation } from "./permission-revocation";
 import { readRevocationRecord } from "./revocation-journal";
 
 /** The signed operation is public, contains no private key, and survives reloads. */
@@ -27,7 +28,7 @@ function pendingStore(w: BrowserWallet) {
 }
 
 /** Owner signature stays in the browser; the relay cannot spend or sign for it. */
-export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: string) => void) {
+async function revocationContext(w: BrowserWallet) {
   const chain = w.chainId === robinhoodChain.id ? robinhoodChain : w.chainId === robinhoodTestnet.id ? robinhoodTestnet : null;
   if (!chain) throw new Error("Unknown account network; refusing to revoke on another chain.");
   const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
@@ -40,23 +41,54 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
   if (account.address.toLowerCase() !== w.smartAccount.toLowerCase()) {
     throw new Error("This owner controls a different account. No revocation was signed.");
   }
+  // Receipt reconciliation must remain available if coverage has since stopped.
+  // The relay checks coverage when these hooks actually request a new quote.
   await getRecoveryTicket(w);
-  const url = relayUrl(w.chainId);
-  const client = createKernelAccountClient({ account, chain, bundlerTransport: http(url), userOperation: userOpGasConfig(publicClient, url) });
+  const url = relayUrl(w.chainId, w.apiOrigin);
+  const sponsor = createSponsor({ url, credentials: "include" });
+  const client = createKernelAccountClient({ account, chain, bundlerTransport: http(url, { fetchOptions: { credentials: "include" } }), paymaster: sponsor.paymaster, paymasterContext: sponsor.paymasterContext, userOperation: userOpGasConfig(publicClient, url) });
+  const readNonce = async () => {
+    const code = await publicClient.request({ method: "eth_getCode", params: [account.address, "latest"] });
+    if (typeof code !== "string" || !/^0x(?:[0-9a-f]{2})*$/i.test(code)) {
+      throw new Error("Could not confirm the account's permission nonce. No revocation was signed; retry when the network is available.");
+    }
+    if (code === "0x") return 1;
+    return publicClient.readContract({ address: account.address, abi: KERNEL_REVOCATION_ABI, functionName: "currentNonce" });
+  };
+  return { chain, publicClient, account, client, entryPoint, readNonce };
+}
+
+/** Obtain an actual sponsored estimate before stopping or replacing an agent. */
+export async function preflightRevocationFromBrowser(w: BrowserWallet): Promise<void> {
   try {
+  const { account, client, publicClient, readNonce } = await revocationContext(w);
+  const pending = pendingStore(w).pending();
+  if (pending) {
+    for (const hash of [pending.hash, ...(pending.previousOperations ?? []).map(previous => previous.hash)]) {
+      try {
+        const receipt = await client.getUserOperationReceipt({ hash });
+        if (receipt.success && await publicClient.readContract({ address: account.address, abi: KERNEL_REVOCATION_ABI, functionName: "validNonceFrom" }) >= pending.nonce) return;
+      } catch (e) {
+        if (!(e instanceof Error && e.name === "UserOperationReceiptNotFoundError")) throw e;
+      }
+    }
+  }
+  const nonce = nextRevocationNonce(await readNonce());
+  await client.prepareUserOperation({ calls: [{ to: account.address, value: 0n,
+    data: encodeFunctionData({ abi: KERNEL_REVOCATION_ABI, functionName: "invalidateNonce", args: [nonce] }),
+  }] });
+  } catch (e) {
+    throw new Error(`${w.chainId === robinhoodTestnet.id ? robinhoodTestnet.name : robinhoodChain.name} (${w.chainId}): ${ownerGasError(e, w.ownerKey)} No revocation was submitted; your existing wallet was kept.`);
+  }
+}
+
+export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: string) => void) {
+  try {
+    const { chain, publicClient, account, client, entryPoint, readNonce } = await revocationContext(w);
     return await invalidatePermissions({
       ...pendingStore(w),
       status: onStatus,
-      readNonce: async () => {
-        // getCode() normalizes a valid "0x" to undefined. Read raw RPC so an
-        // absent or malformed response never means a counterfactual account.
-        const code = await publicClient.request({ method: "eth_getCode", params: [account.address, "latest"] });
-        if (typeof code !== "string" || !/^0x(?:[0-9a-f]{2})*$/i.test(code)) {
-          throw new Error("Could not confirm the account's permission nonce. No revocation was signed; retry when the network is available.");
-        }
-        if (code === "0x") return 1;
-        return publicClient.readContract({ address: account.address, abi: KERNEL_REVOCATION_ABI, functionName: "currentNonce" });
-      },
+      readNonce,
       prepare: async (nonce) => {
         const operation = await client.prepareUserOperation({ calls: [{
           to: account.address, value: 0n,
@@ -74,10 +106,15 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
           const raised = old * 125n / 100n + 1n;
           return raised > current ? raised : current;
         };
-        const repriced = { ...original,
+        const repriced = await client.prepareUserOperation({ ...original,
+          // Sponsor data signs the fee fields too. A fee replacement must get
+          // a fresh quote, while preserving its EntryPoint nonce and call.
+          paymaster: undefined, paymasterData: undefined,
+          paymasterVerificationGasLimit: undefined, paymasterPostOpGasLimit: undefined,
+          signature: undefined,
           maxFeePerGas: bump(original.maxFeePerGas, fees.maxFeePerGas),
           maxPriorityFeePerGas: bump(original.maxPriorityFeePerGas, fees.maxPriorityFeePerGas),
-        };
+        }) as UserOperation<"0.7">;
         const signed = { ...repriced, signature: await account.signUserOperation(repriced) };
         const hash = getUserOperationHash({ userOperation: signed, chainId: chain.id, entryPointAddress: entryPoint.address, entryPointVersion: "0.7" });
         return { hash, operation: formatUserOperationRequest(signed) as RpcUserOperation<"0.7"> };
@@ -110,6 +147,6 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
       readValidNonceFrom: () => publicClient.readContract({ address: account.address, abi: KERNEL_REVOCATION_ABI, functionName: "validNonceFrom" }),
     });
   } catch (error) {
-    throw new Error(`${redact(error, w.ownerKey)} Earlier permissions are not confirmed revoked. Your wallet and recovery access were kept; retry checks saved receipts and can refresh fees for the same revocation.`);
+    throw new Error(`${w.chainId === robinhoodTestnet.id ? robinhoodTestnet.name : robinhoodChain.name} (${w.chainId}): ${ownerGasError(error, w.ownerKey)} Earlier permissions are not confirmed revoked. Your wallet and recovery access were kept; retry checks saved receipts and obtains fresh gas coverage for the same revocation.`);
   }
 }

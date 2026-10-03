@@ -119,7 +119,7 @@ describe("the construction cannot drift between planning and signing", () => {
       1,
       "and so must the validator",
     );
-    assert.equal((RECOVER_CODE.match(/deriveKernelAccount\(/g) ?? []).length, 3, "one definition, two callers");
+    assert.equal((RECOVER_CODE.match(/deriveKernelAccount\(/g) ?? []).length, 4, "one definition shared by address derivation, planning and sweeping");
   });
 
   it("no index, salt or address override is passed — the SDK defaults are the contract", () => {
@@ -145,21 +145,19 @@ describe("the construction cannot drift between planning and signing", () => {
     );
   });
 
-  it("the derivation refuses a zero address on both paths", () => {
+  it("the derivation refuses a zero address on every path", () => {
     assert.equal(
       (RECOVER_CODE.match(/assertDerivedAccount\(/g) ?? []).length,
-      2,
+      3,
       "a sweep aimed at the zero address would be a signed transaction to nothing",
     );
   });
 });
 
 describe("what the refactor must not have loosened", () => {
-  it("recovery is still SELF-PAYING — no paymaster anywhere in the engine", () => {
-    // The relay refuses any op carrying paymaster fields, so a paymaster here
-    // would not be sponsored, it would simply be rejected. More importantly,
-    // house-sponsored withdrawals are a thing this system deliberately cannot do.
-    assert.doesNotMatch(RECOVER_CODE, /paymaster/i, "the recovery engine must not attach a paymaster");
+  it("recovery attaches sponsorship only when supplied by its caller", () => {
+    assert.match(RECOVER_CODE, /opts\.sponsor \? \{ paymaster: opts\.sponsor\.paymaster/);
+    assert.match(RECOVER_CODE, /paymasterContext: opts\.sponsor\.paymasterContext/);
   });
 
   it("the two-operation shape survives: sweep the vault, re-read, then transfer", () => {
@@ -179,7 +177,7 @@ describe("what the refactor must not have loosened", () => {
     assert.match(RECOVER_CODE, /classHoldings/, "the plan must carry the vault's contents");
     assert.match(
       RECOVER_CODE,
-      /plan\.balances\.length === 0 && nativeSweptWei === 0n && plan\.classHoldings\.length === 0/,
+      /plan\.balances\.length === 0 && nativeSweptWei === 0n && plan\.classVaults\.every\(/,
       "and an account with a funded vault must never be called empty",
     );
   });

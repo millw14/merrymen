@@ -115,11 +115,12 @@ describe("identity is pinned; the amount is re-read", () => {
 describe("a disclosed sweep that cannot run stops everything", () => {
   it("the failed sweep throws instead of being skipped, when it was approved", () => {
     const katch = sweepFn.slice(sweepFn.indexOf("} catch (e) {"));
-    assert.match(katch.slice(0, 900), /if \(requireClass\) \{/);
-    assert.match(katch.slice(0, 900), /refusing to continue/);
-    assert.match(katch.slice(0, 900), /The account sweep has NOT been attempted/);
+    const classCatch = katch.slice(0, katch.indexOf("const movable: TokenBalance[] = []"));
+    assert.match(classCatch, /if \(requireClass\) \{/);
+    assert.match(classCatch, /refusing to continue/);
+    assert.match(classCatch, /The account sweep has NOT been attempted/);
     // The best-effort branch survives for everyone else.
-    assert.match(katch.slice(0, 1400), /skipped\.push\(/);
+    assert.match(classCatch, /skipped\.push\(/);
   });
 
   it("the refusal happens BEFORE the account sweep is built", () => {

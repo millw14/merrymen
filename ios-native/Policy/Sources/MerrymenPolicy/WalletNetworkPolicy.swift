@@ -10,16 +10,24 @@ public enum WalletNetworkPolicy {
                      "eth_feeHistory", "eth_estimateGas", "eth_getTransactionReceipt"]
         if url.host == "rpc.mainnet.chain.robinhood.com", ["", "/"].contains(url.path), url.query == nil,
            method == "POST", let rpcMethod, reads.contains(rpcMethod) { return url }
-        guard url.host == "app.merrymen.dev", url.query == nil else { return nil }
+        guard url.host == "app.merrymen.dev" else { return nil }
+        if ["preview", "plan", "withdraw", "reconcile"].contains(operation),
+           url.path == "/api/recover/ticket", url.query == "scope=owner-actions",
+           method == "GET", rpcMethod == nil { return url }
+        guard url.query == nil else { return nil }
         if ["create", "restore"].contains(operation) {
             if method == "GET", url.path == "/api/auth/challenge" { return url }
             if method == "POST", url.path == "/api/grants" { return url }
         }
-        if ["withdraw", "reconcile"].contains(operation) {
-            if url.path == "/api/recover/ticket", ["GET", "POST"].contains(method) { return url }
+        if ["preview", "plan", "withdraw", "reconcile"].contains(operation) {
+            if url.path == "/api/recover/ticket", ["GET", "POST"].contains(method), rpcMethod == nil { return url }
+            if url.path == "/api/bundler/4663", method == "GET", rpcMethod == nil { return url }
             let relayReads = ["eth_chainId", "eth_getUserOperationReceipt", "eth_getUserOperationByHash", "eth_estimateUserOperationGas", "pimlico_getUserOperationGasPrice"]
-            if url.path == "/api/bundler/4663", method == "POST", let rpcMethod,
-               relayReads.contains(rpcMethod) || (operation == "withdraw" && rpcMethod == "eth_sendUserOperation") { return url }
+            let sponsorMethods = ["pm_getPaymasterStubData", "pm_getPaymasterData"]
+            if url.path == "/api/bundler/4663", method == "POST", let rpcMethod {
+                if ["withdraw", "reconcile"].contains(operation), relayReads.contains(rpcMethod) { return url }
+                if operation == "withdraw", rpcMethod == "eth_sendUserOperation" || sponsorMethods.contains(rpcMethod) { return url }
+            }
         }
         return nil
     }

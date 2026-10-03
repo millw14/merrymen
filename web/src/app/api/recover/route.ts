@@ -26,11 +26,14 @@ import {
   explorerFor,
   isHostedMode,
   pimlicoBundlerUrl,
+  pimlicoPaymasterUrl,
   robinhoodChain,
   type MerrymenSettings,
   type StoredGrant,
 } from "@merrymen/core";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
+import { mergeSettings } from "@merrymen/settings";
+import { createSponsor } from "../../../../../worker/src/paymaster";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,6 +71,14 @@ function rpcFor(settings: MerrymenSettings, chainId: number): string | undefined
   return chainId === robinhoodChain.id ? settings.rpcMainnet : settings.rpcTestnet;
 }
 
+/** Local installation policy; request bodies can never select a sponsor. */
+function sponsorFor(settings: MerrymenSettings, chainId: number) {
+  const cfg = mergeSettings(settings, process.env);
+  return cfg.sponsorGasEnabled && cfg.bundlerApiKey
+    ? createSponsor({ url: pimlicoPaymasterUrl(chainId, cfg.bundlerApiKey), policyId: cfg.sponsorshipPolicyId })
+    : undefined;
+}
+
 /**
  * In hosted mode the server holds no owner key by construction, so there is
  * nothing for a server-side recover to read or sweep. Recovery runs entirely in
@@ -96,6 +107,7 @@ export async function GET() {
 
   const chainId = grant.chainId;
   const hasBundler = !!bundlerFor(settings, chainId);
+  const sponsor = sponsorFor(settings, chainId);
   try {
     const plan = await planRecovery({
       chain: chainForId(chainId),
@@ -105,6 +117,7 @@ export async function GET() {
       // The owner's own tokens, including every quarantined scout buy. Without
       // these the escape hatch strands exactly what the owner chose to hold.
       extraTokens: settings.customTokens ?? [],
+      gasSponsored: !!sponsor,
     });
     return NextResponse.json({
       hasStoredKey: true,
@@ -114,6 +127,9 @@ export async function GET() {
       smartAccount: plan.smartAccount,
       ownerAddress: plan.ownerAddress,
       gasWei: plan.gasWei.toString(),
+      gasSponsored: !!sponsor,
+      nativeRecoverableWei: plan.nativeRecoverableWei.toString(),
+      nativeReserveWei: plan.nativeReserveWei.toString(),
       balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
       // THE CLASS BOOK. Both of these existed on the plan and neither was
       // returned, so in local mode the panel showed no vault at all while the
@@ -173,6 +189,7 @@ export async function POST(req: Request) {
   // (we know which account that is); a pasted key may be for a different wallet.
   const expected = pasted ? undefined : grant?.smartAccount;
   const rpcUrl = rpcFor(settings, chainId);
+  const sponsor = sponsorFor(settings, chainId);
 
   try {
     if (mode === "plan") {
@@ -182,11 +199,15 @@ export async function POST(req: Request) {
         rpcUrl,
         expectedSmartAccount: expected,
         extraTokens: settings.customTokens ?? [],
+        gasSponsored: !!sponsor,
       });
       return NextResponse.json({
         smartAccount: plan.smartAccount,
         ownerAddress: plan.ownerAddress,
         gasWei: plan.gasWei.toString(),
+        gasSponsored: !!sponsor,
+        nativeRecoverableWei: plan.nativeRecoverableWei.toString(),
+        nativeReserveWei: plan.nativeReserveWei.toString(),
         explorer: explorerFor(chainId),
         chainId,
         balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
@@ -233,11 +254,15 @@ export async function POST(req: Request) {
       to: body.to,
       expectedSmartAccount: expected,
       extraTokens: settings.customTokens ?? [],
+      sponsor,
     });
     return NextResponse.json({
       txHash: res.txHash,
       to: res.to,
       smartAccount: res.smartAccount,
+      gasSponsored: !!sponsor,
+      nativeSweptWei: res.nativeSweptWei.toString(),
+      nativeReservedWei: res.nativeReservedWei.toString(),
       explorer: explorerFor(chainId),
       chainId,
       balances: res.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),

@@ -15,6 +15,16 @@ before(() => {
 });
 
 describe("recovery tickets", () => {
+  it("binds the owner, canonical deployment and migration family inside the HMAC", () => {
+    const sponsorship = { owner: ACCOUNT, factory: ACCOUNT, factoryData: "0x1234" as const, accounts: [ACCOUNT] };
+    const token = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [], sponsorship });
+    assert.deepEqual(readTicket(token)?.sponsorship, sponsorship);
+    for (const patch of [{ owner: "0x1111111111111111111111111111111111111111" }, { factoryData: "0x1235" }, { accounts: [] }]) {
+      const parts = token.split(".");
+      parts[4] = Buffer.from(JSON.stringify({ ...sponsorship, ...patch })).toString("base64url");
+      assert.equal(readTicket(parts.join(".")), null);
+    }
+  });
   it("round-trips the account and chain it was minted for", () => {
     const t = readTicket(mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [] }));
     assert.ok(t);
@@ -60,6 +70,19 @@ describe("recovery tickets", () => {
 });
 
 describe("the challenge text", () => {
+  it("keeps the installed native client's exact legacy text by default", () => {
+    assert.equal(recoveryChallengeMessage("https://app.merrymen.dev", "N"), [
+      "https://app.merrymen.dev — withdraw from your merrymen account.",
+      "",
+      "This proves you control the owner key so the site will relay your withdrawal.",
+      "It moves no funds by itself and grants no permissions: the withdrawal itself",
+      "is a separate operation you sign next.",
+      "",
+      "URI: https://app.merrymen.dev",
+      "Nonce: N",
+    ].join("\n"));
+    assert.match(recoveryChallengeMessage("https://app.merrymen.dev", "N", true), /permission revocations/);
+  });
   it("binds BOTH origin and nonce into what gets signed", () => {
     // A fixed message would make the signature a permanent bearer credential:
     // anyone who ever saw it — a log line, a support paste, a screenshot — could

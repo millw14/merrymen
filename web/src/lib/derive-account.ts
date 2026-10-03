@@ -26,7 +26,9 @@ import { chainForId, derivationOf, type Derivation } from "@merrymen/core";
  * smart_account, so an unverified address lets one tenant write under another's
  * partition.
  */
-export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Derivation> {
+export async function deriveKernelRecoveryAccount(owner: Address, chainId: number): Promise<
+  Derivation & { factory?: Address; factoryData?: `0x${string}` }
+> {
   // A malformed owner cannot derive anything, and letting it through would ask
   // the SDK to build enable-data out of it. Refuse here rather than downstream.
   const o = derivationOf(owner);
@@ -66,5 +68,15 @@ export async function deriveKernelAccountAddress(owner: Address, chainId: number
   // with the zero address and throws nothing. Returning it here would make the
   // caller's equality test pass whenever BOTH sides failed the same way — see
   // packages/core/src/derivation.ts for why that is worse than an error.
-  return derivationOf(account.address);
+  const derived = derivationOf(account.address);
+  if (!derived.ok) return derived;
+  // viem's public getFactoryArgs() becomes empty once the account is deployed.
+  // The SDK's canonical deployment is still needed to bind sponsorship tickets.
+  const factory = account.factoryAddress;
+  const factoryData = await account.generateInitCode();
+  return { ...derived, factory, factoryData };
+}
+
+export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Derivation> {
+  return deriveKernelRecoveryAccount(owner, chainId);
 }

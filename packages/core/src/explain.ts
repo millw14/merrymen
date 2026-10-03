@@ -222,12 +222,12 @@ export const CONCEPTS: readonly Concept[] = [
     evidence: "web/src/lib/status-line.ts:205-223",
   },
   {
-    term: "its trading fees are covered / covered — only needed to withdraw later",
-    aliases: ["fees are covered", "gas sponsored", "sponsored", "do i need eth"],
-    plain: "When your agent's gas is sponsored, merrymen pays the small network charge on every trade for you. So you only put in USDG — the dollars it trades with — and it can start; it does not need any ETH sitting there to buy and sell. (lets an account with zero ETH start as long as it is sponsored and holds USDG; is the sentence you see.) The one thing that is NOT covered is taking money back out.",
-    because: "statusLine's gasSponsored branch returns these sentences and both arms carry the withdrawal caveat; canStart encodes the same rule (gas OR sponsored+capital) and its header says explicitly that sponsorship does not decide anything about withdrawal.",
-    confusable: "\"Covered\" never means \"you never need ETH\".",
-    evidence: "web/src/lib/status-line.ts:185-204",
+    term: "its trading fees are covered",
+    aliases: ["fees are covered", "gas sponsored", "sponsored", "do i need eth", "covered — only needed to withdraw later"],
+    plain: "When your agent's trading gas is sponsored, merrymen pays the small network charge on every trade for you. You fund USDG — the dollars it trades with — and it does not need ETH sitting there to buy and sell. Withdrawal and permission changes check fee coverage separately before you sign. Their screens tell you whether merrymen can cover that operation; the trading status alone does not confirm it.",
+    because: "statusLine reports the heartbeat's trading sponsorship and canStart allows sponsored trading with capital and zero ETH. Owner withdrawal and revocation flows independently check authenticated account eligibility and the server's sponsorship policy before requesting paymaster data.",
+    confusable: "Trading fee coverage does not establish fee coverage for a separate owner operation.",
+    evidence: "web/src/lib/status-line.ts:182-200",
   },
   {
     term: "Sign in with your wallet first — a hosted agent is bound to the wallet you sign in with.",

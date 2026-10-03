@@ -6,12 +6,14 @@ import {
   encodeErrorResult,
   encodeFunctionResult,
   parseAbi,
+  toFunctionSelector,
   type Address,
   type LocalAccount,
 } from "viem";
 import { privateKeyToAccount, toAccount } from "viem/accounts";
-import { robinhoodChain } from "../../packages/core/src/index";
-import { ownerFromPrivateKey, ownerFromSigner, planRecovery, recoverFunds } from "./recover";
+import { PONS_CLASS_VAULT_FACTORY_V2, robinhoodChain } from "../../packages/core/src/index";
+import { deriveRecoveryAccountAddress, ownerFromPrivateKey, ownerFromSigner, planRecovery, recoverFunds } from "./recover";
+import { createSponsor, SponsorRefused } from "./paymaster";
 
 /**
  * CAN A WALLET WITH NO KEY ACTUALLY GET THE MONEY OUT?
@@ -94,6 +96,29 @@ const HELD = 1_063_408_141_815n;
 /** Where the stub says the factory deploys. */
 const DEPLOYS_TO = "0x05a198A677Fbcd8f5c168d397Fa7ef5eB6D65487" as const;
 const DESTINATION = "0x8e93bad5a60a266b4283855ceffa0979720aed72" as const;
+const CLASS_VAULT = "0x4444444444444444444444444444444444444444" as const;
+const EMPTY_CLASS_VAULT = "0x5555555555555555555555555555555555555555" as const;
+const PAYMASTER = "0x3333333333333333333333333333333333333333" as const;
+const ADDRESS_RESULT = parseAbi(["function f() view returns (address)"]);
+const vaultForSelector = toFunctionSelector("vaultFor(address)");
+
+const fixture = {
+  native: 0n,
+  accountTokens: HELD,
+  classTokens: 0n,
+  classConfirmed: false,
+  failGasPrice: false,
+  refuseSponsor: false,
+  failClassReceipt: false,
+  classReverts: false,
+  classNativeCost: 0n,
+  emptyPrimaryVault: false,
+};
+function resetFixture() {
+  Object.assign(fixture, { native: 0n, accountTokens: HELD, classTokens: 0n, classConfirmed: false,
+    failGasPrice: false, refuseSponsor: false, failClassReceipt: false, classReverts: false, classNativeCost: 0n, emptyPrimaryVault: false });
+  submitted.length = 0;
+}
 
 const hex = (n: bigint) => `0x${n.toString(16)}`;
 
@@ -135,6 +160,11 @@ function stubNode() {
         seen.push(method);
         const ok = (result: unknown) => ({ jsonrpc: "2.0", id, result });
 
+        if (method === "pm_getPaymasterStubData" || method === "pm_getPaymasterData") {
+          if (fixture.refuseSponsor) return ok({});
+          return ok({ paymaster: PAYMASTER, paymasterData: "0x1234", paymasterVerificationGasLimit: hex(100_000n), paymasterPostOpGasLimit: hex(50_000n) });
+        }
+
         // ── the bundler ────────────────────────────────────────────────────
         if (method === "eth_sendUserOperation") {
           submitted.push(params[0] as Record<string, unknown>);
@@ -148,13 +178,17 @@ function stubNode() {
           });
         }
         if (method === "eth_getUserOperationReceipt") {
+          if (fixture.classTokens > 0n && submitted.length === 1) {
+            if (fixture.failClassReceipt) return { jsonrpc: "2.0", id, error: { code: -32000, message: "class receipt lookup failed" } };
+            fixture.classConfirmed = !fixture.classReverts;
+          }
           return ok({
             userOpHash: `0x${"ab".repeat(32)}`,
             sender: DEPLOYS_TO,
             nonce: "0x0",
             actualGasCost: hex(1n),
             actualGasUsed: hex(1n),
-            success: true,
+            success: !(fixture.classReverts && submitted.length === 1),
             logs: [],
             receipt: {
               transactionHash: `0x${"cd".repeat(32)}`,
@@ -188,8 +222,10 @@ function stubNode() {
         // ── the chain ──────────────────────────────────────────────────────
         if (method === "eth_chainId") return ok(hex(BigInt(robinhoodChain.id)));
         if (method === "eth_getCode") return ok("0x");
-        if (method === "eth_getBalance") return ok("0x0");
-        if (method === "eth_gasPrice") return ok(hex(1_000_000_000n));
+        if (method === "eth_getBalance") return ok(hex(fixture.native - (fixture.classConfirmed ? fixture.classNativeCost : 0n)));
+        if (method === "eth_gasPrice") return fixture.failGasPrice
+          ? { jsonrpc: "2.0", id, error: { code: -32000, message: "gas price unavailable" } }
+          : ok(hex(1_000_000_000n));
         if (method === "eth_maxPriorityFeePerGas") return ok(hex(1n));
         if (method === "eth_getLogs") return ok([]);
         if (method === "eth_blockNumber") return ok("0x1");
@@ -217,8 +253,18 @@ function stubNode() {
             };
           }
           if (data.startsWith(SEL.balanceOf)) {
-            const held = String(call.to ?? "").toLowerCase() === DOGGOS ? HELD : 0n;
+            const holder = `0x${data.slice(-40)}`.toLowerCase();
+            const held = String(call.to ?? "").toLowerCase() !== DOGGOS ? 0n
+              : holder === EMPTY_CLASS_VAULT ? 0n
+              : holder === CLASS_VAULT ? (fixture.classConfirmed ? 0n : fixture.classTokens)
+              : fixture.accountTokens + (fixture.classConfirmed ? fixture.classTokens : 0n);
             return ok(encodeFunctionResult({ abi: UINT256, result: held }));
+          }
+          if (data.startsWith(vaultForSelector)) {
+            const primary = String(call.to).toLowerCase() === PONS_CLASS_VAULT_FACTORY_V2[robinhoodChain.id]?.toLowerCase();
+            return ok(encodeFunctionResult({ abi: ADDRESS_RESULT, result: fixture.classTokens === 0n
+              ? "0x0000000000000000000000000000000000000000"
+              : fixture.emptyPrimaryVault && primary ? EMPTY_CLASS_VAULT : CLASS_VAULT }));
           }
           // The account has never sent an operation, so its 4337 nonce is zero.
           if (data.startsWith(SEL.getNonce)) {
@@ -249,6 +295,17 @@ after(() => server.close());
 const extraTokens = [{ address: DOGGOS as Address, symbol: "DOGGOS", decimals: 6 }];
 
 describe("a keyless owner can PLAN", () => {
+  it("the address-only reconstruction performs no holdings scan or signing", async () => {
+    resetFixture();
+    const calls = noCalls();
+    const before = seen.length;
+    const address = await deriveRecoveryAccountAddress({ chain: robinhoodChain, owner: ownerFromSigner(privyShapedAccount(calls)), rpcUrl: url });
+    assert.equal(address, DEPLOYS_TO);
+    assert.deepEqual(calls, noCalls());
+    assert.equal(seen.slice(before).includes("eth_getBalance"), false);
+    assert.equal(seen.slice(before).includes("eth_getLogs"), false);
+  });
+
   it("planRecovery reconstructs the account from a Privy-shaped signer", async () => {
     const calls = noCalls();
     const plan = await planRecovery({
@@ -293,7 +350,7 @@ describe("a keyless owner can PLAN", () => {
 describe("a keyless owner can SWEEP — the half a derivation test cannot see", () => {
   it("recoverFunds signs with the embedded wallet and reaches the bundler", async () => {
     const calls = noCalls();
-    submitted.length = 0;
+    resetFixture();
 
     const result = await recoverFunds({
       chain: robinhoodChain,
@@ -320,10 +377,7 @@ describe("a keyless owner can SWEEP — the half a derivation test cannot see", 
     assert.ok(result.txHash, "the owner must be told the sweep landed");
   });
 
-  it("the swept operation is SELF-PAYING — no paymaster smuggled in", () => {
-    // The relay refuses any op carrying paymaster fields, so an engine that
-    // started attaching them would strand recovery behind gate 4 instead of
-    // sponsoring it. Asserted on the op that actually went out.
+  it("without a house sponsor the operation remains self-paid", () => {
     const op = sentOp();
     for (const field of [
       "paymaster",
@@ -337,6 +391,135 @@ describe("a keyless owner can SWEEP — the half a derivation test cannot see", 
         v === undefined || v === null || v === "0x" || v === "",
         `recovery must not carry ${field}`,
       );
+    }
+  });
+});
+
+describe("house sponsorship covers every recovery operation", () => {
+  const sponsor = createSponsor({ url, policyId: "sp_house_recovery" });
+  const options = () => ({ chain: robinhoodChain, owner: ownerFromSigner(privyShapedAccount(noCalls())),
+    bundlerUrl: url, rpcUrl: url, to: DESTINATION, expectedSmartAccount: DEPLOYS_TO, extraTokens, sponsor });
+
+  it("sweeps tokens from a zero-ETH account with a real owner signature and paymaster", async () => {
+    resetFixture();
+    const result = await recoverFunds(options());
+    assert.equal(submitted.length, 1);
+    assert.equal(sentOp().paymaster, PAYMASTER);
+    assert.equal(sentOp().paymasterData, "0x1234");
+    assert.match(String(sentOp().signature), /^0x[0-9a-f]{40,}$/i);
+    assert.ok(result.txHash);
+    assert.equal(result.nativeReservedWei, 0n);
+  });
+
+  it("discloses and sweeps the full native balance without asking the chain for a gas price", async () => {
+    resetFixture();
+    fixture.accountTokens = 0n;
+    fixture.native = 321n;
+    fixture.failGasPrice = true;
+    const gasReadsBefore = seen.filter((method) => method === "eth_gasPrice").length;
+    const plan = await planRecovery({ ...options(), gasSponsored: true });
+    assert.equal(plan.nativeRecoverableWei, 321n);
+    assert.equal(plan.nativeReserveWei, 0n);
+    assert.equal(plan.unreadable.includes("gas price"), false);
+    const result = await recoverFunds(options());
+    assert.equal(result.nativeSweptWei, 321n);
+    assert.equal(result.nativeReservedWei, 0n);
+    assert.equal(sentOp().paymaster, PAYMASTER);
+    assert.equal(seen.filter((method) => method === "eth_gasPrice").length, gasReadsBefore);
+  });
+
+  it("sponsors the class-only vault operation and the final transfer with zero ETH", async () => {
+    resetFixture();
+    fixture.accountTokens = 0n;
+    fixture.classTokens = HELD;
+    const result = await recoverFunds(options());
+    assert.equal(submitted.length, 2);
+    assert.ok(submitted.every((op) => op.paymaster === PAYMASTER && op.paymasterData === "0x1234"));
+    assert.equal(fixture.classConfirmed, true);
+    assert.equal(result.balances.find((b) => b.address.toLowerCase() === DOGGOS)?.raw, HELD);
+    assert.equal(result.nativeReservedWei, 0n);
+  });
+
+  it("merges the fresh class token balance with an existing account holding exactly once", async () => {
+    resetFixture();
+    fixture.classTokens = 7n;
+    const result = await recoverFunds(options());
+    const rows = result.balances.filter((b) => b.address.toLowerCase() === DOGGOS);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.raw, HELD + 7n);
+    assert.equal(rows[0]?.decimals, 6);
+  });
+
+  it("recovers a funded older vault when the newer vault and account hold no tokens or ETH", async () => {
+    resetFixture();
+    fixture.accountTokens = 0n;
+    fixture.classTokens = HELD;
+    fixture.emptyPrimaryVault = true;
+    const result = await recoverFunds(options());
+    assert.equal(result.classVaults[0]?.holdings.length, 0);
+    assert.equal(result.classVaults[1]?.holdings.length, 1);
+    assert.equal(submitted.length, 2);
+    assert.equal(result.balances[0]?.raw, HELD);
+  });
+
+  it("refuses missing sponsorship before signing or submission, without self-paying", async () => {
+    resetFixture();
+    fixture.native = 1_000_000_000_000_000_000n;
+    fixture.refuseSponsor = true;
+    const calls = noCalls();
+    await assert.rejects(recoverFunds({ ...options(), owner: ownerFromSigner(privyShapedAccount(calls)) }),
+      (e: unknown) => e instanceof SponsorRefused || /no valid paymaster/.test(String(e)));
+    assert.equal(submitted.length, 0);
+    assert.deepEqual(calls, noCalls());
+  });
+
+  it("stops after an ambiguous class receipt and never submits the account sweep", async () => {
+    resetFixture();
+    fixture.accountTokens = 0n;
+    fixture.classTokens = HELD;
+    fixture.failClassReceipt = true;
+    await assert.rejects(recoverFunds(options()), /outcome could not be confirmed.*receipt before submitting another recovery/);
+    assert.equal(submitted.length, 1);
+  });
+
+  it("reports a reverted class receipt and does not pretend its tokens reached the account", async () => {
+    resetFixture();
+    fixture.accountTokens = 0n;
+    fixture.classTokens = HELD;
+    fixture.classReverts = true;
+    const result = await recoverFunds(options());
+    assert.equal(submitted.length, 1);
+    assert.equal(result.txHash, null);
+    assert.equal(result.balances.length, 0);
+    assert.match(result.skipped[0]?.reason ?? "", /reverted on-chain/);
+  });
+
+  it("sizes an unsponsored final native sweep after the class operation's gas cost", async () => {
+    resetFixture();
+    fixture.accountTokens = 0n;
+    fixture.classTokens = HELD;
+    fixture.native = 5_000_000_000_000_000n;
+    fixture.classNativeCost = 100_000_000_000_000n;
+    const result = await recoverFunds({ ...options(), sponsor: undefined });
+    assert.equal(submitted.length, 2);
+    assert.equal(result.nativeSweptWei + result.nativeReservedWei, fixture.native - fixture.classNativeCost);
+  });
+
+  it("carries the owner ticket on the final bundler request when explicitly requested", async () => {
+    resetFixture();
+    const originalFetch = globalThis.fetch;
+    const seen: Array<RequestCredentials | undefined> = [];
+    globalThis.fetch = (input, init) => {
+      if (typeof init?.body === "string" && init.body.includes('"method":"eth_sendUserOperation"')) {
+        seen.push(init.credentials);
+      }
+      return originalFetch(input, init);
+    };
+    try {
+      await recoverFunds({ ...options(), bundlerCredentials: "include" });
+      assert.deepEqual(seen, ["include"]);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });

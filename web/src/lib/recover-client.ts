@@ -37,7 +37,8 @@
 
 import { privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
-import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { base64url, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { createSponsor } from "../../../worker/src/paymaster";
 import {
   ownerFromPrivateKey,
   ownerFromSigner,
@@ -60,6 +61,8 @@ export interface BrowserWallet {
   /** A signer that needs no key — `toViemAccount({ wallet })` from Privy. */
   ownerAccount?: LocalAccount;
   chainId: number;
+  /** Explicit trusted application origin for native clients. Never a provider key. */
+  apiOrigin?: string;
   /** Addresses the grant covers, used as the sweep list. */
   grantTokens?: readonly string[];
 }
@@ -81,9 +84,62 @@ function ownerOf(w: BrowserWallet): RecoveryOwner {
 
 const chainOf = (id: number) => (id === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain);
 
+/** Native's URL adapter has no .origin getter; reconstruct only a checked origin. */
+function canonicalOrigin(value: string): string {
+  if (typeof value !== "string" || !/^https?:\/\/[^/?#\\\s]+\/?$/i.test(value)) throw new Error("recovery needs a trusted application origin, without a path or credentials");
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("recovery application origin is invalid"); }
+  const protocol = url.protocol.toLowerCase();
+  const host = url.hostname.toLowerCase();
+  const port = url.port ?? "";
+  if (!host || url.username || url.password || (url.pathname && url.pathname !== "/") || url.search ||
+      (port && (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535))) {
+    throw new Error("recovery needs a trusted application origin, without a path or credentials");
+  }
+  if (protocol !== "https:" && !(protocol === "http:" && ["localhost", "127.0.0.1", "[::1]", "::1"].includes(host))) {
+    throw new Error("recovery needs HTTPS, except for a local application");
+  }
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const defaultPort = protocol === "https:" ? "443" : "80";
+  return `${protocol}//${authority}${port && port !== defaultPort ? `:${port}` : ""}`;
+}
+
+function recoveryOrigin(apiOrigin?: string): string {
+  const page = typeof window === "undefined" ? undefined : window.location?.origin;
+  const browserOrigin = typeof page === "string" && /^https?:/i.test(page) ? canonicalOrigin(page) : null;
+  if (apiOrigin !== undefined) {
+    const explicit = canonicalOrigin(apiOrigin);
+    if (browserOrigin && explicit !== browserOrigin) throw new Error("recovery application origin does not match this page");
+    return explicit;
+  }
+  if (!browserOrigin) throw new Error("recovery needs a trusted application origin");
+  return browserOrigin;
+}
+
 /** This origin's relay, which holds the house bundler key so the browser cannot. */
-export const relayUrl = (chainId: number) =>
-  `${typeof window === "undefined" ? "" : window.location.origin}/api/bundler/${chainId}`;
+export const relayUrl = (chainId: number, apiOrigin?: string) =>
+  `${recoveryOrigin(apiOrigin)}/api/bundler/${chainId}`;
+
+function ownerChallenge(origin: string, nonce: unknown): string {
+  if (typeof nonce !== "string" || nonce.length > 512) throw new Error("the site returned an invalid recovery nonce");
+  const parts = nonce.split(".");
+  const [random, expiry, namespace, mac] = parts;
+  const expectedNamespace = base64url(new TextEncoder().encode(`${origin}|recovery-owner-actions-v2`));
+  if (parts.length !== 4 || !/^[A-Za-z0-9_-]{21}[AQgw]$/.test(random ?? "") ||
+      !/^[1-9][0-9]{0,15}$/.test(expiry ?? "") || !Number.isSafeInteger(Number(expiry)) ||
+      namespace !== expectedNamespace || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(mac ?? "")) {
+    throw new Error("the site returned an invalid or misbound recovery nonce");
+  }
+  // The server enforces expiry. A device clock offset must not strand recovery.
+  // Keep this exact protocol text browser-safe: recovery-ticket.ts imports crypto.
+  return [
+    `${origin} — recover your merrymen account.`, "",
+    "This proves you control the owner key so the site can relay withdrawals and permission revocations.",
+    "It moves no funds by itself and grants no permissions: each operation",
+    "is a separate operation you sign next.", "",
+    `URI: ${origin}`, `Nonce: ${nonce}`,
+  ].join("\n");
+}
 
 /**
  * Strip anything that could carry a key or an upstream URL out of an error.
@@ -106,6 +162,16 @@ export function redact(e: unknown, ownerKey?: string): string {
     .slice(0, 600);
 }
 
+/** Turn paymaster failures into an actionable message instead of an RPC dump. */
+export function ownerGasError(e: unknown, ownerKey?: string): string {
+  const message = redact(e, ownerKey);
+  if (/AA21|prefund|paymaster|SponsorRefused|sponsor-(?:refused|unreachable|absurd)/i.test(message) ||
+      (e instanceof Error && e.name === "SponsorRefused")) {
+    return "Merrymen could not obtain gas coverage for this action. Retry when coverage is restored; you do not need to add ETH for this fee.";
+  }
+  return message;
+}
+
 /**
  * Sign the recovery challenge with the OWNER KEY, locally, and arm the relay.
  *
@@ -114,21 +180,28 @@ export function redact(e: unknown, ownerKey?: string): string {
  * and no script on the page can read it back out.
  */
 export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
-  const chal = await fetch("/api/recover/ticket", { cache: "no-store" });
+  const origin = recoveryOrigin(w.apiOrigin);
+  const ticketUrl = `${origin}/api/recover/ticket`;
+  const chal = await fetch(`${ticketUrl}?scope=owner-actions`, { cache: "no-store", credentials: "include" });
   if (!chal.ok) throw new Error("could not start recovery — the site did not issue a challenge");
-  const { nonce, message } = (await chal.json()) as { nonce: string; message: string };
+  const challenge = await chal.json() as unknown;
+  if (!challenge || typeof challenge !== "object" || Array.isArray(challenge)) throw new Error("the site returned an invalid recovery challenge");
+  const { nonce, message } = challenge as { nonce?: unknown; message?: unknown };
+  const expectedMessage = ownerChallenge(origin, nonce);
+  if (typeof message !== "string" || message !== expectedMessage) throw new Error("the site returned an unexpected recovery message — refusing to sign");
 
   // Signed HERE. A browser key never leaves this function's scope, let alone the
   // tab; a Privy embedded wallet signs inside its own iframe and this code never
   // sees key material at all. Either way the signature is produced locally.
   const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
   if (!signer) throw new Error("no owner signer: nothing here can sign the recovery challenge.");
-  const signature = await signer.signMessage({ message });
+  const signature = await signer.signMessage({ message: expectedMessage });
 
-  const res = await fetch("/api/recover/ticket", {
+  const res = await fetch(ticketUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ nonce, signature, chainId: w.chainId }),
+    credentials: "include",
+    body: JSON.stringify({ nonce, signature, chainId: w.chainId, scope: "owner-actions" }),
   });
   const body = (await res.json()) as { smartAccount?: string; error?: string };
   if (!res.ok) throw new Error(body.error ?? "the site would not issue a recovery ticket");
@@ -139,6 +212,31 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   if (body.smartAccount && body.smartAccount.toLowerCase() !== w.smartAccount.toLowerCase()) {
     throw new Error("this key does not control the account shown — refusing to sweep");
   }
+}
+
+export interface OwnerGasSupport {
+  gasSponsored: boolean;
+  reason: string | null;
+}
+
+/** The house decides eligibility and policy. An owner signature proves this wallet. */
+export async function ownerGasSupport(w: BrowserWallet): Promise<OwnerGasSupport> {
+  await getRecoveryTicket(w);
+  const response = await fetch(relayUrl(w.chainId, w.apiOrigin), { cache: "no-store", credentials: "include" });
+  const body = await response.json() as { gasSponsored?: unknown; reason?: unknown; error?: unknown };
+  if (!response.ok || typeof body.gasSponsored !== "boolean") {
+    throw new Error(typeof body.error === "string" ? body.error : "Could not check Merrymen gas coverage. Retry when the service is available.");
+  }
+  return { gasSponsored: body.gasSponsored, reason: typeof body.reason === "string" ? body.reason : null };
+}
+
+/** Never charge an owner's ETH as a fallback when house sponsorship is unavailable. */
+export async function ownerGasSponsor(w: BrowserWallet) {
+  const support = await ownerGasSupport(w);
+  if (!support.gasSponsored) {
+    throw new Error(support.reason ?? "Merrymen gas coverage is unavailable on this network. Your wallet was kept; retry when coverage is restored.");
+  }
+  return createSponsor({ url: relayUrl(w.chainId, w.apiOrigin), credentials: "include" });
 }
 
 /**
@@ -153,6 +251,8 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
 export interface BrowserPlan extends RecoverPlan {
   /** True when the account cannot pay for its own withdrawal. */
   needsGas: boolean;
+  gasSponsored: boolean;
+  sponsorshipReason: string | null;
 }
 
 /**
@@ -170,8 +270,11 @@ export interface BrowserPlan extends RecoverPlan {
 export const grantExtraTokens = (grantTokens: readonly string[] = []) =>
   grantTokens.map((address) => ({ address, symbol: "" }));
 
-/** What is in the account, read straight from the chain. No relay, no session. */
+/** Read balances from the chain and check house coverage with an owner proof. */
 export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
+  let support: OwnerGasSupport;
+  try { support = await ownerGasSupport(w); }
+  catch (e) { support = { gasSponsored: false, reason: redact(e, w.ownerKey) }; }
   const plan = (await planRecovery({
     chain: chainOf(w.chainId),
     owner: ownerOf(w),
@@ -180,8 +283,9 @@ export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
     // fails loudly instead of sweeping a stranger's empty account.
     expectedSmartAccount: w.smartAccount,
     extraTokens: grantExtraTokens(w.grantTokens),
+    gasSponsored: support.gasSponsored,
   })) as RecoverPlan;
-  return { ...plan, needsGas: plan.gasWei === 0n };
+  return { ...plan, needsGas: !support.gasSponsored && plan.gasWei === 0n, gasSponsored: support.gasSponsored, sponsorshipReason: support.reason };
 }
 
 /**
@@ -209,12 +313,14 @@ export async function sweepFromBrowser(
 ) {
   // Arms the relay by setting the ticket cookie. Same-origin requests carry it
   // automatically from here, including the ones viem makes inside recoverFunds.
-  await getRecoveryTicket(w);
+  const sponsor = await ownerGasSponsor(w);
 
-  return recoverFunds({
+  try { return await recoverFunds({
     chain: chainOf(w.chainId),
     owner: ownerOf(w),
-    bundlerUrl: relayUrl(w.chainId),
+    bundlerUrl: relayUrl(w.chainId, w.apiOrigin),
+    bundlerCredentials: "include",
+    sponsor,
     to,
     expectedSmartAccount: w.smartAccount,
     extraTokens: grantExtraTokens(w.grantTokens),
@@ -227,5 +333,5 @@ export async function sweepFromBrowser(
           requireApprovedClassSweep: true,
         }
       : {}),
-  });
+  }); } catch (e) { throw new Error(ownerGasError(e, w.ownerKey)); }
 }

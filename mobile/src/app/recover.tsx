@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { router } from "expo-router";
 import { formatEther, isAddress, type Address } from "viem";
-import { robinhoodChain } from "@merrymen/core";
-import { planRecovery, recoverFunds, type RecoverPlan } from "@merrymen/recover";
-import { accountFromMnemonic, privateKeyFromMnemonic, validateMnemonic } from "@/crypto/mnemonic";
+import type { BrowserPlan } from "../../../web/src/lib/recover-client";
+import { accountFromMnemonic, validateMnemonic } from "@/crypto/mnemonic";
+import { planMobileRecovery, recoveryOrigin, sweepMobileRecovery } from "@/crypto/recovery";
 import { forgetOwner, readOwner, writeOwner } from "@/crypto/keystore";
 import { readGrant } from "@/crypto/grantStore";
 import { EXPLORER, RPC_URL } from "@/net/chainlinks";
+import { feedOrigin } from "@/net/api";
 import { useBottomPad, useTopPad } from "@/ui/insets";
 import { useNoScreenshots } from "@/ui/useNoScreenshots";
 import { C } from "@/ui/tokens";
@@ -30,6 +31,9 @@ import { C } from "@/ui/tokens";
  */
 
 type Stage = "restore" | "plan" | "sent";
+// Only Merrymen's canonical service offers house recovery. Custom feed builds
+// retain the standalone bundler field and explicitly pay recovery from ETH.
+const API_ORIGIN = recoveryOrigin(feedOrigin);
 
 /**
  * Strip query strings out of anything URL-shaped before it reaches the screen.
@@ -58,11 +62,14 @@ export default function Recover() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  const [plan, setPlan] = useState<RecoverPlan | null>(null);
+  const [plan, setPlan] = useState<BrowserPlan | null>(null);
   const [expected, setExpected] = useState<Address | null>(null);
+  const [grantTokens, setGrantTokens] = useState<readonly string[]>([]);
+  const [selectedClassVault, setSelectedClassVault] = useState("");
   const [to, setTo] = useState("");
   const [bundler, setBundler] = useState("");
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [skipped, setSkipped] = useState<{ symbol: string; reason: string }[]>([]);
 
   // If a grant is still on the device we know which account the phrase SHOULD
   // control, which turns "wrong key" from a confusing empty sweep into a clear
@@ -108,15 +115,20 @@ export default function Recover() {
         setStage("restore");
         return;
       }
-      const p = await planRecovery({
-        chain: robinhoodChain,
-        ownerPrivateKey: privateKeyFromMnemonic(owner.mnemonic),
+      const saved = await readGrant();
+      const tokens = saved?.grantTokens ?? [];
+      const p = await planMobileRecovery({
+        owner: accountFromMnemonic(owner.mnemonic),
+        apiOrigin: API_ORIGIN,
         rpcUrl: RPC_URL,
         // Throws a clear "this key controls X, not Y" rather than sweeping the
         // wrong (probably empty) account.
         expectedSmartAccount: expected ?? undefined,
+        grantTokens: tokens,
       });
       setPlan(p);
+      setGrantTokens(tokens);
+      setSelectedClassVault(p.classVaults.find(v => v.holdings.length > 0)?.vault ?? "");
     } catch (e) {
       setError(e instanceof Error ? redact(e.message) : "Couldn't read the account.");
     } finally {
@@ -131,7 +143,7 @@ export default function Recover() {
       setError("Enter the address you want the funds sent to.");
       return;
     }
-    if (!bundler.startsWith("http")) {
+    if (!API_ORIGIN && !bundler.startsWith("http")) {
       setError("A bundler URL is required — a smart account cannot move funds without one.");
       return;
     }
@@ -141,14 +153,19 @@ export default function Recover() {
     try {
       const owner = await readOwner();
       if (owner.state !== "present") throw new Error("key unavailable");
-      const res = await recoverFunds({
-        chain: robinhoodChain,
-        ownerPrivateKey: privateKeyFromMnemonic(owner.mnemonic),
+      const selected = plan.classVaults.find(v => v.vault === selectedClassVault);
+      const res = await sweepMobileRecovery({
+        owner: accountFromMnemonic(owner.mnemonic),
+        apiOrigin: API_ORIGIN,
         rpcUrl: RPC_URL,
         bundlerUrl: bundler.trim(),
+        plan,
+        grantTokens,
         to: to as Address,
+        ...(selected?.holdings.length ? { approvedClass: { vault: selected.vault, tokens: selected.holdings.map(h => h.token) } } : {}),
       });
       setTxHash(res.txHash);
+      setSkipped(res.skipped);
       setStage("sent");
     } catch (e) {
       setError(e instanceof Error ? redact(e.message) : "The sweep failed.");
@@ -156,10 +173,12 @@ export default function Recover() {
       setBusy(false);
       setNote(null);
     }
-  }, [plan, to, bundler]);
+  }, [plan, to, bundler, grantTokens, selectedClassVault]);
 
-  const hasBalances = (plan?.balances.length ?? 0) > 0;
-  const noGas = plan ? plan.gasWei === 0n : false;
+  const hasBalances = (plan?.balances.length ?? 0) > 0 || (plan?.nativeRecoverableWei ?? 0n) > 0n || (plan?.classVaults.some(v => v.holdings.length > 0) ?? false);
+  const noGas = plan?.needsGas === true;
+  const coverageUnavailable = API_ORIGIN !== null && plan?.gasSponsored !== true;
+  const cannotSweep = busy || noGas || coverageUnavailable || (plan?.unreadable.length ?? 0) > 0;
 
   return (
     // automaticallyAdjustKeyboardInsets, because this screen does not scroll: its
@@ -238,6 +257,7 @@ export default function Recover() {
             It is <Text style={styles.strong}>not</Text> bound by the caps your agent trades under — that is
             what makes it work when a session key is gone or expired.
           </Text>
+          {API_ORIGIN && <Text style={styles.hint}>Checking fee coverage signs an ownership proof. It moves no funds and grants no permissions.</Text>}
 
           {!plan ? (
             <Pressable style={styles.primary} disabled={busy} onPress={doPlan}>
@@ -256,7 +276,7 @@ export default function Recover() {
                 <Text style={styles.cardLabel}>smart account</Text>
                 <Text style={styles.cardAddr}>{plan.smartAccount}</Text>
                 <Text style={styles.cardLabel}>holds</Text>
-                {hasBalances ? (
+                {plan.balances.length > 0 ? (
                   plan.balances.map((b) => (
                     <View key={b.address} style={styles.balRow}>
                       <Text style={styles.balSym}>{b.symbol}</Text>
@@ -264,25 +284,34 @@ export default function Recover() {
                     </View>
                   ))
                 ) : (
-                  <Text style={styles.muted}>Nothing to sweep — every token balance is zero.</Text>
+                  <Text style={styles.muted}>{plan.unreadable.length ? "Account token balances are incomplete." : "No tokens are held in the account itself."}</Text>
                 )}
                 <View style={styles.balRow}>
-                  <Text style={styles.balSymDim}>ETH (gas)</Text>
+                  <Text style={styles.balSymDim}>ETH balance</Text>
                   <Text style={[styles.balAmt, noGas && { color: C.red }]}>{formatEther(plan.gasWei)}</Text>
                 </View>
               </View>
-
-              {/* Two things people get wrong here, so both are said before the
-                  button rather than discovered after a failed transaction. */}
               <Text style={styles.warnText}>
-                The sweep moves tokens only. The ETH above pays for the transaction and stays behind.
+                {plan.gasSponsored ? "Merrymen covers the network fee, including the selected Class vault. Recoverable ETH moves too; none is kept as a fee reserve." : API_ORIGIN ? "Merrymen fee coverage is unavailable. Refresh the plan when coverage is restored. This app will not charge your ETH as a fallback." : `Standalone recovery pays the network fee from this account. ${formatEther(plan.nativeReserveWei)} ETH is reserved for fees; the remaining recoverable ETH moves with the tokens.`}
               </Text>
-              {noGas && (
+              {plan.sponsorshipReason && <Text style={styles.hint}>{plan.sponsorshipReason}</Text>}
+              {noGas && !API_ORIGIN && (
                 <Text style={styles.errorBox}>
                   This account has no ETH, so it cannot pay for its own recovery. Send a small amount of ETH to
                   the address above first, then come back.
                 </Text>
               )}
+              {plan.unreadable.length > 0 && <Text style={styles.errorBox}>Some balances could not be read: {plan.unreadable.join(", ")}. Refresh the plan before confirming.</Text>}
+              {plan.classVaults.filter(v => v.holdings.length > 0).map(v => (
+                <Pressable key={v.vault} style={styles.card} disabled={busy} onPress={() => setSelectedClassVault(v.vault)}>
+                  <Text style={styles.cardLabel}>{selectedClassVault === v.vault ? "Selected Class vault" : "Select Class vault"}</Text>
+                  <Text style={styles.cardAddr}>{v.vault}</Text>
+                  {v.holdings.map(h => <View key={h.token} style={styles.balRow}><Text style={styles.balSym}>{h.symbol}</Text><Text style={styles.balAmt}>{h.amount}</Text></View>)}
+                  {v.note && <Text style={styles.hint}>{v.note}</Text>}
+                </Pressable>
+              ))}
+              {plan.classVaults.filter(v => v.holdings.length > 0).length > 1 && <Text style={styles.hint}>Only the selected Class vault is included. Recover the others separately.</Text>}
+              <Pressable style={styles.ghost} disabled={busy} onPress={doPlan}><Text style={styles.ghostText}>Refresh balances and fee coverage</Text></Pressable>
 
               {hasBalances && (
                 <>
@@ -305,7 +334,8 @@ export default function Recover() {
                     exchange deposit address unless you are certain it accepts this chain.
                   </Text>
 
-                  <Text style={styles.label}>Bundler URL</Text>
+                  {!API_ORIGIN && <>
+                  <Text style={styles.label}>Your bundler URL — standalone recovery</Text>
                   <TextInput
                     style={styles.inputOne}
                     value={bundler}
@@ -320,15 +350,15 @@ export default function Recover() {
                     spellCheck={false}
                   />
                   <Text style={styles.hint}>
-                    A smart account cannot send a transaction by itself — a bundler submits it. This app has no
-                    key of its own, so paste one from your dashboard settings or from pimlico.io.
+                    This standalone recovery uses your own bundler and this account&apos;s ETH. A custom feed does not provide Merrymen&apos;s recovery service or fee coverage.
                   </Text>
+                  </>}
 
                   {error && <Text style={styles.error}>{error}</Text>}
 
                   <Pressable
-                    style={[styles.dangerSolid, (busy || noGas) && styles.primaryOff]}
-                    disabled={busy || noGas}
+                    style={[styles.dangerSolid, cannotSweep && styles.primaryOff]}
+                    disabled={cannotSweep}
                     onPress={sweep}
                   >
                     {busy ? (
@@ -359,9 +389,9 @@ export default function Recover() {
         <>
           <Text style={styles.h1}>Swept</Text>
           <Text style={styles.lede}>
-            Everything the account held has been sent to {to}. The transaction is on-chain — check it yourself
-            rather than taking our word for it.
+            {txHash ? `Recoverable assets were sent to ${to}. Check the receipt for the confirmed transaction.` : "No transfer was confirmed. Refresh the account to check what remains."}
           </Text>
+          {skipped.map((item, index) => <Text key={`${item.symbol}-${index}`} style={styles.warnText}>Left behind: {item.symbol} — {item.reason}</Text>)}
           {txHash && (
             <Pressable style={styles.primary} onPress={() => Linking.openURL(`${EXPLORER}/tx/${txHash}`)}>
               <Text style={styles.primaryText}>View the receipt</Text>

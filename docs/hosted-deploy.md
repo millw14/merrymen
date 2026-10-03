@@ -31,9 +31,12 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 - **Bundler** — `MERRYMEN_BUNDLER_API_KEY` (a **Pimlico** key). The worker builds the URL per chain as `https://api.pimlico.io/v2/<chainId>/rpc?apikey=…`; Pimlico supports Robinhood testnet **46630** (listed as `robinhood-testnet`). Get a key at <https://dashboard.pimlico.io> (free tier is fine for the slice). Alternatively set `MERRYMEN_BUNDLER_URL` to a full 4337 RPC from any bundler that supports 46630.
 - **RPC** — `MERRYMEN_RPC_TESTNET`. The public endpoint is **`https://rpc.testnet.chain.robinhood.com`** (already the chain's built-in default in `packages/core/src/chain.ts`; set it explicitly, or point at a private endpoint for reliability). `MERRYMEN_RPC_MAINNET` = `https://rpc.mainnet.chain.robinhood.com` for 4663 later.
 - **LLM** (optional, for the strategist) — `GROQ_API_KEY` (free tier) or `ANTHROPIC_API_KEY`.
-- **Gas** — by default the smart account self-pays, so each armed tenant's smart account needs testnet ETH on 46630 from the Robinhood Chain faucet (see <https://docs.robinhood.com/chain/>). Set `MERRYMEN_SPONSOR_GAS=1` on the **orchestrator** and the house pays instead, out of the same Pimlico account as the bundler — tenants then fund USDG only. Two things to know before flipping it:
-  - **Nothing in this repo caps cumulative spend.** The clamps bound a single operation (`PAYMASTER_GAS_MAX`, `GAS_BOUNDS.absoluteMax`), not a month. The **Pimlico sponsorship policy is the only real limit**, so create one scoped to the chain with per-sender and monthly caps and put its id in `MERRYMEN_SPONSORSHIP_POLICY_ID`. Without a policy id `paymasterContext` is undefined and sponsorship is unpoliced.
-  - **Withdrawal is never sponsored.** The recovery path pays its own fee out of the balance it is sweeping, so an account still needs a little ETH to get money back OUT. Every screen that mentions sponsorship says so; do not remove that caveat.
+- **Gas** — set `MERRYMEN_SPONSOR_GAS=1` on both the **orchestrator** (trading operations) and **web** (owner revocations, network migration, withdrawals and recovery). Web also needs `MERRYMEN_BUNDLER_API_KEY` and a `MERRYMEN_SPONSORSHIP_POLICY_ID` (`sp_…`). Configure separate Pimlico policies for trading and owner recovery with chain allowlists and separate global monthly spending caps on both Robinhood networks where you offer coverage. Separate policies keep trading from exhausting the owner recovery allocation.
+  - [Pimlico manages the paymaster and bills usage](https://docs.pimlico.io/guides/pricing); no paymaster top-up is required. Mainnet gas has a 10% surcharge, so leave headroom when setting a total gas budget. API-credit fees are separate and are not capped by sponsorship policies. Keep the billing account in good standing.
+  - Trading coverage requires the house key and pinned trading policy. Missing configuration blocks live trading; paper practice and read-only access remain available without a live executor. A refused startup probe does not remove the sponsor: each actual operation must still obtain a quote, and refusal cannot switch the worker to spending the owner's ETH. Provision both policies before deploying or enabling this coverage.
+  - Owner coverage is restricted to an owner-proven canonical account in a previously enrolled Merrymen wallet family, including stopped wallets and the destination network during migration. Paying for Pimlico alone does not attach a paymaster to every operation.
+  - The owner relay refuses sponsorship without a policy. Each owner operation is bounded by the existing 3,000,000 total gas ceiling, 500,000 gas per paymaster field, a maximum fee of 1 gwei and a maximum cost of 0.001 ETH. The policy can impose tighter limits; its cumulative caps remain necessary. The relay also durably reserves 0.001 ETH per unique final quote, with a 0.01 ETH daily budget per owner across both chains. Exact quote retries reuse their reservation; changed fee or gas fields consume another slot, and unknown outcomes keep the reservation.
+  - Browser and house-connected native owner actions refuse when sponsorship is unavailable; they do not silently spend the owner's ETH. Sponsored recovery reserves no ETH for fees and can withdraw tokens from an account holding zero ETH. Standalone CLI/local recovery still follows its explicit operator sponsorship settings.
 
 ## 4. Environment, per service
 
@@ -51,6 +54,9 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 | `MERRYMEN_PUBLIC_ORIGIN` | the web service's public URL, e.g. `https://merrymen.up.railway.app` — auth binds signatures to it |
 | `PORT` | set by Railway automatically; `start:web` honours it |
 | `GROQ_API_KEY` *(or `ANTHROPIC_API_KEY`)* | **the dashboard chat's brain.** Not optional if you want the chat to think — see below |
+| `MERRYMEN_SPONSOR_GAS` | `1` for owner-action gas coverage |
+| `MERRYMEN_BUNDLER_API_KEY` | House Pimlico key, held only on the server |
+| `MERRYMEN_SPONSORSHIP_POLICY_ID` | Required owner sponsorship policy (`sp_…`), with a chain allowlist and global monthly spending cap |
 
 > **The chat needs a key on the WEB service, not just the orchestrator.**
 > `/api/chat` resolves a model from the web container's own environment, so
@@ -70,9 +76,9 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 | `MERRYMEN_SPONSORSHIP_POLICY_ID` *(with the above)* | Pimlico policy id (`sp_…`) — where the real spend limits live |
 | `GROQ_API_KEY` *(optional)* | strategist brain |
 
-> The orchestrator must NOT get `MERRYMEN_SESSION_SECRET`. The web service needs no BUNDLER or RPC key — it signs nothing — but it does need its own LLM key for the dashboard chat, as above. The DEK is the one secret both hold. Children get the house keys but never the DEK / session secret / `DATABASE_URL` (the supervisor strips them at fork).
+> The orchestrator must NOT get `MERRYMEN_SESSION_SECRET`. Web needs the house Pimlico key and pinned policy for owner operations, plus its own LLM key for dashboard chat. The DEK is shared. Children get house keys but never the DEK, session secret or `DATABASE_URL` (the supervisor strips them at fork).
 >
-> `MERRYMEN_SPONSOR_GAS` goes on the **orchestrator only**, and deliberately so. The dashboard does not read it: the worker reports whether it is sponsoring on its heartbeat, and the web service believes that report. Setting it on web would do nothing, and an earlier design where web resolved it for itself could have shown "fees are covered" while the child refused every trade — the two services have separate environments.
+> Trading coverage is still reported by the worker heartbeat. Web's owner-action coverage is checked separately against its own environment, durable wallet enrollment and Pimlico policy. Set the flag, key and policy on web as well as the orchestrator; setting them only on the orchestrator leaves withdrawals and revocations without coverage.
 
 ## 4b. The research browser (optional, but it is what makes an agent read)
 
@@ -557,7 +563,7 @@ trading. Disconnecting app access leaves the owner's worker and grant in place.
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.
 - Open the dashboard, **sign in** (SIWE — your wallet signs a free challenge), create/**sign a testnet grant** (session-key-only; the owner key never leaves your browser).
 - The orchestrator logs `... spawned (pid …)` for your tenant within ~15s and writes `children/<you>/grant.json` (session key only) + `settings.json`.
-- **Fund** the smart account on testnet (ETH for gas). The child arms and trades on 46630.
+- Verify the web owner-action coverage check and the worker's trading coverage heartbeat after both policies are configured. For house-sponsored testnet trading, fund the smart account with USDG; the owner does not need ETH for gas. An explicitly self-paid deployment needs ETH as well. Missing house coverage must leave live trading unarmed.
 
 ## 7. Known limits of the slice (closed in Phase B)
 - **The dashboard feed now reads the shared Postgres** — the ledger→Postgres port (B2) has landed, so `/api/feed` and `/api/scoreboard` show a child's live numbers in hosted mode. (`pg` is a runtime-only dependency the `Dockerfile` installs into the image; it is deliberately absent from `package.json` so self-hosted stays lean.)

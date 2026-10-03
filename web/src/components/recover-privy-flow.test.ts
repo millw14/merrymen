@@ -123,8 +123,10 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
         // The ETH leg, as the real planner now forecasts it: held minus the
         // engine's own reserve. Without these the panel cannot disclose the
         // one thing that leaves without being in any token list.
-        nativeRecoverableWei: 828_820_000_000_000n,
-        nativeReserveWei: 171_180_000_000_000n,
+        nativeRecoverableWei: 1_000_000_000_000_000n,
+        nativeReserveWei: 0n,
+        gasSponsored: true,
+        sponsorshipReason: null,
         unreadable: [],
         needsGas: false,
       };
@@ -203,8 +205,8 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
     // the class list nor the balances, so it is the one thing that could leave
     // unnamed.
     assert.match(text, /Native ETH/i, "the ETH leg must be disclosed");
-    assert.match(text, /0.000828820/, "with the amount the engine would actually send");
-    assert.match(text, /0.000171180/, "and what stays behind to pay for it");
+    assert.match(text, /0.001000000/, "with the amount the engine would actually send");
+    assert.match(text, /0.000000000/, "sponsored recovery reserves no owner ETH");
     assert.match(text, /5\.785344/, "and the quote stranded in the vault, which no event names");
   });
 

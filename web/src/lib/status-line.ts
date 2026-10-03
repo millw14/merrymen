@@ -179,28 +179,23 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   // `cashUsdg` and `hasGas` are both read from the same snapshot.
   // SPONSORED AND UNFUNDED IS A WORKING AGENT, not a broken one.
   //
-  // Note what this does NOT say: 'you never need ETH'. Withdrawal is a
-  // different path — recover.ts pays for the sweep out of the same balance it
-  // is sweeping — so an owner told they need no ETH at all could trade happily
-  // and then find they cannot get their money out. Sponsorship covers TRADING,
-  // and the sentence says exactly that much.
+  // The heartbeat reports trading sponsorship. Owner withdrawals and
+  // permission changes check their own fee coverage before signing; this
+  // snapshot cannot promise that those separate operations are sponsored.
   if (!a.hasGas && a.gasSponsored) {
     return a.cashUsdg > 0
       ? {
           headline: `${name} is live and its trading fees are covered — you only fund ${money(a.cashUsdg)}.`,
           next:
-            "We pay the network fee on every trade, so you never have to top up gas to keep it running. " +
-            "Moving money back OUT to your own wallet is the one thing that still needs a little ETH in the account.",
+            "We pay the network fee on every trade, so you do not need to top up ETH to keep it running. " +
+            "Withdrawal and permission changes check fee coverage separately before you sign.",
           tone: "good",
         }
       : {
-          headline: `${name} is ready and its fees are covered — it just needs something to trade with.`,
-          // The sibling arm above carries the withdrawal caveat and this one did
-          // not, so the owner LEAST likely to know it was the one not told. Same
-          // scope, same sentence: sponsorship covers trading, not the way out.
+          headline: `${name} is ready and its trading fees are covered — it just needs something to trade with.`,
           next:
-            `Send USDG to the account address, on ${net}. It does not need ETH to trade — only to ` +
-            "move money back out to your own wallet later.",
+            `Send USDG to the account address, on ${net}. It does not need ETH to trade. ` +
+            "Withdrawal and permission changes check fee coverage separately before you sign.",
           tone: "waiting",
         };
   }

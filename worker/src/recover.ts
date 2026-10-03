@@ -11,8 +11,9 @@
  *
  * The sudo validator has no session-key policies attached, so recovery is not
  * bound by the per-trade / daily caps — it can move the whole balance in one op.
- * The account pays its own gas from its native ETH (no paymaster), exactly like
- * the trading executor. Nothing here transmits the key: it signs one UserOp
+ * Gas can be covered by the house's configured sponsor, just like the trading
+ * executor. Without a sponsor the account pays from its native ETH. Nothing
+ * here transmits the key: it signs one UserOp
  * locally and only the signed op reaches the bundler.
  */
 
@@ -45,6 +46,7 @@ import {
   shortAddress,
 } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
+import { SponsorRefused, type Sponsor } from "./paymaster";
 
 /** Shares are an ERC-4626 position: priced, never counted. Same reads snapshot.ts uses. */
 const VAULT_READS = parseAbi(["function convertToAssets(uint256 shares) view returns (uint256)"]);
@@ -168,9 +170,8 @@ export interface RecoverResult extends RecoverPlan {
   skipped: { symbol: string; reason: string }[];
   /**
    * Native ETH actually swept, in wei. Reported separately from `balances`
-   * because it is not a token transfer and cannot be swept in full — the
-   * account pays this very operation's gas out of the same balance, so a
-   * reserve stays behind on purpose.
+   * because it is not a token transfer. With sponsored gas it can be swept in
+   * full; otherwise a reserve stays to pay this operation's gas.
    */
   nativeSweptWei: bigint;
   /** What was deliberately left to cover gas, in wei. */
@@ -479,6 +480,17 @@ async function deriveKernelAccount(chain: Chain, rpcUrl: string | undefined, own
   });
 }
 
+/** Derive and validate the address without reading balances or signing. */
+export async function deriveRecoveryAccountAddress(opts: {
+  chain: Chain;
+  owner: RecoveryOwner;
+  rpcUrl?: string;
+}): Promise<Address> {
+  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccountOf(opts.owner));
+  assertDerivedAccount(account.address, "that owner does not derive an account");
+  return account.address;
+}
+
 /**
  * Rebuild the smart account from the owner and read what it holds. Read-only
  * — no bundler, no signing. Use this to show the user what recovery will move
@@ -496,6 +508,8 @@ export async function planRecovery(opts: {
   expectedSmartAccount?: Address;
   /** Owner-added tokens from settings. Optional — the builtin set is the floor. */
   extraTokens?: readonly unknown[];
+  /** Disclosure only: the caller will supply a house sponsor when it sweeps. */
+  gasSponsored?: boolean;
 }): Promise<RecoverPlan> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const ownerAccount = ownerAccountOf(opts.owner);
@@ -775,12 +789,18 @@ export async function planRecovery(opts: {
   // over-promising on an exit is the direction that turns into a complaint.
   let nativeRecoverableWei = 0n;
   let nativeReserveWei = gas ?? 0n;
-  try {
-    const split = nativeSweep(gas ?? 0n, await publicClient.getGasPrice());
+  if (opts.gasSponsored) {
+    const split = nativeSweep(gas ?? 0n, 0n, true);
     nativeRecoverableWei = split.sweep;
     nativeReserveWei = split.reserve;
-  } catch {
-    unreadable.push("gas price");
+  } else {
+    try {
+      const split = nativeSweep(gas ?? 0n, await publicClient.getGasPrice());
+      nativeRecoverableWei = split.sweep;
+      nativeReserveWei = split.reserve;
+    } catch {
+      unreadable.push("gas price");
+    }
   }
 
   return {
@@ -831,7 +851,8 @@ export async function planRecovery(opts: {
  * Returns a zero sweep when the balance does not clear the reserve, which is the
  * ordinary case for an account holding only gas money.
  */
-export function nativeSweep(heldWei: bigint, gasPriceWei: bigint): { sweep: bigint; reserve: bigint } {
+export function nativeSweep(heldWei: bigint, gasPriceWei: bigint, gasSponsored = false): { sweep: bigint; reserve: bigint } {
+  if (gasSponsored) return { sweep: heldWei, reserve: 0n };
   const GAS_LIMIT_GUESS = 900_000n;
   const reserve = gasPriceWei * GAS_LIMIT_GUESS * 2n;
   if (heldWei <= reserve) return { sweep: 0n, reserve: heldWei };
@@ -842,10 +863,14 @@ export async function recoverFunds(opts: {
   chain: Chain;
   owner: RecoveryOwner;
   bundlerUrl: string;
+  /** Cross-origin application relays may need their owner ticket cookie. */
+  bundlerCredentials?: RequestCredentials;
   rpcUrl?: string;
   to: Address;
   expectedSmartAccount?: Address;
   extraTokens?: readonly unknown[];
+  /** Bounded house sponsor; never falls back to spending the owner's ETH. */
+  sponsor?: Pick<Sponsor, "paymaster" | "paymasterContext">;
   /**
    * THE CLASS RECOVERY THE OWNER ACTUALLY APPROVED.
    *
@@ -896,6 +921,7 @@ export async function recoverFunds(opts: {
     rpcUrl: opts.rpcUrl,
     expectedSmartAccount: opts.expectedSmartAccount,
     extraTokens: opts.extraTokens,
+    gasSponsored: !!opts.sponsor,
   });
 
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
@@ -908,14 +934,18 @@ export async function recoverFunds(opts: {
   // moves — tokens included — so the buffer is protecting the whole sweep, not
   // just the ETH leg.
   let { sweep: nativeSweptWei, reserve: nativeReservedWei } = { sweep: 0n, reserve: plan.gasWei };
-  try {
-    ({ sweep: nativeSweptWei, reserve: nativeReservedWei } = nativeSweep(
-      plan.gasWei,
-      await publicClient.getGasPrice(),
-    ));
-  } catch {
-    // Couldn't price gas — take nothing rather than risk making the op
-    // unaffordable. The tokens still move, which is the larger sum.
+  if (opts.sponsor) {
+    ({ sweep: nativeSweptWei, reserve: nativeReservedWei } = nativeSweep(plan.gasWei, 0n, true));
+  } else {
+    try {
+      ({ sweep: nativeSweptWei, reserve: nativeReservedWei } = nativeSweep(
+        plan.gasWei,
+        await publicClient.getGasPrice(),
+      ));
+    } catch {
+      // Couldn't price gas — take nothing rather than risk making the op
+      // unaffordable. The tokens still move, which is the larger sum.
+    }
   }
 
   // "NOTHING TO RECOVER" MUST NOT BE SAID OVER A FULL VAULT.
@@ -925,7 +955,7 @@ export async function recoverFunds(opts: {
   // tokens the ACCOUNT does not. So an owner whose entire book was class
   // positions was told their account was empty by the one command that exists
   // to get money out.
-  if (plan.balances.length === 0 && nativeSweptWei === 0n && plan.classHoldings.length === 0) {
+  if (plan.balances.length === 0 && nativeSweptWei === 0n && plan.classVaults.every((v) => v.holdings.length === 0) && !opts.approvedClass) {
     return { ...plan, txHash: null, to: opts.to, skipped: [], nativeSweptWei: 0n, nativeReservedWei };
   }
   const ownerAccount = ownerAccountOf(opts.owner);
@@ -947,9 +977,10 @@ export async function recoverFunds(opts: {
   const client = createKernelAccountClient({
     account,
     chain: opts.chain,
-    bundlerTransport: http(opts.bundlerUrl),
+    bundlerTransport: http(opts.bundlerUrl, opts.bundlerCredentials ? { fetchOptions: { credentials: opts.bundlerCredentials } } : undefined),
     // See worker/src/gas.ts — required so recovery works with a Pimlico bundler.
     userOperation: userOpGasConfig(publicClient, opts.bundlerUrl),
+    ...(opts.sponsor ? { paymaster: opts.sponsor.paymaster, paymasterContext: opts.sponsor.paymasterContext } : {}),
   });
 
   // ONE BAD TOKEN MUST NOT STRAND THE REST. The sweep is a single atomic
@@ -1056,8 +1087,26 @@ export async function recoverFunds(opts: {
   const vaultsToSweep = approved
     ? plan.classVaults.filter((v) => v.vault.toLowerCase() === approved.vault.toLowerCase())
     : plan.classVaults.filter((v) => v.holdings.length > 0);
+  let classSweepConfirmed = false;
   for (const target of vaultsToSweep) {
     await sweepOneVault(target.vault, target.holdings);
+  }
+
+  // A completed vault operation already spent gas on an unsponsored account.
+  // Re-read before sizing the final ETH transfer; the original plan's balance
+  // would make the second operation try to transfer money that paid the first.
+  if (classSweepConfirmed) {
+    try {
+      const held = await publicClient.getBalance({ address: account.address });
+      ({ sweep: nativeSweptWei, reserve: nativeReservedWei } = nativeSweep(
+        held,
+        opts.sponsor ? 0n : await publicClient.getGasPrice(),
+        !!opts.sponsor,
+      ));
+    } catch {
+      nativeSweptWei = 0n;
+      if (!plan.unreadable.includes("eth after class recovery")) plan.unreadable.push("eth after class recovery");
+    }
   }
 
   async function sweepOneVault(
@@ -1098,7 +1147,7 @@ export async function recoverFunds(opts: {
         }
         continue;
       }
-      const known = plan.classHoldings.find((h) => h.token.toLowerCase() === token.toLowerCase());
+      const known = vaultHoldings.find((h) => h.token.toLowerCase() === token.toLowerCase());
       live.push({
         token,
         symbol: known?.symbol ?? `${token.slice(0, 6)}…${token.slice(-4)}`,
@@ -1112,6 +1161,8 @@ export async function recoverFunds(opts: {
       );
     }
     if (sweepable.length > 0) {
+      let submittedHash: `0x${string}` | undefined;
+      let confirmation: "pending" | "reverted" | "confirmed" = "pending";
       try {
         const sent = await client.sendUserOperation({
           calls: sweepable.map((h) => ({
@@ -1124,7 +1175,14 @@ export async function recoverFunds(opts: {
             }),
           })),
         });
-        await client.waitForUserOperationReceipt({ hash: sent });
+        submittedHash = sent;
+        const receipt = await client.waitForUserOperationReceipt({ hash: sent });
+        if (!receipt.success) {
+          confirmation = "reverted";
+          throw new Error(`class recovery UserOp reverted on-chain: ${sent}`);
+        }
+        confirmation = "confirmed";
+        classSweepConfirmed = true;
         // The account now holds them. Re-read so op 2 moves the REAL amount
         // rather than the one predicted before the sweep ran.
         for (const h of sweepable) {
@@ -1135,20 +1193,39 @@ export async function recoverFunds(opts: {
               functionName: "balanceOf",
               args: [account.address],
             })
-            .catch(() => 0n)) as bigint;
+            .catch(() => null)) as bigint | null;
+          if (raw === null) {
+            throw new Error(`could not read ${h.token} in the account after the confirmed class sweep`);
+          }
           if (raw > 0n) {
-            plan.balances.push({
+            const index = plan.balances.findIndex((b) => b.address.toLowerCase() === h.token.toLowerCase());
+            const decimals = index >= 0 ? plan.balances[index]!.decimals
+              : vaultHoldings.find((b) => b.token.toLowerCase() === h.token.toLowerCase())?.decimals ?? 18;
+            const balance = {
               symbol: h.symbol,
               address: h.token,
               raw,
-              decimals: 18,
-              amount: formatUnits(raw, 18),
+              decimals,
+              amount: formatUnits(raw, decimals),
               note: "swept out of your class vault by this recovery",
-            });
+            };
+            if (index >= 0) plan.balances[index] = balance;
+            else plan.balances.push(balance);
           }
         }
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
+        // Once sending starts, a transport failure cannot prove nothing landed.
+        // Keep the vault/account boundary closed and name the operation rather
+        // than proceed or recommend a second send with a fresh nonce.
+        if (confirmation === "confirmed" || (confirmation === "pending" && !(e instanceof SponsorRefused))) {
+          throw new Error(
+            `recovery stopped after the class vault submission${submittedHash ? ` ${submittedHash}` : ""}: ${why}. ` +
+              (confirmation === "confirmed" ? "The vault sweep was confirmed, but its resulting balances could not be read. "
+                : "Its outcome could not be confirmed. Check its receipt before submitting another recovery. ") +
+              "The account sweep has not been attempted.",
+          );
+        }
         // FATAL WHEN IT WAS APPROVED. Continuing here is what produced an
         // operation that moved the USDG and the ETH, left 1,063,408 DOGGOS in
         // the vault, and reported success — the owner having approved a

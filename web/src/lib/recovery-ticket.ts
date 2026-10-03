@@ -21,8 +21,8 @@
  * whose derived Kernel address is the one named. It does not prove the account
  * has ever existed here. That is a real limit — a stranger can generate keys in
  * a loop and mint tickets for accounts nobody has ever funded — and it is why
- * the relay tiers its quota on whether this deployment has actually SEEN the
- * account rather than trusting the ticket alone.
+ * sponsorship additionally requires a durable account history on this deployment
+ * and a server-held spending policy. A ticket alone never qualifies for gas.
  *
  * THE SIGNED TEXT BINDS ORIGIN AND NONCE, reusing the same shape sign-in uses.
  * A fixed message would make the signature a permanent bearer credential: anyone
@@ -53,12 +53,16 @@ const hmac = (payload: string, secret: string) =>
  * to sign something with the key that controls all their money and deserves to
  * read a sentence rather than a hex blob.
  */
-export function recoveryChallengeMessage(origin: string, nonce: string): string {
+export function recoveryChallengeMessage(origin: string, nonce: string, ownerActions = false): string {
   return [
-    `${origin} — withdraw from your merrymen account.`,
+    ownerActions ? `${origin} — recover your merrymen account.` : `${origin} — withdraw from your merrymen account.`,
     "",
-    "This proves you control the owner key so the site will relay your withdrawal.",
-    "It moves no funds by itself and grants no permissions: the withdrawal itself",
+    ownerActions
+      ? "This proves you control the owner key so the site can relay withdrawals and permission revocations."
+      : "This proves you control the owner key so the site will relay your withdrawal.",
+    ownerActions
+      ? "It moves no funds by itself and grants no permissions: each operation"
+      : "It moves no funds by itself and grants no permissions: the withdrawal itself",
     "is a separate operation you sign next.",
     "",
     `URI: ${origin}`,
@@ -89,6 +93,13 @@ export interface Ticket {
    * sends can add to it, which is the property that survives going plural.
    */
   classVaults: readonly `0x${string}`[];
+  /** Server-derived owner, deployment and cross-chain family; never caller input. */
+  sponsorship?: {
+    owner: `0x${string}`;
+    factory: `0x${string}`;
+    factoryData: `0x${string}`;
+    accounts: readonly `0x${string}`[];
+  };
   exp: number;
 }
 
@@ -111,7 +122,9 @@ export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
   // thing this field exists to prevent.
   const vault =
     t.classVaults.length > 0 ? t.classVaults.map((v) => v.toLowerCase()).join(VAULT_SEP) : NO_VAULT;
-  const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${vault}.${exp}`;
+  const capability = t.sponsorship
+    ? `.${Buffer.from(JSON.stringify(t.sponsorship)).toString("base64url")}` : "";
+  const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${vault}.${exp}${capability}`;
   return `${body}.${hmac(body, secretOrThrow())}`;
 }
 
@@ -119,13 +132,13 @@ export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
 export function readTicket(token: string | undefined | null, now = Date.now()): Ticket | null {
   if (!token) return null;
   const parts = token.split(".");
-  // FIVE FIELDS SINCE THE VAULT JOINED THE BODY. A ticket in the old four-field
-  // shape does not parse and the owner signs the challenge again — which costs
-  // them one click, bounded by a 15-minute TTL, and is the correct treatment
-  // for a credential whose meaning changed.
-  if (parts.length !== 5) return null;
-  const [account, chain, vault, exp, sig] = parts as [string, string, string, string, string];
-  const body = `${account}.${chain}.${vault}.${exp}`;
+  // Existing five-field tickets retain their unsponsored recovery authority.
+  // The sixth field carries additional server-derived sponsorship proof; an
+  // old ticket must be refreshed before it can request any house-paid gas.
+  if (parts.length !== 5 && parts.length !== 6) return null;
+  const [account, chain, vault, exp] = parts as [string, string, string, string];
+  const sig = parts.at(-1)!;
+  const body = parts.slice(0, -1).join(".");
   let want: Buffer;
   let got: Buffer;
   try {
@@ -153,10 +166,23 @@ export function readTicket(token: string | undefined | null, now = Date.now()): 
     if (parsed.some((v) => !/^0x[0-9a-f]{40}$/.test(v))) return null;
     classVaults = parsed as `0x${string}`[];
   }
+  let sponsorship: Ticket["sponsorship"];
+  if (parts.length === 6) {
+    try {
+      const value = JSON.parse(Buffer.from(parts[4]!, "base64url").toString("utf8"));
+      const address = (v: unknown) => typeof v === "string" && /^0x[0-9a-f]{40}$/i.test(v);
+      if (!value || !address(value.owner) || !address(value.factory) ||
+          typeof value.factoryData !== "string" || !/^0x(?:[0-9a-f]{2})+$/i.test(value.factoryData) ||
+          !Array.isArray(value.accounts) || value.accounts.length < 1 || value.accounts.length > 2 ||
+          !value.accounts.every(address) || !value.accounts.some((a: string) => a.toLowerCase() === account)) return null;
+      sponsorship = value;
+    } catch { return null; }
+  }
   return {
     smartAccount: account as `0x${string}`,
     chainId,
     classVaults,
     exp: expMs,
+    ...(sponsorship ? { sponsorship } : {}),
   };
 }

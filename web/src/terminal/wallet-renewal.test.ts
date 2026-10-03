@@ -34,6 +34,8 @@ let renew: (options: MintOptions) => Promise<unknown>;
 let preflight: (owner: LocalAccount, options: MintOptions) => Promise<void>;
 let preflightCalls = 0;
 type RevocationWallet = { ownerKey?: string; smartAccount: string; chainId: number };
+let gasPreflight: (wallet: RevocationWallet) => Promise<void>;
+let gasPreflightWallets: RevocationWallet[] = [];
 let revoke: (wallet: RevocationWallet) => Promise<unknown>;
 let revokeWallets: RevocationWallet[] = [];
 let restoredKeys: unknown[] = [];
@@ -69,7 +71,7 @@ before(async () => {
       if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => privyOwner };
       if (id === "@/lib/trencher-permission") return { TRENCHER_FACTORY: trencherFactory };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
-      if (id === "@/lib/revoke-client") return { revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); } };
+      if (id === "@/lib/revoke-client") return { preflightRevocationFromBrowser: async (wallet: RevocationWallet) => { gasPreflightWallets.push(wallet); await gasPreflight(wallet); }, revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); } };
       if (id === "@/lib/stop-agent") return { stopAgent: (expectedTenant?: string | null) => { stopCalls++; return stop(expectedTenant); } };
       if (id === "@/lib/session") return {
         FAUCET_URL: "https://faucet.testnet.chain.robinhood.com",
@@ -100,6 +102,8 @@ beforeEach(() => {
   privyOwner = null;
   revokeCalls = 0;
   revokeWallets = [];
+  gasPreflightWallets = [];
+  gasPreflight = async () => {};
   restoredKeys = [];
   mintCalls = 0;
   preflightCalls = 0;
@@ -651,7 +655,7 @@ describe("the funded wallet's re-sign control", () => {
   it("on-chain revocation remains available when the service stop fails", async () => {
     stop = async () => { throw new Error("service unavailable"); };
     await ui.render(React.createElement(Wallet));
-    await acknowledge("I understand revocation uses ETH");
+    await acknowledge("I understand this revokes all earlier permissions");
     await ui.click("Stop & revoke on-chain");
     assert.equal(revokeCalls, 1);
     assert.equal(mintCalls, 0);
@@ -666,11 +670,11 @@ describe("the funded wallet's re-sign control", () => {
     await ui.render(React.createElement(Wallet));
     const funding = ui.container.querySelector("[data-renewal-funding]")!;
     assert.ok(funding.textContent?.includes(address), "revocation funding names the exact smart account");
-    assert.match(funding.textContent!, /Robinhood Chain testnet \(46630\).*testnet ETH/);
-    assert.match(funding.textContent!, /Robinhood Chain \(4663\).*ETH/);
-    assert.match(funding.textContent!, /Balances do not move between networks/);
-    assert.match(funding.textContent!, /AA21.*fund the named network and retry/);
-    assert.equal(funding.querySelector("a")?.getAttribute("href"), "https://faucet.testnet.chain.robinhood.com");
+    assert.match(funding.textContent!, /Robinhood Chain testnet \(46630\).*Merrymen covers the network fees/);
+    assert.match(funding.textContent!, /Robinhood Chain \(4663\).*Merrymen covers the network fees/);
+    assert.match(funding.textContent!, /Balances stay on their current networks/);
+    assert.match(funding.textContent!, /retry once the service restores it/);
+    assert.equal(funding.querySelector("a"), null, "sponsored revocation does not send the owner to buy gas");
     await acknowledge("I authorize revoking");
     await ui.click("move to Robinhood Chain & re-sign");
     assert.equal(revokeCalls, 0);
@@ -728,10 +732,10 @@ describe("the funded wallet's re-sign control", () => {
     const funding = ui.container.querySelector("[data-restore-funding]")!;
     assert.match(funding.textContent!, /both networks.*starting with the current network/);
     assert.ok(funding.textContent?.includes(address));
-    assert.match(funding.textContent!, /Robinhood Chain testnet \(46630\).*testnet ETH/);
-    assert.match(funding.textContent!, /Robinhood Chain \(4663\).*ETH/);
-    assert.match(funding.textContent!, /AA21.*fund the named network and retry/);
-    assert.ok(funding.querySelector("a")?.href.includes("faucet"));
+    assert.match(funding.textContent!, /Robinhood Chain testnet \(46630\).*Merrymen covers the network fees/);
+    assert.match(funding.textContent!, /Robinhood Chain \(4663\).*Merrymen covers the network fees/);
+    assert.match(funding.textContent!, /retry once the service restores it/);
+    assert.equal(funding.querySelector("a"), null);
     await acknowledge("I understand — real funds");
     await acknowledge("I understand restore first stops");
     await ui.click("Restore & arm 0x1111…1111");
@@ -968,4 +972,19 @@ describe("the funded wallet's re-sign control", () => {
   });
 
 
+});
+
+
+describe("owner fee checks preserve the existing permission", () => {
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} sponsorship refusal keeps the active permission and recovery storage`, async () => {
+    useRenewalOwner(kind);
+    gasPreflight = async () => { throw new Error("Merrymen gas coverage is unavailable"); };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    await ui.click("revoke earlier permissions & re-sign");
+    assertExistingPermissionKept(before);
+    assert.equal(gasPreflightWallets.length, 1);
+    assert.match(ui.container.textContent!, /existing permission unchanged.*gas coverage is unavailable/);
+  });
 });

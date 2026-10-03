@@ -20,16 +20,16 @@
  *
  * WHAT THIS DELIBERATELY DOES NOT PROVE: that the account has ever existed on
  * this deployment. A stranger can generate keypairs in a loop and mint tickets
- * for accounts nobody has funded. That is why the relay tiers its quota on
- * whether we have actually SEEN the account rather than trusting the ticket
- * alone — the ticket bounds WHOSE operation may be relayed, not how much of the
- * house's bundler allowance a stranger may spend.
+ * for accounts nobody has funded. Sponsorship therefore checks whether we have
+ * actually SEEN the account rather than trusting the ticket alone. It requires
+ * durable account history plus the house policy;
+ * the ticket by itself never entitles its holder to sponsored gas.
  */
 
 import { NextResponse } from "next/server";
 import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { consumeChallengeNonce, issueChallengeNonce, requestOrigin } from "@/lib/auth";
-import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import { deriveKernelRecoveryAccount } from "@/lib/derive-account";
 import { mintTicket, recoveryChallengeMessage, TICKET_TTL_MS } from "@/lib/recovery-ticket";
 import {
   PONS_CLASS_VAULT_FACTORY,
@@ -42,22 +42,34 @@ import {
 export const runtime = "nodejs";
 
 const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
+const OWNER_ACTIONS_SCOPE = "owner-actions";
+const nonceOrigin = (origin: string, ownerActions: boolean) => ownerActions ? `${origin}|recovery-owner-actions-v2` : origin;
 
 export async function GET(req: Request) {
   const origin = requestOrigin(req);
-  const nonce = issueChallengeNonce(origin);
-  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce) });
+  const scopes = new URL(req.url).searchParams.getAll("scope");
+  if (scopes.length > 1 || (scopes.length === 1 && scopes[0] !== OWNER_ACTIONS_SCOPE)) {
+    return NextResponse.json({ error: "unknown recovery scope" }, { status: 400 });
+  }
+  const ownerActions = scopes[0] === OWNER_ACTIONS_SCOPE;
+  // Installed native clients enforce the legacy text exactly. New clients
+  // opt into owner actions, with a distinct nonce namespace to prevent mixing.
+  const nonce = issueChallengeNonce(nonceOrigin(origin, ownerActions));
+  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce, ownerActions) });
 }
 
 export async function POST(req: Request) {
   const origin = requestOrigin(req);
 
-  let body: { nonce?: unknown; signature?: unknown; chainId?: unknown };
+  let body: { nonce?: unknown; signature?: unknown; chainId?: unknown; scope?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "malformed request" }, { status: 400 });
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "malformed request" }, { status: 400 });
+  if (body.scope !== undefined && body.scope !== OWNER_ACTIONS_SCOPE) return NextResponse.json({ error: "unknown recovery scope" }, { status: 400 });
+  const ownerActions = body.scope === OWNER_ACTIONS_SCOPE;
 
   const nonce = typeof body.nonce === "string" ? body.nonce : "";
   const signature = typeof body.signature === "string" ? body.signature : "";
@@ -74,13 +86,13 @@ export async function POST(req: Request) {
   // BURN THE NONCE FIRST. The signature alone binds origin (it is in the text)
   // but nothing else — without a single-use, expiring nonce, anyone who ever saw
   // that signature could mint tickets for the account forever.
-  const gate = await consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, nonceOrigin(origin, ownerActions));
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   // Reconstruct the exact text that was signed. Nothing the caller sends is
   // trusted as an identity — the address falls out of the signature or the
   // request fails.
-  const message = recoveryChallengeMessage(origin, nonce);
+  const message = recoveryChallengeMessage(origin, nonce, ownerActions);
   let owner: `0x${string}`;
   try {
     owner = await recoverMessageAddress({ message, signature: signature as `0x${string}` });
@@ -97,10 +109,24 @@ export async function POST(req: Request) {
   // 0x0000...0000 would send a recovery sweep at an account nobody owns — the
   // relay's `sender === ticket.smartAccount` check would even pass for it.
   let smartAccount: `0x${string}`;
+  let sponsorship: import("@/lib/recovery-ticket").Ticket["sponsorship"];
   try {
-    const derived = await deriveKernelAccountAddress(owner, chainId);
+    const derived = await deriveKernelRecoveryAccount(owner, chainId);
     if (!derived.ok) return NextResponse.json({ error: derived.why }, { status: 502 });
     smartAccount = derived.address;
+    if (derived.factory && derived.factoryData) {
+      const accounts = [smartAccount];
+      // A destination account can be undeployed during migration. Its owner's
+      // source account is the durable enrollment proof, even after a kill.
+      for (const otherChain of KNOWN_CHAINS) {
+        if (otherChain === chainId) continue;
+        try {
+          const other = await deriveKernelRecoveryAccount(owner, otherChain);
+          if (other.ok && !accounts.some((a) => a.toLowerCase() === other.address.toLowerCase())) accounts.push(other.address);
+        } catch { /* Missing family proof declines sponsorship, never owner-funded recovery. */ }
+      }
+      sponsorship = { owner, factory: derived.factory, factoryData: derived.factoryData, accounts };
+    }
   } catch {
     return NextResponse.json({ error: "could not derive the account for that owner" }, { status: 502 });
   }
@@ -161,7 +187,7 @@ export async function POST(req: Request) {
   // so no other site can cause it to be sent; and short-lived by the ticket's
   // own expiry, which is what actually bounds it.
   const res = NextResponse.json({ smartAccount, expiresInMs: TICKET_TTL_MS });
-  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults }), {
+  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults, sponsorship }), {
     httpOnly: true,
     secure: true,
     sameSite: "strict",

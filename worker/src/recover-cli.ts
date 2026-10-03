@@ -13,9 +13,10 @@
  * so the CLI can decide what to do next without scraping prose.
  */
 
-import { chainForId, pimlicoBundlerUrl, robinhoodChain } from "../../packages/core/src/index";
+import { chainForId, pimlicoBundlerUrl, pimlicoPaymasterUrl, robinhoodChain } from "../../packages/core/src/index";
 import { resolveConfig } from "./settings";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "./recover";
+import { createSponsor } from "./paymaster";
 
 const say = (s: string) => process.stderr.write(`${s}\n`);
 const emit = (obj: unknown) => process.stdout.write(`__RESULT__${JSON.stringify(obj)}\n`);
@@ -47,6 +48,9 @@ async function main() {
   const cfg = resolveConfig();
   const chain = chainForId(chainId);
   const rpcUrl = chainId === robinhoodChain.id ? cfg.rpcMainnet : cfg.rpcTestnet;
+  const sponsor = cfg.sponsorGasEnabled && cfg.bundlerApiKey
+    ? createSponsor({ url: pimlicoPaymasterUrl(chainId, cfg.bundlerApiKey), policyId: cfg.sponsorshipPolicyId })
+    : undefined;
 
   try {
     if (mode === "plan") {
@@ -56,10 +60,12 @@ async function main() {
         rpcUrl,
         expectedSmartAccount: expect,
         extraTokens: cfg.customTokens,
+        gasSponsored: !!sponsor,
       });
       say(`  smart account : ${plan.smartAccount}`);
       say(`  owner EOA     : ${plan.ownerAddress}   ${"<- what MetaMask shows when you import the key"}`);
       say(`  native gas    : ${(Number(plan.gasWei) / 1e18).toFixed(6)} ETH`);
+      say(`  network fees  : ${sponsor ? "covered by the configured gas sponsor" : "paid by the smart account"}`);
       if (plan.balances.length === 0) {
         // Only claim empty when we actually READ everything. Otherwise say what
         // we could not see — "this account is empty" is how someone concludes
@@ -109,6 +115,9 @@ async function main() {
         smartAccount: plan.smartAccount,
         ownerAddress: plan.ownerAddress,
         gasWei: plan.gasWei.toString(),
+        gasSponsored: !!sponsor,
+        nativeRecoverableWei: plan.nativeRecoverableWei.toString(),
+        nativeReserveWei: plan.nativeReserveWei.toString(),
         unreadable: plan.unreadable,
         balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
         // classVault/classHoldings/classNote stay, unchanged in meaning, so a
@@ -147,6 +156,7 @@ async function main() {
       to,
       expectedSmartAccount: expect,
       extraTokens: cfg.customTokens,
+      sponsor,
     });
     if (!res.txHash) {
       // Three different things reach here and they are NOT the same fact.
@@ -167,7 +177,7 @@ async function main() {
     }
     if (res.nativeSweptWei > 0n) {
       say(`  ✓ also swept ${(Number(res.nativeSweptWei) / 1e18).toFixed(6)} ETH ` +
-          `(${(Number(res.nativeReservedWei) / 1e18).toFixed(6)} left to pay for this op)`);
+          (sponsor ? "(network fees sponsored)" : `(${(Number(res.nativeReservedWei) / 1e18).toFixed(6)} left to pay for this op)`));
     }
     say(`  ✓ swept — tx ${res.txHash}`);
     emit({

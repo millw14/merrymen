@@ -10,8 +10,12 @@ public enum WalletSignaturePolicy {
         while index < hex.endIndex { let end = hex.index(index, offsetBy: 2); guard let byte = UInt8(hex[index..<end], radix: 16) else { return false }; bytes.append(byte); index = end }
         guard let text = String(bytes: bytes, encoding: .utf8) else { return false }
         let origin = "https://app.merrymen.dev"
-        if ["withdraw", "reconcile"].contains(operation) {
-            return text == ["\(origin) — withdraw from your merrymen account.", "", "This proves you control the owner key so the site will relay your withdrawal.", "It moves no funds by itself and grants no permissions: the withdrawal itself", "is a separate operation you sign next.", "", "URI: \(origin)", "Nonce: \(nonce)"].joined(separator: "\n")
+        if ["preview", "plan", "withdraw", "reconcile"].contains(operation) {
+            // Both deployed challenge versions are exact ownership proofs.
+            // Neither permits a different origin, nonce or spending message.
+            let legacy = ["\(origin) — withdraw from your merrymen account.", "", "This proves you control the owner key so the site will relay your withdrawal.", "It moves no funds by itself and grants no permissions: the withdrawal itself", "is a separate operation you sign next.", "", "URI: \(origin)", "Nonce: \(nonce)"].joined(separator: "\n")
+            let ownerActions = ["\(origin) — recover your merrymen account.", "", "This proves you control the owner key so the site can relay withdrawals and permission revocations.", "It moves no funds by itself and grants no permissions: each operation", "is a separate operation you sign next.", "", "URI: \(origin)", "Nonce: \(nonce)"].joined(separator: "\n")
+            return text == legacy || text == ownerActions
         }
         if operation == "restore" {
             guard expectedAccount.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil else { return false }
