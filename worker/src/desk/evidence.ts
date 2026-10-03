@@ -20,6 +20,15 @@ import type { BarsRead } from "./gecko";
 import { fmtAge, fmtInt, fmtPct, fmtPrice, fmtUsd, fmtX, utcClock } from "./format";
 import { technicals, type Bar, type Technicals } from "./ta";
 
+/**
+ * May a group read this ticker? Anyone can deploy a coin called "scam.io" or
+ * a slur; a ticker that fails gets a neutral name everywhere it would be
+ * printed — brief, read, header and chart alike. desk.ts supplies the group
+ * gate's judgement; absent, every clean ticker passes.
+ */
+export type Sayable = (ticker: string) => boolean;
+const ANYTHING: Sayable = () => true;
+
 /** The reads the desk makes. Injected, so every branch is testable without the network. */
 export interface DeskReads {
   search(query: string): Promise<GeckoFetch>;
@@ -61,7 +70,6 @@ const median = (xs: number[]): number | null => {
 
 export interface CoinMeasure {
   symbol: string;
-  name: string | null;
   token: string;
   pool: GeckoPool;
   quote: string | null;
@@ -114,7 +122,7 @@ export function resolveByName(query: string, pools: readonly GeckoPool[]): { tok
   const deepest = Math.max(...ranked.map((r) => r.depth));
   const byVolume = [...ranked].sort((a, b) => b.volume - a.volume);
   const [loud, loudNext] = byVolume;
-  if (loud!.volume > 0 && loud!.volume >= loudNext!.volume * 4 && loud!.depth >= deepest * 0.25) return { token: loud!.token, pools: loud!.pools };
+  if (loud!.volume > 0 && loud!.volume >= loudNext!.volume * 4 && loud!.depth >= deepest * 0.5) return { token: loud!.token, pools: loud!.pools };
   const byDepth = [...ranked].sort((a, b) => b.depth - a.depth);
   const [deep, deepNext] = byDepth;
   if (deep!.depth > 0 && deep!.depth >= deepNext!.depth * 4) return { token: deep!.token, pools: deep!.pools };
@@ -156,7 +164,7 @@ export function flowOf(pools: readonly GeckoPool[], w: "h1" | "h6" | "h24"): Flo
   return { buys: sum("buys"), sells: sum("sells"), buyers: sum("buyers"), sellers: sum("sellers"), volumeUsd: sum("volumeUsd") };
 }
 
-export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, reads: DeskReads): Promise<CoinMeasured> {
+export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, reads: DeskReads, sayable: Sayable = ANYTHING): Promise<CoinMeasured> {
   let token: string;
   let pools: GeckoPool[];
   let observedAt: number | undefined;
@@ -182,17 +190,17 @@ export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, rea
   const chart = await reads.hourly(pool.poolId, token);
   const bars = chart.failed ? [] : chart.bars;
   const sides = poolSides(pool.name);
-  const symbol = cleanSymbol(chart.symbol) ?? sides.base ?? "this coin";
-  const name = typeof chart.name === "string" && /^[\p{L}\p{N} ._-]{1,40}$/u.test(chart.name) ? chart.name : null;
+  const ticker = cleanSymbol(chart.symbol) ?? sides.base;
+  const symbol = ticker && sayable(ticker) ? ticker : "this coin";
+  const quote = cleanSymbol(chart.quoteSymbol) ?? sides.quote;
   const now = reads.now();
   return {
     ok: true,
     coin: {
       symbol,
-      name,
       token,
       pool,
-      quote: cleanSymbol(chart.quoteSymbol) ?? sides.quote,
+      quote: quote && sayable(quote) ? quote : null,
       pools,
       bars,
       tech: technicals(bars),
@@ -240,7 +248,9 @@ export function coinBrief(c: CoinMeasure): string {
   const liq = c.pools.reduce((s, x) => s + (x.reserveUsd ?? 0), 0);
   const vol = c.pools.reduce((s, x) => s + credibleVolume(x), 0);
   const age = ageSec(c);
-  L.push(`COIN: ${c.symbol}${c.name && norm(c.name) !== norm(c.symbol) ? ` (${c.name})` : ""} on Robinhood Chain; main pool ${c.symbol}${c.quote ? ` / ${c.quote}` : ""} on ${dexLabel(p.dex)}; ${c.pools.length} pool${c.pools.length === 1 ? "" : "s"} indexed; observed ${utcClock(c.observedAtMs)} UTC`);
+  // The ticker only, never the coin's full name: that is free text its deployer
+  // wrote, and a brief is read by a model.
+  L.push(`COIN: ${c.symbol} on Robinhood Chain; main pool ${c.symbol}${c.quote ? ` / ${c.quote}` : ""} on ${dexLabel(p.dex)}; ${c.pools.length} pool${c.pools.length === 1 ? "" : "s"} indexed; observed ${utcClock(c.observedAtMs)} UTC`);
   if (price !== null) {
     const ch = (["m5", "h1", "h6", "h24"] as const)
       .map((w) => (n(p.buckets[w].changePct) ? `${w === "m5" ? "5m" : w.slice(1) + "h"} ${fmtPct(p.buckets[w].changePct!)}` : null))
@@ -409,7 +419,7 @@ export interface MarketMeasure {
 const MIN_LIQ = 20_000;
 const MIN_VOL = 10_000;
 
-export async function measureMarket(reads: DeskReads): Promise<{ ok: true; market: MarketMeasure } | { ok: false; why: "unavailable" }> {
+export async function measureMarket(reads: DeskReads, sayable: Sayable = ANYTHING): Promise<{ ok: true; market: MarketMeasure } | { ok: false; why: "unavailable" }> {
   const [trending, top, fresh] = await Promise.all([reads.feed("trending_pools"), reads.feed("pools"), reads.feed("new_pools")]);
   if (trending.failed && top.failed) return { ok: false, why: "unavailable" };
   const all = [...(trending.failed ? [] : trending.pools), ...(top.failed ? [] : top.pools)];
@@ -435,7 +445,8 @@ export async function measureMarket(reads: DeskReads): Promise<{ ok: true; marke
     const volume24h = pools.reduce((s, p) => s + credibleVolume(p), 0);
     if (liquidity < MIN_LIQ || volume24h < MIN_VOL) continue;
     coins.push({
-      symbol: base,
+      // Still counted in breadth and volume; just never named.
+      symbol: sayable(base) ? base : "unnamed",
       change24h: best.change24hPct,
       change1h: best.change1hPct,
       volume24h,

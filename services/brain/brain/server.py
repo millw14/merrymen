@@ -15,6 +15,7 @@ money. Brain is outside the trust domain by construction, not by policy.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import time
@@ -248,7 +249,21 @@ async def analyze(req: AnalyzeRequest, authorization: str | None = Header(defaul
 
     started = time.monotonic()
     try:
-        result = await desk.analyze(llm, req, budget)
+        # A SLOT IS HELD NO LONGER THAN THE TIER ALLOWS. The budget is checked
+        # only before each call, and a slow provider can sit on one call for the
+        # client's whole timeout — long after the worker has given up and sent
+        # the code's own read. With two slots for the whole fleet, that would
+        # leave every group's desk "busy" for nothing. Cut it at the tier's
+        # ceiling, cancel the provider call, free the slot.
+        result = await asyncio.wait_for(desk.analyze(llm, req, budget), timeout=TIERS["desk"].max_seconds + 2.0)
+    except asyncio.TimeoutError:
+        result = DeskRefusal(
+            run_id=req.run_id,
+            agent_id=req.agent_id,
+            reason="budget",
+            detail=f"the read took longer than {TIERS['desk'].max_seconds:.0f}s",
+            cost=budget.cost(),
+        )
     finally:
         _desk_slots.release()
     elapsed = round(time.monotonic() - started, 3)

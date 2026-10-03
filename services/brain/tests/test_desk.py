@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from brain import desk, server
 from brain.budget import DeskSlots, RunBudget, TIERS, desk_concurrency_from_env
 from brain.graph import BrainGraph
-from brain.llm import Llm, LlmConfig, REASONING_FIELD, _REASONING_HINT_REFUSED
+from brain.llm import _REASONING_EFFORT_REFUSED, Llm, LlmConfig, REASONING_FIELD, _REASONING_HINT_REFUSED
 from brain.schemas import (
     SCHEMA_VERSION,
     AnalyzeRequest,
@@ -298,8 +298,30 @@ async def test_the_desk_keeps_the_hint_fallback_for_endpoints_that_refuse_it():
     assert isinstance(result, DeskAnalysis)
     assert [REASONING_FIELD in b for b in seen] == [True, False]
     assert budget.model_calls == 1, "the rejected hint never reached a model"
-    assert cfg.base_url in _REASONING_HINT_REFUSED
-    _REASONING_HINT_REFUSED.discard(cfg.base_url)
+    # Remembered as THIS effort refused, never as the endpoint refusing the
+    # hint: decide's "none" must keep being sent (review finding 5).
+    assert (cfg.base_url, "medium") in _REASONING_EFFORT_REFUSED
+    assert cfg.base_url not in _REASONING_HINT_REFUSED
+    _REASONING_EFFORT_REFUSED.discard((cfg.base_url, "medium"))
+
+
+async def test_a_refused_desk_effort_leaves_decides_none_hint_alone():
+    """An endpoint that takes only "none" refuses "medium": decide still sends "none" afterwards."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if body.get(REASONING_FIELD) not in (None, "none"):
+            return httpx.Response(400, json={"error": {"message": f"'{REASONING_FIELD}' must be none"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(GOOD)}}], "usage": {}})
+
+    cfg = _cfg()
+    llm = Llm(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert isinstance(await desk.analyze(llm, _req(), _budget()), DeskAnalysis)
+    await llm.complete(node="decide-like", budget=_budget(), system="s", user="u", deep=True)
+    assert seen[-1].get(REASONING_FIELD) == "none", "decide's hint survives the desk's refused effort"
+    _REASONING_EFFORT_REFUSED.discard((cfg.base_url, "medium"))
 
 
 # ── the fence ──────────────────────────────────────────────────────────────

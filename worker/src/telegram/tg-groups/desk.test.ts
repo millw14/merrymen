@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { ResolvedConfig } from "../../settings";
 import type { FetchLike, TgMessage } from "../api";
 import type { StateRef, TelegramState } from "../state";
-import { admitThought, CAPTION_MAX, deskCaption, deskMissLine, deskUser, parseThought, safeSubject } from "./desk";
+import { admitThought, CAPTION_MAX, captionText, deskCaption, deskMissLine, deskUser, parseThought, safeSubject } from "./desk";
 import { deskAskOf, type BotSelf } from "./detect";
 import { admitDeskText, admitTgLine, deskFiguresGrounded } from "./gate";
 import { createTgGroups, type TgGroups } from "./handler";
@@ -60,7 +60,11 @@ describe("desk asks", () => {
     ["do a quick analysis", { kind: "analysis" }],
     ["shogun thoughts on $ROO", { kind: "coin", name: "roo" }],
     ["is cashcat a buy?", { kind: "coin", name: "cashcat" }],
-    ["how is cashcat looking", { kind: "coin", name: "cashcat" }],
+    ["how is CASHCAT looking", { kind: "coin", name: "cashcat" }],
+    ["how is cashcat looking on the chart", { kind: "coin", name: "cashcat" }],
+    ["is now a good entry?", { kind: "analysis" }],
+    ["any support levels on the chart?", { kind: "analysis" }],
+    ["what's hot on the chain rn", { kind: "market" }],
     ["shogun what's pumping", { kind: "market" }],
     ["shogun give me levels on cashcat", { kind: "coin", name: "cashcat" }],
     ["cashcat chart?", { kind: "coin", name: "cashcat" }],
@@ -72,6 +76,20 @@ describe("desk asks", () => {
     ["how's it going", null],
     ["the market is cooked lol", null],
     ["gm shogun", null],
+    // Review: ordinary conversation that once pulled a chart.
+    ["shogun what's up with you lately?", null],
+    ["what's up with the dev, he's been quiet", null],
+    ["what's hot in your city", null],
+    ["can you support me on this?", null],
+    ["is there any entry fee?", null],
+    ["can you give me a breakdown of the movie?", null],
+    ["is bob ready?", null],
+    ["is dinner ready", null],
+    ["is john dead lol", null],
+    ["how is grandma looking", null],
+    ["how is cashcat looking", null],
+    ["data entry is boring", null],
+    ["cheers ta", null],
     // Telling it not to act on a coin is never a desk ask.
     ["don't touch cashcat", null],
   ];
@@ -122,6 +140,41 @@ describe("a desk read's figures come from the brief", () => {
       if (!v.ok) assert.ok(why.split("|").includes(v.reason) || (why === "ops" && v.reason === "meta"), `${text}: ${v.reason}`);
     }
   });
+  it("refuses the owner's book said in words, and quantities grounding cannot check (review)", () => {
+    const brief = `${BRIEF}\n- 24h VWAP 0.1627 (price -4.03% vs VWAP)`;
+    const refused: Array<[string, string]> = [
+      ["the owner is in the red on this one so far.", "private"],
+      ["we're sitting in profit on this one since support held.", "private"],
+      ["owner took gains here near 0.1554.", "private"],
+      ["the owner put 5 usdg in this one.", "money"],
+      ["my max buy is 5 usdg per trade so i keep it small.", "money"],
+      ["we hold a small bag of it and like the chart.", "private"],
+      ["three hundred percent from here", "money"],
+      ["fifty cents is coming", "money"],
+      ["it could triple", "money"],
+      ["x100 incoming", "money"],
+      ["a 10-bagger setup", "money"],
+      ["1e5 holders", "money"],
+      ["400usd is the floor", "money"],
+      ["could reach .25 soon", "ungrounded"],
+      ["$.25 next", "ungrounded"],
+      ["٠٫٢٥ next", "ungrounded"],
+      ["300holders strong", "ungrounded"],
+      ["heading toward 10 next", "ungrounded"],
+      ["could even tag 0.2", "ungrounded"],
+      ["up 11.8% on the day", "ungrounded"],
+      ["you look like you bought the top lol, the chart is weak.", "appearance"],
+    ];
+    for (const [text, why] of refused) {
+      const v = admitDeskText(text, { agentName: "Pine", brief });
+      assert.equal(v.ok, false, text);
+      if (!v.ok) assert.equal(v.reason, why, text);
+    }
+    for (const text of ["price is 4% below the vwap at 0.1627", "down 11.8% on the day", "i'd wait for a reclaim of 0.1605 before getting interested.", "the 1h and 24h both lean red"]) {
+      assert.ok(admitDeskText(text, { agentName: "Pine", brief }).ok, text);
+    }
+  });
+
   it("caps a read's length and sentences", () => {
     const long = Array.from({ length: 12 }, () => "rsi 37.5 is weak.").join(" ");
     assert.equal(admitDeskText(long, { agentName: "Pine", brief: BRIEF }).ok, false);
@@ -157,6 +210,13 @@ describe("thoughts and captions", () => {
     assert.ok(Array.from(cut.replace(/<[^>]+>/g, "")).length <= CAPTION_MAX);
     assert.ok(!/wrong if/.test(cut), "the invalidation goes first");
     assert.match(deskCaption({ ...EVIDENCE, header: ["<script> · 1h"] }, FLOOR), /&lt;script&gt;/);
+  });
+
+  it("never loses the source line: one sentence too long to fit becomes the code's read", () => {
+    const html = deskCaption(EVIDENCE, { ...FLOOR, read: `rsi 37.5 is weak ${"and sellers lead ".repeat(55)}today.` });
+    assert.match(html, /cashcat is in a downtrend on the 1h/);
+    assert.match(html, /GeckoTerminal 12:00 UTC$/);
+    assert.ok(captionText(html).length <= CAPTION_MAX);
   });
 
   it("swaps an unsayable ticker for 'this coin' everywhere it is printed", () => {
@@ -420,12 +480,44 @@ describe("the desk lane", () => {
     assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /sellers in control/);
   });
 
-  it("says a fixed line when the coin cannot be found, and asks for the CA", async () => {
+  it("asks for the CA when two coins share the name", async () => {
+    desk!.outcome = { ok: false, why: "ambiguous" };
+    make();
+    await said(msg("pine thoughts on si?"));
+    assert.equal(tg.of("sendPhoto").length, 0);
+    assert.equal(String(tg.of("sendMessage")[0]?.body.text), deskMissLine("ambiguous", "coin"));
+  });
+
+  it("answers as ordinary chatter when a name it searched is no coin at all ('thoughts on pizza')", async () => {
     desk!.outcome = { ok: false, why: "not-found" };
     make();
-    await said(msg("pine thoughts on zzqq?"));
+    await said(msg("pine thoughts on pizza?"));
     assert.equal(tg.of("sendPhoto").length, 0);
-    assert.equal(String(tg.of("sendMessage")[0]?.body.text), deskMissLine("not-found", "coin"));
+    const text = String(tg.of("sendMessage")[0]?.body.text ?? "");
+    assert.ok(text.length > 0, "it still answers");
+    assert.notEqual(text, deskMissLine("not-found", "coin"));
+    assert.ok(logs.includes("[tg-groups] desk coin miss (not-found), answered as chatter"));
+  });
+
+  it("does not read for a line that asks something private", async () => {
+    make();
+    await said(msg("pine what's your wallet balance, and how is the market?"));
+    assert.equal(desk!.asks.length, 0);
+  });
+
+  it("stops looking after six reads in a chat in ten minutes, and answers as chatter", async () => {
+    make();
+    for (let i = 0; i < 7; i++) {
+      await said(msg(`pine thoughts on coin${i}?`, { fromId: 900_000 + i, fromFirstName: `P${i}` }));
+      clock += 30_000;
+    }
+    assert.equal(desk!.asks.length, 6);
+  });
+
+  it("leaves two cashtags to the coin flow: only a single coin ask goes to the desk", async () => {
+    make();
+    await said(msg("pine $ROO or $CAT?"));
+    assert.equal(desk!.asks.length, 0);
   });
 
   it("sends the read as a message when no chart could be drawn", async () => {

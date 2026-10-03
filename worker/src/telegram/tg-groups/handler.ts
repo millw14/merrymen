@@ -1905,10 +1905,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const coinQuestion = asksAboutCoin(j.line.text, selfNamesOf(selfNow())) || /\b(?:why|how come)\b/iu.test(j.line.text);
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
-      const deskAsk = !request && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
-      if (deskAsk) {
+      const deskAsk = !request && dec.mood !== "private-ask" && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
+      if (deskAsk && deskRoom(chatId)) {
+        // A coin read is wanted only while the coins switch stays on, like the public-fact lane's.
+        const deskOpts = deskAsk.kind === "coin" ? { ...replyOpts, stillWanted: () => wanted() && coinFactsOn() } : replyOpts;
         track((async () => {
-          const sent = await deskAnswer(chatId, j, deskAsk, replyOpts);
+          const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, intent);
           if (sent) noteAnswered(sent.chatId, j, false);
           else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
         })());
@@ -2059,6 +2061,25 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       return null;
     }
   };
+  /**
+   * HOW OFTEN THE DESK MAY READ. Each new look costs index requests from the
+   * fleet's shared GeckoTerminal budget (the one discovery uses), so a chat gets
+   * at most DESK_PER_CHAT looks and the agent DESK_PER_AGENT in any ten
+   * minutes; past that the line is answered as ordinary chatter. A repeat of a
+   * look still in the desk's one-minute memo costs nothing but is counted the
+   * same, which keeps the rule simple and the ceiling honest.
+   */
+  const DESK_WINDOW_MS = 10 * MIN;
+  const DESK_PER_CHAT = 6;
+  const DESK_PER_AGENT = 30;
+  const deskLooks: Array<{ chatId: number; atMs: number }> = [];
+  const deskRoom = (chatId: number): boolean => {
+    const now = clock();
+    while (deskLooks.length && now - deskLooks[0]!.atMs > DESK_WINDOW_MS) deskLooks.shift();
+    if (deskLooks.length >= DESK_PER_AGENT || deskLooks.filter((l) => l.chatId === chatId).length >= DESK_PER_CHAT) return false;
+    deskLooks.push({ chatId, atMs: now });
+    return true;
+  };
   /** What each chat last asked the desk, so "do a quick analysis" right after reads the same thing. */
   const lastDesk = new Map<number, { ask: TgDeskAsk; atMs: number }>();
   const DESK_FOLLOW_MS = 15 * MIN;
@@ -2151,7 +2172,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * group allowance (rule 7). A miss gets a fixed line asking for the CA or a
    * minute, never a guess.
    */
-  const deskAnswer = async (chatId: number, j: LineJob, ask: TgDeskAsk, o: SpeakOpts): Promise<{ chatId: number; messageId?: number } | null> => {
+  const deskAnswer = async (chatId: number, j: LineJob, ask: TgDeskAsk, o: SpeakOpts, fallback: TgIntent): Promise<{ chatId: number; messageId?: number } | null> => {
     const desk = deskNow();
     if (!desk) return null;
     const early = optsNow();
@@ -2177,6 +2198,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const looked = await readDesk(() => desk.look(ask), 15 * SEC);
     if (!looked || !looked.ok) {
       const why = looked && !looked.ok ? looked.why : "unavailable";
+      // A NAME NOBODY LISTS was probably not a coin: "thoughts on pizza" gets
+      // the ordinary answer, not "drop the CA".
+      if (why === "not-found" && "query" in ask) {
+        log(`[tg-groups] desk coin miss (not-found), answered as chatter`);
+        return speak(chatId, fallback, o);
+      }
       const line = deskMissLine(why, ask.kind);
       const v = admitTgLine(line, { agentName: "", kind: "fixed", recentOwn: [] });
       if (!v.ok) return null;
@@ -2359,7 +2386,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // A cashtag said to it with no CA is a question for the desk, which can
       // find the coin by name; the coin flow's "drop the ca" is for a cashtag
       // dropped in the room, or when there is no desk.
-      const deskTicker = j.addressed !== null && !asked && cas.length === 0 && !foreignMint && cashtags.length > 0 && deskNow() !== null && coinFactsOn();
+      const deskTicker = j.addressed !== null && !asked && cas.length === 0 && !foreignMint && cashtags.length > 0 && deskNow() !== null && coinFactsOn()
+        && deskAskOf(text, selfNamesOf(selfNow()))?.kind === "coin";
       if (!rememberedAsk && !deskTicker && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {

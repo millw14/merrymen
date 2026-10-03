@@ -18,8 +18,11 @@ import { admitDeskText, admitTgLine, TG_DESK_MAX } from "./gate";
 import { callText, type TgModel, type TgModelGate } from "./model";
 import type { TgDeskEvidence, TgDeskStance, TgDeskThinkRequest, TgDeskThought } from "./types";
 
-/** Telegram's limit on a photo caption, in characters after entities are parsed. */
-export const CAPTION_MAX = 1024;
+/**
+ * The longest caption sent, counted in UTF-16 units as Telegram counts them,
+ * below its 1024 so an emoji's second unit can never push the source line off.
+ */
+export const CAPTION_MAX = 1000;
 /**
  * The longest read the gate admits. Longer than its share of a caption on
  * purpose: a faithful read that runs long is cut to fit by whole parts and
@@ -144,6 +147,18 @@ function renamed(text: string, from: string, to: string): string {
  * read — never mid-sentence.
  */
 export function deskCaption(e: TgDeskEvidence, t: TgDeskThought): string {
+  const html = fitCaption(e, t);
+  // One sentence too long to fit even alone: the code's read, which always
+  // does, rather than a caption that loses its source.
+  return html ?? fitCaption(e, e.floor) ?? fitCaption(e, { ...e.floor, read: "" }) ?? "";
+}
+
+/** Visible text of caption HTML: what Telegram counts. */
+export function captionText(html: string): string {
+  return html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+}
+
+function fitCaption(e: TgDeskEvidence, t: TgDeskThought): string | null {
   const subject = safeSubject(e.subject);
   const fix = (s: string) => renamed(s, e.subject, subject);
   const header = e.header.map(fix);
@@ -159,13 +174,12 @@ export function deskCaption(e: TgDeskEvidence, t: TgDeskThought): string {
       [watch ? `👀 watch: ${esc(watch)}` : "", invalidation ? `❌ wrong if: ${esc(invalidation)}` : ""].filter(Boolean).join("\n"),
       tail,
     ].filter(Boolean).join("\n\n");
-  const shown = (html: string) => html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/&quot;/g, '"');
   let html = build();
-  while (Array.from(shown(html)).length > CAPTION_MAX) {
+  while (captionText(html).length > CAPTION_MAX) {
     if (invalidation) invalidation = "";
     else if (watch) watch = "";
     else if (sentences.length > 1) sentences = sentences.slice(0, -1);
-    else break;
+    else return null;
     html = build();
   }
   return html;

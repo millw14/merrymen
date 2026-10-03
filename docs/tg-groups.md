@@ -388,15 +388,23 @@ one-liner from a model that was given no data.
 
 **When.** Only a line said to it (`deskAskOf`, detect.ts):
 
-* a coin named by a cashtag, or by a phrase that asks for a read on it
-  ("thoughts on X", "X good entry", "is X a buy", "chart on X", "how's X
-  looking"); a phrase that could name anything ("check out X", "how is X
-  doing") counts only beside a trading word, so "check out bob" is a person;
+* a coin named by one cashtag, or by a phrase that asks for a read on it
+  ("thoughts on X", "X good entry", "is X a buy", "chart on X"); a phrase
+  that could name anything ("check out X", "how is X looking", "is X ready")
+  counts only beside a trading word or with X written as a ticker in
+  capitals, so "check out bob" and "is dinner ready" are not coins;
 * the market's own words with a question or request ("how's the market",
-  "market update"), or "what's pumping / moving", "any setups";
-* a bare "do a quick analysis" / "entry?" — bound to the coin it replies
+  "market update"), or "what's pumping / moving", "any setups"; "what's up /
+  hot" only beside a trading word;
+* a bare "do a quick analysis" / "good entry?" — bound to the coin it replies
   under, else a desk ask up the reply chain, else what this chat last asked
-  within 15 minutes, else the market.
+  within 15 minutes, else the market. Words with an everyday meaning
+  ("entry", "support", "breakdown") ask for a read only beside a trading word.
+
+A searched name that no index lists ("thoughts on pizza") is answered as
+ordinary chatter, not "drop the CA". A line that asks something private does
+not reach the desk. Each chat gets at most 6 desk looks, and the agent 30, in
+any ten minutes; past that a line is answered as chatter.
 
 A "why" under a coin keeps the public-fact answer (it is about the agent's own
 decision). An addressed cashtag with no CA goes to the desk, which can find
@@ -421,15 +429,18 @@ resistance. The market is the trending and top-pool feeds plus the newest
 pools: breadth by day and hour, volume concentration, flow, leaders and
 laggards, the deepest coins, launches and the ETH backdrop. Reads share the
 fleet GeckoTerminal quota; one minute of memo per ask, and concurrent asks
-share one job. Coin names from the index are reduced to plain tickers before
-they reach a brief, a chart or a caption.
+share one job. Coin names from the index are reduced to plain tickers, and a
+ticker the group gate would not let the agent say ("scam.io", a slur) is
+printed as "this coin" or "unnamed" — in the brief, the read, the header and
+the chart alike. The deployer's free-text coin name never enters a brief.
 
 **The read.** From the brief, in this order:
 
 1. Brain's `POST /v1/analyze` — its deep model at medium reasoning effort,
    its own fleet-wide slot limit (`BRAIN_DESK_CONCURRENCY`, default 2) apart
-   from `/v1/decide`'s per-agent lock — only with `MERRYMEN_TG_GROUPS_BRAIN=1`
-   (rule 7), time-boxed at 22 s;
+   from `/v1/decide`'s per-agent lock, a slot never held past the desk tier's
+   20 s, and a refused effort remembered apart from decide's reasoning hint —
+   only with `MERRYMEN_TG_GROUPS_BRAIN=1` (rule 7), time-boxed at 22 s;
 2. else, within 12 s of starting, the group's own model with the same
    instructions, time-boxed at 20 s;
 3. else the desk's own read, written by code from the same measurements.
@@ -439,17 +450,23 @@ asker's words reach the model only fenced as untrusted; nothing private does
 (rule 3). Each model-written piece (read, watch, invalidation) passes
 `admitDeskText`: every protective clause of the group gate stays, the money
 and figure clauses give way to grounding — every figure must be a brief figure
-of the same kind (percent, multiple, or neither), rounded or within 0.6% —
-and the chart words "entry" and "breakout" and market words ("in the red",
-"transactions", "rejected at") are allowed. A refused piece is replaced by the
+of the same kind (percent, multiple, or neither), within 0.6% or rounded (a
+price needs two significant digits to count as rounded; a percent said with a
+direction must point the brief's way) — and the chart words "entry" and
+"breakout" and market words ("in the red", "transactions", "rejected at") are
+allowed. A quantity grounding cannot check — spelled out, a multiplier, a
+money unit ("5 usdg"), another script's digits — is refused, and so is the
+owner's book in words: a first person or the owner beside a holding, result
+or size ("the owner is in the red on this"). A refused piece is replaced by the
 code's piece. The log line says whose read went out and the refusal code,
 never the text.
 
 **The answer** is one photo reply: the chart (candles, EMA20/50, the nearest
 levels and volume; or the 24h board), with a caption built by code — the
 public header, the read, what to watch, what would flip it, the stance and
-"GeckoTerminal HH:MM UTC". It is cut to Telegram's 1024 characters by whole
-parts and whole sentences. With no chart, the same text goes as a message. A
+"GeckoTerminal HH:MM UTC". It is cut to 1000 UTF-16 units (under Telegram's
+1024) by whole parts and whole sentences; a single sentence too long to fit
+is replaced by the code's read, so the source line is never lost. With no chart, the same text goes as a message. A
 coin it cannot find, two coins it cannot tell apart, or a feed it cannot read
 gets a fixed line asking for the CA or a minute — never a guess.
 

@@ -1656,6 +1656,8 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "other", "same", "very", "really", "just", "also", "so", "too", "not", "no", "yes", "maybe", "kinda", "ok", "okay",
   "sure", "like", "actually", "honestly", "literally", "still", "already", "even", "only", "much", "many", "few", "legit",
   "cool", "sick", "crazy", "proper", "fresh", "clean", "do", "did", "does", "make", "give", "run", "get",
+  // Chart words that sit where a name would: "support levels", "key levels".
+  "support", "resistance", "key", "major", "nearest", "exit",
 ]);
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
@@ -1666,22 +1668,35 @@ const NAME = String.raw`\$?([\p{L}\p{N}][\p{L}\p{N}._-]{1,23})`;
 const DESK_COIN_STRONG: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of)|analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:a\s+)?(?:good|decent|nice|solid|bad|safe)\s+(?:entry|buy|play|bag|hold)\b`, "u"),
-  new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|worth it|legit|dead|done|cooked|bullish|bearish|ready|a hold)\b`, "u"),
-  new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:chart|ta|analysis|entry|levels)\b`, "u"),
-  new RegExp(String.raw`\bhow(?:'?s| is| does)\s+${NAME}\s+(?:look|looking|lookin)\b`, "u"),
+  new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|bullish|bearish|a hold)\b`, "u"),
+  new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:chart|analysis|levels)\b`, "u"),
 ];
-/** Patterns that name something and could be about anything: a coin only beside a trading word. */
+/**
+ * Patterns that name something and could be about anything — "is dinner
+ * ready", "how is grandma looking", "check out bob": a coin only beside a
+ * trading word, or when the name is written in capitals like a ticker.
+ */
 const DESK_COIN_WEAK: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:check out|check|look at|looking at|peep|pull up|what about|how about)\s+${NAME}`, "u"),
-  new RegExp(String.raw`\bhow(?:'?s| is| does)\s+${NAME}\s+(?:doing|holding|going)\b`, "u"),
+  new RegExp(String.raw`\bhow(?:'?s| is| does)\s+${NAME}\s+(?:look|looking|lookin|doing|holding|going)\b`, "u"),
+  new RegExp(String.raw`\bis\s+${NAME}\s+(?:dead|done|cooked|ready|legit|worth it)\b`, "u"),
 ];
 const DESK_MARKET_WORD = /\b(?:market|markets|trenches|memecoins|meme market)\b/u;
 const DESK_MARKET_CUE =
   /\b(?:how|what|whats|update|check|analysis|analy[sz]e|look|looking|doing|vibe|vibes|sentiment|overview|outlook|read|state|today|rn|currently|now|summary|recap|breakdown|thoughts|wdyt|condition|conditions)\b|[?？]/u;
+/** What's moving: these words are about markets in any chat. */
 const DESK_MOVERS =
-  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|running|hot|trending|popping|ripping|bleeding|dumping|cooking|sending|up|green)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|trending|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+/** "what's hot / up / cooking": about markets only beside a trading word ("what's up with the dev" is not). */
+const DESK_MOVERS_WEAK = /\bwhat(?:'?s|s| is| are)\s+(?:hot|cooking|popping|running|green|up)\b/u;
+/** Asks for a chart read in words no other topic uses. */
 const DESK_ANALYSIS =
-  /\b(?:analy[sz](?:e|is|es)|ta|technical analysis|breakdown|deep dive|chart|charts|levels|entry|entries|support|resistance)\b/u;
+  /\b(?:analy[sz](?:e|is|es)|ta|technical analysis|chart|charts|levels|good entry|entry point|better entry|entries)\b/u;
+/** Chart words with an everyday meaning ("entry fee", "support me", "breakdown of the movie"): a read only beside a trading word. */
+const DESK_ANALYSIS_WEAK = /\b(?:entry|support|resistance|breakdown|deep dive)\b/u;
+/** A trading context for the weak words above. Deliberately not the chart words themselves. */
+const DESK_CONTEXT =
+  /\b(?:coin|coins|token|tokens|chart|charts|market|markets|chain|price|buy|buying|sell|selling|ape|aping|bag|bags|pump|pumping|dump|dumping|dip|trade|trading|bullish|bearish|liq|liquidity|volume|mcap|fdv|memecoin|memecoins|trenches|ca)\b|\$[a-z]/u;
 const DESK_REQUEST =
   /\b(?:do|give|run|show|pull|need|want|drop|got|any|what|whats|how|where|is|can|could|would|pls|please|quick)\b|[?？]/u;
 
@@ -1718,9 +1733,16 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
     }
   };
   DESK_COIN_STRONG.forEach(scan);
-  if (DESK_TRADING_CUE.test(t)) DESK_COIN_WEAK.forEach(scan);
+  const cue = DESK_TRADING_CUE.test(t);
+  // A weakly-asked name counts beside a trading word, or written as a ticker:
+  // "how is CASHCAT looking" is a coin, "how is grandma looking" is not.
+  const shouted = (name: string) => name.length >= 3 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name.toUpperCase())}(?![\\p{L}\\p{N}])`, "u").test(text);
+  const weakBefore = found.length;
+  DESK_COIN_WEAK.forEach(scan);
+  if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name)));
   if (found.length) return { kind: "coin", name: found.sort((a, b) => a.at - b.at)[0]!.name };
-  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t)) return { kind: "market" };
-  if (DESK_ANALYSIS.test(t) && DESK_REQUEST.test(t)) return { kind: "analysis" };
+  const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
+  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
+  if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
   return null;
 }

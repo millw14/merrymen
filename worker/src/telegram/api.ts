@@ -1351,7 +1351,7 @@ export async function sendPhotoBytes(
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
-      if (text) form.append("caption", Array.from(text).length > 1024 ? Array.from(text).slice(0, 1020).join("") + "…" : text);
+      if (text) form.append("caption", text);
       if (text && html) form.append("parse_mode", "HTML");
       for (const [k, v] of Object.entries(options)) form.append(k, typeof v === "object" ? JSON.stringify(v) : String(v));
       form.append("photo", new Blob([new Uint8Array(png)], { type: "image/png" }), "chart.png");
@@ -1381,12 +1381,20 @@ export async function sendPhotoBytes(
       disarm();
     }
   };
+  // MEASURED AS TELEGRAM MEASURES IT: the visible text, in UTF-16 units. A
+  // caption over the cap goes as plain text cut at the cap — never as HTML cut
+  // in the middle of a tag or an entity.
+  const visible = caption.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+  if (visible.length > 1024) {
+    const { entityRefused: _, ...rest } = await attempt(Array.from(visible).reduce((acc, ch) => (acc.length + ch.length <= 1020 ? acc + ch : acc), "") + "…", false);
+    return rest;
+  }
   const first = await attempt(caption, true);
   if (first.ok || !first.entityRefused) {
     const { entityRefused: _, ...rest } = first;
     return rest;
   }
-  const plain = await attempt(caption.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&"), false);
+  const plain = await attempt(visible, false);
   const { entityRefused: _, ...rest } = plain;
   return rest;
 }

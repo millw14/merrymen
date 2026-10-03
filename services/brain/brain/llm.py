@@ -52,6 +52,12 @@ REASONING_FIELD = "reasoning_effort"
 #: that refuses the hint pays for it once instead of on every call.
 _REASONING_HINT_REFUSED: set[str] = set()
 
+#: A raised effort an endpoint refused, remembered with the effort it refused.
+#: Kept apart from `_REASONING_HINT_REFUSED` on purpose: an endpoint that only
+#: takes "none" refusing the desk's "medium" must not switch off the "none"
+#: hint every `/v1/decide` call depends on.
+_REASONING_EFFORT_REFUSED: set[tuple[str, str]] = set()
+
 
 def _rejects_reasoning_field(body: str) -> bool:
     """
@@ -178,8 +184,14 @@ class Llm:
         # Still only for a reasoning model, whatever effort a caller asks for: a
         # model that does not reason has no use for the field, and some
         # endpoints reject it outright.
-        if _is_reasoning_model(model) and self.cfg.base_url not in _REASONING_HINT_REFUSED:
-            payload[REASONING_FIELD] = "none" if reasoning_effort is None else reasoning_effort
+        effort = "none" if reasoning_effort is None else reasoning_effort
+        hint_allowed = (
+            self.cfg.base_url not in _REASONING_HINT_REFUSED
+            if effort == "none"
+            else (self.cfg.base_url, effort) not in _REASONING_EFFORT_REFUSED
+        )
+        if _is_reasoning_model(model) and hint_allowed:
+            payload[REASONING_FIELD] = effort
 
         client = await self._http()
         last: Exception | None = None
@@ -210,7 +222,10 @@ class Llm:
                     and REASONING_FIELD in payload
                     and _rejects_reasoning_field(r.text)
                 ):
-                    _REASONING_HINT_REFUSED.add(self.cfg.base_url)
+                    if payload[REASONING_FIELD] == "none":
+                        _REASONING_HINT_REFUSED.add(self.cfg.base_url)
+                    else:
+                        _REASONING_EFFORT_REFUSED.add((self.cfg.base_url, payload[REASONING_FIELD]))
                     payload.pop(REASONING_FIELD, None)
                     continue
                 if r.status_code == 429:

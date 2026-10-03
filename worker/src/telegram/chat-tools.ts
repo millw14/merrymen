@@ -1227,7 +1227,9 @@ const marketRead: ChatTool = {
         : "Market data couldn't be read right now; try again in a minute.";
     }
     const e = r.evidence;
-    return cap(`${e.brief}\n\nRULE-BASED READ (stance: ${e.floor.stance}): ${e.floor.read}\nWatch: ${e.floor.watch}\nWrong if: ${e.floor.invalidation}\nSource: ${e.source}`);
+    // The read and the source first: the tool output cap trims the brief's
+    // tail, never the conclusion or where the figures came from.
+    return cap(`RULE-BASED READ (stance: ${e.floor.stance}): ${e.floor.read}\nWatch: ${e.floor.watch}\nWrong if: ${e.floor.invalidation}\nSource: ${e.source}\n\nMEASUREMENTS:\n${e.brief}`);
   },
 };
 

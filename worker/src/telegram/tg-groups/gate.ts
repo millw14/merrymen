@@ -1524,73 +1524,129 @@ export interface TgDeskGateCtx {
   max?: number;
 }
 
-/** A figure as written: its value, how many decimals it was printed with, and its scale (k/m/b). */
+/** A figure as written: its value, how it was printed, its kind and any direction said with it. */
 interface Figure {
   value: number;
   decimals: number;
+  /** Significant digits as printed: "0.2" has one, "10" two, "0.1593" four. */
+  sig: number;
   scale: number;
   money: boolean;
   unit: "" | "%" | "x";
-  /** Glued to a word after it: "24h", "7d", "2nd". */
-  word: boolean;
+  /** +1 / −1 when a sign or a direction word says which way; 0 when nothing does. */
+  sign: 1 | -1 | 0;
+  /** The word glued on after it, lowercased: "h" in "24h", "holders" in "300holders". */
+  word: string | null;
+  at: number;
+  end: number;
 }
 
 const SCALES: Record<string, number> = { k: 1e3, m: 1e6, mn: 1e6, b: 1e9, bn: 1e9 };
-const FIGURE_RE = /(?<![\p{L}\p{N}_.,])(\$)?\s?(\p{Nd}{1,3}(?:,\p{Nd}{3})+(?:\.\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?:\s?(k|mn|m|bn|b)(?![\p{L}\p{N}]))?(?:\s?(%|x)(?![\p{L}\p{N}]))?(?=([\p{L}])?)/giu;
+const FIGURE_RE = /(?<![\p{L}\p{N}_.,])([-+−])?\s?(\$)?\s?(\p{Nd}{1,3}(?:,\p{Nd}{3})+(?:\.\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?|\.\p{Nd}+)(?:\s?(k|mn|m|bn|b)(?![\p{L}\p{N}]))?(?:\s?(%|x)(?![\p{L}\p{N}]))?(?=([\p{L}]+)?)/giu;
+const UP_WORDS = /\b(?:up|gain(?:ed|ing|s)?|rose|ris(?:e|es|ing)|climb(?:ed|ing|s)?|green|higher|rall(?:y|ied|ying)|pump(?:ed|ing)?|added|above|over|jump(?:ed|ing)?|surg(?:e|ed|ing))\b[^.!?\n\d]{0,12}$/iu;
+const DOWN_WORDS = /\b(?:down|lost|los(?:e|es|ing)|fell|fall(?:s|ing)?|drop(?:ped|ping|s)?|red|lower|dump(?:ed|ing)?|bled|bleed(?:s|ing)?|sank|sink(?:s|ing)?|off|below|under|slid|slump(?:ed|ing)?)\b[^.!?\n\d]{0,12}$/iu;
 
-function figuresIn(text: string): Figure[] {
+function figuresIn(raw: string): Figure[] {
+  const text = raw.normalize("NFKC");
   const out: Figure[] = [];
-  for (const m of text.normalize("NFKC").matchAll(FIGURE_RE)) {
+  for (const m of text.matchAll(FIGURE_RE)) {
     // "13,436" is thirteen thousand; "0,05" is a decimal comma.
-    const rawDigits = m[2] ?? "";
+    const rawDigits = m[3] ?? "";
     const digits = /^\p{Nd}{1,3}(?:,\p{Nd}{3})+(?:\.\p{Nd}+)?$/u.test(rawDigits) ? rawDigits.replace(/,/g, "") : rawDigits.replace(",", ".");
     const value = Number(digits);
     if (!Number.isFinite(value)) continue;
-    const scaleWord = (m[3] ?? "").toLowerCase();
-    const unit = ((m[4] ?? "").toLowerCase() as Figure["unit"]) || "";
+    const scaleWord = (m[4] ?? "").toLowerCase();
+    const unit = ((m[5] ?? "").toLowerCase() as Figure["unit"]) || "";
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 24), at);
+    const explicit = m[1] === "+" ? 1 : m[1] === "-" || m[1] === "−" ? -1 : 0;
+    const said = UP_WORDS.test(before) ? 1 : DOWN_WORDS.test(before) ? -1 : 0;
     out.push({
       value,
       decimals: digits.includes(".") ? digits.length - digits.indexOf(".") - 1 : 0,
+      sig: digits.replace(".", "").replace(/^0+/, "").length,
       scale: SCALES[scaleWord] ?? 1,
-      money: m[1] === "$",
+      money: m[2] === "$",
       unit,
-      word: !scaleWord && !unit && m[5] !== undefined,
+      sign: (explicit || said) as Figure["sign"],
+      word: !scaleWord && !unit && m[6] !== undefined ? m[6].toLowerCase() : null,
+      at,
+      end: at + m[0].length,
     });
   }
   return out;
 }
 
-/** Periods of the indicators the brief names (RSI14, EMA20/50), said with a space. */
+/** A time span glued to its unit: "24h", "7d", "1hr", "2wk". */
+const TIME_WORDS: ReadonlySet<string> = new Set(["h", "hr", "hrs", "hour", "hours", "d", "day", "days", "w", "wk", "wks", "week", "weeks", "min", "mins", "minute", "minutes"]);
+/** Periods of the indicators the brief names (RSI14, EMA20/50), said beside the indicator. */
 const PERIODS = new Set([14, 20, 50]);
+const PERIOD_CONTEXT = /\b(?:ema|sma|ma|rsi|atr|period|moving average)\b/i;
+/** Digits from another script: NFKC leaves them as they are, and Number() cannot read them. */
+const FOREIGN_DIGIT = /(?![0-9])\p{Nd}/u;
 
 /**
- * IS EVERY FIGURE IN THE READ ONE THE BRIEF MEASURED? A figure matches when
- * it is a brief figure of the same kind (percent, multiple, or neither)
- * rounded to fewer digits ("0.1593" read as "0.159" or "0.16", "$9.92m" as
- * "$9.9m", "1.8x" as "2x") or within 0.6% of it; sign is ignored, so "down
- * 12%" matches "-12%". Free without a match: a small count (≤ 12), an
- * indicator period, and a time span glued to its unit ("24h", "7d", "5m"
- * minutes). Everything else — a derived percentage, a target, a holder count,
- * a market cap the brief never had — is a figure the model made up, and the
+ * IS EVERY FIGURE IN THE READ ONE THE BRIEF MEASURED? A figure matches a brief
+ * figure of the same kind (percent, multiple, or neither) when it is within
+ * 0.6% of it, or — printed with two significant digits or more — that figure
+ * rounded ("0.1593" read as "0.159" or "0.16", "$9.92m" as "$9.9m"). One
+ * significant digit is not a rounding of a price, it is a guess: "0.2" against
+ * 0.1593 is a target (a percent may round to a whole number). A percent said with a direction ("+", "up", "below")
+ * must point the brief's way. Free without a match: a count of three or less,
+ * an indicator period beside its indicator ("the 20 ema"), and a time span
+ * glued to its unit ("24h", "7d"). Refused outright: digits from another
+ * script. Everything else — a derived percentage, a target, a holder count, a
+ * market cap the brief never had — is a figure the model made up, and the
  * read is refused for the code's own.
  */
 export function deskFiguresGrounded(text: string, brief: string): boolean {
-  // A figure matches one of its own kind: a percent a percent, a multiple a
-  // multiple, a price or an amount anything that is neither. "3x the average"
-  // is not grounded by an ATR of 3.12%.
-  const known = figuresIn(brief).map((f) => ({ v: Math.abs(f.value * f.scale), unit: f.unit }));
+  if (FOREIGN_DIGIT.test(text.normalize("NFKC"))) return false;
+  // A brief's labels ("1h", "24h", "7d") are not measurements: they ground a
+  // time span said back, never a price or a count.
+  const known = figuresIn(brief).filter((f) => f.word === null || !TIME_WORDS.has(f.word)).map((f) => ({ v: Math.abs(f.value * f.scale), unit: f.unit, sign: f.sign }));
+  const norm = text.normalize("NFKC");
   for (const f of figuresIn(text)) {
     const plainInt = f.decimals === 0 && f.scale === 1 && !f.money && f.unit === "";
-    if (plainInt && (f.value <= 12 || PERIODS.has(f.value))) continue;
-    if (plainInt && f.word && f.value <= 400) continue;
-    // "5m" with no dollar sign beside an integer is five minutes, not five million.
-    if (f.scale === 1e6 && !f.money && f.decimals === 0 && f.unit === "" && f.value <= 60) continue;
+    if (plainInt && f.word === null && f.value <= 3) continue;
+    if (plainInt && PERIODS.has(f.value) && PERIOD_CONTEXT.test(norm.slice(Math.max(0, f.at - 10), f.end + 10))) continue;
+    if (plainInt && f.word !== null && TIME_WORDS.has(f.word) && f.value <= 400) continue;
     const v = Math.abs(f.value * f.scale);
-    const half = 0.5 * 10 ** -f.decimals * f.scale;
-    if (!known.some((k) => k.unit === f.unit && Math.abs(v - k.v) <= Math.max(half, k.v * 0.006))) return false;
+    // A price or an amount needs two significant digits to be a rounding; a
+    // percent or a multiple may round to a whole number ("4%" for -4.03%).
+    const half = f.sig >= 2 || f.unit !== "" ? 0.5 * 10 ** -f.decimals * f.scale : 0;
+    const ok = known.some((k) =>
+      k.unit === f.unit &&
+      Math.abs(v - k.v) <= Math.max(half, k.v * 0.006) &&
+      !(f.unit === "%" && f.sign !== 0 && k.sign !== 0 && f.sign !== k.sign));
+    if (!ok) return false;
   }
   return true;
 }
+
+/**
+ * Quantities said in words, multipliers, and money units: none of them is a
+ * figure grounding can check, and every one is how a price target or a
+ * holding is said without a digit ("three hundred percent", "a 10-bagger",
+ * "x100", "fifty bucks", "5 usdg"). A read writes market figures as the brief
+ * does — "$9.92m", "+12.4%", "0.1605" — or not at all.
+ */
+const DESK_UNCHECKABLE: readonly RegExp[] = [
+  /\b(?:hundreds?|thousands?|[a-z]*illions?|percent|per cent|cents?|bucks|dollars?|grand|tripl(?:e|ed|es|ing)|quadrupl(?:e|ed|es|ing)|doubl(?:ed|ing)|double (?:up|from|again|it|your)|baggers?|half a (?:mil|million|billion))\b/,
+  /\p{N}+\s*-?\s*baggers?\b|(?<![\p{L}\p{N}])[x×]\s?\p{N}|\p{N}\s?e\s?[+-]?\p{N}/u,
+  /\p{N}[\p{N}.,]*\s*(?:usdg|usdc|usdt|usd|dollars?|bucks|eth|weth|btc)\b|\b(?:usdg|usdc|usdt|usd|eth|weth|btc)\s*\p{N}/u,
+].map(U);
+
+/**
+ * THE OWNER'S BOOK, SAID WITHOUT A FIGURE: a first person or the owner beside
+ * a holding, a result or a size — "the owner is in the red on this", "we're
+ * sitting in profit", "my max buy is small", "i hold a bag". The desk is never
+ * handed the book, so any such line is invented, and rule 3 says it is never
+ * said even when true. The market words PRIVATE lets a desk read use ("most
+ * of the board is in the red") stay allowed with no one's book beside them.
+ */
+const DESK_OWN_BOOK = U(
+  /\b(?:i|i'?m|im|i'?ve|ive|i'?d|id|we|we'?re|we'?ve|weve|my|our|us|owner'?s?|boss)\b[^.!?\n]{0,40}?\b(?:hold|holds|holding|held|bags?|bagged|positions?|profits?|gains?|loss(?:es)?|in the (?:red|green)|up (?:a ton|big|huge|nicely|a lot|bad)|down (?:bad|big|a lot|huge)|put|took|max buy|sized?|sizing|bought|sold|entered|exited|stake|allocation|exposure|wallet|balance)\b/,
+);
 
 /**
  * MAY THE DESK'S MODEL-WRITTEN READ GO OUT? The group gate's clauses for a
@@ -1598,10 +1654,13 @@ export function deskFiguresGrounded(text: string, brief: string): boolean {
  * and only as measured:
  *   - every clause that protects people stays: secrets, addresses, links,
  *     handles, cashtags, markup, hate, self-harm, threats, sex, profanity,
- *     advice to buy or sell, claims to have traded, accusations, the owner's
- *     book and identity, operations and models, claiming to be human;
+ *     looks, advice to buy or sell, claims to have traded, accusations, the
+ *     owner's book and identity (in words too: DESK_OWN_BOOK), operations and
+ *     models, claiming to be human;
  *   - the money and figure clauses give way to grounding: a figure is allowed
- *     when, and only when, the brief code measured contains it;
+ *     when, and only when, the brief code measured contains it, and a
+ *     quantity grounding cannot check (words, multipliers, money units) is
+ *     refused (DESK_UNCHECKABLE);
  *   - the alert clause keeps every call shape but lets a read say "entry" and
  *     "breakout" about a chart; PRIVATE and OPS let it say market words
  *     ("in the red", "transactions", "rejected at resistance").
@@ -1640,7 +1699,10 @@ export function admitDeskText(raw: unknown, ctx: TgDeskGateCtx): TgVerdict {
   if (r.low.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
   if (r.low.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");
   if (some(r.low, PROFANITY)) return refuse("profanity");
+  if (some(r.low, GO_BACK_TO)) return refuse("hateful");
+  if (r.low.some((t) => APPEARANCE.some((re) => re.test(t.replace(APPEARANCE_IDIOM, " "))))) return refuse("appearance");
 
+  if (r.low.some((t) => DESK_UNCHECKABLE.some((re) => re.test(t)))) return refuse("money");
   if (!deskFiguresGrounded(text, typeof ctx?.brief === "string" ? ctx.brief : "")) return refuse("ungrounded");
 
   if (r.low.some((t) => ALERT_CALLS.some((re) => re.test(t))) || some(r.cased, ALERT_CAPS) || ALERT_EMOJI.test(r.shown)) return refuse("alert");
@@ -1648,7 +1710,7 @@ export function admitDeskText(raw: unknown, ctx: TgDeskGateCtx): TgVerdict {
   if (r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if (r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
   if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
-  if (r.low.some((t) => PRIVATE_OWN.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
+  if (r.low.some((t) => PRIVATE_OWN.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))) || DESK_OWN_BOOK.test(t))) return refuse("private");
   if (r.low.some((t) => DESK_OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");
   if (emojiCount(text) > TG_LINE_MAX_EMOJI) return refuse("emoji");
