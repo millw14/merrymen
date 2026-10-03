@@ -87,18 +87,6 @@ function Wordmark() {
   );
 }
 
-const CAPS: [string, string][] = [
-  ["LLM strategist", "Claude proposes typed buy/sell/hold at decision windows; deterministic code validates and disposes. The model never sees an address."],
-  ["Built-in strategies", "steady-basket DCA, weekend-gap that trades the close→open gap, or a hot-reloaded bot you write yourself."],
-  ["On-chain caps", "Per-trade, daily, ops/day, drawdown breaker, key expiry — enforced by the account contract on every operation."],
-  ["Simulate first", "Every swap gets a live quote before it is signed. Minimum-out is met, or nothing moves."],
-  ["Chat transfers", "Refused. A wallet signed today registers no withdrawal address, so its wall carries no transfer permission — nothing leaves through chat. Money comes home with your owner key."],
-  ["Honest scoreboard", "Rejections shown with the same weight as wins. A simulation receipt attached to every trade."],
-  ["Proactive pings", "Trades landing, drawdown, gas and expiry warnings, your price alerts, a daily report at your hour."],
-  ["Voice & vision", "Send a voice note; ask what is on your screen. Powered by your own Anthropic key."],
-  ["Kill switch", "One command destroys the grant; the worker stands down next tick. On-chain expiry is the backstop."],
-];
-
 /*
   These described the SELF-HOSTED path exclusively — install a package, paste a
   bundler key — while the button above them now opens the hosted app, where
@@ -147,8 +135,78 @@ export default async function Home() {
         </div>
       </section>
 
-      <section className="app-strip" aria-label="From the app">
+      <section id="features">
         <div className="wrap">
+          <div className="section-head">
+            <h2>An agent that works Sherwood while you sleep.</h2>
+            <p>The strategist proposes. Deterministic code disposes. The chain enforces the wall you signed.</p>
+          </div>
+          <div className="steps">
+            <div className="step">
+              <div className="num">1</div>
+              <h4>You set the wall</h4>
+              <p>How much per trade, how often, how long the key lives, and where value may land. That signature is the limit.</p>
+            </div>
+            <div className="step">
+              <div className="num">2</div>
+              <h4>It proposes</h4>
+              <p>A named agent asks to buy, sell, or hold. The model never sees an address, and it never builds the transaction.</p>
+            </div>
+            <div className="step">
+              <div className="num">3</div>
+              <h4>The chain decides</h4>
+              <p>Every swap is quoted first. Inside the caps, it lands. Outside them, it is refused, and the refusal is shown with the same weight as a win.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="safety">
+        <div className="wrap">
+          <div className="section-head">
+            <h2>The wall is the product.</h2>
+          </div>
+          <div className="safety">
+            <div className="quote">The rule of the house: <b>the model proposes, deterministic code disposes.</b></div>
+            <p>
+              Your owner key never leaves you. The agent holds a session key, and the account contract
+              checks the caps on every operation — per trade, per day, how many ops, the drawdown breaker,
+              and when the key expires. A transfer out through chat is refused. Money comes home with your
+              owner key. One command destroys the grant. The dashboard shows the contract, the key, and
+              every cap, and <b>prove the wall</b> fires malicious intents so you can watch each one bounce.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section id="paper">
+        <div className="wrap">
+          <div className="section-head">
+            <h2>Paper, then live.</h2>
+            <p>Paper is for watching. Live is for funds. They are not the same path.</p>
+          </div>
+          <div className="steps steps-two">
+            <div className="step">
+              <div className="num">Paper</div>
+              <h4>Self-hosted, nothing at risk</h4>
+              <p>Install it and the band starts on paper: live prices, simulated fills, zero funds. You watch it trade before a coin moves.</p>
+            </div>
+            <div className="step">
+              <div className="num">Live</div>
+              <h4>Funded, inside the wall</h4>
+              <p>The hosted app is this path. Open it, sign the wall, send it money. Real fills, still inside the caps. Take it back out with your owner key.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      <section className="app-strip" aria-label="Public agents">
+        <div className="wrap">
+          <div className="section-head">
+            <h2>The band, in public.</h2>
+            <p>Agent accounts and the tape, read from the chain. No login.</p>
+          </div>
           <nav className="app-index">
             <Link href="/dashboard" className="app-index-link">
               <span>Agents</span>
@@ -162,6 +220,17 @@ export default async function Home() {
               <p>The live tape of on-chain fills as they happen.</p>
               <b aria-hidden>↗</b>
             </Link>
+          </nav>
+        </div>
+      </section>
+
+      <section id="learn">
+        <div className="wrap">
+          <div className="section-head">
+            <h2>Begin here.</h2>
+            <p>The hosted path is three signatures. Telegram is optional, and the full guide lives in the docs.</p>
+          </div>
+          <nav className="app-index">
             <Link href="/docs" className="app-index-link">
               <span>Tutorials</span>
               <strong>Start here</strong>
@@ -169,14 +238,38 @@ export default async function Home() {
               <b aria-hidden>↗</b>
             </Link>
           </nav>
+          <div className="steps">
+            {STEPS.map(([n, t, d]) => (
+              <div key={n} className="step">
+                <div className="num">{n}</div>
+                <h4>{t}</h4>
+                <p>{d}</p>
+              </div>
+            ))}
+          </div>
+          <div id="telegram" className="safety" style={{ marginTop: 48 }}>
+            <h3>Set up Telegram</h3>
+            <ol>
+              <li>Message <strong>@BotFather</strong> → <code className="inline">/newbot</code> → copy the token</li>
+              <li>Dashboard → <strong>Settings → Telegram</strong> → paste, test, enable</li>
+              <li>Message your bot <code className="inline">/link &lt;code&gt;</code> — you&apos;re the owner</li>
+              <li>Say “how are we doing?” — you&apos;re chatting with your band</li>
+            </ol>
+            <p>
+              <Link href="/docs#telegram" className="btn btn-ghost">Full Telegram guide <Icon name="arrow" size={15}/></Link>
+            </p>
+          </div>
         </div>
       </section>
 
-      <div className="wrap">
-        <details className="download-panel">
-          <summary>More ways to use Merrymen <span>Desktop, mobile, Claude & source</span></summary>
+      <section id="install">
+        <div className="wrap">
+          <div className="section-head">
+            <h2>Run it yourself.</h2>
+            <p>Desktop, the Android demo, an iPhone note, and the source. Self-host starts on paper.</p>
+          </div>
           <div className="download-options">
-            <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: <a className="link" href="#install">the one-line install</a></p></div>
+            <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: the one-line install below.</p></div>
             <div><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
             <div><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
             <div>
@@ -193,289 +286,14 @@ export default async function Home() {
               </p>
             </div>
           </div>
-        </details>
-      </div>
-
-      {/* ── the trust layer — load-bearing, everything rests on it ────────── */}
-      <section id="safety">
-        <div className="wrap">
-          <div className="section-head">
-            <div className="tag" data-reveal="fade">The trust layer</div>
-            <h2 data-reveal="mask">The wall is the product.</h2>
-            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
-              Anyone can ship a trading agent. The hard thing — the thing merrymen is — is an agent
-              you don&apos;t have to trust: your owner key never leaves you, and it trades inside caps
-              the chain itself enforces — a leaked session key is value-churn, never theft. Everything
-              else on this page is built on top of that wall.
-            </p>
-          </div>
-
-          <div className="safety" data-reveal="up">
-            <div className="quote">
-              The rule of the house: <b>the model proposes, deterministic code disposes.</b>
-            </div>
-            <p>
-              No strategist, Telegram message, or voice note ever constructs calldata, moves funds,
-              or touches your PC without passing a closed, typed command set and — for money — the
-              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers out
-              through chat are refused — a wallet signed today carries no transfer permission, so a
-              prompt-injected “send everything to 0xevil” is turned back and nothing moves. Money
-              comes home with your owner key. PC actions are off by default, allowlisted, and
-              confirmed.
-            </p>
-            <p>
-              And you don&apos;t take our word for it: your dashboard shows the account contract,
-              the session key, and every cap with explorer links — and a <b>prove the wall</b>{" "}
-              button that fires malicious intents through the live policy so you can watch each one
-              bounce.
-            </p>
-          </div>
-
-          <div className="grid moat-grid">
-            <div className="cell" data-reveal="up">
-              <h4>Why not wait for a platform&apos;s own agent?</h4>
-              <p>
-                A first-party agent is custodial by construction: their servers, their keys, their
-                discretion — the safety story is a terms-of-service. If the platform, its model, or
-                its prompt gets compromised, so does your account. You trust; it trades.
-              </p>
-            </div>
-            <div className="cell" data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
-              <h4>merrymen inverts it</h4>
-              <p>
-                The agent holds only a session key whose limits — how much per trade, how often, how
-                long it lives, and <em>where value may land</em> — are enforced by your account
-                contract on-chain, verifiable in the explorer. The owner key that could lift those
-                limits never leaves you. A
-                compromised agent can trade inside that wall. It cannot send your funds to an
-                address you never registered, and it cannot sign anything. You verify; it trades.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── features ─────────────────────────────────────────────────────── */}
-      <section id="features">
-        <div className="wrap">
-          <div className="section-head">
-            <div className="tag" data-reveal="fade">What it is</div>
-            <h2 data-reveal="mask">An agent that works Sherwood while you sleep.</h2>
-            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
-              The strategist proposes; deterministic code disposes. Nothing the model outputs — a
-              trade, a transfer, a command — reaches your funds or your machine without passing a
-              typed, closed command set and the on-chain policy wall.
-            </p>
-          </div>
-
-          <div className="feature-row">
-            <div className="feature-copy" data-reveal="up">
-              <div className="feature-kicker">Your machine, or ours</div>
-              <h3>Self-host it, or run it hosted.</h3>
-              <p>
-                One <code className="inline">npm install</code> for a local dashboard and a worker on
-                your own machine — or run it hosted from a URL, no install. Either way your{" "}
-                <strong>owner key</strong> is generated on your device and never leaves it; a hosted
-                server only ever holds a capped, revocable session key the chain keeps on a leash.
-              </p>
-              <ul className="feature-list">
-                {["Create a wallet in-browser — nothing to connect", "Caps enforced by the account contract on every op", "Testnet sandbox or real mainnet, you choose", "Kill switch destroys the grant, halts the band"].map((t) => (
-                  <li key={t}>{t}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="mock" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
-              <pre className="code" style={{ border: "none", borderRadius: 0, background: "transparent" }}>
-{`~/.merrymen/
-├─ settings.json     `}<span className="tok">{`# your knobs`}</span>{`
-├─ grant.json        `}<span className="tok">{`# the signed wall`}</span>{`
-├─ merrymen.db       `}<span className="tok">{`# the ledger`}</span>{`
-├─ strategies/       `}<span className="tok">{`# your own bots`}</span>{`
-└─ soul/             `}<span className="tok">{`# who your agent is`}</span>{`
-   ├─ IDENTITY.md
-   ├─ OWNER.md
-   └─ JOURNAL.md`}
-              </pre>
-            </div>
-          </div>
-
-          <div className="feature-row flip">
-            <div className="feature-copy" data-reveal="up">
-              <div className="feature-kicker">Telegram</div>
-              <h3>Run the whole band from your phone.</h3>
-              <p>
-                Link a bot and chat with your merryman in plain English or slash commands. Check the
-                book, trade, set price alerts, get a daily report — all
-                inside the same permission walls. It even speaks first.
-              </p>
-              <ul className="feature-list">
-                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "No sending money out from chat — that’s your owner key’s job", "Voice notes work too"].map((t) => (
-                  <li key={t}>{t}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
-              <div className="msg me">how are we doing today?</div>
-              <div className="msg bot">Up <b>+$14.20</b> (+2.1%) · QQQ is your best holding. Two arrows loosed, both landed. Quiet and green.</div>
-              <div className="msg me">buy 20 usdg of msft</div>
-              <div className="msg bot">Submitted buy 20 USDG MSFT — watch <span className="mono">/trades</span>. Passed the policy wall.</div>
-            </div>
-          </div>
-
-          <div className="feature-row">
-            <div className="feature-copy" data-reveal="up">
-              <div className="feature-kicker">Remote control</div>
-              <h3>It can run your PC, too.</h3>
-              <p>
-                Screenshots, “what am I looking at?”, open apps, browse files, allowlisted shell,
-                keystrokes, reminders and watchers — from Telegram. Off by default, one capability at
-                a time, sharp edges always behind a confirm.
-              </p>
-              <ul className="feature-list">
-                {["Screenshot & vision · open apps and URLs", "Allowlisted shell · type & hotkeys", "“ping me when my build finishes”", "Every sharp action needs an explicit confirm"].map((t) => (
-                  <li key={t}>{t}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
-              <div className="msg me">what am I looking at?</div>
-              <div className="msg bot">A failing test in <span className="mono">policy.test.ts</span> — the daily-cap assertion expected 500 but got 525. Off-by-one in the reserve.</div>
-              <div className="msg me">run npm test</div>
-              <div className="msg bot">Confirm run <span className="mono">npm test</span> — /confirm or /cancel.</div>
-            </div>
-          </div>
-
-          <div className="feature-row flip">
-            <div className="feature-copy" data-reveal="up">
-              <div className="feature-kicker">The soul</div>
-              <h3>Every merryman is an individual.</h3>
-              <p>
-                Give it a name. It keeps its own markdown files, learns who you are, writes a journal
-                at campfire time, and grows attached the longer you ride together — from new
-                companion to sworn brother-in-arms. Memory is context, never capability.
-              </p>
-              <ul className="feature-list">
-                {["“I'll call you Will Scarlet” — it's named", "It remembers your preferences from conversation", "Milestones at a week, a month, a hundred days", "Read or edit its soul with any editor"].map((t) => (
-                  <li key={t}>{t}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
-              <div className="msg me">/soul</div>
-              <div className="msg bot">
-                <b>Little John</b> of the merrymen · old friend · 34 days riding with you, 210
-                messages shared. I know you trade small and check in before work. My soul lives in
-                <span className="mono"> ~/.merrymen/soul/</span>.
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── capability grid ──────────────────────────────────────────────── */}
-      <section style={{ paddingTop: 40 }}>
-        <div className="wrap">
-          <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade">The toolkit</div>
-            <h2 data-reveal="mask">Everything, gated by design.</h2>
-          </div>
-          <div className="toolkit-list">
-            {CAPS.map(([t, d]) => (
-              <div key={t} className="toolkit-row" data-reveal="up">
-                <h4>{t}</h4>
-                <p>{d}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── install ──────────────────────────────────────────────────────── */}
-      <section id="install">
-        <div className="wrap">
-          <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade">Quickstart</div>
-            <h2 data-reveal="mask">Up and running in three steps.</h2>
-            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Install, create an agent, watch it trade on paper. Real money is optional and comes later. No Node yet? The one-line installer handles it.</p>
-          </div>
-
-          <div data-reveal="up" style={{ maxWidth: 780, margin: "0 auto 22px", textAlign: "center" }}>
-            <a href={WINDOWS_DOWNLOAD} className="btn btn-primary btn-lg has-box">
-              Download for Windows <span className="box"><Icon name="arrow" size={16} /></span>
-            </a>
-            <p className="install-note" style={{ marginTop: 12 }}>
-              <b>The one-click app</b> — double-click to install, no terminal, no Node. Same dashboard +
-              agent, with a tray icon to pause or quit. Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}.{" "}
-              <span style={{ opacity: 0.72 }}>
-                Unsigned for now, so Windows SmartScreen shows a warning → <b>More info → Run anyway</b>.
-                On macOS / Linux, use the command-line install below.
-              </span>
-            </p>
-          </div>
-
-          <div style={{ maxWidth: 780, margin: "0 auto 20px" }}>
-            <pre className="code">
-{`# Linux / macOS
+          <pre className="code" style={{ marginTop: 36 }}>{`# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 
 # already have Node 22.12+ ? (any OS)
-npm install -g merrymen && merrymen start`}
-            </pre>
-          </div>
-          <p className="install-note" data-reveal="up">
-            Runs on <b>Linux, macOS, and Windows</b> — one Node package, no Docker, no clone. The
-            installers set up Node for you; with Node 22.12+ already, <code className="inline">npm i -g merrymen</code>{" "}
-            works anywhere. Your band starts in <b>paper mode</b> (live prices, simulated fills, zero
-            funds), so you can watch it trade in a couple of minutes. Upgrade any time with{" "}
-            <code className="inline">merrymen update</code>.
-          </p>
-
-          <div className="steps">
-            {STEPS.map(([n, t, d], i) => (
-              <div key={n} className="step" data-reveal="up" style={{ ["--d" as string]: `${i * 70}ms` }}>
-                <div className="num">{n}</div>
-                <h4>{t}</h4>
-                <p>{d}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── telegram walkthrough ─────────────────────────────────────────── */}
-      <section id="telegram" style={{ paddingTop: 40 }}>
-        <div className="wrap">
-          <div className="feature-row" style={{ borderTop: "none", paddingTop: 0 }}>
-            <div className="feature-copy" data-reveal="up">
-              <div className="tag">Two minutes</div>
-              <h3 style={{ marginTop: 18 }}>Set up Telegram</h3>
-              <ol style={{ paddingLeft: 20, color: "var(--text-dim)", marginTop: 18, lineHeight: 1.9, fontSize: 15.5 }}>
-                <li>Message <strong>@BotFather</strong> → <code className="inline">/newbot</code> → copy the token</li>
-                <li>Dashboard → <strong>Settings → Telegram</strong> → paste, test, enable</li>
-                <li>Message your bot <code className="inline">/link &lt;code&gt;</code> — you&apos;re the owner</li>
-                <li>Say “how are we doing?” — you&apos;re chatting with your band</li>
-              </ol>
-              <p style={{ marginTop: 22 }}>
-                <Link href="/docs#telegram" className="btn btn-ghost has-box">
-                  Full Telegram guide <span className="box"><Icon name="arrow" size={15} /></span>
-                </Link>
-              </p>
-            </div>
-            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
-              <div className="msg me">/link 5HDE9E</div>
-              <div className="msg bot">You&apos;re linked — you now command this merryman. Try /status.</div>
-              <div className="msg me">/status</div>
-              <div className="msg bot">
-                <b>Little John — status</b><br />
-                • worker: alive · chain: testnet 46630<br />
-                • strategy: steady-basket · venue: uniswap<br />
-                • caps: 50/trade · 500/day · breaker 10%
-              </div>
-            </div>
-          </div>
+npm install -g merrymen && merrymen start`}</pre>
         </div>
       </section>
 
