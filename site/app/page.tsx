@@ -1,15 +1,9 @@
 import Link from "next/link";
-import { AgentPreview } from "@/components/AgentPreview";
-import { Icon, type IconName } from "@/components/Icon";
-import { Parallax } from "@/components/Parallax";
-import { Marquee } from "@/components/Marquee";
+import { Icon } from "@/components/Icon";
 import { IosBetaForm } from "@/components/IosBetaForm";
-
-const MARQUEE = [
-  "Self-hosted", "Your keys, your caps", "On-chain permission wall", "LLM proposes, code disposes",
-  "Telegram control", "Voice & vision", "Simulated before signed", "Fees only on profit",
-  "Kill switch", "Open source · MIT",
-];
+import { LiveBandDesk } from "@/components/LiveBandDesk";
+import { HeroSignal } from "@/components/HeroSignal";
+import { PUBLIC_LEADERBOARD, readPublicAgents, type PublicAgent } from "@/lib/public-leaderboard";
 
 const GITHUB = "https://github.com/millw14/merrymen";
 
@@ -88,31 +82,21 @@ const ANDROID_DOWNLOAD = `${GITHUB}/releases/download/mobile-v${ANDROID_VERSION}
 function Wordmark() {
   return (
     <div className="wordmark-wrap" aria-hidden>
-      <Parallax speed={0.32}>
-        <div className="wordmark">MERRYMEN</div>
-      </Parallax>
+      <div className="wordmark">MERRYMEN</div>
     </div>
   );
 }
 
-const PROMISES: [IconName, string][] = [
-  ["key", "Your keys, your caps"],
-  ["shield", "Bounded worst case"],
-  ["beaker", "Every trade simulated"],
-  ["chart", "Fees only on profit"],
-  ["ledger", "An honest scoreboard"],
-];
-
-const CAPS: [IconName, string, string][] = [
-  ["cpu", "LLM strategist", "Claude proposes typed buy/sell/hold at decision windows; deterministic code validates and disposes. The model never sees an address."],
-  ["calendar", "Built-in strategies", "steady-basket DCA, weekend-gap that trades the close→open gap, or a hot-reloaded bot you write yourself."],
-  ["shield", "On-chain caps", "Per-trade, daily, ops/day, drawdown breaker, key expiry — enforced by the account contract on every operation."],
-  ["beaker", "Simulate first", "Every swap gets a live quote before it is signed. Minimum-out is met, or nothing moves."],
-  ["transfer", "Chat transfers", "Refused. A wallet signed today registers no withdrawal address, so its wall carries no transfer permission — nothing leaves through chat. Money comes home with your owner key."],
-  ["ledger", "Honest scoreboard", "Rejections shown with the same weight as wins. A simulation receipt attached to every trade."],
-  ["bell", "Proactive pings", "Trades landing, drawdown, gas and expiry warnings, your price alerts, a daily report at your hour."],
-  ["eye", "Voice & vision", "Send a voice note; ask what is on your screen. Powered by your own Anthropic key."],
-  ["power", "Kill switch", "One command destroys the grant; the worker stands down next tick. On-chain expiry is the backstop."],
+const CAPS: [string, string][] = [
+  ["LLM strategist", "Claude proposes typed buy/sell/hold at decision windows; deterministic code validates and disposes. The model never sees an address."],
+  ["Built-in strategies", "steady-basket DCA, weekend-gap that trades the close→open gap, or a hot-reloaded bot you write yourself."],
+  ["On-chain caps", "Per-trade, daily, ops/day, drawdown breaker, key expiry — enforced by the account contract on every operation."],
+  ["Simulate first", "Every swap gets a live quote before it is signed. Minimum-out is met, or nothing moves."],
+  ["Chat transfers", "Refused. A wallet signed today registers no withdrawal address, so its wall carries no transfer permission — nothing leaves through chat. Money comes home with your owner key."],
+  ["Honest scoreboard", "Rejections shown with the same weight as wins. A simulation receipt attached to every trade."],
+  ["Proactive pings", "Trades landing, drawdown, gas and expiry warnings, your price alerts, a daily report at your hour."],
+  ["Voice & vision", "Send a voice note; ask what is on your screen. Powered by your own Anthropic key."],
+  ["Kill switch", "One command destroys the grant; the worker stands down next tick. On-chain expiry is the backstop."],
 ];
 
 /*
@@ -131,62 +115,92 @@ const STEPS: [string, string, string][] = [
   ["3", "Fund it and it trades", "Send it some money and it starts working the market. Change the limits whenever you like — re-signing is free and instant. Steer it from Telegram if you prefer, or take everything back out with your own key."],
 ];
 
-export default function Home() {
+async function publicAgents(): Promise<PublicAgent[] | null> {
+  try {
+    const response = await fetch(PUBLIC_LEADERBOARD, { next: { revalidate: 60 } });
+    if (!response.ok) return null;
+    return readPublicAgents(await response.json());
+  } catch {
+    return null;
+  }
+}
+
+export default async function Home() {
+  const agents = await publicAgents();
   return (
-    <>
+    <div className="home-page">
       <section className="hero home-hero">
-        <div className="wrap hero-layout">
+          <div className="wrap hero-layout">
           <div className="hero-copy">
-            <div className="hero-eyebrow"><span /> THE AGENT IS YOURS.</div>
+            <p className="hero-eyebrow">Trading agents with on-chain limits</p>
             <h1 className="hero-statement">Your agent.<br /><span className="accent">Your rules.</span></h1>
             <p className="hero-sub">Meet your Merryman. A trading agent you can name, chat with, and put to work — with limits enforced on-chain and an owner key that stays yours.</p>
             <div className="hero-cta">
-              <a href={HOSTED_APP} className="btn btn-primary btn-lg">Meet your agent <Icon name="arrow" size={18}/></a>
+              <a href={HOSTED_APP} className="btn btn-primary btn-lg">Open app <Icon name="arrow" size={18}/></a>
               <Link href="/api" className="btn btn-ghost btn-lg">Build with Merrymen <Icon name="arrow" size={16}/></Link>
             </div>
-            <p className="hero-meta">RUN IT HOSTED. SELF-HOST IT. MAKE IT YOURS.</p>
-            <div className="hero-bottom-links" style={{ flexWrap: "wrap", rowGap: 10 }}><Link href="/docs">Read the docs ↗</Link><Link href="/claude">Use it in Claude ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
-            {/* Plain words on purpose: an assistant asked to "connect merrymen mcp" reads this page first, and a link title alone did not tell it there is an MCP server. */}
-            <p className="hero-mcp">
-              <strong>Merrymen MCP server:</strong> connect Claude, Claude Code, ChatGPT, Cursor and other AI assistants to your agent at <code>{MCP_SERVER}</code>. <Link href="/claude">Set it up in one click</Link> · <a href="/llms.txt">instructions for AI assistants</a>
-            </p>
           </div>
-          <AgentPreview />
+          <div className="hero-stage">
+            <HeroSignal />
+            <LiveBandDesk initialAgents={agents?.slice(0, 5) ?? null} initialTotal={agents?.length ?? null} />
+          </div>
         </div>
+      </section>
+
+      <section className="app-strip" aria-label="From the app">
         <div className="wrap">
-          <details className="download-panel">
-            <summary>More ways to use Merrymen <span>Desktop & mobile beta</span></summary>
-            <div className="download-options">
-              <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: <a className="link" href="#install">the one-line install</a></p></div>
-              <div><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
-              <div><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
+          <nav className="app-index">
+            <Link href="/dashboard" className="app-index-link">
+              <span>Agents</span>
+              <strong>See live holdings</strong>
+              <p>Public agent accounts, read from the chain. No login.</p>
+              <b aria-hidden>↗</b>
+            </Link>
+            <Link href="/watch" className="app-index-link">
+              <span>Activity</span>
+              <strong>Watch it trade</strong>
+              <p>The live tape of on-chain fills as they happen.</p>
+              <b aria-hidden>↗</b>
+            </Link>
+            <Link href="/docs" className="app-index-link">
+              <span>Tutorials</span>
+              <strong>Start here</strong>
+              <p>Wallet, limits, Telegram, and how paper differs from live.</p>
+              <b aria-hidden>↗</b>
+            </Link>
+          </nav>
+        </div>
+      </section>
+
+      <div className="wrap">
+        <details className="download-panel">
+          <summary>More ways to use Merrymen <span>Desktop, mobile, Claude & source</span></summary>
+          <div className="download-options">
+            <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: <a className="link" href="#install">the one-line install</a></p></div>
+            <div><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
+            <div><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
+            <div>
+              <h3>Claude, Cursor, and the source</h3>
+              <p>
+                Connect an assistant at the MCP server <code className="inline">{MCP_SERVER}</code>.{" "}
+                <Link className="link" href="/claude">Set it up in one click</Link>
+                {" · "}
+                <a className="link" href="/llms.txt">instructions for AI assistants</a>
+                {" · "}
+                <Link className="link" href="/api">Build with Merrymen</Link>
+                {" · "}
+                <a className="link" href={GITHUB}>GitHub</a>
+              </p>
             </div>
-          </details>
-        </div>
-      </section>
-
-      {/* ── promises ─────────────────────────────────────────────────────── */}
-      <section style={{ paddingTop: 44, paddingBottom: 44 }}>
-        <div className="wrap">
-          <div className="grid promises-grid" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
-            {PROMISES.map(([, label], i) => (
-              <div key={label} className="cell promise" data-reveal="up" style={{ ["--d" as string]: `${i * 70}ms` }}>
-                <span className="promise-n">{String(i + 1).padStart(2, "0")}</span>
-                <h4>{label}</h4>
-              </div>
-            ))}
           </div>
-        </div>
-      </section>
-
-      {/* ── marquee band ─────────────────────────────────────────────────── */}
-      <Marquee items={MARQUEE} />
+        </details>
+      </div>
 
       {/* ── the trust layer — load-bearing, everything rests on it ────────── */}
       <section id="safety">
         <div className="wrap">
           <div className="section-head">
-            <div className="tag" data-reveal="fade"><span className="n">01</span> — the trust layer</div>
+            <div className="tag" data-reveal="fade">The trust layer</div>
             <h2 data-reveal="mask">The wall is the product.</h2>
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               Anyone can ship a trading agent. The hard thing — the thing merrymen is — is an agent
@@ -245,7 +259,7 @@ export default function Home() {
       <section id="features">
         <div className="wrap">
           <div className="section-head">
-            <div className="tag" data-reveal="fade"><span className="n">02</span> — what it is</div>
+            <div className="tag" data-reveal="fade">What it is</div>
             <h2 data-reveal="mask">An agent that works Sherwood while you sleep.</h2>
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               The strategist proposes; deterministic code disposes. Nothing the model outputs — a
@@ -362,13 +376,12 @@ export default function Home() {
       <section style={{ paddingTop: 40 }}>
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">03</span> — the toolkit</div>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade">The toolkit</div>
             <h2 data-reveal="mask">Everything, gated by design.</h2>
           </div>
-          <div className="grid">
-            {CAPS.map(([ic, t, d], i) => (
-              <div key={t} className="cell" data-reveal="up" style={{ ["--d" as string]: `${(i % 3) * 80}ms` }}>
-                <div className="cell-ic"><Icon name={ic} size={26} /></div>
+          <div className="toolkit-list">
+            {CAPS.map(([t, d]) => (
+              <div key={t} className="toolkit-row" data-reveal="up">
                 <h4>{t}</h4>
                 <p>{d}</p>
               </div>
@@ -381,17 +394,15 @@ export default function Home() {
       <section id="install">
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">04</span> — quickstart</div>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade">Quickstart</div>
             <h2 data-reveal="mask">Up and running in three steps.</h2>
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Install, create an agent, watch it trade on paper. Real money is optional and comes later. No Node yet? The one-line installer handles it.</p>
           </div>
 
           <div data-reveal="up" style={{ maxWidth: 780, margin: "0 auto 22px", textAlign: "center" }}>
-            <span className="mag" data-magnetic>
-              <a href={WINDOWS_DOWNLOAD} className="btn btn-primary btn-lg has-box">
-                Download for Windows <span className="box"><Icon name="arrow" size={16} /></span>
-              </a>
-            </span>
+            <a href={WINDOWS_DOWNLOAD} className="btn btn-primary btn-lg has-box">
+              Download for Windows <span className="box"><Icon name="arrow" size={16} /></span>
+            </a>
             <p className="install-note" style={{ marginTop: 12 }}>
               <b>The one-click app</b> — double-click to install, no terminal, no Node. Same dashboard +
               agent, with a tray icon to pause or quit. Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}.{" "}
@@ -439,7 +450,7 @@ npm install -g merrymen && merrymen start`}
         <div className="wrap">
           <div className="feature-row" style={{ borderTop: "none", paddingTop: 0 }}>
             <div className="feature-copy" data-reveal="up">
-              <div className="tag"><span className="n">05</span> — two minutes</div>
+              <div className="tag">Two minutes</div>
               <h3 style={{ marginTop: 18 }}>Set up Telegram</h3>
               <ol style={{ paddingLeft: 20, color: "var(--text-dim)", marginTop: 18, lineHeight: 1.9, fontSize: 15.5 }}>
                 <li>Message <strong>@BotFather</strong> → <code className="inline">/newbot</code> → copy the token</li>
@@ -472,7 +483,7 @@ npm install -g merrymen && merrymen start`}
       <section id="words">
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">06</span> — word from the woods</div>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade">Word from the woods</div>
             <h2 data-reveal="mask">Early words. Honest receipts.</h2>
           </div>
 
@@ -506,11 +517,9 @@ npm install -g merrymen && merrymen start`}
           <h2 data-reveal="mask">Muster your band.</h2>
           <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Free, open source, and yours. Install it, name your merryman, loose the first arrow.</p>
           <div className="hero-cta" data-reveal="up" style={{ marginTop: 30, ["--d" as string]: "150ms" }}>
-            <span className="mag" data-magnetic>
-              <a href={HOSTED_APP} className="btn btn-primary btn-lg has-box">
-                Start trading <span className="box"><Icon name="arrow" size={16} /></span>
-              </a>
-            </span>
+            <a href={HOSTED_APP} className="btn btn-primary btn-lg has-box">
+              Start trading <span className="box"><Icon name="arrow" size={16} /></span>
+            </a>
             <Link href="/docs" className="btn btn-ghost btn-lg">
               Read the docs
             </Link>
@@ -531,6 +540,6 @@ npm install -g merrymen && merrymen start`}
         </div>
         <Wordmark />
       </section>
-    </>
+    </div>
   );
 }
