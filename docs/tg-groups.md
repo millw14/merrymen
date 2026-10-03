@@ -471,7 +471,11 @@ the chart alike. The deployer's free-text coin name never enters a brief.
 Once the exact contract is resolved, an optional background read uses that
 Robinhood contract's published metadata: the existing Pons getter through the
 governed mainnet read client, or GeckoTerminal's token-info endpoint. Both
-share a three-second slice with the candles; neither can extend the lookup.
+queue within the remaining ten-second lookup allowance, with background taking
+priority and a reserve for rendering. Each actual indexed HTTP request is
+bounded at three seconds. The Pons getter uses the governed RPC client and
+stops contributing after three seconds; a late result is ignored. Fleet pacing
+cannot extend the lookup.
 A completed description survives a slow chart, and a completed chart survives
 missing metadata. No project website is fetched and no extra paid provider is
 required. Descriptions are bounded, sanitized, quoted and linked to their
@@ -502,7 +506,10 @@ do not wait behind ordinary chatter, and fresh CA reads do not wait behind
 other coin posts. Non-owner unasked reads retain a concurrency cap; a full
 allowance gets a bounded busy answer. Cosmetic typing never delays a research
 answer. The index lookup gets at most 10 s of what remains; candles are
-optional and bounded at 3 s alongside background, PNG rendering at 1.5 s.
+optional alongside background. Both can wait for the shared fleet quota within
+the lookup allowance; indexed HTTP requests and the Pons result wait each get
+at most 3 s. PNG
+rendering is bounded at 1.5 s.
 Valid pool data survives either timing out. Brain and the group's model consume only the remaining
 composition time; otherwise the measured code read is used. Telegram calls,
 including uploads and safe formatting retries, share the original deadline.

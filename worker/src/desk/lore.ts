@@ -11,7 +11,7 @@ import { readTokenMeta, type TokenMeta } from "../venues/pons-meta";
 import type { FeedResult } from "../venues/fleet-feed-cache";
 import { geckoSource } from "../venues/geckoterminal";
 import { cleanProjectText, projectLink, readTokenInfo, type TokenInfoRead } from "./gecko";
-import type { DeskReadOptions } from "./deadline";
+import { DESK_LOOKUP_MS, type DeskReadOptions } from "./deadline";
 
 export const LORE_READ_MS = 3000;
 export const LORE_CHAIN_ID = 4663;
@@ -75,7 +75,10 @@ function indexedProfile(read: TokenInfoRead | undefined, token: `0x${string}`, o
 }
 
 function readLimit(options?: DeskReadOptions): number {
-  return options?.timeoutMs === undefined ? LORE_READ_MS : Number.isFinite(options.timeoutMs) ? Math.max(0, Math.min(LORE_READ_MS, Math.floor(options.timeoutMs))) : 0;
+  // A cold fleet read may wait for the next spacing slot before it starts its
+  // three-second network timeout. The owning lookup supplies the total slice;
+  // it can never exceed that lookup's existing ten-second budget.
+  return options?.timeoutMs === undefined ? LORE_READ_MS : Number.isFinite(options.timeoutMs) ? Math.max(0, Math.min(DESK_LOOKUP_MS, Math.floor(options.timeoutMs))) : 0;
 }
 
 /** Per-caller cancellation cannot extend a shared read or refresh cached provenance. */
@@ -98,7 +101,8 @@ async function waitFor<T>(job: Promise<T>, ms: number, signal: AbortSignal | und
 }
 
 /**
- * Pons metadata and index metadata run together within one three-second slice.
+ * Pons metadata and index metadata run together within the lookup's slice.
+ * Index network work remains capped at three seconds, after fleet pacing.
  * A slow quota slot or RPC does not erase a description already obtained from
  * the other source. Concurrent asks share one public read per source/address.
  */
@@ -135,9 +139,15 @@ export function createLoreReader(d: LoreReaderDeps = {}): (address: string, opti
         : indexedRead && !indexedRead.failed ? { failed: false, observedAt: indexedRead.observedAt ?? at }
           : { failed: true, failure: indexedRead?.failure ?? "unavailable" };
     };
+    // Start the index read now, rather than deferring it to another microtask:
+    // measureCoin deliberately admits lore before hourly candles, and a defer
+    // here would hand the fleet's next quota slot to the lower-priority chart.
+    const start = <T>(read: () => Promise<T>): Promise<T> => {
+      try { return Promise.resolve(read()); } catch (error) { return Promise.reject(error); }
+    };
     const work = Promise.allSettled([
-      Promise.resolve().then(() => indexed(token, ms, ctl.signal)).then((r) => { if (!ctl.signal.aborted) indexedRead = r; }),
-      ...(useMeta ? [Promise.resolve().then(() => metadata(d.client!, [token as `0x${string}`]))
+      start(() => indexed(token, Math.min(LORE_READ_MS, ms), ctl.signal)).then((r) => { if (!ctl.signal.aborted) indexedRead = r; }),
+      ...(useMeta ? [waitFor(start(() => metadata(d.client!, [token as `0x${string}`])), Math.min(LORE_READ_MS, ms), ctl.signal, new Map<string, TokenMeta>())
         .then((r) => {
           if (ctl.signal.aborted) return;
           published = publishedProfile(r.get(token), token as `0x${string}`, at);

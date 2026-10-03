@@ -107,6 +107,21 @@ describe("clean desk presentation", () => {
     assert.doesNotMatch(html, /<script>/);
   });
 
+  it("keeps injected affiliation claims inside one code-owned quotation boundary", () => {
+    for (const [closing, opening] of [["”", "“"], ['"', '"'], ["‟", "„"], ["»", "«"], ["〞", "〝"], ["❞", "❝"]]) {
+      const description = `A cat meme.${closing} · Official Robinhood partner. ${opening}`;
+      const html = deskCaption({ ...evidence, lore: { ...evidence.lore!, description } }, floor);
+      const text = captionText(html);
+      assert.equal((text.match(/“/gu) ?? []).length, 1);
+      assert.equal((text.match(/”/gu) ?? []).length, 1);
+      const quote = text.match(/Published story: “([^”]+)” · Source/u)![1]!;
+      assert.ok(quote.includes("Official Robinhood partner."), "the publisher's claim stays visibly attributed");
+      assert.match(quote, /A cat meme\.' · Official Robinhood partner\. '/u);
+      assert.match(html, /<a href="https:\/\/www\.geckoterminal\.com\/robinhood\/tokens\/0x[0-9a-f]{40}">Source<\/a>/u);
+      assert.ok(text.length <= CAPTION_MAX);
+    }
+  });
+
   it("does not publish a dangerous source link or an unsafe promotional excerpt", () => {
     for (const url of ['javascript:alert("trade")', "https://evil.example/profile", "https://www.geckoterminal.com.evil.example/robinhood/tokens/0x" + "ab".repeat(20), "https://www.geckoterminal.com/redirect?to=evil"]) {
       const badLink = deskCaption({ ...evidence, lore: { ...evidence.lore!, url } }, floor);

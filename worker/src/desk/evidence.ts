@@ -218,18 +218,21 @@ export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, rea
   const unavailable: BarsRead = { failed: true, failure: "timeout", bars: [] };
   let chart = unavailable;
   onPartial?.(fromChart(chart));
-  // Optional background and candles share the same slice. Either completed
-  // result can enrich a partial reply without waiting for the other source.
-  const sliceMs = Math.min(3000, budget.remaining() * 0.75);
+  // Background queues first so hourly work cannot starve it. Fleet detail
+  // requests are paced: let both queue within the remaining lookup allowance,
+  // with a render reserve. Live indexed HTTP adapters cap network work at 3s.
+  // Either completed result enriches a partial reply without waiting for the other.
+  const optionalLeft = budget.remaining();
+  const sliceMs = optionalLeft - Math.min(1500, optionalLeft * 0.25);
   await Promise.all([
-    budget.run((options) => reads.hourly(pool.poolId, token, options), unavailable, sliceMs)
-      .then((value) => { chart = value; onPartial?.(fromChart(chart)); }),
     ...(reads.lore ? [budget.run((options) => reads.lore!(token, options), { failed: true } as LoreRead, sliceMs)
       .then((value) => {
         const candidate = value.failed ? undefined : value.profile;
         if (candidate?.chainId === 4663 && candidate.token.toLowerCase() === token && candidate.description) profile = candidate;
         onPartial?.(fromChart(chart));
       })] : []),
+    budget.run((options) => reads.hourly(pool.poolId, token, options), unavailable, sliceMs)
+      .then((value) => { chart = value; onPartial?.(fromChart(chart)); }),
   ]);
   const coin = fromChart(chart);
   onPartial?.(coin);

@@ -4,6 +4,11 @@ import type { PublicClient } from "viem";
 import { cleanProjectText, parseTokenInfo, projectLink, readTokenInfo, resetDeskReadsForTest, type TokenInfoRead } from "./gecko";
 import { createLoreReader } from "./lore";
 import type { TokenMeta } from "../venues/pons-meta";
+import { FleetFeedCache, type FeedClock } from "../venues/fleet-feed-cache";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 
 const TOKEN = `0x${"a".repeat(40)}` as const;
 const OTHER = `0x${"b".repeat(40)}` as const;
@@ -136,6 +141,65 @@ describe("contract-bound project metadata", () => {
 });
 
 describe("optional lore within the existing desk budget", () => {
+  it("keeps the network read capped at three seconds when the lookup allows fleet queueing", async () => {
+    const limits: number[] = [];
+    const read = createLoreReader({ now: () => NOW, indexed: async (address, timeoutMs) => { limits.push(timeoutMs); return info({ token: address as `0x${string}` }); } });
+    assert.equal((await read(TOKEN, { timeoutMs: 8500 })).failed, false);
+    assert.equal((await read(OTHER, { timeoutMs: 40 })).failed, false);
+    assert.deepEqual(limits, [3000, 40]);
+  });
+
+  it("survives a cold fleet slot beyond three seconds and admits lore before chart work", async (t) => {
+    const home = mkdtempSync(path.join(tmpdir(), "merrymen-lore-pacing-"));
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: NOW });
+    const clock: FeedClock = {
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+    };
+    const advance = async (ms: number) => {
+      // This also advances the lore reader's real setTimeout budget: the old
+      // three-second TOTAL timeout expires before the 3s slot's network result.
+      t.mock.timers.tick(ms);
+      await nextTurn();
+    };
+    const cache = new FleetFeedCache(home, 3000, clock);
+    const starts: { kind: string; at: number }[] = [];
+    const unavailable = (failure: string): TokenInfoRead => ({ failed: true, failure });
+    try {
+      await cache.get<TokenInfoRead>("robinhood:pool", async () => { starts.push({ kind: "pool", at: Date.now() }); return { failed: false, observedAt: Date.now() }; }, unavailable);
+      const read = createLoreReader({
+        now: () => Date.now(),
+        indexed: (address, networkMs, signal) => cache.get("robinhood:detail:lore", async () => {
+          assert.equal(networkMs, 3000);
+          assert.equal(signal.aborted, false);
+          assert.equal(address, TOKEN);
+          starts.push({ kind: "lore", at: Date.now() });
+          await new Promise((resolve) => { setTimeout(resolve, 200); });
+          return { ...info(), observedAt: Date.now() };
+        }, unavailable),
+      });
+      // Equivalent to measureCoin's priority order after its pool result.
+      const lore = read(TOKEN, { timeoutMs: 8500 });
+      const chart = cache.get<TokenInfoRead>("robinhood:detail:hourly", async () => {
+        starts.push({ kind: "chart", at: Date.now() });
+        await new Promise((resolve) => { setTimeout(resolve, 200); });
+        return { failed: false, observedAt: Date.now() };
+      }, unavailable);
+      await advance(3000);
+      await advance(200);
+      const background = await lore;
+      assert.equal(background.profile?.description, "A hooks-themed meme.");
+      await advance(2800);
+      await advance(200);
+      const candles = await chart;
+      assert.equal(candles.failed, false);
+      assert.deepEqual(starts.map((s) => ({ kind: s.kind, elapsed: s.at - NOW })), [
+        { kind: "pool", elapsed: 0 }, { kind: "lore", elapsed: 3000 }, { kind: "chart", elapsed: 6000 },
+      ]);
+      assert.equal(Date.now() - NOW, 6200, "both optional reads remain inside the existing lookup budget");
+    } finally { cache.close(); rmSync(home, { recursive: true, force: true }); }
+  });
+
   it("returns and attributes a young token's published lore without waiting for an index", async () => {
     let target: readonly `0x${string}`[] = [];
     let signal: AbortSignal | undefined;
@@ -210,6 +274,27 @@ describe("optional lore within the existing desk budget", () => {
     const result = await read(TOKEN, { timeoutMs: 20 });
     assert.equal(result.profile?.source, "GeckoTerminal token info");
     assert.equal(result.profile?.description, "A hooks-themed meme.");
+  });
+
+  it("does not extend a hung metadata RPC to the index's larger fleet queue allowance", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: NOW });
+    let finished = false;
+    let finishRpc: (result: Map<string, TokenMeta>) => void;
+    const read = createLoreReader({
+      client: client(), now: () => Date.now(), indexed: async () => info(),
+      metadata: async () => new Promise((resolve) => { finishRpc = resolve; }),
+    });
+    const job = read(TOKEN, { timeoutMs: 8500 }).then((result) => { finished = true; return result; });
+    await nextTurn();
+    assert.equal(finished, false, "the preferred source gets its bounded opportunity to answer");
+    t.mock.timers.tick(3001);
+    await nextTurn();
+    assert.equal(finished, true, "a completed index description is released after the RPC's own 3s cap");
+    const result = await job;
+    assert.equal(result.profile?.source, "GeckoTerminal token info");
+    finishRpc!(new Map([[TOKEN, meta()]]));
+    await nextTurn();
+    assert.equal(result.profile?.source, "GeckoTerminal token info", "late RPC data cannot rewrite returned evidence");
   });
 
   it("honors a joining caller's shorter cancellation without cancelling another caller", async () => {

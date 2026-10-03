@@ -231,6 +231,11 @@ function sentence(text: string): string {
   return /[.!?]$/u.test(capital) ? capital : `${capital}.`;
 }
 
+/** Publisher punctuation cannot close code's visible attribution boundary. */
+function insideQuote(text: string): string {
+  return text.replace(/[\p{Quotation_Mark}\u2033-\u2037\u275b-\u275f\u276e\u276f]/gu, "'");
+}
+
 /** A profile is a claim, never a verified affiliation or a trading verdict. */
 function aboutLine(e: TgDeskEvidence): string {
   const lore = e.lore;
@@ -257,7 +262,7 @@ function aboutLine(e: TgDeskEvidence): string {
   const admitted = admitTgLine(excerpt.join(" "), { agentName: "", kind: "fixed", recentOwn: [] });
   const source = admitTgLine(lore.source, { agentName: "", kind: "fixed", recentOwn: [] });
   if (!admitted.ok || !source.ok || source.text.length > 60) return missing;
-  let label = esc(source.text);
+  let label = esc(insideQuote(source.text));
   if (lore.url) {
     try {
       const url = new URL(lore.url);
@@ -269,7 +274,7 @@ function aboutLine(e: TgDeskEvidence): string {
       }
     } catch { /* A usable description does not depend on a usable link. */ }
   }
-  return `Published story: “${esc(admitted.text)}${shortened ? "…" : ""}” · ${label}`;
+  return `Published story: “${esc(insideQuote(admitted.text))}${shortened ? "…" : ""}” · ${label}`;
 }
 
 /** One context line; the chart and interpretation carry the rest. */

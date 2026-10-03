@@ -135,6 +135,20 @@ describe("desk evidence: which coin a name means", () => {
 describe("desk evidence: one coin", () => {
   const profile = (token: string): CoinProfile => ({ token: token as `0x${string}`, chainId: 4663, description: "A visual pool logic builder. Claims 999% returns.", name: "Robinhooks", source: "GeckoTerminal token info", url: `https://www.geckoterminal.com/robinhood/tokens/${token}`, observedAtMs: NOW });
 
+  it("gives background the first optional quota slot and allows pacing inside the same lookup", async () => {
+    const slots: string[] = [];
+    let allowance = 0;
+    const r = reads({
+      tokenPools: async () => ok([pool("RHOOKS / WETH", tok("a"))]),
+      lore: async (address, options) => { slots.push("lore"); allowance = options?.timeoutMs ?? 0; return { failed: false, profile: profile(address) }; },
+      hourly: async (_pool, _token, options) => { slots.push("chart"); assert.equal(options?.timeoutMs, allowance); return bars(168); },
+    });
+    const m = await measureCoin({ kind: "coin", address: tok("a") }, r);
+    assert.deepEqual(slots, ["lore", "chart"], "background claims a fleet slot before optional candles");
+    assert.ok(allowance > 6000 && allowance <= 8500, "both quota slots can fit inside the original lookup with a render reserve");
+    assert.ok(m.ok && m.coin.lore && m.coin.tech);
+  });
+
   it("enriches an exact coin with separate attributed claims without changing its measured brief", async () => {
     const r = reads({ tokenPools: async () => ok([pool("RHOOKS / WETH", tok("a"))]), hourly: async () => ({ failed: true, bars: [] }), lore: async (address) => ({ failed: false, profile: profile(address) }) });
     const m = await measureCoin({ kind: "coin", address: tok("a") }, r);

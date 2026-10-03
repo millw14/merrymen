@@ -26,7 +26,7 @@ import { createLoreReader, readCoinLore } from "./lore";
 export const LIVE_READS: DeskReads = {
   search: (q, options) => searchPools(q, Math.min(8000, options?.timeoutMs ?? 8000), options?.signal),
   tokenPools: (a, options) => readTokenPoolsResult(a, { timeoutMs: Math.min(8000, options?.timeoutMs ?? 8000) }),
-  hourly: (pool, token, options) => readHourlyBars(pool, token, 168, Math.min(8000, options?.timeoutMs ?? 8000), options?.signal),
+  hourly: (pool, token, options) => readHourlyBars(pool, token, 168, Math.min(3000, options?.timeoutMs ?? 3000), options?.signal),
   lore: readCoinLore,
   feed: (feed, options) => fetchGeckoPoolsResult(feed, { timeoutMs: Math.min(8000, options?.timeoutMs ?? 8000) }),
   now: () => Date.now(),
