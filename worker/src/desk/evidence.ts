@@ -19,6 +19,7 @@ import type { TgDeskAsk, TgDeskStance, TgDeskThought } from "../telegram/tg-grou
 import type { BarsRead } from "./gecko";
 import { fmtAge, fmtInt, fmtPct, fmtPrice, fmtUsd, fmtX, utcClock } from "./format";
 import { technicals, type Bar, type Technicals } from "./ta";
+import { DeskBudget, type DeskReadOptions } from "./deadline";
 
 /**
  * May a group read this ticker? Anyone can deploy a coin called "scam.io" or
@@ -31,10 +32,10 @@ const ANYTHING: Sayable = () => true;
 
 /** The reads the desk makes. Injected, so every branch is testable without the network. */
 export interface DeskReads {
-  search(query: string): Promise<GeckoFetch>;
-  tokenPools(address: string): Promise<GeckoFetch>;
-  hourly(poolId: string, token: string): Promise<BarsRead>;
-  feed(feed: PoolFeed): Promise<GeckoFetch>;
+  search(query: string, options?: DeskReadOptions): Promise<GeckoFetch>;
+  tokenPools(address: string, options?: DeskReadOptions): Promise<GeckoFetch>;
+  hourly(poolId: string, token: string, options?: DeskReadOptions): Promise<BarsRead>;
+  feed(feed: PoolFeed, options?: DeskReadOptions): Promise<GeckoFetch>;
   now(): number;
 }
 
@@ -164,20 +165,20 @@ export function flowOf(pools: readonly GeckoPool[], w: "h1" | "h6" | "h24"): Flo
   return { buys: sum("buys"), sells: sum("sells"), buyers: sum("buyers"), sellers: sum("sellers"), volumeUsd: sum("volumeUsd") };
 }
 
-export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, reads: DeskReads, sayable: Sayable = ANYTHING): Promise<CoinMeasured> {
+export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, reads: DeskReads, sayable: Sayable = ANYTHING, budget = new DeskBudget(), onPartial?: (coin: CoinMeasure) => void): Promise<CoinMeasured> {
   let token: string;
   let pools: GeckoPool[];
   let observedAt: number | undefined;
   if ("address" in ask) {
     const a = typeof ask.address === "string" ? ask.address.toLowerCase() : "";
     if (!/^0x[0-9a-f]{40}$/.test(a)) return { ok: false, why: "not-found" };
-    const r = await reads.tokenPools(a);
+    const r = await budget.run((options) => reads.tokenPools(a, options), { pools: [], failed: true, failure: "timeout" } as GeckoFetch);
     if (r.failed) return { ok: false, why: "unavailable" };
     token = a;
     pools = r.pools.filter((p) => p.tokenAddress === a);
     observedAt = r.observedAt;
   } else {
-    const r = await reads.search(ask.query);
+    const r = await budget.run((options) => reads.search(ask.query, options), { pools: [], failed: true, failure: "timeout" } as GeckoFetch);
     if (r.failed) return { ok: false, why: r.failure === "invalid-query" ? "not-found" : "unavailable" };
     const hit = resolveByName(ask.query, r.pools);
     if (hit === "not-found" || hit === "ambiguous") return { ok: false, why: hit };
@@ -187,16 +188,14 @@ export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, rea
   }
   const pool = mainPool(pools);
   if (!pool) return { ok: false, why: "not-found" };
-  const chart = await reads.hourly(pool.poolId, token);
-  const bars = chart.failed ? [] : chart.bars;
   const sides = poolSides(pool.name);
-  const ticker = cleanSymbol(chart.symbol) ?? sides.base;
-  const symbol = ticker && sayable(ticker) ? ticker : "this coin";
-  const quote = cleanSymbol(chart.quoteSymbol) ?? sides.quote;
-  const now = reads.now();
-  return {
-    ok: true,
-    coin: {
+  const fromChart = (chart: BarsRead): CoinMeasure => {
+    const bars = chart.failed ? [] : chart.bars;
+    const ticker = cleanSymbol(chart.symbol) ?? sides.base;
+    const symbol = ticker && sayable(ticker) ? ticker : "this coin";
+    const quote = cleanSymbol(chart.quoteSymbol) ?? sides.quote;
+    const now = reads.now();
+    return {
       symbol,
       token,
       pool,
@@ -206,8 +205,16 @@ export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, rea
       tech: technicals(bars),
       observedAtMs: Math.min(observedAt ?? now, chart.observedAt ?? now),
       nowMs: now,
-    },
+    };
   };
+  // Pool measurements already support a real read. A slow chart must not
+  // hide them, including from a caller joining a shared lookup late.
+  const unavailable: BarsRead = { failed: true, failure: "timeout", bars: [] };
+  onPartial?.(fromChart(unavailable));
+  const chart = await budget.run((options) => reads.hourly(pool.poolId, token, options), unavailable, Math.min(3000, budget.remaining() * 0.75));
+  const coin = fromChart(chart);
+  onPartial?.(coin);
+  return { ok: true, coin };
 }
 
 /** Price now: the forming candle's close when the chart was read, else the index's pool price. */
@@ -320,10 +327,13 @@ export function coinFloor(c: CoinMeasure): TgDeskThought {
     const parts = [`not enough chart history on ${s} to read a trend yet`];
     if (n(h24.changePct)) parts.push(`it's ${fmtPct(h24.changePct)} on the day`);
     if (liq > 0) parts.push(`with ${fmtUsd(liq)} of liquidity`);
+    if (n(h24.volumeUsd)) parts.push(`${fmtUsd(h24.volumeUsd)} traded over 24h`);
+    if (n(h24.buyers) && n(h24.sellers)) parts.push(`${fmtInt(h24.buyers)} buyers vs ${fmtInt(h24.sellers)} sellers`);
+    else if (n(h24.buys) && n(h24.sells)) parts.push(`${fmtInt(h24.buys)} buys vs ${fmtInt(h24.sells)} sells`);
     return {
-      read: `${parts.join(", ")}. that's a coin you judge on flow and liquidity, not levels — and young charts swing hard both ways.`,
+      read: `${parts.join(", ")}. i can judge this snapshot's flow and liquidity, but entry levels need the candles.`,
       stance: "cautious",
-      watch: "whether buyers keep outnumbering sellers once the first rush fades",
+      watch: "whether fresh buyers outnumber sellers with liquidity holding up",
       invalidation: "liquidity getting pulled or volume dying off",
     };
   }
@@ -414,13 +424,35 @@ export interface MarketMeasure {
   launches24h: number | null;
   observedAtMs: number;
   nowMs: number;
+  /** Feeds that did not settle successfully; they say nothing about activity. */
+  missingFeeds?: PoolFeed[];
 }
 
 const MIN_LIQ = 20_000;
 const MIN_VOL = 10_000;
 
-export async function measureMarket(reads: DeskReads, sayable: Sayable = ANYTHING): Promise<{ ok: true; market: MarketMeasure } | { ok: false; why: "unavailable" }> {
-  const [trending, top, fresh] = await Promise.all([reads.feed("trending_pools"), reads.feed("pools"), reads.feed("new_pools")]);
+type MarketMeasured = { ok: true; market: MarketMeasure } | { ok: false; why: "unavailable" };
+
+export async function measureMarket(reads: DeskReads, sayable: Sayable = ANYTHING, budget = new DeskBudget(), onPartial?: (market: MarketMeasure) => void): Promise<MarketMeasured> {
+  const unavailable: GeckoFetch = { pools: [], failed: true, failure: "timeout" };
+  let trending = unavailable;
+  let top = unavailable;
+  let fresh = unavailable;
+  const settled = () => {
+    const m = marketFromFeeds(trending, top, fresh, reads, sayable);
+    if (m.ok) onPartial?.(m.market);
+  };
+  // Each feed has the same absolute deadline. Promise.all alone would let
+  // one hung feed hide a complete board already returned by another.
+  await Promise.all([
+    budget.run((options) => reads.feed("trending_pools", options), unavailable).then((r) => { trending = r; settled(); }),
+    budget.run((options) => reads.feed("pools", options), unavailable).then((r) => { top = r; settled(); }),
+    budget.run((options) => reads.feed("new_pools", options), unavailable).then((r) => { fresh = r; settled(); }),
+  ]);
+  return marketFromFeeds(trending, top, fresh, reads, sayable);
+}
+
+function marketFromFeeds(trending: GeckoFetch, top: GeckoFetch, fresh: GeckoFetch, reads: DeskReads, sayable: Sayable): MarketMeasured {
   if (trending.failed && top.failed) return { ok: false, why: "unavailable" };
   const all = [...(trending.failed ? [] : trending.pools), ...(top.failed ? [] : top.pools)];
   const byToken = new Map<string, GeckoPool[]>();
@@ -460,7 +492,11 @@ export async function measureMarket(reads: DeskReads, sayable: Sayable = ANYTHIN
   const now = reads.now();
   const launches24h = fresh.failed ? null : fresh.pools.filter((p) => n(p.createdAt) && now / 1000 - p.createdAt <= 86_400 && (p.reserveUsd ?? 0) >= 10_000).length;
   const observed = [trending, top].filter((r) => !r.failed && n(r.observedAt)).map((r) => r.observedAt!);
-  return { ok: true, market: { coins, eth, launches24h, observedAtMs: observed.length ? Math.min(...observed) : now, nowMs: now } };
+  const missingFeeds: PoolFeed[] = [];
+  if (trending.failed) missingFeeds.push("trending_pools");
+  if (top.failed) missingFeeds.push("pools");
+  if (fresh.failed) missingFeeds.push("new_pools");
+  return { ok: true, market: { coins, eth, launches24h, observedAtMs: observed.length ? Math.min(...observed) : now, nowMs: now, ...(missingFeeds.length ? { missingFeeds } : {}) } };
 }
 
 interface MarketStats {
@@ -508,7 +544,7 @@ export function marketStats(m: MarketMeasure): MarketStats {
 
 export function marketHeader(m: MarketMeasure): string[] {
   const s = marketStats(m);
-  const head = [`Robinhood Chain memecoins · 24h`];
+  const head = [`Robinhood Chain memecoins · ${m.missingFeeds?.length ? "partial 24h snapshot" : "24h"}`];
   const second = [
     `${s.up24}/${s.count} green`,
     s.median24 !== null ? `median ${fmtPct(s.median24)}` : null,
@@ -522,7 +558,8 @@ export function marketBrief(m: MarketMeasure): string {
   const s = marketStats(m);
   const L: string[] = [];
   const mv = (c: MarketCoin) => `${c.symbol} ${n(c.change24h) ? fmtPct(c.change24h) : "?"} (vol ${fmtUsd(c.volume24h)}, liq ${fmtUsd(c.liquidity)})`;
-  L.push(`MARKET: Robinhood Chain memecoins — the ${s.count} most active coins with at least ${fmtUsd(MIN_LIQ)} liquidity and ${fmtUsd(MIN_VOL)} 24h volume; observed ${utcClock(m.observedAtMs)} UTC`);
+  L.push(`MARKET: Robinhood Chain memecoins — the ${s.count} ${m.missingFeeds?.length ? "available indexed" : "most active"} coins with at least ${fmtUsd(MIN_LIQ)} liquidity and ${fmtUsd(MIN_VOL)} 24h volume; observed ${utcClock(m.observedAtMs)} UTC`);
+  if (m.missingFeeds?.length) L.push(`COVERAGE: partial snapshot; ${m.missingFeeds.map((f) => f === "trending_pools" ? "trending" : f === "pools" ? "top-volume" : "new-pool").join(", ")} feed unavailable. Activity outside the available list is unknown.`);
   L.push(`BREADTH 24h: ${s.up24} of ${s.count} up (${fmtPct((s.up24 / s.count) * 100, false)})${s.median24 !== null ? `; median 24h change ${fmtPct(s.median24)}` : ""}`);
   if (s.count1h) L.push(`BREADTH 1h: ${s.up1h} of ${s.count1h} up (${fmtPct((s.up1h / s.count1h) * 100, false)})${s.median1h !== null ? `; median 1h change ${fmtPct(s.median1h)}` : ""}`);
   L.push(`VOLUME 24h: ${fmtUsd(s.volume)} across these coins${s.top3Share !== null ? `; the top 3 take ${fmtPct(s.top3Share, false)}` : ""}: ${s.byVolume.slice(0, 3).map((c) => `${c.symbol} ${fmtUsd(c.volume24h)}`).join(", ")}`);
@@ -542,6 +579,7 @@ export function marketFloor(m: MarketMeasure): TgDeskThought {
   const share1h = s.count1h ? s.up1h / s.count1h : null;
   const ratio = s.buys !== null && s.sells !== null && s.sells > 0 ? s.buys / s.sells : null;
   const out: string[] = [];
+  if (m.missingFeeds?.length) out.push("this is a partial market snapshot; some feeds didn't return usable data.");
   const regime = share >= 0.6 && (s.median24 ?? 0) > 0 ? "risk-on" : share <= 0.35 && (s.median24 ?? 0) < 0 ? "risk-off" : "mixed";
   out.push(regime === "risk-on" ? `the market's risk-on: ${s.up24} of the ${s.count} most active coins are green on the day${s.median24 !== null ? `, median ${fmtPct(s.median24)}` : ""}.`
     : regime === "risk-off" ? `it's a red tape: only ${s.up24} of the ${s.count} most active coins are up on the day${s.median24 !== null ? `, median ${fmtPct(s.median24)}` : ""}.`

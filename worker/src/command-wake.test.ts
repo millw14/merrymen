@@ -37,6 +37,7 @@ import {
   createOrderInFlight,
   createTickClock,
   drainOnTick,
+  drainOnUnreadTick,
   tickPlan,
   tickRatchets,
   writeHeartbeat,
@@ -304,6 +305,7 @@ describe("the tick clock", () => {
     let failRegular: (() => void) | null = null;
     let finishCommand: (() => void) | null = null;
     let failCommand: (() => void) | null = null;
+    let finishNomination: (() => void) | null = null;
     const c = createTickClock({
       now: f.now,
       setTimer: f.setTimer,
@@ -323,6 +325,10 @@ describe("the tick clock", () => {
           finishCommand = resolve;
           failCommand = () => reject(new Error("boom"));
         }),
+      nomination: () => new Promise<void>(resolve => {
+        log.push("nomination");
+        finishNomination = resolve;
+      }),
     });
     /** An owner order in flight, as runQueuedCommand holds one; the returned function lands it. */
     const startOrder = () => {
@@ -340,6 +346,7 @@ describe("the tick clock", () => {
       failRegular: async () => (failRegular!(), await settle()),
       finishCommand: async () => (finishCommand!(), await settle()),
       failCommand: async () => (failCommand!(), await settle()),
+      finishNomination: async () => (finishNomination!(), await settle()),
     };
   }
 
@@ -399,6 +406,102 @@ describe("the tick clock", () => {
     const k = clock();
     assert.equal(k.c.wakeCommand(), false);
     assert.deepEqual(k.log, []);
+  });
+
+  it("verified nominated evidence gets a research tick while the regular cadence stays at its original moment", async () => {
+    const k = clock();
+    assert.equal(k.c.wakeNomination(), false, "nothing is armed before startup");
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    const due = k.f.pending()[0]!;
+    k.f.advance(10_000);
+    assert.equal(k.c.wakeNomination(), true);
+    assert.deepEqual(k.log, ["regular", "nomination"]);
+    assert.deepEqual(k.f.pending(), []);
+    k.f.advance(5_000);
+    await k.finishNomination();
+    assert.deepEqual(k.f.pending(), [due], "research neither observes an extra peak nor postpones the normal one");
+  });
+
+  it("a group nomination cannot bypass the first regular tick's stagger or arming", async () => {
+    const k = clock();
+    k.c.start(30_000);
+    assert.equal(k.c.wakeNomination(), false);
+    assert.deepEqual(k.log, []);
+    assert.deepEqual(k.f.pending(), [1_030_000]);
+    k.f.fire();
+    assert.equal(k.c.wakeNomination(), false, "initial book and grant reads are still running");
+    assert.deepEqual(k.log, ["regular"]);
+    await k.finishRegular();
+    assert.equal(k.c.wakeNomination(), true, "research can run once the first coherent book exists");
+    await k.finishNomination();
+  });
+
+  it("evidence arriving during an active regular tick coalesces into one later research tick", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    k.f.fire();
+    for (let i = 0; i < 5; i++) k.c.wakeNomination();
+    assert.deepEqual(k.log, ["regular", "regular"], "no research tick reads a changing book");
+    assert.deepEqual(k.f.pending(), []);
+    await k.finishRegular();
+    assert.deepEqual(k.log, ["regular", "regular", "nomination"]);
+    await k.finishNomination();
+    assert.deepEqual(k.f.pending(), [k.f.now() + 240_000], "ordinary cadence resumes");
+  });
+
+  it("a nomination wake still waits for a live trade and consumes pending wakes in that one fresh read", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    const due = k.f.pending()[0]!;
+    const land = k.startOrder();
+    k.c.wakeNomination();
+    await settle();
+    k.c.wakeNomination();
+    assert.deepEqual(k.log, ["regular", "hold"], "no portfolio read before the trade settles");
+    assert.equal(k.c.wakeCommand(), false);
+    await land();
+    assert.deepEqual(k.log, ["regular", "hold", "nomination"]);
+    await k.finishNomination();
+    assert.deepEqual(k.f.pending(), [due], "the held read consumes the new nominations without moving the regular clock");
+  });
+
+  it("a nomination wake during a command tick waits for it and runs one research tick afterward", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    const due = k.f.pending()[0]!;
+    k.c.wakeCommand();
+    k.c.wakeNomination();
+    k.c.wakeNomination();
+    assert.deepEqual(k.log, ["regular", "command"]);
+    assert.deepEqual(k.f.pending(), []);
+    await k.finishCommand();
+    assert.deepEqual(k.log, ["regular", "command", "nomination"]);
+    await k.finishNomination();
+    assert.deepEqual(k.f.pending(), [due]);
+  });
+
+  it("a nomination read that outlasts the regular due time hands the overdue regular tick back immediately", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    k.f.advance(230_000);
+    k.c.wakeNomination();
+    k.c.wakeNomination();
+    k.f.advance(20_000);
+    await k.finishNomination();
+    assert.deepEqual(k.f.pending(), [k.f.now()], "regular sampling has priority over another research tick");
+    k.f.fire();
+    await k.finishRegular();
+    assert.deepEqual(k.log, ["regular", "nomination", "regular"]);
   });
 
   it("A TICK THAT FAILS STILL PUTS THE NEXT ONE ON THE CLOCK — a worker that stops ticking is the worst failure there is", async () => {
@@ -491,12 +594,51 @@ describe("the tick plan", () => {
     assert.equal(tickPlan("command").ratchets, false);
   });
 
+  it("a nomination tick admits research but no accounting sample or strategy execution", () => {
+    assert.deepEqual(tickPlan("nomination"), { kind: "nomination", ratchets: false, brain: true, awaitDrain: false, producers: false });
+  });
+
   it("a regular tick is the whole tick, and leaves its drain running beside the strategy", () => {
     assert.deepEqual(tickPlan("regular"), { kind: "regular", ratchets: true, brain: true, awaitDrain: false, producers: true });
   });
 });
 
 describe("the drain, as the plan runs it", () => {
+  it("a nomination read never drains an owner order or starts execution producers", async () => {
+    let drained = false;
+    assert.equal(await drainOnTick(tickPlan("nomination"), async () => { drained = true; }), false);
+    assert.equal(drained, false);
+  });
+
+  it("all actual early read-failure branches leave self-tests, resets and trades queued on nomination ticks", async () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const tick = source.slice(source.indexOf("  async function tick()"), source.indexOf("    if (!(await drainOnTick(plan"));
+    const sites = [...tick.matchAll(/await drainOnUnreadTick\(plan, \(\) => [^\n]+\);/g)].map(match => match[0]);
+    assert.equal(sites.length, 3, "market unread, book unread, and missing held price each use the guarded early drain");
+    assert.equal(tick.split("\n").filter(line => line.includes("runQueuedCommand(")).length, sites.length, "no early command drain escapes the helper");
+    for (const kind of ["nomination", "regular", "command"] as const) {
+      const home = newHome();
+      const now = 1_000_000;
+      const executed: string[] = [];
+      for (const [i, commandKind] of ["selftest", "paper-reset", "trade"].entries()) {
+        writeCommand(home, { id: `early-${i}`, kind: commandKind, at: now + i, expiresAt: now + 60_000 });
+      }
+      const runQueuedCommand = async () => runTickCommand(home, {
+        now: () => now,
+        run: async cmd => { executed.push(cmd.kind); return { ok: true, line: "handled" }; },
+        told: async () => {},
+      });
+      for (const site of sites) {
+        // Execute the production drain site, with a real command-file queue;
+        // the dispatcher is fake so no gas or account data can be changed.
+        await new Function("drainOnUnreadTick", "plan", "active", "agentId", "marketUnread", "bookUnread", "runQueuedCommand", `return (async () => { ${site} })();`)(
+          drainOnUnreadTick, tickPlan(kind), { agentId: "agent" }, "agent", {}, {}, runQueuedCommand,
+        );
+      }
+      assert.deepEqual(executed, kind === "nomination" ? [] : ["selftest", "paper-reset", "trade"]);
+      assert.equal(queuedCommandIds(home).length, kind === "nomination" ? 3 : 0);
+    }
+  });
   it("A COMMAND TICK WAITS FOR ITS ORDER, then stops", async () => {
     let landed = false;
     let land!: () => void;
@@ -651,6 +793,7 @@ function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
     pending: () => queuedCommandIds(home),
     regular: async () => (await tick("regular"), tickMs),
     command: () => tick("command"),
+    nomination: () => tick("nomination"),
     heartbeat: { file: heartbeatFile, mode: () => "live", sponsorGas: () => false },
   });
   const fireDue = async () => {
@@ -716,6 +859,26 @@ function longestSilence(beats: readonly number[], from: number, to: number): num
 }
 
 describe("a command tick's order and the regular tick never overlap", () => {
+
+  it("a nomination research wake cannot read mid-trade or drain a queued owner order", async () => {
+    const w = worker();
+    w.clock.start(0);
+    await w.fire();
+    const due = w.pending()[0]!;
+    w.advance(10_000);
+    w.order("queued-owner-order");
+    w.chat("in-flight");
+    w.clock.wakeNomination();
+    await settle();
+    assert.equal(w.log.includes("nomination reads the book"), false);
+    assert.equal(w.log.some(line => line.includes("WITH A TRADE IN FLIGHT")), false);
+    await w.land("chat");
+    assert.ok(w.log.includes("nomination reads the book"));
+    assert.equal(w.log.includes("nomination runs its producers"), false);
+    assert.equal(w.log.includes("order queued-owner-order sent"), false);
+    assert.deepEqual(queuedCommandIds(w.home), ["queued-owner-order"], "the nomination cannot pick up or replay an order");
+    assert.deepEqual(w.pending(), [due], "the usual accounting observation remains scheduled");
+  });
 
   it("A COMMAND TICK DOES NOT END WHILE ITS ORDER IS MID-TRADE, and the regular tick waits behind it", async () => {
     const w = worker();
@@ -1110,6 +1273,19 @@ describe("what a tick may write down", () => {
     assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "the in-memory mark the breaker divides by does not move");
     await r.equityRow(w.equity);
     assert.deepEqual(w.calls, ["risk peak observe=null"], "asked without observing — risk-period.ts reads the peak on null");
+  });
+
+  it("a group nomination cannot ratchet a transient profit into fees, peaks or the breaker's reference", async () => {
+    const r = tickRatchets(tickPlan("nomination"), { ...BOOK, held: true, breakerObservationUsdg: 150_000_000n });
+    const w = writers();
+    const paperBook = { hwmUsdg: 100 };
+    assert.equal(await r.paperPeak(paperBook, 150, w.paper), 100);
+    await r.riskPeak(150, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
+    assert.equal(r.breakerLift(10_000_000n, PEAK, PEAK), 10_000_000n);
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=null"]);
+    assert.equal(paperBook.hwmUsdg, 100);
   });
 
   it("A REGULAR TICK WRITES EACH ONE DOWN", async () => {

@@ -14,6 +14,7 @@ import type { CoinMeasure, MarketMeasure } from "./evidence";
 import { coinHeader, marketHeader, marketStats } from "./evidence";
 import { fmtPct, fmtPrice, fmtUsd, utcClock } from "./format";
 import { ema } from "./ta";
+import type { DeskReadOptions } from "./deadline";
 
 const W = 1200;
 const H = 675;
@@ -222,12 +223,23 @@ export function marketChartSvg(m: MarketMeasure): string | null {
 }
 
 /** SVG → PNG. Null when the image library is unavailable or the SVG does not render. */
-export async function renderPng(svg: string | null): Promise<Uint8Array | null> {
-  if (!svg) return null;
+export async function renderPng(svg: string | null, options?: DeskReadOptions): Promise<Uint8Array | null> {
+  if (!svg || options?.signal?.aborted) return null;
   try {
     const { default: sharp } = await import("sharp");
-    const png = await sharp(Buffer.from(svg)).png({ compressionLevel: 9 }).toBuffer();
-    return new Uint8Array(png);
+    if (options?.signal?.aborted) return null;
+    const image = sharp(Buffer.from(svg)).png({ compressionLevel: 9 });
+    // libvips also gets a processing ceiling; a caller timing out must not
+    // leave native rendering running indefinitely behind its text answer.
+    if (options?.timeoutMs) image.timeout({ seconds: Math.max(1, Math.ceil(options.timeoutMs / 1000)) });
+    const abort = () => image.destroy();
+    options?.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const png = await image.toBuffer();
+      return options?.signal?.aborted ? null : new Uint8Array(png);
+    } finally {
+      options?.signal?.removeEventListener("abort", abort);
+    }
   } catch {
     return null;
   }

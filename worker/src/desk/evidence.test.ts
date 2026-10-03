@@ -6,6 +6,7 @@ import { cleanSymbol, coinBrief, coinFloor, coinHeader, credibleVolume, mainPool
 import type { BarsRead } from "./gecko";
 import { parseHourlyBars } from "./gecko";
 import { fmtPct, fmtPrice, fmtUsd } from "./format";
+import type { DeskReadOptions } from "./deadline";
 
 const NOW = 1_791_028_800_000;
 const tok = (c: string) => `0x${c.repeat(40)}`;
@@ -256,5 +257,153 @@ describe("the desk port", () => {
     assert.equal(createDesk({ reads: reads() }).think, undefined);
     assert.equal(typeof createDesk({ reads: reads(), brain: { url: "http://brain", token: "t", agentId: "a" } }).think, "function");
     assert.equal(createDesk({ reads: reads(), brain: { url: "", token: "t", agentId: "a" } }).think, undefined);
+  });
+});
+
+describe("the desk's complete lookup deadline", () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const never = <T>() => new Promise<T>(() => {});
+
+  it("returns measured pool flow when hourly candles hang, and never replaces it with late candles", async () => {
+    let finish!: (value: BarsRead) => void;
+    let hourlyOptions: DeskReadOptions | undefined;
+    const pending = new Promise<BarsRead>((resolve) => { finish = resolve; });
+    const r = reads({
+      tokenPools: async () => ok([pool("CAT / WETH", tok("a"))]),
+      hourly: async (_pool, _token, options) => { hourlyOptions = options; return pending; },
+    });
+    const desk = createDesk({ reads: r, render: async () => { throw new Error("no candles to render"); } });
+    const at = performance.now();
+    const value = await desk.look({ kind: "coin", address: tok("a") }, { timeoutMs: 80 });
+    assert.ok(performance.now() - at < 400, "a hung candle read cannot keep the response waiting");
+    assert.ok(value.ok);
+    assert.equal(value.evidence.chart, null);
+    assert.equal(value.evidence.observedAtMs, NOW);
+    assert.match(value.evidence.brief, /main pool liquidity \$200k/);
+    assert.match(value.evidence.floor.read, /\$100k traded over 24h, 200 buyers vs 150 sellers/);
+    assert.equal(hourlyOptions?.signal?.aborted, true);
+    assert.ok((hourlyOptions?.timeoutMs ?? Infinity) < 80);
+    finish(bars(168));
+    await delay(10);
+    assert.strictEqual(await desk.look({ kind: "coin", address: tok("a") }, { timeoutMs: 0 }), value, "late candles cannot mutate or replace the returned floor");
+  });
+
+  it("keeps candle measurements and the floor if PNG rendering hangs", async () => {
+    let finish!: (value: Uint8Array | null) => void;
+    let renderOptions: DeskReadOptions | undefined;
+    const r = reads({ search: async () => ok([pool("CASHCAT / WETH", tok("a"))]) });
+    const desk = createDesk({ reads: r, render: (_svg, options) => {
+      renderOptions = options;
+      return new Promise((resolve) => { finish = resolve; });
+    } });
+    const at = performance.now();
+    const value = await desk.look({ kind: "coin", query: "cashcat" }, { timeoutMs: 180 });
+    assert.ok(performance.now() - at < 600);
+    assert.ok(value.ok);
+    assert.equal(value.evidence.chart, null);
+    assert.match(value.evidence.brief, /HOURLY CHART: 168 candles/);
+    assert.match(value.evidence.floor.read, /trending up/);
+    assert.equal(renderOptions?.signal?.aborted, true);
+    finish(new Uint8Array([42]));
+    await delay(10);
+    assert.strictEqual(await desk.look({ kind: "coin", query: "cashcat" }), value);
+    assert.equal(value.evidence.chart, null, "a late PNG never becomes a second answer");
+  });
+
+  it("passes only the remaining total budget from search to candles", async () => {
+    let remaining = Infinity;
+    const r = reads({
+      search: async () => { await delay(50); return ok([pool("CAT / WETH", tok("a"))]); },
+      hourly: async (_pool, _token, options) => { remaining = options?.timeoutMs ?? Infinity; return never<BarsRead>(); },
+    });
+    const desk = createDesk({ reads: r });
+    const at = performance.now();
+    const value = await desk.look({ kind: "coin", query: "cat" }, { timeoutMs: 100 });
+    assert.ok(value.ok);
+    assert.ok(remaining < 50, "the second stage does not get a fresh deadline");
+    assert.ok(performance.now() - at < 400);
+  });
+
+  it("answers with a partial board when other feeds hang, without inventing zero launches", async () => {
+    const board = [pool("AAA / WETH", tok("1")), pool("BBB / WETH", tok("2")), pool("CCC / WETH", tok("3"))];
+    const r = reads({ feed: async (f) => f === "pools" ? ok(board) : never<GeckoFetch>() });
+    const desk = createDesk({ reads: r });
+    const at = performance.now();
+    const value = await desk.look({ kind: "market" }, { timeoutMs: 70 });
+    assert.ok(performance.now() - at < 400);
+    assert.ok(value.ok);
+    assert.equal(value.evidence.chart, null);
+    assert.equal(value.evidence.observedAtMs, NOW);
+    assert.match(value.evidence.brief, /COVERAGE: partial snapshot; trending, new-pool feed unavailable/);
+    assert.match(value.evidence.floor.read, /partial market snapshot/);
+    assert.doesNotMatch(value.evidence.brief + value.evidence.floor.read, /NEW LAUNCHES:|0 (?:pools|launches)/);
+    assert.strictEqual(await desk.look({ kind: "market" }, { timeoutMs: 0 }), value);
+  });
+
+  it("a short-budget caller joining a longer job receives its pool floor promptly", async () => {
+    let searchCalls = 0;
+    const r = reads({
+      search: async () => { searchCalls++; return ok([pool("CAT / WETH", tok("a"))]); },
+      hourly: async () => never<BarsRead>(),
+    });
+    const desk = createDesk({ reads: r });
+    const longer = desk.look({ kind: "coin", query: "cat" }, { timeoutMs: 300 });
+    await delay(5);
+    const at = performance.now();
+    const shorter = await desk.look({ kind: "coin", query: "cat" }, { timeoutMs: 20 });
+    assert.ok(performance.now() - at < 200);
+    assert.ok(shorter.ok);
+    assert.match(shorter.evidence.brief, /HOURLY CHART: not available/);
+    assert.equal(shorter.evidence.chart, null);
+    assert.equal(searchCalls, 1);
+    assert.ok((await longer).ok);
+  });
+
+  it("a hung shared pool lookup respects each caller's deadline and releases the pending job", async () => {
+    let now = NOW;
+    let calls = 0;
+    const r = reads({ now: () => now, tokenPools: async () => { calls++; return never<GeckoFetch>(); } });
+    const desk = createDesk({ reads: r });
+    const first = desk.look({ kind: "coin", address: tok("a") }, { timeoutMs: 60 });
+    const at = performance.now();
+    assert.deepEqual(await desk.look({ kind: "coin", address: tok("a") }, { timeoutMs: 5 }), { ok: false, why: "unavailable" });
+    assert.ok(performance.now() - at < 200);
+    assert.deepEqual(await first, { ok: false, why: "unavailable" });
+    assert.equal(calls, 1);
+    now += 16_000;
+    assert.deepEqual(await desk.look({ kind: "coin", address: tok("a") }, { timeoutMs: 5 }), { ok: false, why: "unavailable" });
+    assert.equal(calls, 2, "a timed-out job does not stay in pending forever");
+  });
+
+  it("does no lookup work after an exhausted budget, but still serves a fresh memo", async () => {
+    const r = reads();
+    const desk = createDesk({ reads: r });
+    assert.deepEqual(await desk.look({ kind: "coin", query: "cat" }, { timeoutMs: 0 }), { ok: false, why: "unavailable" });
+    assert.deepEqual(r.calls, []);
+  });
+
+  it("does not extend a pool snapshot's freshness by caching after chart processing", async () => {
+    let now = NOW;
+    let calls = 0;
+    const r = reads({
+      now: () => now,
+      tokenPools: async () => { calls++; return { ...ok([pool("CAT / WETH", tok("a"))]), observedAt: NOW - 59_000 }; },
+      hourly: async () => ({ failed: true, failure: "unavailable", bars: [] }),
+    });
+    const desk = createDesk({ reads: r });
+    const first = await desk.look({ kind: "coin", address: tok("a") });
+    assert.ok(first.ok && first.evidence.observedAtMs === NOW - 59_000);
+    now += 2000;
+    await desk.look({ kind: "coin", address: tok("a") });
+    assert.equal(calls, 2, "memo expiry is bounded by observed time, not completion time");
+  });
+
+  it("leaves absent activity unknown in a candle-less snapshot", async () => {
+    const p = pool("CAT / WETH", tok("a"));
+    p.buckets.h24 = emptyGeckoBuckets().h24;
+    const r = reads({ tokenPools: async () => ok([p]), hourly: async () => ({ failed: true, bars: [] }) });
+    const value = await createDesk({ reads: r }).look({ kind: "coin", address: tok("a") });
+    assert.ok(value.ok);
+    assert.doesNotMatch(value.evidence.floor.read, /0 (?:buyers|sellers|buys|sells)|\$0 traded/);
   });
 });

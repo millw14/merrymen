@@ -191,7 +191,8 @@ function fitCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string): string 
 }
 
 /** What it says when the desk could not answer. Fixed lines, judged by the ordinary gate like every template. */
-export function deskMissLine(why: "not-found" | "ambiguous" | "unavailable", kind: "coin" | "market"): string {
+export function deskMissLine(why: "not-found" | "ambiguous" | "unavailable" | "rate-limit", kind: "coin" | "market"): string {
+  if (why === "rate-limit") return "too many research requests right now; i cannot give a fresh verified read";
   if (kind === "market") return "can't pull the market data rn, ask me again in a minute";
   if (why === "not-found") return "can't find a coin by that name on robinhood chain. drop the CA and i'll pull the chart";
   if (why === "ambiguous") return "there's more than one coin with that name on robinhood chain. drop the CA of the one you mean";
