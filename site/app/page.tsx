@@ -124,8 +124,14 @@ export default async function Home() {
             <h1 className="hero-statement">Your agent.<br /><span className="accent">Your rules.</span></h1>
             <p className="hero-sub">Meet your Merryman. A trading agent you can name, chat with, and put to work — with limits enforced on-chain and an owner key that stays yours.</p>
             <div className="hero-cta">
-              <a href={HOSTED_APP} className="btn btn-primary btn-lg">Open app <Icon name="arrow" size={18}/></a>
-              <Link href="/api" className="btn btn-ghost btn-lg">Build with Merrymen <Icon name="arrow" size={16}/></Link>
+              <div className="path">
+                <span>For traders</span>
+                <a href={HOSTED_APP} className="btn btn-primary btn-lg">Open app <Icon name="arrow" size={18}/></a>
+              </div>
+              <div className="path">
+                <span>For developers</span>
+                <Link href="/api" className="btn btn-ghost btn-lg">Build with Merrymen <Icon name="arrow" size={16}/></Link>
+              </div>
             </div>
           </div>
           <div className="hero-stage">
@@ -276,10 +282,11 @@ export default async function Home() {
             <p>Desktop, the Android demo, an iPhone note, and the source. Self-host starts on paper.</p>
           </div>
           <div className="download-options">
-            <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: the one-line install below.</p></div>
-            <div><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
-            <div><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
+            <div><span className="path-note">Paper</span><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: the one-line install below.</p></div>
+            <div><span className="path-note">On a phone</span><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
+            <div><span className="path-note">On a phone</span><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
             <div>
+              <span className="path-note">For developers</span>
               <h3>Claude, Cursor, and the source</h3>
               <p>
                 Connect an assistant at the MCP server <code className="inline">{MCP_SERVER}</code>.{" "}

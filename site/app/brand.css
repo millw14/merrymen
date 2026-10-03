@@ -42,7 +42,18 @@ section[id] { scroll-margin-top: 90px; }
 .home-hero .hero-statement { font-size: clamp(72px, 9.6vw, 132px); font-weight: 500; line-height: .92; letter-spacing: -.07em; margin: 30px 0 0; max-width: 9ch; }
 .home-hero .hero-statement .accent { font-weight: 500; }
 .home-hero .hero-sub { margin: 34px 0 0; max-width: 52ch; font-size: 18px; line-height: 1.7; }
-.home-hero .hero-cta { justify-content: flex-start; gap: 10px; margin-top: 32px; }
+.home-hero .hero-cta { justify-content: flex-start; align-items: flex-end; gap: 10px; margin-top: 32px; }
+.home-page .path { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.home-page .path > span,
+.home-page .path-note {
+  color: var(--lime);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.home-page .path-note { display: block; margin: 0 0 10px; }
 .home-hero .hero-meta { margin-top: 25px; font-size: 9px; letter-spacing: .08em; }
 .hero-bottom-links { display: flex; gap: 24px; font-size: 12px; color: var(--text-2); margin-top: 22px; }
 .hero-bottom-links a:hover { color: var(--lime); }
