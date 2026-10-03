@@ -112,9 +112,9 @@ describe("direct Brain execution remains gated separately from Trencher strategy
   it("ONE CALL SITE, AND IT IS GATED ON ITS OWN ALLOWLIST", () => {
     const raw = tick();
     assert.equal(
-      (raw.match(/if \(!fastTrencher && outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\) && !isPaused\(\)\)/g) ?? []).length,
+      (raw.match(/if \(plan\.kind !== "nomination" && !fastTrencher && outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\) && !isPaused\(\)\)/g) ?? []).length,
       1,
-      "one execution guard, with live enrollment and the pause switch both enforced",
+      "one execution guard, excluding nomination research and enforcing live enrollment and the pause switch",
     );
     assert.match(raw, /outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\)/);
   });

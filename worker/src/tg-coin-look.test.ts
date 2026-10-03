@@ -1289,7 +1289,11 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     assert.match(CODE, /if \(trenchBrain\.reset\(trenchContext\)\) tgDeliver\(tgBook\.reset\(\)\);\n\s+tgDeliver\(tgBook\.expire\(\)\);/);
     // The nominated set still reaches discovery. The pool cache rides beside it
     // (trencher-discovery.ts) and changes what is re-read, never what qualifies.
-    assert.match(CODE, /discoverTrencherUniverse\(mainnetClient\(\),current\.grant,freshTrenchTape\(\),\{nominated:new Set\(tgNominated\),cache:trenchPoolCache\}\)/);
+    const refresh = CODE.slice(CODE.indexOf("const autoTrenchRefresh = new CoalescedRefresh("), CODE.indexOf("function refreshAutoTrench("));
+    assert.match(refresh, /const poolCache = trenchPoolCache;/);
+    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache\s*\}\)/);
+    assert.match(refresh, /autoTrenchContext === context && trenchPoolCache === poolCache && active/,
+      "a result from an old grant or connection cannot replace the current discovery");
   });
 
   it("the look's presence probe reads Robinhood Chain, through the governed mainnet client", () => {
