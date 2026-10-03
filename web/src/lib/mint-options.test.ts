@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import ts from "typescript";
 import { refusalMessage } from "./session";
 
 /**
@@ -24,6 +25,30 @@ import { refusalMessage } from "./session";
 
 const SESSION_SRC = readFileSync(new URL("./session.ts", import.meta.url), "utf8");
 const GRANT_PAGE_SRC = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
+const MINT_ARITY: Record<string, number> = { createAgentWallet: 1, restoreAgentWallet: 2, createPrivyOwnedWallet: 3 };
+
+function mintCalls(source: string): ts.CallExpression[] {
+  const calls: ts.CallExpression[] = [];
+  const parsed = ts.createSourceFile("Wallet.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && Object.hasOwn(MINT_ARITY, node.expression.text)) calls.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  return calls;
+}
+
+function hasNamedOptions(call: ts.CallExpression): boolean {
+  const name = (call.expression as ts.Identifier).text;
+  if (call.arguments.length !== MINT_ARITY[name]) return false;
+  const options = call.arguments[call.arguments.length - 1]!;
+  if (ts.isIdentifier(options)) return options.text === "options";
+  if (!ts.isObjectLiteralExpression(options)) return false;
+  return options.properties.some(property =>
+    (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === "onStatus") ||
+    (ts.isSpreadAssignment(property) && ts.isIdentifier(property.expression) && property.expression.text === "options"),
+  );
+}
 
 describe("mint entry points take NAMED options", () => {
   it("createAgentWallet and restoreAgentWallet take an options object", () => {
@@ -40,21 +65,36 @@ describe("mint entry points take NAMED options", () => {
     // that is still one named object, and it is what keeps a Privy re-sign and
     // an owner-key re-sign on ONE set of conditions rather than two. What must
     // never come back is a bare positional argument list.
-    const calls = [
-      ...GRANT_PAGE_SRC.matchAll(
-        /(createAgentWallet|restoreAgentWallet|createPrivyOwnedWallet)\(([\s\S]{0,400}?)\)\s*[;,\n]/g,
-      ),
-    ];
+    const calls = mintCalls(GRANT_PAGE_SRC);
     assert.ok(calls.length >= 4, `expected every mint call site, found ${calls.length}`);
-    for (const [, name, args] of calls) {
-      const inline = /onStatus:/.test(args);
-      const hoisted = /(^|[\s,])options\s*$/.test(args.trim()) || /,\s*options\s*$/.test(args.trim());
-      assert.ok(inline || hoisted, `${name} must take a named options object, not positional args`);
+    for (const call of calls) {
+      assert.ok(hasNamedOptions(call), `${call.expression.getText()} must take a named options object, not positional args`);
     }
     // And the hoisted one is a real options object, not something reshaped.
     const hoistedLiteral = GRANT_PAGE_SRC.slice(GRANT_PAGE_SRC.indexOf("const options = {"));
     assert.match(hoistedLiteral.slice(0, 900), /onStatus: setStatus/);
     assert.match(hoistedLiteral.slice(0, 900), /hostedAs:/);
+  });
+
+  it("accepts named objects and reviewed-options spreads while rejecting positional or unrelated arguments", () => {
+    for (const source of [
+      "createAgentWallet(options)",
+      "restoreAgentWallet(owner, { onStatus: setStatus, hostedAs: wallet })",
+      "restoreAgentWallet(owner, { ...options, minimumValidationNonce: revocation.validNonceFrom })",
+      "createPrivyOwnedWallet(owner, did, { ...options, minimumValidationNonce: revocation.validNonceFrom })",
+    ]) {
+      assert.equal(hasNamedOptions(mintCalls(source)[0]!), true, source);
+    }
+    for (const source of [
+      "createAgentWallet(caps, setStatus, chainId, tokens, adapter, wallet)",
+      "restoreAgentWallet(owner, caps, setStatus, chainId, tokens, adapter, wallet)",
+      "restoreAgentWallet(owner, options, adapter)",
+      "createPrivyOwnedWallet(owner, did, caps, options)",
+      "restoreAgentWallet(owner, { ...caps })",
+      "restoreAgentWallet(owner, caps)",
+    ]) {
+      assert.equal(hasNamedOptions(mintCalls(source)[0]!), false, source);
+    }
   });
 
   it("every call site that can be hosted passes hostedAs BY NAME", () => {
