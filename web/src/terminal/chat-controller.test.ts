@@ -24,7 +24,7 @@ import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
 import SettingsPage from "./screens/Settings";
-import { ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
+import { askAgent, ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
 import { chatKeyFor } from "./chat-store";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
 import { deferred, json, testDom } from "./test-dom";
@@ -136,6 +136,71 @@ function Harness(p: {
   );
 }
 const h = (p: Parameters<typeof Harness>[0] = {}) => createElement(Harness, p);
+const mediaAt = (matches: () => boolean): typeof window.matchMedia => (media) => ({
+  matches: matches(), media, onchange: null,
+  addListener: noop, removeListener: noop, addEventListener: noop, removeEventListener: noop,
+  dispatchEvent: () => true,
+});
+
+describe("following replies on a phone with a scrolling outer page", () => {
+  it("keeps the same desktop-mounted chat reading position after resizing into the phone layout", async () => {
+    let mobile = false;
+    ui.dom.window.matchMedia = mediaAt(() => mobile);
+    const screen = () => createElement("div", { className: "body" }, h());
+    await ui.render(screen());
+    await settle();
+    const body = ui.container.querySelector<HTMLElement>(".body")!;
+    const conversation = ui.container.querySelector<HTMLElement>(".desk-conversation")!;
+    Object.defineProperties(body, { scrollHeight: { value: 900 }, clientHeight: { value: 500 } });
+    Object.defineProperties(conversation, { scrollHeight: { value: 700 }, clientHeight: { value: 220 } });
+
+    body.scrollTop = 100;
+    await act(async () => body.dispatchEvent(new ui.dom.window.Event("scroll")));
+    await act(async () => chat.say({ role: "agent", text: "Desktop reply keeps following the thread." }));
+    assert.equal(body.scrollTop, 100, "desktop replies do not move the surrounding page");
+    assert.equal(conversation.scrollTop, 700, "desktop outer scrolling does not pause the thread");
+
+    mobile = true;
+    await ui.render(screen());
+    assert.equal(ui.container.querySelector(".desk-conversation"), conversation, "the chat did not remount at the breakpoint");
+    await act(async () => chat.say({ role: "agent", text: "First reply after resizing to a phone." }));
+    assert.equal(body.scrollTop, 900);
+    body.scrollTop = 100;
+    await act(async () => body.dispatchEvent(new ui.dom.window.Event("scroll")));
+    await act(async () => chat.say({ role: "agent", text: "Incoming reply while reading earlier mobile content." }));
+    assert.equal(body.scrollTop, 100, "the existing listener pauses follow in the new phone layout");
+    await ui.click("Latest message");
+    assert.equal(body.scrollTop, 900);
+    assert.equal(conversation.scrollTop, 700);
+  });
+
+  it("brings the composer into view, preserves reading position, and resumes on Latest message", async () => {
+    ui.dom.window.matchMedia = mediaAt(() => true);
+    await ui.render(createElement("div", { className: "body" }, h()));
+    await settle();
+    const body = ui.container.querySelector<HTMLElement>(".body")!;
+    const conversation = ui.container.querySelector<HTMLElement>(".desk-conversation")!;
+    // jsdom supplies no layout: model an overflowing short phone, then drive
+    // the real screen/controller and its scroll events rather than CSS text.
+    Object.defineProperties(body, { scrollHeight: { value: 900 }, clientHeight: { value: 500 } });
+    Object.defineProperties(conversation, { scrollHeight: { value: 700 }, clientHeight: { value: 220 } });
+    await act(async () => chat.say({ role: "agent", text: "First reply on a short phone." }));
+    assert.equal(body.scrollTop, 900, "the outer page follows the composer too");
+    assert.equal(conversation.scrollTop, 700);
+
+    body.scrollTop = 100;
+    await act(async () => body.dispatchEvent(new ui.dom.window.Event("scroll")));
+    await act(async () => chat.say({ role: "agent", text: "Reply while you read earlier content." }));
+    assert.equal(body.scrollTop, 100, "a reply must not pull someone away from earlier content");
+    await ui.click("Latest message");
+    assert.equal(body.scrollTop, 900);
+    assert.equal(conversation.scrollTop, 700);
+
+    await act(async () => chat.setProposal({ id: "go-live", args: {} }));
+    assert.equal(body.scrollTop, 900, "the confirmation and composer stay reachable");
+    assert.equal(count("PUT", "/api/settings"), 0, "scrolling never confirms the proposal");
+  });
+});
 
 const text = () => ui.container.textContent ?? "";
 const textarea = () => ui.container.querySelector("textarea")!;
@@ -218,6 +283,31 @@ const SETTINGS_VIEW: SettingsView = {
 };
 
 const count = (method: string, path: string) => calls.filter((c) => c.method === method && c.url.split("?")[0] === path).length;
+
+describe("reading a withheld live-trading proposal", () => {
+  for (const streamed of [false, true]) {
+    it(`${streamed ? "SSE" : "JSON"} reaches askAgent as readable no-action text without a confirmation or Retry`, async () => {
+      const reply = "Nothing changed. We can keep chatting without real funds. If you meant to start real trading, review Live trading in Settings.";
+      for (const raw of [
+        "<<CMD go-live {}>>",
+        "Confirm below to trade for real.\n<<CMD go-live {}>>",
+        '<<CMD change-settings {"changes":"liveTradingEnabled=true"}>>',
+        'Confirm below to apply both.\n<<CMD change-settings {"changes":"buyPerTickUsdg=5; live trading on"}>>',
+      ]) {
+        routes["POST /api/chat"] = (_url, init) => agentReplyResponse(JSON.parse(String(init?.body)) as AgentChatBody, { stream: streamed }, {
+          credentials: () => ({ provider: "test", transport: "openai", baseUrl: "https://example.test/v1", model: "m", apiKey: "k", vision: false }),
+          complete: async () => raw,
+          stream: async (_creds, _request, onText) => { onText(raw); return raw; },
+        });
+        const result = await askAgent({ message: "Hello, just chatting", state: JSON.stringify({ liveTradingEnabled: false }),
+          history: [{ role: "user", content: "go live" }], expectedTenant: null }, noop);
+        assert.deepEqual(result, { ok: true, reply }, raw);
+      }
+      assert.equal(count("PUT", "/api/settings"), 0);
+      assert.equal(count("POST", "/api/orders"), 0);
+    });
+  }
+});
 
 describe("sending feels instant", () => {
   it("binds a hosted chat request to the account whose confirmed thread supplied its history", async () => {

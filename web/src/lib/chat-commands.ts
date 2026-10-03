@@ -59,6 +59,7 @@ import {
   MERRYMEN_TOKEN,
   PROPOSAL_PARAM,
   buildProposal,
+  decodeProposalLink,
   encodeProposalLink,
   riskProfile,
   understandSettingsText,
@@ -612,6 +613,20 @@ export function commandPayload(
   // command whose whole purpose is that nobody should have to know them.
   for (const [key, v] of Object.entries(cmd.derive?.(args) ?? {})) out[key] = v;
   return out;
+}
+
+/**
+ * Whether confirming this proposal can enable real orders. Read the effective
+ * write/link, including fixed/derived values and the catalog's transport caps;
+ * neither a command id nor a substring of the model's arguments is enough.
+ */
+export function commandEnablesLiveTrading(cmd: ChatCommand, args: Record<string, CommandArg>): boolean {
+  if (cmd.via === "settings") return commandPayload(cmd, args).liveTradingEnabled === true;
+  if (cmd.id !== "change-settings") return false;
+  // The same parser and codec the Settings navigation uses. In particular,
+  // changes after its 600-character/12-row caps cannot become a settings write.
+  const changes = decodeProposalLink(encodeProposalLink(proposalRowsFor(args.changes)));
+  return changes.some((c) => c.key === "liveTradingEnabled" && c.value === true);
 }
 
 /**

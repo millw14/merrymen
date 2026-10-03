@@ -16,8 +16,80 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, isComplete, modelArgsFor, splitCommand } from "./chat-commands";
+import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandEnablesLiveTrading, commandFor, commandPayload, isComplete, modelArgsFor, splitCommand, type ChatCommand, type CommandArg } from "./chat-commands";
 import { RISK_PROFILES, decodeProposalLink } from "@merrymen/core";
+
+describe("effective live-trading changes need explicit proposal eligibility", () => {
+  const settings = commandFor("change-settings")!;
+  const transported = (args: Record<string, CommandArg>) => decodeProposalLink(
+    new URL(settings.toFor!(args), "https://app.example.test").searchParams.get("propose"),
+  );
+
+  it("reads fixed and derived settings payloads, including future registry commands", () => {
+    assert.equal(commandEnablesLiveTrading(commandFor("go-live")!, { liveTradingEnabled: false }), true);
+    assert.equal(commandEnablesLiveTrading(commandFor("go-paper")!, { liveTradingEnabled: true }), false);
+    assert.equal(commandEnablesLiveTrading(commandFor("set-size")!, { buyPerTickUsdg: 5, liveTradingEnabled: true }), false);
+    assert.equal(commandEnablesLiveTrading(commandFor("open-settings")!, { liveTradingEnabled: true }), false);
+    const future: ChatCommand = { id: "future-mode", via: "settings", writes: ["liveTradingEnabled"], say: () => "Mode" };
+    assert.equal(commandEnablesLiveTrading(future, { liveTradingEnabled: true }), true);
+    assert.equal(commandEnablesLiveTrading(future, { liveTradingEnabled: false }), false);
+    assert.equal(commandEnablesLiveTrading({ ...future, fixed: { liveTradingEnabled: false } }, { liveTradingEnabled: true }), false);
+    assert.equal(commandEnablesLiveTrading({ ...future, fixed: { liveTradingEnabled: false }, derive: () => ({ liveTradingEnabled: true }) }, {}), true);
+  });
+
+  it("uses the same catalog aliases and effective values as the actual Settings link", () => {
+    for (const changes of [
+      "liveTradingEnabled=true", "liveTradingEnabled=1", "liveTradingEnabled=enabled",
+      "live trading on", "real money yes", "live mode on", "go live", "use real money",
+      "trade for real", "start real trading", "buyPerTickUsdg=5; liveTradingEnabled=true",
+      // The catalog recognizes this intent despite the model's negation; the
+      // gate must evaluate the resulting write, not believe its wording.
+      "don't go live",
+    ]) {
+      const args = { changes };
+      assert.ok(transported(args).some((c) => c.key === "liveTradingEnabled" && c.value === true), changes);
+      assert.equal(commandEnablesLiveTrading(settings, args), true, changes);
+    }
+    for (const changes of ["liveTradingEnabled=false", "liveTradingEnabled=off", "stop using real money", "buyPerTickUsdg=5"]) {
+      assert.equal(commandEnablesLiveTrading(settings, { changes }), false, changes);
+    }
+  });
+
+  it("keeps catalog first-key precedence and JSON argument last-value precedence", () => {
+    for (const [changes, enabled] of [
+      ["liveTradingEnabled=true; liveTradingEnabled=false", true],
+      ["liveTradingEnabled=false; liveTradingEnabled=true", false],
+      ["liveTradingEnabled=invalid; liveTradingEnabled=true", false],
+    ] as const) {
+      const args = { changes };
+      assert.equal(transported(args).some((c) => c.key === "liveTradingEnabled" && c.value === true), enabled);
+      assert.equal(commandEnablesLiveTrading(settings, args), enabled);
+    }
+    const last = splitCommand('<<CMD change-settings {"changes":"liveTradingEnabled=false","changes":"liveTradingEnabled=true"}>>').command!;
+    assert.equal(commandEnablesLiveTrading(commandFor(last.id)!, last.args), true);
+    assert.equal(splitCommand('<<CMD change-settings {changes:"liveTradingEnabled=true"}>>').command, undefined);
+  });
+
+  it("honors the 600-character parse cap and 12-change Settings transport cap", () => {
+    for (const [changes, enabled] of [
+      ["liveTradingEnabled=true".padEnd(600) + ";liveTradingEnabled=false", true],
+      ["liveTradingEnabled=false".padEnd(600) + ";liveTradingEnabled=true", false],
+      ["liveTradingEnabled=tru".padEnd(600) + "e", false],
+    ] as const) {
+      assert.equal(commandEnablesLiveTrading(settings, { changes }), enabled);
+      assert.equal(transported({ changes }).some((c) => c.key === "liveTradingEnabled" && c.value === true), enabled);
+    }
+    const twelve = ["paperTradingEnabled", "discoveryEnabled", "officialCoinsEnabled", "telegramEnabled", "telegramNotifyEnabled",
+      "telegramControlEnabled", "telegramTransferEnabled", "telegramGroupsEnabled", "telegramGroupCoinsEnabled",
+      "telegramPcControlEnabled", "telegramAgentEnabled", "telegramAgentAutoShell"].map((key) => `${key}=true`).join(";");
+    const omitted = { changes: `${twelve};liveTradingEnabled=true` };
+    assert.equal(transported(omitted).length, 12);
+    assert.equal(commandEnablesLiveTrading(settings, omitted), false, "an untransported thirteenth row cannot enable live trading");
+    const included = { changes: `liveTradingEnabled=true;${twelve}` };
+    assert.equal(transported(included).length, 12);
+    assert.equal(commandEnablesLiveTrading(settings, included), true);
+  });
+});
 
 describe("what the model actually says, and what survives it", () => {
   it("A PROPOSAL IS LIFTED OUT AND THE MARKER NEVER REACHES A PERSON", () => {
