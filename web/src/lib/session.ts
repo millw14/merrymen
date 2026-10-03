@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveTrencherPermission } from "./trencher-permission";
+import { assertV4Deployment } from "./v4-deployment";
 import { GRANT_TRENCHER } from "@merrymen/core";
 
 /**
@@ -385,6 +386,12 @@ async function prepareGrantCore(
         `else would mint a second agent and leave this one's funds where they are.`,
     );
   }
+
+  // The renewal preflight runs this before stopping or revoking the old key.
+  // Keep it in the canonical signer so SDK and phone callers also cannot seal
+  // a v4 route that only the worker later discovers is missing or on another
+  // network. The actual mint checks again after revocation.
+  await assertV4Deployment(publicClient, v4AdapterAddress, chainId, onStatus);
 
   // THE WALL now lives in packages/core/src/wall.ts, so the phone app signs the
   // IDENTICAL permission set rather than a second copy that could drift from this

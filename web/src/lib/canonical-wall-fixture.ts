@@ -62,6 +62,10 @@ export const CLASS_VAULT = "0x00000000000000000000000000000000000c1a55" as Addre
 export const TRENCHER_FACTORY = "0x000000000000000000000000000000000000f4c7" as Address;
 export const TRENCHER_VAULT = "0x000000000000000000000000000000000000fa17" as Address;
 const TRENCHER_CODE = "0x60006000fd" as Hex;
+const V4_ADAPTERS = new Set([
+  "0xe0ce6bd81a472f021a9e85392a8008b8786f9218",
+  "0x0000000000000000000000000000000000000a4a",
+]);
 
 // trencher-permission.ts reads the trusted bytecode hash once, when it loads.
 // session.ts is imported lazily below, so this is set before that happens.
@@ -75,10 +79,17 @@ export interface KernelState {
   currentNonce: number | "unreadable";
   installedNonce?: number | "unreadable";
   unreadableCode?: boolean;
+  v4Code?: Hex | "unreadable";
+  v4PoolManager?: Address | "unreadable";
 }
 function answer(account: Address, method: string, params: unknown[], kernel?: KernelState): RpcAnswer {
   if (method === "eth_chainId") return { result: toHex(robinhoodChain.id) };
   if (method === "eth_getCode") {
+    const target = String(params[0]).toLowerCase();
+    if (V4_ADAPTERS.has(target)) {
+      return kernel?.v4Code === "unreadable" ? reverted() : { result: kernel?.v4Code ?? "0x6000" };
+    }
+    if (target === UNISWAP.v4PoolManager.toLowerCase()) return { result: "0x6000" };
     if (kernel && String(params[0]).toLowerCase() === account.toLowerCase()) {
       return kernel.unreadableCode ? reverted() : { result: "0x6000" };
     }
@@ -87,6 +98,10 @@ function answer(account: Address, method: string, params: unknown[], kernel?: Ke
   if (method === "eth_call") {
     const { to, data } = params[0] as { to: string; data: Hex };
     const target = to.toLowerCase();
+    if (V4_ADAPTERS.has(target)) {
+      if (kernel?.v4PoolManager === "unreadable") return reverted();
+      return { result: encodeAbiParameters([{ type: "address" }], [kernel?.v4PoolManager ?? UNISWAP.v4PoolManager]) };
+    }
     if (kernel && target === account.toLowerCase()) {
       try {
         const call = decodeFunctionData({ abi: KernelV3_3AccountAbi, data });

@@ -2526,7 +2526,7 @@ export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg:
         // Ordered by the INSERT (`at`, id) as always — the alias is `read_at`
         // so ORDER BY cannot resolve to it on either engine.
         `SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity
-          WHERE agent_id = ? AND epoch = ? AND COALESCE(flows_held, 0) = 0
+          WHERE agent_id = ? AND epoch = ? AND mode = 'live' AND COALESCE(flows_held, 0) = 0
           ORDER BY at DESC, id DESC LIMIT 1`,
       )
       .get(agentId, epoch) as { cash_usdg: number; read_at: number } | undefined;

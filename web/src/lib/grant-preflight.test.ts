@@ -109,6 +109,22 @@ describe("read-only grant renewal preflight", () => {
     assert.equal(signer.calls(), 0);
   });
 
+  it("refuses a missing or mismatched v4 deployment before any owner signature", async () => {
+    const { preflightAgentGrant } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    for (const state of [
+      { currentNonce: 8, v4Code: "0x" },
+      { currentNonce: 8, v4Code: "unreadable" },
+      { currentNonce: 8, v4PoolManager: ACCOUNT },
+      { currentNonce: 8, v4PoolManager: "unreadable" },
+    ] satisfies KernelState[]) {
+      await withStubChain(ACCOUNT, () => assert.rejects(preflightAgentGrant(signer.owner, {
+        ...options, v4AdapterAddress: V4_ADAPTER,
+      }), /Could not check Uniswap v4.*Nothing was signed/s), state);
+    }
+    assert.equal(signer.calls(), 0);
+  });
+
   it("signs only the fresh generation after preflight and confirmed revocation", async () => {
     const { preflightAgentGrant, prepareAgentGrant } = await import("./session");
     const original = privateKeyToAccount(ownerKey);
