@@ -36,6 +36,18 @@ function toolCapabilities(def: ToolDef): Capability[] {
   return [def.capability, ...(def.anyOf ?? [])];
 }
 
+/** MCP clients must receive all three safety hints on every listed tool. */
+function servedAnnotations(def: ToolDef) {
+  // Widen for the runtime check: a JS caller can bypass ToolAnnotations.
+  const { readOnlyHint, openWorldHint, destructiveHint } = def.annotations as { readOnlyHint: boolean; openWorldHint: boolean; destructiveHint?: boolean };
+  if (typeof readOnlyHint !== "boolean" || typeof openWorldHint !== "boolean" || (!readOnlyHint && typeof destructiveHint !== "boolean") || (readOnlyHint && destructiveHint !== undefined && destructiveHint !== false)) {
+    throw new Error(`${def.name}: invalid MCP tool safety annotations`);
+  }
+  // A read-only tool is non-destructive. Writes must classify themselves;
+  // never let a missing destructiveHint on a write become false by default.
+  return { title: def.title, ...def.annotations, destructiveHint: readOnlyHint ? false : destructiveHint };
+}
+
 /**
  * Whether a tool may exist at all on a profile, whatever the connection holds:
  * on the directory profile a tool reachable with ANY capability outside it
@@ -94,7 +106,7 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
       description: profile === "directory" ? def.directoryDescription ?? def.description : def.description,
       inputSchema: def.input,
       outputSchema: def.output,
-      annotations: { title: def.title, ...def.annotations },
+      annotations: servedAnnotations(def),
       ...(def.meta ? { _meta: def.meta } : {}),
     }, async (args: unknown) => runTool(def, args, p, trace, opts.deps) as never);
   }

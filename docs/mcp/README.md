@@ -112,3 +112,5 @@ before/after on the approval page.
   and the emergency switch (`MERRYMEN_MCP_ENABLED=0`, which must be set on
   both the web and the orchestrator service)
 - [capability-matrix.md](capability-matrix.md) — what is built, on which services
+- [chatgpt-public-listing.md](chatgpt-public-listing.md) — draft public listing
+  packet and discovery test; submission is blocked pending OpenAI policy review

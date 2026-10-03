@@ -260,7 +260,8 @@ const subscribe = defineTool({
     max_active_subscriptions: z.number(),
     warnings: z.array(z.string()),
   }),
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Subscription can cause future Telegram messages that cannot be recalled.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   budget: { bucket: "notify_write", perMinute: 10, perHour: 60 },
   async handler(args, ctx) {
     const tenant = ctx.principal.tenant.toLowerCase();

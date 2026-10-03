@@ -50,6 +50,7 @@ test("every tool is well-formed and annotated consistently with its capability",
     assert.ok(t.input && t.output, `${t.name} declares input and output schemas`);
     assert.equal(typeof t.annotations.readOnlyHint, "boolean", t.name);
     assert.equal(typeof t.annotations.openWorldHint, "boolean", t.name);
+    if (t.annotations.readOnlyHint) assert.notEqual(t.annotations.destructiveHint, true, `${t.name} cannot be read-only and destructive`);
     if (READ_ONLY_CAPABILITIES.has(t.capability) && !t.anyOf) {
       assert.equal(t.annotations.readOnlyHint, true, `${t.name} uses a read capability and must be read-only`);
     }
@@ -71,6 +72,15 @@ test("every tool that cancels, removes, unfollows or unsubscribes is marked dest
   for (const t of ALL_TOOLS.filter((x) => undoing.test(x.name))) {
     assert.equal(t.annotations.readOnlyHint, false, t.name);
     assert.equal(t.annotations.destructiveHint, true, `${t.name} undoes something, so it must be marked destructive`);
+  }
+});
+
+test("sending a message, submitting research and subscribing are marked destructive", () => {
+  for (const name of ["send_message", "submit_research", "subscribe"]) {
+    const tool = ALL_TOOLS.find((t) => t.name === name);
+    assert.ok(tool, `${name} is in the catalogue`);
+    assert.equal(tool.annotations.readOnlyHint, false, name);
+    assert.equal(tool.annotations.destructiveHint, true, `${name} sends or stores a durable action`);
   }
 });
 
@@ -234,4 +244,3 @@ test("the full server's descriptions give no model instructions either (their po
   // The pointers themselves are kept where they help a client choose the next tool.
   assert.match(ALL_TOOLS.find((t) => t.name === "list_agents")!.description, /Use the id as `agent` in other tools/);
 });
-

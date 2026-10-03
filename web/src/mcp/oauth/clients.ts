@@ -365,8 +365,31 @@ export function parseCimd(clientId: string, body: Buffer): Omit<McpClient, "secr
   }
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) throw new ClientError("invalid_client_metadata", "client metadata document is not an object");
   if (doc.client_id !== clientId) throw new ClientError("invalid_client_metadata", "client metadata client_id does not match the URL");
-  const method = doc.token_endpoint_auth_method ?? "none";
-  if (method !== "none") throw new ClientError("invalid_client_metadata", "only public clients (token_endpoint_auth_method none) are supported by metadata documents");
+  const hasSingularMethod = "token_endpoint_auth_method" in doc;
+  const singularMethod = doc.token_endpoint_auth_method;
+  if (hasSingularMethod && (typeof singularMethod !== "string" || !singularMethod)) {
+    throw new ClientError("invalid_client_metadata", "token_endpoint_auth_method must be a nonempty string");
+  }
+  if ("token_endpoint_auth_methods_supported" in doc) {
+    // ChatGPT's CIMD document offers both `none` and `private_key_jwt`, while
+    // its legacy singular field prefers `private_key_jwt`. Our authorization
+    // server advertises only `none` for CIMD: choose that common method. The
+    // singular field must still describe a method the client actually offers.
+    const offered = doc.token_endpoint_auth_methods_supported;
+    if (!Array.isArray(offered) || !offered.length
+      || offered.some((m) => typeof m !== "string" || !m)
+      || new Set(offered).size !== offered.length) {
+      throw new ClientError("invalid_client_metadata", "token_endpoint_auth_methods_supported must be a nonempty array of distinct methods");
+    }
+    if (hasSingularMethod && !offered.includes(singularMethod)) {
+      throw new ClientError("invalid_client_metadata", "token_endpoint_auth_method must appear in token_endpoint_auth_methods_supported");
+    }
+    if (!offered.includes("none")) {
+      throw new ClientError("invalid_client_metadata", "only public clients (token endpoint auth method none) are supported by metadata documents");
+    }
+  } else if (hasSingularMethod && singularMethod !== "none") {
+    throw new ClientError("invalid_client_metadata", "only public clients (token_endpoint_auth_method none) are supported by metadata documents");
+  }
   if ("client_secret" in doc || "client_secret_expires_at" in doc) throw new ClientError("invalid_client_metadata", "a metadata document must not contain a client secret");
   const uris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [];
   // App-scheme callbacks are left out, never stored (isAppScheme).

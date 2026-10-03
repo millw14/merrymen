@@ -148,7 +148,7 @@ export default function Home() {
             <div className="hero-bottom-links" style={{ flexWrap: "wrap", rowGap: 10 }}><Link href="/docs">Read the docs ↗</Link><Link href="/claude">Use it in Claude ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
             {/* Plain words on purpose: an assistant asked to "connect merrymen mcp" reads this page first, and a link title alone did not tell it there is an MCP server. */}
             <p className="hero-mcp">
-              <strong>Merrymen MCP server:</strong> connect Claude, Claude Code, ChatGPT, Cursor and other AI assistants to your agent at <code>{MCP_SERVER}</code>. <Link href="/claude">Set it up in one click</Link> · <a href="/llms.txt">instructions for AI assistants</a>
+              <strong>Merrymen MCP server:</strong> connect Claude, Claude Code, ChatGPT, Cursor and other AI assistants to your agent at <code>{MCP_SERVER}</code>. <Link href="/claude">Set up Claude</Link> · <Link href="/chatgpt">Set up ChatGPT</Link> · <a href="/llms.txt">instructions for AI assistants</a>
             </p>
           </div>
           <AgentPreview />

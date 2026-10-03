@@ -18,7 +18,7 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Check, ChevronDown, Copy, Plug } from "lucide-react";
-import { claudeCodePluginCommands, installCommands, installLinks } from "@/mcp/install-links";
+import { PLUGIN_SERVER_URL, claudeCodePluginCommands, installCommands, installLinks } from "@/mcp/install-links";
 import { BrandLockup } from "../BrandLockup";
 
 /** The fields of a GET /api/mcp/connections row that the status line reads. */
@@ -246,10 +246,11 @@ export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: stri
                   <Command lines={[`Set up the Merrymen MCP server. Instructions: ${llms}`]} label="Copy the sentence to tell Claude Code" />
                 </Row>
                 <Row name="ChatGPT">
-                  <p>Turn on Developer mode (Settings → Security and login), then create an app with the address below.</p>
+                  <p>Turn on Developer mode (Settings → Security and login), then create a plugin with the address below. After you sign in and allow access, ask ChatGPT to list your Merrymen agents to check the connection.</p>
                   <div className="mcp-hub-actions">
                     <CopyButton text={url} target={addressId} label="Copy address for ChatGPT">Copy address</CopyButton>
                     <Out className="mcp-hub-action" href={links.chatgpt}>Open ChatGPT <ArrowUpRight size={14} aria-hidden /></Out>
+                    {url === PLUGIN_SERVER_URL && <Out className="mcp-hub-minor" href="https://merrymen.dev/chatgpt">ChatGPT steps</Out>}
                   </div>
                 </Row>
                 <Row name="Codex">
