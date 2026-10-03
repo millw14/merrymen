@@ -14,14 +14,19 @@
  * it, and the model is told only the brief and the asker's words, fenced.
  */
 import { esc } from "../api";
-import { admitDeskText, admitTgLine } from "./gate";
+import { admitDeskText, admitTgLine, TG_DESK_MAX } from "./gate";
 import { callText, type TgModel, type TgModelGate } from "./model";
 import type { TgDeskEvidence, TgDeskStance, TgDeskThinkRequest, TgDeskThought } from "./types";
 
 /** Telegram's limit on a photo caption, in characters after entities are parsed. */
 export const CAPTION_MAX = 1024;
-/** The read's share of a caption: the rest is header, watch, invalidation and source. */
-const READ_MAX = 700;
+/**
+ * The longest read the gate admits. Longer than its share of a caption on
+ * purpose: a faithful read that runs long is cut to fit by whole parts and
+ * whole sentences (deskCaption) — a question of space — while one that fails
+ * a clause is never sent at all.
+ */
+const READ_MAX = TG_DESK_MAX;
 const SIDE_MAX = 220;
 
 const STANCES: ReadonlySet<string> = new Set(["constructive", "neutral", "cautious", "avoid"]);
@@ -49,7 +54,7 @@ export function deskSystem(voice: string): string {
     `- Voice: ${voice || "Plain and direct."} Substantive but conversational, like a sharp trader texting a group chat.`,
     "",
     "Reply with one JSON object only:",
-    '{"read": "3-6 sentences, the analysis itself", "stance": "constructive" | "neutral" | "cautious" | "avoid", "watch": "one sentence: the level or condition that matters next", "invalidation": "one sentence: what would flip this view", "confidence": 0.0-1.0}',
+    '{"read": "3-5 sentences and under 550 characters, the analysis itself", "stance": "constructive" | "neutral" | "cautious" | "avoid", "watch": "one short sentence under 140 characters: the level or condition that matters next", "invalidation": "one short sentence under 140 characters: what would flip this view", "confidence": 0.0-1.0}',
   ].join("\n");
 }
 

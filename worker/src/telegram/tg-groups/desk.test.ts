@@ -97,6 +97,9 @@ describe("a desk read's figures come from the brief", () => {
     assert.equal(deskFiguresGrounded("holders up 40% this week", BRIEF), false);
     assert.equal(deskFiguresGrounded("mcap $500m incoming", BRIEF), false);
     assert.equal(deskFiguresGrounded("price is 2.7% above support", BRIEF), false, "derived figures are not measured ones");
+    assert.equal(deskFiguresGrounded("volume 38x the average", BRIEF), false, "a multiple is not grounded by a percent or a plain figure");
+    assert.equal(deskFiguresGrounded("rsi 6.58", BRIEF), false, "a plain figure is not grounded by a percent");
+    assert.ok(deskFiguresGrounded("liquidity/fdv at 6.6%", BRIEF));
   });
   it("admits market vocabulary the chatter gate refuses, and nothing that hurts", () => {
     const ok = admitDeskText("most of the board is in the red and gains faded; it got rejected at 0.1605 on thin transactions. a pullback to 0.1527 is the better entry, a breakout needs volume.", { agentName: "Pine", brief: BRIEF });

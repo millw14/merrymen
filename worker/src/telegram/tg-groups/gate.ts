@@ -1565,16 +1565,20 @@ const PERIODS = new Set([14, 20, 50]);
 
 /**
  * IS EVERY FIGURE IN THE READ ONE THE BRIEF MEASURED? A figure matches when
- * it is the brief's figure rounded to fewer digits ("0.1593" read as "0.159"
- * or "0.16", "$9.92m" as "$9.9m") or within 0.6% of it; sign is ignored, so
- * "down 12%" matches "-12%". Free without a match: a small count (≤ 12), an
+ * it is a brief figure of the same kind (percent, multiple, or neither)
+ * rounded to fewer digits ("0.1593" read as "0.159" or "0.16", "$9.92m" as
+ * "$9.9m", "1.8x" as "2x") or within 0.6% of it; sign is ignored, so "down
+ * 12%" matches "-12%". Free without a match: a small count (≤ 12), an
  * indicator period, and a time span glued to its unit ("24h", "7d", "5m"
  * minutes). Everything else — a derived percentage, a target, a holder count,
  * a market cap the brief never had — is a figure the model made up, and the
  * read is refused for the code's own.
  */
 export function deskFiguresGrounded(text: string, brief: string): boolean {
-  const known = figuresIn(brief).map((f) => Math.abs(f.value * f.scale));
+  // A figure matches one of its own kind: a percent a percent, a multiple a
+  // multiple, a price or an amount anything that is neither. "3x the average"
+  // is not grounded by an ATR of 3.12%.
+  const known = figuresIn(brief).map((f) => ({ v: Math.abs(f.value * f.scale), unit: f.unit }));
   for (const f of figuresIn(text)) {
     const plainInt = f.decimals === 0 && f.scale === 1 && !f.money && f.unit === "";
     if (plainInt && (f.value <= 12 || PERIODS.has(f.value))) continue;
@@ -1583,7 +1587,7 @@ export function deskFiguresGrounded(text: string, brief: string): boolean {
     if (f.scale === 1e6 && !f.money && f.decimals === 0 && f.unit === "" && f.value <= 60) continue;
     const v = Math.abs(f.value * f.scale);
     const half = 0.5 * 10 ** -f.decimals * f.scale;
-    if (!known.some((k) => Math.abs(v - k) <= Math.max(half, k * 0.006))) return false;
+    if (!known.some((k) => k.unit === f.unit && Math.abs(v - k.v) <= Math.max(half, k.v * 0.006))) return false;
   }
   return true;
 }

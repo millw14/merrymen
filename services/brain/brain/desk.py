@@ -63,7 +63,7 @@ Rules:
 - Voice: {voice} Substantive but conversational, like a sharp trader texting a group chat.
 
 Reply with one JSON object only:
-{"read": "3-6 sentences, the analysis itself", "stance": "constructive" | "neutral" | "cautious" | "avoid", "watch": "one sentence: the level or condition that matters next", "invalidation": "one sentence: what would flip this view", "confidence": 0.0-1.0}"""
+{"read": "3-5 sentences and under 550 characters, the analysis itself", "stance": "constructive" | "neutral" | "cautious" | "avoid", "watch": "one short sentence under 140 characters: the level or condition that matters next", "invalidation": "one short sentence under 140 characters: what would flip this view", "confidence": 0.0-1.0}"""
 
 _WHITESPACE = re.compile(r"\s+")
 #: A question tag in any case and spacing, so a literal one in text we did not

@@ -320,7 +320,7 @@ def test_the_question_cannot_close_its_own_fence():
 def test_the_prompt_is_the_desk_prompt_in_the_agents_voice():
     system = desk.system_prompt("You are Shogun. You type in lowercase almost always.")
     assert "Voice: You are Shogun. You type in lowercase almost always. Substantive" in system
-    assert '{"read": "3-6 sentences' in system, "the JSON shape survives substitution"
+    assert '{"read": "3-5 sentences and under 550 characters' in system, "the JSON shape survives substitution"
     assert "{voice}" not in desk.system_prompt("")
     msg = desk.user_message(_req(kind="market", subject="", question="how is the market?"))
     assert msg.startswith("KIND: market\nSUBJECT: the market\n<question>\nhow is the market?\n</question>")
