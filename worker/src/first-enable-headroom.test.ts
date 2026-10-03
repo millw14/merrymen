@@ -38,6 +38,8 @@ import { describe, it } from "node:test";
 import { FIRST_ENABLE_GAS_BOUNDS, GAS_BOUNDS, boundGas, totalGas, type UserOpGas } from "./gas-limits";
 import {
   FIRST_ENABLE_HARD_MAX_BOUNDED,
+  FIRST_ENABLE_WALL_MAX_BOUNDED,
+  KEY_INSTALL_RESERVE_BOUNDED,
   buildCallPermissions,
   firstEnableEnvelope,
   wallShape,
@@ -282,7 +284,7 @@ describe("what must not regress", () => {
     // the trade each fit their own ceiling, and only the two together do not.
     assert.equal(v.ok === false ? v.rule : null, "enable-too-wide");
     assert.match(v.ok === false ? v.detail : "", /14000000/, "by the hard maximum, named");
-    assert.match(v.ok === false ? v.detail : "", /narrower permission set/, "with the remedy");
+    assert.match(v.ok === false ? v.detail : "", /installed on its own first/, "with the remedy");
   });
 
   it("THE LIVE REFUSALS OF 2026-10-01 ARE STILL REFUSED, AND NOW SAY WHY", () => {
@@ -322,6 +324,62 @@ describe("what must not regress", () => {
     const v = boundGas(ORDINARY, ORDINARY, GAS_BOUNDS, false);
     assert.equal(v.ok, false);
     assert.equal(v.ok === false ? v.rule : null, "gas-absurd");
+  });
+});
+
+describe("a wall too wide to carry its first trade is installed on its own", () => {
+  /**
+   * TRANSCRIBED FROM THE `[gas]` LINE, agent 0xbba115, 2026-10-03, after its
+   * owner had re-signed several times (key 0x46fab94a):
+   *
+   *   [gas] account deployed · ENABLE 0x46fab94a ceiling 14000000
+   *         · estimate1 call 2120737 + verif 9346132 + preVerif 312739 = 11826065
+   *         · estimate2 call 2120737 + verif 9346132 + preVerif 312752 = 11826078
+   *         · signed refused (enable-too-wide)
+   *
+   * boundGas bounds against the higher of the two, so the refusal's 16,361,536
+   * is estimate2's.
+   *
+   * The total is 46,457 above the three fields: the sponsor, as in SHOGUN above.
+   * The call is the Trencher vault's one-time deploy + approve + buy.
+   */
+  const LIVE: UserOpGas = {
+    callGasLimit: 2_120_737n,
+    verificationGasLimit: 9_346_132n,
+    preVerificationGas: 312_739n,
+    paymasterVerificationGasLimit: SPONSOR_GAS,
+  };
+  const LIVE2: UserOpGas = { ...LIVE, preVerificationGas: 312_752n };
+  const WIDE = firstEnableEnvelope(wallOfWidth(15));
+
+  it("the live refusal, reproduced: 16,361,536 against 14,000,000", () => {
+    assert.equal(totalGas(LIVE), 11_826_065n, "the logged estimate1");
+    assert.equal(totalGas(LIVE2), 11_826_078n, "the logged estimate2");
+    const v = boundGas(LIVE, LIVE2, firstEnableBounds(WIDE.allowedMaxBounded), true);
+    assert.equal(v.ok === false ? v.rule : null, "enable-too-wide");
+    assert.match(v.ok === false ? v.detail : "", /wants 16361536 gas \(the wall 12073605, the trade 4241474\)/, "the logged detail");
+  });
+
+  it("THE SAME WALL WITH THE BARE INSTALL FITS, with ~1.78M to spare", () => {
+    // approve(USDG, Router02, 0) is less than the single swap the ordinary
+    // first enable measured (50,180 raw call), so that is used as its bound.
+    const install: UserOpGas = { ...LIVE, callGasLimit: ORDINARY.callGasLimit };
+    const v = bound(install, firstEnableBounds(WIDE.allowedMaxBounded));
+    assert.ok(v.ok, v.ok === false ? v.detail : "");
+    assert.ok(v.total < FIRST_ENABLE_HARD_MAX_BOUNDED);
+    assert.equal(FIRST_ENABLE_HARD_MAX_BOUNDED - v.total, 1_779_595n, "room left");
+  });
+
+  it("EVERY SIGNABLE WALL CAN BE INSTALLED: the largest one signing admits, plus the install, fits", () => {
+    // The signer refuses a wall predicted above FIRST_ENABLE_WALL_MAX_BOUNDED
+    // (core first-enable-gas.ts). At exactly that size, the install's bounded
+    // call and the sponsor's measured limits still sit under the maximum.
+    assert.equal(FIRST_ENABLE_WALL_MAX_BOUNDED, FIRST_ENABLE_HARD_MAX_BOUNDED - KEY_INSTALL_RESERVE_BOUNDED);
+    const installCall = ORDINARY.callGasLimit * 2n;
+    assert.ok(
+      FIRST_ENABLE_WALL_MAX_BOUNDED + installCall + SPONSOR_GAS <= FIRST_ENABLE_HARD_MAX_BOUNDED,
+      "the reserve covers the install it is named for",
+    );
   });
 });
 

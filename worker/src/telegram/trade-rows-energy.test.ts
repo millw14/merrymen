@@ -169,3 +169,17 @@ describe("a DROPPED op on /trades", () => {
     assert.equal((await loadTradeViews(db, AGENT, { filter: "filled" })).length, 0);
   });
 });
+
+describe("a key installed on its own", () => {
+  it("is named for what it is in /trades, never 'a coin I can't name' or a trade of $0.00", async () => {
+    const db = ledger();
+    db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, tx_hash, created_at) VALUES (?, 'key-install', ?, 0, 'landed', '0xk', 300)").run(
+      AGENT,
+      CASH.USDG,
+    );
+    const [v] = await loadTradeViews(db, AGENT, {});
+    const line = tradeViewLine(v!, false);
+    assert.match(line, /^🔑 installed your trading key's permissions on their own — nothing traded · /);
+    assert.doesNotMatch(line, /can't name|\$0\.00/);
+  });
+});

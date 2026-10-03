@@ -529,8 +529,9 @@ export function boundGas(
     // under what we will sign. No estimate will change that, and calling it
     // `gas-absurd` — "this estimate is larger than we will sign for" — sent
     // owners looking for a fault that was not there (live, 2026-10-01: two
-    // agents refused every tick at 14.7M and 18.3M). A narrower wall leaves
-    // room for the trade, so it is named for that, with that remedy.
+    // agents refused every tick at 14.7M and 18.3M). The caller's remedy is to
+    // install the wall alone (executor.ts installKey) and send the trade after
+    // it as an ordinary operation; re-signing seals the same wall.
     if (bounds.enableMax !== undefined) {
       return {
         ok: false,
@@ -539,7 +540,9 @@ export function boundGas(
           `installing this key's permission wall together with the trade riding on it wants ${total} gas ` +
           `(the wall ${gas.verificationGasLimit + gas.preVerificationGas}, the trade ${gas.callGasLimit}), ` +
           `past the ${bounds.absoluteMax} we will sign for a first operation. Refused before signing — nothing ` +
-          "was spent. A narrower permission set (fewer custom tokens or capabilities) leaves room for the trade.",
+          "was spent. The key can be installed on its own first (executor.ts installKey), leaving the trade for an " +
+          "ordinary operation; only if the wall does not fit even alone does a narrower permission set " +
+          "(fewer custom tokens or capabilities) help.",
       };
     }
     return {

@@ -13,13 +13,13 @@
  * of the sort is shipped.
  */
 
-import { decodeFunctionData, http, createPublicClient, type Chain, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionData, erc20Abi, http, createPublicClient, type Chain, type Hex } from "viem";
 import { chainRead, metered } from "./rpc-meter";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
-import { FIRST_ENABLE_HARD_MAX_BOUNDED, TRENCHER_FACTORY_ABI, WALL_POLICY_FLAG } from "../../packages/core/src/index";
+import { CASH, FIRST_ENABLE_HARD_MAX_BOUNDED, TRENCHER_FACTORY_ABI, UNISWAP, WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
 import {
@@ -404,11 +404,68 @@ export function isTrencherVaultDeploy(
   }
 }
 
+/**
+ * A NEW KEY'S PERMISSIONS, INSTALLED ON THEIR OWN.
+ *
+ * Kernel installs a session key's wall inside the validation of the first
+ * operation that key signs, so that operation carries the wall and whatever it
+ * was sent to do, and the two together must fit under
+ * FIRST_ENABLE_HARD_MAX_BOUNDED. When they do not, the trade is refused
+ * `enable-too-wide` before signing, and the caller may install the key alone
+ * with this, so the trade can go next as an ordinary operation.
+ *
+ * Live, 2026-10-03, agent 0xbba115: a 12,073,605 wall and a 4,241,474 Trencher
+ * vault deploy + approve + buy came to 16,361,536. They were refused every tick,
+ * through several re-signs, because each re-sign sealed the same wall. That
+ * wall with this call fits with ~1.78M to spare.
+ *
+ * ONE CALL, FIXED HERE, NEVER SUPPLIED. `approve(USDG, Router02, 0)`:
+ *   - the wall always permits it. Router02 is on every wall's USDG approve
+ *     (core wall.ts allowedSpenders), and 0 is under any per-trade cap;
+ *   - it moves nothing and grants nothing. It can only lower an allowance, and
+ *     every trade sets the allowance it needs again in its own batch;
+ *   - it is the cheapest call the wall admits, which is the whole point.
+ * Built by the executor rather than taken from a caller, so "install the key"
+ * can never be a way to send something else under the first-enable ceiling.
+ */
+export function keyInstallCalls(): Call[] {
+  return [
+    {
+      to: CASH.USDG as `0x${string}`,
+      value: 0n,
+      data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [UNISWAP.swapRouter02 as `0x${string}`, 0n] }),
+    },
+  ];
+}
+
+/**
+ * May the key be installed on its own right now? Only when the operation about
+ * to be signed really is a fresh enable: a key already installed has nothing to
+ * install, and the bare approve would then be an ordinary operation spent on
+ * nothing. Every other enable state is refused by name before this is asked.
+ */
+export function keyInstallRefusal(enable: EnableState): GasRefused | null {
+  if (enable.kind === "fresh-enable") return null;
+  return new GasRefused(
+    "enable-redundant",
+    "nothing to install: this key's next operation carries no enable, so its permissions are already in " +
+      "place and the trade can go as an ordinary operation. Nothing was signed.",
+  );
+}
+
 export interface AgentExecutor {
   /** Counterfactual smart-account address (deploys itself on first op). */
   address: `0x${string}`;
   /** Send a batch of calls as one UserOperation and report what settled. */
   execute(calls: Call[], hooks?: ExecuteHooks): Promise<ExecutionResult>;
+  /**
+   * Install this key's permissions with keyInstallCalls() and nothing else:
+   * the remedy for an `enable-too-wide` trade. Bounded by the same
+   * first-enable ceilings, persisted before broadcast through
+   * `hooks.onSubmitted` and never re-sent, exactly like execute(). Refused
+   * (GasRefused, nothing signed) unless the key is still uninstalled.
+   */
+  installKey(hooks?: ExecuteHooks): Promise<ExecutionResult>;
 }
 
 export async function createAgentExecutor(opts: {
@@ -521,9 +578,11 @@ export async function createAgentExecutor(opts: {
     return deployed;
   };
 
-  return {
+  // ONE PATH FOR BOTH OPERATIONS. `mode` is not on AgentExecutor: only
+  // installKey below passes "install", with calls it built itself.
+  const executor = {
     address: account.address,
-    async execute(calls: Call[], hooks?: ExecuteHooks) {
+    async execute(calls: Call[], hooks?: ExecuteHooks, mode: "trade" | "install" = "trade"): Promise<ExecutionResult> {
       const callData = await account.encodeCalls(calls);
 
       // ── BOUND THE GAS BEFORE SIGNING ANYTHING ───────────────────────
@@ -656,7 +715,8 @@ export async function createAgentExecutor(opts: {
       const firstEnable = enable.kind === "fresh-enable";
       // THE VAULT'S ONE-TIME DEPLOYMENT gets its own measured ceiling; every
       // other ordinary operation keeps GAS_BOUNDS. See TRENCHER_DEPLOY_GAS_BOUNDS.
-      const trencherDeploy = !firstEnable && isTrencherVaultDeploy(calls, hooks?.trencherDeployFactory, account.address);
+      const trencherDeploy =
+        mode === "trade" && !firstEnable && isTrencherVaultDeploy(calls, hooks?.trencherDeployFactory, account.address);
       // PER-WALL, AND ONLY FOR THE OPERATION THAT INSTALLS ONE.
       //
       // A deployed account's ordinary operations are untouched: they take
@@ -720,6 +780,10 @@ export async function createAgentExecutor(opts: {
             "signed, and the next tick will ask again.",
         );
       }
+      if (mode === "install") {
+        const refused = keyInstallRefusal(enable);
+        if (refused) throw refused;
+      }
 
       const first = await estimate();
       // Only probe a second time when the first succeeded: a null first is
@@ -744,7 +808,7 @@ export async function createAgentExecutor(opts: {
           : `call ${g.callGasLimit} + verif ${g.verificationGasLimit} + preVerif ${g.preVerificationGas} = ${totalGas(g)}`;
       console.log(
         `[gas] account ${accountLive ? "deployed" : "NOT deployed"} · ` +
-          `${firstEnable ? `ENABLE ${noncePermissionId(nonce)}` : trencherDeploy ? "TRENCHER DEPLOY" : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
+          `${firstEnable ? `${mode === "install" ? "INSTALL ALONE" : "ENABLE"} ${noncePermissionId(nonce)}` : trencherDeploy ? "TRENCHER DEPLOY" : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
           `estimate1 ${fmt(first)} · estimate2 ${fmt(second)} · ` +
           `signed ${bounded.ok ? totalGas(bounded.gas) : "refused"}` +
           `${bounded.ok ? "" : ` (${bounded.rule})`}`,
@@ -969,5 +1033,9 @@ export async function createAgentExecutor(opts: {
         blockNumber: receipt.receipt.blockNumber ?? 0n,
       };
     },
+    installKey(hooks?: ExecuteHooks): Promise<ExecutionResult> {
+      return executor.execute(keyInstallCalls(), hooks, "install");
+    },
   };
+  return { address: executor.address, execute: (calls, hooks) => executor.execute(calls, hooks), installKey: executor.installKey };
 }

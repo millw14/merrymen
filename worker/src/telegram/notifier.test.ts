@@ -79,12 +79,24 @@ test("OUR GAS CHECK IS NOT THE WALL — the ORBIO line an owner was sent", () =>
   }
 });
 
-test("a wall too wide to install with its trade says to re-sign narrower, once", () => {
+test("a wall too wide to install with its trade says the key installs itself, once", () => {
+  // The old remedy sent the owner to re-sign, which seals the same wall: one
+  // owner re-signed several times and was refused every tick regardless.
   const row = { id: 10, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "enable-too-wide", tx_hash: null };
   const first = tradeLine(row, null, true, { label: "ORBIO", side: "buy" });
   assert.match(first, /too wide to install together with this trade/);
-  assert.match(first, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
+  assert.match(first, /No action needed: your agent installs its new permissions on their own first/);
+  assert.doesNotMatch(first, /seals a narrower permission set that leaves room/, "the promise that was not true");
   assert.doesNotMatch(tradeLine(row, null, false), /\/grant/, "repeats carry no instruction");
+});
+
+test("a key installed on its own is said for what it is: no trade, nothing moved", () => {
+  const row = { id: 12, kind: "key-install", amount_usdg: 0, status: "landed", reject_rule: null, tx_hash: "0xabc" };
+  const line = tradeLine(row, "https://explorer.example", false, null);
+  assert.match(line, /^🔑 Installed your trading key's permissions on their own\./);
+  assert.match(line, /nothing was traded and nothing moved/);
+  assert.match(line, /explorer\.example\/tx\/0xabc/);
+  assert.doesNotMatch(line, /\$0\.00|key-install/, "not a trade of nothing, and not the slug");
 });
 
 test("NOR IS THE MARKET — the UBIK line an owner was sent", () => {
@@ -416,7 +428,9 @@ test("the count line says how many, over how long, how recently — and how to f
     line.startsWith("↻ the buy of LARP was refused 59 more times in the last 60 min (enable-too-wide), the last just now. "),
     line,
   );
-  assert.match(line, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
+  // Repeats mean installing the key alone did not clear it, so the line still
+  // carries the one fix that is left.
+  assert.match(line, /If this keeps repeating, re-sign at \/grant with fewer custom tokens or capabilities/);
   const stopped = refusalCountLine(rec({ held: 1, lastAt: 1_000 + 5 * 60 }), 1_000 + REFUSAL_REMIND_LATER_SEC);
   assert.match(stopped, /refused 1 more time in the last 6 hours \(enable-too-wide\), the last 6 hours ago\./);
   assert.doesNotMatch(

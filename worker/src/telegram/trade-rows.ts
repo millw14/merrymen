@@ -108,6 +108,18 @@ export const UNCONFIRMED = "unconfirmed";
 export const ENERGY_BUY_KIND = "energy-buy";
 
 /**
+ * The trades.kind of a new key's permissions installed on their own
+ * (executor.ts installKey): one `approve(USDG, Router02, 0)` that moves
+ * nothing and exists only so the trade that could not carry the wall can go
+ * next. Not a trade: no side, no coin, amount 0. Its row carries the hash
+ * before broadcast and the gas after, like every operation.
+ */
+export const KEY_INSTALL_KIND = "key-install";
+
+/** What a key install is called wherever a trade is shown. */
+export const KEY_INSTALL_LABEL = "your trading key's permissions";
+
+/**
  * What an energy purchase is called wherever a trade is shown.
  *
  * NOT the token's own ticker and never "a coin I can't name": $MERRYMEN bought
@@ -252,8 +264,10 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
             ? "your savings vault"
             : r.kind === "transfer"
               ? "a transfer out"
-              : "a coin I can't name",
-    trusted: energy || equityTicker ? true : (lbl?.trusted ?? false),
+              : r.kind === KEY_INSTALL_KIND
+                ? KEY_INSTALL_LABEL
+                : "a coin I can't name",
+    trusted: energy || equityTicker || r.kind === KEY_INSTALL_KIND ? true : (lbl?.trusted ?? false),
     usdg: Number.isFinite(usdg as number) ? usdg : null,
     realized: ownEvidence && r.realized_vouched === true && Number.isFinite(r.realized_pnl_usdg) ? r.realized_pnl_usdg : null,
     status: r.status,
@@ -292,6 +306,7 @@ function verb(v: TradeView): string {
   if (v.kind === "transfer") return "sent out";
   if (v.kind === "vault-deposit") return "moved cash into";
   if (v.kind === "vault-withdraw") return "moved cash out of";
+  if (v.kind === KEY_INSTALL_KIND) return "installed";
   if (v.side === "buy") return "bought";
   if (v.side === "sell") return "sold";
   return "traded";
@@ -308,9 +323,13 @@ export function tradeViewLine(v: TradeView, html: boolean): string {
     return `↩️ dropped: ${what}, ${e(dollars(v.usdg))} — it never reached the chain, and nothing moved · ${when(v.at)}`;
   }
   if (v.status === "rejected" || v.status === "reverted") {
-    const what = v.side ? `${v.side} of ${coin}` : `trade in ${coin}`;
+    const what = v.side ? `${v.side} of ${coin}` : v.kind === KEY_INSTALL_KIND ? `install of ${coin}` : `trade in ${coin}`;
     const why = v.refusal ? ` — ${e(v.refusal)}` : "";
     return `${v.status === "rejected" ? "🚫 blocked" : "⚠️ failed"}: ${what}, ${e(dollars(v.usdg))}${why} · ${when(v.at)}`;
+  }
+  // Not a trade, and not "for $0.00": it moved nothing.
+  if (v.kind === KEY_INSTALL_KIND && (v.status === "landed" || v.status === "submitted")) {
+    return `${v.status === "landed" ? "🔑 installed" : "⏳ installing"} ${coin} on their own — nothing traded · ${when(v.at)}`;
   }
   const paper =
     v.status === "paper"

@@ -969,9 +969,12 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     case "grant-too-wide":
       return "Re-sign at /grant on the web — a new signature there seals a narrower permission set that usually fits; if it is still too large, drop a custom token or a venue.";
     // The first operation of a key carries its whole wall plus a trade; this
-    // one's wall leaves no room for the trade under what we will sign.
+    // one's wall leaves no room for the trade under what we will sign. The
+    // worker now installs the key on its own (index.ts installKeyAlone), so
+    // the owner has nothing to do — and re-signing would seal the same wall,
+    // which is what the old sentence sent owners to do, over and over.
     case "enable-too-wide":
-      return "Re-sign at /grant on the web — a new signature there seals a narrower permission set that leaves room for the trade that installs it; if it is still refused, drop a custom token or capability. Renewal revokes old permissions on-chain and requires network fees.";
+      return "No action needed: your agent installs its new permissions on their own first, and the trade goes as an ordinary one on a later tick. If this keeps repeating, re-sign at /grant with fewer custom tokens or capabilities — renewal revokes old permissions on-chain and requires network fees.";
     case "no-cash":
       return "Send USDG to the agent's account.";
     // Most often a coin whose only market is a Uniswap v4 pool, on a key that

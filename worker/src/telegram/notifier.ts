@@ -44,7 +44,7 @@ import {
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
-import { ENERGY_BUY_KIND, ENERGY_LABEL, dollars, isEnergyRow } from "./trade-rows";
+import { ENERGY_BUY_KIND, ENERGY_LABEL, KEY_INSTALL_KIND, dollars, isEnergyRow } from "./trade-rows";
 import { tokenTagOf, type RefusalRepeat, type StateRef, type Watcher } from "./state";
 
 /**
@@ -372,6 +372,21 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     : t.kind === ENERGY_BUY_KIND ? `top-up of ${esc(ENERGY_LABEL)}`
     : t.kind === "swap" || t.kind === "curve-trade" ? "trade"
     : esc(t.kind);
+  // A NEW KEY'S PERMISSIONS, INSTALLED ON THEIR OWN (executor.ts installKey).
+  // Said for what it is: no trade happened, nothing moved, and the trade it
+  // makes room for goes next.
+  if (t.kind === KEY_INSTALL_KIND && t.status === "landed") {
+    const proof = t.tx_hash
+      ? explorer
+        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">see it on the explorer ↗</a>`
+        : `\n<code>${esc(t.tx_hash)}</code>`
+      : "";
+    return (
+      "🔑 Installed your trading key's permissions on their own. With a trade riding along they came to more " +
+      "than a key's first operation may use, so nothing was traded and nothing moved. Your next trade goes as an " +
+      `ordinary one.${proof}`
+    );
+  }
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
@@ -713,7 +728,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // NOT FOR ENERGY. A model asked why the agent bought $MERRYMEN has
             // only the token and the headlines to go on, and the one thing it
             // must never say is anything about that token's price or returns.
-            if ((t.status === "landed" || t.status === "paper") && !isEnergyRow(t)) {
+            if ((t.status === "landed" || t.status === "paper") && !isEnergyRow(t) && t.kind !== KEY_INSTALL_KIND) {
               const llm = resolveLlm(cfg);
               if (llm) {
                 const evidence = tradeWhyEvidence(t, decisionFor(db, t.decision_id), newsNow());

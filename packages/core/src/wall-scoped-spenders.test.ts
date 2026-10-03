@@ -14,7 +14,7 @@
  * every approve — fourteen stocks and each custom token — though the Morpho,
  * class and Trencher vaults only ever pull USDG, and the v4 adapter's two legs
  * listed every stock though every tradeable stock has v3 depth. Scoped, the same
- * wall is ~13.11M and signs, with room for a fourth coin.
+ * wall is ~13.11M and signs; a re-sign has room for a fourth coin.
  *
  * ── STRICTLY NARROWER, AND THE OLD WALL UNTOUCHED ───────────────────────
  *
@@ -87,10 +87,16 @@ describe("the owner's wall, signable at last", () => {
     });
   }
 
-  it("with room for a fourth coin, and the limit still where it was at a fifth", () => {
-    const fits = (n: number) => wallSignable(wallShape(perms({ ...everything(n), scopedSpenders: true }) as never), { deploying: true }).ok;
-    assert.equal(fits(4), true);
-    assert.equal(fits(5), false, "the 14M maximum did not move — the wall got smaller");
+  it("a fourth coin on a re-sign, not on a first install, and never a fifth", () => {
+    const fits = (n: number, deploying: boolean) =>
+      wallSignable(wallShape(perms({ ...everything(n), scopedSpenders: true }) as never), { deploying }).ok;
+    assert.equal(fits(3, true), true);
+    // A first install of four coins predicts 13,937,573: 62,427 under the
+    // maximum, which no operation, not even the bare install, can fit beside
+    // it (KEY_INSTALL_RESERVE_BOUNDED). A re-sign pays no CREATE2 and has room.
+    assert.equal(fits(4, true), false, "no operation could install it");
+    assert.equal(fits(4, false), true);
+    assert.equal(fits(5, false), false, "the 14M maximum did not move — the wall got smaller");
   });
 });
 
