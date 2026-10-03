@@ -2,7 +2,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { fitChatState } from "./chat-state";
 import { ENERGY, SETTINGS_CATALOG, conceptsFor, llmProviderById, renderConcepts, type EnergyStatus } from "../../../packages/core/src/index";
-import { COMMAND_SPEC, splitCommand } from "./chat-commands";
+import { COMMAND_SPEC, commandEnablesLiveTrading, commandFor, splitCommand } from "./chat-commands";
 import { requestsLiveTrading } from "./chat-live-request";
 import { sseEvent, streamSafe } from "./chat-stream";
 import { count } from "./format";
@@ -114,7 +114,7 @@ WHEN THEY ASK YOU TO DO SOMETHING:
   Use those names verbatim. A name you invent is dropped, so a buy proposed with the wrong key for its size arrives with no size and is refused — say the words you like, but spell the keys as written here. Naming an id that is not on this list does nothing at all, so do not invent one; say plainly that you cannot do that yet instead.
 - Arguments are FLAT: a string, a number or true/false. Never an object, never a list — a basket is one comma-separated string. Several ids carry their own value and take no arguments at all; pass {} and do not try to steer them.
 - Propose ONE, only when they actually asked for it, and only when you are confident which. If they were vague, ask which they meant rather than guessing — a confirmation card for the wrong thing is worse than a question.
-- Propose go-live only when THEIR CURRENT MESSAGE explicitly asks to enable real trading. Ordinary chat, questions about paper mode, refusals and an earlier request in the history do not ask for it. They can keep chatting while practising.
+- Propose enabling live trading, whether through go-live or change-settings, only when THEIR CURRENT MESSAGE explicitly asks to enable real trading. Ordinary chat, questions about paper mode, refusals and an earlier request in the history do not ask for it. They can keep chatting while practising.
 - Say what you are proposing in your own words FIRST. The button carries its own description; yours is the part that explains why.
 - NEVER put a private key, a seed phrase or any secret in a reply. If they ask for their key, propose reveal-key — it takes them to the wallet page, which is the only place that shows it.
 - BUYING AND SELLING: propose buy or sell when they ask for one, and only with a symbol AND a size you were actually given. If either is missing, ASK — "how much?" is a better reply than a card for a number they never said. You are PLACING it, never doing it: the limits sealed into your key decide whether it goes through, and you find out at the same time they do. Never say you bought or sold anything; the trade appears on their tape when it is real.
@@ -323,13 +323,15 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
 /** The complete reply, split: the words, and the proposal only if it ends them. */
 function finishReply(raw: string, liveRequested: boolean): AgentReply {
   const { reply, command } = splitCommand(raw);
+  const cmd = command ? commandFor(command.id) : null;
   // A valid marker is still a model suggestion, not evidence that this owner
-  // asked to go live. Drop that unsolicited card in both JSON and SSE replies.
-  if (command?.id === "go-live" && !liveRequested) {
-    // A marker-only answer must not become an unreadable-response Retry loop.
-    // No locale is carried by this API; like its other deterministic fallback
-    // messages, this stays English and makes no claim about the current mode.
-    return { reply: reply || "I can chat without turning on live trading. No action was taken from this message." };
+  // asked for its effective live-enabling change. Deny the whole proposal,
+  // including mixed changes, rather than silently offering only part of it.
+  if (cmd && command && commandEnablesLiveTrading(cmd, command.args) && !liveRequested) {
+    // Replace even nonempty model prose: "confirm below" would otherwise leave
+    // the owner looking for a card that was correctly withheld. This API has
+    // no locale field, like its existing deterministic fallback messages.
+    return { reply: "Nothing changed. We can keep chatting without real funds. If you meant to start real trading, review Live trading in Settings." };
   }
   return { reply: reply || null, ...(command ? { command } : {}) };
 }

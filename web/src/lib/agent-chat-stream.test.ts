@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { agentReplyResponse, type AgentChatBody, type AgentChatOptions } from "./agent-chat";
+import { agentReplyResponse, generateAgentReply, type AgentChatBody, type AgentChatOptions } from "./agent-chat";
 import { readReplyStream } from "./chat-stream";
 import Anthropic from "@anthropic-ai/sdk";
 import type { LlmCreds } from "../../../worker/src/llm";
@@ -83,6 +83,7 @@ describe("a streamed proposal", () => {
 
 describe("a go-live card belongs to the current explicit request", () => {
   const REPLY = "We can keep chatting while I practise.\n<<CMD go-live {}>>";
+  const NO_ACTION = "Nothing changed. We can keep chatting without real funds. If you meant to start real trading, review Live trading in Settings.";
   const BODY = {
     // Neither a blocker nor an earlier request can make a new message opt in.
     state: JSON.stringify({ liveBlocker: "live-not-enabled", liveTradingEnabled: false, paperTradingEnabled: true }),
@@ -108,7 +109,7 @@ describe("a go-live card belongs to the current explicit request", () => {
         'What does "go live" mean?', '"go live"', "Go live only if profits are guaranteed",
       ]) {
         const out = await answer(message, stream);
-        assert.deepEqual(out, { reply: "We can keep chatting while I practise." }, message);
+        assert.deepEqual(out, { reply: NO_ACTION }, message);
       }
     });
 
@@ -123,14 +124,68 @@ describe("a go-live card belongs to the current explicit request", () => {
 
     it(`${stream ? "SSE" : "JSON"} supplies a readable no-action reply when an unsolicited marker had no text`, async () => {
       const out = await answer("Just chatting", stream, {}, "<<CMD go-live {}>>");
-      assert.deepEqual(out, { reply: "I can chat without turning on live trading. No action was taken from this message." });
+      assert.deepEqual(out, { reply: NO_ACTION });
     });
 
     it(`${stream ? "SSE" : "JSON"} leaves other commands on their existing path`, async () => {
       const out = await answer("go paper", stream, {}, "I can put you in practice mode.\n<<CMD go-paper {}>>");
       assert.deepEqual(out, { reply: "I can put you in practice mode.", command: { id: "go-paper", args: {} } });
     });
+
+    it(`${stream ? "SSE" : "JSON"} denies unsolicited effective live settings, including aliases and mixed changes`, async () => {
+      for (const changes of [
+        "liveTradingEnabled=true", "live trading on", "real money yes", "go live", "trade for real",
+        "buyPerTickUsdg=5; liveTradingEnabled=true", "liveTradingEnabled=true; liveTradingEnabled=false",
+        "don't go live", "liveTradingEnabled=true".padEnd(600) + ";liveTradingEnabled=false",
+      ]) {
+        for (const message of ["Hi, how are you?", "Don't go live", "How do I start live trading?", 'What does "go live" mean?']) {
+          const raw = `Confirm below and I'll change those settings.\n<<CMD change-settings ${JSON.stringify({ changes })}>>`;
+          const out = await answer(message, stream, {}, raw);
+          assert.deepEqual(out, { reply: NO_ACTION }, `${message}: ${changes}`);
+          assert.doesNotMatch(out.reply, /confirm below|I'll change/, "no absent-card instruction or implied execution remains");
+        }
+      }
+    });
+
+    it(`${stream ? "SSE" : "JSON"} retains the complete live settings proposal when this message opts in`, async () => {
+      const args = { changes: "buyPerTickUsdg=5; liveTradingEnabled=true" };
+      const raw = `You can review both changes in Settings.\n<<CMD change-settings ${JSON.stringify(args)}>>`;
+      const out = await answer("Hi, can you start live trading?", stream, {
+        history: [{ role: "user", content: "Never go live" }],
+      }, raw);
+      assert.deepEqual(out, { reply: "You can review both changes in Settings.", command: { id: "change-settings", args } });
+    });
+
+    it(`${stream ? "SSE" : "JSON"} preserves settings that cannot enable live under effective precedence and caps`, async () => {
+      for (const changes of [
+        "liveTradingEnabled=false", "buyPerTickUsdg=5", "liveTradingEnabled=false; buyPerTickUsdg=5",
+        "liveTradingEnabled=false; liveTradingEnabled=true", "liveTradingEnabled=invalid; liveTradingEnabled=true",
+        "liveTradingEnabled=false".padEnd(600) + ";liveTradingEnabled=true",
+        "liveTradingEnabled=tru".padEnd(600) + "e",
+      ]) {
+        const raw = `Review this in Settings.\n<<CMD change-settings ${JSON.stringify({ changes })}>>`;
+        const out = await answer("Keep practising", stream, {}, raw);
+        assert.deepEqual(out, { reply: "Review this in Settings.", command: { id: "change-settings", args: { changes } } }, changes);
+      }
+    });
+
+    it(`${stream ? "SSE" : "JSON"} gates the decoded last JSON argument and drops malformed commands`, async () => {
+      const enabled = await answer("Just chat", stream, {}, 'Confirm below.\n<<CMD change-settings {"changes":"liveTradingEnabled=false","changes":"liveTradingEnabled=true"}>>');
+      assert.deepEqual(enabled, { reply: NO_ACTION });
+      const disabled = await answer("Just chat", stream, {}, 'Review this in Settings.\n<<CMD change-settings {"changes":"liveTradingEnabled=true","changes":"liveTradingEnabled=false"}>>');
+      assert.deepEqual(disabled, { reply: "Review this in Settings.", command: { id: "change-settings", args: { changes: "liveTradingEnabled=false" } } });
+      const malformed = await answer("Just chat", stream, {}, 'Please tell me more.\n<<CMD change-settings {changes:"liveTradingEnabled=true"}>>');
+      assert.deepEqual(malformed, { reply: "Please tell me more." });
+    });
   }
+
+  it("keeps the same effective live proposal gate on the informational partner surface", async () => {
+    const raw = 'Review this separately.\n<<CMD change-settings {"changes":"live trading on; buyPerTickUsdg=5"}>>';
+    const options: AgentChatOptions = { surface: "partner", credentials, complete: async () => raw };
+    assert.deepEqual(await generateAgentReply({ ...BODY, message: "Just chatting" }, options), { reply: NO_ACTION });
+    const optedIn = await generateAgentReply({ ...BODY, message: "Please start live trading" }, options);
+    assert.deepEqual(optedIn, { reply: "Review this separately.", command: { id: "change-settings", args: { changes: "live trading on; buyPerTickUsdg=5" } } });
+  });
 });
 
 describe("when there is nothing to stream", () => {

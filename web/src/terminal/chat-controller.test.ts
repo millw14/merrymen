@@ -24,7 +24,7 @@ import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
 import SettingsPage from "./screens/Settings";
-import { ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
+import { askAgent, ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
 import { chatKeyFor } from "./chat-store";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
 import { deferred, json, testDom } from "./test-dom";
@@ -283,6 +283,31 @@ const SETTINGS_VIEW: SettingsView = {
 };
 
 const count = (method: string, path: string) => calls.filter((c) => c.method === method && c.url.split("?")[0] === path).length;
+
+describe("reading a withheld live-trading proposal", () => {
+  for (const streamed of [false, true]) {
+    it(`${streamed ? "SSE" : "JSON"} reaches askAgent as readable no-action text without a confirmation or Retry`, async () => {
+      const reply = "Nothing changed. We can keep chatting without real funds. If you meant to start real trading, review Live trading in Settings.";
+      for (const raw of [
+        "<<CMD go-live {}>>",
+        "Confirm below to trade for real.\n<<CMD go-live {}>>",
+        '<<CMD change-settings {"changes":"liveTradingEnabled=true"}>>',
+        'Confirm below to apply both.\n<<CMD change-settings {"changes":"buyPerTickUsdg=5; live trading on"}>>',
+      ]) {
+        routes["POST /api/chat"] = (_url, init) => agentReplyResponse(JSON.parse(String(init?.body)) as AgentChatBody, { stream: streamed }, {
+          credentials: () => ({ provider: "test", transport: "openai", baseUrl: "https://example.test/v1", model: "m", apiKey: "k", vision: false }),
+          complete: async () => raw,
+          stream: async (_creds, _request, onText) => { onText(raw); return raw; },
+        });
+        const result = await askAgent({ message: "Hello, just chatting", state: JSON.stringify({ liveTradingEnabled: false }),
+          history: [{ role: "user", content: "go live" }], expectedTenant: null }, noop);
+        assert.deepEqual(result, { ok: true, reply }, raw);
+      }
+      assert.equal(count("PUT", "/api/settings"), 0);
+      assert.equal(count("POST", "/api/orders"), 0);
+    });
+  }
+});
 
 describe("sending feels instant", () => {
   it("binds a hosted chat request to the account whose confirmed thread supplied its history", async () => {
