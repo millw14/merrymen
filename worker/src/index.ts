@@ -7715,6 +7715,127 @@ async function main() {
   }
 
   /**
+   * A NEW KEY WHOSE WALL LEAVES NO ROOM FOR ITS FIRST TRADE, INSTALLED ON ITS OWN.
+   *
+   * A key's first operation carries its whole wall plus whatever it was sent to
+   * do, and the two together must fit under the first-enable maximum. When they
+   * do not, the trade is refused `enable-too-wide` before signing. Re-signing
+   * could not help, because it seals the same wall. Live, 2026-10-03, agent
+   * 0xbba115 was refused every tick through several re-signs: wall 12,073,605
+   * plus a Trencher vault deploy + buy of 4,241,474.
+   *
+   * So the key is installed with the cheapest call the wall admits
+   * (executor.ts keyInstallCalls: `approve(USDG, Router02, 0)`, which moves
+   * nothing), and the trade goes on a later tick as an ordinary operation
+   * under its own ceiling. Nothing about the trade is decided here, and nothing
+   * is retried in its place: the refused trade is booked `rejected` as before,
+   * and the strategy proposes it again or not.
+   *
+   * THE SAME DURABILITY AS ANY OPERATION. The row is written 'submitted' with
+   * the hash BEFORE broadcast (a failed write refuses to send), settled
+   * 'landed' with its gas after, and left 'submitted' for resolveStrandedOps
+   * when the receipt cannot be read. Replay is impossible: the operation is
+   * nonce-bound to the key's sequence 0, and the executor refuses to install a
+   * key the chain says is already installed (keyInstallRefusal).
+   *
+   * ONCE PER EXECUTOR PER HALF HOUR. Each arm builds a new executor, so a
+   * re-sign starts fresh. An install still in flight is not raced by a second
+   * one, and a wall that cannot be installed even alone is told to the owner
+   * once, not every tick.
+   */
+  async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
+    const last = keyInstallTriedAt.get(executor);
+    if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
+    keyInstallTriedAt.set(executor, Date.now());
+    let recorded = false;
+    try {
+      const exec = await executor.installKey({
+        onSubmitted: async (installHash, op) => {
+          recorded = await addTrade({
+            agent_id: agentId,
+            kind: KEY_INSTALL_KIND,
+            target: CASH.USDG,
+            amount_usdg: 0,
+            user_op_hash: installHash,
+            ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}),
+            status: "submitted",
+          });
+          if (!recorded) throw new NotRecorded(installHash);
+        },
+      });
+      const eth = await ethPrice8();
+      const gasCost = priceGas(exec.gasWei, eth.price8, eth.reason);
+      await addTrade({
+        agent_id: agentId,
+        kind: KEY_INSTALL_KIND,
+        target: CASH.USDG,
+        amount_usdg: 0,
+        tx_hash: exec.txHash,
+        user_op_hash: exec.userOpHash,
+        status: "landed",
+        // Whose cost it was, exactly as a trade's: a sponsored op never left the
+        // account, and gas_wei is subtracted from the owner's return.
+        ...(gasSponsored()
+          ? { sponsored_gas_wei: exec.gasWei.toString() }
+          : {
+              gas_wei: exec.gasWei.toString(),
+              ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
+              ...(exec.gasUnits > 0n ? { gas_units: exec.gasUnits.toString() } : {}),
+            }),
+      });
+      await refreshBudget(agentId);
+      await addEvent(
+        agentId,
+        "ok",
+        `installed this key's permissions on their own (${exec.txHash}): with the trade riding along they came to ` +
+          `more than a key's first operation may use. Nothing was traded; the next trade goes as an ordinary operation.`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof GasRefused) {
+        // Nothing signed. Most often: the wall does not fit even with the
+        // bare install beside it, which only a narrower wall can fix.
+        await addEvent(
+          agentId,
+          "warn",
+          `couldn't install this key's permissions on their own either — nothing was signed: ${msg.slice(0, 300)}. ` +
+            `If this repeats, re-sign at /grant with fewer custom tokens or capabilities.`,
+        );
+        return;
+      }
+      if (e instanceof NotRecorded || e instanceof SponsorRefused) {
+        await addEvent(agentId, "warn", `didn't install this key's permissions on their own — nothing was sent: ${msg.slice(0, 300)}`);
+        return;
+      }
+      if (e instanceof UserOpReverted) {
+        await addTrade({
+          agent_id: agentId,
+          kind: KEY_INSTALL_KIND,
+          target: CASH.USDG,
+          amount_usdg: 0,
+          user_op_hash: e.userOpHash,
+          status: "reverted",
+          reject_rule: classifyRevert(msg).rule,
+        });
+        await refreshBudget(agentId);
+        await addEvent(agentId, "err", `installing this key's permissions on their own reverted on-chain: ${msg.slice(0, 300)}`);
+        return;
+      }
+      // Sent, or possibly sent: the row stays 'submitted' and the resolver
+      // settles it from the chain. Never re-sent from here.
+      if (recorded) await refreshBudget(agentId);
+      await addEvent(
+        agentId,
+        "warn",
+        recorded
+          ? `installing this key's permissions on their own was submitted and its outcome could not be read yet; ` +
+              `the resolver will settle it within ${STRANDED_INTERVAL_SEC / 60} minutes. ${msg.slice(0, 200)}`
+          : `couldn't install this key's permissions on their own: ${msg.slice(0, 300)}`,
+      );
+    }
+  }
+
+  /**
    * SERIALIZED. Every caller goes through processIntent, which holds this.
    *
    * The hazard is named in this file already, at the budget reservation: "a
@@ -10236,126 +10357,6 @@ async function main() {
     }
   }
 
-  /**
-   * A NEW KEY WHOSE WALL LEAVES NO ROOM FOR ITS FIRST TRADE, INSTALLED ON ITS OWN.
-   *
-   * A key's first operation carries its whole wall plus whatever it was sent to
-   * do, and the two together must fit under the first-enable maximum. When they
-   * do not, the trade is refused `enable-too-wide` before signing. Re-signing
-   * could not help, because it seals the same wall. Live, 2026-10-03, agent
-   * 0xbba115 was refused every tick through several re-signs: wall 12,073,605
-   * plus a Trencher vault deploy + buy of 4,241,474.
-   *
-   * So the key is installed with the cheapest call the wall admits
-   * (executor.ts keyInstallCalls: `approve(USDG, Router02, 0)`, which moves
-   * nothing), and the trade goes on a later tick as an ordinary operation
-   * under its own ceiling. Nothing about the trade is decided here, and nothing
-   * is retried in its place: the refused trade is booked `rejected` as before,
-   * and the strategy proposes it again or not.
-   *
-   * THE SAME DURABILITY AS ANY OPERATION. The row is written 'submitted' with
-   * the hash BEFORE broadcast (a failed write refuses to send), settled
-   * 'landed' with its gas after, and left 'submitted' for resolveStrandedOps
-   * when the receipt cannot be read. Replay is impossible: the operation is
-   * nonce-bound to the key's sequence 0, and the executor refuses to install a
-   * key the chain says is already installed (keyInstallRefusal).
-   *
-   * ONCE PER EXECUTOR PER HALF HOUR. Each arm builds a new executor, so a
-   * re-sign starts fresh. An install still in flight is not raced by a second
-   * one, and a wall that cannot be installed even alone is told to the owner
-   * once, not every tick.
-   */
-  async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
-    const last = keyInstallTriedAt.get(executor);
-    if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
-    keyInstallTriedAt.set(executor, Date.now());
-    let recorded = false;
-    try {
-      const exec = await executor.installKey({
-        onSubmitted: async (userOpHash, op) => {
-          recorded = await addTrade({
-            agent_id: agentId,
-            kind: KEY_INSTALL_KIND,
-            target: CASH.USDG,
-            amount_usdg: 0,
-            user_op_hash: userOpHash,
-            ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}),
-            status: "submitted",
-          });
-          if (!recorded) throw new NotRecorded(userOpHash);
-        },
-      });
-      const eth = await ethPrice8();
-      const gasCost = priceGas(exec.gasWei, eth.price8, eth.reason);
-      await addTrade({
-        agent_id: agentId,
-        kind: KEY_INSTALL_KIND,
-        target: CASH.USDG,
-        amount_usdg: 0,
-        tx_hash: exec.txHash,
-        user_op_hash: exec.userOpHash,
-        status: "landed",
-        // Whose cost it was, exactly as a trade's: a sponsored op never left the
-        // account, and gas_wei is subtracted from the owner's return.
-        ...(gasSponsored()
-          ? { sponsored_gas_wei: exec.gasWei.toString() }
-          : {
-              gas_wei: exec.gasWei.toString(),
-              ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
-              ...(exec.gasUnits > 0n ? { gas_units: exec.gasUnits.toString() } : {}),
-            }),
-      });
-      await refreshBudget(agentId);
-      await addEvent(
-        agentId,
-        "ok",
-        `installed this key's permissions on their own (${exec.txHash}): with the trade riding along they came to ` +
-          `more than a key's first operation may use. Nothing was traded; the next trade goes as an ordinary operation.`,
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (e instanceof GasRefused) {
-        // Nothing signed. Most often: the wall does not fit even with the
-        // bare install beside it, which only a narrower wall can fix.
-        await addEvent(
-          agentId,
-          "warn",
-          `couldn't install this key's permissions on their own either — nothing was signed: ${msg.slice(0, 300)}. ` +
-            `If this repeats, re-sign at /grant with fewer custom tokens or capabilities.`,
-        );
-        return;
-      }
-      if (e instanceof NotRecorded || e instanceof SponsorRefused) {
-        await addEvent(agentId, "warn", `didn't install this key's permissions on their own — nothing was sent: ${msg.slice(0, 300)}`);
-        return;
-      }
-      if (e instanceof UserOpReverted) {
-        await addTrade({
-          agent_id: agentId,
-          kind: KEY_INSTALL_KIND,
-          target: CASH.USDG,
-          amount_usdg: 0,
-          user_op_hash: e.userOpHash,
-          status: "reverted",
-          reject_rule: classifyRevert(msg).rule,
-        });
-        await refreshBudget(agentId);
-        await addEvent(agentId, "err", `installing this key's permissions on their own reverted on-chain: ${msg.slice(0, 300)}`);
-        return;
-      }
-      // Sent, or possibly sent: the row stays 'submitted' and the resolver
-      // settles it from the chain. Never re-sent from here.
-      if (recorded) await refreshBudget(agentId);
-      await addEvent(
-        agentId,
-        "warn",
-        recorded
-          ? `installing this key's permissions on their own was submitted and its outcome could not be read yet; ` +
-              `the resolver will settle it within ${STRANDED_INTERVAL_SEC / 60} minutes. ${msg.slice(0, 200)}`
-          : `couldn't install this key's permissions on their own: ${msg.slice(0, 300)}`,
-      );
-    }
-  }
 
   /**
    * LIVENESS, WHICH IS NOT THE SAME QUESTION AS "DID THE CHAIN ANSWER".
