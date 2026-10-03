@@ -51,6 +51,8 @@ import { isActiveClassState, isQuoteTokenRow } from "../class-active";
 import { dollars, when } from "./trade-rows";
 import { currentTradeEpochSync, readOnlyFactsDb, readTradeFacts, type ChatTradeFact } from "../chat-trades";
 import { distinctTrades } from "../distinct-trades";
+import { createDesk } from "../desk/desk";
+import type { TgDeskAsk, TgDeskPort } from "./tg-groups/types";
 
 export const TOOL_OUTPUT_MAX = 1_800;
 
@@ -1200,6 +1202,37 @@ const explainTerm: ChatTool = {
   },
 };
 
+/**
+ * THE MARKET DESK, IN A DM: the same measured evidence a group answer is
+ * built from (worker/src/desk/) — public index pools and hourly candles,
+ * never the ledger — so "how's the market" and "TA on X" get a read over real
+ * figures. It reads and measures only; nothing it returns places a trade.
+ */
+let dmDesk: TgDeskPort | null = null;
+const marketRead: ChatTool = {
+  spec: {
+    name: "market_read",
+    description:
+      "Live market analysis from indexed pool data, measured just now. For one coin (ticker, name or 0x address): price, liquidity and FDV, buy/sell flow, hourly trend, EMA20/50, RSI, ATR, VWAP, range position, volume pace and support/resistance levels. With no coin: the Robinhood Chain memecoin board — breadth, volume concentration, leaders and laggards, new launches, the ETH backdrop. Use for 'how is the market', 'what's moving', 'chart / TA on X', 'is X a good entry'. Reason over these figures and cite only them.",
+    schema: { type: "object", properties: { coin: { type: "string", description: "ticker, name or 0x address; leave out for the whole market" } } },
+  },
+  async run(input) {
+    const q = str(input.coin, 64).replace(/^\$/, "");
+    const ask: TgDeskAsk = !q ? { kind: "market" } : /^0x[0-9a-fA-F]{40}$/.test(q) ? { kind: "coin", address: q } : { kind: "coin", query: q };
+    dmDesk ??= createDesk({ render: async () => null });
+    const r = await dmDesk.look(ask);
+    if (!r.ok) {
+      return r.why === "not-found" ? `No coin called ${q} is listed on Robinhood Chain.`
+        : r.why === "ambiguous" ? `Several coins are called ${q}; ask about one by its 0x address.`
+        : "Market data couldn't be read right now; try again in a minute.";
+    }
+    const e = r.evidence;
+    // The read and the source first: the tool output cap trims the brief's
+    // tail, never the conclusion or where the figures came from.
+    return cap(`RULE-BASED READ (stance: ${e.floor.stance}): ${e.floor.read}\nWatch: ${e.floor.watch}\nWrong if: ${e.floor.invalidation}\nSource: ${e.source}\n\nMEASUREMENTS:\n${e.brief}`);
+  },
+};
+
 export const CHAT_TOOLS: readonly ChatTool[] = [
   agentStatus,
   listTrades,
@@ -1211,6 +1244,7 @@ export const CHAT_TOOLS: readonly ChatTool[] = [
   decisionHistory,
   findToken,
   tokenReport,
+  marketRead,
   settingsTool,
   permissionStatus,
   explainTerm,

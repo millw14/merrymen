@@ -1204,7 +1204,7 @@ export async function editMessageText(
 export async function sendChatAction(
   opts: TelegramOpts,
   chatId: number,
-  action: "typing" = "typing",
+  action: "typing" | "upload_photo" = "typing",
   messageThreadId?: number,
 ): Promise<{ ok: boolean; reason?: string }> {
   const r = await call(opts, "sendChatAction", {
@@ -1324,4 +1324,77 @@ export function sendPhoto(opts: TelegramOpts, chatId: number, filePath: string, 
 
 export function sendDocument(opts: TelegramOpts, chatId: number, filePath: string, caption?: string) {
   return sendFile(opts, "sendDocument", "document", chatId, filePath, caption);
+}
+
+/**
+ * A PHOTO FROM BYTES, AS A GROUP REPLY — what the market desk sends: a chart
+ * drawn in memory, its caption, the reply and topic it belongs to. Bounded
+ * like every upload, never throws, and reports what a group sender needs from
+ * a refusal (flood wait, a supergroup's new id) the way sendMessage does. An
+ * HTML caption Telegram rejects is sent again as plain text, so a formatting
+ * slip never costs the chart.
+ */
+export async function sendPhotoBytes(
+  opts: TelegramOpts,
+  chatId: number,
+  png: Uint8Array,
+  caption: string,
+  extra: SendExtra = {},
+): Promise<SendResult> {
+  if (!SENDABLE_TOKEN.test(opts.token)) return { ok: false, reason: "not a bot token (it has characters no Telegram token has)" };
+  const base = opts.apiBase ?? API_BASE;
+  const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
+  // A photo has no link preview: sendPhoto takes no link_preview_options.
+  const { link_preview_options: _preview, ...options } = sendOptions(extra);
+  const attempt = async (text: string, html: boolean): Promise<SendResult & { entityRefused?: boolean }> => {
+    const { signal, disarm } = deadline(Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
+    try {
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      if (text) form.append("caption", text);
+      if (text && html) form.append("parse_mode", "HTML");
+      for (const [k, v] of Object.entries(options)) form.append(k, typeof v === "object" ? JSON.stringify(v) : String(v));
+      form.append("photo", new Blob([new Uint8Array(png)], { type: "image/png" }), "chart.png");
+      const res = await orAbort(fetchFn(`${base}/bot${opts.token}/sendPhoto`, { method: "POST", body: form, signal }), signal);
+      const body = (await orAbort(res.json(), signal).catch(() => null)) as {
+        ok?: boolean;
+        description?: string;
+        result?: { message_id?: unknown };
+        parameters?: { retry_after?: unknown; migrate_to_chat_id?: unknown };
+      } | null;
+      if (body?.ok) return { ok: true, ...(typeof body.result?.message_id === "number" ? { messageId: body.result.message_id } : {}) };
+      if (signal.aborted) return { ok: false, reason: TIMED_OUT };
+      const reason = body?.description ?? `HTTP ${res.status}`;
+      const retry = body?.parameters?.retry_after;
+      const moved = body?.parameters?.migrate_to_chat_id;
+      return {
+        ok: false,
+        reason,
+        ...(typeof retry === "number" && Number.isFinite(retry) ? { retryAfterSec: retry } : {}),
+        ...(typeof moved === "number" && Number.isFinite(moved) ? { migrateToChatId: moved } : {}),
+        entityRefused: /parse|entit|tag/i.test(reason),
+      };
+    } catch (e) {
+      if (signal.aborted) return { ok: false, reason: TIMED_OUT };
+      return { ok: false, reason: scrub(e instanceof Error ? e.message : String(e), opts.token) };
+    } finally {
+      disarm();
+    }
+  };
+  // MEASURED AS TELEGRAM MEASURES IT: the visible text, in UTF-16 units. A
+  // caption over the cap goes as plain text cut at the cap — never as HTML cut
+  // in the middle of a tag or an entity.
+  const visible = caption.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+  if (visible.length > 1024) {
+    const { entityRefused: _, ...rest } = await attempt(Array.from(visible).reduce((acc, ch) => (acc.length + ch.length <= 1020 ? acc + ch : acc), "") + "…", false);
+    return rest;
+  }
+  const first = await attempt(caption, true);
+  if (first.ok || !first.entityRefused) {
+    const { entityRefused: _, ...rest } = first;
+    return rest;
+  }
+  const plain = await attempt(visible, false);
+  const { entityRefused: _, ...rest } = plain;
+  return rest;
 }

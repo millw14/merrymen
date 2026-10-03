@@ -1629,3 +1629,120 @@ export function lineMood(text: string): ReactionMood | null {
   for (const [mood, re] of MOODS) if (re.test(t)) return mood;
   return null;
 }
+
+// ─── Market desk asks (docs/tg-groups.md "Market analysis") ────────────────
+
+/**
+ * What an addressed line asks the market desk for: the market, a coin by
+ * name, or a chart read with no subject ("do a quick analysis") that the
+ * handler binds to the coin or question it follows. Null: not a desk ask.
+ */
+export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "analysis" };
+
+/** Words that sit where a coin's name would and are not one. */
+const DESK_STOP: ReadonlySet<string> = new Set([
+  "this", "that", "it", "its", "the", "a", "an", "these", "those", "one", "ones", "some", "any", "all", "more", "again",
+  "market", "markets", "chart", "charts", "coin", "coins", "token", "tokens", "trenches", "memes", "memecoins", "chain",
+  "you", "u", "ya", "me", "us", "them", "him", "her", "he", "she", "they", "we", "i", "im", "ur", "your", "my", "our", "their",
+  "out", "here", "there", "now", "today", "rn", "everything", "everyone", "everybody", "things", "stuff", "life", "day",
+  "what", "which", "who", "how", "why", "when", "is", "are", "was", "it's", "good", "bad", "price", "volume", "liquidity",
+  "analysis", "ta", "breakdown", "read", "take", "look", "entry", "entries", "dip", "pump", "plays", "play", "setup",
+  "setups", "movers", "runners", "merrymen", "merryman", "eth", "weth", "btc", "usdg", "usdc", "robinhood", "gm", "gn",
+  "lol", "lmao", "ngl", "tbh", "bro", "ser", "fam", "anon", "pls", "please", "yo", "hey", "sir", "boss", "king",
+  // Verbs and adjectives that sit right before "good entry" or "analysis".
+  "think", "thinking", "guess", "feel", "mean", "believe", "say", "said", "looks", "seems", "quick", "quickly", "single",
+  "real", "full", "deep", "proper", "little", "big", "nice", "new", "old", "short", "fast", "detailed", "technical",
+  "decent", "solid", "safe", "great", "huge", "best", "better", "worse", "worst", "next", "last", "first", "another",
+  "other", "same", "very", "really", "just", "also", "so", "too", "not", "no", "yes", "maybe", "kinda", "ok", "okay",
+  "sure", "like", "actually", "honestly", "literally", "still", "already", "even", "only", "much", "many", "few", "legit",
+  "cool", "sick", "crazy", "proper", "fresh", "clean", "do", "did", "does", "make", "give", "run", "get",
+  // Chart words that sit where a name would: "support levels", "key levels".
+  "support", "resistance", "key", "major", "nearest", "exit",
+]);
+
+/** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
+const DESK_TRADING_CUE =
+  /\b(?:entry|entries|chart|charts|ta|buy|buying|sell|selling|ape|aping|bag|coin|token|price|pump|pumping|dump|dumping|send|sending|ca|liq|liquidity|volume|mcap|fdv|holders|bullish|bearish|dip|setup|levels?|support|resistance|breakout|analysis|analy[sz]e|legit|rug|runner|moon|mooning|cooked)\b/u;
+const NAME = String.raw`\$?([\p{L}\p{N}][\p{L}\p{N}._-]{1,23})`;
+/** Patterns that name a coin AND ask for a read on it. */
+const DESK_COIN_STRONG: readonly RegExp[] = [
+  new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of)|analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
+  new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:a\s+)?(?:good|decent|nice|solid|bad|safe)\s+(?:entry|buy|play|bag|hold)\b`, "u"),
+  new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|bullish|bearish|a hold)\b`, "u"),
+  new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:chart|analysis|levels)\b`, "u"),
+];
+/**
+ * Patterns that name something and could be about anything — "is dinner
+ * ready", "how is grandma looking", "check out bob": a coin only beside a
+ * trading word, or when the name is written in capitals like a ticker.
+ */
+const DESK_COIN_WEAK: readonly RegExp[] = [
+  new RegExp(String.raw`\b(?:check out|check|look at|looking at|peep|pull up|what about|how about)\s+${NAME}`, "u"),
+  new RegExp(String.raw`\bhow(?:'?s| is| does)\s+${NAME}\s+(?:look|looking|lookin|doing|holding|going)\b`, "u"),
+  new RegExp(String.raw`\bis\s+${NAME}\s+(?:dead|done|cooked|ready|legit|worth it)\b`, "u"),
+];
+const DESK_MARKET_WORD = /\b(?:market|markets|trenches|memecoins|meme market)\b/u;
+const DESK_MARKET_CUE =
+  /\b(?:how|what|whats|update|check|analysis|analy[sz]e|look|looking|doing|vibe|vibes|sentiment|overview|outlook|read|state|today|rn|currently|now|summary|recap|breakdown|thoughts|wdyt|condition|conditions)\b|[?？]/u;
+/** What's moving: these words are about markets in any chat. */
+const DESK_MOVERS =
+  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|trending|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+/** "what's hot / up / cooking": about markets only beside a trading word ("what's up with the dev" is not). */
+const DESK_MOVERS_WEAK = /\bwhat(?:'?s|s| is| are)\s+(?:hot|cooking|popping|running|green|up)\b/u;
+/** Asks for a chart read in words no other topic uses. */
+const DESK_ANALYSIS =
+  /\b(?:analy[sz](?:e|is|es)|ta|technical analysis|chart|charts|levels|good entry|entry point|better entry|entries)\b/u;
+/** Chart words with an everyday meaning ("entry fee", "support me", "breakdown of the movie"): a read only beside a trading word. */
+const DESK_ANALYSIS_WEAK = /\b(?:entry|support|resistance|breakdown|deep dive)\b/u;
+/** A trading context for the weak words above. Deliberately not the chart words themselves. */
+const DESK_CONTEXT =
+  /\b(?:coin|coins|token|tokens|chart|charts|market|markets|chain|price|buy|buying|sell|selling|ape|aping|bag|bags|pump|pumping|dump|dumping|dip|trade|trading|bullish|bearish|liq|liquidity|volume|mcap|fdv|memecoin|memecoins|trenches|ca)\b|\$[a-z]/u;
+const DESK_REQUEST =
+  /\b(?:do|give|run|show|pull|need|want|drop|got|any|what|whats|how|where|is|can|could|would|pls|please|quick)\b|[?？]/u;
+
+/**
+ * IS THIS A DESK ASK, AND FOR WHAT? Read on the line without its names and
+ * handles. A cashtag or a strongly-asked name is a coin; a weakly-asked name
+ * is a coin only beside a trading word; the market's own words with a
+ * question or request are the market; a bare analysis request is "analysis".
+ * The name is a search key and nothing else (rule 1).
+ */
+export function deskAskOf(text: string, selfNames: readonly string[] = []): DeskIntent | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const raw = unnamed(text, selfNames);
+  const t = norm(raw);
+  if (!t || COIN_STOP.test(t)) return null;
+  const self = new Set(selfNames.map((n) => norm(String(n ?? ""))));
+  const ok = (name: string | undefined): string | null => {
+    const n = (name ?? "").replace(/[._-]+$/u, "");
+    if (n.length < 2 || DESK_STOP.has(n) || self.has(n) || /^\p{N}+$/u.test(n)) return null;
+    return n;
+  };
+  const tags = extractCashtags(raw);
+  if (tags.length === 1) {
+    const n = ok(tags[0]!.toLowerCase());
+    if (n) return { kind: "coin", name: n };
+  }
+  // The EARLIEST name any pattern finds: "check out cashcat, i think good
+  // entry?" names cashcat, not the "think" before "good entry".
+  const found: { at: number; name: string }[] = [];
+  const scan = (re: RegExp) => {
+    for (const m of t.matchAll(new RegExp(re.source, "gu"))) {
+      const n = ok(m[1]);
+      if (n) found.push({ at: (m.index ?? 0) + m[0].lastIndexOf(m[1]!), name: n });
+    }
+  };
+  DESK_COIN_STRONG.forEach(scan);
+  const cue = DESK_TRADING_CUE.test(t);
+  // A weakly-asked name counts beside a trading word, or written as a ticker:
+  // "how is CASHCAT looking" is a coin, "how is grandma looking" is not.
+  const shouted = (name: string) => name.length >= 3 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name.toUpperCase())}(?![\\p{L}\\p{N}])`, "u").test(text);
+  const weakBefore = found.length;
+  DESK_COIN_WEAK.forEach(scan);
+  if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name)));
+  if (found.length) return { kind: "coin", name: found.sort((a, b) => a.at - b.at)[0]!.name };
+  const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
+  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
+  if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
+  return null;
+}

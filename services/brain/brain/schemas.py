@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 SCHEMA_VERSION = "1.0.0"
 
@@ -74,7 +74,12 @@ _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 _HEXBLOB = re.compile(r"0x[0-9a-fA-F]{16,}")
 
 Action = Literal["buy", "sell", "hold"]
-Tier = Literal["pulse", "research", "deep"]
+#: THE TIERS A DECISION MAY RUN AT. Deliberately narrower than `Tier`: the desk
+#: tier below is sized for one conversational read, and a decision that could
+#: name it would be a trade made on a two-call allowance.
+DecideTier = Literal["pulse", "research", "deep"]
+#: Every allowance the budget knows, including the desk's.
+Tier = Literal["pulse", "research", "deep", "desk"]
 
 
 def _reject_executable(text: str, field: str) -> str:
@@ -226,7 +231,7 @@ class BrainDecision(BaseModel):
     time_horizon: str = ""
     changed_view: ChangedView | None = None
 
-    tier: Tier
+    tier: DecideTier
     #: What depth this decision actually ran at, which under `adaptive` is
     #: decided per-run rather than configured. Recorded because "did escalating
     #: help?" cannot be answered from a setting, only from what happened.
@@ -469,7 +474,7 @@ class DecideRequest(BaseModel):
     # Prior theses with realised outcomes, for continuity and reflection.
     memory: list[str] = Field(default_factory=list)
 
-    tier: Tier = "research"
+    tier: DecideTier = "research"
     # WHICH STAGES RUN — and the default is `adaptive`, not `full`.
     #
     # Measured on the first ten scenarios: analysts-only scored 10/10 at 45
@@ -504,6 +509,116 @@ class Refusal(BaseModel):
         "schema-version-unsupported",
         "provider-unavailable",
         "output-invalid",
+    ]
+    detail: str
+    cost: Cost
+
+
+# ── THE MARKET DESK: a read, not a decision ────────────────────────────────
+#
+# `/v1/analyze` answers a question someone asked in a group chat — "how is the
+# market?", "is this a good entry?" — with a short reasoned read. It never
+# trades, never sizes, and nothing downstream acts on it. It is still published
+# to strangers, so everything a model writes here passes the same backstop as a
+# thesis, plus the things a chat message must never carry: links and cashtags.
+
+#: A link, in any of the forms a group chat would render clickable.
+_URL = re.compile(r"http|www\.|t\.me/", re.IGNORECASE)
+#: A cashtag. `$` before a DIGIT is a price and stays; `$` before a letter is a
+#: ticker someone can search, pump or impersonate.
+_CASHTAG = re.compile(r"\$[A-Za-z]")
+#: Newlines with whatever whitespace hugs them, collapsed to one space.
+_NEWLINES = re.compile(r"\s*[\r\n]+\s*")
+
+
+class AnalyzeRequest(BaseModel):
+    """
+    What the worker sends the desk. ALL of the evidence, already computed.
+
+    Brain fetches nothing here: candles, indicators, flow and liquidity arrive as
+    a text brief the worker built from indexed pool data. The desk's job is to
+    think over that brief, not to go looking for more.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: REQUIRED, unlike on `DecideRequest`. A version that defaults to the
+    #: current one cannot detect the skew it exists to detect.
+    schema_version: str
+    run_id: str = Field(min_length=1, max_length=80)
+    agent_id: str = Field(min_length=1, max_length=80)
+    kind: Literal["coin", "market"]
+    #: The coin's display name. UNTRUSTED — a token's name is whatever its
+    #: deployer typed.
+    subject: str = Field(default="", max_length=40)
+    #: The asker's own words. UNTRUSTED, and fenced in the prompt as such.
+    question: str = Field(default="", max_length=400)
+    #: The code-built brief. ~14,000 chars is ~3,500 tokens: with the 4,000-token
+    #: answer allowance it fits one desk call inside the 12,000-token tier.
+    evidence: str = Field(min_length=1, max_length=14_000)
+    #: The agent's persona/style line, from the worker.
+    voice: str = Field(default="", max_length=500)
+
+
+class DeskAnalysis(BaseModel):
+    """
+    One read of a coin or of the market, as the agent will say it.
+
+    VALIDATED, NEVER REPAIRED. A read carrying an address, a link or a cashtag is
+    refused whole rather than trimmed: a trimmed sentence is a sentence the model
+    did not write, published under the agent's name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    read: str = Field(min_length=40, max_length=900)
+    stance: Literal["constructive", "neutral", "cautious", "avoid"]
+    #: The one level or condition that matters next.
+    watch: str = Field(max_length=260)
+    #: What would flip the view.
+    invalidation: str = Field(max_length=260)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("read", "watch", "invalidation", mode="before")
+    @classmethod
+    def _one_line(cls, v: object) -> object:
+        # Formatting, not repair: a chat line is one paragraph, and the length
+        # bounds should measure what will actually be sent.
+        if isinstance(v, str):
+            return _NEWLINES.sub(" ", v).strip()
+        return v
+
+    @field_validator("read", "watch", "invalidation")
+    @classmethod
+    def _publishable(cls, v: str, info: ValidationInfo) -> str:
+        _reject_executable(v, info.field_name)
+        if _URL.search(v):
+            raise ValueError(f"{info.field_name} contains a link")
+        if _CASHTAG.search(v):
+            raise ValueError(f"{info.field_name} contains a cashtag")
+        return v
+
+
+class DeskRefusal(BaseModel):
+    """
+    The desk's typed no. A SEPARATE type from `Refusal` on purpose.
+
+    The desk's reasons are its own vocabulary, and widening `Refusal.reason` to
+    carry them would let `/v1/decide`'s contract name failures it can never
+    produce — which is how a caller ends up switching on a reason that does not
+    exist for the endpoint it is calling.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = SCHEMA_VERSION
+    run_id: str
+    agent_id: str
+    reason: Literal[
+        "provider-unavailable",
+        "malformed",
+        "budget",
+        "schema-version-unsupported",
     ]
     detail: str
     cost: Cost

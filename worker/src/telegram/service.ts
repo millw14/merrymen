@@ -132,7 +132,7 @@ import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from 
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 import type { TgGroupsStore } from "./tg-groups/store";
-import type { TgCoinsPort, TgGroupFactsPort } from "./tg-groups/types";
+import type { TgCoinsPort, TgDeskPort, TgGroupFactsPort } from "./tg-groups/types";
 import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 import type { HeldGroupEntry } from "./held-groups";
 
@@ -191,6 +191,8 @@ export interface TelegramServiceDeps {
   tgCoins?: TgCoinsPort;
   /** A public projection of recorded actions, with no wallet amounts or private reasons. */
   tgFacts?: TgGroupFactsPort;
+  /** The market desk: public evidence, charts and Brain's read for group market questions. */
+  tgDesk?: () => TgDeskPort;
   /**
    * What a hold process kept about groups while trading was held
    * (held-groups.ts takeHeldGroupUpdates over this home): taken once, at the
@@ -593,6 +595,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         stateRef,
         port: () => deps.tgCoins ?? null,
         facts: () => deps.tgFacts ?? null,
+        desk: () => deps.tgDesk?.() ?? null,
         self: () => {
           const bot = selfFor(groupCfg());
           // The bot's display name (getMe's first_name) is what members see on
