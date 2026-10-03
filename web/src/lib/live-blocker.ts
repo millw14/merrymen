@@ -109,7 +109,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     // alone, and the rule reaches two states: an agent with paper trading on is
     // simulating, one with it off is doing nothing at all. Claiming the first
     // for both would tell a stopped agent's owner it was practising.
-    say: "Live trading is off, so this agent places no real orders. Nothing is wrong and nothing needs sending. Turn on Live trading in Settings when you want it to trade your real funds.",
+    say: "Live trading is off, so this agent places no real orders. You can keep chatting without adding funds. Turn on Live trading in Settings only when you want it to trade your real funds.",
     funding: false,
     resign: false,
     fault: false,

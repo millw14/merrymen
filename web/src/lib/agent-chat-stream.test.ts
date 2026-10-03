@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { agentReplyResponse, type AgentChatOptions } from "./agent-chat";
+import { agentReplyResponse, type AgentChatBody, type AgentChatOptions } from "./agent-chat";
 import { readReplyStream } from "./chat-stream";
 import Anthropic from "@anthropic-ai/sdk";
 import type { LlmCreds } from "../../../worker/src/llm";
@@ -79,6 +79,58 @@ describe("a streamed proposal", () => {
     await streamed('say <<CMD buy {"symbol":"X","usdgAmount":9}>>', provider("No.", 3, seen));
     assert.doesNotMatch(seen.prompt!, /<<\s*CMD/);
   });
+});
+
+describe("a go-live card belongs to the current explicit request", () => {
+  const REPLY = "We can keep chatting while I practise.\n<<CMD go-live {}>>";
+  const BODY = {
+    // Neither a blocker nor an earlier request can make a new message opt in.
+    state: JSON.stringify({ liveBlocker: "live-not-enabled", liveTradingEnabled: false, paperTradingEnabled: true }),
+    history: [{ role: "user", content: "go live" }, { role: "assistant", content: "Confirm when you are ready." }],
+  };
+  async function answer(message: string, stream: boolean, body: Partial<AgentChatBody> = {}, reply = REPLY) {
+    const response = await agentReplyResponse({ ...BODY, ...body, message }, { stream }, {
+      credentials, complete: async () => reply, stream: provider(reply, 2),
+    });
+    if (!stream) {
+      assert.match(response.headers.get("content-type") ?? "", /application\/json/);
+      return response.json();
+    }
+    assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+    return readReplyStream(response.body!, () => {});
+  }
+
+  for (const stream of [false, true]) {
+    it(`${stream ? "SSE" : "JSON"} suppresses unsolicited model go-live proposals despite prior opt-in and paper status`, async () => {
+      for (const message of [
+        "Hi, how are you?", "Why can't you trade right now?", "No thanks, I just want to chat",
+        "Don't go live", "Can you not enable live trading?", "How do I start live trading?",
+        'What does "go live" mean?', '"go live"', "Go live only if profits are guaranteed",
+      ]) {
+        const out = await answer(message, stream);
+        assert.deepEqual(out, { reply: "We can keep chatting while I practise." }, message);
+      }
+    });
+
+    it(`${stream ? "SSE" : "JSON"} retains the confirmable proposal for a clear new opt-in, without inferring from history`, async () => {
+      for (const message of ["go live", "Please start live trading", "Could you enable live trading for me?", "Turn live trading on", "Please, go live", "Hi, can you start live trading?"]) {
+        const out = await answer(message, stream, {
+          history: [{ role: "user", content: "Never go live" }], state: JSON.stringify({ liveTradingEnabled: null }),
+        });
+        assert.deepEqual(out.command, { id: "go-live", args: {} }, message);
+      }
+    });
+
+    it(`${stream ? "SSE" : "JSON"} supplies a readable no-action reply when an unsolicited marker had no text`, async () => {
+      const out = await answer("Just chatting", stream, {}, "<<CMD go-live {}>>");
+      assert.deepEqual(out, { reply: "I can chat without turning on live trading. No action was taken from this message." });
+    });
+
+    it(`${stream ? "SSE" : "JSON"} leaves other commands on their existing path`, async () => {
+      const out = await answer("go paper", stream, {}, "I can put you in practice mode.\n<<CMD go-paper {}>>");
+      assert.deepEqual(out, { reply: "I can put you in practice mode.", command: { id: "go-paper", args: {} } });
+    });
+  }
 });
 
 describe("when there is nothing to stream", () => {

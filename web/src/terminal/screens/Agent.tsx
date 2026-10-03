@@ -150,21 +150,46 @@ export function Agent({
   useEffect(() => {
     void loadTier().then(setTier);
   }, []);
+  const mobileBody = () => window.matchMedia?.("(max-width: 1099px)").matches
+    ? viewport.current?.closest<HTMLElement>(".body") ?? null : null;
+  const updateFollowing = () => {
+    const node = viewport.current;
+    if (!node) return;
+    const body = mobileBody();
+    const isAway = node.scrollHeight - node.scrollTop - node.clientHeight > 48
+      || !!body && body.scrollHeight - body.scrollTop - body.clientHeight > 48;
+    follow.current = !isAway;
+    setAway(isAway);
+  };
   const scrollLatest = () => {
     const node = viewport.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
+    // A short phone also scrolls the outer page. Following only the thread
+    // leaves its newest reply and composer below that page's visible edge.
+    const body = mobileBody();
+    if (body) body.scrollTop = body.scrollHeight;
     follow.current = true;
     setAway(false);
   };
+  useEffect(() => {
+    const body = viewport.current?.closest<HTMLElement>(".body");
+    if (!body) return;
+    // Bind even when mounted on desktop: this screen can survive a resize
+    // into the phone layout without mounting again.
+    const onBodyScroll = () => { if (mobileBody()) updateFollowing(); };
+    body.addEventListener("scroll", onBodyScroll);
+    return () => body.removeEventListener("scroll", onBodyScroll);
+  }, []);
   useLayoutEffect(() => {
     if (follow.current) scrollLatest();
-  }, [chat.messages.length, chat.streaming, chat.sending]);
+  }, [chat.messages.length, chat.streaming, chat.sending, pending]);
   useLayoutEffect(() => {
     const node = input.current;
     if (!node) return;
     node.style.height = "auto";
     node.style.height = `${Math.min(120, node.scrollHeight)}px`;
+    if (follow.current) scrollLatest();
   }, [ask, !!mine]);
   useEffect(() => {
     const node = input.current;
@@ -187,6 +212,8 @@ export function Agent({
       if (follow.current) scrollLatest();
     });
     observer.observe(node);
+    const body = node.closest<HTMLElement>(".body");
+    if (body) observer.observe(body);
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
@@ -761,14 +788,7 @@ export function Agent({
         className="desk-conversation"
         aria-label="Agent conversation"
         tabIndex={0}
-        onScroll={() => {
-          const node = viewport.current;
-          if (!node) return;
-          const isAway =
-            node.scrollHeight - node.scrollTop - node.clientHeight > 48;
-          follow.current = !isAway;
-          setAway(isAway);
-        }}
+        onScroll={updateFollowing}
       >
         <TrencherAnnouncement hasAgent={!!mine} />
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.

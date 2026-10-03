@@ -136,6 +136,71 @@ function Harness(p: {
   );
 }
 const h = (p: Parameters<typeof Harness>[0] = {}) => createElement(Harness, p);
+const mediaAt = (matches: () => boolean): typeof window.matchMedia => (media) => ({
+  matches: matches(), media, onchange: null,
+  addListener: noop, removeListener: noop, addEventListener: noop, removeEventListener: noop,
+  dispatchEvent: () => true,
+});
+
+describe("following replies on a phone with a scrolling outer page", () => {
+  it("keeps the same desktop-mounted chat reading position after resizing into the phone layout", async () => {
+    let mobile = false;
+    ui.dom.window.matchMedia = mediaAt(() => mobile);
+    const screen = () => createElement("div", { className: "body" }, h());
+    await ui.render(screen());
+    await settle();
+    const body = ui.container.querySelector<HTMLElement>(".body")!;
+    const conversation = ui.container.querySelector<HTMLElement>(".desk-conversation")!;
+    Object.defineProperties(body, { scrollHeight: { value: 900 }, clientHeight: { value: 500 } });
+    Object.defineProperties(conversation, { scrollHeight: { value: 700 }, clientHeight: { value: 220 } });
+
+    body.scrollTop = 100;
+    await act(async () => body.dispatchEvent(new ui.dom.window.Event("scroll")));
+    await act(async () => chat.say({ role: "agent", text: "Desktop reply keeps following the thread." }));
+    assert.equal(body.scrollTop, 100, "desktop replies do not move the surrounding page");
+    assert.equal(conversation.scrollTop, 700, "desktop outer scrolling does not pause the thread");
+
+    mobile = true;
+    await ui.render(screen());
+    assert.equal(ui.container.querySelector(".desk-conversation"), conversation, "the chat did not remount at the breakpoint");
+    await act(async () => chat.say({ role: "agent", text: "First reply after resizing to a phone." }));
+    assert.equal(body.scrollTop, 900);
+    body.scrollTop = 100;
+    await act(async () => body.dispatchEvent(new ui.dom.window.Event("scroll")));
+    await act(async () => chat.say({ role: "agent", text: "Incoming reply while reading earlier mobile content." }));
+    assert.equal(body.scrollTop, 100, "the existing listener pauses follow in the new phone layout");
+    await ui.click("Latest message");
+    assert.equal(body.scrollTop, 900);
+    assert.equal(conversation.scrollTop, 700);
+  });
+
+  it("brings the composer into view, preserves reading position, and resumes on Latest message", async () => {
+    ui.dom.window.matchMedia = mediaAt(() => true);
+    await ui.render(createElement("div", { className: "body" }, h()));
+    await settle();
+    const body = ui.container.querySelector<HTMLElement>(".body")!;
+    const conversation = ui.container.querySelector<HTMLElement>(".desk-conversation")!;
+    // jsdom supplies no layout: model an overflowing short phone, then drive
+    // the real screen/controller and its scroll events rather than CSS text.
+    Object.defineProperties(body, { scrollHeight: { value: 900 }, clientHeight: { value: 500 } });
+    Object.defineProperties(conversation, { scrollHeight: { value: 700 }, clientHeight: { value: 220 } });
+    await act(async () => chat.say({ role: "agent", text: "First reply on a short phone." }));
+    assert.equal(body.scrollTop, 900, "the outer page follows the composer too");
+    assert.equal(conversation.scrollTop, 700);
+
+    body.scrollTop = 100;
+    await act(async () => body.dispatchEvent(new ui.dom.window.Event("scroll")));
+    await act(async () => chat.say({ role: "agent", text: "Reply while you read earlier content." }));
+    assert.equal(body.scrollTop, 100, "a reply must not pull someone away from earlier content");
+    await ui.click("Latest message");
+    assert.equal(body.scrollTop, 900);
+    assert.equal(conversation.scrollTop, 700);
+
+    await act(async () => chat.setProposal({ id: "go-live", args: {} }));
+    assert.equal(body.scrollTop, 900, "the confirmation and composer stay reachable");
+    assert.equal(count("PUT", "/api/settings"), 0, "scrolling never confirms the proposal");
+  });
+});
 
 const text = () => ui.container.textContent ?? "";
 const textarea = () => ui.container.querySelector("textarea")!;

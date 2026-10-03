@@ -170,8 +170,35 @@
   .terminal-host .alpha-gate .flow-primary { width:100%; min-height:50px; padding:14px 12px; border-radius:12px; background:#38dda0; color:#07150e; font-size:15px; font-weight:600; box-sizing:border-box; }
   .terminal-host .alpha-gate .hosted-auth { width:100%; }
   .terminal-host .alpha-threshold { margin:4px 0 8px; }
-  .terminal-host .body:has(> .desk-page) { padding-top:12px; padding-bottom:calc(92px + env(safe-area-inset-bottom)); gap:10px; }
-  .terminal-host .body > .desk-page { gap:16px; }
+  /* Chat reserves the menu's actual space instead of subtracting an old nav
+     height from a second viewport-sized box. Short screens scroll the page;
+     long conversations still scroll inside their own readable area. */
+  .terminal-host .app:has(> .body > .desk-page) { height:100dvh; min-height:0; }
+  .terminal-host .app:has(> .body > .desk-page) > .tabbar {
+    position:static;
+    flex-shrink:0;
+    inset:auto;
+    transform:none;
+    margin:0 auto max(10px, env(safe-area-inset-bottom));
+  }
+  .terminal-host .body:has(> .desk-page) {
+    flex:1 1 0;
+    height:auto;
+    max-height:none;
+    min-height:0;
+    overflow-y:auto;
+    padding-top:12px;
+    padding-bottom:14px;
+    gap:10px;
+  }
+  .terminal-host .body > .desk-page {
+    flex:1 0 auto;
+    height:auto;
+    min-height:auto;
+    overflow:visible;
+    gap:16px;
+  }
+  .terminal-host .body > .desk-page > .desk-conversation { min-height:220px; contain:size; }
   .terminal-host .desk-header { display:grid; grid-template-columns:44px minmax(0,1fr); gap:4px 12px; }
   .terminal-host .desk-header > .face { width:44px; height:44px; grid-row:1 / 3; }
   .terminal-host .desk-header h1 { font-size:20px; }
