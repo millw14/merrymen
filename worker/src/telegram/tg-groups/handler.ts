@@ -2549,9 +2549,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * the owner's Leave came after that link. It lasts until they decide again.
    */
   const unblock = (chatId: number): void => {
-    store.setStatus(chatId, "left");
+    const at = clock();
     store.update(chatId, (r) => {
-      r.unblockedAtMs = clock();
+      // One durable state: writing `left` before its consent guard would let
+      // a restart between writes revive an old /link and approve a stranger.
+      r.status = "left";
+      r.statusAtMs = at;
+      delete r.askedOwnerAtMs;
+      r.unblockedAtMs = at;
     }, { flush: true });
     releft.delete(chatId);
   };

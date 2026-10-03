@@ -19,7 +19,7 @@
  *     where it must not, and that no method throws.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -537,6 +537,52 @@ describe("membership", () => {
     await groups.onCallback(press(`tgg:stay:${CHAT}`));
     assert.equal(store.room(CHAT)?.status, "approved");
     assert.equal(store.room(CHAT)?.unblockedAtMs, undefined);
+  });
+
+  it("Unblock persists its consent guard with its status before a restart can revive an old /link", async () => {
+    cfg.telegramAllowlist = [OWNER, CHAT];
+    make();
+    approveRoom(CHAT, "frens");
+    store.addLine(CHAT, { messageId: 7, fromId: ANN, name: "Ann", text: "memory kept", atMs: clock });
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    const writes: Array<{ status: string; statusAtMs: number; unblockedAtMs?: number; askedOwnerAtMs?: number }> = [];
+    const captureWrite = () => {
+      const disk = JSON.parse(readFileSync(store.file, "utf8"));
+      writes.push(disk.rooms[String(CHAT)]);
+    };
+    const originalSetStatus = store.setStatus;
+    const originalUpdate = store.update;
+    store.setStatus = (...args) => {
+      originalSetStatus.apply(store, args);
+      captureWrite();
+    };
+    store.update = (...args) => {
+      originalUpdate.apply(store, args);
+      if (args[2]?.flush) captureWrite();
+    };
+    try {
+      await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    } finally {
+      store.setStatus = originalSetStatus;
+      store.update = originalUpdate;
+    }
+    assert.equal(writes.length, 1, "status and consent guard must reach disk together");
+    assert.equal(writes[0]?.status, "left");
+    assert.equal(writes[0]?.statusAtMs, clock);
+    assert.equal(writes[0]?.unblockedAtMs, clock, "every persisted unblocked state overrides the legacy link");
+    assert.equal(writes[0]?.askedOwnerAtMs, undefined);
+
+    groups.stop();
+    await groups.drain();
+    store.close();
+    store = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+    assert.ok(store.room(CHAT)?.lines.some((l) => l.text === "memory kept"), "unblocking preserves the room's memory");
+    make();
+    const asked = tg.sends(OWNER).length;
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "pending", "a restart cannot let the old link approve a stranger");
+    assert.equal(tg.sends(OWNER).length, asked + 1, "the owner must consent again");
   });
 
   it("Unblock on a /linked group: a line from it after a missed re-add is not approved by the link either", async () => {
