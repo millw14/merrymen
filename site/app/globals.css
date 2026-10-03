@@ -412,9 +412,6 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 /* backstop: if the motion layer never ran, force everything visible */
 .fx-done [data-reveal] { opacity: 1 !important; transform: none !important; clip-path: none !important; }
 
-/* magnetic wrapper — the JS drifts this toward the cursor; it eases back on leave */
-.mag { display: inline-flex; transition: transform .4s cubic-bezier(0.16, 1, 0.3, 1); }
-
 /* nav: fully transparent so the background runs straight through; once you
    scroll, only a faint frost (no colour band, no divider) aids legibility */
 .nav.scrolled {
@@ -449,7 +446,6 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
   .marquee-track { animation: none; }
   .nav-links a::after { display: none; }
   .nav-links a > span { transition: none; }
-  .mag { transition: none; }
 }
 
 /* ---------- live pages: /watch tape + /memescope ---------- */
