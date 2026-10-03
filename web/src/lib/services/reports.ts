@@ -176,8 +176,8 @@ export interface LiveBookSummary {
   realized_pnl: RealizedView;
   fees: { accrued_usdg: number; accruals: number };
   /**
-   * `usdg` sums the priced part; null when landed operations paid gas and none
-   * of it was priced. `complete` is false when some landed operation's gas is
+   * `usdg` sums the priced part; null when settled operations paid gas and none
+   * of it was priced. `complete` is false when some settled operation's gas is
    * unpriced or unrecorded, so a non-null `usdg` is then a floor.
    */
   gas: { usdg: number | null; complete: boolean; priced_ops: number; unpriced_ops: number; sponsored_ops: number; unrecorded_ops: number; notes: string[] };
@@ -570,16 +570,19 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
     const hasTx = num(c.has_tx) === 1;
     if (c.status === "landed") {
       if (hasTx) confirmed += n; else landedNoTx += n;
-      // The worker's own rule (getGasPaidUsdg): gas is what landed operations paid.
+    } else if (c.status === "submitted") submitted += n;
+    else if (c.status === "reverted") reverted += n;
+    else if (c.status === "paper") {
+      if (num(c.is_fill) === 1) paperFills += n; else paperOther += n;
+    }
+    // A proved revert can pay gas too, without becoming a confirmed operation.
+    // Legacy settled rows with no cost evidence remain unrecorded, never free.
+    if (c.status === "landed" || c.status === "reverted") {
       gasUsdg += num(c.gas_usdg) ?? 0;
       gasPriced += num(c.gas_priced) ?? 0;
       gasUnpriced += num(c.gas_unpriced) ?? 0;
       gasSponsored += num(c.gas_sponsored) ?? 0;
       gasMissing += num(c.gas_missing) ?? 0;
-    } else if (c.status === "submitted") submitted += n;
-    else if (c.status === "reverted") reverted += n;
-    else if (c.status === "paper") {
-      if (num(c.is_fill) === 1) paperFills += n; else paperOther += n;
     }
   }
   if (submitted > 0) warnings.push(`${submitted} live operation(s) were submitted and have no final outcome in the ledger yet; they are not counted as confirmed.`);
@@ -619,10 +622,10 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
   ).get(...scope.args, since, until) as Record<string, unknown> | undefined;
 
   const gasNotes: string[] = [];
-  if (gasUnpriced > 0) gasNotes.push(`${gasUnpriced} landed operation(s) paid gas that could not be priced in USDG; the total excludes them.`);
+  if (gasUnpriced > 0) gasNotes.push(`${gasUnpriced} settled operation(s) paid gas that could not be priced in USDG; the total excludes them.`);
   if (gasSponsored > 0) gasNotes.push(`${gasSponsored} operation(s) were sponsored: the sponsor paid their gas, not the owner.`);
-  if (gasMissing > 0) gasNotes.push(`${gasMissing} landed operation(s) carry no gas record at all; the total excludes them.`);
-  // Zero only when it was measured: nothing landed, or everything that landed was sponsored.
+  if (gasMissing > 0) gasNotes.push(`${gasMissing} settled operation(s) carry no gas record at all; the total excludes them.`);
+  // Zero only when it was measured: nothing settled, or all settled gas was sponsored.
   const gasTotal = gasPriced > 0 ? gasUsdg : gasUnpriced > 0 || gasMissing > 0 ? null : 0;
   const gasComplete = gasUnpriced === 0 && gasMissing === 0;
   if (gasTotal !== null && !gasComplete) gasNotes.push("The gas total is a floor: it covers only the operations whose gas was priced (complete is false).");
@@ -873,6 +876,7 @@ async function tradesTable(db: Db, scope: Scope, since: number, until: number, i
     "confirmed is true only for a landed operation with a transaction hash; submitted has no final outcome yet.",
     "realized_pnl_usdg is filled only when both the sell's proceeds and its cost basis were evidenced (realized_pnl_status evidenced); otherwise it is blank.",
     "order_usdg is the amount the order asked for; fill_cash_usdg is the cash that actually moved, when recorded.",
+    "gas covers settled landed or reverted operations; a revert can pay gas without confirming a trade. Unrecorded settled gas is unknown, not free.",
   ];
   // Which recorded realized figures are measurements, per account and book.
   const vouched = new Set<string>();
@@ -913,7 +917,8 @@ async function tradesTable(db: Db, scope: Scope, since: number, until: number, i
     const isSell = r.fill_side === "sell" && (status === "landed" || status === "paper");
     const evidenced = isSell && pnl !== null && vouched.has(String(r.op_key));
     const gasUsdg = num(r.gas_usdg);
-    const gasStatus = status !== "landed" ? "none"
+    const settled = status === "landed" || status === "reverted";
+    const gasStatus = !settled ? "none"
       : gasUsdg !== null ? "priced"
         : r.gas_wei != null ? "unpriced"
           : r.sponsored_gas_wei != null ? "sponsored" : "not_recorded";
@@ -937,7 +942,7 @@ async function tradesTable(db: Db, scope: Scope, since: number, until: number, i
       str(r.fill_qty_raw),
       evidenced ? pnl : null,
       !isSell ? "none" : evidenced ? "evidenced" : "unverified",
-      status === "landed" ? gasUsdg : null,
+      settled ? gasUsdg : null,
       gasStatus,
       tx,
       refusal?.rule ?? null,

@@ -35,7 +35,8 @@ function ledger(): DatabaseSync {
   db.exec(
     "CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY, agent_id TEXT, kind TEXT, amount_usdg REAL, " +
       "status TEXT, reject_rule TEXT, tx_hash TEXT, decision_id TEXT, target TEXT, fill_side TEXT, " +
-      "fill_cash_usdg REAL, realized_pnl_usdg REAL, sell_token TEXT, buy_token TEXT)",
+      "fill_cash_usdg REAL, realized_pnl_usdg REAL, sell_token TEXT, buy_token TEXT, " +
+      "user_op_hash TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
   );
   db.exec("DELETE FROM trades");
   return db;

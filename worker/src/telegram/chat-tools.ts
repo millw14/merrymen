@@ -704,12 +704,15 @@ const pnlBreakdown: ChatTool = {
         try {
           const g = db
             .prepare(
-              `SELECT COALESCE(SUM(gas_usdg),0) AS usd, SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-                 FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")} WHERE status = 'landed' AND created_at >= ? AND created_at <= ?`,
+              `SELECT COALESCE(SUM(gas_usdg),0) AS usd,
+                      SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced,
+                      SUM(CASE WHEN sponsored_gas_wei IS NOT NULL AND sponsored_gas_wei <> '' THEN 1 ELSE 0 END) AS sponsored
+                 FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")} WHERE status IN ('landed', 'reverted') AND created_at >= ? AND created_at <= ?`,
             )
-            .get(who, agentEpoch(db,who), since, ctx.now) as { usd: number; unpriced: number | null } | undefined;
+            .get(who, agentEpoch(db,who), since, ctx.now) as { usd: number; unpriced: number | null; sponsored: number | null } | undefined;
           if (g && g.usd > 0.005) lines.push(`Network fees paid: about ${dollars(g.usd)} (paid in ETH, not in the account value above).`);
-          else if (ctx.cfg.sponsorGasEnabled) lines.push("Network fees are covered by the house sponsor.");
+          if (g?.unpriced) lines.push(`${g.unpriced} settled operation(s) paid gas that could not be priced; the fees shown exclude that cost.`);
+          if (g?.sponsored) lines.push(`The house sponsor covered network fees for ${g.sponsored} settled operation(s).`);
         } catch {
           /* older ledger */
         }

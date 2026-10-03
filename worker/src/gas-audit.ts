@@ -26,8 +26,8 @@
  *   sponsored               what somebody else paid, never the owner's cost
  *   unpriced                landed ops whose gas could not be valued — named,
  *                           never silently treated as free
- *   reverted                gas burned on operations that did not land, which
- *                           the published figure does not count at all
+ *   reverted                gas burned on operations that did not land,
+ *                           included in the owner's recorded network fees
  *
  * PURE, and every figure carries its evidence. `gasWei` and the userOp/tx
  * hashes travel with each line so any claim here can be checked against the
@@ -316,7 +316,7 @@ export function gasAuditLines(d: GasDecomposition): string[] {
   out.push(`  TOTAL landed gas      ${usd(d.totalLandedGasUsdg)} USDG  (this is what the published P&L subtracts)`);
   if (d.revertedGasUsdg > 0) {
     out.push(
-      `  reverted gas          ${usd(d.revertedGasUsdg)} USDG  — real spend the published figure does NOT count`,
+      `  reverted gas          ${usd(d.revertedGasUsdg)} USDG  — included in the owner's recorded network fees`,
     );
   }
   out.push(`  first landed op       ${usd(d.first?.gasUsdg ?? null)} USDG  op ${short(d.first?.userOpHash ?? null)}`);
