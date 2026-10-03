@@ -48,7 +48,8 @@ export type Screen =
   | { kind: "settings" }
   | { kind: "grant" }
   | { kind: "limits" }
-  | { kind: "groupchat" };
+  | { kind: "groupchat" }
+  | { kind: "swap" };
 
 export interface AgentRef {
   slug: string;
