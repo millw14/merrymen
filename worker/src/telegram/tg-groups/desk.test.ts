@@ -23,7 +23,7 @@ import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgD
 
 const BRIEF = [
   "COIN: CASHCAT on Robinhood Chain; main pool CASHCAT / WETH on a v3 pool; 20 pools indexed; observed 12:00 UTC",
-  "PRICE: $0.1554 | change 1h +0.05%, 6h -2.32%, 24h -11.8%",
+  "PRICE: $0.1554 | change 5m 0%, 1h +0.05%, 6h -2.32%, 24h -11.8%",
   "LIQUIDITY: main pool liquidity $4.46m | all pools $10m | FDV $153m | liquidity/FDV 6.58% | 24h volume $9.92m",
   "FLOW (all 20 pools): 24h: 13436 buys / 12190 sells, 4143 buyers / 4720 sellers",
   "- trend: downtrend (price 0.1554 vs EMA20 0.159, EMA50 0.1643; EMA20 -1.81% over 6h)",
@@ -163,6 +163,8 @@ describe("a desk read's figures come from the brief", () => {
       ["heading toward 10 next", "ungrounded"],
       ["could even tag 0.2", "ungrounded"],
       ["up 11.8% on the day", "ungrounded"],
+      ["$5m of fresh liquidity came in", "ungrounded"],
+      ["liquidity is 5m now", "ungrounded"],
       ["you look like you bought the top lol, the chart is weak.", "appearance"],
     ];
     for (const [text, why] of refused) {
@@ -170,7 +172,7 @@ describe("a desk read's figures come from the brief", () => {
       assert.equal(v.ok, false, text);
       if (!v.ok) assert.equal(v.reason, why, text);
     }
-    for (const text of ["price is 4% below the vwap at 0.1627", "down 11.8% on the day", "i'd wait for a reclaim of 0.1605 before getting interested.", "the 1h and 24h both lean red"]) {
+    for (const text of ["price is 4% below the vwap at 0.1627", "liquidity $4.46m, about 4.5m in the main pool", "rsi 37.5 with price at $0.1554", "down 11.8% on the day", "i'd wait for a reclaim of 0.1605 before getting interested.", "the 1h and 24h both lean red"]) {
       assert.ok(admitDeskText(text, { agentName: "Pine", brief }).ok, text);
     }
   });

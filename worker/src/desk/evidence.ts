@@ -486,7 +486,9 @@ export function marketStats(m: MarketMeasure): MarketStats {
   const byVolume = [...m.coins].sort((a, b) => b.volume24h - a.volume24h);
   const liquid = with24.filter((c) => c.volume24h >= 100_000);
   const movers = (liquid.length >= 6 ? liquid : with24).slice().sort((a, b) => b.change24h! - a.change24h!);
-  const counted = m.coins.filter((c) => n(c.buys24h) && n(c.sells24h));
+  // FLOW ONLY WHEN EVERY COIN REPORTED IT: a sum over the coins that happened
+  // to have counts reads as the board's flow and can flip the stance.
+  const complete = m.coins.length > 0 && m.coins.every((c) => n(c.buys24h) && n(c.sells24h));
   return {
     count: m.coins.length,
     up24: with24.filter((c) => c.change24h! > 0).length,
@@ -499,8 +501,8 @@ export function marketStats(m: MarketMeasure): MarketStats {
     byVolume,
     leaders: movers.slice(0, 3),
     laggards: movers.slice(-3).reverse(),
-    buys: counted.length ? counted.reduce((s, c) => s + c.buys24h!, 0) : null,
-    sells: counted.length ? counted.reduce((s, c) => s + c.sells24h!, 0) : null,
+    buys: complete ? m.coins.reduce((s, c) => s + c.buys24h!, 0) : null,
+    sells: complete ? m.coins.reduce((s, c) => s + c.sells24h!, 0) : null,
   };
 }
 

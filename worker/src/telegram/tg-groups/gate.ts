@@ -1603,7 +1603,11 @@ export function deskFiguresGrounded(text: string, brief: string): boolean {
   if (FOREIGN_DIGIT.test(text.normalize("NFKC"))) return false;
   // A brief's labels ("1h", "24h", "7d") are not measurements: they ground a
   // time span said back, never a price or a count.
-  const known = figuresIn(brief).filter((f) => f.word === null || !TIME_WORDS.has(f.word)).map((f) => ({ v: Math.abs(f.value * f.scale), unit: f.unit, sign: f.sign }));
+  // A brief prints every amount with "$" (desk/format.ts fmtUsd), so a scaled
+  // figure without one ("5m" in "change 5m 0%") is a window, not five million.
+  const known = figuresIn(brief)
+    .filter((f) => (f.word === null || !TIME_WORDS.has(f.word)) && (f.scale === 1 || f.money))
+    .map((f) => ({ v: Math.abs(f.value * f.scale), unit: f.unit, sign: f.sign, money: f.money, scaled: f.scale !== 1 }));
   const norm = text.normalize("NFKC");
   for (const f of figuresIn(text)) {
     const plainInt = f.decimals === 0 && f.scale === 1 && !f.money && f.unit === "";
@@ -1614,8 +1618,13 @@ export function deskFiguresGrounded(text: string, brief: string): boolean {
     // A price or an amount needs two significant digits to be a rounding; a
     // percent or a multiple may round to a whole number ("4%" for -4.03%).
     const half = f.sig >= 2 || f.unit !== "" ? 0.5 * 10 ** -f.decimals * f.scale : 0;
+    // An amount ("$5m", "$9.9m") matches only an amount the brief printed; a
+    // price may be said with or without "$".
+    const amount = f.scale !== 1;
     const ok = known.some((k) =>
       k.unit === f.unit &&
+      (!amount || (k.money && k.scaled)) &&
+      (!f.money || k.money || !k.scaled) &&
       Math.abs(v - k.v) <= Math.max(half, k.v * 0.006) &&
       !(f.unit === "%" && f.sign !== 0 && k.sign !== 0 && f.sign !== k.sign));
     if (!ok) return false;

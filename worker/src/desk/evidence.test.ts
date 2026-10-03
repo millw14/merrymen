@@ -219,6 +219,15 @@ describe("desk evidence: the market", () => {
     assert.ok(floor.read.includes(fmtPct(6.5)), "the median is printed the brief's way");
   });
 
+  it("reports no board flow at all when one coin's counts are missing", async () => {
+    const partial = board().map((p, i) => (i === 1 ? { ...p, buys24h: null, sells24h: null } : p));
+    const r = reads({ feed: async (f) => (f === "new_pools" ? ok([]) : ok(partial)) });
+    const m = await measureMarket(r);
+    assert.ok(m.ok);
+    assert.doesNotMatch(marketBrief(m.market), /FLOW 24h/);
+    assert.doesNotMatch(marketFloor(m.market).read, /buys (?:outnumber|and sells)|sells outnumber/);
+  });
+
   it("is unavailable rather than empty when the feeds could not be read", async () => {
     const r = reads({ feed: async () => ({ pools: [], failed: true, failure: "http-429" }) });
     assert.deepEqual(await measureMarket(r), { ok: false, why: "unavailable" });
