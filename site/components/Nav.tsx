@@ -10,6 +10,29 @@ const links = [
   ["/#features", "Features"], ["/memescope", "Markets"], ["/dashboard", "Agents"],
   ["/watch", "Activity"], ["/claude", "Claude & MCP"], ["/api", "Developers"], ["/docs", "Docs"],
 ];
+function ThemeToggle() {
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  useEffect(() => {
+    setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+  }, []);
+  const next = theme === "dark" ? "light" : "dark";
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      aria-pressed={theme === "dark"}
+      aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+      onClick={() => {
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem("merrymen-theme", next); } catch { /* private browsing */ }
+        setTheme(next);
+      }}
+    >
+      {theme === "dark" ? "Light" : "Dark"}
+    </button>
+  );
+}
+
 export function Nav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
@@ -27,7 +50,7 @@ export function Nav() {
       <nav className="nav-links" aria-label="Main navigation">
         {links.map(([href, title]) => <Link key={href} href={href} aria-current={pathname === href ? "page" : undefined}>{title}</Link>)}
       </nav>
-      <div className="nav-right"><a href="https://app.merrymen.dev" className="btn btn-primary">Open app <Icon name="arrow" size={16} /></a><button ref={toggle} className="nav-menu-toggle" aria-expanded={open} aria-controls="mobile-navigation" aria-label={open ? "Close menu" : "Open menu"} onClick={() => setOpen(!open)}>{open ? "✕" : <span aria-hidden>☰</span>}</button></div>
+      <div className="nav-right">{pathname === "/" && <ThemeToggle />}<a href="https://app.merrymen.dev" className="btn btn-primary">Open app <Icon name="arrow" size={16} /></a><button ref={toggle} className="nav-menu-toggle" aria-expanded={open} aria-controls="mobile-navigation" aria-label={open ? "Close menu" : "Open menu"} onClick={() => setOpen(!open)}>{open ? "✕" : <span aria-hidden>☰</span>}</button></div>
     </div>
     <nav className="mobile-navigation" id="mobile-navigation" aria-label="Mobile navigation" hidden={!open}>
       {[...links, ["/app", "Mobile app"], ["/token", "$MERRYMEN"], ["/#telegram", "Telegram"]].map(([href, title]) => <Link key={href} href={href} onClick={() => setOpen(false)} aria-current={pathname === href ? "page" : undefined}>{title}<span aria-hidden>↗</span></Link>)}
