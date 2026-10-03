@@ -64,6 +64,10 @@ TIERS: dict[Tier, TierLimits] = {
     "research": TierLimits(max_calls=24, max_tokens=200_000, max_seconds=55.0),
     # Full committee. Reachable, but never the default.
     "deep": TierLimits(max_calls=45, max_tokens=500_000, max_seconds=110.0),
+    # The market desk: one reasoned read for a group chat, and at most one retry
+    # of an answer that would not validate. NOT a decision tier — `DecideTier`
+    # keeps `/v1/decide` from naming it.
+    "desk": TierLimits(max_calls=2, max_tokens=12_000, max_seconds=20.0),
 }
 
 #: USD per 1M tokens, by model. Unknown models price at 0 and SAY SO in the
@@ -175,6 +179,50 @@ class AgentConcurrency:
             lock = asyncio.Lock()
             self._locks[agent_id] = lock
         return lock
+
+
+def desk_concurrency_from_env(env: dict[str, str] | None = None) -> int:
+    """`BRAIN_DESK_CONCURRENCY`, default 2, clamped to 1..8. Garbage is the default."""
+    raw = (os.environ if env is None else env).get("BRAIN_DESK_CONCURRENCY", "")
+    try:
+        n = int(raw)
+    except ValueError:
+        return 2
+    return max(1, min(8, n))
+
+
+class DeskSlots:
+    """
+    HOW MANY MARKET READS MAY BE IN FLIGHT, ACROSS EVERY AGENT. Refuses; never queues.
+
+    Global rather than per-agent, unlike `AgentConcurrency`, because the thing it
+    protects is the shared provider allowance and not one agent's coherence: a
+    busy group chat can ask a dozen agents the same question at once, and every
+    one of those reads costs the same quota the trading decisions run on.
+
+    INDEPENDENT OF THE DECISION LOCK, by construction — it is a different object
+    that `/v1/decide` never touches. A read must never delay a trade decision,
+    and a decision in flight is no reason to leave a question unanswered.
+
+    A counter rather than an `asyncio.Semaphore`: nothing ever waits on it, so
+    there is nothing for a semaphore to add, and a semaphore made at import time
+    can bind itself to whichever event loop first waits on it.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.in_flight = 0
+
+    def try_acquire(self) -> bool:
+        # No await between the check and the increment, so on one event loop
+        # this cannot race.
+        if self.in_flight >= self.limit:
+            return False
+        self.in_flight += 1
+        return True
+
+    def release(self) -> None:
+        self.in_flight = max(0, self.in_flight - 1)
 
 
 def usage_log_path() -> Path:

@@ -123,6 +123,8 @@ class Llm:
         deep: bool = False,
         json_schema: dict[str, Any] | None = None,
         max_attempts: int = 2,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """
         One model call, counted before it is made and recorded after.
@@ -131,6 +133,13 @@ class Llm:
         RESULT IS RETURNED AS TEXT and parsed by the caller — but the schema is
         still sent, because a provider that can constrain the shape produces far
         fewer unparseable answers than a prompt that merely asks nicely.
+
+        `reasoning_effort` and `max_tokens` are for a node that WANTS the model to
+        think (the market desk). Both default to None, which is today's payload
+        exactly: "none" for a reasoning model and the configured output cap. A
+        caller raising the effort must raise the cap with it, because reasoning
+        tokens are completion tokens and a thinking model under the default cap
+        spends it all before writing the answer.
         """
         budget.check_before(node)
         model = self.cfg.deep_model if deep else self.cfg.quick_model
@@ -146,7 +155,7 @@ class Llm:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": self.cfg.max_output_tokens,
+            "max_tokens": self.cfg.max_output_tokens if max_tokens is None else max_tokens,
         }
         if self.cfg.temperature is not None:
             payload["temperature"] = self.cfg.temperature
@@ -165,8 +174,12 @@ class Llm:
         # ignores it. It is not the correctness fix — that is `parse_view`
         # naming the failure instead of calling it `no-data` — it is the fix
         # that stops the failure happening.
+        #
+        # Still only for a reasoning model, whatever effort a caller asks for: a
+        # model that does not reason has no use for the field, and some
+        # endpoints reject it outright.
         if _is_reasoning_model(model) and self.cfg.base_url not in _REASONING_HINT_REFUSED:
-            payload[REASONING_FIELD] = "none"
+            payload[REASONING_FIELD] = "none" if reasoning_effort is None else reasoning_effort
 
         client = await self._http()
         last: Exception | None = None
