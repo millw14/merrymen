@@ -1,9 +1,9 @@
 /**
- * THE DESK'S TWO EXTRA READS: a name search and an hourly chart.
+ * THE DESK'S EXTRA READS: a name search, an hourly chart and token metadata.
  *
  * Everything else the desk needs is already read elsewhere (a token's pools,
- * the trending/top/new feeds — venues/geckoterminal.ts). These two are new,
- * and they go through the same fleet quota (`cachedGeckoDetail`: one spacing
+ * the trending/top/new feeds — venues/geckoterminal.ts). These reads
+ * go through the same fleet quota (`cachedGeckoDetail`: one spacing
  * slot and one cooldown for every tenant on the host) plus a one-minute memo
  * here, so a coin three people ask about in a minute costs one request.
  *
@@ -16,6 +16,8 @@ import { readBoundedJson } from "../bounded-read";
 import { cachedGeckoDetail, geckoSource, GECKO_NETWORK, parseGeckoPool, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
 import type { FeedResult } from "../venues/fleet-feed-cache";
 import type { Bar } from "./ta";
+import { safeFetchUrl } from "../../../packages/core/src/index";
+import { sanitizeMeta } from "../venues/pons-meta";
 
 const MEMO_MS = 60_000;
 const FAIL_MEMO_MS = 5_000;
@@ -48,6 +50,9 @@ export function resetDeskReadsForTest(): void {
 }
 
 async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
+  // Fleet pacing can outlive an optional caller's read budget. Never begin a
+  // request after that caller has already cancelled it.
+  if (signal?.aborted || timeoutMs < 1) return { ok: false, failure: "unavailable" };
   const source = geckoSource();
   const observedAt = Date.now();
   try {
@@ -64,6 +69,82 @@ async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): 
   } catch {
     return { ok: false, failure: "unavailable" };
   }
+}
+
+/** Plain, bounded project prose; still untrusted publisher data, never instructions. */
+export function cleanProjectText(raw: unknown, max = 500): string {
+  if (typeof raw !== "string") return "";
+  const plain = raw.slice(0, 8000)
+    .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/gi, (s) => ({ "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" }[s.toLowerCase()] ?? " "))
+    .replace(/&#(x[\da-f]{1,6}|\d{1,7});/gi, (_whole, value: string) => {
+      const point = value[0]?.toLowerCase() === "x" ? Number.parseInt(value.slice(1), 16) : Number.parseInt(value, 10);
+      return point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? String.fromCodePoint(point) : " ";
+    })
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/\S+/gi, " ");
+  const clean = sanitizeMeta(plain, max);
+  // Reject obvious attempts to turn a published description into a model
+  // instruction. The remaining prose is ALSO explicitly treated as a claim.
+  return /(?:ignore|disregard|override).{0,40}(?:instructions|system prompt|previous rules)|\b(?:system|assistant|developer)\s*:|<\|(?:im_start|system)|\b(?:reveal|print|exfiltrate).{0,30}(?:secret|api key|credential)/i.test(clean) ? "" : clean;
+}
+
+/** A published link can be shown, but is never fetched by this reader. */
+export function projectLink(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw.length > 500 || /[\u0000-\u0020\u007f-\u009f\u200b\u200c\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u.test(raw)) return undefined;
+  const safe = safeFetchUrl(raw);
+  if (!safe) return undefined;
+  // Query strings are not needed for attribution, and can carry access tokens.
+  safe.search = "";
+  safe.hash = "";
+  const out = safe.toString();
+  return out.length <= 300 ? out : undefined;
+}
+
+export interface IndexedTokenInfo {
+  token: `0x${string}`;
+  name?: string;
+  description: string;
+  website?: string;
+  twitter?: string;
+}
+
+export interface TokenInfoRead extends FeedResult {
+  info?: IndexedTokenInfo;
+}
+
+/** Accept only the requested contract AND network, never a matching ticker. */
+export function parseTokenInfo(body: unknown, token: string): IndexedTokenInfo | null {
+  if (!/^0x[\da-f]{40}$/i.test(token)) return null;
+  const data = (body as { data?: unknown } | null)?.data;
+  if (!data || typeof data !== "object") return null;
+  const d = data as { id?: unknown; type?: unknown; attributes?: unknown };
+  if (d.type !== "token" || typeof d.id !== "string" || d.id.toLowerCase() !== `${GECKO_NETWORK}_${token.toLowerCase()}` || !d.attributes || typeof d.attributes !== "object") return null;
+  const a = d.attributes as Record<string, unknown>;
+  if (typeof a.address !== "string" || a.address.toLowerCase() !== token.toLowerCase()) return null;
+  const name = cleanProjectText(a.name, 64);
+  const description = cleanProjectText(a.description);
+  const website = Array.isArray(a.websites) ? a.websites.slice(0, 5).map(projectLink).find(Boolean) : undefined;
+  const handle = typeof a.twitter_handle === "string" && /^@?[a-z0-9_]{1,15}$/i.test(a.twitter_handle) ? a.twitter_handle.replace(/^@/, "") : undefined;
+  const twitter = handle ? `https://x.com/${handle}` : undefined;
+  return { token: token.toLowerCase() as `0x${string}`, ...(name ? { name } : {}), description, ...(website ? { website } : {}), ...(twitter ? { twitter } : {}) };
+}
+
+/** Metadata spends the existing fleet detail quota; the fixed origin keeps keys private. */
+export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: AbortSignal): Promise<TokenInfoRead> {
+  const token = typeof address === "string" ? address.toLowerCase() : "";
+  if (!/^0x[\da-f]{40}$/.test(token)) return { failed: true, failure: "invalid-token" };
+  return memoized<TokenInfoRead>(
+    `info:${GECKO_NETWORK}:${token}`,
+    async () => {
+      const r = await getJson(`/networks/${GECKO_NETWORK}/tokens/${token}/info`, timeoutMs, signal);
+      if (!r.ok) return { failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
+      const info = parseTokenInfo(r.body, token);
+      return info ? { failed: false, observedAt: r.observedAt, info } : { failed: true, failure: "invalid-shape" };
+    },
+    (failure) => ({ failed: true, failure }),
+  );
 }
 
 /**

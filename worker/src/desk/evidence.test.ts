@@ -7,6 +7,8 @@ import type { BarsRead } from "./gecko";
 import { parseHourlyBars } from "./gecko";
 import { fmtPct, fmtPrice, fmtUsd } from "./format";
 import type { DeskReadOptions } from "./deadline";
+import type { CoinProfile } from "./lore";
+import { DeskBudget } from "./deadline";
 
 const NOW = 1_791_028_800_000;
 const tok = (c: string) => `0x${c.repeat(40)}`;
@@ -131,6 +133,61 @@ describe("desk evidence: which coin a name means", () => {
 });
 
 describe("desk evidence: one coin", () => {
+  const profile = (token: string): CoinProfile => ({ token: token as `0x${string}`, chainId: 4663, description: "A visual pool logic builder. Claims 999% returns.", name: "Robinhooks", source: "GeckoTerminal token info", url: `https://www.geckoterminal.com/robinhood/tokens/${token}`, observedAtMs: NOW });
+
+  it("enriches an exact coin with separate attributed claims without changing its measured brief", async () => {
+    const r = reads({ tokenPools: async () => ok([pool("RHOOKS / WETH", tok("a"))]), hourly: async () => ({ failed: true, bars: [] }), lore: async (address) => ({ failed: false, profile: profile(address) }) });
+    const m = await measureCoin({ kind: "coin", address: tok("a") }, r);
+    assert.ok(m.ok);
+    assert.equal(m.coin.lore?.description, profile(tok("a")).description);
+    assert.doesNotMatch(coinBrief(m.coin), /999|builder|0x[\da-f]{40}/i);
+    const answer = await createDesk({ reads: r, render: async () => null }).look({ kind: "coin", address: tok("a") });
+    assert.ok(answer.ok);
+    assert.deepEqual(answer.evidence.lore, { description: profile(tok("a")).description, name: "Robinhooks", source: "GeckoTerminal token info", url: profile(tok("a")).url, observedAtMs: NOW });
+    assert.doesNotMatch(JSON.stringify(answer.evidence.lore), /"token"|"chainId"/);
+  });
+
+  it("never attaches another contract's profile or runs lore for an ambiguous name", async () => {
+    let calls = 0;
+    const r = reads({ search: async () => ok([pool("TWIN / WETH", tok("a")), pool("TWIN / WETH", tok("b"))]), tokenPools: async () => ok([pool("A / WETH", tok("a"))]), lore: async () => { calls++; return { failed: false, profile: profile(tok("b")) }; } });
+    assert.deepEqual(await measureCoin({ kind: "coin", query: "twin" }, r), { ok: false, why: "ambiguous" });
+    assert.equal(calls, 0);
+    const m = await measureCoin({ kind: "coin", address: tok("a") }, r);
+    assert.ok(m.ok);
+    assert.equal(m.coin.lore, undefined);
+    const wrongChain = reads({ ...r, lore: async () => ({ failed: false, profile: { ...profile(tok("a")), chainId: 1 as 4663 } }) });
+    const other = await measureCoin({ kind: "coin", address: tok("a") }, wrongChain);
+    assert.ok(other.ok && !other.coin.lore);
+  });
+
+  it("publishes completed lore while a chart hangs and ignores late lore after the shared budget", async () => {
+    const partials: string[] = [];
+    const r = reads({ tokenPools: async () => ok([pool("A / WETH", tok("a"))]), hourly: async () => new Promise(() => {}), lore: async (address) => ({ failed: false, profile: profile(address) }) });
+    const at = performance.now();
+    const m = await measureCoin({ kind: "coin", address: tok("a") }, r, undefined, new DeskBudget(100), (c) => partials.push(c.lore?.description ?? ""));
+    assert.ok(m.ok && m.coin.lore && !m.coin.tech);
+    assert.ok(partials.some(Boolean), "partial callers get background before candles finish");
+    assert.ok(performance.now() - at < 500);
+    let complete!: (v: { failed: false; profile: CoinProfile }) => void;
+    const late = reads({ tokenPools: r.tokenPools, hourly: async () => bars(168), lore: async () => new Promise((resolve) => { complete = resolve; }) });
+    let publications = 0;
+    const c = await measureCoin({ kind: "coin", address: tok("a") }, late, undefined, new DeskBudget(100), () => { publications++; });
+    assert.ok(c.ok && c.coin.tech && !c.coin.lore, "a slow background source cannot hide the chart");
+    const settled = publications;
+    complete({ failed: false, profile: profile(tok("a")) });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(publications, settled, "late metadata cannot change a settled reply");
+  });
+
+  it("gives the RHOOKS snapshot a short interpretation without presenting virtual reserves as depth", async () => {
+    const r = reads({ tokenPools: async () => ok([pool("RHOOKS / WETH", tok("a"), { dex: "pons-v2", reserveUsd: 23_200, h24: { changePct: 148.2, buyers: 511, sellers: 618 } })]), hourly: async () => ({ failed: true, bars: [] }) });
+    const m = await measureCoin({ kind: "coin", address: tok("a") }, r);
+    assert.ok(m.ok);
+    const f = coinFloor(m.coin);
+    assert.match(f.read, /sharp move.*More sellers.*launch phase/);
+    assert.doesNotMatch(f.read, /148\.2|23\.2|511|618|thin|rsi|ema/i);
+    assert.equal(f.stance, "cautious");
+  });
   it("measures a coin by name: search, then one hourly chart, nothing else", async () => {
     const r = reads({ search: async () => ok([pool("CASHCAT / WETH 0.3%", tok("a"))]) });
     const m = await measureCoin({ kind: "coin", query: "cashcat" }, r);
@@ -280,7 +337,8 @@ describe("the desk's complete lookup deadline", () => {
     assert.equal(value.evidence.chart, null);
     assert.equal(value.evidence.observedAtMs, NOW);
     assert.match(value.evidence.brief, /main pool liquidity \$200k/);
-    assert.match(value.evidence.floor.read, /\$100k traded over 24h, 200 buyers vs 150 sellers/);
+    assert.match(value.evidence.brief, /200 buyers \/ 150 sellers/);
+    assert.match(value.evidence.floor.read, /Buyers lead the participation count/);
     assert.equal(hourlyOptions?.signal?.aborted, true);
     assert.ok((hourlyOptions?.timeoutMs ?? Infinity) < 80);
     finish(bars(168));

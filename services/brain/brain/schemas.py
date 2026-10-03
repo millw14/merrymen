@@ -531,6 +531,15 @@ _CASHTAG = re.compile(r"\$[A-Za-z]")
 _NEWLINES = re.compile(r"\s*[\r\n]+\s*")
 
 
+class DeskLore(BaseModel):
+    """Untrusted project-published background, separate from measured market evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+    description: str = Field(min_length=1, max_length=1200)
+    name: str | None = Field(default=None, max_length=80)
+    source: str = Field(min_length=1, max_length=80)
+
+
 class AnalyzeRequest(BaseModel):
     """
     What the worker sends the desk. ALL of the evidence, already computed.
@@ -558,6 +567,8 @@ class AnalyzeRequest(BaseModel):
     evidence: str = Field(min_length=1, max_length=14_000)
     #: The agent's persona/style line, from the worker.
     voice: str = Field(default="", max_length=500)
+    #: A project's own claims. Never evidence of affiliation, safety or execution authority.
+    lore: DeskLore | None = None
 
 
 class DeskAnalysis(BaseModel):

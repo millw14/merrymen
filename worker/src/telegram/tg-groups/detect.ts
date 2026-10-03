@@ -1634,10 +1634,12 @@ export function lineMood(text: string): ReactionMood | null {
 
 /**
  * What an addressed line asks the market desk for: the market, a coin by
- * name, or a chart read with no subject ("do a quick analysis") that the
- * handler binds to the coin or question it follows. Null: not a desk ask.
+ * name, or a read/discussion with no subject that the handler binds to the
+ * coin or question it follows. A discussion needs that context; it cannot
+ * silently become a market read. Null: not a desk ask.
  */
-export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "analysis" };
+export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "analysis" }
+  | { kind: "discussion"; topic: "lore" | "explanation" };
 
 /** Words that sit where a coin's name would and are not one. */
 const DESK_STOP: ReadonlySet<string> = new Set([
@@ -1657,7 +1659,7 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "sure", "like", "actually", "honestly", "literally", "still", "already", "even", "only", "much", "many", "few", "legit",
   "cool", "sick", "crazy", "proper", "fresh", "clean", "do", "did", "does", "make", "give", "run", "get",
   // Chart words that sit where a name would: "support levels", "key levels".
-  "support", "resistance", "key", "major", "nearest", "exit",
+  "support", "resistance", "key", "major", "nearest", "exit", "lore", "story", "origin", "narrative", "background", "about", "behind", "of", "for",
 ]);
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
@@ -1670,6 +1672,7 @@ const DESK_COIN_STRONG: readonly RegExp[] = [
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:a\s+)?(?:good|decent|nice|solid|bad|safe)\s+(?:entry|buy|play|bag|hold)\b`, "u"),
   new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|bullish|bearish|a hold)\b`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:chart|analysis|levels)\b`, "u"),
+  new RegExp(String.raw`\b(?:lore|story|origin|narrative|background)\s+(?:of|behind|for|about)\s+(?:the\s+)?(?:coin|token)\s+${NAME}`, "u"),
 ];
 /**
  * Patterns that name something and could be about anything — "is dinner
@@ -1680,7 +1683,20 @@ const DESK_COIN_WEAK: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:check out|check|look at|looking at|peep|pull up|what about|how about)\s+${NAME}`, "u"),
   new RegExp(String.raw`\bhow(?:'?s| is| does)\s+${NAME}\s+(?:look|looking|lookin|doing|holding|going)\b`, "u"),
   new RegExp(String.raw`\bis\s+${NAME}\s+(?:dead|done|cooked|ready|legit|worth it)\b`, "u"),
+  new RegExp(String.raw`\b(?:what(?:'s|s| is)|tell me|explain)\s+(?:the\s+)?(?:lore|story|origin|narrative|background)\s+(?:of|behind|for|about)\s+${NAME}`, "u"),
+  new RegExp(String.raw`\bwhat(?:'s|s| is)\s+${NAME}\s+(?:all\s+)?about\b`, "u"),
+  new RegExp(String.raw`(?:^|\s)${NAME}(?:'s)?\s+(?:lore|story|origin|narrative|background)\b`, "u"),
 ];
+/** Coin nouns make the named subject explicit; ordinary people's stories do not. */
+const DESK_COIN_STORY = new RegExp(String.raw`\b(?:what(?:'s|s| is)|explain|describe|tell me about)\s+(?:the\s+)?(?:coin|token)\s+${NAME}`, "u");
+/** These asks need a subject from the reply chain or a recent desk read. */
+const DESK_LORE =
+  /\bwhat(?:'s|s| is)\s+(?:it|this|that|(?:this|that|the) (?:coin|token))\s+(?:all\s+)?about\b|\b(?:what(?:'s|s| is)|tell me|explain)\s+(?:the|its|(?:this|that|the) coin's)?\s*(?:lore|story|origin|narrative|background)(?:\s+(?:behind|of|for|about)\s+(?:it|this|that|(?:this|that|the) (?:coin|token)))?(?:\s+(?:please|pls))?\s*[?!.,]*$|\b(?:where (?:did|does) (?:it|this coin|that coin) come from|who (?:created|made|started) (?:it|this coin|that coin)|tell me (?:more )?about (?:it|this coin|that coin)|talk (?:a bit )?about (?:it|this coin|that coin)|what(?:'s|s| is) the idea behind (?:it|this coin|that coin))\b/u;
+const DESK_EXPLAIN =
+  /\b(?:make|keep)\s+(?:it|this|that|(?:your|the) (?:answer|reply|read|explanation))\s+(?:cleaner|clearer|simpler|shorter)\b|\b(?:explain|say|describe)\s+(?:it|this|that)\s+(?:more\s+)?(?:clearly|simply|in (?:plain|simple) (?:english|words))\b|\b(?:a|the|your)\s+(?:cleaner|clearer|simpler|shorter)\s+(?:explanation|answer|reply|read)\b|\b(?:your|the|this)\s+(?:answer|reply|read|explanation)\s+(?:is |was )?(?:not (?:clean|clear|simple)(?: enough)?|too (?:messy|cluttered|technical|complicated|dense))\b/u;
+/** An implicit critique is deliberately narrow: "my room isn't clean" is unrelated. */
+const DESK_EXPLAIN_SHORT =
+  /^(?:(?:hmm+|hm+|ok|okay|yeah|yes|fair enough|better|still|but|it's|its|it is|this is|that's|thats|that is)[,.!\s]+)*(?:not (?:clean|clear|simple)(?: enough)?|too (?:messy|cluttered|technical|complicated|dense)|(?:make it )?(?:cleaner|clearer|simpler|shorter))(?: please| pls)?[.!?]*$/u;
 const DESK_MARKET_WORD = /\b(?:market|markets|trenches|memecoins|meme market)\b/u;
 const DESK_MARKET_CUE =
   /\b(?:how|what|whats|update|check|analysis|analy[sz]e|look|looking|doing|vibe|vibes|sentiment|overview|outlook|read|state|today|rn|currently|now|summary|recap|breakdown|thoughts|wdyt|condition|conditions)\b|[?？]/u;
@@ -1704,7 +1720,8 @@ const DESK_REQUEST =
  * IS THIS A DESK ASK, AND FOR WHAT? Read on the line without its names and
  * handles. A cashtag or a strongly-asked name is a coin; a weakly-asked name
  * is a coin only beside a trading word; the market's own words with a
- * question or request are the market; a bare analysis request is "analysis".
+ * question or request are the market; a bare analysis request is "analysis",
+ * and story/rewrite requests are a context-dependent "discussion".
  * The name is a search key and nothing else (rule 1).
  */
 export function deskAskOf(text: string, selfNames: readonly string[] = []): DeskIntent | null {
@@ -1733,6 +1750,7 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
     }
   };
   DESK_COIN_STRONG.forEach(scan);
+  scan(DESK_COIN_STORY);
   const cue = DESK_TRADING_CUE.test(t);
   // A weakly-asked name counts beside a trading word, or written as a ticker:
   // "how is CASHCAT looking" is a coin, "how is grandma looking" is not.
@@ -1741,6 +1759,8 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   DESK_COIN_WEAK.forEach(scan);
   if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name)));
   if (found.length) return { kind: "coin", name: found.sort((a, b) => a.at - b.at)[0]!.name };
+  if (DESK_LORE.test(t)) return { kind: "discussion", topic: "lore" };
+  if (DESK_EXPLAIN.test(t) || DESK_EXPLAIN_SHORT.test(t)) return { kind: "discussion", topic: "explanation" };
   const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
   if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
   if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };

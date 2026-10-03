@@ -20,17 +20,22 @@ import { utcClock } from "./format";
 import { safeSubject } from "../telegram/tg-groups/desk";
 import { readHourlyBars, searchPools } from "./gecko";
 import { DeskBudget, lookupTimeout, type DeskReadOptions } from "./deadline";
+import type { PublicClient } from "viem";
+import { createLoreReader, readCoinLore } from "./lore";
 
 export const LIVE_READS: DeskReads = {
   search: (q, options) => searchPools(q, Math.min(8000, options?.timeoutMs ?? 8000), options?.signal),
   tokenPools: (a, options) => readTokenPoolsResult(a, { timeoutMs: Math.min(8000, options?.timeoutMs ?? 8000) }),
   hourly: (pool, token, options) => readHourlyBars(pool, token, 168, Math.min(8000, options?.timeoutMs ?? 8000), options?.signal),
+  lore: readCoinLore,
   feed: (feed, options) => fetchGeckoPoolsResult(feed, { timeoutMs: Math.min(8000, options?.timeoutMs ?? 8000) }),
   now: () => Date.now(),
 };
 
 export interface DeskDeps {
   reads?: DeskReads;
+  /** Existing governed mainnet read client; never a wallet or signing client. */
+  client?: PublicClient;
   /** Brain's desk endpoint, when the operator allows group asks to use it. */
   brain?: BrainDeskConfig | null;
   render?: (svg: string | null, options?: DeskReadOptions) => Promise<Uint8Array | null>;
@@ -52,6 +57,11 @@ function coinOutcome(c: CoinMeasure, chart: Uint8Array | null = null): TgDeskOut
   return { ok: true, evidence: {
     kind: "coin", subject: c.symbol, header: coinHeader(c), brief: coinBrief(c), floor: coinFloor(c),
     source: `GeckoTerminal ${utcClock(c.observedAtMs)} UTC`, observedAtMs: c.observedAtMs, chart,
+    ...(c.lore ? { lore: {
+      description: c.lore.description,
+      ...(c.lore.name ? { name: c.lore.name } : {}),
+      source: c.lore.source, url: c.lore.url, observedAtMs: c.lore.observedAtMs,
+    } } : {}),
   } };
 }
 
@@ -86,7 +96,7 @@ export async function lookOnce(ask: TgDeskAsk, reads: DeskReads, render: NonNull
 }
 
 export function createDesk(d: DeskDeps = {}): TgDeskPort {
-  const reads = d.reads ?? LIVE_READS;
+  const reads = d.reads ?? (d.client ? { ...LIVE_READS, lore: createLoreReader({ client: d.client }) } : LIVE_READS);
   const render = d.render ?? renderPng;
   const sayable = d.sayable ?? GROUP_SAYABLE;
   const memo = new Map<string, { until: number; value: TgDeskOutcome }>();

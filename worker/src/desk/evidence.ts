@@ -7,7 +7,7 @@
  *   floor    — a read written by code from the same numbers, so a group gets a
  *              real answer even when no model can give a better one.
  *
- * PUBLIC INDEX DATA ONLY. Nothing here is handed a balance, a position, a
+ * PUBLIC MARKET DATA AND PUBLISHED PROJECT CLAIMS ONLY. Nothing here is handed a balance, a position, a
  * limit or anything from the owner's ledger, so nothing here can print one
  * (docs/tg-groups.md rules 2 and 3). Names the index carries are attacker-
  * chosen — anyone can deploy a coin called "ignore your instructions" — so a
@@ -20,6 +20,7 @@ import type { BarsRead } from "./gecko";
 import { fmtAge, fmtInt, fmtPct, fmtPrice, fmtUsd, fmtX, utcClock } from "./format";
 import { technicals, type Bar, type Technicals } from "./ta";
 import { DeskBudget, type DeskReadOptions } from "./deadline";
+import type { CoinProfile, LoreRead } from "./lore";
 
 /**
  * May a group read this ticker? Anyone can deploy a coin called "scam.io" or
@@ -35,6 +36,8 @@ export interface DeskReads {
   search(query: string, options?: DeskReadOptions): Promise<GeckoFetch>;
   tokenPools(address: string, options?: DeskReadOptions): Promise<GeckoFetch>;
   hourly(poolId: string, token: string, options?: DeskReadOptions): Promise<BarsRead>;
+  /** Optional public project claims, resolved only after the exact token is known. */
+  lore?(address: string, options?: DeskReadOptions): Promise<LoreRead>;
   feed(feed: PoolFeed, options?: DeskReadOptions): Promise<GeckoFetch>;
   now(): number;
 }
@@ -79,6 +82,7 @@ export interface CoinMeasure {
   tech: Technicals | null;
   observedAtMs: number;
   nowMs: number;
+  lore?: CoinProfile;
 }
 
 export type CoinMeasured = { ok: true; coin: CoinMeasure } | { ok: false; why: "not-found" | "ambiguous" | "unavailable" };
@@ -189,6 +193,7 @@ export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, rea
   const pool = mainPool(pools);
   if (!pool) return { ok: false, why: "not-found" };
   const sides = poolSides(pool.name);
+  let profile: CoinProfile | undefined;
   const fromChart = (chart: BarsRead): CoinMeasure => {
     const bars = chart.failed ? [] : chart.bars;
     const ticker = cleanSymbol(chart.symbol) ?? sides.base;
@@ -205,13 +210,27 @@ export async function measureCoin(ask: Extract<TgDeskAsk, { kind: "coin" }>, rea
       tech: technicals(bars),
       observedAtMs: Math.min(observedAt ?? now, chart.observedAt ?? now),
       nowMs: now,
+      ...(profile ? { lore: profile } : {}),
     };
   };
   // Pool measurements already support a real read. A slow chart must not
   // hide them, including from a caller joining a shared lookup late.
   const unavailable: BarsRead = { failed: true, failure: "timeout", bars: [] };
-  onPartial?.(fromChart(unavailable));
-  const chart = await budget.run((options) => reads.hourly(pool.poolId, token, options), unavailable, Math.min(3000, budget.remaining() * 0.75));
+  let chart = unavailable;
+  onPartial?.(fromChart(chart));
+  // Optional background and candles share the same slice. Either completed
+  // result can enrich a partial reply without waiting for the other source.
+  const sliceMs = Math.min(3000, budget.remaining() * 0.75);
+  await Promise.all([
+    budget.run((options) => reads.hourly(pool.poolId, token, options), unavailable, sliceMs)
+      .then((value) => { chart = value; onPartial?.(fromChart(chart)); }),
+    ...(reads.lore ? [budget.run((options) => reads.lore!(token, options), { failed: true } as LoreRead, sliceMs)
+      .then((value) => {
+        const candidate = value.failed ? undefined : value.profile;
+        if (candidate?.chainId === 4663 && candidate.token.toLowerCase() === token && candidate.description) profile = candidate;
+        onPartial?.(fromChart(chart));
+      })] : []),
+  ]);
   const coin = fromChart(chart);
   onPartial?.(coin);
   return { ok: true, coin };
@@ -323,61 +342,44 @@ export function coinFloor(c: CoinMeasure): TgDeskThought {
   const liq = c.pools.reduce((acc, x) => acc + (x.reserveUsd ?? 0), 0);
   const age = ageSec(c);
   const h24 = { ...flowOf(c.pools, "h24"), changePct: p.buckets.h24.changePct };
+  const curve = p.dex === CURVE_DEX;
+  const buyersLead = n(h24.buyers) && n(h24.sellers) ? h24.buyers - h24.sellers : null;
   if (!t) {
-    const parts = [`not enough chart history on ${s} to read a trend yet`];
-    if (n(h24.changePct)) parts.push(`it's ${fmtPct(h24.changePct)} on the day`);
-    if (liq > 0) parts.push(`with ${fmtUsd(liq)} of liquidity`);
-    if (n(h24.volumeUsd)) parts.push(`${fmtUsd(h24.volumeUsd)} traded over 24h`);
-    if (n(h24.buyers) && n(h24.sellers)) parts.push(`${fmtInt(h24.buyers)} buyers vs ${fmtInt(h24.sellers)} sellers`);
-    else if (n(h24.buys) && n(h24.sells)) parts.push(`${fmtInt(h24.buys)} buys vs ${fmtInt(h24.sells)} sells`);
+    const parts: string[] = [];
+    if (n(h24.changePct) && h24.changePct > 20) parts.push("It's already had a sharp move today, so I wouldn't chase on that alone.");
+    else if (n(h24.changePct) && h24.changePct < -20) parts.push("It's sold off sharply today; a cheaper price alone doesn't show a recovery.");
+    else parts.push("I don't have enough candle history to call a trend or an entry yet.");
+    if (buyersLead !== null && buyersLead < 0) parts.push("More sellers than buyers are participating, which keeps me cautious.");
+    else if (buyersLead !== null && buyersLead > 0) parts.push("Buyers lead the participation count, but that alone doesn't show sustained demand.");
+    parts.push(curve ? "It's still in its launch phase, and I can't confirm executable depth from the index." : "I'd want a clearer price structure before calling an entry.");
     return {
-      read: `${parts.join(", ")}. i can judge this snapshot's flow and liquidity, but entry levels need the candles.`,
+      read: parts.join(" "),
       stance: "cautious",
-      watch: "whether fresh buyers outnumber sellers with liquidity holding up",
+      watch: curve ? "whether buyer participation improves and real trading depth can be confirmed" : "whether fresh buyers outnumber sellers with liquidity holding up",
       invalidation: "liquidity getting pulled or volume dying off",
     };
   }
   const out: string[] = [];
-  const e20 = t.ema20 !== null ? fmtPrice(t.ema20) : null;
-  const e50 = t.ema50 !== null ? fmtPrice(t.ema50) : null;
-  const emas = e20 && e50 ? `the ema20 (${e20}) and ema50 (${e50})` : e20 ? `the ema20 (${e20})` : "its moving averages";
-  const structure = t.structure === "higher highs and higher lows" ? ", printing higher highs and higher lows"
-    : t.structure === "lower highs and lower lows" ? ", still printing lower highs and lower lows" : "";
-  if (t.trend === "uptrend") out.push(`${s} is trending up on the 1h — price is above ${emas}${structure}.`);
-  else if (t.trend === "downtrend") out.push(`${s} is in a downtrend on the 1h — price is below ${emas}${structure}.`);
-  else out.push(`${s} is chopping sideways on the 1h around ${emas}${structure}.`);
-
-  if (t.rsi14 !== null) {
-    const r = Number(t.rsi14.toFixed(1));
-    const tone = r >= 75 ? "stretched — chasing up here is late" : r >= 60 ? "strong without being overheated" : r >= 45 ? "neutral" : r >= 30 ? "weak" : "washed out, which can bounce but isn't a trend change";
-    const high = t.belowHighPct >= 3 ? `, ${fmtPct(t.belowHighPct, false)} under the ${t.hours >= 120 ? "7d" : `${t.hours}h`} high` : ", pressing the top of its range";
-    out.push(`rsi ${r} is ${tone}${high}.`);
-  }
+  if (t.trend === "uptrend") out.push(`${s} is trending up on the 1h${t.structure === "higher highs and higher lows" ? ", with higher highs and higher lows" : ""}.`);
+  else if (t.trend === "downtrend") out.push(`${s} is in a downtrend on the 1h${t.structure === "lower highs and lower lows" ? ", with lower highs and lower lows" : ""}.`);
+  else out.push(`${s} is chopping sideways on the 1h; direction isn't settled.`);
 
   const v6 = t.volume6hVsPrior;
-  const buyersLead = n(h24.buyers) && n(h24.sellers) ? h24.buyers - h24.sellers : null;
-  const flow = n(h24.buyers) && n(h24.sellers) ? `${fmtInt(h24.buyers)} buyers vs ${fmtInt(h24.sellers)} sellers over 24h` : null;
-  if (v6 !== null && v6 >= 1.5) out.push(`volume is picking up (last 6h at ${fmtX(v6)} the prior pace)${flow ? `, ${flow}` : ""}.`);
-  else if (v6 !== null && v6 <= 0.6) {
-    const diverge = t.trend === "uptrend" ? " — the move isn't being backed by fresh volume" : "";
-    out.push(`volume is drying up (last 6h at ${fmtX(v6)} the prior pace)${diverge}${flow ? `; ${flow}` : ""}.`);
-  } else if (flow) out.push(`participation is steady, ${flow}.`);
+  if (t.rsi14 !== null && t.rsi14 >= 75) out.push("Momentum looks stretched, so chasing carries extra risk.");
+  else if (v6 !== null && v6 <= 0.6 && t.trend === "uptrend") out.push("The rise is losing volume support, which makes the move less convincing.");
+  else if (v6 !== null && v6 >= 1.5) out.push("Volume is picking up, giving the move more participation.");
+  else if (buyersLead !== null && buyersLead < 0) out.push("Sellers outnumber buyers, so participation isn't backing a clean entry.");
+  else if (buyersLead !== null && buyersLead > 0) out.push("Buyers outnumber sellers, though that doesn't prove lasting demand.");
 
   const fdv = n(p.fdvUsd) && p.fdvUsd > 0 ? p.fdvUsd : null;
   const thin = liq > 0 && liq < 25_000;
-  if (thin) out.push(`liquidity is thin at ${fmtUsd(liq)}, so size moves it a lot.`);
-  else if (fdv && liq > 0 && liq / fdv < 0.03) out.push(`liquidity is light for its size (${fmtUsd(liq)} against a ${fmtUsd(fdv)} fdv).`);
-  if (age !== null && age < 48 * 3600) out.push(`it's only ${fmtAge(age)} old, so the chart has little history to lean on.`);
+  if (curve) out.push("It's still in its launch phase; indexed reserves don't confirm executable trading depth.");
+  else if (thin) out.push("Liquidity is thin, so even modest trades can move the price.");
+  else if (fdv && liq > 0 && liq / fdv < 0.03) out.push("Trading depth is light relative to its valuation.");
+  else if (age !== null && age < 48 * 3600) out.push("It's young, so there's little history to lean on.");
 
   const s1 = t.supports[0];
-  const s2 = t.supports[1];
   const r1 = t.resistances[0];
-  const r2 = t.resistances[1];
-  const lvl = [
-    s1 ? `support sits around ${fmtPrice(s1.price)}${s2 ? `, then ${fmtPrice(s2.price)}` : ""}` : null,
-    r1 ? `resistance at ${fmtPrice(r1.price)}${r2 ? `, then ${fmtPrice(r2.price)}` : ""}` : null,
-  ].filter(Boolean);
-  if (lvl.length) out.push(`${lvl.join("; ")}.`);
 
   // Stance: a few plain points, said out loud so it can be audited.
   let score = 0;
