@@ -382,6 +382,7 @@ function parseRoom(v: unknown, keyHint: string): TgRoom | null {
   for (const k of [
     "addedAtMs",
     "askedOwnerAtMs",
+    "unblockedAtMs",
     "shushedUntilMs",
     "lastOwnAtMs",
     "lastAmbientAtMs",
@@ -930,6 +931,8 @@ export class TgGroupsStore {
       room.status = status;
       room.statusAtMs = at;
       delete room.askedOwnerAtMs;
+      // The owner has decided again (TgRoom.unblockedAtMs).
+      if (status === "approved" || status === "blocked") delete room.unblockedAtMs;
       if (byId !== undefined && isInt(byId) && (status === "approved" || status === "pending")) {
         room.addedById = byId;
         room.addedAtMs = at;

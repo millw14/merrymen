@@ -1446,8 +1446,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!room) return undefined;
     if (room.status === "pending" || room.status === "left") {
       // A negative id on the allowlist is a group the owner ran /link in
-      // before this feature: approved on first sight.
-      if (linked) {
+      // before this feature: approved on first sight — unless the owner has
+      // since told it to leave and only unblocked it (unblock).
+      if (linked && room.unblockedAtMs === undefined) {
         store.setStatus(chatId, "approved");
         note("ok", "Telegram groups: a group the owner linked earlier is approved");
       } else if (room.status === "left") {
@@ -2542,9 +2543,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * again, where a blocked room's would have been undone quietly. Memory is not
    * touched; Forget is for that. `releft` is cleared so a line from the group,
    * if it is ever back, is not answered with a leave this process remembered.
+   *
+   * `unblockedAtMs` holds that promise for a group the owner once ran /link in:
+   * its allowlist entry would otherwise approve anyone's re-add on sight, and
+   * the owner's Leave came after that link. It lasts until they decide again.
    */
   const unblock = (chatId: number): void => {
     store.setStatus(chatId, "left");
+    store.update(chatId, (r) => {
+      r.unblockedAtMs = clock();
+    }, { flush: true });
     releft.delete(chatId);
   };
 
@@ -2843,7 +2851,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           if (switchOn()) track(leaveRoom(chatId, "the owner said leave"));
           return;
         }
-        if (linked) {
+        // A link the owner made before telling it to leave does not outlast
+        // that Leave: an unblocked group is asked about again (unblock).
+        if (linked && room.unblockedAtMs === undefined) {
           approve(chatId, u.fromId, "added to a group the owner linked", o?.late === true);
           return;
         }

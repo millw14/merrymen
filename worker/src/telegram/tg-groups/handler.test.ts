@@ -517,6 +517,43 @@ describe("membership", () => {
     assert.equal(tg.of("leaveChat").length, 3, "blocked again later, it leaves again");
   });
 
+  it("Unblock on a group the owner once /linked: a stranger's re-add still asks, the owner's approves", async () => {
+    // The legacy allowlist entry approves a re-add on sight. The owner's Leave
+    // came after that link, so unblocking must not hand it back silently.
+    cfg.telegramAllowlist = [OWNER, CHAT];
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    assert.ok(store.room(CHAT)?.unblockedAtMs !== undefined);
+    const asked = tg.sends(OWNER).length;
+
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "pending", "not approved by the old link");
+    assert.equal(tg.sends(OWNER).length, asked + 1, "the owner is asked");
+
+    // Stay is the owner deciding again: approved, and the link counts from here.
+    await groups.onCallback(press(`tgg:stay:${CHAT}`));
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(store.room(CHAT)?.unblockedAtMs, undefined);
+  });
+
+  it("Unblock on a /linked group: a line from it after a missed re-add is not approved by the link either", async () => {
+    cfg.telegramAllowlist = [OWNER, CHAT];
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    await said(msg("anyone here?", { fromId: BOB }));
+    assert.equal(store.room(CHAT)?.status, "pending");
+    // The owner adding it back still approves it, as it always did.
+    groups.onMember(member());
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(store.room(CHAT)?.unblockedAtMs, undefined);
+  });
+
   it("Unblock on a group that is not blocked changes nothing", async () => {
     make();
     approveRoom(CHAT, "frens");

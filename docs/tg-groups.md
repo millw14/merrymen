@@ -142,7 +142,10 @@ A group is `approved`, `pending`, `left` or `blocked`.
   `/groups unblock` (alias `/unblock`, which clears every blocked group) move
   it to `left`: the bot is not in it and has not been asked in, so the
   owner's re-add approves it as before, and anyone else's asks the owner
-  again. Memory is untouched; Forget is for that.
+  again. That holds for a group on `telegramAllowlist` from a legacy
+  `/link` too: the Leave came after the link, so the link does not approve
+  it again until the owner decides (Stay, their own re-add, or Leave clears
+  `unblockedAtMs`). Memory is untouched; Forget is for that.
 
 In a group that is not `approved` it never sends "🚫 not authorized" (today's
 behaviour for every visible message, which with privacy mode off would be one
