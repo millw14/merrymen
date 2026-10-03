@@ -1682,6 +1682,24 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
     assert.equal(store.room(CHAT)?.lines.filter((l) => !l.own).length, 0);
   });
 
+  it("the owner's /groups unblock in DM clears a blocked group; anyone else's is just a DM", async () => {
+    const GONE = -1004411223344;
+    store.ensureRoom(GONE, { title: "left by mistake", kind: "supergroup" });
+    store.setStatus(GONE, "blocked");
+    const before = sendsTo(OWNER).length;
+    await deliver(dm("/groups unblock"));
+    await waitFor(() => sendsTo(OWNER).length === before + 1);
+    assert.match(String(sendsTo(OWNER).at(-1)?.body.text), /Unblocked «left by mistake»/);
+    assert.equal(store.room(GONE)?.status, "left");
+    assert.equal(store.room(CHAT)?.status, "approved", "an approved group is untouched");
+
+    store.setStatus(GONE, "blocked");
+    const again = sendsTo(OWNER).length;
+    await deliver(dm("/unblock"));
+    await waitFor(() => sendsTo(OWNER).length === again + 1);
+    assert.equal(store.room(GONE)?.status, "left", "/unblock is the same command");
+  });
+
   it("the owner's live group, joined before this feature: never refused or asked for a code, approved when the owner speaks, its welcome answered", async () => {
     const LIVE = -1003377889900;
     const chat = { id: LIVE, type: "supergroup", title: "lust rage mode (the redemption)" };

@@ -110,6 +110,8 @@ export interface OperationCounts {
  * Gas is still summed per row. The reconciler's copies carry no gas, so the
  * copies this exists for add nothing to it; a byte-for-byte duplicate would,
  * and that is the repair's job rather than a reader's.
+ * Reverted operations with owner gas proof also spent money, even though
+ * their trade outcome and refusal counts remain unchanged.
  */
 export async function readOperationCounts(
   db: Db,
@@ -120,8 +122,8 @@ export async function readOperationCounts(
   const op = tradeOpKey("t");
   const t = (await db
     .prepare(
-      `SELECT COALESCE(SUM(CASE WHEN t.status = 'landed' THEN t.gas_usdg ELSE 0 END), 0) AS gas,
-              COUNT(DISTINCT CASE WHEN t.status = 'landed' AND t.gas_wei IS NOT NULL AND t.gas_usdg IS NULL
+      `SELECT COALESCE(SUM(CASE WHEN t.status IN ('landed','reverted') THEN t.gas_usdg ELSE 0 END), 0) AS gas,
+              COUNT(DISTINCT CASE WHEN t.status IN ('landed','reverted') AND t.gas_wei IS NOT NULL AND t.gas_usdg IS NULL
                                   THEN ${op} END) AS unpriced,
               COUNT(DISTINCT CASE WHEN t.status = 'landed' THEN ${op} END) AS landed,
               COUNT(DISTINCT CASE WHEN t.status = 'paper' THEN ${op} END) AS paper_filled,

@@ -90,7 +90,9 @@ describe("read-only grant renewal preflight", () => {
         ...options, extraTokens, trencherFactory: TRENCHER_FACTORY, v4AdapterAddress: V4_ADAPTER,
       }), error => {
         assert.ok(error instanceof Error);
-        assert.match(error.message, /against a limit of 14,000,000/);
+        // The 14,000,000 maximum, less room for the operation that installs
+        // the key (core first-enable-gas.ts KEY_INSTALL_RESERVE_BOUNDED).
+        assert.match(error.message, /against a limit of 13,850,000 \(14,000,000, less room for the operation that installs it\)/);
         assert.match(error.message, /the most that fits with the features you have enabled is 4\. Remove at least 2 custom tokens/);
         return true;
       });
@@ -104,6 +106,22 @@ describe("read-only grant renewal preflight", () => {
     await withStubChain(ACCOUNT, () => assert.rejects(preflightAgentGrant(signer.owner, {
       ...options, expectAccount: "0x000000000000000000000000000000000000b110",
     }), /refusing to sign: this owner derives/));
+    assert.equal(signer.calls(), 0);
+  });
+
+  it("refuses a missing or mismatched v4 deployment before any owner signature", async () => {
+    const { preflightAgentGrant } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    for (const state of [
+      { currentNonce: 8, v4Code: "0x" },
+      { currentNonce: 8, v4Code: "unreadable" },
+      { currentNonce: 8, v4PoolManager: ACCOUNT },
+      { currentNonce: 8, v4PoolManager: "unreadable" },
+    ] satisfies KernelState[]) {
+      await withStubChain(ACCOUNT, () => assert.rejects(preflightAgentGrant(signer.owner, {
+        ...options, v4AdapterAddress: V4_ADAPTER,
+      }), /Could not check Uniswap v4.*Nothing was signed/s), state);
+    }
     assert.equal(signer.calls(), 0);
   });
 

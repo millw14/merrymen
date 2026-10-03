@@ -38,7 +38,7 @@ function pgTranslated(raw: DatabaseSync): Db {
 }
 
 const SCHEMA = `CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, status TEXT,
-  user_op_hash TEXT, decision_id TEXT, fill_side TEXT, buy_token TEXT, gas_wei TEXT, gas_usdg REAL,
+  user_op_hash TEXT, decision_id TEXT, fill_side TEXT, buy_token TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL,
   epoch INTEGER, created_at INTEGER);`;
 
 /**
@@ -124,6 +124,41 @@ for (const [label, open] of [
         assert.equal(c.tokensTouched, 1);
         assert.equal(c.gasUsdg, 0.01);
         assert.equal(c.unpricedTrades, 0);
+      } finally {
+        raw.close();
+      }
+    });
+
+    it("includes proved reverted owner installation expenses and unpriced caveats within the account's run", async () => {
+      const raw = new DatabaseSync(":memory:");
+      try {
+        seed(raw);
+        raw.exec(`INSERT INTO trades (agent_id, kind, status, user_op_hash, gas_wei, sponsored_gas_wei, gas_usdg, epoch, created_at) VALUES
+          ('0xA', 'key-install', 'reverted', '0xpriced', '1000', NULL, 0.25, 2, 2000),
+          ('0xA', 'key-install', 'reverted', '0xunpriced', '2000', NULL, NULL, 2, 2001),
+          ('0xA', 'key-install', 'reverted', '0xUNPRICED', '2000', NULL, NULL, 2, 2002),
+          ('0xA', 'key-install', 'reverted', '0xsponsor', NULL, '3000', NULL, 2, 2003),
+          ('0xA', 'key-install', 'reverted', '0xmissing', NULL, NULL, NULL, 2, 2004),
+          ('0xA', 'key-install', 'reverted', '0xlegacyprice', NULL, NULL, 0.5, 2, 2005),
+          ('0xA', 'key-install', 'submitted', '0xpending', NULL, NULL, NULL, 2, 2006),
+          ('0xA', 'key-install', 'reverted', '0xpriced', '4000', NULL, 30, 1, 2007),
+          ('0xA', 'key-install', 'reverted', '0xunpriced', '5000', NULL, NULL, 1, 2008),
+          ('0xOTHER', 'key-install', 'reverted', '0xpriced', '6000', NULL, 50, 2, 2009),
+          ('0xOTHER', 'key-install', 'reverted', '0xunpriced', '7000', NULL, NULL, 2, 2010);`);
+        const db = open(raw);
+        const counts = await readOperationCounts(db, "0xA", 2, "landed");
+        assert.ok(Math.abs(counts.gasUsdg - 0.76) < 1e-12, "priced owner reverts add to landed gas, including legacy priced cost without wei");
+        assert.equal(counts.unpricedTrades, 1, "unknown owner price is counted once; sponsor and missing proof add no caveat");
+        assert.equal(counts.landed, 4);
+        assert.equal(counts.filledPaper, 1);
+        assert.equal(counts.tokensTouched, 1);
+        assert.equal(counts.refused, 8, "the five new reverted operations keep the existing refusal counter semantics");
+        const previousRun = await readOperationCounts(db, "0xA", 1, "landed");
+        assert.equal(previousRun.gasUsdg, 30);
+        assert.equal(previousRun.unpricedTrades, 1);
+        const otherOwner = await readOperationCounts(db, "0xOTHER", 2, "landed");
+        assert.equal(otherOwner.gasUsdg, 50);
+        assert.equal(otherOwner.unpricedTrades, 1);
       } finally {
         raw.close();
       }

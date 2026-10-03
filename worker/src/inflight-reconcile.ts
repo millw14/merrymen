@@ -428,6 +428,10 @@ export interface ResolvedOp {
   txHash: string;
   /** The chain's verdict. A reverted op moved nothing. */
   success: boolean;
+  /** Per-operation cost and payer from its own EntryPoint event, including reverts. */
+  gasWei: bigint;
+  gasUnits: bigint;
+  gasPayer: "owner" | "sponsor";
   /** |USDG leg|, 6dp. 0 when unattributable, and only meaningful on success. */
   notionalUsdg6: bigint;
   attributed: boolean;
@@ -504,7 +508,7 @@ export async function resolveSubmittedOps(opts: {
     // established "not found". Both leave the op exactly as it was.
     if (!logs.complete || logs.logs.length === 0) continue;
 
-    let decoded: { success: boolean } | null = null;
+    let decoded: { success: boolean; gasWei: bigint; gasUnits: bigint; gasPayer: "owner" | "sponsor" } | null = null;
     let txHash = "";
     let blockNumber: bigint | undefined;
     for (const raw of logs.logs) {
@@ -515,7 +519,8 @@ export async function resolveSubmittedOps(opts: {
           data: raw.data,
         });
         if (String(d.args.userOpHash).toLowerCase() !== hash) continue;
-        decoded = { success: Boolean(d.args.success) };
+        decoded = { success: Boolean(d.args.success), gasWei: d.args.actualGasCost, gasUnits: d.args.actualGasUsed,
+          gasPayer: /^0x0{40}$/i.test(String(d.args.paymaster)) ? "owner" : "sponsor" };
         txHash = String(raw.transactionHash).toLowerCase();
         try {
           const b = raw.blockNumber === undefined ? undefined : BigInt(raw.blockNumber);
@@ -546,7 +551,7 @@ export async function resolveSubmittedOps(opts: {
         usdgDelta6 = null;
       }
     }
-    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, usdgDelta6, ...(blockNumber !== undefined ? { blockNumber } : {}) });
+    out.push({ userOpHash: hash, txHash, ...decoded, notionalUsdg6, attributed, usdgDelta6, ...(blockNumber !== undefined ? { blockNumber } : {}) });
   }
   return out;
 }

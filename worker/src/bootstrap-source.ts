@@ -105,19 +105,21 @@ export function missingHeldColumns(e: unknown): boolean {
  * row has a read time but its insert — so it reads exactly what the anchor
  * read before them, and a held mark cannot slip in through it.
  */
-async function cashBaseline(shared: Db, agentId: string): Promise<EquityRow | undefined> {
+async function cashBaseline(shared: Db, agentId: string, epoch: number): Promise<EquityRow | undefined> {
   try {
     return (await shared
       .prepare(
         "SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity " +
-          "WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1",
+          "WHERE LOWER(agent_id) = ? AND epoch = ? AND mode = 'live' " +
+          "AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1",
       )
-      .get(agentId)) as EquityRow | undefined;
+      .get(agentId, epoch)) as EquityRow | undefined;
   } catch (e) {
     if (!missingHeldColumns(e)) throw e;
     return (await shared
-      .prepare("SELECT cash_usdg, at AS read_at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
-      .get(agentId)) as EquityRow | undefined;
+      .prepare("SELECT cash_usdg, at AS read_at FROM equity " +
+        "WHERE LOWER(agent_id) = ? AND epoch = ? AND mode = 'live' ORDER BY at DESC, id DESC LIMIT 1")
+      .get(agentId, epoch)) as EquityRow | undefined;
   }
 }
 
@@ -235,7 +237,12 @@ export async function deriveBootstrapAccounting(
     // in this cash, and the hosted resume's `since` must let its settlement
     // shift the baseline rather than read it as drift. Older rows fall back to
     // `at`. Aliased `read_at` so ORDER BY still means the insert.
-    const equity = await cashBaseline(shared, agentId);
+    // Compare the next real cash read only with this period's real book.
+    // A newer practice mark (usually 1,000 USDG) or a prior period's balance
+    // is not evidence of a deposit or withdrawal in the current live book.
+    // Unclassified legacy marks still count as history below, but cannot
+    // license a cash baseline when their mode is unknown.
+    const equity = await cashBaseline(shared, agentId, epoch);
     // But a held mark IS a durable trace of a funded account: it must refuse the
     // new-account claim below exactly as any other mark does.
     const anyMark: unknown =

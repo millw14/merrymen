@@ -529,7 +529,7 @@ describe("THE EXCLUSIONS", () => {
     assert.match(CODE, /const discovered = autoTrench\.tokens\.filter\([^;]*&&!isEnergyReserveToken\(t\.address\)\);/);
   });
   it("the deposit scan is told the grant's chain (which reserve tokens make a purchase reserve-out)", () => {
-    const at = CODE.indexOf("flows = await findTransferFlows({");
+    const at = CODE.indexOf("await scanAndBookDepositWindow({");
     assert.match(CODE.slice(at, at + 1200), /\.\.\.\(s\.grant \? \{ chainId: s\.grant\.chainId \} : \{\}\),/);
   });
 });

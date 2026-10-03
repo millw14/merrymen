@@ -19,7 +19,7 @@
  *     where it must not, and that no method throws.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -476,6 +476,164 @@ describe("membership", () => {
     groups.onMember(member());
     await groups.drain();
     assert.equal(store.room(CHAT)?.status, "approved");
+  });
+
+  it("Unblock: a Leave pressed by mistake is undone, and a stranger's re-add asks the owner again", async () => {
+    make();
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    assert.equal(store.room(CHAT)?.status, "blocked");
+    const asked = tg.sends(OWNER).length;
+
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    // Undecided, not approved: the bot is not in the group, and unblocking is
+    // not the owner asking it in.
+    assert.equal(store.room(CHAT)?.status, "left");
+    assert.match(String(tg.of("editMessageText").at(-1)?.body.text), /Unblocked «frens»/);
+    assert.equal(tg.of("leaveChat").length, 1, "unblocking leaves nothing");
+
+    // A stranger adding it back is no longer undone: the owner is asked.
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(tg.of("leaveChat").length, 1, "not left again");
+    assert.equal(store.room(CHAT)?.status, "pending");
+    assert.equal(tg.sends(OWNER).length, asked + 1, "the owner is asked again");
+  });
+
+  it("Unblock clears the process's own re-leave memory, so a line from the group is not met with a leave", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    // A line proves it is back while blocked: it leaves again, once per process.
+    await said(msg("still here?"));
+    assert.equal(tg.of("leaveChat").length, 2);
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    groups.onMember(member());
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    store.setStatus(CHAT, "blocked");
+    await said(msg("back again"));
+    assert.equal(tg.of("leaveChat").length, 3, "blocked again later, it leaves again");
+  });
+
+  it("Unblock on a group the owner once /linked: a stranger's re-add still asks, the owner's approves", async () => {
+    // The legacy allowlist entry approves a re-add on sight. The owner's Leave
+    // came after that link, so unblocking must not hand it back silently.
+    cfg.telegramAllowlist = [OWNER, CHAT];
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    assert.ok(store.room(CHAT)?.unblockedAtMs !== undefined);
+    const asked = tg.sends(OWNER).length;
+
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "pending", "not approved by the old link");
+    assert.equal(tg.sends(OWNER).length, asked + 1, "the owner is asked");
+
+    // Stay is the owner deciding again: approved, and the link counts from here.
+    await groups.onCallback(press(`tgg:stay:${CHAT}`));
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(store.room(CHAT)?.unblockedAtMs, undefined);
+  });
+
+  it("Unblock persists its consent guard with its status before a restart can revive an old /link", async () => {
+    cfg.telegramAllowlist = [OWNER, CHAT];
+    make();
+    approveRoom(CHAT, "frens");
+    store.addLine(CHAT, { messageId: 7, fromId: ANN, name: "Ann", text: "memory kept", atMs: clock });
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    const writes: Array<{ status: string; statusAtMs: number; unblockedAtMs?: number; askedOwnerAtMs?: number }> = [];
+    const captureWrite = () => {
+      const disk = JSON.parse(readFileSync(store.file, "utf8"));
+      writes.push(disk.rooms[String(CHAT)]);
+    };
+    const originalSetStatus = store.setStatus;
+    const originalUpdate = store.update;
+    store.setStatus = (...args) => {
+      originalSetStatus.apply(store, args);
+      captureWrite();
+    };
+    store.update = (...args) => {
+      originalUpdate.apply(store, args);
+      if (args[2]?.flush) captureWrite();
+    };
+    try {
+      await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    } finally {
+      store.setStatus = originalSetStatus;
+      store.update = originalUpdate;
+    }
+    assert.equal(writes.length, 1, "status and consent guard must reach disk together");
+    assert.equal(writes[0]?.status, "left");
+    assert.equal(writes[0]?.statusAtMs, clock);
+    assert.equal(writes[0]?.unblockedAtMs, clock, "every persisted unblocked state overrides the legacy link");
+    assert.equal(writes[0]?.askedOwnerAtMs, undefined);
+
+    groups.stop();
+    await groups.drain();
+    store.close();
+    store = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+    assert.ok(store.room(CHAT)?.lines.some((l) => l.text === "memory kept"), "unblocking preserves the room's memory");
+    make();
+    const asked = tg.sends(OWNER).length;
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "pending", "a restart cannot let the old link approve a stranger");
+    assert.equal(tg.sends(OWNER).length, asked + 1, "the owner must consent again");
+  });
+
+  it("Unblock on a /linked group: a line from it after a missed re-add is not approved by the link either", async () => {
+    cfg.telegramAllowlist = [OWNER, CHAT];
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    await said(msg("anyone here?", { fromId: BOB }));
+    assert.equal(store.room(CHAT)?.status, "pending");
+    // The owner adding it back still approves it, as it always did.
+    groups.onMember(member());
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(store.room(CHAT)?.unblockedAtMs, undefined);
+  });
+
+  it("Unblock on a group that is not blocked changes nothing", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.match(String(tg.of("editMessageText").at(-1)?.body.text), /isn't blocked/);
+  });
+
+  it("Unblock from anyone but the owner, in their DM, decides nothing", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`, { fromId: BOB }));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`, { chatId: CHAT }));
+    assert.equal(store.room(CHAT)?.status, "blocked");
+  });
+
+  it("/groups unblock clears every blocked group and only those", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    store.ensureRoom(OTHER, { title: "strangers", kind: "supergroup" });
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:leave:${OTHER}`));
+    store.ensureRoom(-1003, { title: "kept", kind: "supergroup" });
+    store.setStatus(-1003, "approved");
+
+    await groups.unblockAll(OWNER);
+    assert.equal(store.room(CHAT)?.status, "left");
+    assert.equal(store.room(OTHER)?.status, "left");
+    assert.equal(store.room(-1003)?.status, "approved", "an approved group is untouched");
+    assert.match(tg.texts(OWNER).at(-1) ?? "", /Unblocked «(frens|strangers)», «(frens|strangers)»/);
+
+    await groups.unblockAll(OWNER);
+    assert.match(tg.texts(OWNER).at(-1) ?? "", /Nothing to unblock/);
   });
 
   it("no answer within 24 h: it leaves on its own", async () => {
@@ -1933,6 +2091,24 @@ describe("forgetting and the owner's controls", () => {
     assert.equal(edit?.body.message_id, listId);
     assert.match(String(edit?.body.text), /Your Telegram groups/);
     assert.ok(edit?.body.reply_markup, "the buttons stay under a re-rendered list");
+  });
+
+  it("/groups offers Unblock on a blocked group, and says how to clear them all", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.groupsCommand(OWNER);
+    const list = tg.sends(OWNER).at(-1);
+    assert.match(String(list?.body.text), /1\. «frens» — you told me to leave/);
+    assert.match(String(list?.body.text), /\/groups unblock/);
+    assert.deepEqual(list?.body.reply_markup, {
+      inline_keyboard: [
+        [
+          { text: "1 · Unblock", callback_data: `tgg:unblock:${CHAT}` },
+          { text: "1 · Forget", callback_data: `tgg:forget:${CHAT}` },
+        ],
+      ],
+    });
   });
 
   it("/groups with none, and with privacy mode on, says so", async () => {

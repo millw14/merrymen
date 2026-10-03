@@ -526,7 +526,9 @@ test("THE CALL SITE: the ceiling is keyed on the OPERATION, and the deploy state
   // different thing: keyed on the batch decoding as the vault's own
   // deploy(self), never on whether the account is deployed (asserted below).
   assert.doesNotMatch(code, /\bDEPLOY_GAS_BOUNDS\b/, "the undeployed-only ceiling is gone");
-  assert.match(code, /const trencherDeploy = !firstEnable && isTrencherVaultDeploy\(calls, hooks\?\.trencherDeployFactory, account\.address\)/,
+  // And only for a trade: a key installed on its own (installKey) carries the
+  // executor's fixed approve, never a vault deployment.
+  assert.match(code, /const trencherDeploy =\s*mode === "trade" && !firstEnable && isTrencherVaultDeploy\(calls, hooks\?\.trencherDeployFactory, account\.address\)/,
     "the vault deployment's ceiling is keyed on the decoded batch and the caller's factory");
   assert.match(src, /!accountLive && isFirstEnable\(nonce\)/, "and the old gate is on the record");
 

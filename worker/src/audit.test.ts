@@ -104,6 +104,29 @@ describe("reconstruct — the book from primitives", () => {
     assert.equal(book.netContributionsUsdg, 600);
   });
 
+  it("keeps reverted installation expenses unpriced when their historical cash value is unknown", () => {
+    const book = reconstruct(chain([{ kind: "fill", payload: {
+      kind: "key-install", amountUsdg: 0, status: "reverted", txHash: "0xinstall",
+      gasWei: "123", gasUsdg: null,
+    } }]));
+    assert.equal(book.gasWei, 123n);
+    assert.equal(book.gasUsdg, 0);
+    assert.equal(book.gasUnpricedFills, 1);
+    assert.equal(book.grossBuyNotionalUsdg, 0);
+  });
+
+  it("counts priced reverted installation gas without charging the owner for sponsored gas", () => {
+    const book = reconstruct(chain([
+      { kind: "fill", payload: { kind: "key-install", amountUsdg: 0, status: "reverted", txHash: "0xowner",
+        gasWei: "123", gasUsdg: 0.25 } },
+      { kind: "fill", payload: { kind: "key-install", amountUsdg: 0, status: "reverted", txHash: "0xsponsor",
+        gasWei: null, gasUsdg: null, sponsoredGasWei: "456" } },
+    ]));
+    assert.equal(book.gasWei, 123n);
+    assert.equal(book.gasUsdg, 0.25);
+    assert.equal(book.gasUnpricedFills, 0);
+  });
+
   it("lists every record an RPC could check", () => {
     const book = reconstruct(chain([deposit, buy, sell, mark]));
     assert.deepEqual(book.chainRefs.map((r) => r.txHash), ["0xdep", "0xbuy", "0xsell"]);

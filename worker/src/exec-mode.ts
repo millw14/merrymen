@@ -44,7 +44,7 @@ import { TRADEABLE_CHAIN_ID } from "./preflight";
  */
 export type { RefuseRule } from "../../packages/core/src/autonomy";
 export { liveBlockerText } from "../../packages/core/src/autonomy";
-import type { RefuseRule } from "../../packages/core/src/autonomy";
+import { liveBlockerText, type RefuseRule } from "../../packages/core/src/autonomy";
 
 export type ExecMode =
   /**
@@ -92,6 +92,15 @@ export function publishedMode(v: ExecMode): PublishedMode {
     case "refuse":
       return "idle";
   }
+}
+
+/** The refusal's fill claim must come from the same verdict as execution. */
+export function executionBlockerNotice(v: ExecMode): string {
+  if (v.mode === "live") return "trading for real — every leg of the live rail is available";
+  return `NOT trading for real yet: ${liveBlockerText(v.rule)}. ` +
+    (v.mode === "paper"
+      ? "Fills below are simulated at live prices until that is fixed."
+      : "No real orders or simulated fills are being placed while this is blocked.");
 }
 
 export interface ExecInputs {
@@ -374,4 +383,3 @@ export function liveBlocker(a: ExecInputs): RefuseRule {
   if (!a.gasSponsored && a.gasWei !== null && a.gasWei === 0n) return "no-gas";
   return "no-cash";
 }
-

@@ -698,6 +698,28 @@ describe("ensureRoom and setStatus", () => {
     s.setStatus(CHAT, "pending", 77);
     assert.equal(s.room(CHAT)!.askedOwnerAtMs, undefined, "re-added: not asked yet");
   });
+
+  it("an unblock is remembered across a reopen, and ends when the owner decides again", () => {
+    const s = open();
+    s.ensureRoom(CHAT, { title: "frogs", kind: "group" });
+    s.setStatus(CHAT, "left");
+    s.update(CHAT, (r) => {
+      r.unblockedAtMs = T0;
+    }, { flush: true });
+    assert.equal(onDisk().rooms[String(CHAT)].unblockedAtMs, T0, "on disk at once");
+    s.close();
+    const again = open();
+    assert.equal(again.room(CHAT)!.unblockedAtMs, T0, "read back");
+    again.setStatus(CHAT, "pending", 55);
+    assert.equal(again.room(CHAT)!.unblockedAtMs, T0, "being asked is not a decision");
+    again.setStatus(CHAT, "approved");
+    assert.equal(again.room(CHAT)!.unblockedAtMs, undefined, "Stay, or the owner's own re-add");
+    again.update(CHAT, (r) => {
+      r.unblockedAtMs = T0;
+    });
+    again.setStatus(CHAT, "blocked");
+    assert.equal(again.room(CHAT)!.unblockedAtMs, undefined, "Leave");
+  });
 });
 
 // ─── Lines and people ────────────────────────────────────────────────────

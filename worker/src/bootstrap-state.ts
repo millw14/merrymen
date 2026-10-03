@@ -83,10 +83,10 @@
  *                                reaches the operator log and agents.
  *                                contributions_why, so a demoted carry is not
  *                                just an unexplained count
- *   lastObservedCashUsdg         newest durable equity row → micro-string or
+ *   lastObservedCashUsdg         current period's newest unheld live equity row → micro-string or
  *                                null → planFirstObservation → the downtime
  *                                drift baseline; null means no reading, which
- *                                yields no drift claim rather than a zero one
+ *                                prevents a clean resume claim until verified
  *   accountingEpoch              durable agents row → integer → setAgentEpoch,
  *                                MAX() → the child files its rows in the epoch
  *                                the rest of the system is reading
@@ -666,7 +666,10 @@ export function planFirstObservation(args: {
     return { action: "book-opening-balance", amountUsdg: args.equityUsdg };
   }
   if (args.licence === "resume") {
-    const drift = args.anchorCashUsdg === null ? 0n : args.cashUsdg - args.anchorCashUsdg;
+    if (args.anchorCashUsdg === null) {
+      return { action: "stand-down", why: "no cash baseline from the current live accounting period; contributions cannot be verified across downtime" };
+    }
+    const drift = args.cashUsdg - args.anchorCashUsdg;
     if (drift > args.materialDriftUsdg || drift < -args.materialDriftUsdg) {
       return { action: "resume-with-drift", driftUsdg: drift };
     }

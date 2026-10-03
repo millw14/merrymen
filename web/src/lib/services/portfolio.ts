@@ -1001,13 +1001,13 @@ export interface BookPerformance {
   fees_accrued_usdg: number | null;
   fee_accruals: number | null;
   /**
-   * Gas landed operations paid, in USDG (reports.ts's rule): the priced part;
-   * null when no landed operation has priced gas and some have unpriced or unrecorded gas;
-   * 0 only when nothing landed or every landed operation was sponsored.
+   * Gas settled operations paid, in USDG (reports.ts's rule): the priced part;
+   * null when no settled operation has priced gas and some have unpriced or unrecorded gas;
+   * 0 only when nothing settled or every settled operation was sponsored.
    */
   gas_usdg: number | null;
   gas_unpriced_ops: number | null;
-  /** Landed operations with no gas record at all (neither paid nor sponsored). */
+  /** Settled operations with no gas record at all (neither paid nor sponsored). */
   gas_unrecorded_ops: number | null;
   /** False when gas_usdg leaves out unpriced or unrecorded operations (a floor, or null). */
   gas_complete: boolean | null;
@@ -1083,9 +1083,9 @@ async function runMarkAt(db: Db, run: RunKey, book: Book, cond: string, order: "
 }
 
 /**
- * Operation counts and gas, one row per operation. Gas is what LANDED
+ * Operation counts and gas, one row per operation. Gas is what SETTLED
  * operations paid (the worker's getGasPaidUsdg and reports.ts's rule), and
- * every landed operation is one of: priced (gas_usdg), unpriced (gas_wei with
+ * every settled operation is one of: priced (gas_usdg), unpriced (gas_wei with
  * no USDG price), sponsored (someone else paid), or unrecorded (no gas record
  * at all — a row the in-flight reconciler wrote, say). Only the first is in the
  * total, so the other two decide whether the total is a floor or unknown.
@@ -1100,12 +1100,12 @@ async function opCounts(db: Db, scope: LedgerScope, w: Window): Promise<{ ops: O
         COUNT(CASE WHEN t.status = 'paper' THEN 1 END) AS paper_fills,
         COUNT(CASE WHEN t.status = 'rejected' AND t.reject_rule LIKE 'paper:%' THEN 1 END) AS paper_refused,
         COUNT(CASE WHEN t.status = 'rejected' AND (t.reject_rule IS NULL OR t.reject_rule NOT LIKE 'paper:%') THEN 1 END) AS refused,
-        COALESCE(SUM(CASE WHEN t.status = 'landed' THEN t.gas_usdg END), 0) AS gas,
-        COUNT(CASE WHEN t.status = 'landed' AND t.gas_usdg IS NOT NULL THEN 1 END) AS priced,
-        COUNT(CASE WHEN t.status = 'landed' AND t.gas_wei IS NOT NULL AND t.gas_wei <> '' AND t.gas_usdg IS NULL THEN 1 END) AS unpriced,
-        COUNT(CASE WHEN t.status = 'landed' AND t.gas_usdg IS NULL AND (t.gas_wei IS NULL OR t.gas_wei = '')
+        COALESCE(SUM(CASE WHEN t.status IN ('landed', 'reverted') THEN t.gas_usdg END), 0) AS gas,
+        COUNT(CASE WHEN t.status IN ('landed', 'reverted') AND t.gas_usdg IS NOT NULL THEN 1 END) AS priced,
+        COUNT(CASE WHEN t.status IN ('landed', 'reverted') AND t.gas_wei IS NOT NULL AND t.gas_wei <> '' AND t.gas_usdg IS NULL THEN 1 END) AS unpriced,
+        COUNT(CASE WHEN t.status IN ('landed', 'reverted') AND t.gas_usdg IS NULL AND (t.gas_wei IS NULL OR t.gas_wei = '')
           AND (t.sponsored_gas_wei IS NULL OR t.sponsored_gas_wei = '') THEN 1 END) AS unrecorded,
-        COUNT(CASE WHEN t.status = 'landed' AND t.sponsored_gas_wei IS NOT NULL AND t.sponsored_gas_wei NOT IN ('', '0') THEN 1 END) AS sponsored
+        COUNT(CASE WHEN t.status IN ('landed', 'reverted') AND t.sponsored_gas_wei IS NOT NULL AND t.sponsored_gas_wei NOT IN ('', '0') THEN 1 END) AS sponsored
        FROM ${distinctTrades(`lower(t.agent_id) IN (${qs(scope.accounts.length)}) AND t.created_at > ?`)}
       WHERE t.created_at > ? AND t.created_at <= ?`)
     .get(...scope.accounts, w.since - OP_COPY_REACH_SEC, w.since, w.until)) as Row | undefined;
@@ -1185,10 +1185,10 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
     return_pct: null, max_drawdown_pct: null, attribution: noAttr("this book has no valuation in the window"),
     realized_pnl_usdg: null, realized_sells_counted: null, realized_sells_excluded: null,
     fees_accrued_usdg: live ? null : 0, fee_accruals: live ? null : 0,
-    // reports.ts's rule: zero only when it was measured (nothing landed, or
-    // everything that landed was sponsored); unknown when landed operations
+    // reports.ts's rule: zero only when it was measured (nothing settled, or
+    // everything that settled was sponsored); unknown when settled operations
     // paid gas and none of it was priced; otherwise the priced part, flagged
-    // as a floor whenever any landed operation's gas is unpriced or unrecorded.
+    // as a floor whenever any settled operation's gas is unpriced or unrecorded.
     gas_usdg: live ? (counts.priced > 0 ? money(counts.gas) : counts.unpriced > 0 || counts.unrecorded > 0 ? null : 0) : 0,
     gas_unpriced_ops: live ? counts.unpriced : 0,
     gas_unrecorded_ops: live ? counts.unrecorded : 0,
@@ -1197,10 +1197,10 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
     ops, series: [], series_bucket_s: null, caveats,
   };
   if (!live) caveats.push("Paper book: simulated money. Real deposits and withdrawals never enter it, and it accrues no fees and pays no gas.");
-  if (live && counts.unpriced > 0) caveats.push(`${counts.unpriced} landed operation(s) paid gas that could not be priced in USDG, so gas_usdg leaves them out.`);
-  if (live && counts.unrecorded > 0) caveats.push(`${counts.unrecorded} landed operation(s) carry no gas record at all (neither paid nor sponsored), so gas_usdg leaves them out.`);
-  if (live && out.gas_usdg === null) caveats.push("Gas is unknown, not zero: no landed operation in the window has priced gas, and some have gas that was unpriced or never recorded.");
-  else if (live && out.gas_complete === false) caveats.push("gas_usdg is a floor: it covers only the landed operations whose gas was priced (gas_complete is false).");
+  if (live && counts.unpriced > 0) caveats.push(`${counts.unpriced} settled operation(s) paid gas that could not be priced in USDG, so gas_usdg leaves them out.`);
+  if (live && counts.unrecorded > 0) caveats.push(`${counts.unrecorded} settled operation(s) carry no gas record at all (neither paid nor sponsored), so gas_usdg leaves them out.`);
+  if (live && out.gas_usdg === null) caveats.push("Gas is unknown, not zero: no settled operation in the window has priced gas, and some have gas that was unpriced or never recorded.");
+  else if (live && out.gas_complete === false) caveats.push("gas_usdg is a floor: it covers only the settled operations whose gas was priced (gas_complete is false).");
 
   if (live) {
     const f = (await db

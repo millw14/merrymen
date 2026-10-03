@@ -1055,6 +1055,24 @@ describe("a restart's reading is dated by when its cash was read", () => {
  * breaker's peak with the fee's: a book that ran 100 → 150 → 110 was judged at
  * 110 against 100 — no drawdown — and every non-exit buy went out for a day.
  */
+describe("the local restart baseline stays in the real accounting book", () => {
+  it("ignores later paper and unknown-mode marks without losing the real cash read", async () => {
+    exec("DELETE FROM equity");
+    const baselineAt = nowSec() - 10;
+    for (const [mode, cash, at] of [["live", 100, baselineAt], ["paper", 1_000, baselineAt + 1], [null, 200, baselineAt + 2]] as const) {
+      await store.addEquity(ACCOUNT, { mode: mode ?? "live", ethWei: 0n, cashUsdg: cash, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: cash });
+      exec("UPDATE equity SET at = ?, mode = ? WHERE id = (SELECT MAX(id) FROM equity)", at, mode);
+    }
+    assert.deepEqual(await store.lastKnownCashReading(ACCOUNT), { cashUsdg: 100, at: baselineAt });
+  });
+
+  it("paper-only marks are not a known zero balance", async () => {
+    exec("DELETE FROM equity");
+    await store.addEquity(ACCOUNT, { mode: "paper", ethWei: 0n, cashUsdg: 1_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 1_000 });
+    assert.equal(await store.lastKnownCashReading(ACCOUNT), null);
+  });
+});
+
 describe("a held look does not switch the drawdown breaker off", () => {
   /** A dropped swap, 25 h old (inside the window); the agent buys 50 of stock and it runs 100 → 150 → 110. */
   async function droppedOpRun(): Promise<string[]> {

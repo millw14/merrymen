@@ -231,7 +231,7 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
         // Priced when it was burned. A null here is UNPRICED, not free — and it
         // is counted, so a "net of gas" claim can be checked rather than taken.
         if (typeof p.gasUsdg === "number") book.gasUsdg += p.gasUsdg;
-        else if (p.status === "landed") book.gasUnpricedFills += 1;
+        else if (p.status === "landed" || p.status === "reverted") book.gasUnpricedFills += 1;
       }
       if (typeof p.txHash === "string" && p.txHash) {
         book.chainRefs.push({ kind: "fill", txHash: p.txHash, seq: e.seq });

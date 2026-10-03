@@ -226,7 +226,7 @@ test("summary: paper and live are separate books, each with its own figures", as
   assert.equal(live.gas.usdg, 0.07);
   assert.equal(live.gas.priced_ops, 2);
   assert.equal(live.gas.unpriced_ops, 1);
-  assert.equal(live.gas.unrecorded_ops, 2, "landed with no gas record at all is counted, not summed as zero");
+  assert.equal(live.gas.unrecorded_ops, 3, "landed and reverted operations with no gas record are counted, not summed as zero");
   assert.equal(live.gas.complete, false, "a partial gas sum says it is a floor");
   assert.ok(live.gas.notes.some((n: string) => /could not be priced/.test(n)));
   assert.ok(live.gas.notes.some((n: string) => /floor/.test(n)));

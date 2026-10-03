@@ -92,6 +92,13 @@ export interface TgRoom {
   statusAtMs: number;
   /** A DM asking the owner Stay/Leave went out at this time (pending rooms). */
   askedOwnerAtMs?: number;
+  /**
+   * The owner unblocked this room (undid a Leave) at this time, and has not
+   * decided on it since. Until they do, a legacy /link on the allowlist does
+   * not approve it: someone else adding it back asks the owner, because their
+   * Leave came after the link. Cleared when the room is approved or blocked.
+   */
+  unblockedAtMs?: number;
   /** Privacy-mode DM already sent for this room. */
   privacyHintSent?: boolean;
   /** The hello went out. */

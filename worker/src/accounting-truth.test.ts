@@ -276,8 +276,19 @@ describe("P3 — a balance that moved while the worker was down is never guessed
       equityUsdg: U(10),
       cashUsdg: U(10),
     });
-    assert.equal(r.plan.action, "resume-clean", "an absent baseline yields no drift claim");
+    assert.equal(r.plan.action, "stand-down", "an absent baseline cannot prove the real cash was unchanged");
     assert.equal(r.booked, 0n);
+    assert.equal(r.contributionsKnown, false, "do not charge performance fees on unverified capital");
+  });
+
+  it("paper-only history with no capital evidence never turns a new real balance into profit", () => {
+    const r = armHosted(anchorFile(established({
+      highWaterMarkUsdg: "0", netContributionsUsdg: "0", anchoredContributionsUsdg: "0",
+      unanchoredFlowCount: 0, lastObservedCashUsdg: null,
+    })), { equityUsdg: U(50), cashUsdg: U(50) });
+    assert.equal(r.plan.action, "stand-down");
+    assert.equal(r.booked, 0n);
+    assert.equal(r.contributionsKnown, false);
   });
 });
 

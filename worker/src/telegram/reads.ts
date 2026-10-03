@@ -14,7 +14,7 @@ import { currentTradeEpochSync } from "../chat-trades";
 import { OP_KEY, readEvidencedSellsSync } from "../trade-evidence";
 import { gasQualifier } from "../equity";
 import { overlayHistory } from "./history-overlay";
-import { loadTradeViews, renderTradeList, when, type TradeViewOpts } from "./trade-rows";
+import { KEY_INSTALL_KIND, loadTradeViews, renderTradeList, when, type TradeViewOpts } from "./trade-rows";
 import { heldSqlSync, isHeld, measuredMarks, readMeasuredMarkSync } from "../held-marks";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
@@ -122,7 +122,7 @@ function gasPaid(db: DatabaseSync, agentId: string, epoch: number): { usdg: numb
       .prepare(
         `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                 SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-           FROM trades WHERE agent_id = ? AND status = 'landed' AND epoch = ?`,
+           FROM trades WHERE agent_id = ? AND status IN ('landed', 'reverted') AND epoch = ?`,
       )
       .get(agentId, epoch) as { usdg: number; unpriced: number | null } | undefined;
     return { usdg: row?.usdg ?? 0, unpricedTrades: row?.unpriced ?? 0 };
@@ -684,12 +684,16 @@ export function readReport(ctx: StatusContext, publicSafe = false): string {
       /* no positions table yet */
     }
     // Today's trades (created_at is unix seconds — the table default).
+    // Installing permissions is maintenance, never an arrow that traded.
     try {
       const t = db
         .prepare(
-          "SELECT SUM(CASE WHEN status='landed' THEN 1 ELSE 0 END) AS landed, SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected FROM trades WHERE agent_id = ? AND created_at >= ?",
+          `SELECT SUM(CASE WHEN t.status='landed' THEN 1 ELSE 0 END) AS landed,
+                  SUM(CASE WHEN t.status='rejected' THEN 1 ELSE 0 END) AS rejected
+             FROM ${distinctTrades("t.agent_id = ?")}
+            WHERE t.created_at >= ? AND t.kind != ?`,
         )
-        .get(agentId, midnight) as { landed: number | null; rejected: number | null } | undefined;
+        .get(agentId, midnight, KEY_INSTALL_KIND) as { landed: number | null; rejected: number | null } | undefined;
       lines.push(`• arrows today: ${t?.landed ?? 0} landed · ${t?.rejected ?? 0} turned back by the wall`);
     } catch {
       /* no trades table yet */
@@ -748,8 +752,9 @@ export function readBrag(ctx: StatusContext): string {
     let best = "";
     try {
       const b = db
-        .prepare("SELECT kind, amount_usdg FROM trades WHERE agent_id = ? AND status='landed' ORDER BY amount_usdg DESC LIMIT 1")
-        .get(agentId) as { kind: string; amount_usdg: number } | undefined;
+        .prepare(`SELECT t.kind, t.amount_usdg FROM ${distinctTrades("t.agent_id = ?")}
+                  WHERE t.status='landed' AND t.kind != ? ORDER BY t.amount_usdg DESC LIMIT 1`)
+        .get(agentId, KEY_INSTALL_KIND) as { kind: string; amount_usdg: number } | undefined;
       if (b) best = `\n• best shot: ${esc(b.kind)} ${b.amount_usdg.toFixed(2)} USDG`;
     } catch {
       /* no trades */

@@ -107,7 +107,8 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
-import { findTransferFlows, resumeFrom } from "./deposit-log";
+import { resumeFrom } from "./deposit-log";
+import { scanAndBookDepositWindow } from "./deposit-scan";
 import { renderWhy } from "./strategies/reasons";
 import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
 import { classRouteLooks, idleAndClassGate } from "./class-entry-gate";
@@ -159,7 +160,7 @@ import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantFilePath, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { hostedKillFromChat } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
-import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
+import { execModeOf, executionBlockerNotice, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
 import {
   accountingLicence,
@@ -231,6 +232,8 @@ import {
 import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
+import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
+import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
@@ -670,6 +673,14 @@ interface ActiveAgent {
  * this file is against the full address, so a collision here is cosmetic.
  */
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
+/**
+ * When each executor last tried installing its key alone (installKeyAlone in
+ * main). Module scope, not main's, so it exists before the first intent can
+ * reach it; keyed by executor, so every arm starts fresh.
+ */
+const keyInstallTriedAt = new WeakMap<AgentExecutor, number>();
+const KEY_INSTALL_RETRY_MS = 30 * 60_000;
 
 async function main() {
   await initStore();
@@ -3350,7 +3361,12 @@ async function main() {
           settlementsQueued.add(r.userOpHash);
           settlementQueue.push({ userOpHash: r.userOpHash, createdAt: row.createdAt, usdgDelta6: explains.usdgDelta6 });
         }
-        await addTrade({
+        // An install's gas is its entire expense. Both payer and cost must be
+        // recorded before its submitted recovery row can become terminal.
+        const wrote = row.kind === KEY_INSTALL_KIND
+          ? await settleKeyInstall({ addTrade }, agentId, { userOpHash: r.userOpHash, success: r.success,
+              proof: { txHash: r.txHash as `0x${string}`, gasWei: r.gasWei, gasUnits: r.gasUnits, gasPayer: r.gasPayer } })
+          : await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
           target: row.target,
@@ -3364,8 +3380,10 @@ async function main() {
           user_op_hash: r.userOpHash,
           tx_hash: r.txHash,
           status: r.success ? "landed" : "reverted",
+          ...gasFields(r),
           ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
         });
+        if (!wrote) continue;
         await addEvent(
           agentId,
           "warn",
@@ -3671,13 +3689,6 @@ async function main() {
     const record = async (
       deltaUsdg: bigint,
       why: string,
-      /**
-       * Set when the flow was READ off the chain rather than inferred from a
-       * balance change. It switches the row's `source`, which is the column that
-       * exists so the two can never be mistaken for each other: an inferred flow
-       * is an opinion an audit may drop on sight, a chain-log flow is a receipt.
-       */
-      evidence?: { txHash: string; blockNumber: number; logIndex: number },
     ) => {
       if (deltaUsdg === 0n) return;
       const inbound = deltaUsdg > 0n;
@@ -3688,7 +3699,7 @@ async function main() {
       // column is written by the heartbeat and may not exist on the first tick,
       // which is precisely the tick that books an opening balance.
       const mode = paperActive() ? ("paper" as const) : ("live" as const);
-      if (mode === "paper" && !evidence) {
+      if (mode === "paper") {
         // Refused here as well as in the store so the HIGH-WATER MARK below is
         // never moved by a simulated balance either: the flow and the peak are
         // one decision, and letting the peak move on a refused flow would leave
@@ -3703,10 +3714,7 @@ async function main() {
         agentId,
         direction: inbound ? "in" : "out",
         amountUsdg: usdgNum(amount),
-        source: evidence ? "chain-log" : "inferred",
-        txHash: evidence?.txHash,
-        blockNumber: evidence?.blockNumber,
-        logIndex: evidence?.logIndex,
+        source: "inferred",
         mode,
         // The chain is left to addFlow's own read of `agents.chain_id`, which
         // ensureAgent writes from the signed grant. That is the chain the grant
@@ -3741,15 +3749,12 @@ async function main() {
      * this pass covered the window since the last one.
      *
      * Returning TRUE makes the scan authoritative and switches inference off
-     * for this tick. Returning FALSE is the honest answer whenever the window
-     * is not fully covered — no watermark yet, a gap wider than the lookback, or
-     * an RPC that would not answer — and inference stays in charge for it.
+     * for this tick. FALSE means no watermark yet or a gap wider than the
+     * lookback: those retain the legacy opening policy. An established window
+     * that failed to read or book throws and holds instead of inferring.
      *
-     * The flows go through the same `record` as an inferred one, so a chain-read
-     * deposit moves the high-water mark exactly like any other capital. Booking
-     * the flow without moving the peak would leave the next tick treating the
-     * deposit as profit and charging a fee on the owner's own money, which is
-     * the original bug with a transaction hash attached to it.
+     * Receipt flows and both peaks commit together through bookCapitalFlow.
+     * Its insert gate protects a retry even when the cached known keys are stale.
      */
     const scanChainFlows = async (s: {
       chain: ReconcileChain;
@@ -3758,7 +3763,6 @@ async function main() {
     }): Promise<boolean> => {
       let head: bigint;
       let from: bigint;
-      let flows: Awaited<ReturnType<typeof findTransferFlows>>;
       try {
         head = await s.chain.getBlockNumber();
         if (chainScanCursor === null) {
@@ -3820,7 +3824,7 @@ async function main() {
           chainScanCursor = at;
         }
         from = chainScanCursor;
-        flows = await findTransferFlows({
+        await scanAndBookDepositWindow({
           chain: s.chain,
           smartAccount: s.smartAccount,
           usdgToken: CASH.USDG as `0x${string}`,
@@ -3838,21 +3842,27 @@ async function main() {
           // (never booked here — the worker books it at landing).
           ...(s.grant ? { chainId: s.grant.chainId } : {}),
           log: (m) => console.log(`[flows] ${m}`),
+        }, {
+          agentId,
+          mode: paperActive() ? "paper" : "live",
+          afterBooked: async (fl) => {
+            highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+            await addEvent(
+              agentId,
+              "ok",
+              `${fl.direction === "in" ? "📥 funded" : "📤 withdrawn"} ${fmt(fl.amountUsdg6)} USDG ` +
+                `(${fl.txHash.slice(0, 10)}…) — capital, not performance: the high-water mark moved with it`,
+            );
+          },
         });
+        // Another receipt booker may have won the same insert while our cached
+        // keys were stale; take its committed peak before judging performance.
+        highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
       } catch (e) {
-        // An RPC that will not answer is not evidence of no deposits. Leave the
-        // cursor where it is so the same window is retried, and let inference
-        // cover this tick.
-        console.log(`[flows] chain scan skipped (${e instanceof Error ? e.message : String(e)})`);
-        return false;
-      }
-
-      for (const fl of flows) {
-        await record(
-          fl.direction === "in" ? fl.amountUsdg6 : -fl.amountUsdg6,
-          `${fl.txHash.slice(0, 10)}…`,
-          { txHash: fl.txHash, blockNumber: fl.blockNumber, logIndex: fl.logIndex },
-        );
+        // Keep the same window AND the cash baseline. An established scan that
+        // failed must never infer this movement: the retry will read its receipt.
+        // The outer reconcileFlowsOrRetry catches this and holds fees/ratchets.
+        throw new Error(`chain scan held (${e instanceof Error ? e.message : String(e)})`);
       }
       // Advanced only after a clean pass, so a failure re-reads rather than skips.
       chainScanCursor = head;
@@ -7706,6 +7716,52 @@ async function main() {
   }
 
   /**
+   * A NEW KEY WHOSE WALL LEAVES NO ROOM FOR ITS FIRST TRADE, INSTALLED ON ITS OWN.
+   *
+   * A key's first operation carries its whole wall plus whatever it was sent to
+   * do, and the two together must fit under the first-enable maximum. When they
+   * do not, the trade is refused `enable-too-wide` before signing. Re-signing
+   * could not help, because it seals the same wall. Live, 2026-10-03, agent
+   * 0xbba115 was refused every tick through several re-signs: wall 12,073,605
+   * plus a Trencher vault deploy + buy of 4,241,474.
+   *
+   * So the key is installed with the cheapest call the wall admits
+   * (executor.ts keyInstallCalls: `approve(USDG, Router02, 0)`, which moves
+   * nothing), and the trade goes on a later tick as an ordinary operation
+   * under its own ceiling. Nothing about the trade is decided here, and nothing
+   * is retried in its place: the refused trade is booked `rejected` as before,
+   * and the strategy proposes it again or not.
+   *
+   * THE SAME DURABILITY AS ANY OPERATION. The row is written 'submitted' with
+   * the hash BEFORE broadcast (a failed write refuses to send), settled
+   * 'landed' with its gas after, and left 'submitted' for resolveStrandedOps
+   * when the receipt cannot be read. Replay is impossible: the operation is
+   * nonce-bound to the key's sequence 0, and the executor refuses to install a
+   * key the chain says is already installed (keyInstallRefusal).
+   *
+   * ONCE PER EXECUTOR PER HALF HOUR. Each arm builds a new executor, so a
+   * re-sign starts fresh. An install still in flight is not raced by a second
+   * one, and a wall that cannot be installed even alone is told to the owner
+   * once, not every tick.
+   */
+  async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
+    const last = keyInstallTriedAt.get(executor);
+    if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
+    keyInstallTriedAt.set(executor, Date.now());
+    await installKeyRecorded({
+      addTrade,
+      priceGas: async (wei) => {
+        const eth = await ethPrice8();
+        const priced = priceGas(wei, eth.price8, eth.reason);
+        return priced.usdg === null ? null : usdgNum(priced.usdg);
+      },
+      refreshBudget: () => refreshBudget(agentId),
+      event: (level, message) => addEvent(agentId, level, message),
+      resolveMinutes: STRANDED_INTERVAL_SEC / 60,
+    }, agentId, executor);
+  }
+
+  /**
    * SERIALIZED. Every caller goes through processIntent, which holds this.
    *
    * The hazard is named in this file already, at the budget reservation: "a
@@ -10009,6 +10065,10 @@ async function main() {
           reject_rule: e.rule,
           ...sim,
         });
+        // The wall fits, only not with this trade beside it: install it alone,
+        // so the next trade is an ordinary operation. Still inside this
+        // intent's lock, so nothing else signs with this key meanwhile.
+        if (e.rule === "enable-too-wide") await installKeyAlone(agentId, executor);
         return;
       }
 
@@ -10223,6 +10283,7 @@ async function main() {
     }
   }
 
+
   /**
    * LIVENESS, WHICH IS NOT THE SAME QUESTION AS "DID THE CHAIN ANSWER".
    *
@@ -10361,9 +10422,7 @@ async function main() {
               (verdict.mode !== "live" && verdict.wouldBlockLive
                 ? ` One thing to know first: when you do turn it on, ${liveBlockerText(verdict.wouldBlockLive)}.`
                 : "")
-            : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
-              `Fills below are simulated at live prices until that is fixed. Live trading is a ` +
-              `switch in Settings, and it stays off until you turn it on.`,
+            : executionBlockerNotice(verdict),
       );
     }
   }
