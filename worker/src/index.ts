@@ -262,6 +262,8 @@ import { readPublicTradesToday } from "./tg-trade-facts";
 import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
+import { createDesk } from "./desk/desk";
+import type { TgDeskPort } from "./telegram/tg-groups/types";
 import { readDexTokenPairs } from "./venues/dexscreener";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
@@ -925,6 +927,24 @@ async function main() {
     paper: () => paperActive(),
     log: (line) => console.log(line),
   });
+  /**
+   * THE MARKET DESK for Telegram groups (docs/tg-groups.md "Market analysis"):
+   * public index evidence, indicators and a chart for "how's the market" and
+   * "check out X". Brain reasons over it only when the operator says group
+   * asks may spend Brain's key — MERRYMEN_TG_GROUPS_BRAIN=1 (rule 7) — and
+   * otherwise the group's own model or the desk's code-written read answers.
+   * Rebuilt only when that choice or Brain's address changes, so its one-minute
+   * memo survives between asks.
+   */
+  let tgDeskBuilt: { key: string; port: TgDeskPort } | null = null;
+  const tgDesk = (): TgDeskPort => {
+    const brain = (process.env.MERRYMEN_TG_GROUPS_BRAIN ?? "").trim() === "1" && cfg.brainUrl && cfg.brainToken
+      ? { url: cfg.brainUrl, token: cfg.brainToken, agentId: active?.agentId ?? "agent", timeoutMs: 22_000 }
+      : null;
+    const key = brain ? `${brain.url}|${brain.token}|${brain.agentId}` : "";
+    if (!tgDeskBuilt || tgDeskBuilt.key !== key) tgDeskBuilt = { key, port: createDesk({ brain }) };
+    return tgDeskBuilt.port;
+  };
   /**
    * Hand outcomes to the chat side, then let resolved nominations go: their
    * tape pages are dropped now (a coin kept alive by a chat that has its
@@ -13712,6 +13732,7 @@ async function main() {
     // as an address and nothing else.
     tgGroupsStore,
     tgCoins,
+    tgDesk,
     tgFacts: { tradesToday: () => readPublicTradesToday(buildStatusContext().agentId, Math.floor(Date.now() / 1000)) },
     // What the hold process kept about groups while this tenant's trading was
     // held (telegram/held-groups.ts), in this home: applied at the first poll.
