@@ -135,7 +135,17 @@ A group is `approved`, `pending`, `left` or `blocked`.
 * `telegramGroupsEnabled` off → it is silent in every group (it still records
   membership changes so turning it back on works).
 * Owner DM command `/groups` lists known groups with their status and buttons
-  (Stay / Leave / Forget). Forget wipes that chat's memory.
+  (Stay / Leave / Unblock / Forget). Forget wipes that chat's memory.
+* A `blocked` group stays blocked: anyone else adding it back is undone
+  quietly. Only the owner's own re-add, or an unblock, lifts it. **Unblock**
+  (offered on a blocked group in `/groups`) and the owner DM command
+  `/groups unblock` (alias `/unblock`, which clears every blocked group) move
+  it to `left`: the bot is not in it and has not been asked in, so the
+  owner's re-add approves it as before, and anyone else's asks the owner
+  again. That holds for a group on `telegramAllowlist` from a legacy
+  `/link` too: the Leave came after the link, so the link does not approve
+  it again until the owner decides (Stay, their own re-add, or Leave clears
+  `unblockedAtMs`). Memory is untouched; Forget is for that.
 
 In a group that is not `approved` it never sends "🚫 not authorized" (today's
 behaviour for every visible message, which with privacy mode off would be one

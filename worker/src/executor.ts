@@ -13,13 +13,13 @@
  * of the sort is shipped.
  */
 
-import { decodeFunctionData, http, createPublicClient, type Chain, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionData, erc20Abi, http, createPublicClient, type Chain, type Hex } from "viem";
 import { chainRead, metered } from "./rpc-meter";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
-import { FIRST_ENABLE_HARD_MAX_BOUNDED, TRENCHER_FACTORY_ABI, WALL_POLICY_FLAG } from "../../packages/core/src/index";
+import { CASH, FIRST_ENABLE_HARD_MAX_BOUNDED, TRENCHER_FACTORY_ABI, UNISWAP, WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
 import {
@@ -85,8 +85,30 @@ export interface ExecutionResult {
    * price belongs to the day.
    */
   gasUnits: bigint;
+  /** Payer proved by the settled operation, rather than mutable worker settings. */
+  gasPayer?: "owner" | "sponsor";
   /** Block the operation landed in — an anchor for anyone re-deriving this later. */
   blockNumber: bigint;
+}
+
+export interface UserOpGasProof {
+  txHash: `0x${string}`;
+  gasWei: bigint;
+  gasUnits: bigint;
+  gasPayer: "owner" | "sponsor";
+}
+
+/** Bundled transaction gas is not proof of one operation's installation expense. */
+export function perOperationGasProof(receipt: {
+  actualGasCost?: unknown; actualGasUsed?: unknown; paymaster?: unknown;
+  receipt: { transactionHash: `0x${string}` };
+}, signedPaymaster?: unknown): UserOpGasProof | null {
+  if (typeof receipt.actualGasCost !== "bigint" || receipt.actualGasCost < 0n ||
+    typeof receipt.actualGasUsed !== "bigint" || receipt.actualGasUsed < 0n) return null;
+  const payer = receipt.paymaster ?? signedPaymaster;
+  if (payer !== undefined && (typeof payer !== "string" || !/^0x[0-9a-f]{40}$/i.test(payer))) return null;
+  return { txHash: receipt.receipt.transactionHash, gasWei: receipt.actualGasCost, gasUnits: receipt.actualGasUsed,
+    gasPayer: payer !== undefined && !/^0x0{40}$/i.test(payer as string) ? "sponsor" : "owner" };
 }
 
 /**
@@ -96,7 +118,7 @@ export interface ExecutionResult {
  */
 export class UserOpReverted extends Error {
   readonly userOpHash: `0x${string}`;
-  constructor(userOpHash: `0x${string}`, reason?: string) {
+  constructor(userOpHash: `0x${string}`, reason?: string, readonly gasProof?: UserOpGasProof) {
     super(`reverted on-chain${reason ? `: ${reason}` : ""} (${userOpHash})`);
     this.name = "UserOpReverted";
     this.userOpHash = userOpHash;
@@ -404,11 +426,81 @@ export function isTrencherVaultDeploy(
   }
 }
 
+/**
+ * A NEW KEY'S PERMISSIONS, INSTALLED ON THEIR OWN.
+ *
+ * Kernel installs a session key's wall inside the validation of the first
+ * operation that key signs, so that operation carries the wall and whatever it
+ * was sent to do, and the two together must fit under
+ * FIRST_ENABLE_HARD_MAX_BOUNDED. When they do not, the trade is refused
+ * `enable-too-wide` before signing, and the caller may install the key alone
+ * with this, so the trade can go next as an ordinary operation.
+ *
+ * Live, 2026-10-03, agent 0xbba115: a 12,073,605 wall and a 4,241,474 Trencher
+ * vault deploy + approve + buy came to 16,361,536. They were refused every tick,
+ * through several re-signs, because each re-sign sealed the same wall. That
+ * wall with this call fits with ~1.78M to spare.
+ *
+ * ONE CALL, FIXED HERE, NEVER SUPPLIED. `approve(USDG, Router02, 0)`:
+ *   - the wall always permits it. Router02 is on every wall's USDG approve
+ *     (core wall.ts allowedSpenders), and 0 is under any per-trade cap;
+ *   - it moves nothing and grants nothing. It can only lower an allowance, and
+ *     every trade sets the allowance it needs again in its own batch;
+ *   - it is the cheapest call the wall admits, which is the whole point.
+ * Built by the executor rather than taken from a caller, so "install the key"
+ * can never be a way to send something else under the first-enable ceiling.
+ */
+export function keyInstallCalls(): Call[] {
+  return [
+    {
+      to: CASH.USDG as `0x${string}`,
+      value: 0n,
+      data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [UNISWAP.swapRouter02 as `0x${string}`, 0n] }),
+    },
+  ];
+}
+
+/**
+ * May the key be installed on its own right now? Only when the operation about
+ * to be signed really is a fresh enable: a key already installed has nothing to
+ * install, and the bare approve would then be an ordinary operation spent on
+ * nothing. Every other enable state is refused by name before this is asked.
+ */
+export function keyInstallRefusal(enable: EnableState): GasRefused | null {
+  if (enable.kind === "fresh-enable") return null;
+  return new GasRefused(
+    "enable-redundant",
+    "nothing to install: this key's next operation carries no enable, so its permissions are already in " +
+      "place and the trade can go as an ordinary operation. Nothing was signed.",
+  );
+}
+
+/** The operation must use the exact nonce whose enable state and gas bounds were checked. */
+export async function prepareCheckedUserOperation<T extends { nonce?: unknown }>(
+  checkedNonce: bigint,
+  prepare: (nonce: bigint) => Promise<T>,
+): Promise<T> {
+  const prepared = await prepare(checkedNonce);
+  if (typeof prepared.nonce !== "bigint" || prepared.nonce !== checkedNonce) {
+    throw new GasRefused("nonce-changed",
+      "the prepared operation's nonce differs from the one whose permissions and gas bounds were checked. Nothing was signed.");
+  }
+  return prepared;
+}
+
 export interface AgentExecutor {
   /** Counterfactual smart-account address (deploys itself on first op). */
   address: `0x${string}`;
   /** Send a batch of calls as one UserOperation and report what settled. */
   execute(calls: Call[], hooks?: ExecuteHooks): Promise<ExecutionResult>;
+  /**
+   * Install this key's permissions with keyInstallCalls() and nothing else:
+   * the remedy for an `enable-too-wide` trade. Bounded by the same
+   * first-enable ceilings, persisted before broadcast through
+   * `hooks.onSubmitted` and never re-sent, exactly like execute(). Refused
+   * (GasRefused, nothing signed) unless the key is still uninstalled.
+   */
+  installKey(hooks?: ExecuteHooks): Promise<ExecutionResult>;
 }
 
 export async function createAgentExecutor(opts: {
@@ -521,9 +613,11 @@ export async function createAgentExecutor(opts: {
     return deployed;
   };
 
-  return {
+  // ONE PATH FOR BOTH OPERATIONS. `mode` is not on AgentExecutor: only
+  // installKey below passes "install", with calls it built itself.
+  const executor = {
     address: account.address,
-    async execute(calls: Call[], hooks?: ExecuteHooks) {
+    async execute(calls: Call[], hooks?: ExecuteHooks, mode: "trade" | "install" = "trade"): Promise<ExecutionResult> {
       const callData = await account.encodeCalls(calls);
 
       // ── BOUND THE GAS BEFORE SIGNING ANYTHING ───────────────────────
@@ -544,6 +638,7 @@ export async function createAgentExecutor(opts: {
         try {
           const g = (await client.estimateUserOperationGas({
             callData,
+            nonce,
             // Estimate the operation we will actually SEND. An unsponsored probe
             // of a sponsored op omits the paymaster's own verification and postOp
             // gas, so the three limits we bound would be measured against a
@@ -656,7 +751,8 @@ export async function createAgentExecutor(opts: {
       const firstEnable = enable.kind === "fresh-enable";
       // THE VAULT'S ONE-TIME DEPLOYMENT gets its own measured ceiling; every
       // other ordinary operation keeps GAS_BOUNDS. See TRENCHER_DEPLOY_GAS_BOUNDS.
-      const trencherDeploy = !firstEnable && isTrencherVaultDeploy(calls, hooks?.trencherDeployFactory, account.address);
+      const trencherDeploy =
+        mode === "trade" && !firstEnable && isTrencherVaultDeploy(calls, hooks?.trencherDeployFactory, account.address);
       // PER-WALL, AND ONLY FOR THE OPERATION THAT INSTALLS ONE.
       //
       // A deployed account's ordinary operations are untouched: they take
@@ -720,6 +816,10 @@ export async function createAgentExecutor(opts: {
             "signed, and the next tick will ask again.",
         );
       }
+      if (mode === "install") {
+        const refused = keyInstallRefusal(enable);
+        if (refused) throw refused;
+      }
 
       const first = await estimate();
       // Only probe a second time when the first succeeded: a null first is
@@ -744,7 +844,7 @@ export async function createAgentExecutor(opts: {
           : `call ${g.callGasLimit} + verif ${g.verificationGasLimit} + preVerif ${g.preVerificationGas} = ${totalGas(g)}`;
       console.log(
         `[gas] account ${accountLive ? "deployed" : "NOT deployed"} · ` +
-          `${firstEnable ? `ENABLE ${noncePermissionId(nonce)}` : trencherDeploy ? "TRENCHER DEPLOY" : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
+          `${firstEnable ? `${mode === "install" ? "INSTALL ALONE" : "ENABLE"} ${noncePermissionId(nonce)}` : trencherDeploy ? "TRENCHER DEPLOY" : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
           `estimate1 ${fmt(first)} · estimate2 ${fmt(second)} · ` +
           `signed ${bounded.ok ? totalGas(bounded.gas) : "refused"}` +
           `${bounded.ok ? "" : ` (${bounded.rule})`}`,
@@ -820,11 +920,14 @@ export async function createAgentExecutor(opts: {
       // explicit nonce, fees and factory unchanged, and sendUserOperation uses
       // `parameters.signature ||` so a signed operation is never re-signed. It
       // also issues the RPC with retryCount: 0, so the send is never repeated.
-      const prepared = (await client.prepareUserOperation({
+      const prepared = await prepareCheckedUserOperation(nonce, async (checkedNonce) => (await client.prepareUserOperation({
         callData,
+        // A prior submitted enable can land while estimates are running. Never
+        // replace the checked enable nonce with a later ordinary-operation nonce.
+        nonce: checkedNonce,
         // Explicit, so prepareUserOperation uses these instead of estimating.
         ...bounded.gas,
-      } as never)) as Record<string, unknown>;
+      } as never)) as Record<string, unknown>);
 
       // THE LIMITS WE SIGNED MUST BE THE LIMITS WE BOUNDED. viem spreads the
       // paymaster's reply OVER the prepared request, so a sponsor that returned
@@ -941,10 +1044,11 @@ export async function createAgentExecutor(opts: {
       // used to have to choose between. It went, and we could not find out.
       if (!receipt) throw new UserOpUnresolved(userOpHash, lastErr || "receipt never resolved");
 
-      if (!receipt.success) {
-        // Surface the on-chain revert reason when the bundler provides one.
-        throw new UserOpReverted(userOpHash, (receipt as { reason?: string }).reason);
+      const operationProof = perOperationGasProof(receipt, prepared.paymaster);
+      if (mode === "install" && !operationProof) {
+        throw new UserOpUnresolved(userOpHash, "the receipt omitted per-operation installation cost or payer proof; waiting for its EntryPoint event");
       }
+
       // actualGasCost is the ERC-4337 field: what the EntryPoint charged the
       // account, verification included. gasUsed × effectiveGasPrice covers only
       // the bundled transaction and would under-count our share of it, so it is
@@ -953,21 +1057,31 @@ export async function createAgentExecutor(opts: {
         typeof receipt.actualGasCost === "bigint"
           ? receipt.actualGasCost
           : (receipt.receipt.gasUsed ?? 0n) * (receipt.receipt.effectiveGasPrice ?? 0n);
+      const gasUnits = typeof receipt.actualGasUsed === "bigint" ? receipt.actualGasUsed : (receipt.receipt.gasUsed ?? 0n);
+      // The receipt names its payer. Older bundlers omit it, in which case the
+      // signed operation's paymaster is still immutable evidence of who paid.
+      const paymaster = receipt.paymaster ?? (typeof prepared.paymaster === "string" ? prepared.paymaster : undefined);
+      const gasPayer = paymaster && !/^0x0{40}$/i.test(paymaster) ? "sponsor" as const : "owner" as const;
+      if (!receipt.success) {
+        throw new UserOpReverted(userOpHash, receipt.reason, operationProof ?? undefined);
+      }
       return {
         txHash: receipt.receipt.transactionHash,
         userOpHash,
         logs: receipt.logs ?? [],
         gasWei,
+        gasPayer,
         // Same preference order as gasWei, for the same reason and with the
         // error running the other way: `actualGasUsed` is our operation's
         // share, while the bundled transaction's `gasUsed` contains other
         // senders' work and would OVER-count us. A fallback, never a default.
-        gasUnits:
-          typeof (receipt as { actualGasUsed?: bigint }).actualGasUsed === "bigint"
-            ? (receipt as { actualGasUsed: bigint }).actualGasUsed
-            : (receipt.receipt.gasUsed ?? 0n),
+        gasUnits,
         blockNumber: receipt.receipt.blockNumber ?? 0n,
       };
     },
+    installKey(hooks?: ExecuteHooks): Promise<ExecutionResult> {
+      return executor.execute(keyInstallCalls(), hooks, "install");
+    },
   };
+  return { address: executor.address, execute: (calls, hooks) => executor.execute(calls, hooks), installKey: executor.installKey };
 }

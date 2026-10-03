@@ -43,8 +43,9 @@ import {
 } from "./energy-alert";
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
+import { distinctTrades } from "../distinct-trades";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
-import { ENERGY_BUY_KIND, ENERGY_LABEL, dollars, isEnergyRow } from "./trade-rows";
+import { ENERGY_BUY_KIND, ENERGY_LABEL, KEY_INSTALL_KIND, dollars, isEnergyRow } from "./trade-rows";
 import { tokenTagOf, type RefusalRepeat, type StateRef, type Watcher } from "./state";
 
 /**
@@ -147,13 +148,15 @@ function openRO(): DatabaseSync | null {
  * that is already correct without it, so a missing row, a schema older than
  * `decision_id`, or a locked database must cost the owner nothing but the extra
  * sentence.
+ * The agent scope is required: a malformed link must never supply another
+ * tenant's private decision to the narrator.
  */
-function decisionFor(db: DatabaseSync, decisionId: string | null | undefined): DecisionLite | null {
-  if (!decisionId) return null;
+function decisionFor(db: DatabaseSync, decisionId: string | null | undefined, agentId: string | null): DecisionLite | null {
+  if (!decisionId || !agentId) return null;
   try {
     const row = db
-      .prepare("SELECT symbol, action, reason FROM decisions WHERE id = ?")
-      .get(decisionId) as unknown as DecisionLite | undefined;
+      .prepare("SELECT symbol, action, reason FROM decisions WHERE id = ? AND LOWER(agent_id) = LOWER(?)")
+      .get(decisionId, agentId) as unknown as DecisionLite | undefined;
     return row ?? null;
   } catch {
     return null;
@@ -372,6 +375,21 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     : t.kind === ENERGY_BUY_KIND ? `top-up of ${esc(ENERGY_LABEL)}`
     : t.kind === "swap" || t.kind === "curve-trade" ? "trade"
     : esc(t.kind);
+  // A NEW KEY'S PERMISSIONS, INSTALLED ON THEIR OWN (executor.ts installKey).
+  // Said for what it is: no trade happened, nothing moved, and the trade it
+  // makes room for goes next.
+  if (t.kind === KEY_INSTALL_KIND && t.status === "landed") {
+    const proof = t.tx_hash
+      ? explorer
+        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">see it on the explorer ↗</a>`
+        : `\n<code>${esc(t.tx_hash)}</code>`
+      : "";
+    return (
+      "🔑 Installed your trading key's permissions on their own. With a trade riding along they came to more " +
+      "than a key's first operation may use, so nothing was traded and nothing moved. Your next trade goes as an " +
+      `ordinary one.${proof}`
+    );
+  }
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
@@ -483,6 +501,8 @@ interface TradeAgg {
   status: string;
   c: number;
   s: number;
+  /** Settled rows whose executed cash was not measured. Never use their requested size. */
+  unknown?: number;
 }
 
 /** Pretty a period like 5/15/60/1440 minutes → "5m" / "1h" / "24h". */
@@ -500,8 +520,14 @@ export function tradeDigestLine(rows: TradeAgg[], periodMin: number): string {
   const by: Record<string, TradeAgg> = {};
   for (const r of rows) by[r.status] = r;
   const parts: string[] = [];
-  if (by.landed) parts.push(`🏹 ${by.landed.c}× landed (${by.landed.s.toFixed(2)} USDG)`);
-  if (by.paper) parts.push(`📜 ${by.paper.c}× paper (${by.paper.s.toFixed(2)} USDG)`);
+  const settledAmount = (r: TradeAgg): string => {
+    const unknown = r.unknown ?? 0;
+    if (unknown >= r.c) return "amount unknown";
+    const measured = `${r.s.toFixed(2)} USDG`;
+    return unknown > 0 ? `${measured} measured; ${unknown} amount${unknown === 1 ? "" : "s"} unknown` : measured;
+  };
+  if (by.landed) parts.push(`🏹 ${by.landed.c}× landed (${settledAmount(by.landed)})`);
+  if (by.paper) parts.push(`📜 ${by.paper.c}× paper (${settledAmount(by.paper)})`);
   if (by.rejected) parts.push(`🛡 ${by.rejected.c}× turned back`);
   if (by.reverted) parts.push(`⚠️ ${by.reverted.c}× didn't go through`);
   const label = periodLabel(periodMin);
@@ -657,6 +683,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     // = NULL` matches nothing — so an unarmed notifier reports nobody's trades
     // rather than, on a shared ledger, some other tenant's.
     const agentId = deps.getAgentId();
+    // Collapse this account's operation copies before applying cursor, kind
+    // or outcome filters. A late bare swap copy must not revive an install or
+    // re-notify an operation whose canonical row is already behind the cursor.
     const periodMin = cfg.telegramNotifyEveryMin;
     const db = openRO();
     if (db) {
@@ -669,9 +698,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           // Immediate: one message per trade row.
           const rows = db
             .prepare(
-              `SELECT ${TRADE_PING_COLUMNS} FROM trades WHERE id > ? AND agent_id = ? ORDER BY id ASC LIMIT 10`,
+              `SELECT ${TRADE_PING_COLUMNS} FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?)")} WHERE id > ? ORDER BY id ASC LIMIT 10`,
             )
-            .all(state.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
+            .all(agentId, state.lastNotifiedTradeId) as unknown as TradeRowLite[];
           for (const t of rows) {
             // THE REMEDY ON CHANGE, THE REFUSAL ONCE AND THEN COUNTED. A
             // strategist that keeps proposing the same uncovered leg produces
@@ -713,10 +742,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // NOT FOR ENERGY. A model asked why the agent bought $MERRYMEN has
             // only the token and the headlines to go on, and the one thing it
             // must never say is anything about that token's price or returns.
-            if ((t.status === "landed" || t.status === "paper") && !isEnergyRow(t)) {
+            if ((t.status === "landed" || t.status === "paper") && !isEnergyRow(t) && t.kind !== KEY_INSTALL_KIND) {
               const llm = resolveLlm(cfg);
               if (llm) {
-                const evidence = tradeWhyEvidence(t, decisionFor(db, t.decision_id), newsNow());
+                const evidence = tradeWhyEvidence(t, decisionFor(db, t.decision_id, agentId), newsNow());
                 if (evidence) said = await narrateTrade(evidence, llm);
               }
             }
@@ -751,9 +780,19 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           // Quiet mode: batch trade pings into ONE summary every periodMin minutes.
           const st = deps.stateRef.get();
           if (now() - st.lastTradeDigestAt >= periodMin * 60) {
+            // A key installed on its own is not a trade: counted, it would read
+            // "1× landed (0.00 USDG)". The trade it made room for is counted
+            // when it lands.
+            // Settled totals use measured cash only; a missing fill amount is
+            // disclosed as unknown, while unfilled statuses keep requested size.
             const agg = db
-              .prepare("SELECT status, COUNT(*) AS c, COALESCE(SUM(amount_usdg), 0) AS s FROM trades WHERE id > ? AND agent_id = ? GROUP BY status")
-              .all(st.lastNotifiedTradeId, agentId) as unknown as TradeAgg[];
+              .prepare(
+                "SELECT status, COUNT(*) AS c, " +
+                  "COALESCE(SUM(CASE WHEN status IN ('landed', 'paper') THEN fill_cash_usdg ELSE amount_usdg END), 0) AS s, " +
+                  "SUM(CASE WHEN status IN ('landed', 'paper') AND fill_cash_usdg IS NULL THEN 1 ELSE 0 END) AS unknown " +
+                  `FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?)")} WHERE id > ? AND kind != ? GROUP BY status`,
+              )
+              .all(agentId, st.lastNotifiedTradeId, KEY_INSTALL_KIND) as unknown as TradeAgg[];
             const maxRow = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
             const total = agg.reduce((n, r) => n + r.c, 0);
             if (total > 0) await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
@@ -766,11 +805,11 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // that never fires.
             const closes = db
               .prepare(
-                `SELECT ${TRADE_PING_COLUMNS} FROM trades ` +
-                  "WHERE id > ? AND agent_id = ? AND fill_side = 'sell' AND realized_pnl_usdg IS NOT NULL " +
+                `SELECT ${TRADE_PING_COLUMNS} FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?)")} ` +
+                  "WHERE id > ? AND fill_side = 'sell' AND realized_pnl_usdg IS NOT NULL " +
                   "ORDER BY id ASC LIMIT 10",
               )
-              .all(st.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
+              .all(agentId, st.lastNotifiedTradeId) as unknown as TradeRowLite[];
             for (const t of closes) await sendCardFor(t, token, chatId, true, (await coinFor(db, t, agentId, cfg))?.label);
             deps.stateRef.set({
               ...deps.stateRef.get(),

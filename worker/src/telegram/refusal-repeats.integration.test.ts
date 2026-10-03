@@ -35,7 +35,8 @@ function ledger(): DatabaseSync {
   db.exec(
     "CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY, agent_id TEXT, kind TEXT, amount_usdg REAL, " +
       "status TEXT, reject_rule TEXT, tx_hash TEXT, decision_id TEXT, target TEXT, fill_side TEXT, " +
-      "fill_cash_usdg REAL, realized_pnl_usdg REAL, sell_token TEXT, buy_token TEXT)",
+      "fill_cash_usdg REAL, realized_pnl_usdg REAL, sell_token TEXT, buy_token TEXT, " +
+      "user_op_hash TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
   );
   db.exec("DELETE FROM trades");
   return db;
@@ -113,14 +114,14 @@ describe("one refusal re-proposed every tick", () => {
 
     const [first, hour, later] = about as [string, string, string];
     assert.match(first, /^⛽ a swap wasn't sent — its permission set is too wide to install together with this trade\./);
-    assert.match(first, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/, "the fix, with the first line");
+    assert.match(first, /No action needed: your agent installs its new permissions on their own first/, "the fix, with the first line");
     assert.ok(first.endsWith(REFUSAL_FIRST_NOTE), "and what to expect if it repeats");
 
     assert.ok(
       hour.startsWith("↻ the swap was refused 60 more times in the last 60 min (enable-too-wide), the last just now. "),
       hour,
     );
-    assert.match(hour, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/, "the fix rides on the count");
+    assert.match(hour, /If this keeps repeating, re-sign at \/grant with fewer custom tokens or capabilities/, "the fix rides on the count");
     assert.match(later, /was refused 139 more times in the last 6 hours \(enable-too-wide\), the last 4 hours ago\./);
 
     assert.equal(1 + counts(about).reduce((a, b) => a + b, 0), 200, "every attempt is accounted for");

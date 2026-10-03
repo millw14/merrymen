@@ -2038,6 +2038,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       ) {
         return tgGroups.groupsCommand(m.chatId);
       }
+      // /groups unblock (or /unblock): the owner clearing every group they told
+      // the bot to leave. Owner-only and DM-only, exactly like /groups.
+      if (
+        tgGroups &&
+        m.chatId === m.fromId &&
+        m.fromId === stateRef.get().ownerId &&
+        /^\/(?:groups(?:@\w+)?\s+unblock|unblock(?:@\w+)?)\s*$/i.test(m.text.trim())
+      ) {
+        return tgGroups.unblockAll(m.chatId);
+      }
       return handle(m, c);
     };
     // In the order they happened: a press and a typed message in the same

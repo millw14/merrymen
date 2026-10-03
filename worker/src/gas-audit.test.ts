@@ -129,17 +129,16 @@ describe("what counts as the owner's cost", () => {
     assert.match(gasAuditLines(d).join("\n"), /UNPRICED .* cost unknown, not zero/);
   });
 
-  it("surfaces gas burned on reverted ops, which the published figure omits", () => {
-    // The leaderboard sums gas WHERE status='landed'. A reverted op still burned
-    // the owner's ETH, so the published loss understates what was actually
-    // spent — worth knowing before anyone calls the number complete.
+  it("separates reverted gas while retaining it in the owner's recorded network fees", () => {
+    // A reverted operation still burned ETH. Separate it from landed gas for
+    // diagnosis, without describing it as omitted from the owner's return.
     const d = decomposeGas("0xacct", 1, [
       op({ id: 1, gasUsdg: 0.05 }),
       op({ id: 2, status: "reverted", gasUsdg: 0.04, createdAt: 1_788_000_100 }),
     ]);
     assert.equal(d.totalLandedGasUsdg, 0.05);
     assert.equal(d.revertedGasUsdg, 0.04);
-    assert.match(gasAuditLines(d).join("\n"), /reverted gas .* does NOT count/);
+    assert.match(gasAuditLines(d).join("\n"), /reverted gas .* included in the owner's recorded network fees/);
   });
 
   it("ignores rejected ops entirely — nothing was broadcast, nothing was burned", () => {

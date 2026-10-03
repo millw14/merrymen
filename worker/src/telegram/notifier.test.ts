@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { mock, test } from "node:test";
 import {
   REFUSAL_KEYS_KEPT,
   REFUSAL_REMIND_LATER_SEC,
@@ -9,10 +12,300 @@ import {
   refusalKey,
   refusalVerdict,
   sweepRefusals,
+  startNotifier,
   tradeDigestLine,
   tradeLine,
 } from "./notifier";
-import { parseRefusalRepeats, type RefusalRepeat } from "./state";
+import { loadTelegramState, parseRefusalRepeats, type RefusalRepeat } from "./state";
+import type { ResolvedConfig } from "../settings";
+
+const NOTIFY_OWNER = 123_456_789;
+const NOTIFY_AGENT = "0x00000000000000000000000000000000000000aa";
+const NOTIFY_OTHER = "0x00000000000000000000000000000000000000bb";
+const NOTIFY_NOW = Math.floor(Date.parse("2026-10-03T12:00:00Z") / 1000);
+const NOTIFY_PERIOD_MIN = 5;
+
+interface NotifyTradeExtra {
+  fillCash?: number | null;
+  fillSide?: string | null;
+  decisionId?: string;
+  opHash?: string;
+  createdAt?: number;
+}
+
+/** Exercise the real read-only ledger query, cursor writes and scheduled passes. */
+async function withNotifier(
+  run: (h: {
+    add: (id: number, agent: string, kind: string, status: string, amount?: number, extra?: NotifyTradeExtra) => void;
+    decision: (id: string, agent: string, symbol: string, reason: string) => void;
+    start: () => Promise<void>;
+    nextPeriod: () => Promise<void>;
+    state: () => ReturnType<typeof loadTelegramState>;
+    sends: Array<{ chatId: number; text: string }>;
+    prompts: string[];
+  }) => Promise<void>,
+  options: { agentId?: string | null; immediate?: boolean; narrate?: boolean } = {},
+): Promise<void> {
+  const home = mkdtempSync(path.join(tmpdir(), "merrymen-notifier-digest-"));
+  const priorHome = process.env.MERRYMEN_HOME;
+  const priorFetch = globalThis.fetch;
+  process.env.MERRYMEN_HOME = home;
+  const db = new DatabaseSync(path.join(home, "merrymen.db"));
+  db.exec(`CREATE TABLE trades (
+    id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+    amount_usdg REAL NOT NULL, reject_rule TEXT, tx_hash TEXT, decision_id TEXT, target TEXT,
+    fill_side TEXT, fill_cash_usdg REAL, realized_pnl_usdg REAL, sell_token TEXT, buy_token TEXT,
+    user_op_hash TEXT, created_at INTEGER NOT NULL
+  ); CREATE TABLE agents (smart_account TEXT PRIMARY KEY, live_blocker TEXT);
+  CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, symbol TEXT, action TEXT, reason TEXT);`);
+  let clock = NOTIFY_NOW;
+  let state: ReturnType<typeof loadTelegramState> = { ...loadTelegramState(), ownerId: NOTIFY_OWNER, lastNotifiedTradeId: 0 };
+  const sends: Array<{ chatId: number; text: string }> = [];
+  const prompts: string[] = [];
+  const notes: string[] = [];
+  globalThis.fetch = (async (url, init) => {
+    if (String(url) === "https://model.test/v1/chat/completions") {
+      assert.ok(options.narrate, "a model is used only by the narration fixture");
+      prompts.push(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "I followed the recorded reason." } }] }), { status: 200 });
+    }
+    assert.match(String(url), /^https:\/\/api\.telegram\.org\/bot123:TEST\/sendMessage$/u, "only the fake Telegram transport is used");
+    const body = JSON.parse(String(init?.body)) as { chat_id: number; text: string };
+    sends.push({ chatId: body.chat_id, text: body.text });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: sends.length } }), { status: 200 });
+  }) as typeof fetch;
+  const cfg = {
+    telegramEnabled: true, telegramBotToken: "123:TEST", telegramNotifyEnabled: true,
+    telegramNotifyEveryMin: options.immediate ? 0 : NOTIFY_PERIOD_MIN, telegramDigestHour: 99, tickSeconds: 60,
+    customTokens: [], telegramPcControlEnabled: false, telegramCapabilities: [],
+    ...(options.narrate ? { llmProvider: "custom", llmApiKey: "TEST-KEY", llmBaseUrl: "https://model.test/v1", llmProviderModel: "test" } : {}),
+  } as unknown as ResolvedConfig;
+  let handle: ReturnType<typeof startNotifier> | undefined;
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(notes, [], "the notifier pass completed without swallowing a query failure");
+  };
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await run({
+      add: (id, agent, kind, status, amount = 0, extra = {}) => {
+        const cash = extra.fillCash === undefined ? status === "landed" || status === "paper" ? amount : null : extra.fillCash;
+        const side = extra.fillSide === undefined ? kind === "swap" && (status === "landed" || status === "paper") ? "buy" : null : extra.fillSide;
+        db.prepare("INSERT INTO trades (id, agent_id, kind, status, amount_usdg, fill_cash_usdg, decision_id, fill_side, user_op_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(id, agent, kind, status, amount, cash, extra.decisionId ?? null, side, extra.opHash ?? null, extra.createdAt ?? clock);
+      },
+      decision: (id, agent, symbol, reason) => {
+        db.prepare("INSERT INTO decisions (id, agent_id, symbol, action, reason) VALUES (?, ?, ?, 'buy', ?)").run(id, agent, symbol, reason);
+      },
+      start: async () => {
+        assert.equal(handle, undefined, "one notifier per fixture");
+        handle = startNotifier({
+          getCfg: () => cfg,
+          stateRef: { get: () => state, set: (next) => { state = next; } },
+          note: (_level, message) => notes.push(message),
+          buildStatusContext: () => ({ name: "Robin", strategy: "s", venue: "v", paused: false, workerAliveSec: 0, grant: null, chainId: 4663, telegramMaxActionUsdg: 25 }),
+          getAlertInputs: () => ({ grantExpiresAt: null, maxActionUsdg: null, cashUsdg: null, drawdownBps: null, breakerBps: null, gasWei: null }),
+          getChainId: () => null,
+          getAgentId: () => options.agentId === undefined ? NOTIFY_AGENT : options.agentId,
+          now: () => clock,
+        });
+        await settle();
+      },
+      nextPeriod: async () => {
+        assert.ok(handle);
+        clock += NOTIFY_PERIOD_MIN * 60;
+        mock.timers.tick(15_000);
+        await settle();
+      },
+      state: () => state,
+      sends,
+      prompts,
+    });
+  } finally {
+    handle?.stop();
+    mock.timers.reset();
+    globalThis.fetch = priorFetch;
+    if (priorHome === undefined) delete process.env.MERRYMEN_HOME;
+    else process.env.MERRYMEN_HOME = priorHome;
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("quiet notifier counts real trades in a mixed batch, excludes key installs and another tenant, and does not replay them", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "key-install", "landed");
+    h.add(2, NOTIFY_AGENT, "swap", "landed", 25);
+    h.add(3, NOTIFY_AGENT, "swap", "paper", 7.5);
+    h.add(4, NOTIFY_AGENT, "swap", "rejected", 9);
+    h.add(5, NOTIFY_AGENT, "swap", "reverted", 3);
+    h.add(6, NOTIFY_OTHER, "swap", "landed", 999);
+    h.add(7, NOTIFY_OTHER, "key-install", "landed");
+    await h.start();
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0]!.chatId, NOTIFY_OWNER);
+    assert.match(h.sends[0]!.text, /1× landed \(25\.00 USDG\)/u);
+    assert.match(h.sends[0]!.text, /1× paper \(7\.50 USDG\)/u);
+    assert.match(h.sends[0]!.text, /1× turned back/u);
+    assert.match(h.sends[0]!.text, /1× didn't go through/u);
+    assert.doesNotMatch(h.sends[0]!.text, /key-install|permissions|999|2× landed|0\.00 USDG/u);
+    assert.equal(h.state().lastNotifiedTradeId, 7, "the global high-water advances past filtered rows too");
+    assert.equal(h.state().lastTradeDigestAt, NOTIFY_NOW);
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 1, "a scheduled pass does not replay the batch");
+    assert.equal(h.state().lastTradeDigestAt, NOTIFY_NOW + NOTIFY_PERIOD_MIN * 60);
+  });
+});
+
+test("quiet notifier consumes install-only batches without a trade summary and later retains a real trade", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "key-install", "landed");
+    h.add(2, NOTIFY_AGENT, "key-install", "rejected");
+    h.add(3, NOTIFY_OTHER, "swap", "landed", 999);
+    await h.start();
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.state().lastNotifiedTradeId, 3);
+    assert.equal(h.state().lastTradeDigestAt, NOTIFY_NOW);
+    h.add(4, NOTIFY_AGENT, "key-install", "landed");
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.state().lastNotifiedTradeId, 4);
+    h.add(5, NOTIFY_AGENT, "swap", "landed", 6.25);
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0]!.text, /1× landed \(6\.25 USDG\)/u);
+    assert.doesNotMatch(h.sends[0]!.text, /2× landed|3× landed|permissions|999/u);
+    assert.equal(h.state().lastNotifiedTradeId, 5);
+  });
+});
+
+test("an unarmed quiet notifier never digests another tenant's trades", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "swap", "landed", 25);
+    h.add(2, NOTIFY_OTHER, "swap", "paper", 999);
+    await h.start();
+    assert.deepEqual(h.sends, []);
+    assert.equal(h.state().lastNotifiedTradeId, 2);
+    h.add(3, NOTIFY_OTHER, "swap", "landed", 888);
+    await h.nextPeriod();
+    assert.deepEqual(h.sends, []);
+    assert.equal(h.state().lastNotifiedTradeId, 3);
+  }, { agentId: null });
+});
+
+test("quiet notifier sums measured live and paper cash, marking missing fill cash unknown rather than spent", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "key-install", "landed");
+    h.add(2, NOTIFY_AGENT, "swap", "landed", 25, { fillCash: 20 });
+    h.add(3, NOTIFY_AGENT, "swap", "landed", 777, { fillCash: null });
+    h.add(4, NOTIFY_AGENT, "swap", "landed", 8, { fillCash: 0 });
+    h.add(5, NOTIFY_AGENT, "swap", "paper", 35, { fillCash: 7.5 });
+    h.add(6, NOTIFY_AGENT, "swap", "paper", 888, { fillCash: null });
+    h.add(7, NOTIFY_AGENT, "swap", "rejected", 9);
+    h.add(8, NOTIFY_OTHER, "swap", "landed", 999);
+    await h.start();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0]!.text, /3× landed \(20\.00 USDG measured; 1 amount unknown\)/u);
+    assert.match(h.sends[0]!.text, /2× paper \(7\.50 USDG measured; 1 amount unknown\)/u);
+    assert.match(h.sends[0]!.text, /1× turned back/u);
+    assert.doesNotMatch(h.sends[0]!.text, /25\.00|35\.00|777|888|999/u);
+    assert.equal(h.state().lastNotifiedTradeId, 8);
+    h.add(9, NOTIFY_AGENT, "swap", "landed", 111, { fillCash: null });
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[1]!.text, /1× landed \(amount unknown\)/u);
+    assert.doesNotMatch(h.sends[1]!.text, /0\.00 USDG|111/u, "missing fill evidence is not a zero or the requested amount");
+  });
+});
+
+test("the immediate notifier never narrates a foreign decision attached to an own fill", async () => {
+  await withNotifier(async (h) => {
+    h.decision("foreign-decision", NOTIFY_OTHER, "SECRET", "PRIVATE_FOREIGN_PLAN");
+    h.decision("own-decision", NOTIFY_AGENT.toUpperCase(), "OWN", "OWN_RECORDED_REASON");
+    h.add(1, NOTIFY_AGENT, "swap", "landed", 25, { decisionId: "foreign-decision" });
+    h.add(2, NOTIFY_AGENT, "swap", "paper", 7, { decisionId: "own-decision" });
+    h.add(3, NOTIFY_OTHER, "swap", "landed", 999, { decisionId: "foreign-decision" });
+    await h.start();
+    assert.equal(h.sends.length, 2, "the own receipts remain available, including the orphaned decision link");
+    assert.ok(h.sends.every((send) => send.chatId === NOTIFY_OWNER));
+    assert.equal(h.prompts.length, 1, "the mismatched decision cannot supply narration evidence");
+    assert.match(h.prompts[0]!, /OWN_RECORDED_REASON/u);
+    assert.doesNotMatch(JSON.stringify({ sends: h.sends, prompts: h.prompts }), /PRIVATE_FOREIGN_PLAN|SECRET|999/u);
+    assert.equal(h.state().lastNotifiedTradeId, 2);
+  }, { immediate: true, narrate: true });
+});
+
+test("quiet notifier collapses mixed-case operation copies before excluding installs and retains independent paper fills and refusals", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "key-install", "landed", 0, { opHash: "0xABCD10" });
+    h.add(2, NOTIFY_AGENT, "swap", "landed", 0, { opHash: "0xabcd10", fillSide: null, fillCash: null });
+    h.add(3, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xABCD20", fillCash: 20 });
+    h.add(4, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xabcd20", fillSide: null, fillCash: null });
+    h.add(5, NOTIFY_AGENT, "swap", "paper", 7);
+    h.add(6, NOTIFY_AGENT, "swap", "paper", 9);
+    h.add(7, NOTIFY_AGENT, "swap", "rejected", 5);
+    h.add(8, NOTIFY_AGENT, "swap", "rejected", 5);
+    h.add(9, NOTIFY_OTHER, "swap", "landed", 999, { opHash: "0xABCD20" });
+    await h.start();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0]!.text, /1× landed \(20\.00 USDG\)/u);
+    assert.match(h.sends[0]!.text, /2× paper \(16\.00 USDG\)/u);
+    assert.match(h.sends[0]!.text, /2× turned back/u);
+    assert.doesNotMatch(h.sends[0]!.text, /unknown|999|2× landed|3× landed|4× landed/u);
+    assert.equal(h.state().lastNotifiedTradeId, 9, "the cursor consumes physical copies without counting them");
+  });
+});
+
+test("late bare swap copies of a notified fill and install cannot create another quiet digest", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "key-install", "landed", 0, { opHash: "0xABCD10" });
+    h.add(2, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xABCD20", fillCash: 20 });
+    await h.start();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0]!.text, /1× landed \(20\.00 USDG\)/u);
+    assert.equal(h.state().lastNotifiedTradeId, 2);
+    const restartedAt = NOTIFY_NOW + NOTIFY_PERIOD_MIN * 60;
+    h.add(3, NOTIFY_AGENT, "swap", "landed", 0, { opHash: "0xabcd10", fillSide: null, fillCash: null, createdAt: restartedAt });
+    h.add(4, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xabcd20", fillSide: null, fillCash: null, createdAt: restartedAt });
+    h.add(5, NOTIFY_AGENT, "swap", "submitted", 25, { opHash: "0xAbCd20", fillSide: null, fillCash: null, createdAt: restartedAt });
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 1, "collapse reaches back before the cursor and keeps the original kind/status");
+    assert.equal(h.state().lastNotifiedTradeId, 5);
+    h.add(6, NOTIFY_AGENT, "swap", "paper", 3);
+    h.add(7, NOTIFY_AGENT, "swap", "paper", 3);
+    h.add(8, NOTIFY_AGENT, "swap", "rejected", 9);
+    h.add(9, NOTIFY_AGENT, "swap", "rejected", 9);
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[1]!.text, /2× paper \(6\.00 USDG\)/u);
+    assert.match(h.sends[1]!.text, /2× turned back/u);
+    assert.doesNotMatch(h.sends[1]!.text, /landed/u);
+    assert.equal(h.state().lastNotifiedTradeId, 9);
+  });
+});
+
+test("immediate notifier emits one receipt per canonical operation and ignores later copies", async () => {
+  await withNotifier(async (h) => {
+    h.add(1, NOTIFY_AGENT, "key-install", "landed", 0, { opHash: "0xABCD10" });
+    h.add(2, NOTIFY_AGENT, "swap", "landed", 0, { opHash: "0xabcd10", fillSide: null, fillCash: null });
+    h.add(3, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xABCD20", fillCash: 20 });
+    h.add(4, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xabcd20", fillSide: null, fillCash: null });
+    await h.start();
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[0]!.text, /Installed your trading key/u);
+    assert.match(h.sends[1]!.text, /20\.00/u);
+    assert.equal(h.state().lastNotifiedTradeId, 3);
+    h.add(5, NOTIFY_AGENT, "swap", "landed", 0, { opHash: "0xAbCd10", fillSide: null, fillCash: null });
+    h.add(6, NOTIFY_AGENT, "swap", "landed", 25, { opHash: "0xAbCd20", fillSide: null, fillCash: null });
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 2);
+    h.add(7, NOTIFY_AGENT, "swap", "paper", 5);
+    await h.nextPeriod();
+    assert.equal(h.sends.length, 3);
+    assert.match(h.sends[2]!.text, /Practice trade.*no real money moved/u);
+    assert.equal(h.state().lastNotifiedTradeId, 7);
+  }, { immediate: true });
+});
 
 test("tradeDigestLine summarises only the non-empty status buckets", () => {
   const line = tradeDigestLine(
@@ -79,12 +372,24 @@ test("OUR GAS CHECK IS NOT THE WALL — the ORBIO line an owner was sent", () =>
   }
 });
 
-test("a wall too wide to install with its trade says to re-sign narrower, once", () => {
+test("a wall too wide to install with its trade says the key installs itself, once", () => {
+  // The old remedy sent the owner to re-sign, which seals the same wall: one
+  // owner re-signed several times and was refused every tick regardless.
   const row = { id: 10, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "enable-too-wide", tx_hash: null };
   const first = tradeLine(row, null, true, { label: "ORBIO", side: "buy" });
   assert.match(first, /too wide to install together with this trade/);
-  assert.match(first, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
+  assert.match(first, /No action needed: your agent installs its new permissions on their own first/);
+  assert.doesNotMatch(first, /seals a narrower permission set that leaves room/, "the promise that was not true");
   assert.doesNotMatch(tradeLine(row, null, false), /\/grant/, "repeats carry no instruction");
+});
+
+test("a key installed on its own is said for what it is: no trade, nothing moved", () => {
+  const row = { id: 12, kind: "key-install", amount_usdg: 0, status: "landed", reject_rule: null, tx_hash: "0xabc" };
+  const line = tradeLine(row, "https://explorer.example", false, null);
+  assert.match(line, /^🔑 Installed your trading key's permissions on their own\./);
+  assert.match(line, /nothing was traded and nothing moved/);
+  assert.match(line, /explorer\.example\/tx\/0xabc/);
+  assert.doesNotMatch(line, /\$0\.00|key-install/, "not a trade of nothing, and not the slug");
 });
 
 test("NOR IS THE MARKET — the UBIK line an owner was sent", () => {
@@ -416,7 +721,9 @@ test("the count line says how many, over how long, how recently — and how to f
     line.startsWith("↻ the buy of LARP was refused 59 more times in the last 60 min (enable-too-wide), the last just now. "),
     line,
   );
-  assert.match(line, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
+  // Repeats mean installing the key alone did not clear it, so the line still
+  // carries the one fix that is left.
+  assert.match(line, /If this keeps repeating, re-sign at \/grant with fewer custom tokens or capabilities/);
   const stopped = refusalCountLine(rec({ held: 1, lastAt: 1_000 + 5 * 60 }), 1_000 + REFUSAL_REMIND_LATER_SEC);
   assert.match(stopped, /refused 1 more time in the last 6 hours \(enable-too-wide\), the last 6 hours ago\./);
   assert.doesNotMatch(

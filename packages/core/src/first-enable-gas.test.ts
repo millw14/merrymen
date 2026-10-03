@@ -166,13 +166,23 @@ describe("the energy buy costs what it was measured to cost, and is sealed only 
     assert.equal(fits(1, true, {}), false);
   });
 
-  it("ONLY WHEN IT FITS — a class+Trencher wall with a token has no room when deploying", () => {
+  it("ONLY WHEN IT FITS — a class+Trencher wall with a token has no room for it", () => {
+    // Not even on a renewal: with the energy buy this wall predicts 13,961,815
+    // re-signed, 38,185 under the maximum. That is less than the sponsor's own
+    // limits, so no operation could ever install it — it was signable only
+    // while signing ignored the operation that has to carry it
+    // (KEY_INSTALL_RESERVE_BOUNDED).
     assert.equal(fits(4663, true, { ...CLASS, ...TRENCHER, extraTokens: tokens(1) }), false);
-    // A renewal pays no CREATE2, and that is exactly the room the energy buy
-    // needs here — `deploying` is a fact about the account, not a constant.
-    assert.equal(fits(4663, false, { ...CLASS, ...TRENCHER, extraTokens: tokens(1) }), true);
+    assert.equal(fits(4663, false, { ...CLASS, ...TRENCHER, extraTokens: tokens(1) }), false);
     // The hosted default (class vault sealed) keeps room for a few tokens.
     assert.equal(fits(4663, true, { ...CLASS }), true);
+  });
+
+  it("`deploying` is a fact about the account, not a constant", () => {
+    // A renewal pays no CREATE2, and that is exactly the room the energy buy
+    // needs here.
+    assert.equal(fits(4663, true, { ...CLASS, extraTokens: tokens(3) }), false);
+    assert.equal(fits(4663, false, { ...CLASS, extraTokens: tokens(3) }), true);
   });
 
   it("IS the signing policy, one permission wider — never a second arithmetic", () => {

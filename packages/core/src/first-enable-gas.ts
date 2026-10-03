@@ -173,6 +173,38 @@ export const FIRST_ENABLE_GAS_MODEL = {
  */
 export const FIRST_ENABLE_HARD_MAX_BOUNDED = 14_000_000n;
 
+/**
+ * ROOM EVERY SIGNABLE WALL MUST LEAVE FOR THE OPERATION THAT INSTALLS IT.
+ *
+ * The hard maximum binds the whole first operation (wall + payload + sponsor),
+ * but signing used to judge the wall alone against it. So a wall could pass
+ * signing while no operation could ever carry it under the maximum. Live,
+ * 2026-10-03, agent 0xbba115, re-signed several times: the wall was 12,073,605
+ * and its first trade (the Trencher vault's deploy + approve + buy) was
+ * 4,241,474. That came to 16,361,536 and was refused `enable-too-wide` every
+ * tick. Every re-sign sealed the same wall, so none of them could help.
+ *
+ * When the trade does not fit, the executor now installs the key on its own
+ * first (executor.ts installKey): one `approve(USDG, Router02, 0)`, which
+ * moves nothing and only revokes. This reserve guarantees that operation
+ * always fits. No signed wall is left without an operation that can install it.
+ *
+ * THE ARITHMETIC, from measurement:
+ *   call  — the ordinary first enable's whole payload, a single swap: 50,180
+ *           raw × 2.00 headroom = 100,360. An approve to zero is less than a
+ *           swap, so this is an upper bound for the install's call.
+ *   sponsor — the paymaster's two limits on the live canary: 46,457.
+ *   100,360 + 46,457 = 146,817, rounded up to 150,000.
+ *
+ * A third of a custom token's ~462,874. A wall within 150,000 of the maximum
+ * could never be installed by anything, so refusing it at signing is the only
+ * honest answer.
+ */
+export const KEY_INSTALL_RESERVE_BOUNDED = 150_000n;
+
+/** The most a wall may predict and still be signed: the maximum, less its install's room. */
+export const FIRST_ENABLE_WALL_MAX_BOUNDED = FIRST_ENABLE_HARD_MAX_BOUNDED - KEY_INSTALL_RESERVE_BOUNDED;
+
 export interface FirstEnableEnvelope {
   shape: WallShape;
   /** What this wall should cost to install, raw, before headroom. */
@@ -181,7 +213,10 @@ export interface FirstEnableEnvelope {
   expectedBounded: bigint;
   /** The most this wall may be signed for: its own envelope, capped. */
   allowedMaxBounded: bigint;
-  /** True when the wall's own envelope fits under the hard product maximum. */
+  /**
+   * True when the wall's own envelope fits under the hard product maximum WITH
+   * room left for the operation that installs it (KEY_INSTALL_RESERVE_BOUNDED).
+   */
   withinHardMax: boolean;
 }
 
@@ -214,8 +249,10 @@ export function firstEnableEnvelope(
   const expectedRaw = BigInt(Math.max(0, fittedRaw));
   const expectedBounded = (expectedRaw * BigInt(m.boundedOverRawBps)) / 10_000n;
   // DEPLOYABILITY IS JUDGED ON THE PREDICTION, not on the tolerance. Otherwise
-  // the slack we allow an estimator would decide which walls exist.
-  const withinHardMax = expectedBounded <= FIRST_ENABLE_HARD_MAX_BOUNDED;
+  // the slack we allow an estimator would decide which walls exist. And
+  // against the maximum LESS the install's room: a wall that fills the maximum
+  // by itself has no operation that can carry it.
+  const withinHardMax = expectedBounded <= FIRST_ENABLE_WALL_MAX_BOUNDED;
   const tolerated = (expectedBounded * BigInt(m.safetyBps)) / 10_000n;
   return {
     shape,
@@ -370,7 +407,8 @@ export function wallSignable(
   const head =
     `${WALL_TOO_WIDE}: installing it would need about ` +
     `${env.expectedBounded.toLocaleString()} gas against a limit of ` +
-    `${FIRST_ENABLE_HARD_MAX_BOUNDED.toLocaleString()}.`;
+    `${FIRST_ENABLE_WALL_MAX_BOUNDED.toLocaleString()} (${FIRST_ENABLE_HARD_MAX_BOUNDED.toLocaleString()}, ` +
+    `less room for the operation that installs it).`;
 
   if (opts.basket && maxTokens !== null && removeAtLeast !== null && removeAtLeast > 0) {
     return {

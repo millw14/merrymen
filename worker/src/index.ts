@@ -232,6 +232,8 @@ import {
 import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
+import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
+import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
@@ -671,6 +673,14 @@ interface ActiveAgent {
  * this file is against the full address, so a collision here is cosmetic.
  */
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
+/**
+ * When each executor last tried installing its key alone (installKeyAlone in
+ * main). Module scope, not main's, so it exists before the first intent can
+ * reach it; keyed by executor, so every arm starts fresh.
+ */
+const keyInstallTriedAt = new WeakMap<AgentExecutor, number>();
+const KEY_INSTALL_RETRY_MS = 30 * 60_000;
 
 async function main() {
   await initStore();
@@ -3369,7 +3379,12 @@ async function main() {
           settlementsQueued.add(r.userOpHash);
           settlementQueue.push({ userOpHash: r.userOpHash, createdAt: row.createdAt, usdgDelta6: explains.usdgDelta6 });
         }
-        await addTrade({
+        // An install's gas is its entire expense. Both payer and cost must be
+        // recorded before its submitted recovery row can become terminal.
+        const wrote = row.kind === KEY_INSTALL_KIND
+          ? await settleKeyInstall({ addTrade }, agentId, { userOpHash: r.userOpHash, success: r.success,
+              proof: { txHash: r.txHash as `0x${string}`, gasWei: r.gasWei, gasUnits: r.gasUnits, gasPayer: r.gasPayer } })
+          : await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
           target: row.target,
@@ -3383,8 +3398,10 @@ async function main() {
           user_op_hash: r.userOpHash,
           tx_hash: r.txHash,
           status: r.success ? "landed" : "reverted",
+          ...gasFields(r),
           ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
         });
+        if (!wrote) continue;
         await addEvent(
           agentId,
           "warn",
@@ -7725,6 +7742,52 @@ async function main() {
   }
 
   /**
+   * A NEW KEY WHOSE WALL LEAVES NO ROOM FOR ITS FIRST TRADE, INSTALLED ON ITS OWN.
+   *
+   * A key's first operation carries its whole wall plus whatever it was sent to
+   * do, and the two together must fit under the first-enable maximum. When they
+   * do not, the trade is refused `enable-too-wide` before signing. Re-signing
+   * could not help, because it seals the same wall. Live, 2026-10-03, agent
+   * 0xbba115 was refused every tick through several re-signs: wall 12,073,605
+   * plus a Trencher vault deploy + buy of 4,241,474.
+   *
+   * So the key is installed with the cheapest call the wall admits
+   * (executor.ts keyInstallCalls: `approve(USDG, Router02, 0)`, which moves
+   * nothing), and the trade goes on a later tick as an ordinary operation
+   * under its own ceiling. Nothing about the trade is decided here, and nothing
+   * is retried in its place: the refused trade is booked `rejected` as before,
+   * and the strategy proposes it again or not.
+   *
+   * THE SAME DURABILITY AS ANY OPERATION. The row is written 'submitted' with
+   * the hash BEFORE broadcast (a failed write refuses to send), settled
+   * 'landed' with its gas after, and left 'submitted' for resolveStrandedOps
+   * when the receipt cannot be read. Replay is impossible: the operation is
+   * nonce-bound to the key's sequence 0, and the executor refuses to install a
+   * key the chain says is already installed (keyInstallRefusal).
+   *
+   * ONCE PER EXECUTOR PER HALF HOUR. Each arm builds a new executor, so a
+   * re-sign starts fresh. An install still in flight is not raced by a second
+   * one, and a wall that cannot be installed even alone is told to the owner
+   * once, not every tick.
+   */
+  async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
+    const last = keyInstallTriedAt.get(executor);
+    if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
+    keyInstallTriedAt.set(executor, Date.now());
+    await installKeyRecorded({
+      addTrade,
+      priceGas: async (wei) => {
+        const eth = await ethPrice8();
+        const priced = priceGas(wei, eth.price8, eth.reason);
+        return priced.usdg === null ? null : usdgNum(priced.usdg);
+      },
+      refreshBudget: () => refreshBudget(agentId),
+      event: (level, message) => addEvent(agentId, level, message),
+      resolveMinutes: STRANDED_INTERVAL_SEC / 60,
+    }, agentId, executor);
+  }
+
+  /**
    * SERIALIZED. Every caller goes through processIntent, which holds this.
    *
    * The hazard is named in this file already, at the budget reservation: "a
@@ -10028,6 +10091,10 @@ async function main() {
           reject_rule: e.rule,
           ...sim,
         });
+        // The wall fits, only not with this trade beside it: install it alone,
+        // so the next trade is an ordinary operation. Still inside this
+        // intent's lock, so nothing else signs with this key meanwhile.
+        if (e.rule === "enable-too-wide") await installKeyAlone(agentId, executor);
         return;
       }
 
@@ -10241,6 +10308,7 @@ async function main() {
       releaseBudget();
     }
   }
+
 
   /**
    * LIVENESS, WHICH IS NOT THE SAME QUESTION AS "DID THE CHAIN ANSWER".

@@ -90,7 +90,9 @@ describe("read-only grant renewal preflight", () => {
         ...options, extraTokens, trencherFactory: TRENCHER_FACTORY, v4AdapterAddress: V4_ADAPTER,
       }), error => {
         assert.ok(error instanceof Error);
-        assert.match(error.message, /against a limit of 14,000,000/);
+        // The 14,000,000 maximum, less room for the operation that installs
+        // the key (core first-enable-gas.ts KEY_INSTALL_RESERVE_BOUNDED).
+        assert.match(error.message, /against a limit of 13,850,000 \(14,000,000, less room for the operation that installs it\)/);
         assert.match(error.message, /the most that fits with the features you have enabled is 4\. Remove at least 2 custom tokens/);
         return true;
       });
