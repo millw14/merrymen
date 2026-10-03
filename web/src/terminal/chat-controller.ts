@@ -118,6 +118,13 @@ export interface ChatController {
 export interface ConfirmScope {
   say(line: Omit<ChatMessage, "id" | "at">): void;
   followOrder(id: string, expiresInMs: number | null): void;
+  /**
+   * Clear or replace THIS confirm's card — and only while it is still the
+   * card up. The composer stays open while a card is carried out, and a
+   * question sent meanwhile puts up its own card; whatever this confirm would
+   * do to the card then does nothing, so a newer card is never cleared or
+   * swapped under the owner's thumb between reading it and tapping.
+   */
   setProposal(p: Proposal | null): void;
   refreshSettings(): void;
   /**
@@ -646,6 +653,16 @@ export function useChatController(o: {
   // whether anything that acts may still go out (the same owner, throughout),
   // and `owner` goes with it so the route can refuse a session another tab
   // changed unseen (lib/order-owner.ts).
+  //
+  // AND ONLY ITS OWN CARD. The same owner can ask something else while a
+  // confirm runs — a snipe's lookup can take SNIPE_LOOKUP_MS — and that
+  // question's reply puts up its own card. The confirm's `setProposal` then
+  // cleared whatever card was up, not its own: the newer card vanished before
+  // it could be read, or could be swapped for another with "Yes, do it" in the
+  // same place. So it acts only while the card up is the very proposal this
+  // confirm was handed — checked and written in one step, against the state
+  // React holds rather than the last render's, so a reply landing in the same
+  // batch is seen.
   const confirm = useCallback(
     async (run: (p: Proposal, on: ConfirmScope) => Promise<void>) => {
       const p = proposalRef.current;
@@ -666,7 +683,7 @@ export function useChatController(o: {
           if (theirs()) followOrder(id, expiresInMs);
         },
         setProposal: (next) => {
-          if (theirs()) setProposal(next);
+          if (theirs()) setProposal((now) => (now === p ? next : now));
         },
         refreshSettings: () => {
           if (theirs()) refreshSettings();
