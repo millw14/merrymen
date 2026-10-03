@@ -47,11 +47,12 @@ export function resetDeskReadsForTest(): void {
   pending.clear();
 }
 
-async function getJson(route: string, timeoutMs: number): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
+async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
   const source = geckoSource();
   const observedAt = Date.now();
   try {
-    const res = await fetch(`${source.base}${route}`, { headers: source.headers, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const res = await fetch(`${source.base}${route}`, { headers: source.headers, redirect: "error", signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (!res.ok) {
       const retry = res.headers.get("retry-after");
       const ms = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
@@ -76,13 +77,13 @@ export function searchable(query: string): string | null {
 }
 
 /** GeckoTerminal's pool search, on Robinhood Chain only. Pools are parsed like every other feed. */
-export async function searchPools(query: string, timeoutMs = 8000): Promise<GeckoFetch> {
+export async function searchPools(query: string, timeoutMs = 8000, signal?: AbortSignal): Promise<GeckoFetch> {
   const q = searchable(query);
   if (!q) return { pools: [], failed: true, failure: "invalid-query" };
   return memoized<GeckoFetch>(
     `search:${q.toLowerCase()}`,
     async () => {
-      const r = await getJson(`/search/pools?query=${encodeURIComponent(q)}&network=${GECKO_NETWORK}&page=1`, timeoutMs);
+      const r = await getJson(`/search/pools?query=${encodeURIComponent(q)}&network=${GECKO_NETWORK}&page=1`, timeoutMs, signal);
       if (!r.ok) return { pools: [], failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const data = (r.body as { data?: unknown })?.data;
       if (!Array.isArray(data)) return { pools: [], failed: true, failure: "invalid-shape" };
@@ -138,7 +139,7 @@ export function parseHourlyBars(body: unknown, token: string, now = Date.now()):
 }
 
 /** Up to a week of hourly candles for one pool, priced in USD for `token`. */
-export async function readHourlyBars(poolId: string, token: string, limit = 168, timeoutMs = 8000): Promise<BarsRead> {
+export async function readHourlyBars(poolId: string, token: string, limit = 168, timeoutMs = 8000, signal?: AbortSignal): Promise<BarsRead> {
   const pool = typeof poolId === "string" ? poolId.toLowerCase() : "";
   const tok = typeof token === "string" ? token.toLowerCase() : "";
   if (!/^0x([\da-f]{40}|[\da-f]{64})$/.test(pool) || !/^0x[\da-f]{40}$/.test(tok)) return { failed: true, failure: "invalid-market", bars: [] };
@@ -146,7 +147,7 @@ export async function readHourlyBars(poolId: string, token: string, limit = 168,
   return memoized<BarsRead>(
     `hour:${pool}:${tok}:${n}`,
     async () => {
-      const r = await getJson(`/networks/${GECKO_NETWORK}/pools/${pool}/ohlcv/hour?aggregate=1&limit=${n}&currency=usd&token=${tok}`, timeoutMs);
+      const r = await getJson(`/networks/${GECKO_NETWORK}/pools/${pool}/ohlcv/hour?aggregate=1&limit=${n}&currency=usd&token=${tok}`, timeoutMs, signal);
       if (!r.ok) return { failed: true, failure: r.failure, bars: [], ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const parsed = parseHourlyBars(r.body, tok);
       return parsed ? { failed: false, observedAt: r.observedAt, ...parsed } : { failed: true, failure: "invalid-shape", bars: [] };

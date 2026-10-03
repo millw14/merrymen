@@ -411,13 +411,31 @@ one-liner from a model that was given no data.
   within 15 minutes, else the market. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
 
-A searched name that no index lists ("thoughts on pizza") is answered as
-ordinary chatter, not "drop the CA". A line that asks something private does
-not reach the desk. Each chat gets at most 6 desk looks, and the agent 30, in
-any ten minutes; past that a line is answered as chatter.
+Concurrent reads retain the subject of the latest received question, even
+when an older lookup finishes later. The follow-up lifetime starts at receipt.
 
-A "why" under a coin keeps the public-fact answer (it is about the agent's own
-decision). An addressed cashtag with no CA goes to the desk, which can find
+A posted CA is answered by the desk too, inside its budget (below): a coin
+that passes the quick screen gets the chart and read in place of the
+"let me see 👀" ack. The status line distinguishes that screen from a trade
+review or confirmed fill; accepting a nomination never claims Brain has
+reviewed it. A post that asked about the coin ("thoughts on 0x…"), including
+an addressed repost, gets a current read. "Why" under a coin includes its
+recorded public outcome and safe reason separately from the current market
+read, including skipped, expired and not-ready outcomes. A missing chart or
+model does not discard measured pool data: the code's read goes out as text.
+If no evidence can be obtained, the answer identifies that limitation.
+
+A searched name that no index lists gets an explicit identification failure
+and asks for the CA; an ambiguous name is never guessed. A line that asks
+something private does not reach the desk. Each chat gets at most 6 desk
+looks, and the agent 30, in any ten minutes; past that an explicit research
+question gets an allowance-unavailable answer rather than invented banter.
+The per-person reply counter reserves a slot before transport. Confirmed
+Telegram refusals or expiry before sending refund that slot; successful and
+uncertain deliveries retain it.
+
+A "why" under a coin preserves the recorded outcome's provenance in the
+desk answer. An addressed cashtag with no CA goes to the desk, which can find
 the coin by name, instead of "drop the ca"; a cashtag dropped in the room
 still gets the coin flow. Coin reads honour the coins switch; the market does
 not need it. A line that is distress, an injection, or a public-fact request
@@ -450,10 +468,26 @@ the chart alike. The deployer's free-text coin name never enters a brief.
    its own fleet-wide slot limit (`BRAIN_DESK_CONCURRENCY`, default 2) apart
    from `/v1/decide`'s per-agent lock, a slot never held past the desk tier's
    20 s, and a refused effort remembered apart from decide's reasoning hint —
-   only with `MERRYMEN_TG_GROUPS_BRAIN=1` (rule 7), time-boxed at 22 s;
-2. else, within 12 s of starting, the group's own model with the same
-   instructions, time-boxed at 20 s;
+   only with `MERRYMEN_TG_GROUPS_BRAIN=1` (rule 7), time-boxed at most 18 s
+   of the remaining composition budget;
+2. else the group's own model with the same instructions, only when at least
+   6 s of composition time remains;
 3. else the desk's own read, written by code from the same measurements.
+
+The whole research reply has one 30 s budget from receipt, including the
+initial coin screen, queue time, evidence, optional model and Telegram
+delivery. At least 5 s is reserved for delivery. Explicit research requests
+do not wait behind ordinary chatter, and fresh CA reads do not wait behind
+other coin posts. Non-owner unasked reads retain a concurrency cap; a full
+allowance gets a bounded busy answer. Cosmetic typing never delays a research
+answer. The index lookup gets at most 10 s of what remains; candles are
+optional and bounded at 3 s, PNG rendering at 1.5 s. Valid pool data survives
+either timing out. Brain and the group's model consume only the remaining
+composition time; otherwise the measured code read is used. Telegram calls,
+including uploads and safe formatting retries, share the original deadline.
+A transport timeout is an unknown delivery outcome and is never blindly
+retried. Telegram outages or a flood wait can prevent delivery; they cannot
+leave hidden late sends or extend the bot's research deadline.
 
 Brain and model calls go through the group allowance like every line. The
 asker's words reach the model only fenced as untrusted; nothing private does
@@ -542,21 +576,27 @@ considered.
 A coin line is an answer to whoever posted the CA, and counts in pacing's
 flood rule like any other (the same `isFlooded`, imported, not mirrored):
 past 6 answers to one person in 2 minutes, their next CA gets one 👀 per
-window at most, then nothing. Never the owner. Outcomes (step 8) are the
-coin's report, not a new answer, and are not held back by it.
+window at most, then nothing. Never the owner. Concurrent research checks and
+counts the person's slot inside the send lock before transport; an ambiguous
+timeout retains that count because the answer may have landed. Outcomes
+(step 8) are the coin's report, not a new answer, and are not held back by it.
 
-**Off the chat's queue.** The handler runs a chat's lines one at a time. A
-CA's reads (the chain, GeckoTerminal) are not done there: the flow decides at
+**Off the chat's queue.** Ordinary chatter runs one line at a time. Public
+research starts beside it. A CA's reads (the chain, GeckoTerminal) are not
+done there: the flow decides at
 once that it owns the line (nothing that decides it needs a read), and the
 claim, the look, the lines and the nomination run on that chat's **coin
-lane** (`CoinFlow.begin`), serial per chat — so a coin's second post is still
-answered from the first one's memo — but apart from the chatter queue. A look
+lane** (`CoinFlow.begin`), apart from the chatter queue. With the desk
+connected, public CA research runs concurrently under its allowance;
+without it, posts remain serial per chat. Durable per-message claims still happen before
+any look or nomination, and the sender reserves one immediate reply per
+message. A look
 that hangs never holds the chat's next line. Every look is bounded (10 s,
 `COIN_FLOW.lookMs`): past it the answer is `unknown`, whatever the port does.
 An outcome that arrives while its ack is still going out waits for the ack.
 
 **Whoever asked goes first.** A shill's backlog of CAs must not make the
-owner's "@bot what about 0x…" wait past the 90 s send window. Of the posts
+owner's "@bot what about 0x…" wait past the 30 s research window. Of the posts
 waiting on a chat's lane, one that addresses the agent or is the owner's is
 worked first (the owner asking before anyone asking, before the owner's bare
 CA, before anyone else's; in arrival order among equals). A post still
@@ -594,8 +634,10 @@ Per posted CA, in order:
    is counted per person instead: everyone who asks about a coin gets the
    answer, once an hour each — the owner always, and at most 3 others per
    coin per chat per hour (`COIN_FLOW.seenAskedMax`); past that, a raid of
-   askers is counted as reposts — and the flood rule still bounds them. Only a
-   Robinhood Chain coin it actually looked at counts: one remembered while it
+   askers is counted as reposts — and the flood rule still bounds them.
+   An addressed repost can refresh the desk's public evidence without
+   nominating the same post again. Only a Robinhood Chain coin it actually
+   looked at counts: one remembered while it
    was not ready is looked at afresh when it is posted again, and a memo from
    an older build that says `wallet`, `not-token`, `unknown` or `coins-off`
    is never answered from.
@@ -677,9 +719,12 @@ Per posted CA, in order:
    already holds or decided in the last 6 h (`recent`) is answered from
    memory only when this chat has its own memo of it: a coin another group
    nominated is never mentioned.
-7. **Ack** right away, tagging the sender: a short model line in the
-   "hmm is this good? i think i like it" register (thinking out loud, no
-   verdict yet), or a template.
+7. **Research reply**, inside the same 30 s receipt-to-send budget: with the
+   desk connected, the chart and grounded read replace the placeholder ack.
+   The quick screen's result is identified as a screen, not a completed trade
+   review. Without a desk port, the existing short line remains; a connected
+   but unavailable desk states the limitation. A missing
+   verified price, chart or model never licenses an invented view.
 8. **Outcome** within the nomination TTL (15 min), reported by the trading
    side as `CoinOutcome` (a nomination whose entry was claimed inside the
    TTL waits up to 10 minutes past it for that fill, so a buy that lands
@@ -708,9 +753,20 @@ Per posted CA, in order:
    `GATE_FORCED_HOLD` or `STALE_MARK_HOLD` are not market views and are
    reported as `skipped`, never voiced as a take.
 
-A ticker without a CA ("$PEPE?": a line that is only tickers, or one addressed
-to it) → "drop the ca" (at most once per chat per hour); a ticker mentioned in
-passing is ordinary chatter. A command-shaped message from a non-owner ("buy this", "ape 100") is a
+The 15-minute nomination lifetime is an internal trading limit, not the
+group's reply deadline. The initial research answer does not wait for it.
+Nominated-page and discovery requests arriving during an active refresh are
+coalesced into a follow-up pass rather than lost. A newly qualified pending
+nomination can wake a serialized review with a fresh book; it keeps the
+original regular trading cadence, does not sample a new financial peak or
+accrue a fee, and cannot create a new entry outside the regular producer.
+Canonical pools, prices, signed permissions, energy, review allowances and
+all risk and nomination caps still decide whether it can proceed.
+
+A ticker without a CA dropped in the room ("$PEPE?") → "drop the ca" (at most
+once per chat per hour). An addressed coin question goes to the desk's name
+search when connected; a ticker mentioned in passing is ordinary chatter.
+A command-shaped message from a non-owner ("buy this", "ape 100") is a
 nomination at most; the words never size anything.
 
 ### Trencher readiness

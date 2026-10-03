@@ -6,7 +6,7 @@
  */
 import { calculateChatMath, parseChatMath } from "../../../../packages/core/src/index";
 import { admitTgLine, TG_LINE_MAX } from "./gate";
-import type { CoinLook, TgPublicFact, TgPublicTradeFact } from "./types";
+import type { CoinLook, TgCoinMemo, TgPublicFact, TgPublicTradeFact } from "./types";
 
 export type PublicFactRequest =
   | { kind: "trades"; why: boolean; symbol?: string; side?: "buy" | "sell" }
@@ -106,6 +106,26 @@ const QUICK_TAKE: Partial<Record<CoinLook["kind"], string>> = {
   "not-token": "it didn't resolve as a token on Robinhood Chain",
   own: "that isn't a coin for me to research here",
 };
+
+/** The quick screen's verdict on a coin kind, in its own words; undefined for a kind with none. */
+export function quickTake(kind: CoinLook["kind"]): string | undefined {
+  return QUICK_TAKE[kind];
+}
+
+/** A stored outcome is evidence; acceptance into a queue is never a Brain verdict. */
+export function publicCoinStatus(memo: TgCoinMemo | undefined, nowMs: number): string | undefined {
+  if (!memo) return undefined;
+  const reason = publicCoinReason(memo.notes);
+  if (memo.verdict === "bought") return `i bought it${memo.paper ? " on paper" : ""}${reason ? ` because ${reason}` : " after its recorded review"}`;
+  if (memo.verdict === "passed") return `i passed${reason ? ` because ${reason}` : " after its recorded review"}`;
+  if (memo.verdict === "skipped") return `no filled buy was recorded${reason ? `: ${reason}` : "; passing the quick screen wasn't trade approval"}`;
+  if (memo.verdict === "expired") return `the nomination expired without a confirmed buy${reason ? `: ${reason}` : ""}`;
+  if (memo.verdict === "not-ready") return `automated entries weren't ready${reason ? `: ${reason}` : "; this chart read is research"}`;
+  if (memo.verdict === "candidate" && nowMs - memo.atMs > 15 * 60_000) return "no completed trade outcome is recorded; this chart read doesn't confirm a buy";
+  if (memo.verdict === "candidate") return "it clears the quick screen; safe entry checks and a trade review are still required";
+  const take = quickTake(memo.verdict as CoinLook["kind"]);
+  return take ? `quick screen: ${take}` : undefined;
+}
 
 /** A numeric exception is assembled by code, never granted to model-written text. */
 export function publicFactLine(fact: TgPublicFact): string | null {

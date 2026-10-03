@@ -121,7 +121,8 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
+import { CoalescedRefresh } from "./coalesced-refresh";
 import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
@@ -770,29 +771,42 @@ async function main() {
   };
   let autoTrench: Awaited<ReturnType<typeof discoverTrencherUniverse>> | null = null;
   let autoTrenchContext = "";
-  let autoTrenchPending = false;
   let autoTrenchNext = 0;
   let autoTrenchBalances = new Map<string,bigint>();
   // Pools proved canonical stay proved across passes (trencher-discovery.ts).
   // Grant changes keep these chain facts; connection changes replace the cache
   // because another RPC can serve a different chain or fork.
   let trenchPoolCache = new TrencherPoolCache();
-  function refreshAutoTrench() {
+  const autoTrenchRefresh = new CoalescedRefresh({ run: async () => {
+    if (!active || !grantTrencher(active.grant)) return true;
+    const current = active;
+    const context = `${current.agentId}:${current.grant.grantedAt}`;
+    const poolCache = trenchPoolCache;
+    autoTrenchNext = Date.now() + 60_000;
+    try {
+      // Nominations change which pools are read, never the chain verification
+      // or the grant/custody checks that admit one to the trading universe.
+      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache });
+      if (autoTrenchContext === context && trenchPoolCache === poolCache && active && `${active.agentId}:${active.grant.grantedAt}` === context) {
+        autoTrench = result;
+        warmHeldNames(coinNames, result);
+        wakeQualifiedNominations();
+      }
+      return true;
+    } catch {
+      trenchNotice(current.agentId, "Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.");
+      return false;
+    }
+  } });
+  function refreshAutoTrench(newEvidence = false) {
     if (!active || !grantTrencher(active.grant)) return;
     const context = `${active.agentId}:${active.grant.grantedAt}`;
-    if (context !== autoTrenchContext) { autoTrenchContext=context; autoTrench=null; autoTrenchNext=0; }
-    if (autoTrenchPending || Date.now()<autoTrenchNext) return;
-    autoTrenchPending=true; autoTrenchNext=Date.now()+60_000;
-    const current=active;
-    const poolCache=trenchPoolCache;
-    // Nominated coins (Telegram groups) are verified beyond the top slice by
-    // the same on-chain checks; the set is addresses only (trencher-discovery.ts).
-    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated),cache:trenchPoolCache}).then(result=>{
-      if (autoTrenchContext===context && trenchPoolCache===poolCache) autoTrench=result;
-      // The held coins' names are read now, minutes before any exit needs one:
-      // a decision never waits for the chain (decision-name.ts).
-      if (autoTrenchContext===context && trenchPoolCache===poolCache) warmHeldNames(coinNames, result);
-    }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
+    if (context !== autoTrenchContext) { autoTrenchContext=context; autoTrench=null; autoTrenchNext=0; newEvidence=true; }
+    // A regular poll does not request a second pass of the same evidence.
+    // New pages DO: coalesce them behind the active pass instead of dropping
+    // a nomination merely because discovery was already running.
+    if (!newEvidence && (autoTrenchRefresh.busy() || Date.now() < autoTrenchNext)) return;
+    autoTrenchRefresh.request();
   }
   const trenchTapeReader = new TrenchTapeReader();
   let trenchTapeAt = 0;
@@ -816,8 +830,7 @@ async function main() {
       if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
       // Discovery otherwise runs against the preceding tape and then waits a
       // full minute even though a new tape has just arrived.
-      autoTrenchNext = 0;
-      refreshAutoTrench();
+      refreshAutoTrench(true);
     }).catch(() => {
       // No provider URL or response body: those may contain credentials.
       console.warn("[trencher] Market tape refresh failed; retaining the last tape within its freshness limit.");
@@ -887,6 +900,10 @@ async function main() {
   const tgBook = new NominationBook(tgGroupsStore);
   /** Unresolved nominations whose own token page rides on the tape (lowercased). */
   const tgNominated = new Set<string>();
+  const tgNominationWakes = new Set<string>();
+  // Wired once the existing serialized clock is initialized. Discovery never
+  // mutates watchTokens or places an order outside a serialized trading tick.
+  let wakeNominatedTick: (() => boolean) | null = null;
   /**
    * Brain decision id → the nominated coin that review was about. The group
    * entry claim reads it (tg-coin-look.ts claimGroupEntry) so an entry from a
@@ -900,7 +917,6 @@ async function main() {
   const tgExitWatch = new WeakMap<TradeIntent, { address: string; notes: string[] }>();
   /** `${utcDay}:${address}` of group-entry refusals already logged — once each. */
   const tgEntryRefusalsLogged = new Set<string>();
-  let tgNominatedTapePending = false;
   const tgLook = createCoinLook({
     own: () => (active ? bookAddresses(active.grant, active.grant.smartAccount) : []),
     held: (a) => (tgHeld.has(a) ? { name: tgHeld.get(a) ?? null } : null),
@@ -931,6 +947,7 @@ async function main() {
     book: tgBook,
     onNominated: (address) => {
       tgNominated.add(address);
+      console.log("[tg-groups] nomination stage: queued for pool checks");
       trenchTapeReader.setNominated(tgNominated);
       refreshNominatedTape();
     },
@@ -938,6 +955,15 @@ async function main() {
     paper: () => paperActive(),
     log: (line) => console.log(line),
   });
+  function wakeQualifiedNominations(): void {
+    if (!wakeNominatedTick || cfg.strategy !== "trencher" || !cfg.trencherFastEnabled || !active || !autoTrench) return;
+    const qualified = new Set(autoTrench.qualified.map(p => p.tokenAddress.toLowerCase()));
+    const waiting = [...tgNominated].filter(a => qualified.has(a) && !tgNominationWakes.has(a) && tgBook.nominated(a));
+    if (waiting.length && wakeNominatedTick()) {
+      for (const address of waiting) tgNominationWakes.add(address);
+      console.log("[tg-groups] nomination stage: verified pool; research wake accepted");
+    }
+  }
   /**
    * THE MARKET DESK for Telegram groups (docs/tg-groups.md "Market analysis"):
    * public index evidence, indicators and a chart for "how's the market" and
@@ -950,7 +976,7 @@ async function main() {
   let tgDeskBuilt: { key: string; port: TgDeskPort } | null = null;
   const tgDesk = (): TgDeskPort => {
     const brain = (process.env.MERRYMEN_TG_GROUPS_BRAIN ?? "").trim() === "1" && cfg.brainUrl && cfg.brainToken
-      ? { url: cfg.brainUrl, token: cfg.brainToken, agentId: active?.agentId ?? "agent", timeoutMs: 22_000 }
+      ? { url: cfg.brainUrl, token: cfg.brainToken, agentId: active?.agentId ?? "agent", timeoutMs: 18_000 }
       : null;
     const key = brain ? `${brain.url}|${brain.token}|${brain.agentId}` : "";
     if (!tgDeskBuilt || tgDeskBuilt.key !== key) tgDeskBuilt = { key, port: createDesk({ brain }) };
@@ -971,7 +997,7 @@ async function main() {
     try {
       const list = outcomes == null ? [] : Array.isArray(outcomes) ? [...outcomes] : [outcomes];
       if (list.length > 0) setImmediate(() => tgCoins.emit(list));
-      for (const a of [...tgNominated]) if (!tgBook.nominated(a)) tgNominated.delete(a);
+      for (const a of [...tgNominated]) if (!tgBook.nominated(a)) { tgNominated.delete(a); tgNominationWakes.delete(a); }
       trenchTapeReader.setNominated(tgNominated);
       const now = Date.now();
       for (const [id, r] of tgReviewedNominated) if (now - r.atMs > 3_600_000) tgReviewedNominated.delete(id);
@@ -985,21 +1011,13 @@ async function main() {
    * lets discovery run against them, so the coin can reach verification
    * without waiting out the tape's own clock.
    */
-  function refreshNominatedTape(): void {
-    if (tgNominatedTapePending) return;
-    tgNominatedTapePending = true;
-    void trenchTapeReader
-      .refreshNominated()
-      .then((failures) => {
-        if (failures.length) console.warn(`[trencher] ${failures.length} nominated tape page(s) could not be read; retried with the tape.`);
-        autoTrenchNext = 0;
-        refreshAutoTrench();
-      })
-      .catch(() => {})
-      .finally(() => {
-        tgNominatedTapePending = false;
-      });
-  }
+  const nominatedTapeRefresh = new CoalescedRefresh({ run: async () => {
+    const failures = await trenchTapeReader.refreshNominated();
+    if (failures.length) console.warn(`[trencher] ${failures.length} nominated tape page(s) could not be read; retried with the tape.`);
+    refreshAutoTrench(true);
+    return failures.length === 0;
+  } });
+  function refreshNominatedTape(): void { nominatedTapeRefresh.request(); }
   /**
    * AFTER A TRENCHER REVIEW IS PERSISTED (runShadow writes the decision before
    * it returns): tell the book what the Brain decided about that token. The
@@ -3129,6 +3147,7 @@ async function main() {
       // to its cache. Its result also belongs to the old connection.
       trenchPoolCache = new TrencherPoolCache();
       autoTrench = null;
+      autoTrenchContext = "";
       autoTrenchNext = 0;
       if (active) {
         await addEvent(active.agentId, "ok", "connection settings changed — re-arming executor");
@@ -10446,6 +10465,7 @@ async function main() {
    * tick it is. See runCommandTick at the run loop.
    */
   let commandTick = false;
+  let nominationTick = false;
   async function tick() {
     // A COMMAND TICK is this same tick with its producers left out: the same
     // grant sync, the same market read, the same book read and equity — the
@@ -10455,7 +10475,7 @@ async function main() {
     // time. And no ratchet: it composes equity for the order and writes none of
     // it down. Every one of those forks reads this plan (command-wake.ts
     // tickPlan, where a test runs it) rather than a flag tested inline.
-    const plan = tickPlan(commandTick ? "command" : "regular");
+    const plan = tickPlan(commandTick ? "command" : nominationTick ? "nomination" : "regular");
     const tickStartedAt = Date.now();
     let brainOrderAccepted = false;
     const fastTrencher = cfg.strategy === "trencher" && cfg.trencherFastEnabled;
@@ -10477,6 +10497,10 @@ async function main() {
     await refreshConfig();
     const armed = await syncGrant();
     await observeRailCash();
+
+    // Settings can change while this research wake was waiting for a trade.
+    // It must never become an extra review/execution tick for another rail.
+    if (plan.kind === "nomination" && (cfg.strategy !== "trencher" || !cfg.trencherFastEnabled || !active || !grantTrencher(active.grant))) return;
 
     if (active && grantTrencher(active.grant)) {
       refreshTrenchTape(); refreshAutoTrench();
@@ -10573,7 +10597,7 @@ async function main() {
       // filled — see runOrderCommand for why filling it would switch the
       // drawdown breaker off.
       const marketUnread = tickBook.unread("market");
-      if (active) await runQueuedCommand(active.agentId, marketUnread).catch(() => {});
+      await drainOnUnreadTick(plan, () => (active ? runQueuedCommand(active.agentId, marketUnread) : Promise.resolve()));
       return;
     }
 
@@ -10995,7 +11019,8 @@ async function main() {
       // book unread there is no equity for the breaker to judge it against, so
       // it is refused by name — see runOrderCommand. And so is a Telegram
       // order until a tick composes again: the book says so for both.
-      await runQueuedCommand(agentId, tickBook.unread("book")).catch(() => {});
+      const bookUnread = tickBook.unread("book");
+      await drainOnUnreadTick(plan, () => runQueuedCommand(agentId, bookUnread));
       return;
     }
 
@@ -11007,7 +11032,8 @@ async function main() {
       console.log(`[tick] incomplete market coverage — no price for held ${missingPrice.join(",")}; holding (equity + breaker skipped, not a real drawdown)`);
       await addEvent(agentId, "warn", `held ${missingPrice.join(", ")} couldn't be priced this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`);
       // Answered for the same reason as the unread book just above.
-      await runQueuedCommand(agentId, tickBook.unread("book")).catch(() => {});
+      const bookUnread = tickBook.unread("book");
+      await drainOnUnreadTick(plan, () => runQueuedCommand(agentId, bookUnread));
       return;
     }
 
@@ -12392,7 +12418,7 @@ async function main() {
               at: Math.floor(Date.now() / 1000),
             });
           }
-          if (!fastTrencher && outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId) && !isPaused()) {
+          if (plan.kind !== "nomination" && !fastTrencher && outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId) && !isPaused()) {
             const d = outcome.result.decision;
             const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
             const want = orderFromDecision(d, { maxUsdg: ceiling, minUsdg: BRAIN_MIN_TRADE_USDG });
@@ -12445,7 +12471,7 @@ async function main() {
               if (!brainOrderAccepted) await refundEntry(energyClaim);
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
-          } else if (!fastTrencher && outcome.ran && outcome.result.ok && outcome.result.decision.action !== "hold") {
+          } else if (plan.kind !== "nomination" && !fastTrencher && outcome.ran && outcome.result.ok && outcome.result.decision.action !== "hold") {
             // SAID, NOT SILENT. A Brain BUY on an agent outside the live
             // allowlist (or paused) is a thought by design, but it used to leave
             // no line at all — Gary logged 8 of 8 `[brain] BUY NVDA` on
@@ -14032,6 +14058,17 @@ async function main() {
     reportRpc();
   };
 
+  /** A nominated coin gets fresh research, without another accounting sample
+   * or strategy pass. The regular clock still owns execution and its cadence. */
+  const runNominationTick = async (): Promise<void> => {
+    if (cfg.strategy !== "trencher" || !cfg.trencherFastEnabled || tgBook.priority().size === 0) return;
+    nominationTick = true;
+    const run = tickBook.during(tick);
+    nominationTick = false;
+    await run.catch(tickFailed);
+    reportRpc();
+  };
+
   // THE CLOCK BOTH RUN ON, AND THE WATCHER THAT WAKES IT, wired to the drain's
   // own one-at-a-time slot and to every trade on the intent chain inside
   // createCommandClock, where a test runs that wiring. A command tick takes the
@@ -14060,11 +14097,13 @@ async function main() {
     pending: () => queuedCommandIds(merrymenHome()),
     regular: runLoop,
     command: runCommandTick,
+    nomination: runNominationTick,
     // The file the watchdog reads, which the clock now writes itself — a test
     // reads its `at` through a held order. Required, so a clock with no
     // heartbeat does not compile.
     heartbeat: { file: homePaths.heartbeat(), mode: () => publishedMode(execMode()), sponsorGas: gasSponsored },
   });
+  wakeNominatedTick = () => tickClock.wakeNomination();
   // A directory listing every couple of seconds. Unref'd, so it never holds a
   // process open that would otherwise exit.
   setInterval(() => {

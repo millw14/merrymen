@@ -369,10 +369,10 @@ export interface TgDeskThinkRequest {
  */
 export interface TgDeskPort {
   /** Evidence and chart for one ask. Never throws. */
-  look(ask: TgDeskAsk): Promise<TgDeskOutcome>;
+  look(ask: TgDeskAsk, options?: { timeoutMs?: number }): Promise<TgDeskOutcome>;
   /**
    * The Brain's read, when the operator lets group asks spend Brain's key
    * (rule 7). Absent or null: the group's own model, else the code's floor.
    */
-  think?(req: TgDeskThinkRequest): Promise<TgDeskThought | null>;
+  think?(req: TgDeskThinkRequest, options?: { timeoutMs?: number }): Promise<TgDeskThought | null>;
 }

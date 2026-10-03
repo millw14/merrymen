@@ -396,6 +396,52 @@ describe("claims", () => {
     assert.equal(memoOf(CA1)!.verdict, "candidate", "no claimed Brain verdict or completed fill");
   });
 
+  it("concurrent same-CA reads preserve the original nomination and its matched outcome", async () => {
+    const releases: Array<(look: CoinLook) => void> = [];
+    port!.look = () => new Promise((resolve) => { releases.push(resolve); });
+    const flow = makeFlow({ read: async () => true });
+    const first = await begin(flow, CHAT, `shogun thoughts on ${CA1}`, { id: 510, addressed: true });
+    const second = await begin(flow, CHAT, `shogun thoughts on ${CA1}`, { id: 511, from: BOB, addressed: true });
+    await settle();
+    assert.equal(releases.length, 2, "public research may start concurrently");
+    releases[0]!({ kind: "candidate", name: "Froggy" });
+    await first.done;
+    releases[1]!({ kind: "too-quiet", name: "Later observation" });
+    await second.done;
+    assert.equal(port!.nominations.length, 1);
+    assert.equal(memoOf(CA1)!.verdict, "candidate");
+    assert.equal(memoOf(CA1)!.messageId, 510);
+    assert.equal(memoOf(CA1)!.byId, ANN);
+    await flow.onOutcome({ kind: "bought", address: CA1, chatId: CHAT, messageId: 510,
+      paper: true, decisionId: "original-filled", notes: ["new buyers keep showing up"] });
+    assert.equal(memoOf(CA1)!.verdict, "bought");
+    assert.equal(memoOf(CA1)!.decisionId, "original-filled");
+    assert.equal(spoken.at(-1)!.o.replyTo, 510);
+    assert.deepEqual(spoken.at(-1)!.o.mention, { id: ANN, name: "ann" });
+  });
+
+  it("a delayed concurrent lookup cannot overwrite a newer completed outcome", async () => {
+    const releases: Array<(look: CoinLook) => void> = [];
+    port!.look = () => new Promise((resolve) => { releases.push(resolve); });
+    const notes: string[] = [];
+    const flow = makeFlow({ read: async (_chat, _address, o) => { if (o.note) notes.push(o.note); return true; } });
+    const first = await begin(flow, CHAT, CA1, { id: 520 });
+    const second = await begin(flow, CHAT, `shogun why ${CA1}`, { id: 521, from: BOB, addressed: true });
+    await settle();
+    releases[0]!({ kind: "candidate", name: "Froggy" });
+    await first.done;
+    await flow.onOutcome({ kind: "passed", address: CA1, chatId: CHAT, messageId: 520,
+      decisionId: "recorded-pass", notes: ["the same few wallets trade it"] });
+    releases[1]!({ kind: "too-thin", name: "Later observation" });
+    await second.done;
+    assert.equal(port!.nominations.length, 1);
+    assert.equal(memoOf(CA1)!.verdict, "passed");
+    assert.equal(memoOf(CA1)!.messageId, 520);
+    assert.equal(memoOf(CA1)!.decisionId, "recorded-pass");
+    assert.match(notes.at(-1)!, /i passed because/);
+    assert.match(notes.at(-1)!, /the same few wallets trade it/);
+  });
+
   it("missing FDV or creation time still yields observed research without making an unknown look tradable or memorable", async () => {
     const ready = mock.method(port!, "readiness");
     const flow = makeFlow();

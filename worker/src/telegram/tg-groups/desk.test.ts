@@ -9,14 +9,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type { ResolvedConfig } from "../../settings";
 import type { FetchLike, TgMessage } from "../api";
 import type { StateRef, TelegramState } from "../state";
 import { admitThought, CAPTION_MAX, captionText, deskCaption, deskMissLine, deskUser, parseThought, safeSubject } from "./desk";
 import { deskAskOf, type BotSelf } from "./detect";
 import { admitDeskText, admitTgLine, deskFiguresGrounded } from "./gate";
-import { createTgGroups, type TgGroups } from "./handler";
+import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
 import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskEvidence, TgDeskOutcome, TgDeskPort, TgDeskThinkRequest, TgDeskThought, TrencherReadiness } from "./types";
@@ -236,7 +236,7 @@ describe("thoughts and captions", () => {
   });
 
   it("its miss lines pass the ordinary gate", () => {
-    for (const why of ["not-found", "ambiguous", "unavailable"] as const) {
+    for (const why of ["not-found", "ambiguous", "unavailable", "rate-limit"] as const) {
       for (const kind of ["coin", "market"] as const) assert.ok(admitTgLine(deskMissLine(why, kind), { agentName: "", kind: "fixed", recentOwn: [] }).ok, `${why}/${kind}`);
     }
   });
@@ -260,6 +260,9 @@ interface Call {
 class FakeTg {
   calls: Call[] = [];
   private nextId = 5_000;
+  beforeReply?: (method: string) => Promise<void>;
+  replyEnvelope?: (method: string) => Record<string, unknown> | undefined;
+  sentAt: number[] = [];
   fetchFn: FetchLike = async (url, init) => {
     const method = url.split("/").pop() ?? "";
     let body: Record<string, unknown> = {};
@@ -268,7 +271,9 @@ class FakeTg {
       for (const [k, v] of raw.entries()) body[k] = typeof v === "string" ? v : `<${(v as Blob).size} bytes>`;
     } else if (typeof raw === "string") body = JSON.parse(raw) as Record<string, unknown>;
     this.calls.push({ method, body });
-    const env = method === "sendMessage" || method === "sendPhoto" ? { ok: true, result: { message_id: this.nextId++ } } : { ok: true, result: true };
+    if (method === "sendPhoto" || method === "sendMessage") this.sentAt.push(clock);
+    await this.beforeReply?.(method);
+    const env = this.replyEnvelope?.(method) ?? (method === "sendMessage" || method === "sendPhoto" ? { ok: true, result: { message_id: this.nextId++ } } : { ok: true, result: true });
     return { ok: true, status: 200, json: async () => env };
   };
   of(method: string): Call[] {
@@ -276,12 +281,13 @@ class FakeTg {
   }
 }
 
+let lookKind: CoinLook["kind"] = "candidate";
 class FakePort implements TgCoinsPort {
   readiness(): TrencherReadiness {
     return { kind: "ready-paper", ownerReason: "ready" };
   }
-  async look(): Promise<CoinLook> {
-    return { kind: "candidate", name: "Froggy" };
+  async look(_address: string): Promise<CoinLook> {
+    return { kind: lookKind, name: "Froggy" };
   }
   nominate(): NominateResult {
     return { ok: true };
@@ -321,7 +327,7 @@ let tstate: TelegramState;
 const realFetch = globalThis.fetch;
 const stateRef: StateRef = { get: () => tstate, set: (s) => { tstate = s; } };
 
-function make(): TgGroups {
+function make(overrides: Partial<TgGroupsDeps> = {}): TgGroups {
   groups = createTgGroups({
     opts: () => ({ token: TOKEN, fetchFn: tg.fetchFn }),
     store,
@@ -341,6 +347,7 @@ function make(): TgGroups {
     sleep: async (ms) => { clock += Math.max(0, ms); },
     timer: () => new Promise(() => {}),
     log: (s) => logs.push(s),
+    ...overrides,
   });
   return groups;
 }
@@ -382,6 +389,7 @@ beforeEach(() => {
   envVars = {};
   logs = [];
   nextMsg = 100;
+  lookKind = "candidate";
   __resetMemoryPassThrottleForTest();
   store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
   store.setStatus(CHAT, "approved", OWNER);
@@ -411,7 +419,7 @@ describe("the desk lane", () => {
     assert.equal(p.parse_mode, "HTML");
     assert.match(String(p.caption), /cashcat is in a downtrend on the 1h/);
     assert.ok(tg.of("sendChatAction").some((c) => c.body.action === "upload_photo"));
-    assert.ok(logs.some((l) => l === "[tg-groups] desk coin read: floor"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor in /.test(l)));
     assert.ok(!logs.some((l) => /how is the market|CASHCAT|cashcat/.test(l)), "logs carry no text or coin");
   });
 
@@ -448,7 +456,7 @@ describe("the desk lane", () => {
     const caption = String(tg.of("sendPhoto")[0]?.body.caption);
     assert.match(caption, /keeps bleeding under the ema20/);
     assert.match(caption, /👀 watch: a reclaim of 0\.1605/);
-    assert.ok(logs.includes("[tg-groups] desk coin read: model"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: model in /.test(l)));
     assert.equal(prompts.length, 1);
     assert.match(prompts[0]!, /EVIDENCE BRIEF:\nCOIN: CASHCAT/);
     assert.match(prompts[0]!, /<question>\npine thoughts on cashcat\?\n<\/question>/);
@@ -462,7 +470,7 @@ describe("the desk lane", () => {
     const caption = String(tg.of("sendPhoto")[0]?.body.caption);
     assert.doesNotMatch(caption, /0\.30/);
     assert.match(caption, /cashcat is in a downtrend on the 1h/);
-    assert.ok(logs.includes("[tg-groups] desk coin read: floor (model read refused: ungrounded)"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor \(model read refused: ungrounded\) in /.test(l)));
   });
 
   it("asks Brain first when the operator allowed it, and counts it like a model call", async () => {
@@ -478,7 +486,7 @@ describe("the desk lane", () => {
     assert.equal(desk.thinks.length, 1);
     assert.match(desk.thinks[0]!.voice, /^You are Pine\./);
     assert.equal(prompts.length, 0, "the group model is not asked when Brain answered");
-    assert.ok(logs.includes("[tg-groups] desk coin read: brain"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: brain in /.test(l)));
     assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /sellers in control/);
   });
 
@@ -490,15 +498,15 @@ describe("the desk lane", () => {
     assert.equal(String(tg.of("sendMessage")[0]?.body.text), deskMissLine("ambiguous", "coin"));
   });
 
-  it("answers as ordinary chatter when a name it searched is no coin at all ('thoughts on pizza')", async () => {
+  it("states exactly when an explicit searched name is not listed", async () => {
     desk!.outcome = { ok: false, why: "not-found" };
     make();
     await said(msg("pine thoughts on pizza?"));
     assert.equal(tg.of("sendPhoto").length, 0);
     const text = String(tg.of("sendMessage")[0]?.body.text ?? "");
     assert.ok(text.length > 0, "it still answers");
-    assert.notEqual(text, deskMissLine("not-found", "coin"));
-    assert.ok(logs.includes("[tg-groups] desk coin miss (not-found), answered as chatter"));
+    assert.equal(text, deskMissLine("not-found", "coin"));
+    assert.ok(logs.includes("[tg-groups] desk coin miss (not-found)"));
   });
 
   it("does not read for a line that asks something private", async () => {
@@ -507,13 +515,14 @@ describe("the desk lane", () => {
     assert.equal(desk!.asks.length, 0);
   });
 
-  it("stops looking after six reads in a chat in ten minutes, and answers as chatter", async () => {
+  it("states the research allowance when six reads in ten minutes are used", async () => {
     make();
     for (let i = 0; i < 7; i++) {
       await said(msg(`pine thoughts on coin${i}?`, { fromId: 900_000 + i, fromFirstName: `P${i}` }));
       clock += 30_000;
     }
     assert.equal(desk!.asks.length, 6);
+    assert.match(String(tg.of("sendMessage").at(-1)?.body.text), /too many research requests/);
   });
 
   it("leaves two cashtags to the coin flow: only a single coin ask goes to the desk", async () => {
@@ -544,6 +553,397 @@ describe("the desk lane", () => {
     assert.equal(desk!.asks.length, 0, "a coin read honours the coins switch");
     await said(msg("pine how is the market?"));
     assert.deepEqual(desk!.asks, [{ kind: "market" }], "the market is not a coin");
+  });
+
+  it("answers a posted CA that passes the quick screen with the chart and read — not 'let me see 👀'", async () => {
+    make();
+    const CA = "0xd7321801caae694090694ff55a9323139f043b88";
+    await said(msg(CA));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", address: CA }]);
+    const photos = tg.of("sendPhoto");
+    assert.equal(photos.length, 1);
+    const caption = String(photos[0]!.body.caption);
+    assert.match(caption, /cashcat is in a downtrend on the 1h/);
+    assert.match(caption, /it clears the quick screen; safe entry checks and a trade review are still required/);
+    assert.match(caption, /GeckoTerminal 12:00 UTC$/);
+    assert.equal(tg.of("sendMessage").length, 0, "no separate ack");
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor in \d/.test(l)));
+  });
+
+  it("answers 'thoughts on <CA>' with the read and the quick screen's verdict, and 'why' under it with the same", async () => {
+    lookKind = "too-quiet";
+    make();
+    const CA = "0x6c0ac5d0f01ee19fb949dbeaba6f6f48f31c09c0";
+    const post = msg(`pine thoughts on ${CA}`);
+    await said(post);
+    const first = tg.of("sendPhoto");
+    assert.equal(first.length, 1);
+    assert.match(String(first[0]!.body.caption), /quick screen: there isn't enough recent activity for me/);
+    const answerId = 5_000;
+    await said(msg("pine why", { replyTo: { messageId: answerId, fromId: BOT.id, text: "x" } } as Partial<TgMessage>));
+    const second = tg.of("sendPhoto");
+    assert.equal(second.length, 2, "'why' gets the chart and read, not a one-line snapshot");
+    assert.match(String(second[1]!.body.caption), /quick screen: there isn't enough recent activity for me/);
+    assert.deepEqual(desk!.asks.map((a) => ("address" in a ? a.address : "?")), [CA, CA]);
+  });
+
+  it("sends a truthful research miss and screen status when a posted CA cannot be charted", async () => {
+    desk!.outcome = { ok: false, why: "unavailable" };
+    make();
+    await said(msg("0xd7321801caae694090694ff55a9323139f043b88"));
+    assert.equal(tg.of("sendPhoto").length, 0);
+    assert.equal(tg.of("sendMessage").length, 1);
+    assert.match(String(tg.of("sendMessage")[0]?.body.text), /can.t pull that chart/);
+    assert.match(String(tg.of("sendMessage")[0]?.body.text), /safe entry checks and a trade review/);
+    assert.doesNotMatch(String(tg.of("sendMessage")[0]?.body.text), /brain|let me see/i);
+  });
+
+  it("why keeps the matched skipped or expired reason beside a fresh chart read", async () => {
+    make();
+    for (const [index, verdict] of (["skipped", "expired"] as const).entries()) {
+      const address = `0x${(index + 1).toString(16).padStart(40, "0")}`;
+      const original = msg(address);
+      store.addLine(CHAT, { messageId: original.messageId!, fromId: ANN, name: "Ann", text: address, atMs: clock });
+      store.rememberCoin(CHAT, { address, messageId: original.messageId!, byId: ANN, byName: "Ann",
+        atMs: clock, verdict, decisionId: `saved-${verdict}`, notes: ["liquidity was thin"] });
+      await said(msg("pine why", { replyTo: { messageId: original.messageId!, fromId: ANN, text: address } }));
+      const caption = String(tg.of("sendPhoto").at(-1)?.body.caption);
+      assert.match(caption, /liquidity was thin/);
+      assert.match(caption, verdict === "skipped" ? /no filled buy was recorded/ : /expired without a confirmed buy/);
+      assert.doesNotMatch(caption, /sent.*brain|let me see|still checking/i);
+      assert.equal(store.coin(CHAT, address)!.decisionId, `saved-${verdict}`);
+    }
+    assert.equal(tg.of("sendPhoto").length, 2);
+  });
+
+  it("parallel fresh CAs keep the six-answer person limit while other people remain independent", async () => {
+    const releases: Array<(look: CoinLook) => void> = [];
+    const port = new FakePort();
+    port.look = () => new Promise((resolve) => { releases.push(resolve); });
+    make({ port: () => port });
+    for (let i = 0; i < 12; i++) groups.onMessage(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(releases.length, 12);
+    for (const release of releases) release({ kind: "candidate", name: "Froggy" });
+    await groups.drain();
+    assert.equal(tg.of("sendPhoto").length + tg.of("sendMessage").length, 6);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 6);
+    port.look = async () => ({ kind: "candidate", name: "Othercoin" });
+    await said(msg("0xffffffffffffffffffffffffffffffffffffffff", { fromId: 900_123, fromFirstName: "Bob" }));
+    assert.equal(tg.of("sendPhoto").length + tg.of("sendMessage").length, 7);
+    assert.equal(store.person(CHAT, 900_123)!.answers!.count, 1);
+  });
+
+  it("an uncertain unknown-coin send keeps its person allowance consumed", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => { if (method === "sendMessage") throw new Error("transport uncertain"); };
+    make({ port: () => port });
+    for (let i = 0; i < 12; i++) groups.onMessage(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`));
+    await groups.drain();
+    assert.equal(tg.of("sendMessage").length, 6, "failed requests may already have landed");
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 6);
+  });
+
+  it("six definitive rejections refund person slots so the next valid answer is allowed", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 400, description: "Bad Request: message not found" } : undefined;
+    make({ port: () => port });
+    for (let i = 0; i < 6; i++) await said(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`));
+    assert.equal(tg.of("sendMessage").length, 6);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 0, "Telegram confirmed no answer was delivered");
+    tg.replyEnvelope = undefined;
+    await said(msg("0xffffffffffffffffffffffffffffffffffffffff"));
+    assert.equal(tg.of("sendMessage").length, 7);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("a definitive 429 whose retry cannot fit the deadline refunds the person slot", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 31 } } : undefined;
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendMessage").length, 1, "the retry cannot start past the deadline");
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 0);
+    clock += 31_000;
+    tg.replyEnvelope = undefined;
+    await said(msg("0x0000000000000000000000000000000000000002"));
+    assert.equal(tg.of("sendMessage").length, 2);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("refunding a definitive rejection subtracts only its own slot and preserves later person updates", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => {
+      if (method !== "sendMessage") return;
+      const current = store.person(CHAT, ANN)!;
+      store.upsertPerson(CHAT, { id: ANN, name: "New name", lastSeenMs: clock + 123,
+        answers: { ...current.answers!, count: current.answers!.count + 2 } });
+    };
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 400, description: "Bad Request: message not found" } : undefined;
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 2);
+    assert.equal(store.person(CHAT, ANN)!.name, "New name");
+    assert.equal(store.person(CHAT, ANN)!.lastSeenMs, clock + 123);
+  });
+
+  it("an expiry before the first fetch refunds the slot without starting a request", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    make({ port: () => port });
+    const transportNow = Date.now();
+    let first = true;
+    const date = mock.method(Date, "now", () => { if (first) { first = false; return transportNow; } return transportNow + 31_000; });
+    try {
+      await said(msg("0x0000000000000000000000000000000000000001"));
+    } finally {
+      date.mock.restore();
+    }
+    assert.equal(tg.of("sendMessage").length, 0, "the API deadline elapsed before fetch began");
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 0);
+    await said(msg("0x0000000000000000000000000000000000000002"));
+    assert.equal(tg.of("sendMessage").length, 1);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("a definitive rejection refund does not restore a person forgotten during transport", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => { if (method === "sendMessage") await groups.forgetMe(CHAT, ANN, undefined, { late: true }); };
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 400, description: "Bad Request: message not found" } : undefined;
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(store.person(CHAT, ANN), undefined);
+    assert.equal(store.room(CHAT)!.lines.some((line) => line.fromId === ANN), false);
+  });
+
+  it("an ambiguous thread error keeps its slot and does not retry in another topic", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => { if (method === "sendMessage") throw new Error("thread not found"); };
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001", { messageThreadId: 19, isTopicMessage: true }));
+    assert.equal(tg.of("sendMessage").length, 1, "a transport error cannot prove the first send failed to arrive");
+    assert.equal(tg.of("sendMessage")[0]!.body.message_thread_id, 19);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("the owner remains exempt from the parallel person flood limit", async () => {
+    make();
+    for (let i = 0; i < 8; i++) groups.onMessage(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`, { fromId: OWNER, fromFirstName: "Owner" }));
+    await groups.drain();
+    assert.equal(tg.of("sendPhoto").length + tg.of("sendMessage").length, 8);
+    assert.equal(store.person(CHAT, OWNER)!.answers!.count, 8);
+  });
+
+  it("carries the same thirty-second budget through coin screen, evidence, model and delivery", async () => {
+    const CA = "0xd7321801caae694090694ff55a9323139f043b88";
+    const port = new FakePort();
+    port.look = async () => { clock += 8_000; return { kind: "candidate", name: "Froggy" }; };
+    const budgets: number[] = [];
+    desk = Object.assign(new FakeDesk(), {
+      look: async (ask: TgDeskAsk, options?: { timeoutMs?: number }): Promise<TgDeskOutcome> => {
+        desk!.asks.push(ask); budgets.push(options!.timeoutMs!); clock += 8_000;
+        return { ok: true, evidence: EVIDENCE };
+      },
+      think: async (_req: TgDeskThinkRequest, options?: { timeoutMs?: number }): Promise<null> => {
+        budgets.push(options!.timeoutMs!); clock += options!.timeoutMs!; return null;
+      },
+    });
+    tg.beforeReply = async (method) => { if (method === "sendPhoto") clock += 3_000; };
+    make({ port: () => port });
+    const started = clock;
+    await said(msg(`pine thoughts on ${CA}`));
+    assert.deepEqual(budgets, [10_000, 9_000]);
+    assert.equal(clock - started, 28_000, "only one budget, including screen and send");
+    assert.equal(tg.of("sendPhoto").length, 1);
+    assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /downtrend/);
+    assert.equal(tg.of("sendChatAction").length, 1, "no second blocking typing request");
+  });
+
+  it("does not await a hung typing action before the useful research reply", async () => {
+    tg.beforeReply = (method) => method === "sendChatAction" ? new Promise(() => {}) : Promise.resolve();
+    make();
+    await said(msg("pine how is the market currently?"));
+    assert.equal(tg.of("sendPhoto").length, 1);
+  });
+
+  it("never sends a late floor or fallback after the incoming deadline expires", async () => {
+    desk = Object.assign(new FakeDesk(), { look: async () => { clock += 30_001; return { ok: true, evidence: EVIDENCE }; } });
+    make();
+    await said(msg("pine thoughts on cashcat?"));
+    assert.equal(tg.of("sendPhoto").length, 0);
+    assert.equal(tg.of("sendMessage").length, 0);
+    assert.ok(logs.some((l) => l.includes("reply-deadline")));
+  });
+
+  it("an addressed CA gets its own read beside an older slow coin advertisement", async () => {
+    const first = "0xd7321801caae694090694ff55a9323139f043b88";
+    const second = "0x6c0ac5d0f01ee19fb949dbeaba6f6f48f31c09c0";
+    let release!: (look: CoinLook) => void;
+    const port = new FakePort();
+    port.look = (address: string) => address === first ? new Promise<CoinLook>((r) => { release = r; }) : Promise.resolve({ kind: "too-quiet", name: "Froggy" });
+    make({ port: () => port });
+    groups.onMessage(msg(first));
+    await new Promise((r) => setImmediate(r));
+    const ask = msg(`pine thoughts on ${second}`);
+    groups.onMessage(ask);
+    for (let i = 0; i < 20 && tg.of("sendPhoto").length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(tg.of("sendPhoto").length, 1);
+    assert.equal(tg.of("sendPhoto")[0]?.body.reply_parameters && JSON.parse(String(tg.of("sendPhoto")[0]?.body.reply_parameters)).message_id, ask.messageId);
+    clock += 31_000;
+    release({ kind: "candidate", name: "Oldcoin" });
+    await groups.drain();
+    assert.equal(tg.of("sendPhoto").length, 1, "the old job's deadline is not refreshed");
+  });
+
+  it("a slower earlier CA cannot replace the newer desk subject for an unthreaded follow-up", async () => {
+    const address = "0x0000000000000000000000000000000000000001";
+    let release!: (look: CoinLook) => void;
+    const port = new FakePort();
+    port.look = () => new Promise((resolve) => { release = resolve; });
+    make({ port: () => port });
+    groups.onMessage(msg(address));
+    await new Promise((r) => setImmediate(r));
+    groups.onMessage(msg("pine thoughts on cashcat?", { fromId: OWNER, fromFirstName: "Owner" }));
+    for (let i = 0; i < 20 && tg.of("sendPhoto").length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(tg.of("sendPhoto").length, 1);
+    release({ kind: "candidate", name: "Oldercoin" });
+    await groups.drain();
+    assert.equal(tg.of("sendPhoto").length, 2);
+    await said(msg("pine do a quick analysis", { fromId: OWNER, fromFirstName: "Owner" }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "cashcat" }, "receipt order wins even when receipts share the same clock tick");
+  });
+
+  it("finishing a coin read does not extend the original subject's follow-up lifetime", async () => {
+    desk = Object.assign(new FakeDesk(), { think: async () => { clock += 18_000; return null; } });
+    make();
+    const arrivedAt = clock;
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendPhoto").length, 1);
+    clock = arrivedAt + 15 * 60_000 + 1_000;
+    await said(msg("pine do a quick analysis", { fromId: OWNER, fromFirstName: "Owner" }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "market" });
+  });
+
+  it("a definitive chat migration preserves the coin subject for destination forum follow-ups", async () => {
+    const destination = -1009876543210;
+    const address = "0x0000000000000000000000000000000000000001";
+    let first = true;
+    tg.replyEnvelope = (method) => {
+      if (method !== "sendPhoto" || !first) return undefined;
+      first = false;
+      return { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded", parameters: { migrate_to_chat_id: destination } };
+    };
+    make();
+    await said(msg(address, { messageThreadId: 19, isTopicMessage: true }));
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.equal(tg.of("sendPhoto")[1]!.body.chat_id, String(destination));
+    assert.equal(tg.of("sendPhoto")[1]!.body.message_thread_id, undefined, "the old topic cannot be reused after migration");
+    await said(msg("pine do a quick analysis", { chatId: destination, fromId: OWNER, fromFirstName: "Owner", messageThreadId: 23, isTopicMessage: true }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", address });
+    assert.equal(tg.of("sendPhoto").at(-1)!.body.chat_id, String(destination));
+    assert.equal(tg.of("sendPhoto").at(-1)!.body.message_thread_id, "23");
+    assert.equal(store.person(destination, ANN)!.answers!.count, 1, "only the successful destination attempt consumes a slot");
+  });
+
+  it("migration cannot refund an unrelated newer destination answer window or bypass its flood cap", async () => {
+    const destination = -1009876543210;
+    store.ensureRoom(destination, { title: "new room", kind: "supergroup" });
+    store.setStatus(destination, "approved", OWNER);
+    store.upsertPerson(destination, { id: ANN, name: "Newer Ann", lastSeenMs: clock + 1,
+      answers: { count: 6, sinceMs: clock } });
+    tg.replyEnvelope = (method) => method === "sendPhoto"
+      ? { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded", parameters: { migrate_to_chat_id: destination } }
+      : undefined;
+    make();
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendPhoto").length, 1, "the destination's existing six answers prohibit another send");
+    assert.equal(store.person(destination, ANN)!.answers!.count, 6);
+    assert.equal(store.person(destination, ANN)!.name, "Newer Ann");
+    assert.equal(store.person(destination, ANN)!.lastSeenMs, T0 + 1);
+  });
+
+  it("migration to an absent destination refunds both definite refused attempts", async () => {
+    const destination = -1009876543210;
+    let first = true;
+    tg.replyEnvelope = (method) => {
+      if (method !== "sendPhoto") return undefined;
+      if (first) {
+        first = false;
+        return { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded", parameters: { migrate_to_chat_id: destination } };
+      }
+      return { ok: false, error_code: 400, description: "Bad Request: message not found" };
+    };
+    make();
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.equal(store.person(destination, ANN)!.answers!.count, 0);
+  });
+
+  it("bounds a full public-read lane with an honest busy reply without another lookup", async () => {
+    const releases: Array<(look: CoinLook) => void> = [];
+    const port = new FakePort();
+    port.look = () => new Promise((resolve) => { releases.push(resolve); });
+    make({ port: () => port });
+    for (let i = 0; i < 13; i++) {
+      groups.onMessage(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`, { fromId: 900_000 + i, fromFirstName: `P${i}` }));
+    }
+    for (let i = 0; i < 20 && tg.of("sendMessage").length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(releases.length, 12, "the thirteenth request does not spend a read");
+    assert.equal(desk!.asks.length, 0);
+    assert.equal(tg.of("sendMessage").length, 1);
+    assert.match(String(tg.of("sendMessage")[0]?.body.text), /too many research requests/);
+    clock += 31_000;
+    for (const release of releases) release({ kind: "unknown" });
+    await groups.drain();
+    assert.equal(tg.of("sendMessage").length, 1, "expired work cannot send a later fallback");
+  });
+
+  it("a public analysis does not queue behind an older chatter model call", async () => {
+    fakeModel(() => "unused");
+    let finish!: () => void;
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const prompt = JSON.parse(init.body).messages.map((m: { content: string }) => m.content).join(" ");
+      if (!prompt.includes("EVIDENCE BRIEF:")) await new Promise<void>((resolve) => { finish = resolve; });
+      const text = prompt.includes("EVIDENCE BRIEF:") ? JSON.stringify(FLOOR) : "i owe you a better joke";
+      return { ok: true, json: async () => ({ choices: [{ message: { content: text } }] }) };
+    }) as never;
+    make();
+    groups.onMessage(msg("pine tell me a joke"));
+    for (let i = 0; i < 20 && !finish; i++) await new Promise((r) => setImmediate(r));
+    assert.ok(finish, "the older chatter call is still running");
+    groups.onMessage(msg("pine how is the market currently?", { fromId: 900_001, fromFirstName: "Bob" }));
+    for (let i = 0; i < 20 && tg.of("sendPhoto").length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(tg.of("sendPhoto").length, 1, "a useful read arrives before the older call finishes");
+    finish();
+    await groups.drain();
+  });
+
+  it("refreshes an addressed CA repost and preserves its forum topic and one reply per post", async () => {
+    make();
+    const CA = "0xd7321801caae694090694ff55a9323139f043b88";
+    await said(msg(CA));
+    clock += 16_000;
+    const repost = msg(`pine thoughts on ${CA} and 0x6c0ac5d0f01ee19fb949dbeaba6f6f48f31c09c0`, { isTopicMessage: true, messageThreadId: 19 });
+    await said(repost);
+    assert.equal(tg.of("sendPhoto").length, 2, "two addresses still have one immediate reply");
+    assert.equal(tg.of("sendPhoto")[1]?.body.message_thread_id, "19");
+    assert.equal(store.person(CHAT, ANN)?.answers?.count, 2, "chart replies count toward flood control");
+  });
+
+  it("answers a complaint about the previous research reply with a read", async () => {
+    make();
+    await said(msg("pine how is the market currently?"));
+    clock += 16_000;
+    await said(msg("What's your deal? He asked you a question and all you've got is just vibes, you damn beast", { replyTo: { messageId: 5_000, fromId: BOT.id, text: FLOOR.read } }));
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.deepEqual(desk!.asks, [{ kind: "market" }, { kind: "market" }]);
+    assert.equal(tg.of("sendMessage").length, 0, "no roast or vague banter replaces the analysis");
   });
 
   it("is not reached by a line not said to it", async () => {

@@ -18,6 +18,7 @@ import { test } from "node:test";
 import { createPublicClient, custom, decodeFunctionData, encodeFunctionResult, erc20Abi, keccak256, multicall3Abi, type Hex, type PublicClient } from "viem";
 import { CASH, UNISWAP, GRANT_TRENCHER, robinhoodChain, type StoredGrant } from "../../packages/core/src/index";
 import { POOL_REFUSAL_TTL_MS, TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
+import { CoalescedRefresh } from "./coalesced-refresh";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
 const vault = "0x2222222222222222222222222222222222222222";
@@ -182,41 +183,43 @@ test("changing the connection discards cached evidence and a discovery already i
   // Exercise the actual worker wiring without starting its main loop. Both
   // fragments are ordinary JavaScript; the surrounding module is TypeScript.
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-  const refresh = source.slice(source.indexOf("  function refreshAutoTrench()"), source.indexOf("  const trenchTapeReader ="));
+  const refresh = source.slice(source.indexOf("  const autoTrenchRefresh ="), source.indexOf("  const trenchTapeReader ="));
   const resetStart = source.indexOf("      poolPrices.reset();", source.indexOf("  async function refreshConfig()"));
   const reset = source.slice(resetStart, source.indexOf("      if (active) {", resetStart));
   const pending: { cache: TrencherPoolCache; resolve: (result: unknown) => void }[] = [];
   const discover = (_client: unknown, _grant: unknown, _tape: unknown, opts: { cache: TrencherPoolCache }) =>
     new Promise(resolve => pending.push({ cache: opts.cache, resolve }));
-  const worker = new Function("discoverTrencherUniverse", "TrencherPoolCache", `
+  const worker = new Function("discoverTrencherUniverse", "TrencherPoolCache", "CoalescedRefresh", `
     let active = { agentId: "agent", grant: { grantedAt: 1 } };
-    let autoTrench = null, autoTrenchContext = "", autoTrenchPending = false, autoTrenchNext = 0;
+    let autoTrench = null, autoTrenchContext = "", autoTrenchNext = 0;
     let trenchPoolCache = new TrencherPoolCache(), names = 0;
     const grantTrencher = () => true, mainnetClient = () => ({}), freshTrenchTape = () => [];
     const tgNominated = new Set(), coinNames = {}, poolPrices = { reset() {} };
     const warmHeldNames = () => { names++; }, trenchNotice = () => {};
+    const wakeQualifiedNominations = () => {};
     ${refresh}
     return {
       tick: refreshAutoTrench,
       reconnect() { ${reset} },
       snapshot: () => ({ result: autoTrench, names, cache: trenchPoolCache }),
     };
-  `)(discover, TrencherPoolCache) as {
+  `)(discover, TrencherPoolCache, CoalescedRefresh) as {
     tick(): void; reconnect(): void;
     snapshot(): { result: unknown; names: number; cache: TrencherPoolCache };
   };
   worker.tick();
+  await new Promise(resolve => setImmediate(resolve));
   const old = pending[0]!;
   old.cache.rememberVerified(factory, vault, { token0: CASH.USDG, token1: owner, fee: 3000 });
   worker.reconnect();
+  worker.tick(); // A new connection while the old pass runs owes one new pass.
   assert.notEqual(worker.snapshot().cache, old.cache);
   assert.equal(worker.snapshot().cache.verified(factory, vault), undefined);
   old.resolve({ oldConnection: true });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(worker.snapshot().result, null);
   assert.equal(worker.snapshot().names, 0, "old holdings must not warm names on the new connection");
-  worker.tick();
-  assert.equal(pending.length, 2, "new connection is read without waiting for the old refresh interval");
+  assert.equal(pending.length, 2, "the coalesced new-connection read starts without another poll or the old interval");
   pending[1]!.resolve({ newConnection: true });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(worker.snapshot().result, { newConnection: true });

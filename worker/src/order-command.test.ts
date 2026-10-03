@@ -168,8 +168,8 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
   });
 });
 
-describe("an unreadable market answers the order instead of starving it", () => {
-  it("THE DRAIN RUNS ON A TICK THAT COULD NOT READ THE MARKET", () => {
+describe("an execution tick with an unreadable market answers the order instead of starving it", () => {
+  it("THE DRAIN RUNS ON A REGULAR OR COMMAND TICK THAT COULD NOT READ THE MARKET", () => {
     // The market-unreadable return sits a THOUSAND LINES above the normal
     // drain, so a queued order was not delayed by such a tick — it was skipped
     // entirely, and with the fleet rate-limited it was skipped on every tick
@@ -180,7 +180,10 @@ describe("an unreadable market answers the order instead of starving it", () => 
     const at = CODE.indexOf("the market could not be read this tick");
     assert.ok(at > 0);
     const branch = CODE.slice(at, CODE.indexOf("return;", at) + 8);
-    assert.match(branch, /const marketUnread = tickBook\.unread\("market"\);\s*if \(active\) await runQueuedCommand\(active\.agentId, marketUnread\)/);
+    assert.match(branch, /const marketUnread = tickBook\.unread\("market"\);\s*await drainOnUnreadTick\(plan, \(\) => \(active \? runQueuedCommand\(active\.agentId, marketUnread\) : Promise\.resolve\(\)\)\);/);
+    // The plan-aware helper retains regular/command drains and leaves owner
+    // commands untouched on a nomination research wake. command-wake.test.ts
+    // executes these production statements against real command-file queues.
     // The refusal those reads produce — by name, before the pause and before
     // anything is sized, with nothing reaching a submitter — is run in
     // order-gate.test.ts, and so is the same refusal for a Telegram order after
@@ -189,7 +192,7 @@ describe("an unreadable market answers the order instead of starving it", () => 
     // compile.
   });
 
-  it("but the PROBE still runs, because it needs no market data at all", () => {
+  it("the PROBE still runs on execution ticks, because it needs no market data at all", () => {
     // A pipeline probe proves the wall, the bundler and the paymaster. None of
     // that depends on a price, so an unreadable tick is no reason to refuse it.
     // The probe arm takes no flag; only the trade arm does.

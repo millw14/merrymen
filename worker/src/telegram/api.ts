@@ -29,9 +29,16 @@ export interface TelegramOpts {
    * The longest one JSON call is waited for, in ms; TG_CALL_TIMEOUT_MS when
    * absent. getUpdates adds its long poll on top. A photo or document upload
    * is waited for this long or UPLOAD_TIMEOUT_MS, whichever is longer: a
-   * bound set short to keep calls quick must not cut off a file.
+   * bound set short to keep calls quick must not cut off a file. The explicit
+   * reply deadline below can shorten either allowance.
    */
   timeoutMs?: number;
+  /**
+   * Optional absolute reply deadline (Date.now milliseconds). Caps JSON calls,
+   * uploads and safe formatting retries together. An expired deadline starts
+   * no request; a transport timeout has an unknown outcome and is not retried.
+   */
+  deadlineAtMs?: number;
 }
 
 /**
@@ -286,7 +293,8 @@ function short(token: string): string {
 /**
  * An upload carries the file itself, so it gets longer than a JSON call's
  * TG_CALL_TIMEOUT_MS. It holds the serial poll loop while it runs, so it is
- * bounded all the same. A caller's `timeoutMs` can raise it, never lower it.
+ * bounded all the same. A caller's `timeoutMs` can raise it, never lower it;
+ * an explicit reply deadline can shorten it.
  */
 const UPLOAD_TIMEOUT_MS = 60_000;
 
@@ -309,6 +317,13 @@ const TIMED_OUT = "request failed: timed out";
 function limitOf(opts: TelegramOpts, fallback: number): number {
   const own = opts.timeoutMs;
   return typeof own === "number" && Number.isFinite(own) && own > 0 ? own : fallback;
+}
+
+/** A reply's remaining time can shorten even an upload's usual allowance. */
+function requestLimit(opts: TelegramOpts, allowance: number): number {
+  if (opts.deadlineAtMs === undefined) return allowance;
+  if (!Number.isFinite(opts.deadlineAtMs)) return 0;
+  return Math.min(allowance, Math.max(0, opts.deadlineAtMs - Date.now()));
 }
 
 /**
@@ -378,6 +393,8 @@ function scrub(message: string, token: string): string {
 interface CallResult {
   result: unknown;
   reason?: string;
+  /** True only when the request never started or Telegram explicitly refused it. */
+  noDelivery?: boolean;
   errorCode?: number;
   retryAfterSec?: number;
   migrateToChatId?: number;
@@ -408,9 +425,10 @@ function failureOf(env: { description?: unknown; error_code?: unknown; parameter
   return out;
 }
 
-/** retryAfterSec / migrateToChatId of a refused call, only the ones it has. */
-function nextStep(r: CallResult): { retryAfterSec?: number; migrateToChatId?: number } {
+/** Delivery evidence and next steps of a failed call, only the ones it has. */
+function nextStep(r: CallResult): { retryAfterSec?: number; migrateToChatId?: number; noDelivery?: boolean } {
   return {
+    ...(r.noDelivery === true ? { noDelivery: true } : {}),
     ...(r.retryAfterSec !== undefined ? { retryAfterSec: r.retryAfterSec } : {}),
     ...(r.migrateToChatId !== undefined ? { migrateToChatId: r.migrateToChatId } : {}),
   };
@@ -442,24 +460,31 @@ const SENDABLE_TOKEN = /^[A-Za-z0-9:_-]+$/;
  * (tg-groups/handler.ts), so every later line of that chat went stale.
  */
 async function call(opts: TelegramOpts, method: string, params?: Record<string, unknown>, pollMs = 0): Promise<CallResult> {
-  if (!SENDABLE_TOKEN.test(opts.token)) return { result: null, reason: "not a bot token (it has characters no Telegram token has)" };
+  if (!SENDABLE_TOKEN.test(opts.token)) return { result: null, reason: "not a bot token (it has characters no Telegram token has)", noDelivery: true };
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
   const url = `${base}/bot${opts.token}/${method}`;
-  const { signal, disarm } = deadline(limitOf(opts, TG_CALL_TIMEOUT_MS) + Math.max(0, pollMs));
+  const ms = requestLimit(opts, limitOf(opts, TG_CALL_TIMEOUT_MS) + Math.max(0, pollMs));
+  if (ms <= 0) return { result: null, reason: TIMED_OUT, noDelivery: true };
+  const { signal, disarm } = deadline(ms);
 
   try {
     let res: Awaited<ReturnType<FetchLike>>;
+    let started = false;
     try {
+      const init = params
+        ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal }
+        : { signal };
+      if (signal.aborted || requestLimit(opts, Infinity) <= 0) return { result: null, reason: TIMED_OUT, noDelivery: true };
+      started = true;
       res = await orAbort(
-        params
-          ? fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal })
-          : fetchFn(url, { signal }),
+        fetchFn(url, init),
         signal,
       );
     } catch (e) {
-      if (signal.aborted) return { result: null, reason: TIMED_OUT };
-      return { result: null, reason: `request failed: ${scrub(e instanceof Error ? e.message : String(e), opts.token)}` };
+      const evidence = !started ? { noDelivery: true } : {};
+      if (signal.aborted) return { result: null, reason: TIMED_OUT, ...evidence };
+      return { result: null, reason: `request failed: ${scrub(e instanceof Error ? e.message : String(e), opts.token)}`, ...evidence };
     }
     // READ THE BODY ON AN ERROR TOO. Telegram answers a refused request with
     // HTTP 400 AND a JSON description ("Bad Request: can't parse entities…",
@@ -486,7 +511,7 @@ async function call(opts: TelegramOpts, method: string, params?: Record<string, 
     // before its retry_after is refused again, a 401 or 409 is not a network
     // blip and must not be retried like one, and a group that became a
     // supergroup is only reachable at its new id.
-    const failure = failureOf(env, res.ok, res.status);
+    const failure = { ...failureOf(env, res.ok, res.status), ...(env.ok === false ? { noDelivery: true } : {}) };
     if (typeof env.description === "string") return { result: null, reason: env.description, ...failure };
     if (!res.ok) return { result: null, reason: `HTTP ${res.status}`, ...failure };
     return { result: null, reason: body ? "bot API returned ok:false" : "response is not JSON", ...failure };
@@ -1104,6 +1129,8 @@ function clip(t: string): string {
 export interface SendResult {
   ok: boolean;
   reason?: string;
+  /** All attempts definitively failed to deliver. Absent for uncertain transport failures. */
+  noDelivery?: boolean;
   messageId?: number;
   /** Flood control: nothing from this bot should go out for this many seconds. */
   retryAfterSec?: number;
@@ -1136,7 +1163,7 @@ export async function sendMessage(
     const kb = keyboard && keyboard.length ? { reply_markup: markup(keyboard) } : {};
     const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML", ...kb, ...options });
     if (html.result != null) return { ok: true, messageId: idOf(html.result) };
-    if (html.reason && /parse|entit|tag/i.test(html.reason)) {
+    if (html.noDelivery === true && html.reason && /parse|entit|tag/i.test(html.reason)) {
       const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, ""), ...kb, ...options });
       return plain.result != null
         ? { ok: true, messageId: idOf(plain.result) }
@@ -1150,7 +1177,7 @@ export async function sendMessage(
   // A refused keyboard must not cost the owner the message. Only a refusal
   // that names the buttons is retried — a dead token or a blocked chat would
   // fail the same way twice.
-  if (!first.reason || !/button|url|reply.?markup|keyboard/i.test(first.reason)) return first;
+  if (first.noDelivery !== true || !first.reason || !/button|url|reply.?markup|keyboard/i.test(first.reason)) return first;
   const { keyboard, links } = withoutLinks(extra.keyboard);
   const tail = links.map((l) => `\n${esc(l.text)}: ${esc(l.url)}`).join("");
   return attempt(clip(`${text}${tail}`), keyboard.length ? keyboard : undefined);
@@ -1292,8 +1319,11 @@ async function sendFile(
   // Bounded like call(): an upload that never finishes would hold the serial
   // poll loop just as a hung sendMessage would. Never shorter than
   // UPLOAD_TIMEOUT_MS: a `timeoutMs` set to keep JSON calls quick would
-  // otherwise cut every photo and document to it, without a word.
-  const { signal, disarm } = deadline(Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
+  // otherwise cut every photo and document to it, without a word. An explicit
+  // reply deadline has priority over this normal upload allowance.
+  const ms = requestLimit(opts, Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
+  if (ms <= 0) return { ok: false, reason: TIMED_OUT };
+  const { signal, disarm } = deadline(ms);
   try {
     const { readFileSync } = await import("node:fs");
     const path = await import("node:path");
@@ -1305,6 +1335,7 @@ async function sendFile(
       form.append("parse_mode", "HTML");
     }
     form.append(field, new Blob([bytes]), path.basename(filePath));
+    if (signal.aborted || requestLimit(opts, Infinity) <= 0) return { ok: false, reason: TIMED_OUT };
     const res = await orAbort(fetchFn(`${base}/bot${opts.token}/${method}`, { method: "POST", body: form, signal }), signal);
     const body = (await orAbort(res.json(), signal).catch(() => null)) as { ok?: boolean; description?: string } | null;
     if (body?.ok) return { ok: true };
@@ -1341,13 +1372,16 @@ export async function sendPhotoBytes(
   caption: string,
   extra: SendExtra = {},
 ): Promise<SendResult> {
-  if (!SENDABLE_TOKEN.test(opts.token)) return { ok: false, reason: "not a bot token (it has characters no Telegram token has)" };
+  if (!SENDABLE_TOKEN.test(opts.token)) return { ok: false, reason: "not a bot token (it has characters no Telegram token has)", noDelivery: true };
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
   // A photo has no link preview: sendPhoto takes no link_preview_options.
   const { link_preview_options: _preview, ...options } = sendOptions(extra);
   const attempt = async (text: string, html: boolean): Promise<SendResult & { entityRefused?: boolean }> => {
-    const { signal, disarm } = deadline(Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
+    const ms = requestLimit(opts, Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
+    if (ms <= 0) return { ok: false, reason: TIMED_OUT, noDelivery: true };
+    const { signal, disarm } = deadline(ms);
+    let started = false;
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
@@ -1355,6 +1389,8 @@ export async function sendPhotoBytes(
       if (text && html) form.append("parse_mode", "HTML");
       for (const [k, v] of Object.entries(options)) form.append(k, typeof v === "object" ? JSON.stringify(v) : String(v));
       form.append("photo", new Blob([new Uint8Array(png)], { type: "image/png" }), "chart.png");
+      if (signal.aborted || requestLimit(opts, Infinity) <= 0) return { ok: false, reason: TIMED_OUT, noDelivery: true };
+      started = true;
       const res = await orAbort(fetchFn(`${base}/bot${opts.token}/sendPhoto`, { method: "POST", body: form, signal }), signal);
       const body = (await orAbort(res.json(), signal).catch(() => null)) as {
         ok?: boolean;
@@ -1370,13 +1406,15 @@ export async function sendPhotoBytes(
       return {
         ok: false,
         reason,
+        ...(body?.ok === false ? { noDelivery: true } : {}),
         ...(typeof retry === "number" && Number.isFinite(retry) ? { retryAfterSec: retry } : {}),
         ...(typeof moved === "number" && Number.isFinite(moved) ? { migrateToChatId: moved } : {}),
-        entityRefused: /parse|entit|tag/i.test(reason),
+        entityRefused: body?.ok === false && /parse|entit|tag/i.test(reason),
       };
     } catch (e) {
-      if (signal.aborted) return { ok: false, reason: TIMED_OUT };
-      return { ok: false, reason: scrub(e instanceof Error ? e.message : String(e), opts.token) };
+      const evidence = !started ? { noDelivery: true } : {};
+      if (signal.aborted) return { ok: false, reason: TIMED_OUT, ...evidence };
+      return { ok: false, reason: scrub(e instanceof Error ? e.message : String(e), opts.token), ...evidence };
     } finally {
       disarm();
     }

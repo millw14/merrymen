@@ -146,11 +146,11 @@ function renamed(text: string, from: string, to: string): string {
  * dropping whole parts (invalidation, then watch), then whole sentences of the
  * read — never mid-sentence.
  */
-export function deskCaption(e: TgDeskEvidence, t: TgDeskThought): string {
-  const html = fitCaption(e, t);
+export function deskCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string): string {
+  const html = fitCaption(e, t, note);
   // One sentence too long to fit even alone: the code's read, which always
   // does, rather than a caption that loses its source.
-  return html ?? fitCaption(e, e.floor) ?? fitCaption(e, { ...e.floor, read: "" }) ?? "";
+  return html ?? fitCaption(e, e.floor, note) ?? fitCaption(e, { ...e.floor, read: "" }, note) ?? "";
 }
 
 /** Visible text of caption HTML: what Telegram counts. */
@@ -158,7 +158,11 @@ export function captionText(html: string): string {
   return html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 }
 
-function fitCaption(e: TgDeskEvidence, t: TgDeskThought): string | null {
+/**
+ * `note` is one code-written line — the quick screen's verdict on a posted
+ * coin — kept whatever else is cut: it is what the poster asked.
+ */
+function fitCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string): string | null {
   const subject = safeSubject(e.subject);
   const fix = (s: string) => renamed(s, e.subject, subject);
   const header = e.header.map(fix);
@@ -172,6 +176,7 @@ function fitCaption(e: TgDeskEvidence, t: TgDeskThought): string | null {
       head,
       esc(sentences.join(" ")),
       [watch ? `👀 watch: ${esc(watch)}` : "", invalidation ? `❌ wrong if: ${esc(invalidation)}` : ""].filter(Boolean).join("\n"),
+      note ? esc(fix(note)) : "",
       tail,
     ].filter(Boolean).join("\n\n");
   let html = build();
@@ -186,7 +191,8 @@ function fitCaption(e: TgDeskEvidence, t: TgDeskThought): string | null {
 }
 
 /** What it says when the desk could not answer. Fixed lines, judged by the ordinary gate like every template. */
-export function deskMissLine(why: "not-found" | "ambiguous" | "unavailable", kind: "coin" | "market"): string {
+export function deskMissLine(why: "not-found" | "ambiguous" | "unavailable" | "rate-limit", kind: "coin" | "market"): string {
+  if (why === "rate-limit") return "too many research requests right now; i cannot give a fresh verified read";
   if (kind === "market") return "can't pull the market data rn, ask me again in a minute";
   if (why === "not-found") return "can't find a coin by that name on robinhood chain. drop the CA and i'll pull the chart";
   if (why === "ambiguous") return "there's more than one coin with that name on robinhood chain. drop the CA of the one you mean";

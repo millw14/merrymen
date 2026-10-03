@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 import { askBrainDesk, parseDeskAnalysis } from "./brain-desk";
+import { createDesk } from "./desk";
 
 const REQ = { kind: "coin" as const, subject: "CASHCAT", question: "good entry?", brief: "RSI14: 37.5", voice: "You are Pine." };
 
@@ -57,5 +58,16 @@ describe("askBrainDesk over the wire", () => {
     reply = (res) => res.writeHead(200).end("not json");
     assert.equal(await askBrainDesk({ url, token: "tok", agentId: "a" }, REQ), null);
     assert.equal(await askBrainDesk({ url: "", token: "tok", agentId: "a" }, REQ), null);
+  });
+
+  it("the desk port applies the caller's remaining timeout to a hung response body", async () => {
+    reply = (res) => { res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true,'); };
+    const desk = createDesk({ brain: { url, token: "tok", agentId: "a", timeoutMs: 18_000 } });
+    const at = performance.now();
+    assert.equal(await desk.think!(REQ, { timeoutMs: 80 }), null);
+    assert.ok(performance.now() - at < 500, "remaining reply time overrides the configured 18-second timeout");
+    seen = null;
+    assert.equal(await desk.think!(REQ, { timeoutMs: 0 }), null);
+    assert.equal(seen, null, "an exhausted budget sends no request");
   });
 });

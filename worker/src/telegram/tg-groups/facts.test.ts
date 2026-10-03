@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { calculateChatMath } from "../../../../packages/core/src/index";
-import { publicFactLine, publicFactRequest } from "./facts";
+import { publicCoinStatus, publicFactLine, publicFactRequest } from "./facts";
+import type { TgCoinMemo } from "./types";
 
 const now = Date.UTC(2026, 9, 1, 20, 0, 0);
 
 describe("public factual group answers", () => {
+  it("distinguishes a queued screen, expired nomination and recorded trade outcomes", () => {
+    const memo: TgCoinMemo = { address: "0x" + "a".repeat(40), name: "PRISM", byId: 1, byName: "Ann", messageId: 10, atMs: now, verdict: "candidate" };
+    assert.match(publicCoinStatus(memo, now)!, /safe entry checks and a trade review are still required/);
+    assert.doesNotMatch(publicCoinStatus(memo, now)!, /sent to|with the brain|approved|bought/);
+    assert.match(publicCoinStatus(memo, now + 16 * 60_000)!, /no completed trade outcome is recorded/);
+    assert.doesNotMatch(publicCoinStatus(memo, now + 16 * 60_000)!, /expired|review never|passed/);
+    assert.match(publicCoinStatus({ ...memo, verdict: "expired" }, now + 16 * 60_000)!, /expired without a confirmed buy/);
+    assert.match(publicCoinStatus({ ...memo, verdict: "skipped", notes: ["the market read was unavailable"] }, now)!, /no filled buy.*market read was unavailable/);
+    assert.match(publicCoinStatus({ ...memo, verdict: "not-ready", notes: ["liquidity was thin"] }, now)!, /entries weren't ready.*liquidity was thin/);
+    assert.match(publicCoinStatus({ ...memo, verdict: "bought", paper: true, decisionId: "d1", notes: ["participation was improving"] }, now)!, /bought it on paper because participation was improving/);
+    assert.doesNotMatch(publicCoinStatus({ ...memo, verdict: "passed", notes: ["wallet balance 999999", "thin liquidity"] }, now)!, /999999|wallet/);
+  });
   it("reports measured public metrics with their actual source and cached timestamp", () => {
     const line = publicFactLine({ kind: "coin", nowMs: now, look: { kind: "candidate", name: "PRISM", research: { observedAtMs: now - 120_000, source: "geckoterminal", liquidityUsd: 120_000, volume24hUsd: 32_100, priceChange24hPct: -4.251 } } });
     assert.match(line!, /PRISM.*GeckoTerminal snapshot 19:58 UTC \(cached\)/);

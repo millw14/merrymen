@@ -161,20 +161,20 @@ export function createCommandWake(deps: {
   };
 }
 
-/** The two kinds of tick the clock runs. */
-export type TickKind = "regular" | "command";
+/** Regular execution, owner-command execution, and group-nomination research ticks. */
+export type TickKind = "regular" | "command" | "nomination";
 
 /**
  * WHAT A TICK DOES, decided once at its top and read wherever it forks.
  *
  * It used to be a boolean tested inline in three places inside main(), where
  * no test can reach; dropping any one of them typechecked and passed. Every
- * decision a command tick makes differently lives here now, where it runs.
+ * decision an extra command or nomination tick makes differently lives here.
  *
  *   ratchets   — observe this tick's equity into what only ever goes up, and
  *                record it: the fee and high-water-mark accrual, the
  *                risk-period peak, the paper peak, the equity row. Off on a
- *                command tick. The fee above the mark follows the running
+ *                command or nomination tick. The fee above the mark follows the running
  *                maximum of SAMPLED equity, and that maximum only rises as
  *                samples are added — so an owner's order that added a sample
  *                could charge a fee on a transient peak the regular cadence
@@ -191,8 +191,8 @@ export type TickKind = "regular" | "command";
  *                tick drains beside the strategy, as it always has: its own
  *                intents queue behind the order on the intent chain.
  *   producers  — everything after the drain: stranded resolve, discovery, the
- *                strategy, the class route. Never on a command tick, or every
- *                owner order would also buy the basket a second time.
+ *                strategy, the class route. Never on command or nomination
+ *                ticks: arriving chat work cannot add an execution pass.
  */
 export interface TickPlan {
   kind: TickKind;
@@ -204,6 +204,9 @@ export interface TickPlan {
 
 export function tickPlan(kind: TickKind): TickPlan {
   if (kind === "command") return { kind, ratchets: false, brain: false, awaitDrain: true, producers: false };
+  // A group may cause a fresh research read, never an extra equity peak,
+  // performance fee, queued owner order, or strategy/class execution pass.
+  if (kind === "nomination") return { kind, ratchets: false, brain: true, awaitDrain: false, producers: false };
   return { kind, ratchets: true, brain: true, awaitDrain: false, producers: true };
 }
 
@@ -361,6 +364,7 @@ export function livePeaksStale(paper: boolean, markBook: MarkBook, capitalPeakDi
  * tick to stop reading.
  */
 export async function drainOnTick(plan: TickPlan, drain: () => Promise<unknown>): Promise<boolean> {
+  if (plan.kind === "nomination") return false;
   let run: Promise<unknown>;
   try {
     run = drain();
@@ -373,6 +377,14 @@ export async function drainOnTick(plan: TickPlan, drain: () => Promise<unknown>)
   );
   if (plan.awaitDrain) await landed;
   return plan.producers;
+}
+
+/** A read failure still answers queued owner commands on execution ticks.
+ * Research ticks leave every command untouched, including self-tests and
+ * resets that can mutate money or accounting without a complete market read. */
+export async function drainOnUnreadTick(plan: TickPlan, drain: () => Promise<unknown>): Promise<void> {
+  if (plan.kind === "nomination") return;
+  try { await drain(); } catch { /* The drain owns its result or retry. */ }
 }
 
 /**
@@ -549,6 +561,8 @@ export interface TickClock {
   state(): { ticked: boolean; tickRunning: boolean; regularDueInMs: number | null };
   /** Run one command tick between regular ones. False — and nothing run — if a tick is running or none is armed. */
   wakeCommand(): boolean;
+  /** Run one research-only nomination tick, preserving the regular cadence and trade serialization. */
+  wakeNomination(): boolean;
 }
 
 export function createTickClock(deps: {
@@ -565,11 +579,14 @@ export function createTickClock(deps: {
   regular: () => Promise<number>;
   /** One command tick. */
   command: () => Promise<void>;
+  /** Fresh book/policy reads and Brain review only: no financial ratchets or execution producers. */
+  nomination?: () => Promise<void>;
 }): TickClock {
   let running = false;
   let ticked = false;
   let timer: unknown = null;
   let dueAt = 0;
+  let nominationWanted = false;
 
   const arm = (ms: number) => {
     const wait = Number.isFinite(ms) ? Math.max(0, ms) : deps.fallbackMs;
@@ -595,6 +612,9 @@ export function createTickClock(deps: {
       return waiting.then(startRegular, startRegular);
     }
     try {
+      // Evidence received while this tick waited for a trade is read by this
+      // very tick; it does not also owe a second one after that read.
+      nominationWanted = false;
       return deps.regular();
     } catch {
       return Promise.resolve(deps.fallbackMs);
@@ -610,7 +630,40 @@ export function createTickClock(deps: {
         running = false;
         ticked = true;
         arm(next);
+        if (nominationWanted) wakeNomination();
       });
+  };
+
+  const startNomination = (): Promise<void> => {
+    let waiting: Promise<unknown> | null;
+    try { waiting = deps.inFlight(); } catch { waiting = null; }
+    if (waiting) {
+      try { deps.onHold(); } catch { /* The heartbeat cannot stop the clock. */ }
+      return waiting.then(startNomination, startNomination);
+    }
+    nominationWanted = false;
+    try { return deps.nomination!(); } catch { return Promise.resolve(); }
+  };
+
+  const wakeNomination = (): boolean => {
+    // The first regular tick owns boot staggering, initial arming and the
+    // first coherent book. A group cannot bring that initialization forward.
+    if (!deps.nomination || !ticked) return false;
+    if (running) { nominationWanted = true; return true; }
+    if (timer === null) return false;
+    // A regular tick already due makes the same fresh reads. Prefer it to
+    // an additional research tick and keep its accounting cadence intact.
+    if (dueAt <= deps.now()) return true;
+    const due = dueAt;
+    deps.clearTimer(timer);
+    timer = null;
+    running = true;
+    void startNomination().catch(() => {}).then(() => {
+      running = false;
+      arm(due - deps.now());
+      if (nominationWanted) wakeNomination();
+    });
+    return true;
   };
 
   return {
@@ -621,6 +674,7 @@ export function createTickClock(deps: {
     state() {
       return { ticked, tickRunning: running, regularDueInMs: timer === null ? null : dueAt - deps.now() };
     },
+    wakeNomination,
     wakeCommand() {
       if (timer === null || running) return false;
       deps.clearTimer(timer);
@@ -638,6 +692,7 @@ export function createTickClock(deps: {
         .then(() => {
           running = false;
           arm(due - deps.now());
+          if (nominationWanted) wakeNomination();
         });
       return true;
     },
@@ -689,6 +744,8 @@ export interface CommandClock {
   start(delayMs: number): void;
   /** One look at the queue; true when it woke a command tick. */
   poll(): boolean;
+  /** New verified group evidence may request a serialized research-only tick. */
+  wakeNomination(): boolean;
   /** The clock's own state, for logs and tests. */
   state(): { ticked: boolean; tickRunning: boolean; regularDueInMs: number | null };
 }
@@ -706,6 +763,7 @@ export function createCommandClock(deps: {
   pending: () => readonly string[];
   regular: () => Promise<number>;
   command: () => Promise<void>;
+  nomination?: () => Promise<void>;
   /**
    * The heartbeat file the orchestrator's watchdog reads, and what a beat from
    * the clock says in it: the mode heartbeat() would publish and who pays gas.
@@ -734,6 +792,7 @@ export function createCommandClock(deps: {
     onHold: beat,
     regular: deps.regular,
     command: deps.command,
+    nomination: deps.nomination,
   });
   const watcher = createCommandWake({
     pending: deps.pending,
@@ -755,5 +814,6 @@ export function createCommandClock(deps: {
       return watcher.poll();
     },
     state: () => clock.state(),
+    wakeNomination: () => clock.wakeNomination(),
   };
 }
