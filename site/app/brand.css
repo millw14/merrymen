@@ -181,8 +181,7 @@ html[data-theme="light"] body:has(.home-page) {
   letter-spacing: -0.02em;
   text-wrap: balance;
 }
-.home-page .hero-eyebrow,
-.home-page .tag {
+.home-page .hero-eyebrow {
   font-family: var(--font-sans);
   text-transform: none;
   letter-spacing: 0;

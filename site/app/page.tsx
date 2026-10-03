@@ -138,6 +138,7 @@ export default async function Home() {
       <section id="features">
         <div className="wrap">
           <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">01</span> — what it is</div>
             <h2>An agent that works Sherwood while you sleep.</h2>
             <p>The strategist proposes. Deterministic code disposes. The chain enforces the wall you signed.</p>
           </div>
@@ -164,6 +165,7 @@ export default async function Home() {
       <section id="safety">
         <div className="wrap">
           <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">02</span> — the trust layer</div>
             <h2>The wall is the product.</h2>
           </div>
           <div className="safety">
@@ -182,6 +184,7 @@ export default async function Home() {
       <section id="paper">
         <div className="wrap">
           <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">03</span> — before a coin moves</div>
             <h2>Paper, then live.</h2>
             <p>Paper is for watching. Live is for funds. They are not the same path.</p>
           </div>
@@ -204,6 +207,7 @@ export default async function Home() {
       <section className="app-strip" aria-label="Public agents">
         <div className="wrap">
           <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">04</span> — live from Sherwood</div>
             <h2>The band, in public.</h2>
             <p>Agent accounts and the tape, read from the chain. No login.</p>
           </div>
@@ -227,6 +231,7 @@ export default async function Home() {
       <section id="learn">
         <div className="wrap">
           <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">05</span> — quickstart</div>
             <h2>Begin here.</h2>
             <p>The hosted path is three signatures. Telegram is optional, and the full guide lives in the docs.</p>
           </div>
@@ -248,7 +253,8 @@ export default async function Home() {
             ))}
           </div>
           <div id="telegram" className="safety" style={{ marginTop: 48 }}>
-            <h3>Set up Telegram</h3>
+            <div className="tag"><span className="n">06</span> — two minutes</div>
+            <h3 style={{ marginTop: 18 }}>Set up Telegram</h3>
             <ol>
               <li>Message <strong>@BotFather</strong> → <code className="inline">/newbot</code> → copy the token</li>
               <li>Dashboard → <strong>Settings → Telegram</strong> → paste, test, enable</li>
@@ -265,6 +271,7 @@ export default async function Home() {
       <section id="install">
         <div className="wrap">
           <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">07</span> — on your machine</div>
             <h2>Run it yourself.</h2>
             <p>Desktop, the Android demo, an iPhone note, and the source. Self-host starts on paper.</p>
           </div>
@@ -301,7 +308,7 @@ npm install -g merrymen && merrymen start`}</pre>
       <section id="words">
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade">Word from the woods</div>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">08</span> — word from the woods</div>
             <h2 data-reveal="mask">Early words. Honest receipts.</h2>
           </div>
 
