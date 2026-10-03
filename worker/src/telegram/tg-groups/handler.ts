@@ -1091,7 +1091,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
             pauseFor(r.retryAfterSec);
             continue;
           }
-          if (r.noDelivery === true && typeof r.migrateToChatId === "number" && !migrated) {
+          if (r.noDelivery === true && !deliveryPossible && typeof r.migrateToChatId === "number" && !migrated) {
+            // This refusal proves the source attempt did not answer anyone.
+            // Refund before merging people: a newer destination record may
+            // discard the source slot entirely. The destination must pass
+            // its own allowance check on the next attempt.
+            if (answerSlot) answerSlot.rollback(chatId);
+            answerSlot = null;
+            accounted = false;
             migrated = true;
             store.migrate(chatId, r.migrateToChatId);
             chatId = r.migrateToChatId;

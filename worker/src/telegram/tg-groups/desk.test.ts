@@ -848,6 +848,41 @@ describe("the desk lane", () => {
     assert.deepEqual(desk!.asks.at(-1), { kind: "coin", address });
     assert.equal(tg.of("sendPhoto").at(-1)!.body.chat_id, String(destination));
     assert.equal(tg.of("sendPhoto").at(-1)!.body.message_thread_id, "23");
+    assert.equal(store.person(destination, ANN)!.answers!.count, 1, "only the successful destination attempt consumes a slot");
+  });
+
+  it("migration cannot refund an unrelated newer destination answer window or bypass its flood cap", async () => {
+    const destination = -1009876543210;
+    store.ensureRoom(destination, { title: "new room", kind: "supergroup" });
+    store.setStatus(destination, "approved", OWNER);
+    store.upsertPerson(destination, { id: ANN, name: "Newer Ann", lastSeenMs: clock + 1,
+      answers: { count: 6, sinceMs: clock } });
+    tg.replyEnvelope = (method) => method === "sendPhoto"
+      ? { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded", parameters: { migrate_to_chat_id: destination } }
+      : undefined;
+    make();
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendPhoto").length, 1, "the destination's existing six answers prohibit another send");
+    assert.equal(store.person(destination, ANN)!.answers!.count, 6);
+    assert.equal(store.person(destination, ANN)!.name, "Newer Ann");
+    assert.equal(store.person(destination, ANN)!.lastSeenMs, T0 + 1);
+  });
+
+  it("migration to an absent destination refunds both definite refused attempts", async () => {
+    const destination = -1009876543210;
+    let first = true;
+    tg.replyEnvelope = (method) => {
+      if (method !== "sendPhoto") return undefined;
+      if (first) {
+        first = false;
+        return { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded", parameters: { migrate_to_chat_id: destination } };
+      }
+      return { ok: false, error_code: 400, description: "Bad Request: message not found" };
+    };
+    make();
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.equal(store.person(destination, ANN)!.answers!.count, 0);
   });
 
   it("bounds a full public-read lane with an honest busy reply without another lookup", async () => {
