@@ -544,6 +544,8 @@ interface LineJob {
    * line (see forgottenSince).
    */
   seenAtMs: number;
+  /** Monotonic receipt order; keeps concurrent research subjects in human order. */
+  ingressOrder: number;
   threadId?: number;
   /** The question-to-the-room second look (see QUESTION_WAIT_MS). */
   deferred?: boolean;
@@ -570,7 +572,7 @@ interface Outgoing {
   /** Told why, when the line is not sent (see Quiet). */
   miss?: (why: Quiet) => void;
   /** Synchronous person allowance check/count under the send lock, before the first transport attempt. */
-  accountAnswer?: (chatId: number) => Quiet | null;
+  accountAnswer?: (chatId: number) => Quiet | AnswerSlot;
   /**
    * A market desk answer: the chart, when one was drawn, and its caption as
    * HTML already built and escaped by desk.ts. It goes out without a typing
@@ -594,7 +596,12 @@ interface SpeakOpts {
   ambient?: boolean;
   /** Told why, when nothing is sent (see Quiet). */
   miss?: (why: Quiet) => void;
-  accountAnswer?: (chatId: number) => Quiet | null;
+  accountAnswer?: (chatId: number) => Quiet | AnswerSlot;
+}
+
+/** One person's provisional answer slot, refundable only on definitive non-delivery. */
+interface AnswerSlot {
+  rollback: (chatId: number) => void;
 }
 
 // ─── The handler ───────────────────────────────────────────────────────────
@@ -640,6 +647,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const repliedTo = new Lru<string, true>(LRU_MAX);
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
+  const messageIngressOrder = new Lru<string, number>(LRU_MAX);
+  let ingressOrder = 0;
   /** The forum topic of each recent message, so an outcome minutes later lands in the same topic. */
   const threads = new Lru<string, number>(LRU_MAX);
   /**
@@ -1009,91 +1018,107 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       let threadId = o.threadId;
       let migrated = false;
       let accounted = false;
-      const baseOpts = optsNow();
-      if (!baseOpts) {
-        missed(o, "no-token");
-        return null;
-      }
-      const early = whyNot(o, chatId);
-      if (early) {
-        missed(o, early);
-        return null;
-      }
-      // One transport deadline across safe formatting/topic/migration retries.
-      const opts = o.replyByMs === undefined ? baseOpts : {
-        ...baseOpts,
-        deadlineAtMs: Date.now() + Math.max(0, o.replyByMs - clock()),
-      };
-      if (o.replyByMs === undefined) {
-        try {
-          stageOf(o.chatId, "send: typing");
-          await sendChatAction(opts, chatId, o.desk?.photo ? "upload_photo" : "typing", threadId);
-        } catch (e) {
-          fail("typing", e);
-        }
-      }
-      if (!o.desk && o.replyByMs === undefined) {
-        stageOf(o.chatId, "send: typing delay");
-        await sleep(typingDelayMs(o.text, false, rand));
-      }
-      for (let attempt = 0; attempt < 4; attempt++) {
-        stageOf(o.chatId, "send: flood pacer");
-        if (!(await waitTurn(chatId, o.replyByMs))) {
-          const why = clock() >= (o.replyByMs ?? Infinity) ? "reply-deadline" : "send-rate";
-          log(`[tg-groups] research send blocked (${why})`);
-          missed(o, why);
+      let answerSlot: AnswerSlot | null = null;
+      let deliveryPossible = false;
+      try {
+        const baseOpts = optsNow();
+        if (!baseOpts) {
+          missed(o, "no-token");
           return null;
         }
-        const late = whyNot(o, chatId);
-        if (late) {
-          missed(o, late);
+        const early = whyNot(o, chatId);
+        if (early) {
+          missed(o, early);
           return null;
         }
-        if (!accounted && o.accountAnswer) {
-          const refusal = o.accountAnswer(chatId);
-          if (refusal) { missed(o, refusal); return null; }
-          accounted = true;
-        }
-        stageOf(o.chatId, "send: message");
-        const where = {
-          ...(isMsgId(replyTo) ? { replyToMessageId: replyTo } : {}),
-          ...(isMsgId(threadId) ? { messageThreadId: threadId } : {}),
-          disablePreview: true,
+        // One transport deadline across safe formatting/topic/migration retries.
+        const opts = o.replyByMs === undefined ? baseOpts : {
+          ...baseOpts,
+          deadlineAtMs: Date.now() + Math.max(0, o.replyByMs - clock()),
         };
-        const r = o.desk?.photo
-          ? await sendPhotoBytes(opts, chatId, o.desk.photo, o.desk.html, where)
-          : await sendMessage(opts, chatId, o.desk ? o.desk.html : htmlOf(o), where);
-        if (r.ok) {
-          if (isMsgId(o.replyTo)) landedOn.set(msgKey(o.chatId, o.replyTo), true);
-          return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
+        if (o.replyByMs === undefined) {
+          try {
+            stageOf(o.chatId, "send: typing");
+            await sendChatAction(opts, chatId, o.desk?.photo ? "upload_photo" : "typing", threadId);
+          } catch (e) {
+            fail("typing", e);
+          }
         }
-        if (typeof r.retryAfterSec === "number") {
-          pauseFor(r.retryAfterSec);
-          continue;
+        if (!o.desk && o.replyByMs === undefined) {
+          stageOf(o.chatId, "send: typing delay");
+          await sleep(typingDelayMs(o.text, false, rand));
         }
-        if (typeof r.migrateToChatId === "number" && !migrated) {
-          migrated = true;
-          store.migrate(chatId, r.migrateToChatId);
-          chatId = r.migrateToChatId;
-          replyTo = undefined;
-          threadId = undefined;
-          continue;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          stageOf(o.chatId, "send: flood pacer");
+          if (!(await waitTurn(chatId, o.replyByMs))) {
+            const why = clock() >= (o.replyByMs ?? Infinity) ? "reply-deadline" : "send-rate";
+            log(`[tg-groups] research send blocked (${why})`);
+            missed(o, why);
+            return null;
+          }
+          const late = whyNot(o, chatId);
+          if (late) {
+            missed(o, late);
+            return null;
+          }
+          if (!accounted && o.accountAnswer) {
+            const admission = o.accountAnswer(chatId);
+            if (typeof admission === "string") { missed(o, admission); return null; }
+            answerSlot = admission;
+            accounted = true;
+          }
+          stageOf(o.chatId, "send: message");
+          const where = {
+            ...(isMsgId(replyTo) ? { replyToMessageId: replyTo } : {}),
+            ...(isMsgId(threadId) ? { messageThreadId: threadId } : {}),
+            disablePreview: true,
+          };
+          let r;
+          try {
+            r = o.desk?.photo
+              ? await sendPhotoBytes(opts, chatId, o.desk.photo, o.desk.html, where)
+              : await sendMessage(opts, chatId, o.desk ? o.desk.html : htmlOf(o), where);
+          } catch (e) {
+            deliveryPossible = true;
+            throw e;
+          }
+          if (r.ok || r.noDelivery !== true) deliveryPossible = true;
+          if (r.ok) {
+            if (isMsgId(o.replyTo)) landedOn.set(msgKey(o.chatId, o.replyTo), true);
+            return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
+          }
+          if (r.noDelivery === true && typeof r.retryAfterSec === "number") {
+            pauseFor(r.retryAfterSec);
+            continue;
+          }
+          if (r.noDelivery === true && typeof r.migrateToChatId === "number" && !migrated) {
+            migrated = true;
+            store.migrate(chatId, r.migrateToChatId);
+            chatId = r.migrateToChatId;
+            replyTo = undefined;
+            threadId = undefined;
+            continue;
+          }
+          // A topic Telegram no longer knows (deleted since, or a thread id that
+          // was never a topic): once more without it. The reply, when there is
+          // one, still puts the line next to the message it answers.
+          if (r.noDelivery === true && isMsgId(threadId) && typeof r.reason === "string" && /thread not found/i.test(r.reason)) {
+            threadId = undefined;
+            continue;
+          }
+          // "request failed: …" is the transport (a dead network, a call past
+          // api.ts TG_CALL_TIMEOUT_MS), not Telegram saying no.
+          log(`[tg-groups] send failed (${r.reason && !/^request failed/.test(r.reason) ? "refused" : "no answer"})`);
+          missed(o, "send-failed");
+          return null;
         }
-        // A topic Telegram no longer knows (deleted since, or a thread id that
-        // was never a topic): once more without it. The reply, when there is
-        // one, still puts the line next to the message it answers.
-        if (isMsgId(threadId) && typeof r.reason === "string" && /thread not found/i.test(r.reason)) {
-          threadId = undefined;
-          continue;
-        }
-        // "request failed: …" is the transport (a dead network, a call past
-        // api.ts TG_CALL_TIMEOUT_MS), not Telegram saying no.
-        log(`[tg-groups] send failed (${r.reason && !/^request failed/.test(r.reason) ? "refused" : "no answer"})`);
         missed(o, "send-failed");
         return null;
+      } finally {
+        // Every known refusal (including a pre-fetch expiry) proves this
+        // attempt did not answer the person. Never refund an uncertain send.
+        if (answerSlot && !deliveryPossible) answerSlot.rollback(chatId);
       }
-      missed(o, "send-failed");
-      return null;
     }, o.replyByMs);
 
   /** One emoji on a message, through the same pacer and pause as a line. */
@@ -1340,14 +1365,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * Concurrent research rechecks this under deliver's serialized send lock.
    * Count before transport so the next reply sees the slot, and keep the count
    * if Telegram times out: that request may already have reached the room.
+   * Known non-delivery refunds only this slot, preserving later counts.
    */
-  const accountResearchAnswer = (poster: TgLine, seenAt: number): ((chatId: number) => Quiet | null) => (chatId) => {
+  const accountResearchAnswer = (poster: TgLine, seenAt: number): ((chatId: number) => Quiet | AnswerSlot) => (chatId) => {
     if (forgottenSince(chatId, poster.fromId, seenAt)) return "forgotten";
     if (flooded(chatId, poster.fromId)) return "flood";
     const now = clock();
+    const window = bump(store.person(chatId, poster.fromId)?.answers, now, FLOOD_WINDOW_MS);
     store.upsertPerson(chatId, { id: poster.fromId, name: poster.name,
-      answers: bump(store.person(chatId, poster.fromId)?.answers, now, FLOOD_WINDOW_MS) });
-    return null;
+      answers: window });
+    return { rollback: (currentChatId) => {
+      if (forgottenSince(chatId, poster.fromId, seenAt) || forgottenSince(currentChatId, poster.fromId, seenAt)) return;
+      const current = store.person(currentChatId, poster.fromId);
+      if (!current?.answers || current.answers.sinceMs !== window.sinceMs || current.answers.count <= 0) return;
+      store.upsertPerson(currentChatId, { id: poster.fromId, name: current.name,
+        answers: { ...current.answers, count: current.answers.count - 1 }, lastSeenMs: current.lastSeenMs });
+    } };
   };
 
   /** Past the flood: one 👀 on their post per window, then nothing. */
@@ -2148,8 +2181,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return true;
   };
   /** What each chat last asked the desk, so "do a quick analysis" right after reads the same thing. */
-  const lastDesk = new Map<number, { ask: TgDeskAsk; atMs: number }>();
+  const lastDesk = new Map<number, { ask: TgDeskAsk; atMs: number; ingressOrder: number }>();
   const DESK_FOLLOW_MS = 15 * MIN;
+  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined): void => {
+    if (order === undefined || (lastDesk.get(chatId)?.ingressOrder ?? -1) >= order) return;
+    if (lastDesk.size > 256 && !lastDesk.has(chatId)) lastDesk.delete(lastDesk.keys().next().value!);
+    lastDesk.set(chatId, { ask, atMs, ingressOrder: order });
+  };
 
   /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
   const repliedDesk = (j: LineJob): TgDeskAsk | null => {
@@ -2359,8 +2397,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const opts = { ...o, replyByMs };
     // Remember the actual subject even on failure: a reply asking for a proper
     // analysis should retry that subject, not turn into unrelated banter.
-    if (lastDesk.size > 256) lastDesk.delete(lastDesk.keys().next().value!);
-    lastDesk.set(chatId, { ask, atMs: clock() });
+    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder);
     if (!allowed) return deskMiss(chatId, ask, "rate-limit", opts, note);
     deskTyping(chatId, replyByMs, o.threadId);
     const composed = await deskCompose(chatId, ask, j.line.text, note, replyByMs);
@@ -2403,6 +2440,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       accountAnswer: accountResearchAnswer(poster, seenAt),
     };
     const ask: TgDeskAsk = { kind: "coin", address };
+    const order = messageIngressOrder.get(msgKey(chatId, poster.messageId));
+    rememberDesk(chatId, ask, seenAt, order);
     const note = deskNoteFor(store.coin(chatId, address)) ?? o.note;
     let sent: { chatId: number; messageId?: number } | null;
     if (o.busy) sent = await deskMiss(chatId, ask, "rate-limit", opts, note);
@@ -2415,10 +2454,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     // A transport timeout may already have landed. Keep the message's reply
     // reservation; the coin flow's fallback cannot blindly send another answer.
-    if (sent && !forgottenSince(chatId, poster.fromId, seenAt)) {
-      const now = clock();
-      if (lastDesk.size > 256) lastDesk.delete(lastDesk.keys().next().value!);
-      lastDesk.set(sent.chatId, { ask, atMs: now });
+    if (sent && sent.chatId !== chatId && !forgottenSince(chatId, poster.fromId, seenAt) && !forgottenSince(sent.chatId, poster.fromId, seenAt)) {
+      // Migration carries the subject, retaining its original receipt order
+      // and lifetime; a newer destination ask still wins.
+      rememberDesk(sent.chatId, ask, seenAt, order);
     }
     return sent !== null;
   };
@@ -2935,6 +2974,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         const key = msgKey(chatId, messageId);
         received.set(key, now);
+        const order = ++ingressOrder;
+        messageIngressOrder.set(key, order);
         // THE TOPIC ONLY WHEN TELEGRAM SAYS IT IS ONE. A reply in a forum's
         // General topic carries message_thread_id too — the reply thread's,
         // with no is_topic_message — and a send naming it is refused ("message
@@ -2953,7 +2994,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         maybeMemoryPass(chatId);
 
-        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ...(threadId !== undefined ? { threadId } : {}) };
+        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order, ...(threadId !== undefined ? { threadId } : {}) };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.
         const coin = extractCas(text).length > 0;

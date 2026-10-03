@@ -1464,7 +1464,7 @@ describe("sendMessage — group options", () => {
       body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 17", parameters: { retry_after: 17 } },
     });
     const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "x", { keyboard: [[{ text: "a", url: "https://x.y" }]] });
-    assert.deepEqual(r, { ok: false, reason: "Too Many Requests: retry after 17", retryAfterSec: 17 });
+    assert.deepEqual(r, { ok: false, reason: "Too Many Requests: retry after 17", retryAfterSec: 17, noDelivery: true });
     assert.equal(f.calls.length, 1);
   });
 
@@ -1483,7 +1483,7 @@ describe("sendMessage — group options", () => {
       { status: 429, body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 9", parameters: { retry_after: 9 } } },
     );
     const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "<b>x");
-    assert.deepEqual(r, { ok: false, reason: "Too Many Requests: retry after 9", retryAfterSec: 9 });
+    assert.deepEqual(r, { ok: false, reason: "Too Many Requests: retry after 9", retryAfterSec: 9, noDelivery: true });
   });
 
   it("migrate_to_chat_id surfaces — the group became a supergroup", async () => {
@@ -1492,15 +1492,16 @@ describe("sendMessage — group options", () => {
       body: { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: GROUP } },
     });
     const r = await sendMessage({ token: "t", fetchFn: f }, -555, "hi");
-    assert.deepEqual(r, { ok: false, reason: "Bad Request: group chat was upgraded to a supergroup chat", migrateToChatId: GROUP });
+    assert.deepEqual(r, { ok: false, reason: "Bad Request: group chat was upgraded to a supergroup chat", migrateToChatId: GROUP, noDelivery: true });
     assert.equal(f.calls.length, 1);
   });
 
-  it("an ordinary refusal carries no next-step fields", async () => {
+  it("an ordinary refusal proves non-delivery without next-step fields", async () => {
     const f = scripted({ status: 403, body: { ok: false, error_code: 403, description: "Forbidden: bot was kicked from the supergroup chat" } });
     assert.deepEqual(await sendMessage({ token: "t", fetchFn: f }, GROUP, "x"), {
       ok: false,
       reason: "Forbidden: bot was kicked from the supergroup chat",
+      noDelivery: true,
     });
   });
 

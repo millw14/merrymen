@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type { ResolvedConfig } from "../../settings";
 import type { FetchLike, TgMessage } from "../api";
 import type { StateRef, TelegramState } from "../state";
@@ -261,6 +261,7 @@ class FakeTg {
   calls: Call[] = [];
   private nextId = 5_000;
   beforeReply?: (method: string) => Promise<void>;
+  replyEnvelope?: (method: string) => Record<string, unknown> | undefined;
   sentAt: number[] = [];
   fetchFn: FetchLike = async (url, init) => {
     const method = url.split("/").pop() ?? "";
@@ -272,7 +273,7 @@ class FakeTg {
     this.calls.push({ method, body });
     if (method === "sendPhoto" || method === "sendMessage") this.sentAt.push(clock);
     await this.beforeReply?.(method);
-    const env = method === "sendMessage" || method === "sendPhoto" ? { ok: true, result: { message_id: this.nextId++ } } : { ok: true, result: true };
+    const env = this.replyEnvelope?.(method) ?? (method === "sendMessage" || method === "sendPhoto" ? { ok: true, result: { message_id: this.nextId++ } } : { ok: true, result: true });
     return { ok: true, status: 200, json: async () => env };
   };
   of(method: string): Call[] {
@@ -644,6 +645,93 @@ describe("the desk lane", () => {
     assert.equal(store.person(CHAT, ANN)!.answers!.count, 6);
   });
 
+  it("six definitive rejections refund person slots so the next valid answer is allowed", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 400, description: "Bad Request: message not found" } : undefined;
+    make({ port: () => port });
+    for (let i = 0; i < 6; i++) await said(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`));
+    assert.equal(tg.of("sendMessage").length, 6);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 0, "Telegram confirmed no answer was delivered");
+    tg.replyEnvelope = undefined;
+    await said(msg("0xffffffffffffffffffffffffffffffffffffffff"));
+    assert.equal(tg.of("sendMessage").length, 7);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("a definitive 429 whose retry cannot fit the deadline refunds the person slot", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 31 } } : undefined;
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendMessage").length, 1, "the retry cannot start past the deadline");
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 0);
+    clock += 31_000;
+    tg.replyEnvelope = undefined;
+    await said(msg("0x0000000000000000000000000000000000000002"));
+    assert.equal(tg.of("sendMessage").length, 2);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("refunding a definitive rejection subtracts only its own slot and preserves later person updates", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => {
+      if (method !== "sendMessage") return;
+      const current = store.person(CHAT, ANN)!;
+      store.upsertPerson(CHAT, { id: ANN, name: "New name", lastSeenMs: clock + 123,
+        answers: { ...current.answers!, count: current.answers!.count + 2 } });
+    };
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 400, description: "Bad Request: message not found" } : undefined;
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 2);
+    assert.equal(store.person(CHAT, ANN)!.name, "New name");
+    assert.equal(store.person(CHAT, ANN)!.lastSeenMs, clock + 123);
+  });
+
+  it("an expiry before the first fetch refunds the slot without starting a request", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    make({ port: () => port });
+    const transportNow = Date.now();
+    let first = true;
+    const date = mock.method(Date, "now", () => { if (first) { first = false; return transportNow; } return transportNow + 31_000; });
+    try {
+      await said(msg("0x0000000000000000000000000000000000000001"));
+    } finally {
+      date.mock.restore();
+    }
+    assert.equal(tg.of("sendMessage").length, 0, "the API deadline elapsed before fetch began");
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 0);
+    await said(msg("0x0000000000000000000000000000000000000002"));
+    assert.equal(tg.of("sendMessage").length, 1);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
+  it("a definitive rejection refund does not restore a person forgotten during transport", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => { if (method === "sendMessage") await groups.forgetMe(CHAT, ANN, undefined, { late: true }); };
+    tg.replyEnvelope = (method) => method === "sendMessage" ? { ok: false, error_code: 400, description: "Bad Request: message not found" } : undefined;
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(store.person(CHAT, ANN), undefined);
+    assert.equal(store.room(CHAT)!.lines.some((line) => line.fromId === ANN), false);
+  });
+
+  it("an ambiguous thread error keeps its slot and does not retry in another topic", async () => {
+    const port = new FakePort();
+    port.look = async () => ({ kind: "unknown" });
+    tg.beforeReply = async (method) => { if (method === "sendMessage") throw new Error("thread not found"); };
+    make({ port: () => port });
+    await said(msg("0x0000000000000000000000000000000000000001", { messageThreadId: 19, isTopicMessage: true }));
+    assert.equal(tg.of("sendMessage").length, 1, "a transport error cannot prove the first send failed to arrive");
+    assert.equal(tg.of("sendMessage")[0]!.body.message_thread_id, 19);
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 1);
+  });
+
   it("the owner remains exempt from the parallel person flood limit", async () => {
     make();
     for (let i = 0; i < 8; i++) groups.onMessage(msg(`0x${(i + 1).toString(16).padStart(40, "0")}`, { fromId: OWNER, fromFirstName: "Owner" }));
@@ -711,6 +799,55 @@ describe("the desk lane", () => {
     release({ kind: "candidate", name: "Oldcoin" });
     await groups.drain();
     assert.equal(tg.of("sendPhoto").length, 1, "the old job's deadline is not refreshed");
+  });
+
+  it("a slower earlier CA cannot replace the newer desk subject for an unthreaded follow-up", async () => {
+    const address = "0x0000000000000000000000000000000000000001";
+    let release!: (look: CoinLook) => void;
+    const port = new FakePort();
+    port.look = () => new Promise((resolve) => { release = resolve; });
+    make({ port: () => port });
+    groups.onMessage(msg(address));
+    await new Promise((r) => setImmediate(r));
+    groups.onMessage(msg("pine thoughts on cashcat?", { fromId: OWNER, fromFirstName: "Owner" }));
+    for (let i = 0; i < 20 && tg.of("sendPhoto").length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(tg.of("sendPhoto").length, 1);
+    release({ kind: "candidate", name: "Oldercoin" });
+    await groups.drain();
+    assert.equal(tg.of("sendPhoto").length, 2);
+    await said(msg("pine do a quick analysis", { fromId: OWNER, fromFirstName: "Owner" }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "cashcat" }, "receipt order wins even when receipts share the same clock tick");
+  });
+
+  it("finishing a coin read does not extend the original subject's follow-up lifetime", async () => {
+    desk = Object.assign(new FakeDesk(), { think: async () => { clock += 18_000; return null; } });
+    make();
+    const arrivedAt = clock;
+    await said(msg("0x0000000000000000000000000000000000000001"));
+    assert.equal(tg.of("sendPhoto").length, 1);
+    clock = arrivedAt + 15 * 60_000 + 1_000;
+    await said(msg("pine do a quick analysis", { fromId: OWNER, fromFirstName: "Owner" }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "market" });
+  });
+
+  it("a definitive chat migration preserves the coin subject for destination forum follow-ups", async () => {
+    const destination = -1009876543210;
+    const address = "0x0000000000000000000000000000000000000001";
+    let first = true;
+    tg.replyEnvelope = (method) => {
+      if (method !== "sendPhoto" || !first) return undefined;
+      first = false;
+      return { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded", parameters: { migrate_to_chat_id: destination } };
+    };
+    make();
+    await said(msg(address, { messageThreadId: 19, isTopicMessage: true }));
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.equal(tg.of("sendPhoto")[1]!.body.chat_id, String(destination));
+    assert.equal(tg.of("sendPhoto")[1]!.body.message_thread_id, undefined, "the old topic cannot be reused after migration");
+    await said(msg("pine do a quick analysis", { chatId: destination, fromId: OWNER, fromFirstName: "Owner", messageThreadId: 23, isTopicMessage: true }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", address });
+    assert.equal(tg.of("sendPhoto").at(-1)!.body.chat_id, String(destination));
+    assert.equal(tg.of("sendPhoto").at(-1)!.body.message_thread_id, "23");
   });
 
   it("bounds a full public-read lane with an honest busy reply without another lookup", async () => {

@@ -411,6 +411,9 @@ one-liner from a model that was given no data.
   within 15 minutes, else the market. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
 
+Concurrent reads retain the subject of the latest received question, even
+when an older lookup finishes later. The follow-up lifetime starts at receipt.
+
 A posted CA is answered by the desk too, inside its budget (below): a coin
 that passes the quick screen gets the chart and read in place of the
 "let me see 👀" ack. The status line distinguishes that screen from a trade
@@ -427,6 +430,9 @@ and asks for the CA; an ambiguous name is never guessed. A line that asks
 something private does not reach the desk. Each chat gets at most 6 desk
 looks, and the agent 30, in any ten minutes; past that an explicit research
 question gets an allowance-unavailable answer rather than invented banter.
+The per-person reply counter reserves a slot before transport. Confirmed
+Telegram refusals or expiry before sending refund that slot; successful and
+uncertain deliveries retain it.
 
 A "why" under a coin preserves the recorded outcome's provenance in the
 desk answer. An addressed cashtag with no CA goes to the desk, which can find
@@ -716,7 +722,8 @@ Per posted CA, in order:
 7. **Research reply**, inside the same 30 s receipt-to-send budget: with the
    desk connected, the chart and grounded read replace the placeholder ack.
    The quick screen's result is identified as a screen, not a completed trade
-   review. With the desk disabled, the existing short line remains. A missing
+   review. Without a desk port, the existing short line remains; a connected
+   but unavailable desk states the limitation. A missing
    verified price, chart or model never licenses an invented view.
 8. **Outcome** within the nomination TTL (15 min), reported by the trading
    side as `CoinOutcome` (a nomination whose entry was claimed inside the
