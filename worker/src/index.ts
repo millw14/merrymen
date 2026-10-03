@@ -107,7 +107,8 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
-import { findTransferFlows, resumeFrom } from "./deposit-log";
+import { resumeFrom } from "./deposit-log";
+import { scanAndBookDepositWindow } from "./deposit-scan";
 import { renderWhy } from "./strategies/reasons";
 import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
 import { classRouteLooks, idleAndClassGate } from "./class-entry-gate";
@@ -159,7 +160,7 @@ import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantFilePath, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { hostedKillFromChat } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
-import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
+import { execModeOf, executionBlockerNotice, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
 import {
   accountingLicence,
@@ -3688,13 +3689,6 @@ async function main() {
     const record = async (
       deltaUsdg: bigint,
       why: string,
-      /**
-       * Set when the flow was READ off the chain rather than inferred from a
-       * balance change. It switches the row's `source`, which is the column that
-       * exists so the two can never be mistaken for each other: an inferred flow
-       * is an opinion an audit may drop on sight, a chain-log flow is a receipt.
-       */
-      evidence?: { txHash: string; blockNumber: number; logIndex: number },
     ) => {
       if (deltaUsdg === 0n) return;
       const inbound = deltaUsdg > 0n;
@@ -3705,7 +3699,7 @@ async function main() {
       // column is written by the heartbeat and may not exist on the first tick,
       // which is precisely the tick that books an opening balance.
       const mode = paperActive() ? ("paper" as const) : ("live" as const);
-      if (mode === "paper" && !evidence) {
+      if (mode === "paper") {
         // Refused here as well as in the store so the HIGH-WATER MARK below is
         // never moved by a simulated balance either: the flow and the peak are
         // one decision, and letting the peak move on a refused flow would leave
@@ -3720,10 +3714,7 @@ async function main() {
         agentId,
         direction: inbound ? "in" : "out",
         amountUsdg: usdgNum(amount),
-        source: evidence ? "chain-log" : "inferred",
-        txHash: evidence?.txHash,
-        blockNumber: evidence?.blockNumber,
-        logIndex: evidence?.logIndex,
+        source: "inferred",
         mode,
         // The chain is left to addFlow's own read of `agents.chain_id`, which
         // ensureAgent writes from the signed grant. That is the chain the grant
@@ -3758,15 +3749,12 @@ async function main() {
      * this pass covered the window since the last one.
      *
      * Returning TRUE makes the scan authoritative and switches inference off
-     * for this tick. Returning FALSE is the honest answer whenever the window
-     * is not fully covered — no watermark yet, a gap wider than the lookback, or
-     * an RPC that would not answer — and inference stays in charge for it.
+     * for this tick. FALSE means no watermark yet or a gap wider than the
+     * lookback: those retain the legacy opening policy. An established window
+     * that failed to read or book throws and holds instead of inferring.
      *
-     * The flows go through the same `record` as an inferred one, so a chain-read
-     * deposit moves the high-water mark exactly like any other capital. Booking
-     * the flow without moving the peak would leave the next tick treating the
-     * deposit as profit and charging a fee on the owner's own money, which is
-     * the original bug with a transaction hash attached to it.
+     * Receipt flows and both peaks commit together through bookCapitalFlow.
+     * Its insert gate protects a retry even when the cached known keys are stale.
      */
     const scanChainFlows = async (s: {
       chain: ReconcileChain;
@@ -3775,7 +3763,6 @@ async function main() {
     }): Promise<boolean> => {
       let head: bigint;
       let from: bigint;
-      let flows: Awaited<ReturnType<typeof findTransferFlows>>;
       try {
         head = await s.chain.getBlockNumber();
         if (chainScanCursor === null) {
@@ -3837,7 +3824,7 @@ async function main() {
           chainScanCursor = at;
         }
         from = chainScanCursor;
-        flows = await findTransferFlows({
+        await scanAndBookDepositWindow({
           chain: s.chain,
           smartAccount: s.smartAccount,
           usdgToken: CASH.USDG as `0x${string}`,
@@ -3855,21 +3842,27 @@ async function main() {
           // (never booked here — the worker books it at landing).
           ...(s.grant ? { chainId: s.grant.chainId } : {}),
           log: (m) => console.log(`[flows] ${m}`),
+        }, {
+          agentId,
+          mode: paperActive() ? "paper" : "live",
+          afterBooked: async (fl) => {
+            highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+            await addEvent(
+              agentId,
+              "ok",
+              `${fl.direction === "in" ? "📥 funded" : "📤 withdrawn"} ${fmt(fl.amountUsdg6)} USDG ` +
+                `(${fl.txHash.slice(0, 10)}…) — capital, not performance: the high-water mark moved with it`,
+            );
+          },
         });
+        // Another receipt booker may have won the same insert while our cached
+        // keys were stale; take its committed peak before judging performance.
+        highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
       } catch (e) {
-        // An RPC that will not answer is not evidence of no deposits. Leave the
-        // cursor where it is so the same window is retried, and let inference
-        // cover this tick.
-        console.log(`[flows] chain scan skipped (${e instanceof Error ? e.message : String(e)})`);
-        return false;
-      }
-
-      for (const fl of flows) {
-        await record(
-          fl.direction === "in" ? fl.amountUsdg6 : -fl.amountUsdg6,
-          `${fl.txHash.slice(0, 10)}…`,
-          { txHash: fl.txHash, blockNumber: fl.blockNumber, logIndex: fl.logIndex },
-        );
+        // Keep the same window AND the cash baseline. An established scan that
+        // failed must never infer this movement: the retry will read its receipt.
+        // The outer reconcileFlowsOrRetry catches this and holds fees/ratchets.
+        throw new Error(`chain scan held (${e instanceof Error ? e.message : String(e)})`);
       }
       // Advanced only after a clean pass, so a failure re-reads rather than skips.
       chainScanCursor = head;
@@ -10429,9 +10422,7 @@ async function main() {
               (verdict.mode !== "live" && verdict.wouldBlockLive
                 ? ` One thing to know first: when you do turn it on, ${liveBlockerText(verdict.wouldBlockLive)}.`
                 : "")
-            : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
-              `Fills below are simulated at live prices until that is fixed. Live trading is a ` +
-              `switch in Settings, and it stays off until you turn it on.`,
+            : executionBlockerNotice(verdict),
       );
     }
   }

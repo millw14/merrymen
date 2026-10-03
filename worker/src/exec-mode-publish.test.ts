@@ -23,7 +23,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { execModeOf, publishedMode, type ExecInputs, type ExecMode } from "./exec-mode";
+import { execModeOf, executionBlockerNotice, publishedMode, type ExecInputs, type ExecMode } from "./exec-mode";
 
 /** A fully-working agent. Each test below breaks exactly one leg. */
 const WORKING: ExecInputs = {
@@ -59,6 +59,28 @@ describe("every ExecMode arm publishes something, and never the wrong thing", ()
       );
       assert.notEqual(publishedMode({ mode: "paper", rule }), "live");
     }
+  });
+});
+
+describe("the feed's execution claim follows the real verdict", () => {
+  it("an empty live account with paper disabled reports idle with no simulated fills", () => {
+    const verdict = execModeOf({ ...WORKING, cashUsdg: 0n, paperTradingEnabled: false });
+    const line = executionBlockerNotice(verdict);
+    assert.equal(verdict.mode, "refuse");
+    assert.match(line, /No real orders or simulated fills are being placed/);
+    assert.doesNotMatch(line, /Fills below are simulated|stays off until/);
+  });
+
+  it("a blocked account only promises simulation when paper mode is actually active", () => {
+    const verdict = execModeOf({ ...WORKING, cashUsdg: 0n, paperTradingEnabled: true });
+    assert.equal(verdict.mode, "paper");
+    assert.match(executionBlockerNotice(verdict), /Fills below are simulated/);
+  });
+
+  it("an un-installable grant never claims paper fills, even with paper permission", () => {
+    const verdict = execModeOf({ ...WORKING, wallTooWide: true, paperTradingEnabled: true });
+    assert.equal(verdict.mode, "refuse");
+    assert.doesNotMatch(executionBlockerNotice(verdict), /Fills below are simulated/);
   });
 });
 

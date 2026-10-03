@@ -522,3 +522,54 @@ describe("B8 — a shared ledger the flows_held/cash_read_at migration has not r
     assert.equal(locked.kind, "unknown", "a column name in some other error is not a missing column");
   });
 });
+
+describe("restart cash comes from the current live book", () => {
+  async function ledger(preMigration = false): Promise<Db> {
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(db);
+    if (preMigration) {
+      await db.exec("ALTER TABLE equity DROP COLUMN flows_held");
+      await db.exec("ALTER TABLE equity DROP COLUMN cash_read_at");
+    }
+    await db.prepare(
+      `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, hwm_usdg, epoch)
+       VALUES (?, ?, ?, 4663, '{}', 1, 2, 50, 2)`,
+    ).run(SMART, OWNER, OWNER);
+    return db;
+  }
+
+  async function mark(db: Db, cash: number, epoch: number, mode: string | null, at: number): Promise<void> {
+    await db.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at)
+       VALUES (?, '0', ?, 0, 0, ?, ?, ?, ?)`,
+    ).run(SMART, cash, cash, epoch, mode, at);
+  }
+
+  for (const preMigration of [false, true]) {
+    it(`ignores newer paper, prior epoch and unknown-mode cash (legacy columns: ${preMigration})`, async () => {
+      const db = await ledger(preMigration);
+      await mark(db, 39, 2, "live", NOW - 500);
+      await mark(db, 1_000, 2, "paper", NOW - 300);
+      await mark(db, 200, 1, "live", NOW - 200);
+      await mark(db, 700, 2, null, NOW - 100);
+      const a = await deriveBootstrapAccounting(db, SMART, NOW);
+      assert.equal(a.kind, "established");
+      if (a.kind !== "established") return;
+      assert.equal(a.lastObservedCashUsdg, "39000000");
+      assert.equal(a.observedAt, NOW - 500);
+    });
+
+    it(`unrelated marks preserve history without inventing a real cash baseline (legacy columns: ${preMigration})`, async () => {
+      const db = await ledger(preMigration);
+      await db.prepare("UPDATE agents SET hwm_usdg = 0").run();
+      await mark(db, 1_000, 2, "paper", NOW - 300);
+      await mark(db, 200, 1, "live", NOW - 200);
+      await mark(db, 700, 2, null, NOW - 100);
+      const a = await deriveBootstrapAccounting(db, SMART, NOW);
+      assert.equal(a.kind, "established", "history must never become a fresh opening deposit");
+      if (a.kind !== "established") return;
+      assert.equal(a.lastObservedCashUsdg, null);
+      assert.equal(a.accountingEpoch, 2);
+    });
+  }
+});

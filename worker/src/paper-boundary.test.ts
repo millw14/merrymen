@@ -387,7 +387,7 @@ describe("index.ts passes the mode it knows", () => {
     const record = src.slice(from, src.indexOf("await adjustAgentHwm(agentId", from));
     assert.match(record, /paperActive\(\)/, "the mode is decided from paperActive(), synchronously");
     assert.match(record, /\bmode,/, "and passed into addFlow");
-    assert.match(record, /if \(mode === "paper" && !evidence\)/, "and the high-water mark is not moved either");
+    assert.match(record, /if \(mode === "paper"\)/, "and the high-water mark is not moved either");
   });
 });
 
