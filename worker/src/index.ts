@@ -75,6 +75,7 @@ import {
   wallShape,
   buildCallPermissions,
   grantWallOptions,
+  grantV4AdapterReaches,
   tokenCoverage,
   uncoveredBasketSymbols,
   type CircleTier,
@@ -261,6 +262,8 @@ import { readPublicTradesToday } from "./tg-trade-facts";
 import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
+import { createDesk } from "./desk/desk";
+import type { TgDeskPort } from "./telegram/tg-groups/types";
 import { readDexTokenPairs } from "./venues/dexscreener";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
@@ -924,6 +927,24 @@ async function main() {
     paper: () => paperActive(),
     log: (line) => console.log(line),
   });
+  /**
+   * THE MARKET DESK for Telegram groups (docs/tg-groups.md "Market analysis"):
+   * public index evidence, indicators and a chart for "how's the market" and
+   * "check out X". Brain reasons over it only when the operator says group
+   * asks may spend Brain's key — MERRYMEN_TG_GROUPS_BRAIN=1 (rule 7) — and
+   * otherwise the group's own model or the desk's code-written read answers.
+   * Rebuilt only when that choice or Brain's address changes, so its one-minute
+   * memo survives between asks.
+   */
+  let tgDeskBuilt: { key: string; port: TgDeskPort } | null = null;
+  const tgDesk = (): TgDeskPort => {
+    const brain = (process.env.MERRYMEN_TG_GROUPS_BRAIN ?? "").trim() === "1" && cfg.brainUrl && cfg.brainToken
+      ? { url: cfg.brainUrl, token: cfg.brainToken, agentId: active?.agentId ?? "agent", timeoutMs: 22_000 }
+      : null;
+    const key = brain ? `${brain.url}|${brain.token}|${brain.agentId}` : "";
+    if (!tgDeskBuilt || tgDeskBuilt.key !== key) tgDeskBuilt = { key, port: createDesk({ brain }) };
+    return tgDeskBuilt.port;
+  };
   /**
    * Hand outcomes to the chat side, then let resolved nominations go: their
    * tape pages are dropped now (a coin kept alive by a chat that has its
@@ -8449,7 +8470,16 @@ async function main() {
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
-          v4: intent.custody !== "trencher" && (grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null)),
+          // And when the ADAPTER is what will execute (buildTradeCalls takes it
+          // whenever it is live), only for a pair its legs cover: a scoped wall
+          // (GRANT_SCOPED_SPENDERS) trades stocks on v3 only, and on any wall a
+          // coin added since signing is on no leg at all. The legacy Permit2
+          // route is reached only when no live adapter is sealed.
+          v4:
+            intent.custody !== "trencher" &&
+            (active.v4AdapterLive && grantV4Adapter(active.grant) !== null
+              ? grantV4AdapterReaches(active.grant, intent.sellToken, intent.buyToken)
+              : grantHasV4(active.grant)),
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
@@ -8656,7 +8686,12 @@ async function main() {
             return;
           }
         }
-        exec = await send(calls);
+        // The vault's one-time deployment rides with its first buy; the
+        // executor checks the batch really is deploy(self) on this factory
+        // before it uses the deployment's own gas ceiling.
+        exec = await (custody && !custody.deployed
+          ? executor.execute(calls, { ...submitHooks, trencherDeployFactory: custody.factory })
+          : send(calls));
         const venue = quote.v4
           ? active.v4AdapterLive && grantV4Adapter(active.grant)
             ? "v4 (adapter)"
@@ -8780,7 +8815,11 @@ async function main() {
               tokenOut: intent.buyToken,
               amountIn: probeIn,
               via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
-              v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+              // The same gate as the quote above, legs included.
+              v4:
+                active.v4AdapterLive && grantV4Adapter(active.grant) !== null
+                  ? grantV4AdapterReaches(active.grant, intent.sellToken, intent.buyToken)
+                  : grantHasV4(active.grant),
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
@@ -13693,6 +13732,7 @@ async function main() {
     // as an address and nothing else.
     tgGroupsStore,
     tgCoins,
+    tgDesk,
     tgFacts: { tradesToday: () => readPublicTradesToday(buildStatusContext().agentId, Math.floor(Date.now() / 1000)) },
     // What the hold process kept about groups while this tenant's trading was
     // held (telegram/held-groups.ts), in this home: applied at the first poll.

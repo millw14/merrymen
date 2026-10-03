@@ -126,6 +126,48 @@ describe("the lookups answer with names, and truthfully", () => {
   });
 });
 
+describe("the settings tool reads the worker's refusal before saying nothing stops launchpad buying", () => {
+  // Review: a key the worker has refused buys nothing, whatever the settings
+  // say; the agent row's live_blocker is where that refusal is recorded.
+  const ready = {
+    customTokens: [], tickSeconds: 15, paperTradingEnabled: false, trencherLiveEnabled: false,
+    classSnipeEnabled: true, classPerEntryUsdg: 5, liveTradingEnabled: true, assetMode: "all",
+    discoveryEnabled: true, scoutEnabled: true, scoutBudgetUsdg: 15, scoutPerTokenUsdg: 25,
+  };
+  const sealed = { grantFeatures: ["pons-class"], ponsClassVaultAddress: `0x${"c1".repeat(20)}`, grantedAt: NOW - 86_400, expiresAt: NOW + 30 * 86_400 };
+  const settings = () => toolByName("settings")!.run({}, { ...(ctx(SHOGUN) as object), cfg: ready, grant: sealed } as never);
+  const setBlocker = (b: string | null) => {
+    const db = new DatabaseSync(homePaths.db());
+    db.prepare("UPDATE agents SET live_blocker = ? WHERE smart_account = ?").run(b, SHOGUN);
+    db.close();
+  };
+
+  it("names the refusal instead of 'nothing is stopping it'", async () => {
+    setBlocker("dead-policy");
+    try {
+      const out = await settings();
+      assert.doesNotMatch(out, /nothing I can see is stopping it/);
+      assert.match(out, /still needs, before it buys anything: I can't trade for real right now: this trading key was signed before a fix/);
+    } finally {
+      setBlocker(null);
+    }
+  });
+
+  it("and says nothing is stopping it when the row has no refusal", async () => {
+    assert.match(await settings(), /launchpad buying: nothing I can see is stopping it/);
+  });
+
+  it("but not about a refusal that describes the key the owner just replaced (settle window)", async () => {
+    setBlocker("dead-policy");
+    try {
+      const out = await toolByName("settings")!.run({}, { ...(ctx(SHOGUN) as object), cfg: ready, grant: { ...sealed, grantedAt: NOW - 5 } } as never);
+      assert.match(out, /nothing I can see is stopping it/);
+    } finally {
+      setBlocker(null);
+    }
+  });
+});
+
 describe("one owner never sees another's ledger", () => {
   it("no lookup leaks the other tenant", async () => {
     for (const name of ["list_trades", "recent_activity", "pnl_breakdown", "agent_status", "decisions"]) {

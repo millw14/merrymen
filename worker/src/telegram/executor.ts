@@ -41,7 +41,13 @@ export type PendingAction =
    * range-checked (settings-chat.ts). Applied only on confirm, and the control
    * switch is checked again then.
    */
-  | { kind: "setting"; key: string; value: unknown; expiresAt: number };
+  | { kind: "setting"; key: string; value: unknown; expiresAt: number }
+  /**
+   * Several settings changes, approved together (settings-chat.ts
+   * proposeManyChanges). Every one is a chat-route key whose value the chat's
+   * own spec accepts; all are checked again, and applied all-or-none.
+   */
+  | { kind: "settings"; changes: { key: string; value: unknown }[]; expiresAt: number };
 
 /**
  * What a kill actually did, so the reply can say exactly that. Defined with
@@ -87,8 +93,10 @@ export interface CommandDeps {
    * question (and parks it) or a plain reply; `applySetting` saves a confirmed
    * change. Optional so hosts without them answer honestly instead of failing.
    */
-  proposeSetting?(setting: string, value: string): string;
+  proposeSetting?(setting: string, value: string, changes?: string): string;
   applySetting?(key: string, value: unknown): string;
+  /** Several confirmed changes, applied all-or-none. */
+  applySettings?(changes: readonly { key: string; value: unknown }[]): string;
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
@@ -279,7 +287,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
-      } else if (p.kind === "setting") {
+      } else if (p.kind === "setting" || p.kind === "settings") {
         if (!deps.controlEnabled) {
           deps.clearPending();
           return "🔒 control was turned off before you confirmed — nothing changed.";
@@ -315,6 +323,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.power(p.action);
         case "setting":
           return deps.applySetting ? deps.applySetting(p.key, p.value) : "settings can't be changed from chat here — nothing changed.";
+        case "settings":
+          return deps.applySettings ? deps.applySettings(p.changes) : "settings can't be changed from chat here — nothing changed.";
         case "kill":
           // What THIS agent did, in the words the hold process uses too
           // (kill-confirm.ts).
@@ -323,7 +333,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     }
     case "set":
       return deps.proposeSetting
-        ? deps.proposeSetting(cmd.setting, cmd.value)
+        ? deps.proposeSetting(cmd.setting, cmd.value, cmd.changes)
         : "settings can't be changed from chat on this deployment — use Settings on the dashboard.";
     case "settings":
       return deps.reads.settings ? deps.reads.settings() : "your settings live on the dashboard, under Settings.";

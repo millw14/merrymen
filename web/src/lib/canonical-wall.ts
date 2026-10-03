@@ -53,6 +53,7 @@ import {
   GRANT_TRENCHER,
   GRANT_V4_ADAPTER,
   GRANT_ENERGY,
+  GRANT_SCOPED_SPENDERS,
   ENERGY_ROUTE_V1,
   TRADEABLE_V2,
   isEnergyReserveToken,
@@ -83,6 +84,10 @@ export const CANONICAL_GRANT_FEATURES: readonly string[] = [
   GRANT_PONS_CLASS,
   GRANT_TRENCHER,
   GRANT_ENERGY,
+  // A shape version, not a capability: grantWallOptions rebuilds a scoped wall
+  // from it, so the comparison below checks the wall that was actually signed.
+  // Listed in the same change that lets both signers mint it.
+  GRANT_SCOPED_SPENDERS,
 ];
 
 /** A sealed address field, and the marker that must travel with it. */

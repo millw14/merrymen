@@ -13,13 +13,13 @@
  * of the sort is shipped.
  */
 
-import { http, createPublicClient, type Chain, type Hex } from "viem";
+import { decodeFunctionData, http, createPublicClient, type Chain, type Hex } from "viem";
 import { chainRead, metered } from "./rpc-meter";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
-import { FIRST_ENABLE_HARD_MAX_BOUNDED, WALL_POLICY_FLAG } from "../../packages/core/src/index";
+import { FIRST_ENABLE_HARD_MAX_BOUNDED, TRENCHER_FACTORY_ABI, WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
 import {
@@ -27,6 +27,7 @@ import {
   checkPrefund,
   FIRST_ENABLE_GAS_BOUNDS,
   GAS_BOUNDS,
+  TRENCHER_DEPLOY_GAS_BOUNDS,
   totalGas,
   type UserOpGas,
 } from "./gas-limits";
@@ -374,6 +375,33 @@ export interface ExecuteHooks {
    * resolver prove it (inflight-reconcile.ts findDroppedOps).
    */
   onSubmitted?(userOpHash: `0x${string}`, op: { nonce: bigint | null }): Promise<void>;
+  /**
+   * The verified Trencher factory, passed ONLY with the batch that deploys this
+   * account's vault (index.ts, custody not yet deployed). The deployment's own
+   * gas allowance (TRENCHER_DEPLOY_GAS_BOUNDS) applies only when the batch's
+   * first call decodes as `deploy(self)` on exactly this address — the caller
+   * naming a factory is not enough by itself.
+   */
+  trencherDeployFactory?: `0x${string}`;
+}
+
+/**
+ * Is this batch the one-time Trencher vault deployment? Decoded here, from the
+ * calls about to be signed, rather than trusted from the caller.
+ */
+export function isTrencherVaultDeploy(
+  calls: readonly { to: string; data?: string }[],
+  factory: string | undefined,
+  self: string,
+): boolean {
+  const first = calls[0];
+  if (!factory || !first?.data || first.to.toLowerCase() !== factory.toLowerCase() || calls.length > 3) return false;
+  try {
+    const d = decodeFunctionData({ abi: TRENCHER_FACTORY_ABI, data: first.data as Hex });
+    return d.functionName === "deploy" && String(d.args?.[0]).toLowerCase() === self.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 export interface AgentExecutor {
@@ -626,12 +654,17 @@ export async function createAgentExecutor(opts: {
       const nonce = await account.getNonce();
       const enable = await readEnableState(publicClient, account.address, nonce);
       const firstEnable = enable.kind === "fresh-enable";
+      // THE VAULT'S ONE-TIME DEPLOYMENT gets its own measured ceiling; every
+      // other ordinary operation keeps GAS_BOUNDS. See TRENCHER_DEPLOY_GAS_BOUNDS.
+      const trencherDeploy = !firstEnable && isTrencherVaultDeploy(calls, hooks?.trencherDeployFactory, account.address);
       // PER-WALL, AND ONLY FOR THE OPERATION THAT INSTALLS ONE.
       //
       // A deployed account's ordinary operations are untouched: they take
       // GAS_BOUNDS exactly as before, so nothing here can widen a steady-state
       // ceiling. The enlarged allowance belongs to the enable and expires with
-      // it — the next operation this account signs is judged at 3,000,000.
+      // it — the next operation this account signs is judged at 3,000,000, on
+      // its estimate (GasBounds.totalJudgedOn: a first enable's call may carry
+      // nothing an ordinary day's could not).
       //
       // AND THE WALL'S ALLOWANCE IS JUDGED AGAINST THE WALL, NOT AGAINST THE
       // WALL PLUS WHATEVER IS RIDING ALONG. `allowedMaxBounded` is a prediction
@@ -650,7 +683,9 @@ export async function createAgentExecutor(opts: {
               callMax: GAS_BOUNDS.absoluteMax,
             }
           : FIRST_ENABLE_GAS_BOUNDS
-        : GAS_BOUNDS;
+        : trencherDeploy
+          ? TRENCHER_DEPLOY_GAS_BOUNDS
+          : GAS_BOUNDS;
 
       // An enable-shaped operation we cannot justify is refused BY NAME, before
       // the estimate and long before a signature. Letting these fall through to
@@ -709,7 +744,7 @@ export async function createAgentExecutor(opts: {
           : `call ${g.callGasLimit} + verif ${g.verificationGasLimit} + preVerif ${g.preVerificationGas} = ${totalGas(g)}`;
       console.log(
         `[gas] account ${accountLive ? "deployed" : "NOT deployed"} · ` +
-          `${firstEnable ? `ENABLE ${noncePermissionId(nonce)}` : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
+          `${firstEnable ? `ENABLE ${noncePermissionId(nonce)}` : trencherDeploy ? "TRENCHER DEPLOY" : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
           `estimate1 ${fmt(first)} · estimate2 ${fmt(second)} · ` +
           `signed ${bounded.ok ? totalGas(bounded.gas) : "refused"}` +
           `${bounded.ok ? "" : ` (${bounded.rule})`}`,

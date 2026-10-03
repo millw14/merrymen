@@ -297,3 +297,75 @@ export interface TgCoinsPort {
   /** "paper" | "live" — for "on paper" in buy lines and the persona. */
   mode(): "paper" | "live";
 }
+
+// ─── The market desk (docs/tg-groups.md "Market analysis") ──────────────────
+
+/**
+ * What an addressed line asked the desk for. A name is a search key and an
+ * address a lookup key — never a nomination: nothing a desk ask carries
+ * crosses into trading (rule 1). The asker's words are not part of the ask.
+ */
+export type TgDeskAsk =
+  | { kind: "market" }
+  | { kind: "coin"; query: string }
+  | { kind: "coin"; address: string };
+
+export type TgDeskStance = "constructive" | "neutral" | "cautious" | "avoid";
+
+/** One reasoned read: from the Brain, the group's model, or written by code from the measurements. */
+export interface TgDeskThought {
+  read: string;
+  stance: TgDeskStance;
+  watch: string;
+  invalidation: string;
+  confidence?: number;
+}
+
+/**
+ * The desk's evidence for one ask: public index data only, measured by code.
+ * Never a balance, size, P&L, address or anything from the owner's ledger
+ * (rules 2 and 3) — the desk is never handed any of it.
+ */
+export interface TgDeskEvidence {
+  kind: "market" | "coin";
+  /** The coin's symbol as the index lists it, or "market". Gated before it is printed. */
+  subject: string;
+  /** Caption lines built by code from public metrics. */
+  header: string[];
+  /** The measured brief a model reasons over. Every figure a read may cite is in here. */
+  brief: string;
+  /** The read written by code from the same measurements: the floor when no model answers well. */
+  floor: TgDeskThought;
+  /** "GeckoTerminal 14:05 UTC". */
+  source: string;
+  observedAtMs: number;
+  /** The chart as PNG bytes, or null when it could not be drawn. */
+  chart: Uint8Array | null;
+}
+
+export type TgDeskOutcome =
+  | { ok: true; evidence: TgDeskEvidence }
+  | { ok: false; why: "not-found" | "ambiguous" | "unavailable"; candidates?: string[] };
+
+/** What the Brain is asked to think over. The question is the asker's words: untrusted. */
+export interface TgDeskThinkRequest {
+  kind: "market" | "coin";
+  subject: string;
+  question: string;
+  brief: string;
+  voice: string;
+}
+
+/**
+ * THE DESK, as tg-groups sees it. index.ts builds it from worker/src/desk/;
+ * this directory never imports that side (it fetches, draws and calls Brain).
+ */
+export interface TgDeskPort {
+  /** Evidence and chart for one ask. Never throws. */
+  look(ask: TgDeskAsk): Promise<TgDeskOutcome>;
+  /**
+   * The Brain's read, when the operator lets group asks spend Brain's key
+   * (rule 7). Absent or null: the group's own model, else the code's floor.
+   */
+  think?(req: TgDeskThinkRequest): Promise<TgDeskThought | null>;
+}

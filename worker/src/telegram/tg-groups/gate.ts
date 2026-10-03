@@ -758,10 +758,10 @@ const SIZE_AFTER =
   "(?:\\p{N}|(?:a\\s+)?(?:ton|tons|bunch|lot|lotta|load|loads|heap|heaps|bag|bags|stack|stacks|chunk|chunks|boatload|shitload|shit ton|size)\\b|" +
   "half\\b|double\\b|triple\\b|all of it\\b|everything\\b|another bag\\b|" +
   "(?:one|two|three|four|five|six|seven|eight|nine|ten|twenty|fifty|hundred|thousand|million|couple|few|dozen)\\b)";
-const ALERT: readonly RegExp[] = [
+const ALERT_CALLS: readonly RegExp[] = [
   /\b(?:buy|sell|price|trade|trading|whale|pump|call|entry|exit) alerts?\b/,
   /\b(?:buy|sell|entry|exit|trade|trading|long|short) signals?\b|\bsignal (?:group|channel|call)s?\b/,
-  /\bentry\b|\bentries\b|\bentered\b(?!\s+the\s+(?:chat|room|group))/,
+  /\bentered\b(?!\s+the\s+(?:chat|room|group))/,
   /\b(?:got|get|getting|i'?m|im|i am|was|went|came|bought|aped|jumped|am) in at\b/,
   /\btargets\b|\bprice targets?\b|\b(?:first|next|my|our|the) target\b|\btarget (?:hit|reached|is|at|of|price)\b/,
   /\bt(?:ake|akes|aking|ook)[\s-]*profits?\b|\bstop[\s-]*loss(?:es)?\b|\btp\d?\b|\bsl\b/,
@@ -769,12 +769,21 @@ const ALERT: readonly RegExp[] = [
   /\bjust (?:bought|sold|aped|entered|opened|longed|shorted)\b/,
   /\bnew positions?\b|\bpositions? (?:opened|closed)\b|\b(?:opened|closed) (?:a|my|the) position\b/,
   /\b(?:bought|sold|entered|exited) (?:in )?at\b|\bgoing (?:long|short)\b|\blonged\b|\bshorted\b/,
-  /\bbreak(?:out|ing out)\b|\bin we go\b|\bcount me in\b/,
+  /\bin we go\b|\bcount me in\b/,
   new RegExp(
     `\\b(?:bought|buying|sold|selling|aped|aping|grabbed|grabbing|picked up|picking up|added|adding|scooped(?: up)?|loaded(?: up)?(?: on)?)\\s+(?:(?:in|into|on|up)\\s+)?(?:some more\\s+|more\\s+)?${SIZE_AFTER}`,
     "u",
   ),
 ].map(U);
+/**
+ * WORDS A CHART READ AND A SHILL'S CALL SHARE. In a line of chatter they are a
+ * call ("entry here 🚀"); in a desk read they are what the question was ("is
+ * this a good entry?" — "a pullback to support is the better entry"). Only the
+ * desk's read (admitDeskText) may use them, and only with every other alert
+ * still refused.
+ */
+const ALERT_CHART_WORDS: readonly RegExp[] = [/\bentry\b|\bentries\b/, /\bbreak(?:out|outs|ing out)\b/].map(U);
+const ALERT: readonly RegExp[] = [...ALERT_CALLS, ...ALERT_CHART_WORDS];
 const ALERT_CAPS = U(/\b(?:BUY|SELL|LONG|SHORT|ALERT|ENTRY|EXIT|APE|APED|PUMP)\b/);
 const ALERT_EMOJI = /[🚨📈📉🚀💰💸🤑📊💎]/u;
 
@@ -786,100 +795,108 @@ const ALERT_EMOJI = /[🚨📈📉🚀💰💸🤑📊💎]/u;
  * the coin flow's own line — "my wallet" is `private`), "fail" alone ("epic
  * fail"), "granted", "setting" (the sun), "cap" ("no cap").
  */
-const OPS = U(
+const OPS_WORDS: readonly string[] = [
+  "errors?",
+  "erroring",
+  "errored",
+  "failed",
+  "failing",
+  "failures?",
+  "bugs?",
+  "buggy",
+  "bugged",
+  "crash(?:es|ed|ing)?",
+  "rpcs?",
+  "gas\\s+(?:fees?|costs?|prices?|limits?)",
+  "gwei",
+  "slippage",
+  "revert(?:s|ed|ing)?",
+  "insufficient",
+  "time[\\s-]?outs?",
+  "timed[\\s-]?out",
+  "rate[\\s-]*limit(?:s|ed|ing)?",
+  "apis?",
+  "api[\\s-]*keys?",
+  "(?:private|secret) keys?",
+  "seed phrases?",
+  "mnemonics?",
+  "models?",
+  "providers?",
+  "prompts?",
+  "settings",
+  "config(?:s|uration)?",
+  "permissions?",
+  "session[\\s-]*keys?",
+  "grants?",
+  "allowances?",
+  "limits?",
+  "(?:not|un)[\\s-]?armed",
+  "armed",
+  "arming",
+  "energy",
+  "vaults?",
+  "smart[\\s-]*(?:accounts?|wallets?)",
+  "kill[\\s-]*switch",
+  "live[\\s-]*switch",
+  "(?:daily|spending|trade|position|group|per[\\s-]trade) (?:cap|limit)s?",
+  "cooldowns?",
+  "retr(?:y|ies|ied|ying)",
+  "outages?",
+  "downtime",
+  "offline",
+  "maintenance",
+  "glitch(?:es|ed|y)?",
+  "exceptions?",
+  "servers?",
+  "database",
+  "debug(?:ging|ged)?",
+  "restart(?:s|ed|ing)?",
+  "reboot(?:s|ed|ing)?",
+  "redeploy(?:s|ed|ing)?",
+  "nonces?",
+  "bundlers?",
+  "userops?",
+  "transactions?",
+  "txn?s?",
+  "tx hash(?:es)?",
+  "funds",
+  "underfunded",
+  "reject(?:s|ed|ion|ions)?",
+  "unable to",
+  "(?:can'?t|cannot|couldn'?t|could not) (?:sell|buy|trade|exit|get out)",
+  "not enough (?:cash|money|funds|liquidity|gas|energy|usdg)",
+  "out of (?:cash|money|funds|gas|energy|usdg)",
+  "didn'?t go through",
+  "never went through",
+  "(?:not|never|wasn'?t|isn'?t) (?:filled|executed)",
+  "hit (?:my|the|a) (?:daily )?(?:limit|cap)",
+  "paused me",
+  "(?:switched|turned|shut) me off",
+  "llms?",
+  "gpt[\\w.-]*",
+  "chatgpt",
+  "openai",
+  "anthropic",
+  "claude",
+  "llama",
+  "qwen",
+  "groq",
+  "gemini",
+  "mistral",
+  "deepseek",
+];
+const OPS = U(new RegExp(`\\b(?:${OPS_WORDS.join("|")})\\b`));
+/**
+ * OPS FOR A CHART READ: the same list less the words that are market
+ * vocabulary there ("buy transactions", "slippage in a thin pool", "rejected
+ * at resistance", "not enough liquidity"). The failure words, keys, models,
+ * settings and the agent's own limits all stay refused.
+ */
+const DESK_OPS = U(
   new RegExp(
-    "\\b(?:" +
-      [
-        "errors?",
-        "erroring",
-        "errored",
-        "failed",
-        "failing",
-        "failures?",
-        "bugs?",
-        "buggy",
-        "bugged",
-        "crash(?:es|ed|ing)?",
-        "rpcs?",
-        "gas\\s+(?:fees?|costs?|prices?|limits?)",
-        "gwei",
-        "slippage",
-        "revert(?:s|ed|ing)?",
-        "insufficient",
-        "time[\\s-]?outs?",
-        "timed[\\s-]?out",
-        "rate[\\s-]*limit(?:s|ed|ing)?",
-        "apis?",
-        "api[\\s-]*keys?",
-        "(?:private|secret) keys?",
-        "seed phrases?",
-        "mnemonics?",
-        "models?",
-        "providers?",
-        "prompts?",
-        "settings",
-        "config(?:s|uration)?",
-        "permissions?",
-        "session[\\s-]*keys?",
-        "grants?",
-        "allowances?",
-        "limits?",
-        "(?:not|un)[\\s-]?armed",
-        "armed",
-        "arming",
-        "energy",
-        "vaults?",
-        "smart[\\s-]*(?:accounts?|wallets?)",
-        "kill[\\s-]*switch",
-        "live[\\s-]*switch",
-        "(?:daily|spending|trade|position|group|per[\\s-]trade) (?:cap|limit)s?",
-        "cooldowns?",
-        "retr(?:y|ies|ied|ying)",
-        "outages?",
-        "downtime",
-        "offline",
-        "maintenance",
-        "glitch(?:es|ed|y)?",
-        "exceptions?",
-        "servers?",
-        "database",
-        "debug(?:ging|ged)?",
-        "restart(?:s|ed|ing)?",
-        "reboot(?:s|ed|ing)?",
-        "redeploy(?:s|ed|ing)?",
-        "nonces?",
-        "bundlers?",
-        "userops?",
-        "transactions?",
-        "txn?s?",
-        "tx hash(?:es)?",
-        "funds",
-        "underfunded",
-        "reject(?:s|ed|ion|ions)?",
-        "unable to",
-        "(?:can'?t|cannot|couldn'?t|could not) (?:sell|buy|trade|exit|get out)",
-        "not enough (?:cash|money|funds|liquidity|gas|energy|usdg)",
-        "out of (?:cash|money|funds|gas|energy|usdg)",
-        "didn'?t go through",
-        "never went through",
-        "(?:not|never|wasn'?t|isn'?t) (?:filled|executed)",
-        "hit (?:my|the|a) (?:daily )?(?:limit|cap)",
-        "paused me",
-        "(?:switched|turned|shut) me off",
-        "llms?",
-        "gpt[\\w.-]*",
-        "chatgpt",
-        "openai",
-        "anthropic",
-        "claude",
-        "llama",
-        "qwen",
-        "groq",
-        "gemini",
-        "mistral",
-        "deepseek",
-      ].join("|") +
-      ")\\b",
+    `\\b(?:${OPS_WORDS.filter((w) => !["transactions?", "txn?s?", "slippage", "reject(?:s|ed|ion|ions)?"].includes(w))
+      .map((w) => w.replace("|liquidity", ""))
+      .join("|")})\\b`,
   ),
 );
 /** Idioms that share a word with OPS: "no exceptions", "with the exception of". */
@@ -891,11 +908,10 @@ const OPS_IDIOM = U(/\bno exceptions?\b|\bwith the exception of\b|\bthe exceptio
  * or real name, ids and link codes. Its view of a coin ("not for me") is its
  * own to share; what it holds and how it did are not.
  */
-const PRIVATE: readonly RegExp[] = [
+const PRIVATE_OWN: readonly RegExp[] = [
   /\bbalances?\b|\bportfolios?\b|\bpnl\b|\bp\s*&\s*l\b|\bp and l\b|\broi\b|\bnet[\s-]?worth\b/,
   /\bmy (?:wallet|address|addy|bags?|stack|holdings|positions|pnl|p&l|funds|cash|money|savings|keys?|seed|account|balance|profits?|losses|gains|size)\b/,
-  /\bprofit(?:s|able|ability)?\b|\bloss(?:es)?\b|\bgains\b/,
-  /\bin the (?:green|red)\b|\b(?:i'?m|im|i am|we'?re|i was|i'?ve been) (?:up|down) (?:big|bad|huge|a lot|massively|so much|nicely|heavy)\b/,
+  /\b(?:i'?m|im|i am|we'?re|i was|i'?ve been) (?:up|down) (?:big|bad|huge|a lot|massively|so much|nicely|heavy)\b/,
   /\bmade (?:some |good |real |a little |a bit of |decent |so much |a lot of )?money\b|\bmade (?:bank|a killing)\b/,
   /\blost (?:some |a lot of |so much |all (?:my |of my )?|my |real )?money\b|\blost (?:big|everything|it all)\b/,
   /\bhow much (?:i|we)(?:'?ve| have| had)? (?:have|had|made|make|lost|lose|hold|own|got|put in|spent|risk|risked)\b/,
@@ -905,6 +921,14 @@ const PRIVATE: readonly RegExp[] = [
   /\bowner(?:'?s)?\b[^.!?\n]{0,30}\b(?:wallet|address|location|lives?|living|based|located|real name|full name|last name|surname|phone|number|email|house|home|city|country|town|timezone|time zone|works? at|workplace|job|age)\b/,
   /\blink codes?\b|\b(?:telegram|chat|user) ids?\b/,
 ].map(U);
+/**
+ * Market words PRIVATE refuses in chatter, where "profits" and "in the red" can
+ * only be about its own book. A desk read says them about a chart or a board
+ * ("most of the board is in the red", "gains faded on volume"), and is never
+ * handed the book to say them about.
+ */
+const PRIVATE_MARKET_WORDS: readonly RegExp[] = [/\bprofit(?:s|able|ability)?\b|\bloss(?:es)?\b|\bgains\b/, /\bin the (?:green|red)\b/].map(U);
+const PRIVATE: readonly RegExp[] = [...PRIVATE_OWN, ...PRIVATE_MARKET_WORDS];
 /** Idioms that share a word with PRIVATE: "a loss for words", "your loss", "i'm sold on". */
 const PRIVATE_IDIOM = U(/\b(?:a\s+)?loss for words\b|\bat a loss\b|\b(?:your|their|his|her|no|whose) loss\b/g);
 
@@ -1484,6 +1508,222 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   }
 
   return { ok: true, text: lines.join("\n") };
+}
+
+// ── the desk's read ─────────────────────────────────────────────────────────
+
+/** The longest model-written market read, in characters, and its sentences. */
+export const TG_DESK_MAX = 900;
+export const TG_DESK_MAX_SENTENCES = 8;
+
+export interface TgDeskGateCtx {
+  agentName: string;
+  /** The measured brief the read was written from. Every figure in the read must be one of its figures. */
+  brief: string;
+  /** The longest this piece may be: the read, or a one-sentence watch/invalidation. */
+  max?: number;
+}
+
+/** A figure as written: its value, how it was printed, its kind and any direction said with it. */
+interface Figure {
+  value: number;
+  decimals: number;
+  /** Significant digits as printed: "0.2" has one, "10" two, "0.1593" four. */
+  sig: number;
+  scale: number;
+  money: boolean;
+  unit: "" | "%" | "x";
+  /** +1 / −1 when a sign or a direction word says which way; 0 when nothing does. */
+  sign: 1 | -1 | 0;
+  /** The word glued on after it, lowercased: "h" in "24h", "holders" in "300holders". */
+  word: string | null;
+  at: number;
+  end: number;
+}
+
+const SCALES: Record<string, number> = { k: 1e3, m: 1e6, mn: 1e6, b: 1e9, bn: 1e9 };
+const FIGURE_RE = /(?<![\p{L}\p{N}_.,])([-+−])?\s?(\$)?\s?(\p{Nd}{1,3}(?:,\p{Nd}{3})+(?:\.\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?|\.\p{Nd}+)(?:\s?(k|mn|m|bn|b)(?![\p{L}\p{N}]))?(?:\s?(%|x)(?![\p{L}\p{N}]))?(?=([\p{L}]+)?)/giu;
+const UP_WORDS = /\b(?:up|gain(?:ed|ing|s)?|rose|ris(?:e|es|ing)|climb(?:ed|ing|s)?|green|higher|rall(?:y|ied|ying)|pump(?:ed|ing)?|added|above|over|jump(?:ed|ing)?|surg(?:e|ed|ing))\b[^.!?\n\d]{0,12}$/iu;
+const DOWN_WORDS = /\b(?:down|lost|los(?:e|es|ing)|fell|fall(?:s|ing)?|drop(?:ped|ping|s)?|red|lower|dump(?:ed|ing)?|bled|bleed(?:s|ing)?|sank|sink(?:s|ing)?|off|below|under|slid|slump(?:ed|ing)?)\b[^.!?\n\d]{0,12}$/iu;
+
+function figuresIn(raw: string): Figure[] {
+  const text = raw.normalize("NFKC");
+  const out: Figure[] = [];
+  for (const m of text.matchAll(FIGURE_RE)) {
+    // "13,436" is thirteen thousand; "0,05" is a decimal comma.
+    const rawDigits = m[3] ?? "";
+    const digits = /^\p{Nd}{1,3}(?:,\p{Nd}{3})+(?:\.\p{Nd}+)?$/u.test(rawDigits) ? rawDigits.replace(/,/g, "") : rawDigits.replace(",", ".");
+    const value = Number(digits);
+    if (!Number.isFinite(value)) continue;
+    const scaleWord = (m[4] ?? "").toLowerCase();
+    const unit = ((m[5] ?? "").toLowerCase() as Figure["unit"]) || "";
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 24), at);
+    const explicit = m[1] === "+" ? 1 : m[1] === "-" || m[1] === "−" ? -1 : 0;
+    const said = UP_WORDS.test(before) ? 1 : DOWN_WORDS.test(before) ? -1 : 0;
+    out.push({
+      value,
+      decimals: digits.includes(".") ? digits.length - digits.indexOf(".") - 1 : 0,
+      sig: digits.replace(".", "").replace(/^0+/, "").length,
+      scale: SCALES[scaleWord] ?? 1,
+      money: m[2] === "$",
+      unit,
+      sign: (explicit || said) as Figure["sign"],
+      word: !scaleWord && !unit && m[6] !== undefined ? m[6].toLowerCase() : null,
+      at,
+      end: at + m[0].length,
+    });
+  }
+  return out;
+}
+
+/** A time span glued to its unit: "24h", "7d", "1hr", "2wk". */
+const TIME_WORDS: ReadonlySet<string> = new Set(["h", "hr", "hrs", "hour", "hours", "d", "day", "days", "w", "wk", "wks", "week", "weeks", "min", "mins", "minute", "minutes"]);
+/** Periods of the indicators the brief names (RSI14, EMA20/50), said beside the indicator. */
+const PERIODS = new Set([14, 20, 50]);
+const PERIOD_CONTEXT = /\b(?:ema|sma|ma|rsi|atr|period|moving average)\b/i;
+/** Digits from another script: NFKC leaves them as they are, and Number() cannot read them. */
+const FOREIGN_DIGIT = /(?![0-9])\p{Nd}/u;
+
+/**
+ * IS EVERY FIGURE IN THE READ ONE THE BRIEF MEASURED? A figure matches a brief
+ * figure of the same kind (percent, multiple, or neither) when it is within
+ * 0.6% of it, or — printed with two significant digits or more — that figure
+ * rounded ("0.1593" read as "0.159" or "0.16", "$9.92m" as "$9.9m"). One
+ * significant digit is not a rounding of a price, it is a guess: "0.2" against
+ * 0.1593 is a target (a percent may round to a whole number). A percent said with a direction ("+", "up", "below")
+ * must point the brief's way. Free without a match: a count of three or less,
+ * an indicator period beside its indicator ("the 20 ema"), and a time span
+ * glued to its unit ("24h", "7d"). Refused outright: digits from another
+ * script. Everything else — a derived percentage, a target, a holder count, a
+ * market cap the brief never had — is a figure the model made up, and the
+ * read is refused for the code's own.
+ */
+export function deskFiguresGrounded(text: string, brief: string): boolean {
+  if (FOREIGN_DIGIT.test(text.normalize("NFKC"))) return false;
+  // A brief's labels ("1h", "24h", "7d") are not measurements: they ground a
+  // time span said back, never a price or a count.
+  // A brief prints every amount with "$" (desk/format.ts fmtUsd), so a scaled
+  // figure without one ("5m" in "change 5m 0%") is a window, not five million.
+  const known = figuresIn(brief)
+    .filter((f) => (f.word === null || !TIME_WORDS.has(f.word)) && (f.scale === 1 || f.money))
+    .map((f) => ({ v: Math.abs(f.value * f.scale), unit: f.unit, sign: f.sign, money: f.money, scaled: f.scale !== 1 }));
+  const norm = text.normalize("NFKC");
+  for (const f of figuresIn(text)) {
+    const plainInt = f.decimals === 0 && f.scale === 1 && !f.money && f.unit === "";
+    if (plainInt && f.word === null && f.value <= 3) continue;
+    if (plainInt && PERIODS.has(f.value) && PERIOD_CONTEXT.test(norm.slice(Math.max(0, f.at - 10), f.end + 10))) continue;
+    if (plainInt && f.word !== null && TIME_WORDS.has(f.word) && f.value <= 400) continue;
+    const v = Math.abs(f.value * f.scale);
+    // A price or an amount needs two significant digits to be a rounding; a
+    // percent or a multiple may round to a whole number ("4%" for -4.03%).
+    const half = f.sig >= 2 || f.unit !== "" ? 0.5 * 10 ** -f.decimals * f.scale : 0;
+    // An amount ("$5m", "$9.9m") matches only an amount the brief printed; a
+    // price may be said with or without "$".
+    const amount = f.scale !== 1;
+    const ok = known.some((k) =>
+      k.unit === f.unit &&
+      (!amount || (k.money && k.scaled)) &&
+      (!f.money || k.money || !k.scaled) &&
+      Math.abs(v - k.v) <= Math.max(half, k.v * 0.006) &&
+      !(f.unit === "%" && f.sign !== 0 && k.sign !== 0 && f.sign !== k.sign));
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/**
+ * Quantities said in words, multipliers, and money units: none of them is a
+ * figure grounding can check, and every one is how a price target or a
+ * holding is said without a digit ("three hundred percent", "a 10-bagger",
+ * "x100", "fifty bucks", "5 usdg"). A read writes market figures as the brief
+ * does — "$9.92m", "+12.4%", "0.1605" — or not at all.
+ */
+const DESK_UNCHECKABLE: readonly RegExp[] = [
+  /\b(?:hundreds?|thousands?|[a-z]*illions?|percent|per cent|cents?|bucks|dollars?|grand|tripl(?:e|ed|es|ing)|quadrupl(?:e|ed|es|ing)|doubl(?:ed|ing)|double (?:up|from|again|it|your)|baggers?|half a (?:mil|million|billion))\b/,
+  /\p{N}+\s*-?\s*baggers?\b|(?<![\p{L}\p{N}])[x×]\s?\p{N}|\p{N}\s?e\s?[+-]?\p{N}/u,
+  /\p{N}[\p{N}.,]*\s*(?:usdg|usdc|usdt|usd|dollars?|bucks|eth|weth|btc)\b|\b(?:usdg|usdc|usdt|usd|eth|weth|btc)\s*\p{N}/u,
+].map(U);
+
+/**
+ * THE OWNER'S BOOK, SAID WITHOUT A FIGURE: a first person or the owner beside
+ * a holding, a result or a size — "the owner is in the red on this", "we're
+ * sitting in profit", "my max buy is small", "i hold a bag". The desk is never
+ * handed the book, so any such line is invented, and rule 3 says it is never
+ * said even when true. The market words PRIVATE lets a desk read use ("most
+ * of the board is in the red") stay allowed with no one's book beside them.
+ */
+const DESK_OWN_BOOK = U(
+  /\b(?:i|i'?m|im|i'?ve|ive|i'?d|id|we|we'?re|we'?ve|weve|my|our|us|owner'?s?|boss)\b[^.!?\n]{0,40}?\b(?:hold|holds|holding|held|bags?|bagged|positions?|profits?|gains?|loss(?:es)?|in the (?:red|green)|up (?:a ton|big|huge|nicely|a lot|bad)|down (?:bad|big|a lot|huge)|put|took|max buy|sized?|sizing|bought|sold|entered|exited|stake|allocation|exposure|wallet|balance)\b/,
+);
+
+/**
+ * MAY THE DESK'S MODEL-WRITTEN READ GO OUT? The group gate's clauses for a
+ * read that is allowed to be about money — but only the market's public money,
+ * and only as measured:
+ *   - every clause that protects people stays: secrets, addresses, links,
+ *     handles, cashtags, markup, hate, self-harm, threats, sex, profanity,
+ *     looks, advice to buy or sell, claims to have traded, accusations, the
+ *     owner's book and identity (in words too: DESK_OWN_BOOK), operations and
+ *     models, claiming to be human;
+ *   - the money and figure clauses give way to grounding: a figure is allowed
+ *     when, and only when, the brief code measured contains it, and a
+ *     quantity grounding cannot check (words, multipliers, money units) is
+ *     refused (DESK_UNCHECKABLE);
+ *   - the alert clause keeps every call shape but lets a read say "entry" and
+ *     "breakout" about a chart; PRIVATE and OPS let it say market words
+ *     ("in the red", "transactions", "rejected at resistance").
+ * Longer than a line (TG_DESK_MAX), shorter than a post. Refused is refused:
+ * the caller sends the code's own read instead, never a repaired one.
+ */
+export function admitDeskText(raw: unknown, ctx: TgDeskGateCtx): TgVerdict {
+  const max = typeof ctx?.max === "number" && ctx.max > 0 ? Math.min(ctx.max, TG_DESK_MAX) : TG_DESK_MAX;
+  const s = typeof raw === "string" ? raw : "";
+  if (s.length > max * 16) return refuse("too-long");
+  const agentName = typeof ctx?.agentName === "string" ? ctx.agentName.trim() : "";
+  const tidied = tidyTgLine(s, agentName);
+  const lines = tidied.split("\n").map(shownOf).filter((l) => l !== "");
+  if (lines.length === 0) return refuse("empty");
+  const r = readingsOf(tidied);
+  if (r.shown === "") return refuse("empty");
+  if (isPass(r)) return refuse("pass");
+  if (PAYLOAD_CHARS.test(tidied)) return refuse("hidden-chars");
+  if (metaRefusal(r)) return refuse("meta");
+  if (dodgeRefusal(r)) return refuse("dodge");
+  const text = lines.join(" ");
+  if (Array.from(text).length > max) return refuse("too-long");
+  if (sentenceCount([text]) > TG_DESK_MAX_SENTENCES) return refuse("too-long");
+
+  if (containsSecret(s, []) || r.cased.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasKeypairRun(t) || hasMnemonicRun(t))) return refuse("secret");
+  if (r.cased.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t)) || r.joined.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t))) {
+    return refuse("address");
+  }
+  if (r.cased.some((t) => LINK_SHAPES.some((re) => re.test(t))) || r.joined.some((t) => LINK_SHAPES.some((re) => re.test(t)))) return refuse("link");
+  if (some(r.cased, HANDLE)) return refuse("handle");
+  if (cashtagRefusal([...r.cased, ...r.low], [])) return refuse("cashtag");
+  if (markupRefusal(r, lowNames(agentName, []))) return refuse("meta");
+
+  if (hasSlur(tidied) || r.low.some(traitAttack)) return refuse("hateful");
+  if (r.low.some((t) => SELFHARM.some((re) => re.test(t)))) return refuse("selfharm");
+  if (r.low.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
+  if (r.low.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");
+  if (some(r.low, PROFANITY)) return refuse("profanity");
+  if (some(r.low, GO_BACK_TO)) return refuse("hateful");
+  if (r.low.some((t) => APPEARANCE.some((re) => re.test(t.replace(APPEARANCE_IDIOM, " "))))) return refuse("appearance");
+
+  if (r.low.some((t) => DESK_UNCHECKABLE.some((re) => re.test(t)))) return refuse("money");
+  if (!deskFiguresGrounded(text, typeof ctx?.brief === "string" ? ctx.brief : "")) return refuse("ungrounded");
+
+  if (r.low.some((t) => ALERT_CALLS.some((re) => re.test(t))) || some(r.cased, ALERT_CAPS) || ALERT_EMOJI.test(r.shown)) return refuse("alert");
+  if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
+  if (r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
+  if (r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
+  if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
+  if (r.low.some((t) => PRIVATE_OWN.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))) || DESK_OWN_BOOK.test(t))) return refuse("private");
+  if (r.low.some((t) => DESK_OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
+  if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");
+  if (emojiCount(text) > TG_LINE_MAX_EMOJI) return refuse("emoji");
+  return { ok: true, text };
 }
 
 // ── the BIP-39 English wordlist ─────────────────────────────────────────────

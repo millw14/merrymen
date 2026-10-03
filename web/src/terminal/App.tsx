@@ -772,6 +772,7 @@ export function App() {
                 onClick={() => goTab(t.id)}
               >
                 <TabIcon id={t.id} />
+                <span className="tab-label" aria-hidden="true">{t.label}</span>
                 {t.id === "agent" && chat.unread && <i className="tab-unread" aria-label="New in chat" />}
               </button>
             ))}

@@ -70,8 +70,9 @@ export function liveBlockerText(rule: RefuseRule): string {
     case "grant-too-wide":
       return (
         "this key's permission set is too wide to install on-chain — its first operation would cost more " +
-        "gas than we will sign for, so it can never reach the chain. Re-signing with fewer tokens or " +
-        "fewer venues addresses the oversized permission; revoking old permissions requires network fees"
+        "gas than we will sign for, so it can never reach the chain. Re-signing on the web seals a narrower permission " +
+        "set that usually fits; if it is still too large, drop a token or a venue. Revoking old permissions " +
+        "requires network fees"
       );
     case "no-executor":
       return "no bundler is configured, so nothing can be submitted to the chain";

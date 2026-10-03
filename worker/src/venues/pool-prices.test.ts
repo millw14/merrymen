@@ -576,3 +576,120 @@ describe("PriceQuote.liquidityUsdg", () => {
     assert.equal("liquidityUsdg" in chainlinkish, false);
   });
 });
+
+/**
+ * THE 0.01% TIER, AND THE COINS IT WAS HIDING.
+ *
+ * This chain's main WETH/USDG pool is on the 100 tier ("USDG/WETH 0.01% … the
+ * 26.1M pool", the scout's own read, 2026-10-02), which FEE_TIERS did not scan.
+ * Every WETH-routed price needs that leg, and the autonomous Trencher verifies
+ * pools at whatever fee they report — so it admitted coins this reader then
+ * called unpriceable, and a coin nothing can price is never bought.
+ */
+describe("the 0.01% tier", () => {
+  const Q96 = 2n ** 96n;
+  const WETH = (CASH.WETH as string).toLowerCase();
+  const USDG = (CASH.USDG as string).toLowerCase();
+  const CATE_WETH = "0x000000000000000000000000000000000000cc01" as const;
+  const WETH_USDG_100 = "0x000000000000000000000000000000000000cc02" as const;
+  const WETH_USDG_500 = "0x000000000000000000000000000000000000cc03" as const;
+  const sqrtX96 = (price: number, d0: number, d1: number) =>
+    BigInt(Math.round(Math.sqrt(price * 10 ** (d1 - d0)) * 2 ** 96));
+  const liquidityFor = (cashRaw: bigint, sqrtPriceX96: bigint) => (cashRaw * Q96) / sqrtPriceX96;
+  const cumulativesFor = (price: number, d0: number, d1: number, windowSec = 900) => {
+    const tick = Math.round(Math.log(price * 10 ** (d1 - d0)) / Math.log(1.0001));
+    return [0n, BigInt(tick * windowSec)] as const;
+  };
+  const ETH_USD = 3000;
+  const CATE_IN_WETH = 1.5e-8;
+  const SQRT_WETH_USDG = sqrtX96(ETH_USD, 18, 6);
+  const SQRT_CATE_WETH = sqrtX96(CATE_IN_WETH, 18, 18);
+  const oneWeth = 10n ** 18n;
+
+  /**
+   * CATE trades against WETH at 0.3%; WETH/USDG exists at 0.01% (deep) and,
+   * optionally, at 0.05% (shallower). `twapAt100` says whether the deep pool
+   * can serve a 15-minute TWAP — a pool keeps one observation until somebody
+   * pays to grow it.
+   */
+  const chain = (o: { with500: boolean; twapAt100: boolean; observed: string[] }) =>
+    stubClient({
+      poolFor: (a, b, fee) => {
+        const pair = [a, b].sort().join("/");
+        if (fee === 3000 && pair === [CATE.address.toLowerCase(), WETH].sort().join("/")) return CATE_WETH;
+        if (pair === [WETH, USDG].sort().join("/")) {
+          if (fee === 100) return WETH_USDG_100;
+          if (fee === 500 && o.with500) return WETH_USDG_500;
+        }
+        return null;
+      },
+      cashInPool: (pool) =>
+        pool === CATE_WETH ? 100n * oneWeth : pool === WETH_USDG_100 ? usdgD(26_000_000) : usdgD(400_000),
+      token0: (pool) => (pool === CATE_WETH ? CATE.address : (CASH.WETH as `0x${string}`)),
+      sqrtPriceX96: (pool) => (pool === CATE_WETH ? SQRT_CATE_WETH : SQRT_WETH_USDG),
+      liquidity: (pool) =>
+        pool === CATE_WETH
+          ? liquidityFor(100n * oneWeth, SQRT_CATE_WETH)
+          : liquidityFor(pool === WETH_USDG_100 ? usdgD(26_000_000) : usdgD(400_000), SQRT_WETH_USDG),
+      tickCumulatives: (pool) => {
+        o.observed.push(pool);
+        if (pool === WETH_USDG_100 && !o.twapAt100) return null;
+        return pool === CATE_WETH ? cumulativesFor(CATE_IN_WETH, 18, 18) : cumulativesFor(ETH_USD, 18, 6);
+      },
+    });
+
+  const price = async (client: PublicClient) =>
+    createPoolPriceReader().read({
+      client,
+      tokens: [CATE],
+      guard: { minLiquidityUsdg: usdgD(25_000), maxDivergenceBps: 500 },
+      nowSec: 1_000,
+    });
+
+  it("PRICES A WETH-ROUTED COIN WHOSE ONLY WETH/USDG LEG IS ON THE 0.01% TIER", async () => {
+    // Before the tier was scanned this was "no Uniswap v3 pool against USDG or
+    // WETH", and the coin fell through to "I know this token but not where it
+    // trades" — the line the Trencher's verified coins were logged with.
+    const r = await price(chain({ with500: false, twapAt100: true, observed: [] }));
+    assert.equal(r.quotes.has("CATE"), true, r.refused[0]?.reason ?? "");
+    assert.match(r.quotes.get("CATE")!.detail!, /via WETH/);
+    const usd = Number(r.quotes.get("CATE")!.price8) / 1e8;
+    assert.ok(Math.abs(usd - CATE_IN_WETH * ETH_USD) / (CATE_IN_WETH * ETH_USD) < 0.01, `got $${usd}`);
+  });
+
+  it("the deepest pool still wins when it can serve the TWAP", async () => {
+    const observed: string[] = [];
+    const r = await price(chain({ with500: true, twapAt100: true, observed }));
+    assert.equal(r.quotes.has("CATE"), true);
+    assert.ok(observed.includes(WETH_USDG_100), "the 0.01% pool was the one read");
+    assert.ok(!observed.includes(WETH_USDG_500), "and the shallower one never needed asking");
+  });
+
+  it("A DEEP POOL WITH NO TWAP DOES NOT HIDE A SHALLOWER ONE THAT HAS ONE — no regression", async () => {
+    // The risk the new tier brings: if the deepest pool keeps one observation,
+    // picking it by cash alone would refuse a coin the 0.05% pool priced fine
+    // before the tier existed. The choice falls through to the deepest pool
+    // that can actually answer.
+    const observed: string[] = [];
+    const r = await price(chain({ with500: true, twapAt100: false, observed }));
+    assert.equal(r.quotes.has("CATE"), true, r.refused[0]?.reason ?? "");
+    assert.ok(observed.includes(WETH_USDG_500), "priced off the pool that could answer");
+  });
+
+  it("and with nothing that can answer, it is refused — never priced off spot", async () => {
+    // The tier widens where a TWAP is LOOKED FOR, never what counts as one: a
+    // pool with no time-average is still not a price to trade on.
+    const observed: string[] = [];
+    const r = await price(chain({ with500: false, twapAt100: false, observed }));
+    assert.equal(r.quotes.has("CATE"), false);
+    assert.ok(observed.includes(WETH_USDG_100), "the deep pool was asked");
+  });
+
+  it("asks no extra question of a token with a single pool", async () => {
+    // The fall-through costs one observe() per candidate, so it only runs when
+    // there IS a candidate to fall through to.
+    const observed: string[] = [];
+    await price(chain({ with500: false, twapAt100: true, observed }));
+    assert.equal(observed.filter((p) => p === WETH_USDG_100).length, 1, "observed once, by the price read itself");
+  });
+});

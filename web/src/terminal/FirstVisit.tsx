@@ -106,8 +106,13 @@ export const STOPS: Stop[] = [
 {titleKey: "tour.stop26.title", copyKey: "tour.stop26.copy", "target": ["[data-tour=\"chat-input\"]"], "screen": {"kind": "tab", "tab": "agent"}}
 ];
 
+/** The short first-run path. Every stop remains available from Topics. */
+export const ESSENTIAL_STOP_INDICES: number[] = [0, 1, 8, 2, 9, 5, 4, 25];
+const FULL_STOP_INDICES = STOPS.map((_, index) => index);
+
 const KEY = `merrymen.tour.v${TOUR_VERSION}`;
-type Saved = { done: boolean; step: number; pending?: boolean; replay?: boolean; claimed?: string };
+type TourTrack = "essentials" | "all";
+type Saved = { done: boolean; step: number; track?: TourTrack; pending?: boolean; replay?: boolean; claimed?: string };
 
 function readLocal(key: string): Saved | null {
   try {
@@ -116,7 +121,9 @@ function readLocal(key: string): Saved | null {
     const v = JSON.parse(raw) as Partial<Saved>;
     if (typeof v.done !== "boolean") return null;
     const step = Number.isInteger(v.step) && v.step! >= 0 && v.step! < STOPS.length ? v.step! : 0;
-    return { done: v.done, step, pending: v.pending === true, replay: v.replay === true, claimed: typeof v.claimed === "string" ? v.claimed : undefined };
+    // Records written before tracks existed resume the original full tour.
+    const track = v.track === "essentials" || v.track === "all" ? v.track : "all";
+    return { done: v.done, step, track, pending: v.pending === true, replay: v.replay === true, claimed: typeof v.claimed === "string" ? v.claimed : undefined };
   } catch {
     // Storage can be unavailable (private windows, blocked cookies). The tour
     // still works; it simply cannot remember, which is the safe direction.
@@ -166,7 +173,7 @@ function AccountTour({
   const [topicsOpen, setTopicsOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const key = tenant ? `${KEY}:${tenant}` : KEY;
-  const [saved, setSaved] = useState<Saved>({ done: true, step: 0 });
+  const [saved, setSaved] = useState<Saved>({ done: true, step: 0, track: "essentials" });
   const [syncFailed, setSyncFailed] = useState(false);
   const [layout, setLayout] = useState<Layout | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -179,6 +186,9 @@ function AccountTour({
   callbacks.current = { onScreen, onQuestion, onExplore };
   const done = saved.done && !saved.replay;
   const step = saved.step;
+  const track: TourTrack = saved.track === "all" ? "all" : "essentials";
+  const sequence = track === "all" ? FULL_STOP_INDICES : ESSENTIAL_STOP_INDICES;
+  const position = Math.max(0, sequence.indexOf(step));
   const save = useCallback((next: Saved) => {
     state.current = next;
     writeLocal(key, next);
@@ -226,7 +236,7 @@ function AccountTour({
         writeLocal(KEY, { ...anonymous, claimed: tenant });
       }
     }
-    save(local ?? { done: false, step: 0 });
+    save(local ?? { done: false, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" });
     setReady(true);
     void sync();
     const retry = () => { void sync(); };
@@ -266,8 +276,13 @@ function AccountTour({
     void sync();
   }, [tenant, save, sync]);
 
-  const goto = (next: number) => {
-    save({ ...state.current, step: Math.max(0, Math.min(next, STOPS.length - 1)) });
+  const goto = (nextPosition: number) => {
+    const bounded = Math.max(0, Math.min(nextPosition, sequence.length - 1));
+    save({ ...state.current, step: sequence[bounded]! });
+  };
+
+  const gotoTopic = (nextStep: number) => {
+    save({ ...state.current, step: nextStep, track: "all" });
   };
 
   // Resuming a stop after reload must navigate too. Callback changes from App
@@ -364,7 +379,7 @@ function AccountTour({
           type="button"
           onClick={() => {
             askedRef.current = false;
-            save({ ...state.current, replay: true, step: 0 });
+            save({ ...state.current, replay: true, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" });
           }}
         >
           <Compass size={14} />
@@ -376,7 +391,7 @@ function AccountTour({
   }
 
   const stop = STOPS[step]!;
-  const last = step === STOPS.length - 1;
+  const last = position === sequence.length - 1;
   // Below the target when there is room, above it otherwise; centred with no
   // target at all. Clamped so the card can never sit off-screen on a phone.
   const measured = layout?.step === step ? layout : null;
@@ -405,7 +420,7 @@ function AccountTour({
           */}
           <LanguagePicker />
           <span className="tour-count">
-            {step + 1} / {STOPS.length}
+            {position + 1} / {sequence.length}
           </span>
           <button type="button" className="tour-skip" onClick={finish}>
             {t("tour.skip")}
@@ -414,13 +429,13 @@ function AccountTour({
         <h2>{t(stop.titleKey)}</h2>
         <p>{t(stop.copyKey)}</p>
         <button type="button" className="tour-back" aria-expanded={topicsOpen} onClick={() => setTopicsOpen(v => !v)}>{t("tour.topics")}</button>
-        {topicsOpen && <nav className="tour-topics" aria-label="Tutorial topics">{STOPS.map((topic, i) => <button type="button" key={topic.titleKey} aria-current={i === step ? "step" : undefined} onClick={() => { goto(i); setTopicsOpen(false); }}>{i + 1}. {t(topic.titleKey)}</button>)}</nav>}
+        {topicsOpen && <nav className="tour-topics" aria-label="Tutorial topics">{STOPS.map((topic, i) => <button type="button" key={topic.titleKey} aria-current={i === step ? "step" : undefined} onClick={() => { gotoTopic(i); setTopicsOpen(false); }}>{i + 1}. {t(topic.titleKey)}</button>)}</nav>}
         <footer>
           <span className="tour-buttons">
-            <button type="button" className="tour-back" onClick={() => goto(step - 1)} disabled={step === 0}>
+            <button type="button" className="tour-back" onClick={() => goto(position - 1)} disabled={position === 0}>
               {t("tour.back")}
             </button>
-            <button type="button" className="tour-next" onClick={() => (last ? finish() : goto(step + 1))}>
+            <button type="button" className="tour-next" onClick={() => (last ? finish() : goto(position + 1))}>
               {last ? t("tour.finish") : t("tour.next")}
             </button>
           </span>

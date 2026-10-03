@@ -54,6 +54,7 @@ import {
   leaveChat,
   sendChatAction,
   sendMessage,
+  sendPhotoBytes,
   setMessageReaction,
   type InlineKeyboard,
   type TelegramOpts,
@@ -68,6 +69,7 @@ import {
   addressedHow,
   addressedSmallTalk,
   asksAboutCoin,
+  deskAskOf,
   extractCaHits,
   extractCas,
   extractCashtags,
@@ -86,6 +88,7 @@ import {
   type BotSelf,
   type SmallTalk,
 } from "./detect";
+import { admitThought, deskCaption, deskMissLine, thinkWithModel } from "./desk";
 import { admitTgLine } from "./gate";
 import { publicCoinReason, publicFactRequest, type PublicFactRequest } from "./facts";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
@@ -110,8 +113,21 @@ import {
   type PaceInput,
 } from "./pacing";
 import { TG_LIMITS, utcDay, type TgGroupsStore } from "./store";
-import type { Chattiness, CoinLook, TgCoinMemo, TgCoinsPort, TgGroupFactsPort, TgLine, TgPerson, TgPublicFact, TgRoom } from "./types";
-import { mentionFor, say, type SpeakCtx, type TgIntent } from "./voice";
+import type {
+  Chattiness,
+  CoinLook,
+  TgCoinMemo,
+  TgCoinsPort,
+  TgDeskAsk,
+  TgDeskPort,
+  TgDeskThought,
+  TgGroupFactsPort,
+  TgLine,
+  TgPerson,
+  TgPublicFact,
+  TgRoom,
+} from "./types";
+import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
 // ─── The numbers ───────────────────────────────────────────────────────────
 
@@ -272,6 +288,12 @@ export interface TgGroupsDeps {
   port: () => TgCoinsPort | null;
   /** A read-only projection of this agent's fills. No raw owner ledger rows. */
   facts?: () => TgGroupFactsPort | null;
+  /**
+   * The market desk (worker/src/desk/): public evidence, a chart and, when the
+   * operator allows it, Brain's read. Absent or null: no desk answers, and a
+   * coin question gets the public snapshot as before.
+   */
+  desk?: () => TgDeskPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
   /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
@@ -534,6 +556,12 @@ interface Outgoing {
   stillWanted?: () => boolean;
   /** Told why, when the line is not sent (see Quiet). */
   miss?: (why: Quiet) => void;
+  /**
+   * A market desk answer: the chart, when one was drawn, and its caption as
+   * HTML already built and escaped by desk.ts. It goes out without a typing
+   * pause — the reads and the read already took a person's time.
+   */
+  desk?: { html: string; photo: Uint8Array | null };
 }
 
 interface SpeakOpts {
@@ -970,12 +998,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
       try {
         stageOf(o.chatId, "send: typing");
-        await sendChatAction(opts, chatId, "typing", threadId);
+        await sendChatAction(opts, chatId, o.desk?.photo ? "upload_photo" : "typing", threadId);
       } catch (e) {
         fail("typing", e);
       }
-      stageOf(o.chatId, "send: typing delay");
-      await sleep(typingDelayMs(o.text, false, rand));
+      if (!o.desk) {
+        stageOf(o.chatId, "send: typing delay");
+        await sleep(typingDelayMs(o.text, false, rand));
+      }
       for (let attempt = 0; attempt < 4; attempt++) {
         stageOf(o.chatId, "send: flood pacer");
         await waitTurn(chatId);
@@ -985,11 +1015,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           return null;
         }
         stageOf(o.chatId, "send: message");
-        const r = await sendMessage(opts, chatId, htmlOf(o), {
+        const where = {
           ...(isMsgId(replyTo) ? { replyToMessageId: replyTo } : {}),
           ...(isMsgId(threadId) ? { messageThreadId: threadId } : {}),
           disablePreview: true,
-        });
+        };
+        const r = o.desk?.photo
+          ? await sendPhotoBytes(opts, chatId, o.desk.photo, o.desk.html, where)
+          : await sendMessage(opts, chatId, o.desk ? o.desk.html : htmlOf(o), where);
         if (r.ok) {
           if (isMsgId(o.replyTo)) landedOn.set(msgKey(o.chatId, o.replyTo), true);
           return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
@@ -1870,6 +1903,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
       const context = coinContext(j);
       const coinQuestion = asksAboutCoin(j.line.text, selfNamesOf(selfNow())) || /\b(?:why|how come)\b/iu.test(j.line.text);
+      // THE DESK FIRST for a market or coin read: evidence, a chart and a
+      // reasoned answer, off the chat queue like the public facts below.
+      const deskAsk = !request && dec.mood !== "private-ask" && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
+      if (deskAsk && deskRoom(chatId)) {
+        // A coin read is wanted only while the coins switch stays on, like the public-fact lane's.
+        const deskOpts = deskAsk.kind === "coin" ? { ...replyOpts, stillWanted: () => wanted() && coinFactsOn() } : replyOpts;
+        track((async () => {
+          const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, intent);
+          if (sent) noteAnswered(sent.chatId, j, false);
+          else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
+        })());
+        return null;
+      }
       const wantedFact = request || (context && coinQuestion);
       // Slow reads use a detached lane: another line, the owner's commands
       // and this chat's subsequent questions continue while evidence loads.
@@ -2003,6 +2049,198 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       fail("public facts", e);
       return null;
     } finally { if (timer) clearTimeout(timer); }
+  };
+
+  // ── the market desk (docs/tg-groups.md "Market analysis") ──────────────
+
+  const deskNow = (): TgDeskPort | null => {
+    if ((env().MERRYMEN_TG_GROUPS_DESK ?? "").trim() === "0") return null;
+    try {
+      return d.desk?.() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * HOW OFTEN THE DESK MAY READ. Each new look costs index requests from the
+   * fleet's shared GeckoTerminal budget (the one discovery uses), so a chat gets
+   * at most DESK_PER_CHAT looks and the agent DESK_PER_AGENT in any ten
+   * minutes; past that the line is answered as ordinary chatter. A repeat of a
+   * look still in the desk's one-minute memo costs nothing but is counted the
+   * same, which keeps the rule simple and the ceiling honest.
+   */
+  const DESK_WINDOW_MS = 10 * MIN;
+  const DESK_PER_CHAT = 6;
+  const DESK_PER_AGENT = 30;
+  const deskLooks: Array<{ chatId: number; atMs: number }> = [];
+  const deskRoom = (chatId: number): boolean => {
+    const now = clock();
+    while (deskLooks.length && now - deskLooks[0]!.atMs > DESK_WINDOW_MS) deskLooks.shift();
+    if (deskLooks.length >= DESK_PER_AGENT || deskLooks.filter((l) => l.chatId === chatId).length >= DESK_PER_CHAT) return false;
+    deskLooks.push({ chatId, atMs: now });
+    return true;
+  };
+  /** What each chat last asked the desk, so "do a quick analysis" right after reads the same thing. */
+  const lastDesk = new Map<number, { ask: TgDeskAsk; atMs: number }>();
+  const DESK_FOLLOW_MS = 15 * MIN;
+
+  /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
+  const repliedDesk = (j: LineJob): TgDeskAsk | null => {
+    const stored = store.room(j.msg.chatId);
+    if (!stored) return null;
+    const room = freshView(stored, clock());
+    let id = j.line.replyTo;
+    const seen = new Set<number>();
+    for (let depth = 0; isMsgId(id) && depth < 4; depth++) {
+      if (seen.has(id)) break;
+      seen.add(id);
+      const line = room.lines.find((l) => l.messageId === id);
+      const text = line?.text ?? (depth === 0 && j.msg.replyTo?.messageId === id ? j.msg.replyTo.text ?? "" : "");
+      if (!line?.own) {
+        const intent = deskAskOf(text, selfNamesOf(selfNow()));
+        if (intent?.kind === "market") return { kind: "market" };
+        if (intent?.kind === "coin" && coinFactsOn()) return { kind: "coin", query: intent.name };
+      }
+      if (!line) break;
+      id = line.replyTo;
+    }
+    return null;
+  };
+
+  /**
+   * WHAT, IF ANYTHING, THE DESK IS ASKED. A named coin is searched (or, when
+   * the reply chain's coin carries that name, looked up by its address); the
+   * market is the market; a bare "do a quick analysis" or "wdyt" binds to the
+   * coin it replies under, then to a desk ask up the reply chain, then to what
+   * this chat last asked within the quarter hour, else the market. A "why"
+   * under a coin is about the agent's own decision and keeps the public-fact
+   * answer. Coin asks honour the coins switch.
+   */
+  const deskAskFor = (j: LineJob, context: { address: string; memo?: TgCoinMemo } | null, coinQuestion: boolean): TgDeskAsk | null => {
+    if (!deskNow()) return null;
+    const intent = deskAskOf(j.line.text, selfNamesOf(selfNow()));
+    if (intent?.kind === "coin") {
+      if (!coinFactsOn()) return null;
+      if (context?.memo?.name && context.memo.name.toLowerCase() === intent.name.toLowerCase()) return { kind: "coin", address: context.address };
+      return { kind: "coin", query: intent.name };
+    }
+    if (intent?.kind === "market") return { kind: "market" };
+    const bare = intent?.kind === "analysis" || (!intent && context !== null && coinQuestion && !/\b(?:why|how come)\b/iu.test(j.line.text));
+    if (!bare) return null;
+    if (context) return coinFactsOn() ? { kind: "coin", address: context.address } : null;
+    const chained = repliedDesk(j);
+    if (chained) return chained;
+    const prev = lastDesk.get(j.msg.chatId);
+    if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return prev.ask;
+    return { kind: "market" };
+  };
+
+  /** The desk's reads, time-boxed off the chat queue like every public fact. */
+  const readDesk = async <T>(read: () => Promise<T>, ms: number): Promise<T | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = d.timer ? d.timer(ms).then(() => null) : new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+        timer.unref?.();
+      });
+      return await Promise.race([Promise.resolve().then(read), expired]);
+    } catch (e) {
+      fail("desk", e);
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  /** The persona line the read is written in: its name and its typing style, nothing else. */
+  const deskVoice = (): string => {
+    let key = "";
+    try {
+      key = String(d.agentKey() ?? "");
+    } catch {
+      key = "";
+    }
+    const name = selfNow()?.name ?? "";
+    return `${name ? `You are ${name}. ` : ""}${styleWords(styleFor(key))}`.slice(0, 500);
+  };
+
+  /**
+   * ANSWER A DESK ASK: evidence and chart, then a read — Brain's when the
+   * operator allows it, else the group's model, else the code's floor — each
+   * model-written piece admitted against the brief, then one photo (or, with
+   * no chart, one message) as a reply. Every model call is counted against the
+   * group allowance (rule 7). A miss gets a fixed line asking for the CA or a
+   * minute, never a guess.
+   */
+  const deskAnswer = async (chatId: number, j: LineJob, ask: TgDeskAsk, o: SpeakOpts, fallback: TgIntent): Promise<{ chatId: number; messageId?: number } | null> => {
+    const desk = deskNow();
+    if (!desk) return null;
+    const early = optsNow();
+    if (early) {
+      try {
+        await sendChatAction(early, chatId, "upload_photo", o.threadId);
+      } catch (e) {
+        fail("typing", e);
+      }
+    }
+    const base = {
+      chatId,
+      intent: { kind: "answer", mood: "normal" } as TgIntent,
+      ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+      ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+      bornAtMs: typeof o.bornAtMs === "number" ? o.bornAtMs : clock(),
+      followUp: false,
+      ownerAddressed: o.ownerAddressed === true,
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      ...(o.miss ? { miss: o.miss } : {}),
+    };
+    stageOf(chatId, "desk: look");
+    const looked = await readDesk(() => desk.look(ask), 15 * SEC);
+    if (!looked || !looked.ok) {
+      const why = looked && !looked.ok ? looked.why : "unavailable";
+      // A NAME NOBODY LISTS was probably not a coin: "thoughts on pizza" gets
+      // the ordinary answer, not "drop the CA".
+      if (why === "not-found" && "query" in ask) {
+        log(`[tg-groups] desk coin miss (not-found), answered as chatter`);
+        return speak(chatId, fallback, o);
+      }
+      const line = deskMissLine(why, ask.kind);
+      const v = admitTgLine(line, { agentName: "", kind: "fixed", recentOwn: [] });
+      if (!v.ok) return null;
+      log(`[tg-groups] desk ${ask.kind} miss (${why})`);
+      const sent = await deliver({ ...base, text: v.text });
+      if (sent) recordOwn(sent.chatId, sent.messageId, v.text, sent.chatId === chatId ? o.replyTo : undefined);
+      return sent;
+    }
+    const e = looked.evidence;
+    const req = { kind: e.kind, subject: e.subject, question: j.line.text.slice(0, 400), brief: e.brief, voice: deskVoice() };
+    const started = Date.now();
+    let thought: TgDeskThought | null = null;
+    let by = "floor";
+    if (desk.think) {
+      stageOf(chatId, "desk: brain");
+      const think = desk.think;
+      thought = await gate.run(chatId, () => think(req), 22 * SEC);
+      if (thought) by = "brain";
+    }
+    const m = modelNow();
+    if (!thought && m && Date.now() - started < 12 * SEC) {
+      stageOf(chatId, "desk: model");
+      thought = await thinkWithModel(m, gate, chatId, req, 20 * SEC);
+      if (thought) by = "model";
+    }
+    const admitted = admitThought(thought, e, selfNow()?.name ?? "");
+    // Which kind of read went out and, when a model's was refused, the gate's
+    // reason code — never the text, the question or the coin.
+    log(`[tg-groups] desk ${e.kind} read: ${admitted.from === "model" ? by : "floor"}${admitted.refused ? ` (${by} read refused: ${admitted.refused})` : ""}`);
+    const html = deskCaption(e, admitted.thought);
+    stageOf(chatId, "desk: send");
+    const sent = await deliver({ ...base, text: admitted.thought.read, desk: { html, photo: e.chart } });
+    if (!sent) return null;
+    recordOwn(sent.chatId, sent.messageId, admitted.thought.read.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined);
+    if (lastDesk.size > 256) lastDesk.delete(lastDesk.keys().next().value!);
+    lastDesk.set(sent.chatId, { ask, atMs: clock() });
+    return sent;
   };
 
   const requestedFact = async (request: PublicFactRequest, chatId: number): Promise<TgPublicFact> => {
@@ -2145,7 +2383,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         ({ cas, otherChain, foreignMint } = asked);
         cashtags = [];
       }
-      if (!rememberedAsk && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
+      // A cashtag said to it with no CA is a question for the desk, which can
+      // find the coin by name; the coin flow's "drop the ca" is for a cashtag
+      // dropped in the room, or when there is no desk.
+      const deskTicker = j.addressed !== null && !asked && cas.length === 0 && !foreignMint && cashtags.length > 0 && deskNow() !== null && coinFactsOn()
+        && deskAskOf(text, selfNamesOf(selfNow()))?.kind === "coin";
+      if (!rememberedAsk && !deskTicker && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,

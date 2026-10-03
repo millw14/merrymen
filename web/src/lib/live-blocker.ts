@@ -79,7 +79,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     fault: true,
   },
   "wrong-chain": {
-    say: "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused.",
+    say: "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused. And funds already sent to this address on another network are not recovered by that new grant — it routes future deposits only, never moves what is stuck elsewhere.",
     funding: false,
     resign: true,
     fault: true,
@@ -89,7 +89,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     // grows with tokens AND venues together — every venue you allow is pinned
     // on every token you allow — so an owner who only hears "too many tokens"
     // may remove five and still be refused.
-    say: "This agent's permission set covers too many tokens and venues to install on-chain, so its first operation can never be signed. Review fewer tokens or venues on the wallet page and renew. Funding alone cannot fix the oversized permission; revoking it requires network fees.",
+    say: "This agent's permission set is too large to install on-chain, so its first operation can never be signed. Renew it on the web wallet page — a new signature there seals a narrower permission set that usually fits; if it is still too large, drop a token or venue. Funding alone cannot fix the oversized permission; revoking it requires network fees.",
     funding: false,
     resign: true,
     fault: true,

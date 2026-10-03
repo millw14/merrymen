@@ -309,7 +309,12 @@ export interface CashPool {
  */
 export async function bestCashPool(
   client: PublicClient,
-  args: { token: `0x${string}`; cash: `0x${string}` },
+  args: {
+    token: `0x${string}`;
+    cash: `0x${string}`;
+    /** The TWAP window the price is read over. See "DEEPEST THAT CAN ANSWER" below. */
+    twapWindowSec?: number;
+  },
 ): Promise<CashPool | null> {
   const pools = await Promise.all(
     FEE_TIERS.map(async (fee) => {
@@ -334,9 +339,35 @@ export async function bestCashPool(
     }),
   );
 
-  let best: CashPool | null = null;
-  for (const p of pools) if (p && (!best || p.cashInPool > best.cashInPool)) best = p;
-  return best && best.cashInPool > 0n ? best : null;
+  const live = pools
+    .flatMap((p): CashPool[] => (p && p.cashInPool > 0n ? [p] : []))
+    .sort((a, b) => (b.cashInPool > a.cashInPool ? 1 : b.cashInPool < a.cashInPool ? -1 : 0));
+  if (live.length <= 1) return live[0] ?? null;
+
+  // ── THE DEEPEST THAT CAN ANSWER, WHEN THERE IS A CHOICE ─────────────────
+  //
+  // Most cash still wins — but a pool whose oracle cannot serve the window is a
+  // pool `readPoolPrice` will refuse to value, and picking it over a shallower
+  // pool that CAN would turn a priceable token into an unpriceable one. That
+  // became reachable when FEE_TIERS gained 100: the chain's deepest WETH/USDG
+  // pool sits there, and a pool keeps a single observation until somebody pays
+  // to grow it. So, only when there is an alternative, ask each in depth order
+  // whether it can serve the window and take the first that can. If none can,
+  // the deepest is returned exactly as before, and its refusal says why.
+  //
+  // One extra observe() per candidate tried, and only for tokens with more
+  // than one pool. Every caller — the price read, and the depth readers that
+  // must describe the SAME pool (see above) — gets the same answer.
+  const window = args.twapWindowSec ?? DEFAULT_TWAP_WINDOW_SEC;
+  for (const p of live) {
+    try {
+      await client.readContract({ address: p.pool, abi: POOL_ABI, functionName: "observe", args: [[window, 0]] });
+      return p;
+    } catch {
+      /* no TWAP over this window here; try the next deepest */
+    }
+  }
+  return live[0]!;
 }
 
 export async function readPoolPrice(
@@ -351,7 +382,7 @@ export async function readPoolPrice(
 ): Promise<PoolPrice | null> {
   const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
 
-  const best = await bestCashPool(client, { token: args.token, cash: args.cash });
+  const best = await bestCashPool(client, { token: args.token, cash: args.cash, twapWindowSec: windowSec });
   if (!best) return null;
 
   try {

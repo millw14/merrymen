@@ -4,12 +4,15 @@ A Merryman whose bot is added to a Telegram group behaves like one more person
 in it. It answers when it is called, now and then joins a conversation on its
 own, remembers each chat, and reacts to coins people post: it looks at the
 coin, tags whoever sent it, and either buys a little (when its Brain likes it
-and every trencher limit allows it) or says why it is passing. It never posts
-trade alerts, error messages, sizes, prices or P&L.
+and every trencher limit allows it) or says why it is passing. Asked about the
+market or a coin, it answers like a trader: a chart and a reasoned read of
+public index data (Market analysis). It never posts trade alerts, error
+messages, sizes or its own P&L.
 
 This file is the contract the modules under `worker/src/telegram/tg-groups/`,
 `worker/src/trencher-nominate.ts`, `worker/src/tg-coin-look.ts`,
-`worker/src/tg-groups-ferry.ts` and the settings surfaces are built against.
+`worker/src/tg-groups-ferry.ts`, `worker/src/desk/` and the settings surfaces
+are built against.
 Types live in `worker/src/telegram/tg-groups/types.ts`. The boundary of rule 1
 is pinned by `worker/src/telegram/tg-groups/boundary.test.ts`.
 
@@ -46,8 +49,12 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    balances, limits or wallet P&L, in digits or words. Deterministic factual
    replies may report public indexed coin metrics with their source and
    observation time, or calculate from numbers explicitly supplied in the
-   question. Hypothetical arithmetic is never presented as a verified trade.
-   Generic model-written chatter retains the no-money gate. No
+   question. A market desk read may cite public market figures only when
+   every figure in it is one the brief code measured for that answer contains
+   (Market analysis); the desk is never handed the owner's book, so it has
+   none of the owner's figures to cite. Hypothetical arithmetic is never
+   presented as a verified trade. Generic model-written chatter retains the
+   no-money gate. No
    "bought 50 USDG of X", no "🚨 BUY", no "entered", no "new position". A buy
    is said the way a person says it ("ok grabbed a little 🤝"), and only
    after the fill is `landed` or `paper`. Paper is said out loud.
@@ -75,7 +82,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    group gate (`gate.ts`); a refused line is dropped, never repaired, and the
    fallback is a template or silence. Structured research, arithmetic and
    trade-history replies have their own strict factual gate; arbitrary text
-   cannot use it to bypass the generative gate. An addressed factual question
+   cannot use it to bypass the generative gate. A desk read passes
+   `admitDeskText` — every protective clause, with the money and figure bans
+   replaced by grounding in its brief — and a refused read is replaced by the
+   desk's code-written read, never repaired. An addressed factual question
    can report unavailable evidence without exposing provider details.
    Unprompted failures (model, chain, Brain, Telegram) are silent in the group
    and at most logged.
@@ -89,9 +99,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
 
 7. **Never spend trading's allowance, never block the owner.** Group lines use
    a dedicated model key when the operator sets one; a hosted agent never
-   spends the house key on group chatter unless the operator says so. Every
-   group model call is counted against a daily allowance that survives
-   redeploys. Group work runs off the serial poll loop, so a slow model or
+   spends the house key on group chatter unless the operator says so. Brain
+   reads a group's market question only with `MERRYMEN_TG_GROUPS_BRAIN=1`.
+   Every group model call, Brain's included, is counted against a daily
+   allowance that survives redeploys. Group work runs off the serial poll loop, so a slow model or
    Brain never delays the owner's DMs, buttons or `/kill`.
 
 ## Which groups it talks in
@@ -340,8 +351,9 @@ to someone in distress goes out shushed or not.
 
 ## Factual questions
 
-An addressed coin question receives a dated public index snapshot and a
-quick-screen take. It never claims a chart was analysed or a Brain decision
+An addressed coin question goes to the market desk (Market analysis) when it
+is on; a "why" about its own decision, or any coin question with the desk off,
+receives a dated public index snapshot and a quick-screen take. It never claims a chart was analysed or a Brain decision
 was made without that evidence. A reply such as "wdyt" to its own coin
 acknowledgement follows the remembered reply chain to that group's original
 coin; a name or cashtag resolves only to one unambiguous remembered coin.
@@ -366,6 +378,97 @@ decimal arithmetic and only the supplied operands. They never become a
 verified account result. Product questions use fixed, code-backed answers
 for the web's trade history, P&L images, wallet steps, permissions and group
 delivery; model-written banter cannot invent those facts.
+
+## Market analysis
+
+The market desk answers what a trader in the chat actually asks — "how is the
+market", "what's moving", "check out cashcat, good entry?", "thoughts on
+$ROO", "do a quick analysis" — with a chart and a reasoned read, instead of a
+one-liner from a model that was given no data.
+
+**When.** Only a line said to it (`deskAskOf`, detect.ts):
+
+* a coin named by one cashtag, or by a phrase that asks for a read on it
+  ("thoughts on X", "X good entry", "is X a buy", "chart on X"); a phrase
+  that could name anything ("check out X", "how is X looking", "is X ready")
+  counts only beside a trading word or with X written as a ticker in
+  capitals, so "check out bob" and "is dinner ready" are not coins;
+* the market's own words with a question or request ("how's the market",
+  "market update"), or "what's pumping / moving", "any setups"; "what's up /
+  hot" only beside a trading word;
+* a bare "do a quick analysis" / "good entry?" — bound to the coin it replies
+  under, else a desk ask up the reply chain, else what this chat last asked
+  within 15 minutes, else the market. Words with an everyday meaning
+  ("entry", "support", "breakdown") ask for a read only beside a trading word.
+
+A searched name that no index lists ("thoughts on pizza") is answered as
+ordinary chatter, not "drop the CA". A line that asks something private does
+not reach the desk. Each chat gets at most 6 desk looks, and the agent 30, in
+any ten minutes; past that a line is answered as chatter.
+
+A "why" under a coin keeps the public-fact answer (it is about the agent's own
+decision). An addressed cashtag with no CA goes to the desk, which can find
+the coin by name, instead of "drop the ca"; a cashtag dropped in the room
+still gets the coin flow. Coin reads honour the coins switch; the market does
+not need it. A line that is distress, an injection, or a public-fact request
+never reaches the desk.
+
+**Evidence** (`worker/src/desk/`, built by index.ts as `TgDeskPort`; this
+directory imports only its types). A name is resolved through GeckoTerminal's
+pool search on Robinhood Chain: an exact ticker only, and when several tokens
+share it one wins only by dominating — four times the next one's
+liquidity-backed 24h volume (a pool under $1k of liquidity, or past a hundred
+turns of it, counts nothing) or four times its liquidity — else "ambiguous"
+and the chat is asked for the CA. A name is a lookup key and nothing else: it
+is never nominated, never written to discovery, and never reaches trading
+(rule 1). The desk reads the coin's pools and a week of hourly candles from
+its busiest deep pool, and measures: price and change by window, liquidity and
+FDV, all-pool buy/sell flow and traders, age, trend and structure, EMA20/50,
+RSI14, ATR, 24h VWAP, range position, volume pace, and clustered support and
+resistance. The market is the trending and top-pool feeds plus the newest
+pools: breadth by day and hour, volume concentration, flow, leaders and
+laggards, the deepest coins, launches and the ETH backdrop. Reads share the
+fleet GeckoTerminal quota; one minute of memo per ask, and concurrent asks
+share one job. Coin names from the index are reduced to plain tickers, and a
+ticker the group gate would not let the agent say ("scam.io", a slur) is
+printed as "this coin" or "unnamed" — in the brief, the read, the header and
+the chart alike. The deployer's free-text coin name never enters a brief.
+
+**The read.** From the brief, in this order:
+
+1. Brain's `POST /v1/analyze` — its deep model at medium reasoning effort,
+   its own fleet-wide slot limit (`BRAIN_DESK_CONCURRENCY`, default 2) apart
+   from `/v1/decide`'s per-agent lock, a slot never held past the desk tier's
+   20 s, and a refused effort remembered apart from decide's reasoning hint —
+   only with `MERRYMEN_TG_GROUPS_BRAIN=1` (rule 7), time-boxed at 22 s;
+2. else, within 12 s of starting, the group's own model with the same
+   instructions, time-boxed at 20 s;
+3. else the desk's own read, written by code from the same measurements.
+
+Brain and model calls go through the group allowance like every line. The
+asker's words reach the model only fenced as untrusted; nothing private does
+(rule 3). Each model-written piece (read, watch, invalidation) passes
+`admitDeskText`: every protective clause of the group gate stays, the money
+and figure clauses give way to grounding — every figure must be a brief figure
+of the same kind (percent, multiple, or neither), within 0.6% or rounded (a
+price needs two significant digits to count as rounded; a percent said with a
+direction must point the brief's way) — and the chart words "entry" and
+"breakout" and market words ("in the red", "transactions", "rejected at") are
+allowed. A quantity grounding cannot check — spelled out, a multiplier, a
+money unit ("5 usdg"), another script's digits — is refused, and so is the
+owner's book in words: a first person or the owner beside a holding, result
+or size ("the owner is in the red on this"). A refused piece is replaced by the
+code's piece. The log line says whose read went out and the refusal code,
+never the text.
+
+**The answer** is one photo reply: the chart (candles, EMA20/50, the nearest
+levels and volume; or the 24h board), with a caption built by code — the
+public header, the read, what to watch, what would flip it, the stance and
+"GeckoTerminal HH:MM UTC". It is cut to 1000 UTF-16 units (under Telegram's
+1024) by whole parts and whole sentences; a single sentence too long to fit
+is replaced by the code's read, so the source line is never lost. With no chart, the same text goes as a message. A
+coin it cannot find, two coins it cannot tell apart, or a feed it cannot read
+gets a fixed line asking for the CA or a minute — never a guess.
 
 ## The coin flow
 
@@ -781,7 +884,9 @@ Allowance: `MERRYMEN_TG_GROUPS_LLM_PER_DAY` model calls per agent per UTC day
 durable store (so a redeploy does not hand out a fresh day). A 429 pauses the
 model 10 min; a daily-cap, rejected-key or unknown-model failure pauses it
 until UTC midnight. Every call is time-boxed at 20 s. At most 2 group model
-calls run at once per agent.
+calls run at once per agent. A desk read (Market analysis) is one call — to
+Brain when `MERRYMEN_TG_GROUPS_BRAIN=1`, else to this model — and is counted
+the same way.
 
 ## Operator switch
 
@@ -793,6 +898,12 @@ recorded so switching it back on works, the age limits still apply, and
 so a held child's forget reaches the stored copy too. Hosted, the
 orchestrator also sets it for one child whose group memory could not be
 restored at spawn (see Storage and the ferry).
+
+`MERRYMEN_TG_GROUPS_DESK=0` turns off only the market desk: market and coin
+questions go back to the voice and the public snapshot.
+`MERRYMEN_TG_GROUPS_BRAIN=1` lets desk reads use Brain (needs
+`MERRYMEN_BRAIN_URL` and `MERRYMEN_BRAIN_TOKEN`); unset, they never touch
+Brain's key.
 
 ## After an outage, and while trading is held
 

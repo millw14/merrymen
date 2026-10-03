@@ -1051,7 +1051,7 @@ function cleanNotes(notes: unknown): string[] {
   return out;
 }
 
-function styleWords(style: TgStyle): string {
+export function styleWords(style: TgStyle): string {
   const out: string[] = [];
   out.push(style.lower >= 0.9 ? "You type in lowercase almost always." : "You mostly type in lowercase, now and then with a capital at the start.");
   out.push(

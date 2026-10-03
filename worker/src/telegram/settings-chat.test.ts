@@ -52,7 +52,7 @@ describe("proposeSettingChange — a question, never a change", () => {
       "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out. On the dashboard you can also choose what it posts there: the coins it buys, passing thoughts, and how many a day.";
     for (const [setting, value] of [["xPosting", "on"], ["post on X", "yes"], ["twitter", "on"], ["tweets", "off"], ["posting on x", "off"], ["posting on x", ""], ["X settings", "change"]] as const) {
       const p = proposeSettingChange(setting, value, ctx);
-      assert.deepEqual(p, { kind: "reply", text, button: "dashboard" }, setting);
+      assert.deepEqual(p, { kind: "reply", text, button: "dashboard", anchor: "x-posting" }, setting);
     }
   });
 
@@ -91,7 +91,7 @@ describe("proposeSettingChange — a question, never a change", () => {
       ["telegramGroupsChattiness", "chatty"],
     ] as const) {
       const p = proposeSettingChange(setting, value, ctx);
-      assert.deepEqual(p, { kind: "reply", text, button: "dashboard" }, `${setting} ${value}`);
+      assert.deepEqual(p, { kind: "reply", text, button: "dashboard", anchor: "telegram-groups" }, `${setting} ${value}`);
     }
   });
 
@@ -168,6 +168,63 @@ describe("resolveSettingName — /set takes words, not keys", () => {
   });
 });
 
+describe("launchpad buying — where it is, by every name it goes by", () => {
+  // An owner told launchpad buying was "on the dashboard" answered "I don't
+  // see launchpad setting anywhere?": the page called it "class route", inside
+  // a closed group, and the agent guessed at where it was.
+  it("every name for it reaches the dashboard reply, never a question or the generic list", () => {
+    for (const [setting, value] of [
+      ["launchSniping", "on"],
+      ["launchpad buying", "on"],
+      ["Launchpad buying", ""],
+      ["launchpad sniping", "on"],
+      ["launch buying", "off"],
+      ["launchpad", "on"],
+      ["class route", "on"],
+      ["Class sniping", "on"],
+      ["classSnipeEnabled", "true"],
+    ] as const) {
+      const p = proposeSettingChange(setting, value, ctx) as { kind: string; button?: string; anchor?: string; text: string };
+      assert.equal(p.kind, "reply", setting);
+      assert.equal(p.button, "dashboard", setting);
+      assert.equal(p.anchor, "launchpad-buying", setting);
+    }
+  });
+
+  it("names the place on the page, the switch's own label, and what else must be set", () => {
+    const p = proposeSettingChange("launchpad buying", "on", ctx) as { text: string };
+    assert.match(p.text, /Settings → Custom tokens &amp; discovery/, "escaped for Telegram HTML");
+    assert.doesNotMatch(p.text, /& /, "no bare ampersand, which Telegram refuses");
+    assert.match(p.text, /"launchpad buying \(class route\)"/);
+    assert.match(p.text, /button below opens it/);
+    assert.match(p.text, /scout mode on/);
+    assert.match(p.text, /max per token/);
+    assert.match(p.text, /live trading on/);
+    assert.match(p.text, /Class vault factory contract/);
+    assert.match(p.text, /Advanced settings → Connections/);
+    assert.match(p.text, /re-signed/);
+  });
+
+  it("each dashboard-only reply whose control has an id on the page links straight to it", () => {
+    const anchor = (k: string) => (proposeSettingChange(k, "on", ctx) as { anchor?: string }).anchor;
+    assert.equal(anchor("memecoinLive"), "trencher-mode");
+    assert.equal(anchor("telegram"), "telegram");
+    // No id for these on the page: the button opens Settings at the top, and
+    // the reply carries no anchor field at all.
+    assert.equal("anchor" in proposeSettingChange("liveTrading", "on", ctx), false);
+    assert.equal("anchor" in proposeSettingChange("aiProvider", "x", ctx), false);
+  });
+
+  it("the page has every id an anchor names", () => {
+    const page = readFileSync(new URL("../../../web/src/terminal/screens/Settings.tsx", import.meta.url), "utf8");
+    for (const k of ["launchSniping", "memecoinLive", "telegram", "telegramGroups", "xPosting"]) {
+      const id = (proposeSettingChange(k, "on", ctx) as { anchor?: string }).anchor;
+      assert.ok(id, k);
+      assert.match(page, new RegExp(`id="${id}"`), `${k} → #${id}`);
+    }
+  });
+});
+
 describe("a value asked for is remembered", () => {
   it("'What should it be?' marks the setting so a bare reply answers it", () => {
     const p = proposeSettingChange("strategistStopLossBps", "", ctx);
@@ -234,11 +291,15 @@ describe("INVARIANT: a press answers only the question parked for the presser", 
   });
 
   it("typed yes/no only ever confirms a SETTINGS question", () => {
+    // One setting or several approved together ("be more careful") — both are
+    // settings questions. A transfer, a kill or a shell command still needs
+    // /confirm or its button.
     const i = src.indexOf('"YES" ANSWERS A SETTINGS QUESTION');
     const shortcut = src.slice(i, i + 1200);
-    assert.match(shortcut, /parked\?\.kind === "setting" && answerableNow/);
+    assert.match(shortcut, /\(parked\?\.kind === "setting" \|\| parked\?\.kind === "settings"\) && answerableNow/);
     assert.match(src, /typedAnswerable\.delete\(senderKey\)/, "every new message uses up the eligibility");
-    assert.match(src, /if \(meta\?\.action\.kind === "setting"\) typedAnswerable\.add\(pendingKey\)/);
+    assert.match(src, /if \(meta\?\.action\.kind === "setting" \|\| meta\?\.action\.kind === "settings"\) typedAnswerable\.add\(pendingKey\)/);
+    assert.doesNotMatch(shortcut, /"transfer"|"kill"|"shell"/, "and nothing else");
   });
 
   it("a press never wipes another member's live question", () => {

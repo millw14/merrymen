@@ -15,7 +15,7 @@ import {
 } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
-import { builtinGrantTargets, type GrantCaps } from "./grant";
+import { GRANT_SCOPED_SPENDERS, builtinGrantTargets, type GrantCaps } from "./grant";
 import { ENERGY_ROUTE_V1, GRANT_ENERGY, isEnergyReserveToken } from "./energy";
 // The deployability policy, for `energyBuyFits` below. first-enable-gas.ts
 // deliberately imports nothing (it counts permissions structurally), so this
@@ -391,6 +391,65 @@ export interface WallOptions extends TrencherPermission {
    * (usableExtraTokens drops it), so nothing here can spend it once bought.
    */
   energyBuy?: boolean;
+  /**
+   * EACH SPENDER NAMED ONLY ON THE TOKENS IT ACTUALLY PULLS. Off for every
+   * grant signed before GRANT_SCOPED_SPENDERS existed, so those rebuild byte
+   * for byte as they were signed; both signers now seal it on.
+   *
+   * Without it, every spender is pinned on every approve: the Morpho vault,
+   * the class vault and the Trencher vault — which only ever pull USDG — sat in
+   * the ONE_OF of all fourteen stock approves and every custom-token approve,
+   * and the v4 adapter's two legs listed every stock. That is reach nothing
+   * uses, and it is not free: each entry is 32 bytes of the enable data the
+   * first operation carries, and it is why a class + Trencher + v4 wall with
+   * three custom tokens came to ~15.75M bounded gas against the 14M product
+   * maximum (first-enable-gas.ts) and could not be signed at all.
+   *
+   * Scoped:
+   *   - USDG approve: every spender, unchanged — every venue is funded in USDG.
+   *   - custom-token approves: the routers that can SELL a coin — Router02, the
+   *     v4 adapter and the Pons adapter (plus Rialto/Permit2 where opted in).
+   *   - stock approves: Router02 only (plus Rialto/Permit2 where opted in).
+   *   - the v4 adapter trades USDG and the owner's own coins, never a stock.
+   *     Every tradeable stock has v3 depth (see allowUniswapV4); what this
+   *     gives up is the occasional better v4 fill on a stock. What it closes is
+   *     the equity book's exposure to a caller-chosen v4 pool: `hooks` and
+   *     `minAmountOut` are unpinned, so a stolen key could sell every share
+   *     through a hostile pool for one wei — the reason `curveAssets` already
+   *     keeps stocks away from the Pons venues.
+   *
+   * Strictly narrower: every call the scoped wall permits, the unscoped one
+   * permits too. The worker reads the same marker (grantV4AdapterAssets) and
+   * never quotes a v4 leg the scoped wall does not cover.
+   */
+  scopedSpenders?: boolean;
+}
+
+/** The tradeable stock tokens, in the order every list in this file names them. */
+function tradeableStockAddresses(): Address[] {
+  return STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).map(
+    (t) => t.address as Address,
+  );
+}
+
+/**
+ * The assets the V4SelfSwap adapter may trade, on EITHER leg, for this wall.
+ *
+ * ONE function for the wall and for the worker's router gate, so the set a key
+ * may swap and the set the worker will quote cannot drift apart: quoting a v4
+ * leg the wall does not cover picks a route that reverts at validation.
+ *
+ * Unscoped (every grant before GRANT_SCOPED_SPENDERS): USDG, every tradeable
+ * stock and the owner's coins — the same list Router02 is pinned to. Scoped:
+ * USDG and the owner's coins only, which is exactly the set of approves that
+ * name the adapter as a spender.
+ */
+export function v4AdapterAssets(opts: Pick<WallOptions, "scopedSpenders" | "extraTokens">): Address[] {
+  return [
+    CASH.USDG as Address,
+    ...(opts.scopedSpenders === true ? [] : tradeableStockAddresses()),
+    ...usableExtraTokens(opts.extraTokens).map((t) => t.address as Address),
+  ];
 }
 
 /**
@@ -541,11 +600,35 @@ export function buildCallPermissions(
   // the swap set cannot drift apart within one grant.
   const adapterAssets: Address[] = [
     CASH.USDG as Address,
-    ...STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).map(
-      (t) => t.address as Address,
-    ),
+    ...tradeableStockAddresses(),
     ...extras.map((t) => t.address as Address),
   ];
+  // THE V4 ADAPTER'S LEGS — `adapterAssets` on an unscoped wall, USDG and the
+  // owner's coins on a scoped one. Same function the worker's router gate
+  // calls (grantV4AdapterAssets), so the quote and the wall agree.
+  const v4Assets = v4AdapterAssets(opts);
+  // ── WHO MAY BE APPROVED FOR WHAT (WallOptions.scopedSpenders) ─────────────
+  //
+  // Unscoped, every approve below names every spender. Scoped, each token's
+  // approve names only the contracts that can pull THAT token:
+  //   - the Morpho, class and Trencher vaults pull USDG and nothing else
+  //     (Morpho's asset is USDG; the class buy's funding leg is pinned to
+  //     USDG below; TrencherVault's `cash` is immutable), so they stay on the
+  //     USDG approve only;
+  //   - the v4 and Pons adapters trade cash against the owner's coins, so
+  //     they stay on the custom-token approves and leave the stock ones.
+  // Filtered from `spenders` rather than rebuilt, so the order — and with it
+  // the encoded bytes of every entry that remains — is the one the unscoped
+  // wall already uses.
+  const scoped = opts.scopedSpenders === true;
+  const usdgOnly = new Set(
+    [MORPHO.steakhouseUsdgVault as Address, classVault, trencherVault]
+      .filter((a): a is Address => a !== undefined)
+      .map((a) => a.toLowerCase()),
+  );
+  const coinSpenders = scoped ? spenders.filter((s) => !usdgOnly.has(s.toLowerCase())) : spenders;
+  const curveOrV4 = new Set([adapter, ponsAdapter].filter((a): a is Address => a !== undefined).map((a) => a.toLowerCase()));
+  const stockSpenders = scoped ? coinSpenders.filter((s) => !curveOrV4.has(s.toLowerCase())) : spenders;
   /**
    * WHAT A CURVE TRADE MAY TOUCH: cash and the owner's own coins. Never the
    * equity book.
@@ -616,7 +699,7 @@ export function buildCallPermissions(
           valueLimit: 0n,
           abi: erc20Abi,
           functionName: "approve",
-          args: [{ condition: ParamCondition.ONE_OF, value: spenders }, null],
+          args: [{ condition: ParamCondition.ONE_OF, value: stockSpenders }, null],
         }) as const,
     ),
     // Owner-added tokens, same shape and same routers. Present ONLY because the
@@ -629,7 +712,7 @@ export function buildCallPermissions(
           valueLimit: 0n,
           abi: erc20Abi,
           functionName: "approve",
-          args: [{ condition: ParamCondition.ONE_OF, value: spenders }, null],
+          args: [{ condition: ParamCondition.ONE_OF, value: coinSpenders }, null],
         }) as const,
     ),
     // USDG out of the wall — ONLY to addresses the owner registered, and only
@@ -871,8 +954,10 @@ export function buildCallPermissions(
             abi: V4SELFSWAP_ABI,
             functionName: "swapExactIn",
             args: [
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              // `v4Assets`: equal to `adapterAssets` unless the wall is scoped,
+              // when stocks leave both legs (WallOptions.scopedSpenders).
+              { condition: ParamCondition.ONE_OF, value: v4Assets },
+              { condition: ParamCondition.ONE_OF, value: v4Assets },
               null, // fee — any tier the pool actually has
               null, // tickSpacing — pool identity, bounded by the quote
               null, // hooks — see above
@@ -1170,6 +1255,11 @@ export function buildWallPolicies(args: {
         // policy with no router permission and no router in the USDG approve.
         // The worker would build the buy, and the chain would refuse it.
         energyBuy: args.energyBuy,
+        // And a fifth: a signer that sized the SCOPED wall (wallSignable over
+        // buildCallPermissions) and minted GRANT_SCOPED_SPENDERS would have
+        // signed the unscoped one here — the wall it had just refused as too
+        // large to install.
+        scopedSpenders: args.scopedSpenders,
       }) as never,
     }),
   ];
@@ -1222,7 +1312,33 @@ export function grantWallOptions(grant: {
     allowRialto: features.has("rialto"),
     allowUniswapV4: features.has("v4"),
     energyBuy: features.has(GRANT_ENERGY),
+    scopedSpenders: features.has(GRANT_SCOPED_SPENDERS),
   };
+}
+
+/**
+ * The assets this grant's v4 adapter may trade, lowercased — for the worker's
+ * router gate, from the same marker and tokens the wall was rebuilt from.
+ */
+export function grantV4AdapterAssets(grant: {
+  grantTokens?: readonly string[];
+  grantFeatures?: readonly string[];
+}): ReadonlySet<string> {
+  return new Set(v4AdapterAssets(grantWallOptions(grant)).map((a) => a.toLowerCase()));
+}
+
+/**
+ * Can this grant's v4 adapter take BOTH legs of this swap? The router gate's
+ * question: a v4 quote for a pair the wall does not cover is a route that
+ * reverts at validation, which is worse than never having considered it.
+ */
+export function grantV4AdapterReaches(
+  grant: { grantTokens?: readonly string[]; grantFeatures?: readonly string[] },
+  tokenIn: string,
+  tokenOut: string,
+): boolean {
+  const assets = grantV4AdapterAssets(grant);
+  return assets.has(tokenIn.toLowerCase()) && assets.has(tokenOut.toLowerCase());
 }
 
 /**

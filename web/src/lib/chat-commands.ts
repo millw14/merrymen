@@ -54,7 +54,15 @@
  * chat can widen a sealed grant. One control, one set of conditions, everything
  * else points at it — the third time this file reaches that conclusion.
  */
-import { ENERGY, MERRYMEN_TOKEN, riskProfile } from "@merrymen/core";
+import {
+  ENERGY,
+  MERRYMEN_TOKEN,
+  PROPOSAL_PARAM,
+  buildProposal,
+  encodeProposalLink,
+  riskProfile,
+  understandSettingsText,
+} from "@merrymen/core";
 import { isCircleStrategyId } from "@/terminal/strategy";
 import { count, usd } from "@/lib/format";
 
@@ -72,6 +80,13 @@ export interface ChatCommand {
    * be confirming the description rather than the act.
    */
   say: (args: Record<string, CommandArg>) => string;
+  /**
+   * For an ORDER: what was placed, once it has been — the receipt's half of
+   * `say`. `say` is written before the owner confirms and ends "I'll place
+   * it"; prefixed with "Placed it —" it read "Placed it — Spend $10.00 buying
+   * UBIK. I'll place it — …", promising the act it had just reported.
+   */
+  placed?: (args: Record<string, CommandArg>) => string;
   /**
    * How it happens: which existing authenticated surface performs it.
    *
@@ -130,6 +145,12 @@ export interface ChatCommand {
   askFor?: readonly string[];
   /** For `navigate`: where to. */
   to?: string;
+  /**
+   * For `navigate`: where to, worked out from the arguments. `change-settings`
+   * is the case: the page is fixed (`to`), the changes ride in its query so
+   * Settings opens with them filled in for approval. Never a different path.
+   */
+  toFor?: (args: Record<string, CommandArg>) => string;
   /**
    * Does this need a second look even after the confirmation card?
    *
@@ -334,6 +355,7 @@ const REGISTRY: ChatCommand[] = [
     say: (a) =>
       `Spend ${money(a.usdgAmount)} buying ${String(a.symbol).toUpperCase()}. ` +
       `I'll place it — my key's limits still decide whether it goes through.`,
+    placed: (a) => `a buy of ${String(a.symbol).toUpperCase()} for ${money(a.usdgAmount)}.`,
   },
   /**
    * SNIPE — "get me into PEPE with $20", where PEPE may be a coin this agent
@@ -376,6 +398,9 @@ const REGISTRY: ChatCommand[] = [
       `Sell ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()}. ` +
       `If that is more than you hold I sell what is there, and if it is a coin on a bonding curve I have to sell the whole position — ` +
       `I'll tell you which happened. I'll place it; my key's limits still decide.`,
+    placed: (a) =>
+      `a sell of ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()} — or the whole position, if that is ` +
+      `less or it is a coin on a bonding curve; I'll tell you which.`,
   },
   /**
    * GET-ENERGY — "get your $MERRYMEN": the agent buys the $MERRYMEN it is short
@@ -430,6 +455,7 @@ const REGISTRY: ChatCommand[] = [
       `small margin for price movement (at least $1.00); the pool fees and the token's own tax are paid out of the USDG. ` +
       `It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide ` +
       `whether it goes through.`,
+    placed: (a) => `a buy of up to ${money(a.usdgAmount)} of $MERRYMEN, kept as energy.`,
   },
   // ── the ones that only take you somewhere ────────────────────────────────
   {
@@ -492,7 +518,41 @@ const REGISTRY: ChatCommand[] = [
     weighty: true,
     say: () => `Take you to review renewal of my trading permission. Revoking the old permission requires network fees before you sign the replacement.`,
   },
+  /**
+   * ANY SETTING, IN THE OWNER'S WORDS — "be more careful and message me less",
+   * "turn on launchpad buying", "stop loss at 10%".
+   *
+   * The commands above each cover one or two settings; this covers the rest
+   * without handing the model a write. It NAVIGATES: the changes ride to
+   * Settings, where the panel shows before and after and the owner approves
+   * them there (SettingsProposal.tsx) — the same place the Telegram agent's
+   * "Review & approve" button lands. The sentence is built here from the
+   * catalog's reading of the changes, never from the model's prose.
+   */
+  {
+    id: "change-settings",
+    via: "navigate",
+    to: "/settings#proposal",
+    askFor: ["changes"],
+    weighty: true,
+    say: (a) => {
+      const rows = proposalRowsFor(a.changes);
+      if (!rows.length) return "Open Settings, where you can describe the change and approve it.";
+      return `Open Settings with ${rows.length === 1 ? "this change" : `these ${rows.length} changes`} ready for you to approve: ${rows
+        .map((r) => `${r.label} → ${r.afterText}`)
+        .join("; ")}. Nothing changes until you tap Approve there.`;
+    },
+    toFor: (a) => {
+      const rows = proposalRowsFor(a.changes);
+      return rows.length ? `/settings?${PROPOSAL_PARAM}=${encodeProposalLink(rows)}#proposal` : "/settings#proposal";
+    },
+  },
 ];
+
+/** What a `change-settings` proposal would change, read by the catalog and nothing else. */
+function proposalRowsFor(changes: CommandArg | undefined) {
+  return buildProposal(understandSettingsText(String(changes ?? "").slice(0, 600)), {}).rows;
+}
 
 export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze(REGISTRY);
 

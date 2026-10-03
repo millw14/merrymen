@@ -49,6 +49,52 @@ export interface Watcher {
   lastValue?: number;
 }
 
+/**
+ * One refusal the strategist keeps re-proposing, and how many of its repeats
+ * were counted rather than sent (notifier.ts refusalVerdict).
+ */
+export interface RefusalRepeat {
+  /** The reject rule, for the closing tally's slug. */
+  rule: string;
+  /** What was refused, HTML-escaped already — "buy of LARP". */
+  what: string;
+  /** Unix seconds the last line about it went out. */
+  pushedAt: number;
+  /** Unix seconds the newest row of it was seen, sent or held. */
+  lastAt: number;
+  /** Rows of it held back since `pushedAt`. */
+  held: number;
+  /** Reminders already sent for this run of it; spaces the next one out. */
+  reminded: number;
+}
+
+/** A held refusal as read back from a file, or null when it is not one. */
+function parseRefusalRepeat(v: unknown): RefusalRepeat | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  const n = (x: unknown) => typeof x === "number" && Number.isFinite(x) && x >= 0;
+  if (typeof r.rule !== "string" || typeof r.what !== "string") return null;
+  if (!n(r.pushedAt) || !n(r.lastAt) || !n(r.held) || !n(r.reminded)) return null;
+  return {
+    rule: r.rule,
+    what: r.what,
+    pushedAt: r.pushedAt as number,
+    lastAt: r.lastAt as number,
+    held: r.held as number,
+    reminded: r.reminded as number,
+  };
+}
+
+export function parseRefusalRepeats(v: unknown): Record<string, RefusalRepeat> {
+  const out: Record<string, RefusalRepeat> = {};
+  if (!v || typeof v !== "object" || Array.isArray(v)) return out;
+  for (const [key, rec] of Object.entries(v as Record<string, unknown>)) {
+    const parsed = parseRefusalRepeat(rec);
+    if (parsed) out[key] = parsed;
+  }
+  return out;
+}
+
 export interface TelegramState {
   offset: number;
   /**
@@ -165,13 +211,19 @@ export interface TelegramState {
    * The reject rule whose REMEDY was last pushed to the owner.
    *
    * A refusal repeats every tick the strategist re-proposes the same leg, so
-   * the instruction for fixing it must not. The refusal line still goes out
-   * each time — it is a measurement, and a suppressed one is a lie about how
-   * often this is happening — but "re-sign at /grant" is said once per rule and
-   * then held until the rule changes. Adding a remedy without this turns one
-   * confusing push per tick into one paragraph per tick.
+   * the instruction for fixing it must not. "Re-sign at /grant" is said once
+   * per rule and then held until the rule changes. Adding a remedy without
+   * this turns one confusing push per tick into one paragraph per tick. The
+   * repeats themselves are counted rather than sent — see `refusalRepeats`.
    */
   lastRemedyRule: string | null;
+  /**
+   * Repeats of one refusal held back from the owner's chat, by refusal
+   * (notifier.ts refusalKey). See `RefusalRepeat`.
+   *
+   * Optional so a file written before this existed reads as "nothing held".
+   */
+  refusalRepeats?: Record<string, RefusalRepeat>;
   /** Condition-episode dedupe: key → unix seconds last fired. */
   firedAlerts: Record<string, number>;
   /**
@@ -336,6 +388,7 @@ const DEFAULT: TelegramState = {
   lastNotifiedTradeId: -1,
   lastTradeDigestAt: 0,
   lastRemedyRule: null,
+  refusalRepeats: {},
   firedAlerts: {},
   signWatch: null,
   lastDigestDate: "",
@@ -416,6 +469,7 @@ export function loadTelegramState(): TelegramState {
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
       lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,
       lastRemedyRule: typeof s.lastRemedyRule === "string" ? s.lastRemedyRule : null,
+      refusalRepeats: parseRefusalRepeats(s.refusalRepeats),
       firedAlerts: s.firedAlerts && typeof s.firedAlerts === "object" ? (s.firedAlerts as Record<string, number>) : {},
       signWatch:
         s.signWatch && typeof s.signWatch === "object" &&

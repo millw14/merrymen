@@ -372,7 +372,7 @@ export function Agent({
     if (!cmd) return;
     try {
       if (cmd.via === "navigate") {
-        window.location.href = cmd.to!;
+        window.location.href = cmd.toFor ? cmd.toFor(proposal.args) : cmd.to!;
         return;
       }
       if (cmd.via === "snipe") {
@@ -462,7 +462,7 @@ export function Agent({
         await placeOrder(on, commandPayload(cmd, proposal.args), (duplicate) =>
           duplicate
             ? `That exact order is already queued — I have not placed a second one.`
-            : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
+            : `Placed it — ${(cmd.placed ?? cmd.say)(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
         );
         return;
       }

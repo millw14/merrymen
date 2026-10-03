@@ -342,3 +342,37 @@ test("both signers seal the energy buy and mint its marker from ONE boolean", ()
     assert.ok(decidedAt < sealedAt, `${name} must decide the energy buy before buildWallPolicies seals the wall`);
   }
 });
+
+test("both signers seal the SCOPED wall and mint its marker from the same field", () => {
+  // GRANT_SCOPED_SPENDERS tells the server's byte comparison and the executor's
+  // first-enable sizing which wall shape was signed. A signer that scoped the
+  // wall without the marker would be refused by the server (it rebuilds the
+  // unscoped wall); one that minted the marker over an unscoped wall would be
+  // refused too, and sized wrong by the executor. One field decides both.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.match(src, /scopedSpenders:\s*true as boolean/, `${name} must seal the scoped wall`);
+    assert.match(
+      src,
+      /wallOpts\.scopedSpenders\s*\?\s*\[GRANT_SCOPED_SPENDERS\]\s*:\s*\[\]/,
+      `${name} must mint GRANT_SCOPED_SPENDERS from the field that scoped the wall`,
+    );
+    assert.equal([...src.matchAll(/\[GRANT_SCOPED_SPENDERS\]/g)].length, 1, `${name} must mint it in exactly one place`);
+  }
+});
+
+test("the worker never quotes a v4 leg the wall does not cover", () => {
+  // A scoped wall trades stocks on v3 only, and on any wall a coin added since
+  // signing is on no adapter leg. Both v4 gates — the quote and the impact
+  // probe that re-prices it — ask the same function the wall was built from.
+  const INDEX = readFileSync(`${HERE}index.ts`, "utf8");
+  const gates = [...INDEX.matchAll(/\bv4:\s*\n?[^,]*?grantV4Adapter\(active\.grant\) !== null[\s\S]{0,160}/g)].map((m) => m[0]);
+  assert.equal(gates.length, 2, "the quote gate and the impact-probe gate");
+  for (const g of gates) {
+    // When the adapter will execute, its legs decide — the legacy marker is
+    // only the fallback for a grant with no live adapter, never an OR beside it.
+    assert.match(g, /!== null\s*\?\s*grantV4AdapterReaches\(active\.grant, intent\.sellToken, intent\.buyToken\)\s*:\s*grantHasV4\(active\.grant\)/);
+  }
+});
