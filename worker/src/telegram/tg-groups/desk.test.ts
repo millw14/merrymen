@@ -371,9 +371,10 @@ describe("the desk lane", () => {
   it("binds 'do a quick analysis' to the market question it replies under", async () => {
     make();
     const q = msg("how is the market");
-    store.addLine(CHAT, { messageId: q.messageId, fromId: ANN, name: "Ann", text: q.text!, atMs: clock });
+    const qid = q.messageId!;
+    store.addLine(CHAT, { messageId: qid, fromId: ANN, name: "Ann", text: q.text!, atMs: clock });
     const ack = 4_000;
-    store.addLine(CHAT, { messageId: ack, fromId: BOT.id, name: "Pine", text: "one sec", atMs: clock, replyTo: q.messageId, own: true });
+    store.addLine(CHAT, { messageId: ack, fromId: BOT.id, name: "Pine", text: "one sec", atMs: clock, replyTo: qid, own: true });
     await said(msg("pine do a quick analysis", { replyTo: { messageId: ack, fromId: BOT.id, text: "one sec" } } as Partial<TgMessage>));
     assert.deepEqual(desk!.asks, [{ kind: "market" }]);
   });
