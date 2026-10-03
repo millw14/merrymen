@@ -168,12 +168,17 @@ html[data-theme="light"] body:has(.home-page) {
   color: var(--text);
 }
 
-.home-page h1,
+.home-page h1 {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  text-wrap: balance;
+}
 .home-page h2,
 .home-page h3,
 .home-page h4 {
-  font-family: var(--font-sans);
+  font-family: var(--font-serif), "Iowan Old Style", Palatino, Georgia, serif;
   font-weight: 500;
+  letter-spacing: -0.02em;
   text-wrap: balance;
 }
 .home-page .hero-eyebrow,
@@ -445,10 +450,10 @@ html[data-theme="light"] .band-desk {
 
 .home-page section { border-color: var(--line); }
 .home-page .section-head { max-width: 760px; margin-bottom: 68px; }
-.home-page .section-head h2 { font-size: clamp(44px, 6vw, 76px); line-height: .98; letter-spacing: -.045em; }
+.home-page .section-head h2 { font-size: clamp(44px, 6vw, 76px); line-height: 1.05; letter-spacing: -.02em; }
 .home-page .section-head p { color: var(--text-2); }
 .home-page .feature-row { gap: 88px; padding: 72px 0; }
-.home-page .feature-copy h3 { font-size: clamp(34px, 4vw, 50px); letter-spacing: -.035em; }
+.home-page .feature-copy h3 { font-size: clamp(34px, 4vw, 50px); letter-spacing: -.02em; }
 .home-page .mock { border-radius: 3px; box-shadow: none; }
 
 .home-page .safety {
@@ -512,7 +517,7 @@ html[data-theme="light"] .band-desk {
   color: var(--text);
   padding-top: 112px;
 }
-.home-page .cta h2 { font-size: clamp(58px, 8vw, 110px); }
+.home-page .cta h2 { font-size: clamp(58px, 8vw, 110px); line-height: 1.02; letter-spacing: -.025em; }
 .home-page .wordmark { color: #3d5646; font-family: var(--font-sans); }
 html[data-theme="light"] .home-page .wordmark { color: #26382b; }
 body:has(.home-page) footer.foot {
