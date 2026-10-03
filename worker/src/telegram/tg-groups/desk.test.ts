@@ -276,12 +276,13 @@ class FakeTg {
   }
 }
 
+let lookKind: CoinLook["kind"] = "candidate";
 class FakePort implements TgCoinsPort {
   readiness(): TrencherReadiness {
     return { kind: "ready-paper", ownerReason: "ready" };
   }
   async look(): Promise<CoinLook> {
-    return { kind: "candidate", name: "Froggy" };
+    return { kind: lookKind, name: "Froggy" };
   }
   nominate(): NominateResult {
     return { ok: true };
@@ -382,6 +383,7 @@ beforeEach(() => {
   envVars = {};
   logs = [];
   nextMsg = 100;
+  lookKind = "candidate";
   __resetMemoryPassThrottleForTest();
   store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
   store.setStatus(CHAT, "approved", OWNER);
@@ -411,7 +413,7 @@ describe("the desk lane", () => {
     assert.equal(p.parse_mode, "HTML");
     assert.match(String(p.caption), /cashcat is in a downtrend on the 1h/);
     assert.ok(tg.of("sendChatAction").some((c) => c.body.action === "upload_photo"));
-    assert.ok(logs.some((l) => l === "[tg-groups] desk coin read: floor"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor in /.test(l)));
     assert.ok(!logs.some((l) => /how is the market|CASHCAT|cashcat/.test(l)), "logs carry no text or coin");
   });
 
@@ -448,7 +450,7 @@ describe("the desk lane", () => {
     const caption = String(tg.of("sendPhoto")[0]?.body.caption);
     assert.match(caption, /keeps bleeding under the ema20/);
     assert.match(caption, /👀 watch: a reclaim of 0\.1605/);
-    assert.ok(logs.includes("[tg-groups] desk coin read: model"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: model in /.test(l)));
     assert.equal(prompts.length, 1);
     assert.match(prompts[0]!, /EVIDENCE BRIEF:\nCOIN: CASHCAT/);
     assert.match(prompts[0]!, /<question>\npine thoughts on cashcat\?\n<\/question>/);
@@ -462,7 +464,7 @@ describe("the desk lane", () => {
     const caption = String(tg.of("sendPhoto")[0]?.body.caption);
     assert.doesNotMatch(caption, /0\.30/);
     assert.match(caption, /cashcat is in a downtrend on the 1h/);
-    assert.ok(logs.includes("[tg-groups] desk coin read: floor (model read refused: ungrounded)"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor \(model read refused: ungrounded\) in /.test(l)));
   });
 
   it("asks Brain first when the operator allowed it, and counts it like a model call", async () => {
@@ -478,7 +480,7 @@ describe("the desk lane", () => {
     assert.equal(desk.thinks.length, 1);
     assert.match(desk.thinks[0]!.voice, /^You are Pine\./);
     assert.equal(prompts.length, 0, "the group model is not asked when Brain answered");
-    assert.ok(logs.includes("[tg-groups] desk coin read: brain"));
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: brain in /.test(l)));
     assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /sellers in control/);
   });
 
@@ -544,6 +546,56 @@ describe("the desk lane", () => {
     assert.equal(desk!.asks.length, 0, "a coin read honours the coins switch");
     await said(msg("pine how is the market?"));
     assert.deepEqual(desk!.asks, [{ kind: "market" }], "the market is not a coin");
+  });
+
+  it("answers a posted CA that passes the quick screen with the chart and read — not 'let me see 👀'", async () => {
+    make();
+    const CA = "0xd7321801caae694090694ff55a9323139f043b88";
+    await said(msg(CA));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", address: CA }]);
+    const photos = tg.of("sendPhoto");
+    assert.equal(photos.length, 1);
+    const caption = String(photos[0]!.body.caption);
+    assert.match(caption, /cashcat is in a downtrend on the 1h/);
+    assert.match(caption, /passes my quick screen — sent to the brain for a buy call/);
+    assert.match(caption, /GeckoTerminal 12:00 UTC$/);
+    assert.equal(tg.of("sendMessage").length, 0, "no separate ack");
+    assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor in \d/.test(l)));
+  });
+
+  it("answers 'thoughts on <CA>' with the read and the quick screen's verdict, and 'why' under it with the same", async () => {
+    lookKind = "too-quiet";
+    make();
+    const CA = "0x6c0ac5d0f01ee19fb949dbeaba6f6f48f31c09c0";
+    const post = msg(`pine thoughts on ${CA}`);
+    await said(post);
+    const first = tg.of("sendPhoto");
+    assert.equal(first.length, 1);
+    assert.match(String(first[0]!.body.caption), /quick screen: there isn't enough recent activity for me/);
+    const answerId = 5_000;
+    await said(msg("pine why", { replyTo: { messageId: answerId, fromId: BOT.id, text: "x" } } as Partial<TgMessage>));
+    const second = tg.of("sendPhoto");
+    assert.equal(second.length, 2, "'why' gets the chart and read, not a one-line snapshot");
+    assert.match(String(second[1]!.body.caption), /quick screen: there isn't enough recent activity for me/);
+    assert.deepEqual(desk!.asks.map((a) => ("address" in a ? a.address : "?")), [CA, CA]);
+  });
+
+  it("falls back to the ack when the desk cannot answer a posted CA", async () => {
+    desk!.outcome = { ok: false, why: "unavailable" };
+    make();
+    await said(msg("0xd7321801caae694090694ff55a9323139f043b88"));
+    assert.equal(tg.of("sendPhoto").length, 0);
+    assert.equal(tg.of("sendMessage").length, 1, "the coin flow's own ack goes out instead");
+    assert.ok(logs.includes("[tg-groups] desk coin read for a post missed (unavailable)"));
+  });
+
+  it("keeps the brain's read inside the half-minute budget", async () => {
+    desk = Object.assign(new FakeDesk(), { think: async (): Promise<TgDeskThought | null> => { await new Promise((r) => setTimeout(r, 50)); return null; } });
+    make();
+    const t0 = Date.now();
+    await said(msg("pine thoughts on cashcat?"));
+    assert.ok(Date.now() - t0 < 30_000);
+    assert.equal(tg.of("sendPhoto").length, 1);
   });
 
   it("is not reached by a line not said to it", async () => {

@@ -401,6 +401,15 @@ one-liner from a model that was given no data.
   within 15 minutes, else the market. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
 
+A posted CA is answered by the desk too, inside its budget (below): a coin
+that passes the quick screen gets the chart and read in place of the
+"let me see 👀" ack, with a code-written line that the buy call is with the
+Brain; a post that asked about the coin ("thoughts on 0x…") gets the read with
+the quick screen's verdict under it; "why" under a coin gets the read with the
+Brain's recorded public reason, or the screen's verdict, under it. When the
+desk cannot answer, the coin flow's own line goes out as before. The
+nomination, its caps and the trading side are unchanged.
+
 A searched name that no index lists ("thoughts on pizza") is answered as
 ordinary chatter, not "drop the CA". A line that asks something private does
 not reach the desk. Each chat gets at most 6 desk looks, and the agent 30, in
@@ -444,6 +453,10 @@ the chart alike. The deployer's free-text coin name never enters a brief.
 2. else, within 12 s of starting, the group's own model with the same
    instructions, time-boxed at 20 s;
 3. else the desk's own read, written by code from the same measurements.
+
+The whole answer has a 25 s budget from the ask: the index look gets at most
+10 s, Brain at most 18 s of what is left, the group's model only with 6 s or
+more left; past it the code's read goes out.
 
 Brain and model calls go through the group allowance like every line. The
 asker's words reach the model only fenced as untrusted; nothing private does

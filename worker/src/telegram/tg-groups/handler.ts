@@ -64,7 +64,7 @@ import {
   type TgServiceMessage,
 } from "../api";
 import type { StateRef } from "../state";
-import { CoinFlow, type CoinIntent, type CoinPostEnd, type CoinQuiet, type CoinSpeakOpts } from "./coins";
+import { CoinFlow, type CoinIntent, type CoinPostEnd, type CoinQuiet, type CoinReadOpts, type CoinSpeakOpts } from "./coins";
 import {
   addressedHow,
   addressedSmallTalk,
@@ -90,7 +90,7 @@ import {
 } from "./detect";
 import { admitThought, deskCaption, deskMissLine, thinkWithModel } from "./desk";
 import { admitTgLine } from "./gate";
-import { publicCoinReason, publicFactRequest, type PublicFactRequest } from "./facts";
+import { publicCoinReason, publicFactRequest, quickTake, type PublicFactRequest } from "./facts";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
 import {
   describeTgGroupsModel,
@@ -1395,6 +1395,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     dashboardUrl: () => d.dashboardBase(),
     now: clock,
     log,
+    read: (chatId, address, o) => track(deskReadCoin(chatId, address, o)),
     ...(typeof d.timer === "function" ? { timer: d.timer } : {}),
   });
   flow.start();
@@ -1907,10 +1908,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // reasoned answer, off the chat queue like the public facts below.
       const deskAsk = !request && dec.mood !== "private-ask" && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
       if (deskAsk && deskRoom(chatId)) {
+        const note = deskAsk.kind === "coin" && "address" in deskAsk && context?.address === deskAsk.address ? deskNoteFor(context.memo) : undefined;
         // A coin read is wanted only while the coins switch stays on, like the public-fact lane's.
         const deskOpts = deskAsk.kind === "coin" ? { ...replyOpts, stillWanted: () => wanted() && coinFactsOn() } : replyOpts;
         track((async () => {
-          const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, intent);
+          const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, intent, note);
           if (sent) noteAnswered(sent.chatId, j, false);
           else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
         })());
@@ -2116,6 +2118,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * under a coin is about the agent's own decision and keeps the public-fact
    * answer. Coin asks honour the coins switch.
    */
+  /**
+   * The code-written line under a read about a coin this chat remembers: the
+   * Brain's public reason when it reviewed it, else the quick screen's verdict.
+   * Never a private reason or a figure (publicCoinReason, quickTake).
+   */
+  const deskNoteFor = (memo: TgCoinMemo | undefined): string | undefined => {
+    if (!memo) return undefined;
+    const reason = publicCoinReason(memo.notes);
+    if (memo.verdict === "bought") return `🧠 i bought it${memo.paper ? " on paper" : ""}${reason ? ` because ${reason}` : " after the brain's review"}`;
+    if (memo.verdict === "passed") return `🧠 i passed${reason ? ` because ${reason}` : " after the brain's review"}`;
+    if (memo.verdict === "candidate") return "🧠 passes my quick screen — the buy call is with the brain";
+    const take = quickTake(memo.verdict as CoinLook["kind"]);
+    return take ? `quick screen: ${take}` : undefined;
+  };
+
   const deskAskFor = (j: LineJob, context: { address: string; memo?: TgCoinMemo } | null, coinQuestion: boolean): TgDeskAsk | null => {
     if (!deskNow()) return null;
     const intent = deskAskOf(j.line.text, selfNamesOf(selfNow()));
@@ -2125,7 +2142,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       return { kind: "coin", query: intent.name };
     }
     if (intent?.kind === "market") return { kind: "market" };
-    const bare = intent?.kind === "analysis" || (!intent && context !== null && coinQuestion && !/\b(?:why|how come)\b/iu.test(j.line.text));
+    // "why" under a coin is a desk ask too: the chart and the read, with the
+    // recorded reason under it (deskNoteFor) — not a one-line snapshot.
+    const bare = intent?.kind === "analysis" || (!intent && context !== null && coinQuestion);
     if (!bare) return null;
     if (context) return coinFactsOn() ? { kind: "coin", address: context.address } : null;
     const chained = repliedDesk(j);
@@ -2165,41 +2184,107 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
-   * ANSWER A DESK ASK: evidence and chart, then a read — Brain's when the
-   * operator allows it, else the group's model, else the code's floor — each
-   * model-written piece admitted against the brief, then one photo (or, with
-   * no chart, one message) as a reply. Every model call is counted against the
-   * group allowance (rule 7). A miss gets a fixed line asking for the CA or a
-   * minute, never a guess.
+   * THE DESK'S WHOLE BUDGET, from the ask to a caption ready to send. A coin
+   * posted in a group is answered inside half a minute or the automation is
+   * not automation: the index look gets at most DESK_LOOK_MS, and whatever is
+   * left of DESK_BUDGET_MS goes to Brain, then — with at least DESK_MODEL_MIN_MS
+   * left — the group's model. Past it, the code's own read goes out.
    */
-  const deskAnswer = async (chatId: number, j: LineJob, ask: TgDeskAsk, o: SpeakOpts, fallback: TgIntent): Promise<{ chatId: number; messageId?: number } | null> => {
+  const DESK_BUDGET_MS = 25 * SEC;
+  const DESK_LOOK_MS = 10 * SEC;
+  const DESK_BRAIN_MS = 18 * SEC;
+  const DESK_MODEL_MIN_MS = 6 * SEC;
+
+  /**
+   * EVIDENCE AND A READ FOR ONE ASK: the desk's look, then Brain's read when
+   * the operator allows it, else the group's model, else the code's floor —
+   * each model-written piece admitted against the brief — as a caption ready
+   * to send. Every model call is counted against the group allowance (rule
+   * 7). A miss is the desk's reason, for the caller to word.
+   */
+  const deskCompose = async (
+    chatId: number,
+    ask: TgDeskAsk,
+    question: string,
+    note?: string,
+  ): Promise<{ ok: true; html: string; read: string; chart: Uint8Array | null; kind: "market" | "coin" } | { ok: false; why: "not-found" | "ambiguous" | "unavailable" }> => {
     const desk = deskNow();
-    if (!desk) return null;
-    const early = optsNow();
-    if (early) {
-      try {
-        await sendChatAction(early, chatId, "upload_photo", o.threadId);
-      } catch (e) {
-        fail("typing", e);
-      }
+    if (!desk) return { ok: false, why: "unavailable" };
+    const started = Date.now();
+    const left = (): number => DESK_BUDGET_MS - (Date.now() - started);
+    stageOf(chatId, "desk: look");
+    const looked = await readDesk(() => desk.look(ask), DESK_LOOK_MS);
+    if (!looked || !looked.ok) return { ok: false, why: looked && !looked.ok ? looked.why : "unavailable" };
+    const e = looked.evidence;
+    const req = { kind: e.kind, subject: e.subject, question: question.slice(0, 400), brief: e.brief, voice: deskVoice() };
+    let thought: TgDeskThought | null = null;
+    let by = "floor";
+    if (desk.think && left() > DESK_MODEL_MIN_MS) {
+      stageOf(chatId, "desk: brain");
+      const think = desk.think;
+      thought = await gate.run(chatId, () => think(req), Math.min(DESK_BRAIN_MS, left()));
+      if (thought) by = "brain";
     }
-    const base = {
+    const m = modelNow();
+    if (!thought && m && left() >= DESK_MODEL_MIN_MS) {
+      stageOf(chatId, "desk: model");
+      thought = await thinkWithModel(m, gate, chatId, req, left());
+      if (thought) by = "model";
+    }
+    const admitted = admitThought(thought, e, selfNow()?.name ?? "");
+    // Which kind of read went out, how long it took and, when a model's was
+    // refused, the gate's reason code — never the text, the question or the coin.
+    log(`[tg-groups] desk ${e.kind} read: ${admitted.from === "model" ? by : "floor"}${admitted.refused ? ` (${by} read refused: ${admitted.refused})` : ""} in ${Math.round((Date.now() - started) / 100) / 10}s`);
+    return { ok: true, html: deskCaption(e, admitted.thought, note), read: admitted.thought.read, chart: e.chart, kind: e.kind };
+  };
+
+  /** One desk answer out: a photo, or the caption as a message with no chart. Recorded as its own line. */
+  const deskDeliver = async (
+    chatId: number,
+    composed: { html: string; read: string; chart: Uint8Array | null },
+    o: SpeakOpts,
+  ): Promise<{ chatId: number; messageId?: number } | null> => {
+    stageOf(chatId, "desk: send");
+    const sent = await deliver({
       chatId,
       intent: { kind: "answer", mood: "normal" } as TgIntent,
+      text: composed.read,
       ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
       ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+      ...(o.mention ? { mention: o.mention } : {}),
       bornAtMs: typeof o.bornAtMs === "number" ? o.bornAtMs : clock(),
       followUp: false,
       ownerAddressed: o.ownerAddressed === true,
       ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
       ...(o.miss ? { miss: o.miss } : {}),
-    };
-    stageOf(chatId, "desk: look");
-    const looked = await readDesk(() => desk.look(ask), 15 * SEC);
-    if (!looked || !looked.ok) {
-      const why = looked && !looked.ok ? looked.why : "unavailable";
-      // A NAME NOBODY LISTS was probably not a coin: "thoughts on pizza" gets
-      // the ordinary answer, not "drop the CA".
+      desk: { html: composed.html, photo: composed.chart },
+    });
+    if (sent) recordOwn(sent.chatId, sent.messageId, composed.read.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined);
+    return sent;
+  };
+
+  /** "Working on it": the chart is a few seconds away. */
+  const deskTyping = async (chatId: number, threadId?: number): Promise<void> => {
+    const early = optsNow();
+    if (!early) return;
+    try {
+      await sendChatAction(early, chatId, "upload_photo", threadId);
+    } catch (e) {
+      fail("typing", e);
+    }
+  };
+
+  /**
+   * ANSWER A DESK ASK said to it: the composed read as one reply. A name no
+   * index lists is answered as chatter ("thoughts on pizza"); any other miss
+   * gets a fixed line asking for the CA or a minute, never a guess.
+   */
+  const deskAnswer = async (chatId: number, j: LineJob, ask: TgDeskAsk, o: SpeakOpts, fallback: TgIntent, note?: string): Promise<{ chatId: number; messageId?: number } | null> => {
+    if (!deskNow()) return null;
+    await deskTyping(chatId, o.threadId);
+    const composed = await deskCompose(chatId, ask, j.line.text, note);
+    if (!composed.ok) {
+      const why = composed.why;
       if (why === "not-found" && "query" in ask) {
         log(`[tg-groups] desk coin miss (not-found), answered as chatter`);
         return speak(chatId, fallback, o);
@@ -2208,39 +2293,51 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const v = admitTgLine(line, { agentName: "", kind: "fixed", recentOwn: [] });
       if (!v.ok) return null;
       log(`[tg-groups] desk ${ask.kind} miss (${why})`);
-      const sent = await deliver({ ...base, text: v.text });
+      const sent = await deliver({
+        chatId,
+        intent: { kind: "answer", mood: "normal" } as TgIntent,
+        text: v.text,
+        ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+        ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+        bornAtMs: typeof o.bornAtMs === "number" ? o.bornAtMs : clock(),
+        followUp: false,
+        ownerAddressed: o.ownerAddressed === true,
+        ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+        ...(o.miss ? { miss: o.miss } : {}),
+      });
       if (sent) recordOwn(sent.chatId, sent.messageId, v.text, sent.chatId === chatId ? o.replyTo : undefined);
       return sent;
     }
-    const e = looked.evidence;
-    const req = { kind: e.kind, subject: e.subject, question: j.line.text.slice(0, 400), brief: e.brief, voice: deskVoice() };
-    const started = Date.now();
-    let thought: TgDeskThought | null = null;
-    let by = "floor";
-    if (desk.think) {
-      stageOf(chatId, "desk: brain");
-      const think = desk.think;
-      thought = await gate.run(chatId, () => think(req), 22 * SEC);
-      if (thought) by = "brain";
-    }
-    const m = modelNow();
-    if (!thought && m && Date.now() - started < 12 * SEC) {
-      stageOf(chatId, "desk: model");
-      thought = await thinkWithModel(m, gate, chatId, req, 20 * SEC);
-      if (thought) by = "model";
-    }
-    const admitted = admitThought(thought, e, selfNow()?.name ?? "");
-    // Which kind of read went out and, when a model's was refused, the gate's
-    // reason code — never the text, the question or the coin.
-    log(`[tg-groups] desk ${e.kind} read: ${admitted.from === "model" ? by : "floor"}${admitted.refused ? ` (${by} read refused: ${admitted.refused})` : ""}`);
-    const html = deskCaption(e, admitted.thought);
-    stageOf(chatId, "desk: send");
-    const sent = await deliver({ ...base, text: admitted.thought.read, desk: { html, photo: e.chart } });
+    const sent = await deskDeliver(chatId, composed, o);
     if (!sent) return null;
-    recordOwn(sent.chatId, sent.messageId, admitted.thought.read.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined);
     if (lastDesk.size > 256) lastDesk.delete(lastDesk.keys().next().value!);
     lastDesk.set(sent.chatId, { ask, atMs: clock() });
     return sent;
+  };
+
+  /**
+   * THE COIN FLOW'S READ (coins.ts CoinFlowDeps.read): a posted CA answered
+   * with the chart and the read inside the desk's budget, the quick screen's
+   * verdict as a code-written line under it. False — and the coin flow says
+   * its own line — when the desk is off, the chat has had its share of reads,
+   * or the desk could not answer.
+   */
+  const deskReadCoin = async (chatId: number, address: string, o: CoinReadOpts): Promise<boolean> => {
+    if (!deskNow() || !/^0x[0-9a-fA-F]{40}$/.test(address) || !deskRoom(chatId)) return false;
+    await deskTyping(chatId);
+    const composed = await deskCompose(chatId, { kind: "coin", address }, o.trigger.text, o.note);
+    if (!composed.ok) {
+      log(`[tg-groups] desk coin read for a post missed (${composed.why})`);
+      return false;
+    }
+    const label = o.mention && isUserId(o.mention.id) ? tagLabel(o.mention.name) : "";
+    const sent = await deskDeliver(chatId, composed, {
+      replyTo: o.replyTo,
+      ...(label && o.mention ? { mention: { id: o.mention.id, name: label } } : {}),
+      bornAtMs: o.trigger.atMs,
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+    });
+    return sent !== null;
   };
 
   const requestedFact = async (request: PublicFactRequest, chatId: number): Promise<TgPublicFact> => {

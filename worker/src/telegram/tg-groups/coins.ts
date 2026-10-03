@@ -67,6 +67,13 @@
 
 import type { TgGroupsStore } from "./store";
 import { asksAboutCoin } from "./detect";
+import { quickTake } from "./facts";
+
+/** The quick screen's verdict as the line under a desk read. */
+const screenNote = (kind: CoinKind): string | undefined => {
+  const take = quickTake(kind);
+  return take ? `quick screen: ${take}` : undefined;
+};
 import type {
   CoinKind,
   CoinLook,
@@ -202,6 +209,16 @@ export interface CoinSpeakOpts {
   stillWanted?: () => boolean;
 }
 
+/** Where the desk's read of a posted coin goes, and what code adds to it. */
+export interface CoinReadOpts {
+  replyTo: number;
+  trigger: TgLine;
+  mention?: { id: number; name: string };
+  /** One code-written line under the read: what the quick screen decided. */
+  note?: string;
+  stillWanted?: () => boolean;
+}
+
 export interface CoinFlowDeps {
   store: TgGroupsStore;
   /** The trading side's port, or null while there is none (not wired yet, trading restarting). */
@@ -221,6 +238,15 @@ export interface CoinFlowDeps {
   now: () => number;
   /** One line, never carrying message text, addresses, titles or names. */
   log: (s: string) => void;
+  /**
+   * THE DESK'S CHART AND READ for a posted coin, as one reply (the handler's
+   * market desk). True when it went out. A coin that passes the quick screen
+   * gets this in place of "let me see what this is 👀" — a real answer in
+   * seconds, while the buy call is still with the Brain — and a post that
+   * asked gets it for any Robinhood Chain coin. Absent, or false: the flow's
+   * own line, exactly as before.
+   */
+  read?: (chatId: number, address: string, o: CoinReadOpts) => Promise<boolean>;
   /**
    * Resolves once `ms` have passed: what bounds a look (COIN_FLOW.lookMs).
    * Real time when absent. Injectable so a test can end a look that never
@@ -1116,16 +1142,30 @@ export class CoinFlow {
     // gets: the owner ask while not ready, a nomination once ready. Every
     // other kind is its grounded line either way (asking the owner to switch
     // trencher mode on would not get a thin or a curve coin bought).
+    // A post that ASKED about the coin gets the desk's chart and read, with
+    // the quick screen's verdict under it; an unasked post its one line.
+    const readOr = (note: string | undefined, fallback: () => Promise<boolean>): Promise<boolean> => {
+      const tag = tagSender();
+      return this.readOr(chatId, coin, {
+        replyTo: line.messageId,
+        trigger: line,
+        ...(tag ? { mention: tag } : {}),
+        ...(note ? { note } : {}),
+        stillWanted: () => this.coinsOn() && !gone(),
+      }, gone, fallback);
+    };
     if (look.kind === "held") {
       d.store.rememberCoin(chatId, memo("held", look.name, coin));
       const tag = tagSender();
-      await say(intentOf({ kind: "coin-seen", verdict: "held" }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      const plain = () => say(intentOf({ kind: "coin-seen", verdict: "held" }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      await (m.addressed === true ? readOr(screenNote("held"), plain) : plain());
       return;
     }
     if (look.kind !== "candidate") {
       d.store.rememberCoin(chatId, memo(look.kind, look.name, coin));
       const tag = tagSender();
-      await say(intentOf({ kind: "coin-look", look: look.kind }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      const plain = () => say(intentOf({ kind: "coin-look", look: look.kind }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      await (m.addressed === true ? readOr(screenNote(look.kind), plain) : plain());
       return;
     }
 
@@ -1160,7 +1200,12 @@ export class CoinFlow {
       d.store.rememberCoin(chatId, memo("candidate", look.name, coin));
       const tag = tagSender();
       const k = `${chatId}:${coin}`;
-      const ack = say(intentOf({ kind: "coin-ack" }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      // The read in place of the ack: the chart and what it says now, while
+      // the buy call is with the Brain. The ack when the desk cannot answer.
+      const ack = readOr(
+        "🧠 passes my quick screen — sent to the brain for a buy call, i'll say it here when it lands",
+        () => say(intentOf({ kind: "coin-ack" }), { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName }),
+      );
       this.acks.set(k, ack);
       try {
         await ack;
@@ -1192,6 +1237,13 @@ export class CoinFlow {
     }
     // invalid / not-ready (readiness changed during the look): silence.
     hush("coin-refused");
+  }
+
+  /** The desk's read when the handler wired one and it went out; else `fallback`. Never rejects. */
+  private readOr(chatId: number, address: string, o: CoinReadOpts, gone: () => boolean, fallback: () => Promise<boolean>): Promise<boolean> {
+    const read = this.d.read;
+    if (!read || gone()) return fallback();
+    return read(chatId, address, o).then((ok) => (ok ? true : fallback()), () => fallback());
   }
 
   /**

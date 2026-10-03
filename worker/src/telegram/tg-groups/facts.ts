@@ -107,6 +107,11 @@ const QUICK_TAKE: Partial<Record<CoinLook["kind"], string>> = {
   own: "that isn't a coin for me to research here",
 };
 
+/** The quick screen's verdict on a coin kind, in its own words; undefined for a kind with none. */
+export function quickTake(kind: CoinLook["kind"]): string | undefined {
+  return QUICK_TAKE[kind];
+}
+
 /** A numeric exception is assembled by code, never granted to model-written text. */
 export function publicFactLine(fact: TgPublicFact): string | null {
   if (!fact || typeof fact !== "object") return null;

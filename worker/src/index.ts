@@ -939,7 +939,7 @@ async function main() {
   let tgDeskBuilt: { key: string; port: TgDeskPort } | null = null;
   const tgDesk = (): TgDeskPort => {
     const brain = (process.env.MERRYMEN_TG_GROUPS_BRAIN ?? "").trim() === "1" && cfg.brainUrl && cfg.brainToken
-      ? { url: cfg.brainUrl, token: cfg.brainToken, agentId: active?.agentId ?? "agent", timeoutMs: 22_000 }
+      ? { url: cfg.brainUrl, token: cfg.brainToken, agentId: active?.agentId ?? "agent", timeoutMs: 18_000 }
       : null;
     const key = brain ? `${brain.url}|${brain.token}|${brain.agentId}` : "";
     if (!tgDeskBuilt || tgDeskBuilt.key !== key) tgDeskBuilt = { key, port: createDesk({ brain }) };
