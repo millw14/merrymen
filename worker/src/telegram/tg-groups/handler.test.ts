@@ -478,6 +478,81 @@ describe("membership", () => {
     assert.equal(store.room(CHAT)?.status, "approved");
   });
 
+  it("Unblock: a Leave pressed by mistake is undone, and a stranger's re-add asks the owner again", async () => {
+    make();
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    assert.equal(store.room(CHAT)?.status, "blocked");
+    const asked = tg.sends(OWNER).length;
+
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    // Undecided, not approved: the bot is not in the group, and unblocking is
+    // not the owner asking it in.
+    assert.equal(store.room(CHAT)?.status, "left");
+    assert.match(String(tg.of("editMessageText").at(-1)?.body.text), /Unblocked «frens»/);
+    assert.equal(tg.of("leaveChat").length, 1, "unblocking leaves nothing");
+
+    // A stranger adding it back is no longer undone: the owner is asked.
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(tg.of("leaveChat").length, 1, "not left again");
+    assert.equal(store.room(CHAT)?.status, "pending");
+    assert.equal(tg.sends(OWNER).length, asked + 1, "the owner is asked again");
+  });
+
+  it("Unblock clears the process's own re-leave memory, so a line from the group is not met with a leave", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    // A line proves it is back while blocked: it leaves again, once per process.
+    await said(msg("still here?"));
+    assert.equal(tg.of("leaveChat").length, 2);
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    groups.onMember(member());
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    store.setStatus(CHAT, "blocked");
+    await said(msg("back again"));
+    assert.equal(tg.of("leaveChat").length, 3, "blocked again later, it leaves again");
+  });
+
+  it("Unblock on a group that is not blocked changes nothing", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`));
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.match(String(tg.of("editMessageText").at(-1)?.body.text), /isn't blocked/);
+  });
+
+  it("Unblock from anyone but the owner, in their DM, decides nothing", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`, { fromId: BOB }));
+    await groups.onCallback(press(`tgg:unblock:${CHAT}`, { chatId: CHAT }));
+    assert.equal(store.room(CHAT)?.status, "blocked");
+  });
+
+  it("/groups unblock clears every blocked group and only those", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    store.ensureRoom(OTHER, { title: "strangers", kind: "supergroup" });
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.onCallback(press(`tgg:leave:${OTHER}`));
+    store.ensureRoom(-1003, { title: "kept", kind: "supergroup" });
+    store.setStatus(-1003, "approved");
+
+    await groups.unblockAll(OWNER);
+    assert.equal(store.room(CHAT)?.status, "left");
+    assert.equal(store.room(OTHER)?.status, "left");
+    assert.equal(store.room(-1003)?.status, "approved", "an approved group is untouched");
+    assert.match(tg.texts(OWNER).at(-1) ?? "", /Unblocked «(frens|strangers)», «(frens|strangers)»/);
+
+    await groups.unblockAll(OWNER);
+    assert.match(tg.texts(OWNER).at(-1) ?? "", /Nothing to unblock/);
+  });
+
   it("no answer within 24 h: it leaves on its own", async () => {
     make();
     groups.onMember(member({ fromId: BOB }));
@@ -1933,6 +2008,24 @@ describe("forgetting and the owner's controls", () => {
     assert.equal(edit?.body.message_id, listId);
     assert.match(String(edit?.body.text), /Your Telegram groups/);
     assert.ok(edit?.body.reply_markup, "the buttons stay under a re-rendered list");
+  });
+
+  it("/groups offers Unblock on a blocked group, and says how to clear them all", async () => {
+    make();
+    approveRoom(CHAT, "frens");
+    await groups.onCallback(press(`tgg:leave:${CHAT}`));
+    await groups.groupsCommand(OWNER);
+    const list = tg.sends(OWNER).at(-1);
+    assert.match(String(list?.body.text), /1\. «frens» — you told me to leave/);
+    assert.match(String(list?.body.text), /\/groups unblock/);
+    assert.deepEqual(list?.body.reply_markup, {
+      inline_keyboard: [
+        [
+          { text: "1 · Unblock", callback_data: `tgg:unblock:${CHAT}` },
+          { text: "1 · Forget", callback_data: `tgg:forget:${CHAT}` },
+        ],
+      ],
+    });
   });
 
   it("/groups with none, and with privacy mode on, says so", async () => {

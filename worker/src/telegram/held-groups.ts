@@ -54,11 +54,11 @@ export const HELD_GROUPS_MAX = 100;
 const MAX_READ_BYTES = 256 * 1024;
 
 /**
- * A Stay, Leave or Forget button: what it is for, and the group. The same
+ * A Stay, Leave, Forget or Unblock button: what it is for, and the group. The same
  * pattern as tg-groups/handler.ts CB_RE, which asks with these (a copy, since
  * tg-groups imports nothing from here; held-groups.test.ts holds them equal).
  */
-export const GROUP_PRESS_RE = /^tgg:(stay|leave|forget):(-?\d{1,20})$/;
+export const GROUP_PRESS_RE = /^tgg:(stay|leave|forget|unblock):(-?\d{1,20})$/;
 
 /** A press as kept: no query id, which is long gone by the time the child reads it. */
 export type HeldGroupPress = Pick<TgCallback, "chatId" | "fromId" | "messageId" | "data" | "date">;

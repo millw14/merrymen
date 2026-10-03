@@ -192,7 +192,7 @@ const LRU_MAX = 2_000;
 /** Callback data this file owns. Short on purpose: Telegram caps it at 64 bytes. */
 const CB_PREFIX = "tgg:";
 /** The hold process reads presses by the same pattern (held-groups.ts GROUP_PRESS_RE). */
-const CB_RE = /^tgg:(stay|leave|forget):(-?\d{1,20})$/;
+const CB_RE = /^tgg:(stay|leave|forget|unblock):(-?\d{1,20})$/;
 
 /** Intents that report on a coin already decided: never stale, never blocked by "one reply per message". */
 const FOLLOW_UPS: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>(["coin-bought", "coin-passed", "coin-skipped", "coin-exited"]);
@@ -388,6 +388,12 @@ export interface TgGroups {
   onCallback(cb: TgCallback, o?: { late?: boolean }): Promise<boolean>;
   /** The owner's /groups, in their DM `chatId`. */
   groupsCommand(chatId: number): Promise<void>;
+  /**
+   * The owner's /groups unblock, in their DM `chatId`: every group they told
+   * the bot to leave goes back to undecided, so a Leave pressed by mistake is
+   * not forever. Memory is untouched (Forget is for that).
+   */
+  unblockAll(chatId: number): Promise<void>;
   /**
    * The owner's /forget in a group: that chat's memory and nothing else.
    * `late` (the service's backlog rule): wiped all the same, and nothing is
@@ -2274,10 +2280,29 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const row: InlineKeyboard[number] = [];
       if (r.status === "pending") row.push({ text: `${n} · Stay`, callbackData: `${CB_PREFIX}stay:${r.chatId}` });
       if (r.status === "pending" || r.status === "approved") row.push({ text: `${n} · Leave`, callbackData: `${CB_PREFIX}leave:${r.chatId}` });
+      if (r.status === "blocked") row.push({ text: `${n} · Unblock`, callbackData: `${CB_PREFIX}unblock:${r.chatId}` });
       row.push({ text: `${n} · Forget`, callbackData: `${CB_PREFIX}forget:${r.chatId}` });
       keyboard.push(row);
     });
+    // A Leave pressed by mistake is otherwise forever: a blocked group's every
+    // re-add by someone else is undone, and nothing on this list said how out.
+    if (rooms.some((r) => r.status === "blocked")) {
+      lines.push("", "Pressed Leave by mistake? Unblock lets a group back, or send /groups unblock to clear them all.");
+    }
     return { html: lines.join("\n"), keyboard };
+  };
+
+  /**
+   * BLOCKED BACK TO UNDECIDED — `left`, not `approved`. The bot is not in the
+   * group, and the owner unblocking it is not the owner asking it in: their own
+   * re-add approves it as it always did (onMember), and anyone else's asks them
+   * again, where a blocked room's would have been undone quietly. Memory is not
+   * touched; Forget is for that. `releft` is cleared so a line from the group,
+   * if it is ever back, is not answered with a leave this process remembered.
+   */
+  const unblock = (chatId: number): void => {
+    store.setStatus(chatId, "left");
+    releft.delete(chatId);
   };
 
   /** A /forget or /forgetme just happened: see forgottenSince. `userId` absent is the whole chat. */
@@ -2707,6 +2732,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
             outcome = `👋 I'll stay out of ${title}.`;
           }
           await answer("Done");
+        } else if (what === "unblock") {
+          if (room.status === "blocked") {
+            unblock(chatId);
+            note("ok", "Telegram groups: the owner unblocked a group");
+            outcome = `✅ Unblocked ${title}. Add me back to it and I'll join in.`;
+            await answer("Unblocked");
+          } else {
+            outcome = `${title} isn't blocked.`;
+            await answer("Not blocked");
+          }
         } else {
           markForgotten(chatId);
           store.forgetChat(chatId);
@@ -2741,6 +2776,26 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         if (r.ok && isMsgId(r.messageId)) listings.set(r.messageId, true);
       } catch (e) {
         fail("groups", e);
+      }
+    },
+
+    async unblockAll(chatId: number): Promise<void> {
+      try {
+        const opts = optsNow();
+        if (!opts) return;
+        const blocked = store.rooms().filter((r) => r.status === "blocked");
+        for (const r of blocked) unblock(r.chatId);
+        if (blocked.length > 0) note("ok", `Telegram groups: the owner unblocked ${blocked.length} group(s)`);
+        const names = blocked.map((r) => (r.title ? `«${esc(r.title)}»` : "a group")).join(", ");
+        await sendMessage(
+          opts,
+          chatId,
+          blocked.length === 0
+            ? "Nothing to unblock: you haven't told me to leave any group."
+            : `✅ Unblocked ${names}. Add me back to any of them and I'll join in.`,
+        );
+      } catch (e) {
+        fail("unblock", e);
       }
     },
 
