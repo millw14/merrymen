@@ -9,7 +9,7 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { assertDerivedAccount, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import { userOpGasConfig } from "../../../worker/src/gas";
 import { getRecoveryTicket, relayUrl, redact, type BrowserWallet } from "./recover-client";
-import { invalidatePermissions, KERNEL_REVOCATION_ABI, type PendingRevocation } from "./permission-revocation";
+import { invalidatePermissions, KERNEL_REVOCATION_ABI, readConfirmedRevocationCutoff, type PendingRevocation } from "./permission-revocation";
 import { readRevocationRecord } from "./revocation-journal";
 
 /** The signed operation is public, contains no private key, and survives reloads. */
@@ -33,6 +33,8 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
   const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
   if (!signer) throw new Error("Sign in as this wallet's owner, or unlock its recovery key, to revoke permissions on-chain.");
   const publicClient = createPublicClient({ chain, transport: http() });
+  // Confirmation polls are bounded and cannot reuse a cached pre-receipt head.
+  const confirmationClient = createPublicClient({ chain, cacheTime: 0, transport: http(undefined, { timeout: 2_500, retryCount: 0 }) });
   const entryPoint = getEntryPoint("0.7");
   const sudo = await signerToEcdsaValidator(publicClient, { signer, entryPoint, kernelVersion: KERNEL_V3_3 });
   const account = await createKernelAccount(publicClient, { entryPoint, kernelVersion: KERNEL_V3_3, plugins: { sudo } });
@@ -97,7 +99,7 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
       receipt: async (hash) => {
         try {
           const receipt = await client.getUserOperationReceipt({ hash });
-          return { success: receipt.success, transactionHash: receipt.receipt.transactionHash };
+          return { success: receipt.success, transactionHash: receipt.receipt.transactionHash, blockNumber: receipt.receipt.blockNumber };
         } catch (e) {
           if (e instanceof Error && e.name === "UserOperationReceiptNotFoundError") return null;
           throw e;
@@ -105,9 +107,12 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
       },
       wait: async (hash: Hex) => {
         const receipt = await client.waitForUserOperationReceipt({ hash, timeout: 60_000 });
-        return { success: receipt.success, transactionHash: receipt.receipt.transactionHash };
+        return { success: receipt.success, transactionHash: receipt.receipt.transactionHash, blockNumber: receipt.receipt.blockNumber };
       },
-      readValidNonceFrom: () => publicClient.readContract({ address: account.address, abi: KERNEL_REVOCATION_ABI, functionName: "validNonceFrom" }),
+      readValidNonceFrom: receipt => readConfirmedRevocationCutoff(receipt, {
+        head: () => confirmationClient.getBlockNumber({ cacheTime: 0 }),
+        validNonceFrom: blockNumber => confirmationClient.readContract({ address: account.address, abi: KERNEL_REVOCATION_ABI, functionName: "validNonceFrom", blockNumber }),
+      }),
     });
   } catch (error) {
     throw new Error(`${redact(error, w.ownerKey)} Earlier permissions are not confirmed revoked. Your wallet and recovery access were kept; retry checks saved receipts and can refresh fees for the same revocation.`);

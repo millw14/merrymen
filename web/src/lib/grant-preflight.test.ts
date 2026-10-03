@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { privateKeyToAccount } from "viem/accounts";
-import { type Hex, type LocalAccount } from "viem";
+import { decodeFunctionData, type Hex, type LocalAccount } from "viem";
+import { KernelV3_3AccountAbi } from "@zerodev/sdk";
 import { buildCallPermissions, firstEnableEnvelope, wallShape } from "@merrymen/core";
 import {
   CLASS_FACTORY, CLASS_VAULT, TRENCHER_FACTORY, TRENCHER_VAULT,
@@ -147,5 +148,57 @@ describe("read-only grant renewal preflight", () => {
       const serialized = JSON.parse(Buffer.from(grant.serialized, "base64").toString("utf8"));
       assert.equal(serialized.enableSignature, signed[0]!.signature);
     }, kernel);
+  });
+
+  it("pins renewed signing reads to one head and carries the confirmed revocation cutoff", async () => {
+    const { prepareAgentGrant } = await import("./session");
+    const original = privateKeyToAccount(ownerKey);
+    const signed: number[] = [];
+    const owner: LocalAccount = { ...original, async signTypedData(data) {
+      signed.push((data.message as { nonce: number }).nonce);
+      return original.signTypedData(data);
+    } };
+    const reads: NonNullable<KernelState["reads"]> = [];
+    await withStubChain(ACCOUNT, () => prepareAgentGrant(owner, { ...options, minimumValidationNonce: 9 }), {
+      currentNonce: 9, installedNonce: 0, validNonceFrom: 9, blockNumber: 100n, reads,
+    });
+    assert.deepEqual(signed, [9]);
+    const nonceReads = reads.filter(({ method, params }) => {
+      if (method !== "eth_call") return false;
+      const { to, data } = params[0] as { to: string; data: Hex };
+      if (to.toLowerCase() !== ACCOUNT.toLowerCase()) return false;
+      try {
+        return ["currentNonce", "validationConfig", "validNonceFrom"].includes(decodeFunctionData({ abi: KernelV3_3AccountAbi, data }).functionName);
+      } catch { return false; }
+    });
+    assert.equal(nonceReads.length, 3);
+    assert.ok(nonceReads.every(({ params }) => params[1] === "0x64"), "every nonce read uses the same block");
+    assert.ok(reads.some(({ method, params }) => method === "eth_getCode" && String(params[0]).toLowerCase() === ACCOUNT.toLowerCase() && params[1] === "0x64"));
+  });
+
+  it("does not sign when a later renewal read is older than the confirmed revocation", async () => {
+    const { prepareAgentGrant } = await import("./session");
+    for (const kernel of [
+      { currentNonce: 8, validNonceFrom: 8 },
+      { currentNonce: 9, validNonceFrom: 8 },
+      { currentNonce: 8, validNonceFrom: 9 },
+      { currentNonce: 9, validNonceFrom: 9, undeployed: true },
+    ] satisfies KernelState[]) {
+      const signer = ownerThatMustNotSign();
+      await withStubChain(ACCOUNT, () => assert.rejects(prepareAgentGrant(signer.owner, {
+        ...options, minimumValidationNonce: 9,
+      }), /not caught up with the confirmed revocation.*Nothing was signed/), kernel);
+      assert.equal(signer.calls(), 0);
+    }
+  });
+
+  it("rejects an invalid or unbound revocation cutoff before requesting a signature", async () => {
+    const { prepareAgentGrant } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    for (const minimumValidationNonce of [-1, 0, 1, 1.5, NaN, Infinity, 0x1_0000_0000]) {
+      await assert.rejects(prepareAgentGrant(signer.owner, { ...options, minimumValidationNonce }), /confirmed revocation boundary/);
+    }
+    await assert.rejects(prepareAgentGrant(signer.owner, { ...options, expectAccount: undefined, minimumValidationNonce: 2 }), /confirmed revocation boundary/);
+    assert.equal(signer.calls(), 0);
   });
 });

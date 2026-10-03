@@ -273,7 +273,13 @@ async function prepareGrantCore(
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
   preflightOnly = false,
+  minimumValidationNonce?: number,
 ): Promise<Grant | null> {
+  if (minimumValidationNonce !== undefined &&
+      (!expectAccount || !Number.isInteger(minimumValidationNonce) ||
+       minimumValidationNonce < 2 || minimumValidationNonce > 0xffff_ffff)) {
+    throw new Error("A confirmed revocation boundary requires the existing account and a valid permission nonce. Nothing was signed.");
+  }
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -682,9 +688,16 @@ async function prepareGrantCore(
   // so it never performs that fallback read behind the signing boundary.
   // Read the raw response: viem's getCode normalizes a legitimate "0x" to
   // undefined, making it indistinguishable from a malformed missing result.
-  const code = await publicClient.request({ method: "eth_getCode", params: [account.address, "latest"] });
+  // A renewal's confirmed cutoff must survive the separate signing reads.
+  // Pin these reads to one fresh head and refuse an RPC view that predates it.
+  const nonceBlock = minimumValidationNonce === undefined ? undefined : await publicClient.getBlockNumber({ cacheTime: 0 });
+  const nonceBlockTag = nonceBlock === undefined ? "latest" : `0x${nonceBlock.toString(16)}` as const;
+  const code = await publicClient.request({ method: "eth_getCode", params: [account.address, nonceBlockTag] });
   if (typeof code !== "string" || !/^0x(?:[0-9a-f]{2})*$/i.test(code)) {
     throw new Error("Could not confirm the account's permission nonce. Nothing was signed; try again when the network is available.");
+  }
+  if (minimumValidationNonce !== undefined && code === "0x") {
+    throw new Error("The network has not caught up with the confirmed revocation. Nothing was signed; retry when the account state is available.");
   }
   let validatorNonce = 1;
   let enableData = await getPluginsEnableTypedData({
@@ -697,10 +710,16 @@ async function prepareGrantCore(
   });
   if (code !== "0x") {
     const validationId = (enableData.message as { validationId: `0x${string}` }).validationId;
-    const current = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "currentNonce" });
-    const installed = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "validationConfig", args: [validationId] });
+    const current = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "currentNonce", blockNumber: nonceBlock });
+    const installed = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "validationConfig", args: [validationId], blockNumber: nonceBlock });
     if (!Number.isInteger(current) || !Number.isInteger(installed.nonce) || installed.nonce > current) {
       throw new Error("The account's permission nonce could not be verified. Nothing was signed.");
+    }
+    if (minimumValidationNonce !== undefined) {
+      const cutoff = await publicClient.readContract({ address: account.address, abi: KernelV3_3AccountAbi, functionName: "validNonceFrom", blockNumber: nonceBlock });
+      if (!Number.isInteger(cutoff) || cutoff < minimumValidationNonce || current < minimumValidationNonce) {
+        throw new Error("The network has not caught up with the confirmed revocation. Nothing was signed; retry when the account state is available.");
+      }
     }
     // Kernel v3.3 _enableDigest advances only an identifier already installed
     // at the current generation. This also handles currentNonce=0 correctly.
@@ -822,11 +841,13 @@ async function mintGrant(
   expectAccount?: Address,
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
+  minimumValidationNonce?: number,
 ): Promise<MintedGrant> {
   const previousLocal = localStorage.getItem(STORAGE_KEY);
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
+    false, minimumValidationNonce,
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
 
@@ -1210,6 +1231,8 @@ export interface MintOptions {
    */
   ponsClassVaultFactory?: `0x${string}`;
   trencherFactory?: `0x${string}`;
+  /** Selected account's confirmed revocation cutoff; signing refuses an older RPC view. */
+  minimumValidationNonce?: number;
 }
 
 /**
@@ -1230,7 +1253,7 @@ export async function preflightAgentGrant(owner: LocalAccount, o: MintOptions): 
     { account: owner, binding: "external-owner" },
     o.caps, o.onStatus, o.chainId ?? robinhoodChain.id, o.extraTokens ?? [],
     o.v4AdapterAddress, o.ponsAdapterAddress, undefined, o.expectAccount,
-    o.ponsClassVaultFactory, o.trencherFactory, true,
+    o.ponsClassVaultFactory, o.trencherFactory, true, o.minimumValidationNonce,
   );
 }
 
@@ -1250,6 +1273,8 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    false,
+    o.minimumValidationNonce,
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
   return grant;
@@ -1276,6 +1301,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.minimumValidationNonce,
   );
 }
 
@@ -1311,6 +1337,7 @@ export async function createPrivyOwnedWallet(
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.minimumValidationNonce,
   );
 }
 
@@ -1346,6 +1373,7 @@ export async function restoreAgentWallet(
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.minimumValidationNonce,
   );
 }
 
