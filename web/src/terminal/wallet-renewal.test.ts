@@ -104,7 +104,7 @@ beforeEach(() => {
   mintCalls = 0;
   preflightCalls = 0;
   stopCalls = 0;
-  revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}` });
+  revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 });
   previewOwner = async () => ({ smartAccount: address, owner: address });
   stop = async () => {};
   preflight = async () => {};
@@ -524,7 +524,9 @@ describe("the funded wallet's re-sign control", () => {
     };
     renew = async options => {
       events.push("mint fresh grant");
-      assert.equal(options, checkedOptions, "the reviewed settings are passed to the fresh signing operation");
+      const { minimumValidationNonce, ...reviewed } = options;
+      assert.deepEqual(reviewed, checkedOptions, "the reviewed settings are passed to the fresh signing operation");
+      assert.equal(minimumValidationNonce, 9, "the confirmed revocation cutoff reaches the signer");
       assert.equal(events.at(-2), "revocation confirmed", "nothing signed during preflight can be reused after invalidation");
       return { local: { ...activeGrant, sessionKeyAddress: fixtureAddress(900) }, handoff: { ok: true } };
     };
@@ -537,7 +539,7 @@ describe("the funded wallet's re-sign control", () => {
     await act(async () => { checked.resolve(); });
     assert.deepEqual(events, ["preflight start", "preflight passed", "stop", "revoke requested"]);
     assert.equal(mintCalls, 0, "revocation requested without a confirmed receipt must not mint");
-    await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
+    await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 }); });
     assert.deepEqual(events, ["preflight start", "preflight passed", "stop", "revoke requested", "revocation confirmed", "mint fresh grant"]);
     assert.equal(preflightCalls, 1);
     assert.equal(mintCalls, 1);
@@ -719,6 +721,7 @@ describe("the funded wallet's re-sign control", () => {
     renew = async options => {
       assert.equal(options.chainId, 4663);
       assert.equal(options.expectAccount, address);
+      assert.equal(options.minimumValidationNonce, 3, "signing uses the destination chain's cutoff, not the source's");
       return { local: { ...activeGrant, chainId: 4663, sessionKeyAddress: `0x${"8".repeat(40)}` }, handoff: { ok: true } };
     };
     await ui.render(React.createElement(Wallet));
@@ -738,11 +741,11 @@ describe("the funded wallet's re-sign control", () => {
     assert.deepEqual(revokeWallets.map(w => w.chainId), [46630]);
     assert.equal(mintCalls, 0);
     assert.equal(input.matches(":disabled"), true);
-    await act(async () => { source.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
+    await act(async () => { source.resolve({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 12 }); });
     assert.deepEqual(revokeWallets.map(w => w.chainId), [46630, 4663]);
     assert.equal(mintCalls, 0, "a source receipt alone cannot mint the replacement");
     assert.ok(revokeWallets.every(w => w.smartAccount === address && w.ownerKey === grant.demoOwnerPrivateKey));
-    await act(async () => { destination.resolve({ transactionHash: `0x${"5".repeat(64)}` }); });
+    await act(async () => { destination.resolve({ transactionHash: `0x${"5".repeat(64)}`, validNonceFrom: 3 }); });
     assert.equal(mintCalls, 1);
     assert.deepEqual(restoredKeys, [grant.demoOwnerPrivateKey]);
   });

@@ -77,13 +77,19 @@ const reverted = (data?: Hex): RpcAnswer => ({ error: { code: 3, message: "execu
 /** One JSON-RPC answer from a chain whose Kernel factory deploys to `account`. */
 export interface KernelState {
   currentNonce: number | "unreadable";
+  validNonceFrom?: number | "unreadable";
+  blockNumber?: bigint;
+  undeployed?: boolean;
+  reads?: Array<{ method: string; params: unknown[] }>;
   installedNonce?: number | "unreadable";
   unreadableCode?: boolean;
   v4Code?: Hex | "unreadable";
   v4PoolManager?: Address | "unreadable";
 }
 function answer(account: Address, method: string, params: unknown[], kernel?: KernelState): RpcAnswer {
+  kernel?.reads?.push({ method, params });
   if (method === "eth_chainId") return { result: toHex(robinhoodChain.id) };
+  if (method === "eth_blockNumber") return { result: toHex(kernel?.blockNumber ?? 12_345n) };
   if (method === "eth_getCode") {
     const target = String(params[0]).toLowerCase();
     if (V4_ADAPTERS.has(target)) {
@@ -91,7 +97,7 @@ function answer(account: Address, method: string, params: unknown[], kernel?: Ke
     }
     if (target === UNISWAP.v4PoolManager.toLowerCase()) return { result: "0x6000" };
     if (kernel && String(params[0]).toLowerCase() === account.toLowerCase()) {
-      return kernel.unreadableCode ? reverted() : { result: "0x6000" };
+      return kernel.unreadableCode ? reverted() : { result: kernel.undeployed ? "0x" : "0x6000" };
     }
     return { result: String(params[0]).toLowerCase() === TRENCHER_FACTORY ? TRENCHER_CODE : "0x" };
   }
@@ -107,6 +113,9 @@ function answer(account: Address, method: string, params: unknown[], kernel?: Ke
         const call = decodeFunctionData({ abi: KernelV3_3AccountAbi, data });
         if (call.functionName === "currentNonce") return kernel.currentNonce === "unreadable" ? reverted() : {
           result: encodeFunctionResult({ abi: KernelV3_3AccountAbi, functionName: "currentNonce", result: kernel.currentNonce }),
+        };
+        if (call.functionName === "validNonceFrom") return kernel.validNonceFrom === "unreadable" ? reverted() : {
+          result: encodeFunctionResult({ abi: KernelV3_3AccountAbi, functionName: "validNonceFrom", result: kernel.validNonceFrom ?? 0 }),
         };
         if (call.functionName === "validationConfig") return kernel.installedNonce === "unreadable" ? reverted() : {
           result: encodeFunctionResult({ abi: KernelV3_3AccountAbi, functionName: "validationConfig", result: { nonce: kernel.installedNonce ?? 0, hook: "0x0000000000000000000000000000000000000000" } }),

@@ -925,8 +925,8 @@ export default function GrantPage() {
       if (previousGrant && previousGrant.chainId !== selectedChain) {
         await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: previousGrant.chainId }, setStatus);
       }
-      await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: selectedChain }, setStatus);
-      const { local: g, handoff } = await restoreAgentWallet(ownerKey, options);
+      const revocation = await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: selectedChain }, setStatus);
+      const { local: g, handoff } = await restoreAgentWallet(ownerKey, { ...options, minimumValidationNonce: revocation.validNonceFrom });
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
       localStorage.setItem(BACKUP_KEY, "1");
@@ -1144,16 +1144,16 @@ export default function GrantPage() {
       setReplacementRequired(true);
       await stopAgent(session?.hosted ? session.address : undefined);
       stopped = true;
-      await revokeFromBrowser(ownerWallet(), setStatus);
-      if (chainId !== grant.chainId) await revokeFromBrowser(ownerWallet(chainId), setStatus);
+      let revocation = await revokeFromBrowser(ownerWallet(), setStatus);
+      if (chainId !== grant.chainId) revocation = await revokeFromBrowser(ownerWallet(chainId), setStatus);
       revoked = true;
       // TWO OWNERS, ONE CONTROL. Everything above — the fresh settings, the
       // selected chain, the current caps, the adapter verification — is shared;
       // only where the signature comes from differs.
       const { local: g, handoff } =
         resignBy === "privy"
-          ? await createPrivyOwnedWallet(privyOwner!.account, privyOwner!.did, options)
-          : await restoreAgentWallet(grant.demoOwnerPrivateKey as `0x${string}`, options);
+          ? await createPrivyOwnedWallet(privyOwner!.account, privyOwner!.did, { ...options, minimumValidationNonce: revocation.validNonceFrom })
+          : await restoreAgentWallet(grant.demoOwnerPrivateKey as `0x${string}`, { ...options, minimumValidationNonce: revocation.validNonceFrom });
       setGrant(g);
       // Same correction as create/restore: report what the server said, so a
       // renewed key that the server refused doesn't read as a renewed agent.
