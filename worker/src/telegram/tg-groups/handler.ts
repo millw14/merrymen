@@ -1713,6 +1713,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     landedOn.deleteWhere((k) => k.startsWith(prefix));
     coinMissed.deleteWhere((k) => k.startsWith(prefix));
     askedIn.deleteWhere((k) => k.startsWith(prefix));
+    lastDesk.delete(chatId);
   };
 
   // ─── The memory pass ─────────────────────────────────────────────────────
@@ -2023,6 +2024,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         })());
         return null;
       }
+      if (!request && dec.mood !== "private-ask" && !isInjection(j.line.text)
+        && deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "discussion") {
+        const sent = await deskClarify(chatId, replyOpts, j);
+        if (!sent) { releaseReply(chatId, messageId); return whyLost(); }
+        return null;
+      }
       const wantedFact = request || (context && coinQuestion);
       // Slow reads use a detached lane: another line, the owner's commands
       // and this chat's subsequent questions continue while evidence loads.
@@ -2203,7 +2210,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const room = freshView(stored, clock());
     let id = j.line.replyTo;
     const seen = new Set<number>();
-    for (let depth = 0; isMsgId(id) && depth < 4; depth++) {
+    for (let depth = 0; isMsgId(id) && depth < 8; depth++) {
       if (seen.has(id)) break;
       seen.add(id);
       const line = room.lines.find((l) => l.messageId === id);
@@ -2225,7 +2232,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * market is the market; a bare "do a quick analysis" or "wdyt" binds to the
    * coin it replies under, then to a desk ask up the reply chain, then to what
    * this chat last asked within the quarter hour, else the market. A "why"
-   * under a coin carries its recorded public outcome beneath the current read. Coin asks honour the coins switch.
+   * under a coin carries its recorded public outcome beneath the current read.
+   * Story questions bind only to coins; rewrites can bind to either kind of
+   * read. With no subject, discussion requests ask for one. Coin asks honour
+   * the coins switch.
    */
   /**
    * The code-written line under a read about a coin this chat remembers: the
@@ -2246,13 +2256,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // "why" under a coin is a desk ask too: the chart and the read, with the
     // recorded reason under it (deskNoteFor) — not a one-line snapshot.
     const complaint = j.addressed !== null && /\b(?:vibes|asked you|asked a question|answer|chart|analysis)\b/iu.test(j.line.text) && /\b(?:just|nothing|not|deal|why|how|asked|single|entire)\b|[?？]/iu.test(j.line.text);
-    const bare = intent?.kind === "analysis" || (!intent && context !== null && coinQuestion) || complaint;
+    const discussion = intent?.kind === "discussion";
+    const lore = discussion && intent.topic === "lore";
+    const bare = intent?.kind === "analysis" || discussion || (!intent && context !== null && coinQuestion) || complaint;
     if (!bare) return null;
     if (context) return coinFactsOn() ? { kind: "coin", address: context.address } : null;
     const chained = repliedDesk(j);
-    if (chained) return chained;
+    if (chained) return !lore || chained.kind === "coin" ? chained : null;
     const prev = lastDesk.get(j.msg.chatId);
-    if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return prev.ask;
+    if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return !lore || prev.ask.kind === "coin" ? prev.ask : null;
+    if (discussion) return null;
     return { kind: "market" };
   };
 
@@ -2320,7 +2333,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const looked = await readDesk(() => desk.look(ask, { timeoutMs: lookMs }), lookMs);
     if (!looked || !looked.ok) return { ok: false, why: looked && !looked.ok ? looked.why : "unavailable" };
     const e = looked.evidence;
-    const req = { kind: e.kind, subject: e.subject, question: question.slice(0, 400), brief: e.brief, voice: deskVoice() };
+    const req = { kind: e.kind, subject: e.subject, question: question.slice(0, 400), brief: e.brief, voice: deskVoice(),
+      ...(e.lore ? { lore: { description: e.lore.description, source: e.lore.source, ...(e.lore.name ? { name: e.lore.name } : {}) } } : {}) };
     let thought: TgDeskThought | null = null;
     let by = "floor";
     if (desk.think && left() > DESK_MODEL_MIN_MS) {
@@ -2394,6 +2408,23 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
       ...(o.miss ? { miss: o.miss } : {}),
       ...(o.accountAnswer ? { accountAnswer: o.accountAnswer } : {}),
+    });
+    if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    return sent;
+  };
+
+  /** No subject is evidence too: ask once instead of guessing a coin or inventing its story. */
+  const deskClarify = async (chatId: number, o: SpeakOpts, j: LineJob): Promise<{ chatId: number; messageId?: number } | null> => {
+    const text = "which coin or read do you mean? reply to it, or send the coin's name or address so i can explain it properly.";
+    const sent = await deliver({
+      chatId, intent: { kind: "answer", mood: "normal" }, text,
+      ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+      ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+      bornAtMs: j.bornAtMs, replyByMs: j.bornAtMs + RESEARCH_REPLY_MS,
+      followUp: false, ownerAddressed: o.ownerAddressed === true,
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      ...(o.miss ? { miss: o.miss } : {}),
+      accountAnswer: accountResearchAnswer(j.line, j.seenAtMs),
     });
     if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
     return sent;

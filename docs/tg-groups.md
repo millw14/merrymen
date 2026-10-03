@@ -410,6 +410,12 @@ one-liner from a model that was given no data.
   under, else a desk ask up the reply chain, else what this chat last asked
   within 15 minutes, else the market. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
+* a coin's story or background ("what's RHOOKS about", "what's its lore"),
+  or a request to explain the previous read more clearly ("not clean enough",
+  "make it simpler"). These follow the coin or desk reply chain before the
+  recent chat subject. Without a subject they ask which coin, never default
+  to an unrelated market read. A lore follow-up is read-only and cannot
+  nominate a token for trading. Chat-wide forgetting clears this subject.
 
 Concurrent reads retain the subject of the latest received question, even
 when an older lookup finishes later. The follow-up lifetime starts at receipt.
@@ -462,6 +468,25 @@ ticker the group gate would not let the agent say ("scam.io", a slur) is
 printed as "this coin" or "unnamed" — in the brief, the read, the header and
 the chart alike. The deployer's free-text coin name never enters a brief.
 
+Once the exact contract is resolved, an optional background read uses that
+Robinhood contract's published metadata: the existing Pons getter through the
+governed mainnet read client, or GeckoTerminal's token-info endpoint. Both
+queue within the remaining ten-second lookup allowance, with background taking
+priority and a reserve for rendering. Each actual indexed HTTP request is
+bounded at three seconds. The Pons getter uses the governed RPC client and
+stops contributing after three seconds; a late result is ignored. Fleet pacing
+cannot extend the lookup.
+A completed description survives a slow chart, and a completed chart survives
+missing metadata. No project website is fetched and no extra paid provider is
+required. Descriptions are bounded, sanitized, quoted and linked to their
+contract-specific source. They are publisher claims, not verified utility,
+origin, affiliation or trading safety. Without a usable description the reply
+says that the story could not be verified; it never invents lore from a name.
+These claims are kept separate from the measured brief, and their numbers
+never authorize financial figures in a generated read. Brain receives only
+the description, published name and source label, without profile URLs,
+contract identity or owner data.
+
 **The read.** From the brief, in this order:
 
 1. Brain's `POST /v1/analyze` — its deep model at medium reasoning effort,
@@ -481,8 +506,11 @@ do not wait behind ordinary chatter, and fresh CA reads do not wait behind
 other coin posts. Non-owner unasked reads retain a concurrency cap; a full
 allowance gets a bounded busy answer. Cosmetic typing never delays a research
 answer. The index lookup gets at most 10 s of what remains; candles are
-optional and bounded at 3 s, PNG rendering at 1.5 s. Valid pool data survives
-either timing out. Brain and the group's model consume only the remaining
+optional alongside background. Both can wait for the shared fleet quota within
+the lookup allowance; indexed HTTP requests and the Pons result wait each get
+at most 3 s. PNG
+rendering is bounded at 1.5 s.
+Valid pool data survives either timing out. Brain and the group's model consume only the remaining
 composition time; otherwise the measured code read is used. Telegram calls,
 including uploads and safe formatting retries, share the original deadline.
 A transport timeout is an unknown delivery outcome and is never blindly
@@ -507,10 +535,19 @@ never the text.
 
 **The answer** is one photo reply: the chart (candles, EMA20/50, the nearest
 levels and volume; or the 24h board), with a caption built by code — the
-public header, the read, what to watch, what would flip it, the stance and
-"GeckoTerminal HH:MM UTC". It is cut to 1000 UTF-16 units (under Telegram's
+short ticker title, attributed project description, a conversational take,
+one compact market context line, the next confirmation to watch, the public
+screen or trade verdict, and the stance with "GeckoTerminal HH:MM UTC".
+The take interprets the story and measured evidence without repeating the
+biography or every chart statistic. The model is forbidden from adding origin,
+affiliation or social-activity claims; common claim patterns also trigger a
+code fallback. This does not establish that arbitrary generated prose is true.
+With no candles, the fallback explains
+the observed flow and uncertainty rather than inventing indicators or levels.
+It is cut to 1000 UTF-16 units (under Telegram's
 1024) by whole parts and whole sentences; a single sentence too long to fit
-is replaced by the code's read, so the source line is never lost. With no chart, the same text goes as a message. A
+is replaced by the code's read, so the description's attribution, public
+verdict and source line are never lost. With no chart, the same text goes as a message. A
 coin it cannot find, two coins it cannot tell apart, or a feed it cannot read
 gets a fixed line asking for the CA or a minute — never a guess.
 

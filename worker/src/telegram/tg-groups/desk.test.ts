@@ -68,6 +68,21 @@ describe("desk asks", () => {
     ["shogun what's pumping", { kind: "market" }],
     ["shogun give me levels on cashcat", { kind: "coin", name: "cashcat" }],
     ["cashcat chart?", { kind: "coin", name: "cashcat" }],
+    ["shogun what is CASHCAT about?", { kind: "coin", name: "cashcat" }],
+    ["shogun explain the coin cashcat", { kind: "coin", name: "cashcat" }],
+    ["what's the lore of the token CASHCAT?", { kind: "coin", name: "cashcat" }],
+    ["what is it about?", { kind: "discussion", topic: "lore" }],
+    ["what is the coin about?", { kind: "discussion", topic: "lore" }],
+    ["what's the lore?", { kind: "discussion", topic: "lore" }],
+    ["what's the story behind it?", { kind: "discussion", topic: "lore" }],
+    ["tell me the origin", { kind: "discussion", topic: "lore" }],
+    ["explain the narrative", { kind: "discussion", topic: "lore" }],
+    ["tell me more about it", { kind: "discussion", topic: "lore" }],
+    ["talk about it a bit", { kind: "discussion", topic: "lore" }],
+    ["what's the lore please?", { kind: "discussion", topic: "lore" }],
+    ["hmm, better, but not clean enough", { kind: "discussion", topic: "explanation" }],
+    ["make it cleaner please", { kind: "discussion", topic: "explanation" }],
+    ["can you explain it in simple words?", { kind: "discussion", topic: "explanation" }],
     // Not desk asks: people, small talk, a statement, a song.
     ["how is bob doing", null],
     ["check out this song", null],
@@ -89,6 +104,12 @@ describe("desk asks", () => {
     ["how is grandma looking", null],
     ["how is cashcat looking", null],
     ["data entry is boring", null],
+    ["what's the story of star wars?", null],
+    ["where did bob come from?", null],
+    ["what's my family's origin?", null],
+    ["my room is not clean enough", null],
+    ["pine make my kitchen cleaner please", null],
+    ["the movie's narrative is too messy", null],
     ["cheers ta", null],
     // Telling it not to act on a coin is never a desk ask.
     ["don't touch cashcat", null],
@@ -204,14 +225,14 @@ describe("thoughts and captions", () => {
 
   it("builds an escaped caption under Telegram's cap, cutting whole parts", () => {
     const html = deskCaption(EVIDENCE, FLOOR);
-    assert.match(html, /^<b>CASHCAT \/ WETH · 1h · \$0\.1554 \(-11\.8% 24h\)<\/b>\n/);
-    assert.match(html, /👀 watch: /);
-    assert.match(html, /🟠 cautious · GeckoTerminal 12:00 UTC$/);
+    assert.match(html, /^<b>CASHCAT<\/b>\n/);
+    assert.match(html, /Next: An hourly close/);
+    assert.match(html, /Cautious · GeckoTerminal 12:00 UTC$/);
     const long: TgDeskThought = { ...FLOOR, read: Array.from({ length: 80 }, () => "rsi 37.5 is weak.").join(" ") };
     const cut = deskCaption(EVIDENCE, long);
     assert.ok(Array.from(cut.replace(/<[^>]+>/g, "")).length <= CAPTION_MAX);
     assert.ok(!/wrong if/.test(cut), "the invalidation goes first");
-    assert.match(deskCaption({ ...EVIDENCE, header: ["<script> · 1h"] }, FLOOR), /&lt;script&gt;/);
+    assert.doesNotMatch(deskCaption({ ...EVIDENCE, header: ["<script> · 1h"] }, FLOOR), /<script>/, "unused index labels cannot become HTML");
   });
 
   it("never loses the source line: one sentence too long to fit becomes the code's read", () => {
@@ -226,7 +247,7 @@ describe("thoughts and captions", () => {
     assert.equal(safeSubject("BUY"), "this coin");
     const html = deskCaption({ ...EVIDENCE, subject: "BUY", header: ["BUY / WETH · 1h"] }, { ...FLOOR, read: "buy is weak here." });
     assert.doesNotMatch(html, /\bBUY\b/);
-    assert.match(html, /this coin \/ WETH/);
+    assert.match(html, /<b>this coin<\/b>/);
   });
 
   it("fences the asker's words so they cannot close the question", () => {
@@ -455,7 +476,7 @@ describe("the desk lane", () => {
     await said(msg("pine thoughts on cashcat?"));
     const caption = String(tg.of("sendPhoto")[0]?.body.caption);
     assert.match(caption, /keeps bleeding under the ema20/);
-    assert.match(caption, /👀 watch: a reclaim of 0\.1605/);
+    assert.match(caption, /Next: A reclaim of 0\.1605/);
     assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: model in /.test(l)));
     assert.equal(prompts.length, 1);
     assert.match(prompts[0]!, /EVIDENCE BRIEF:\nCOIN: CASHCAT/);
@@ -488,6 +509,17 @@ describe("the desk lane", () => {
     assert.equal(prompts.length, 0, "the group model is not asked when Brain answered");
     assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: brain in /.test(l)));
     assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /sellers in control/);
+  });
+
+  it("passes only the sourced description to Brain while keeping profile links and timestamps in the caption evidence", async () => {
+    const lore = { name: "Cashcat", description: "A cat-themed community coin.", source: "GeckoTerminal token profile",
+      url: "https://www.geckoterminal.com/robinhood/tokens/0x1234567890abcdef1234567890abcdef12345678", observedAtMs: clock };
+    desk!.outcome = { ok: true, evidence: { ...EVIDENCE, lore } };
+    desk = Object.assign(desk!, { think: async (req: TgDeskThinkRequest) => { desk!.thinks.push(req); return FLOOR; } });
+    make();
+    await said(msg("pine what is the coin cashcat about?"));
+    assert.deepEqual(desk.thinks[0]!.lore, { name: lore.name, description: lore.description, source: lore.source });
+    assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /cat-themed community coin/);
   });
 
   it("asks for the CA when two coins share the name", async () => {
@@ -564,7 +596,7 @@ describe("the desk lane", () => {
     assert.equal(photos.length, 1);
     const caption = String(photos[0]!.body.caption);
     assert.match(caption, /cashcat is in a downtrend on the 1h/);
-    assert.match(caption, /it clears the quick screen; safe entry checks and a trade review are still required/);
+    assert.match(caption, /It passes the initial screen; a trade still needs safety checks and review/);
     assert.match(caption, /GeckoTerminal 12:00 UTC$/);
     assert.equal(tg.of("sendMessage").length, 0, "no separate ack");
     assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: floor in \d/.test(l)));
@@ -578,12 +610,12 @@ describe("the desk lane", () => {
     await said(post);
     const first = tg.of("sendPhoto");
     assert.equal(first.length, 1);
-    assert.match(String(first[0]!.body.caption), /quick screen: there isn't enough recent activity for me/);
+    assert.match(String(first[0]!.body.caption), /There isn't enough recent activity for me/);
     const answerId = 5_000;
     await said(msg("pine why", { replyTo: { messageId: answerId, fromId: BOT.id, text: "x" } } as Partial<TgMessage>));
     const second = tg.of("sendPhoto");
     assert.equal(second.length, 2, "'why' gets the chart and read, not a one-line snapshot");
-    assert.match(String(second[1]!.body.caption), /quick screen: there isn't enough recent activity for me/);
+    assert.match(String(second[1]!.body.caption), /There isn't enough recent activity for me/);
     assert.deepEqual(desk!.asks.map((a) => ("address" in a ? a.address : "?")), [CA, CA]);
   });
 
@@ -609,7 +641,7 @@ describe("the desk lane", () => {
       await said(msg("pine why", { replyTo: { messageId: original.messageId!, fromId: ANN, text: address } }));
       const caption = String(tg.of("sendPhoto").at(-1)?.body.caption);
       assert.match(caption, /liquidity was thin/);
-      assert.match(caption, verdict === "skipped" ? /no filled buy was recorded/ : /expired without a confirmed buy/);
+      assert.match(caption, verdict === "skipped" ? /no filled buy was recorded/i : /expired without a confirmed buy/i);
       assert.doesNotMatch(caption, /sent.*brain|let me see|still checking/i);
       assert.equal(store.coin(CHAT, address)!.decisionId, `saved-${verdict}`);
     }
@@ -944,6 +976,106 @@ describe("the desk lane", () => {
     assert.equal(tg.of("sendPhoto").length, 2);
     assert.deepEqual(desk!.asks, [{ kind: "market" }, { kind: "market" }]);
     assert.equal(tg.of("sendMessage").length, 0, "no roast or vague banter replaces the analysis");
+  });
+
+  it("answers the screenshot's 'not clean enough' follow-up about the same coin in its forum topic", async () => {
+    const address = "0xe07119cdd031e8a2043c3c9c4f9c56f34e54a81e";
+    let nominations = 0;
+    const port = new FakePort();
+    port.nominate = () => { nominations++; return { ok: true }; };
+    make({ port: () => port });
+    await said(msg(address, { isTopicMessage: true, messageThreadId: 19 }));
+    clock += 16_000;
+    await said(msg("hmm, better, but not clean enough", {
+      replyTo: { messageId: 5_000, fromId: BOT.id, text: FLOOR.read },
+      isTopicMessage: true, messageThreadId: 19,
+    }));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", address }, { kind: "coin", address }]);
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.equal(tg.of("sendPhoto")[1]!.body.message_thread_id, "19");
+    assert.equal(tg.of("sendMessage").length, 0, "no 'fair enough, it's a mess' banter");
+    assert.equal(nominations, 1, "a rewrite never renominates the coin");
+  });
+
+  it("binds lore, origin and narrative questions to the remembered read", async () => {
+    make();
+    await said(msg("pine thoughts on cashcat?", { fromId: OWNER, fromFirstName: "Owner" }));
+    for (const text of ["what is it about?", "what's the lore?", "where did it come from?", "explain the narrative"]) {
+      clock += 16_000;
+      await said(msg(`pine ${text}`, { fromId: OWNER, fromFirstName: "Owner" }));
+    }
+    assert.deepEqual(desk!.asks, Array.from({ length: 5 }, () => ({ kind: "coin", query: "cashcat" })));
+    assert.equal(tg.of("sendPhoto").length, 5);
+    assert.equal(tg.of("sendMessage").length, 0);
+  });
+
+  it("researches the story under an unprocessed CA without admitting it as a trade nomination", async () => {
+    const address = "0xe07119cdd031e8a2043c3c9c4f9c56f34e54a81e";
+    let nominations = 0;
+    const port = new FakePort();
+    port.nominate = () => { nominations++; return { ok: true }; };
+    make({ port: () => port });
+    store.addLine(CHAT, { messageId: 80, fromId: ANN, name: "Ann", text: address, atMs: clock });
+    await said(msg("pine what is it about?", { replyTo: { messageId: 80, fromId: ANN, text: address } }));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", address }]);
+    assert.equal(nominations, 0, "asking for a coin's story is read-only");
+  });
+
+  it("a lore question under an older read keeps its quoted subject ahead of the newer chat subject", async () => {
+    make();
+    await said(msg("pine thoughts on cashcat?", { fromId: OWNER, fromFirstName: "Owner" }));
+    for (const answerId of [5_000, 5_001]) {
+      clock += 16_000;
+      await said(msg("what is it about?", { fromId: OWNER, fromFirstName: "Owner",
+        replyTo: { messageId: answerId, fromId: BOT.id, text: FLOOR.read } }));
+    }
+    clock += 16_000;
+    await said(msg("pine thoughts on othercoin?", { fromId: OWNER, fromFirstName: "Owner" }));
+    clock += 16_000;
+    await said(msg("what's the story behind it?", {
+      fromId: OWNER, fromFirstName: "Owner",
+      replyTo: { messageId: 5_002, fromId: BOT.id, text: FLOOR.read },
+    }));
+    assert.deepEqual(desk!.asks, [
+      { kind: "coin", query: "cashcat" }, { kind: "coin", query: "cashcat" }, { kind: "coin", query: "cashcat" },
+      { kind: "coin", query: "othercoin" }, { kind: "coin", query: "cashcat" },
+    ]);
+  });
+
+  it("clarifies a subject-less lore or rewrite ask without a paid lookup or a guessed market", async () => {
+    make();
+    for (const text of ["pine what's the lore?", "pine make it cleaner please"]) {
+      const before = clock;
+      await said(msg(text));
+      assert.ok(clock - before <= 30_000);
+      clock += 16_000;
+    }
+    assert.equal(desk!.asks.length, 0);
+    assert.equal(tg.of("sendPhoto").length, 0);
+    assert.equal(tg.of("sendMessage").length, 2);
+    assert.ok(tg.of("sendMessage").every((call) => /which coin or read do you mean/.test(String(call.body.text))));
+    assert.equal(store.person(CHAT, ANN)!.answers!.count, 2);
+  });
+
+  it("a chat-wide forget clears the implicit subject before a lore follow-up", async () => {
+    make();
+    await said(msg("pine thoughts on cashcat?"));
+    await groups.forgetChat(CHAT, undefined, { late: true });
+    clock += 16_000;
+    await said(msg("pine what's the lore?"));
+    assert.equal(desk!.asks.length, 1);
+    assert.equal(tg.of("sendPhoto").length, 1);
+    assert.match(String(tg.of("sendMessage")[0]?.body.text), /which coin or read do you mean/);
+  });
+
+  it("does not turn unrelated personal stories or cleaning complaints into coin research", async () => {
+    make();
+    await said(msg("pine thoughts on cashcat?"));
+    for (const text of ["pine my room is not clean enough", "pine what's the story of star wars?", "pine where did bob come from?"]) {
+      clock += 16_000;
+      await said(msg(text, { replyTo: { messageId: 5_000, fromId: BOT.id, text: FLOOR.read } }));
+    }
+    assert.equal(desk!.asks.length, 1);
   });
 
   it("is not reached by a line not said to it", async () => {
