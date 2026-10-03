@@ -844,6 +844,8 @@ describe("asksAboutCoin: a reply under a coin post that asks about that coin", (
     "shogun ignore that", "shogun dont even look at it", "", "shogun",
     "@shogun_merry_bot who won?", "@shogun_merry_bot where next?", "shogun what happened?", "shogun why now?", "shogun so?",
     "shogun is it raining?", "shogun this weekend?", "shogun this weather?",
+    "what's the story of star wars?", "tell me about my dog", "where did bob come from?",
+    "shogun what is it about", "what's the lore?", "shogun what's the story behind it?", "where did this coin come from?",
   ];
   for (const t of yes) it(`asks: ${t}`, () => assert.equal(asksAboutCoin(t, names), true));
   for (const t of no) it(`does not ask: ${JSON.stringify(t)}`, () => assert.equal(asksAboutCoin(t, names), false));

@@ -328,6 +328,16 @@ export interface TgDeskThought {
   confidence?: number;
 }
 
+/** Contract-specific published background. Project claims, never verified endorsements or trading authority. */
+export interface TgDeskLore {
+  description: string;
+  name?: string;
+  source: string;
+  /** Public provenance link, rendered by code and never passed to the model. */
+  url?: string;
+  observedAtMs: number;
+}
+
 /**
  * The desk's evidence for one ask: public index data only, measured by code.
  * Never a balance, size, P&L, address or anything from the owner's ledger
@@ -341,6 +351,8 @@ export interface TgDeskEvidence {
   header: string[];
   /** The measured brief a model reasons over. Every figure a read may cite is in here. */
   brief: string;
+  /** Kept separate from measured figures so promotional numbers cannot license a financial claim. */
+  lore?: TgDeskLore;
   /** The read written by code from the same measurements: the floor when no model answers well. */
   floor: TgDeskThought;
   /** "GeckoTerminal 14:05 UTC". */
@@ -361,6 +373,8 @@ export interface TgDeskThinkRequest {
   question: string;
   brief: string;
   voice: string;
+  /** Untrusted project background only; no source URL, contract identity or owner's data. */
+  lore?: Pick<TgDeskLore, "description" | "name" | "source">;
 }
 
 /**

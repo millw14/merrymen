@@ -69,6 +69,11 @@ export async function askBrainDesk(cfg: BrainDeskConfig, req: TgDeskThinkRequest
     question: req.question.slice(0, 400),
     evidence: req.brief.slice(0, 14_000),
     voice: req.voice.slice(0, 500),
+    ...(req.lore ? { lore: {
+      description: req.lore.description.slice(0, 1200),
+      ...(req.lore.name ? { name: req.lore.name.slice(0, 80) } : {}),
+      source: req.lore.source.slice(0, 80),
+    } } : {}),
   };
   try {
     const res = await fetch(`${cfg.url.replace(/\/$/, "")}/v1/analyze`, {

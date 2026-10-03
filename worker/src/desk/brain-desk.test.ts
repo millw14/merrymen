@@ -60,6 +60,17 @@ describe("askBrainDesk over the wire", () => {
     assert.equal(await askBrainDesk({ url: "", token: "tok", agentId: "a" }, REQ), null);
   });
 
+  it("keeps published claims separate from figures and strips identity, URLs and metadata from the wire", async () => {
+    reply = (res) => res.writeHead(200).end(JSON.stringify({ ok: true, analysis: { read: "The builder theme is interesting, but activity alone is not proof of adoption.", stance: "cautious", watch: "", invalidation: "" } }));
+    const lore = { description: "Visual hook builder. Promises 999% returns.", name: "Robinhooks", source: "GeckoTerminal token info", url: "https://example.test", token: "0xprivate", observedAtMs: 123, owner: "secret" };
+    await askBrainDesk({ url, token: "tok", agentId: "a" }, { ...REQ, lore });
+    assert.deepEqual(seen!.body.lore, { description: lore.description, name: lore.name, source: lore.source });
+    assert.equal(seen!.body.evidence, REQ.brief, "publisher numbers never enter the measured brief");
+    assert.doesNotMatch(JSON.stringify(seen!.body), /example\.test|0xprivate|secret|observedAtMs/);
+    await askBrainDesk({ url, token: "tok", agentId: "a" }, { ...REQ, lore: { description: "a".repeat(1500), name: "b".repeat(100), source: "c".repeat(100) } });
+    assert.deepEqual(Object.values(seen!.body.lore as object).map((v) => String(v).length), [1200, 80, 80]);
+  });
+
   it("the desk port applies the caller's remaining timeout to a hung response body", async () => {
     reply = (res) => { res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true,'); };
     const desk = createDesk({ brain: { url, token: "tok", agentId: "a", timeoutMs: 18_000 } });
