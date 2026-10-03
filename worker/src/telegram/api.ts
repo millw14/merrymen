@@ -1344,7 +1344,8 @@ export async function sendPhotoBytes(
   if (!SENDABLE_TOKEN.test(opts.token)) return { ok: false, reason: "not a bot token (it has characters no Telegram token has)" };
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
-  const options = sendOptions(extra);
+  // A photo has no link preview: sendPhoto takes no link_preview_options.
+  const { link_preview_options: _preview, ...options } = sendOptions(extra);
   const attempt = async (text: string, html: boolean): Promise<SendResult & { entityRefused?: boolean }> => {
     const { signal, disarm } = deadline(Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
     try {
