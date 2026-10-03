@@ -85,8 +85,30 @@ export interface ExecutionResult {
    * price belongs to the day.
    */
   gasUnits: bigint;
+  /** Payer proved by the settled operation, rather than mutable worker settings. */
+  gasPayer?: "owner" | "sponsor";
   /** Block the operation landed in — an anchor for anyone re-deriving this later. */
   blockNumber: bigint;
+}
+
+export interface UserOpGasProof {
+  txHash: `0x${string}`;
+  gasWei: bigint;
+  gasUnits: bigint;
+  gasPayer: "owner" | "sponsor";
+}
+
+/** Bundled transaction gas is not proof of one operation's installation expense. */
+export function perOperationGasProof(receipt: {
+  actualGasCost?: unknown; actualGasUsed?: unknown; paymaster?: unknown;
+  receipt: { transactionHash: `0x${string}` };
+}, signedPaymaster?: unknown): UserOpGasProof | null {
+  if (typeof receipt.actualGasCost !== "bigint" || receipt.actualGasCost < 0n ||
+    typeof receipt.actualGasUsed !== "bigint" || receipt.actualGasUsed < 0n) return null;
+  const payer = receipt.paymaster ?? signedPaymaster;
+  if (payer !== undefined && (typeof payer !== "string" || !/^0x[0-9a-f]{40}$/i.test(payer))) return null;
+  return { txHash: receipt.receipt.transactionHash, gasWei: receipt.actualGasCost, gasUnits: receipt.actualGasUsed,
+    gasPayer: payer !== undefined && !/^0x0{40}$/i.test(payer as string) ? "sponsor" : "owner" };
 }
 
 /**
@@ -96,7 +118,7 @@ export interface ExecutionResult {
  */
 export class UserOpReverted extends Error {
   readonly userOpHash: `0x${string}`;
-  constructor(userOpHash: `0x${string}`, reason?: string) {
+  constructor(userOpHash: `0x${string}`, reason?: string, readonly gasProof?: UserOpGasProof) {
     super(`reverted on-chain${reason ? `: ${reason}` : ""} (${userOpHash})`);
     this.name = "UserOpReverted";
     this.userOpHash = userOpHash;
@@ -453,6 +475,19 @@ export function keyInstallRefusal(enable: EnableState): GasRefused | null {
   );
 }
 
+/** The operation must use the exact nonce whose enable state and gas bounds were checked. */
+export async function prepareCheckedUserOperation<T extends { nonce?: unknown }>(
+  checkedNonce: bigint,
+  prepare: (nonce: bigint) => Promise<T>,
+): Promise<T> {
+  const prepared = await prepare(checkedNonce);
+  if (typeof prepared.nonce !== "bigint" || prepared.nonce !== checkedNonce) {
+    throw new GasRefused("nonce-changed",
+      "the prepared operation's nonce differs from the one whose permissions and gas bounds were checked. Nothing was signed.");
+  }
+  return prepared;
+}
+
 export interface AgentExecutor {
   /** Counterfactual smart-account address (deploys itself on first op). */
   address: `0x${string}`;
@@ -603,6 +638,7 @@ export async function createAgentExecutor(opts: {
         try {
           const g = (await client.estimateUserOperationGas({
             callData,
+            nonce,
             // Estimate the operation we will actually SEND. An unsponsored probe
             // of a sponsored op omits the paymaster's own verification and postOp
             // gas, so the three limits we bound would be measured against a
@@ -884,11 +920,14 @@ export async function createAgentExecutor(opts: {
       // explicit nonce, fees and factory unchanged, and sendUserOperation uses
       // `parameters.signature ||` so a signed operation is never re-signed. It
       // also issues the RPC with retryCount: 0, so the send is never repeated.
-      const prepared = (await client.prepareUserOperation({
+      const prepared = await prepareCheckedUserOperation(nonce, async (checkedNonce) => (await client.prepareUserOperation({
         callData,
+        // A prior submitted enable can land while estimates are running. Never
+        // replace the checked enable nonce with a later ordinary-operation nonce.
+        nonce: checkedNonce,
         // Explicit, so prepareUserOperation uses these instead of estimating.
         ...bounded.gas,
-      } as never)) as Record<string, unknown>;
+      } as never)) as Record<string, unknown>);
 
       // THE LIMITS WE SIGNED MUST BE THE LIMITS WE BOUNDED. viem spreads the
       // paymaster's reply OVER the prepared request, so a sponsor that returned
@@ -1005,10 +1044,11 @@ export async function createAgentExecutor(opts: {
       // used to have to choose between. It went, and we could not find out.
       if (!receipt) throw new UserOpUnresolved(userOpHash, lastErr || "receipt never resolved");
 
-      if (!receipt.success) {
-        // Surface the on-chain revert reason when the bundler provides one.
-        throw new UserOpReverted(userOpHash, (receipt as { reason?: string }).reason);
+      const operationProof = perOperationGasProof(receipt, prepared.paymaster);
+      if (mode === "install" && !operationProof) {
+        throw new UserOpUnresolved(userOpHash, "the receipt omitted per-operation installation cost or payer proof; waiting for its EntryPoint event");
       }
+
       // actualGasCost is the ERC-4337 field: what the EntryPoint charged the
       // account, verification included. gasUsed × effectiveGasPrice covers only
       // the bundled transaction and would under-count our share of it, so it is
@@ -1017,19 +1057,25 @@ export async function createAgentExecutor(opts: {
         typeof receipt.actualGasCost === "bigint"
           ? receipt.actualGasCost
           : (receipt.receipt.gasUsed ?? 0n) * (receipt.receipt.effectiveGasPrice ?? 0n);
+      const gasUnits = typeof receipt.actualGasUsed === "bigint" ? receipt.actualGasUsed : (receipt.receipt.gasUsed ?? 0n);
+      // The receipt names its payer. Older bundlers omit it, in which case the
+      // signed operation's paymaster is still immutable evidence of who paid.
+      const paymaster = receipt.paymaster ?? (typeof prepared.paymaster === "string" ? prepared.paymaster : undefined);
+      const gasPayer = paymaster && !/^0x0{40}$/i.test(paymaster) ? "sponsor" as const : "owner" as const;
+      if (!receipt.success) {
+        throw new UserOpReverted(userOpHash, receipt.reason, operationProof ?? undefined);
+      }
       return {
         txHash: receipt.receipt.transactionHash,
         userOpHash,
         logs: receipt.logs ?? [],
         gasWei,
+        gasPayer,
         // Same preference order as gasWei, for the same reason and with the
         // error running the other way: `actualGasUsed` is our operation's
         // share, while the bundled transaction's `gasUsed` contains other
         // senders' work and would OVER-count us. A fallback, never a default.
-        gasUnits:
-          typeof (receipt as { actualGasUsed?: bigint }).actualGasUsed === "bigint"
-            ? (receipt as { actualGasUsed: bigint }).actualGasUsed
-            : (receipt.receipt.gasUsed ?? 0n),
+        gasUnits,
         blockNumber: receipt.receipt.blockNumber ?? 0n,
       };
     },

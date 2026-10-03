@@ -859,6 +859,7 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "enable-replayed": "it tried to install permissions that had already been installed",
   "enable-redundant": "its permissions were already installed, so the install was not repeated",
   "enable-unverified": "the chain could not confirm whether its permissions needed installing",
+  "nonce-changed": "its operation sequence changed after its permissions and network fee were checked",
   // gas-limits.ts `checkPrefund`: the fee the network holds up front.
   "prefund-short": "the account did not hold enough to cover the network fee up front",
   "prefund-unverified": "the up-front network fee could not be checked against the account's balance",
@@ -878,6 +879,7 @@ const GAS_REFUSALS: ReadonlySet<string> = new Set([
   "enable-replayed",
   "enable-redundant",
   "enable-unverified",
+  "nonce-changed",
   "prefund-short",
   "prefund-unverified",
 ]);

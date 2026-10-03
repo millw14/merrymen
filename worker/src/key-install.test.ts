@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ParamCondition } from "@zerodev/permissions/policies";
 import { decodeFunctionData, erc20Abi } from "viem";
-import { GasRefused, keyInstallCalls, keyInstallRefusal } from "./executor";
+import { GasRefused, keyInstallCalls, keyInstallRefusal, perOperationGasProof } from "./executor";
 import { CASH, UNISWAP, buildCallPermissions } from "../../packages/core/src/index";
 
 const CAPS = { perTradeUsdg: 25, dailyUsdg: 100, maxOpsPerDay: 48, maxDrawdownBps: 2000, ttlDays: 14 };
@@ -114,5 +114,28 @@ describe("it is sent only for a key the chain says is still uninstalled", () => 
     assert.ok(r instanceof GasRefused);
     assert.equal(r.rule, "enable-redundant");
     assert.match(r.message, /nothing to install/);
+  });
+});
+
+describe("installation cost is proved per operation", () => {
+  const txHash = `0x${"3".repeat(64)}` as `0x${string}`;
+  const sponsor = "0x5555555555555555555555555555555555555555";
+  const receipt = { actualGasCost: 123n, actualGasUsed: 456n, receipt: {
+    transactionHash: txHash, gasUsed: 999999n, effectiveGasPrice: 888888n,
+  } };
+  it("uses the exact operation cost and units rather than the other operations in its bundle", () => {
+    assert.deepEqual(perOperationGasProof(receipt), { txHash, gasWei: 123n, gasUnits: 456n, gasPayer: "owner" });
+    assert.equal(perOperationGasProof({ ...receipt, paymaster: sponsor })!.gasPayer, "sponsor");
+  });
+  it("missing or malformed operation fields never fall back to bundled transaction gas", () => {
+    for (const missing of [{ actualGasCost: undefined }, { actualGasUsed: undefined },
+      { actualGasCost: -1n }, { actualGasUsed: -1n }, { actualGasCost: 123 }, { actualGasUsed: "456" }]) {
+      assert.equal(perOperationGasProof({ ...receipt, ...missing }), null);
+    }
+  });
+  it("an omitted receipt payer uses the immutable signed operation, and invalid payer evidence is refused", () => {
+    assert.equal(perOperationGasProof(receipt, sponsor)!.gasPayer, "sponsor");
+    assert.equal(perOperationGasProof({ ...receipt, paymaster: "0x0000000000000000000000000000000000000000" }, sponsor)!.gasPayer, "owner");
+    assert.equal(perOperationGasProof({ ...receipt, paymaster: "bad" }), null);
   });
 });

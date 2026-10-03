@@ -232,6 +232,7 @@ import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, loo
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
+import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
@@ -3359,7 +3360,12 @@ async function main() {
           settlementsQueued.add(r.userOpHash);
           settlementQueue.push({ userOpHash: r.userOpHash, createdAt: row.createdAt, usdgDelta6: explains.usdgDelta6 });
         }
-        await addTrade({
+        // An install's gas is its entire expense. Both payer and cost must be
+        // recorded before its submitted recovery row can become terminal.
+        const wrote = row.kind === KEY_INSTALL_KIND
+          ? await settleKeyInstall({ addTrade }, agentId, { userOpHash: r.userOpHash, success: r.success,
+              proof: { txHash: r.txHash as `0x${string}`, gasWei: r.gasWei, gasUnits: r.gasUnits, gasPayer: r.gasPayer } })
+          : await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
           target: row.target,
@@ -3373,8 +3379,10 @@ async function main() {
           user_op_hash: r.userOpHash,
           tx_hash: r.txHash,
           status: r.success ? "landed" : "reverted",
+          ...gasFields(r),
           ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
         });
+        if (!wrote) continue;
         await addEvent(
           agentId,
           "warn",
@@ -7747,92 +7755,17 @@ async function main() {
     const last = keyInstallTriedAt.get(executor);
     if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
     keyInstallTriedAt.set(executor, Date.now());
-    let recorded = false;
-    try {
-      const exec = await executor.installKey({
-        onSubmitted: async (installHash, op) => {
-          recorded = await addTrade({
-            agent_id: agentId,
-            kind: KEY_INSTALL_KIND,
-            target: CASH.USDG,
-            amount_usdg: 0,
-            user_op_hash: installHash,
-            ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}),
-            status: "submitted",
-          });
-          if (!recorded) throw new NotRecorded(installHash);
-        },
-      });
-      const eth = await ethPrice8();
-      const gasCost = priceGas(exec.gasWei, eth.price8, eth.reason);
-      await addTrade({
-        agent_id: agentId,
-        kind: KEY_INSTALL_KIND,
-        target: CASH.USDG,
-        amount_usdg: 0,
-        tx_hash: exec.txHash,
-        user_op_hash: exec.userOpHash,
-        status: "landed",
-        // Whose cost it was, exactly as a trade's: a sponsored op never left the
-        // account, and gas_wei is subtracted from the owner's return.
-        ...(gasSponsored()
-          ? { sponsored_gas_wei: exec.gasWei.toString() }
-          : {
-              gas_wei: exec.gasWei.toString(),
-              ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
-              ...(exec.gasUnits > 0n ? { gas_units: exec.gasUnits.toString() } : {}),
-            }),
-      });
-      await refreshBudget(agentId);
-      await addEvent(
-        agentId,
-        "ok",
-        `installed this key's permissions on their own (${exec.txHash}): with the trade riding along they came to ` +
-          `more than a key's first operation may use. Nothing was traded; the next trade goes as an ordinary operation.`,
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (e instanceof GasRefused) {
-        // Nothing signed. Most often: the wall does not fit even with the
-        // bare install beside it, which only a narrower wall can fix.
-        await addEvent(
-          agentId,
-          "warn",
-          `couldn't install this key's permissions on their own either — nothing was signed: ${msg.slice(0, 300)}. ` +
-            `If this repeats, re-sign at /grant with fewer custom tokens or capabilities.`,
-        );
-        return;
-      }
-      if (e instanceof NotRecorded || e instanceof SponsorRefused) {
-        await addEvent(agentId, "warn", `didn't install this key's permissions on their own — nothing was sent: ${msg.slice(0, 300)}`);
-        return;
-      }
-      if (e instanceof UserOpReverted) {
-        await addTrade({
-          agent_id: agentId,
-          kind: KEY_INSTALL_KIND,
-          target: CASH.USDG,
-          amount_usdg: 0,
-          user_op_hash: e.userOpHash,
-          status: "reverted",
-          reject_rule: classifyRevert(msg).rule,
-        });
-        await refreshBudget(agentId);
-        await addEvent(agentId, "err", `installing this key's permissions on their own reverted on-chain: ${msg.slice(0, 300)}`);
-        return;
-      }
-      // Sent, or possibly sent: the row stays 'submitted' and the resolver
-      // settles it from the chain. Never re-sent from here.
-      if (recorded) await refreshBudget(agentId);
-      await addEvent(
-        agentId,
-        "warn",
-        recorded
-          ? `installing this key's permissions on their own was submitted and its outcome could not be read yet; ` +
-              `the resolver will settle it within ${STRANDED_INTERVAL_SEC / 60} minutes. ${msg.slice(0, 200)}`
-          : `couldn't install this key's permissions on their own: ${msg.slice(0, 300)}`,
-      );
-    }
+    await installKeyRecorded({
+      addTrade,
+      priceGas: async (wei) => {
+        const eth = await ethPrice8();
+        const priced = priceGas(wei, eth.price8, eth.reason);
+        return priced.usdg === null ? null : usdgNum(priced.usdg);
+      },
+      refreshBudget: () => refreshBudget(agentId),
+      event: (level, message) => addEvent(agentId, level, message),
+      resolveMinutes: STRANDED_INTERVAL_SEC / 60,
+    }, agentId, executor);
   }
 
   /**

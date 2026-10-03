@@ -1202,6 +1202,8 @@ export interface TradeRow {
   basis_source?: "receipt" | "paper" | "quote";
   /** Gas actually paid, wei, as a decimal string. Real cost; not in equity_usdg. */
   gas_wei?: string;
+  /** Gas charged to the operation's paymaster, never to this owner's return. */
+  sponsored_gas_wei?: string;
   /**
    * Gas UNITS charged, as a decimal string — the price-independent half of the
    * cost. Absent on rows written before it was captured, which is why every
@@ -1713,14 +1715,14 @@ export async function journaled(
   epoch: number,
   kind: JournalKind,
   payload: unknown,
-  write: (db: Db) => Promise<void>,
+  write: (db: Db) => Promise<void | false>,
 ): Promise<void> {
   // One transaction, pinned to one connection (tx()), so the domain write and
   // its journal entry commit together or not at all. The SQLite driver also
   // keeps unrelated asynchronous operations outside this transaction.
   await getDb().tx(async (tx) => {
-    await write(tx);
-    await appendJournalRow(tx, agentId, epoch, kind, payload);
+    // An already-recorded install is an idempotent no-op, including its journal.
+    if (await write(tx) !== false) await appendJournalRow(tx, agentId, epoch, kind, payload);
   });
 }
 
@@ -2436,9 +2438,9 @@ export async function getGasPaidUsdg(
     const row = await getDb()
       .prepare(
         `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
-                COUNT(*) AS landed,
+                SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
                 SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-           FROM trades WHERE agent_id = ? AND status = 'landed'${where}`,
+           FROM trades WHERE agent_id = ? AND status IN ('landed', 'reverted')${where}`,
       )
       .get(...params) as { usdg: number; landed: number | null; unpriced: number | null } | undefined;
     return {
@@ -3090,8 +3092,10 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
     // Only money-moving rows enter the hash chain. A rejection changes no
     // balance, so its absence cannot distort a performance claim — and there
     // are thousands of them. They stay in `trades` (and in the export, as
-    // context) without being part of the tamper-evident record.
-    const moved = row.status === "landed" || row.status === "paper";
+    // context) without being part of the tamper-evident record. An on-chain
+    // revert with proved gas still spent money and does belong in the record.
+    const moved = row.status === "landed" || row.status === "paper" ||
+      (row.status === "reverted" && (row.gas_wei !== undefined || row.sponsored_gas_wei !== undefined));
     const writeRow = async (db: Db) => {
       // RESOLVE THE PRE-BROADCAST ROW, if there is one.
       //
@@ -3114,7 +3118,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     status = ?, reject_rule = ?, sim_quote_out = ?, sim_min_out = ?, sim_fee_tier = ?,
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
-                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
+                    gas_wei = ?, sponsored_gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
                     fill_symbol = COALESCE(?, fill_symbol),
                     budget_settled_at = CASE WHEN ? = 'landed' THEN unixepoch() ELSE budget_settled_at END
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
@@ -3141,6 +3145,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             row.order_id ?? null,
             row.settlement_status ?? null,
             row.gas_wei ?? null,
+            row.sponsored_gas_wei ?? null,
             row.fill_slippage_bps ?? null,
             row.fill_cash_usdg ?? null,
             row.gas_usdg ?? null,
@@ -3156,15 +3161,23 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         // it was submitted in, and moving it would make the export's boundary
         // disagree with the chain's ordering.
         if (res.changes > 0) return;
+        if (row.kind === "key-install") {
+          const known = await db.prepare(
+            "SELECT id FROM trades WHERE agent_id = ? AND user_op_hash = ? AND status != 'submitted' LIMIT 1",
+          ).get(row.agent_id, row.user_op_hash);
+          // The resolver and the receipt waiter can observe the same landing.
+          // Never insert a second setup cost or journal entry after it settled.
+          if (known) return false as const;
+        }
       }
       await db
       .prepare(
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units,
+                             order_id, settlement_status, gas_wei, sponsored_gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units,
                              trade_fee_usdg, fill_symbol, user_op_nonce)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -3190,6 +3203,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         row.order_id ?? null,
         row.settlement_status ?? null,
         row.gas_wei ?? null,
+        row.sponsored_gas_wei ?? null,
         row.fill_slippage_bps ?? null,
         epoch,
         row.fill_cash_usdg ?? null,
@@ -3225,6 +3239,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         fillSide: row.fill_side ?? null,
         gasUsdg: row.gas_usdg ?? null,
         gasWei: row.gas_wei ?? null,
+        sponsoredGasWei: row.sponsored_gas_wei ?? null,
+        gasUnits: row.gas_units ?? null,
         kind: row.kind,
         realizedPnlUsdg: row.realized_pnl_usdg ?? null,
         sellToken: row.sell_token ?? null,
