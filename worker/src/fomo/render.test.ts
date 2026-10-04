@@ -15,10 +15,11 @@ import {
   GROUP_DM_DEFLECTION,
   groupScrub,
   NOT_PERMISSION_LINE,
+  refForModel,
   renderAnswer,
   renderEnvelope,
 } from "./render";
-import type { RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData, TraderContextData } from "./tools";
+import type { RankingsData, ResearchCoinData, ResearchStatusData, TokenActivityData, TokenThesesData, TraderContextData } from "./tools";
 import type { FomoEnvelope, FomoToolName, ResolvedSubject, ResultStatus, TokenIdentity } from "./types";
 
 const NOW = Date.UTC(2026, 9, 4, 16, 5);
@@ -248,5 +249,100 @@ describe("the chat rules", () => {
 
   it("groupScrub removes identities but keeps money", () => {
     assert.equal(groupScrub("@frank bought $PONS for $3,000 at 0x39dbed3a00 see https://x.y/z"), "[someone] bought PONS for $3,000 at [address] see [link]");
+  });
+});
+
+describe("review fixes", () => {
+  const status = (jobs: ResearchStatusData["jobs"], over: Partial<ResearchStatusData> = {}): ResearchStatusData => ({
+    token: null,
+    assessment: null,
+    funnel: [],
+    watches: [],
+    jobs,
+    request: null,
+    cohort: null,
+    health: { state: "watching-condition", detail: "Monitoring is on, but the shared trader feed last delivered 1h ago; it is not current.", configured: true, creditsRemaining: null },
+    capabilities: { AUTHENTICATED_TESTED: 3, PARTIAL: 5, DOCUMENTED: 21, UNSUPPORTED: 2 },
+    capabilitiesUnverified: ["ws-alerts", "account", "balances"],
+    capabilitiesDown: [],
+    ...over,
+  });
+  const job = (s: string, deadlineMs: number) => ({ id: "j1", kind: "research-coin-deep", status: s, deadlineMs, createdAtMs: NOW - 3_600_000, delivered: false });
+
+  it("a job past its deadline is never 'in progress' (C16/C37), even when its stored status still says queued", () => {
+    const stuck = renderEnvelope(env("fomo_get_research_status", "ok", status([job("queued", NOW - 60_000), job("running", NOW - 1)]), { subject: null }), O);
+    assert.ok(!/in progress/.test(stuck), stuck);
+    assert.match(stuck, /2 deeper research jobs did not finish before the deadline/);
+    const expired = renderEnvelope(env("fomo_get_research_status", "ok", status([job("expired", NOW - 60_000)]), { subject: null }), O);
+    assert.match(expired, /1 deeper research job did not finish before the deadline/);
+    const live = renderEnvelope(env("fomo_get_research_status", "ok", status([job("queued", NOW + 300_000)]), { subject: null }), O);
+    assert.match(live, /1 deeper research job is in progress/);
+    const failed = renderEnvelope(env("fomo_get_research_status", "ok", status([job("failed", NOW - 60_000)]), { subject: null }), O);
+    assert.match(failed, /1 deeper research job failed/);
+    assert.ok(!/in progress/.test(failed));
+  });
+
+  it("research status renders a compact capability summary (C41)", () => {
+    const text = renderEnvelope(env("fomo_get_research_status", "ok", status([]), { subject: null }), O);
+    assert.match(text, /Provider routes: 3 verified, 5 partial, 21 documented only\. Not yet verified by a call: ws-alerts, account, balances\./);
+    assert.match(text, /Data status: Monitoring is on, but the shared trader feed last delivered 1h ago/);
+    // An older producer without the lists still renders the counts.
+    const bare = status([]);
+    delete bare.capabilitiesUnverified;
+    delete bare.capabilitiesDown;
+    assert.match(renderEnvelope(env("fomo_get_research_status", "ok", bare, { subject: null }), O), /Provider routes: 3 verified/);
+  });
+
+  it("a research answer promises nothing for a job that is not live", () => {
+    const base: ResearchCoinData = {
+      token: T, label: { symbol: "PONS", name: null }, dossierId: "dsr_x", revision: 1, builtAt: NOW, focus: null,
+      strongestSupport: null, strongestOpposition: null, claims: [], flow: null, wordsVsActions: [], unknowns: [], changeConditions: [],
+      coverage: { uniqueTheses: 0, uniqueAuthors: 0, windowRequested: "24h", oldestSourceAt: null, newestSourceAt: null, providerTotal: 0, pagesRequested: 1, pagesReturned: 1, duplicatesRemoved: 0, sourceCaps: [], missingSections: [], limitations: [] },
+      changes: null, job: { id: "j1", deadlineMs: NOW + 600_000, status: "queued", created: true }, executionAvailability: "unsupported-venue",
+    };
+    assert.match(renderEnvelope(env("fomo_research_coin", "partial", base, { reason: "deep-research-queued" }), O), /deeper read is queued, with a deadline in 10m/);
+    for (const st of ["expired", "failed", "cancelled"]) {
+      const text = renderEnvelope(env("fomo_research_coin", "ok", { ...base, job: { ...base.job!, status: st, deadlineMs: NOW - 1 } }), O);
+      assert.ok(!/queued|will finish/.test(text), text);
+      assert.match(text, /did not finish/);
+    }
+    // A stored "queued" past its deadline is not live either.
+    assert.ok(!/is queued/.test(renderEnvelope(env("fomo_research_coin", "ok", { ...base, job: { ...base.job!, deadlineMs: NOW - 1 } }), O)));
+  });
+
+  it("the model's evidence refs never carry a full address, tx hash or provider user id (C42)", () => {
+    const addr = "0x39dbed3a00000000000000000000000000000c0d";
+    const tx = "0x" + "ab".repeat(32);
+    const mint = "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump";
+    const e = env("fomo_get_token_activity", "ok", null, {
+      evidence: [
+        { id: `fomo:token-stats/eip155:4663:${addr}@${NOW}`, kind: "token-stats", sourceUrl: null },
+        { id: `fomo:fills/${FRANK}:eip155:4663:${addr}@${NOW}`, kind: "fills", sourceUrl: null },
+        { id: `fomo:event/log:${tx}:3`, kind: "event", sourceUrl: null },
+        { id: `fomo:holdings/${FRANK}`, kind: "holdings", sourceUrl: null },
+        { id: `fomo:token-stats/solana:1399811149:${mint}`, kind: "token-stats", sourceUrl: null },
+        { id: "fomo:thesis/th-0001", kind: "thesis", sourceUrl: null },
+      ],
+    });
+    const block = evidenceForModel([e], 8_000, { now: NOW });
+    const refs = block.split("\n").find((l) => l.startsWith("refs: "))!;
+    assert.ok(refs, block);
+    assert.ok(!/0x[0-9a-fA-F]{16,}/.test(refs), refs);
+    assert.ok(!refs.includes(FRANK), "no full provider user id");
+    assert.ok(!refs.includes(mint), "no full mint");
+    assert.match(refs, /fomo:token-stats\/eip155:4663:0x39db…0c0d@/);
+    assert.match(refs, /fomo:thesis\/th-0001/);
+    assert.equal(refForModel("fomo:board/trending@1"), "fomo:board/trending@1", "a ref with nothing long is unchanged");
+  });
+
+  it("a provider snapshot and a transfer note survive into the answer text (C31, C36)", () => {
+    const e = env("fomo_get_rankings", "stale", { board: "most-held-tokens", window: null, basis: "x", traders: [], tokens: [] } as RankingsData, {
+      subject: { kind: "market" },
+      reason: "provider-snapshot",
+      coverage: { ...env("fomo_get_rankings", "ok", null).coverage, notes: ["The provider served a stored snapshot of the most-held board (about 2h old), not a live read."] },
+    });
+    assert.match(renderEnvelope(e, O), /stored snapshot of the most-held board \(about 2h old\)/);
+    const t = env("fomo_get_token_theses", "ok", theses(), { coverage: { ...env("fomo_get_token_theses", "ok", null).coverage, notes: ["Some positions were received by transfer, not bought."] } });
+    assert.match(renderEnvelope(t, O), /received by transfer, not bought/);
   });
 });

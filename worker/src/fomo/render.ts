@@ -237,7 +237,10 @@ function coverageLine(env: FomoEnvelope): string | null {
   if (env.status === "partial" && c.missing.length) parts.push(`Not read: ${c.missing.slice(0, 3).join(", ")}.`);
   else if (env.status === "partial" && env.reason !== "deep-research-queued") parts.push("Part of this could not be read.");
   if (c.capped) parts.push("More records exist than were read, so counts are a floor.");
-  const keep = c.notes.filter((n) => /floor|filter|gap|snapshot|truncat|caps holdings|not the whole|removed|left out|unknown, not zero|not a measure|not skill|not proven/i.test(n));
+  // Notes that change what the answer means: limits, removed rows, transfers that are not trades, stored copies, unread parts.
+  const keep = c.notes.filter((n) =>
+    /floor|filter|gap|snapshot|truncat|caps holdings|not the whole|removed|left out|unknown, not zero|not a measure|not skill|not proven|transfer|carried|could not be|not compared|not complete|reach back/i.test(n),
+  );
   for (const n of keep.slice(0, 3)) parts.push(n);
   return parts.length ? parts.join(" ") : null;
 }
@@ -307,7 +310,7 @@ function availabilityLine(a: string): string {
   }
 }
 
-function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audience): string[] {
+function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d) return [];
   const out: string[] = [];
@@ -329,7 +332,9 @@ function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audie
   if (d.profile) {
     const p = d.profile.pnlUsd;
     const parts = (["24h", "7d", "30d", "all"] as const).filter((w) => w in p).map((w) => `${w} ${signedUsd(p[w])}`);
-    if (parts.length) out.push(`Provider-reported realised P&L (not a skill measure): ${parts.join(", ")}.`);
+    // A windowed figure is only meaningful with the time its window ended: say when it was read.
+    const asOf = finite(d.profile.asOf) ? `, as of ${ago(now, d.profile.asOf)}${d.profile.mayBeOlder ? " or earlier" : ""}` : ", read at an unknown time";
+    if (parts.length) out.push(`Provider-reported realised P&L (not a skill measure${asOf}): ${parts.join(", ")}.`);
   }
   if (d.formerHandle) out.push("Note: that handle is one they used before; the account has since renamed.");
   return out;
@@ -349,10 +354,12 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
   out.push(`${name} ${scope}: ${plural(c.buys, "buy", "buys")} and ${plural(c.sells, "sell", "sells")} in the feed${c.transfers ? `, plus ${plural(c.transfers, "transfer", "transfers")} (not purchases)` : ""}.`);
   for (const e of d.events.slice(0, 5)) out.push(eventLine(e, audience, now, false));
   for (const f of d.fills.slice(0, 3)) out.push(`• fill: ${f.side} ${usd(f.usd)} ${ago(now, f.at)} (provider-reported)`);
-  const pos = d.positions.slice(0, 3).map(
-    (p) =>
-      `${sym(p.label, audience) ?? "a coin"} ${p.status ?? "status unknown"}, cost ${usd(p.costBasisUsd)}, realised P&L to date ${signedUsd(p.realizedPnlUsd)}${p.status === "open" ? `, unrealised ${signedUsd(p.unrealizedPnlUsd)}` : ""}`,
-  );
+  const pos = d.positions.slice(0, 3).map((p) => {
+    const name = `${sym(p.label, audience) ?? "a coin"} ${p.status ?? "status unknown"}`;
+    // Received, never bought: its "cost" is a transfer valuation, not money the trader put in.
+    if ((p.transferredInAmount ?? 0) > 0 && (p.boughtAmount ?? 0) === 0) return `${name}, received by transfer (not bought)`;
+    return `${name}, cost ${usd(p.costBasisUsd)}, realised P&L to date ${signedUsd(p.realizedPnlUsd)}${p.status === "open" ? `, unrealised ${signedUsd(p.unrealizedPnlUsd)}` : ""}`;
+  });
   if (pos.length) out.push(`Positions (provider-reported): ${pos.join("; ")}.`);
   return out;
 }
@@ -432,7 +439,7 @@ function bodyOpportunities(env: FomoEnvelope<OpportunitiesData>, audience: Audie
   d.rows.slice(0, 8).forEach((r, i) => {
     const sig: string[] = [];
     if (r.signals.cohortBuyers) sig.push(`${plural(r.signals.cohortBuyers, "followed trader", "followed traders")} bought`);
-    if (r.signals.firstSeenInWindow) sig.push("first seen in this window");
+    if (r.signals.firstSeenInWindow === true) sig.push("first seen in this window");
     if (r.signals.newThesis) sig.push("new thesis");
     if (r.signals.boards.length) sig.push(`on ${r.signals.boards.join(" and ")} board`);
     if (finite(r.signals.latestBuyAt)) sig.push(`latest buy ${ago(now, r.signals.latestBuyAt)}`);
@@ -480,9 +487,25 @@ function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, n
   }
   if (d.unknowns.length) out.push(`Unknowns: ${d.unknowns.slice(0, 2).join(" ")}`);
   if (d.changeConditions.length) out.push(`What would change this view: ${d.changeConditions.slice(0, 2).join(" ")}`);
-  if (d.job) out.push(`A deeper read is queued and will finish within ${durationText(Math.max(0, d.job.deadlineMs - now))}; this answer is from the quick read.`);
+  if (d.job) out.push(jobLine(d.job, now));
   out.push(availabilityLine(d.executionAvailability));
   return out;
+}
+
+/**
+ * What an owner is told about a deep-research job. Only a job that is queued
+ * or running AND before its deadline is pending, and even then the deadline is
+ * a bound, not a promise of delivery. Past its deadline nothing will claim it
+ * (store.claimJob), so it reads as not finished, never "in progress".
+ */
+function jobPending(j: { status: string; deadlineMs: number }, now: number): boolean {
+  return (j.status === "queued" || j.status === "running") && finite(j.deadlineMs) && j.deadlineMs > now;
+}
+
+function jobLine(job: NonNullable<ResearchCoinData["job"]>, now: number): string {
+  if (jobPending(job, now)) return `A deeper read is ${job.status === "running" ? "running" : "queued"}, with a deadline in ${durationText(job.deadlineMs - now)}; this answer is from the reads made now.`;
+  if (job.status === "done") return "A deeper read of this coin already finished today.";
+  return "The deeper read registered today did not finish.";
 }
 
 function bodyStatus(env: FomoEnvelope<ResearchStatusData>, audience: Audience, now: number): string[] {
@@ -498,9 +521,38 @@ function bodyStatus(env: FomoEnvelope<ResearchStatusData>, audience: Audience, n
   out.push(`Data status: ${sanitizeText(d.health.detail, 200)}`);
   out.push(`Watching ${plural(d.watches.length, "coin", "coins")}${d.watches.length ? `: ${d.watches.slice(0, 5).map((w) => w.symbol ?? "a coin").join(", ")}` : ""}.`);
   if (d.cohort) out.push(`Followed cohort: ${d.cohort.size} of ${d.cohort.target} traders (version ${d.cohort.version})${d.cohort.shortfallReason ? `; short because ${sanitizeText(d.cohort.shortfallReason, 120)}` : ""}.`);
-  const running = d.jobs.filter((j) => j.status === "queued" || j.status === "running");
+  const running = d.jobs.filter((j) => jobPending(j, now));
   if (running.length) out.push(`${plural(running.length, "deeper research job is", "deeper research jobs are")} in progress.`);
+  const expired = d.jobs.filter((j) => j.status === "expired" || ((j.status === "queued" || j.status === "running") && !jobPending(j, now)));
+  if (expired.length) out.push(`${plural(expired.length, "deeper research job", "deeper research jobs")} did not finish before the deadline.`);
+  const failed = d.jobs.filter((j) => j.status === "failed");
+  if (failed.length) out.push(`${plural(failed.length, "deeper research job", "deeper research jobs")} failed.`);
+  const caps = capabilityLine(d);
+  if (caps) out.push(caps);
   return out;
+}
+
+/** A compact capability summary: counts by status, then the routes in use that no call has verified yet, then any that are down. */
+function capabilityLine(d: ResearchStatusData): string | null {
+  const c = d.capabilities ?? {};
+  const words: [string, string][] = [
+    ["AUTHENTICATED_TESTED", "verified"],
+    ["PARTIAL", "partial"],
+    ["DOCUMENTED", "documented only"],
+    ["ENTITLEMENT_BLOCKED", "blocked by the plan"],
+    ["UNAVAILABLE", "unavailable"],
+  ];
+  const counts = words.filter(([k]) => finite(c[k]) && c[k]! > 0).map(([k, w]) => `${c[k]} ${w}`);
+  if (!counts.length) return null;
+  const name = (x: string) => sanitizeText(x, 40).replace(/[^a-z0-9-]/gi, "");
+  const unverified = (d.capabilitiesUnverified ?? []).map(name).filter(Boolean);
+  const down = (d.capabilitiesDown ?? []).map(name).filter(Boolean);
+  const more = (xs: string[]) => `${xs.slice(0, 6).join(", ")}${xs.length > 6 ? ` and ${xs.length - 6} more` : ""}`;
+  return (
+    `Provider routes: ${counts.join(", ")}.` +
+    (unverified.length ? ` Not yet verified by a call: ${more(unverified)}.` : "") +
+    (down.length ? ` Refused or unavailable when last called: ${more(down)}.` : "")
+  );
 }
 
 function bodyWatch(env: FomoEnvelope<WatchData>, audience: Audience): string[] {
@@ -520,7 +572,7 @@ function body(env: FomoEnvelope, audience: Audience, now: number): string[] {
     case "fomo_resolve_subject":
       return bodyResolve(env as FomoEnvelope<ResolveData>, audience);
     case "fomo_get_trader_context":
-      return bodyTraderContext(env as FomoEnvelope<TraderContextData>, audience);
+      return bodyTraderContext(env as FomoEnvelope<TraderContextData>, audience, now);
     case "fomo_get_trader_activity":
       return bodyTraderActivity(env as FomoEnvelope<TraderActivityData>, audience, now);
     case "fomo_get_token_theses":
@@ -621,6 +673,21 @@ function subjectText(s: ResolvedSubject | null, audience: Audience): string {
   return `token ${coin(s.token, s.label, audience)}`;
 }
 
+/**
+ * An evidence ref as the model may see it. Ref ids are minted from full token
+ * keys (`…:0x<40 hex>`), transaction hashes and provider user ids, and the
+ * model is told never to type a full address or reveal internal identifiers,
+ * so it is never handed one: long hex, base58 mints and uuids are shortened
+ * the way the subject line shortens them. A ref is a citation label, not a
+ * handle anything resolves, so the short form loses nothing.
+ */
+export function refForModel(id: string): string {
+  return sanitizeText(id, 400)
+    .replace(/0x[0-9a-fA-F]{16,}/g, (h) => shortAddress(h))
+    .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, (u) => `${u.slice(0, 8)}…`)
+    .replace(/(^|[^A-Za-z0-9])([1-9A-HJ-NP-Za-km-z]{32,})/g, (_m, pre: string, b58: string) => `${pre}${shortAddress(b58)}`);
+}
+
 function asOfText(env: FomoEnvelope, now: number): string {
   const f = env.freshness;
   const parts = [`served from ${f.servedFrom}`];
@@ -656,7 +723,7 @@ export function evidenceForModel(envs: readonly FomoEnvelope[], maxChars: number
     const facts = audience === "group" && needsDirectMessage(env) ? ["(withheld in a group: answer in a direct message)"] : envelopeLines(env, audience, now);
     for (const f of facts) lines.push(`fact: ${f}`);
     if (env.dossierRevision) lines.push(`dossier: ${env.dossierRevision.dossierId} revision ${env.dossierRevision.revision}`);
-    if (env.evidence.length) lines.push(`refs: ${env.evidence.slice(0, 15).map((e) => e.id).join(" ")}`);
+    if (env.evidence.length) lines.push(`refs: ${[...new Set(env.evidence.slice(0, 15).map((e) => refForModel(e.id)))].join(" ")}`);
   });
   const inner = fenceSafe(audience === "group" ? groupScrub(lines.join("\n")) : lines.join("\n"));
   const max = Math.max(200, Math.floor(maxChars)) - open.length - close.length - 2;

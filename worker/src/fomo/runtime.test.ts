@@ -66,7 +66,7 @@ describe("createFomoRuntime", () => {
     assert.equal(await store.readAllowance(d, `fomo:credits:pool:all:d:${day}`), 250, "the charge lives in the shared counters");
     const usage = await store.usageForDay(d, day);
     assert.equal(usage.find((u) => u.bucket === "leaderboard")?.calls, 1);
-    assert.deepEqual(await rt.runJobs(NOW), { claimed: 0, done: 0, failed: 0 });
+    assert.deepEqual(await rt.runJobs(NOW), { claimed: 0, done: 0, failed: 0, cancelled: 0 });
   });
 
   it("background shared research draws on the pool, not on one owner's caps", async () => {
@@ -92,6 +92,26 @@ describe("createFomoRuntime", () => {
     const r = await rt.service.refreshDossier(token, { symbol: "PONS", name: null }, { priority: "discovery", depth: "quick", now: NOW });
     assert.notEqual(r.status, "budget-limited");
     assert.equal(r.dossier?.revision, 1);
+  });
+
+  it("runJobs cancels a deep job whose owner switched data access off after asking, before any read (C24)", async () => {
+    const { db: d } = db();
+    const fx = (n: string) => JSON.parse(readFileSync(new URL(`./testdata/${n}.json`, import.meta.url), "utf8"));
+    let calls = 0;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      calls++;
+      const p = new URL(String(input)).pathname;
+      const body = p.startsWith("/v2/thesis/token/") ? fx("theses-token") : p === "/v2/alerts" ? fx("alerts") : /\/stats$/.test(p) ? fx("token-stats") : fx("leaderboard-24h");
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const live = { dataAccess: true, monitoring: false, follow: false };
+    const rt = await createFomoRuntime({ db: d, dialect: "sqlite", apiKey: "test_key_not_a_credential_0000", access: async () => live, now: () => NOW, fetchImpl });
+    const env = await rt.service.invoke(ctx("r1"), "fomo_research_coin", { token: "0x39dbed3a00000000000000000000000000000c0d", chain: "robinhood", depth: "deep" });
+    assert.ok((env.data as { job: unknown } | null)?.job, "the deep job was registered while access was on");
+    live.dataAccess = false;
+    const before = calls;
+    assert.deepEqual(await rt.runJobs(NOW), { claimed: 1, done: 0, failed: 0, cancelled: 1 });
+    assert.equal(calls, before, "no provider call after the owner switched Fomo off");
   });
 
   it("derives the daily pool from the plan with a safety reserve, and caps owners and groups under it", () => {

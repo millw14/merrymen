@@ -75,8 +75,11 @@ export interface FomoRuntime {
   backgroundBudget: FomoBudget;
   usage: UsageMeter;
   client: FomoClient | null;
-  /** One pass of the deep-research job queue (claim, run, finish fenced); delivery stays with the surfaces. */
-  runJobs(now?: number, limit?: number): Promise<{ claimed: number; done: number; failed: number }>;
+  /**
+   * One pass of the deep-research job queue (claim, run, finish fenced); delivery stays with the surfaces.
+   * A job whose owner switched data access off since asking is cancelled before anything is read.
+   */
+  runJobs(now?: number, limit?: number): Promise<{ claimed: number; done: number; failed: number; cancelled: number }>;
 }
 
 /**

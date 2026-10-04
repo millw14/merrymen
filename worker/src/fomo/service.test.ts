@@ -13,11 +13,14 @@
  * registers its job before promising anything.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 
 import { wrapSqlite, type Db } from "../db";
+import { homePaths } from "../home";
 import { FomoBudget, MemoryAllowance, UsageMeter, type FomoBudgetConfig } from "./budget";
 import type { FomoAccess } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
@@ -29,9 +32,11 @@ import {
   DEEP_JOB_DEADLINE_MS,
   runPendingJobs,
   SHARED_RESEARCH_TENANT,
+  STREAM_COVERAGE_MARK_KEY,
   type FomoInvokeContext,
   type FomoServiceExt,
 } from "./service";
+import { renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
   OpportunitiesData,
@@ -491,7 +496,7 @@ describe("fomo_research_coin", () => {
     assert.equal(again.data?.job?.created, false);
 
     const ran = await runPendingJobs(h.service, h.db, { now: () => h.clock.now, limit: 5 });
-    assert.deepEqual(ran, { claimed: 1, done: 1, failed: 0 });
+    assert.deepEqual(ran, { claimed: 1, done: 1, failed: 0, cancelled: 0 });
     assert.equal((await store.getJob(h.db, OWNER, job.id))?.status, "done");
     assert.equal((await store.jobsAwaitingDelivery(h.db, 10)).length, 1, "delivery is left to the surfaces");
   });
@@ -859,5 +864,429 @@ describe("reports, memory, health", () => {
     assert.equal(usage.find((u) => u.bucket === "leaderboard")?.credits, 250);
     // The cache key is public: no tenant in it.
     assert.ok(await store.cacheGet(h.db, cacheKeyOf("leaderboard", { window: "24h", limit: 100 })));
+  });
+});
+
+// ── Review fixes: coverage stays honest ─────────────────────────────────
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** The shared stream is current, and (when `reachesBackMs` is given) has been seen current since that long ago. */
+async function streamIsCurrent(h: Harness, reachesBackMs: number | null = 40 * DAY_MS): Promise<void> {
+  await store.setCheckpoint(h.db, "alerts", null, h.clock.now - 5_000, h.clock.now - 1_000);
+  if (reachesBackMs !== null) {
+    await store.cachePut(h.db, {
+      cacheKey: STREAM_COVERAGE_MARK_KEY,
+      dataClass: "activity",
+      payload: { fromMs: h.clock.now - reachesBackMs, seenMs: h.clock.now - 60_000 },
+      retrievedAtMs: h.clock.now - 60_000,
+      providerAsOfMs: null,
+    });
+  }
+}
+
+/** A db whose token-keyed event reads throw while `on` is set (a statement timeout on the big table); everything else works. */
+function flakyEvents(d: Db, gate: { on: boolean }): Db {
+  const wrap = (x: Db): Db => ({
+    prepare: (sql) => {
+      if (gate.on && /FROM fomo_events WHERE token_key = \?/.test(sql)) throw new Error("canceling statement due to statement timeout");
+      return x.prepare(sql);
+    },
+    exec: (q) => x.exec(q),
+    tx: (fn) => x.tx((t) => fn(wrap(t))),
+  });
+  return wrap(d);
+}
+
+describe("a shallower read never replaces a deeper one as a change (C4)", () => {
+  const base = () => (fixture("theses-token").theses as Rec[])[0]!;
+  const users = Array.from({ length: 125 }, (_, i) => `${(i + 16).toString(16).padStart(8, "0")}-0000-4000-8000-${i.toString().padStart(12, "0")}`);
+  const thesis = (i: number): Rec => ({
+    ...base(),
+    id: `th-d${i}`,
+    userId: users[i],
+    handle: `u${i}`,
+    // Pages 2 and 3 (theses 25-39) hold a well-supported objection; page 1 holds none of it.
+    text: i >= 25 && i < 40 ? `dev sold everything, this is a rug number ${i}` : `strong community and breakout soon number ${i}`,
+    ts: new Date(NOW - (i + 1) * 60_000).toISOString(),
+  });
+  const deepHarness = async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", (u) => {
+      const pages = Number(u.searchParams.get("pages") ?? "1");
+      return json({ totalAvailable: 125, source: "live", theses: Array.from({ length: 25 * pages }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": "1250" });
+    });
+    const token = tokenIdentity(robinhoodChain(), PONS)!;
+    const deep = await h.service.refreshDossierAs({ tenant: OWNER, surface: "app-chat", priority: "interactive" }, token, { symbol: "PONS", name: null }, { depth: "deep", now: h.clock.now });
+    assert.ok(deep.dossier);
+    assert.equal(deep.dossier.coverage.pagesReturned, 5);
+    assert.ok(deep.dossier.strongestOpposition, "the deep read found the objection");
+    return { h, deep: deep.dossier };
+  };
+
+  it("carries the deeper pages from the shared cache and refuses to compare different depths", async () => {
+    const { h, deep } = await deepHarness();
+    h.clock.now += 31 * 60_000;
+    const before = h.count("pages=5");
+    const quick = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick", since_revision: deep.revision });
+    assert.equal(h.count("pages=5"), before, "the deeper pages came from the cache, not a new 6,250-credit read");
+    assert.equal(quick.data?.coverage.pagesReturned, 5, "the stored revision keeps the deeper coverage");
+    assert.equal(quick.data?.coverage.uniqueTheses, 125);
+    assert.equal(quick.data?.strongestOpposition?.claimKey, deep.strongestOpposition!.claimKey, "the objection is still on record");
+    assert.ok(quick.data?.coverage.limitations.some((l) => /stored copy/.test(l)), "carried pages are labelled a stored copy");
+    assert.ok(quick.coverage.notes.some((n) => /carried from a deeper read/.test(n)));
+    assert.equal(quick.data?.changes?.comparable, false);
+    assert.equal(quick.data?.changes?.reason, "different-scope");
+    const latest = asDossierOf(await store.latestDossier(h.db, PONS_KEY));
+    assert.equal(latest?.strongestOpposition?.claimKey, deep.strongestOpposition!.claimKey, "the shared latest revision did not lose the objection");
+    const text = renderEnvelope(quick, { audience: "owner", maxChars: 4000, now: h.clock.now });
+    assert.ok(!/No longer present|no longer an objection/i.test(text), text);
+  });
+
+  it("with no deeper copy left to carry, the narrower revision is never compared as a change", async () => {
+    const { h, deep } = await deepHarness();
+    h.raw.prepare("DELETE FROM fomo_cache WHERE cache_key LIKE ?").run("%pages=5%");
+    h.clock.now += 31 * 60_000;
+    const quick = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick", since_revision: deep.revision });
+    assert.equal(quick.data?.coverage.pagesReturned, 1);
+    assert.equal(quick.data?.changes?.comparable, false, "a one-page read is not compared with a five-page one");
+    assert.equal(quick.data?.changes?.reason, "different-scope");
+    assert.equal(quick.data?.changes?.changes.length, 0);
+  });
+});
+
+function asDossierOf(s: store.StoredDossier | null): ResearchCoinData | null {
+  return s ? (s.dossier as unknown as ResearchCoinData) : null;
+}
+
+describe("a failed event-record read is a failure, never an empty read (C5)", () => {
+  it("activity goes partial with the record missing; research is not stored as 'buyers left'", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const gate = { on: false };
+    const h = await harness({ raw, db: flakyEvents(wrapSqlite(raw), gate) });
+    await streamIsCurrent(h);
+    await store.insertEvents(h.db, [buyEvent(FRANK, PONS, NOW - 30 * 60_000, "ev:p1"), buyEvent(STAR, PONS, NOW - 20 * 60_000, "ev:p2")]);
+    const first = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(first.status, "ok");
+    assert.equal(first.data?.flow?.distinctBuyers, 2);
+    assert.equal(h.count("/v2/alerts"), 0, "the current, reaching record alone answered");
+
+    gate.on = true;
+    h.clock.now += 40 * 60_000;
+    await store.setCheckpoint(h.db, "alerts", null, h.clock.now - 5_000, h.clock.now - 1_000);
+    const act = await h.invoke<TokenActivityData>("fomo_get_token_activity", { token: PONS, chain: "robinhood" });
+    assert.equal(act.status, "partial", "a failed record read is not 'empty'");
+    assert.ok(act.coverage.missing.includes("stream-record"));
+    assert.ok(h.count("/v2/alerts") >= 1, "the provider feed stood in for the record");
+    const text = renderEnvelope(act, { audience: "owner", maxChars: 3000, now: h.clock.now });
+    assert.ok(!/No matching activity were returned/.test(text), text);
+    assert.match(text, /Not read: stream-record/);
+
+    const again = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", since_revision: 1 });
+    assert.equal(again.status, "partial");
+    assert.equal(again.data?.changes?.comparable, false, "an incomplete read supports no change claim");
+    assert.ok(!(again.data?.changes?.changes ?? []).some((c) => /No longer present|Distinct buyers: 2 → 0/.test(c)));
+  });
+
+  it("a failed cohort read makes the cohort answer partial rather than complete", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const inner = wrapSqlite(raw);
+    let fail = false;
+    const wrap = (x: Db): Db => ({
+      prepare: (sql) => {
+        if (fail && /FROM fomo_events WHERE user_id = \?/.test(sql)) throw new Error("connection reset");
+        return x.prepare(sql);
+      },
+      exec: (q) => x.exec(q),
+      tx: (fn) => x.tx((t) => fn(wrap(t))),
+    });
+    const h = await harness({ raw, db: wrap(inner) });
+    await store.insertCohortVersion(h.db, cohort(1, [FRANK, STAR]));
+    fail = true;
+    const env = await h.invoke<TokenActivityData>("fomo_get_token_activity", { cohort_only: true });
+    assert.notEqual(env.status, "empty");
+    assert.notEqual(env.status, "ok");
+  });
+});
+
+describe("open coverage gaps reach research too (C6)", () => {
+  it("a gap in the 24h window makes research partial, says so, and supports no change claim", async () => {
+    const h = await harness();
+    await streamIsCurrent(h);
+    await store.recordGap(h.db, "alerts", NOW - 6 * HOUR_MS, NOW - 2 * HOUR_MS, "stream-backpressure", NOW);
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(env.status, "partial");
+    assert.ok(env.coverage.notes.some((n) => /open gap/.test(n)), env.coverage.notes.join(" | "));
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 4000, now: NOW });
+    assert.ok(!/0 buyers \/ 0 sellers/.test(text), "a hole is not observed silence");
+    h.clock.now += 60_000;
+    await store.setCheckpoint(h.db, "alerts", null, h.clock.now - 5_000, h.clock.now - 1_000);
+    const since = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", since_revision: env.data!.revision });
+    assert.equal(since.data?.changes?.comparable, false);
+    assert.equal(since.data?.changes?.noChange, false, "'no change' is never claimed across a gap");
+  });
+});
+
+describe("the stream record answers alone only for a window it reaches back over (C32)", () => {
+  it("just after ingestion starts, a 7d question reads the provider feed instead of reporting 'empty'", async () => {
+    const h = await harness();
+    await streamIsCurrent(h, null);
+    const env = await h.invoke<TokenActivityData>("fomo_get_token_activity", { token: PONS, chain: "robinhood", window: "7d" });
+    assert.notEqual(env.status, "empty");
+    assert.ok(h.count("/v2/alerts") >= 1, "the cold record is not the whole week");
+    assert.ok(env.coverage.notes.some((n) => /does not reach back/.test(n)));
+    assert.ok((env.data?.events.length ?? 0) > 0);
+  });
+
+  it("once the record provably reaches back over the window, it alone answers", async () => {
+    const h = await harness();
+    await streamIsCurrent(h, 40 * DAY_MS);
+    const env = await h.invoke<TokenActivityData>("fomo_get_token_activity", { token: PONS, chain: "robinhood", window: "7d" });
+    assert.equal(h.count("/v2/alerts"), 0);
+    assert.ok(env.coverage.notes.some((n) => /live shared feed record/.test(n)));
+  });
+});
+
+describe("owners see the monitoring health that applies to them (C15)", () => {
+  it("not configured, permission off, monitoring off: each said in its own words", async () => {
+    assert.equal((await (await harness({ key: false })).service.ownerHealth(OWNER, NOW)).state, "not-configured");
+    assert.equal((await (await harness({ access: { dataAccess: false, monitoring: true, follow: false } })).service.ownerHealth(OWNER, NOW)).state, "permission-required");
+    const off = await (await harness({ access: { dataAccess: true, monitoring: false, follow: false } })).service.ownerHealth(OWNER, NOW);
+    assert.equal(off.state, "research-only");
+    assert.match(off.detail, /monitoring is off/);
+  });
+
+  it("a stream that is down or stale is never 'arriving normally', even when a lookup just answered", async () => {
+    const h = await harness();
+    await h.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal((await h.service.ownerHealth(OWNER, NOW)).state, "watching-condition", "no feed has delivered on this install");
+    await store.setCheckpoint(h.db, "alerts", null, NOW - HOUR_MS, NOW - HOUR_MS);
+    const stale = await h.service.ownerHealth(OWNER, NOW);
+    assert.equal(stale.state, "watching-condition");
+    assert.match(stale.detail, /not current/);
+    const global = await h.service.health(NOW);
+    assert.ok(!/arriving normally/.test(global.detail), "a lookup that answered is not a stream that delivers");
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    assert.equal(status.data?.health.state, "watching-condition");
+    const text = renderEnvelope(status, { audience: "owner", maxChars: 3000, now: NOW });
+    assert.match(text, /Data status: Monitoring is on, but the shared trader feed last delivered/);
+    assert.ok(!/arriving normally/.test(text));
+  });
+
+  it("open gaps are a watching condition; a current feed without gaps is receiving fresh data", async () => {
+    const h = await harness();
+    await streamIsCurrent(h);
+    assert.equal((await h.service.ownerHealth(OWNER, NOW)).state, "receiving-fresh-data");
+    await store.recordGap(h.db, "alerts", NOW - 3 * HOUR_MS, NOW - 2 * HOUR_MS, "recovery-failed", NOW);
+    const gap = await h.service.ownerHealth(OWNER, NOW);
+    assert.equal(gap.state, "watching-condition");
+    assert.match(gap.detail, /1 gap\(s\) in the last 24h/);
+  });
+
+  it("a provider that is down is provider-unavailable for the owner too", async () => {
+    const h = await harness();
+    h.routes.set("leaderboard", () => json({ error: "down" }, 503));
+    await h.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal((await h.service.ownerHealth(OWNER, NOW)).state, "provider-unavailable");
+  });
+});
+
+describe("one owner's budget refusal is theirs alone (C23)", () => {
+  it("tenant A's own cap does not tell tenant B, or the fleet, that Fomo is rationed", async () => {
+    const h = await harness({ budget: { sharedDailyCredits: 1_000_000, tenantHourlyCredits: 300, tenantDailyCredits: 300, groupHourlyCredits: 300 } });
+    const A = OWNER;
+    const B = "0xbbbb000000000000000000000000000000000002";
+    const refused = await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { tenant: A });
+    assert.equal(refused.status, "budget-limited");
+    assert.match(refused.reason ?? "", /budget-tenant-/);
+    assert.equal((await h.service.ownerHealth(A, NOW)).state, "budget-limited", "A is told about A's own cap");
+    assert.notEqual((await h.service.ownerHealth(B, NOW)).state, "budget-limited", "B is not");
+    assert.equal((await h.service.health(NOW)).budgetLimited, false, "the process-wide health is not");
+    const bStatus = await h.invoke<ResearchStatusData>("fomo_get_research_status", {}, { tenant: B });
+    assert.notEqual(bStatus.data?.health.state, "budget-limited");
+  });
+
+  it("a refusal by the shared pool is fleet-wide", async () => {
+    // Owner caps far above the pool: whatever refuses is a limit every owner shares.
+    const h = await harness({ budget: { sharedDailyCredits: 100, tenantHourlyCredits: 1_000_000, tenantDailyCredits: 1_000_000, groupHourlyCredits: 1_000_000 } });
+    const env = await h.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal(env.status, "budget-limited");
+    assert.ok(env.reason === "budget-shared-daily" || env.reason === "budget-class-reserve", env.reason ?? "");
+    assert.equal((await h.service.health(NOW)).budgetLimited, true);
+    assert.equal((await h.service.ownerHealth("0xbbbb000000000000000000000000000000000002", NOW)).state, "budget-limited", "every owner shares the pool");
+  });
+});
+
+describe("a queued deep job re-checks the owner's data access when it runs (C24)", () => {
+  it("access revoked after asking: the job is cancelled with no provider call", async () => {
+    const access: FomoAccess = { dataAccess: true, monitoring: true, follow: false };
+    const h = await harness({ access });
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: "PONS", depth: "deep" });
+    const job = env.data!.job!;
+    access.dataAccess = false;
+    const calls = h.calls.length;
+    const ran = await runPendingJobs(h.service, h.db, { now: () => h.clock.now, limit: 5 });
+    assert.deepEqual(ran, { claimed: 1, done: 0, failed: 0, cancelled: 1 });
+    assert.equal(h.calls.length, calls, "not one provider call charged to an owner who switched Fomo off");
+    const stored = await store.getJob(h.db, OWNER, job.id);
+    assert.equal(stored?.status, "cancelled");
+    assert.equal((stored?.result as Rec | null)?.reason, "data-access-off");
+  });
+});
+
+describe("a provider's stored fallback copy is labelled stale (C31)", () => {
+  it("the most-held board the provider marks stale is never 'ok, live'", async () => {
+    const h = await harness();
+    const env = await h.invoke<RankingsData>("fomo_get_rankings", { board: "most-held-tokens" });
+    assert.equal(env.status, "stale");
+    assert.equal(env.reason, "provider-snapshot");
+    assert.ok(env.coverage.notes.some((n) => /stored snapshot of the most-held board \(about 2h old\)/.test(n)), env.coverage.notes.join(" | "));
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 3000, now: NOW });
+    assert.match(text, /stored snapshot of the most-held board/);
+    // Served again from our cache, it is still the provider's fallback.
+    const cached = await h.invoke<RankingsData>("fomo_get_rankings", { board: "most-held-tokens" });
+    assert.equal(cached.freshness.servedFrom, "cache");
+    assert.equal(cached.status, "stale");
+    // A live board stays live.
+    assert.equal((await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" })).status, "ok");
+  });
+});
+
+describe("a full page of one trader's theses is capped (C33)", () => {
+  const page = (n: number, total: number | null): Rec => {
+    const base = (fixture("theses-token").theses as Rec[])[0]!;
+    return {
+      totalAvailable: total,
+      source: "live",
+      theses: Array.from({ length: n }, (_, i) => ({ ...base, id: `th-u${i}`, userId: KALEO, handle: "CryptoKaleo", text: `distinct thesis ${i}`, ts: new Date(NOW - (i + 1) * HOUR_MS).toISOString() })),
+    };
+  };
+
+  it("trader-only: a full page with a larger provider total is capped, not the whole record", async () => {
+    const h = await harness();
+    h.routes.set("thesis-user", () => json(page(25, 200), 200, { "x-credits-cost": "1250" }));
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { trader: KALEO });
+    assert.equal(env.status, "capped");
+    assert.equal(env.coverage.capped, true);
+    assert.match(renderEnvelope(env, { audience: "owner", maxChars: 3000, now: NOW }), /More records exist than were read/);
+  });
+
+  it("trader + token: a full page is capped even with no per-pair total", async () => {
+    const h = await harness();
+    h.routes.set("thesis-user", () => {
+      const p = page(25, null);
+      for (const t of p.theses as Rec[]) t.address = PONS;
+      return json(p, 200, { "x-credits-cost": "1250" });
+    });
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { trader: KALEO, token: PONS, chain: "robinhood" });
+    assert.equal(env.coverage.capped, true);
+  });
+});
+
+describe("'first seen in this window' needs a baseline before the window (C34)", () => {
+  it("an earlier buy before a 7d window is found; a window past retention is unknown, not 'first seen'", async () => {
+    const h = await harness();
+    await store.insertCohortVersion(h.db, cohort(1, [FRANK]));
+    await store.insertEvents(h.db, [buyEvent(FRANK, CACHE_TOKEN, NOW - 9 * DAY_MS, "ev:old"), buyEvent(FRANK, CACHE_TOKEN, NOW - HOUR_MS, "ev:new")]);
+    const pick = (e: FomoEnvelope<OpportunitiesData>) => e.data?.rows.find((r) => r.token.address === CACHE_TOKEN)?.signals;
+    const week = await h.invoke<OpportunitiesData>("fomo_find_opportunities", { window: "7d" });
+    assert.equal(pick(week)?.firstSeenInWindow, false, "the 9-day-old buy is before the window");
+    const month = await h.invoke<OpportunitiesData>("fomo_find_opportunities", { window: "30d" });
+    assert.equal(pick(month)?.firstSeenInWindow, null, "the record before a 30d window is past retention");
+    assert.ok(!/first seen in this window/.test(renderEnvelope(month, { audience: "owner", maxChars: 3000, now: NOW })));
+  });
+
+  it("a trader whose read hit its limit leaves first appearance unknown", async () => {
+    const h = await harness();
+    await store.insertCohortVersion(h.db, cohort(1, [FRANK]));
+    const many = Array.from({ length: 100 }, (_, i) => buyEvent(FRANK, PONS, NOW - (i + 1) * 60_000, `ev:busy-${i}`));
+    await store.insertEvents(h.db, [buyEvent(FRANK, CACHE_TOKEN, NOW - 30 * 60_000 - 30_000, "ev:cache-now"), ...many]);
+    const env = await h.invoke<OpportunitiesData>("fomo_find_opportunities", {});
+    const cache = env.data?.rows.find((r) => r.token.address === CACHE_TOKEN);
+    assert.notEqual(cache?.signals.firstSeenInWindow, true);
+  });
+});
+
+describe("trader P&L carries its as-of and drops windows it no longer describes (C35)", () => {
+  it("a 24h figure from a five-day-old cohort record is not shown as today's", async () => {
+    const h = await harness();
+    const c = cohort(1, [KALEO]);
+    c.createdAt = NOW - 5 * DAY_MS;
+    c.members[0]!.evidence.providerReported = { "pnlUsd.24h": 151_383, "pnlUsd.7d": 9_000 };
+    await store.insertCohortVersion(h.db, c);
+    const env = await h.invoke<TraderContextData>("fomo_get_trader_context", { trader: "CryptoKaleo" });
+    const p = env.data?.profile;
+    assert.equal(p?.source, "cohort-evidence");
+    assert.equal(p?.asOf, NOW - 5 * DAY_MS);
+    assert.equal(p?.mayBeOlder, true);
+    assert.ok(!("24h" in (p?.pnlUsd ?? {})), "a 24h figure older than a day describes a different day");
+    assert.equal(p?.pnlUsd["7d"], 9_000);
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 3000, now: NOW });
+    assert.match(text, /as of 5 days ago or earlier\): 7d \+\$9,000/);
+    assert.ok(!/151,383/.test(text));
+  });
+});
+
+describe("a received-only position is not a buy (C36)", () => {
+  it("side=buy leaves out a position that was only transferred in; the answer labels such rows", async () => {
+    const h = await harness();
+    const buys = await h.invoke<TraderActivityData>("fomo_get_trader_activity", { trader: STAR, side: "buy", window: "30d" });
+    assert.ok(!buys.data!.positions.some((p) => p.label.symbol === "FU2O"), "FU2O was received, never bought");
+    const all = await h.invoke<TraderActivityData>("fomo_get_trader_activity", { trader: STAR, window: "30d" });
+    assert.ok(all.data!.positions.some((p) => p.label.symbol === "FU2O"));
+    const text = renderEnvelope(all, { audience: "owner", maxChars: 3000, now: NOW });
+    assert.match(text, /\$FU2O open, received by transfer \(not bought\)/);
+    assert.match(text, /received by transfer, not bought/);
+  });
+});
+
+describe("reads do not depend on trading or monitoring (C40)", () => {
+  it("with trading paused and monitoring and follow off, lookups still answer", async () => {
+    const prior = process.env.MERRYMEN_HOME;
+    const home = mkdtempSync(path.join(os.tmpdir(), "fomo-paused-"));
+    process.env.MERRYMEN_HOME = home;
+    try {
+      writeFileSync(homePaths.paused(), "paused", "utf8");
+      assert.ok(existsSync(homePaths.paused()), "the pause marker the tick loop honours is set");
+      const h = await harness({ access: { dataAccess: true, monitoring: false, follow: false } });
+      for (const [tool, args] of [
+        ["fomo_get_token_theses", { token: PONS, chain: "robinhood" }],
+        ["fomo_get_rankings", { board: "traders" }],
+        ["fomo_research_coin", { token: PONS, chain: "robinhood" }],
+        ["fomo_get_research_status", {}],
+      ] as const) {
+        const env = await h.invoke(tool, args);
+        assert.ok(!["not-authorized", "failed", "unavailable"].includes(env.status), `${tool}: ${env.status} ${env.reason}`);
+        assert.ok(env.data !== null, tool);
+      }
+      assert.ok(h.calls.length > 0);
+    } finally {
+      if (prior === undefined) delete process.env.MERRYMEN_HOME;
+      else process.env.MERRYMEN_HOME = prior;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("research status never reads a dead job as in progress, and shows capabilities (C16/C37, C41)", () => {
+  it("a job past its deadline is expired; the text says it did not finish and lists unverified routes", async () => {
+    const h = await harness();
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: "PONS", depth: "deep" });
+    assert.ok(env.data?.job);
+    h.clock.now += DEEP_JOB_DEADLINE_MS + 60_000;
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    assert.equal(status.data?.jobs[0]?.status, "expired");
+    const text = renderEnvelope(status, { audience: "owner", maxChars: 3000, now: h.clock.now });
+    assert.ok(!/in progress/.test(text), text);
+    assert.match(text, /1 deeper research job did not finish before the deadline/);
+    assert.match(text, /Provider routes: \d+ verified/);
+    assert.match(text, /Not yet verified by a call: [^.]*ws-alerts/);
+    assert.ok(status.data?.capabilitiesUnverified?.includes("ws-alerts"));
+    // The same deep request the same day is today's dead job: nothing promises it again.
+    const again = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: "PONS", depth: "deep" });
+    assert.equal(again.data?.job?.status, "expired");
+    assert.notEqual(again.reason, "deep-research-queued");
+    assert.ok(!/is queued/.test(renderEnvelope(again, { audience: "owner", maxChars: 3000, now: h.clock.now })));
   });
 });

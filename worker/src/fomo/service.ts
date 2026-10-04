@@ -48,10 +48,12 @@ import { createHash } from "node:crypto";
 import type { Db } from "../db";
 import { sanitizeText } from "../research/news";
 import { utcDay, type ChargeRequest, type ChargeResult, type FomoBudget } from "./budget";
-import { CAPABILITY_FOR_ROUTE, capabilityFromCall, mergeCapability } from "./capabilities";
+import { CAPABILITY_FOR_ROUTE, capabilityFromCall, DOCUMENTED_CAPABILITIES, mergeCapabilities, mergeCapability } from "./capabilities";
 import type { BrokerReport, FomoAccess, FomoService, FomoServiceHealth } from "./contract";
 import {
+  agoText,
   buildDossier,
+  durationText,
   eventTime,
   FEED_FLOOR_NOTE,
   parseWindowMs,
@@ -59,12 +61,13 @@ import {
   readThesisText,
   redactExecutables,
   resolveFamilies,
+  STALE_SNAPSHOT_PREFIX,
   THESIS_PAGE_SIZE,
   type DossierClaimDetail,
 } from "./dossier";
 import { dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
-import { SingleFlight, buildFreshness, decideRead, type CacheEntryState } from "./freshness";
+import { SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
 import { chainFromUserText, executionAvailabilityOf, isRobinhoodToken, ROBINHOOD_NETWORK_ID, tokenFromKey, tokenIdentity } from "./identity";
 import {
   ROUTE_COST,
@@ -206,7 +209,19 @@ export interface RefreshOutcome {
 export interface FomoServiceExt extends FomoService {
   /** Tenants that reported holding each token recently (position-protection routing for the orchestrator pass). */
   heldTokensSnapshot(now?: number): Map<string, string[]>;
-  /** A dossier refresh charged to a named payer, optionally inside a credit allowance (research jobs). */
+  /**
+   * One owner's health, in the states the owner can act on: their own data
+   * access and monitoring switches, the shared feed's freshness and open
+   * coverage gaps, the provider, and the budget (theirs and the fleet's).
+   * `health(now)` stays the process-wide view for operators.
+   */
+  ownerHealth(tenant: string, now?: number): Promise<FomoServiceHealth>;
+  /**
+   * A dossier refresh charged to a named payer, optionally inside a credit
+   * allowance (research jobs). A payer that is a real owner must still have
+   * data access when it runs; otherwise nothing is read and the outcome is
+   * not-authorized.
+   */
   refreshDossierAs(
     payer: ChargeAs,
     token: TokenIdentity,
@@ -355,6 +370,21 @@ const CAPABILITY_THROTTLE_MS = 5 * MIN;
 const COHORT_MEMO_MS = MIN;
 /** The stream record counts as current when the shared ingestion advanced its checkpoint this recently. */
 const STREAM_CURRENT_MS = 2 * MIN;
+/**
+ * Two sightings of a current stream this far apart still count as one unbroken
+ * run: inside the provider's replay ring, so a reconnect between them either
+ * recovered the span or recorded a gap in the ledger (ingest.ts).
+ */
+const STREAM_CONTINUITY_MS = 6 * HOUR;
+/** The stream-coverage mark is rewritten at most this often per process. */
+const STREAM_MARK_WRITE_MS = MIN;
+/** Where the mark lives: the shared cache table, so every replica and a restart see it. Never a provider body. */
+export const STREAM_COVERAGE_MARK_KEY = "fomo:v1:meta:stream-coverage:alerts";
+const STREAM_MARK_KEY = STREAM_COVERAGE_MARK_KEY;
+/** Monitoring counts the shared feed as delivering while its checkpoint moved this recently (as the orchestrator's child file does). */
+const FEED_FRESH_MS = 10 * MIN;
+/** A budget refusal colours health for this long. */
+const BUDGET_HEALTH_MS = 15 * MIN;
 const HELD_TTL_MS = 6 * HOUR;
 const FIRST_SEEN_LOOKBACK_MS = 7 * DAY;
 /** Provider pages are fetched at a fixed size so every caller shares one cached copy. */
@@ -522,6 +552,36 @@ function asDossier(v: unknown, token: TokenIdentity): CoinDossier | null {
 
 type SectionStatus = "ok" | "stale" | "failed" | "unavailable" | "budget-limited" | "not-found";
 
+/** The provider's own word that it served a stored copy (a fallback board, a thesis snapshot), not a live pull. */
+interface ProviderSnapshot {
+  source: string | null;
+  /** How old the provider says its copy is; null when it did not say. */
+  ageSeconds: number | null;
+}
+
+function snapshotOf(source: unknown, stale: unknown, ageSeconds: unknown): ProviderSnapshot | null {
+  // "captured" and "snapshot" are the provider's fallback sources (capabilities.ts: "source captured means a fallback board").
+  const flagged = stale === true || source === "captured" || source === "snapshot";
+  if (!flagged) return null;
+  return { source: typeof source === "string" ? source : null, ageSeconds: finite(ageSeconds) && ageSeconds >= 0 ? ageSeconds : null };
+}
+
+/** The provider's as-of: its own capture time, or (for a copy it called stored) the retrieval time less the age it gave. */
+function providerAsOfOf(asOf: number | null, retrievedAt: number | null, snap: ProviderSnapshot | null): number | null {
+  if (asOf !== null) return asOf;
+  return snap && snap.ageSeconds !== null && retrievedAt !== null ? retrievedAt - Math.round(snap.ageSeconds * 1000) : null;
+}
+
+const SNAPSHOT_LABEL: Record<string, string> = {
+  "board-most-held": "the most-held board",
+  "board-trending": "the trending board",
+  "board-graduated": "the graduated board",
+  leaderboard: "the trader leaderboard",
+  theses: "the thesis list",
+  "token-stats": "the token stats",
+  feed: "the activity feed",
+};
+
 interface Section<T> {
   name: string;
   route: RouteName | null;
@@ -541,6 +601,8 @@ interface Section<T> {
   pages: number;
   /** A resolution read: metered, but not part of the answer's data age or page count. */
   identity?: boolean;
+  /** Set when the provider said this copy is its stored fallback; the answer is then stale, whatever we fetched. */
+  providerSnapshot?: ProviderSnapshot | null;
 }
 
 interface ReadSpec<T> {
@@ -585,6 +647,14 @@ function localSection<T>(name: string, data: T, retrievedAt: number | null, serv
     creditsRemaining: null,
     pages: 0,
   };
+}
+
+/**
+ * A local read that FAILED. Not an empty read: the data is null, so the answer
+ * is partial (or failed when nothing else was read), never "no records".
+ */
+function failedLocalSection(name: string, reason: string): Section<never> {
+  return { ...localSection<never>(name, null as never, null, "none"), data: null, status: "failed", reason };
 }
 
 function failureStatus(f: ProviderFailure | "not-configured" | "aborted" | "internal-error"): SectionStatus {
@@ -685,6 +755,21 @@ function defaultMessage(status: ResultStatus, reason: string | null): string | n
   }
 }
 
+/**
+ * A job's status as an owner should read it: one still queued or running
+ * past its deadline is "expired". Nothing claims a job after its deadline
+ * (store.claimJob), so it will never finish and is never "in progress".
+ */
+export function jobStatusAt(status: string, deadlineMs: number, now: number): string {
+  return (status === "queued" || status === "running") && !(deadlineMs > now) ? "expired" : status;
+}
+
+/** What a dossier's change check covered: two revisions are compared only over the same scope (features.ts changeSummary). */
+function changeScopeOf(d: CoinDossier): string {
+  const stored = d.coverage.limitations.some((l) => l.startsWith(STALE_SNAPSHOT_PREFIX));
+  return `${d.coverage.windowRequested}|thesis-pages:${d.coverage.pagesReturned}|${stored ? "stored-copy" : "live"}`;
+}
+
 // ── The service ──────────────────────────────────────────────────────────
 
 export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
@@ -707,7 +792,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
 
   let lastProviderOkAt: number | null = null;
   let lastProviderFailure: { at: number; reason: string; down: boolean } | null = null;
-  let lastBudgetRefusalAt: number | null = null;
+  /**
+   * BUDGET REFUSALS, BY WHOSE LIMIT SAID NO. One service serves every owner on
+   * a replica, so a refusal by ONE owner's (or group's, or job's) own cap must
+   * not tell every other owner that Fomo is rationed, nor tell them that
+   * somebody else hit a limit. Only a refusal by a limit everyone shares (the
+   * pool, a priority class's share of it, or a budget that cannot answer) is
+   * fleet-wide; the rest are kept per tenant and shown to that tenant only.
+   */
+  let lastFleetBudgetRefusalAt: number | null = null;
+  const tenantBudgetRefusals = new Map<string, number>();
+  let streamMark: { fromMs: number; seenMs: number; writtenAt: number } | null = null;
   let capabilityPrior: Map<string, CapabilityRecord> | null = null;
   const capabilityWrittenAt = new Map<string, { at: number; status: string }>();
   const held = new Map<string, { keys: string[]; at: number }>();
@@ -717,6 +812,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     ids: Set<string>;
     byId: Map<string, CohortMember>;
     version: number | null;
+    /** When the cohort version was built; null when there is none. */
+    createdAt: number | null;
     size: number | null;
     target: number;
     shortfallReason: string | null;
@@ -724,7 +821,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
 
   async function cohortSnapshot(now: number): Promise<CohortSnap> {
     if (cohortMemo && now - cohortMemo.at >= 0 && now - cohortMemo.at < COHORT_MEMO_MS) return cohortMemo.value;
-    let value: CohortSnap = { ids: new Set(), byId: new Map(), version: null, size: null, target: 150, shortfallReason: null };
+    let value: CohortSnap = { ids: new Set(), byId: new Map(), version: null, createdAt: null, size: null, target: 150, shortfallReason: null };
     try {
       const c = await store.latestCohort(db);
       if (c) {
@@ -733,6 +830,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           ids: new Set(byId.keys()),
           byId,
           version: c.cohort.version,
+          createdAt: finite(c.cohort.createdAt) ? c.cohort.createdAt : null,
           size: c.cohort.members.length,
           target: c.cohort.target,
           shortfallReason: c.cohort.shortfallReason,
@@ -746,12 +844,95 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   }
 
   async function streamCurrent(now: number): Promise<boolean> {
+    return (await streamCoverage(now)).current;
+  }
+
+  /**
+   * WHETHER THE SHARED STREAM IS CURRENT, AND HOW FAR BACK ITS RECORD REACHES.
+   *
+   * The checkpoint says only that the stream moved recently. Nothing records
+   * when ingestion began, so on a fresh database (or after a long outage) a
+   * 7-day question answered from the record alone would read a few minutes of
+   * events as a week of silence. So the service keeps its own mark: the first
+   * time any service saw the stream current, carried forward while sightings
+   * stay within STREAM_CONTINUITY_MS of each other, restarted after a longer
+   * silence. It lives in the shared cache table, so replicas and restarts agree.
+   *
+   * The mark can only be LATER than the truth (nobody looked earlier), and a
+   * later mark sends more questions to the provider feed, never fewer. Gaps
+   * inside the run are the ingest ledger's business (listOpenGaps).
+   */
+  async function streamCoverage(now: number): Promise<{ current: boolean; checkpointAt: number | null; fromMs: number | null }> {
+    let cp: store.StreamCheckpoint | null = null;
     try {
-      const cp = await store.getCheckpoint(db, "alerts");
-      return !!cp && now - cp.updatedAtMs >= 0 && now - cp.updatedAtMs <= STREAM_CURRENT_MS;
+      cp = await store.getCheckpoint(db, "alerts");
     } catch {
-      return false;
+      return { current: false, checkpointAt: null, fromMs: null };
     }
+    const current = !!cp && now - cp.updatedAtMs >= 0 && now - cp.updatedAtMs <= STREAM_CURRENT_MS;
+    if (!current) return { current, checkpointAt: cp?.updatedAtMs ?? null, fromMs: null };
+    try {
+      if (!streamMark || now - streamMark.writtenAt >= STREAM_MARK_WRITE_MS || now < streamMark.writtenAt) {
+        const e = await store.cacheGet(db, STREAM_MARK_KEY);
+        const p = e && isObj(e.payload) ? e.payload : null;
+        const held = p && finite(p.fromMs) && finite(p.seenMs) && p.fromMs <= p.seenMs ? { fromMs: p.fromMs, seenMs: p.seenMs } : null;
+        // A run continues only from a sighting close enough before now; anything else starts a new run here.
+        const continues = held !== null && now >= held.seenMs && now - held.seenMs <= STREAM_CONTINUITY_MS;
+        const fromMs = continues ? held.fromMs : now;
+        await store.cachePut(db, { cacheKey: STREAM_MARK_KEY, dataClass: "activity", payload: { fromMs, seenMs: now }, retrievedAtMs: now, providerAsOfMs: null, meta: { kind: "stream-coverage" } });
+        streamMark = { fromMs, seenMs: now, writtenAt: now };
+      } else {
+        streamMark = { ...streamMark, seenMs: now };
+      }
+      return { current, checkpointAt: cp!.updatedAtMs, fromMs: streamMark.fromMs };
+    } catch (e) {
+      // Without the mark the record's reach is unknown: current, but proven to cover nothing.
+      log(`fomo: stream coverage mark failed: ${errText(e)}`);
+      return { current, checkpointAt: cp!.updatedAtMs, fromMs: null };
+    }
+  }
+
+  /** Open coverage gaps overlapping [since, now]; null when the gap ledger could not be read (unknown, never "none"). */
+  async function openGapsIn(since: number, now: number): Promise<{ count: number; minutes: number } | null> {
+    try {
+      const gaps = await store.listOpenGaps(db, null, 50);
+      const overlapping = gaps.filter((g) => g.toMs >= since && g.fromMs <= now);
+      const minutes = Math.round(overlapping.reduce((n, g) => n + (Math.min(g.toMs, now) - Math.max(g.fromMs, since)), 0) / MIN);
+      return { count: overlapping.length, minutes };
+    } catch {
+      return null;
+    }
+  }
+
+  /** A token's events in the shared record. A failed read says so: it is never an empty one. */
+  async function localTokenEvents(tokenKey: string, since: number): Promise<{ ok: true; events: StoredTraderEvent[] } | { ok: false }> {
+    try {
+      return { ok: true, events: await store.eventsForToken(db, tokenKey, since, LOCAL_EVENT_LIMIT) };
+    } catch (e) {
+      log(`fomo: event record read failed: ${errText(e)}`);
+      return { ok: false };
+    }
+  }
+
+  /** Record a budget refusal against the scope whose limit said no (see lastFleetBudgetRefusalAt). */
+  function noteBudgetRefusal(reason: string, cc: ChargeContext, now: number): void {
+    const shared = cc.tenant === SHARED_RESEARCH_TENANT;
+    // The research cap (researchCapped) answers class-reserve for background research only; owners never pay through it.
+    const poolLimit = reason === "budget-shared-daily" || (reason === "budget-class-reserve" && !shared);
+    // Discovery may be shed while the pool still serves owners (discoveryShedAt), so a discovery refusal is not fleet-wide.
+    if (reason === "budget-error" || (poolLimit && cc.priority !== "discovery")) {
+      lastFleetBudgetRefusalAt = now;
+      return;
+    }
+    if (shared || !cc.tenant) return;
+    tenantBudgetRefusals.set(cc.tenant, now);
+    if (tenantBudgetRefusals.size > 1_000) {
+      for (const [t, at] of tenantBudgetRefusals) if (!(now - at >= 0 && now - at < BUDGET_HEALTH_MS)) tenantBudgetRefusals.delete(t);
+    }
+  }
+
+  function recentRefusal(at: number | null | undefined, now: number): boolean {
+    return typeof at === "number" && now - at >= 0 && now - at < BUDGET_HEALTH_MS;
   }
 
   async function recordCapability(route: RouteName, r: ProviderResult<unknown>, notFoundIsSubject: boolean): Promise<void> {
@@ -805,8 +986,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           payload: r.data,
           retrievedAtMs: at,
           providerAsOfMs: m.providerAsOf,
-          // Metadata only; never a provider body.
-          meta: { route: m.route, credits: m.creditsCost, source: m.providerSource, stale: m.providerStale },
+          // Metadata only; never a provider body. source/stale/ageSeconds are read back so a cached fallback stays labelled.
+          meta: { route: m.route, credits: m.creditsCost, source: m.providerSource, stale: m.providerStale, ageSeconds: m.providerAgeSeconds },
         });
       } else if (m.attempts > 0) {
         await store.cacheMarkAttempt(db, key, spec.cls, "failed", at);
@@ -832,10 +1013,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       log(`fomo: cache read failed: ${errText(e)}`);
     }
     const heldData = entry && entry.retrievedAtMs !== null ? spec.revive(entry.payload) : null;
+    const heldMeta = entry && isObj(entry.meta) ? entry.meta : null;
+    const heldSnap = heldData !== null && heldMeta ? snapshotOf(heldMeta.source, heldMeta.stale, heldMeta.ageSeconds) : null;
     const state: CacheEntryState | null = entry
       ? {
           retrievedAt: heldData !== null ? entry.retrievedAtMs : null,
-          providerAsOf: heldData !== null ? entry.providerAsOfMs : null,
+          providerAsOf: heldData !== null ? providerAsOfOf(entry.providerAsOfMs, entry.retrievedAtMs, heldSnap) : null,
           lastAttemptAt: entry.lastAttemptAtMs,
           lastAttemptOutcome: entry.lastAttemptOutcome,
         }
@@ -868,6 +1051,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         providerAsOf: state?.providerAsOf ?? null,
         lastOutcome: outcome,
         cacheHits: 1,
+        providerSnapshot: heldSnap,
       });
 
     const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true });
@@ -880,6 +1064,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         providerAsOf: state?.providerAsOf ?? null,
         lastOutcome: "skipped-fresh",
         cacheHits: 1,
+        providerSnapshot: heldSnap,
       });
     }
     if (first.action === "serve-stale" && heldData !== null) return heldCopy("stale", "recent-failure", first.lastRefreshOutcome);
@@ -893,7 +1078,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }
     const estimate = expectedCredits(spec.route, pages);
     const refused = async (reason: string): Promise<Section<T>> => {
-      lastBudgetRefusalAt = now;
+      noteBudgetRefusal(reason, cc, now);
       usage?.recordRefusal({ now, bucket: CAPABILITY_FOR_ROUTE[spec.route] });
       const second = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: false });
       return second.action === "serve-stale" && heldData !== null
@@ -953,13 +1138,16 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const callUsage = { providerCalls: mine ? 1 : 0, cacheHits: ran ? 0 : 1, credits: mine ? m.creditsCost : 0, creditsRemaining: m.creditsRemaining };
     if (result.ok) {
       const revived = spec.revive(JSON.parse(JSON.stringify(result.data)) as unknown) ?? result.data;
+      // Fetched live, but the provider may say its copy is a stored fallback: that is carried, not hidden.
+      const snap = snapshotOf(m.providerSource, m.providerStale, m.providerAgeSeconds);
       return base({
         data: revived,
         servedFrom: "live",
         retrievedAt: m.retrievedAt,
-        providerAsOf: m.providerAsOf,
+        providerAsOf: providerAsOfOf(m.providerAsOf, m.retrievedAt, snap),
         lastAttemptAt: m.retrievedAt,
         lastOutcome: "ok",
+        providerSnapshot: snap,
         ...callUsage,
       });
     }
@@ -1222,9 +1410,18 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       } else if (a.sections.some((s) => s.status === "stale")) {
         status = "stale";
         reason = reason ?? a.sections.find((s) => s.status === "stale")?.reason ?? null;
+      } else if (a.sections.some((s) => !s.identity && s.data !== null && s.providerSnapshot)) {
+        // The provider said this is its stored fallback copy: a stale answer, even though we fetched it just now.
+        status = "stale";
+        reason = reason ?? "provider-snapshot";
       } else if (a.capped) status = "capped";
       else if (o.rows === 0) status = "empty";
       else status = "ok";
+    }
+    for (const s of a.sections) {
+      if (s.identity || s.data === null || !s.providerSnapshot) continue;
+      const age = s.providerSnapshot.ageSeconds !== null ? ` (about ${durationText(s.providerSnapshot.ageSeconds * 1000)} old)` : "";
+      a.note(`The provider served a stored snapshot of ${SNAPSHOT_LABEL[s.name] ?? "this data"}${age}, not a live read.`);
     }
     // The answer's age is the age of its data, not of the identity lookup that found the subject.
     const pool = a.sections.some((s) => !s.identity) ? a.sections.filter((s) => !s.identity) : a.sections;
@@ -1314,6 +1511,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     audience: "owner" | "group";
     surface: FomoSurface;
     conversationKey: string | null;
+    /** The tenant's permissions as read for this call (dispatch runs only when data access is on). */
+    access: FomoAccess | null;
   }
 
   async function toolResolve(ic: Inv, args: ToolArgs["fomo_resolve_subject"]): Promise<FomoEnvelope<ResolveData>> {
@@ -1347,25 +1546,68 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     });
   }
 
-  async function profileFromHeld(userId: string, now: number, cohort: CohortSnap, hit: TraderResolution extends infer X ? (X extends { ok: true; hit: infer H } ? H : null) : null): Promise<TraderContextData["profile"]> {
+  /**
+   * Windowed P&L older than its own window describes a different window (a
+   * "24h" figure read five days ago is not today's 24h), so it is dropped
+   * rather than shown as current. "all" has no window to outlive.
+   */
+  function pnlStillDescribesItsWindow(w: RankingWindow, asOf: number | null, now: number): boolean {
+    if (w === "all") return true;
+    const ms = parseWindowMs(w);
+    return asOf !== null && typeof ms === "number" && now - asOf <= ms;
+  }
+
+  async function profileFromHeld(
+    a: Answer,
+    userId: string,
+    now: number,
+    cohort: CohortSnap,
+    hit: TraderResolution extends infer X ? (X extends { ok: true; hit: infer H } ? H : null) : null,
+  ): Promise<TraderContextData["profile"]> {
     // Only data already held: cohort evidence, a cached leaderboard row, or the search hit. Never a 2,500-credit read for a holdings question.
+    const dropped: RankingWindow[] = [];
     const member = cohort.byId.get(userId);
     if (member) {
+      // The figures were read no later than the cohort version's build; a member carried without fresh data keeps older ones.
+      const asOf = cohort.createdAt;
       const p = member.evidence.providerReported;
       const pnl: Partial<Record<RankingWindow, number | null>> = {};
-      for (const w of ["24h", "7d", "30d", "all"] as const) if (`pnlUsd.${w}` in p) pnl[w] = p[`pnlUsd.${w}`] ?? null;
-      return { source: "cohort-evidence", pnlUsd: pnl, volumeUsd: p["volumeUsd.24h"] ?? null, trades: p.trades ?? null, accountAgeDays: p.accountAgeDays ?? null, averageHoldTimeSeconds: p.averageHoldTimeSeconds ?? null };
+      for (const w of ["24h", "7d", "30d", "all"] as const) {
+        if (!(`pnlUsd.${w}` in p)) continue;
+        if (pnlStillDescribesItsWindow(w, asOf, now)) pnl[w] = p[`pnlUsd.${w}`] ?? null;
+        else dropped.push(w);
+      }
+      if (dropped.length) a.note(`P&L for ${dropped.join(", ")} was left out: the followed-cohort record it came from is older than that window.`);
+      const fresh24 = pnlStillDescribesItsWindow("24h", asOf, now);
+      return {
+        source: "cohort-evidence",
+        asOf,
+        mayBeOlder: true,
+        pnlUsd: pnl,
+        volumeUsd: fresh24 ? p["volumeUsd.24h"] ?? null : null,
+        trades: p.trades ?? null,
+        accountAgeDays: p.accountAgeDays ?? null,
+        averageHoldTimeSeconds: p.averageHoldTimeSeconds ?? null,
+      };
     }
     const pnl: Partial<Record<RankingWindow, number | null>> = {};
     let volume: number | null = null;
     let trades: number | null = null;
+    let asOf: number | null = null;
     for (const w of ["24h", "7d", "30d", "all"] as const) {
       try {
         const e = await store.cacheGet(db, cacheKeyOf("leaderboard", { window: w, limit: BOARD_LIMIT }));
         const page = e && e.retrievedAtMs !== null && now - e.retrievedAtMs < DAY ? R.leaderboard(e.payload) : null;
         const row = page?.rows.find((r) => r.trader.userId === userId);
-        if (row) {
+        if (row && e) {
+          // The provider's own capture time when it gave one, else when we read the board.
+          const at = e.providerAsOfMs ?? e.retrievedAtMs;
+          if (!pnlStillDescribesItsWindow(w, at, now)) {
+            dropped.push(w);
+            continue;
+          }
           pnl[w] = row.pnlUsd;
+          asOf = asOf === null || at === null ? at : Math.min(asOf, at);
           if (w === "24h") {
             volume = row.volumeUsd;
             trades = row.trades;
@@ -1375,9 +1617,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         // Optional context.
       }
     }
-    if (Object.keys(pnl).length) return { source: "leaderboard", pnlUsd: pnl, volumeUsd: volume, trades, accountAgeDays: null, averageHoldTimeSeconds: null };
+    if (dropped.length) a.note(`P&L for ${dropped.join(", ")} was left out: the stored leaderboard copy is older than that window.`);
+    if (Object.keys(pnl).length) return { source: "leaderboard", asOf, mayBeOlder: false, pnlUsd: pnl, volumeUsd: volume, trades, accountAgeDays: null, averageHoldTimeSeconds: null };
     // A search hit states a P&L without saying over which window; it is not filed under one.
-    if (hit) return { source: "search", pnlUsd: {}, volumeUsd: hit.volumeUsd, trades: null, accountAgeDays: null, averageHoldTimeSeconds: null };
+    if (hit) return { source: "search", asOf: null, mayBeOlder: false, pnlUsd: {}, volumeUsd: hit.volumeUsd, trades: null, accountAgeDays: null, averageHoldTimeSeconds: null };
     return null;
   }
 
@@ -1439,11 +1682,20 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       if (args.depth === "deep") {
         const p = a.add(await read(ic.cc, specs.profile(userId), args.freshness));
         if (p.data) {
-          profile = { source: "profile-read", pnlUsd: p.data.pnlUsd, volumeUsd: p.data.volumeUsd, trades: p.data.trades, accountAgeDays: p.data.accountAgeDays, averageHoldTimeSeconds: p.data.averageHoldTimeSeconds };
+          profile = {
+            source: "profile-read",
+            asOf: p.providerAsOf ?? p.retrievedAt,
+            mayBeOlder: false,
+            pnlUsd: p.data.pnlUsd,
+            volumeUsd: p.data.volumeUsd,
+            trades: p.data.trades,
+            accountAgeDays: p.data.accountAgeDays,
+            averageHoldTimeSeconds: p.data.averageHoldTimeSeconds,
+          };
           a.ref("profile", userId, p.retrievedAt);
         }
       } else {
-        profile = await profileFromHeld(userId, ic.now, snap, r.hit);
+        profile = await profileFromHeld(a, userId, ic.now, snap, r.hit);
       }
       if (profile && Object.keys(profile.pnlUsd).length) a.note("P&L figures are provider-reported realised P&L, not a measure of skill.");
       if (args.window === "1h") a.note("Provider P&L windows start at 24h; there is no 1h figure.");
@@ -1491,8 +1743,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       positions = pos.data.rows
         .filter((p) => !token || p.token?.key === token.key)
         .filter((p) => {
-          if (args.side === "buy") return inWindow(p.openedAt, since);
-          if (args.side === "sell") return inWindow(p.closedAt, since) || ((p.soldAmount ?? 0) > 0 && inWindow(p.openedAt, since));
+          // A position that was only RECEIVED is not a buy, and one only SENT OUT is not a sale: a transfer
+          // opens and closes positions too (cohort.ts measurePositions drops received-only rows for the same reason).
+          if (args.side === "buy") return ((p.boughtAmount ?? 0) > 0 || p.avgEntryPrice !== null) && inWindow(p.openedAt, since);
+          if (args.side === "sell") return ((p.soldAmount ?? 0) > 0 || p.avgExitPrice !== null) && (inWindow(p.closedAt, since) || inWindow(p.openedAt, since));
           return inWindow(p.openedAt, since) || inWindow(p.closedAt, since) || (since === null);
         })
         .map((p) => ({
@@ -1652,10 +1906,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let section: Section<ThesesPage>;
     let rows: Thesis[] = [];
     let page: ThesesPage | null = null;
+    // One page of a trader's theses: a FULL page means more may exist, whatever the provider total says (or omits).
+    const traderPageLimit = Math.min(100, Math.max(args.limit, 25));
     if (token && trader) {
-      section = a.add(await read(ic.cc, specs.thesesByUserToken(trader.userId, token, Math.min(100, Math.max(args.limit, 25))), args.freshness));
+      section = a.add(await read(ic.cc, specs.thesesByUserToken(trader.userId, token, traderPageLimit), args.freshness));
       page = section.data;
       rows = page?.rows ?? [];
+      // The provider total is not documented as per (trader, token) on this route, so only the full page counts.
+      if (rows.length >= traderPageLimit) a.capped = true;
     } else if (token) {
       const r = await readTokenTheses(ic.cc, a, token, args.depth, args.freshness);
       section = r.section;
@@ -1663,9 +1921,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       rows = r.rows;
       if (r.capped) a.capped = true;
     } else {
-      section = a.add(await read(ic.cc, specs.thesesByUser(trader!.userId, Math.min(100, Math.max(args.limit, 25))), args.freshness));
+      section = a.add(await read(ic.cc, specs.thesesByUser(trader!.userId, traderPageLimit), args.freshness));
       page = section.data;
       rows = page?.rows ?? [];
+      // Every thesis by one trader: a full page, or a provider total above what came back, means more exist.
+      if (rows.length >= traderPageLimit || (page !== null && page.totalAvailable !== null && page.totalAvailable > rows.length)) a.capped = true;
     }
     let honoured: boolean | null = null;
     if (page) {
@@ -1692,7 +1952,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       }
       const winMs = windowMsOf(args.window);
       if (winMs !== null) rows = rows.filter((x) => x.postedAt !== null && x.postedAt >= ic.now - winMs);
-      if (page.stale === true) a.note(`The provider served a stored thesis snapshot${page.ageSeconds !== null ? ` about ${Math.round(page.ageSeconds / 3600)}h old` : ""}, not a live pull.`);
+      // A stored thesis snapshot (page.stale) is labelled, with its age, by finish() from the section's provider flags.
       if (page.partial === true) a.partial = true;
       if (page.totalAvailable !== null && page.totalAvailable > rows.length && !a.capped && !trader) a.capped = true;
     }
@@ -1719,30 +1979,39 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     });
   }
 
-  async function cohortEvents(snap: CohortSnap, since: number, perTrader: number): Promise<StoredTraderEvent[]> {
+  /**
+   * The cohort's events since `since`, newest first per trader. `failed` when a
+   * read threw (the list is then partial, never complete); `reachedFloor` is
+   * false when some trader's read hit `perTrader` before reaching `since`, so
+   * that trader's older events may be missing.
+   */
+  async function cohortEvents(snap: CohortSnap, since: number, perTrader: number): Promise<{ events: StoredTraderEvent[]; failed: boolean; reachedFloor: boolean }> {
     const out: StoredTraderEvent[] = [];
+    let reachedFloor = true;
     for (const id of snap.ids) {
       try {
-        out.push(...(await store.eventsForTrader(db, id, since, perTrader)));
+        const got = await store.eventsForTrader(db, id, since, perTrader);
+        if (got.length >= perTrader) reachedFloor = false;
+        out.push(...got);
       } catch (e) {
         log(`fomo: cohort event read failed: ${errText(e)}`);
-        break;
+        return { events: out, failed: true, reachedFloor: false };
       }
     }
-    return out;
+    return { events: out, failed: false, reachedFloor };
+  }
+
+  function cohortReadFailed(a: Answer): void {
+    a.partial = true;
+    a.note("The followed traders' record could not be read in full; some of their activity is missing here.");
   }
 
   async function gapNote(a: Answer, since: number, now: number): Promise<void> {
-    try {
-      const gaps = await store.listOpenGaps(db, null, 50);
-      const overlapping = gaps.filter((g) => g.toMs >= since && g.fromMs <= now);
-      if (overlapping.length) {
-        a.partial = true;
-        const mins = Math.round(overlapping.reduce((n, g) => n + (Math.min(g.toMs, now) - Math.max(g.fromMs, since)), 0) / MIN);
-        a.note(`The shared feed record has ${overlapping.length} open gap(s) in this window (about ${mins} min not yet recovered); activity there may be missing.`);
-      }
-    } catch {
-      // Without the gap ledger the answer says nothing about gaps rather than claiming none.
+    // Without the gap ledger (null) the answer says nothing about gaps rather than claiming none.
+    const g = await openGapsIn(since, now);
+    if (g && g.count) {
+      a.partial = true;
+      a.note(`The shared feed record has ${g.count} open gap(s) in this window (about ${g.minutes} min not yet recovered); activity there may be missing.`);
     }
   }
 
@@ -1764,15 +2033,28 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let local: StoredTraderEvent[] = [];
     let rest: TraderEvent[] = [];
     let statsSection: Section<TokenStats> | null = null;
-    const current = await streamCurrent(ic.now);
     if (token) {
-      local = await store.eventsForToken(db, token.key, since, LOCAL_EVENT_LIMIT).catch(() => []);
-      const localSec = a.add(localSection("stream-record", local, local.length ? Math.max(...local.map((e) => e.observedAt)) : null));
-      // The shared stream already records every Robinhood event; a REST read adds nothing unless the record is behind or "now" was asked.
-      if (isRobinhoodToken(token) && current && args.freshness !== "force-refresh") {
+      const stream = await streamCoverage(ic.now);
+      const read0 = await localTokenEvents(token.key, since);
+      let localSec: Section<unknown>;
+      if (read0.ok) {
+        local = read0.events;
+        localSec = a.add(localSection("stream-record", local, local.length ? Math.max(...local.map((e) => e.observedAt)) : null));
+      } else {
+        // A failed read of the record is a missing section, never "no activity".
+        localSec = a.add(failedLocalSection("stream-record", "local-read-failed"));
+        if (!a.missing.includes("stream-record")) a.missing.push("stream-record");
+      }
+      // The shared stream records every Robinhood event, so the record alone answers, but only for a window it
+      // provably reaches back over (streamCoverage), when it could be read, and unless "now" was asked.
+      const recordReaches = stream.fromMs !== null && stream.fromMs <= since;
+      if (isRobinhoodToken(token) && stream.current && recordReaches && read0.ok && args.freshness !== "force-refresh") {
         a.note("Served from the live shared feed record.");
         essential.push(localSec);
       } else {
+        if (isRobinhoodToken(token) && stream.current && read0.ok && !recordReaches) {
+          a.note("The shared feed record does not reach back over this whole window, so the provider feed was read too.");
+        }
         const t = token;
         const feed = a.add(await read(ic.cc, specs.feed({ token: t.address, chain: feedChainOf(t) }), args.freshness));
         if (feed.data) {
@@ -1790,9 +2072,16 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       } else if (statsSection.data) a.ref("token-stats", token.key, statsSection.retrievedAt);
     } else {
       if (args.cohortOnly) {
-        local = await cohortEvents(cohort, since, 100);
-        const localSec = a.add(localSection("stream-record", local, local.length ? Math.max(...local.map((e) => e.observedAt)) : null));
-        essential.push(localSec);
+        const ce = await cohortEvents(cohort, since, 100);
+        local = ce.events;
+        if (ce.failed && local.length === 0) {
+          const failed = a.add(failedLocalSection("stream-record", "local-read-failed"));
+          if (!a.missing.includes("stream-record")) a.missing.push("stream-record");
+          essential.push(failed);
+        } else {
+          essential.push(a.add(localSection("stream-record", local, local.length ? Math.max(...local.map((e) => e.observedAt)) : null)));
+          if (ce.failed) cohortReadFailed(a);
+        }
         if (cohort.size === null) a.note("No followed cohort has been built yet.");
       } else {
         const chain = args.chain ?? undefined;
@@ -1949,10 +2238,22 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const cohort = await cohortSnapshot(ic.now);
     const graduated = a.add(await read(ic.cc, specs.tokenBoard("graduated"), args.freshness));
     const trending = a.add(await read(ic.cc, specs.tokenBoard("trending"), args.freshness));
-    // Local cohort record (free): first purchases and breadth over the window; a 7-day lookback decides "first seen".
-    const lookback = Math.min(since, ic.now - FIRST_SEEN_LOOKBACK_MS);
-    const events = cohort.ids.size ? await cohortEvents(cohort, lookback, 100) : [];
-    const localSec = a.add(localSection("cohort-record", events, events.length ? Math.max(...events.map((e) => e.observedAt)) : null));
+    // Local cohort record (free): first purchases and breadth over the window. "First seen" needs a BASELINE
+    // BEFORE the window, so the read starts a full lookback before `since` (whatever the window), and the
+    // verdict is only given when that baseline was read in full and lies inside the record's retention.
+    const lookback = since - FIRST_SEEN_LOOKBACK_MS;
+    const retainedFrom = ic.now - store.FOMO_RETENTION.eventsMs;
+    const ce = cohort.ids.size ? await cohortEvents(cohort, Math.max(lookback, retainedFrom), 100) : { events: [], failed: false, reachedFloor: true };
+    const events = ce.events;
+    const localSec = ce.failed && events.length === 0
+      ? a.add(failedLocalSection("cohort-record", "local-read-failed"))
+      : a.add(localSection("cohort-record", events, events.length ? Math.max(...events.map((e) => e.observedAt)) : null));
+    if (ce.failed) {
+      if (localSec.data === null && !a.missing.includes("cohort-record")) a.missing.push("cohort-record");
+      else cohortReadFailed(a);
+    }
+    const baselineKnown = !ce.failed && ce.reachedFloor && lookback >= retainedFrom;
+    if (cohort.ids.size && !baselineKnown) a.note("Whether a coin is new to the followed traders could not be judged: the record before this window was not read in full.");
     const before = events.filter((e) => eventTime(e) < since);
     const inWin = events.filter((e) => eventTime(e) >= since);
     const firstSeen = new Map<string, number>();
@@ -2003,13 +2304,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         filteredByCap++;
         continue;
       }
-      const firstSeenInWindow = early.has(c.token.key);
+      // An earlier buy seen in the baseline is a known "no"; no earlier buy is a "yes" only over a complete baseline.
+      const firstSeenInWindow: boolean | null = !early.has(c.token.key) ? false : baselineKnown ? true : null;
       // EARLY-SIGNAL EVIDENCE, NOT SIZE: market cap, volume, holders and board rank are never scored.
       const recent = c.latestBuyAt !== null && ic.now - c.latestBuyAt <= 6 * HOUR ? 1 : 0;
       const score =
         3 * c.cohortBuyers.size +
         1 * Math.max(0, c.buyers.size - c.cohortBuyers.size) * 0.5 +
-        2 * (firstSeenInWindow ? 1 : 0) +
+        2 * (firstSeenInWindow === true ? 1 : 0) +
         1 * (c.newThesis ? 1 : 0) +
         1 * (c.boards.has("graduated") ? 1 : 0) +
         0.5 * (c.boards.has("trending") ? 1 : 0) +
@@ -2055,6 +2357,22 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
 
   // ── Dossier refresh ─────────────────────────────────────────────────
 
+  /**
+   * The thesis pages of an earlier, DEEPER read of this coin, from the shared
+   * cache (no provider call), while that copy is still fit to show at all.
+   */
+  async function deeperThesisCopy(t: TokenIdentity, pages: number, now: number): Promise<{ page: ThesesPage; retrievedAt: number } | null> {
+    try {
+      const spec = specs.thesesByToken(t, pages);
+      const e = await store.cacheGet(db, cacheKeyOf(spec.route, spec.params));
+      if (!e || e.retrievedAtMs === null || now < e.retrievedAtMs || now - e.retrievedAtMs > policyFor("theses").staleServeMaxMs) return null;
+      const page = R.theses(e.payload);
+      return page ? { page, retrievedAt: e.retrievedAtMs } : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function refreshCore(
     cc: ChargeContext,
     a: Answer,
@@ -2063,8 +2381,13 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     o: { depth: "quick" | "standard" | "deep"; mode: FreshnessMode },
   ): Promise<RefreshOutcome> {
     const before = a.sections.length;
+    const notes: string[] = [];
+    const say = (n: string): void => {
+      a.note(n);
+      if (!notes.includes(n)) notes.push(n);
+    };
     const previous = await previousDossier(token);
-    const th = await readTokenTheses(cc, a, token, o.depth, o.mode);
+    let th = await readTokenTheses(cc, a, token, o.depth, o.mode);
     const usageNow = (): RefreshOutcome["usage"] => {
       const mine = a.sections.slice(before);
       return {
@@ -2077,14 +2400,61 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       // No thesis evidence: the previous dossier stands, and nothing is rebuilt from less.
       const st = th.section.status;
       const status: ResultStatus = st === "budget-limited" ? "budget-limited" : previous ? "stale" : st === "ok" || st === "stale" ? "failed" : st;
-      return { dossier: previous, changed: false, status, reason: th.section.reason, checked: false, usage: usageNow(), notes: [] };
+      return { dossier: previous, changed: false, status, reason: th.section.reason, checked: false, usage: usageNow(), notes };
+    }
+    const page = th.section.data;
+    /*
+     * A NARROWER READ IS NOT EVIDENCE THAT A CLAIM DISAPPEARED. The revision is
+     * shared by every owner, the lens and the follow review, and the research
+     * queue refreshes at quick depth. Built from one page after a five-page
+     * read, it would drop every claim that lived on pages 2-5 and announce the
+     * objections gone. So when the stored revision read more pages than this
+     * read, the deeper read's later pages are carried from the shared cache
+     * (no provider call), labelled as a stored copy with its age, and page one
+     * is the fresh read. With no deeper copy left to carry (it outlived the
+     * cache), the narrower revision is built, and the change summary refuses to
+     * compare the two (their scopes differ, see toolResearchCoin).
+     */
+    let carried: { pages: number; retrievedAt: number } | null = null;
+    const deeperPages = previous?.coverage.pagesReturned ?? 0;
+    if (th.pages < deeperPages) {
+      const deeper = await deeperThesisCopy(token, deeperPages, cc.now);
+      if (deeper) {
+        const seen = new Set(th.rows.map((x) => x.id));
+        const rows = [...th.rows, ...deeper.page.rows.filter((x) => !seen.has(x.id))];
+        const total = page.totalAvailable ?? deeper.page.totalAvailable;
+        th = { ...th, rows, pages: deeperPages, capped: rows.length >= deeperPages * THESIS_PAGE_SIZE || (total !== null && total > rows.length) };
+        carried = { pages: deeperPages, retrievedAt: deeper.retrievedAt };
+        say(`Thesis pages 2-${deeperPages} are carried from a deeper read ${agoText(cc.now - deeper.retrievedAt)}; only the first page was read again.`);
+      }
     }
     const since = cc.now - DAY;
-    const local = await store.eventsForToken(db, token.key, since, LOCAL_EVENT_LIMIT).catch(() => [] as StoredTraderEvent[]);
+    const loc = await localTokenEvents(token.key, since);
+    const local = loc.ok ? loc.events : [];
+    if (!loc.ok) {
+      a.add(failedLocalSection("stream-record", "local-read-failed"));
+      say("The shared feed record could not be read; the provider feed was read instead.");
+    }
     let rest: TraderEvent[] = [];
-    let activityRead: boolean;
-    if (isRobinhoodToken(token) && (await streamCurrent(cc.now)) && o.mode !== "force-refresh") {
+    /*
+     * true: the 24h of activity was read; false: it could not be; null: what
+     * was read is real but not known to be complete (an open gap in the shared
+     * record), so an empty list is not "nobody traded" (buildDossier).
+     */
+    let activityRead: boolean | null;
+    // The activity behind this revision is not a complete 24h: no change (and no "no change") is claimed across it.
+    let activityIncomplete = !loc.ok;
+    const robinhood = isRobinhoodToken(token);
+    const stream = robinhood && loc.ok && o.mode !== "force-refresh" ? await streamCoverage(cc.now) : null;
+    const gaps = stream?.current ? await openGapsIn(since, cc.now) : null;
+    if (stream?.current && stream.fromMs !== null && stream.fromMs <= since && gaps !== null && gaps.count === 0) {
+      // The shared record provably reaches back over the whole window with no hole in it: it alone is the read.
       activityRead = true;
+    } else if (stream?.current && gaps !== null && gaps.count > 0) {
+      // A hole in the record the ingest ledger has not recovered: the events held are real, the silence is not.
+      activityRead = null;
+      activityIncomplete = true;
+      say(`The shared feed record has ${gaps.count} open gap(s) in the last 24h (about ${gaps.minutes} min not yet recovered); activity there may be missing.`);
     } else {
       const feed = a.add(await read(cc, specs.feed({ token: token.address, chain: feedChainOf(token) }), o.mode));
       if (feed.data) rest = feed.data.rows.filter((e) => e.token?.key === token.key);
@@ -2095,11 +2465,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const refusedBy = a.sections.slice(before).find((s) => s.reason !== null && (s.reason.startsWith("budget-") || s.reason === "job-allowance"));
     if (refusedBy && previous) {
       // Never rebuild from less because a budget said no: the previous revision stands, said so.
-      return { dossier: previous, changed: false, status: "budget-limited", reason: refusedBy.reason, checked: false, usage: usageNow(), notes: [] };
+      return { dossier: previous, changed: false, status: "budget-limited", reason: refusedBy.reason, checked: false, usage: usageNow(), notes };
     }
     const cohort = await cohortSnapshot(cc.now);
     const events = dedupeEvents([...local, ...rest]).events;
-    const page = th.section.data;
     const built = buildDossier({
       token,
       label: fillLabel(label, th.rows.map((x) => ({ token: x.token, label: x.tokenLabel })), token.key),
@@ -2109,15 +2478,16 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         pagesReturned: th.pages,
         providerTotal: page.totalAvailable,
         capped: th.capped,
-        stale: page.stale,
-        ageSeconds: page.ageSeconds,
+        // Carried pages are a stored copy: the dossier labels them so, with their age.
+        stale: carried ? true : page.stale,
+        ageSeconds: carried ? Math.max(0, Math.round((cc.now - carried.retrievedAt) / 1000)) : page.ageSeconds,
         chainFilterHonoured: page.chainFilterHonoured,
       },
       events,
       cohortUserIds: cohort.ids,
       stats: statsData,
       marketContext: [],
-      routeContext: [isRobinhoodToken(token) ? "On Robinhood Chain; a trading route has not been verified by Merrymen." : "Not on a chain Merrymen trades; research only."],
+      routeContext: [robinhood ? "On Robinhood Chain; a trading route has not been verified by Merrymen." : "Not on a chain Merrymen trades; research only."],
       ownFamilies: new Set<string>(),
       selfNames,
       previous,
@@ -2142,10 +2512,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       }
     }
     const thesisLive = th.section.status === "ok";
-    const anyMissing = a.sections.slice(before).some((s) => s.data === null) || !activityRead;
+    const anyMissing = a.sections.slice(before).some((s) => s.data === null) || activityRead === false || activityIncomplete;
     const anyStale = a.sections.slice(before).some((s) => s.status === "stale");
     const status: ResultStatus = anyMissing ? "partial" : anyStale ? "stale" : "ok";
-    return { dossier, changed, status, reason: status === "ok" ? null : a.sections.slice(before).find((s) => s.status !== "ok")?.reason ?? null, checked: thesisLive && activityRead, usage: usageNow(), notes: [] };
+    const reason = status === "ok" ? null : a.sections.slice(before).find((s) => s.status !== "ok")?.reason ?? (activityIncomplete ? "activity-incomplete" : null);
+    // "Checked" supports a change claim (or "no change"): every input was read just now, completely. Carried pages
+    // are not re-read, but they make this a stored-copy scope, which compares only with another (changeScopeOf).
+    const checked = thesisLive && activityRead === true && !activityIncomplete;
+    return { dossier, changed, status, reason, checked, usage: usageNow(), notes };
   }
 
   function claimView(c: CoinDossier["claims"][number] | null): ClaimView | null {
@@ -2182,7 +2556,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
             costAllowanceCredits: DEEP_JOB_CREDIT_ALLOWANCE,
             nowMs: ic.now,
           });
-          if (q.ok) job = { id: q.job.id, deadlineMs: q.job.deadlineMs, status: q.job.status, created: q.created };
+          if (q.ok) {
+            // Today's job may be an earlier one that already finished, failed or ran out of time: only a live one is "queued".
+            const live = (q.job.status === "queued" || q.job.status === "running") && q.job.deadlineMs > ic.now;
+            job = { id: q.job.id, deadlineMs: q.job.deadlineMs, status: live ? q.job.status : jobStatusAt(q.job.status, q.job.deadlineMs, ic.now), created: q.created };
+          }
           else a.note(q.reason === "quota-exceeded" ? "Deeper research could not be scheduled: too many research jobs are already running." : "Deeper research for this coin was already scheduled differently today.");
         } catch (e) {
           log(`fomo: job enqueue failed: ${errText(e)}`);
@@ -2214,13 +2592,24 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     if (args.sinceRevision !== null) {
       const base = await store.dossierRevision(db, token.key, args.sinceRevision).catch(() => null);
       const baseline = base ? asDossier(base.dossier, token) : null;
-      const scope = d.coverage.windowRequested;
+      // Two revisions compare only over the same coverage: window, thesis pages read, and live vs stored copy.
+      // A one-page read set against a five-page one would report the unread pages' claims as gone.
       const cs = changeSummary(
-        baseline ? { dossier: baseline, checkedAt: base!.builtAtMs, scope: baseline.coverage.windowRequested } : null,
-        { dossier: d, checkedAt: ic.now, scope, succeeded: r.checked },
+        baseline ? { dossier: baseline, checkedAt: base!.builtAtMs, scope: changeScopeOf(baseline) } : null,
+        { dossier: d, checkedAt: ic.now, scope: changeScopeOf(d), succeeded: r.checked },
       );
       changes = { comparable: cs.comparable, noChange: cs.noChange, changes: cs.changes.map((c) => sanitizeText(c, 240)).slice(0, 12), reason: cs.reason, sinceRevision: args.sinceRevision };
-      if (!cs.comparable) a.note(cs.reason === "no-baseline" ? `Revision ${args.sinceRevision} is not on record, so no comparison was made.` : `No comparison was made (${cs.reason}).`);
+      if (!cs.comparable) {
+        a.note(
+          cs.reason === "no-baseline"
+            ? `Revision ${args.sinceRevision} is not on record, so no comparison was made.`
+            : cs.reason === "different-scope"
+              ? `Revision ${args.sinceRevision} read a different depth of theses (or a stored copy), so the two are not compared.`
+              : cs.reason === "check-failed"
+                ? `This read was not complete, so it is not compared with revision ${args.sinceRevision}.`
+                : `No comparison was made (${cs.reason}).`,
+        );
+      }
     }
     for (const e of d.evidence.slice(0, 30)) a.addRef(e);
     a.ref("dossier", `${d.dossierId}r${d.revision}`);
@@ -2257,8 +2646,9 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       job,
       executionAvailability: availabilityOf(token),
     };
+    const jobPending = job !== null && (job.status === "queued" || job.status === "running");
     const status: ResultStatus | undefined =
-      job !== null ? "partial" : r.status === "budget-limited" ? "budget-limited" : r.status === "stale" ? "stale" : r.status === "partial" ? "partial" : undefined;
+      jobPending ? "partial" : r.status === "budget-limited" ? "budget-limited" : r.status === "stale" ? "stale" : r.status === "partial" ? "partial" : undefined;
     return finish(ic, a, {
       cls: "theses",
       mode: args.freshness,
@@ -2267,7 +2657,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       rows: d.coverage.uniqueTheses + (d.flow ? (d.flow.distinctBuyers ?? 0) + (d.flow.distinctSellers ?? 0) : 0),
       essential: [],
       status: status ?? (d.coverage.uniqueTheses === 0 && !d.flow ? "empty" : "ok"),
-      reason: job !== null ? "deep-research-queued" : r.reason,
+      reason: jobPending ? "deep-research-queued" : r.reason,
       dossierRevision: { dossierId: d.dossierId, revision: d.revision },
     });
   }
@@ -2291,13 +2681,22 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const jobs = await store.recentJobs(db, tenant, 5).catch(() => []);
     const request = args.requestId ? await store.getRequest(db, tenant, args.requestId).catch(() => null) : null;
     const cohort = await cohortSnapshot(ic.now);
-    const health = await healthOf(ic.now);
-    const caps: Record<string, number> = {};
+    const health = await ownerHealthOf(tenant, ic.access, ic.now);
+    // The documented baseline with every observation folded in, so a route nobody has called yet still shows as unverified.
+    let observed: CapabilityRecord[] = [];
     try {
-      for (const c of await store.listCapabilities(db)) caps[c.status] = (caps[c.status] ?? 0) + 1;
+      observed = await store.listCapabilities(db);
     } catch {
-      // Counts are context only.
+      // Without observations the baseline is all that is known: everything reads as documented only.
     }
+    const merged = mergeCapabilities(DOCUMENTED_CAPABILITIES, observed);
+    const caps: Record<string, number> = {};
+    for (const c of merged) caps[c.status] = (caps[c.status] ?? 0) + 1;
+    const used = new Set<string>([...Object.values(CAPABILITY_FOR_ROUTE), "ws-alerts"]);
+    // The monitoring stream first: it is what "is Fomo working?" most depends on.
+    const streamFirst = (x: string, y: string): number => (x === "ws-alerts" ? -1 : y === "ws-alerts" ? 1 : x < y ? -1 : x > y ? 1 : 0);
+    const capabilitiesUnverified = merged.filter((c) => used.has(c.capability) && c.status === "DOCUMENTED").map((c) => c.capability).sort(streamFirst);
+    const capabilitiesDown = merged.filter((c) => used.has(c.capability) && (c.status === "UNAVAILABLE" || c.status === "ENTITLEMENT_BLOCKED")).map((c) => c.capability).sort();
     if (assessment) a.ref("assessment", assessment.id);
     if (token && !assessment && funnel.length === 0) a.note("Merrymen has not assessed this coin for you; nothing was skipped because nothing was reviewed.");
     const data: ResearchStatusData = {
@@ -2314,11 +2713,13 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         : null,
       funnel: funnel.map((f) => ({ stage: f.stage, detail: f.detail ? sanitizeText(f.detail, 200) : null, atMs: f.atMs })),
       watches: watches.map((w) => ({ tokenKey: w.tokenKey, symbol: w.label.symbol ? sanitizeText(w.label.symbol, 24) : null, expiresAtMs: w.expiresAtMs })),
-      jobs: jobs.map((j) => ({ id: j.id, kind: j.kind, status: j.status, deadlineMs: j.deadlineMs, createdAtMs: j.createdAtMs, delivered: j.deliveredAtMs !== null })),
+      jobs: jobs.map((j) => ({ id: j.id, kind: j.kind, status: jobStatusAt(j.status, j.deadlineMs, ic.now), deadlineMs: j.deadlineMs, createdAtMs: j.createdAtMs, delivered: j.deliveredAtMs !== null })),
       request: request ? { requestId: request.requestId, tool: request.tool, status: request.status, createdAtMs: request.createdAtMs } : null,
       cohort: cohort.size !== null && cohort.version !== null ? { size: cohort.size, version: cohort.version, target: cohort.target, shortfallReason: cohort.shortfallReason } : null,
       health: { state: health.state, detail: health.detail, configured: health.configured, creditsRemaining: health.creditsRemaining },
       capabilities: caps,
+      capabilitiesUnverified,
+      capabilitiesDown,
     };
     return finish(ic, a, {
       cls: "profile",
@@ -2384,17 +2785,94 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
 
   async function healthOf(now: number): Promise<FomoServiceHealth> {
     const creditsRemaining = usage?.snapshot().lastCreditsRemaining?.value ?? null;
-    const budgetLimited = lastBudgetRefusalAt !== null && now - lastBudgetRefusalAt >= 0 && now - lastBudgetRefusalAt < 15 * MIN;
+    // Process-wide: only refusals by a limit every owner shares (noteBudgetRefusal). One owner's own cap is theirs.
+    const budgetLimited = recentRefusal(lastFleetBudgetRefusalAt, now);
     const base = { configured: client !== null, lastProviderOkAt, lastProviderFailure: lastProviderFailure ? { at: lastProviderFailure.at, reason: lastProviderFailure.reason } : null, creditsRemaining, budgetLimited };
     if (!client) return { ...base, state: "not-configured", detail: "Fomo data is not configured on this install (no provider key is set)." };
     if (lastProviderFailure?.down && (lastProviderOkAt === null || lastProviderFailure.at > lastProviderOkAt)) {
       return { ...base, state: "provider-unavailable", detail: `The Fomo data provider is not answering (${lastProviderFailure.reason}); answers use stored copies where they exist.` };
     }
-    if (budgetLimited) return { ...base, state: "budget-limited", detail: "Fomo research is being rationed: the retrieval budget refused a read in the last 15 minutes." };
-    if ((lastProviderOkAt !== null && now - lastProviderOkAt <= 15 * MIN) || (await streamCurrent(now))) {
-      return { ...base, state: "receiving-fresh-data", detail: "Fomo data is arriving normally." };
+    if (budgetLimited) return { ...base, state: "budget-limited", detail: "Fomo research is being rationed: the shared retrieval budget refused a read in the last 15 minutes." };
+    const lookups = lastProviderOkAt !== null && now - lastProviderOkAt <= 15 * MIN;
+    const stream = await streamCurrent(now);
+    if (lookups || stream) {
+      // A lookup that answered is not a stream that delivers: the sentence says which one is true.
+      const detail = stream && lookups
+        ? "Fomo data is arriving normally: lookups answer and the shared trader feed is current."
+        : stream
+          ? "The shared trader feed is current."
+          : "Fomo lookups are answering; the shared trader feed is not current.";
+      return { ...base, state: "receiving-fresh-data", detail };
     }
     return { ...base, state: "research-only", detail: "Fomo is configured; nothing has been read from it recently." };
+  }
+
+  /**
+   * ONE OWNER'S HEALTH ("is Fomo working?"). The process-wide health cannot
+   * answer it: it knows nothing of this owner's switches, and a lookup that
+   * answered says nothing about whether the shared trader feed is delivering.
+   * So: configuration, this owner's data access, the provider, the budget (the
+   * fleet's and this owner's own, never another owner's), then, when
+   * monitoring is on, the shared feed's freshness and any open coverage gap in
+   * the last day. Monitoring off is research-only, said in those words.
+   */
+  async function ownerHealthOf(tenantRaw: string, accessIn: FomoAccess | null, now: number): Promise<FomoServiceHealth> {
+    const tenant = store.tenantKey(tenantRaw);
+    const mine = recentRefusal(tenantBudgetRefusals.get(tenant), now);
+    let access = accessIn;
+    if (!access && client) {
+      try {
+        access = await deps.access(tenantRaw);
+      } catch (e) {
+        log(`fomo: access check failed: ${errText(e)}`);
+      }
+    }
+    if (client && (!access || access.dataAccess !== true)) {
+      // Permission first, as in invoke(): an owner who switched Fomo off is told so, and nothing else is read for them.
+      return {
+        state: "permission-required",
+        detail: "Fomo data access is switched off for this account, so nothing is read for it.",
+        configured: true,
+        lastProviderOkAt: null,
+        lastProviderFailure: null,
+        creditsRemaining: null,
+        budgetLimited: false,
+      };
+    }
+    const fleet = await healthOf(now);
+    const base = { ...fleet, budgetLimited: fleet.budgetLimited || mine };
+    if (fleet.state === "not-configured" || !access) return base;
+    if (fleet.state === "provider-unavailable" || fleet.state === "budget-limited") return base;
+    if (mine) {
+      return { ...base, state: "budget-limited", detail: "Your Fomo research allowance is used up for now: a read for this account was refused in the last 15 minutes." };
+    }
+    if (!access.monitoring && !access.follow) {
+      return { ...base, state: "research-only", detail: `Fomo lookups are on; trader monitoring is off.${fleet.lastProviderOkAt !== null && now - fleet.lastProviderOkAt <= 15 * MIN ? " Lookups are answering." : ""}` };
+    }
+    let checkpointAt: number | null = null;
+    try {
+      checkpointAt = (await store.getCheckpoint(db, "alerts"))?.updatedAtMs ?? null;
+    } catch {
+      // Unknown is not fresh.
+    }
+    if (checkpointAt === null) {
+      return { ...base, state: "watching-condition", detail: "Monitoring is on, but the shared trader feed has not delivered anything on this install yet." };
+    }
+    if (!(now - checkpointAt >= 0 && now - checkpointAt <= FEED_FRESH_MS)) {
+      return { ...base, state: "watching-condition", detail: `Monitoring is on, but the shared trader feed last delivered ${agoText(Math.max(0, now - checkpointAt))}; it is not current.` };
+    }
+    const gaps = await openGapsIn(now - DAY, now);
+    if (gaps === null) {
+      return { ...base, state: "watching-condition", detail: "The shared trader feed is delivering, but whether it has gaps could not be checked." };
+    }
+    if (gaps.count > 0) {
+      return {
+        ...base,
+        state: "watching-condition",
+        detail: `The shared trader feed is delivering, but ${gaps.count} gap(s) in the last 24h (about ${gaps.minutes} min) have not been recovered; activity there may be missing.`,
+      };
+    }
+    return { ...base, state: "receiving-fresh-data", detail: "The shared trader feed is delivering, with no open gaps in the last 24h." };
   }
 
   // ── The dispatcher ──────────────────────────────────────────────────
@@ -2413,6 +2891,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       audience,
       surface,
       conversationKey: ctx?.conversationKey ?? null,
+      access: null,
       // One owner is one budget: the store lowercases tenants, so the budget keys must too.
       cc: { tenant: store.tenantKey(tenant), surface, priority: ctx?.priority ?? "interactive", groupId, now, signal: ctx?.signal, cap: null },
     };
@@ -2457,6 +2936,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       await audit(env.status, { reason: env.reason, detail: v.reason });
       return env;
     }
+    ic.access = access;
     let env: FomoEnvelope;
     try {
       env = await dispatch(ic, tool, v.args);
@@ -2504,6 +2984,26 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     payWith: BudgetLike = budget,
   ): Promise<RefreshOutcome> {
     const now = finite(opts.now) ? opts.now : clock();
+    const none = { providerCalls: 0, cacheHits: 0, creditsCharged: 0 };
+    /*
+     * AN OWNER WHO SWITCHED FOMO OFF IS NOT CHARGED FOR IT LATER. A deep job is
+     * queued while access is on and runs minutes later on the leader; the
+     * permission check in invoke() was then. So a payer that is a real owner
+     * is checked again here, before any cache read or provider call, and a
+     * refused or unreadable permission reads nothing. Shared research belongs
+     * to nobody and has no owner to ask.
+     */
+    if (store.tenantKey(payer.tenant) !== SHARED_RESEARCH_TENANT) {
+      let access: FomoAccess | null = null;
+      try {
+        access = await deps.access(payer.tenant);
+      } catch (e) {
+        log(`fomo: access check failed: ${errText(e)}`);
+      }
+      if (!access || access.dataAccess !== true) {
+        return { dossier: null, changed: false, status: "not-authorized", reason: "data-access-off", checked: false, usage: none, notes: [] };
+      }
+    }
     const cc: ChargeContext = {
       budget: payWith,
       tenant: store.tenantKey(payer.tenant),
@@ -2518,7 +3018,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return await refreshCore(cc, new Answer(), token, label, { depth: opts.depth, mode: opts.mode ?? "prefer-fresh" });
     } catch (e) {
       log(`fomo: dossier refresh failed: ${errText(e)}`);
-      return { dossier: null, changed: false, status: "failed", reason: "internal-error", checked: false, usage: { providerCalls: 0, cacheHits: 0, creditsCharged: 0 }, notes: [] };
+      return { dossier: null, changed: false, status: "failed", reason: "internal-error", checked: false, usage: none, notes: [] };
     }
   }
 
@@ -2611,6 +3111,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return healthOf(finite(now) ? now : clock());
     },
 
+    ownerHealth(tenant: string, now?: number) {
+      return ownerHealthOf(typeof tenant === "string" ? tenant.trim() : "", null, finite(now) ? now : clock());
+    },
+
     heldTokensSnapshot(now?: number) {
       const at = finite(now) ? now : clock();
       const out = new Map<string, string[]>();
@@ -2642,12 +3146,12 @@ export async function runPendingJobs(
   service: FomoServiceExt,
   db: Db,
   opts: { now?: () => number; limit?: number; leaseMs?: number; log?: (line: string) => void } = {},
-): Promise<{ claimed: number; done: number; failed: number }> {
+): Promise<{ claimed: number; done: number; failed: number; cancelled: number }> {
   const now = opts.now ?? Date.now;
   const limit = Math.max(1, Math.min(20, Math.floor(opts.limit ?? 3)));
   const leaseMs = Math.max(30_000, Math.floor(opts.leaseMs ?? DEEP_JOB_DEADLINE_MS + MIN));
   const log = opts.log ?? (() => {});
-  const out = { claimed: 0, done: 0, failed: 0 };
+  const out = { claimed: 0, done: 0, failed: 0, cancelled: 0 };
   for (let i = 0; i < limit; i++) {
     let job: store.ClaimedFomoJob | null;
     try {
@@ -2658,10 +3162,11 @@ export async function runPendingJobs(
     }
     if (!job) break;
     out.claimed++;
-    const finishWith = async (status: "done" | "failed", result: unknown): Promise<void> => {
+    const finishWith = async (status: "done" | "failed" | "cancelled", result: unknown): Promise<void> => {
       const ok = await store.finishJob(db, job!, { status, result }).catch(() => false);
       if (!ok) log(`fomo: job ${job!.id} was no longer ours to finish`);
       if (status === "done") out.done++;
+      else if (status === "cancelled") out.cancelled++;
       else out.failed++;
     };
     const p = isObj(job.params) ? job.params : {};
@@ -2698,6 +3203,11 @@ export async function runPendingJobs(
         reason: r.reason,
         credits: r.usage.creditsCharged,
       };
+      if (r.status === "not-authorized") {
+        // The owner switched data access off after asking: nothing was read, and nothing will be delivered.
+        await finishWith("cancelled", { ...result, reason: r.reason ?? "data-access-off" });
+        continue;
+      }
       // "Done" means the deeper read happened; a refused budget or a failed read is reported as such, with the reason.
       const deeper = r.dossier !== null && (r.status === "ok" || r.status === "partial" || r.status === "stale");
       await finishWith(deeper ? "done" : "failed", deeper ? result : { ...result, reason: r.reason ?? r.status });

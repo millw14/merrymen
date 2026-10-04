@@ -289,6 +289,15 @@ export interface TraderContextData {
   profile: {
     /** Where the figures came from; none of them is a skill measure. */
     source: "cohort-evidence" | "leaderboard" | "search" | "profile-read";
+    /**
+     * When the figures were read; null when unknown. A windowed P&L describes
+     * the window ending THEN, so it is shown with this time, and a figure
+     * older than its own window is left out (a 24h figure from five days ago
+     * describes a different day).
+     */
+    asOf: number | null;
+    /** True when asOf is only an upper bound (cohort evidence can be carried from an earlier refresh). */
+    mayBeOlder: boolean;
     pnlUsd: Partial<Record<RankingWindow, number | null>>;
     volumeUsd: number | null;
     trades: number | null;
@@ -428,7 +437,13 @@ export interface OpportunityRow {
     cohortBuyers: number;
     distinctBuyers: number;
     latestBuyAt: number | null;
-    firstSeenInWindow: boolean;
+    /**
+     * The cohort's first appearance on this coin falls in the window. Null
+     * when that cannot be judged: the record before the window was not read
+     * in full (older than retention, a trader's read hit its limit, or the
+     * read failed). Only true scores.
+     */
+    firstSeenInWindow: boolean | null;
     newThesis: boolean;
     boards: string[];
   };
@@ -491,11 +506,22 @@ export interface ResearchStatusData {
   } | null;
   funnel: { stage: FunnelStage; detail: string | null; atMs: number }[];
   watches: { tokenKey: string; symbol: string | null; expiresAtMs: number }[];
+  /**
+   * The owner's recent research jobs. `status` is the stored status, except
+   * that a job still queued or running past its deadline reads "expired":
+   * nothing will finish it, so it is never shown as in progress.
+   */
   jobs: { id: string; kind: string; status: string; deadlineMs: number; createdAtMs: number; delivered: boolean }[];
   request: { requestId: string; tool: string; status: string; createdAtMs: number } | null;
   cohort: { size: number; version: number; target: number; shortfallReason: string | null } | null;
+  /** The OWNER's health: their switches, the shared feed's freshness and gaps, the provider, and the budget (theirs and the fleet's). */
   health: { state: string; detail: string; configured: boolean; creditsRemaining: number | null };
+  /** Provider capabilities by status: the documented baseline with every observation folded in. */
   capabilities: Record<string, number>;
+  /** Capabilities Merrymen uses that no call has verified yet (still only documented). Absent from older producers. */
+  capabilitiesUnverified?: string[];
+  /** Capabilities Merrymen uses that the provider refused or could not serve when last called. */
+  capabilitiesDown?: string[];
 }
 
 export interface WatchData {
