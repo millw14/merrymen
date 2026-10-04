@@ -434,6 +434,17 @@ const CHILD_SECRET_STRIP = [
   // outright, and there is no "but then the fetch fails" pressure to ever
   // remove it. See research/hey.ts.
   "MERRYMEN_HEY_API_KEY",
+  // THE FOMO DATA KEY, under both names an operator might set (the house's and
+  // the provider's own docs'). Same reason as the two above: a child holding it
+  // could leak it into a prompt, a decision row or a log line. A hosted child
+  // still answers Fomo questions — it asks THIS process over the IPC channel
+  // (fomo/broker.ts), and this process stamps the tenant from which child
+  // asked, so the child never needs the key and never chooses whose budget or
+  // permissions apply. settings.ts resolves `fomoApiKey` from env as a
+  // fallback, which is exactly why leaving either name in a child's
+  // environment would hand the house key to every tenant.
+  "MERRYMEN_FOMO_API_KEY",
+  "FOMO_API_KEY",
   // Privy authenticates PEOPLE at the web edge. A worker child acts for an
   // agent that is already authorized by a signed grant; it has no login to
   // verify and no reason to hold the key that would verify one.
