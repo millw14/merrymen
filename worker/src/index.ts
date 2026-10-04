@@ -153,7 +153,21 @@ import { renderBuilder } from "./research/coin-builder";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
 import { FunnelRecorder, candidateSkipOf, classifyReview, classifyStage, entryTokenOf, installDecisionFunnel, trenchReviewBlock, trencherSymbol, unqualifiedReasons, type Classified } from "./decision-funnel";
-import { EarlyCandidateBook, earlyEntryBound, earlyEntryPools, earlyFunnelOf, installEarlyCandidateBook } from "./early-candidates";
+import { EarlyCandidateBook, earlyCandidateBook, earlyEntryBound, earlyEntryPools, earlyFunnelOf, installEarlyCandidateBook } from "./early-candidates";
+import {
+  FomoChild,
+  childExplorationStore,
+  childFollowCounters,
+  childFomoTenant,
+  chooseChildFomoBroker,
+  fomoFollowLiveEnabledFor,
+  installFomoChild,
+  selfHostedFomoBroker,
+  type FomoLiveFacts,
+} from "./fomo-child";
+import { processBrokerPort } from "./fomo/broker";
+import type { FomoBroker } from "./fomo/contract";
+import { createTgFomoPort } from "./tg-fomo-port";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -793,6 +807,80 @@ async function main() {
    */
   const earlyBook = new EarlyCandidateBook();
   installEarlyCandidateBook(earlyBook);
+  /**
+   * FOMO RESEARCH IN THIS CHILD (fomo-child.ts, docs/fomo.md). Reads the
+   * orchestrator's fomo.json for THIS tenant, assesses its signals, offers the
+   * authorised, feasible ones to the early book above (a nomination and a
+   * ceiling, never an order), asks for sooner reviews of held coins (never a
+   * sell), gates follow entries at the strategy loop (revalidate, day cap,
+   * exploration reservation — it can only DROP an entry) and reports back
+   * through the broker. The broker is null until it is built (below, beside
+   * Telegram) and whenever this process has none: research then answers
+   * "unavailable" and nothing is reported.
+   */
+  let fomoBroker: FomoBroker | null = null;
+  /** Did the gas sponsor quote at arm? null when this agent has no sponsored flow configured. */
+  let fomoSponsorQuoted: boolean | null = null;
+  /** When this tick's prices were read (ms), for the follow freshness checks. */
+  let fomoPricesAt: number | null = null;
+  const fomoChild = new FomoChild({
+    broker: () => fomoBroker,
+    // Trusted process context only: MERRYMEN_TENANT hosted, "self" self-hosted.
+    ownTenant: () => childFomoTenant(process.env, isHostedMode()),
+    home: () => merrymenHome(),
+    live: () => fomoLiveFacts(),
+    earlyBook: () => earlyCandidateBook(),
+    counters: childFollowCounters(merrymenHome(), (line) => console.log(line)),
+    ledgerStore: childExplorationStore(merrymenHome()),
+    funnel: {
+      note: (a, s, c) => funnel.note(a, s ?? funnelSymbol(a), c),
+      latest: (a) => {
+        const l = funnel.traceFor(a).latest;
+        return l ? { stage: l.stage, detail: l.detail, decisionId: l.decisionId, at: l.lastAt } : null;
+      },
+    },
+    symbolOf: (a) => watchTokens.find((t) => t.address.toLowerCase() === a.toLowerCase())?.symbol ?? null,
+    log: (line) => console.log(line),
+  });
+  installFomoChild(fomoChild);
+  /** What the follow path reads at the moment of asking: settings, pause, rail, grant limits, this tick's prices. */
+  function fomoLiveFacts(): FomoLiveFacts {
+    const lim = active?.limits;
+    const spent = lim ? spentToday() : 0n;
+    return {
+      agentId: active?.agentId ?? null,
+      settings: {
+        dataAccess: cfg.fomoDataAccess,
+        monitoring: cfg.fomoMonitoringEnabled,
+        follow: cfg.fomoFollowEnabled,
+        strategy: cfg.strategy,
+        trencherFast: cfg.trencherFastEnabled,
+        scoutEnabled: cfg.scoutEnabled,
+        scoutBudgetUsdg: cfg.scoutBudgetUsdg,
+        scoutPerTokenUsdg: cfg.scoutPerTokenUsdg,
+      },
+      rail: execMode().mode,
+      paused: isPaused(),
+      liveFollowAllowed: fomoFollowLiveEnabledFor(active?.agentId),
+      sponsorship: { sponsoredFlow: gasSponsored(), available: fomoSponsorQuoted },
+      perTrade6: lim ? lim.perTradeUsdg : null,
+      dailyHeadroom6: lim ? (lim.dailyUsdg > spent ? lim.dailyUsdg - spent : 0n) : null,
+      vault: !!(active && grantTrencher(active.grant) && lim?.trencherVault),
+      knownAsset: (a) => !!lim?.knownTrencherAssets?.some((x) => x.toLowerCase() === a.toLowerCase()),
+      routeVerified: (a) => (autoTrench ? autoTrench.qualified.some((q) => q.tokenAddress.toLowerCase() === a.toLowerCase()) : null),
+      depthUsd: (a) => lastLiquidityUsd.get(a.toLowerCase()) ?? null,
+      price: (a) => {
+        const t = watchTokens.find((w) => w.address.toLowerCase() === a.toLowerCase());
+        const q = t ? lastPrices.get(t.symbol) : undefined;
+        return q ? { price8: q.price8, source: q.source, stale: q.stale } : null;
+      },
+      pricesAt: fomoPricesAt,
+    };
+  }
+  /** What discovery's early path reads: the book's coins, then the follow path's verification-only asks. */
+  function earlyDiscoverySet(): Set<string> {
+    return new Set([...earlyBook.addresses(), ...fomoChild.verifyRequests()]);
+  }
   // Reserved review capacity: the rotation asks the book on every pick
   // (trencher-brain.ts candidate). One slot in four at most, unless nothing
   // else is eligible; the lane only chooses among coins already eligible.
@@ -806,6 +894,9 @@ async function main() {
     if (!held && outcome.ran && outcome.result.ok) {
       earlyBook.onReviewed(token, { action: outcome.result.decision.action, decisionId: outcome.result.decision.decision_id });
     }
+    // The follow book hears entry verdicts, a held coin's sooner review is
+    // answered, and a trader-flow lens's citations are checked. Never throws.
+    fomoChild.onReviewed({ token, held, outcome });
   };
   trenchBrain.onDrop = (why, decisionId, info) => {
     console.log(`[trencher] ${why}`);
@@ -834,7 +925,7 @@ async function main() {
       // or the grant/custody checks that admit one to the trading universe.
       // Early candidates are read beside them, through the same verification,
       // without the volume screen or the top slice (trencher-discovery.ts).
-      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyBook.addresses() });
+      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyDiscoverySet() });
       if (autoTrenchContext === context && trenchPoolCache === poolCache && active && `${active.agentId}:${active.grant.grantedAt}` === context) {
         autoTrench = result;
         warmHeldNames(coinNames, result);
@@ -935,7 +1026,10 @@ async function main() {
       if (earlyContext !== null && earlyContext !== context) earlyBook.reset();
       earlyContext = context;
       earlyBook.expire();
-      const addresses = earlyBook.addresses();
+      // The book's coins first, then the follow path's verification-only asks
+      // (fomo-child.ts verifyRequests): a tape page and an on-chain pool check,
+      // never a review slot or a ceiling — those come only with a book offer.
+      const addresses = earlyDiscoverySet();
       const key = [...addresses].join(",");
       if (key === earlyTapeKey) return;
       earlyTapeKey = key;
@@ -6683,6 +6777,9 @@ async function main() {
         );
       }
     }
+    // A follow entry planned on sponsored gas is DROPPED when the sponsor did
+    // not quote — never moved onto the owner's own gas (fomo-child.ts gateEntry).
+    fomoSponsorQuoted = cfg.sponsorGasEnabled && cfg.bundlerApiKey ? !!sponsor : null;
     const agentId = await ensureAgent(grant);
 
     // THE PEAK COMES BACK IMMEDIATELY AFTER THE ROW EXISTS, and before anything
@@ -8116,6 +8213,8 @@ async function main() {
       // about a trade it cannot show. Answers a nominated coin's decision and
       // a group-bought coin's exit; never throws into the trade.
       if (wrote) tgNoteTradeRow(intent, decision_id, row.status);
+      // A sale out of a follow position feeds its realised loss (fomo-child.ts); never throws.
+      if (wrote) fomoChild.noteTradeRow(row);
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
@@ -10786,6 +10885,8 @@ async function main() {
 
     // Feed prices land BEFORE the book read so paper valuation uses this tick's px.
     lastPrices = market.prices;
+    // Dated from the market read, the earlier of the two clocks: a follow quote is never younger than it is.
+    fomoPricesAt = marketObservedAt * 1000;
 
     const paper = paperActive();
     // THE LIVE PEAKS, FROM THE LEDGER, BEFORE THIS TICK READS BALANCES AND
@@ -11922,6 +12023,28 @@ async function main() {
       maxDrawdownBps: active.limits.maxDrawdownBps,
     });
 
+    // ── FOMO RESEARCH, THIS TENANT'S (fomo-child.ts) ────────────────────
+    //
+    // Before the review block, so a follow nomination or a held coin's sooner
+    // review is seen by this tick's pick. SYNCHRONOUS AND NEVER FATAL: one
+    // bounded file read, at most 40 assessments, reports sent and not awaited;
+    // the ledger reads it needs run in the background for the next tick. No
+    // exit waits on it, and it places nothing.
+    fomoChild.tick({
+      context: trenchContext,
+      // An incomplete book's equity is a partial sum: unknown, which sizes a follow entry at zero.
+      equity6: bookIncomplete ? null : equityUsdg,
+      held: positions.map((p) => ({ token: p.token, symbol: p.symbol, decimals: p.decimals, valueUsdg6: p.valueUsdg, price8: p.price8, priceStale: p.priceStale })),
+      basis: async (symbol) => {
+        try {
+          return await getBasis(agentId, basisMode, symbol);
+        } catch {
+          return null;
+        }
+      },
+      entrySec: async (symbol) => (await getTrenchEntry(agentId, basisMode, symbol))?.entrySec ?? null,
+    });
+
     // A quiet strategy still forms a market view, and publishes it when it
     // changes. Run this after the tick so an actual published decision takes
     // precedence over a fallback. Only fresh public quotes are used; failures
@@ -12084,7 +12207,11 @@ async function main() {
                 alternate: {
                   lastReviewedAtMs: new Map(
                     focusPositions.flatMap((p) => {
-                      const at = trenchBrain.reviewedAt(p.symbol);
+                      // A held coin research asked about (fomo-child.ts: a
+                      // cohort sale, a thinning route, its own exit condition)
+                      // reads as never reviewed, so it is the next review —
+                      // a sooner look, never a sell.
+                      const at = fomoChild.heldReviewDue(p.token) ? undefined : trenchBrain.reviewedAt(p.symbol);
                       // Omitted, never defaulted — chooseFocus reads absent as
                       // overdue, and a default would invert that.
                       return at === undefined ? [] : [[p.symbol, at] as const];
@@ -12437,6 +12564,11 @@ async function main() {
             if (tape) {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
+            // THE TRADER-FLOW LENS, AFTER the tape signals so nothing above
+            // overwrites it, and only while this Brain advertises the key: an
+            // older build would refuse the whole decision over an unknown lens.
+            // No addresses, no vendor name (lens.ts; re-checked in fomo-child.ts).
+            fomoChild.attachLens(inputs.market.signals, focus.token, cfg.brainUrl);
             const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
             trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
               // Enrichment cannot block the trading tick or mutate a review after its deadline.
@@ -13022,8 +13154,25 @@ async function main() {
       // energy is claimed or any decision row is written.
       const groupEntry = entry ? tgClaimGroupEntry(intent) : null;
       if (groupEntry?.group && !groupEntry.ok) continue;
+      // ── FOMO FOLLOW: REVALIDATED, CLAIMED AND RESERVED, OR DROPPED ──────
+      //
+      // An entry into a coin a follow nomination reached (fomo-child.ts) is
+      // checked again NOW against its assessment — our own fresh quote inside
+      // the 2% band, follow still on, not paused, the same rail, live follow
+      // allowed, the grant covering the coin, sponsorship still there when the
+      // entry was planned on it (never moved onto the owner's gas), the setup
+      // unexpired and the ceiling as it stands now — then claims one of the
+      // day's follow entries and reserves its exploration headroom. Any
+      // failure drops THIS entry and files why. It can only drop: every gate
+      // below still runs, and an entry no nomination reached passes untouched.
+      const followGate = entry ? fomoChild.gateEntry(intent) : null;
+      if (followGate?.kind === "dropped") {
+        tgSettleGroupEntry(groupEntry, intent.decisionId, null);
+        continue;
+      }
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
+        fomoChild.settleEntry(followGate, null, intent.decisionId);
         noteEntryFunnel(intent, classifyStage({ kind: "execution", rule: "entry-energy-withheld" }));
         tgSettleGroupEntry(groupEntry, intent.decisionId, null);
         await withholdEntry(agentId);
@@ -13038,6 +13187,7 @@ async function main() {
         whyCode: w?.code,
       });
       if (!stamped.ok) {
+        fomoChild.settleEntry(followGate, null, intent.decisionId);
         await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, null);
         continue;
@@ -13052,6 +13202,9 @@ async function main() {
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
+        // A fill commits the reservation and opens the exploration position;
+        // no fill releases it and gives the day's follow entry back.
+        fomoChild.settleEntry(followGate, facts?.status, intent.decisionId);
       } else {
         // A sale that empties a coin bought through a group may earn one
         // "out of that one" line once its row lands (tgNoteTradeRow).
@@ -13958,6 +14111,33 @@ async function main() {
   // between them; and never on strategyNote, which is the owner's event feed.
   const tgTally = makeChatTally(telegramLog, () => Math.floor(Date.now() / 1000));
 
+  // THE FOMO RESEARCH BROKER (fomo-child.ts chooseChildFomoBroker), decided
+  // from the process alone. Hosted: the orchestrator's service over the IPC
+  // channel it spawned us with — it stamps the tenant from WHICH CHILD asked,
+  // so nothing here ever names one; no channel means "unavailable". Self-
+  // hosted: a local runtime over fomo.sqlite in this home with the install's
+  // own key, for the fixed tenant "self", permissions read live from settings.
+  // Built in the background; until it is, research answers "unavailable".
+  void chooseChildFomoBroker({
+    hosted: isHostedMode(),
+    port: processBrokerPort(),
+    selfHosted: () =>
+      selfHostedFomoBroker({
+        apiKey: cfg.fomoApiKey ?? null,
+        access: () => ({ dataAccess: cfg.fomoDataAccess, monitoring: cfg.fomoMonitoringEnabled, follow: cfg.fomoFollowEnabled }),
+        log: (line) => console.log(line),
+      }),
+    log: (line) => console.log(line),
+  }).then(
+    (r) => {
+      fomoBroker = r.broker;
+      console.log(`[fomo] research broker: ${r.kind}`);
+    },
+    () => {},
+  );
+  // Telegram groups reach the research through this port only (coin-level aggregates, audience "group").
+  const tgFomoPort = createTgFomoPort(() => fomoBroker);
+
   startTelegram({
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
     // and the very next message must see it — the tick-refreshed `cfg` snapshot
@@ -13995,6 +14175,10 @@ async function main() {
     // What the hold process kept about groups while this tenant's trading was
     // held (telegram/held-groups.ts), in this home: applied at the first poll.
     heldGroupUpdates: () => takeHeldGroupUpdates(merrymenHome()),
+    // Social-trading research (docs/fomo.md): the broker above for DMs, and the
+    // groups' port over the same broker. Neither carries a tenant.
+    fomo: () => fomoBroker,
+    fomoGroupPort: () => tgFomoPort,
     kill: () => {
       try {
         const grant = loadGrantFile();

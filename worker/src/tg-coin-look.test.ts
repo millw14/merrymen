@@ -1293,7 +1293,10 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     assert.match(refresh, /const poolCache = trenchPoolCache;/);
     // The early-candidate set (early-candidates.ts) rides beside both; it
     // too changes what is read, never the verification (trencher-discovery.ts).
-    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*earlyBook\.addresses\(\))?\s*\}\)/);
+    // The follow path's verification-only asks (fomo-child.ts verifyRequests)
+    // ride beside the book's coins through the same verification: they change
+    // what is read, never what qualifies, and earn no review slot or ceiling.
+    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*(?:earlyBook\.addresses\(\)|earlyDiscoverySet\(\)))?\s*\}\)/);
     assert.match(refresh, /autoTrenchContext === context && trenchPoolCache === poolCache && active/,
       "a result from an old grant or connection cannot replace the current discovery");
   });

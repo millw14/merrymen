@@ -199,6 +199,8 @@ test("changing the connection discards cached evidence and a discovery already i
     const wakeQualifiedNominations = () => {};
     // The early-candidate book (early-candidates.ts) and its funnel filing.
     const earlyBook = { addresses: () => new Set() }, noteEarlyDiscovery = () => {};
+    // ...and the follow path's verification-only asks beside it (fomo-child.ts).
+    const earlyDiscoverySet = () => new Set();
     ${refresh}
     return {
       tick: refreshAutoTrench,
