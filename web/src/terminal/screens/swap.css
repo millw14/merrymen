@@ -1,0 +1,54 @@
+/**
+ * Swap screen — scoped (.sw) styles on the terminal tokens. Nothing here
+ * invents a token: --tx/--tx-2/--faint/--line/--card/--lime/--up/--down all
+ * come from .terminal-host. Colour follows terminal semantics — up = landed,
+ * down = failed, lime = the active mark.
+ */
+
+.sw { display: flex; flex-direction: column; gap: 14px; max-width: 640px; }
+.sw-note { margin: 0; font-size: 13px; line-height: 1.6; color: var(--tx-2); }
+.sw-note a { color: var(--lime); }
+.sw-note-warn { color: var(--lime); }
+
+/* balance figures — dim label, mono figure */
+.sw-figs { display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 6px 16px; }
+.sw-fig { display: flex; justify-content: space-between; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--tx-2); }
+.sw-fig:last-child { border-bottom: none; }
+.sw-fig b { font-family: var(--mono); font-weight: 600; color: var(--tx); }
+
+/* amount field */
+.sw-field { display: flex; flex-direction: column; gap: 6px; }
+.sw-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.sw-amount-row { display: flex; align-items: center; gap: 8px; background: var(--raised); border: 1px solid var(--line); border-radius: 10px; padding: 3px 6px 3px 12px; }
+.sw-amount-row:focus-within { border-color: var(--lime); }
+.sw-amount-row input { flex: 1; min-width: 0; background: none; border: none; color: var(--tx); font-family: var(--mono); font-size: 18px; padding: 9px 0; outline: none; }
+.sw-max { flex: none; font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--tx-2); padding: 8px 13px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); cursor: pointer; }
+.sw-max:hover:not(:disabled) { color: var(--lime); border-color: var(--lime); }
+.sw-max:disabled { opacity: 0.45; cursor: default; }
+.sw-hint { font-size: 12px; color: var(--faint); line-height: 1.55; margin: 0; }
+.sw-hint a { color: var(--lime); }
+
+/* quote card */
+.sw-quote { display: flex; flex-direction: column; gap: 9px; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
+.sw-quote-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--tx-2); }
+.sw-quote-row strong { font-family: var(--mono); font-size: 16px; color: var(--tx); }
+.sw-quote-row span:last-child { font-family: var(--mono); color: var(--tx); }
+
+/* staged action */
+.sw-btn { display: block; width: 100%; text-align: center; font-weight: 700; font-size: 15px; padding: 13px 20px; border-radius: 11px; background: var(--lime); color: #14210a; border: 1px solid var(--lime); cursor: pointer; }
+.sw-btn:disabled { opacity: 0.5; cursor: default; background: var(--raised); color: var(--faint); border-color: var(--line); }
+.sw-btn.confirm:disabled { background: var(--raised); }
+.sw-back { background: none; border: none; color: var(--faint); font-size: 12.5px; cursor: pointer; padding: 6px 0 0; align-self: flex-start; }
+.sw-back:hover { color: var(--tx-2); }
+
+/* result boxes + notices */
+.sw-result { border-radius: 10px; padding: 12px 15px; font-size: 12.5px; line-height: 1.55; border: 1px solid var(--line); color: var(--tx-2); }
+.sw-result.err { border-color: var(--down); }
+
+/* recent conversions */
+.sw-history h2 { font-size: 13px; font-weight: 700; margin: 4px 0 10px; color: var(--tx-2); }
+.sw-history ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.sw-history li { font-size: 12.5px; line-height: 1.5; color: var(--tx-2); border-left: 2px solid var(--line); padding-left: 10px; }
+.sw-history li.ok { border-color: var(--up); }
+.sw-history li.warn, .sw-history li.err { border-color: var(--down); }
+.sw-error { color: var(--down); font-family: var(--mono); font-size: 12.5px; }

@@ -141,6 +141,8 @@ describe("every control survives the restyle", () => {
   it("keeps the measured control census", () => {
     // A number that moves is not necessarily wrong — but it must be noticed,
     // and a class rename is never the reason for one.
+    // 11→12 checkboxes, 12→13 numbers: the auto-convert toggle + gas reserve
+    // (swap settings PR).
     const count = (re: RegExp) => (SRC.match(re) ?? []).length;
     // 12 since "research before deciding". deskEnabled was in core and read by
     // the worker while missing from BOTH the settings route's field list and
@@ -173,30 +175,22 @@ describe("every control survives the restyle", () => {
     // must not start being bought on its own") protects owners from the
     // PLATFORM widening what gets bought, and a person typing an address is not
     // the platform — so the choice is theirs, visible, and defaulted on.
-    // 19 since TELEGRAM GROUPS (docs/tg-groups.md): "Hang out in Telegram
-    // groups" and "Look at coins people post". Both default ON, so — like the
-    // platform coin list — the control is what makes OFF reachable, and both
-    // are dashboard-only: the chat refuses them and points here.
-    assert.equal(count(/type="checkbox"/g), 19, "checkboxes");
+    // 20 on this branch: main's 19 (incl. TELEGRAM GROUPS) plus the
+    // auto-convert toggle above, which cannot ride the string draft,
+    // hence its own state hook.
+    assert.equal(count(/type="checkbox"/g), 20, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
     // an owner could not turn it on at all.
     // 14 includes the owner-configurable class-position exit timer.
-    //
-    // COUNTED BY HANDLER, NOT BY `type`. The census used to count
-    // `type="number"`, and every one of those became `type="text"` with an
-    // `inputMode`: a number input hands JavaScript an EMPTY STRING for anything
-    // its own locale cannot parse, and empty means "clear to default" at the
-    // server — so a comma keystroke silently reset the setting. `setNum` is now
-    // the thing that makes a field numeric, so it is the thing to count.
-    //
-    // 22, not 14, because the eight fields that were ALREADY plain text with an
-    // `inputMode` were on the same broken path and now share the handler.
-    assert.equal(count(/setNum\("/g), 22, "numeric settings");
+    // 23 on this branch: main's 22 plus autoConvertReservePct, migrated to
+    // the setNum handler during the rebase — a raw type="number" would
+    // reintroduce the comma-keystroke silent reset the migration fixed.
+    assert.equal(count(/setNum\("/g), 23, "numeric settings");
     // And every one of them shows its own refusal, rather than relying on a
     // save-time error for a field the reader has already scrolled past.
-    assert.equal(count(/aria-invalid=/g), 22, "numeric settings marking themselves invalid");
+    assert.equal(count(/aria-invalid=/g), 23, "numeric settings marking themselves invalid");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     // 13 since the class vault factory. The number moved for the reason this
     // census exists to allow — a control was ADDED, deliberately — and the
@@ -246,11 +240,10 @@ describe("every control survives the restyle", () => {
     // silently narrow what their agent trades — the same class of failure as the
     // consent flag above, one step less dangerous.
     // 23 includes the opt-in fast Trencher profile.
-    // 26 since the three Telegram groups settings. Two of them default ON, so
-    // unguarded they would write whatever the form held for every owner who
-    // saved anything — silently taking a bot out of its groups, or switching
-    // coin-looking off, by visiting a page.
-    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 26);
+    // 27 on this branch: main's 26 (incl. the three Telegram groups guards)
+    // plus autoConvertEnabled — same guard shape; unguarded a save would
+    // silently reset the convert toggle.
+    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 27);
   });
 });
 
@@ -360,7 +353,10 @@ describe("nothing is left behind after a save", () => {
     assert.ok(refetch > 0 && saved > refetch && resetEnd > saved, "saved values must be read back before clearing the draft");
     const reset = save.slice(saved, resetEnd);
     const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
-    assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
+    // 27 on this branch: main's 26 plus autoConvertEnabled, guarded and reset
+    // with the consent flags — unguarded a save would silently reset the
+    // convert toggle, unreset it would keep showing the local value.
+    assert.equal(guarded.length, 27, "every guard has the `if (x !== null) body.key = x;` shape");
     const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));
     assert.deepEqual(left, [], "sent by save() but not reset after it");
   });

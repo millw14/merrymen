@@ -160,6 +160,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [trencherFast, setTrencherFast] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
+  // Auto-convert is a boolean, so it can't ride the string `draft`.
+  const [autoConvertEnabled, setAutoConvertEnabled] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
@@ -486,6 +488,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (trencherFast !== null) body.trencherFastEnabled = trencherFast;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
+    if (autoConvertEnabled !== null) body.autoConvertEnabled = autoConvertEnabled;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
     if (caps !== null) body.telegramCapabilities = caps;
@@ -573,6 +576,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setDeskEnabled(null);
       setClassSnipe(null);
       setOfficialCoins(null);
+      // The auto-convert toggle rides its own hook like the consent flags
+      // above, not the string draft — so it is cleared with them, or after a
+      // save the screen keeps showing the local value while `view` holds the
+      // server's. (The reserve pct rides the draft, cleared by setDraft({}).)
+      setAutoConvertEnabled(null);
       void loadTelegram();
       if (statusTimer.current) clearTimeout(statusTimer.current);
       statusTimer.current = setTimeout(() => setStatus(null), 4000);
@@ -674,6 +682,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     && assetModeVal === "crypto" && discoveryEnabledVal && officialCoinsVal
     && (trencherFast ?? view.values.trencherFastEnabled ?? d.trencherFastEnabled)
     && Number(draft.tickSeconds ?? view.values.tickSeconds ?? d.tickSeconds) === 15;
+  const autoConvertVal = autoConvertEnabled ?? view.values.autoConvertEnabled ?? d.autoConvertEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
   const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
@@ -2200,6 +2209,30 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <input type="text" inputMode="decimal" placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={setNum("llmMaxActionUsdg")} aria-invalid={!!numError.llmMaxActionUsdg} />
               <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
+            <label className="mm-field">
+              <span className="mm-label">fund with ETH — auto-convert to USDG</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={autoConvertVal} onChange={(e) => setAutoConvertEnabled(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{autoConvertVal ? "surplus ETH → USDG, gas kept" : "off"}</span>
+              </span>
+              <span className="mm-hint">Send ETH and surplus converts to USDG with a gas reserve kept. Saving this preference now; the worker conversion lands in the follow-up.</span>
+            </label>
+            <Field label="gas reserve" hint="Percent of the ETH balance kept as gas when converting; the worker always keeps at least one trade's worth, even at 1%.">
+              <input
+                value={v("autoConvertReservePct")}
+                inputMode="numeric"
+                placeholder={String(d.autoConvertReservePct)}
+                onChange={setNum("autoConvertReservePct")} aria-invalid={!!numError.autoConvertReservePct}
+              />
+              <span className="mm-unit">%</span>
+            </Field>
+            <div className="mm-field">
+              <span className="mm-label">manual swap</span>
+              <Link href="/swap" className="mm-btn primary">
+                Swap ETH → USDG →
+              </Link>
+              <span className="mm-hint">Convert by hand with a live quote — same permission, same reserve.</span>
+            </div>
           </div>
 
           </details>

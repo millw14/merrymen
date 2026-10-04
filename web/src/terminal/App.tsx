@@ -54,6 +54,7 @@ import { Profile } from "./screens/Profile";
 import { glanceOfHow, thesisOfHow, type ProfileAgent } from "./profile-view";
 import "./profile.css";
 import { Search } from "./screens/Search";
+import { Swap } from "./screens/Swap";
 import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
@@ -599,6 +600,7 @@ export function App() {
             onDesk={() => goTab("agent")}
             onDeposit={() => openScreen({ kind: "deposit" })}
             onWithdraw={() => openScreen({ kind: "withdraw" })}
+            onSwap={() => openScreen({ kind: "swap" })}
             stopped={stopped}
             perTrade={perTrade}
             perDay={perDay}
@@ -739,6 +741,7 @@ export function App() {
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
+        {screen.kind === "swap" && <Swap />}
       </div>
       {desktop && money ? (
         <aside
@@ -844,3 +847,4 @@ export function App() {
     </div></div></WiredProvider>
   );
 }
+
