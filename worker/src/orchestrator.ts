@@ -41,6 +41,79 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { repairHistoricalFills } from "./history-fill-repair";
+import { createPublicClient as gasPublicClient, http as gasHttp } from "viem";
+import { GAS_RECOVERY_SCHEMA, gasRecoveryAccounts, gasRecoveryChain, recordRecoveredGas, recoverSettledGas } from "./receipt-gas-recovery";
+import { refreshIdlePaperValuations } from "./paper-idle-valuation";
+
+let gasRecoveryRunning = false;
+let gasRecoveryNextAt = 0;
+const gasRecoveryCursors = new Map<string, number>();
+let gasRecoveryDb: Db | null = null;
+let gasRecoveryRpc = "";
+let gasReceiptChain: ReturnType<typeof gasRecoveryChain> | null = null;
+
+/** Read-only chain recovery beside the fleet loop. No grant or signer is needed, including for idle accounts. */
+function startGasRecovery(): void {
+  if (gasRecoveryRunning || stopping || !process.env.DATABASE_URL || Date.now() < gasRecoveryNextAt) return;
+  gasRecoveryRunning = true;
+  void (async () => {
+    if (!gasRecoveryDb) {
+      const db = await makePgDb(process.env.DATABASE_URL!);
+      await applyLedgerSchema(db);
+      await db.exec(GAS_RECOVERY_SCHEMA);
+      gasRecoveryDb = db;
+    }
+    const rpc = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    if (rpc !== gasRecoveryRpc || !gasReceiptChain) {
+      gasRecoveryRpc = rpc;
+      gasReceiptChain = gasRecoveryChain(gasPublicClient({ transport: gasHttp(rpc, { timeout: 2_000, retryCount: 0 }) }));
+    }
+    const accounts = await gasRecoveryAccounts(gasRecoveryDb);
+    // Sequential, bounded batches share the public RPC with live trading.
+    // Cursors revisit failures after reaching the end instead of blocking later receipts.
+    for (const { account, epoch, chainId } of accounts) {
+      if (stopping || haltRequested()) break;
+      const key = `${account}:${epoch}`;
+      const result = await recoverSettledGas({ db: gasRecoveryDb, chain: gasReceiptChain, account, epoch, chainId,
+        afterId: gasRecoveryCursors.get(key) ?? 0,
+        record: (row, proof) => stopping || haltRequested() ? Promise.resolve(false) : recordRecoveredGas(gasRecoveryDb!, row, proof),
+      });
+      gasRecoveryCursors.set(key, result.afterId);
+      if (result.recovered) log(`historical gas: ${result.recovered} receipt-backed expense(s) recovered for ${account}; budget charges unchanged`);
+    }
+  })().catch(e => log(`historical gas recovery unavailable — ${e instanceof Error ? e.message : String(e)}`))
+    .finally(() => { gasRecoveryRunning = false; gasRecoveryNextAt = Date.now() + 10_000; });
+}
+
+let idlePaperRunning = false;
+let idlePaperNextAt = 0;
+let idlePaperAfter = "";
+/** An expired or stopped worker does not stop its durable practice book being valued. */
+function startIdlePaperRefresh(): void {
+  if (idlePaperRunning || stopping || haltRequested() || !gasRecoveryDb || Date.now() < idlePaperNextAt) return;
+  idlePaperRunning = true;
+  void refreshIdlePaperValuations(gasRecoveryDb, {
+    now: Math.floor(Date.now() / 1000), afterAccount: idlePaperAfter,
+    isRunning: account => stopping || haltRequested()
+      || [...children.values()].some(child => child.smartAccount.toLowerCase() === account),
+    lockIdleAccount: async (tx, account) => {
+      if (stopping || haltRequested()) return false;
+      // The durable account claim names its tenant even after a grant expires.
+      // A transaction lock conflicts with every replica's normal worker lease
+      // and protects the valuation until COMMIT, including spawn preparation.
+      const claims = await tx.prepare("SELECT DISTINCT LOWER(tenant) AS tenant FROM agent_account WHERE LOWER(smart_account) = ?")
+        .all(account) as { tenant: string }[];
+      if (claims.length !== 1 || !/^0x[0-9a-f]{40}$/.test(claims[0]!.tenant)) return false;
+      const lock = await tx.prepare("SELECT pg_try_advisory_xact_lock(CAST(? AS BIGINT)) AS held")
+        .get(leaseKey(claims[0]!.tenant).toString()) as { held: boolean } | undefined;
+      return lock?.held === true && !stopping && !haltRequested();
+    },
+  }).then(result => {
+    idlePaperAfter = result.nextAccount ?? "";
+    if (result.written) log(`paper valuation: ${result.written} stopped book(s) measured from durable checkpoints`);
+  }).catch(error => log(`paper valuation unavailable — ${error instanceof Error ? error.message : String(error)}`))
+    .finally(() => { idlePaperRunning = false; idlePaperNextAt = Date.now() + 30_000; });
+}
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
@@ -74,7 +147,7 @@ import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease, leaseKey, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -106,6 +179,7 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import { reconstructionRoster, reconstructionCustodyRefusal, type ReconstructionGrant } from "./accounting-roster";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -7079,10 +7153,12 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
   try {
     const shared = await makePgDb(url);
     const ledgerAgents = (await shared
-      .prepare("SELECT smart_account, owner_address, epoch, mode, hwm_usdg, contributions_known FROM agents")
+      .prepare("SELECT smart_account, owner_address, chain_id, epoch, mode, hwm_usdg, contributions_known, beat_at, created_at FROM agents")
       .all()) as unknown as Record<string, unknown>[];
 
-    // THE ROSTER IS THE GRANT STORE, NOT THE LEDGER.
+    // Include every grant, even before its first ledger mirror. A removed
+    // grant's existing financial account may instead resolve through its
+    // durable account claim; that supplies identity, never signing authority.
     //
     // The first dry run covered 22 of 24 tenants and could not say what happened
     // to the other two, because it enumerated `agents` — a table a tenant only
@@ -7094,14 +7170,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // synthesised from its grant and comes out of the planner as exactly what it
     // is — no chain history, no rows to remove, nothing to do — recorded rather
     // than absent.
-    const tenantByAccount = new Map<string, string>();
-    const ambiguousAccounts = new Set<string>();
-    const byAccount = new Map<string, Record<string, unknown>>();
-    /** account → the class vault holding its assets, for the classifier. */
-    const custodyVaults = new Map<string, readonly string[]>();
-    for (const a of ledgerAgents) byAccount.set(String(a.smart_account ?? "").toLowerCase(), a);
-
-    let rosterOnly = 0;
+    const grants: ReconstructionGrant[] = [];
     let rosterRead = true;
     try {
       const gs = getGrantStore();
@@ -7112,25 +7181,12 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
           log(`recon| tenant ${tenant} holds a grant with no smart account — it cannot be planned`);
           continue;
         }
-        const previousTenant = tenantByAccount.get(acct.toLowerCase());
-        if (previousTenant && previousTenant.toLowerCase() !== tenant.toLowerCase()) ambiguousAccounts.add(acct.toLowerCase());
-        tenantByAccount.set(acct.toLowerCase(), tenant);
         // FROM THE GRANT, which is the only place a class vault can honestly
         // come from: it is CREATE2-salted with one smart account, so there is no
         // fleet-wide list, and a settings-sourced value would point one owner's
         // reader at another owner's vault (custody.ts).
-        const vaults = custodyAddressesOf(g);
-        if (vaults.length > 0) custodyVaults.set(acct.toLowerCase(), vaults);
-        if (byAccount.has(acct.toLowerCase())) continue;
-        rosterOnly += 1;
-        byAccount.set(acct.toLowerCase(), {
-          smart_account: acct,
-          owner_address: g?.owner ?? null,
-          epoch: 1,
-          mode: null,
-          hwm_usdg: 0,
-          contributions_known: null,
-        });
+        grants.push({ tenant, smartAccount: acct, owner: g?.owner ?? null,
+          chainId: Number(g?.chainId), custodyAddresses: custodyAddressesOf(g) });
       }
     } catch (e) {
       // LOUD, and the run continues on the ledger roster alone — but the count
@@ -7139,15 +7195,25 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       rosterRead = false;
       log(`recon| GRANT ROSTER UNREADABLE (${e instanceof Error ? e.message : String(e)}) — tenants may be missing`);
     }
-    const agents = [...byAccount.values()];
+    let claims: Record<string, unknown>[] = [];
+    let claimsRead = true;
+    try {
+      claims = await shared.prepare("SELECT smart_account, tenant FROM agent_account").all() as Record<string, unknown>[];
+    } catch (e) {
+      claimsRead = false;
+      log(`recon| ACCOUNT CLAIMS UNREADABLE (${e instanceof Error ? e.message : String(e)}) — ownership cannot be verified`);
+    }
+    const roster = reconstructionRoster({ ledgerAgents, grants, claims });
+    const { agents, tenantByAccount, custodyVaults, rosterOnly } = roster;
     log(
       `recon| roster: ${agents.length} account(s) — ${ledgerAgents.length} from the ledger, ` +
-        `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead}`,
+        `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead} · account claims read ${claimsRead}`,
     );
     const repairOptions = parseRepairOptions(process.env);
     if (repairOptions?.mode === "commit") {
-      const refusal = !rosterRead ? "grant roster unreadable" :
-        repairOptions.accounts.some((account) => ambiguousAccounts.has(account)) ? "selected account resolves to multiple tenants" : accountingCommitRefusal({
+      const conflict = repairOptions.accounts.find((account) => roster.refusals.has(account));
+      const refusal = !rosterRead ? "grant roster unreadable" : !claimsRead ? "durable account claims unreadable" :
+        conflict ? `${conflict}: ${roster.refusals.get(conflict)}` : accountingCommitRefusal({
         ...repairOptions,
         plans: agents.map((agent) => ({
           smartAccount: String(agent.smart_account),
@@ -7267,6 +7333,16 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     }
 
     const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash, tenantByAccount });
+    for (const plan of plans) {
+      const refusal = roster.refusals.get(plan.smartAccount.toLowerCase()) ??
+        (!claimsRead ? "durable account claims unreadable" : null) ??
+        reconstructionCustodyRefusal(roster, plan.smartAccount, chain.get(plan.smartAccount.toLowerCase()));
+      if (refusal) {
+        plan.blocked = refusal;
+        plan.contributionsKnownAfter = false;
+        plan.pnlPublishableAfter = false;
+      }
+    }
 
     // ONE REPORT, NOT TWO — AND IT HAS TO FIT IN THE WINDOW YOU CAN READ IT IN.
     //
@@ -8471,6 +8547,8 @@ export async function runOrchestrator(): Promise<void> {
       telegramLiveness();
       await mirrorLedgers();
       startHistoryRepair();
+      startGasRecovery();
+      startIdlePaperRefresh();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
       // costs a vendor request; most passes it costs a file write.

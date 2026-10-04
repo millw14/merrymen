@@ -38,7 +38,7 @@ const unavailable = (): Rank => ({ pnlBps: null, unrankedWhy: "quality-unknown" 
 interface Mark { id: number; equity: number; at: number; book: "paper" | "live" | null; held: boolean }
 
 const knownColumns = new WeakMap<object, Set<string>>();
-async function tradeColumn(db: Db, column: "budget_settled_at" | "user_op_nonce"): Promise<boolean> {
+async function tradeColumn(db: Db, column: "budget_settled_at" | "user_op_nonce" | "gas_recorded_at"): Promise<boolean> {
   if (knownColumns.get(db)?.has(column)) return true;
   try {
     await db.prepare(`SELECT ${column} FROM trades WHERE 1 = 0`).all();
@@ -121,15 +121,22 @@ async function latestMark(db: Db, account: string, epoch: number): Promise<Mark 
  * count as expenses, but an installation alone is not a filled trade.
  */
 async function gasAt(db: Db, account: string, epoch: number, at: number): Promise<{ gas: number; complete: boolean; landed: number }> {
-  const [hasSettlement, hasNonce] = await Promise.all([tradeColumn(db, "budget_settled_at"), tradeColumn(db, "user_op_nonce")]);
-  const settledAt = hasSettlement ? "COALESCE(t.budget_settled_at, t.created_at)" : "t.created_at";
+  const [hasSettlement, hasNonce, hasReceiptTime] = await Promise.all([
+    tradeColumn(db, "budget_settled_at"), tradeColumn(db, "user_op_nonce"), tradeColumn(db, "gas_recorded_at"),
+  ]);
+  // Historical fee recovery records the confirmed receipt's block time without
+  // moving the risk budget's settlement window. Both new and recovered costs
+  // belong to that execution time when it is available.
+  const receiptTime = hasReceiptTime ? "CASE WHEN t.gas_recorded_at > 0 THEN t.gas_recorded_at END" : "NULL";
+  const settledAt = `COALESCE(${receiptTime}, ${hasSettlement ? "t.budget_settled_at, " : ""}t.created_at)`;
   const free = `(COALESCE(t.gas_usdg, -1) = 0 OR (t.gas_usdg IS NULL AND
     (COALESCE(t.gas_wei, '') = '0' OR (COALESCE(t.gas_wei, '') = ''
       AND COALESCE(t.sponsored_gas_wei, '') NOT IN ('', '0')))))`;
   // Older updates observed settlement but retained its submission time. A nonce
   // identifies potentially delayed executions; their nonzero cost has no
   // evidenced historical time. Proved free outcomes cannot change the result.
-  const ambiguous = hasNonce ? `(t.status IN ('landed', 'reverted') AND ${hasSettlement ? "t.budget_settled_at IS NULL" : "1 = 1"}
+  const ambiguous = hasNonce ? `(t.status IN ('landed', 'reverted') AND ${receiptTime} IS NULL
+    AND ${hasSettlement ? "t.budget_settled_at IS NULL" : "1 = 1"}
     AND COALESCE(t.user_op_nonce, '') <> '' AND NOT ${free})` : "1 = 0";
   const row = await db.prepare(`SELECT
       COALESCE(SUM(t.gas_usdg), 0) AS gas,
@@ -225,13 +232,14 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
   if (inputs[0].status === "rejected" || !gas || (!gas.complete && liveRank.pnlBps !== null)) liveRank = unavailable();
   performance.gasComplete = gas?.complete ?? null;
   // Net contributions may be zero or negative after a withdrawal. A dollar
-  // gain still has meaning with a proved funding history and executed trade;
-  // the percentage/rank keeps refusing a nonpositive denominator.
-  if (contributed !== null && contributionsKnown === true && gas?.complete && gas.landed > 0) {
+  // gain still has meaning with a proved funding history. A measured, funded
+  // live book also has a net result before its first fill (including installation
+  // fees). That headline does not make it eligible for a trading rank.
+  if (contributed !== null && contributionsKnown === true && gas?.complete) {
     const pnl = measured.equity - contributed! - gas.gas;
     if (Number.isFinite(pnl)) performance.pnlUsdg = performance.publicBook ? pnl : null;
     const bps = contributed > 0 ? pnl / contributed * 10_000 : null;
-    if (liveRank.pnlBps !== null && bps !== null && Number.isFinite(bps)) performance.pnlBps = bps;
+    if (bps !== null && Number.isFinite(bps)) performance.pnlBps = bps;
   }
   return { performance, liveRank, paperPnlBps: null };
 }
