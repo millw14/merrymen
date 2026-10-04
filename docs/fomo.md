@@ -340,7 +340,12 @@ broker; self-hosted, `fomo.sqlite`. Hosted child homes are wiped on redeploy, so
 file alone would let a redeploy refill a spent allocation. Until the durable copy has been
 read the ceiling is 0. Each entry is recorded as pending and read back **before** it is
 submitted, so a crash after broadcast cannot lose it; if the record cannot be confirmed
-within 8 s, the entry is dropped. A newer assessment that is no longer an entry candidate
+within 8 s, the entry is dropped. Absence of stored state must be proven: a failed or
+refused read is "unknown", never "nothing stored", so a redeploy under load cannot reset a
+spent allocation. While the ledger is unknown, the existing scout gate is charged the cost
+of every open Trencher position, which bounds what follow and early entries can hold. It is
+charged the whole budget only if that book cannot be read either, so the Fomo kill switch
+never stops unrelated scout buys. A newer assessment that is no longer an entry candidate
 withdraws the open nomination, and the gate checks the latest assessment. No martingale, no averaging down, no leverage,
 no rounding up. A size below the economic floor becomes `WATCH`. In-process reservations
 stop concurrent signals from overspending.
