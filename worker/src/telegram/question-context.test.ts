@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isAnalysisOnlyMessage, isExplicitTradeRequest, marketQuestionPlan, referencedTradeId, replyReferenceBlock } from "./question-context";
+import { isAnalysisOnlyMessage, isExplicitTradeRequest, marketQuestionPlan, referencedTradeId, replyReferenceBlock, replyTradeNeedsClarification } from "./question-context";
 
 const symbols = ["OFY", "UBIK", "ZZZ"];
 const history = [{ role: "assistant" as const, content: "UBIK / USDG: an earlier chart." }];
@@ -96,6 +96,40 @@ describe("exact historical trade follow-ups", () => {
   });
   it("a stale trade ID is not attached to a new generic loss question", () => {
     assert.equal(referencedTradeId("why did you lose money today?", h, undefined), null);
+  });
+  for (const q of ["what were the fees?", "what were the proceeds?", "what was the cost?", "what was the result?", "what was the fee?", "what were the costs?", "what were the results?"]) {
+    it(`a direct trade reply supplies the referent without a pronoun: ${q}`, () => {
+      assert.equal(referencedTradeId(q, h, "Sold OFY (trade #12)."), 12);
+      assert.equal(referencedTradeId(q, h, undefined), null, "history needs a deictic referent");
+    });
+  }
+  it("accepts canonical restart IDs and repeated references to the same trade", () => {
+    assert.equal(referencedTradeId("what were the proceeds?", h, "Trade #-12. See trade #-12 again."), -12);
+  });
+  for (const reply of ["trade #12 and trade #13", "trade #12.5", "trade #12abc", "trade #not-an-id", "trade #12 and trade #bad", "trade #0", "trade #9007199254740993"]) {
+    it(`asks for a single valid trade rather than guessing from: ${reply}`, () => {
+      assert.equal(referencedTradeId("what were the fees?", h, reply), null);
+      assert.equal(replyTradeNeedsClarification("what were the fees?", reply), true);
+    });
+  }
+  it("a current explicit trade ID overrides an ambiguous reply", () => {
+    assert.equal(replyTradeNeedsClarification("what were the fees for trade #99?", "trade #12 and trade #13"), false);
+  });
+  it("a current aggregate-period question supersedes the replied-to trade", () => {
+    for (const q of ["what were the fees today?", "what were the proceeds yesterday?", "what was my profit this week?", "what were the total fees?", "what were the proceeds across all my trades?", "what were the total fees that day?", "what were the fees across those trades?", "what were the fees for that day?", "what were the proceeds from those trades today?"]) {
+      assert.equal(referencedTradeId(q, h, "trade #12"), null, q);
+      assert.equal(replyTradeNeedsClarification(q, "trade #12 and trade #13"), false, q);
+    }
+    assert.equal(referencedTradeId("what were the fees for that trade today?", h, "trade #12"), 12);
+    assert.equal(referencedTradeId("what were the total fees for that trade?", h, "trade #12"), 12);
+  });
+  it("a different currently named asset cannot borrow the replied-to trade", () => {
+    const quote = "Sold OFY (trade #12).";
+    for (const q of ["what were the fees for UBIK?", "what were the fees for ubik?", "what were the fees for $UBIK?", "what was the cost of 0x1111111111111111111111111111111111111111?"]) {
+      assert.equal(referencedTradeId(q, h, quote, symbols), null, q);
+      assert.equal(replyTradeNeedsClarification(q, quote, symbols), true, q);
+    }
+    assert.equal(referencedTradeId("what were the fees for OFY?", h, quote, symbols), 12);
   });
 });
 

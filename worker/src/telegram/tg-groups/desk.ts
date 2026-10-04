@@ -18,8 +18,9 @@ import { esc } from "../api";
 import { admitDeskText, admitTgLine, deskFiguresGrounded, TG_DESK_MAX } from "./gate";
 import { callText, type TgModel, type TgModelGate } from "./model";
 import type { TgDeskEvidence, TgDeskStance, TgDeskThinkRequest, TgDeskThought } from "./types";
-import { DESK_INTENT_FOCUS, deskQuestionIndicator, deskQuestionIntent, thoughtAnswersIntent } from "../../desk/questions";
+import { deskAnswerFocus, deskQuestionIndicator, deskQuestionIntent, thoughtAnswersIntent } from "../../desk/questions";
 import { labelledPriceBrief } from "../../desk/prices";
+import { marketFallbackScenario, marketObservationBrief } from "../../desk/market-scenarios";
 
 export { deskQuestionIntent } from "../../desk/questions";
 
@@ -35,11 +36,13 @@ export function deskQuestionEvidence(e: TgDeskEvidence, question: string): TgDes
     watch: "Name the coin so its structure, participation and real depth can be checked.",
     invalidation: "Market strength alone doesn't confirm an individual coin's setup.",
   };
-  const needsCoin = ["scalp", "entry", "invalidation", "targets", "breakout", "risk-reward", "sizing", "safety", "execution", "indicators", "timeframe", "comparison", "news", "prediction"].includes(intent);
+  const needsCoin = ["scalp", "entry", "invalidation", "targets", "breakout", "risk-reward", "sizing", "safety", "execution", "indicators", "comparison"].includes(intent);
+  const boardScenario = e.kind === "market" && e.reference?.kind !== "comparison"
+    ? marketFallbackScenario(e, intent, /\bpartial (?:market )?snapshot\b/i.test(e.brief)) : undefined;
   return {
     ...e,
-    floor: measured ?? (e.kind === "market" && needsCoin ? marketFloor : e.floor),
-    brief: `${e.brief}\nANSWER FOCUS: ${DESK_INTENT_FOCUS[intent]}`,
+    floor: measured ?? boardScenario ?? (e.kind === "market" && needsCoin ? marketFloor : e.floor),
+    brief: `${e.brief}${boardScenario ? `\n${marketObservationBrief(e.observedAtMs)}` : ""}\nANSWER FOCUS: ${deskAnswerFocus(e.kind, intent, e.subject)}`,
   };
 }
 
@@ -73,6 +76,7 @@ export function deskSystem(voice: string): string {
     "Weigh the signals against each other: say which dominates and why, and name contradictions (price up on fading volume, strong flow into a thin pool). Answer the question actually asked. If they ask about an entry, name where the chart offers better risk/reward (a level from the brief), what confirmation you would want first, and where the idea is wrong. Be concrete and decisive when the evidence is clear, and say what is missing when it is not.",
     "For a follow-up, answer the requested scenario in the first sentence. Entry/scalp, invalidation, target, breakout/retest, timeframe, reward/risk, participation, safety and sizing are different questions. Follow ANSWER FOCUS from the evidence. Do not repeat the project biography or a generic overview when a specific question is asked; confirmation and invalidation are printed alongside your read. Discuss the theme only for a story or overview question. A sharp two or three sentences beat a dashboard recital.",
     "The measured execution chart is hourly only. Indexed short-window price change is not a lower-timeframe candle series. Precise scalp entries, future prices, trader identities, executable slippage, safe position size, contract safety and exact changes since a prior reply cannot be established without the corresponding evidence. Only use reward/risk arithmetic already computed in the evidence, with its assumptions and costs excluded.",
+    "A market board's observation time and indexed hourly/day windows are separate from any individual coin's candle times. Answer market-wide freshness, news and recovery questions at board scope; a board alone cannot verify timed news or forecast a recovery.",
     "",
     "Rules:",
     "- Use only numbers that appear in the brief, written the same way (you may round to fewer digits). Never invent prices, levels, percentages, holder counts, news or social claims. Do not compute new numbers.",
@@ -99,7 +103,7 @@ export function deskUser(req: TgDeskThinkRequest): string {
   const project = req.kind === "coin"
     ? `\n\n<project_claims>\n${lore ? `${lore.name ? `PUBLISHED NAME: ${fence(lore.name).replace(/\s+/g, " ")}\n` : ""}SOURCE: ${fence(lore.source).replace(/\s+/g, " ")}\nDESCRIPTION: ${fence(lore.description)}` : "No reliable project description was found. Do not guess its story from the name."}\n</project_claims>`
     : "";
-  return `KIND: ${req.kind}\nSUBJECT: ${fence(req.subject || "the market").replace(/\s+/g, " ")}\nANSWER FOCUS: ${DESK_INTENT_FOCUS[deskQuestionIntent(req.question)]}\n<question>\n${fence(req.question.slice(0, 400))}\n</question>${project}\n\nEVIDENCE BRIEF:\n${fence(req.brief)}`;
+  return `KIND: ${req.kind}\nSUBJECT: ${fence(req.subject || "the market").replace(/\s+/g, " ")}\nANSWER FOCUS: ${deskAnswerFocus(req.kind, deskQuestionIntent(req.question), req.subject)}\n<question>\n${fence(req.question.slice(0, 400))}\n</question>${project}\n\nEVIDENCE BRIEF:\n${fence(req.brief)}`;
 }
 
 /** The outermost JSON object in a model's answer, as a thought. Null for anything else. */

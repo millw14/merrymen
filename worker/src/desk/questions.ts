@@ -3,6 +3,9 @@ import type { TgDeskIntent, TgDeskThought } from "../telegram/tg-groups/types";
 
 export function deskQuestionIntent(question: string): TgDeskIntent {
   const q = String(question ?? "").slice(0, 400).normalize("NFKC").toLowerCase().replace(/[’']/g, "'");
+  // A prior time is not a second asset. The current read can describe structure,
+  // but cannot invent a saved snapshot from yesterday or last week.
+  if (/\b(?:compar(?:ed|e|ing)(?:\s+\w+){0,3}\s+(?:to|with|against)|better than|stronger than|versus|vs\.?)\s+(?:the\s+)?(?:yesterday(?:'s)?|last (?:week|month|hour|day|night|session)|(?:an? )?earlier (?:price|snapshot|read|session)|(?:previous|prior) (?:price|snapshot|read|session)|before)\b/.test(q)) return "trend";
   if (/\b(?:compar(?:e|ing|ison)|versus|vs\.?|which (?:one|coin|token) (?:is|looks)|which is (?:stronger|better)|better than|stronger than)\b/.test(q) && !/\b(?:buyers?|sellers?)\b/.test(q)) return "comparison";
   if (/\b(?:risk[\s/-]*(?:to[\s/-]*)?reward|r\s*[:/]\s*r|rr|r:r)\b/.test(q)) return "risk-reward";
   if (/\b(?:scalp(?:ing)?|quick flip|quick trade|short[- ]term entry)\b/.test(q)) return "scalp";
@@ -19,7 +22,7 @@ export function deskQuestionIntent(question: string): TgDeskIntent {
   if (/\b(?:volume|buyers?|sellers?|flow|participation|whales?|accumulation|distribution)\b/.test(q)) return "volume";
   if (/\b(?:news|catalyst|announcement|story|project|theme|what does (?:it|this) do|why (?:is|was) (?:it|this|\w+) (?:pumping|dumping|moving))\b/.test(q)) return "news";
   if (/\b(?:did you (?:buy|sell)|are you (?:holding|buying|selling)|your (?:position|holdings|trade)|have you (?:bought|sold)|execute|place (?:an? )?order)\b/.test(q)) return "execution";
-  if (/\b(?:predict\w*|forecast|guarantee\w*|win rate|probability|chance|will (?:it|this|\w+) (?:pump|rise|recover|moon|dump|fall)|next (?:hour|day|week)|tomorrow|bottom(?:ed)?|top(?:ped)?)\b/.test(q)) return "prediction";
+  if (/\b(?:predict\w*|forecast|guarantee\w*|win rate|probability|chance|will (?:the )?(?:it|this|\w+) (?:pump|rise|recover|moon|dump|fall)|next (?:hour|day|week)|tomorrow|bottom(?:ed)?|top(?:ped)?)\b/.test(q)) return "prediction";
   if (/\b(?:trend|structure|bullish|bearish|higher (?:high|low)s?|lower (?:high|low)s?|what (?:has )?changed|still valid|still (?:good|bullish|bearish))\b/.test(q)) return "trend";
   return "overview";
 }
@@ -54,6 +57,16 @@ export const DESK_INTENT_FOCUS: Record<TgDeskIntent, string> = {
   execution: "This is public market analysis. It does not confirm any private account's positions or executed orders and cannot authorize a trade. Do not claim a buy, sell or holding.",
   overview: "Give a concise interpretation of structure, participation and liquidity. Discuss the published theme only if it helps answer the actual question.",
 };
+
+/** A board follow-up uses the board's observation and coverage, not coin candles. */
+export function deskAnswerFocus(kind: "coin" | "market", intent: TgDeskIntent, subject?: string): string {
+  if (kind === "market" && (!subject || /^(?:the )?market$/i.test(subject))) {
+    if (intent === "timeframe") return "Answer market-data freshness directly using this board's observation time and indexed hourly/day windows. Fetch time does not verify every underlying trade or candle is current; disclose partial coverage. Do not borrow a coin's candle timestamp or ask for a named coin.";
+    if (intent === "news") return "Answer the market-wide news question directly. This board contains price, volume and participation, not verified timestamped news; it cannot attribute a market move to a catalyst. Do not substitute a project biography or ask for a named coin.";
+    if (intent === "prediction") return "Answer market-recovery uncertainty directly using measured breadth and participation as conditional evidence. No future recovery, price, date or win probability is established. Do not replace the board question with an individual coin's entry or ask for a named coin.";
+  }
+  return DESK_INTENT_FOCUS[intent];
+}
 
 /** A model repeating the biography must not crowd out a specific market question. */
 export function thoughtAnswersIntent(t: TgDeskThought, intent: TgDeskIntent): boolean {

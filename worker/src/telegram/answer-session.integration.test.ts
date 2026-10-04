@@ -205,7 +205,8 @@ describe("the newest trades, in true time", () => {
 });
 
 describe("quoted trade references keep the owner boundary", () => {
-  it("a foreign owner's canonical trade ID cannot reveal their private trade facts", async () => {
+  for (const question of ["why that buy?", "what were the fees?", "what were the proceeds?"]) {
+  it(`a foreign owner's canonical trade ID cannot reveal their private trade facts: ${question}`, async () => {
     const other = "0x1111111111111111111111111111111111111111";
     const w = new DatabaseSync(homePaths.db());
     let id: number;
@@ -219,10 +220,32 @@ describe("quoted trade references keep the owner boundary", () => {
       seeded = opts.messages.find((m) => m.role === "user")!.text!;
       return { text: "That trade isn't in my current-run records.", toolUses: [] };
     }) as never;
-    const answer = await answerQuestion({ question: "why that buy?", replyContext: `trade #${id!}`, name: "Shogun", identity: "", memory: "", gap: "", history: [], tools: tools(), creds, turn });
+    const answer = await answerQuestion({ question, replyContext: `trade #${id!}`, name: "Shogun", identity: "", memory: "", gap: "", history: [], tools: tools(), creds, turn });
     assert.ok(answer!.used.includes("trade_details"));
     assert.match(seeded, /That trade is not in this owner's current-run records/);
     assert.doesNotMatch(seeded, /PRIVATEFACT|12345/);
+    assert.equal(toolSessionStatsForTest().open, 0);
+  });
+  }
+  it("a pronoun-free proceeds reply reads this owner's exact trade from SQLite before a no-tool model answers", async () => {
+    const w = new DatabaseSync(homePaths.db());
+    let id: number;
+    try {
+      const result = w.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, fill_side, fill_cash_usdg, fill_qty_raw, fill_symbol, realized_pnl_usdg, basis_source, created_at) VALUES (?, 'swap', ?, ?, ?, 99, 'landed', 'sell', 12.34, '100', 'EXACTSALE', 2.34, 'receipt', ?)`).run(SHOGUN, VAULT, coin(988), USDG, NOW - 60);
+      id = Number(result.lastInsertRowid);
+    } finally { w.close(); }
+    let seeded = "";
+    const turn = (async (_c: unknown, opts: { messages: { role: string; text?: string }[] }) => {
+      seeded = opts.messages.find((m) => m.role === "user")!.text!;
+      return { text: "The measured sale proceeds were $12.34.", toolUses: [] };
+    }) as never;
+    const answer = await answerQuestion({ question: "what were the proceeds?", replyContext: `trade #${id!}`, name: "Shogun", identity: "", memory: "", gap: "", history: [{ role: "assistant", content: "trade #1" }], tools: tools(), creds, turn });
+    assert.deepEqual(answer!.used, ["trade_details"]);
+    assert.match(seeded, new RegExp(`Trade #${id!}:`));
+    assert.match(seeded, /EXACTSALE/);
+    assert.match(seeded, /12\.34/);
+    assert.match(seeded, /Cost of the quantity sold: \$10\.00/);
+    assert.doesNotMatch(seeded, /\$99\.00/, "an intended size does not replace measured proceeds");
     assert.equal(toolSessionStatsForTest().open, 0);
   });
 });

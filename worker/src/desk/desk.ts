@@ -25,6 +25,7 @@ import { createLoreReader, readCoinLore } from "./lore";
 import { coinIndicatorFloors, coinScenarioBrief, coinScenarioFloors } from "./scenarios";
 import { comparisonBrief, comparisonFloor } from "./comparison";
 import { coinPriceBrief } from "./prices";
+import { marketScenarioFloors } from "./market-scenarios";
 
 export const LIVE_READS: DeskReads = {
   search: (q, options) => searchPools(q, Math.min(8000, options?.timeoutMs ?? 8000), options?.signal),
@@ -71,7 +72,7 @@ function coinOutcome(c: CoinMeasure, chart: Uint8Array | null = null): TgDeskOut
 
 function marketOutcome(m: MarketMeasure, chart: Uint8Array | null = null): TgDeskOutcome {
   return { ok: true, evidence: {
-    kind: "market", subject: "market", reference: { kind: "market" }, header: marketHeader(m), brief: marketBrief(m), floor: marketFloor(m),
+    kind: "market", subject: "market", reference: { kind: "market" }, header: marketHeader(m), brief: marketBrief(m), floor: marketFloor(m), scenarios: marketScenarioFloors(m),
     source: `GeckoTerminal ${utcClock(m.observedAtMs)} UTC`, observedAtMs: m.observedAtMs, chart,
   } };
 }

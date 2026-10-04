@@ -1671,6 +1671,7 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "data", "wanna", "want", "wanting", "scalp", "scalping", "stop", "stops", "target", "targets", "invalidation", "confirmation", "risk", "reward", "profit",
   "rsi", "ema", "vwap", "breakout", "retest", "sizing", "leverage", "bull", "bear", "bullish", "bearish",
   "cpu", "gpu", "ram", "ssd", "usb", "html", "css", "api", "utc", "usd", "dollars", "dollar", "worth",
+  "yesterday", "yesterdays", "tomorrow", "week", "weeks", "month", "months", "days", "year", "years", "quarter", "quarters", "earlier", "previous", "prior", "past", "before", "then", "session",
 ]);
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
@@ -1754,16 +1755,21 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
     return n;
   };
   const tags = extractCashtags(raw);
-  const comparison = /\b(?:compar(?:e|ing|ison)|versus|vs\.?|better than|stronger than|which (?:(?:one|coin|token) )?(?:(?:is|looks) )?(?:stronger|better|safer))\b/u.test(t);
+  const comparison = /\b(?:compar(?:e|ed|ing|ison)|versus|vs\.?|better than|stronger than|which (?:(?:one|coin|token) )?(?:(?:is|looks) )?(?:stronger|better|safer))\b/u.test(t);
   if (comparison) {
     const hits = extractCaHits(raw);
     if (hits.some(h => h.chain === "other") || hasOtherChainLink(raw) || hasForeignMint(raw)) return null;
     if (hits.length === 2) return { kind: "comparison", names: [hits[0]!.address, hits[1]!.address] };
     if (hits.length > 2 || tags.length > 2) return { kind: "discussion", topic: "setup" };
     if (tags.length === 2) return { kind: "comparison", names: [tags[0]!.toLowerCase(), tags[1]!.toLowerCase()] };
-    const pair = new RegExp(String.raw`(?:\bcompare\s+)?${NAME}\s+(?:versus|vs\.?|with|and|or|better than|stronger than)\s+${NAME}`, "u").exec(t);
+    const pair = new RegExp(String.raw`(?:\bcompare\s+)?${NAME}\s+(?:versus|vs\.?|with|to|against|and|or|compared (?:with|to)|better than|stronger than)\s+(?:the\s+)?${NAME}`, "u").exec(t);
     if (pair) {
       const a = ok(pair[1]), b = ok(pair[2]);
+      const temporal = /^(?:today|yesterday|yesterdays|tomorrow|last|previous|prior|past|earlier|before|then|day|days|week|weeks|month|months|year|years|quarter|quarters|session)$/u;
+      // A prior-time comparison refreshes the real coin. Time words are not
+      // a second asset, and current measurements cannot invent an old read.
+      if (temporal.test(pair[2] ?? "")) return a ? { kind: "coin", name: a } : { kind: "discussion", topic: "setup" };
+      if (temporal.test(pair[1] ?? "")) return b ? { kind: "coin", name: b } : { kind: "discussion", topic: "setup" };
       const capital = (name: string) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name.toUpperCase())}(?![\\p{L}\\p{N}])`, "u").test(text);
       if (a && b && a !== b && (DESK_TRADING_CUE.test(t) || (capital(a) && capital(b)))) return { kind: "comparison", names: [a, b] };
     }

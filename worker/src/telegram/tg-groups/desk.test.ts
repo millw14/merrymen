@@ -1228,6 +1228,14 @@ describe("public research follow-up contexts", () => {
     assert.equal(deskAskOf("compare dinner with lunch"), null);
   });
 
+  for (const question of ["pine is OFY better than yesterday's price?", "pine compare OFY to last week", "pine is OFY stronger than the previous session?", "pine OFY compared with yesterday"]) {
+    it(`refreshes one asset for a temporal comparison: ${question}`, async () => {
+      make();
+      await said(msg(question));
+      assert.deepEqual(desk!.asks[0], { kind: "coin", query: "ofy" });
+    });
+  }
+
   for (const question of ["pine what if I buy 10 OFY?", "pine should I sell 5 OFY?", "pine would you buy 10 OFY at support?", `pine where is the stop loss for 0x${"a".repeat(40)}?`, `pine where is the stop for 0x${"a".repeat(40)}?`, `pine can you scalp 0x${"a".repeat(40)}?`, `pine chart 0x${"a".repeat(40)}`, `pine is buying 10 0x${"a".repeat(40)} a good idea?`, `pine can you explain buying 10 0x${"a".repeat(40)}?`, `pine do you think I should buy 10 0x${"a".repeat(40)}?`]) {
     it(`keeps an explicit hypothetical or contract analysis read-only: ${question}`, async () => {
       let nominations = 0;

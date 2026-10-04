@@ -108,10 +108,32 @@ export function marketQuestionPlan(question: string, history: readonly Conversat
 }
 
 /** An exact referenced trade must be verified against this owner's ledger. */
-export function referencedTradeId(question: string, history: readonly ConversationTurn[], reply: string | undefined): number | null {
-  if (/\btrade\s*#?\s*-?\d+\b/i.test(question) || !/\b(?:why|cost|proceeds|profit|loss|fees|result|happened)\b/i.test(question)) return null;
-  if (!/^\s*(?:and\s+)?why\s*\??\s*$/i.test(question) && !/\b(?:that|this|it|those)\b/i.test(question)) return null;
+export function referencedTradeId(question: string, history: readonly ConversationTurn[], reply: string | undefined, knownSymbols: readonly string[] = []): number | null {
+  if (!isReferencedTradeDetailQuestion(question)) return null;
+  // A direct reply supplies the referent. History alone still needs a deictic
+  // question, so a fresh generic fees/proceeds question can't borrow an old ID.
+  if (!reply?.trim() && !/^\s*(?:and\s+)?why\s*\??\s*$/i.test(question) && !/\b(?:that|this|it|those)\b/i.test(question)) return null;
   const source = reply?.trim() || [...history].reverse().find((h) => h.role === "assistant")?.content || "";
-  const ids = [...new Set([...source.matchAll(/\btrade\s*#\s*(-?\d+)\b/gi)].map((m) => Number(m[1])))];
+  const currentAssets = references(question, knownSymbols).map((asset) => asset.toLowerCase());
+  const sourceAssets = new Set(references(source, knownSymbols).map((asset) => asset.toLowerCase()));
+  if (currentAssets.some((asset) => !sourceAssets.has(asset))) return null;
+  const markers = [...source.matchAll(/\btrade\s*#/gi)];
+  const matches = [...source.matchAll(/\btrade\s*#\s*(-?\d+)(?=$|[\s,;:)\]}]|[.!?](?![\w\d]))/gi)];
+  if (matches.length !== markers.length) return null; // no partial decimal, malformed or mixed ID
+  const ids = [...new Set(matches.map((m) => Number(m[1])))];
   return ids.length === 1 && Number.isSafeInteger(ids[0]) && ids[0] !== 0 ? ids[0]! : null;
+}
+
+function isReferencedTradeDetailQuestion(question: string): boolean {
+  const collective = /\b(?:overall|combined|across|all|trades|buys|sells|sales|positions)\b/i.test(question);
+  const aggregate = /\b(?:total|today|yesterday|(?:this|that|the|last|past)\s+(?:day|week|month|year|period|\d+\s*(?:h(?:ours)?|days?|weeks?|months?))|24\s*(?:h|hours))\b/i.test(question);
+  const specific = /\b(?:this|that|the)\s+(?:trade|buy|sell|sale|fill|transaction)\b|\bits\b|\b(?:for|of|from)\s+(?:it|that|this)\b(?!\s+(?:day|week|month|year|period)\b)/i.test(question);
+  return !collective && !(aggregate && !specific) && !/\btrade\s*#?\s*-?\d+\b/i.test(question)
+    && /\b(?:why|costs?|proceeds|profit|loss|fees?|results?|happened)\b/i.test(question);
+}
+
+/** An explicit trade reply with ambiguous/malformed IDs needs another referent. */
+export function replyTradeNeedsClarification(question: string, reply: string | undefined, knownSymbols: readonly string[] = []): boolean {
+  return !!reply?.trim() && isReferencedTradeDetailQuestion(question)
+    && /\btrade\s*#/i.test(reply) && referencedTradeId(question, [], reply, knownSymbols) === null;
 }

@@ -389,6 +389,30 @@ async def test_followup_question_and_measured_focus_reach_the_model_without_exec
     assert "cannot authorize trades" in system
 
 
+@pytest.mark.parametrize(
+    "question,focus",
+    [
+        ("How fresh is this market data?", "Use this board's observation time, not a coin's candle time."),
+        ("What news is moving the market?", "No verified timestamped market news is included."),
+        ("Will the market recover?", "A recovery is conditional on breadth and participation, never promised."),
+    ],
+)
+async def test_market_followup_focus_stays_at_board_scope(question, focus):
+    evidence = "MARKET: 3 sampled coins; observed 22:01 UTC. BREADTH 24h: 1 of 3 up.\nANSWER FOCUS: " + focus
+    answer = {"read": "The market snapshot covers indexed hourly and daily windows, not every underlying trade time.", "stance": "cautious", "watch": "Check source update times.", "invalidation": "Missing updates prevent a current execution view.", "confidence": 0.4}
+    llm, seen = _scripted([json.dumps(answer)])
+    result = await desk.analyze(llm, _req(kind="market", subject="market", question=question, evidence=evidence), _budget())
+
+    assert isinstance(result, DeskAnalysis), result
+    system = seen[0]["messages"][0]["content"]
+    user = seen[0]["messages"][1]["content"]
+    assert "Answer market-wide freshness, news and recovery questions at board scope" in system
+    assert "separate from any individual coin's candle times" in system
+    assert f"<question>\n{question}\n</question>" in user
+    assert "ANSWER FOCUS: " + focus in user
+    assert "<project_claims>" not in user
+
+
 def test_missing_story_is_explicit_and_market_asks_do_not_inherit_coin_biographies():
     coin = desk.user_message(_req())
     assert "No reliable project description was found" in coin

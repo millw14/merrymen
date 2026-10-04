@@ -25,7 +25,7 @@ import { PLAIN_WORDS } from "./plain-words";
 import { ENERGY_WORDS } from "./energy-words";
 import type { SignReason } from "./sign-prompt";
 import { calculateChatMath, parseChatMath, STOCK_TOKENS } from "../../../packages/core/src/index";
-import { marketQuestionPlan, referencedTradeId, replyReferenceBlock } from "./question-context";
+import { marketQuestionPlan, referencedTradeId, replyReferenceBlock, replyTradeNeedsClarification } from "./question-context";
 
 /** Rounds of lookups before it must answer. */
 export const MAX_ROUNDS = 4;
@@ -125,7 +125,11 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
     });
     const literalMath=parseChatMath(i.question);
     if(literalMath) { const result=calculateChatMath(literalMath); return {text:result.ok?result.text:result.error,used:["calculate"],needsSignature:false,signReason:null}; }
-    const priorTrade = referencedTradeId(i.question, i.history, i.replyContext);
+    const knownSymbols = [...STOCK_TOKENS.map((t) => t.symbol), ...(i.tools.cfg.customTokens ?? []).map((t) => t.symbol)];
+    if (replyTradeNeedsClarification(i.question, i.replyContext, knownSymbols)) {
+      return { text: "Which trade do you mean? Reply to one trade or send its canonical trade ID so I can verify its records.", used, needsSignature, signReason };
+    }
+    const priorTrade = referencedTradeId(i.question, i.history, i.replyContext, knownSymbols);
     const tradeAnswer=priorTrade === null ? await answerTradeQuestion(i.question,i.tools) : null;
     if(tradeAnswer!==null)return {text:tradeAnswer,used:["list_trades"],needsSignature:false,signReason:null};
     // A model may choose to answer without calling anything. Seed concrete
@@ -146,7 +150,6 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
       used.push(name);
     };
     if (priorTrade !== null) await seed("trade_details", { trade_id: priorTrade });
-    const knownSymbols = [...STOCK_TOKENS.map((t) => t.symbol), ...(i.tools.cfg.customTokens ?? []).map((t) => t.symbol)];
     const market = marketQuestionPlan(i.question, i.history, i.replyContext, knownSymbols);
     if (market?.needsClarification) {
       return { text: market.coins.length ? "Which coin or pair do you mean? Send the names or contract addresses." : "Which coin do you mean? Send its name or contract address so I can check the current market.", used, needsSignature, signReason };
