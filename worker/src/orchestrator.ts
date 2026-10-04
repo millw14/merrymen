@@ -63,11 +63,11 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
-import { writeFileAtomicSync } from "./atomic-write";
+import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
@@ -75,7 +75,7 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings, type StoredGrant } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
   botIdOf,
@@ -115,6 +115,7 @@ import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import {
   clearHoldNotified,
   ensureTelegramSchema,
@@ -139,6 +140,16 @@ import {
   tgGroupsHeldOff,
   type TgGroupsRestore,
 } from "./tg-groups-ferry";
+import {
+  deletePersonalMemory,
+  ensurePersonalMemorySchema,
+  forgetPersonalMemoryHome,
+  forgetPersonalMemoryInHomes,
+  forgetStoredPersonalMemory,
+  forgetUnwantedPersonalMemory,
+  publishPersonalMemory,
+  restorePersonalMemory,
+} from "./personal-memory-ferry";
 import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
@@ -869,7 +880,7 @@ let stopping = false;
 /** A lease-lost child must exit before THIS replica may arm the tenant again. */
 const leaseLossDraining = new Set<string>();
 /** An expired grant's process must exit and its final ledger must settle before re-sign can arm. */
-const retiringExpired = new Map<string, { mirror: boolean; lease: TenantLease | null }>();
+const retiringExpired = new Map<string, { mirror: boolean; memory: boolean; held: boolean; lease: TenantLease | null }>();
 export function isRetiringExpiredForTest(tenant: string): boolean {
   return retiringExpired.has(tenant.toLowerCase());
 }
@@ -1342,7 +1353,44 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
  */
 const tgGroupsSeen = new Map<string, string>();
 const tgGroupsHeld = new Set<string>();
+const personalMemorySeen = new Map<string, string>();
+let personalMemoryStoreForTest: { shared: Db; dek: Buffer | null; dialect: "postgres" | "sqlite" } | null = null;
 let tgGroupsNoDekLogged = false;
+
+/** Exercise the real restore against an isolated store, including failed ciphertext. */
+export function setPersonalMemoryStoreForTest(store: typeof personalMemoryStoreForTest): void {
+  personalMemoryStoreForTest = store;
+}
+
+/** No personal-memory writer starts until its stored notes and DM history are readable. */
+async function restorePersonalMemoryForChild(tenant: `0x${string}`): Promise<boolean> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !personalMemoryStoreForTest) return true;
+  const dek = personalMemoryStoreForTest ? personalMemoryStoreForTest.dek : tgGroupsDek();
+  if (!dek) {
+    log(`${tenant}: personal memory has no usable store DEK — not starting a memory writer`);
+    return false;
+  }
+  try {
+    const shared = async (): Promise<Db> => {
+      const db = personalMemoryStoreForTest?.shared ?? await makePgDb(url!);
+      await ensurePersonalMemorySchema(db, personalMemoryStoreForTest?.dialect ?? "postgres");
+      return db;
+    };
+    const result = await restorePersonalMemory({ tenant, home: childHome(tenant), shared, dek, log });
+    if (result === "failed" || result === "unreadable") {
+      log(`${tenant}: personal memory restore incomplete (${result}) — not starting a memory writer; next reconcile retries`);
+      return false;
+    }
+    personalMemorySeen.delete(tenant.toLowerCase());
+    return true;
+  } catch {
+    // Never include source memory, credentials or a database's SQL values in
+    // the log. The durable snapshot and local files remain untouched.
+    log(`${tenant}: personal memory restore unavailable — not starting a memory writer; next reconcile retries`);
+    return false;
+  }
+}
 
 /** The store DEK, or null (said once) when this process has none: nothing is ferried in the clear. */
 function tgGroupsDek(): Buffer | null {
@@ -1411,11 +1459,21 @@ async function restoreTgGroupsForChild(tenant: `0x${string}`): Promise<void> {
  * when the kill branch stands it down. Checked and removed synchronously,
  * before anything is awaited, so no spawn can start in between.
  */
+function localMemoryWriterPresent(tenant: string): boolean {
+  return children.has(tenant) || holders.has(tenant) || spawning.has(tenant) || exitingChildren.has(tenant);
+}
+
 async function forgetTgGroups(tenant: string): Promise<void> {
   const lc = tenant.toLowerCase();
   tgGroupsSeen.delete(lc);
   tgGroupsHeld.delete(lc);
-  if (!children.has(lc)) forgetTgGroupsHome(childHome(tenant), log);
+  personalMemorySeen.delete(lc);
+  // A held bot, preparation or draining process can still write this home.
+  // Its removal path clears the home once that writer is gone.
+  if (!localMemoryWriterPresent(lc)) {
+    forgetTgGroupsHome(childHome(tenant), log);
+    forgetPersonalMemoryHome(childHome(tenant), log);
+  }
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -1424,6 +1482,13 @@ async function forgetTgGroups(tenant: string): Promise<void> {
     await deleteTgGroups(tenant, shared, log);
   } catch (e) {
     log(`tg-groups: ${tenant} stored memory not deleted — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  try {
+    const shared = await makePgDb(url);
+    await ensurePersonalMemorySchema(shared, "postgres");
+    await deletePersonalMemory(tenant, shared, log);
+  } catch {
+    log(`personal-memory: ${tenant} stored memory not deleted — next reconcile retries`);
   }
 }
 
@@ -1449,11 +1514,17 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
   // A tenant that comes back publishes afresh and is not held by a spawn of its old grant.
   for (const t of [...tgGroupsSeen.keys()]) if (!wanted.has(t)) tgGroupsSeen.delete(t);
   for (const t of [...tgGroupsHeld]) if (!wanted.has(t)) tgGroupsHeld.delete(t);
+  for (const t of [...personalMemorySeen.keys()]) if (!wanted.has(t)) personalMemorySeen.delete(t);
   forgetTgGroupsInHomes({
     childrenDir: path.join(merrymenHome(), "children"),
-    keep: (t) => wanted.has(t) || children.has(t),
+    keep: (t) => wanted.has(t) || localMemoryWriterPresent(t),
     before: listedAtMs,
     log,
+  });
+  forgetPersonalMemoryInHomes({
+    childrenDir: path.join(merrymenHome(), "children"), wanted,
+    running: new Set([...children.keys(), ...holders.keys(), ...spawning.keys(), ...exitingChildren.keys()]),
+    before: listedAtMs, log,
   });
   const url = process.env.DATABASE_URL;
   if (!url) return;
@@ -1464,10 +1535,17 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
   } catch (e) {
     log(`tg-groups: stored memory of removed agents not swept this pass — ${e instanceof Error ? e.message : String(e)}`);
   }
+  try {
+    const shared = await makePgDb(url);
+    await ensurePersonalMemorySchema(shared, "postgres");
+    await forgetUnwantedPersonalMemory({ shared, wanted, listedAtMs, log });
+  } catch {
+    log("personal-memory: stored memory of removed agents not swept this pass — next reconcile retries");
+  }
 }
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
-async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount: `0x${string}`; expiresAt: number } | null> {
+async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount: `0x${string}`; expiresAt: number; grant: StoredGrant } | null> {
   // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
   if (killRequested(childHome(tenant))) return null;
   const grant = await getGrantStore().get(tenant);
@@ -1506,7 +1584,7 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount
   // ledger table is on, the caller needs it to derive the accounting anchor, and
   // the grant is the only place the orchestrator can learn it without a second
   // decrypting read.
-  return { smartAccount: grant.smartAccount as `0x${string}`, expiresAt: grant.expiresAt };
+  return { smartAccount: grant.smartAccount as `0x${string}`, expiresAt: grant.expiresAt, grant };
 }
 
 /**
@@ -2326,13 +2404,65 @@ function mirrorSerially<T>(tenant: string, pass: () => Promise<T>): Promise<T> {
  * runs only when this replica holds the lease and no child of the tenant is
  * running. A redeploy leaves no file — nothing to copy, and nothing the anchor
  * could have missed from THIS container. A failure is logged and the anchor is
- * derived regardless: it is no worse than before.
+ * derived regardless for ordinary copy errors. An interrupted copy or rebuilt
+ * source blocks re-arming instead of accepting an unsafe new accounting book.
  */
+const LEDGER_SOURCE_BLOCK = "ledger-source-blocked.json";
+
+/** A pending guarded mirror also survives a supervisor crash before its report. */
+function ledgerSourceBlocked(home: string): boolean {
+  try { lstatSync(path.join(home, LEDGER_SOURCE_BLOCK)); return true; }
+  catch (error) { return (error as { code?: unknown }).code !== "ENOENT"; }
+}
+
+async function mirrorStoppedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant)) {
+  return mirrorSerially(tenant, async () => {
+    if (ledgerSourceBlocked(home)) throw new Error("Ledger source is blocked; preserve the home and recover its accounting before rearming.");
+    // Check the original witnesses BEFORE mirrorTenant can advance any cursor.
+    // Retrying a rebuilt source after that advancement can otherwise erase the
+    // shared position on the second pass, once its rewind evidence is gone.
+    await assertLedgerSourceContinuity(child, shared, tenant);
+    const marker = path.join(home, LEDGER_SOURCE_BLOCK);
+    writeFileAtomicSync(marker, JSON.stringify({ version: 1, state: "pending-mirror" }), 0o600, { durable: true });
+    const report = await mirrorTenant({ tenant, child, shared });
+    if (report.restarted && Object.keys(report.restarted).length) {
+      // Do not clear the pending marker. A new supervisor must refuse too,
+      // even though this first pass has already rewritten mirror_state.
+      throw new Error("Ledger source changed during the mirror; retain its lease and home for accounting recovery.");
+    }
+    rmSync(marker);
+    fsyncDirSync(home);
+    return report;
+  });
+}
+
+/** Re-arm must pass the same original-cursor check, including after a restart. */
+async function ledgerSourceAllowsResume(tenant: string): Promise<boolean> {
+  const home = childHome(tenant);
+  if (ledgerSourceBlocked(home)) {
+    log(`[alert] ${tenant}: ledger source is blocked — preserving the home without starting a worker or holder`);
+    return false;
+  }
+  if (!existsSync(path.join(home, "merrymen.db")) || (!process.env.DATABASE_URL && !retirementMemoryStoreForTest)) return true;
+  const handle = openChildLedger(home);
+  if (!handle) return false;
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    await shared.exec(translateSchema(MIRROR_STATE_DDL));
+    try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+    await mirrorSerially(tenant, () => assertLedgerSourceContinuity(handle.db, shared, tenant));
+    return !ledgerSourceBlocked(home);
+  } catch {
+    log(`[alert] ${tenant}: ledger source continuity is unconfirmed — retaining its home without rearming`);
+    return false;
+  } finally { handle.close(); }
+}
+
 export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant)): Promise<boolean> {
   const handle = openChildLedger(home);
   if (!handle) return false;
   try {
-    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+    const r = await mirrorStoppedLedger(tenant, handle.db, shared, home);
     if (r.failed) {
       log(`${tenant}: final mirror before the anchor STALLED — ${Object.entries(r.failed).map(([k, v]) => `${k}: ${v}`).join(" | ")}`);
     }
@@ -2513,11 +2643,16 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
       log(`${tenant}: no usable signed grant in the store — not spawning`);
-      // THE GRANT IS GONE, and its group memory goes with it now. A crash
-      // restart lands here with no reconcile kill branch to do it, because the
-      // tenant is no longer in `children`. The sweep would also catch it on the
-      // next pass.
-      await forgetTgGroups(tenant);
+      // No usable key is not proof that the tenant was removed: permission
+      // replacement keeps its public roster row while the old key is stopped.
+      // Only actual removal forgets its groups. An unreadable roster preserves
+      // the memory and still refuses to start a worker.
+      try {
+        const retained = (await getGrantStore().listTenants()).some((t) => t.toLowerCase() === tenant.toLowerCase());
+        if (!retained) await forgetTgGroups(tenant);
+      } catch (error) {
+        log(`${tenant}: grant presence unreadable — preserving group memory without spawning: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return;
     }
     const { smartAccount } = grantForChild;
@@ -2525,6 +2660,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: signed grant expired or has no valid expiry — not starting a worker; re-sign required`);
       return;
     }
+    if (!(await ledgerSourceAllowsResume(tenant))) return;
     // The settings the child will actually read, so the watchdog can size its
     // patience to the tick that child will actually run. `tickSeconds` resolves
     // file-before-env (settings.ts), and the file is what we just wrote.
@@ -2534,6 +2670,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // closed, so the agent would run with contributions marked unknown for no
     // reason other than a race.
     await writeBootstrapForChild(tenant, smartAccount);
+    // The bootstrap's final mirror may have detected an unexpected source
+    // change (or an interrupted copy). Never arm over its durable barrier.
+    if (ledgerSourceBlocked(childHome(tenant))) return;
+    // Before the practice-book gate too: its holder may answer DMs and /forget,
+    // so it must not run over an unreadable or partially restored snapshot.
+    if (!(await restorePersonalMemoryForChild(tenant))) return;
     let restore = await tryPaperRestore(tenant, smartAccount);
     // A PRACTICE RESET ITS OWNER ASKED FOR, honoured here because no worker can
     // honour it: this is the book the gate below would hold. Most often the
@@ -2583,6 +2725,20 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // This wait is shared by the roster and crash-restart paths. It also lets
     // a resource failure in another tenant pause forks across the container.
     await waitForSpawnSlot();
+    // A replacement stop can land while the book and memory are being restored.
+    // Bind the fork to the exact authority fetched before preparation, including
+    // its actual session key. Public account/session metadata alone cannot prove
+    // that the key is unchanged. Nothing from either grant is logged.
+    try {
+      const latest = await getGrantStore().get(tenant);
+      if (!latest || JSON.stringify(latest) !== JSON.stringify(grantForChild.grant)) {
+        log(`${tenant}: signed grant stopped or changed during worker preparation — not spawning`);
+        return;
+      }
+    } catch (error) {
+      log(`${tenant}: signed grant unreadable after worker preparation — not spawning: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     if (grantForChild.expiresAt <= Math.floor(Date.now() / 1000)) {
       log(`${tenant}: signed grant expired during worker preparation — not spawning`);
       return;
@@ -2936,8 +3092,25 @@ function keepResetOffer(held: Holder, settings: MerrymenSettings): void {
 async function startHolderProcess(held: Holder): Promise<void> {
   const tenant = held.tenant;
   await waitForSpawnSlot();
+  try {
+    const latest = await getGrantStore().get(tenant);
+    if (!latest || !Number.isFinite(latest.expiresAt) || latest.expiresAt <= Math.floor(Date.now() / 1000)
+        || latest.smartAccount.toLowerCase() !== held.smartAccount.toLowerCase()) {
+      log(`${tenant}: signed grant stopped, expired or changed before the held bot's fork — not starting it`);
+      return;
+    }
+  } catch {
+    log(`${tenant}: signed grant unreadable before the held bot's fork — not starting it`);
+    return;
+  }
+  // No await follows this gate, so a stop/lease loss during preparation cannot
+  // bypass it and start a second writer in the same home.
   const lease = leases.get(tenant);
   if (holders.get(tenant) !== held || held.proc || held.leaving || held.stoodDown || !lease || lateSpawnRefusal(tenant, lease)) return;
+  if (ledgerSourceBlocked(childHome(tenant))) {
+    log(`[alert] ${tenant}: ledger source is blocked — held bot fork refused until accounting recovery`);
+    return;
+  }
   if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
     log(`[alert] ${tenant}: hold process deferred; local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached`);
     return;
@@ -3482,49 +3655,104 @@ function killChild(tenant: string): void {
 }
 
 let retirementMirrorForTest: ((tenant: string) => Promise<boolean>) | null = null;
+let retirementMemoryStoreForTest: { shared: Db; dek: Buffer | null; dialect: "postgres" | "sqlite" } | null = null;
 
 /** Test seam for a failed or delayed final mirror, without a production database. */
 export function setRetirementMirrorForTest(fn: ((tenant: string) => Promise<boolean>) | null): void {
   retirementMirrorForTest = fn;
 }
 
-/** A stopped worker's local ledger must be durable before its expiry barrier can leave. */
-async function mirrorRetiredWorker(tenant: string, lease: TenantLease): Promise<boolean> {
-  if (retirementMirrorForTest) return retirementMirrorForTest(tenant);
+/** Real sealed-memory retirement tests use SQLite without reaching production. */
+export function setRetirementMemoryStoreForTest(store: typeof retirementMemoryStoreForTest): void {
+  retirementMemoryStoreForTest = store;
+}
+
+/** Save the writer's final groups, or only its forget journal when its groups are held. */
+async function mirrorRetiredMemory(
+  tenant: string,
+  lease: TenantLease,
+  shared: Db,
+  dek: Buffer | null,
+  dialect: "postgres" | "sqlite",
+  held: boolean,
+): Promise<boolean> {
+  if (!dek || leases.get(tenant) !== lease || !lease.healthy()) return false;
+  await ensureTgGroupsSchema(shared, dialect);
+  if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+  const options = { tenant, home: childHome(tenant), shared, dek, seen: tgGroupsSeen, log };
+  let saved = true;
+  if (!held && !tgGroupsHeld.has(tenant.toLowerCase())) {
+    const published = await publishTgGroups({ ...options });
+    saved = published === "published" || published === "unchanged" || published === "absent";
+    if (published !== "published" && published !== "unchanged") {
+      if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+      if (await forgetStoredTgGroups({ ...options }) === "failed") saved = false;
+    }
+  } else {
+    // An unrestored file is not authoritative: never seal it over the stored
+    // row. A held bot can still receive forget requests, which must reach it.
+    if (await forgetStoredTgGroups({ ...options }) === "failed") saved = false;
+  }
+  if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+  await ensurePersonalMemorySchema(shared, dialect);
+  if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+  const personal = { tenant, home: childHome(tenant), shared, dek, log };
+  if (!held) {
+    const published = await publishPersonalMemory({ ...personal, seen: personalMemorySeen });
+    if (published !== "published" && published !== "unchanged" && published !== "absent") saved = false;
+    if (published !== "published" && published !== "unchanged") {
+      if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+      if (await forgetStoredPersonalMemory(personal) === "failed") saved = false;
+    }
+  } else {
+    if (await forgetStoredPersonalMemory(personal) === "failed") saved = false;
+  }
+  return saved && leases.get(tenant) === lease && lease.healthy();
+}
+
+/** A stopped worker's ledger and memory must be durable before its expiry barrier can leave. */
+async function mirrorRetiredWorker(tenant: string, lease: TenantLease, mirrorLedger: boolean, held: boolean): Promise<boolean> {
+  if (retirementMirrorForTest && mirrorLedger) return retirementMirrorForTest(tenant);
   const file = path.join(childHome(tenant), "merrymen.db");
-  if (!existsSync(file)) return true;
   const url = process.env.DATABASE_URL;
   // A file-only deployment keeps this home as its ledger. There is no shared
   // destination to copy to, and expiry never deletes the home.
-  if (!url) return true;
-  const handle = openChildLedger(childHome(tenant));
-  if (!handle) {
+  if (!url && !retirementMemoryStoreForTest) return true;
+  const handle = mirrorLedger && existsSync(file) ? openChildLedger(childHome(tenant)) : null;
+  if (mirrorLedger && existsSync(file) && !handle) {
     log(`[alert] ${tenant}: expired worker's ledger exists but cannot be opened; retaining its lease and home`);
     return false;
   }
   try {
-    const shared = await makePgDb(url);
-    await applyLedgerSchema(shared);
-    await shared.exec(translateSchema(MIRROR_STATE_DDL));
-    try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
     if (leases.get(tenant) !== lease || !lease.healthy()) return false;
-    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
-    if (r.failed) {
-      log(`[alert] ${tenant}: expired worker's final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
-      return false;
+    if (handle) {
+      await applyLedgerSchema(shared);
+      await shared.exec(translateSchema(MIRROR_STATE_DDL));
+      try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+      if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+      const r = await mirrorStoppedLedger(tenant, handle.db, shared);
+      if (r.failed) {
+        log(`[alert] ${tenant}: expired worker's final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
+        return false;
+      }
+      if (r.hasMore) {
+        log(`${tenant}: expired worker's final mirror has another source batch; retaining its lease for the next pass`);
+        return false;
+      }
+      const counts = mirrorCountsLine(tenant, r);
+      if (counts) log(`${counts} (expired worker's final pass)`);
     }
-    if (r.hasMore) {
-      log(`${tenant}: expired worker's final mirror has another source batch; retaining its lease for the next pass`);
-      return false;
-    }
-    const counts = mirrorCountsLine(tenant, r);
-    if (counts) log(`${counts} (expired worker's final pass)`);
-    return true;
+    const saved = await mirrorRetiredMemory(tenant, lease, shared,
+      retirementMemoryStoreForTest ? retirementMemoryStoreForTest.dek : tgGroupsDek(),
+      retirementMemoryStoreForTest?.dialect ?? "postgres", held);
+    if (!saved) log(`[alert] ${tenant}: stopped worker's final memory save incomplete; retaining its lease and home`);
+    return saved;
   } catch (error) {
     log(`[alert] ${tenant}: expired worker's final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
     return false;
   } finally {
-    handle.close();
+    handle?.close();
   }
 }
 
@@ -3557,6 +3785,8 @@ async function retireExpiredGrants(
       const wasHeld = holders.has(lc) || readRestoreBlocked(childHome(lc)) !== null;
       retiringExpired.set(lc, {
         mirror: children.has(lc) || exitingChildren.has(lc) || (!wasHeld && existsSync(path.join(childHome(lc), "merrymen.db"))),
+        memory: (!!process.env.DATABASE_URL || retirementMemoryStoreForTest !== null) && existsSync(childHome(lc)),
+        held: wasHeld,
         lease: leases.get(lc) ?? null,
       });
       log(`${lc}: signed grant expired — retiring its process before freeing capacity; grant and home remain stored`);
@@ -3574,12 +3804,12 @@ async function retireExpiredGrants(
     if (holders.has(tenant)) standDownHolder(tenant);
     if (children.has(tenant) || exitingChildren.has(tenant) || spawning.has(tenant) || holders.has(tenant)) continue;
     const lease = leases.get(tenant);
-    if (retirement.mirror) {
+    if (retirement.mirror || retirement.memory) {
       if (!lease || lease !== retirement.lease || !lease.healthy()) {
         log(`[alert] ${tenant}: expired worker's lease unavailable before its final mirror; keeping the local re-arm barrier`);
         continue;
       }
-      if (!(await mirrorRetiredWorker(tenant, lease))) continue;
+      if (!(await mirrorRetiredWorker(tenant, lease, retirement.mirror, retirement.held))) continue;
       if (leases.get(tenant) !== lease || !lease.healthy()) continue;
     }
     if (lease && lease !== retirement.lease) continue;
@@ -7706,6 +7936,7 @@ async function mirrorLedgers(): Promise<void> {
   let shared;
   // Null unless the group-memory schema is in place and the DEK is present.
   let tgGroupsDekThisPass: Buffer | null = null;
+  let personalMemoryDekThisPass: Buffer | null = null;
   try {
     shared = await makePgDb(url);
     // The full ledger schema, not just the cursor table. Nothing else applies
@@ -7752,6 +7983,12 @@ async function mirrorLedgers(): Promise<void> {
     } catch (e) {
       log(`tg-groups: schema unavailable, not ferried this pass — ${e instanceof Error ? e.message : String(e)}`);
     }
+    try {
+      await ensurePersonalMemorySchema(shared, "postgres");
+      personalMemoryDekThisPass = tgGroupsDek();
+    } catch {
+      log("personal-memory: schema unavailable, not ferried this pass");
+    }
   } catch (e) {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -7783,64 +8020,71 @@ async function mirrorLedgers(): Promise<void> {
     // fifteen-second clock, is twenty-two leaked handles a quarter-minute for
     // as long as the service runs.
     const handle = openChildLedger(childHome(tenant));
-    if (!handle) continue;
-    try {
-      const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
-      // The link code and any chat the owner just linked. Not part of the
-      // ledger — it is a file, not a table — but it needs the same ferry and
-      // the same lease: only the replica that owns this child may speak for it.
-      await publishChildTelegram(tenant as `0x${string}`, shared, "trading");
-      // Read while the handle is open, on the mirror's clock. The news desk
-      // asks about what the fleet holds before what it merely may buy, and this
-      // is the only place the orchestrator can see the difference.
-      tenantHeldSymbols.set(tenant.toLowerCase(), await heldEquitySymbols(handle.db));
-      // The coin side of the same reading, and the only place it is available:
-      // a Trencher's universe is discovered inside the child and lives in this
-      // sqlite, which nothing outside this loop opens.
-      tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
-      // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
-      //
-      // This used to print only when n > 0, which made a stalled table and an
-      // idle fleet look identical — and mirrorTenant's per-table catch means a
-      // stall is permanent and silent. So the failures print unconditionally,
-      // for the same reason fleetHealth prints unconditionally: an operator who
-      // learns to read silence as health cannot see a wedged mirror.
-      // A REWIND MEANS ROWS WERE LOST BEFORE IT. Printed separately from the
-      // counts because it is not routine: it says this tenant's child ledger
-      // was rebuilt under a watermark that outlived it, and everything the
-      // append-only tables held before that point is gone with the old file.
-      //
-      // ONCE PER REWIND, NOT ONCE PER PASS. A rebuilt child whose table is
-      // still EMPTY leaves the watermark where it was (there is no row to move
-      // it to), so the same rewind is detected again on every 15s pass until the
-      // child writes that many rows — a paper agent idle over a weekend never
-      // does. Measured 2026-09-27 03:00: 61+ tenants each printing this every
-      // pass, burying the one line that says rows were lost. The detection and
-      // what it guards (a rebuilt child must not delete the shared cost basis
-      // it has merely forgotten) are unchanged; only the repetition goes.
-      const rewind = r.restarted
-        ? Object.entries(r.restarted).map(([k, v]) => `${k} (was ${v.was})`).join(", ")
-        : null;
-      if (rewind && lastRewindLogged.get(tenant) !== rewind) {
-        log(`ledger mirror: ${tenant} CURSOR REWOUND — the child ledger was rebuilt beneath it: ${rewind}`);
+    if (handle) {
+      try {
+        const r = await mirrorSerially(tenant, () => {
+          // A loop pass may have captured this child before retirement stopped
+          // it. It must respect a guarded final copy's durable source barrier.
+          if (ledgerSourceBlocked(childHome(tenant))) throw new Error("Ledger source is blocked; accounting recovery is required before another mirror.");
+          return mirrorTenant({ tenant, child: handle.db, shared });
+        });
+        // The link code and any chat the owner just linked. Not part of the
+        // ledger — it is a file, not a table — but it needs the same ferry and
+        // the same lease: only the replica that owns this child may speak for it.
+        await publishChildTelegram(tenant as `0x${string}`, shared, "trading");
+        // Read while the handle is open, on the mirror's clock. The news desk
+        // asks about what the fleet holds before what it merely may buy, and this
+        // is the only place the orchestrator can see the difference.
+        tenantHeldSymbols.set(tenant.toLowerCase(), await heldEquitySymbols(handle.db));
+        // The coin side of the same reading, and the only place it is available:
+        // a Trencher's universe is discovered inside the child and lives in this
+        // sqlite, which nothing outside this loop opens.
+        tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
+        // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
+        //
+        // This used to print only when n > 0, which made a stalled table and an
+        // idle fleet look identical — and mirrorTenant's per-table catch means a
+        // stall is permanent and silent. So the failures print unconditionally,
+        // for the same reason fleetHealth prints unconditionally: an operator who
+        // learns to read silence as health cannot see a wedged mirror.
+        // A REWIND MEANS ROWS WERE LOST BEFORE IT. Printed separately from the
+        // counts because it is not routine: it says this tenant's child ledger
+        // was rebuilt under a watermark that outlived it, and everything the
+        // append-only tables held before that point is gone with the old file.
+        //
+        // ONCE PER REWIND, NOT ONCE PER PASS. A rebuilt child whose table is
+        // still EMPTY leaves the watermark where it was (there is no row to move
+        // it to), so the same rewind is detected again on every 15s pass until the
+        // child writes that many rows — a paper agent idle over a weekend never
+        // does. Measured 2026-09-27 03:00: 61+ tenants each printing this every
+        // pass, burying the one line that says rows were lost. The detection and
+        // what it guards (a rebuilt child must not delete the shared cost basis
+        // it has merely forgotten) are unchanged; only the repetition goes.
+        const rewind = r.restarted
+          ? Object.entries(r.restarted).map(([k, v]) => `${k} (was ${v.was})`).join(", ")
+          : null;
+        if (rewind && lastRewindLogged.get(tenant) !== rewind) {
+          log(`ledger mirror: ${tenant} CURSOR REWOUND — the child ledger was rebuilt beneath it: ${rewind}`);
+        }
+        if (rewind) lastRewindLogged.set(tenant, rewind);
+        else lastRewindLogged.delete(tenant);
+        if (r.failed) {
+          const why = Object.entries(r.failed)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(" | ");
+          log(`ledger mirror: ${tenant} STALLED — ${why}`);
+        }
+        // What arrived, and apart from it what was deliberately not copied; see
+        // mirrorCountsLine for why the two are never summed.
+        const counts = mirrorCountsLine(tenant, r);
+        if (counts) log(counts);
+      } catch (e) {
+        log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        handle.close();
       }
-      if (rewind) lastRewindLogged.set(tenant, rewind);
-      else lastRewindLogged.delete(tenant);
-      if (r.failed) {
-        const why = Object.entries(r.failed)
-          .map(([k, v]) => `${k}: ${v}`)
-          .join(" | ");
-        log(`ledger mirror: ${tenant} STALLED — ${why}`);
-      }
-      // What arrived, and apart from it what was deliberately not copied; see
-      // mirrorCountsLine for why the two are never summed.
-      const counts = mirrorCountsLine(tenant, r);
-      if (counts) log(counts);
-    } catch (e) {
-      log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      handle.close();
     }
+    if (leases.get(tenant.toLowerCase()) !== lease || !lease.healthy()) continue;
     // THE CHILD'S TELEGRAM GROUPS, beside the telegram link and under the same
     // lease: only the replica that owns this child may speak for it, and a
     // stale home left here by a child now running elsewhere must never
@@ -7862,6 +8106,15 @@ async function mirrorLedgers(): Promise<void> {
       }
     } else if (tgGroupsDekThisPass) {
       await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+    }
+    if (leases.get(tenant.toLowerCase()) !== lease || !lease.healthy()) continue;
+    if (personalMemoryDekThisPass) {
+      const options = { tenant, home: childHome(tenant), shared, dek: personalMemoryDekThisPass, log };
+      const published = await publishPersonalMemory({ ...options, seen: personalMemorySeen });
+      if (published !== "published" && published !== "unchanged") {
+        if (leases.get(tenant.toLowerCase()) !== lease || !lease.healthy()) continue;
+        await forgetStoredPersonalMemory(options);
+      }
     }
     // ── THE WIRE ────────────────────────────────────────────────────────────
     //
@@ -7910,6 +8163,10 @@ async function mirrorLedgers(): Promise<void> {
     // undone by the restore that ends it.
     if (tgGroupsDekThisPass) {
       await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+    }
+    if (leases.get(tenant.toLowerCase()) !== lease || !lease.healthy()) continue;
+    if (personalMemoryDekThisPass) {
+      await forgetStoredPersonalMemory({ tenant, home: childHome(tenant), shared, dek: personalMemoryDekThisPass, log });
     }
   }
 

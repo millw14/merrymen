@@ -142,6 +142,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "honourFleetHalt",
       "isHeldForTest",
       "localChildProcessCount",
+      "localMemoryWriterPresent",
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
@@ -154,6 +155,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "standDownHolder",
       "standDownLostLeasesNow",
       "startHolderProcess",
+      "sweepTgGroups",
       "watchHolder",
     ]);
   });

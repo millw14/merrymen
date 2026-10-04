@@ -202,7 +202,7 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
       return true;
     },
     soulInfo: () => "SOUL",
-    forgetOwner: () => calls.push("forget"),
+    forgetOwner: () => { calls.push("forget"); },
     // ── PC control (default: master ON, all capabilities on, for dispatch tests) ──
     pcControlEnabled: true,
     capabilities: new Set(["screen", "vision", "apps", "system", "files", "clipboard", "shell", "keyboard", "watchers"]),
@@ -252,6 +252,25 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
 }
 
 describe("executeCommand — code disposes", () => {
+  it("acknowledges forgetting only after the durable memory wipe completes", async () => {
+    let finish!: () => void;
+    const waiting = new Promise<void>(resolve => { finish = resolve; });
+    const d = deps({ forgetOwner: () => waiting });
+    let answered = false;
+    const response = executeCommand({ kind: "forget" }, d).then(reply => { answered = true; return reply; });
+    await Promise.resolve();
+    assert.equal(answered, false, "pending persistence cannot be reported as done");
+    finish();
+    assert.match(await response, /done.*let go/);
+  });
+
+  it("does not claim forgotten memory when its durable wipe fails", async () => {
+    const d = deps({ forgetOwner: async () => { throw new Error("journal unavailable"); } });
+    const reply = await executeCommand({ kind: "forget" }, d);
+    assert.match(reply, /couldn't confirm.*try \/forget/);
+    assert.doesNotMatch(reply, /done|start fresh/);
+  });
+
   it("routes reads without side effects", async () => {
     const d = deps();
     assert.equal(await executeCommand({ kind: "status" }, d), "STATUS");

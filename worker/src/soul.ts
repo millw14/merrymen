@@ -18,7 +18,8 @@
  * smuggle a transfer recipient or credential back into a prompt.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsc, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrieve";
@@ -30,6 +31,7 @@ import {
   normalizeAgentName,
 } from "../../packages/core/src/agent-name";
 import type { NameSeat } from "./name-reconcile";
+import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 /** The stock name, defined once in core — the Agent screen's name chip compares against it. */
 export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
@@ -369,18 +371,36 @@ export function notesTail(max = 25): string {
 }
 
 export function forgetOwner(): void {
+  // Write-ahead privacy request survives a crash before either local wipe.
+  // Unlike ordinary flavor writes, forgetting must throw rather than claim
+  // success when the file or durable completion record could not be written.
+  const request = recordPersonalMemoryForget({ kind: "owner" });
   ensureSoul();
-  writeSafe(
-    ownerFile(),
-    [
+  const replacement = [
       `# What I know about my owner`,
       ``,
       `<!-- written by your merryman as it gets to know you; edit freely, it reads this -->`,
       ``,
       `- (${today()}) They asked me to forget what I knew. A fresh start.`,
       ``,
-    ].join("\n"),
-  );
+    ].join("\n");
+  const erase = (file: string, text: string) => {
+    if (!lstatSync(soulDir()).isDirectory()) throw new Error("soul directory unavailable");
+    const tmp = `${file}.${randomUUID()}.forget.tmp`;
+    const fd = openSync(tmp, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | (fsc.O_NOFOLLOW ?? 0), 0o600);
+    try {
+      try { writeFileSync(fd, text, "utf8"); fsyncSync(fd); }
+      finally { closeSync(fd); }
+      renameSync(tmp, file);
+      const dir = openSync(soulDir(), "r");
+      try { fsyncSync(dir); } finally { closeSync(dir); }
+    } finally { rmSync(tmp, { force: true }); }
+  };
+  erase(ownerFile(), replacement);
+  // Evicted owner facts and notes share ARCHIVE.md. Keeping it would let
+  // retrieval bring forgotten facts back; conservatively clear that archive.
+  erase(archiveFile(), "# Archive\n\n<!-- Cleared when my owner asked me to forget. -->\n");
+  completePersonalMemoryForget(request);
 }
 
 // ── journal ─────────────────────────────────────────────────────────────────
