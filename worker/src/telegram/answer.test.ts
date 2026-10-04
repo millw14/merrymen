@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { AgentMsg, AgentTurn, LlmCreds } from "../llm";
-import { MAX_ROUNDS, answerQuestion, answerSystem, type AnswerInput } from "./answer";
+import { brokerFailureEnvelope } from "../fomo/broker";
+import type { FomoBroker } from "../fomo/contract";
+import type { FomoToolName } from "../fomo/types";
+import { FOMO_LATE_TEXT, FOMO_UNAVAILABLE_TEXT, MAX_ROUNDS, answerFomoDm, answerQuestion, answerSystem, type AnswerInput, type FomoDmInput } from "./answer";
 import type { ToolContext } from "./chat-tools";
 
 const creds = { provider: "test", transport: "openai", baseUrl: "http://x", apiKey: "k", model: "m", vision: false } as unknown as LlmCreds;
@@ -322,5 +325,102 @@ describe("contextual follow-ups refresh evidence before narration", () => {
     const s = scripted([{ text: "I couldn't check the current market, so I can't give a verified entry.", toolUses: [] }]);
     await answerQuestion({ ...base(s.turn), question: "best entry?", replyContext: reference, lookup: async () => { throw new Error("network down"); } });
     assert.match(s.seen[0]!.find((m) => m.role === "user")!.text, /evidence could not be read. Do not guess/);
+  });
+});
+
+// ─── Social-trading research in a DM: the bounded pipeline (answerFomoDm) ────
+
+describe("answerFomoDm — research first, bounded", () => {
+  const NOW = Date.UTC(2026, 9, 4, 16, 5);
+  function broker(over: Partial<{ call: FomoBroker["call"]; get: FomoBroker["memory"]["get"] }> = {}) {
+    const seen: string[] = [];
+    const b: FomoBroker = {
+      call: over.call ?? (async (tool: FomoToolName) => {
+        seen.push(`call:${tool}`);
+        return { ...brokerFailureEnvelope(tool, "x", "x", NOW), status: "empty", reason: null, message: null };
+      }),
+      memory: {
+        get: over.get ?? (async () => (seen.push("memory.get"), null)),
+        set: async () => {},
+        clear: async () => {},
+      },
+      report: async () => {},
+      configured: () => true,
+    };
+    return { b, seen };
+  }
+  const input = (b: FomoBroker | null, over: Partial<FomoDmInput> = {}): FomoDmInput => ({
+    text: "what are fomo traders buying?",
+    broker: b,
+    audience: "owner",
+    conversationKey: "tg-dm:1",
+    active: false,
+    nowMs: NOW,
+    creds: null,
+    ...over,
+  });
+
+  it("an ordinary message with no research conversation asks the broker nothing, not even its memory", async () => {
+    const { b, seen } = broker();
+    for (const text of ["hello", "buy 10 of PEPE", "what did you buy today?", "/status"]) {
+      assert.deepEqual(await answerFomoDm(input(b, { text })), { handled: false }, text);
+    }
+    assert.deepEqual(seen, []);
+  });
+
+  it("no broker: a research question is told research is unavailable here", async () => {
+    const r = await answerFomoDm(input(null));
+    assert.ok(r.handled);
+    assert.equal(r.text, FOMO_UNAVAILABLE_TEXT);
+    assert.deepEqual(await answerFomoDm(input(null, { text: "hello" })), { handled: false });
+  });
+
+  it("a lookup that never answers is cut off at the deadline, honestly", async () => {
+    const { b } = broker({ call: () => new Promise(() => {}) });
+    const started = Date.now();
+    const r = await answerFomoDm(input(b, { deadlineMs: 60 }));
+    assert.ok(r.handled);
+    assert.equal(r.text, FOMO_LATE_TEXT);
+    assert.equal(r.timedOut, true);
+    assert.ok(Date.now() - started < 2_000);
+  });
+
+  it("a memory read that never answers is cut off too (memory is never a reason to wait)", async () => {
+    const { b } = broker({ get: () => new Promise(() => {}) });
+    const r = await answerFomoDm(input(b, { deadlineMs: 80 }));
+    assert.ok(r.handled);
+  });
+
+  it("each lookup is bounded by its own share and the deadline, and carries the shared abort", async () => {
+    const seenOpts: Array<{ timeoutMs?: number; signal?: AbortSignal }> = [];
+    const { b } = broker({
+      call: async (tool, _args, opts) => {
+        seenOpts.push({ timeoutMs: opts.timeoutMs, signal: opts.signal });
+        return { ...brokerFailureEnvelope(tool, "x", "x", NOW), status: "empty", reason: null, message: null };
+      },
+    });
+    await answerFomoDm(input(b));
+    assert.equal(seenOpts.length, 1);
+    assert.ok(seenOpts[0]!.timeoutMs! <= 15_000 && seenOpts[0]!.timeoutMs! > 0);
+    assert.ok(seenOpts[0]!.signal instanceof AbortSignal);
+    assert.equal(seenOpts[0]!.signal!.aborted, true, "aborted once the answer is done: nothing outlives it");
+  });
+
+  it("a composer still writing at the deadline is dropped for the deterministic answer", async () => {
+    const { b } = broker();
+    let started = 0;
+    const r = await answerFomoDm(input(b, {
+      text: "should we follow $PONS on fomo?",
+      creds,
+      deadlineMs: 6_000,
+      compose: () => {
+        started += 1;
+        return new Promise(() => {});
+      },
+    }));
+    assert.ok(r.handled);
+    assert.equal(started, 1);
+    assert.equal(r.composed, false);
+    assert.equal(r.analysis, true);
   });
 });

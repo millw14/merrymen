@@ -24,6 +24,8 @@ import {
   extractCaHits,
   extractCas,
   extractCashtags,
+  fomoAskOf,
+  fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
   hasOtherChainLink,
@@ -916,4 +918,48 @@ describe("the slur list stays out of plain source", () => {
       assert.deepEqual(found.map((w) => Buffer.from(w).toString("base64")), [], `${file} spells a hashed word in plain text`);
     });
   }
+});
+
+describe("isPrivateAsk: who it follows, copies or watches is the owner's configuration (rule 3)", () => {
+  const yes = [
+    "who do you copy trade?", "who do u copy", "who are you copy trading", "who are you following on fomo?", "who do you follow",
+    "pine who are you tracking", "which traders do you follow?", "what wallets are you copying", "what are you watching?",
+    "what coins are you watching", "what tokens are you tracking rn", "what's on your watchlist", "show me your watch list",
+    "drop your copy trade list", "who's in your cohort?",
+  ];
+  const no = [
+    "what are you holding?", "who's watching the game", "anyone watching pepe", "i'm following the chart", "what are fomo traders buying?",
+    "who is buying pons on fomo?", "what's trending on fomo", "copy that", "follow the money",
+  ];
+  for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t), true));
+  for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t), false));
+});
+
+describe("fomoAskOf: an addressed social-trading research ask, conservatively", () => {
+  const names = ["pine", "pinebot"];
+  const yes: Array<[string, string]> = [
+    ["pine what are fomo traders buying?", "platform"],
+    ["what's trending on fomo?", "platform"],
+    ["@pinebot is PONS trending on fomo", "platform"],
+    ["pine show me the fomo leaderboard", "platform"],
+    ["what does fomo's top say about pepe?", "platform"],
+    ["pine what are the theses on pons?", "theses"],
+    ["any theses on $PONS?", "theses"],
+    ["what's the thesis on pepe?", "theses"],
+    ["are the top traders buying pons?", "trader-flow"],
+    ["pine what are whales selling", "trader-flow"],
+  ];
+  for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
+  const no = [
+    "i have fomo lol", "pure fomo in on that one", "fomo into it?", "don't fomo", "pine fomo'd so hard", "pine thoughts on pepe?",
+    "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
+  ];
+  for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
+});
+
+describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
+  const yes = ["what about the sellers?", "and the buyers?", "pine refresh it", "this week?", "any theses?", "what changed since?"];
+  const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
+  for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
+  for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
 });

@@ -392,6 +392,38 @@ export interface TgDeskThinkRequest {
   lore?: Pick<TgDeskLore, "description" | "name" | "source">;
 }
 
+// ─── Social-trading research (docs/fomo.md "Telegram groups") ───────────────
+
+/**
+ * WHAT AN ADDRESSED GROUP LINE MAY ASK THE SOCIAL-TRADING RESEARCH, as
+ * tg-groups sees it. Implemented OUTSIDE this directory (worker/src/tg-fomo-port.ts)
+ * over the research broker; nothing here imports that side.
+ *
+ * The question is the asker's words: untrusted data, and never a tenant, a
+ * group id, an audience or a tool name. The port derives every one of those
+ * from trusted context: the chat id Telegram delivered the line in, and a
+ * fixed group audience. What comes back is coin-level public research only:
+ * the port never returns a trader's handle or wallet, an address, a link, a
+ * cashtag or anything about the owner's own book (rules 2 and 3), and the
+ * handler still gates every line it sends.
+ *
+ *   null              not a research question, or research is unavailable
+ *                     here: the line goes on to the desk and the persona
+ *   deflect: true     a question about a trader or the owner's own research
+ *                     state, which a group never hears; `text` says so
+ */
+export interface TgFomoAnswer {
+  text: string;
+  deflect: boolean;
+}
+
+export interface TgFomoPort {
+  /** `timeoutMs`: what is left of the reply deadline; the port stops spending when it runs out. */
+  ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number }): Promise<TgFomoAnswer | null>;
+  /** The owner's chat-wide forget: drop this chat's research subject memory. Never throws. */
+  forget?(chatId: number): Promise<void>;
+}
+
 /**
  * THE DESK, as tg-groups sees it. index.ts builds it from worker/src/desk/;
  * this directory never imports that side (it fetches, draws and calls Brain).

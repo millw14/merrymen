@@ -37,7 +37,16 @@ export function isAnalysisOnlyMessage(text: string): boolean {
 
 const MARKET_TERMS = /\b(?:entry|exit|scalp(?:ing)?|support|resistance|breakout|breakdown|retest|candle|trend|chart|momentum|volume|liquidity|vwap|rsi|ema|atr|bullish|bearish|upside|downside|market|stop|target|invalidation|risk|reward|pullback|bounce|chase)\b|\b(?:should|would|could|can)\b.*\b(?:buy|sell|hold|long|short)\b|\b(?:is|are)\b.*\b(?:buying|selling|holding)\b/i;
 const TRADE_DISCUSSION = /\b(?:what\s+if|suppose|assuming|if)\b[^.!?\n]*\b(?:buy|sell|hold|long|short)\b|\b(?:can|could|would|will)\s+you\s+(?:please\s+)?explain\b[^.!?\n]*\b(?:buying|selling|holding)\b|^(?:please\s+)?explain\b[^.!?\n]*\b(?:buying|selling|holding)\b/i;
-const NOT_COINS = new Set(["I", "USD", "USDG", "USDC", "USDT", "EMA", "RSI", "ATR", "VWAP", "TA", "TP", "SL", "ATH", "API", "AI", "PC", "UTC", "P", "L"]);
+/**
+ * Upper-case words that are not coins. FOMO and its platform words are here
+ * because "what are the top FOMO traders buying?" names a research platform
+ * (docs/fomo.md), not a ticker: read as one, it seeded a market read for a
+ * coin called FOMO and asked "which coin do you mean?".
+ */
+const NOT_COINS = new Set([
+  "I", "USD", "USDG", "USDC", "USDT", "EMA", "RSI", "ATR", "VWAP", "TA", "TP", "SL", "ATH", "API", "AI", "PC", "UTC", "P", "L",
+  "FOMO", "FOMOAPI", "FOMO.FAMILY", "THESIS", "THESES", "TRADERS", "TRADER", "COHORT", "KOL", "KOLS",
+]);
 
 function references(text: string, knownSymbols: readonly string[]): string[] {
   const refs = new Map<string, string>();

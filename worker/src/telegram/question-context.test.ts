@@ -147,3 +147,19 @@ describe("discussion is distinct from an explicit action request", () => {
     it(`keeps direct intent available: ${q}`, () => assert.equal(isAnalysisOnlyMessage(q), false));
   }
 });
+
+describe("FOMO is a research platform, never a ticker", () => {
+  it("'top FOMO traders' does not seed a market read of a coin called FOMO", () => {
+    const plan = marketQuestionPlan("what are the top FOMO traders buying in this market?", [], undefined, symbols);
+    assert.ok(!plan?.coins.some((c) => c.toUpperCase() === "FOMO"), JSON.stringify(plan));
+  });
+  it("'is FOMO showing volume on OFY?' asks about OFY alone, with no clarification", () => {
+    assert.deepEqual(marketQuestionPlan("is FOMO showing volume on OFY?", [], undefined, symbols), { coins: ["OFY"], market: false, needsClarification: false });
+  });
+  it("the platform's words are not coins either", () => {
+    for (const q of ["any THESES on the chart?", "is FOMOAPI down? check the chart", "what are TRADERS doing on the chart"]) {
+      const plan = marketQuestionPlan(q, [], undefined, symbols);
+      assert.ok(!plan?.coins.some((c) => ["THESES", "FOMOAPI", "TRADERS"].includes(c.toUpperCase())), `${q}: ${JSON.stringify(plan)}`);
+    }
+  });
+});
