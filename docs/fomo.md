@@ -64,14 +64,18 @@ disposes. Execution is the existing intent → policy → executor path.
 | Permission | Default | What it allows | Where |
 |---|---|---|---|
 | `fomoDataAccess` | on | answer Fomo questions, read-only | Settings → Fomo research |
-| `fomoMonitoringEnabled` | off | let the cohort and watched coins route research to this agent | Settings → Fomo research |
-| `fomoFollowEnabled` | off | let research **nominate** coins into the existing memecoin review, sized inside the scout budget | Settings → Fomo research |
+| `fomoMonitoringEnabled` | off | let the cohort and watched coins route research to this agent (hosted only) | Settings → Fomo research |
+| `fomoFollowEnabled` | off | let research **nominate** coins into the existing memecoin review, sized inside the scout budget (hosted only) | Settings → Fomo research |
 | live follow | nobody | live execution of follow nominations | operator allowlist `MERRYMEN_FOMO_FOLLOW_LIVE`. Also requires `liveTradingEnabled`, `trencherLiveEnabled`, a signed grant and the vault. |
 | X posting | existing | publication of confirmed fills only, through the existing pipeline | Settings → Posting on X |
 
 Revoked data access is enforced in the service before any cache read or provider call, on
 every surface, even while monitoring is off, the watchlist is empty or trading is paused.
-An information request never creates a trade, a post or a recurring watch. "Watch this
+Hosted, Fomo research is for owners with an agent: a signed-in wallet with no stored grant
+is refused, so throwaway wallets cannot spend the fleet's shared credits. Monitoring and
+following need the hosted fleet pass; a self-hosted install answers questions only, and
+its settings page and chat say so. An information request never creates a trade, a post
+or a recurring watch. "Watch this
 coin" is an explicit owner-only mutation, capped at 25 per owner and expiring after at
 most 30 days. "Should we follow this?" is analysis, not permission.
 
@@ -242,6 +246,14 @@ reserve. They are verified on chain without the top-20 slice. A bounded book hol
 capital is never guaranteed. A missing market cap is unknown, not zero, and a new pool for
 an old token is not a launch.
 
+To let a small coin's route be verified before it can be nominated, the child may ask
+discovery to verify up to 3 Robinhood coins with recent cohort buying. It asks only when a
+follow nomination could actually act: paper, or live with the operator allowlist; scout
+enabled; not paused; a vault present. A coin verified this way is marked early. The regular
+autonomous list (`regularEntryPools`) leaves early pools out, and the paper list leaves out
+coins that are on the tape only because of an ask. So such a coin reaches candidates only
+through a follow nomination and the follow gate.
+
 The three questions stay separate. Is it worth investigating? That is the dossier. Does
 the setup justify risk? That is the Brain review. Is this exact trade permitted and
 executable? That is the unchanged `shouldEnter` entry floors, pool price guards, vault
@@ -316,8 +328,20 @@ submission and checks:
 - the 5 USDG autonomous vault bound
 
 Any unknown input gives 0. The exploration allocation **is the owner's existing scout
-budget**; there is no parallel allowance. Realised exploration losses consume it, and
-closing a losing position never refills it. No martingale, no averaging down, no leverage,
+budget**; there is no parallel allowance. Follow positions and the existing unpriceable
+scout positions draw on one pool in both directions, so their combined cost can never
+exceed `scoutBudgetUsdg`. Realised exploration losses consume it, and closing a losing
+position never refills it; only changing the scout settings, which re-authorises them,
+resets the loss.
+
+**The money state is durable.** The exploration ledger, the pending-entry record and the
+daily follow count live in the owner's tenant store: hosted, the shared Postgres via the
+broker; self-hosted, `fomo.sqlite`. Hosted child homes are wiped on redeploy, so a local
+file alone would let a redeploy refill a spent allocation. Until the durable copy has been
+read the ceiling is 0. Each entry is recorded as pending and read back **before** it is
+submitted, so a crash after broadcast cannot lose it; if the record cannot be confirmed
+within 8 s, the entry is dropped. A newer assessment that is no longer an entry candidate
+withdraws the open nomination, and the gate checks the latest assessment. No martingale, no averaging down, no leverage,
 no rounding up. A size below the economic floor becomes `WATCH`. In-process reservations
 stop concurrent signals from overspending.
 
@@ -405,6 +429,22 @@ answers use one call on the existing house model.
 | `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget |
 | `MERRYMEN_FOMO_ENABLED=0` | orchestrator | turns the fleet pass off; children spawn without IPC and answer "unavailable" |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
+| `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
+| `MERRYMEN_TENANT` | set by the orchestrator in each child | not a secret; the child checks `fomo.json` belongs to it. IPC never trusts it: the orchestrator stamps the tenant itself. |
+
+Surface limits:
+- **Telegram DM:** 25 s for the whole Fomo answer, 15 s per lookup, and 3 research lookups
+  per model answer, because the poll loop is serial. The model loop never starts deep
+  research; that comes only from the planner on explicit owner wording.
+- **Telegram groups:** 6 research answers per chat and 30 per agent per 10 minutes.
+  Answers are coin-level only, with no money figures, handles, addresses or links (the
+  group gate is unchanged). The attribution reads "via fomoapi" there, because the gate
+  refuses "API" and domains.
+- **App chat:** at most 4 lookups per question. Analysis answers count against a
+  per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
+  factual answer is sent with a note.
+- **MCP:** the read tools only, under `market.read`, with research status under
+  `agents.read`. Watch, unwatch and deep research are not offered over MCP.
 
 Health is visible to owners without logs. "Is Fomo working?" and the status route report:
 `not-configured`, `disabled`, `permission-required`, `provider-unavailable`,
@@ -429,8 +469,9 @@ MERRYMEN_FOMO_API_KEY=… npx tsx scripts/fomo-probe.mts [--theses] [--trader] [
 4. The schema is additive (`fomo_*` tables only). Leaving it in place is harmless; dropping
    the tables loses only research caches, cohort history and drafts, never ledger or money
    records.
-5. Brain: the `trader-flow` lens is sent only when Brain advertises it, so a Brain
-   rollback simply stops the lens.
+5. Brain: the `trader-flow` lens is sent only when Brain advertises it in `/health`, and
+   the probe's cached answer is dropped on the first decide that fails while carrying the
+   lens. A Brain rollback stops the lens after at most one failed review.
 
 ## Decisions needed from Milla
 
@@ -446,6 +487,13 @@ MERRYMEN_FOMO_API_KEY=… npx tsx scripts/fomo-probe.mts [--theses] [--trader] [
 4. **Plan.** Credits for the fleet (Builder or higher recommended) and the
    `MERRYMEN_FOMO_PLAN_CREDITS` value.
 5. **Stage E canary.** Name the agent, its scout budget and the live allowlist entry.
+6. **Verification asks.** Coins with cohort buying may be verified on chain beyond the
+   top-20 slice, so that a follow nomination has a verified route. They are kept out of the
+   regular candidate lists. Confirm this use of the slice, or ask for asks to be limited
+   to coins already inside it.
+7. **Calibration.** The cohort weights, the follow thresholds and the economic floor
+   (1 USDG) are reasoned defaults, not fitted ones. Revisit them once real data has been
+   read.
 
 ## Status labels
 
