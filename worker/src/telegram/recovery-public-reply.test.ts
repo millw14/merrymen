@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRecoveryPublicReply, isRecoveryPublicRequest, parseRecoveryPublicAsk, RECOVERY_PUBLIC_CONTEXT, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_UNAVAILABLE } from "./recovery-public-reply";
+import { createRecoveryPublicReply, isRecoveryPublicRequest, parseRecoveryPublicAsk, RECOVERY_PUBLIC_CONTEXT, RECOVERY_PUBLIC_GREETING, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_NOTICE, RECOVERY_PUBLIC_UNAVAILABLE } from "./recovery-public-reply";
 import type { TgDeskEvidence, TgDeskOutcome } from "./tg-groups/types";
 
 const NOW = 1_800_000_000_000;
@@ -27,7 +27,8 @@ test("only fresh, contract-bound evidence becomes a sourced public reply", async
   const out = await reply(request());
   assert.equal(out.kind, "public");
   assert.match(out.text, /hourly trend/);
-  assert.match(out.text, /GeckoTerminal · .* UTC\nTrading remains held\.$/);
+  assert.match(out.text, /GeckoTerminal · .* UTC\nAn agent upgrade is underway/);
+  assert.ok(out.text.endsWith(RECOVERY_PUBLIC_NOTICE));
   assert.equal(out.evidence?.reference.kind, "coin");
   assert.ok(Object.isFrozen(out));
   assert.ok(Object.isFrozen(out.evidence));
@@ -90,13 +91,13 @@ test("greetings, acknowledgments and status have fixed natural replies without a
   let calls = 0;
   const reply = createRecoveryPublicReply({ now: () => NOW, look: async () => { calls++; throw new Error("small talk must not read"); } });
   const fixtures = [
-    { inputs: ["hi", "Hiii", "  Hiiii!!!  ", "Heyyy!", "hellooo", "hello there", "how are you?", "HOW’S IT GOING?", "are you there", "you there?"], intent: "greeting", text: "Hey, I'm here. What are we looking at?" },
-    { inputs: ["gm", "gmmmm", "good morning!"], intent: "morning", text: "Morning. What's on your radar?" },
+    { inputs: ["hi", "Hiii", "  Hiiii!!!  ", "Heyyy!", "hellooo", "hello there", "how are you?", "HOW’S IT GOING?", "are you there", "you there?"], intent: "greeting", text: RECOVERY_PUBLIC_GREETING },
+    { inputs: ["gm", "gmmmm", "good morning!"], intent: "morning", text: `Morning. ${RECOVERY_PUBLIC_GREETING}` },
     { inputs: ["gn", "gnnn", "good night", "bye", "goodbye!"], intent: "farewell", text: "Catch you later." },
     { inputs: ["thanks", "THANKS!", "thank you", "thx", "ty"], intent: "thanks", text: "You're welcome." },
     { inputs: ["ok", "okay!", "sure", "cool"], intent: "ack", text: "Got you." },
-    { inputs: ["eh", "eh??", "huh", "huhhh?"], intent: "clarify", text: "I'm here. What did you want to ask?" },
-    { inputs: ["are you back", "are you working?", "are you online", "status"], intent: "status", text: "I'm here and replying. Trading is paused while the saved accounting is reconciled." },
+    { inputs: ["eh", "eh??", "huh", "huhhh?"], intent: "clarify", text: RECOVERY_PUBLIC_GREETING },
+    { inputs: ["are you back", "are you working?", "are you online", "status"], intent: "status", text: RECOVERY_PUBLIC_GREETING },
   ];
   for (const fixture of fixtures) for (const text of fixture.inputs) {
     assert.equal(parseRecoveryPublicAsk(text), fixture.intent, text);
@@ -104,10 +105,37 @@ test("greetings, acknowledgments and status have fixed natural replies without a
     const out = await reply(request(text));
     assert.deepEqual(out, { kind: "conversation", text: fixture.text }, text);
     assert.ok(Object.isFrozen(out));
-    if (fixture.intent !== "status") assert.doesNotMatch(out.text, /Trading|fresh public data|GeckoTerminal/, text);
+    if (["thanks", "ack", "farewell"].includes(fixture.intent)) assert.doesNotMatch(out.text, /trading|fresh public data|GeckoTerminal/, text);
+    else assert.ok(out.text.includes(RECOVERY_PUBLIC_NOTICE), text);
   }
   for (const text of ["help", "/help"]) assert.deepEqual(await reply(request(text)), { kind: "help", text: RECOVERY_PUBLIC_HELP }, text);
   assert.equal(calls, 0);
+});
+
+test("upgrade feedback stays simple without promising financial readiness or an ETA", async () => {
+  assert.equal(RECOVERY_PUBLIC_NOTICE, "An agent upgrade is underway. Automated trading is temporarily paused.");
+  assert.equal(RECOVERY_PUBLIC_GREETING, "An agent upgrade is underway. Automated trading is temporarily paused. I'm still here for coin and chart questions.");
+  let calls = 0;
+  const reply = createRecoveryPublicReply({ now: () => NOW, look: async () => { calls++; throw new Error("must not read"); } });
+  const samples = [
+    ["Hiii", RECOVERY_PUBLIC_GREETING], ["eh", RECOVERY_PUBLIC_GREETING], ["status", RECOVERY_PUBLIC_GREETING],
+    ["help", RECOVERY_PUBLIC_HELP], ["why", RECOVERY_PUBLIC_CONTEXT], ["buy $FROG", RECOVERY_PUBLIC_HELD],
+  ] as const;
+  for (const [text, expected] of samples) {
+    const out = await reply(request(text));
+    assert.equal(out.text, expected, text);
+    assert.ok(out.text.includes(RECOVERY_PUBLIC_NOTICE), text);
+    assert.ok(out.text.length <= 1000, text);
+    assert.equal(out.evidence, undefined);
+    assert.equal(out.photo, undefined);
+  }
+  assert.equal(calls, 0);
+  assert.match(RECOVERY_PUBLIC_HELD, /I can't place orders, change trading limits or confirm account positions\./);
+  const unavailable = createRecoveryPublicReply({ now: () => NOW, look: async () => ({ ok: false, why: "unavailable" }) });
+  const out = await unavailable(request());
+  assert.equal(out.text, RECOVERY_PUBLIC_UNAVAILABLE);
+  assert.match(out.text, /can't verify fresh public data/);
+  for (const text of [...samples.map(([, expected]) => expected), out.text]) assert.doesNotMatch(text, /data recovery|accounting|recovery|historical|memory|funds? (?:are |is )?safe|balances? (?:are |is )?safe|migration (?:is )?complete|upgrade (?:is )?complete|trading (?:has )?resumed|back (?:to )?trading|LLM|minutes?|hours?|tomorrow|ETA/i);
 });
 
 test("explicit assets retain precedence even when their tickers look conversational", async () => {

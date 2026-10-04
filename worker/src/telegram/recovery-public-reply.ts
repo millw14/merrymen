@@ -3,10 +3,12 @@ import { deskQuestionIndicator, deskQuestionIntent } from "../desk/questions";
 import type { TgDeskAsk, TgDeskEvidence, TgDeskThought } from "./tg-groups/types";
 import type { RecoveryPublicLook } from "./recovery-public-transport";
 
-export const RECOVERY_PUBLIC_UNAVAILABLE = "I can't verify fresh public data for that right now. Trading remains held.";
-export const RECOVERY_PUBLIC_HELP = "Send me a coin ticker or contract for a chart read or its published story, or ask about the market. Trading is paused during recovery.";
-export const RECOVERY_PUBLIC_HELD = "Trading remains held. I can't place orders, change trading limits or confirm account positions.";
-export const RECOVERY_PUBLIC_CONTEXT = "Tell me which coin or question you mean. I don't have earlier chat context during recovery.";
+export const RECOVERY_PUBLIC_NOTICE = "An agent upgrade is underway. Automated trading is temporarily paused.";
+export const RECOVERY_PUBLIC_GREETING = `${RECOVERY_PUBLIC_NOTICE} I'm still here for coin and chart questions.`;
+export const RECOVERY_PUBLIC_UNAVAILABLE = `I can't verify fresh public data for that right now. ${RECOVERY_PUBLIC_NOTICE}`;
+export const RECOVERY_PUBLIC_HELP = `${RECOVERY_PUBLIC_GREETING} Send a ticker or contract for a chart read or its published story, or ask about the market.`;
+export const RECOVERY_PUBLIC_HELD = `${RECOVERY_PUBLIC_NOTICE} I can't place orders, change trading limits or confirm account positions.`;
+export const RECOVERY_PUBLIC_CONTEXT = `${RECOVERY_PUBLIC_NOTICE} Tell me which coin or question you mean.`;
 const MAX_TEXT = 800;
 const MAX_REPLY = 1000;
 const MAX_FRESH_MS = 60_000;
@@ -15,14 +17,14 @@ const ticker = (text: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/.test(text);
 const QUESTION_WORDS = new Set("chart charts lore story description project theme read show me please public fresh current currently overview of for on about what whats is are does do it this the a an can you tell explain look at how why has changed trend structure price hourly candle candles history volume participation buyers sellers flow liquidity depth momentum rsi rsi14 ema ema20 ema50 vwap atr atr14 indicator indicators news safety safe rug scam audit risk invalidation support resistance target targets prediction forecast bottom timeframe freshness old recent stale now from quote index published token coin and thoughts opinion take check out entry quick analysis i think good".split(" "));
 const CONVERSATION_WORDS = new Set("help hi hello gm gn hey status thanks thankyou yes no okay ok sure cool sorry welcome bye goodbye".split(" "));
 const CONVERSATION = Object.freeze({
-  greeting: "Hey, I'm here. What are we looking at?",
-  morning: "Morning. What's on your radar?",
+  greeting: RECOVERY_PUBLIC_GREETING,
+  morning: `Morning. ${RECOVERY_PUBLIC_GREETING}`,
   farewell: "Catch you later.",
   thanks: "You're welcome.",
   ack: "Got you.",
-  clarify: "I'm here. What did you want to ask?",
+  clarify: RECOVERY_PUBLIC_GREETING,
   repair: RECOVERY_PUBLIC_CONTEXT,
-  status: "I'm here and replying. Trading is paused while the saved accounting is reconciled.",
+  status: RECOVERY_PUBLIC_GREETING,
 });
 type ConversationIntent = keyof typeof CONVERSATION;
 /** Exact phrases only; explicit asset syntax is parsed before this stateless small-talk lane. */
@@ -143,7 +145,7 @@ function publicReply(e: TgDeskEvidence, parsed: Exclude<Parsed, string>, questio
     }
   }
   const source = `GeckoTerminal · ${new Date(e.observedAtMs).toISOString().slice(0, 16).replace("T", " ")} UTC`;
-  const tail = `${source}\nTrading remains held.`;
+  const tail = `${source}\n${RECOVERY_PUBLIC_NOTICE}`;
   const room = MAX_REPLY - subject.length - tail.length - 3;
   if (body.length > room) body = `${body.slice(0, room - 1).trimEnd()}…`;
   const evidence: RecoveryPublicEvidence = Object.freeze({ kind: e.kind, subject, observedAtMs: e.observedAtMs, source: "GeckoTerminal", reference: ref });

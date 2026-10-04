@@ -12,7 +12,7 @@ import { RecoveryReplyBotLeases } from "./recovery-reply-lease";
 import { openRecoveryReplyState, readRecoveryReplyOffset, readReplyPrivacy, RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import { PgTenantLeaseManager, leaseKey } from "./tenant-lease";
 import { openSecret, sealSecret } from "./store-crypto";
-import { createRecoveryPublicReply, RECOVERY_PUBLIC_CONTEXT } from "./telegram/recovery-public-reply";
+import { createRecoveryPublicReply, RECOVERY_PUBLIC_CONTEXT, RECOVERY_PUBLIC_GREETING, RECOVERY_PUBLIC_HELD } from "./telegram/recovery-public-reply";
 import type { Db } from "./db";
 import type { TelegramOpts, TgMessage } from "./telegram/api";
 
@@ -396,10 +396,13 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     await f.run({ reply: createRecoveryPublicReply({ now: f.clock, look: async () => { reads++; throw new Error("casual messages must not look up coins"); } }) });
     assert.equal(reads, 0); assert.equal(f.sends.length, 6);
     assert.equal(f.sends.filter(sent => sent.chatId === a.room).length, 2);
-    const held = f.sends.filter(sent => /Trading remains held/.test(sent.text));
+    const held = f.sends.filter(sent => sent.text === RECOVERY_PUBLIC_HELD);
     assert.equal(held.length, 1);
-    for (const sent of f.sends.filter(sent => sent !== held[0])) assert.doesNotMatch(sent.text, /fresh public data|Trading|earlier context/);
-    assert.ok(f.sends.some(sent => /I'm here/.test(sent.text))); assert.ok(f.sends.some(sent => /ask/.test(sent.text)));
+    for (const sent of f.sends.filter(sent => sent !== held[0])) {
+      assert.equal(sent.text, RECOVERY_PUBLIC_GREETING);
+      assert.match(sent.text, /upgrade.*underway/); assert.match(sent.text, /trading is temporarily paused/);
+      assert.doesNotMatch(sent.text, /fresh public data|data recovery|accounting|earlier context/);
+    }
     assert.equal(Number((await f.offset())!.offset_id), 10);
     assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
     assert.equal((await f.pool.query("SELECT child_state FROM tenant_telegram WHERE tenant=$1", [a.tenant])).rows[0]!.child_state, "held:recovery-replies");
@@ -409,7 +412,7 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     const f = await fixture(s);
     f.transport.getUpdates = async () => ({ ...updates([f.msg(1, "/chart FROG"), f.msg(2, "/lore FROG"), f.msg(3, "/market"), f.msg(4, "/buy FROG")], 6), callbacks: [{ updateId: 5, id: "old-financial-button", chatId: 701, fromId: 701, messageId: 100, data: "confirm-buy", date: Math.floor(f.clock() / 1000) }] });
     const callbacks: string[] = []; f.transport.answerCallbackQuery = async (_opts, _id, text) => { callbacks.push(text ?? ""); return { ok: true }; };
-    await f.run(); assert.deepEqual([...f.replies].sort(), ["/chart FROG", "/lore FROG", "/market"].sort()); assert.ok(f.sends.some(sent => /held/.test(sent.text))); assert.match(callbacks[0]!, /cannot authorize/);
+    await f.run(); assert.deepEqual([...f.replies].sort(), ["/chart FROG", "/lore FROG", "/market"].sort()); assert.ok(f.sends.some(sent => sent.text === RECOVERY_PUBLIC_HELD)); assert.match(callbacks[0]!, /cannot authorize/);
     assert.equal(Number((await f.offset())!.offset_id), 6);
   });
 
