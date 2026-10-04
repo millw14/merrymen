@@ -254,6 +254,13 @@ the original `--expected-source-deployment`, `--expected-source-commit`,
 Build its unique repository-root bundle with the same reviewed hash procedure
 used for the memory-only CLI; the DEK remains inside the container.
 
+Review every production deployment path before merging. Pinning the Railway
+orchestrator does not hold a web application whose Git integration deploys
+`main` automatically. A merge intended only to save the reviewed change must
+wait until production promotion is verifiably held for every affected service,
+or until those deployments are explicitly reviewed and authorized. Do not infer
+a deployment hold from an inaccessible dashboard or an unchanged worker pin.
+
 Only after source capture, fresh restore verification, downloaded ciphertext
 hash verification and stage succeed should the approved volume, variables and
 **exact reviewed CI-green commit** be applied together. Check the entire pending
