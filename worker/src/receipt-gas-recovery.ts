@@ -100,16 +100,16 @@ export async function recoverGasProof(row: GasRecoveryRow, chain: GasRecoveryCha
     (row.gas_recorded_at !== null && row.gas_recorded_at !== at) ||
     (payer === "owner" && row.gas_wei !== null && row.gas_wei !== event.actualGasCost.toString()) ||
     (payer === "sponsor" && row.sponsored_gas_wei !== null && row.sponsored_gas_wei !== event.actualGasCost.toString()) ||
-    (payer === "sponsor" && row.gas_usdg !== null && row.gas_usdg !== 0)) return null;
+    ((payer === "sponsor" || event.actualGasCost === 0n) && row.gas_usdg !== null && row.gas_usdg !== 0)) return null;
   const proof: RecoveredGas = { account: row.agent_id, epoch: row.epoch, chainId,
     userOpHash: row.user_op_hash, txHash: row.tx_hash, blockHash: receipt.blockHash,
     blockNumber: receipt.blockNumber.toString(), at, nonce: event.nonce.toString(),
     gasWei: event.actualGasCost.toString(), gasUnits: event.actualGasUsed.toString(), payer,
-    usdg: payer === "sponsor" || event.actualGasCost === 0n ? 0 : row.gas_usdg };
-  if (payer === "owner" && event.actualGasCost > 0n && row.gas_usdg === null) {
+    usdg: payer === "sponsor" || event.actualGasCost === 0n ? 0 : null };
+  if (payer === "owner" && event.actualGasCost > 0n) {
     // The registered mainnet feed is the only historical pricing source here.
     // No present-day price, spot quote, stale round, or other-chain feed is accepted.
-    if (chainId !== robinhoodChain.id) return proof;
+    if (chainId !== robinhoodChain.id) return row.gas_usdg === null ? proof : null;
     try {
       const latest = await chain.latestRound();
       if (latest) {
@@ -129,6 +129,10 @@ export async function recoverGasProof(row: GasRecoveryRow, chain: GasRecoveryCha
         }
       }
     } catch { /* receipt cost survives an unavailable historical price */ }
+    // Filling receipt fields can make a stored cost newly publishable. That
+    // monetary value must agree with independent historical evidence first;
+    // an unknown or conflicting price leaves the existing record untouched.
+    if (row.gas_usdg !== null && row.gas_usdg !== proof.usdg) return null;
   }
   return proof;
 }

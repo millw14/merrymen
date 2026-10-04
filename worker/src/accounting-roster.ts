@@ -142,11 +142,11 @@ export function reconstructionRoster(args: {
 }
 
 /**
- * A durable claim cannot prove a removed grant's historic custody. An outward
- * cash leg might buy assets in the account's own vault; classifying it without
- * that vault would invent a withdrawal and inflate its return. The full chain
- * scan may therefore repair a claim-only account only when it contains no
- * outward USDG movement. Never infer a historic vault from a claim or settings.
+ * A durable claim cannot prove a removed grant's historic custody. Cash going
+ * to its own vault may be a purchase rather than a withdrawal, and cash coming
+ * back may be sale proceeds rather than a deposit. Neither direction proves
+ * external capital without historic custody or independently verified source
+ * evidence. Claims identify the tenant to hold; they do not supply that proof.
  */
 export function reconstructionCustodyRefusal(
   roster: ReconstructionRoster,
@@ -154,7 +154,7 @@ export function reconstructionCustodyRefusal(
   capital: { movements: readonly { direction: "in" | "out" }[] } | undefined,
 ): string | null {
   if (roster.grantCustodyKnown.has(account.toLowerCase())) return null;
-  return capital?.movements.some((movement) => movement.direction === "out")
-    ? "historic custody is unverified after grant removal; outward USDG movements require signed custody evidence"
+  return capital?.movements.length
+    ? "historic custody is unverified after grant removal; USDG movements require signed custody or independently verified external-source evidence"
     : null;
 }

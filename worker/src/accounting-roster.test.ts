@@ -49,13 +49,13 @@ test("agreement between a signed grant and normalized durable aliases retains on
   assert.equal(roster.grantCustodyKnown.has(key), true);
 });
 
-test("a removed grant's deposit-only history may be reconstructed, but every outward USDG movement refuses", () => {
+test("a removed grant's claim identifies its tenant but refuses every USDG movement without custody evidence", () => {
   const roster = reconstructionRoster({ ledgerAgents: [ledger()], grants: [], claims: [claim()] });
-  assert.equal(reconstructionCustodyRefusal(roster, ACCOUNT, { movements: [{ direction: "in" }] }), null);
   assert.equal(reconstructionCustodyRefusal(roster, key, { movements: [] }), null);
   assert.equal(reconstructionCustodyRefusal(roster, ACCOUNT, undefined), null,
     "the existing missing-scan gate still owns absent chain evidence");
-  for (const movements of [[{ direction: "out" as const }], [{ direction: "in" as const }, { direction: "out" as const }]]) {
+  for (const movements of [[{ direction: "in" as const }], [{ direction: "out" as const }],
+      [{ direction: "in" as const }, { direction: "out" as const }]]) {
     assert.match(reconstructionCustodyRefusal(roster, ACCOUNT, { movements })!, /historic custody.*unverified/);
   }
 });
@@ -69,7 +69,7 @@ test("an unambiguous signed grant proves custody, including an empty set, while 
   const conflicted = reconstructionRoster({ ledgerAgents: [ledger()],
     grants: [grant(), grant({ custodyAddresses: [VAULT] })], claims: [claim()] });
   assert.equal(conflicted.grantCustodyKnown.has(key), false);
-  assert.match(reconstructionCustodyRefusal(conflicted, ACCOUNT, { movements: [{ direction: "out" }] })!, /signed custody evidence/);
+  assert.match(reconstructionCustodyRefusal(conflicted, ACCOUNT, { movements: [{ direction: "out" }] })!, /signed custody/);
 });
 
 test("a removed grant's own-vault purchase refuses the false withdrawal classification", () => {
@@ -87,6 +87,37 @@ test("a removed grant's own-vault purchase refuses the false withdrawal classifi
     totals: totalCapital([{ amountRaw: "25000000", classification }]) };
   const refusal = reconstructionCustodyRefusal(roster, ACCOUNT, capital);
   assert.match(refusal!, /historic custody.*unverified/);
+});
+
+test("a directly funded historic vault's sale proceeds refuse the false deposit classification", async () => {
+  const roster = reconstructionRoster({ ledgerAgents: [ledger()], grants: [], claims: [claim()] });
+  const cash = OTHER_ACCOUNT, token = OTHER_TENANT, curve = "0x00000000000000000000000000000000000000ff";
+  const legs = [{ token, from: VAULT, to: curve, amountRaw: "400000000000000000000" },
+    { token: cash, from: curve, to: ACCOUNT, amountRaw: "31000000" }];
+  const classification = classifyUsdgMovement({ account: ACCOUNT, usdg: legs[1]!, txLegs: legs,
+    usdgToken: cash, custodyAddresses: roster.custodyVaults.get(key) });
+  assert.equal(classification.kind, "capital-in", "a missing vault prevents pairing the sale's token leg");
+  const movement = { txHash: TX, blockNumber: 10, logIndex: 0, at: 90, direction: "in" as const,
+    amountRaw: "31000000", counterparty: curve, classification };
+  const capital = { account: ACCOUNT, complete: true, notes: [], movements: [movement], totals: totalCapital([movement]) };
+  const plan = planReconstruction({ agents: roster.agents, flows: [], chain: new Map([[key, capital]]),
+    onchainCash: new Map([[key, 31]]), equityByAccountEpoch: new Map([[`${key}#1`, 31]]),
+    tenantByAccount: roster.tenantByAccount })[0]!;
+  assert.equal(plan.contributionsKnownAfter, true, "coverage alone cannot prove an inbound vault sale is capital");
+  plan.blocked = reconstructionCustodyRefusal(roster, ACCOUNT, capital);
+  assert.match(plan.blocked!, /historic custody.*unverified/);
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  try {
+    await applyLedgerSchema(db);
+    const repaired = await runRepair(db, [plan], { mode: "commit", accounts: [key], runId: "unverified-vault-sale", resume: false }, 4663);
+    assert.equal(repaired[0]!.stage, "skipped-blocked");
+    assert.equal(repaired[0]!.contributionsKnownAfter, false);
+    for (const table of ["flows", "flows_quarantine", "agents"]) {
+      assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0,
+        `${table} must remain untouched`);
+    }
+  } finally { raw.close(); }
 });
 
 test("a current grant without an existing claim retains the previous grant roster behavior", () => {
@@ -168,7 +199,7 @@ test("an unrelated ambiguous account does not prevent resolving an explicitly sc
   assert.equal(roster.refusals.has(OTHER_ACCOUNT), true);
 });
 
-test("claim-based resolution can feed the existing guarded receipt repair without changing wallet authority or caps", async () => {
+test("agreement between a grant and claim feeds guarded receipt repair without changing wallet authority or caps", async () => {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   try {
@@ -179,7 +210,7 @@ test("claim-based resolution can feed the existing guarded receipt repair withou
     await db.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, at) VALUES (?, 'in', 60, 'inferred', 1, 100)")
       .run(ACCOUNT);
     const before = await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(ACCOUNT) as Record<string, unknown>;
-    const roster = reconstructionRoster({ ledgerAgents: [before], grants: [], claims: [claim()] });
+    const roster = reconstructionRoster({ ledgerAgents: [before], grants: [grant()], claims: [claim()] });
     const classification = { kind: "capital-in" as const, why: "external deposit", evidence: {
       counterparty: OWNER, direction: "in" as const, txLegCount: 1, rule: "no-pair-external" as const } };
     const plans = planReconstruction({ agents: roster.agents,

@@ -15,7 +15,8 @@ const abi = parseAbi(["event UserOperationEvent(bytes32 indexed userOpHash, addr
 const at = 1_790_000_000;
 const zero = `0x${"0".repeat(40)}` as Hex;
 
-function fixture(payer: "owner" | "sponsor" = "sponsor", status: "landed" | "reverted" = "landed") {
+function fixture(payer: "owner" | "sponsor" = "sponsor", status: "landed" | "reverted" = "landed",
+  actualGasCost = 1_000_000_000_000_000n) {
   const row: GasRecoveryRow = { id: 1, agent_id: account, epoch: 2, status, tx_hash: tx, user_op_hash: op,
     user_op_nonce: "7", gas_wei: null, sponsored_gas_wei: null, gas_units: null, gas_usdg: null, gas_recorded_at: null };
   const receipt: GasReceipt = { transactionHash: tx, blockHash, blockNumber: 100n, status: "success", logs: [{
@@ -24,7 +25,7 @@ function fixture(payer: "owner" | "sponsor" = "sponsor", status: "landed" | "rev
       userOpHash: op, sender: account, paymaster: payer === "owner" ? zero : `0x${"b".repeat(40)}`,
     } }) as Hex[],
     data: encodeAbiParameters([{ type: "uint256" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }],
-      [7n, status === "landed", 1_000_000_000_000_000n, 200_000n]),
+      [7n, status === "landed", actualGasCost, 200_000n]),
   }] };
   const chain: GasRecoveryChain = {
     chainId: async () => 4663, head: async () => 200n, receipt: async () => receipt,
@@ -62,12 +63,103 @@ describe("receipt-backed historical gas", () => {
     assert.equal(p?.payer, "owner"); assert.equal(p?.usdg, 2.5);
     assert.equal(p?.price?.roundId, "2"); assert.equal(p?.price?.updatedAt, at - 60);
   });
+  it("independently corroborates an existing owner cost before filling missing receipt evidence", async () => {
+    const f = fixture("owner"); f.row.gas_usdg = 2.5;
+    let priceReads = 0;
+    const latestRound = f.chain.latestRound;
+    f.chain.latestRound = async () => { priceReads++; return latestRound(); };
+    const { raw, db } = ledger(f.row);
+    try {
+      const proof = await recoverGasProof(f.row, f.chain, 4663, 200n);
+      assert.equal(priceReads, 1);
+      assert.equal(proof?.usdg, 2.5);
+      assert.equal(proof?.price?.roundId, "2");
+      assert.equal(await recordRecoveredGas(db, f.row, proof!), true);
+      assert.deepEqual({ ...raw.prepare("SELECT gas_usdg,gas_wei,gas_recorded_at FROM trades").get()! },
+        { gas_usdg: 2.5, gas_wei: "1000000000000000", gas_recorded_at: at });
+      const audit = raw.prepare("SELECT proof_json FROM gas_recovery_receipts").get() as { proof_json: string };
+      assert.equal(JSON.parse(audit.proof_json).price.roundId, "2");
+    } finally { raw.close(); }
+  });
+  it("refuses a conflicting recorded owner cost without enriching the row or writing an audit proof", async () => {
+    for (const status of ["landed", "reverted"] as const) for (const stored of [0, 2.4, 2.500001]) {
+      const f = fixture("owner", status); f.row.gas_usdg = stored;
+      let priceReads = 0;
+      const latestRound = f.chain.latestRound;
+      f.chain.latestRound = async () => { priceReads++; return latestRound(); };
+      const { raw, db } = ledger(f.row);
+      try {
+        const before = raw.prepare("SELECT * FROM trades").get();
+        const result = await recoverSettledGas({ db, chain: f.chain, account, epoch: 2, chainId: 4663,
+          record: (row, proof) => recordRecoveredGas(db, row, proof) });
+        assert.equal(priceReads, 1, `${status}/${stored}: stored money cannot skip pricing`);
+        assert.equal(result.recovered, 0);
+        assert.deepEqual(raw.prepare("SELECT * FROM trades").get(), before);
+        assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM gas_recovery_receipts").get() as { n: number }).n, 0);
+      } finally { raw.close(); }
+    }
+  });
+  it("refuses enrichment of a stored owner cost when its historical price cannot be corroborated", async () => {
+    const mutations: ((f: ReturnType<typeof fixture>) => void)[] = [
+      f => { f.chain.latestRound = async () => null; },
+      f => { f.chain.latestRound = async () => { throw new Error("feed unavailable"); }; },
+      f => { f.chain.latestRound = async () => ({ roundId: 1n, priceUsd: 2500, updatedAt: at - 7 * 3600 }); },
+      f => { f.chain.round = async id => id === 3n ? null : ({ roundId: id, priceUsd: 2500, updatedAt: at - 60 }); },
+    ];
+    for (const mutate of mutations) {
+      const f = fixture("owner"); f.row.gas_usdg = 2.5; mutate(f);
+      assert.equal(await recoverGasProof(f.row, f.chain, 4663, 200n), null);
+    }
+    const f = fixture("owner"); f.row.gas_usdg = 2.5;
+    f.chain.latestRound = async () => { throw new Error("another chain cannot use this feed"); };
+    assert.equal(await recoverGasProof(f.row, f.chain, 46630, 200n), null);
+  });
+  it("proves a zero actual owner fee without a feed and refuses a conflicting stored expense", async () => {
+    for (const stored of [null, 0, 2.5]) {
+      const f = fixture("owner", "landed", 0n); f.row.gas_usdg = stored;
+      let priceReads = 0;
+      f.chain.latestRound = async () => { priceReads++; throw new Error("zero owner expense needs no price"); };
+      const proof = await recoverGasProof(f.row, f.chain, 4663, 200n);
+      if (stored === 2.5) assert.equal(proof, null);
+      else { assert.equal(proof?.usdg, 0); assert.equal(proof?.gasWei, "0"); }
+      assert.equal(priceReads, 0);
+    }
+  });
+  it("corroborates sponsored zero owner expense without pricing while refusing stored owner costs", async () => {
+    for (const stored of [0, 2.5]) {
+      const f = fixture("sponsor"); f.row.gas_usdg = stored;
+      let priceReads = 0;
+      f.chain.latestRound = async () => { priceReads++; throw new Error("sponsored owner expense needs no price"); };
+      const proof = await recoverGasProof(f.row, f.chain, 4663, 200n);
+      if (stored === 0) { assert.equal(proof?.usdg, 0); assert.equal(proof?.payer, "sponsor"); }
+      else assert.equal(proof, null);
+      assert.equal(priceReads, 0);
+    }
+  });
   it("retains raw gas when historical pricing or its publication boundary is unavailable", async () => {
     const f = fixture("owner");
     f.chain.round = async id => id === 3n ? null : ({ roundId: id, priceUsd: 2500, updatedAt: at - 60 });
     assert.equal((await recoverGasProof(f.row, f.chain, 4663, 200n))?.usdg, null);
     f.chain.latestRound = async () => { throw new Error("RPC unavailable"); };
     assert.equal((await recoverGasProof(f.row, f.chain, 4663, 200n))?.gasWei, "1000000000000000");
+  });
+  it("retains an unpriced raw receipt with NULL owner cost and prices it on a later recovery pass", async () => {
+    const f = fixture("owner"); const { raw, db } = ledger(f.row);
+    try {
+      const latestRound = f.chain.latestRound;
+      f.chain.latestRound = async () => null;
+      const opts = { db, chain: f.chain, account, epoch: 2, chainId: 4663,
+        record: (row: GasRecoveryRow, proof: Parameters<typeof recordRecoveredGas>[2]) => recordRecoveredGas(db, row, proof) };
+      assert.equal((await recoverSettledGas(opts)).recovered, 1);
+      assert.deepEqual({ ...raw.prepare("SELECT gas_usdg,gas_wei,gas_recorded_at FROM trades").get()! },
+        { gas_usdg: null, gas_wei: "1000000000000000", gas_recorded_at: at });
+      const audit = raw.prepare("SELECT proof_json FROM gas_recovery_receipts").get() as { proof_json: string };
+      assert.equal(JSON.parse(audit.proof_json).usdg, null);
+      f.chain.latestRound = latestRound;
+      assert.equal((await recoverSettledGas(opts)).recovered, 1);
+      assert.equal((raw.prepare("SELECT gas_usdg FROM trades").get() as { gas_usdg: number }).gas_usdg, 2.5);
+      assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM gas_recovery_receipts").get() as { n: number }).n, 2);
+    } finally { raw.close(); }
   });
   it("never prices an old owner cost at a stale or future round", async () => {
     const f = fixture("owner");
