@@ -142,6 +142,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "honourFleetHalt",
       "isHeldForTest",
       "localChildProcessCount",
+      "localMemoryWriterPresent",
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
@@ -154,6 +155,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "standDownHolder",
       "standDownLostLeasesNow",
       "startHolderProcess",
+      "sweepTgGroups",
       "watchHolder",
     ]);
   });
@@ -171,7 +173,7 @@ describe("held tenants reach only the loops they belong in", () => {
       assert.ok(!body.includes(never), `the holders loop must not call ${never}`);
     }
     // And a fleet whose only tenants are held still gets to that loop.
-    assert.match(mirror.body!.getText(), /if \(!url \|\| \(children\.size === 0 && holders\.size === 0\)\) return;/);
+    assert.match(mirror.body!.getText(), /if \(\(!url && !liveMirrorStoreForTest\) \|\| \(children\.size === 0 && holders\.size === 0\)\) return;/);
   });
 
   it("A LEASE KEPT FOR A HOLD PROCESS THAT HAS NOT EXITED SPEAKS FOR NOBODY AND MIRRORS NOTHING", () => {

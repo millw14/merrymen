@@ -38,7 +38,7 @@ before(async () => {
   resetSettingsStoreForTest();
   resetGrantStoreForTest();
   const grantOf = (smartAccount: string) =>
-    ({ smartAccount, chainId: 4663, serialized: "not-a-permission-account", demoSessionPrivateKey: "" }) as unknown as StoredGrant;
+    ({ smartAccount, chainId: 4663, serialized: "not-a-permission-account", demoSessionPrivateKey: "0x" + "11".repeat(32) }) as unknown as StoredGrant;
   await getGrantStore().put(TENANT, grantOf("0x00000000000000000000000000000000000000a1"));
   await getGrantStore().put(OTHER, grantOf("0x00000000000000000000000000000000000000a2"));
 });

@@ -459,7 +459,8 @@ describe("the world can change while a child is being prepared", () => {
   });
 
   it("A LEASE RELEASED MID-SPAWN STOPS THE SPAWN", async () => {
-    await store.put(TENANT, grant());
+    const originalGrant = grant();
+    await store.put(TENANT, originalGrant);
     const g = closeGate();
     const first = reconcile();
     await g.reached;
@@ -468,6 +469,9 @@ describe("the world can change while a child is being prepared", () => {
     // top must not start a worker this replica no longer holds a lock for.
     await store.remove(TENANT);
     await reconcile();
+    // Restore the exact grant without reconciling: the preparation's grant
+    // check now succeeds, but this replica still has no lease for the spawn.
+    await store.put(TENANT, originalGrant);
     g.open();
     await first;
     assert.equal(spawned.length, 0, "no worker starts without the lease it was prepared under");
@@ -475,6 +479,7 @@ describe("the world can change while a child is being prepared", () => {
     // The pass that released the lease left the home alone, because a spawn
     // was still preparing in it; the next one wipes it.
     assert.ok(existsSync(path.join(childHome(TENANT), "grant.json")), "the revoked grant was written before the refusal");
+    await store.remove(TENANT);
     await reconcile();
     assert.equal(existsSync(childHome(TENANT)), false, "the next pass wipes what the refused spawn wrote");
   });

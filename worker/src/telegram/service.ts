@@ -995,9 +995,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // turns persist to disk since chat_turns, so wiping only the facts while
       // the transcript survived would make the reply ("I've let go of what I
       // knew about you") untrue.
-      forgetOwner: () => {
+      forgetOwner: async () => {
         forgetOwner();
-        void clearChatTurns(msg.chatId); // fire-and-forget; the in-memory wipe below is immediate
+        await clearChatTurns(msg.chatId);
         history.delete(msg.chatId);
         stickyIds.delete(msg.chatId);
       },

@@ -27,21 +27,46 @@
  * runtime) and the worker via the @merrymen/grant-store alias — never by the
  * browser bundle, which is why it lives here and not in core's browser barrel.
  */
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { carriesOwnerKey } from "../../packages/core/src/index";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
+import { privateKeyToAccount } from "viem/accounts";
+import { writeFileAtomic } from "./atomic-write";
+import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA } from "./ledger-import-schema";
+
+/** Never evict old authority fences to make room for another permission. */
+export const MAX_RETIRED_SESSION_KEYS = 256;
+
+interface ReplacementStop {
+  /** Hash of the actual signing key, never the client's claimed address. */
+  sessionKeyHash: string;
+  sessionKeyAddress: `0x${string}`;
+  stoppedAt: number;
+}
+
+export type ReplacementStopResult = "stopped" | "absent" | "changed";
+
+export class GrantReplacementConflict extends Error {
+  constructor() {
+    super("This permission cannot be armed: its session key was stopped, or permission replacement history is full. Nothing was changed; contact support if a fresh permission is rejected.");
+    this.name = "GrantReplacementConflict";
+  }
+}
 
 /** A grant safe to persist server-side: session-key-only, session key sealed. */
 export interface StoredRecord {
   tenant: `0x${string}`;
   chainId: number;
   /** The grant, session key REMOVED (it lives sealed, separately). */
-  grant: Omit<StoredGrant, "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
+  grant: Omit<StoredGrant, "demoSessionPrivateKey" | "demoOwnerPrivateKey"> & {
+    replacementStop?: ReplacementStop;
+    retiredSessionKeyHashes?: string[];
+  };
   /** The session key, AES-256-GCM sealed when a DEK is set, else plaintext. */
   sealedSessionKey: string;
   updatedAt: number;
@@ -67,6 +92,8 @@ export interface GrantStore {
   tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null>;
   /** Forget a tenant's grant (the kill switch). */
   remove(tenant: `0x${string}`): Promise<void>;
+  /** Remove signing capability, retaining the roster/home during permission replacement. */
+  stopForReplacement(tenant: `0x${string}`, expectedAccount?: string, expectedSession?: string): Promise<ReplacementStopResult>;
   /**
    * Forget a tenant's grant IF it was stored at or before `atSec` (unix
    * seconds, compared with the record's server-stamped `updatedAt`).
@@ -98,9 +125,12 @@ function toRecord(tenant: `0x${string}`, grant: StoredGrant): StoredRecord {
   // What survives here as defence in depth is the owner-key refusal above and
   // the fact that the record is keyed on the AUTHENTICATED tenant below, never
   // on anything the grant declares about itself.
-  const { demoSessionPrivateKey, demoOwnerPrivateKey, ...rest } = grant as StoredGrant & {
+  const { demoSessionPrivateKey, demoOwnerPrivateKey, replacementStop, retiredSessionKeyHashes, ...rest } = grant as StoredGrant & {
     demoOwnerPrivateKey?: string;
+    replacementStop?: unknown;
+    retiredSessionKeyHashes?: unknown;
   };
+  if (replacementStop !== undefined || retiredSessionKeyHashes !== undefined) throw new Error("Permission replacement state is managed by the service, not the submitted grant.");
   void demoOwnerPrivateKey; // discarded; the guard above already refused a real one
   const dek = storeDek();
   const sealedSessionKey = dek ? sealSecret(demoSessionPrivateKey, dek) : demoSessionPrivateKey;
@@ -114,10 +144,68 @@ function toRecord(tenant: `0x${string}`, grant: StoredGrant): StoredRecord {
 }
 
 /** Reassemble a full grant, decrypting the session key back in. */
-function fromRecord(rec: StoredRecord): StoredGrant {
+function fromRecord(rec: StoredRecord): StoredGrant | null {
+  if (rec.grant.replacementStop !== undefined) return null;
   const dek = storeDek();
   const sessionKey = dek ? openSecret(rec.sealedSessionKey, dek) : rec.sealedSessionKey;
-  return { ...rec.grant, demoSessionPrivateKey: sessionKey as `0x${string}` } as StoredGrant;
+  const { replacementStop, retiredSessionKeyHashes, ...grant } = rec.grant;
+  void replacementStop; void retiredSessionKeyHashes;
+  return { ...grant, demoSessionPrivateKey: sessionKey as `0x${string}` } as StoredGrant;
+}
+
+function sessionKeyHash(key: string): string {
+  if (typeof key !== "string" || !/^0x[0-9a-f]{64}$/i.test(key)) {
+    throw new Error("The permission's session key cannot be verified. Nothing was replaced.");
+  }
+  return createHash("sha256").update(Buffer.from(key.slice(2), "hex")).digest("hex");
+}
+
+function retiredSessionKeys(grant: StoredRecord["grant"]): string[] {
+  const keys = grant.retiredSessionKeyHashes ?? [];
+  if (!Array.isArray(keys) || keys.length > MAX_RETIRED_SESSION_KEYS || keys.some(key => typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key))) {
+    throw new Error("The permission replacement history could not be verified. Nothing was replaced.");
+  }
+  const retired = [...new Set(keys)];
+  if (grant.replacementStop) {
+    const key = grant.replacementStop.sessionKeyHash;
+    if (typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key)) throw new Error("The stopped permission could not be verified. Nothing was replaced.");
+    if (!retired.includes(key)) retired.push(key);
+  }
+  // At capacity, the current key can still be stopped in replacementStop
+  // without evicting any historical hash. A fresh put must retain room for
+  // its own eventual stop and refuses when this effective history is full.
+  if (retired.length > MAX_RETIRED_SESSION_KEYS + 1) throw new Error("Permission replacement history is full. Nothing was replaced; contact support.");
+  return retired;
+}
+
+/** A stop does not authorize a new grant: keep updatedAt for pending /kill requests. */
+function replacementRecord(rec: StoredRecord, expectedAccount?: string, expectedSession?: string): StoredRecord | null {
+  if (expectedAccount !== undefined && rec.grant.smartAccount.toLowerCase() !== expectedAccount.toLowerCase()) return null;
+  let stop = rec.grant.replacementStop;
+  if (!stop) {
+    const dek = storeDek();
+    const key = dek ? openSecret(rec.sealedSessionKey, dek) : rec.sealedSessionKey;
+    stop = {
+      sessionKeyHash: sessionKeyHash(key),
+      sessionKeyAddress: privateKeyToAccount(key as `0x${string}`).address,
+      stoppedAt: Math.floor(Date.now() / 1000),
+    };
+  }
+  if (expectedSession !== undefined && stop.sessionKeyAddress.toLowerCase() !== expectedSession.toLowerCase()) return null;
+  retiredSessionKeys(rec.grant); // Validate every existing historical fence.
+  const retired = [...new Set(rec.grant.retiredSessionKeyHashes ?? [])];
+  if (!retired.includes(stop.sessionKeyHash) && retired.length < MAX_RETIRED_SESSION_KEYS) {
+    retired.push(stop.sessionKeyHash);
+  }
+  // A full array stays intact; replacementStop separately fences the current
+  // key. No later put may clear that marker at full effective capacity.
+  return {
+    ...rec,
+    grant: { ...rec.grant, expiresAt: 0, serialized: "", replacementStop: stop, retiredSessionKeyHashes: retired },
+    // ZeroDev's serialized account embeds another copy of the session key.
+    // Both copies must disappear before reporting a durable replacement stop.
+    sealedSessionKey: "",
+  };
 }
 
 // ── file backend ─────────────────────────────────────────────────────────────
@@ -201,11 +289,17 @@ export class FileGrantStore implements GrantStore {
   }
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
     await this.locked(tenant, async () => {
+      let prior: StoredRecord | null = null;
+      try { prior = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const retired = prior ? retiredSessionKeys(prior.grant) : [];
+      if (retired.length >= MAX_RETIRED_SESSION_KEYS || retired.includes(sessionKeyHash(grant.demoSessionPrivateKey))) {
+        throw new GrantReplacementConflict();
+      }
       // Stamped inside the lock, so `updatedAt` is when the record landed.
       const rec = toRecord(tenant, grant);
-      const tmp = `${this.file(tenant)}.${randomUUID()}.tmp`;
-      await writeFile(tmp, JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
-      await rename(tmp, this.file(tenant));
+      if (retired.length > 0) rec.grant.retiredSessionKeyHashes = retired;
+      await writeFileAtomic(this.file(tenant), JSON.stringify(rec, null, 2), 0o600, { durable: true });
     });
   }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
@@ -220,8 +314,10 @@ export class FileGrantStore implements GrantStore {
     try {
       const files = await readdir(this.dir);
       return files.filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5) as `0x${string}`);
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      // Cleanup callers must not turn an unreadable roster into proof of deletion.
+      throw error;
     }
   }
   async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>> {
@@ -240,6 +336,20 @@ export class FileGrantStore implements GrantStore {
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     await this.locked(tenant, () => rm(this.file(tenant), { force: true }));
+  }
+  async stopForReplacement(tenant: `0x${string}`, expectedAccount?: string, expectedSession?: string): Promise<ReplacementStopResult> {
+    return this.locked(tenant, async () => {
+      let rec: StoredRecord;
+      try { rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+        throw error;
+      }
+      const stopped = replacementRecord(rec, expectedAccount, expectedSession);
+      if (!stopped) return "changed";
+      await writeFileAtomic(this.file(tenant), JSON.stringify(stopped, null, 2), 0o600, { durable: true });
+      return "stopped";
+    });
   }
   async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
     // The read and the delete under one lock (see `locked`), so no put lands
@@ -351,6 +461,11 @@ export class PgGrantStore implements GrantStore {
                updated_at BIGINT NOT NULL
              )`,
           );
+          // Explicit deletion must fence an already staged original-book
+          // transfer in the same statement as removing its grant. Set up the
+          // nonpayload tombstones before any request can take that path.
+          await c.query(LEDGER_IMPORT_SCHEMA);
+          await c.query(LEDGER_IMPORT_GENERATIONS_SCHEMA);
           if (!alive) throw new Error("grant store connection ended during setup");
         } catch (e) {
           // A failed CREATE must not leave a connection open on every retry.
@@ -371,14 +486,31 @@ export class PgGrantStore implements GrantStore {
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
     const rec = toRecord(tenant, grant);
     const c = await this.client();
-    await c.query(
+    const { rows } = await c.query(
       `INSERT INTO grants (tenant, chain_id, grant_json, sealed_session_key, updated_at)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (tenant) DO UPDATE SET
-         chain_id = EXCLUDED.chain_id, grant_json = EXCLUDED.grant_json,
-         sealed_session_key = EXCLUDED.sealed_session_key, updated_at = EXCLUDED.updated_at`,
-      [rec.tenant, rec.chainId, JSON.stringify(rec.grant), rec.sealedSessionKey, rec.updatedAt],
+         chain_id = EXCLUDED.chain_id,
+         grant_json = jsonb_set(EXCLUDED.grant_json, '{retiredSessionKeyHashes}',
+           CASE WHEN grants.grant_json->'replacementStop'->>'sessionKeyHash' IS NOT NULL
+                     AND NOT COALESCE(grants.grant_json->'retiredSessionKeyHashes' ? (grants.grant_json->'replacementStop'->>'sessionKeyHash'), FALSE)
+             THEN COALESCE(grants.grant_json->'retiredSessionKeyHashes', '[]'::jsonb) || jsonb_build_array(grants.grant_json->'replacementStop'->>'sessionKeyHash')
+             ELSE COALESCE(grants.grant_json->'retiredSessionKeyHashes', '[]'::jsonb) END),
+         sealed_session_key = EXCLUDED.sealed_session_key, updated_at = EXCLUDED.updated_at
+       WHERE (grants.grant_json->'replacementStop' IS NULL
+          OR grants.grant_json->'replacementStop'->>'sessionKeyHash' <> $6)
+         AND CASE WHEN grants.grant_json->'retiredSessionKeyHashes' IS NULL
+                    OR jsonb_typeof(grants.grant_json->'retiredSessionKeyHashes') = 'array'
+           THEN jsonb_array_length(COALESCE(grants.grant_json->'retiredSessionKeyHashes', '[]'::jsonb))
+             + CASE WHEN grants.grant_json->'replacementStop'->>'sessionKeyHash' IS NOT NULL
+                      AND NOT COALESCE(grants.grant_json->'retiredSessionKeyHashes' ? (grants.grant_json->'replacementStop'->>'sessionKeyHash'), FALSE)
+               THEN 1 ELSE 0 END < $7
+           ELSE FALSE END
+         AND NOT COALESCE(grants.grant_json->'retiredSessionKeyHashes' ? $6, FALSE)
+       RETURNING tenant`,
+      [rec.tenant, rec.chainId, JSON.stringify(rec.grant), rec.sealedSessionKey, rec.updatedAt, sessionKeyHash(grant.demoSessionPrivateKey), MAX_RETIRED_SESSION_KEYS],
     );
+    if (rows.length === 0) throw new GrantReplacementConflict();
   }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     const c = await this.client();
@@ -415,12 +547,56 @@ export class PgGrantStore implements GrantStore {
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
-    await c.query(`DELETE FROM grants WHERE tenant = $1`, [tenant.toLowerCase()]);
+    await c.query(`WITH gone AS (
+      DELETE FROM grants WHERE tenant = $1 RETURNING tenant
+    ), invalidated AS (
+      UPDATE tenant_ledger_import AS i SET state = 'deleted', sealed = NULL, bytes = 0
+      FROM gone WHERE i.tenant = gone.tenant RETURNING i.generation, i.tenant
+    ), fenced AS (
+      UPDATE tenant_ledger_import_generations AS g SET state = 'deleted'
+      FROM invalidated WHERE g.generation = invalidated.generation AND g.tenant = invalidated.tenant
+      RETURNING g.generation
+    ) SELECT tenant FROM gone`, [tenant.toLowerCase()]);
+  }
+  async stopForReplacement(tenant: `0x${string}`, expectedAccount?: string, expectedSession?: string): Promise<ReplacementStopResult> {
+    const c = await this.client();
+    const { rows } = await c.query(
+      `SELECT tenant, chain_id, grant_json, sealed_session_key, updated_at FROM grants WHERE tenant = $1`,
+      [tenant.toLowerCase()],
+    );
+    const row = rows[0];
+    if (!row) return "absent";
+    const rec: StoredRecord = {
+      tenant: String(row.tenant) as `0x${string}`,
+      chainId: Number(row.chain_id),
+      grant: (typeof row.grant_json === "string" ? JSON.parse(row.grant_json) : row.grant_json) as StoredRecord["grant"],
+      sealedSessionKey: String(row.sealed_session_key),
+      updatedAt: Number(row.updated_at),
+    };
+    const stopped = replacementRecord(rec, expectedAccount, expectedSession);
+    if (!stopped) return "changed";
+    // Compare the exact previous record, not a seconds-resolution timestamp:
+    // another tab's fresh grant must survive even when both writes share a second.
+    const updated = await c.query(
+      `UPDATE grants SET grant_json = $4::jsonb, sealed_session_key = ''
+       WHERE tenant = $1 AND grant_json = $2::jsonb AND sealed_session_key = $3 RETURNING tenant`,
+      [tenant.toLowerCase(), JSON.stringify(rec.grant), rec.sealedSessionKey, JSON.stringify(stopped.grant)],
+    );
+    return updated.rows.length > 0 ? "stopped" : "changed";
   }
   async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
     const c = await this.client();
     const t = tenant.toLowerCase();
-    const { rows } = await c.query(`DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant`, [t, atSec]);
+    const { rows } = await c.query(`WITH gone AS (
+      DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant
+    ), invalidated AS (
+      UPDATE tenant_ledger_import AS i SET state = 'deleted', sealed = NULL, bytes = 0
+      FROM gone WHERE i.tenant = gone.tenant RETURNING i.generation, i.tenant
+    ), fenced AS (
+      UPDATE tenant_ledger_import_generations AS g SET state = 'deleted'
+      FROM invalidated WHERE g.generation = invalidated.generation AND g.tenant = invalidated.tenant
+      RETURNING g.generation
+    ) SELECT tenant FROM gone`, [t, atSec]);
     if (rows.length > 0) return "removed";
     // Nothing deleted: either there is no row, or it was put after the kill.
     // This read only names which — the decision was the DELETE above.

@@ -616,10 +616,13 @@ export async function forgetStoredTgGroups(o: {
     }
     const row = (await o.shared.prepare(SELECT_SQL).get(tenant)) as { sealed?: unknown } | undefined;
     const text = row ? openRow(tenant, row.sealed, o.dek) : null;
-    if (!row || text === null) {
-      if (row) logOnce(memo, log, tenant, "forget-unreadable", `tg-groups: ${tenant} stored memory is unreadable — no forget requests to apply to it`);
+    if (!row) {
       memo.stored.set(tenant, read.fp);
       return "none";
+    }
+    if (text === null) {
+      logOnce(memo, log, tenant, "forget-unreadable", `tg-groups: ${tenant} stored memory is unreadable — forget requests retained for retry`);
+      return "failed";
     }
     const next = forgotten(text, read.ops);
     if (next === null) {
@@ -668,7 +671,7 @@ export async function forgetStoredTgGroups(o: {
  *   none       — no stored copy; nothing written
  *   unreadable — a stored copy that will not open under this DEK for this
  *                tenant, or opens to something that is not version 1 JSON;
- *                nothing written, and the child's next publish replaces it
+ *                nothing written; its group writer must remain held off
  *   failed     — the home had no file and the read or the write failed,
  *                or its forget requests could not be read; nothing written
  */
@@ -835,11 +838,12 @@ async function exists(file: string, log: TgGroupsLog, tenant: string): Promise<b
  * exists to protect. It stays held until a spawn finds the home without it —
  * the next redeploy at the latest — and restores the row.
  *
- * Anything else lets go: restored and none leave nothing to protect, and
- * unreadable is a row the child's next publish is meant to replace.
+ * Restored and none leave nothing to protect. An unreadable row is retained
+ * too: a fresh empty writer cannot replace
+ * memory that may become readable once its correct DEK is available.
  */
 export function tgGroupsHeldOff(r: TgGroupsRestore, heldBefore: boolean): boolean {
-  if (r === "failed") return true;
+  if (r === "failed" || r === "unreadable") return true;
   if (r === "present") return heldBefore;
   return false;
 }

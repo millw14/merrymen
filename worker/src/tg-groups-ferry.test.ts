@@ -945,9 +945,9 @@ describe("held off: a failed restore never lets an empty memory overwrite the st
       ["restored", false, false],
       ["none", true, false],
       ["none", false, false],
-      // The documented behaviour: the child's next publish replaces an unreadable row.
-      ["unreadable", true, false],
-      ["unreadable", false, false],
+      // An unreadable row may still be recoverable with its original key.
+      ["unreadable", true, true],
+      ["unreadable", false, true],
     ];
     for (const [r, before, held] of cases) assert.equal(tgGroupsHeldOff(r, before), held, `${r}, held before: ${before}`);
   });
@@ -1444,6 +1444,7 @@ describe("the group files leave a home whose grant is gone while no child runs t
       caps: { perTradeUsdg: 10, dailyUsdg: 50, maxDrawdownPct: 20, expiryDays: 7 },
       grantFeatures: ["tradeable-v2"],
       grantTokens: [],
+      demoSessionPrivateKey: `0x${"ab".repeat(32)}`,
     } as unknown as Parameters<ReturnType<typeof getGrantStore>["put"]>[1];
     await getGrantStore().put(B as `0x${string}`, grant);
     const killed = childHome(B);
@@ -1457,7 +1458,7 @@ describe("the group files leave a home whose grant is gone while no child runs t
 });
 
 describe("the row is read here and nowhere else", () => {
-  test("no other worker or web source names the table", () => {
+  test("only the ferry and the verified backup and checkpoint tools name the table in production source", () => {
     const repo = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..");
     const walk = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -1468,11 +1469,13 @@ describe("the row is read here and nowhere else", () => {
     const files = [...walk(path.join(repo, "worker", "src")), ...walk(path.join(repo, "web", "src"))];
     assert.ok(files.length > 100, "the walk reached the sources");
     const naming = files
+      .filter((f) => !/\.test\.tsx?$/.test(f))
       .filter((f) => readFileSync(f, "utf8").includes("tenant_tg_groups"))
       .map((f) => path.relative(repo, f).split(path.sep).join("/"))
       .sort();
-    // The file never becomes a trading input, a web read or a second writer.
-    assert.deepEqual(naming, ["worker/src/tg-groups-ferry.test.ts", "worker/src/tg-groups-ferry.ts"]);
+    // The file never becomes a trading input or a web read. The reviewed
+    // operator tools verify backup/checkpoint state through this same ferry.
+    assert.deepEqual(naming, ["worker/src/ledger-safeguard.ts", "worker/src/memory-safeguard.ts", "worker/src/tg-groups-ferry.ts"]);
   });
 });
 
@@ -1518,8 +1521,11 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.ok(gate > 0, "the mirror's lease gate");
     assert.ok(call > gate, "only for a tenant whose lease this replica holds healthily");
     assert.ok(mirror.indexOf("await publishTgGroups({", call + 1) < 0, "one call site");
-    assert.match(mirror, /await ensureTgGroupsSchema\(shared, "postgres"\);/, "the schema is ensured where the other shared schemas are");
-    assert.equal(ORCH.split("publishTgGroups(").length - 1, 1, "the mirror is the only publisher");
+    assert.match(mirror, /await ensureTgGroupsSchema\(shared, liveMirrorStoreForTest\?\.dialect \?\? "postgres"\);/, "the production schema stays Postgres, with an explicit SQLite test seam");
+    assert.equal(ORCH.split("publishTgGroups(").length - 1, 2, "the live and final retirement mirror publish under leases");
+    const final = body("async function mirrorRetiredMemory(");
+    assert.ok(final.indexOf("!lease.healthy()") < final.indexOf("await publishTgGroups({"), "retirement also checks its lease before publishing");
+    assert.match(final, /if \(!held && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\)/, "retirement does not publish held memory");
   });
 
   test("restore: in spawnChild, behind the lease refusal, after the link restore and before spawn()", () => {
@@ -1554,7 +1560,9 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.ok(holder.includes("HOLD_ENTRY") && holder.includes("env: childEnv(tenant)"), "the other one is the hold process");
 
     const mirror = body("async function mirrorLedgers(");
-    assert.match(mirror, /if \(tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
+    assert.match(mirror, /if \(tgGroupsDekThisPass && mayPublishMemory\(\) && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
+    assert.match(mirror, /const mayPublishMemory = \(\) => sourceConfirmed && children\.get\(tenant\) === worker/);
+    assert.match(mirror, /leases\.get\(tenant\.toLowerCase\(\)\) === lease && lease\.healthy\(\) && !ledgerSourceBlocked\(childHome\(tenant\)\)/);
 
     const forget = body("async function forgetTgGroups(");
     assert.match(forget, /tgGroupsHeld\.delete\(/, "cleared with the grant");
@@ -1579,18 +1587,21 @@ describe("the orchestrator ferries it where the contract says", () => {
     const patchHolder = mirror.indexOf("await forgetStoredTgGroups({", holdersGate);
     assert.ok(holders > patchHeld && holdersGate > holders && patchHolder > holdersGate, "a held tenant's requests reach the row");
     assert.ok(mirror.indexOf("await publishTgGroups({", holders) < 0, "and nothing of a held tenant is published");
-    assert.equal(ORCH.split("forgetStoredTgGroups(").length - 1, 3, "and nowhere else");
+    assert.equal(ORCH.split("forgetStoredTgGroups(").length - 1, 5, "the live and final retirement mirrors patch held or unpublished memory");
   });
 
   test("gone with the grant, from the home: forgetTgGroups clears a home no child runs in, before it awaits anything", () => {
     const forget = body("async function forgetTgGroups(");
-    const clear = forget.indexOf("if (!children.has(lc)) forgetTgGroupsHome(childHome(tenant), log);");
+    const clear = forget.indexOf("if (!localMemoryWriterPresent(lc)) {");
     assert.ok(clear > 0, "only when no child of it runs here");
+    assert.ok(forget.indexOf("forgetTgGroupsHome(childHome(tenant), log);", clear) > clear);
+    assert.ok(forget.indexOf("forgetPersonalMemoryHome(childHome(tenant), log);", clear) > clear);
+    assert.match(body("function localMemoryWriterPresent("), /children\.has\(tenant\).*holders\.has\(tenant\).*spawning\.has\(tenant\).*exitingChildren\.has\(tenant\)/, "held, preparing and draining writers are preserved too");
     assert.ok(forget.indexOf("await ") > clear, "synchronously, before the first await, so no spawn starts in between");
     const sweep = body("async function sweepTgGroups(");
     const walk = sweep.indexOf("forgetTgGroupsInHomes({");
     assert.ok(walk > 0 && walk < sweep.indexOf("const url = process.env.DATABASE_URL;"), "every pass, with or without a database");
-    assert.match(sweep, /keep: \(t\) => wanted\.has\(t\) \|\| children\.has\(t\),\s*before: listedAtMs,/);
+    assert.match(sweep, /keep: \(t\) => wanted\.has\(t\) \|\| localMemoryWriterPresent\(t\),\s*before: listedAtMs,/);
     assert.match(sweep, /childrenDir: path\.join\(merrymenHome\(\), "children"\),/, "the directory childHome uses");
   });
 
