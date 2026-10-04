@@ -25,7 +25,7 @@ import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 
 import { rmSync, writeFileSync } from "node:fs";
 import { grantTrencher, TRENCHER_VAULT_ABI } from "../../packages/core/src/trencher-vault";
-import { TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
+import { DISCOVERY_SLICE, TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
 import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
@@ -152,6 +152,7 @@ import type { ResearchFile } from "./research-files";
 import { renderBuilder } from "./research/coin-builder";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
+import { FunnelRecorder, candidateSkipOf, classifyReview, classifyStage, entryTokenOf, installDecisionFunnel, trenchReviewBlock, trencherSymbol, unqualifiedReasons, type Classified } from "./decision-funnel";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -762,8 +763,31 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
-  trenchBrain.onDrop = (why, decisionId) => {
+  /**
+   * WHERE EACH COIN STOPPED (decision-funnel.ts). One recorder per process,
+   * installed so the Telegram chat tools can answer "why did you skip that
+   * coin?" through `decisionFunnel()` without reaching into main(). Filed at
+   * the decision points below and nowhere else; it reads verdicts and never
+   * makes one.
+   */
+  const funnel = new FunnelRecorder();
+  installDecisionFunnel(funnel);
+  const funnelSymbol = (token: string) =>
+    watchTokens.find((t) => t.address.toLowerCase() === token.toLowerCase())?.symbol ?? trencherSymbol(token);
+  /** An ENTRY intent's fate, filed under its coin. Trencher agents only: exits and other rails are not this funnel. */
+  function noteEntryFunnel(intent: TradeIntent, c: Classified): void {
+    if (cfg.strategy !== "trencher") return;
+    const token = entryTokenOf(intent as { kind: string; sellToken?: string; buyToken?: string });
+    if (token) funnel.note(token, funnelSymbol(token), { ...c, decisionId: c.decisionId ?? intent.decisionId ?? null });
+  }
+  trenchBrain.onReviewed = ({ token, symbol, held, priceStale, outcome }) => {
+    // Entry reviews only: a held coin's review is about its exit, which is
+    // mechanical and not a place a candidate stops.
+    if (!held) funnel.note(token, symbol, classifyReview(outcome, { held, priceStale }));
+  };
+  trenchBrain.onDrop = (why, decisionId, info) => {
     console.log(`[trencher] ${why}`);
+    if (info) funnel.note(info.token, info.symbol, { ...classifyStage({ kind: "take-drop", reason: info.reason }), decisionId: info.decisionId ?? null, candidateAction: info.action });
     // A ready BUY that will never become an order: if it answered a nominated
     // coin, the chat hears `skipped` now instead of waiting out the TTL. The
     // book ignores decisions that were not about a nomination.
@@ -828,6 +852,8 @@ async function main() {
     void trenchTapeReader.refresh().then(result => {
       trenchTapeAt = result.observedAt;
       if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
+      // The coins the tape screen dropped, once per refresh, by the rule each failed.
+      for (const s of trenchTapeReader.screenedOut()) funnel.note(s.tokenAddress, null, classifyStage({ kind: "discovery", screen: s.reason }));
       // Discovery otherwise runs against the preceding tape and then waits a
       // full minute even though a new tape has just arrived.
       refreshAutoTrench(true);
@@ -1054,6 +1080,7 @@ async function main() {
         : { group: false };
     }
     if (g.group && !g.ok) {
+      noteEntryFunnel(intent, classifyStage({ kind: "execution", rule: g.why === "cap" ? "group-entry-cap" : "group-nomination-resolved" }));
       const day = new Date().toISOString().slice(0, 10);
       const key = `${day}:${g.address}`;
       if (!tgEntryRefusalsLogged.has(key)) {
@@ -5437,6 +5464,9 @@ async function main() {
     const out: Candidate[] = [];
     if (cfg.trencherFastEnabled) {
       let autonomousBudget = true;
+      // Unread is not spent: both exclude every autonomous coin, and only the
+      // funnel needs to know which (decision-funnel.ts SKIP_STAGE).
+      let autonomousBudgetUnread = false;
       if (!paperActive() && autoTrench?.custody.deployed && active) {
         try {
           const [spent,start] = await Promise.all([
@@ -5444,7 +5474,7 @@ async function main() {
             active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"windowStart"}),
           ]);
           autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+5_000_000n <= 25_000_000n;
-        } catch { autonomousBudget = false; }
+        } catch { autonomousBudget = false; autonomousBudgetUnread = true; }
       }
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
       // THE SAME `no-exit` LINE THE WALL DRAWS (policy.ts), drawn before the
@@ -5460,12 +5490,29 @@ async function main() {
       const entryPools = !paperActive() && active && grantTrencher(active.grant)
         ? highVolumePools(freshTape.filter(p => autoTrench?.qualified.some(q => q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)))
         : highVolumePools(freshTape);
+      // Screened-tape coins that never reached the verified universe, named
+      // (beyond the slice, unverified pool, other venue). Filing only.
+      const unqualified = autoTrench && active && grantTrencher(active.grant)
+        ? unqualifiedReasons({ tape: freshTape, qualified: autoTrench.qualified, nominated: tgNominated, slice: DISCOVERY_SLICE })
+        : null;
+      for (const [token, why] of unqualified ?? []) funnel.note(token, null, why);
       for (const p of entryPools) {
         const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
         const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
-        if (autonomous && !autonomousBudget) continue;
-        if (!t || (!autonomous && !allowed.has(t.address.toLowerCase())) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
+        if (autonomous && !autonomousBudget) {
+          funnel.note(p.tokenAddress, t?.symbol, classifyStage({ kind: "candidate-skip", skip: autonomousBudgetUnread ? "autonomous-budget-unread" : "autonomous-budget-spent" }));
+          continue;
+        }
+        if (!t || (!autonomous && !allowed.has(t.address.toLowerCase())) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) {
+          const skip = candidateSkipOf({ watched: !!t, autonomous, allowed: !!t && allowed.has(t.address.toLowerCase()), createdAt: p.createdAt, fdvUsd: p.fdvUsd, nowSec });
+          // An unwatched coin the line above already explained is not filed twice.
+          if (skip && !(skip === "not-watched" && unqualified?.has(p.tokenAddress.toLowerCase()))) {
+            funnel.note(p.tokenAddress, t?.symbol, classifyStage({ kind: "candidate-skip", skip }));
+          }
+          continue;
+        }
         if (!autonomous && sellable && !sellable.has(t.address.toLowerCase())) {
+          funnel.note(t.address, t.symbol, classifyStage({ kind: "candidate-skip", skip: "no-exit" }));
           if (!noExitAnnounced.has(t.address.toLowerCase()) && active) {
             noExitAnnounced.add(t.address.toLowerCase());
             void addEvent(active.agentId, "warn",
@@ -7947,6 +7994,9 @@ async function main() {
       // them back as a receipt (order-receipt.ts), and a receipt read from this
       // row and a sentence read from it cannot disagree about what happened.
       lastTradeOutcome = ledgerFactsOf(row);
+      // The funnel hears every entry's fate — refused, sent, filled — from the
+      // one place they all pass, whether or not the row then lands.
+      noteEntryFunnel(intent, classifyStage({ kind: "trade", status: row.status, rejectRule: row.reject_rule ?? null }));
       const wrote = await addTrade({ ...row, decision_id });
       /**
        * AND THEN THE AGENT SAYS WHAT IT MAKES OF IT.
@@ -10485,6 +10535,12 @@ async function main() {
     // resets a cap (trencher-nominate.ts reset).
     if (trenchBrain.reset(trenchContext)) tgDeliver(tgBook.reset());
     tgDeliver(tgBook.expire());
+    // The funnel answers for one agent; at most one aggregated line per 10 minutes.
+    if (active) funnel.scope(active.agentId);
+    if (fastTrencher && active) {
+      const line = funnel.logLine();
+      if (line) console.log(`[${short(active.agentId)}] ${line}`);
+    }
     if (fastTrencher && active && (!cfg.brainUrl || !cfg.brainToken)) {
       trenchNotice(active.agentId, "Brain is not connected, so new buys are paused. Automatic exits remain active.");
     }
@@ -11814,6 +11870,12 @@ async function main() {
     // NOR WHILE TODAY'S AI REVIEWS ARE PACED OR SPENT (energyNow.reviews):
     // skipping the whole block leaves nextBrainReviewAt null, so the tick
     // keeps its regular cadence instead of chasing a deadline it may not use.
+    //
+    // A Trencher that requires the Brain buys nothing while this block is
+    // skipped, so the reason it was skipped is filed (decision-funnel.ts):
+    // `book-incomplete` in particular was a silence that lasted as long as
+    // one holding's cost stayed unknown.
+    if (fastTrencher) funnel.block(trenchReviewBlock({ brainConfigured: !!(cfg.brainUrl && cfg.brainToken), bookIncomplete, brainTick: plan.brain, reviewsOpen: energyNow.reviews.open }));
     if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain && energyNow.reviews.open) {
       try {
         const epochNow = await getAgentEpoch(agentId);
@@ -11869,11 +11931,25 @@ async function main() {
         const energyEntriesClosed = energyNow.enforce && !energyNow.entries.open;
         const entriesBraked = breakerTripped({ drawdown: drawdownNow }) || (energyNow.enforce && !energyNow.entries.open);
         const trenchEligible = fastTrencher && !entriesBraked ? await trenchCandidates() : [];
+        if (fastTrencher && entriesBraked) funnel.block(breakerTripped({ drawdown: drawdownNow }) ? "drawdown-breaker" : "entries-energy-spent");
         const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
+        // THE SAME FILTER, NOW SAYING WHAT IT REFUSED. Paused by ADDRESS:
+        // `pausedTokens` holds lowercased addresses (snapshot.ts) and was asked
+        // for a symbol here, which can never match — a paused token passed.
+        const trenchReviewable = (c: (typeof trenchEligible)[number]): boolean => {
+          if (market.pausedTokens.has(c.token.toLowerCase())) {
+            funnel.note(c.token, c.symbol, classifyStage({ kind: "candidate-skip", skip: "token-paused" }));
+            return false;
+          }
+          if (positions.some(p => p.token.toLowerCase() === c.token.toLowerCase())) return false;
+          const entry = shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000));
+          if (!entry.enter) funnel.note(c.token, c.symbol, classifyStage({ kind: "entry-screen", why: entry.why }));
+          return entry.enter;
+        };
         // A nominated coin (Telegram groups) is looked at first when it is
         // ELIGIBLE here — the same filter every tape coin passes. The hint
         // moves it up the queue, never onto it (trencher-brain.ts candidate).
-        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter), tgBook.priority());
+        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority());
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
         // none was looked at. The strategy's idle reason says why instead, as
@@ -12851,6 +12927,7 @@ async function main() {
       if (groupEntry?.group && !groupEntry.ok) continue;
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
+        noteEntryFunnel(intent, classifyStage({ kind: "execution", rule: "entry-energy-withheld" }));
         tgSettleGroupEntry(groupEntry, intent.decisionId, null);
         await withholdEntry(agentId);
         continue;

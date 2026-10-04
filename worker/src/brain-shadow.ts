@@ -235,6 +235,35 @@ export function publishesAView(
 }
 
 /**
+ * THE GATE AND WHAT IT OVERRODE, as the ledger keeps them.
+ *
+ * These were logged on the `[brain] gate` line and nowhere else, so "how many
+ * holds were the gate's, and how many of those were buys the model wanted?"
+ * was answerable only from logs that rotate. Persisted in `signals_json` (the
+ * owner's copy, never published) so the funnel reads from the ledger.
+ *
+ * VALIDATED, NOT CAST: the decision is service JSON, and a field from a build
+ * newer or older than this one must degrade to null rather than land as
+ * whatever shape it arrived in. Null means "not reported" — never "open",
+ * never zero, never "the model agreed".
+ */
+export function gateSignals(d: Partial<Pick<BrainDecision,
+  "schema_version" | "gate_verdict" | "gate_why" | "gate_caveat_count" | "proposed_action" | "proposed_delta_usdg">>) {
+  const verdict = d.gate_verdict;
+  const proposed = d.proposed_action;
+  const count = d.gate_caveat_count;
+  const delta = d.proposed_delta_usdg;
+  return {
+    schema_version: typeof d.schema_version === "string" ? d.schema_version.slice(0, 32) : null,
+    gate_verdict: verdict === "proceed" || verdict === "downgrade-to-hold" || verdict === "refuse" ? verdict : null,
+    gate_why: typeof d.gate_why === "string" ? d.gate_why.slice(0, 400) : null,
+    gate_caveat_count: typeof count === "number" && Number.isInteger(count) && count >= 0 ? count : null,
+    proposed_action: proposed === "buy" || proposed === "sell" || proposed === "hold" ? proposed : null,
+    proposed_delta_usdg: typeof delta === "number" && Number.isFinite(delta) ? delta : null,
+  };
+}
+
+/**
  * Run one shadow decision, if anything is worth thinking about.
  *
  * Returns without calling Brain when the trigger says nothing changed — which
@@ -523,6 +552,10 @@ export async function persistBrainDecision(
         snapshot_id: snapshot.snapshotId,
         trigger_id: triggerId,
         trigger_reason: trigger.reason,
+        // The refusal's own code, so a gate refusal on book quality
+        // (`portfolio-quality-insufficient`) is countable without parsing
+        // `reason`. Service text: kept only when it is code-shaped.
+        refusal_reason: result.kind === "refused" && /^[a-z0-9-]{1,48}$/.test(result.reason) ? result.reason : null,
         quality: snapshot.quality,
         cost: result.kind === "refused" ? result.cost : null,
       }),
@@ -566,10 +599,13 @@ export async function persistBrainDecision(
   // was not allowed to be sized" are different events with different remedies
   // and they used to render identically. `may_size` is the gate's own property
   // (verdict === "proceed"), read rather than recomputed here.
+  const gate = gateSignals(d);
   log(
     `[brain] gate ${d.gate_verdict ?? "not-reported"}` +
       ` may_size=${d.gate_verdict === undefined || d.gate_verdict === null ? "unknown" : d.gate_verdict === "proceed"}` +
       ` caveats=${d.gate_caveat_count ?? "unknown"}` +
+      // What the model asked for before the gate, only when the Brain says.
+      (gate.proposed_action ? ` proposed=${gate.proposed_action}` : "") +
       (d.gate_why ? ` · ${d.gate_why}` : ""),
   );
   log(
@@ -654,6 +690,8 @@ export async function persistBrainDecision(
       expected_edge_usdg: d.expected_edge_usdg ?? null,
       economics: d.economics ?? "unknown",
       expected_trade_gas_usdg: d.expected_trade_gas_usdg ?? null,
+      // THE GATE'S VERDICT AND WHAT IT OVERRODE. See gateSignals.
+      ...gate,
       cost: d.cost,
       models: d.models,
       latency_seconds: result.seconds,

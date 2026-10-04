@@ -141,6 +141,11 @@ export function chooseFocus(args: {
   positions: readonly HeldPosition[];
   universe: readonly UniverseToken[];
   prices: ReadonlyMap<string, QuotedPrice>;
+  /**
+   * LOWERCASED TOKEN ADDRESSES, as `MarketSafety.pausedTokens` fills it
+   * (snapshot.ts). It was read with the SYMBOL, which can never match an
+   * address — so a paused token was offered as a candidate all along.
+   */
   paused: ReadonlySet<string>;
   /** Opt-in. Absent = a held position wins outright, as it always has. */
   alternate?: FocusAlternation;
@@ -198,7 +203,7 @@ export function chooseFocus(args: {
     .map((t) => ({ t, q: args.prices.get(t.symbol) }))
     .filter((x): x is { t: UniverseToken; q: QuotedPrice } => {
       if (!x.q || x.q.price8 <= 0n) return false;
-      if (args.paused.has(x.t.symbol)) return false;
+      if (args.paused.has(x.t.address.toLowerCase())) return false;
       return !CANNOT_OPEN_ON.has(x.q.source);
     });
   // NOTHING TO ENTER IS NOT A REASON TO REVIEW NOTHING. Reached only when a

@@ -1,4 +1,4 @@
-import type { BrainDecision } from "./brain-client";
+import type { BrainDecision, BrainResult } from "./brain-client";
 import { orderFromDecision } from "./brain-live";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import type { GeckoFetch, GeckoPool } from "./venues/geckoterminal";
@@ -103,7 +103,7 @@ export class TrenchTapeReader {
     } catch { failures.push("nominated=unavailable"); }
   }
 
-  snapshot() {
+  private fresh() {
     const pages = [...this.pages.values()].filter(p => this.now() - p.at <= TRENCH_TAPE_MAX_AGE_MS);
     // Prefer the newest observation of a pool across overlapping feeds.
     const unique = new Map<string, GeckoPool>();
@@ -113,8 +113,37 @@ export class TrenchTapeReader {
         if (!unique.has(key)) unique.set(key, p);
       }
     }
-    return { pools: highVolumePools([...unique.values()], true),
+    return { pools: [...unique.values()], pages };
+  }
+
+  snapshot() {
+    const { pools, pages } = this.fresh();
+    return { pools: highVolumePools(pools, true),
       observedAt: pages.length ? Math.min(...pages.map(p => p.at)) : 0 };
+  }
+
+  /**
+   * THE COINS THE SCREEN DROPPED, and the first rule each failed — read only
+   * by the decision funnel (decision-funnel.ts), so "why was that coin never
+   * looked at?" has an answer that is not "it was not in the log".
+   *
+   * Per TOKEN, not per pool: a coin with one passing pool was not screened
+   * out, whatever its other pools look like. The reason given is the busiest
+   * failing pool's. Same fresh pages and same rules as `snapshot()`, so this
+   * can never disagree with what was actually offered.
+   */
+  screenedOut(): { tokenAddress: string; reason: TrenchScreen }[] {
+    const passed = new Set<string>();
+    const failed = new Map<string, { reason: TrenchScreen; volume: number }>();
+    for (const p of this.fresh().pools) {
+      const token = p.tokenAddress.toLowerCase();
+      const reason = trenchScreenReason(p);
+      if (reason === null) { passed.add(token); continue; }
+      const volume = typeof p.volume24hUsd === "number" && Number.isFinite(p.volume24hUsd) ? p.volume24hUsd : -1;
+      const prior = failed.get(token);
+      if (!prior || volume > prior.volume) failed.set(token, { reason, volume });
+    }
+    return [...failed].filter(([token]) => !passed.has(token)).map(([tokenAddress, f]) => ({ tokenAddress, reason: f.reason }));
   }
 
   async refresh() {
@@ -160,17 +189,37 @@ export async function fetchTrenchTape(fetchPage = fetchGeckoPoolsResult): Promis
   return highVolumePools(healthy.flatMap(r => r.pools), true);
 }
 
+/** The first rule of the tape screen a pool failed. See `trenchScreenReason`. */
+export type TrenchScreen =
+  | "quote-asset" | "not-memecoin" | "volume-unknown" | "volume-below-min"
+  | "buyers-below-min" | "no-buys-24h" | "no-sells-24h" | "no-m5-volume";
+
+/**
+ * THE TAPE SCREEN, NAMED. `highVolumePools` asks this and nothing else, so the
+ * reason the decision funnel reports is the rule that actually applied rather
+ * than a second reading of it that could drift. Same order, same comparisons:
+ * a missing count still fails as it always did (`?? 0`), and is only NAMED
+ * here — it is not a new rule and it does not move a threshold.
+ */
+export function trenchScreenReason(p: GeckoPool): TrenchScreen | null {
+  // Quote assets are portfolio cash/bridge assets, never speculative entries.
+  // instrumentClassOf deliberately classifies unknown addresses as memecoins.
+  if ([CASH.USDG, CASH.WETH].some(a => a.toLowerCase() === p.tokenAddress.toLowerCase())) return "quote-asset";
+  if (instrumentClassOf(p.tokenAddress) !== "memecoin") return "not-memecoin";
+  if (!Number.isFinite(p.volume24hUsd)) return "volume-unknown";
+  if ((p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN) return "volume-below-min";
+  if ((p.buyers24h ?? 0) < 20) return "buyers-below-min";
+  if ((p.buys24h ?? 0) <= 0) return "no-buys-24h";
+  if ((p.sells24h ?? 0) <= 0) return "no-sells-24h";
+  if ((p.buckets.m5?.volumeUsd ?? 0) <= 0) return "no-m5-volume";
+  return null;
+}
+
 /** Volume ranks opportunities; on-chain depth and wallet policy still gate trades. */
 export function highVolumePools(pools: readonly GeckoPool[], perPool = false): GeckoPool[] {
   const byToken = new Map<string, GeckoPool>();
   for (const p of pools) {
-    // Quote assets are portfolio cash/bridge assets, never speculative entries.
-    // instrumentClassOf deliberately classifies unknown addresses as memecoins.
-    if ([CASH.USDG, CASH.WETH].some(a => a.toLowerCase() === p.tokenAddress.toLowerCase())) continue;
-    if (instrumentClassOf(p.tokenAddress) !== "memecoin") continue;
-    if (!Number.isFinite(p.volume24hUsd) || (p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN ||
-        (p.buyers24h ?? 0) < 20 || (p.buys24h ?? 0) <= 0 || (p.sells24h ?? 0) <= 0 ||
-        (p.buckets.m5?.volumeUsd ?? 0) <= 0) continue;
+    if (trenchScreenReason(p) !== null) continue;
     const key = perPool
       ? `${p.tokenAddress.toLowerCase()}:${p.dex}:${p.poolAddress?.toLowerCase() ?? p.poolId}`
       : p.tokenAddress.toLowerCase();
@@ -200,6 +249,32 @@ export function trenchBrainPersona(symbol: string, held: boolean): string {
       : `You hold zero ${symbol}. This is an entry review: choose BUY or HOLD. A bearish view means HOLD, not SELL; short selling is not supported.`);
 }
 type Ready = { decision: BrainDecision; input: ShadowInputs; token: string; context: string; started: number };
+
+/** What a dropped order was about, for a caller that files it by coin (the decision funnel). */
+export type TrenchDropInfo = { symbol: string; token: string; action: string; reason: string; decisionId?: string };
+
+/**
+ * WHY A REVIEW PRODUCED NO DECISION, in words that are true.
+ *
+ * Every non-decision used to print as "Brain unavailable: <kind>" — including
+ * the commonest one, a refusal by the portfolio gate on book quality, where
+ * the Brain was up, answered within milliseconds, and refused on purpose
+ * before any model call. An owner reading "unavailable" goes looking for an
+ * outage; the remedy is in the accounting (graph.py `assess`, refusing before
+ * it bills). The refusal reason is service text, so only a short code-shaped
+ * one is repeated.
+ */
+export function brainNoDecisionNote(symbol: string, result: BrainResult): string {
+  if (result.ok) return `Brain reviewed ${symbol}: ${result.decision.action}`;
+  if (result.kind === "unreachable") return "Brain unavailable: unreachable; no order approved";
+  if (result.kind === "malformed") return `Brain answered ${symbol} with an unusable decision (malformed); no order approved`;
+  const reason = /^[a-z0-9-]{1,48}$/.test(result.reason) ? result.reason : "unrecognised-reason";
+  if (reason === "portfolio-quality-insufficient") {
+    return `Brain did not review ${symbol}: the portfolio gate refused on book quality (${reason}); no new entry approved`;
+  }
+  if (reason === "budget-exhausted") return `Brain stopped reviewing ${symbol}: the run's model budget ran out (${reason}); no order approved`;
+  return `Brain refused to decide on ${symbol} (${reason}); no order approved`;
+}
 
 /** Model calls cannot hold up a stop-loss tick. Results are one-use, short-lived data. */
 export class TrenchBrainReview {
@@ -373,7 +448,18 @@ export class TrenchBrainReview {
     this.nextAt = started + TRENCH_REVIEW_INTERVAL_MS;
     void run().then(outcome => {
       if (this.context !== context || this.generation !== generation) return;
+      const held = Boolean(input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0));
+      try {
+        this.onReviewed?.({ token, symbol: input.market.symbol, held, priceStale: input.market.priceStale === true, outcome });
+      } catch { /* An observer cannot break the review it observes. */ }
       if (outcome.ran && outcome.result.ok) {
+        // A NEWER DECISION REPLACES AN UNUSED ORDER, AND THAT IS SAID TOO.
+        // Every branch here overwrites `ready`; an untaken BUY or SELL sitting
+        // there used to vanish without a word whenever its coin left the
+        // strategy's candidate list before the next review landed. Only this
+        // branch: a review that produced no decision leaves `ready` alone, as
+        // it always has.
+        this.supersede();
         if (outcome.result.decision.action === "sell" &&
             !input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0)) {
           this.ready = null;
@@ -398,8 +484,30 @@ export class TrenchBrainReview {
         }
         this.ready = { decision: outcome.result.decision, input, token, context, started };
         note(`Brain reviewed ${input.market.symbol}: ${outcome.result.decision.action}`);
-      } else note(outcome.ran ? `Brain unavailable: ${outcome.result.ok ? "" : outcome.result.kind}` : outcome.why);
+      } else note(outcome.ran ? brainNoDecisionNote(input.market.symbol, outcome.result) : outcome.why);
     }).catch(() => note("Brain review failed; no new entry approved")).finally(() => { this.pending = false; });
+  }
+
+  /**
+   * Told about every review that completed in the current context, before
+   * any of the guards in `launch` decide what becomes of it — the decision
+   * funnel's view of what the Brain said (index.ts). Read-only: it cannot
+   * change the outcome, and a throw from it is swallowed.
+   */
+  onReviewed?: (r: { token: string; symbol: string; held: boolean; priceStale: boolean; outcome: ShadowOutcome }) => void;
+
+  private supersede(): void {
+    const r = this.ready;
+    this.ready = null;
+    if (!r || r.decision.action.toLowerCase() === "hold") return;
+    const id = typeof r.decision.decision_id === "string" && r.decision.decision_id.trim() ? r.decision.decision_id : undefined;
+    const reason = "superseded by a newer review before it was taken";
+    // The decision id rides only in `info`, not in the second argument the
+    // nomination book answers from: the review that replaced this one may be
+    // answering that same nomination right now, and telling the group
+    // `skipped` underneath it would race the answer that is still coming.
+    this.onDrop?.(`Brain ${r.decision.action.toUpperCase()} ${r.input.market.symbol} not used: ${reason}`, undefined,
+      { symbol: r.input.market.symbol, token: r.token, action: r.decision.action, reason, decisionId: id });
   }
 
   /** When this symbol was last actually reviewed, ms epoch. Absent = never. */
@@ -412,7 +520,7 @@ export class TrenchBrainReview {
    * Brain decision it was, so a caller waiting on that decision's fill (a
    * nominated coin) hears that none is coming instead of waiting out a TTL.
    */
-  onDrop?: (why: string, decisionId?: string) => void;
+  onDrop?: (why: string, decisionId?: string, info?: TrenchDropInfo) => void;
 
   take(symbol: string, token: string, price8: bigint, maxUsdg: number, held = false): TrenchBrainOrder | null {
     const r = this.ready;
@@ -427,7 +535,7 @@ export class TrenchBrainReview {
     const act = r.decision.action.toUpperCase();
     const id = typeof r.decision.decision_id === "string" && r.decision.decision_id.trim() ? r.decision.decision_id : undefined;
     const drop = (reason: string): null => {
-      this.onDrop?.(`Brain ${act} ${symbol} not used: ${reason}`, id);
+      this.onDrop?.(`Brain ${act} ${symbol} not used: ${reason}`, id, { symbol, token: r.token, action: r.decision.action, reason, decisionId: id });
       return null;
     };
     if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return drop("whether it is held changed since the review");

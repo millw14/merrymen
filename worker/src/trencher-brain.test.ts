@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
@@ -483,4 +483,77 @@ test("at most NOMINATED_PAGES_MAX nominated pages are ever read", async () => {
   reader.setNominated(Array.from({ length: NOMINATED_PAGES_MAX + 3 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`));
   await reader.refreshNominated();
   assert.equal(reads.length, NOMINATED_PAGES_MAX);
+});
+
+test("the tape screen, named: highVolumePools keeps exactly the pools trenchScreenReason passes", () => {
+  const variants: Partial<GeckoPool>[] = [
+    {}, { volume24hUsd: 99_999 }, { volume24hUsd: 100_000 }, { volume24hUsd: null }, { volume24hUsd: Number.NaN },
+    { buyers24h: 19 }, { buyers24h: null }, { buys24h: 0 }, { sells24h: 0 }, { sells24h: null },
+    { buckets: emptyGeckoBuckets() }, { tokenAddress: USDG }, { tokenAddress: CASH.USDG.toLowerCase() as `0x${string}` },
+  ];
+  const pools = variants.map((over, i) => pool({ poolId: `p${i}`, poolAddress: `0x${(i + 1).toString(16).padStart(40, "0")}` as `0x${string}`, dex: "d", ...over }));
+  const kept = new Set(highVolumePools(pools, true).map(p => p.poolId));
+  for (const p of pools) assert.equal(kept.has(p.poolId), trenchScreenReason(p) === null, p.poolId);
+  assert.equal(trenchScreenReason(pool({ volume24hUsd: 99_999 })), "volume-below-min");
+  assert.equal(trenchScreenReason(pool({ buckets: emptyGeckoBuckets() })), "no-m5-volume");
+});
+
+test("screenedOut names coins the screen dropped — never one with a passing pool", async () => {
+  const quiet = "0x00000000000000000000000000000000000000c1" as const;
+  const reader = new TrenchTapeReader(async (feed, opts) => feed === "pools" && opts?.page === 1
+    ? { failed: false, pools: [
+        pool(), pool({ poolAddress: ROUTER, volume24hUsd: 5 }), // TOKEN: one pool passes, so not screened out
+        pool({ tokenAddress: quiet, poolAddress: quiet, volume24hUsd: 50_000 }),
+        pool({ tokenAddress: quiet, poolAddress: AGENT as `0x${string}`, volume24hUsd: 90_000, buyers24h: 3 }),
+      ] }
+    : { failed: false, pools: [] }, () => 1000);
+  await reader.refresh();
+  assert.deepEqual(reader.screenedOut(), [{ tokenAddress: quiet, reason: "volume-below-min" }], "the busiest failing pool's reason");
+  assert.equal(reader.snapshot().pools.length, 1, "and the snapshot is what it always was");
+});
+
+test("a refusal is not called an outage: the gate refusing on book quality says so", async () => {
+  const refused = (reason: string) => ({ ok: false, kind: "refused", reason, detail: "", cost: { model_calls: 0, tokens_in: 0, tokens_out: 0, usd: 0 } }) as const;
+  const quality = brainNoDecisionNote("MEME", refused("portfolio-quality-insufficient"));
+  assert.doesNotMatch(quality, /unavailable/i);
+  assert.match(quality, /portfolio gate refused on book quality \(portfolio-quality-insufficient\)/);
+  assert.match(brainNoDecisionNote("MEME", refused("budget-exhausted")), /model budget ran out/);
+  assert.match(brainNoDecisionNote("MEME", refused("<script>")), /unrecognised-reason/, "service text is not repeated");
+  assert.match(brainNoDecisionNote("MEME", { ok: false, kind: "unreachable", detail: "x" }), /^Brain unavailable: unreachable/);
+  // And through launch, which is where the line is written.
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("paper");
+  const notes: string[] = [];
+  review.launch("paper", input, TOKEN, async () => ({ ran: true, result: refused("portfolio-quality-insufficient") }) as unknown as ShadowOutcome, n => notes.push(n));
+  await setImmediate();
+  assert.equal(notes.length, 1);
+  assert.doesNotMatch(notes[0]!, /Brain unavailable/);
+});
+
+test("onReviewed hears each completed review with held and stale flags, and cannot break it", async () => {
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("paper");
+  const seen: { token: string; symbol: string; held: boolean; priceStale: boolean }[] = [];
+  review.onReviewed = ({ token, symbol, held, priceStale }) => { seen.push({ token, symbol, held, priceStale }); throw new Error("observer bug"); };
+  const notes: string[] = [];
+  review.launch("paper", { ...input, market: { ...input.market, priceStale: true } } as ShadowInputs, TOKEN, async () => answer(), n => notes.push(n));
+  await setImmediate();
+  assert.deepEqual(seen, [{ token: TOKEN, symbol: "MEME", held: false, priceStale: true }]);
+  assert.deepEqual(notes, ["Brain reviewed MEME: buy"], "the review went on as if nobody were listening");
+  assert.ok(review.take("MEME", TOKEN, 1_000_000n, 5));
+});
+
+test("a review that produced no decision leaves an earlier ready order alone", async () => {
+  let t = 1000;
+  const review = new TrenchBrainReview(() => t);
+  review.reset("paper");
+  const drops: unknown[] = [];
+  review.onDrop = (w, id, info) => drops.push([w, id, info]);
+  review.launch("paper", input, TOKEN, async () => answer(), () => {});
+  await setImmediate();
+  t += 30_000;
+  review.launch("paper", input, TOKEN, async () => ({ ran: true, result: { ok: false, kind: "unreachable", detail: "down" } }) as unknown as ShadowOutcome, () => {});
+  await setImmediate();
+  assert.deepEqual(drops, []);
+  assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5)?.decisionId, "decision-1");
 });
