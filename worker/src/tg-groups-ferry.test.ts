@@ -238,7 +238,7 @@ describe("the table", () => {
         seenSql.push(sql);
         return {
           run: async () => ({ changes: 1, lastInsertRowid: 0 }),
-          get: async () => undefined,
+          get: async () => sql.includes("to_regclass('tenant_recovery_reply_state')") ? { table_name: null } : undefined,
           all: async () => [],
         };
       },
@@ -250,13 +250,15 @@ describe("the table", () => {
     assert.equal(await publishTgGroups({ tenant: A, home: src, shared: recorder, dek: DEK, seen: new Map(), log: () => {} }), "published");
     assert.equal(await restoreTgGroups({ tenant: A, home: home(t), shared: recorder, dek: DEK, log: () => {} }), "none");
     await deleteTgGroups(A, recorder, () => {});
-    assert.equal(seenSql.length, 3);
+    assert.equal(seenSql.length, 5);
+    assert.equal(seenSql.filter(sql => sql.includes("to_regclass('tenant_recovery_reply_state')")).length, 2,
+      "publish and restore each check the optional privacy journal");
     for (const sql of seenSql) {
       const pg = translateQuery(sql);
       assert.ok(!pg.includes("?"), `untranslated placeholder in: ${pg}`);
-      assert.match(pg, /\$1\b/);
+      if (sql.includes("?")) assert.match(pg, /\$1\b/);
     }
-    const upsert = translateQuery(seenSql[0]!);
+    const upsert = translateQuery(seenSql.find(sql => sql.startsWith("INSERT INTO tenant_tg_groups"))!);
     assert.match(upsert, /VALUES \(\$1, \$2, \$3, \$4\)/);
     // Column-scoped: the conflict branch names exactly the three columns it replaces.
     assert.match(
@@ -578,11 +580,9 @@ describe("restore", () => {
     assertClean(lines);
   });
 
-  // The orchestrator holds a child's groups off on `failed` (tgGroupsHeldOff),
-  // so `failed` must mean the home had no file. A database that cannot be
-  // reached at a crash restart must not hold off a child whose own file
-  // survived.
-  test("a database opened lazily: only for a home without the file, and an open that fails is failed", async (t) => {
+  // Remote forget requests can arrive while a retained home is stopped.
+  // Both retained and missing files must pass the current privacy check.
+  test("retained and missing group files both check current privacy; an unreachable proof stays held", async (t) => {
     const { db } = await sqlite(t);
     let opened = 0;
     const lazy = async (): Promise<Db> => {
@@ -592,27 +592,30 @@ describe("restore", () => {
     const kept = home(t);
     put(kept, memory("the child's own"));
     assert.equal(await restoreTgGroups({ tenant: A, home: kept, shared: lazy, dek: DEK, log: () => {} }), "present");
-    assert.equal(opened, 0, "a home that kept its file never touches the database");
+    assert.equal(opened, 1, "a retained home still checks current remote forget requests");
 
     const unreachable = async (): Promise<Db> => {
       throw new Error("connect ECONNREFUSED");
     };
     const kept2 = home(t);
     put(kept2, memory("the child's own"));
-    assert.equal(await restoreTgGroups({ tenant: A, home: kept2, shared: unreachable, dek: DEK, log: () => {} }), "present");
+    assert.equal(await restoreTgGroups({ tenant: A, home: kept2, shared: unreachable, dek: DEK, log: () => {} }), "failed");
+    assert.equal(readFileSync(path.join(kept2, TG_GROUPS_FILE_NAME), "utf8"), memory("the child's own"),
+      "refusal preserves the retained file for reconciliation");
 
     const { lines, log } = logs();
     const empty = home(t);
     assert.equal(await restoreTgGroups({ tenant: A, home: empty, shared: unreachable, dek: DEK, log }), "failed");
     assert.deepEqual(readdirSync(empty), []);
-    assert.match(lines[0]!, /could not be read — connect ECONNREFUSED/);
+    assert.match(lines[0]!, /current privacy proof could not be read — memory remains held/);
+    assert.doesNotMatch(lines[0]!, /connect ECONNREFUSED/);
 
     const src = home(t);
     put(src, memory("stored"));
     await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen: new Map(), log: () => {} });
     const fresh = home(t);
     assert.equal(await restoreTgGroups({ tenant: A, home: fresh, shared: lazy, dek: DEK, log: () => {} }), "restored");
-    assert.equal(opened, 1);
+    assert.equal(opened, 2);
     assert.equal(readFileSync(path.join(fresh, TG_GROUPS_FILE_NAME), "utf8"), memory("stored"));
   });
 });
@@ -1471,7 +1474,7 @@ describe("the group files leave a home whose grant is gone while no child runs t
 });
 
 describe("the row is read here and nowhere else", () => {
-  test("only the ferry and the verified backup and checkpoint tools name the table in production source", () => {
+  test("only the ferry, verified operator tools and narrow public recovery store name the table", () => {
     const repo = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..");
     const walk = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -1486,9 +1489,9 @@ describe("the row is read here and nowhere else", () => {
       .filter((f) => readFileSync(f, "utf8").includes("tenant_tg_groups"))
       .map((f) => path.relative(repo, f).split(path.sep).join("/"))
       .sort();
-    // The file never becomes a trading input or a web read. The reviewed
-    // operator tools verify backup/checkpoint state through this same ferry.
-    assert.deepEqual(naming, ["worker/src/ledger-handover-cli.ts", "worker/src/ledger-safeguard.ts", "worker/src/memory-safeguard.ts", "worker/src/tg-groups-ferry.ts"]);
+    // No trading path or web read is admitted. The separately reviewed reply
+    // store projects approved rooms and applies privacy without using old turns.
+    assert.deepEqual(naming, ["worker/src/ledger-handover-cli.ts", "worker/src/ledger-safeguard.ts", "worker/src/memory-safeguard.ts", "worker/src/recovery-reply-store.ts", "worker/src/tg-groups-ferry.ts"]);
   });
 });
 

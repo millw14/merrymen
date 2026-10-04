@@ -1,6 +1,7 @@
 import type { Autonomy } from "@merrymen/core";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import { LIVE_WITHIN_SEC } from "@/lib/telegram-poll-window";
 
 /** Optional on older servers. Only an explicit recovery pause changes the UI. */
 export function pausedRecovery(value: FleetRecoveryView | null | undefined): FleetRecoveryView | null {
@@ -32,7 +33,7 @@ export function recoveryAutonomy(autonomy: Autonomy, recovery: FleetRecoveryView
 }
 
 /** Recovery is not evidence that a bot is polling or able to reply. */
-export function recoveryTelegram(status: TelegramStatus | null): { label: string; detail: string | null } {
+export function recoveryTelegram(status: TelegramStatus | null, now = Math.floor(Date.now() / 1000)): { label: string; detail: string | null } {
   if (!status) return { label: "Checking connection…", detail: null };
   if (!status.hasToken) return { label: "Not set up", detail: null };
   if (!status.enabled) return { label: "Switched off", detail: null };
@@ -40,6 +41,12 @@ export function recoveryTelegram(status: TelegramStatus | null): { label: string
   if (status.listening?.state === "revoked" && !status.connected) return { label: "Token refused", detail: "Check the saved token in Settings." };
   if (!status.connected) return { label: "Connection unverified", detail: null };
   if (status.listening?.state === "conflict") return { label: "Another program has the bot", detail: "Replies are not confirmed." };
+  const lastOkAt = status.listening?.lastOkAt;
+  if (status.listening?.state === "held" && status.listening.reason === "recovery-replies"
+      && status.tradingHeld === "recovery-replies" && typeof lastOkAt === "number" && Number.isSafeInteger(lastOkAt)
+      && lastOkAt > 0 && lastOkAt <= now && now - lastOkAt <= LIVE_WITHIN_SEC) {
+    return { label: "Listening for public questions", detail: "Charts and project descriptions only. Trading remains paused." };
+  }
   return { label: "Waiting for recovery", detail: status.listening?.state === "live"
     ? "Bot polling is confirmed. Trading stays paused."
     : "Replies are not confirmed while recovery is in progress." };

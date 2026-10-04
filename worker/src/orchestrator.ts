@@ -36,6 +36,7 @@
  * ledger, which the child already has), and runs before the child seeds its
  * budget counters — noted at store.ts's fail-closed write and at the arm site.
  */
+import { handoffRecoveryReplyOffset, recoveryReplyPrivacyAllowsFork } from "./recovery-reply-handoff";
 import { readRiskPeriod, RISK_PERIOD_SCHEMA } from "./risk-period";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
@@ -2935,7 +2936,23 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
     // child is already polling would be read from a file the child has by then
     // replaced with a fresh, unlinked default.
+    if (process.env.DATABASE_URL) {
+      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+      const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
+      if (!dek || !await recoveryReplyPrivacyAllowsFork({
+        tenant, home: childHome(tenant), shared, dek,
+        mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+      })) return;
+    }
     await writeTelegramForChild(tenant);
+    if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
+      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+      await handoffRecoveryReplyOffset({
+        tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
+        home: childHome(tenant), shared,
+        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+      });
+    }
     // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
     // restoreTgGroupsForChild.
     await restoreTgGroupsForChild(tenant);
@@ -3269,6 +3286,16 @@ async function spawnHolder(
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
   await writeTelegramForChild(tenant);
+  if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
+    const grant = await getGrantStore().get(tenant);
+    if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+    await handoffRecoveryReplyOffset({
+      tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
+      home: childHome(tenant), shared,
+      mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+    });
+  }
   // THE LAST AWAIT IS ABOVE THIS LINE: asked again for the same reasons as
   // spawnChild's, and one more. A tenant already held is not held twice.
   const late = lateSpawnRefusal(tenant, lease) ?? (holders.has(tenant) ? "it is already held" : null);

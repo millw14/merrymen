@@ -6,6 +6,8 @@ import { JSDOM } from "jsdom";
 import { autonomyOf } from "@merrymen/core";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import { telegramListening } from "@/lib/telegram-listening";
+import { runtimeFromRow } from "@/lib/telegram-runtime";
 import type { ChatController } from "./chat-controller";
 import type { LiveMine } from "./live";
 import { ownerTradeEmptyTitle, recoveryAutonomy, recoveryMemory, recoveryTelegram } from "./recovery-view";
@@ -159,5 +161,23 @@ describe("Telegram during recovery", () => {
       assert.equal(polling.detail, "Replies are not confirmed while recovery is in progress.");
       assert.doesNotMatch(polling.detail!, /polling is confirmed/);
     }
+  });
+  it("shows the separate public listener only with a current measured poll and its trading hold", () => {
+    const now = held.checkedAt;
+    const runtime = runtimeFromRow({ bot_id: "801", owner_id: 1, poll_ok_at: now - 10,
+      poll_err: null, poll_err_at: null, child_state: "held:recovery-replies" }, true);
+    const publicStatus = status(telegramListening(runtime, "801:local_fixture", now));
+    assert.deepEqual(recoveryTelegram(publicStatus, now), {
+      label: "Listening for public questions", detail: "Charts and project descriptions only. Trading remains paused." });
+    for (const lastOkAt of [null, 0, now - 181, now + 1]) {
+      const unproved = recoveryTelegram({ ...publicStatus, listening: { ...publicStatus.listening!, lastOkAt } }, now);
+      assert.equal(unproved.label, "Waiting for recovery");
+    }
+    assert.equal(recoveryTelegram({ ...publicStatus, tradingHeld: null }, now).label, "Waiting for recovery");
+    assert.equal(recoveryTelegram({ ...publicStatus, connected: false }, now).label, "Connection unverified");
+    assert.equal(recoveryTelegram({ ...publicStatus, botElsewhere: true }, now).label, "Connected to another agent");
+    const wrongBot = status(telegramListening(runtime, "802:local_fixture", now));
+    assert.equal(wrongBot.linkPending, true);
+    assert.equal(recoveryTelegram(wrongBot, now).label, "Waiting for recovery");
   });
 });
