@@ -51,7 +51,7 @@ export function proveRecoveryReplyRoot(env: NodeJS.ProcessEnv = process.env, rea
             || (env.MERRYMEN_INITIAL_HANDOVER !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(env.MERRYMEN_INITIAL_HANDOVER)))
             throw recoveryReplyRefused();
         const holds = env.MERRYMEN_ACCOUNTING_HOLD_TENANTS;
-        if (holds !== undefined && holds.split(",").some(t => !/^0x[0-9a-f]{40}$/i.test(t.trim())))
+        if (holds !== undefined && holds !== "" && holds.split(",").some(t => !/^0x[0-9a-f]{40}$/i.test(t.trim())))
             throw recoveryReplyRefused();
     };
     mode();

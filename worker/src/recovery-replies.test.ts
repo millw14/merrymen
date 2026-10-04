@@ -252,6 +252,19 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     const g = await fixture(s); rmSync(g.halt); await assert.rejects(g.run()); assert.equal(g.audit.length, 0);
   });
 
+  await t.test("an explicit empty accounting hold list replies under the unchanged global halt", async s => {
+    const f = await fixture(s);
+    f.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = "";
+    f.transport.getUpdates = async () => updates([f.msg(1)], 2);
+    const rows = await f.original(), files = fileFacts(f.home);
+    await f.run();
+    assert.equal(f.sends.length, 1); assert.equal(Number((await f.offset())!.offset_id), 2);
+    assert.equal(f.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS, "");
+    assert.equal(f.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY, "1");
+    assert.equal(f.env.MERRYMEN_FLEET_RECOVERY_REPLIES, "1");
+    assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
+  });
+
   await t.test("missing hold/link/claim stays unavailable and malformed grants/tokens refuse without initialization", async s => {
     for (const sql of ["DELETE FROM fleet_recovery_health", "UPDATE tenant_telegram SET owner_id=NULL", "DELETE FROM telegram_bot_claims"]) {
       const f = await fixture(s); await f.pool.query(sql); const before = await f.original(); await f.run(); assert.equal(f.sends.length, 0); assert.deepEqual(await f.original(), before); assert.equal(existsSync(path.join(f.home, "persistent-home.json")), false);
@@ -262,6 +275,51 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
       if (broken === "grant") await f.pool.query("UPDATE grants SET grant_json='{}'");
       else await f.pool.query("UPDATE tenant_settings SET sealed=$1", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: "not-a-token", telegramAllowlist: [701] }), DEK)]);
       await assert.rejects(f.run()); assert.equal(f.sends.length, 0); assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS table")).rows[0]!.table, null);
+    }
+  });
+
+  await t.test("omitted allowlist with a valid or malformed token leaves linked owner unavailable while all tenant leases and another bot remain active", async s => {
+    for (const malformedToken of [false, true]) {
+      const f = await fixture(s, 2), missing = f.actors[0]!, good = f.actors[1]!, probe = await f.connect();
+      const settings = (await f.pool.query("SELECT sealed FROM tenant_settings WHERE tenant=$1", [missing.tenant])).rows[0]!;
+      const cfg = JSON.parse(openSecret(String(settings.sealed), DEK));
+      delete cfg.telegramAllowlist;
+      if (malformedToken) cfg.telegramBotToken = "synthetic malformed nonempty token";
+      await f.pool.query("UPDATE tenant_settings SET sealed=$1 WHERE tenant=$2", [sealSecret(JSON.stringify(cfg), DEK), missing.tenant]);
+      const rows = await f.original(), files = fileFacts(f.home);
+      const linkBefore = (await f.pool.query("SELECT * FROM tenant_telegram WHERE tenant=$1", [missing.tenant])).rows[0]!;
+      assert.equal(Number(linkBefore.owner_id), missing.ownerId); assert.ok(Number(linkBefore.linked_at) > 0); assert.equal(linkBefore.bot_id, missing.botId);
+      const providerBots: string[] = [], baseMe = f.transport.getMe, baseSend = f.transport.sendMessage;
+      let missingTenantHeld = false;
+      f.transport.getMe = async opts => {
+        assert.equal(opts.token, good.token); providerBots.push(`me:${good.botId}`);
+        assert.equal((await probe.query("SELECT pg_try_advisory_lock($1::bigint) AS held", [leaseKey(missing.tenant).toString()])).rows[0]!.held, false);
+        missingTenantHeld = true;
+        return baseMe(opts);
+      };
+      f.transport.getUpdates = async opts => { assert.equal(opts.token, good.token); providerBots.push(`poll:${good.botId}`); return updates([f.msg(1, "$GOOD chart", 1)], 2); };
+      f.transport.sendMessage = async (opts, chat, text, extra) => { assert.equal(opts.token, good.token); providerBots.push(`send:${good.botId}`); return baseSend(opts, chat, text, extra); };
+      await f.run();
+      assert.equal(missingTenantHeld, true); assert.deepEqual(providerBots, [`me:${good.botId}`, `poll:${good.botId}`, `send:${good.botId}`]);
+      assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.botId, good.botId); assert.deepEqual(f.replies, ["$GOOD chart"]);
+      assert.equal(await f.offset(missing.botId), undefined); assert.equal(Number((await f.offset(good.botId))!.offset_id), 2);
+      assert.deepEqual((await f.pool.query("SELECT * FROM tenant_telegram WHERE tenant=$1", [missing.tenant])).rows[0], linkBefore);
+      assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
+    }
+  });
+
+  await t.test("present null, scalar, object and malformed allowlists refuse before provider calls or offset initialization", async s => {
+    for (const allowlist of [null, 701, "701", { owner: 701 }, ["701"], [0]]) {
+      const f = await fixture(s, 2), bad = f.actors[0]!;
+      await f.pool.query("UPDATE tenant_settings SET sealed=$1 WHERE tenant=$2", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: bad.token, telegramAllowlist: allowlist }), DEK), bad.tenant]);
+      const rows = await f.original([]), files = fileFacts(f.home);
+      let providerCalls = 0;
+      f.transport.getMe = async () => { providerCalls++; throw new Error("malformed scope must not call getMe"); };
+      f.transport.getUpdates = async () => { providerCalls++; throw new Error("malformed scope must not poll"); };
+      await assert.rejects(f.run());
+      assert.equal(providerCalls, 0); assert.equal(f.sends.length, 0); assert.equal(f.replies.length, 0);
+      assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS table")).rows[0]!.table, null);
+      assert.deepEqual(await f.original([]), rows); assert.deepEqual(fileFacts(f.home), files);
     }
   });
 
@@ -485,13 +543,14 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     for (const a of late.actors) assert.equal(Number((await late.offset(a.botId))!.offset_id), 5);
   });
 
-  await t.test("link/token/grant/lease/halt changes during a transaction refuse and roll back its cursor", async s => {
-    for (const change of ["link", "token", "grant", "tenant-lease", "bot-lease", "halt"]) {
+  await t.test("link/token/allowlist/grant/lease/halt changes during a transaction refuse and roll back its cursor", async s => {
+    for (const change of ["link", "token", "allowlist", "grant", "tenant-lease", "bot-lease", "halt"]) {
       const f = await fixture(s); await f.prime(); let once = false;
       f.transport.getUpdates = async () => updates([f.msg(1)]);
       f.hook(async (sql, _values, client) => { if (once || !/^UPDATE recovery_reply_offsets SET offset_id/.test(sql)) return; once = true;
         if (change === "link") await client!.query("UPDATE tenant_telegram SET owner_id=999 WHERE tenant=$1", [f.actors[0]!.tenant]);
         if (change === "token") await client!.query("UPDATE tenant_settings SET sealed=$1", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: "801:changed", telegramAllowlist: [701] }), DEK)]);
+        if (change === "allowlist") await client!.query("UPDATE tenant_settings SET sealed=$1", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: f.actors[0]!.token }), DEK)]);
         if (change === "grant") await client!.query("UPDATE grants SET updated_at=101");
         if (change === "tenant-lease") f.health.tenant = false;
         if (change === "bot-lease") f.health.bot = false;

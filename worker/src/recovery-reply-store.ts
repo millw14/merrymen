@@ -86,6 +86,8 @@ export async function readReplySnapshot(db: ReplyQuery, grant: ReplyGrant, dek: 
     }
     if (cfg.telegramEnabled !== true || typeof cfg.telegramBotToken !== "string")
         return null;
+    if (cfg.telegramAllowlist === undefined)
+        return null;
     const match = /^0*([1-9][0-9]{0,15}):[A-Za-z0-9_-]+$/.exec(cfg.telegramBotToken);
     if (!match)
         throw recoveryReplyRefused();
