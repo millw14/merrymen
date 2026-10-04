@@ -1,58 +1,497 @@
 # Fomo research, discovery and selective following
 
-Status: in implementation on `claude/fomo-research-discovery-4ed31b`. Nothing here
-is LIVE_AUTHORIZED. No provider key was available while it was written, so no route
-is AUTHENTICATED_TESTED yet (see the capability report).
+Merrymen can look up Fomo trader and coin information when an owner asks. It can watch a
+maintained cohort of traders, research coins those traders touch, including small ones
+the old discovery screen deleted, and turn that research into bounded entry nominations
+inside the owner's existing limits. It is not copy trading. A trader buying a coin is a
+reason to investigate, not an instruction to buy. A bullish thesis is a claim to
+evaluate, not a fact.
 
-The provider is **fomoapi.io** ("FOMO API"), an independent, read-only data service for
-fomo.family social-trading activity. It states it is **not affiliated with fomo.family**.
-Merrymen does not claim any partnership with either. Fomo supplies information; Merrymen
-keeps its own execution system. The provider's trading-account product
-(`/v2/trading/*`, `/pay/create`) is never called. The client only uses an allowlist of
-GET paths.
+**Provider.** The data comes from **FOMO API (fomoapi.io)**, an independent, read-only
+data service for fomo.family social-trading activity. It states it is *not affiliated with,
+endorsed by, or in partnership with fomo.family*, and Merrymen claims no partnership with
+either. Fomo supplies information; Merrymen keeps its own execution system. The provider's
+trading-account and payment products (`/v2/trading/*`, `/pay/create`) are refused by the
+client's GET-only path allowlist.
+
+**Status of this change** (labels defined at the end):
+
+| Area | Status |
+|---|---|
+| Provider adapter, identity, normalisation | IMPLEMENTED, FIXTURE_TESTED. No route is AUTHENTICATED_TESTED: no key was available. |
+| On-demand tools: app chat, Telegram DM and groups, MCP | IMPLEMENTED, FIXTURE_TESTED |
+| Shared ingestion, 150-trader cohort, research queue, child files | IMPLEMENTED, FIXTURE_TESTED. Stream behaviour NOT_YET_VERIFIED against the live provider. |
+| Early-opportunity discovery path | IMPLEMENTED, FIXTURE_TESTED |
+| Selective-following assessments into the Trencher review | IMPLEMENTED, FIXTURE_TESTED. PAPER_TESTED only at module level (no live paper agent was run). |
+| Publication drafts | IMPLEMENTED, FIXTURE_TESTED. Delivery to X is disabled pending policy review. |
+| Live canary (Stage E) and fleet expansion (Stage F) | NOT part of this change. Needs explicit owner approval. |
 
 ## The operating loop
 
-Observe → identify → retrieve evidence → analyse → evaluate portfolio fit → act within
-authorization → monitor → explain → measure outcomes.
+```
+Observe → identify → retrieve evidence → analyse → evaluate portfolio fit
+        → act within authorization → monitor → explain → measure outcomes
+```
 
-A trader buying a coin is a reason to investigate, not an instruction to buy. A bullish
-thesis is a claim to evaluate, not a fact.
+Each step is a separate module with its own tests. The model proposes; deterministic code
+disposes. Execution is the existing intent → policy → executor path.
 
 ## Integration map (real files)
 
-| Concern | Where it lives today | How Fomo hooks in |
+| Concern | Existing system | Fomo integration |
 |---|---|---|
-| Provider client | none. Templates: `worker/src/research/hey.ts`, `worker/src/venues/bitquery.ts`, `worker/src/bounded-read.ts` | `worker/src/fomo/provider.ts`, the only file that names the API host. Behaviour: Bearer header, GET allowlist, bounded reads, typed failures, credit headers, key scrub. |
-| Contract types | none | `worker/src/fomo/types.ts` |
-| Shared persistence | `Db` seam `worker/src/db.ts` (sqlite / Postgres); store template `worker/src/groupchat/store.ts` | `worker/src/fomo/store.ts`, using `ensureFomoSchema` under advisory lock `1_297_692_140`. Hosted: shared Postgres (web + orchestrator). Self-hosted: `fomo.sqlite` in `MERRYMEN_HOME`, shared by worker and web. |
-| Key custody | vendor keys are orchestrator-only and removed from children (`CHILD_SECRET_STRIP`, `worker/src/orchestrator.ts:411`) | `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) is read by the orchestrator, the web process and the self-hosted worker. Both names are removed from hosted children. |
-| On-demand reads from a hosted child (Telegram) | children have no DB and no vendor keys; spawned with `stdio: ["ignore","pipe","pipe"]` (`orchestrator.ts:2608`) | Spawn adds an `ipc` channel. `worker/src/fomo/broker.ts`: the child sends `{op,args}` and the orchestrator answers with the tenant **stamped from which child sent it**. The child cannot choose a tenant. |
-| App chat | `web/src/app/api/chat/route.ts` and `web/src/lib/agent-chat.ts`: one model call, no tool loop | `web/src/lib/fomo-chat.ts` detects Fomo intent on the server and invokes registered tools through the shared dispatcher. It answers factual questions from code and analytical ones from fenced evidence. Subject memory is server-side. |
-| Telegram DM | `worker/src/telegram/chat-tools.ts` `CHAT_TOOLS`; loop in `worker/src/telegram/answer.ts` | Adds `fomo_*` `ChatTool`s backed by the broker, plus deterministic seeds and per-chat subject memory (`service.ts`). |
-| Telegram groups | `worker/src/telegram/tg-groups/*` behind a port boundary (`boundary.test.ts`) | Adds `TgFomoPort` in `tg-groups/types.ts`. Coin-level aggregates only. Trader identities and private state stay in DMs (group rules 2/3). |
-| MCP / agent tool interface | `web/src/mcp/tools/*`, `defineTool`, `runTool` | `web/src/mcp/tools/fomo.ts`: `market.read` for public reads, `agents.read` for tenant research status. |
-| Shared ingestion | orchestrator fleet passes (`orchestrator.ts:8468-8493`) | `startFomoPass()` runs one stream connection per fleet under a singleton lease, plus targeted REST recovery. Events are persisted, deduped and checkpointed, then routed to opted-in tenants as `fomo.json` in the child home (the `research-files.ts` pattern). |
-| Discovery funnel | `worker/src/trencher-brain.ts` (`TRENCH_VOLUME_MIN = 100_000`), `worker/src/trencher-discovery.ts` (`DISCOVERY_SLICE = 20`, nominations inherit the volume screen) | Adds a separate early-opportunity path. Fomo candidates are verified on chain against their own route-specific screen before the old volume ranking, and enter review with reserved capacity. Entry still needs every execution guard. |
-| Brain | `services/brain/brain/schemas.py` `LENS_KEYS`, `graph.py` `_DESK` | Adds a new `trader-flow` lens (vendor-neutral). The rendered dossier carries no addresses. The worker sends it only when Brain advertises the lens. |
-| Decisions and execution | `worker/src/index.ts` producers → `ensureDecision` → `processIntent` → `checkPolicy` → executor / paper arm | Follow assessments become **nominations, priority and a size ceiling** for the existing Trencher review. Brain decides, `take()` validates, and the strategy emits the ordinary intent. There is no second executor. |
-| Publication | `worker/src/xpost/*` outbox (`xpost_posts`) and `thesis-policy.ts` `SOURCE_POLICY` | `worker/src/fomo/publish.ts` keeps a draft outbox with content revision, destination, consent scope, evidence ref, a fleet dedupe key and delivery state. Sending new kinds to X is **disabled pending policy review** (X rule 3 and provider redistribution terms). Confirmed buys keep using the existing pipeline. |
-| Settings | `packages/core/src/settings.ts`, `settings-catalog.ts`, `web/src/app/api/settings/route.ts` | New settings: `fomoDataAccess`, `fomoMonitoringEnabled`, `fomoFollowEnabled`. Exploration reuses the owner's existing scout budget. |
+| Contract types | none | `worker/src/fomo/types.ts` (data meaning, envelopes, statuses), `worker/src/fomo/contract.ts` (service, broker, IPC wire format, child file) |
+| Provider | templates `research/hey.ts`, `venues/bitquery.ts` | `worker/src/fomo/provider.ts`. The only code that names the host. GET allowlist, one Bearer header, bounded reads, the provider's documented retry policy, credit headers, key scrubbing, runtime normalisers. `capabilities.ts` holds the capability report. |
+| Identity | lowercased 0x address on chain 4663 | `worker/src/fomo/identity.ts`: (namespace, network id as returned, address). EVM lowercased per network; Solana mints keep case. Never routed through `chainForId`. |
+| Event identity | none | `worker/src/fomo/events.ts`: provider event id, then fill id, then tx hash + log index, then an explicitly ambiguous fingerprint |
+| Persistence | `Db` seam (`worker/src/db.ts`) | `worker/src/fomo/store.ts`: 27 `fomo_*` tables under advisory lock `1_297_692_140`. Hosted: shared Postgres. Self-hosted: `fomo.sqlite` (`fomo/local-db.ts`), shared by worker and dashboard. |
+| Research service | none | `worker/src/fomo/service.ts` and `tools.ts`: one dispatcher, 9 registered read tools plus 2 owner-only mutations |
+| Natural language | `telegram/question-context.ts`, `chat-ledger-facts.ts` | `worker/src/fomo/intent.ts` (deterministic planner) and `subject-memory.ts` (per-conversation subject) |
+| Rendering and chat | none shared | `worker/src/fomo/render.ts` (answer-first text, model evidence block, runtime rules) and `chat.ts` (the one pipeline every chat surface calls) |
+| Key custody and processes | vendor keys orchestrator-only (`CHILD_SECRET_STRIP`) | Key held by the orchestrator, the web process and the self-hosted worker. Stripped from hosted children under both names. Hosted children ask the orchestrator over a new IPC channel (`fomo/broker.ts`), and the orchestrator stamps the tenant from which child asked. |
+| App chat | `web/src/app/api/chat/route.ts`, `web/src/lib/agent-chat.ts` | `web/src/lib/fomo-chat.ts` and `fomo-runtime.ts`. Factual questions are answered by code from tool results; analytical ones get a fenced evidence block and runtime rules. |
+| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates only and deflects trader questions to DMs. |
+| MCP | `web/src/mcp/tools/*` | `web/src/mcp/tools/fomo.ts` |
+| Fleet ingestion | orchestrator passes | `worker/src/orchestrator-fomo.ts`: one singleton-lease leader runs the alerts stream, cohort refresh, research queue, jobs, publication drafts and retention. Every replica writes `fomo.json` for its own children (`fomo/child-file.ts`). |
+| Discovery funnel | `trencher-brain.ts` `TRENCH_VOLUME_MIN = 100_000`, `trencher-discovery.ts` `DISCOVERY_SLICE = 20` | `worker/src/early-candidates.ts`: an early path ahead of both, with every execution guard kept. `worker/src/decision-funnel.ts` instruments every stage. |
+| Following | Trencher review (`TrenchBrainReview`), `NominationBook` | `worker/src/fomo/following.ts`, `sizing.ts`, `lifecycle.ts`, wired by `worker/src/fomo-child.ts` |
+| Brain | `services/brain` `LENS_KEYS`, `_DESK` | New vendor-neutral `trader-flow` lens (`fomo/lens.ts` renders it), a pulse reservation, a selective-following instruction and the pre-gate `proposed_action` |
+| Publication | `worker/src/xpost/*` | `worker/src/fomo/publish.ts`: draft outbox with status-matched wording, consent scope, fleet dedupe and reconcile-before-retry. X delivery is off. |
+| Settings | `packages/core/src/settings.ts` | `fomoDataAccess` (on), `fomoMonitoringEnabled` (off), `fomoFollowEnabled` (off). Dashboard-only; the chat refuses them. |
 
-## Stages
+## Permissions — kept separate
 
-Each stage is labelled as one of: IMPLEMENTED, FIXTURE_TESTED, AUTHENTICATED_TESTED,
-PAPER_TESTED, LIVE_AUTHORIZED, NOT_YET_VERIFIED.
+| Permission | Default | What it allows | Where |
+|---|---|---|---|
+| `fomoDataAccess` | on | answer Fomo questions, read-only | Settings → Fomo research |
+| `fomoMonitoringEnabled` | off | let the cohort and watched coins route research to this agent | Settings → Fomo research |
+| `fomoFollowEnabled` | off | let research **nominate** coins into the existing memecoin review, sized inside the scout budget | Settings → Fomo research |
+| live follow | nobody | live execution of follow nominations | operator allowlist `MERRYMEN_FOMO_FOLLOW_LIVE`. Also requires `liveTradingEnabled`, `trencherLiveEnabled`, a signed grant and the vault. |
+| X posting | existing | publication of confirmed fills only, through the existing pipeline | Settings → Posting on X |
 
-- **A.** Repository inspection, funnel diagnosis, provider contract, identity, fixtures.
-- **B.** Registered read-only tools on app chat, Telegram DM and groups, and MCP.
-  Freshness, envelopes, dossiers.
-- **C.** 150-trader cohort, shared ingestion, durable recovery, change detection,
-  smaller-coin discovery.
-- **D.** Selective-following paper decisions, exploration sizing, lifecycle monitoring,
-  publication drafts.
-- **E/F.** Named live canary and expansion. These need explicit owner approval and are
-  **not part of this change**.
+Revoked data access is enforced in the service before any cache read or provider call, on
+every surface, even while monitoring is off, the watchlist is empty or trading is paused.
+An information request never creates a trade, a post or a recurring watch. "Watch this
+coin" is an explicit owner-only mutation, capped at 25 per owner and expiring after at
+most 30 days. "Should we follow this?" is analysis, not permission.
 
-(Sections on capability status, cost, operations and rollback are filled in as the work
-lands.)
+## On-demand retrieval
+
+`Question → authenticate → resolve subject and intent → invoke tool → check cache freshness
+→ retrieve → validate → answer`
+
+- **Registered tools:** `fomo_resolve_subject`, `fomo_get_trader_context`, `fomo_get_trader_activity`,
+  `fomo_get_token_theses`, `fomo_get_token_activity`, `fomo_get_rankings`, `fomo_find_opportunities`,
+  `fomo_research_coin`, `fomo_get_research_status` (owner only), plus the mutations
+  `fomo_watch_coin` and `fomo_unwatch_coin` (owner only, never offered to a model loop).
+- **Strict arguments:** each tool has an `additionalProperties:false` schema. Tenant,
+  credentials, host, path and URL can never be arguments.
+- **Trusted context only:** the session cookie (web, MCP); the orchestrator's record of which
+  child asked (hosted Telegram); the fixed `self` tenant (self-hosted).
+- **The tool is always called.** Trusted code decides whether a cached copy satisfies the
+  freshness policy:
+
+  | Class | Max age | Oldest copy served |
+  |---|---|---|
+  | activity | 60 s | 30 min |
+  | holdings | 5 min | 6 h |
+  | rankings | 15 min | 24 h |
+  | theses | 30 min | 7 d |
+  | token-stats | 5 min | 2 h |
+  | profile | 1 h | 7 d |
+  | boards | 5 min | 2 h |
+
+  "refresh", "latest", "check now" and "right now" force an upstream attempt. Identical
+  concurrent refreshes share one in-flight call and never substitute an older result.
+- **Envelopes:** every result carries a request id, resolved subject, requested versus
+  achieved scope, status, evidence refs, five separate clocks (`retrievedAt`,
+  `providerAsOf`, `sourceEventAt`, `lastRefreshAttemptAt`, `cacheAgeMs`), coverage, usage
+  and dossier revision. Statuses `ok / empty / partial / capped / stale / failed /
+  unavailable / not-authorized / budget-limited / needs-clarification / not-found` are
+  never collapsed. "No matching records returned" is not "nobody traded".
+- **Answers:** the subject comes first, then the answer, then attribution ("Source: Fomo
+  via FOMO API (independent; not affiliated with fomo.family)"), then material freshness
+  and coverage limits. Provider-reported, independently verified and Merrymen
+  interpretation are labelled differently. No Fomo permalink is ever invented.
+- **Follow-ups:** the resolved coin, chain, trader, window and dossier revision carry
+  across turns per conversation, for 30 minutes. A correction replaces the subject before
+  the next lookup. A same-ticker coin on another chain triggers one focused clarification;
+  it is never silently chosen.
+- **Deep research** registers a bounded job (10-minute deadline, 15,000-credit allowance)
+  before later delivery is promised. Telegram delivers one consolidated result to the same
+  DM after re-checking the recipient and the data-access permission.
+
+## The 150-trader cohort
+
+`worker/src/fomo/cohort.ts`, run by the leader every 6 hours.
+
+**Identity.** Members are keyed by provider `userId` (UUID), not handle. Handle history is
+kept, so a rename does not break history. Duplicate leaderboard rows merge.
+
+**Scoring.** Explainable components:
+- consistency across 24h/7d/30d/all
+- relevant-chain share
+- early discovery
+- holding period against Merrymen's latency
+- exit behaviour
+- concentration
+- execution capacity
+- thesis usefulness
+- data completeness
+
+Dollar P&L enters only as a damped, capped rank percentile. **Followers are ignored.**
+Small samples shrink toward a prior. Missing history is unknown: it carries no weight and
+is never negative or invented.
+
+**Gradual refresh.** At most 10 changes per refresh. Hysteresis and a minimum tenure apply.
+Every addition and removal records its reason. Versions persist with inclusion times.
+
+**No padding.** When evidence is insufficient the cohort is smaller and carries a
+`shortfallReason`.
+
+**Narrative-only traders.** A trader whose holds are shorter than Merrymen can act on stays
+useful for narrative discovery but is `followable:false`.
+
+**Position dependencies.** Traders an open position depends on are tracked separately: at
+most 30 per owner and 300 overall, expiring, and never counted in the 150.
+
+## Shared ingestion
+
+`worker/src/fomo/stream.ts` and `ingest.ts`, run by the leader.
+
+- **One stream for the fleet.** A single `/ws/alerts` connection, filtered to Robinhood
+  Chain because only Robinhood tokens can become entries. On-demand lookups still cover
+  every chain. There are never 150 sockets per agent.
+- **Persist first.** Every normalised event is inserted, deduplicated by event key, before
+  anything is routed. Live, replayed, REST-recovered and post-restart copies route exactly
+  once.
+- **Recovery.** Reconnects use exponential backoff with full jitter, plus a heartbeat
+  watchdog. The bounded inbound queue applies backpressure: a full queue closes the socket
+  and records a gap rather than dropping. Oversized or garbage frames go to dead letters.
+  REST recovery runs from the monotonic checkpoint (strictly newer cursor), up to 10 pages.
+  A gap that cannot be recovered stays visible and is never reported as complete.
+- **Research tasks.** Bursts coalesce into one research task per (coin, evidence revision).
+  Priority order: held positions, then explicitly watched coins, then discovery.
+- **Tenant isolation.** Public cohort activity is shared. Per-owner data (watches, held
+  coins, assessments) never crosses owners. Each child's `fomo.json` contains public
+  activity plus that owner's own state only.
+
+## What the data means
+
+Kept apart by name in the types:
+- actual fill size (`fillUsd`, only when the provider matched an exact on-chain fill)
+- the post-fill position mark (`positionValueUsd`)
+- position-level cumulative realised P&L (never summed)
+- current quantity
+- holdings valuation, which is a floor when truncated
+- transfers and airdrops, which are never purchases
+
+Provider-reported, provider-verified and independently verified observations are labelled
+separately.
+
+The app feed has an upstream size floor near $3,000, so small fills are invisible. Every
+answer that relies on the feed says so.
+
+## Shogun's inactivity: diagnosis
+
+Diagnosis from code (no production data was read). The funnel instrumentation now records
+where each coin stops, so the dominant cause can be measured instead of guessed.
+
+| Stage | Where | What stops coins | Kind |
+|---|---|---|---|
+| Rail | `index.ts` | live agent without `trencherLiveEnabled` | permission (announced) |
+| Tape screen | `trencher-brain.ts:9` | 24h volume < **$100,000**, < 20 buyers, one-sided, no 5m volume | discovery screen (was silent; now `DISCOVERY_SCREENED_OUT`) |
+| Discovery slice | `trencher-discovery.ts:11` | only the busiest **20** v3 pools, canonical factory, USDG/WETH quote; nominations inherit the volume screen | discovery screen |
+| Candidate builder | `index.ts` | missing `createdAt` or FDV skipped **silently**; a failed vault-budget read skipped **every** autonomous coin silently | accidental silent exits (now recorded) |
+| Entry screen | `strategies/trencher.ts` | liquidity < $25k, FDV < $50k, age < 10 min, unpriced | execution guard (kept) |
+| Review guard | `index.ts` | one unknown-cost holding sets `bookIncomplete` and disables **every** review | likely permanent-hold accident |
+| Brain gate | `gate.py` | 3 or more caveats force a hold; process caveats (audit never run, gas basis, no position history on paper) can make that permanent | likely permanent-hold accident |
+| Model | `trencher-brain.ts` persona | "hold if evidence or edge is insufficient"; one coin per 30 s | judgement |
+| `take()` | `trencher-brain.ts` | review older than 60 s (tick may be 60 s), price moved more than 2%, superseded decision; console-only | silent drops (now recorded) |
+| Strategy | `strategies/trencher.ts:555` | an approved BUY over headroom or the cap is discarded silently | silent drop (counted as "approval without outcome") |
+
+Fixed in this change:
+- The paused-token filter compared symbols against an address set. This made it too
+  permissive, not too strict.
+- A portfolio-quality refusal was reported as "Brain unavailable".
+- Gate verdict, reasons, caveat count, schema version and the model's pre-gate
+  `proposed_action` are now persisted.
+
+Deliberately **not** changed, because they need owner review:
+- the $100k screen and 20-pool slice for the regular tape
+- the entry floors
+- the three-caveat rule
+- the vault caps
+
+Smaller coins now reach review through the separate early path below, without loosening
+any of these.
+
+## Smaller-coin discovery
+
+`worker/src/early-candidates.ts`: the early-opportunity path. Its sources:
+- a first observed purchase by a useful cohort trader
+- several distinct watched traders buying
+- a new thesis on an unseen token
+- trending and graduated boards
+- explicit owner nominations
+
+These get a **route-specific early screen** instead of the volume screen: a v3 pool on the
+vault's route, two-sided trading (an exit has been observed), fresh activity and a known
+reserve. They are verified on chain without the top-20 slice. A bounded book holds them:
+8 active, 24 new per day, cooldowns. One review slot in four is reserved for them;
+capital is never guaranteed. A missing market cap is unknown, not zero, and a new pool for
+an old token is not a launch.
+
+The three questions stay separate. Is it worth investigating? That is the dossier. Does
+the setup justify risk? That is the Brain review. Is this exact trade permitted and
+executable? That is the unchanged `shouldEnter` entry floors, pool price guards, vault
+caps, policy, energy and rail.
+
+## Dossiers and feed intelligence
+
+`worker/src/fomo/dossier.ts` keeps one versioned dossier per canonical token, shared by
+chat, background research and triggered reviews.
+
+- **Building.** Fetches are staged: one thesis page, expanding only when contested or
+  thin, and never "all theses". Copies collapse into evidence families. Merrymen's own
+  posts and echoes are excluded from independent confirmation. One well-supported
+  objection outranks ten copies of one bullish post.
+- **Contents.** Source statements, observed actions, verified facts and inference are
+  separated. Each dossier holds the strongest support and opposition, flow (distinct
+  buyers vs repeat adds), words-vs-actions inconsistencies (explicitly not proof of fraud),
+  unknowns, change conditions, exact coverage and schema/prompt/model versions.
+- **Revisions.** An unchanged evidence set does not create a new revision.
+
+`features.ts` adds:
+- early discovery and participation breadth
+- conviction changes, from buy events only
+- thesis changes and narrative development
+- position deterioration
+- "what changed" summaries. "No change" is only reported with a comparable earlier
+  baseline and a successful check.
+
+`lens.ts` renders the vendor-neutral `trader-flow` Brain lens. It contains no addresses and
+no vendor name, and carries opaque refs that the worker validates against what was sent.
+
+## Selective following, sizing and lifecycle
+
+`following.ts`, `sizing.ts`, `lifecycle.ts`, wired in `worker/src/fomo-child.ts`.
+
+**Research states.** `WATCH`, `PROBE_CANDIDATE`, `ENTRY_CANDIDATE`, `ADD_CANDIDATE`,
+`HOLD_POSITION`, `REDUCE_CANDIDATE`, `EXIT_CANDIDATE`, `REJECT_SETUP`, `RESEARCH_ONLY`.
+
+**Judged at our own price and time.** Signal delay, research delay and price movement are
+measured against Merrymen's own quote. A trader's dollar size is never copied, and their
+entry is never assumed to still be available.
+
+**Hard constraints versus ordinary uncertainty.**
+- `REJECT_SETUP`: identity, authorization, stale quote, a run-away price, a verified
+  objection, or a route too thin for our size.
+- `WATCH`: ordinary uncertainty such as short history, thin or conflicting theses, a size
+  below the economic floor, or entries paused. It is never automatically bearish.
+
+**Mapping into existing code.** Reviewed trusted code turns an assessment into a
+nomination, a priority and a per-coin ceiling for the **existing** Trencher review.
+- Brain decides.
+- `take()` keeps its 60 s / 2% guards.
+- The strategy emits the ordinary intent.
+- `checkPolicy`, the vault, energy and the paper/live rail apply unchanged.
+
+There is no second executor and no policy bypass. `revalidate()` runs immediately before
+submission and checks:
+- expiry
+- price move since the decision quote
+- permission and pause changes
+- the rail
+- sponsorship availability. A sponsored flow whose sponsor is unavailable is dropped and
+  never charged to the owner.
+
+**Sizing.** In micro-USDG, rounded down. The ceiling is the minimum of:
+- the signed per-trade limit
+- daily headroom
+- the remaining exploration allocation
+- the per-token allocation
+- exposure headroom
+- route capacity
+- the 5 USDG autonomous vault bound
+
+Any unknown input gives 0. The exploration allocation **is the owner's existing scout
+budget**; there is no parallel allowance. Realised exploration losses consume it, and
+closing a losing position never refills it. No martingale, no averaging down, no leverage,
+no rounding up. A size below the economic floor becomes `WATCH`. In-process reservations
+stop concurrent signals from overspending.
+
+**Lifecycle.**
+- Our own stop, take-profit and max-hold run first and are never delayed by social data or
+  model calls.
+- A trader selling triggers an **independent review**, never a mirrored exit.
+- Reduce or exit candidates need independent deterioration. Liquidity is judged at the
+  current size.
+- The entry rationale is append-only and never rewritten after the outcome is known.
+
+## Publication
+
+`worker/src/fomo/publish.ts`.
+
+- **Drafts come from persisted records only.** A post's wording must match the actual
+  status: researching, watching, considering, submitted ("sent, waiting to settle"),
+  paper-traded ("on paper"), or confirmed purchase / reduction / exit. "Bought" requires a
+  landed fill.
+- **The outbox.** It stores the content revision, destination, consent scope, evidence
+  ref, a tenant-inclusive dedupe key and a fleet key. At most 2 near-identical posts go out
+  per coin, kind and 6-hour window across all agents.
+- **Delivery safety.** Consent is re-checked at send time. An ambiguous timeout is
+  reconciled before any retry.
+- **Delivery to X is disabled in this change.** Every draft ends `blocked-policy`
+  ("policy-review-required"). X posting rule 3 allows coin posts only about coins the agent
+  bought. The provider's terms reserve redistribution rights for an Enterprise plan. X's
+  automation rules need verifying. Confirmed buys keep flowing through the existing X
+  pipeline unchanged. Autonomous replies stay off.
+
+## Security and isolation
+
+- **Untrusted text.** Theses, comments, handles, token names and metadata are untrusted:
+  sanitised, fenced as data, and unable to add tool calls or change a research state.
+- **No model authority.** The model never chooses a tenant, database query, path, URL or
+  host.
+- **Authorization is checked twice:** in the service below the model, and again at
+  delivery or action time (`revalidate`, Telegram's recipient re-check, the outbox's
+  consent re-check).
+- **Secrets.** Keys stay out of prompts, logs, traces and errors. Stream URLs that carry a
+  key are only ever logged in redacted form. Boundary tests pin which files may read the key
+  and that only the adapter names the host.
+- **Caches.** Shared caches hold public provider data only. Subject memory, watches,
+  assessments, funnel traces and jobs are tenant-scoped, and the tests cover every getter.
+
+## Cost model (credits)
+
+Documented costs:
+
+| Item | Credits |
+|---|---|
+| Leaderboard, normal read | 250 |
+| Alerts page | 125 |
+| Thesis page | 1,250 |
+| Wallet resolution (handle or userId profile) | 2,500 |
+| `/v2/me` and the WebSocket | 0 |
+
+Measured `x-credits-cost` replaces these estimates when it is present. Plans per month:
+Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
+
+| Work | Credits | Notes |
+|---|---|---|
+| Cohort refresh (4 leaderboards) | 1,000 per 6 h = 4,000/day | background budget |
+| Cohort enrichment (positions) | ≤ 20 × 250 per refresh | measured inputs, reused about 3 days |
+| Stream | 0 | free on every plan |
+| Recovery after a reconnect | 125–1,250 | at most 10 pages |
+| Quick dossier refresh | ≈ 1,625 | 1 thesis page + alerts + stats |
+| Holdings question | 250 | |
+| Theses question | 1,250 per page | |
+
+The shared daily pool is `plan × (1 − 20%) / 31`, split 25% position protection, 45%
+interactive and 30% discovery. Discovery is shed first. Per-owner hourly and daily caps,
+per-group caps and model-call caps apply. Nothing upgrades a plan, tops up credits or
+switches provider. On the Free plan (about 6,450 credits/day) the fleet gets roughly one
+cohort refresh, a few holdings lookups and about one thesis page a day: enough to verify,
+not to operate. **Builder** (about 322k/day) is the realistic minimum for a fleet;
+**Starter** suits a single canary. Factual chat answers use zero model calls. Analytical
+answers use one call on the existing house model.
+
+## Operations
+
+| Variable | Process | Meaning |
+|---|---|---|
+| `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) | web, orchestrator; self-hosted worker or settings `fomoApiKey` | provider key, stripped from hosted children |
+| `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget |
+| `MERRYMEN_FOMO_ENABLED=0` | orchestrator | turns the fleet pass off; children spawn without IPC and answer "unavailable" |
+| `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
+
+Health is visible to owners without logs. "Is Fomo working?" and the status route report:
+`not-configured`, `disabled`, `permission-required`, `provider-unavailable`,
+`budget-limited`, `research-only`, `watching-condition`, `receiving-fresh-data`. The
+orchestrator logs one aggregated line per 20 minutes, with no identities and no key-bearing
+URLs.
+
+To verify with a key: run the read-only probe below. It reports per-capability evidence
+and touches no trading route.
+
+```bash
+MERRYMEN_FOMO_API_KEY=… npx tsx scripts/fomo-probe.mts [--theses] [--trader] [--stream]
+```
+
+## Rollback
+
+1. Set `MERRYMEN_FOMO_ENABLED=0` on the orchestrator. The stream, cohort, research and
+   child files stop, and children spawn without IPC.
+2. Unset `MERRYMEN_FOMO_API_KEY` on the web. Lookups answer "not configured".
+3. Owners' `fomoFollowEnabled` defaults to off. Turning it off stops nominations at the
+   next tick. Open positions keep their normal exits.
+4. The schema is additive (`fomo_*` tables only). Leaving it in place is harmless; dropping
+   the tables loses only research caches, cohort history and drafts, never ledger or money
+   records.
+5. Brain: the `trader-flow` lens is sent only when Brain advertises it, so a Brain
+   rollback simply stops the lens.
+
+## Decisions needed from Milla
+
+1. **Terms.** The provider licenses use "within your own applications and internal
+   operations" and reserves redistribution for Enterprise. fomo.family's own terms forbid
+   automated harvesting. Decide on LLM processing and on any public republication before
+   commercial deployment.
+2. **X publication** of research, watching or considering posts conflicts with X rule 3.
+   Keep it off, or change the rule and collect a separate research-post consent.
+3. **Regular-tape screens** (the $100k volume and top-20 slice), the entry floors and the
+   three-caveat Brain gate rule: left unchanged here. The diagnosis above says which ones
+   look like accidental permanent holds.
+4. **Plan.** Credits for the fleet (Builder or higher recommended) and the
+   `MERRYMEN_FOMO_PLAN_CREDITS` value.
+5. **Stage E canary.** Name the agent, its scout budget and the live allowlist entry.
+
+## Status labels
+
+**IMPLEMENTED:** code exists and is wired. **FIXTURE_TESTED:** tests pass against fixtures
+constructed from the provider's documentation (not captured responses).
+**AUTHENTICATED_TESTED:** verified with a real key; none yet. **PAPER_TESTED:** exercised
+by a real paper agent end to end; none yet. **LIVE_AUTHORIZED:** owner-approved live use;
+none. **NOT_YET_VERIFIED:** behaviour assumed from documentation (stream heartbeats, ring
+retention, thesis-by-token Robinhood filtering, holders coverage, paid-plan daily ceiling).
+
+## Capability report (documented baseline, fetched 2026-10-04T16:05Z)
+
+Statuses move to AUTHENTICATED_TESTED, PARTIAL, ENTITLEMENT_BLOCKED or UNAVAILABLE as calls
+are observed. They are stored in `fomo_capabilities` and shown by
+`fomo_get_research_status`.
+
+| Capability | Route | Status | Evidence | As of |
+|---|---|---|---|---|
+| account | `/v2/me` | DOCUMENTED | documented: /v1 catalogue GET /v2/me: plan, credits{monthly,usedThisMonth,prepaid,remaining}, streams{appFeed,onChain}; zero credits; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| leaderboard | `/v2/leaderboard/{window}` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/{window}: window 24h\|7d\|30d\|all, limit 1-150 (100 on all), 250 credits per call; rows carry userId; no chain filter; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| trader-by-handle | `/v2/users/{handle}` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}: 2,500 credits on a hit, 250 on an unresolvable handle, refunded while wallets are resolving; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| trader-by-id | `/v2/users/id/{userId}` | DOCUMENTED | documented: openapi.json GET /v2/users/id/{userId}: same identity payload as the handle route, 2,500 credits; 404 does not consume the allowance; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| positions | `/v2/users/{userId}/positions` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/positions (userId accepted): 25 closed per cursor page, 250 credits per page; the vendor states a full history is not obtainable at any setting; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| swaps | `/v2/users/{userId}/swaps` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/swaps: 100 fills per cursor page, 250 credits per page; tradeIdIn/tradeIdOut join to positions; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| swaps-relay | `/v2/users/{userId}/swaps?source=relay` | PARTIAL | documented: listed only in the /v1 catalogue, absent from openapi.json; covers Relay-routed flow only (vendor measured 96% in-window); 409 retryable while a wallet resolves; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| balances | `/v2/users/{userId}/balances` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/balances: upstream cap of ~100 holdings with no way past it, so totalValueUsd is a floor when truncated; ?chain= narrows rows; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| following | `/v2/users/{userId}/following` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/following: at most 200 names upstream, flat 250 credits; 503 retryable never means not-found; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| spotlight | `/v2/users/{userId}/spotlight` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/spotlight: the vendor's own pick of best trades and theses, 250 credits; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| theses | `/v2/thesis` | DOCUMENTED | documented: openapi.json GET /v2/thesis: recent theses across coins with networkId and equity (no likes); ?chain= filter; 1,250 credits per page; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| theses-by-token | `/v2/thesis/token/{address}` | PARTIAL | documented: openapi.json GET /v2/thesis/token/{mint}: the network enum is sol\|bnb\|base\|eth\|arc with no robinhood value, so a Robinhood token is queried without one and every row's networkId must be checked; 1,250 credits per page; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| theses-by-user | `/v2/thesis/user/{userId}` | DOCUMENTED | documented: openapi.json GET /v2/thesis/user/{id}: every thesis by one trader, sort likes\|recent, ?chain=; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| theses-by-user-token | `/v2/thesis/user/{userId}/token/{address}` | DOCUMENTED | documented: openapi.json GET /v2/thesis/user/{id}/token/{address}: one trader's theses on one token; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| trade-detail | `/v2/trades/{tradeId}` | DOCUMENTED | documented: openapi.json GET /v2/trades/{tradeId}: swaps, transfers, entry/exit, realized PnL, isDev; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| trade-comments | `/v2/trades/{tradeId}/comments` | DOCUMENTED | documented: openapi.json GET /v2/trades/{tradeId}/comments: thread with parentId, limit 1-200, 250 credits; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-stats | `/v2/token/{address}/stats` | DOCUMENTED | documented: openapi.json GET /v2/token/{address}/stats: windows 5m\|1h\|4h\|24h, volumes sent as strings, buySellRatio null with no sells; networkId needed outside the vendor directory; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-devs | `/v2/token/{address}/devs` | DOCUMENTED | documented: openapi.json GET /v2/token/{address}/devs: deployer and insider positions with their theses; an empty list is not a clean bill of health; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-holders | `/token/{address}/holders` | PARTIAL | documented: openapi.json GET /token/{address}/holders is populated from captured balances, and GET /health and GET /v1 report a captured dataset of 8 traders, so the holder set is tiny and an absence proves nothing; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-board-trending | `/v2/leaderboard/tokens/trending` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/trending: live with a 5-minute cache; source captured means a fallback board; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-board-graduated | `/v2/leaderboard/tokens/graduated` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/graduated: same shape as trending; small caps by nature; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-board-most-held | `/v2/leaderboard/tokens/most-held` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/most-held: holders is null on this board upstream; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-activity | `/v2/tokens/activity` | PARTIAL | documented: openapi.json GET /v2/tokens/activity: the vendor states its upstream stopped publishing this board on 2026-08-23; answers carry stale:true; not wired into the client; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-candles | `/v2/token/{address}/candles` | PARTIAL | documented: listed in the /v1 catalogue and the pricing page (Growth and Scale only) but absent from openapi.json; not wired into the client; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| search | `/v2/search` | DOCUMENTED | documented: openapi.json GET /v2/search: traders and tokens, each with a type; trader rows carry userId; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| tokens-search | `/v2/tokens/search` | DOCUMENTED | documented: openapi.json GET /v2/tokens/search: symbol/name to address, networkId, market cap; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| alerts-rest | `/v2/alerts` | DOCUMENTED | documented: openapi.json GET /v2/alerts: the app feed's LARGE events only (floor near $3,000 of position value), opaque cursor checkpointing, 125 credits; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| ws-alerts | `/ws/alerts` | DOCUMENTED | documented: openapi.json WSS /ws/alerts: app feed on every plan, zero credits; paid keys realtime, a free key delayed 15 s after 7 days; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| ws-trades | `/ws/trades` | DOCUMENTED | documented: openapi.json WSS /ws/trades: on-chain stream for Growth or Scale keys only; a lower plan is refused (403 or close 1008) and is ENTITLEMENT_BLOCKED once probed; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| trading-account | `/v2/trading/*` | UNSUPPORTED | policy: the vendor's order-placing account product; Merrymen keeps its own execution system and the client refuses the path; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| credit-top-up | `/pay/create` | UNSUPPORTED | policy: a payment flow; Merrymen never pays through a research adapter and the client refuses the path; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
