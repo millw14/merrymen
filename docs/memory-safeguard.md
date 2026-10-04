@@ -1,9 +1,24 @@
-# Preserving existing agent homes before the first memory-ferry deployment
+# Preserving memory and original accounting through renewal and deployment
 
 This is a reviewed operator procedure, not an automatic deployment step. It
 requires Milla's approval of the change and temporary production access. The
 tools below have been prepared and tested locally; preparing them does not
 authorize a production halt, database write, SSH-key registration or deployment.
+
+Permission renewal stops the old signing permission and retains the agent's
+roster, identity, history and memory. Explicit agent deletion still forgets
+personal/group memory and invalidates any staged import generation. Cleanup
+waits for the writer to exit; it retains the original financial book and removes
+obsolete signing-key/bot configuration copies. A failed or incomplete final
+accounting copy retains its lease and source rather than discarding them.
+
+**Do not stage production changes before the final encrypted source backup is
+verified and downloaded.** Staged changes are shared across the environment;
+another dashboard operation can commit the entire patch. Coordinate with other
+active tasks first. Never use global keyboard shortcuts in the Railway SQL
+editor while deployment changes are pending. Use the connector/read-only CLI or
+a precisely scoped SQL Run button. Preparing a local configuration file is safe;
+creating a staged environment patch exposes an actionable production change.
 
 The first deployment needs this extra step: the old container has owner memory
 on its ephemeral disk and cannot run the new personal-memory ferry on shutdown.
@@ -83,8 +98,8 @@ the bundled CLI in that same repository-root layout against an encrypted fixture
 
 1. Confirm the exact old Railway deployment ID and commit, orchestrator PID,
    and **one active replica**. Confirm no deployment is automatically replacing
-   it while this procedure runs. Prepare/build the new image while the old
-   deployment remains active. Keep the old container until the final checkpoint
+   it while this procedure runs. Build and test the revision locally and in CI;
+   leave the live service configuration unchanged. Keep the old container until the final checkpoint
    and preseed succeed. If there are multiple replicas, stop here: their stale
    homes cannot safely be selected by an insert-only seed without recording the
    lease-owning source first.
@@ -140,11 +155,9 @@ the bundled CLI in that same repository-root layout against an encrypted fixture
    accepting the deleted incarnation's memory. No-home stored rows remain
    unchanged. The final artifact must be less than five minutes old; if needed,
    capture again while the halt remains in place **before the first seed**.
-7. Deploy only after final backup verification, checkpoint and seed all succeed.
-   Confirm the new deployment restores the memory rows, preserves approved
-   groups and accounting, and has one listener per bot. Retain the encrypted
-   artifact for approved recovery; never restore it over a later privacy
-   request or current memory without another explicit review.
+7. Complete the original-book handover below before deploying. Partial paper
+   book, cost-basis or chat restoration cannot restore original accounting
+   source IDs. The memory-only backup does not authorize bypassing that check.
 
 The common source arguments are public values verified in step 1:
 
@@ -162,6 +175,102 @@ halt this procedure itself created, and only if its inode and operation-token
 text remain unchanged and the exact old deployment is still active. A
 pre-existing or changed halt stays in place. This resumes the old fleet without
 another approval question; completed mirror batches remain safe to retry.
+
+## One-shot original-book handover to persistent storage
+
+Ordinary deployments must reuse a verified Railway volume. The fleet's
+`MERRYMEN_HOME` must exactly equal `RAILWAY_VOLUME_MOUNT_PATH`, with
+`MERRYMEN_PERSISTENT_HOME_REQUIRED=1` and an operator-pinned provider UUID in
+`MERRYMEN_HOME_VOLUME_ID`. The code verifies the actual writable kernel mount,
+private plain directories, no nested mounts and a durable volume manifest.
+Provider UUID and inode identity persist across starts; device numbers are
+checked within each current mount namespace. No container-overlay fallback is
+accepted when this feature is required.
+
+A first **empty** volume additionally requires `MERRYMEN_INITIAL_HANDOVER`.
+Before any ordinary writer, the orchestrator creates and syncs its own
+`FLEET_HALT` and manifest. It never clears that hold automatically. Existing
+data without a manifest, a different volume, a replaced halt or a partial first
+initialization requires reviewed recovery; startup refuses and retains data.
+
+`worker/src/ledger-handover-cli.ts` is an explicit operator tool, separate from
+the normal worker and memory-only capture:
+
+| Mode | Required state | Effect |
+| --- | --- | --- |
+| `preflight` | Exact current deployment/commit/PID and one replica | Read-only public coverage: existing books, never-created books, historical missing books and present-but-unverified sources; never declares release eligible |
+| `capture` | Original source halted, all writers exited, final verified memory artifact, final mirror complete | New encrypted fleet artifact containing allowlisted original books, memory, exact grant incarnations and target identity; actual fresh-SQLite round-trip verification |
+| `verify` | Same halted original source and artifact | Rechecks original source, rows, allocation high-water, shared accounting and memory; no staging |
+| `stage` | Same verified original source under healthy tenant leases | Insert-only personal-memory seeding and tenant-bound one-shot ledger imports; no execution or accounting reset |
+| `restore` | Exact reviewed target on its verified mounted volume and own unchanged halt | Original books restored before memory; imported generations consumed transactionally; absent historical books remain explicitly blocked |
+| `complete` | All target books, consumed generations, memory and privacy content verified, no writers | Syncs the completed manifest, then removes only this handover's unchanged halt; never removes tenant accounting barriers |
+
+The financial artifact is **not a raw SQLite export or a recurring snapshot**.
+It transfers only compiled columns from the original agent, events, posts,
+trades, equity, flows, fee accruals, journal, decisions, positions, paper book,
+cost basis, position/trench floors, class positions, risk periods, energy days,
+flow quarantine, Brain trigger state, completed command audit and pool metadata.
+Original row IDs, stamps, journal payload bytes/hashes, nonces, settlement state,
+allocation sequences, spend/review counters and deduplication records are retained.
+It excludes signing keys, authorization, settings, bot/link files and DM rows;
+memory is carried through its existing authenticated privacy boundary.
+
+Each book is limited to 64 MiB and 250,000 rows; the encrypted fleet file is
+limited to 384 MiB (256 MiB plaintext envelope). Oversized or unknown financial
+schema refuses rather than truncates. Pending trades or unfinished commands,
+changed grants, differing shared accounting, missing original cursor witnesses
+or an unhealthy lease also refuse. These export limits do not restrict a healthy
+book growing on its persistent volume during normal use.
+
+Publication is no-clobber and crash-safe: the target records the pending
+generation, syncs a fresh SQLite stage, links it without overwriting an existing
+book, then consumes the shared import transaction. A lost commit acknowledgement
+can finish only that exact generation. Consumption clears the staged encrypted
+payload while retaining a nonpayload receipt bound to the provider volume,
+account, chain, original file inode and an in-book random identity. A missing,
+truncated or replaced book cannot mint another identity or replay the import,
+even when its shared cursors were still zero. Explicit deletion permanently
+fences the old generation; a re-grant may reattach only the exact retained
+original source with its identity and accounting proof.
+
+An absent historical original book is never treated as an empty/new agent.
+`preflight` reports it. After explicit review of those gaps, capture may use
+`--acknowledge-historical-ledger-gaps` to bind their current grant and full shared
+financial digest in the encrypted manifest. Restore writes a durable tenant
+accounting block before restoring memory. Completion checks that block and the
+unchanged accounting; the tenant remains unable to bootstrap, mirror or trade
+until separate reviewed financial recovery. An existing rebuilt book with
+missing witnesses does **not** qualify as an absent-book gap.
+
+Run the one-shot tool with explicit `MERRYMEN_HOME` on the source, even when the
+old service normally derives its home from the OS. All mutating/verification
+modes require `--quiescent --single-replica-confirmed`, the current
+`--expected-deployment`, `--expected-commit` and `--orchestrator-pid`.
+Capture additionally takes `--memory-artifact`, `--output`,
+`--target-volume-id`, `--target-mount-path`, `--target-commit` and
+`--operation-token`. Other modes take `--artifact`. Target modes also require
+the original `--expected-source-deployment`, `--expected-source-commit`,
+`--source-orchestrator-pid` and `--source-orchestrator-start` from the artifact.
+Build its unique repository-root bundle with the same reviewed hash procedure
+used for the memory-only CLI; the DEK remains inside the container.
+
+Only after source capture, fresh restore verification, downloaded ciphertext
+hash verification and stage succeed should the approved volume, variables and
+**exact reviewed CI-green commit** be applied together. Check the entire pending
+environment patch for unrelated changes immediately before committing it. Keep
+the target held until restore and completion pass, then verify one bot listener,
+original book identities/history and unchanged trading limits before reconnecting
+the source to `main`.
+
+If the old deployment was already removed, **stop this handover**. A redeployed
+old image is not evidence that its ephemeral disk returned. A live memory-only
+backup cannot seed a final financial handover. Preserve the current volume,
+encrypted artifacts and shared accounting for separate reviewed recovery; never
+substitute shared database IDs for original source IDs, reset cursors or clear
+accounting blocks to make deployment pass. The old-halt rollback above is valid
+only while the exact old source remains active. After replacement, keep the
+target's hold and seek reviewed recovery instead of claiming that rollback will
+recover the removed filesystem.
 
 During live trading-worker mirroring and final accounting copies, `ledger-source-blocked.json`
 in a tenant's home records an interrupted copy or unexpected source rewind. It

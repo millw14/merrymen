@@ -37,6 +37,7 @@ import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { privateKeyToAccount } from "viem/accounts";
 import { writeFileAtomic } from "./atomic-write";
+import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA } from "./ledger-import-schema";
 
 /** Never evict old authority fences to make room for another permission. */
 export const MAX_RETIRED_SESSION_KEYS = 256;
@@ -460,6 +461,11 @@ export class PgGrantStore implements GrantStore {
                updated_at BIGINT NOT NULL
              )`,
           );
+          // Explicit deletion must fence an already staged original-book
+          // transfer in the same statement as removing its grant. Set up the
+          // nonpayload tombstones before any request can take that path.
+          await c.query(LEDGER_IMPORT_SCHEMA);
+          await c.query(LEDGER_IMPORT_GENERATIONS_SCHEMA);
           if (!alive) throw new Error("grant store connection ended during setup");
         } catch (e) {
           // A failed CREATE must not leave a connection open on every retry.
@@ -541,7 +547,16 @@ export class PgGrantStore implements GrantStore {
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
-    await c.query(`DELETE FROM grants WHERE tenant = $1`, [tenant.toLowerCase()]);
+    await c.query(`WITH gone AS (
+      DELETE FROM grants WHERE tenant = $1 RETURNING tenant
+    ), invalidated AS (
+      UPDATE tenant_ledger_import AS i SET state = 'deleted', sealed = NULL, bytes = 0
+      FROM gone WHERE i.tenant = gone.tenant RETURNING i.generation, i.tenant
+    ), fenced AS (
+      UPDATE tenant_ledger_import_generations AS g SET state = 'deleted'
+      FROM invalidated WHERE g.generation = invalidated.generation AND g.tenant = invalidated.tenant
+      RETURNING g.generation
+    ) SELECT tenant FROM gone`, [tenant.toLowerCase()]);
   }
   async stopForReplacement(tenant: `0x${string}`, expectedAccount?: string, expectedSession?: string): Promise<ReplacementStopResult> {
     const c = await this.client();
@@ -572,7 +587,16 @@ export class PgGrantStore implements GrantStore {
   async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
     const c = await this.client();
     const t = tenant.toLowerCase();
-    const { rows } = await c.query(`DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant`, [t, atSec]);
+    const { rows } = await c.query(`WITH gone AS (
+      DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant
+    ), invalidated AS (
+      UPDATE tenant_ledger_import AS i SET state = 'deleted', sealed = NULL, bytes = 0
+      FROM gone WHERE i.tenant = gone.tenant RETURNING i.generation, i.tenant
+    ), fenced AS (
+      UPDATE tenant_ledger_import_generations AS g SET state = 'deleted'
+      FROM invalidated WHERE g.generation = invalidated.generation AND g.tenant = invalidated.tenant
+      RETURNING g.generation
+    ) SELECT tenant FROM gone`, [t, atSec]);
     if (rows.length > 0) return "removed";
     // Nothing deleted: either there is no row, or it was put after the kill.
     // This read only names which — the decision was the DELETE above.

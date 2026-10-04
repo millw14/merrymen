@@ -116,6 +116,9 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
+import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
+import { preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
+import { scrubHostedGrantCache } from "./hosted-grant-cache";
 import {
   clearHoldNotified,
   ensureTelegramSchema,
@@ -868,6 +871,12 @@ export function hasLeaseForTest(tenant: string): boolean {
   return leases.has(tenant.toLowerCase());
 }
 
+/** Cold-start integration seam: never acquires or replaces a production lease. */
+export function setTenantLeaseForTest(tenant: `0x${string}`, lease: TenantLease | null): void {
+  if (localMemoryWriterPresent(tenant)) throw new Error("Test lease substitution requires an idle tenant.");
+  if (lease) leases.set(tenant, lease); else leases.delete(tenant);
+}
+
 /**
  * The advisory lease held for each tenant we are running, keyed by lowercased
  * tenant. Acquired in reconcile() BEFORE the first spawn and held across crash
@@ -1541,6 +1550,11 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
     await forgetUnwantedPersonalMemory({ shared, wanted, listedAtMs, log });
   } catch {
     log("personal-memory: stored memory of removed agents not swept this pass — next reconcile retries");
+  }
+  try {
+    await invalidateLedgerImportsUnlessListed(await makePgDb(url), wanted, listedAtMs);
+  } catch {
+    log("ledger-import: removed-agent payload cleanup deferred; original books and generation fences remain protected");
   }
 }
 
@@ -2411,9 +2425,18 @@ const LEDGER_SOURCE_BLOCK = "ledger-source-blocked.json";
 // A failure to persist a missing live source must not permit a later fresh book
 // in this supervisor. Keep the deployment for recovery if durable storage fails.
 const blockedLedgerHomes = new Set<string>();
+const removedLedgerPending = new Map<string, TenantLease>();
+let persistentHomeVerifierForTest: (() => PersistentHomeIdentity | null) | null = null;
+/** Filesystem integration tests substitute only the kernel/provider proof. */
+export function setPersistentHomeVerifierForTest(verifier: typeof persistentHomeVerifierForTest): void {
+  persistentHomeVerifierForTest = verifier;
+}
+function persistentFleetHome(): PersistentHomeIdentity | null {
+  return persistentHomeVerifierForTest ? persistentHomeVerifierForTest() : verifyPersistentHome();
+}
 
 /** A pending guarded mirror also survives a supervisor crash before its report. */
-function ledgerSourceBlocked(home: string): boolean {
+function ledgerSourceBlocked(home: string, includeImport = true): boolean {
   if (blockedLedgerHomes.has(home)) {
     // Retry only persistence, never clearance. Storage recovering must not
     // turn a failed source-loss fence into permission to start a fresh book.
@@ -2429,7 +2452,35 @@ function ledgerSourceBlocked(home: string): boolean {
     return true;
   }
   try { lstatSync(path.join(home, LEDGER_SOURCE_BLOCK)); return true; }
+  catch (error) { if ((error as { code?: unknown }).code !== "ENOENT") return true; }
+  // An import whose transaction/publication has not completed cannot be
+  // mirrored, reset or handed to a worker. Only restoreLedgerImport clears it.
+  if (!includeImport) return false;
+  try { lstatSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)); return true; }
   catch (error) { return (error as { code?: unknown }).code !== "ENOENT"; }
+}
+
+/** Persistent production books are proved before any partial restore can create one. */
+async function preparePersistentLedgerForChild(tenant: `0x${string}`, grant: StoredGrant, lease: TenantLease): Promise<boolean> {
+  const volume = persistentFleetHome();
+  if (!volume) return true; // Existing self-hosted operation does not opt into Railway storage.
+  try {
+    const dek = retirementMemoryStoreForTest ? retirementMemoryStoreForTest.dek : storeDek(), url = process.env.DATABASE_URL;
+    if (!dek || (!url && !retirementMemoryStoreForTest) || leases.get(tenant) !== lease || !lease.healthy()) throw new Error("Unavailable ledger handover authority.");
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    const dialect = retirementMemoryStoreForTest?.dialect ?? "postgres";
+    if (leases.get(tenant) !== lease || !lease.healthy()) throw new Error("Changed ledger handover lease.");
+    await restoreLedgerImport({ tenant, smartAccount: grant.smartAccount.toLowerCase(), chainId: grant.chainId,
+      home: childHome(tenant), volume, shared, dek, lease, dialect });
+    // A genuinely new book needs a durable external receipt as well. An empty
+    // source must not become replayable after loss of the mounted volume.
+    await registerLedgerSource({ tenant, smartAccount: grant.smartAccount.toLowerCase(), chainId: grant.chainId,
+      home: childHome(tenant), volume, shared, lease, dialect });
+    return leases.get(tenant) === lease && lease.healthy() && !ledgerSourceBlocked(childHome(tenant));
+  } catch {
+    log(`[alert] ${tenant}: persistent original book is unconfirmed — retaining the home without starting a worker or holder`);
+    return false;
+  }
 }
 
 async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant), stillOwned?: () => boolean) {
@@ -2506,10 +2557,11 @@ export async function finalMirrorBeforeAnchor(
       lease ? () => leases.get(tenant) === lease && lease.healthy() : undefined);
     if (r.failed) {
       log(`${tenant}: final mirror before the anchor STALLED — ${Object.entries(r.failed).map(([k, v]) => `${k}: ${v}`).join(" | ")}`);
+      return false;
     }
     const counts = mirrorCountsLine(tenant, r);
     if (counts) log(`${counts} (final pass before the anchor)`);
-    return true;
+    return !r.hasMore;
   } catch (e) {
     log(`${tenant}: final mirror before the anchor failed — ${e instanceof Error ? e.message : String(e)}`);
     return false;
@@ -2637,6 +2689,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   if (accountingTenantHeld(tenant)) return;
   if (retiringExpired.has(tenant)) return;
+  if (removedLedgerPending.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
   // Checking `children` is not enough: this function awaits a dozen times
   // before the child exists, and a second caller arriving in that window saw
@@ -2682,6 +2735,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: a Telegram kill is pending — not spawning`);
       return;
     }
+    // Check the fleet root before writing a tenant key or any bootstrap file.
+    persistentFleetHome();
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
       log(`${tenant}: no usable signed grant in the store — not spawning`);
@@ -2702,6 +2757,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: signed grant expired or has no valid expiry — not starting a worker; re-sign required`);
       return;
     }
+    if (!(await preparePersistentLedgerForChild(tenant, grantForChild.grant, lease))) return;
     if (!(await ledgerSourceAllowsResume(tenant))) return;
     // The settings the child will actually read, so the watchdog can size its
     // patience to the tick that child will actually run. `tickSeconds` resolves
@@ -3813,6 +3869,20 @@ async function mirrorRetiredWorker(tenant: string, lease: TenantLease, mirrorLed
 }
 
 /** Stop expired processes, then wait for exit and a complete final ledger copy. */
+async function scrubInactiveGrantForChild(tenant: `0x${string}`, nowSec: number): Promise<void> {
+  if (localMemoryWriterPresent(tenant)) return;
+  try {
+    const current = await getGrantStore().get(tenant);
+    // No await between the fresh authority read and the synchronous identity
+    // checks/unlink. Only grant.json is removed; memory and the book remain.
+    scrubHostedGrantCache(childHome(tenant), current, {
+      nowSec, writerAbsent: !localMemoryWriterPresent(tenant), hosted: true,
+    });
+  } catch {
+    log(`${tenant}: inactive signing-key cache cleanup deferred; original home remains preserved`);
+  }
+}
+
 async function retireExpiredGrants(
   tenants: readonly `0x${string}`[],
   expiries: Map<string, number | null>,
@@ -3822,6 +3892,9 @@ async function retireExpiredGrants(
     const lc = tenant.toLowerCase() as `0x${string}`;
     const expiry = expiries.get(lc);
     if (typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec) continue;
+    // Cold inactive tenants have no process or lease, but can still retain an
+    // obsolete signing-key copy on the mounted volume.
+    await scrubInactiveGrantForChild(lc, nowSec);
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
@@ -3871,6 +3944,7 @@ async function retireExpiredGrants(
     if (lease && lease !== retirement.lease) continue;
     await releaseLease(tenant);
     retiringExpired.delete(tenant);
+    await scrubInactiveGrantForChild(tenant as `0x${string}`, nowSec);
     log(`${tenant}: expired process exited and final mirror pass completed — capacity released; stored grant can be re-signed`);
   }
 }
@@ -4048,6 +4122,15 @@ export async function reconcile(): Promise<void> {
     standDownHolder(tenant);
   }
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
+  // A delete/re-grant cannot outrun the stopped source's unfinished final
+  // copy. Retry under precisely the retained lease before permitting a fork.
+  for (const [tenant, lease] of removedLedgerPending) {
+    if (localMemoryWriterPresent(tenant) || leases.get(tenant) !== lease || !lease.healthy()) continue;
+    const url = process.env.DATABASE_URL;
+    if (!url && !retirementMemoryStoreForTest) continue;
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    if (await finalMirrorBeforeAnchor(tenant, shared, childHome(tenant), lease)) removedLedgerPending.delete(tenant);
+  }
   // A stored but expired key is still wanted for revocation, home and Telegram
   // memory cleanup. It cannot sign another operation, so it does not need an
   // OS worker. The worker enforces this same expiry when it arms; the fetched
@@ -4095,7 +4178,9 @@ export async function reconcile(): Promise<void> {
     if (holders.has(lc)) continue;
     // A capacity handoff must not release an uncertain source's recovery
     // lease before spawnChild has a chance to see its tenant-local fence.
-    if (ledgerSourceBlocked(childHome(lc))) continue;
+    // The importer, under this tenant's lease, is allowed to finish its own
+    // pending generation. A source-loss/mirror barrier still refuses here.
+    if (ledgerSourceBlocked(childHome(lc), false)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
@@ -4292,18 +4377,13 @@ export async function reconcile(): Promise<void> {
     if (!wanted.has(tenant)) {
       log(`${tenant} grant removed — standing it down`);
       killChild(tenant);
-      try {
-        rmSync(childHome(tenant), { recursive: true, force: true });
-      } catch {
-        /* best-effort cleanup */
-      }
       // AND THE SEALED COPY OF ITS TELEGRAM GROUPS, which would otherwise
       // outlive the home it came from. See forgetTgGroups.
       await forgetTgGroups(tenant);
     }
   }
-  // AND ANY HELD TENANT'S, the same way: its hold process stopped and its home
-  // wiped. A Telegram /kill sent to a hold process lands here too, once the
+  // AND ANY HELD TENANT'S, the same way: its process must exit before cleanup.
+  // A Telegram /kill sent to a hold process lands here too, once the
   // order ferry has carried it to the store. Never mirrored first: a held
   // book is exactly the one the mirror must not copy (see `holders`).
   for (const [tenant, held] of [...holders]) {
@@ -4316,11 +4396,6 @@ export async function reconcile(): Promise<void> {
     standDownHolder(tenant);
     holdAlerted.delete(tenant);
     holdNoticed.delete(tenant);
-    try {
-      rmSync(childHome(tenant), { recursive: true, force: true });
-    } catch {
-      /* best-effort cleanup */
-    }
     // AND ITS TELEGRAM GROUPS, sealed copy and all, as for a child: a hold
     // keeps the group memory (it is never published or restored while held),
     // but the grant going takes it. See forgetTgGroups.
@@ -4347,8 +4422,8 @@ export async function reconcile(): Promise<void> {
    * after the last mirror pass left rows in it that are nowhere else, and the
    * spawn that would have carried them up (finalMirrorBeforeAnchor) is not
    * coming. Without the lease it is not ours to write: another replica may
-   * have run the tenant since. A failed copy is logged and the home is wiped
-   * regardless, as the spawn path derives its anchor regardless.
+   * have run the tenant since. Retain the original financial source even
+   * after a successful copy: accounting IDs and deduplication are durable.
    */
   for (const tenant of childHomeTenants()) {
     if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
@@ -4359,19 +4434,42 @@ export async function reconcile(): Promise<void> {
     // Never a held book (see `holders`): a stood-down one whose process has
     // not exited still has the lease it kept, and its home may reach here.
     const expectedLease = leases.get(tenant);
-    if (url && expectedLease?.healthy() && !holders.has(tenant)) {
+    if ((url || retirementMemoryStoreForTest) && expectedLease?.healthy() && !holders.has(tenant)) {
       try {
-        await finalMirrorBeforeAnchor(tenant, await makePgDb(url), childHome(tenant), expectedLease);
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+        if (!(await finalMirrorBeforeAnchor(tenant, shared, childHome(tenant), expectedLease)))
+          removedLedgerPending.set(tenant, expectedLease);
       } catch (e) {
-        log(`${tenant}: last mirror before wiping its home failed — ${e instanceof Error ? e.message : String(e)}`);
+        removedLedgerPending.set(tenant, expectedLease);
+        log(`${tenant}: last mirror before removed-agent cleanup failed — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
-    log(`${tenant} grant removed — wiping the home it left with no child running`);
     try {
-      rmSync(childHome(tenant), { recursive: true, force: true });
+      // The earlier roster can be stale after the final mirror's awaits.
+      // Never erase a renewal/re-grant's retained home on that old snapshot.
+      const retained = (await getGrantStore().listTenants()).some(t => t.toLowerCase() === tenant);
+      if (retained || localMemoryWriterPresent(tenant)) continue;
+      const current = await getGrantStore().get(tenant as `0x${string}`);
+      if (current || localMemoryWriterPresent(tenant)) continue;
+      const home = childHome(tenant);
+      scrubHostedGrantCache(home, current, { nowSec: Math.floor(Date.now() / 1000), writerAbsent: true, hosted: true });
+      forgetTgGroupsHome(home, log);
+      forgetPersonalMemoryHome(home, log);
+      if (existsSync(path.join(home, "merrymen.db"))) {
+        // Erase obsolete bot/config copies while preserving the original book
+        // and all crash/consumption barriers. No raw ledger archive is made.
+        for (const file of ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"])
+          rmSync(path.join(home, file), { force: true });
+        fsyncDirSync(home);
+        log(`${tenant} grant removed — personal memory and cached access cleared; original accounting retained`);
+      } else {
+        // A pending or consumed book must never be replaced by an empty home.
+        if (ledgerSourceBlocked(home) || persistentFleetHome()) continue;
+        rmSync(home, { recursive: true, force: true });
+      }
     } catch {
-      /* best-effort cleanup */
+      log(`${tenant}: removed-agent cleanup deferred; retaining its original home`);
     }
   }
   // AND EVERY OTHER TENANT'S WHOSE GRANT IS GONE, running here or not: the
@@ -4389,7 +4487,8 @@ export async function reconcile(): Promise<void> {
   // lease is what stops another replica, in a deploy overlap say, from arming
   // a grant signed again beside it. It goes when the exit does (watchHolder).
   for (const tenant of [...leases.keys()]) {
-    if (!wanted.has(tenant) && !retiringExpired.has(tenant) && !exitingChildren.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
+    if (!wanted.has(tenant) && !retiringExpired.has(tenant) && !removedLedgerPending.has(tenant)
+        && !ledgerSourceBlocked(childHome(tenant)) && !exitingChildren.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
   }
 }
 
@@ -8761,6 +8860,10 @@ export async function runOrchestrator(): Promise<void> {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
+  // A new mounted home first writes its own durable halt. No child, holder,
+  // accounting repair or ordinary writer may precede this preparation.
+  const persistent = preparePersistentHomeForHandover();
+  if (persistent?.handoverState === "held") log("persistent home awaits verified original-book and memory handover; fleet remains halted");
   // Validate the complete operator list before any diagnosis, mutation or
   // child starts. A malformed entry must never silently drop from a hold.
   const accountingHolds = accountingHoldTenants(process.env);

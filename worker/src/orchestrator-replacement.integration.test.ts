@@ -1,7 +1,7 @@
 /** Permission replacement stops the old worker while retaining its memory and ledger. */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -10,7 +10,7 @@ import type { ChildProcess } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 import type { TenantLease } from "./tenant-lease";
 
-const fleet = mkdtempSync(path.join(os.tmpdir(), "merrymen-replacement-"));
+const fleet = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-replacement-")));
 process.env.MERRYMEN_HOME = fleet;
 process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
@@ -144,8 +144,13 @@ it("retains soul, DM and group history through a replacement stop, exit, failed 
 
   await store.remove(tenant);
   await reconcile();
+  assert.ok(existsSync(childHome(tenant)), "explicit deletion waits for the old writer to exit");
   spawned.at(-1)!.exit();
-  assert.equal(existsSync(childHome(tenant)), false, "an explicit removal still removes the home");
+  await reconcile();
+  assert.ok(existsSync(path.join(childHome(tenant), "merrymen.db")), "the original accounting source survives explicit removal");
+  assert.equal(existsSync(path.join(childHome(tenant), "soul", "OWNER.md")), false, "explicit removal still forgets personal memory");
+  assert.equal(existsSync(path.join(childHome(tenant), "tg-groups.json")), false);
+  assert.equal(existsSync(path.join(childHome(tenant), "grant.json")), false, "the stopped hosted signing-key cache is removed after exit");
   setRetirementMirrorForTest(null);
 });
 
