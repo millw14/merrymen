@@ -12,7 +12,7 @@ import { RecoveryReplyBotLeases } from "./recovery-reply-lease";
 import { openRecoveryReplyState, readRecoveryReplyOffset, readReplyPrivacy, RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import { PgTenantLeaseManager, leaseKey } from "./tenant-lease";
 import { openSecret, sealSecret } from "./store-crypto";
-import { createRecoveryPublicReply, RECOVERY_PUBLIC_CONTEXT, RECOVERY_PUBLIC_GREETING, RECOVERY_PUBLIC_HELD } from "./telegram/recovery-public-reply";
+import { createRecoveryPublicReply, RECOVERY_PUBLIC_CONTEXT, RECOVERY_PUBLIC_GREETING, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_BUTTON_HELD } from "./telegram/recovery-public-reply";
 import type { Db } from "./db";
 import type { TelegramOpts, TgMessage } from "./telegram/api";
 
@@ -412,7 +412,7 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     const f = await fixture(s);
     f.transport.getUpdates = async () => ({ ...updates([f.msg(1, "/chart FROG"), f.msg(2, "/lore FROG"), f.msg(3, "/market"), f.msg(4, "/buy FROG")], 6), callbacks: [{ updateId: 5, id: "old-financial-button", chatId: 701, fromId: 701, messageId: 100, data: "confirm-buy", date: Math.floor(f.clock() / 1000) }] });
     const callbacks: string[] = []; f.transport.answerCallbackQuery = async (_opts, _id, text) => { callbacks.push(text ?? ""); return { ok: true }; };
-    await f.run(); assert.deepEqual([...f.replies].sort(), ["/chart FROG", "/lore FROG", "/market"].sort()); assert.ok(f.sends.some(sent => sent.text === RECOVERY_PUBLIC_HELD)); assert.match(callbacks[0]!, /cannot authorize/);
+    await f.run(); assert.deepEqual([...f.replies].sort(), ["/chart FROG", "/lore FROG", "/market"].sort()); assert.ok(f.sends.some(sent => sent.text === RECOVERY_PUBLIC_HELD)); assert.equal(callbacks[0], RECOVERY_PUBLIC_BUTTON_HELD);
     assert.equal(Number((await f.offset())!.offset_id), 6);
   });
 
