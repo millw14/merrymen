@@ -4,10 +4,11 @@
  * Distinct from /api/scoreboard, which is per-caller and deliberately scoped —
  * its own header calls the unscoped version "a customer-list dump". This one
  * publishes a much narrower row: no smart account, no caps, no fees, no
- * high-water mark, and no absolute dollar figure at all. See lib/read-leaderboard.
+ * high-water mark. Aggregate dollar figures require the owner's public-book
+ * opt-in. See lib/read-leaderboard.
  *
- * Cacheable for the same reason /api/theses is: there is no `tenantOf` and no
- * per-caller anything in this file or in the module it calls.
+ * Percentage-only directory responses are shared-cacheable. A public-book
+ * response is not stored, so turning publication off cannot replay its dollars.
  */
 import { NextResponse } from "next/server";
 import { readLeaderboard } from "@/lib/read-leaderboard";
@@ -34,7 +35,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const r = await readLeaderboard();
+  const publishedBook = r.agents.some((agent) => agent.performance?.publicBook === true);
   return NextResponse.json(r, {
-    headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=120" },
+    headers: { "Cache-Control": publishedBook ? "no-store" : "public, s-maxage=60, stale-while-revalidate=120" },
   });
 }

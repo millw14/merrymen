@@ -363,13 +363,14 @@ test("the actual financial reads use applied account/run indexes rather than sca
       for (let at = 1; at <= 20; at++) trade.run(account, `${account}-op-${at}`, at);
     }
     raw.exec("COMMIT; ANALYZE");
-    const plans: { sql: string; details: string }[] = [];
+    const plans: { sql: string; details: string; nestedDetails: string }[] = [];
     const actual: Db = { ...db, prepare(sql) {
       const statement = db.prepare(sql);
       return { ...statement, async get(...params) {
         if (sql.includes("LOWER(agent_id)") || sql.includes("LOWER(t.agent_id)")) {
           const rows = raw.prepare("EXPLAIN QUERY PLAN " + sql).all(...params as never[]);
-          plans.push({ sql, details: rows.map((row) => String(row.detail)).join("\n") });
+          plans.push({ sql, details: rows.map((row) => String(row.detail)).join("\n"),
+            nestedDetails: rows.filter((row) => Number(row.parent) !== 0).map((row) => String(row.detail)).join("\n") });
         }
         return statement.get(...params);
       } };
@@ -378,12 +379,18 @@ test("the actual financial reads use applied account/run indexes rather than sca
     const equities = plans.filter((p) => p.sql.includes("FROM equity"));
     assert.equal(equities.length, 2, "both raw current and measured financial marks are checked");
     for (const plan of equities) {
-      assert.match(plan.details, /SEARCH equity USING INDEX equity_agent_run_normalized \(<expr>=\? AND epoch=\?\)/);
+      // SQLite versions may also push the valuation cutoff into the index
+      // search. Both plans must still constrain the normalized account/run.
+      assert.match(plan.details, /SEARCH equity USING INDEX equity_agent_run_normalized \(<expr>=\? AND epoch=\?(?:\)| AND )/);
       assert.doesNotMatch(plan.details, /SCAN equity/);
     }
     const flows = plans.find((p) => p.sql.includes("FROM flows"))!;
-    assert.match(flows.details, /SEARCH flows USING INDEX flows_agent_run_normalized \(<expr>=\? AND epoch=\?\)/);
+    assert.match(flows.details, /SEARCH flows USING INDEX flows_agent_run_normalized \(<expr>=\? AND epoch=\?(?:\)| AND )/);
+    assert.doesNotMatch(flows.details, /SCAN flows/);
     const trades = plans.find((p) => p.sql.includes("FROM trades"))!;
-    assert.match(trades.details, /SEARCH t USING INDEX trades_agent_run_normalized \(<expr>=\? AND epoch=\?\)/);
+    assert.match(trades.details, /SEARCH t USING INDEX trades_agent_run_normalized \(<expr>=\? AND epoch=\?(?:\)| AND )/);
+    // The outer aggregate scans its already scoped coroutine result, also
+    // named t. Only nested accesses can scan the underlying trades table.
+    assert.doesNotMatch(trades.nestedDetails, /SCAN t\b/);
   } finally { raw.close(); }
 });
