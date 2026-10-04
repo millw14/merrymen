@@ -39,7 +39,11 @@ without inventing authorization for the affected bot.
 ## Controlled rollout
 
 After review and all required CI checks, pin the orchestrator service to the
-reviewed commit and set these service variables together:
+reviewed main commit and set these service variables together. Production
+deployments and PostgreSQL writes are currently on hold until the operator
+approves a concrete plan in chat. The restrictive-control migration below
+also requires a verified PostgreSQL backup and GitHub approval before rollout.
+Announce each deployment before triggering it; never deploy a codex/* branch.
 
 ```text
 MERRYMEN_START=start:recovery-replies
@@ -85,6 +89,33 @@ trading. Greetings also explain that coin and chart questions remain available.
 Ordinary room chatter stays quiet. Explicit coin requests such as `chart HI`
 still use the public research path; trading commands remain held.
 
+The linked, individually allowlisted owner can also send exact `/pause`,
+`/kill`, `/confirm` and `/cancel` commands. Approved groups require the exact
+`/command@bot_username` form or a plain slash command replying to this bot;
+being a member of an approved room does not give another member control.
+File `telegramControlEnabled` overrides the operator setting, with the same
+default as the ordinary worker. A present malformed flag refuses; a disabled
+flag records no new pause, kill or confirmation. Cancellation of an existing
+pending request remains available and cannot lift any pause or confirmed kill.
+
+These commands append scoped metadata to `recovery_reply_controls` in the
+same transaction as the bot offset, after current authority and lease checks.
+The listener acknowledges only a recorded request. It does not delete or revoke
+permissions, change an agent's financial state or execute a kill. `/resume`
+stays held. A `/kill` confirmation must come from the same owner and chat under
+the same current grant/token/claim authority, within the existing 90-second
+window measured from the original kill message. Delayed processing cannot
+restart that window. Each newer request supersedes earlier unconfirmed
+requests in that scope; cancelling or confirming the newest cannot reactivate
+an older request. Prior confirmed kills and pauses remain restrictive.
+
+Post-arm restrictive requests are recorded even when their thirty-second reply
+deadline has expired or response capacity is exhausted. Pre-arm commands remain
+ignored. A failed acknowledgement cannot erase a committed stop, and a failed
+journal write cannot advance the offset. Before any future trading admission,
+the re-baseline and worker handoff must consume these records and preserve
+their protective state; this listener alone does not authorize resumption.
+
 Durable message progress is keyed by the bot stream. Restarts, token changes
 and claim changes preserve its high-water mark. The ordinary worker handoff
 reads that progress only after its existing source, grant and lease gates.
@@ -100,7 +131,7 @@ privacy proof cannot mean that no forget request exists.
 
 For rollback, stop the reply deployment and verify its removal, then use the
 approved **report-only** entry with all original holds intact. Preserve the
-new message progress and privacy journal. Never return to an older ordinary
+new message progress, privacy journal and restrictive-control journal. Never return to an older ordinary
 worker that ignores those records, and never clear the halt to make rollback
 or a test pass.
 

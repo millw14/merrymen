@@ -15,6 +15,8 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { createRecoveryPublicReply, RECOVERY_PUBLIC_CONTEXT, RECOVERY_PUBLIC_GREETING, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_BUTTON_HELD } from "./telegram/recovery-public-reply";
 import type { Db } from "./db";
 import type { TelegramOpts, TgMessage } from "./telegram/api";
+import { RECOVERY_REPLY_CONTROLS_SCHEMA, RECOVERY_PAUSE_RECORDED, RECOVERY_KILL_PROMPT, RECOVERY_KILL_CONFIRMED } from "./recovery-reply-controls";
+import { CONFIRM_TTL_SEC } from "./telegram/kill-confirm";
 
 const URL = process.env.MERRYMEN_TEST_PG_URL;
 const DEK = Buffer.alloc(32, 13);
@@ -103,6 +105,155 @@ async function fixture(t: TestContext, count = 1) {
   const prime = async (offsetId = 0, armedAgo = 0) => { await pool.query(RECOVERY_REPLY_SCHEMA); for (const a of actors) await pool.query("INSERT INTO recovery_reply_offsets VALUES($1,$2,$3,4663,$4,200,$5,$6,$7)", [a.botId, a.tenant, a.account, createHash("sha256").update(a.token).digest("hex").slice(0, 16), offsetId, Math.floor(clock / 1000) - armedAgo, clock]); };
   return { actors, pool, connect, env, home, halt, mount, health, transport, sends, polls, replies, audit, run, msg, offset, prime, original, botClient, tenantClients, clock: () => clock, advance: (ms: number) => { clock += ms; }, hook: (fn: typeof hook) => { hook = fn; } };
 }
+
+test("actual durable owner controls: local PostgreSQL journal, authority and atomic offsets", { skip: !URL, timeout: 120_000 }, async t => {
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(new globalThis.URL(URL!).hostname), "LOCAL test database only");
+  const beforeDatabaseUrl = process.env.DATABASE_URL;
+  t.after(() => assert.equal(process.env.DATABASE_URL, beforeDatabaseUrl, "test must not set DATABASE_URL"));
+
+  await t.test("owner stop controls commit with offsets; confirmations survive listener restart without touching financial state", async s => {
+    const f = await fixture(s), a = f.actors[0]!, original = await f.original(), files = fileFacts(f.home);
+    f.transport.getUpdates = async () => updates([f.msg(1, "/pause"), f.msg(2, "/kill")], 3);
+    await f.run();
+    assert.deepEqual(f.sends.map(x => x.text).sort(), [RECOVERY_PAUSE_RECORDED, RECOVERY_KILL_PROMPT].sort());
+    let rows = (await f.pool.query("SELECT * FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => x.kind), ["pause", "kill-request"]);
+    assert.equal(Number(rows[1]!.expires_at_ms), f.clock() + CONFIRM_TTL_SEC * 1000);
+    assert.ok(rows.every(x => x.tenant === a.tenant && x.smart_account === a.account && Number(x.owner_id) === a.ownerId));
+    assert.equal(Number((await f.offset())!.offset_id), 3);
+    f.advance(1000); f.transport.getUpdates = async () => updates([f.msg(3, "/confirm"), f.msg(4, "/confirm"), f.msg(5, "/resume")], 6);
+    await f.run();
+    rows = (await f.pool.query("SELECT * FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => x.kind), ["pause", "kill-request", "kill-confirm"]);
+    assert.equal(Number(rows[2]!.request_update_id), 2);
+    assert.equal(f.sends.filter(x => x.text === RECOVERY_KILL_CONFIRMED).length, 1);
+    assert.equal(f.sends.filter(x => /no pending kill request/.test(x.text)).length, 1);
+    assert.equal(f.sends.filter(x => x.text === RECOVERY_PUBLIC_HELD).length, 1);
+    assert.equal(Number((await f.offset())!.offset_id), 6); assert.deepEqual(await f.original(), original); assert.deepEqual(fileFacts(f.home), files);
+  });
+
+  await t.test("unapproved/group strangers/bot senders/prearm stops record nothing; late postarm stops still persist", async s => {
+    const f = await fixture(s), a = f.actors[0]!; await f.prime(0, 120);
+    const original = await f.original(), files = fileFacts(f.home);
+    f.transport.getUpdates = async () => updates([
+      f.msg(1, "/pause", 0, { date: Math.floor(f.clock() / 1000) - 121 }),
+      f.msg(2, "/pause", 0, { date: Math.floor(f.clock() / 1000) - 60 }),
+      f.msg(3, "/pause@bot_801", 0, { chatId: a.room, fromId: 777 }),
+      f.msg(4, "/pause@bot_801", 0, { chatId: a.room - 1 }),
+      f.msg(5, "/pause", 0, { chatId: a.room }),
+      f.msg(6, "/pause@otherbot", 0, { chatId: a.room }),
+      f.msg(7, "/pause@bot_801", 0, { chatId: a.room, fromIsBot: true }),
+      f.msg(8, "/pause@bot_801", 0, { chatId: a.room, senderChatId: a.room }),
+      f.msg(9, "/pause@bot_801", 0, { chatId: a.room }),
+      f.msg(10, "/kill", 0, { chatId: a.room, replyTo: { messageId: 10, fromId: Number(a.botId) } }),
+    ], 11);
+    await f.run();
+    const rows = (await f.pool.query("SELECT update_id,kind,chat_id FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => [Number(x.update_id), x.kind, Number(x.chat_id)]), [[2, "pause", a.ownerId], [9, "pause", a.room], [10, "kill-request", a.room]]);
+    assert.ok(!f.sends.some(x => /pause request is recorded/.test(x.text) && x.chatId === a.ownerId), "late request is durable but its reply deadline stays expired");
+    assert.equal(Number((await f.offset())!.offset_id), 11); assert.deepEqual(await f.original(), original); assert.deepEqual(fileFacts(f.home), files);
+  });
+
+  await t.test("kill confirmation is owner/chat/current authority scoped, expires, and cancellation appends without lifting pause", async s => {
+    const f = await fixture(s), a = f.actors[0]!, original = await f.original();
+    f.transport.getUpdates = async () => updates([f.msg(1, "/pause"), f.msg(2, "/kill"), f.msg(3, "/confirm@bot_801", 0, { chatId: a.room }), f.msg(4, "/confirm", 0, { chatId: 777, fromId: 777 })], 5);
+    await f.run(); f.advance(CONFIRM_TTL_SEC * 1000 + 1000);
+    f.transport.getUpdates = async () => updates([f.msg(5, "/confirm"), f.msg(6, "/cancel"), f.msg(7, "/confirm")], 8);
+    await f.run();
+    let rows = (await f.pool.query("SELECT update_id,kind,request_update_id FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => x.kind), ["pause", "kill-request", "kill-cancel"]);
+    assert.equal(Number(rows[2]!.request_update_id), 2); assert.ok(f.sends.some(x => /confirmation expired/.test(x.text)));
+    assert.ok(f.sends.some(x => /earlier pause or confirmed kill remains recorded/.test(x.text)));
+    f.transport.getUpdates = async () => updates([f.msg(8, "/kill")], 9); await f.run();
+    await f.pool.query("UPDATE grants SET updated_at=updated_at+1 WHERE tenant=$1", [a.tenant]);
+    f.transport.getUpdates = async () => updates([f.msg(9, "/confirm")], 10); await f.run();
+    rows = (await f.pool.query("SELECT kind FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => x.kind), ["pause", "kill-request", "kill-cancel", "kill-request"]);
+    assert.match(f.sends.at(-1)!.text, /no pending kill request/);
+    const unchanged = await f.original(["tenant_telegram", "grants"]), before = original as Array<[string, unknown]>;
+    assert.deepEqual(unchanged, before.filter(([table]) => table !== "grants"));
+  });
+
+  await t.test("file and operator control-off respect existing precedence; group-off does not record group controls", async s => {
+    for (const [file, env, enabled] of [[false, "1", false], [true, "0", true], [undefined, "0", false], [undefined, "true", true]] as const) {
+      const f = await fixture(s), a = f.actors[0]!;
+      await f.pool.query("UPDATE tenant_settings SET sealed=$1 WHERE tenant=$2", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: a.token, telegramAllowlist: [a.ownerId, a.room], ...(file === undefined ? {} : { telegramControlEnabled: file }) }), DEK), a.tenant]);
+      f.transport.getUpdates = async () => updates([f.msg(1, "/pause"), f.msg(2, "/kill")], 3);
+      await f.run({ env: { ...f.env, MERRYMEN_TELEGRAM_CONTROL: env } });
+      const rows = (await f.pool.query("SELECT kind FROM recovery_reply_controls ORDER BY update_id")).rows;
+      assert.deepEqual(rows.map(x => x.kind), enabled ? ["pause", "kill-request"] : []);
+      if (!enabled) assert.ok(f.sends.every(x => /turned off.*No stop request was recorded/.test(x.text)));
+      assert.equal(Number((await f.offset())!.offset_id), 3);
+    }
+    const f = await fixture(s), a = f.actors[0]!;
+    f.transport.getUpdates = async () => updates([f.msg(1, "/pause@bot_801", 0, { chatId: a.room })], 2);
+    await f.run({ env: { ...f.env, MERRYMEN_TG_GROUPS: "0" } });
+    assert.deepEqual((await f.pool.query("SELECT kind FROM recovery_reply_controls")).rows, []); assert.equal(f.sends.length, 0);
+  });
+
+  await t.test("a newer kill supersedes older pending requests; cancelling it never resurrects an older request or clears a confirmed kill", async s => {
+    const f = await fixture(s);
+    f.transport.getUpdates = async () => updates([
+      f.msg(1, "/kill"), f.msg(2, "/kill"), f.msg(3, "/cancel"), f.msg(4, "/confirm"),
+      f.msg(5, "/kill"), f.msg(6, "/confirm"), f.msg(7, "/kill"), f.msg(8, "/cancel"), f.msg(9, "/confirm"),
+    ], 10);
+    await f.run();
+    const rows = (await f.pool.query("SELECT update_id,kind,request_update_id FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => [Number(x.update_id), x.kind, x.request_update_id === null ? null : Number(x.request_update_id)]),
+      [[1, "kill-request", null], [2, "kill-request", null], [3, "kill-cancel", 2], [5, "kill-request", null], [6, "kill-confirm", 5], [7, "kill-request", null], [8, "kill-cancel", 7]]);
+    assert.equal(f.sends.filter(x => /no pending kill request/.test(x.text)).length, 2);
+    assert.equal(Number((await f.offset())!.offset_id), 10);
+  });
+
+  await t.test("a delayed batch cannot restart the original kill confirmation window", async s => {
+    const f = await fixture(s); await f.prime(0, 200);
+    const oldKillAt = Math.floor(f.clock() / 1000) - CONFIRM_TTL_SEC - 1;
+    f.transport.getUpdates = async () => updates([f.msg(1, "/kill", 0, { date: oldKillAt }), f.msg(2, "/confirm")], 3);
+    await f.run();
+    const rows = (await f.pool.query("SELECT kind,message_at_sec,expires_at_ms FROM recovery_reply_controls ORDER BY update_id")).rows;
+    assert.deepEqual(rows.map(x => x.kind), ["kill-request"]);
+    assert.equal(Number(rows[0]!.expires_at_ms), oldKillAt * 1000 + CONFIRM_TTL_SEC * 1000);
+    assert.equal(f.sends.length, 1); assert.match(f.sends[0]!.text, /confirmation expired/);
+    assert.equal(Number((await f.offset())!.offset_id), 3);
+  });
+
+  await t.test("a malformed present control flag refuses without defaulting to enabled or advancing a command", async s => {
+    for (const bad of [null, "false", 0, {}, []]) {
+      const f = await fixture(s), a = f.actors[0]!;
+      await f.pool.query("UPDATE tenant_settings SET sealed=$1 WHERE tenant=$2", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: a.token, telegramAllowlist: [a.ownerId], telegramControlEnabled: bad }), DEK), a.tenant]);
+      f.transport.getUpdates = async () => updates([f.msg(1, "/pause")], 2);
+      await assert.rejects(f.run()); assert.equal(f.sends.length, 0); assert.equal(f.polls.length, 0);
+      assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS offsets")).rows[0]!.offsets, null);
+    }
+  });
+
+  await t.test("all restrictive controls persist before the bounded response cap; lease loss rolls back both controls and offsets", async s => {
+    const f = await fixture(s);
+    f.transport.getUpdates = async () => updates(Array.from({ length: 100 }, (_, i) => f.msg(i + 1, "/pause")), 101);
+    await f.run();
+    assert.equal((await f.pool.query("SELECT count(*) AS n FROM recovery_reply_controls")).rows[0]!.n, "100");
+    assert.equal(Number((await f.offset())!.offset_id), 101); assert.equal(f.sends.length, 16);
+    const changed = await fixture(s); await changed.prime();
+    changed.transport.getUpdates = async () => updates([changed.msg(1, "/pause")], 2);
+    changed.hook(async sql => { if (/^INSERT INTO recovery_reply_controls/.test(sql)) changed.health.tenant = false; });
+    await assert.rejects(changed.run()); assert.equal(Number((await changed.offset())!.offset_id), 0);
+    assert.deepEqual((await changed.pool.query("SELECT * FROM recovery_reply_controls")).rows, []); assert.equal(changed.sends.length, 0);
+  });
+
+  await t.test("journal refusal rolls back the update cutoff; failed acknowledgement does not erase a committed stop", async s => {
+    const f = await fixture(s); await f.prime(); await f.pool.query(RECOVERY_REPLY_CONTROLS_SCHEMA);
+    await f.pool.query("ALTER TABLE recovery_reply_controls ADD CONSTRAINT fixture_pause_refusal CHECK(kind<>'pause')");
+    f.transport.getUpdates = async () => updates([f.msg(1, "/pause")], 2);
+    await assert.rejects(f.run());
+    assert.equal(Number((await f.offset())!.offset_id), 0); assert.deepEqual((await f.pool.query("SELECT * FROM recovery_reply_controls")).rows, []); assert.equal(f.sends.length, 0);
+    await f.pool.query("ALTER TABLE recovery_reply_controls DROP CONSTRAINT fixture_pause_refusal");
+    f.transport.sendMessage = async () => ({ ok: false, noDelivery: true, reason: "synthetic refused delivery" });
+    await f.run(); assert.equal(Number((await f.offset())!.offset_id), 2);
+    assert.deepEqual((await f.pool.query("SELECT kind FROM recovery_reply_controls")).rows.map(x => x.kind), ["pause"]);
+    f.transport.getUpdates = async (_opts, offset) => { assert.equal(offset, 2); return updates([f.msg(1, "/pause")], 2); };
+    await f.run(); assert.equal((await f.pool.query("SELECT * FROM recovery_reply_controls")).rows.length, 1);
+  });
+});
 
 test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff and atomic privacy", { skip: !URL, timeout: 120_000 }, async t => {
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(new globalThis.URL(URL!).hostname), "LOCAL test database only");
