@@ -173,6 +173,13 @@ describe("a tenant being spawned is not a tenant that isn't running", () => {
   };
   const calls = (root: ts.Node, name: string) =>
     all(root, (n) => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name);
+  // A guard supplied to a preparation callback is not the final guard in the
+  // spawning function. Select calls executed by that function itself.
+  const bodyCalls = (root: ts.FunctionDeclaration, name: string) => calls(root, name).filter((call) => {
+    let enclosing = call.parent;
+    while (!ts.isFunctionLike(enclosing)) enclosing = enclosing.parent;
+    return enclosing === root;
+  });
   const within = (n: ts.Node, outer: ts.Node) => n.getStart() >= outer.getStart() && n.getEnd() <= outer.getEnd();
 
   /** The claim: the tenant goes into `spawning`, stamped with when. */
@@ -238,7 +245,7 @@ describe("a tenant being spawned is not a tenant that isn't running", () => {
     // lease dropped or released, or a Telegram kill landing in between was
     // invisible, and the child started anyway.
     const spawn = fn("spawnChild");
-    const late = calls(spawn, "lateSpawnRefusal")[0];
+    const late = bodyCalls(spawn, "lateSpawnRefusal")[0];
     const started = calls(spawn, "spawn")[0];
     assert.ok(late && started, "spawnChild asks again, and spawns");
     const lateAwaits = all(spawn, ts.isAwaitExpression).filter((a) => a.getEnd() > late.getStart());
@@ -276,12 +283,13 @@ describe("a tenant being spawned is not a tenant that isn't running", () => {
 });
 
 /**
- * THE KILL SWITCH WIPES EVERY HOME IT STANDS DOWN, NOT ONLY A RUNNING ONE.
+ * THE KILL SWITCH CLEARS PRIVATE ACCESS EVEN WHEN NO CHILD STARTED.
  *
  * A kill or a DELETE /api/grants that lands mid-spawn is refused at the last
  * moment, after the grant, the settings (with the bot token) and the anchor
  * were written — so the tenant never reaches `children`, and the kill-switch
- * branch, which walked only `children`, never cleared its cached access. Driven in
+ * branch, which walked only `children`, never cleared its cached access.
+ * Original accounting files stay for recovery. Driven in
  * double-spawn.integration.test.ts.
  */
 describe("a stood-down tenant's access is cleared while its original source stays", () => {

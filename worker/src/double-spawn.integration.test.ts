@@ -35,14 +35,15 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, beforeEach, describe, it, mock } from "node:test";
 import type { ChildProcess } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 
-const FLEET = mkdtempSync(path.join(os.tmpdir(), "merrymen-double-spawn-"));
+const FLEET = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-double-spawn-")));
 process.env.MERRYMEN_HOME = FLEET;
 process.env.MERRYMEN_HOSTED = "1";
 // The file stores and the no-op lease: no Postgres in this test.
@@ -212,6 +213,81 @@ async function fireRestart(): Promise<void> {
 /** The child's own heartbeat, written now by the test's clock. */
 const beat = () => writeFileSync(path.join(childHome(TENANT), "heartbeat.json"), JSON.stringify({ at: Math.floor(Date.now() / 1000) }));
 const keepsDying = () => said.some((l) => /keeps dying right after start/.test(l));
+
+function accountingSnapshot(db: DatabaseSync): string {
+  return JSON.stringify([
+    db.prepare("SELECT * FROM trades ORDER BY id").all(),
+    db.prepare("SELECT * FROM positions ORDER BY agent_id, symbol").all(),
+    db.prepare("SELECT * FROM cost_basis ORDER BY agent_id, mode, symbol").all(),
+  ]);
+}
+
+/** A stopped original book beside disposable access and private-memory copies. */
+function seedRemovalState(): { inode: number; accounting: string } {
+  const home = childHome(TENANT);
+  const file = path.join(home, "merrymen.db");
+  const db = new DatabaseSync(file);
+  let accounting: string;
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL,
+        kind TEXT NOT NULL, target TEXT NOT NULL, amount_usdg REAL NOT NULL,
+        status TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS positions (
+        agent_id TEXT NOT NULL, symbol TEXT NOT NULL, token TEXT NOT NULL,
+        raw_balance TEXT NOT NULL, ui_multiplier TEXT NOT NULL, price_usd REAL NOT NULL,
+        value_usdg REAL NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, symbol)
+      );
+      CREATE TABLE IF NOT EXISTS cost_basis (
+        agent_id TEXT NOT NULL, mode TEXT NOT NULL, symbol TEXT NOT NULL,
+        qty_raw TEXT NOT NULL, cost_usdg TEXT NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, mode, symbol)
+      );
+      CREATE TABLE IF NOT EXISTS chat_turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+        role TEXT NOT NULL, content TEXT NOT NULL, memory_ids TEXT, at INTEGER NOT NULL
+      );
+    `);
+    db.prepare("INSERT INTO trades (id, agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(73, ACCOUNT, "buy", "TEST", 12.5, "submitted", 1_700_000_000);
+    db.prepare("INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, value_usdg, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(ACCOUNT, "TEST", ACCOUNT, "2000000000000000000", "1", 6.25, 12.5, 1_700_000_000);
+    db.prepare("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(ACCOUNT, "live", "TEST", "2000000000000000000", "12500000", 1_700_000_000);
+    db.prepare("INSERT INTO chat_turns (chat_id, role, content, at) VALUES (?, ?, ?, ?)")
+      .run(101, "user", "disposable private fixture", 1_700_000_000);
+    accounting = accountingSnapshot(db);
+  } finally {
+    db.close();
+  }
+  mkdirSync(path.join(home, "soul"), { recursive: true });
+  for (const name of ["OWNER.md", "ARCHIVE.md"]) {
+    writeFileSync(path.join(home, "soul", name), "disposable private fixture", { mode: 0o600 });
+  }
+  for (const name of ["tg-groups.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"]) {
+    writeFileSync(path.join(home, name), "{}", { mode: 0o600 });
+  }
+  return { inode: statSync(file).ino, accounting };
+}
+
+function assertRemovedAccessAndRetainedBook(original: { inode: number; accounting: string }): void {
+  const home = childHome(TENANT);
+  const file = path.join(home, "merrymen.db");
+  assert.equal(statSync(file).ino, original.inode, "the original accounting file remains");
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    assert.equal(accountingSnapshot(db), original.accounting, "original trade IDs, positions and cost basis remain unchanged");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM chat_turns WHERE chat_id > 0").get()!.n, 0, "private DM turns are erased");
+  } finally {
+    db.close();
+  }
+  for (const name of ["grant.json", "settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json", "tg-groups.json", "soul/OWNER.md", "soul/ARCHIVE.md"]) {
+    assert.equal(existsSync(path.join(home, name)), false, `${name} is removed with revoked access`);
+  }
+}
 
 beforeEach(async () => {
   gate?.open();
@@ -439,7 +515,7 @@ describe("the world can change while a child is being prepared", () => {
     assert.ok(said.some((l) => /kill/.test(l) && /not spawning/.test(l)), said.join("\n"));
   });
 
-  it("AND THE PASS THAT CARRIES THE KILL OUT WIPES THE HOME IT WAS PREPARED IN", async () => {
+  it("AND THE KILL PASS CLEARS PREPARED ACCESS WHILE RETAINING THE ORIGINAL BOOK", async () => {
     // The refused spawn never reached `children`, and the kill-switch branch
     // walked only `children`: the revoked grant.json, the settings with the
     // bot token and the pending request stayed until the container went, and
@@ -448,13 +524,14 @@ describe("the world can change while a child is being prepared", () => {
     const g = closeGate();
     const pass = reconcile();
     await g.reached;
+    const original = seedRemovalState();
     writeKillRequest(childHome(TENANT), grant(), Math.floor(Date.now() / 1000));
     g.open();
     await pass;
     assert.ok(existsSync(path.join(childHome(TENANT), "settings.json")), "the refused spawn left its preparation behind");
     await reconcile();
     assert.equal(await store.get(TENANT), null, "the kill took the grant out of the store");
-    assert.equal(existsSync(childHome(TENANT)), false, "and the home went with it");
+    assertRemovedAccessAndRetainedBook(original);
     assert.equal(spawned.length, 0);
   });
 
@@ -464,6 +541,7 @@ describe("the world can change while a child is being prepared", () => {
     const g = closeGate();
     const first = reconcile();
     await g.reached;
+    const original = seedRemovalState();
     // The grant is deleted meanwhile, so the next pass no longer wants the
     // tenant and releases its lease. The spawn that checked the lease at the
     // top must not start a worker this replica no longer holds a lock for.
@@ -476,23 +554,25 @@ describe("the world can change while a child is being prepared", () => {
     await first;
     assert.equal(spawned.length, 0, "no worker starts without the lease it was prepared under");
     assert.ok(said.some((l) => /lease/.test(l) && /not spawning/.test(l)), said.join("\n"));
-    // The pass that released the lease left the home alone, because a spawn
-    // was still preparing in it; the next one wipes it.
+    // The pass that released the lease left the home alone while a spawn was
+    // preparing; the next one removes its access without replacing the book.
     assert.ok(existsSync(path.join(childHome(TENANT), "grant.json")), "the revoked grant was written before the refusal");
     await store.remove(TENANT);
     await reconcile();
-    assert.equal(existsSync(childHome(TENANT)), false, "the next pass wipes what the refused spawn wrote");
+    assertRemovedAccessAndRetainedBook(original);
+    assert.equal(spawned.length, 0, "cleanup does not retry the refused spawn");
   });
 
-  it("A CRASHED CHILD WAITING ON ITS RESTART LOSES ITS HOME, AND ITS RESTART, WHEN ITS GRANT GOES", async () => {
+  it("A CRASHED CHILD LOSES ACCESS AND ITS RESTART, WHILE ITS ORIGINAL BOOK REMAINS", async () => {
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
+      const original = seedRemovalState();
       spawned[0]!.die(1);
       assert.match(rallies().at(-1)!, /restart #1, exit 1/);
       await store.remove(TENANT);
       await reconcile();
-      assert.equal(existsSync(childHome(TENANT)), false, "no child in it, and no grant for it: the home goes");
+      assertRemovedAccessAndRetainedBook(original);
       mock.timers.tick(60_000);
       await settle();
       assert.equal(spawned.length, 1, "the restart was cancelled with it");
