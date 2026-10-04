@@ -493,6 +493,29 @@ describe("revalidate", () => {
     assert.deepEqual(revalidate(watch, current(watch)), { ok: false, reason: "not-an-entry-candidate" });
   });
 
+  it("the coin's LATEST assessment governs: a newer non-entry verdict fails it as setup-deteriorated", () => {
+    const a = entry();
+    // Both cohort traders sold, and the deployer's sale is an observed-action objection.
+    const later = assessFollow(
+      setup({
+        now: NOW + 60_000,
+        triggers: [ev("u-alice"), ev("u-bob", { at: NOW - 60_000 }), ev("u-alice", { kind: "sell", at: NOW + 30_000 }), ev("u-bob", { kind: "sell", at: NOW + 40_000 })],
+        dossier: dossier([claim({}), claim({ stance: "opposing", support: "observed-action" })]),
+        quote: { price8: P(1.03), at: NOW + 55_000, source: "pool" },
+      }),
+    );
+    assert.equal(later.state, "REJECT_SETUP");
+    assert.ok(later.reasonCodes.includes("verified-objection"));
+    assert.deepEqual(revalidate(a, current(a, { latest: later })), { ok: false, reason: "setup-deteriorated" });
+    // The same assessment, or a newer one that is still an entry, changes nothing.
+    assert.equal(revalidate(a, current(a, { latest: a })).ok, true);
+    assert.equal(revalidate(a, current(a, { latest: assessFollow(setup({ now: NOW + 1_000 })) })).ok, true);
+    assert.equal(revalidate(a, current(a, { latest: null })).ok, true);
+    // Another coin's verdict is not this one's.
+    const other = assessFollow(setup({ token: SOL }));
+    assert.equal(revalidate(a, current(a, { latest: other })).ok, true);
+  });
+
   it("a probe revalidates against a probe of the current ceiling", () => {
     const a = assessFollow(setup({ triggers: [ev("u-alice")] }));
     assert.deepEqual(revalidate(a, current(a)), { ok: true, maxUsdg6: 2_500_000n });
@@ -621,6 +644,25 @@ describe("FollowBook", () => {
     const out = book.reset();
     assert.deepEqual(out, [{ kind: "expired", address: addr(1), assessmentId: "fa_1" }]);
     assert.equal([...counters.used.values()][0], 1);
+  });
+
+  it("withdraw: a deteriorated setup's nomination ends now, is not re-offered inside the hold, and an in-flight entry is left to its fill", () => {
+    const { book, counters, tick } = make();
+    book.offer(hint(1));
+    book.offer(hint(2));
+    assert.equal(book.withdraw(addr(1)), "withdrawn");
+    assert.equal(book.nominated(addr(1)), null);
+    assert.equal(book.claimEntry(addr(1)), "not-nominated", "nothing can be claimed on it");
+    assert.deepEqual(book.expire(), [{ kind: "withdrawn", address: addr(1), assessmentId: "fa_1" }]);
+    assert.deepEqual(book.offer(hint(1)), { ok: false, reason: "cooldown" }, "not re-offered inside the hold");
+    tick(FOLLOW_BOOK.withdrawHoldMs);
+    assert.deepEqual(book.offer(hint(1)), { ok: true }, "after it, a standing setup may be offered again");
+    assert.equal(book.claimEntry(addr(2)), "taken");
+    assert.equal(book.withdraw(addr(2)), "in-flight", "a claimed entry already on its way resolves through its fill");
+    assert.ok(book.nominated(addr(2)));
+    book.refundEntry(addr(2));
+    assert.equal([...counters.used.values()][0], 0, "its claim still goes back");
+    assert.equal(book.withdraw(addr(9)), "none");
   });
 
   it("held-review requests: soon first, never downgraded, and they lapse", () => {

@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -19,17 +19,30 @@ import {
   ExplorationLedger,
   FOLLOW_SOURCE,
   FOMO_CHILD,
+  FOMO_STATE_KEYS,
   FomoChild,
+  brokerDurableState,
+  childDurableFollowCounters,
+  childExplorationStore,
   childFomoTenant,
   chooseChildFomoBroker,
+  decodeDurableExploration,
+  durableWireBytes,
   effectiveAccess,
+  encodeDurableExploration,
+  fileExplorationStore,
   fileFollowCounters,
   fomoFollowLiveEnabledFor,
   memoryExplorationStore,
   selfHostedFomoBroker,
+  type DurableFollowCounters,
+  type DurableStatePort,
+  type ExplorationPosition,
+  type ExplorationState,
   type FomoLiveFacts,
   type HeldCoin,
   type OwnPrice,
+  type SelfHostedJobs,
 } from "./fomo-child";
 import { brokerFailureEnvelope, validateBrokerReport, type BrokerPort } from "./fomo/broker";
 import { writeChildFomoFile } from "./fomo/child-file";
@@ -37,6 +50,7 @@ import type { BrokerReport, BrokerRequest, BrokerResponse, ChildFomoFile, ChildS
 import type { FollowCounters } from "./fomo/following";
 import { chainFromProvider, robinhoodChain, tokenIdentity } from "./fomo/identity";
 import { AUTONOMOUS_ENTRY_CAP_6 } from "./fomo/sizing";
+import { enqueueJob, recentJobs } from "./fomo/store";
 import type { CoinDossier, DossierClaim, FollowAssessment, TokenIdentity, TraderEvent } from "./fomo/types";
 
 const T0 = 1_800_000_000_000;
@@ -178,6 +192,7 @@ interface LiveState {
   paused: boolean;
   liveFollowAllowed: boolean;
   sponsorship: FomoLiveFacts["sponsorship"];
+  scoutHeldCost6: bigint | null;
   perTrade6: bigint | null;
   dailyHeadroom6: bigint | null;
   vault: boolean;
@@ -231,10 +246,41 @@ interface HarnessOpts {
   live?: Partial<LiveState>;
   fetchImpl?: typeof fetch;
   broker?: FomoBroker | null;
+  /** Production wiring: the tenant's durable store, the home's files as caches, the durable day count. */
+  durable?: DurableStatePort;
+  /** Start at this clock (a "redeploy" later on). */
+  now?: number;
+}
+
+/** The tenant's durable store as the broker memory API holds it, with failure switches. */
+function memoryDurable() {
+  const d = {
+    map: new Map<string, string>(),
+    readable: true,
+    writable: true,
+    reads: 0,
+    writes: 0,
+    port: null as unknown as DurableStatePort,
+  };
+  d.port = {
+    async read(key) {
+      d.reads++;
+      if (!d.readable) return { kind: "unknown" };
+      const v = d.map.get(key);
+      return v === undefined ? { kind: "absent" } : { kind: "found", text: v };
+    },
+    async write(key, text) {
+      d.writes++;
+      if (!d.writable) return false;
+      d.map.set(key, text);
+      return true;
+    },
+  };
+  return d;
 }
 
 function harness(o: HarnessOpts = {}) {
-  const t = { now: T0 };
+  const t = { now: o.now ?? T0 };
   const home = tmpHome();
   const coins = o.coins ?? [coin(1)];
   const state: LiveState = {
@@ -252,6 +298,7 @@ function harness(o: HarnessOpts = {}) {
     paused: false,
     liveFollowAllowed: false,
     sponsorship: { sponsoredFlow: false, available: null },
+    scoutHeldCost6: 0n,
     perTrade6: U(25),
     dailyHeadroom6: U(100),
     vault: true,
@@ -265,6 +312,7 @@ function harness(o: HarnessOpts = {}) {
   const broker = o.broker === undefined ? recordingBroker() : o.broker;
   const book = new EarlyCandidateBook(() => t.now);
   const counters = memoryCounters();
+  const durableCounters: DurableFollowCounters | null = o.durable ? childDurableFollowCounters(home, o.durable, undefined, () => t.now) : null;
   const notes: { address: string; detail: string; stage: string }[] = [];
   const store = memoryExplorationStore();
   const basis = new Map<string, { qtyRaw: bigint; costUsdg: bigint }>();
@@ -277,6 +325,7 @@ function harness(o: HarnessOpts = {}) {
     paused: state.paused,
     liveFollowAllowed: state.liveFollowAllowed,
     sponsorship: { ...state.sponsorship },
+    scoutHeldCost6: state.scoutHeldCost6,
     perTrade6: state.perTrade6,
     dailyHeadroom6: state.dailyHeadroom6,
     vault: state.vault,
@@ -292,8 +341,9 @@ function harness(o: HarnessOpts = {}) {
     home: () => home,
     live,
     earlyBook: () => book,
-    counters,
-    ledgerStore: store,
+    counters: durableCounters ?? counters,
+    ledgerStore: o.durable ? childExplorationStore(home) : store,
+    durable: o.durable ?? null,
     funnel: {
       note: (address, _s, c) => notes.push({ address, detail: c.detail, stage: String(c.stage) }),
       latest: () => null,
@@ -321,8 +371,21 @@ function harness(o: HarnessOpts = {}) {
     decisionId,
   });
   const reports = (): BrokerReport[] => (broker && "reports" in broker ? (broker as unknown as { reports: BrokerReport[] }).reports : []);
-  return { t, home, state, broker, book, counters, notes, store, basis, entrySecs, symbol, child, tick, assessmentsReported, entry, live, reports };
+  return { t, home, state, broker, book, counters, durableCounters, notes, store, basis, entrySecs, symbol, child, tick, assessmentsReported, entry, live, reports };
 }
+
+/** A durable harness, loaded: the first tick asks the store, the second assesses with the ledger known. */
+async function loaded(o: HarnessOpts) {
+  const h = harness(o);
+  h.tick();
+  await h.child.settled();
+  h.t.now += 1_000;
+  h.tick();
+  await h.child.settled();
+  return h;
+}
+
+const DAY = new Date(T0).toISOString().slice(0, 10);
 
 function stateOf(as: readonly FollowAssessment[], address: string): FollowAssessment | undefined {
   // EVM addresses are lowercase identity; a Solana mint keeps its case.
@@ -497,6 +560,22 @@ describe("the gates that stop a setup", () => {
     h.tick();
     assert.deepEqual(h.child.verifyRequests(), [], "and only while following is on");
   });
+
+  it("a verification ask is made only where a follow nomination could act: never for a live agent the operator did not allow-list", () => {
+    const ask = (over: Partial<LiveState>, settings: Partial<LiveState["settings"]> = {}) => {
+      const h = harness({ live: over });
+      Object.assign(h.state.settings, settings);
+      h.state.verified = new Set();
+      h.tick();
+      return h.child.verifyRequests();
+    };
+    assert.deepEqual(ask({ rail: "live", liveFollowAllowed: false }), [], "live, not allow-listed: discovery is asked nothing");
+    assert.deepEqual(ask({ rail: "live", liveFollowAllowed: true }), [coin(1)]);
+    assert.deepEqual(ask({ rail: "refuse" }), []);
+    assert.deepEqual(ask({}, { scoutEnabled: false }), [], "no exploration budget: nothing could be bought");
+    assert.deepEqual(ask({ paused: true }), []);
+    assert.deepEqual(ask({ rail: "paper" }), [coin(1)]);
+  });
 });
 
 describe("fomo.json trust", () => {
@@ -534,17 +613,87 @@ describe("fomo.json trust", () => {
   });
 });
 
+// ─── A setup that deteriorates after its nomination ──────────────────────────
+
+describe("the newest assessment governs a nomination", () => {
+  const rewrite = (h: ReturnType<typeof harness>, signals: ChildSignal[]) => {
+    h.t.now += FOMO_CHILD.fileReadEveryMs + 1;
+    h.state.pricesAt = h.t.now - 1_000;
+    writeChildFomoFile(h.home, fileOf(signals, { writtenAt: h.t.now - 1_000 }));
+    h.tick();
+  };
+
+  it("a verified objection after the nomination withdraws it everywhere, and a BUY still on its way is dropped", () => {
+    const t1 = tok(coin(1));
+    const h = harness();
+    h.tick();
+    assert.ok(h.child.followBook.nominated(coin(1)), "nominated");
+    assert.equal(h.book.active().length, 1);
+    // The deployer sold: an observed-action objection. The price is still inside the band.
+    const objected = signal(t1, { dossier: dossier(t1, { claims: [claim(), claim({ claimKey: "deployer:sold", stance: "opposing", support: "observed-action" })] }) });
+    rewrite(h, [objected]);
+    assert.equal(h.child.latestAssessment(t1.key)!.state, "REJECT_SETUP");
+    assert.equal(h.child.followBook.nominated(coin(1)), null, "the follow nomination is withdrawn");
+    assert.equal(h.book.active().length, 0, "the early-book offer and its review slot are gone");
+    assert.equal(h.book.maxUsdgFor(coin(1)), 5, "its ceiling is still remembered, so an in-flight BUY stays bounded");
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(g.kind, "dropped");
+    assert.equal(g.kind === "dropped" && g.reason, "setup-deteriorated");
+    assert.equal(h.counters.taken, 0, "no follow entry claimed");
+    assert.equal(h.child.reservations.outstanding().count, 0, "nothing reserved");
+    assert.equal(h.child.ledger.positions("paper").length, 0, "nothing recorded");
+  });
+
+  it("cohort sellers catching up (WATCH) also withdraws it; a fresh ENTRY waits out the hold", () => {
+    const t1 = tok(coin(1));
+    const h = harness();
+    h.tick();
+    const sold = signal(t1, {
+      triggers: [
+        ev(t1, 1, { kind: "sell", sourceEventAt: T0 + 5_000 }),
+        ev(t1, 2, { kind: "sell", sourceEventAt: T0 + 6_000 }),
+        ev(t1, 2, { sourceEventAt: T0 - 30_000 }),
+        ev(t1, 1, { sourceEventAt: T0 - 60_000 }),
+      ],
+    });
+    rewrite(h, [sold]);
+    assert.notEqual(h.child.latestAssessment(t1.key)!.state, "ENTRY_CANDIDATE");
+    assert.equal(h.child.followBook.nominated(coin(1)), null);
+    assert.equal((h.child.gateEntry(h.entry(coin(1), 5)) as { reason?: string }).reason, "setup-deteriorated");
+    // Buying again right away: not re-offered inside the hold, so a flickering setup cannot churn the book.
+    rewrite(h, [signal(t1, { triggers: [ev(t1, 3, { sourceEventAt: h.t.now - 2_000 }), ev(t1, 4, { sourceEventAt: h.t.now - 3_000 })] })]);
+    assert.equal(h.child.latestAssessment(t1.key)!.state, "ENTRY_CANDIDATE", "the setup is back");
+    assert.equal(h.child.followBook.nominated(coin(1)), null, "but not re-nominated inside the hold");
+    h.t.now += 10 * 60_000;
+    rewrite(h, [signal(t1, { triggers: [ev(t1, 5, { sourceEventAt: h.t.now + FOMO_CHILD.fileReadEveryMs - 1_000 }), ev(t1, 6, { sourceEventAt: h.t.now + FOMO_CHILD.fileReadEveryMs - 2_000 })] })]);
+    assert.ok(h.child.followBook.nominated(coin(1)), "after it, a standing setup is nominated again");
+    assert.equal(h.child.gateEntry(h.entry(coin(1), 5)).kind, "follow", "and its entry is no longer treated as withdrawn");
+  });
+
+  it("an entry whose nomination stands passes, with the latest assessment checked", () => {
+    const h = harness();
+    h.tick();
+    h.t.now += FOMO_CHILD.fileReadEveryMs + 1;
+    h.state.pricesAt = h.t.now - 1_000;
+    h.tick();
+    assert.equal(h.child.gateEntry(h.entry(coin(1), 5)).kind, "follow");
+  });
+});
+
 // ─── The entry gate ─────────────────────────────────────────────────────────
 
 describe("the entry gate", () => {
-  it("passes a fresh follow entry: claims a follow entry, reserves, and a paper fill commits and opens the position", () => {
+  it("passes a fresh follow entry: claims a follow entry, reserves, records it pending, and a paper fill commits and settles the position", () => {
     const h = harness();
     h.tick();
     const g = h.child.gateEntry(h.entry(coin(1), 5));
     assert.equal(g.kind, "follow");
     assert.equal(h.counters.taken, 1);
     assert.equal(h.child.reservations.outstanding().pending6, U(5));
+    assert.equal(h.child.ledger.positions("paper").length, 1, "recorded before it is sent");
+    assert.equal(h.child.ledger.figures("paper").held6, 0n, "counted once: by the reservation while it is live");
     h.child.settleEntry(g, "paper", "d-1");
+    assert.equal(h.child.ledger.positions("paper")[0]!.everHeld, true);
     assert.equal(h.child.reservations.outstanding().pending6, 0n);
     assert.equal(h.child.ledger.figures("paper").held6, U(5));
     const deps = h.reports().filter((r) => r.kind === "position-dependency");
@@ -561,13 +710,14 @@ describe("the entry gate", () => {
     assert.deepEqual(h.child.gateEntry({ kind: "swap", sellToken: coin(1), buyToken: CASH.USDG, notionalUsdg: U(5) }), { kind: "none" }, "an exit is never gated");
   });
 
-  it("no fill: the reservation is released and the day's follow entry given back", () => {
+  it("no fill: the reservation is released, the pending position removed and the day's follow entry given back", () => {
     const h = harness();
     h.tick();
     const g = h.child.gateEntry(h.entry(coin(1), 5));
     h.child.settleEntry(g, "rejected", "d-1");
     assert.equal(h.child.reservations.outstanding().count, 0);
     assert.equal(h.counters.taken, 0);
+    assert.equal(h.child.ledger.positions("paper").length, 0);
   });
 
   it("a price move past the 2% band since the assessment drops the entry and files why", () => {
@@ -749,6 +899,270 @@ describe("the exploration allocation", () => {
   });
 });
 
+// ─── Durable money state (the tenant's store, not the child's home) ────────
+
+describe("the follow path's money state is durable in the tenant's store", () => {
+  it("until the store has been read, the exploration ceiling is zero and the day count refuses — never an empty ledger", async () => {
+    const d = memoryDurable();
+    d.readable = false;
+    const h = harness({ durable: d.port });
+    h.tick();
+    await h.child.settled();
+    assert.equal(h.child.ledger.loaded(), false);
+    const c = h.child.ceilingFor(coin(1), h.t.now);
+    assert.equal(c.ceiling6, 0n);
+    assert.equal(c.binding, "unknown:exploration-remaining");
+    assert.equal(h.book.active().length, 0, "nothing is nominated on an unread ledger");
+    assert.equal(h.durableCounters!.takeFollowEntry(DAY, 3), false, "an unread day count is not a fresh day");
+    // The store answers again: read on the next due tick, and the follow path works.
+    d.readable = true;
+    h.t.now += FOMO_CHILD.durableRetryMs;
+    h.tick();
+    await h.child.settled();
+    h.t.now += 1_000;
+    h.tick();
+    assert.equal(h.child.ledger.loaded(), true);
+    assert.equal(h.child.ceilingFor(coin(1), h.t.now).ceiling6, U(5));
+    assert.equal(h.book.active().length, 1);
+  });
+
+  it("a redeploy wipes the child's home; the loss, the held cost and the day's follow entries survive it", async () => {
+    const d = memoryDurable();
+    const a = await loaded({ durable: d.port, coins: [coin(1), coin(2)], live: { settings: { ...harness().state.settings, scoutBudgetUsdg: 6 } } });
+    const g = a.child.gateEntry(a.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    assert.equal(await a.child.persistEntry(g, "d-1"), true);
+    a.child.settleEntry(g, "paper", "d-1");
+    // Sold for 2: a 3 USDG loss, closed.
+    a.child.noteTradeRow({ status: "paper", fill_side: "sell", sell_token: coin(1), fill_cash_usdg: 2 });
+    a.basis.set(a.symbol(coin(1)), { qtyRaw: 0n, costUsdg: 0n });
+    a.t.now += FOMO_CHILD.fileReadEveryMs + 1;
+    a.tick();
+    await a.child.settled();
+    a.t.now += FOMO_CHILD.flatConfirmMs + 1;
+    a.tick();
+    await a.child.settled();
+    assert.equal(a.child.ledger.figures("paper").loss6, U(3));
+    assert.ok(d.map.has(FOMO_STATE_KEYS.exploration) && d.map.has(FOMO_STATE_KEYS.followEntries));
+
+    // THE REDEPLOY: a new, empty home; the same tenant store.
+    const b = await loaded({ durable: d.port, coins: [coin(1), coin(2)], now: a.t.now + 1_000, live: { settings: { ...a.state.settings } } });
+    assert.equal(b.child.ledger.figures("paper").loss6, U(3), "the realised loss did not refill");
+    assert.equal(b.child.ceilingFor(coin(2), b.t.now).parts["exploration-remaining"], U(3));
+    assert.equal(b.durableCounters!.takeFollowEntry(DAY, 1), false, "today's follow entry is still spent");
+    assert.equal(b.durableCounters!.takeFollowEntry(DAY, 3), true);
+  });
+
+  it("a missing durable copy with a present local copy is UPLOADED, not discarded", async () => {
+    const d = memoryDurable();
+    const h0 = harness();
+    const home = h0.home;
+    const local: ExplorationState = {
+      epochKey: "true:20000000:10000000",
+      epochSince: T0 - 3_600_000,
+      savedAt: T0 - 60_000,
+      books: { paper: { positions: [], closedLoss6: U(4) }, live: { positions: [], closedLoss6: 0n } },
+    };
+    fileExplorationStore(path.join(home, "fomo-exploration.json")).save(local);
+    writeFileSync(path.join(home, "fomo-follow-entries.json"), JSON.stringify({ day: DAY, taken: 3 }));
+    const ledger = new ExplorationLedger(childExplorationStore(home), () => {}, { durable: d.port, now: () => T0 });
+    const counters = childDurableFollowCounters(home, d.port, undefined, () => T0);
+    assert.equal(await ledger.load(), true);
+    assert.equal(await counters.load(), true);
+    await ledger.settled();
+    await counters.settled();
+    assert.equal(ledger.figures("paper").loss6, U(4));
+    assert.equal(counters.takeFollowEntry(DAY, 3), false);
+    assert.equal(decodeDurableExploration(d.map.get(FOMO_STATE_KEYS.exploration)!) !== "corrupt", true, "uploaded");
+    assert.deepEqual(JSON.parse(d.map.get(FOMO_STATE_KEYS.followEntries)!), { day: DAY, taken: 3 });
+  });
+
+  it("an unreadable durable copy is unknown (zero) until the owner re-authorises; an unreadable count is today used", async () => {
+    const d = memoryDurable();
+    d.map.set(FOMO_STATE_KEYS.exploration, "{not json");
+    d.map.set(FOMO_STATE_KEYS.followEntries, "{not json");
+    const home = harness().home;
+    const ledger = new ExplorationLedger(childExplorationStore(home), () => {}, { durable: d.port, now: () => T0 });
+    const counters = childDurableFollowCounters(home, d.port, undefined, () => T0);
+    await ledger.load();
+    await counters.load();
+    ledger.syncEpoch("k1", T0);
+    assert.equal(ledger.figures("paper").held6, null);
+    assert.equal(counters.takeFollowEntry(DAY, 3), false);
+    ledger.syncEpoch("k2", T0 + 1);
+    assert.equal(ledger.figures("paper").loss6, 0n, "a new authorisation starts afresh");
+  });
+
+  it("the broker port believes 'nothing stored' only when the store demonstrably answers", async () => {
+    const mem = new Map<string, string>();
+    const sw = { get: true, set: true };
+    const broker = {
+      ...recordingBroker(),
+      memory: {
+        get: async (k: string) => (sw.get ? mem.get(k) ?? null : null),
+        set: async (k: string, v: string) => {
+          if (sw.set) mem.set(k, v);
+        },
+        clear: async () => {},
+      },
+    };
+    let n = 0;
+    const port = brokerDurableState(() => broker, { newNonce: () => `n${++n}` });
+    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "absent" });
+    // Two loads at once (the ledger and the day count) do not read each other's probe.
+    assert.deepEqual(await Promise.all([port.read(FOMO_STATE_KEYS.exploration), port.read(FOMO_STATE_KEYS.followEntries)]), [{ kind: "absent" }, { kind: "absent" }]);
+    sw.get = false;
+    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "a failed read is not an empty ledger");
+    sw.get = true;
+    sw.set = false;
+    mem.delete(FOMO_STATE_KEYS.probe);
+    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "the probe did not read back");
+    assert.equal(await port.write(FOMO_STATE_KEYS.exploration, "{}"), false, "an unconfirmed write is not a write");
+    sw.set = true;
+    assert.equal(await port.write(FOMO_STATE_KEYS.exploration, "{\"a\":1}"), true);
+    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "found", text: "{\"a\":1}" });
+    assert.deepEqual(await brokerDurableState(() => null).read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "no broker yet");
+  });
+
+  it("the durable copy carries every accounting field and a full book fits the memory API", () => {
+    const pos = (i: number, mode: string): ExplorationPosition => ({
+      symbol: `T${String(i).padStart(11, "0")}`,
+      token: coin(i),
+      source: i % 2 ? "follow" : "early",
+      decisionId: `decision-${"x".repeat(60)}`,
+      assessmentId: `fa_${"a".repeat(24)}`,
+      openedAt: T0 + i,
+      entryCost6: U(5),
+      proceeds6: U(1.25),
+      heldCost6: i % 3 ? U(4.999999) : null,
+      everHeld: i % 2 === 0,
+      flatSince: i % 5 ? null : T0,
+      setupExpiresAt: T0 + 900_000,
+      horizonEndsAt: T0 + 86_400_000,
+      strengthAtEntry: { strongSupport: 1, supportFamilies: 2, supportAuthors: 3, strongOpposition: 0, opposeFamilies: 1 },
+      traders: Array.from({ length: 10 }, (_, k) => `3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a${k}${mode}`),
+      entryId: `f:${(T0 + i).toString(36)}:${i}`,
+    });
+    const full: ExplorationState = {
+      epochKey: "true:20000000:10000000",
+      epochSince: T0,
+      savedAt: T0 + 5,
+      books: {
+        paper: { positions: Array.from({ length: FOMO_CHILD.ledgerPositionsMax }, (_, i) => pos(i + 1, "p")), closedLoss6: U(123.456789) },
+        live: { positions: Array.from({ length: FOMO_CHILD.ledgerPositionsMax }, (_, i) => pos(i + 100, "l")), closedLoss6: U(7) },
+      },
+    };
+    const text = encodeDurableExploration(full);
+    assert.ok(durableWireBytes(text) <= FOMO_CHILD.durableWireMaxBytes, `${durableWireBytes(text)} bytes`);
+    const back = decodeDurableExploration(text);
+    assert.notEqual(back, "corrupt");
+    const b = back as ExplorationState;
+    for (const mode of ["paper", "live"] as const) {
+      assert.equal(b.books[mode].closedLoss6, full.books[mode].closedLoss6);
+      assert.deepEqual(
+        b.books[mode].positions.map(({ decisionId: _d, traders: _t, ...rest }) => rest),
+        full.books[mode].positions.map(({ decisionId: _d, traders: _t, ...rest }) => rest),
+      );
+    }
+    assert.equal(decodeDurableExploration(text.replace('"l":"7000000"', '"l":"-1"')), "corrupt");
+    assert.equal(decodeDurableExploration(text.slice(0, -2)), "corrupt");
+    assert.equal(decodeDurableExploration(JSON.stringify({ ...JSON.parse(text), v: 2 })), "corrupt");
+  });
+});
+
+describe("an entry is recorded before it is sent", () => {
+  it("a crash after broadcast keeps the entry's cost and its day claim counted", async () => {
+    const d = memoryDurable();
+    const a = await loaded({ durable: d.port, coins: [coin(1), coin(2)] });
+    const g = a.child.gateEntry(a.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    assert.equal(await a.child.persistEntry(g, "d-1"), true, "durable before it is sent");
+    // Sent… and the process dies before the receipt: no settleEntry.
+    const b = await loaded({ durable: d.port, coins: [coin(1), coin(2)], now: a.t.now + 2_000 });
+    assert.equal(b.child.ledger.figures("paper").held6, U(5), "the pending entry still counts its full cost");
+    assert.equal(b.child.ceilingFor(coin(2), b.t.now).parts["exploration-remaining"], U(15));
+    assert.equal(b.durableCounters!.takeFollowEntry(DAY, 1), false, "and its day claim");
+    // The basis shows it landed: an ordinary held position from now on.
+    b.basis.set(b.symbol(coin(1)), { qtyRaw: 5n * 10n ** 18n, costUsdg: U(5) });
+    b.t.now += 1_000;
+    b.tick();
+    await b.child.settled();
+    assert.equal(b.child.ledger.positions("paper")[0]!.everHeld, true);
+    assert.equal(b.child.ledger.figures("paper").held6, U(5));
+  });
+
+  it("an entry that never landed is forgotten only after the unsettled grace", async () => {
+    const d = memoryDurable();
+    const a = await loaded({ durable: d.port });
+    const g = a.child.gateEntry(a.entry(coin(1), 5));
+    assert.equal(await a.child.persistEntry(g, "d-1"), true);
+    const b = await loaded({ durable: d.port, now: a.t.now + 2_000 });
+    assert.equal(b.child.ledger.figures("paper").held6, U(5));
+    b.t.now += FOMO_CHILD.unsettledGraceMs + 1;
+    b.state.pricesAt = b.t.now - 1_000;
+    b.tick();
+    await b.child.settled();
+    assert.equal(b.child.ledger.positions("paper").length, 0);
+    assert.equal(b.child.ledger.figures("paper").held6, 0n);
+  });
+
+  it("an entry whose record cannot be made durable is dropped and settled, never sent", async () => {
+    const d = memoryDurable();
+    const h = await loaded({ durable: d.port });
+    d.writable = false;
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    assert.equal(await h.child.persistEntry(g, "d-1"), false);
+    assert.equal(h.child.reservations.outstanding().count, 0, "the reservation is released");
+    assert.equal(h.child.ledger.positions("paper").length, 0, "the pending position is removed");
+    d.writable = true;
+    assert.equal(h.durableCounters!.takeFollowEntry(DAY, 1), true, "the day's claim was given back");
+    assert.deepEqual(h.notes.at(-1), { address: coin(1), detail: "follow-state-not-durable", stage: "BUDGET_EXHAUSTED" });
+    assert.equal(await h.child.persistEntry({ kind: "none" }), true, "an entry no nomination reached is not held up");
+  });
+});
+
+describe("one scout pool", () => {
+  it("what the existing scout gate holds is spent from the same budget: a full pool sizes follow at zero", () => {
+    const h = harness();
+    h.state.scoutHeldCost6 = U(20);
+    h.tick();
+    const c = h.child.ceilingFor(coin(1), h.t.now);
+    assert.equal(c.parts["exploration-remaining"], 0n);
+    assert.equal(c.ceiling6, 0n);
+    assert.equal(h.book.active().length, 0, "no follow nomination while quarantined cost fills the budget");
+    const k = harness();
+    k.state.scoutHeldCost6 = U(17);
+    k.tick();
+    assert.equal(k.child.ceilingFor(coin(1), k.t.now).parts["exploration-remaining"], U(3));
+    const g = k.child.gateEntry(k.entry(coin(1), 3));
+    assert.equal(g.kind, "follow", "3 USDG is what the shared pool has left");
+    assert.equal(k.child.gateEntry(k.entry(coin(1), 1)).kind, "dropped");
+    const u = harness();
+    u.state.scoutHeldCost6 = null;
+    u.tick();
+    assert.equal(u.child.ceilingFor(coin(1), u.t.now).binding, "unknown:exploration-remaining", "unknown is not permission");
+  });
+
+  it("the existing scout gate is told what exploration holds and has reserved", async () => {
+    const h = harness();
+    h.tick();
+    assert.equal(h.child.explorationScoutUse6(), 0n);
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(h.child.explorationScoutUse6(), U(5), "reserved and not yet settled");
+    h.child.settleEntry(g, "paper", "d-1");
+    assert.equal(h.child.explorationScoutUse6(), U(5), "held");
+    const d = memoryDurable();
+    d.readable = false;
+    const k = harness({ durable: d.port });
+    k.tick();
+    await k.child.settled();
+    assert.equal(k.child.explorationScoutUse6(), null, "unread while following could act: the whole budget, not zero");
+    k.state.settings.follow = false;
+    assert.equal(k.child.explorationScoutUse6(), 0n, "an unread ledger never blocks an owner who does not follow");
+  });
+});
+
 // ─── Held positions ─────────────────────────────────────────────────────────
 
 describe("a held coin", () => {
@@ -827,6 +1241,47 @@ describe("the trader-flow lens", () => {
     k.child.attachLens({}, coin(1), "https://brain.test/");
     await k.child.settled();
     assert.equal(now.n, 2, "asked again after the hour");
+  });
+
+  it("a decide that carried the lens and failed turns it off NOW, until a fresh /health read says yes", async () => {
+    const reads = { n: 0 };
+    const h = harness({ fetchImpl: healthFetch(["technical", "trader-flow"], reads) });
+    h.tick();
+    h.child.attachLens({}, coin(1), "https://brain.test");
+    await h.child.settled();
+    const s1: Record<string, string> = {};
+    assert.equal(h.child.attachLens(s1, coin(1), "https://brain.test"), true);
+    // The Brain was rolled back: /v1/decide 422s the unknown key (arrives as `unreachable`).
+    const failed = { ran: true, result: { ok: false, kind: "unreachable", detail: "brain returned HTTP 422" } } as unknown as ShadowOutcome;
+    h.child.onReviewed({ token: coin(1), held: false, outcome: failed });
+    const s2: Record<string, string> = {};
+    assert.equal(h.child.attachLens(s2, coin(1), "https://brain.test"), false, "off at once, not after the hourly probe");
+    assert.equal("trader-flow" in s2, false);
+    h.t.now += FOMO_CHILD.lensRecheckAfterFailMs - 1;
+    assert.equal(h.child.attachLens({}, coin(1), "https://brain.test"), false);
+    await h.child.settled();
+    assert.equal(reads.n, 1, "no re-read before the recheck");
+    h.t.now += 1;
+    assert.equal(h.child.attachLens({}, coin(1), "https://brain.test"), false, "the re-read runs in the background");
+    await h.child.settled();
+    assert.equal(reads.n, 2);
+    assert.equal(h.child.attachLens({}, coin(1), "https://brain.test"), true, "a fresh /health that says yes brings it back");
+  });
+
+  it("a read that started before the failure cannot bring the lens back", async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = (async () => {
+      await gate;
+      return new Response(JSON.stringify({ lens_keys: ["trader-flow"] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const h = harness({ fetchImpl: slow });
+    h.tick();
+    h.child.lensProbe.advertises("https://brain.test");
+    h.child.lensProbe.invalidate();
+    release!();
+    await h.child.settled();
+    assert.equal(h.child.lensProbe.advertises("https://brain.test"), false);
   });
 
   it("is withheld when anything address-shaped is in it, and absent without research access", async () => {
@@ -976,5 +1431,99 @@ describe("the child's broker", () => {
     assert.equal(local.broker!.configured(), false, "no key: not configured, honestly");
     const env = await local.broker!.call("fomo_get_rankings", {}, { surface: "telegram-dm", audience: "owner", conversationKey: "tg-dm:1", priority: "interactive" });
     assert.equal(env.status, "unavailable");
+  });
+
+  it("self-hosted, the durable money state lands in fomo.sqlite through the direct broker", async () => {
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    const broker = await selfHostedFomoBroker({ apiKey: null, access: () => ({ dataAccess: true, monitoring: false, follow: true }), db, now: () => T0 });
+    const port = brokerDurableState(() => broker);
+    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "absent" }, "a fresh install: shown absent, not assumed");
+    const h = await loaded({ durable: port });
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(g.kind, "follow", "both loads probed the store and adopted it");
+    assert.equal(await h.child.persistEntry(g, "d-1"), true);
+    const stored = await port.read(FOMO_STATE_KEYS.exploration);
+    assert.equal(stored.kind, "found");
+    const st = decodeDurableExploration((stored as { text: string }).text) as ExplorationState;
+    assert.equal(st.books.paper.positions.length, 1, "the pending entry is in the install's store");
+    assert.deepEqual(JSON.parse((await broker.memory.get(FOMO_STATE_KEYS.followEntries))!), { day: DAY, taken: 1 });
+  });
+
+  it("self-hosted, the install runs its own deep-research queue and sweeps what missed its deadline", async () => {
+    let now = T0;
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    const box: { jobs: SelfHostedJobs | null } = { jobs: null };
+    await selfHostedFomoBroker({
+      apiKey: null,
+      access: () => ({ dataAccess: true, monitoring: false, follow: false }),
+      db,
+      jobsEveryMs: FOMO_CHILD.selfHostedJobsEveryMs,
+      onJobs: (j) => (box.jobs = j),
+      fetchImpl: (async () => assert.fail("no provider call without a key")) as typeof fetch,
+      now: () => now,
+    });
+    const jobs = box.jobs;
+    assert.ok(jobs, "the loop is started for a self-hosted runtime");
+    const base = { tenant: "self", idempotencyKey: null, conversationKey: "tg-dm:1", surface: "telegram-dm" as const, costAllowanceCredits: null };
+    const late = await enqueueJob(db, { ...base, kind: "deep-research", params: { tokenKey: `eip155:4663:${coin(1)}` }, deadlineMs: T0 + 60_000, nowMs: T0 });
+    const odd = await enqueueJob(db, { ...base, kind: "not-a-kind", params: {}, deadlineMs: T0 + 3_600_000, nowMs: T0 });
+    assert.ok(late.ok && odd.ok);
+    now = T0 + 120_000; // the first job missed its deadline while nothing ran it
+    try {
+      await jobs.pass();
+      await jobs.pass();
+    } finally {
+      jobs.stop();
+    }
+    const after = await recentJobs(db, "self", 10);
+    for (const j of after) assert.ok(j.status !== "queued" && j.status !== "running", `${j.kind} is ${j.status}`);
+    assert.equal(after.find((j) => j.kind === "deep-research")?.status, "failed", "swept: never reported as in progress again");
+  });
+});
+
+// ─── The wiring in index.ts, read as source ─────────────────────────────────
+
+describe("index.ts wires the follow path's money rules", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+
+  it("the money state is the tenant's durable store, with the home's files as caches", () => {
+    assert.match(CODE, /const fomoDurable = brokerDurableState\(\(\) => fomoBroker\);/);
+    assert.match(CODE, /counters: childDurableFollowCounters\(merrymenHome\(\), fomoDurable,/);
+    assert.match(CODE, /durable: fomoDurable,/);
+    assert.doesNotMatch(CODE, /counters: childFollowCounters\(/, "the home-only counter is not the record");
+  });
+
+  it("an entry's pending record is confirmed durable after the gate and before anything is claimed or sent", () => {
+    const loopAt = CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {");
+    const LOOP = CODE.slice(loopAt, CODE.indexOf("\n    }\n", loopAt));
+    const gate = LOOP.indexOf("const followGate = entry ? fomoChild.gateEntry(intent) : null;");
+    const persist = LOOP.indexOf("if (followGate && !(await fomoChild.persistEntry(followGate, intent.decisionId))) {");
+    const energy = LOOP.indexOf("const energyClaim = entry ? await claimEntry() : null;");
+    const sent = LOOP.indexOf("await processIntentReporting(intent");
+    assert.ok(loopAt > 0 && gate > 0 && persist > gate && energy > persist && sent > energy);
+  });
+
+  it("one scout pool: the follow ceiling is told the quarantined cost, and the scout gate the exploration cost", () => {
+    assert.match(CODE, /scoutHeldCost6: lastQuarantinedKnown \? lastQuarantinedUsdg : null,/);
+    assert.match(CODE, /lastQuarantinedKnown = true;/);
+    const fn = CODE.slice(CODE.indexOf("async function scoutContextFor("));
+    assert.match(fn.slice(0, 8000), /quarantinedUsdg: lastQuarantinedUsdg \+ \(fomoChild\.explorationScoutUse6\(\) \?\? usdg\(cfg\.scoutBudgetUsdg\)\),/);
+  });
+
+  it("the regular autonomous list excludes pools discovery read only for the early path", () => {
+    assert.match(CODE, /\? regularEntryPools\(freshTape, autoTrench\?\.qualified \?\? \[\]\)/);
+    assert.doesNotMatch(CODE, /highVolumePools\(freshTape\.filter\(p => autoTrench\?\.qualified\.some\(/);
+  });
+
+  it("the paper rail's regular list leaves out coins that are on the tape only because Fomo asked to verify them", () => {
+    assert.match(CODE, /const verifyOnly = new Set\(fomoChild\.verifyRequests\(\)\.filter\(\(a\) => !earlyBook\.addresses\(\)\.has\(a\)\)\);/);
+    assert.match(CODE, /: highVolumePools\(freshTape\)\.filter\(\(p\) => !verifyOnly\.has\(p\.tokenAddress\.toLowerCase\(\)\)\);/);
+    assert.doesNotMatch(CODE, /: highVolumePools\(freshTape\);/);
+  });
+
+  it("self-hosted runs its own deep-research queue; hosted never builds a local runtime", () => {
+    const at = CODE.indexOf("void chooseChildFomoBroker({");
+    assert.ok(at > 0);
+    assert.match(CODE.slice(at, at + 900), /selfHostedFomoBroker\(\{[\s\S]*jobsEveryMs: FOMO_CHILD\.selfHostedJobsEveryMs,/);
   });
 });

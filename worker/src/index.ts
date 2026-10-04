@@ -25,7 +25,7 @@ import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 
 import { rmSync, writeFileSync } from "node:fs";
 import { grantTrencher, TRENCHER_VAULT_ABI } from "../../packages/core/src/trencher-vault";
-import { DISCOVERY_SLICE, TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
+import { DISCOVERY_SLICE, TrencherPoolCache, discoverTrencherUniverse, regularEntryPools } from "./trencher-discovery";
 import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
@@ -155,9 +155,11 @@ import { chooseFocus, focusLabel } from "./brain-focus";
 import { FunnelRecorder, candidateSkipOf, classifyReview, classifyStage, entryTokenOf, installDecisionFunnel, trenchReviewBlock, trencherSymbol, unqualifiedReasons, type Classified } from "./decision-funnel";
 import { EarlyCandidateBook, earlyCandidateBook, earlyEntryBound, earlyEntryPools, earlyFunnelOf, installEarlyCandidateBook } from "./early-candidates";
 import {
+  FOMO_CHILD,
   FomoChild,
+  brokerDurableState,
+  childDurableFollowCounters,
   childExplorationStore,
-  childFollowCounters,
   childFomoTenant,
   chooseChildFomoBroker,
   fomoFollowLiveEnabledFor,
@@ -823,6 +825,16 @@ async function main() {
   let fomoSponsorQuoted: boolean | null = null;
   /** When this tick's prices were read (ms), for the follow freshness checks. */
   let fomoPricesAt: number | null = null;
+  /**
+   * THE FOLLOW PATH'S MONEY STATE IS DURABLE (fomo-child.ts brokerDurableState):
+   * the exploration ledger and the follow-entry day count live in this
+   * tenant's store, reached through the broker — hosted, the orchestrator's
+   * Postgres (a hosted child's home is wiped by every redeploy); self-hosted,
+   * fomo.sqlite. The files in this home stay as local caches. Until the store
+   * has been read, the exploration ceiling is UNKNOWN (zero) and the day count
+   * refuses: an unread ledger is never an empty one.
+   */
+  const fomoDurable = brokerDurableState(() => fomoBroker);
   const fomoChild = new FomoChild({
     broker: () => fomoBroker,
     // Trusted process context only: MERRYMEN_TENANT hosted, "self" self-hosted.
@@ -830,8 +842,9 @@ async function main() {
     home: () => merrymenHome(),
     live: () => fomoLiveFacts(),
     earlyBook: () => earlyCandidateBook(),
-    counters: childFollowCounters(merrymenHome(), (line) => console.log(line)),
+    counters: childDurableFollowCounters(merrymenHome(), fomoDurable, (line) => console.log(line)),
     ledgerStore: childExplorationStore(merrymenHome()),
+    durable: fomoDurable,
     funnel: {
       note: (a, s, c) => funnel.note(a, s ?? funnelSymbol(a), c),
       latest: (a) => {
@@ -862,6 +875,10 @@ async function main() {
       rail: execMode().mode,
       paused: isPaused(),
       liveFollowAllowed: fomoFollowLiveEnabledFor(active?.agentId),
+      // ONE SCOUT POOL: what the existing scout gate already counts
+      // (quarantined, curve and class cost) is spent from the same budget the
+      // follow ceiling draws on. Unknown until the tick has computed it.
+      scoutHeldCost6: lastQuarantinedKnown ? lastQuarantinedUsdg : null,
       sponsorship: { sponsoredFlow: gasSponsored(), available: fomoSponsorQuoted },
       perTrade6: lim ? lim.perTradeUsdg : null,
       dailyHeadroom6: lim ? (lim.dailyUsdg > spent ? lim.dailyUsdg - spent : 0n) : null,
@@ -877,7 +894,12 @@ async function main() {
       pricesAt: fomoPricesAt,
     };
   }
-  /** What discovery's early path reads: the book's coins, then the follow path's verification-only asks. */
+  /**
+   * What discovery's early path reads: the book's coins, then the follow
+   * path's verification-only asks (made only where a follow nomination could
+   * act). A pool read only for an ask comes back `early` and stays off the
+   * regular candidate list (trencher-discovery.ts regularEntryPools).
+   */
   function earlyDiscoverySet(): Set<string> {
     return new Set([...earlyBook.addresses(), ...fomoChild.verifyRequests()]);
   }
@@ -5103,6 +5125,8 @@ async function main() {
   // from an intent, so a strategy can't declare its own target priceable.
   let lastUnpriceable: Set<string> = new Set();
   let lastQuarantinedUsdg = 0n;
+  /** Has a tick computed `lastQuarantinedUsdg` yet? Before that its 0 is a default, not a reading (the follow ceiling reads it). */
+  let lastQuarantinedKnown = false;
   // ETH held by the smart account, as of the last tick that could read it.
   //
   // NULL means "not read yet", which is different from zero — and the
@@ -5662,9 +5686,24 @@ async function main() {
       // Do not require a historical discovery row: trending records used to
       // carry firstSeen=0, so that age-window query silently excluded them all.
       const freshTape = freshTrenchTape();
+      // The regular list is the REGULAR reads only: a pool verified because
+      // something asked the early path (an early-book offer, a Fomo follow
+      // verification ask) is `early`, beyond the slice, and reaches the list
+      // below only through earlyEntryPools — i.e. only with an early-book
+      // offer behind it (trencher-discovery.ts regularEntryPools).
+      // THE PAPER RAIL TOO. Without a trencher grant the regular list is the
+      // whole screened tape, and that tape now carries the pages a Fomo
+      // verification ask added (fomo-child verifyRequests). A coin that is on
+      // the tape ONLY because Fomo asked must not become a regular paper
+      // candidate: that would skip the follow gate (revalidate, caps,
+      // reservation) and make paper results say something the live path never
+      // would. It reaches candidates through the early path once nominated.
+      // Narrowing only — a coin the feeds carry organically is unaffected
+      // unless it is also being verify-asked, and then it waits for the gate.
+      const verifyOnly = new Set(fomoChild.verifyRequests().filter((a) => !earlyBook.addresses().has(a)));
       const entryPools = !paperActive() && active && grantTrencher(active.grant)
-        ? highVolumePools(freshTape.filter(p => autoTrench?.qualified.some(q => q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)))
-        : highVolumePools(freshTape);
+        ? regularEntryPools(freshTape, autoTrench?.qualified ?? [])
+        : highVolumePools(freshTape).filter((p) => !verifyOnly.has(p.tokenAddress.toLowerCase()));
       // Screened-tape coins that never reached the verified universe, named
       // (beyond the slice, unverified pool, other venue). Filing only.
       const unqualified = autoTrench && active && grantTrencher(active.grant)
@@ -7969,7 +8008,11 @@ async function main() {
         if (s === undefined) return 0n;
         return (await getBasis(active.agentId, paperActive() ? "paper" : "live", s)).costUsdg;
       })(),
-      quarantinedUsdg: lastQuarantinedUsdg,
+      // ONE POOL, BOTH WAYS: the scout budget is also what Fomo follow and
+      // early exploration holds (fomo-child.ts explorationScoutUse6), so an
+      // unpriceable buy cannot spend what a follow position already took.
+      // Unknown while following could be acting reads as the whole budget.
+      quarantinedUsdg: lastQuarantinedUsdg + (fomoChild.explorationScoutUse6() ?? usdg(cfg.scoutBudgetUsdg)),
     };
   }
 
@@ -11432,6 +11475,7 @@ async function main() {
     // subtrahend is zero.
     lastQuarantinedUsdg =
       quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg - classCostInQuarantine;
+    lastQuarantinedKnown = true;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
     const bookIncomplete = unknownCost.length > 0;
@@ -13170,6 +13214,14 @@ async function main() {
         tgSettleGroupEntry(groupEntry, intent.decisionId, null);
         continue;
       }
+      // RECORDED BEFORE ANYTHING IS SENT. The gate opened this entry's pending
+      // exploration position and took its day claim; both must read back from
+      // the tenant's store before the entry goes on, so a crash after the
+      // broadcast cannot forget what it cost. Unconfirmed → dropped, settled.
+      if (followGate && !(await fomoChild.persistEntry(followGate, intent.decisionId))) {
+        tgSettleGroupEntry(groupEntry, intent.decisionId, null);
+        continue;
+      }
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         fomoChild.settleEntry(followGate, null, intent.decisionId);
@@ -14125,6 +14177,9 @@ async function main() {
       selfHostedFomoBroker({
         apiKey: cfg.fomoApiKey ?? null,
         access: () => ({ dataAccess: cfg.fomoDataAccess, monitoring: cfg.fomoMonitoringEnabled, follow: cfg.fomoFollowEnabled }),
+        // SELF-HOSTED ONLY: this install's deep-research queue runs here, one
+        // job a minute (hosted, the orchestrator runs every tenant's).
+        jobsEveryMs: FOMO_CHILD.selfHostedJobsEveryMs,
         log: (line) => console.log(line),
       }),
     log: (line) => console.log(line),

@@ -8,7 +8,7 @@ import {
   earlyScreenReason, earlyVerifyPools, installEarlyCandidateBook, type EarlyOffer,
 } from "./early-candidates";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchScreenReason } from "./trencher-brain";
-import { DISCOVERY_SLICE, EARLY_VERIFY_MAX, discoverTrencherUniverse } from "./trencher-discovery";
+import { DISCOVERY_SLICE, EARLY_VERIFY_MAX, discoverTrencherUniverse, regularEntryPools } from "./trencher-discovery";
 import { FunnelRecorder, classifyStage } from "./decision-funnel";
 import { makeTrencher, shouldEnter, TRENCHER_FAST, type Candidate } from "./strategies/trencher";
 import { takeTick, type Snapshot } from "./strategies/types";
@@ -227,6 +227,27 @@ test("maxUsdgFor: floored to the cent, remembered past the entry, null for a coi
   assert.equal(book.maxUsdgFor(A), null, "and is forgotten after its memory");
 });
 
+test("withdraw: the source takes its own offer back now; its ceiling stays remembered and no cooldown starts", () => {
+  let now = T0;
+  const book = new EarlyCandidateBook(() => now);
+  assert.equal(book.offer(A, offer({ maxUsdg6: 3_000_000n })), "added");
+  assert.equal(book.offer(B, offer({ source: "other-source" })), "added");
+  assert.equal(book.withdraw(B, "fomo-follow"), false, "only the offering source's own entry");
+  assert.equal(book.withdraw(A, "fomo-follow"), true);
+  assert.equal(book.has(A), false);
+  assert.ok(!book.addresses().has(A), "off the tape page, the verification and the candidate list");
+  assert.ok(!book.priority().has(A), "and out of the reserved review slot");
+  assert.equal(book.maxUsdgFor(A), 3, "an in-flight review's BUY is still bounded by the ceiling it was offered under");
+  assert.equal(book.withdraw(A, "fomo-follow"), false);
+  assert.equal(book.offer(A, offer()), "added", "no cooldown: the source decides when its setup holds again");
+  // A decided coin (BUY awaiting its entry tick) is withdrawn too.
+  book.onReviewed(A, { action: "buy", decisionId: "d-a" });
+  assert.equal(book.withdraw(A, "fomo-follow"), true);
+  assert.equal(book.has(A), false);
+  now += EARLY.capMemoryMs;
+  assert.equal(book.maxUsdgFor(A), null, "the remembered ceiling lapses like any other");
+});
+
 test("reset forgets every offer (no replay) and keeps the caps", () => {
   let now = T0;
   const book = new EarlyCandidateBook(() => now);
@@ -369,8 +390,9 @@ test("a $20k-volume, two-sided coin with $30k depth and $60k FDV reaches verific
   assert.deepEqual(result.early, { verified: [SMALL], unverified: [], deferred: [] });
   assert.equal(result.qualified.filter(p => !p.early).length, DISCOVERY_SLICE, "the slice is untouched");
 
-  // THE CANDIDATE LIST, built the way index.ts trenchCandidates builds it.
-  const entryPools = highVolumePools(snap.pools.filter(p => result.qualified.some(q => q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)));
+  // THE CANDIDATE LIST, built the way index.ts trenchCandidates builds it:
+  // the regular reads only, then the early book's coins beside them.
+  const entryPools = regularEntryPools(snap.pools, result.qualified);
   const early = earlyEntryPools(snap.pools, book.addresses(), { regular: new Set(entryPools.map(p => p.tokenAddress)), qualified: result.qualified });
   assert.deepEqual(early.map(p => p.tokenAddress), [SMALL]);
   const p = early[0]!;

@@ -274,6 +274,16 @@ const eventRef = (e: TraderEvent): EvidenceRef => ({ id: `fomo:event/${sanitizeT
 
 const ENTRY_STATES: ReadonlySet<ResearchState> = new Set(["ENTRY_CANDIDATE", "PROBE_CANDIDATE", "ADD_CANDIDATE"]);
 
+/**
+ * The two states a NEW follow entry may come from (an ADD is a held coin's
+ * research state the existing path cannot take; see toExecutionHint). A
+ * nomination whose coin's latest assessment is anything else no longer has a
+ * setup behind it.
+ */
+export function isNewEntryState(state: unknown): boolean {
+  return state === "ENTRY_CANDIDATE" || state === "PROBE_CANDIDATE";
+}
+
 const round4 = (n: number) => Math.round(n * 10_000) / 10_000;
 
 function cleanLabel(l: TokenLabel | null | undefined): TokenLabel {
@@ -605,6 +615,15 @@ export interface RevalidateInput {
   sponsorshipAvailable: boolean | null;
   /** Was this entry planned on a sponsored flow? */
   sponsoredFlow: boolean;
+  /**
+   * The coin's LATEST assessment, when one newer than `a` exists. The
+   * nomination carries the assessment it was made from; research keeps
+   * running after it, and a later verdict that is no longer an entry (cohort
+   * sellers caught up, a verified objection appeared, the setup turned to
+   * WATCH or research-only) is exactly "a change that would have produced a
+   * different assessment".
+   */
+  latest?: FollowAssessment | null;
   config?: Partial<FollowConfig>;
 }
 
@@ -616,10 +635,16 @@ export type RevalidateResult = { ok: true; maxUsdg6: bigint } | { ok: false; rea
  * that would have produced a different assessment fails it with one stable
  * reason, the first found:
  *
- *   setup-expired, follow-disabled, entries-paused, rail-refused,
- *   live-follow-not-allowed, permission-missing, rail-mode-changed,
- *   sponsorship-unavailable, quote-missing, stale-quote, no-decision-quote,
- *   price-moved, size-below-floor
+ *   setup-deteriorated, setup-expired, follow-disabled, entries-paused,
+ *   rail-refused, live-follow-not-allowed, permission-missing,
+ *   rail-mode-changed, sponsorship-unavailable, quote-missing, stale-quote,
+ *   no-decision-quote, price-moved, size-below-floor
+ *
+ * THE LATEST ASSESSMENT GOVERNS. A newer assessment of the same coin that is
+ * not an entry state fails it as `setup-deteriorated`, whatever the
+ * nomination-time assessment said: the invalidation conditions it published
+ * ("cohort-sellers-reach-buyers", "verified-objection-appears", …) are
+ * checked by the machine that wrote them, on the newer inputs.
  *
  * SPONSORSHIP FAILS CLOSED. An entry planned on a sponsored flow whose
  * sponsor is unavailable (or unknown) is refused, never re-routed onto the
@@ -633,6 +658,10 @@ export function revalidate(a: FollowAssessment, current: RevalidateInput): Reval
   const cfg: FollowConfig = { ...FOLLOW_DEFAULTS, ...(current.config ?? {}) };
   const fail = (reason: string): RevalidateResult => ({ ok: false, reason });
   if (!a || !ENTRY_STATES.has(a.state)) return fail("not-an-entry-candidate");
+  const latest = current.latest;
+  if (latest && latest !== a && latest.id !== a.id && latest.token?.key === a.token?.key && !isNewEntryState(latest.state)) {
+    return fail("setup-deteriorated");
+  }
   if (a.executionAvailability !== "supported-authorized" || !isRobinhoodToken(a.token)) return fail("execution-unavailable");
   const now = current.now;
   if (typeof a.setupExpiresAt !== "number" || !Number.isFinite(now) || now >= a.setupExpiresAt) return fail("setup-expired");
@@ -684,6 +713,12 @@ export const FOLLOW_BOOK = {
   entriesPerDay: 3,
   /** The same token is not nominated again this soon after a verdict. */
   tokenCooldownMs: 2 * 3_600_000,
+  /**
+   * A nomination WITHDRAWN because its coin's newer assessment is no longer an
+   * entry is not offered again this soon: a setup flickering between WATCH and
+   * ENTRY must not churn the early book's daily offers or its review slots.
+   */
+  withdrawHoldMs: 10 * 60_000,
   /** A held-review request lapses after this. */
   heldReviewTtlMs: 10 * 60_000,
   heldReviewMax: 20,
@@ -707,7 +742,8 @@ export type FollowOutcome =
   | { kind: "bought"; address: string; assessmentId: string; decisionId: string; paper: boolean }
   | { kind: "passed"; address: string; assessmentId: string; decisionId: string | null }
   | { kind: "skipped"; address: string; assessmentId: string; decisionId: string | null }
-  | { kind: "expired"; address: string; assessmentId: string };
+  | { kind: "expired"; address: string; assessmentId: string }
+  | { kind: "withdrawn"; address: string; assessmentId: string };
 
 export type FollowEntryClaim = "taken" | "cap" | "not-nominated";
 
@@ -742,7 +778,8 @@ const validId = (id: unknown): id is string => typeof id === "string" && id.trim
  * allowance.
  *
  * Every nomination gets exactly one outcome — a review verdict, a fill, its
- * expiry or a reset — and outcomes are keyed by ADDRESS for reviews and by
+ * expiry, a reset or a withdrawal (its setup deteriorated) — and outcomes are
+ * keyed by ADDRESS for reviews and by
  * DECISION ID for fills, never by "the latest decision": the rotation may
  * have reviewed another coin in between. Claim before an entry, refund on no
  * fill: a crash in between under-spends by one, never over-spends.
@@ -751,6 +788,8 @@ export class FollowBook {
   private queue: Pending[] = [];
   private outbox: FollowOutcome[] = [];
   private verdictAt = new Map<string, number>();
+  /** Address → when its nomination was withdrawn (see `withdraw`). */
+  private withdrawnAt = new Map<string, number>();
   private buys = new Map<string, Pending>();
   private claims = new Map<string, { day: string; atMs: number }[]>();
   private heldReviews = new Map<string, { urgency: "normal" | "soon"; assessmentId: string; atMs: number }>();
@@ -780,6 +819,8 @@ export class FollowBook {
     if (this.find(address)) return { ok: false, reason: "duplicate" };
     const v = this.verdictAt.get(address);
     if (v !== undefined && t - v < FOLLOW_BOOK.tokenCooldownMs) return { ok: false, reason: "cooldown" };
+    const w = this.withdrawnAt.get(address);
+    if (w !== undefined && t - w < FOLLOW_BOOK.withdrawHoldMs) return { ok: false, reason: "cooldown" };
     if (this.queue.length >= FOLLOW_BOOK.maxOpen) return { ok: false, reason: "busy" };
     this.queue.push({
       address,
@@ -935,6 +976,27 @@ export class FollowBook {
     return this.expire();
   }
 
+  /**
+   * THE SETUP IS GONE: the coin's newer assessment is no longer an entry. The
+   * open nomination is `withdrawn` now rather than at its TTL, so the review
+   * rotation stops favouring it and no later BUY can be matched to it. A
+   * nomination whose claimed entry is already in flight is left to its fill
+   * (`in-flight`), exactly as `reset` leaves it: that entry passed the gate
+   * before the setup changed, and its claim and outcome must still resolve.
+   */
+  withdraw(address: string): "withdrawn" | "in-flight" | "none" {
+    const t = this.now();
+    this.sweep(t);
+    const a = lower(address);
+    const p = this.find(a);
+    if (!p) return "none";
+    if (p.entryInFlightAtMs !== undefined) return "in-flight";
+    this.outbox.push({ kind: "withdrawn", address: p.address, assessmentId: p.assessmentId });
+    this.retire(p);
+    this.withdrawnAt.set(a, t);
+    return "withdrawn";
+  }
+
   // ── sooner reviews of held positions ────────────────────────────────────
 
   /** Ask for a sooner review of a held coin. A `soon` never downgrades to `normal`. */
@@ -1005,6 +1067,7 @@ export class FollowBook {
       this.retire(p);
     }
     for (const [a, at] of this.verdictAt) if (t - at >= FOLLOW_BOOK.tokenCooldownMs) this.verdictAt.delete(a);
+    for (const [a, at] of this.withdrawnAt) if (t - at >= FOLLOW_BOOK.withdrawHoldMs) this.withdrawnAt.delete(a);
     for (const [a, list] of this.claims) {
       const kept = list.filter((c) => t - c.atMs < DAY_MS);
       if (kept.length) this.claims.set(a, kept);

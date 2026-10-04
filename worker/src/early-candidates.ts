@@ -290,6 +290,31 @@ export class EarlyCandidateBook {
     return { address: a, source: e.source, ref: e.ref, action, decisionId };
   }
 
+  /**
+   * THE SOURCE TAKES ITS OFFER BACK: the setup it offered the coin for is gone
+   * (fomo-child.ts withdraws a follow offer when the coin's newer assessment
+   * is no longer an entry). The coin leaves the book now — its tape page, its
+   * verification, its review slot and, for a decided coin, its place on the
+   * candidate list — instead of at its expiry.
+   *
+   * THE CEILING IS REMEMBERED, NOT FORGOTTEN, exactly as when an entry
+   * expires: a review already in flight may still produce a BUY, and that BUY
+   * must be bounded by the ceiling it was offered under, never by the wider
+   * default. (The source's own entry gate drops it; this only keeps the bound.)
+   *
+   * Only the offering source's own entry is withdrawn, and no cooldown is
+   * started: the source decides when its setup holds again. True when an
+   * entry left.
+   */
+  withdraw(address: string, source: string): boolean {
+    const t = this.now();
+    this.sweep(t);
+    const e = this.entries.get(lower(address));
+    if (!e || e.source !== source) return false;
+    this.retire(e, t);
+    return true;
+  }
+
   /** Drop every entry past its expiry. Returns the addresses that left, for the caller to log. */
   expire(): string[] {
     return this.sweep(this.now());

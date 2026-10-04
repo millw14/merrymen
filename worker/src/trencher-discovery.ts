@@ -18,6 +18,24 @@ export const EARLY_VERIFY_MAX = 5;
 /** A verified pool. `early` marks one admitted through the early path (see DiscoveryOptions.early). */
 export type QualifiedPool = GeckoPool & { early?: true };
 
+/**
+ * THE REGULAR AUTONOMOUS ENTRY LIST (index.ts trenchCandidates): the fresh
+ * tape's pools that discovery verified through the REGULAR reads — the top
+ * slice and the nominations — screened by `highVolumePools`.
+ *
+ * WHY `early` POOLS ARE LEFT OUT. A pool verified only because something
+ * asked the early path to read it (an early-book offer, or the Fomo follow
+ * path's verification-only ask) is beyond the slice by construction. Letting
+ * it into this list would make an ASK into a regular candidate — reviewed in
+ * the ordinary rotation, bought at the ordinary autonomous size, with no
+ * follow gate, no follow-entry cap and no exploration budget, on an agent the
+ * operator never allow-listed for follow. Early pools reach the candidate list
+ * only through `earlyEntryPools`, which requires an early-book offer.
+ */
+export function regularEntryPools(tape: readonly GeckoPool[], qualified: readonly Pick<QualifiedPool, "poolAddress" | "tokenAddress" | "early">[]): GeckoPool[] {
+  return highVolumePools(tape.filter(p => qualified.some(q => q.early !== true && q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)));
+}
+
 export interface DiscoveryOptions {
   /**
    * Lowercased token addresses somebody nominated (a coin posted in a Telegram

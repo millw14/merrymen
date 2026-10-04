@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { keccak256, type PublicClient } from "viem";
 import { CASH, UNISWAP, GRANT_TRENCHER, MERRYMEN_TOKEN, type StoredGrant } from "../../packages/core/src/index";
-import { EARLY_VERIFY_MAX, NOMINATED_VERIFY_MAX, discoverTrencherUniverse } from "./trencher-discovery";
+import { EARLY_VERIFY_MAX, NOMINATED_VERIFY_MAX, discoverTrencherUniverse, regularEntryPools } from "./trencher-discovery";
+import { earlyEntryPools } from "./early-candidates";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
 const token="0x1111111111111111111111111111111111111111";
@@ -294,4 +295,34 @@ test("early verification is bounded by EARLY_VERIFY_MAX, beside the slice and th
   assert.equal(result.qualified.length, 20 + NOMINATED_VERIFY_MAX + EARLY_VERIFY_MAX);
   assert.equal(new Set(reads).size, 20 + NOMINATED_VERIFY_MAX + EARLY_VERIFY_MAX);
   assert.equal(result.early.deferred.length, 10 - EARLY_VERIFY_MAX);
+});
+
+// ─── What an early read may NOT become ─────────────────────────────────────
+//
+// A Fomo follow verification ask (fomo-child.ts verifyRequests) rides the
+// early path. Discovery verifies the coin beyond the slice and marks it
+// `early`; that must never make it a REGULAR autonomous candidate — reviewed in
+// the ordinary rotation and bought at the ordinary size, with no follow gate,
+// on an agent the operator never allow-listed for follow.
+
+test("a beyond-slice coin verified only because Fomo asked never reaches the regular candidate list", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(25);
+  const asked = tape[20]!; // the 21st busiest: passes the $100k screen, one past the slice
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, { early: [asked.tokenAddress] });
+  assert.equal(result.qualified.find(p => p.tokenAddress === asked.tokenAddress)?.early, true, "verified, and marked early");
+
+  const regular = regularEntryPools(tape, result.qualified);
+  assert.ok(!regular.some(p => p.tokenAddress === asked.tokenAddress), "not a regular candidate");
+  assert.deepEqual(regular.map(p => p.tokenAddress), tape.slice(0, 20).map(p => p.tokenAddress), "the regular list is the slice, exactly");
+  // With no early-book offer (no follow nomination), the early list does not add it either.
+  assert.deepEqual(earlyEntryPools(tape, new Set(), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified }), []);
+  // Only an early-book offer brings it in, through the early path.
+  const viaBook = earlyEntryPools(tape, new Set([asked.tokenAddress]), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified });
+  assert.deepEqual(viaBook.map(p => p.tokenAddress), [asked.tokenAddress]);
 });

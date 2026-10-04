@@ -24,8 +24,15 @@
  * Brain, take() (60 s, 2% band, the min of every bound), the strategy's own
  * sizing, the energy claim, checkPolicy, the vault caps and the paper/live
  * rail exactly as before. The only thing added at the entry is a GATE that can
- * drop a follow entry (revalidation, the exploration reservation and the
- * follow-entry day cap) — it can never add one, enlarge one or route one.
+ * drop a follow entry (revalidation against the newest assessment, the
+ * exploration reservation, the follow-entry day cap, and a pending record of
+ * the entry made durable before it is sent) — it can never add one, enlarge
+ * one or route one.
+ *
+ * DURABLE MONEY STATE. The exploration ledger and the day count live in the
+ * tenant's store through the broker (brokerDurableState), because a hosted
+ * child's home does not survive a redeploy; until they have been read, every
+ * exploration figure is unknown and no follow entry sizes above zero.
  *
  * TRUST. The tenant comes from the process (MERRYMEN_TENANT, set by the
  * orchestrator for the child it spawned; "self" self-hosted), never from the
@@ -41,6 +48,7 @@
  * or a tick.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { CASH, instrumentClassOf, isEnergyReserveToken } from "../../packages/core/src/index";
@@ -53,9 +61,11 @@ import { createDirectBroker, createIpcBroker, type BrokerPort } from "./fomo/bro
 import { readChildFomoFile, type ChildFomoRead, type ChildFomoReadReason } from "./fomo/child-file";
 import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type FomoAccess, type FomoBroker } from "./fomo/contract";
 import {
+  FOLLOW_BOOK,
   FOLLOW_DEFAULTS,
   FollowBook,
   assessFollow,
+  isNewEntryState,
   revalidate,
   toExecutionHint,
   type ExecutionHint,
@@ -71,7 +81,7 @@ import { dossierStrength, objectionStrengthened, reviewHeldPosition, thesisStren
 import { openLocalFomoDb } from "./fomo/local-db";
 import { createFomoRuntime } from "./fomo/runtime";
 import { AUTONOMOUS_ENTRY_CAP_6, ExplorationReservations, entryCeiling, microUsdgFloor, type EntryCeiling, type ReservationSnapshot } from "./fomo/sizing";
-import { ensureFomoSchema } from "./fomo/store";
+import { ensureFomoSchema, sweepJobs } from "./fomo/store";
 import type { FollowAssessment, FomoHealthState, FunnelStage, TraderEvent } from "./fomo/types";
 import type { Db } from "./db";
 
@@ -118,6 +128,45 @@ export const FOMO_CHILD = Object.freeze({
   /** A position seen flat is closed only when it is still flat this much later. */
   flatConfirmMs: 60_000,
   reportedMax: 400,
+  /**
+   * Open exploration positions one rail's book may hold. A full book takes no
+   * new follow or early entry: the durable copy must always fit the memory
+   * API (`durableWireMaxBytes`), and an entry it could not record is an entry
+   * it could not account for.
+   */
+  ledgerPositionsMax: 24,
+  /**
+   * The largest durable copy sent, in bytes as it travels in a broker request
+   * (the JSON string escaped inside the request). The broker refuses requests
+   * over 16 KiB; this leaves room for the envelope.
+   */
+  durableWireMaxBytes: 15_000,
+  /** A failed durable read or write is retried no sooner than this. */
+  durableRetryMs: 15_000,
+  /** An unchanged durable copy is written again this often, so no retention can age it out. */
+  durableTouchMs: 12 * 3_600_000,
+  /** How long an entry waits for its pending position and day claim to be confirmed durable before it is dropped. */
+  durableConfirmTimeoutMs: 8_000,
+  /** After a decide that carried the lens failed, the lens stays off at least this long and until /health says yes again. */
+  lensRecheckAfterFailMs: 5 * 60_000,
+  /** A coin whose follow nomination was withdrawn has its entries dropped this long (the early book's cap memory, with slack). */
+  withdrawnMemoryMs: 30 * 60_000,
+  /** Self-hosted only: one deep-research job pass this often (hosted, the orchestrator runs them). */
+  selfHostedJobsEveryMs: 60_000,
+});
+
+/**
+ * THE RESERVED MEMORY KEYS this child keeps its money state under, through
+ * the broker's tenant-scoped memory API (hosted: the orchestrator's Postgres,
+ * stamped with this child's tenant; self-hosted: fomo.sqlite). Conversation
+ * keys are `tg-dm:…`, `tg-group:…`, `app:…` — never `state:` — and the store's
+ * retention leaves `state:` keys alone.
+ */
+export const FOMO_STATE_KEYS = Object.freeze({
+  exploration: "state:fomo-exploration",
+  followEntries: "state:fomo-follow-entries",
+  /** A tiny nonce written and read back to tell "nothing stored" from "the read failed". */
+  probe: "state:fomo-probe",
 });
 
 // ─── The broker this child talks through ───────────────────────────────────
@@ -157,16 +206,24 @@ export async function chooseChildFomoBroker(c: {
  * THE SELF-HOSTED RUNTIME: fomo.sqlite in MERRYMEN_HOME, the install's own key
  * (resolved by settings.ts and passed in), and permissions read from the
  * owner's live settings. Only the fixed tenant "self" is ever served.
+ *
+ * With `jobsEveryMs`, this process also RUNS the install's deep-research
+ * queue (startSelfHostedJobs): a self-hosted install has no orchestrator, so
+ * nothing else would ever claim a job the service queued and promised.
  */
 export async function selfHostedFomoBroker(o: {
   apiKey: string | null;
   access: () => FomoAccess;
   home?: string;
+  /** Run the local deep-research queue this often (index.ts passes FOMO_CHILD.selfHostedJobsEveryMs). Absent: never. */
+  jobsEveryMs?: number;
   /** Tests only. */
   db?: Db;
   fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (line: string) => void;
+  /** Tests only: the job loop's handle. */
+  onJobs?: (jobs: SelfHostedJobs) => void;
 }): Promise<FomoBroker> {
   const db = o.db ?? openLocalFomoDb(o.home);
   await ensureFomoSchema(db, "sqlite");
@@ -181,7 +238,77 @@ export async function selfHostedFomoBroker(o: {
     fetchImpl: o.fetchImpl,
     now: o.now,
   });
+  if (typeof o.jobsEveryMs === "number" && Number.isFinite(o.jobsEveryMs) && o.jobsEveryMs > 0) {
+    const jobs = startSelfHostedJobs({
+      runJobs: () => rt.runJobs(undefined, 1),
+      sweep: (now) => sweepJobs(db, now),
+      everyMs: o.jobsEveryMs,
+      now: o.now,
+      log: o.log,
+    });
+    o.onJobs?.(jobs);
+  }
   return createDirectBroker(rt.service, SELF_HOSTED_TENANT, { log: o.log, now: o.now });
+}
+
+export interface SelfHostedJobs {
+  /** One pass now (the timer calls this); resolves when it finished. Never rejects. */
+  pass(): Promise<void>;
+  stop(): void;
+}
+
+/**
+ * THE SELF-HOSTED DEEP-RESEARCH LOOP. Hosted, the orchestrator's leader pass
+ * claims deep jobs for the whole fleet, and a hosted child never runs this
+ * (its broker is IPC; chooseChildFomoBroker never builds a local runtime for
+ * it). A self-hosted install has nobody else: every deep request queued a job
+ * that never ran while its answer promised it would.
+ *
+ * Bounded like the orchestrator's: ONE job per pass, one pass at a time, at
+ * `everyMs`. Each pass first SWEEPS — a queued job past its deadline, or a
+ * running one whose lease lapsed, is failed — so research status never shows
+ * a dead job as in progress. Errors are logged and the next pass tries again;
+ * a pass never throws into the trading process.
+ */
+export function startSelfHostedJobs(o: {
+  runJobs: () => Promise<unknown>;
+  sweep: (now: number) => Promise<unknown>;
+  everyMs: number;
+  now?: () => number;
+  log?: (line: string) => void;
+}): SelfHostedJobs {
+  const clock = o.now ?? Date.now;
+  const log = o.log ?? (() => {});
+  let running: Promise<void> | null = null;
+  let stopped = false;
+  const pass = (): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    if (running) return running;
+    running = (async () => {
+      try {
+        await o.sweep(clock());
+      } catch (e) {
+        log(`[fomo] deep-research sweep failed (${e instanceof Error ? e.name : "error"})`);
+      }
+      try {
+        await o.runJobs();
+      } catch (e) {
+        log(`[fomo] deep-research job pass failed (${e instanceof Error ? e.name : "error"})`);
+      }
+    })().finally(() => {
+      running = null;
+    });
+    return running;
+  };
+  const timer = setInterval(() => void pass(), Math.max(1_000, Math.floor(o.everyMs)));
+  (timer as { unref?: () => void }).unref?.();
+  return {
+    pass,
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
 }
 
 /**
@@ -229,6 +356,10 @@ export function effectiveAccess(owner: FomoAccess, file: FomoAccess | null): Fom
  * any failure is a refusal. An unreadable file is read as "today's allowance
  * is used up" and rewritten that way, so a damaged counter costs at most the
  * rest of one day — never a fresh allowance.
+ *
+ * ON ITS OWN THIS IS NOT DURABLE ON HOSTED: a hosted child's home is wiped by
+ * every redeploy. Production uses DurableFollowCounters (below), which keeps
+ * the count in the tenant's store and this file only as a local cache.
  */
 export function fileFollowCounters(file: string, log: (line: string) => void = () => {}): FollowCounters {
   type Rec = { day: string; taken: number };
@@ -293,6 +424,367 @@ export function childExplorationStore(home: string): ExplorationLedgerStore {
   return fileExplorationStore(path.join(home, FOMO_EXPLORATION_FILE));
 }
 
+/** The production counter: the tenant's durable copy, with the file in this child's home as its local cache. */
+export function childDurableFollowCounters(home: string, durable: DurableStatePort, log?: (line: string) => void, now?: () => number): DurableFollowCounters {
+  return new DurableFollowCounters(path.join(home, FOMO_FOLLOW_COUNTER_FILE), durable, log, now);
+}
+
+// ─── Durable state over the broker's memory API ────────────────────────────
+
+/**
+ * WHERE THE MONEY STATE LIVES. A hosted child's home is the orchestrator's
+ * `childHome()`, which has no volume: every redeploy wipes it. The two figures
+ * that bound follow spending — the exploration ledger (held cost and realised
+ * loss) and the follow-entry day count — therefore live in the tenant's own
+ * store, reached through the broker (the orchestrator stamps the tenant; the
+ * child never names one). Self-hosted, the same calls land in fomo.sqlite.
+ */
+export type DurableRead = { kind: "found"; text: string } | { kind: "absent" } | { kind: "unknown" };
+
+export interface DurableStatePort {
+  /**
+   * The stored text; `absent` ONLY when the store was shown to be answering
+   * reads at the time; `unknown` for anything else. Never throws.
+   */
+  read(key: string): Promise<DurableRead>;
+  /** True only when the text was written AND read back unchanged. Never throws. */
+  write(key: string, text: string): Promise<boolean>;
+}
+
+/** Bytes a durable copy takes inside a broker request (escaped as a JSON string). */
+export function durableWireBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8");
+}
+
+/**
+ * The durable port over a broker's memory API.
+ *
+ * NULL IS AMBIGUOUS, so it is never taken at its word. `memory.get` answers
+ * null both for "nothing stored" and for a failed read (no channel yet, a
+ * timeout, the orchestrator's rate limit, a store error). Reading a missing
+ * ledger as an empty one would hand back the whole scout allowance and a
+ * fresh day of follow entries after every redeploy. So a null is believed
+ * only when the store demonstrably answers right now: a fresh nonce written
+ * to the probe key reads back, and the key reads null AGAIN after it.
+ * Anything short of that is `unknown`, and the caller keeps every figure
+ * unknown (no follow entry sizes above zero) and asks again later.
+ *
+ * Writes are confirmed the same way: `memory.set` swallows its own failures,
+ * so a write counts only when a read returns exactly what was written.
+ */
+export function brokerDurableState(broker: () => FomoBroker | null, opts: { newNonce?: () => string } = {}): DurableStatePort {
+  const nonce = opts.newNonce ?? randomUUID;
+  const get = async (b: FomoBroker, key: string): Promise<string | null> => {
+    try {
+      const v = await b.memory.get(key);
+      return typeof v === "string" ? v : null;
+    } catch {
+      return null;
+    }
+  };
+  const set = async (b: FomoBroker, key: string, text: string): Promise<void> => {
+    try {
+      await b.memory.set(key, text);
+    } catch {
+      // confirmed (or not) by the read that follows
+    }
+  };
+  const readOnce = async (key: string): Promise<DurableRead> => {
+    const b = safeBroker(broker);
+    if (!b) return { kind: "unknown" };
+    const v = await get(b, key);
+    if (v !== null) return { kind: "found", text: v };
+    const probe = JSON.stringify({ probe: String(nonce()).slice(0, 64) });
+    await set(b, FOMO_STATE_KEYS.probe, probe);
+    if ((await get(b, FOMO_STATE_KEYS.probe)) !== probe) return { kind: "unknown" };
+    const again = await get(b, key);
+    return again !== null ? { kind: "found", text: again } : { kind: "absent" };
+  };
+  // ONE READ AT A TIME: two loads probing the one probe key at once would each
+  // read the other's nonce back and both answer `unknown`.
+  let queue: Promise<unknown> = Promise.resolve();
+  return {
+    read(key) {
+      const run = queue.then(
+        () => readOnce(key),
+        () => readOnce(key),
+      );
+      queue = run.catch(() => undefined);
+      return run.catch((): DurableRead => ({ kind: "unknown" }));
+    },
+    async write(key, text) {
+      if (typeof text !== "string" || text.length === 0 || durableWireBytes(text) > FOMO_CHILD.durableWireMaxBytes) return false;
+      const b = safeBroker(broker);
+      if (!b) return false;
+      await set(b, key, text);
+      return (await get(b, key)) === text;
+    },
+  };
+}
+
+function safeBroker(broker: () => FomoBroker | null): FomoBroker | null {
+  try {
+    return broker();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a durably backed piece of state offers the child: whether its durable
+ * copy has been adopted, a cheap per-tick kick (load when due, retry or touch
+ * a write when due), and a flush the entry path awaits before submitting.
+ */
+export interface DurableBacked {
+  loaded(): boolean;
+  kick(now: number): void;
+  /** The newest state, written and read back. False when it could not be confirmed. */
+  flush(): Promise<boolean>;
+  settled(): Promise<void>;
+}
+
+export function isDurableBacked(v: unknown): v is DurableBacked {
+  const d = v as Partial<DurableBacked> | null;
+  return !!d && typeof d.loaded === "function" && typeof d.kick === "function" && typeof d.flush === "function" && typeof d.settled === "function";
+}
+
+/**
+ * ONE KEY'S WRITES, IN ORDER. At most one write is in flight; the newest
+ * wanted text is what gets written (older ones are coalesced away), and a
+ * write is confirmed by reading it back. A failed write leaves the slot dirty
+ * for `kick` to retry; an unchanged copy is rewritten every `durableTouchMs`.
+ */
+class DurableSlot {
+  private wanted: string | null = null;
+  private confirmed: string | null = null;
+  private confirmedAt = Number.NEGATIVE_INFINITY;
+  private failedAt = Number.NEGATIVE_INFINITY;
+  private running: Promise<boolean> | null = null;
+
+  constructor(
+    private readonly port: DurableStatePort,
+    private readonly key: string,
+    private readonly now: () => number,
+  ) {}
+
+  want(text: string): void {
+    this.wanted = text;
+  }
+
+  /** The store already holds exactly this (it was just read): nothing to write. */
+  known(text: string): void {
+    this.wanted = text;
+    this.confirmed = text;
+    this.confirmedAt = this.now();
+  }
+
+  dirty(): boolean {
+    return this.wanted !== null && this.wanted !== this.confirmed;
+  }
+
+  async flush(): Promise<boolean> {
+    for (let i = 0; i < 3; i++) {
+      if (!this.dirty()) return true;
+      const r = this.running ?? (this.running = this.writeNewest().finally(() => (this.running = null)));
+      if (!(await r)) return false;
+    }
+    return !this.dirty();
+  }
+
+  kick(now: number): void {
+    if (this.running || this.wanted === null) return;
+    if (this.dirty()) {
+      if (now - this.failedAt >= FOMO_CHILD.durableRetryMs) void this.flush();
+      return;
+    }
+    if (now - this.confirmedAt >= FOMO_CHILD.durableTouchMs) {
+      this.confirmed = null;
+      void this.flush();
+    }
+  }
+
+  async settled(): Promise<void> {
+    while (this.running) await this.running.catch(() => false);
+  }
+
+  private async writeNewest(): Promise<boolean> {
+    for (let i = 0; i < 4; i++) {
+      if (!this.dirty()) return true;
+      const text = this.wanted as string;
+      let ok = false;
+      try {
+        ok = await this.port.write(this.key, text);
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        this.failedAt = this.now();
+        return false;
+      }
+      this.confirmed = text;
+      this.confirmedAt = this.now();
+    }
+    return !this.dirty();
+  }
+}
+
+type CounterRec = { day: string; taken: number };
+const utcDayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+function counterOf(text: string): CounterRec | "corrupt" {
+  try {
+    const v = JSON.parse(text) as Partial<CounterRec>;
+    if (v && typeof v.day === "string" && v.day.length <= 10 && Number.isSafeInteger(v.taken) && (v.taken as number) >= 0) return { day: v.day, taken: v.taken as number };
+  } catch {
+    // fall through
+  }
+  return "corrupt";
+}
+
+function readCounterFile(file: string): CounterRec | null | "corrupt" {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? null : "corrupt";
+  }
+  return counterOf(text);
+}
+
+/** The later day wins; the same day keeps the larger count. Over-counting is the safe side. */
+function laterCount(a: CounterRec | null, b: CounterRec | null): CounterRec | null {
+  if (!a) return b;
+  if (!b) return a;
+  if (a.day === b.day) return a.taken >= b.taken ? a : b;
+  return a.day > b.day ? a : b;
+}
+
+/**
+ * THE FOLLOW-ENTRY DAY COUNT, DURABLE. FollowCounters is synchronous (a claim
+ * is taken at the entry gate, with no await between the check and the write),
+ * so the count is held in memory once LOADED, written through to the local
+ * file at once, and to the tenant's store in the background; the entry path
+ * then awaits `flush` before it submits anything (FomoChild.persistEntry), so
+ * no entry is sent on a claim that is not durable.
+ *
+ * UNTIL LOADED, NO ENTRY: a take answers false. Unknown is not a fresh day.
+ * A missing durable copy with a present local file is UPLOADED, not
+ * discarded; an unreadable copy is read as today's allowance used.
+ */
+export class DurableFollowCounters implements FollowCounters, DurableBacked {
+  private rec: CounterRec | null = null;
+  private loading: Promise<boolean> | null = null;
+  private loadTriedAt = Number.NEGATIVE_INFINITY;
+  private readonly slot: DurableSlot;
+
+  constructor(
+    private readonly file: string,
+    private readonly durable: DurableStatePort,
+    private readonly log: (line: string) => void = () => {},
+    private readonly now: () => number = Date.now,
+  ) {
+    this.slot = new DurableSlot(durable, FOMO_STATE_KEYS.followEntries, now);
+  }
+
+  takeFollowEntry(day: string, limit: number): boolean {
+    try {
+      if (!this.rec) return false;
+      const taken = this.rec.day === day ? this.rec.taken : 0;
+      if (taken >= limit) return false;
+      this.set({ day, taken: taken + 1 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  refundFollowEntry(day: string): void {
+    try {
+      if (!this.rec || this.rec.day !== day || this.rec.taken <= 0) return;
+      this.set({ day, taken: this.rec.taken - 1 });
+    } catch {
+      // Not refunded: under-spends by one, the safe side.
+    }
+  }
+
+  loaded(): boolean {
+    return this.rec !== null;
+  }
+
+  kick(now: number): void {
+    if (this.rec) {
+      this.slot.kick(now);
+      return;
+    }
+    if (!this.loading && now - this.loadTriedAt >= FOMO_CHILD.durableRetryMs) void this.load();
+  }
+
+  flush(): Promise<boolean> {
+    return this.rec ? this.slot.flush() : Promise.resolve(false);
+  }
+
+  async settled(): Promise<void> {
+    if (this.loading) await this.loading.catch(() => false);
+    await this.slot.settled();
+  }
+
+  /** Read and adopt the durable copy. False (and nothing adopted) while it cannot be read. */
+  load(): Promise<boolean> {
+    if (this.rec) return Promise.resolve(true);
+    if (this.loading) return this.loading;
+    this.loading = this.loadOnce().finally(() => (this.loading = null));
+    return this.loading;
+  }
+
+  private async loadOnce(): Promise<boolean> {
+    this.loadTriedAt = this.now();
+    let r: DurableRead;
+    try {
+      r = await this.durable.read(FOMO_STATE_KEYS.followEntries);
+    } catch {
+      r = { kind: "unknown" };
+    }
+    if (r.kind === "unknown" || this.rec) return this.rec !== null;
+    const local = readCounterFile(this.file);
+    const stored = r.kind === "found" ? counterOf(r.text) : null;
+    if (stored === "corrupt" || (stored === null && local === "corrupt")) {
+      this.log("[fomo] follow-entry counter unreadable; today's follow entries are treated as used");
+      this.set({ day: utcDayOf(this.now()), taken: FOLLOW_BOOK.entriesPerDay });
+      return true;
+    }
+    const merged = laterCount(stored, local === "corrupt" ? null : local) ?? { day: "", taken: 0 };
+    if (r.kind === "found" && stored && merged.day === stored.day && merged.taken === stored.taken) {
+      this.rec = merged;
+      this.slot.known(r.text);
+      this.writeLocal(merged);
+      return true;
+    }
+    // Absent, or the local copy is ahead of it (its last write did not land): uploaded.
+    if (merged.day === "" && r.kind === "absent" && local === null) {
+      this.rec = merged;
+      return true;
+    }
+    this.set(merged);
+    return true;
+  }
+
+  private set(r: CounterRec): void {
+    this.rec = r;
+    this.writeLocal(r);
+    this.slot.want(JSON.stringify(r));
+    void this.slot.flush();
+  }
+
+  private writeLocal(r: CounterRec): void {
+    try {
+      mkdirSync(path.dirname(this.file), { recursive: true });
+      writeFileAtomicSync(this.file, JSON.stringify(r), 0o600);
+    } catch {
+      // the durable copy is the record; the file is a cache
+    }
+  }
+}
+
 // ─── The exploration ledger ────────────────────────────────────────────────
 
 /**
@@ -307,6 +799,10 @@ export function childExplorationStore(home: string): ExplorationLedgerStore {
  *            its full cost until it is seen held or forgotten.
  *   lost     realised loss on those positions, since the AUTHORISATION EPOCH.
  *
+ * (The follow ceiling adds the cost the EXISTING scout gate already counts —
+ * quarantined, curve and class positions — to `held`, so the two paths draw
+ * on one pool: FomoChild.ceilingFor.)
+ *
  * THE EPOCH is the moment this worker first saw the owner's current scout
  * settings (enabled, budget, per-token). Changing any of them is a new
  * authorisation and starts a new epoch at zero loss; nothing else does. A
@@ -320,9 +816,22 @@ export function childExplorationStore(home: string): ExplorationLedgerStore {
  * floored to the micro-USDG; a sale whose cash leg is unknown counts as zero
  * proceeds — the loss is over-counted, never under-counted.
  *
- * Persisted beside the ledger in this child's home and written only by this
- * process. An unreadable file makes every figure UNKNOWN (no follow entry
- * sizes above zero) until the owner's next re-authorisation starts afresh.
+ * A POSITION IS RECORDED BEFORE ITS ENTRY IS SENT. The entry gate opens it as
+ * PENDING (its full cost, never seen held) and the entry path waits for that
+ * to be durable before it submits; the outcome then settles it (no fill →
+ * removed; a fill → an ordinary position). So a crash after broadcast leaves
+ * the cost counted until a basis read shows the coin held or the unsettled
+ * grace forgets it — never an entry that spent money nothing remembers. While
+ * this process still holds the entry's reservation, the reservation counts it
+ * and the ledger does not, so it is never counted twice.
+ *
+ * DURABLE, in the tenant's store (FOMO_STATE_KEYS.exploration), with a copy in
+ * this child's home as a local cache. Until the durable copy has been READ,
+ * every figure is UNKNOWN — no follow entry sizes above zero — because a
+ * hosted child's home does not survive a redeploy and an absent file there
+ * says nothing. A durable copy that cannot be parsed, like an unreadable local
+ * file without one, makes every figure UNKNOWN until the owner's next
+ * re-authorisation starts afresh.
  */
 export type RailBook = "paper" | "live";
 
@@ -351,6 +860,8 @@ export interface ExplorationPosition {
   horizonEndsAt: number | null;
   strengthAtEntry: DossierStrength | null;
   traders: string[];
+  /** Set while the entry that opened it has no outcome yet (gate → settle). Absent on older records. */
+  entryId?: string | null;
 }
 
 interface Book {
@@ -362,6 +873,8 @@ export interface ExplorationState {
   epochKey: string;
   epochSince: number;
   books: Record<RailBook, Book>;
+  /** When this copy was written (monotonic per process). A local copy newer than the durable one is uploaded. */
+  savedAt?: number;
 }
 
 export interface ExplorationLedgerStore {
@@ -372,6 +885,7 @@ export interface ExplorationLedgerStore {
 
 const bigOf = (v: unknown): bigint | null => (typeof v === "string" && /^-?\d{1,30}$/.test(v) ? BigInt(v) : null);
 const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const ENTRY_ID = /^[A-Za-z0-9._:-]{1,64}$/;
 
 function positionOf(v: unknown): ExplorationPosition | null {
   if (!v || typeof v !== "object") return null;
@@ -411,6 +925,7 @@ function positionOf(v: unknown): ExplorationPosition | null {
     horizonEndsAt: numOrNull(r.horizonEndsAt),
     strengthAtEntry: strength,
     traders: Array.isArray(r.traders) ? r.traders.filter((x): x is string => typeof x === "string").slice(0, FOMO_CHILD.dependencyMaxTraders) : [],
+    entryId: typeof r.entryId === "string" && ENTRY_ID.test(r.entryId) ? r.entryId : null,
   };
 }
 
@@ -423,7 +938,12 @@ export function parseExploration(text: string): ExplorationState | "corrupt" {
     const v = JSON.parse(text) as Record<string, unknown>;
     if (!v || typeof v !== "object" || typeof v.epochKey !== "string" || numOrNull(v.epochSince) === null) return "corrupt";
     const books = v.books as Record<string, unknown> | undefined;
-    const out: ExplorationState = { epochKey: v.epochKey, epochSince: v.epochSince as number, books: { paper: emptyBook(), live: emptyBook() } };
+    const out: ExplorationState = {
+      epochKey: v.epochKey,
+      epochSince: v.epochSince as number,
+      books: { paper: emptyBook(), live: emptyBook() },
+      savedAt: numOrNull(v.savedAt) ?? 0,
+    };
     for (const mode of ["paper", "live"] as const) {
       const b = books?.[mode] as Record<string, unknown> | undefined;
       if (!b) continue;
@@ -434,6 +954,105 @@ export function parseExploration(text: string): ExplorationState | "corrupt" {
         const pos = positionOf(p);
         if (!pos) return "corrupt";
         positions.push(pos);
+      }
+      out.books[mode] = { positions, closedLoss6: loss };
+    }
+    return out;
+  } catch {
+    return "corrupt";
+  }
+}
+
+/**
+ * THE DURABLE COPY, COMPACT. The memory API carries at most 16 KiB per
+ * request, so a position travels as a tuple and without the two fields
+ * nothing reads back (its decision id and trader list):
+ *
+ *   [symbol, token, "f"|"e", openedAt, entryCost6, proceeds6, heldCost6|null,
+ *    everHeld 0|1, flatSince, setupExpiresAt, horizonEndsAt, assessmentId,
+ *    [5 strength counts]|null, entryId]
+ *
+ * Every field the accounting reads is carried; a copy that does not decode
+ * EXACTLY is "corrupt", never a partial ledger.
+ */
+export function encodeDurableExploration(s: ExplorationState): string {
+  const book = (b: Book) => ({
+    l: b.closedLoss6.toString(),
+    p: b.positions.map((p) => [
+      p.symbol,
+      p.token,
+      p.source === "early" ? "e" : "f",
+      p.openedAt,
+      p.entryCost6.toString(),
+      p.proceeds6.toString(),
+      p.heldCost6 === null ? null : p.heldCost6.toString(),
+      p.everHeld ? 1 : 0,
+      p.flatSince,
+      p.setupExpiresAt,
+      p.horizonEndsAt,
+      p.assessmentId,
+      p.strengthAtEntry
+        ? [p.strengthAtEntry.strongSupport, p.strengthAtEntry.supportFamilies, p.strengthAtEntry.supportAuthors, p.strengthAtEntry.strongOpposition, p.strengthAtEntry.opposeFamilies]
+        : null,
+      p.entryId ?? null,
+    ]),
+  });
+  return JSON.stringify({ v: 1, k: s.epochKey, s: s.epochSince, at: s.savedAt ?? 0, b: { paper: book(s.books.paper), live: book(s.books.live) } });
+}
+
+export function decodeDurableExploration(text: string): ExplorationState | "corrupt" {
+  try {
+    const v = JSON.parse(text) as Record<string, unknown>;
+    if (!v || typeof v !== "object" || v.v !== 1 || typeof v.k !== "string" || numOrNull(v.s) === null || numOrNull(v.at) === null) return "corrupt";
+    const books = v.b as Record<string, unknown> | undefined;
+    if (!books || typeof books !== "object") return "corrupt";
+    const out: ExplorationState = { epochKey: v.k, epochSince: v.s as number, savedAt: v.at as number, books: { paper: emptyBook(), live: emptyBook() } };
+    const numOrNullStrict = (x: unknown): number | null | undefined => (x === null ? null : typeof x === "number" && Number.isFinite(x) ? x : undefined);
+    for (const mode of ["paper", "live"] as const) {
+      const b = books[mode] as Record<string, unknown> | undefined;
+      if (!b || typeof b !== "object") return "corrupt";
+      const loss = bigOf(b.l);
+      if (loss === null || loss < 0n || !Array.isArray(b.p)) return "corrupt";
+      const positions: ExplorationPosition[] = [];
+      for (const t of b.p) {
+        if (!Array.isArray(t) || t.length !== 14) return "corrupt";
+        const [symbol, token, src, openedAt, entry, proceeds, held, everHeld, flatSince, setupExpiresAt, horizonEndsAt, assessmentId, strength, entryId] = t as unknown[];
+        const entryCost6 = bigOf(entry);
+        const proceeds6 = bigOf(proceeds);
+        const heldCost6 = held === null ? null : bigOf(held);
+        const fs = numOrNullStrict(flatSince);
+        const se = numOrNullStrict(setupExpiresAt);
+        const he = numOrNullStrict(horizonEndsAt);
+        if (typeof symbol !== "string" || typeof token !== "string" || !EVM.test(token) || (src !== "f" && src !== "e")) return "corrupt";
+        if (numOrNull(openedAt) === null || entryCost6 === null || proceeds6 === null || (held !== null && heldCost6 === null)) return "corrupt";
+        if (everHeld !== 0 && everHeld !== 1) return "corrupt";
+        if (fs === undefined || se === undefined || he === undefined) return "corrupt";
+        if (assessmentId !== null && typeof assessmentId !== "string") return "corrupt";
+        if (entryId !== null && (typeof entryId !== "string" || !ENTRY_ID.test(entryId))) return "corrupt";
+        let strengthAtEntry: DossierStrength | null = null;
+        if (strength !== null) {
+          if (!Array.isArray(strength) || strength.length !== 5 || !strength.every((n) => Number.isSafeInteger(n) && (n as number) >= 0)) return "corrupt";
+          const [strongSupport, supportFamilies, supportAuthors, strongOpposition, opposeFamilies] = strength as number[];
+          strengthAtEntry = { strongSupport: strongSupport!, supportFamilies: supportFamilies!, supportAuthors: supportAuthors!, strongOpposition: strongOpposition!, opposeFamilies: opposeFamilies! };
+        }
+        positions.push({
+          symbol,
+          token,
+          source: src === "e" ? "early" : "follow",
+          decisionId: null,
+          assessmentId: assessmentId as string | null,
+          openedAt: openedAt as number,
+          entryCost6,
+          proceeds6,
+          heldCost6,
+          everHeld: everHeld === 1,
+          flatSince: fs,
+          setupExpiresAt: se,
+          horizonEndsAt: he,
+          strengthAtEntry,
+          traders: [],
+          entryId: entryId as string | null,
+        });
       }
       out.books[mode] = { positions, closedLoss6: loss };
     }
@@ -496,24 +1115,153 @@ export interface ExplorationFigures {
   tokenHeld6(token: string): bigint | null;
 }
 
-export class ExplorationLedger {
-  private state: ExplorationState | null;
-  private unknown: boolean;
+function safeLocalLoad(store: ExplorationLedgerStore): ExplorationState | null | "corrupt" {
+  try {
+    return store.load();
+  } catch {
+    return "corrupt";
+  }
+}
+
+export class ExplorationLedger implements DurableBacked {
+  private state: ExplorationState | null = null;
+  private unknown = false;
   /** While unknown: the scout settings in force when it became unknown. A change is a re-authorisation. */
   private unknownKey: string | null = null;
+  /** Durable mode, before the durable copy has been read: every figure is unknown. */
+  private loading: boolean;
+  private loadingP: Promise<boolean> | null = null;
+  private loadTriedAt = Number.NEGATIVE_INFINITY;
+  /** What happened while loading, applied once the state is known. */
+  private wantedEpoch: { key: string; at: number } | null = null;
+  private heldSells: { mode: RailBook; token: string; cash6: bigint | null }[] = [];
+  /** Entry ids whose cost a reservation in THIS process still counts (see the class comment). */
+  private readonly reserved = new Set<string>();
+  private readonly durable: DurableStatePort | null;
+  private readonly slot: DurableSlot | null;
+  private readonly now: () => number;
 
   constructor(
     private readonly store: ExplorationLedgerStore,
     private readonly log: (line: string) => void = () => {},
+    opts: { durable?: DurableStatePort | null; now?: () => number } = {},
   ) {
-    const loaded = store.load();
+    this.durable = opts.durable ?? null;
+    this.now = opts.now ?? Date.now;
+    this.slot = this.durable ? new DurableSlot(this.durable, FOMO_STATE_KEYS.exploration, this.now) : null;
+    this.loading = this.durable !== null;
+    if (!this.loading) this.adopt(safeLocalLoad(store));
+  }
+
+  private adopt(loaded: ExplorationState | null | "corrupt"): void {
     this.unknown = loaded === "corrupt";
     this.state = loaded === "corrupt" ? null : loaded;
-    if (this.unknown) log("[fomo] exploration ledger unreadable; follow entries size to zero until the scout budget is re-authorised");
+    if (this.unknown) this.log("[fomo] exploration ledger unreadable; follow entries size to zero until the scout budget is re-authorised");
+  }
+
+  loaded(): boolean {
+    return !this.loading;
+  }
+
+  kick(now: number): void {
+    if (this.loading) {
+      if (!this.loadingP && now - this.loadTriedAt >= FOMO_CHILD.durableRetryMs) void this.load();
+      return;
+    }
+    this.slot?.kick(now);
+  }
+
+  flush(): Promise<boolean> {
+    if (!this.slot) return Promise.resolve(true);
+    if (this.loading) return Promise.resolve(false);
+    return this.slot.flush();
+  }
+
+  async settled(): Promise<void> {
+    if (this.loadingP) await this.loadingP.catch(() => false);
+    await this.slot?.settled();
+  }
+
+  /**
+   * READ THE DURABLE COPY AND ADOPT IT. The durable copy wins, unless the
+   * local cache was provably written after it (its last durable write did not
+   * land before a restart) — then the local copy is adopted and uploaded. A
+   * confirmed-absent durable copy with a local one present is UPLOADED, not
+   * discarded (an install that predates the durable copy keeps its loss). An
+   * unreadable store leaves everything unknown and is asked again later.
+   */
+  load(): Promise<boolean> {
+    if (!this.loading || !this.durable) return Promise.resolve(true);
+    if (this.loadingP) return this.loadingP;
+    this.loadingP = this.loadOnce().finally(() => (this.loadingP = null));
+    return this.loadingP;
+  }
+
+  private async loadOnce(): Promise<boolean> {
+    this.loadTriedAt = this.now();
+    let r: DurableRead;
+    try {
+      r = await this.durable!.read(FOMO_STATE_KEYS.exploration);
+    } catch {
+      r = { kind: "unknown" };
+    }
+    if (!this.loading) return true;
+    if (r.kind === "unknown") return false;
+    const local = safeLocalLoad(this.store);
+    let chosen: ExplorationState | null | "corrupt";
+    let upload = false;
+    if (r.kind === "found") {
+      const d = decodeDurableExploration(r.text);
+      if (d === "corrupt") chosen = "corrupt";
+      else if (local !== null && local !== "corrupt" && (local.savedAt ?? 0) > (d.savedAt ?? 0)) {
+        chosen = local;
+        upload = true;
+      } else {
+        chosen = d;
+        this.slot!.known(r.text);
+        try {
+          this.store.save(d);
+        } catch {
+          // the local copy is a cache
+        }
+      }
+    } else {
+      chosen = local;
+      upload = local !== null && local !== "corrupt";
+    }
+    this.loading = false;
+    this.adopt(chosen);
+    if (upload) this.persist();
+    const epoch = this.wantedEpoch;
+    this.wantedEpoch = null;
+    if (epoch) this.syncEpoch(epoch.key, epoch.at);
+    const sells = this.heldSells;
+    this.heldSells = [];
+    for (const s of sells) this.noteSell(s.mode, s.token, s.cash6);
+    return true;
+  }
+
+  /** Written through: the local cache now, the durable copy in the background (flush awaits it). */
+  private persist(): void {
+    if (!this.state) return;
+    this.state.savedAt = Math.max(this.now(), (this.state.savedAt ?? 0) + 1);
+    try {
+      this.store.save(this.state);
+    } catch {
+      // the durable copy is the record
+    }
+    if (this.slot) {
+      this.slot.want(encodeDurableExploration(this.state));
+      void this.slot.flush();
+    }
   }
 
   /** The owner's scout settings as an authorisation: a change is a new epoch. */
   syncEpoch(key: string, now: number): void {
+    if (this.loading) {
+      this.wantedEpoch = { key, at: now };
+      return;
+    }
     if (this.unknown) {
       if (this.unknownKey === null || this.unknownKey === key) {
         this.unknownKey = key;
@@ -523,7 +1271,7 @@ export class ExplorationLedger {
       this.unknown = false;
       this.unknownKey = null;
       this.state = { epochKey: key, epochSince: now, books: { paper: emptyBook(), live: emptyBook() } };
-      this.store.save(this.state);
+      this.persist();
       return;
     }
     if (this.state && this.state.epochKey === key) return;
@@ -543,17 +1291,19 @@ export class ExplorationLedger {
     } else {
       this.state = { epochKey: key, epochSince: now, books: { paper: emptyBook(), live: emptyBook() } };
     }
-    this.store.save(this.state);
+    this.persist();
   }
 
   figures(mode: RailBook): ExplorationFigures {
-    if (this.unknown) return { held6: null, loss6: null, tokenHeld6: () => null };
-    // Nothing stored yet is a fact, not a gap: a position is only ever opened
+    if (this.loading || this.unknown) return { held6: null, loss6: null, tokenHeld6: () => null };
+    // Nothing stored yet is a fact, not a gap — but only once the DURABLE copy
+    // has been read and shown absent (load): a position is only ever opened
     // into a stored ledger, so none exists and nothing has been lost.
     const book = this.state ? this.state.books[mode] : emptyBook();
+    const counted = book.positions.filter((p) => !(p.entryId && this.reserved.has(p.entryId)));
     let held: bigint | null = 0n;
     let loss: bigint | null = book.closedLoss6;
-    for (const p of book.positions) {
+    for (const p of counted) {
       if (p.heldCost6 === null || held === null || loss === null) {
         held = null;
         loss = null;
@@ -568,7 +1318,7 @@ export class ExplorationLedger {
       tokenHeld6: (token) => {
         const t = token.toLowerCase();
         let sum = 0n;
-        for (const p of book.positions) {
+        for (const p of counted) {
           if (p.token !== t) continue;
           if (p.heldCost6 === null) return null;
           sum += p.heldCost6;
@@ -576,6 +1326,22 @@ export class ExplorationLedger {
         return sum;
       },
     };
+  }
+
+  /**
+   * For the EXISTING scout gate (one pool): what exploration holds now, with
+   * an unknown basis read standing in at the larger of its entry and last
+   * known cost. Null only while the ledger itself is unknown or unread.
+   */
+  heldForScout6(mode: RailBook): bigint | null {
+    if (this.loading || this.unknown) return null;
+    let sum = 0n;
+    for (const p of this.state?.books[mode].positions ?? []) {
+      if (p.entryId && this.reserved.has(p.entryId)) continue;
+      const h = p.heldCost6;
+      sum += h === null ? p.entryCost6 : h > p.entryCost6 ? h : p.entryCost6;
+    }
+    return sum;
   }
 
   position(mode: RailBook, token: string): ExplorationPosition | null {
@@ -587,20 +1353,63 @@ export class ExplorationLedger {
     return this.state?.books[mode].positions ?? [];
   }
 
-  open(mode: RailBook, p: ExplorationPosition): void {
-    if (!this.state || this.unknown) return;
+  open(mode: RailBook, p: ExplorationPosition): boolean {
+    if (this.loading || !this.state || this.unknown) return false;
     this.state.books[mode].positions.push(p);
-    this.store.save(this.state);
+    this.persist();
+    return true;
+  }
+
+  /**
+   * AN ENTRY ABOUT TO BE SENT: its position, PENDING, before anything leaves
+   * this process. False — and the entry must not be sent — when the ledger is
+   * unknown or unread, or its book is full. `reservedHere`: a reservation in
+   * this process counts the cost until settlement (see the class comment).
+   */
+  openPending(mode: RailBook, p: ExplorationPosition, reservedHere: boolean): boolean {
+    if (this.loading || !this.state || this.unknown) return false;
+    if (!p.entryId || !ENTRY_ID.test(p.entryId)) return false;
+    const book = this.state.books[mode];
+    if (book.positions.length >= FOMO_CHILD.ledgerPositionsMax) return false;
+    if (book.positions.some((x) => x.entryId === p.entryId)) return false;
+    book.positions.push(p);
+    if (reservedHere) this.reserved.add(p.entryId);
+    this.persist();
+    return true;
+  }
+
+  /**
+   * THE ENTRY'S OUTCOME. No fill: the pending position is removed. A fill: it
+   * becomes an ordinary position (held from now on for paper and landed; a
+   * submitted one waits for the basis to show it, inside the unsettled grace).
+   */
+  settlePending(mode: RailBook, entryId: string, filled: boolean, status: string | null | undefined): void {
+    this.reserved.delete(entryId);
+    if (this.loading || !this.state || this.unknown) return;
+    const book = this.state.books[mode];
+    const p = book.positions.find((x) => x.entryId === entryId);
+    if (!p) return;
+    if (!filled) book.positions = book.positions.filter((x) => x !== p);
+    else {
+      p.entryId = null;
+      if (status === "paper" || status === "landed") p.everHeld = true;
+    }
+    this.persist();
   }
 
   /** A sale of a coin exploration holds. Unknown cash counts as zero proceeds. */
   noteSell(mode: RailBook, token: string, cash6: bigint | null): void {
+    if (this.loading) {
+      // Applied once the ledger is read; a lost note only over-counts the loss.
+      if (this.heldSells.length < 32) this.heldSells.push({ mode, token, cash6 });
+      return;
+    }
     if (!this.state || this.unknown) return;
     const p = this.position(mode, token);
     if (!p) return;
     p.everHeld = true;
     if (cash6 !== null && cash6 > 0n) p.proceeds6 += cash6;
-    this.store.save(this.state);
+    this.persist();
   }
 
   /**
@@ -609,7 +1418,7 @@ export class ExplorationLedger {
    * filled past the grace → forgotten as no fill.
    */
   async refresh(mode: RailBook, basisOf: (symbol: string) => Promise<{ qtyRaw: bigint; costUsdg: bigint } | null>, now: number): Promise<void> {
-    if (!this.state || this.unknown) return;
+    if (this.loading || !this.state || this.unknown) return;
     const book = this.state.books[mode];
     let changed = false;
     for (const p of [...book.positions]) {
@@ -620,6 +1429,8 @@ export class ExplorationLedger {
         b = null;
       }
       if (!this.state || this.state.books[mode] !== book) return;
+      // Settled (no fill) while its basis was being read: nothing to update.
+      if (!book.positions.includes(p)) continue;
       if (b === null) {
         if (p.heldCost6 !== null) changed = true;
         p.heldCost6 = null;
@@ -644,7 +1455,7 @@ export class ExplorationLedger {
           book.positions = book.positions.filter((x) => x !== p);
           changed = true;
         }
-      } else if (now - p.openedAt > FOMO_CHILD.unsettledGraceMs) {
+      } else if (now - p.openedAt > FOMO_CHILD.unsettledGraceMs && !(p.entryId && this.reserved.has(p.entryId))) {
         book.positions = book.positions.filter((x) => x !== p);
         changed = true;
       } else if (p.heldCost6 !== p.entryCost6) {
@@ -652,7 +1463,7 @@ export class ExplorationLedger {
         changed = true;
       }
     }
-    if (changed) this.store.save(this.state);
+    if (changed) this.persist();
   }
 }
 
@@ -671,6 +1482,8 @@ export class BrainLensProbe {
   private checkedAt = Number.NEGATIVE_INFINITY;
   private value = false;
   private inflight: Promise<void> | null = null;
+  /** Bumped by `invalidate`: a read that started before it cannot restore the old answer. */
+  private generation = 0;
 
   constructor(
     private readonly fetchImpl: typeof fetch | undefined,
@@ -697,12 +1510,29 @@ export class BrainLensProbe {
     return this.value;
   }
 
+  /**
+   * A DECIDE THAT CARRIED THE LENS FAILED (unreachable, which is how a 422 for
+   * an unknown key arrives). /health may be served by a different build than
+   * /v1/decide — a rollback in progress, a replica behind — so its cached
+   * "yes" is no longer evidence. The lens is off NOW, stays off at least
+   * `lensRecheckAfterFailMs`, and comes back only when a /health read made
+   * after this moment says yes again. Without this, every lens-carrying review
+   * failed for up to an hour after a Brain rollback, each spending a review.
+   */
+  invalidate(recheckAfterMs: number = FOMO_CHILD.lensRecheckAfterFailMs): void {
+    this.generation++;
+    this.value = false;
+    // Due again `recheckAfterMs` from now (advertises() re-reads once now − checkedAt ≥ everyMs).
+    this.checkedAt = this.now() - this.everyMs + Math.max(0, recheckAfterMs);
+  }
+
   /** Resolves when no read is in flight (tests, shutdown). */
   settled(): Promise<void> {
     return this.inflight ?? Promise.resolve();
   }
 
   private async probe(u: string): Promise<void> {
+    const generation = this.generation;
     let ok = false;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
@@ -721,7 +1551,7 @@ export class BrainLensProbe {
     } finally {
       clearTimeout(timer);
     }
-    if (this.url === u) this.value = ok;
+    if (this.url === u && this.generation === generation) this.value = ok;
   }
 }
 
@@ -732,6 +1562,8 @@ export interface EarlyOfferPort {
   offer(address: string, o: EarlyOffer): EarlyOfferResult;
   active(): readonly Readonly<{ address: string; source: string; state: string; decisionId: string | null }>[];
   maxUsdgFor(address: string): number | null;
+  /** The source takes its offer back (its setup is gone); the ceiling stays remembered. */
+  withdraw(address: string, source: string): boolean;
 }
 
 /** The decision funnel (decision-funnel.ts): filing a follow drop, and reading a coin's latest stage. */
@@ -771,6 +1603,13 @@ export interface FomoLiveFacts {
   liveFollowAllowed: boolean;
   /** sponsoredFlow: this rail plans sponsored gas; available: the sponsor quoted at arm (null = unknown). */
   sponsorship: { sponsoredFlow: boolean; available: boolean | null };
+  /**
+   * What the EXISTING scout gate already counts against the same budget —
+   * quarantined (unpriceable), curve and class cost (index.ts
+   * lastQuarantinedUsdg), micro-USDG. Null = not computed yet: unknown, so
+   * the follow ceiling is zero. One pool: follow never spends what these hold.
+   */
+  scoutHeldCost6: bigint | null;
   /** The signed per-trade cap (grant limits), micro-USDG. */
   perTrade6: bigint | null;
   /** What today's daily cap still allows, from the existing budget counters. */
@@ -815,8 +1654,16 @@ export interface FomoChildDeps {
   home(): string;
   live(): FomoLiveFacts;
   earlyBook(): EarlyOfferPort | null;
+  /** The follow-entry day count. Production: DurableFollowCounters (childDurableFollowCounters). */
   counters: FollowCounters;
+  /** The exploration ledger's LOCAL cache (this child's home). */
   ledgerStore: ExplorationLedgerStore;
+  /**
+   * The tenant's durable store (brokerDurableState). Given, the ledger is
+   * UNKNOWN until its durable copy is read; absent (tests), the local store
+   * is the record.
+   */
+  durable?: DurableStatePort | null;
   funnel?: FunnelPort;
   readFile?: (home: string, tenant: string, now: number) => ChildFomoRead;
   /** The cost-basis ledger's symbol for a coin (index.ts: the watch set). */
@@ -846,12 +1693,14 @@ export interface FomoChildHealth {
 /** What the entry gate decided for one intent. */
 export type FollowGate =
   | { kind: "none" }
-  | { kind: "early"; token: string; mode: RailBook; size6: bigint }
+  | { kind: "early"; token: string; mode: RailBook; size6: bigint; entryId: string }
   | {
       kind: "follow";
       token: string;
       tokenKey: string;
       reservationId: string;
+      /** The pending exploration position this entry opened (ExplorationLedger.openPending). */
+      entryId: string;
       size6: bigint;
       assessment: FollowAssessment;
       mode: RailBook;
@@ -938,6 +1787,10 @@ export function followDropStage(reason: string): FunnelStage {
       return "SIZE_BELOW_ECONOMIC_FLOOR";
     case "exploration-exhausted":
     case "follow-entry-cap":
+    // The allowance could not be ACCOUNTED for: the pending position or the
+    // day's claim was not recorded durably, so the entry is not sent.
+    case "exploration-unrecorded":
+    case "state-not-durable":
       return "BUDGET_EXHAUSTED";
     default:
       return "RESEARCH_INCOMPLETE";
@@ -1001,14 +1854,23 @@ export class FomoChild {
   private refreshing: Promise<void> | null = null;
   private logged = new Set<string>();
   private seq = 0;
+  /** Coins whose follow nomination was withdrawn (setup deteriorated) → until when their entries are dropped. */
+  private withdrawn = new Map<string, number>();
 
   constructor(private readonly deps: FomoChildDeps) {
     this.now = deps.now ?? Date.now;
     this.log = deps.log ?? (() => {});
     this.followBook = new FollowBook(deps.counters, this.now);
     this.reservations = new ExplorationReservations({ now: this.now });
-    this.ledger = new ExplorationLedger(deps.ledgerStore, this.log);
+    this.ledger = new ExplorationLedger(deps.ledgerStore, this.log, { durable: deps.durable ?? null, now: this.now });
     this.lensProbe = new BrainLensProbe(deps.fetchImpl, this.now);
+  }
+
+  /** The state this child keeps durably: the ledger, and the day count when it is a durable one. */
+  private backed(): DurableBacked[] {
+    const out: DurableBacked[] = [this.ledger];
+    if (isDurableBacked(this.deps.counters)) out.push(this.deps.counters);
+    return out;
   }
 
   // ── the tick ───────────────────────────────────────────────────────────
@@ -1024,6 +1886,19 @@ export class FomoChild {
     try {
       this.lastTickAt = now;
       const live = this.deps.live();
+      // Durable state first: a load when due (until then every exploration
+      // figure is unknown and the day count refuses), a failed write retried.
+      // Nothing is read for an owner who has Fomo research off — as nothing
+      // is written for one who never follows (syncEpoch below).
+      if (live.settings.dataAccess === true || live.settings.follow === true) {
+        for (const d of this.backed()) {
+          try {
+            d.kick(now);
+          } catch {
+            // asked again next tick
+          }
+        }
+      }
       this.equity6 = input.equity6;
       this.held = new Map(input.held.map((h) => [lower(h.token), h]));
       this.syncContext(input.context);
@@ -1054,7 +1929,7 @@ export class FomoChild {
 
   /** Resolves when the background reads started by the last tick have finished (tests, shutdown). */
   settled(): Promise<void> {
-    return Promise.all([this.refreshing ?? Promise.resolve(), this.lensProbe.settled()]).then(() => undefined);
+    return Promise.all([this.refreshing ?? Promise.resolve(), this.lensProbe.settled(), ...this.backed().map((d) => d.settled())]).then(() => undefined);
   }
 
   private syncContext(context: string): void {
@@ -1139,7 +2014,9 @@ export class FomoChild {
         budget6: microUsdgFloor(live.settings.scoutBudgetUsdg),
         perToken6: microUsdgFloor(live.settings.scoutPerTokenUsdg),
       },
-      explorationHeldCost6: f.held6,
+      // ONE POOL: what the existing scout gate already holds (quarantined,
+      // curve, class) is spent from the same budget, so it is held here too.
+      explorationHeldCost6: sharedScoutHeld6(f.held6, live.scoutHeldCost6),
       explorationPending6: pending.exploration6,
       realizedExplorationLoss6: f.loss6,
       tokenHeldCost6: f.tokenHeld6(address),
@@ -1253,22 +2130,79 @@ export class FomoChild {
         this.reportAssessment(a);
         const hint = toExecutionHint(a);
         if (hint.kind === "nominate" && follow && !live.paused) this.nominate(hint, a, s);
+        // THE NEWEST ASSESSMENT GOVERNS. A coin nominated on an earlier pass
+        // whose setup is no longer an entry (cohort sellers caught up, an
+        // objection was verified, it turned WATCH or research-only) loses its
+        // nomination, its early-book offer and its reserved review now — not
+        // at its TTL — and gateEntry drops any BUY still on its way.
+        if (robinhood && !isNewEntryState(a.state)) this.withdraw(address, a, now);
         // A SOONER REVIEW, NEVER A SELL — whether or not following is on: a
         // held coin's protection does not wait for permission to buy.
         if (holding && review) this.maybeRequestHeldReview(address, review, heldSell, now, a, hint);
-        // VERIFICATION ONLY. A coin with cohort buying that discovery has not
-        // verified cannot become an entry candidate (route unverified ⇒
-        // research only), and it cannot be verified unless someone asks. So
-        // it is asked of discovery's early verification — a tape page and an
-        // on-chain pool check, never a review slot and never a ceiling: it is
-        // not offered to the early book, so it never becomes a candidate.
-        if (follow && live.vault && robinhood && !holding && tradableCoin(address) && this.verify.length < FOMO_CHILD.verifyMax) {
+        // VERIFICATION ONLY, AND ONLY WHERE A NOMINATION COULD ACT. A coin with
+        // cohort buying that discovery has not verified cannot become an entry
+        // candidate (route unverified ⇒ research only), and it cannot be
+        // verified unless someone asks. So it is asked of discovery's early
+        // verification — a tape page and an on-chain pool check, never a
+        // review slot and never a ceiling: it is not offered to the early book.
+        //
+        // The ask widens what discovery reads, so it is made only when the
+        // nomination it could lead to would be allowed to act: the same rail
+        // and live-allowlist test as the assessment's research-only reasons,
+        // scout (the exploration budget) on, entries not paused. A live agent
+        // the operator never allow-listed asks for nothing. And a pool read
+        // only for this ask comes back `early`, which the regular candidate
+        // list excludes (trencher-discovery.ts regularEntryPools): only a
+        // follow nomination's early-book offer can make it a candidate.
+        if (follow && this.verifyAskAllowed(live) && robinhood && !holding && tradableCoin(address) && this.verify.length < FOMO_CHILD.verifyMax) {
           if (cohortSince(s.triggers, s.token.key, now - FOLLOW_DEFAULTS.breadthWindowMs).buyers > 0) this.verify.push(address);
         }
       } catch (e) {
         this.once(`assess:${e instanceof Error ? e.name : "error"}`, `[fomo] one signal could not be assessed (${e instanceof Error ? e.name : "error"})`);
       }
     }
+  }
+
+  /** Could a follow nomination act on this agent right now? (researchOnlyReasons' rail test, plus scout and pause.) */
+  private verifyAskAllowed(live: FomoLiveFacts): boolean {
+    if (live.paused === true || live.vault !== true || live.settings.scoutEnabled !== true) return false;
+    if (live.rail === "paper") return true;
+    return live.rail === "live" && live.liveFollowAllowed === true;
+  }
+
+  /**
+   * WITHDRAW A NOMINATION WHOSE SETUP IS GONE: the follow book's (unless its
+   * claimed entry is already in flight — that one resolves through its fill),
+   * the tracked assessment, and the early book's offer (its ceiling stays
+   * remembered there, so an in-flight review's BUY is still bounded). The coin
+   * is remembered as withdrawn so gateEntry drops a BUY that arrives anyway.
+   */
+  private withdraw(address: string, a: FollowAssessment, now: number): void {
+    const book = this.deps.earlyBook();
+    if (!this.tracked.has(address) && this.followBook.nominated(address) === null) {
+      let earlyFollow = false;
+      try {
+        earlyFollow = !!book?.active().some((e) => lower(e.address) === address && e.source === FOLLOW_SOURCE);
+      } catch {
+        earlyFollow = false;
+      }
+      if (!earlyFollow) return;
+    }
+    const r = this.followBook.withdraw(address);
+    if (r !== "in-flight") this.tracked.delete(address);
+    try {
+      book?.withdraw(address, FOLLOW_SOURCE);
+    } catch {
+      // the offer still expires at its own time; gateEntry drops its entries meanwhile
+    }
+    this.withdrawn.set(address, now + FOMO_CHILD.withdrawnMemoryMs);
+    if (this.withdrawn.size > FOMO_CHILD.reportedMax) this.withdrawn.delete(this.withdrawn.keys().next().value as string);
+    try {
+      this.deps.funnel?.note(address, null, { stage: "RESEARCH_INCOMPLETE", detail: `follow-withdrawn:${a.state.toLowerCase()}`, decisionId: null });
+    } catch {
+      // filing is best effort
+    }
+    this.log(`[fomo] follow nomination withdrawn: the newer assessment is ${a.state}`);
   }
 
   private nominate(hint: Extract<ExecutionHint, { kind: "nominate" }>, a: FollowAssessment, s: ChildSignal): void {
@@ -1283,6 +2217,7 @@ export class FomoChild {
       return;
     }
     const address = lower(hint.tokenAddress);
+    this.withdrawn.delete(address);
     this.tracked.set(address, {
       assessment: a,
       until: hint.expiresAt + FOMO_CHILD.trackedGraceMs,
@@ -1421,11 +2356,18 @@ export class FomoChild {
 
   /**
    * RIGHT BEFORE AN ENTRY IS SUBMITTED. A follow-nominated coin's entry is
-   * revalidated against its assessment (fresh own quote within the 2% band,
-   * permissions, rail, sponsorship, setup expiry, the ceiling NOW), claims
-   * one of the day's follow entries and reserves its exploration headroom.
-   * Any failure DROPS the entry and files why. Anything else passes through
-   * untouched. It can only drop, never add, enlarge or route.
+   * revalidated against its assessment AND the coin's latest one (fresh own
+   * quote within the 2% band, permissions, rail, sponsorship, setup expiry, a
+   * setup that has not deteriorated since, the ceiling NOW), claims one of
+   * the day's follow entries, reserves its exploration headroom and records
+   * its PENDING exploration position. Any failure DROPS the entry and files
+   * why. Anything else passes through untouched. It can only drop, never add,
+   * enlarge or route.
+   *
+   * The pending position and the day's claim are written through to the
+   * tenant's store in the background; the entry path must then await
+   * `persistEntry` before it sends anything (C27: a crash after broadcast
+   * must not lose what the entry cost).
    */
   gateEntry(intent: { kind: string; sellToken?: string; buyToken?: string; notionalUsdg?: bigint; decisionId?: string }): FollowGate {
     let token = "";
@@ -1443,15 +2385,36 @@ export class FomoChild {
       } catch {
         earlyFollow = false;
       }
-      if (!open && !tracked && !earlyFollow) {
-        const size6 = typeof intent.notionalUsdg === "bigint" && intent.notionalUsdg > 0n ? intent.notionalUsdg : null;
-        return early && size6 !== null ? { kind: "early", token, mode: this.mode(this.deps.live()), size6 } : { kind: "none" };
-      }
       const now = this.now();
-      const live = this.deps.live();
-      const mode = this.mode(live);
+      const withdrawnUntil = this.withdrawn.get(token);
+      const withdrawn = withdrawnUntil !== undefined && now < withdrawnUntil;
+      if (withdrawnUntil !== undefined && !withdrawn) this.withdrawn.delete(token);
+      if (!open && !tracked && !earlyFollow && !early && !withdrawn) return { kind: "none" };
 
       const drop = (reason: string): FollowGate => this.drop(token, reason, intent.decisionId);
+      // A coin Fomo research touched — nominated, offered, remembered by the
+      // early book or withdrawn — enters only while its NEWEST assessment is
+      // still an entry: a BUY reviewed on a setup that has since gone (sellers
+      // caught up, an objection was verified, WATCH, research-only) is dropped.
+      const latest = this.assessments.get(robinhoodKey(token)) ?? null;
+      if (withdrawn || (latest && !isNewEntryState(latest.state))) return drop("setup-deteriorated");
+
+      const live = this.deps.live();
+      const mode = this.mode(live);
+      if (!open && !tracked && !earlyFollow) {
+        // An early-book coin with no follow nomination behind it (its ceiling
+        // is remembered past its offer): passes, but its cost is recorded as
+        // a PENDING exploration position before it is sent, or it is dropped.
+        const size6 = typeof intent.notionalUsdg === "bigint" && intent.notionalUsdg > 0n ? intent.notionalUsdg : null;
+        if (size6 === null) return { kind: "none" };
+        const symbol = this.symbolOf(token);
+        const entryId = this.entryId("e", now);
+        if (!symbol || !this.ledger.openPending(mode, this.newPosition(token, symbol, "early", intent.decisionId ?? null, null, now, size6, null, null, entryId), false)) {
+          return drop("exploration-unrecorded");
+        }
+        return { kind: "early", token, mode, size6, entryId };
+      }
+
       const a = tracked && (!open || open.assessmentId === tracked.assessment.id) ? tracked.assessment : null;
       if (!a || !open) return drop("nomination-lapsed");
       const quote = this.ownQuote(token, live);
@@ -1463,12 +2426,15 @@ export class FomoChild {
         sizing,
         sponsorshipAvailable: live.rail === "live" ? live.sponsorship.available : true,
         sponsoredFlow: live.rail === "live" && live.sponsorship.sponsoredFlow === true,
+        latest,
       });
       if (!r.ok) return drop(r.reason);
       const size6 = typeof intent.notionalUsdg === "bigint" ? intent.notionalUsdg : null;
       if (size6 === null || size6 <= 0n) return drop("size-unknown");
       if (size6 > r.maxUsdg6) return drop("above-ceiling");
       if (size6 < sizing.floor6) return drop("size-below-floor");
+      const symbol = this.symbolOf(token);
+      if (!symbol) return drop("exploration-unrecorded");
       const claim = this.followBook.claimEntry(token);
       if (claim === "cap") return drop("follow-entry-cap");
       if (claim !== "taken") return drop("nomination-lapsed");
@@ -1478,13 +2444,69 @@ export class FomoChild {
         this.followBook.refundEntry(token);
         return drop("exploration-exhausted");
       }
-      return { kind: "follow", token, tokenKey, reservationId, size6, assessment: a, mode };
+      // RECORDED BEFORE IT IS SENT. The reservation counts it in this process;
+      // the pending position is what a restart will still count.
+      const entryId = this.entryId("f", now);
+      const position = this.newPosition(token, symbol, "follow", intent.decisionId ?? null, a, now, size6, null, tracked ?? null, entryId);
+      if (!this.ledger.openPending(mode, position, true)) {
+        this.reservations.release(reservationId);
+        this.followBook.refundEntry(token);
+        return drop("exploration-unrecorded");
+      }
+      return { kind: "follow", token, tokenKey, reservationId, entryId, size6, assessment: a, mode };
     } catch (e) {
       // Unanswerable is not "not a follow entry" when it was one: drop.
-      if (token && (this.tracked.has(token) || this.safeNominated(token))) return this.drop(token, "gate-error", intent.decisionId);
+      if (token && (this.tracked.has(token) || this.safeNominated(token) || this.withdrawn.has(token))) return this.drop(token, "gate-error", intent.decisionId);
       this.once(`gate:${e instanceof Error ? e.name : "error"}`, `[fomo] entry gate error (${e instanceof Error ? e.name : "error"})`);
       return { kind: "none" };
     }
+  }
+
+  /**
+   * THE GATE'S RECORD, MADE DURABLE BEFORE THE ENTRY IS SENT. A follow or
+   * early gate wrote its pending position (and a follow gate its day claim)
+   * through to the tenant's store in the background; this waits — bounded —
+   * until both read back. Unconfirmed, the entry is settled as not sent and
+   * DROPPED: an entry whose cost a restart could forget is not sent at all.
+   * True for every other gate. Never throws.
+   */
+  async persistEntry(gate: FollowGate | null | undefined, decisionId?: string | null): Promise<boolean> {
+    if (!gate || (gate.kind !== "follow" && gate.kind !== "early")) return true;
+    let ok = false;
+    try {
+      // An early gate took no day claim: only its pending position must be durable.
+      const parts: DurableBacked[] = gate.kind === "follow" ? this.backed() : [this.ledger];
+      const flushAll = () => Promise.all(parts.map((d) => d.flush().catch(() => false))).then((rs) => rs.every(Boolean));
+      // A refusal can be momentary (the broker's per-child lane is shared with
+      // reports): asked again a few times, inside the same bound.
+      const all = (async () => {
+        for (let i = 0; i < 3; i++) {
+          if (await flushAll()) return true;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        return flushAll();
+      })();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), FOMO_CHILD.durableConfirmTimeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      try {
+        ok = await Promise.race([all, timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      ok = false;
+    }
+    if (ok) return true;
+    this.settleEntry(gate, "not-sent", decisionId);
+    this.drop(gate.token, "state-not-durable", decisionId ?? undefined);
+    return false;
+  }
+
+  private entryId(kind: "f" | "e", now: number): string {
+    return `${kind}:${Math.max(0, Math.floor(now)).toString(36)}:${++this.seq}`;
   }
 
   private safeNominated(token: string): boolean {
@@ -1502,10 +2524,31 @@ export class FomoChild {
       enabled: live.settings.scoutEnabled === true,
       budget6: microUsdgFloor(live.settings.scoutBudgetUsdg),
       perToken6: microUsdgFloor(live.settings.scoutPerTokenUsdg),
-      explorationHeldCost6: f.held6,
+      // One pool, as in ceilingFor.
+      explorationHeldCost6: sharedScoutHeld6(f.held6, live.scoutHeldCost6),
       realizedExplorationLoss6: f.loss6,
       tokenHeldCost6: f.tokenHeld6(token),
     };
+  }
+
+  /**
+   * WHAT EXPLORATION SPENDS OF THE SCOUT BUDGET, for the EXISTING scout gate
+   * (index.ts scoutContextFor adds it to the quarantined cost): the cost
+   * follow and early positions hold, plus entries reserved and not yet
+   * settled. One pool in both directions. Null — which that gate reads as the
+   * whole budget spent — while the ledger is unread or unreadable AND follow
+   * could be acting; with follow not allowed, nothing new can be opened, and
+   * an unread ledger is not allowed to block the owner's own scout buys.
+   */
+  explorationScoutUse6(): bigint | null {
+    try {
+      const live = this.deps.live();
+      const held = this.ledger.heldForScout6(this.mode(live));
+      if (held === null) return this.followAllowed(live) ? null : 0n;
+      return held + this.reservations.pendingAgainst(this.now(), "").exploration6;
+    } catch {
+      return null;
+    }
   }
 
   private drop(token: string, reason: string, decisionId: string | undefined): FollowGate {
@@ -1527,9 +2570,10 @@ export class FomoChild {
 
   /**
    * THE ENTRY'S OUTCOME. A fill (paper / landed / submitted) commits the
-   * reservation, opens the exploration position and records the follow
-   * dependency; anything else releases the reservation and refunds the day's
-   * follow entry. Never throws.
+   * reservation, settles the pending exploration position into an ordinary
+   * one and records the follow dependency; anything else releases the
+   * reservation, removes the pending position and refunds the day's follow
+   * entry. Never throws.
    */
   settleEntry(gate: FollowGate | null | undefined, status: string | null | undefined, decisionId?: string | null): void {
     if (!gate || gate.kind === "none" || gate.kind === "dropped") return;
@@ -1537,31 +2581,23 @@ export class FomoChild {
       const now = this.now();
       const filled = tradeConsumesSnapshot(status);
       const live = this.deps.live();
-      const symbol = this.symbolOf(gate.token);
       if (gate.kind === "early") {
-        if (filled && symbol) {
-          this.ledger.open(gate.mode, this.newPosition(gate.token, symbol, "early", decisionId ?? null, null, now, gate.size6, status, null));
-        }
+        this.ledger.settlePending(gate.mode, gate.entryId, filled, status);
         return;
       }
       if (!filled) {
         this.reservations.release(gate.reservationId);
+        this.ledger.settlePending(gate.mode, gate.entryId, false, status);
         this.followBook.refundEntry(gate.token);
         if (decisionId) this.followBook.onFill(decisionId, status ?? "not-sent", live.rail === "paper");
         return;
       }
       if (decisionId) this.followBook.onFill(decisionId, status!, live.rail === "paper");
       const tracked = this.tracked.get(gate.token);
-      if (symbol) {
-        // Committed and opened together: from this moment the ledger counts the
-        // cost, and the reservation counts only for snapshots older than it.
-        this.reservations.commit(gate.reservationId, { at: now, amount6: gate.size6 });
-        this.ledger.open(gate.mode, this.newPosition(gate.token, symbol, "follow", decisionId ?? null, gate.assessment, now, gate.size6, status, tracked ?? null));
-      } else {
-        // No ledger name to follow it by: the reservation stays PENDING, so its
-        // cost keeps counting for the rest of this process — the safe side.
-        this.once("ledger-no-symbol", "[fomo] a follow fill had no ledger symbol; its exploration cost stays reserved this session");
-      }
+      // Committed and settled together: from this moment the ledger counts the
+      // cost, and the reservation counts only for snapshots older than it.
+      this.reservations.commit(gate.reservationId, { at: now, amount6: gate.size6 });
+      this.ledger.settlePending(gate.mode, gate.entryId, true, status);
       this.reportDependencies(gate.token, tracked ?? null, now);
     } catch (e) {
       this.once(`settle:${e instanceof Error ? e.name : "error"}`, `[fomo] follow entry settle error (${e instanceof Error ? e.name : "error"})`);
@@ -1587,6 +2623,7 @@ export class FomoChild {
     cost6: bigint,
     status: string | null | undefined,
     tracked: Tracked | null,
+    entryId: string | null = null,
   ): ExplorationPosition {
     const horizon = a?.horizon ? HORIZON_MS[a.horizon] ?? null : null;
     return {
@@ -1605,6 +2642,7 @@ export class FomoChild {
       horizonEndsAt: horizon !== null ? now + horizon : null,
       strengthAtEntry: tracked?.strength ?? null,
       traders: [...new Set((tracked?.triggers ?? []).map((e) => lower(e.trader.userId)).filter(Boolean))].slice(0, FOMO_CHILD.dependencyMaxTraders),
+      entryId,
     };
   }
 
@@ -1685,6 +2723,16 @@ export class FomoChild {
       if (sent && ok) {
         this.lensSent.delete(a);
         if (this.now() - sent.at <= FOMO_CHILD.lensSentTtlMs) this.traceCitations(a, ok, sent);
+      } else if (sent && r.outcome.ran && !r.outcome.result.ok && r.outcome.result.kind === "unreachable") {
+        // The decide that carried the lens was refused or never answered — an
+        // older Brain answers an unknown lens key with a 422, which arrives
+        // here as `unreachable`. Stop sending it now, not at the next hourly
+        // probe: until /health is read again and says yes, no lens.
+        this.lensSent.delete(a);
+        if (this.now() - sent.at <= FOMO_CHILD.lensSentTtlMs) {
+          this.lensProbe.invalidate();
+          this.log("[fomo] a decision carrying the trader-flow lens failed; the lens is off until Brain advertises it again");
+        }
       }
     } catch {
       // a review report never breaks a review
@@ -1765,6 +2813,15 @@ export class FomoChild {
 
 function scoutKey(s: FomoChildSettings): string {
   return `${s.scoutEnabled === true}:${microUsdgFloor(s.scoutBudgetUsdg) ?? "?"}:${microUsdgFloor(s.scoutPerTokenUsdg) ?? "?"}`;
+}
+
+/**
+ * Exploration's held cost plus what the existing scout gate holds — one pool.
+ * Unknown (or invalid) in either is unknown, which sizes the entry at zero.
+ */
+function sharedScoutHeld6(exploration6: bigint | null, scout6: bigint | null | undefined): bigint | null {
+  if (exploration6 === null || typeof scout6 !== "bigint" || scout6 < 0n) return null;
+  return exploration6 + scout6;
 }
 
 function zeroCeiling(): EntryCeiling {
