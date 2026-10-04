@@ -31,6 +31,10 @@ export interface TgLine {
   replyTo?: number;
   /** True for the agent's own lines. */
   own?: boolean;
+  /** Public research identity on our own answer, never a trade nomination. */
+  deskAsk?: TgDeskAsk;
+  /** The Telegram forum topic this line belongs to. */
+  threadId?: number;
 }
 
 /** What it knows about one person, from one chat only. */
@@ -248,7 +252,7 @@ export type TgPublicFact =
   | { kind: "coin"; look: CoinLook; nowMs: number; reviewed?: { verdict: "bought" | "passed" | "skipped"; paper?: boolean; notes?: string[] } }
   | { kind: "trades"; data: TgPublicTradesToday; why: boolean; symbol?: string; side?: "buy" | "sell" }
   | { kind: "calculation"; input: ChatMathInput }
-  | { kind: "site"; topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" }
+  | { kind: "site"; topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" | "onboarding" | "funding" | "withdrawals" | "modes" | "v4" | "readiness" | "drawdown" | "privacy" }
   | { kind: "unavailable"; topic: "coin" | "trades" | "calculation" };
 
 /** See CoinLook.source. */
@@ -314,10 +318,13 @@ export interface TgCoinsPort {
  */
 export type TgDeskAsk =
   | { kind: "market" }
+  | { kind: "comparison"; queries: [string, string] }
   | { kind: "coin"; query: string }
   | { kind: "coin"; address: string };
 
 export type TgDeskStance = "constructive" | "neutral" | "cautious" | "avoid";
+
+export type TgDeskIntent = "scalp" | "entry" | "invalidation" | "targets" | "breakout" | "risk-reward" | "timeframe" | "trend" | "indicators" | "volume" | "liquidity" | "safety" | "sizing" | "prediction" | "comparison" | "news" | "execution" | "overview";
 
 /** One reasoned read: from the Brain, the group's model, or written by code from the measurements. */
 export interface TgDeskThought {
@@ -351,10 +358,18 @@ export interface TgDeskEvidence {
   header: string[];
   /** The measured brief a model reasons over. Every figure a read may cite is in here. */
   brief: string;
+  /** Measured prices only: indicator scores/counts cannot become entry or stop levels. */
+  priceBrief?: string;
   /** Kept separate from measured figures so promotional numbers cannot license a financial claim. */
   lore?: TgDeskLore;
   /** The read written by code from the same measurements: the floor when no model answers well. */
   floor: TgDeskThought;
+  /** Question-specific reads computed from these same public measurements. */
+  scenarios?: Partial<Record<TgDeskIntent, TgDeskThought>>;
+  /** Indicator-specific reads; missing values are stated as missing evidence. */
+  indicators?: Partial<Record<"rsi" | "ema20" | "ema50" | "vwap" | "atr", TgDeskThought>>;
+  /** Stable, public subject for a reply after source-line pruning or restart. */
+  reference?: TgDeskAsk;
   /** "GeckoTerminal 14:05 UTC". */
   source: string;
   observedAtMs: number;
