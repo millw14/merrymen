@@ -391,6 +391,8 @@ const FIRST_SEEN_LOOKBACK_MS = 7 * DAY;
 const BOARD_LIMIT = 100;
 const FEED_LIMIT = 100;
 const LOCAL_EVENT_LIMIT = 500;
+/** Open gaps read per window check (openGapsIn); a fuller window is reported as "more than". */
+const GAP_PAGE = 100;
 
 /** Failures that mean the provider (or our entitlement) is not answering at all. */
 const PROVIDER_DOWN: ReadonlySet<ProviderFailure> = new Set(["unauthorized", "credits-exhausted", "entitlement", "server-error", "unreachable", "no-key"]);
@@ -570,6 +572,17 @@ function snapshotOf(source: unknown, stale: unknown, ageSeconds: unknown): Provi
 function providerAsOfOf(asOf: number | null, retrievedAt: number | null, snap: ProviderSnapshot | null): number | null {
   if (asOf !== null) return asOf;
   return snap && snap.ageSeconds !== null && retrievedAt !== null ? retrievedAt - Math.round(snap.ageSeconds * 1000) : null;
+}
+
+/**
+ * Whether one newest-first feed page stops inside [since, now]: it does not reach back to `since`, and the
+ * provider says more exist (or does not say, on a full page). Such a page is a floor of the window, not the window.
+ */
+export function feedPageCutShort(page: Pick<AlertsPage, "rows" | "dropped" | "hasMore" | "oldestTs">, since: number): boolean {
+  if (typeof page.oldestTs === "number" && page.oldestTs <= since) return false;
+  if (page.hasMore === true) return true;
+  if (page.hasMore === false) return false;
+  return page.rows.length + (finite(page.dropped) ? page.dropped : 0) >= FEED_LIMIT;
 }
 
 const SNAPSHOT_LABEL: Record<string, string> = {
@@ -892,22 +905,36 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }
   }
 
-  /** Open coverage gaps overlapping [since, now]; null when the gap ledger could not be read (unknown, never "none"). */
-  async function openGapsIn(since: number, now: number): Promise<{ count: number; minutes: number } | null> {
+  /**
+   * Open coverage gaps overlapping [since, now]; null when the gap ledger could not be read (unknown, never "none").
+   * Asked of the window itself, newest first: a page of the ledger's OLDEST open gaps (unrecoverable ones stay open
+   * for the whole retention) would hide a fresh hole and read as "none". More than a page is a floor (`more`).
+   */
+  async function openGapsIn(since: number, now: number): Promise<{ count: number; minutes: number; more: boolean } | null> {
     try {
-      const gaps = await store.listOpenGaps(db, null, 50);
-      const overlapping = gaps.filter((g) => g.toMs >= since && g.fromMs <= now);
+      const gaps = await store.listOpenGapsOverlapping(db, null, since, now, GAP_PAGE + 1);
+      const more = gaps.length > GAP_PAGE;
+      const overlapping = gaps.slice(0, GAP_PAGE).filter((g) => g.toMs >= since && g.fromMs <= now);
       const minutes = Math.round(overlapping.reduce((n, g) => n + (Math.min(g.toMs, now) - Math.max(g.fromMs, since)), 0) / MIN);
-      return { count: overlapping.length, minutes };
+      return { count: overlapping.length, minutes, more };
     } catch {
       return null;
     }
   }
 
-  /** A token's events in the shared record. A failed read says so: it is never an empty one. */
-  async function localTokenEvents(tokenKey: string, since: number): Promise<{ ok: true; events: StoredTraderEvent[] } | { ok: false }> {
+  /** How a gap count reads: a full page is "more than", never an exact figure. */
+  function gapWords(g: { count: number; minutes: number; more: boolean }): { count: string; minutes: string } {
+    return g.more ? { count: `more than ${g.count}`, minutes: `at least ${g.minutes} min` } : { count: String(g.count), minutes: `about ${g.minutes} min` };
+  }
+
+  /**
+   * A token's events in the shared record. A failed read says so: it is never an empty one. `full`: the read
+   * stopped at its row limit (newest first), so the window's oldest events may be left out; a floor, not the window.
+   */
+  async function localTokenEvents(tokenKey: string, since: number): Promise<{ ok: true; events: StoredTraderEvent[]; full: boolean } | { ok: false }> {
     try {
-      return { ok: true, events: await store.eventsForToken(db, tokenKey, since, LOCAL_EVENT_LIMIT) };
+      const events = await store.eventsForToken(db, tokenKey, since, LOCAL_EVENT_LIMIT);
+      return { ok: true, events, full: events.length >= LOCAL_EVENT_LIMIT };
     } catch (e) {
       log(`fomo: event record read failed: ${errText(e)}`);
       return { ok: false };
@@ -2011,7 +2038,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const g = await openGapsIn(since, now);
     if (g && g.count) {
       a.partial = true;
-      a.note(`The shared feed record has ${g.count} open gap(s) in this window (about ${g.minutes} min not yet recovered); activity there may be missing.`);
+      const w = gapWords(g);
+      a.note(`The shared feed record has ${w.count} open gap(s) in this window (${w.minutes} not yet recovered); activity there may be missing.`);
     }
   }
 
@@ -2414,15 +2442,23 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
      * is the fresh read. With no deeper copy left to carry (it outlived the
      * cache), the narrower revision is built, and the change summary refuses to
      * compare the two (their scopes differ, see toolResearchCoin).
+     *
+     * Only a fresh read that was itself CUT SHORT borrows pages. When the
+     * provider's whole list fit (not capped, or its total is no more than what
+     * was read), the fresh read is the list: carrying older pages would bring
+     * back theses it no longer serves. Never more is carried than the provider
+     * now says exist, and a carry makes the refresh "stale" ("carried-pages").
      */
     let carried: { pages: number; retrievedAt: number } | null = null;
     const deeperPages = previous?.coverage.pagesReturned ?? 0;
-    if (th.pages < deeperPages) {
+    const freshTotal = page.totalAvailable;
+    if (th.capped && th.pages < deeperPages && (freshTotal === null || freshTotal > th.rows.length)) {
       const deeper = await deeperThesisCopy(token, deeperPages, cc.now);
       if (deeper) {
         const seen = new Set(th.rows.map((x) => x.id));
-        const rows = [...th.rows, ...deeper.page.rows.filter((x) => !seen.has(x.id))];
-        const total = page.totalAvailable ?? deeper.page.totalAvailable;
+        const extra = deeper.page.rows.filter((x) => !seen.has(x.id));
+        const rows = [...th.rows, ...(freshTotal === null ? extra : extra.slice(0, Math.max(0, freshTotal - th.rows.length)))];
+        const total = freshTotal ?? deeper.page.totalAvailable;
         th = { ...th, rows, pages: deeperPages, capped: rows.length >= deeperPages * THESIS_PAGE_SIZE || (total !== null && total > rows.length) };
         carried = { pages: deeperPages, retrievedAt: deeper.retrievedAt };
         say(`Thesis pages 2-${deeperPages} are carried from a deeper read ${agoText(cc.now - deeper.retrievedAt)}; only the first page was read again.`);
@@ -2450,15 +2486,28 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     if (stream?.current && stream.fromMs !== null && stream.fromMs <= since && gaps !== null && gaps.count === 0) {
       // The shared record provably reaches back over the whole window with no hole in it: it alone is the read.
       activityRead = true;
+      if (loc.ok && loc.full) {
+        // ...but the read stopped at its row limit, newest first: the window's oldest trades are left out.
+        activityRead = null;
+        activityIncomplete = true;
+        say(`The shared feed record holds more trades for this coin in the last 24h than one read takes (${LOCAL_EVENT_LIMIT}); the oldest are left out, so the flow here is a floor.`);
+      }
     } else if (stream?.current && gaps !== null && gaps.count > 0) {
       // A hole in the record the ingest ledger has not recovered: the events held are real, the silence is not.
       activityRead = null;
       activityIncomplete = true;
-      say(`The shared feed record has ${gaps.count} open gap(s) in the last 24h (about ${gaps.minutes} min not yet recovered); activity there may be missing.`);
+      const w = gapWords(gaps);
+      say(`The shared feed record has ${w.count} open gap(s) in the last 24h (${w.minutes} not yet recovered); activity there may be missing.`);
     } else {
       const feed = a.add(await read(cc, specs.feed({ token: token.address, chain: feedChainOf(token) }), o.mode));
       if (feed.data) rest = feed.data.rows.filter((e) => e.token?.key === token.key);
       activityRead = feed.data !== null;
+      if (feed.data && feedPageCutShort(feed.data, since)) {
+        // One page, newest first, that stops inside the window: what it holds is real, the rest of the 24h is unread.
+        activityRead = null;
+        activityIncomplete = true;
+        say("The provider feed's one page of trades for this coin does not reach back over the whole 24h; older trades in the window are left out, so the flow here is a floor.");
+      }
     }
     const stats = a.add(await read(cc, specs.tokenStats(token), o.mode));
     const statsData = stats.data && (!stats.data.token || stats.data.token.key === token.key) ? stats.data : null;
@@ -2512,6 +2561,9 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       }
     }
     const thesisLive = th.section.status === "ok";
+    // Carried pages are a stored copy, not this read: the refresh says so ("carried-pages"), never ok-fresh.
+    // Added last, so a failed or stale read above still names the reason.
+    if (carried) a.add({ ...localSection("carried-theses", true, carried.retrievedAt, "stale-cache"), status: "stale", reason: "carried-pages" });
     const anyMissing = a.sections.slice(before).some((s) => s.data === null) || activityRead === false || activityIncomplete;
     const anyStale = a.sections.slice(before).some((s) => s.status === "stale");
     const status: ResultStatus = anyMissing ? "partial" : anyStale ? "stale" : "ok";
@@ -2869,7 +2921,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return {
         ...base,
         state: "watching-condition",
-        detail: `The shared trader feed is delivering, but ${gaps.count} gap(s) in the last 24h (about ${gaps.minutes} min) have not been recovered; activity there may be missing.`,
+        detail: `The shared trader feed is delivering, but ${gapWords(gaps).count} gap(s) in the last 24h (${gapWords(gaps).minutes}) have not been recovered; activity there may be missing.`,
       };
     }
     return { ...base, state: "receiving-fresh-data", detail: "The shared trader feed is delivering, with no open gaps in the last 24h." };
@@ -3032,6 +3084,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       } catch (e) {
         log(`fomo: memory read failed: ${errText(e)}`);
         return null;
+      }
+    },
+    // STRICT (contract.ts FomoService.memoryRead): the money state's reads.
+    // "Nothing stored" only when the store answered; a store error is a
+    // failure, so a child can never mistake a DB blip for an empty ledger.
+    async memoryRead(tenant, conversationKey) {
+      try {
+        return { ok: true, value: (await store.getSubject(db, tenant, conversationKey))?.json ?? null };
+      } catch (e) {
+        log(`fomo: memory read failed: ${errText(e)}`);
+        return { ok: false, reason: "store-error" };
       }
     },
     async memorySet(tenant, conversationKey, json, nowMs) {

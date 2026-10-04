@@ -30,6 +30,7 @@ import {
   cacheKeyOf,
   createFomoService,
   DEEP_JOB_DEADLINE_MS,
+  feedPageCutShort,
   runPendingJobs,
   SHARED_RESEARCH_TENANT,
   STREAM_COVERAGE_MARK_KEY,
@@ -851,6 +852,38 @@ describe("reports, memory, health", () => {
     assert.equal(await h.service.memoryGet(OWNER, "c1"), null);
   });
 
+  it("the strict memory read says 'nothing stored' only when the store answered; a store error is a failure, never null", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const inner = wrapSqlite(raw);
+    const down = { on: false };
+    const db: Db = {
+      prepare(sql) {
+        const st = inner.prepare(sql);
+        if (!/SELECT subject_json/.test(sql)) return st;
+        return {
+          run: (...a) => st.run(...a),
+          all: (...a) => st.all(...a),
+          get: async (...a) => {
+            if (down.on) throw new Error("Connection terminated unexpectedly");
+            return st.get(...a);
+          },
+        };
+      },
+      exec: (sql) => inner.exec(sql),
+      tx: (fn) => inner.tx(fn),
+    };
+    const h = await harness({ db, raw });
+    const read = h.service.memoryRead!;
+    assert.deepEqual(await read(OWNER, "state:k"), { ok: true, value: null }, "answered: nothing stored");
+    await h.service.memorySet(OWNER, "state:k", JSON.stringify({ l: "15" }), NOW);
+    assert.deepEqual(await read(OWNER, "state:k"), { ok: true, value: JSON.stringify({ l: "15" }) });
+    assert.deepEqual(await read("0xother", "state:k"), { ok: true, value: null }, "tenant-scoped");
+    down.on = true;
+    assert.deepEqual(await read(OWNER, "state:k"), { ok: false, reason: "store-error" }, "a store error is not an empty store");
+    assert.equal(await h.service.memoryGet(OWNER, "state:k"), null, "the lenient read keeps its contract for chat memory");
+    assert.ok(h.logs.some((l) => /memory read failed/.test(l)));
+  });
+
   it("health says receiving fresh data after a successful read, and records capabilities and usage", async () => {
     const h = await harness();
     assert.equal((await h.service.health(NOW)).state, "research-only");
@@ -954,6 +987,109 @@ describe("a shallower read never replaces a deeper one as a change (C4)", () => 
     assert.equal(quick.data?.changes?.reason, "different-scope");
     assert.equal(quick.data?.changes?.changes.length, 0);
   });
+
+  it("a complete fresh read is the list: a deeper copy's pages are not carried back into it (R7)", async () => {
+    const { h, deep } = await deepHarness();
+    // The provider removes a spam ring: twenty theses remain, all on page one. The read is complete.
+    h.routes.set("thesis-token", () => json({ totalAvailable: 20, source: "live", theses: Array.from({ length: 20 }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": "1250" }));
+    h.clock.now += 40 * 60_000;
+    const quick = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick" });
+    assert.equal(quick.data?.coverage.uniqueTheses, 20, "the removed theses do not come back from the cache");
+    assert.equal(quick.data?.coverage.providerTotal, 20);
+    assert.equal(quick.data?.coverage.pagesReturned, 1);
+    assert.equal(quick.data?.strongestOpposition, null, "an objection that lived only on the removed pages is gone from the read");
+    assert.ok(!quick.coverage.notes.some((n) => /carried from a deeper read/.test(n)));
+    assert.equal(quick.status, "ok");
+    const latest = asDossierOf(await store.latestDossier(h.db, PONS_KEY));
+    assert.equal(latest?.coverage.uniqueTheses, 20, "nor do they come back into the shared latest revision");
+    assert.ok(deep.coverage.uniqueTheses > 20);
+  });
+
+  it("a cut-short fresh read carries no more than the provider now says exist, and is stale, not ok (R7)", async () => {
+    const { h } = await deepHarness();
+    // Still more than a page, but fewer than the deeper copy holds.
+    h.routes.set("thesis-token", (u) => {
+      const pages = Number(u.searchParams.get("pages") ?? "1");
+      return json({ totalAvailable: 60, source: "live", theses: Array.from({ length: Math.min(60, 25 * pages) }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": "1250" });
+    });
+    h.clock.now += 40 * 60_000;
+    const quick = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick" });
+    assert.ok(quick.coverage.notes.some((n) => /carried from a deeper read/.test(n)));
+    assert.equal(quick.data?.coverage.uniqueTheses, 60, "carried up to the provider's current total, never past it");
+    assert.equal(quick.status, "stale", "carried pages are a stored copy, never ok-fresh");
+    assert.equal(quick.reason, "carried-pages");
+    assert.equal(quick.freshness.servedFrom, "stale-cache");
+  });
+});
+
+describe("a feed or record read cut short is not the whole 24h (R6)", () => {
+  const hex = (n: number, w: number) => n.toString(16).padStart(w, "0");
+  const alert = (i: number, ts: number, kind: "buy" | "sell") => {
+    const id = `${hex(i + 1, 8)}-aaaa-4bbb-8ccc-${hex(i + 1, 12)}`;
+    return {
+      id,
+      alertType: kind,
+      source: "feed",
+      eventId: id,
+      userId: `${hex(1000 + i, 8)}-0000-4000-8000-${hex(i, 12)}`,
+      tradeId: null,
+      swapId: null,
+      transferId: null,
+      trader: `t${i}`,
+      token: "PONS",
+      tokenAddress: PONS,
+      chainId: 4663,
+      chain: "robinhood",
+      usdValue: 5000,
+      positionValueUsd: 5000,
+      text: `t${i} ${kind}`,
+      ts,
+    };
+  };
+
+  it("one REST page that stops inside the window makes research partial and supports no change claim", async () => {
+    const h = await harness();
+    // No stream: the token feed is the activity read. 100 rows over the last ~3h, and the provider says there are more.
+    let phase = 0;
+    h.routes.set("alerts", () => {
+      const now = h.clock.now;
+      const rows = Array.from({ length: 100 }, (_, i) => alert(i + phase * 1000, now - 60_000 - i * 100_000, phase === 0 || i % 2 ? "buy" : "sell"));
+      return json({ order: "desc", hasMore: true, newestTs: rows[0]!.ts, oldestTs: rows[99]!.ts, nextCursor: null, oldestCursor: "c1", alerts: rows }, 200, { "x-credits-cost": "125" });
+    });
+    const r1 = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(r1.status, "partial");
+    assert.equal(r1.reason, "activity-incomplete");
+    assert.ok(r1.coverage.notes.some((n) => /does not reach back over the whole 24h/.test(n)), r1.coverage.notes.join(" | "));
+    phase = 1;
+    h.clock.now += 40 * 60_000;
+    const r2 = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", since_revision: r1.data!.revision });
+    assert.equal(r2.status, "partial");
+    assert.equal(r2.data?.changes?.comparable, false, "a page that rolled over is not buyers leaving");
+    assert.equal(r2.data?.changes?.reason, "check-failed");
+    assert.deepEqual(r2.data?.changes?.changes, []);
+  });
+
+  it("the shared record read stopped at its row limit is a floor, not the window", async () => {
+    const h = await harness();
+    await streamIsCurrent(h);
+    const evs = Array.from({ length: 500 }, (_, i) => buyEvent(`${hex(2000 + i, 8)}-0000-4000-8000-${hex(i, 12)}`, PONS, NOW - 60_000 - i * 60_000, `ev:cap${i}`));
+    for (let i = 0; i < evs.length; i += 100) await store.insertEvents(h.db, evs.slice(i, i + 100));
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(h.count("/v2/alerts"), 0, "the record answered");
+    assert.equal(env.status, "partial");
+    assert.equal(env.reason, "activity-incomplete");
+    assert.ok(env.coverage.notes.some((n) => /more trades for this coin in the last 24h than one read takes/.test(n)), env.coverage.notes.join(" | "));
+  });
+
+  it("feedPageCutShort: a page reaching back to the window's start, or the provider's 'no more', is complete", () => {
+    const since = NOW - DAY_MS;
+    const page = (n: number, hasMore: boolean | null, oldestTs: number | null) => ({ rows: Array.from({ length: n }, () => ({}) as TraderEvent), dropped: 0, hasMore, oldestTs });
+    assert.equal(feedPageCutShort(page(100, true, since - 1), since), false, "older rows are outside the window");
+    assert.equal(feedPageCutShort(page(100, true, since + HOUR_MS), since), true);
+    assert.equal(feedPageCutShort(page(100, false, since + HOUR_MS), since), false);
+    assert.equal(feedPageCutShort(page(100, null, null), since), true, "a full page that does not say is not complete");
+    assert.equal(feedPageCutShort(page(40, null, null), since), false);
+  });
 });
 
 function asDossierOf(s: store.StoredDossier | null): ResearchCoinData | null {
@@ -1025,6 +1161,35 @@ describe("open coverage gaps reach research too (C6)", () => {
     const since = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", since_revision: env.data!.revision });
     assert.equal(since.data?.changes?.comparable, false);
     assert.equal(since.data?.changes?.noChange, false, "'no change' is never claimed across a gap");
+  });
+
+  it("old never-closed gaps do not hide a fresh hole from health, research or activity (R5)", async () => {
+    const h = await harness();
+    await streamIsCurrent(h);
+    // Unrecoverable gaps stay open for the whole retention; oldest first, sixty of them filled the old 50-row read.
+    for (let i = 0; i < 60; i++) {
+      const from = NOW - 25 * DAY_MS + i * 6 * HOUR_MS;
+      await store.recordGap(h.db, "alerts", from, from + 60_000, "unrecoverable:page-cap", NOW);
+    }
+    await store.recordGap(h.db, "alerts", NOW - 3 * HOUR_MS, NOW - 2 * HOUR_MS, "recovery-failed", NOW);
+    const health = await h.service.ownerHealth(OWNER, NOW);
+    assert.equal(health.state, "watching-condition");
+    assert.match(health.detail, /1 gap\(s\) in the last 24h \(about 60 min\)/);
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(env.status, "partial");
+    assert.equal(env.reason, "activity-incomplete");
+    const act = await h.invoke<TokenActivityData>("fomo_get_token_activity", { token: PONS, chain: "robinhood" });
+    assert.equal(act.status, "partial");
+    assert.ok(act.coverage.notes.some((n) => /1 open gap\(s\) in this window/.test(n)), act.coverage.notes.join(" | "));
+  });
+
+  it("more open gaps in the window than one read takes is said as a floor, never an exact count (R5)", async () => {
+    const h = await harness();
+    await streamIsCurrent(h);
+    for (let i = 0; i < 101; i++) await store.recordGap(h.db, "alerts", NOW - 20 * HOUR_MS + i * 60_000, NOW - 20 * HOUR_MS + i * 60_000 + 1_000, "stream-backpressure", NOW);
+    const health = await h.service.ownerHealth(OWNER, NOW);
+    assert.equal(health.state, "watching-condition");
+    assert.match(health.detail, /more than 100 gap\(s\) in the last 24h \(at least \d+ min\)/);
   });
 });
 

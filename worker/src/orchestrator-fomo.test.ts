@@ -30,6 +30,7 @@ import {
   recoverVia,
   scrubLogText,
   streamEndpointFor,
+  UNRECOVERABLE_GAP_PREFIX,
   xpostConsentLookup,
   type FomoBudgetPort,
   type FomoLeaseHandle,
@@ -40,7 +41,7 @@ import type { ChildFomoFile, FomoAccess, FomoService, FomoServiceHealth } from "
 import { normalizeChildFomoFile } from "./fomo/child-file";
 import { buildDossier } from "./fomo/dossier";
 import { tokenFromKey } from "./fomo/identity";
-import type { IngestConfig } from "./fomo/ingest";
+import { isUnrecoverableGap, type IngestConfig } from "./fomo/ingest";
 import { createFomoClient, type FomoClient } from "./fomo/provider";
 import { draftPublication, type PublicationDraft } from "./fomo/publish";
 import * as store from "./fomo/store";
@@ -153,6 +154,7 @@ const WELCOME = { type: "welcome", stream: "alerts", realtime: true, delaySecond
 class FakeService implements FomoService {
   isConfigured = true;
   refreshStatus: FomoEnvelope["status"] = "ok";
+  refreshReason: string | null = null;
   refreshes: { tokenKey: string; priority: RetrievalPriority; depth: string }[] = [];
   async invoke(): Promise<FomoEnvelope> {
     throw new Error("the pass never invokes a tool");
@@ -168,7 +170,7 @@ class FakeService implements FomoService {
   }
   async refreshDossier(token: TokenIdentity, _label: TokenLabel, opts: { priority: RetrievalPriority; depth: "quick" | "standard" | "deep" }) {
     this.refreshes.push({ tokenKey: token.key, priority: opts.priority, depth: opts.depth });
-    return { dossier: null, changed: false, status: this.refreshStatus, reason: null };
+    return { dossier: null, changed: false, status: this.refreshStatus, reason: this.refreshReason };
   }
   async health(): Promise<FomoServiceHealth> {
     return {
@@ -260,7 +262,8 @@ function fixtureClient(serve: Serve, calls: string[], time: ManualTime): FomoCli
     calls.push(url.pathname + url.search);
     const lb = /^\/v2\/leaderboard\/(24h|7d|30d|all)$/.exec(url.pathname);
     if (lb && serve.leaderboard) {
-      const body = typeof serve.leaderboard === "function" ? serve.leaderboard(lb[1]!) : fixture("leaderboard-24h");
+      // The fixture board as captured just now: an old capture is not scored (boardFitForScoring).
+      const body = typeof serve.leaderboard === "function" ? serve.leaderboard(lb[1]!) : { ...fixture("leaderboard-24h"), capturedAt: new Date(time.now() - MIN).toISOString() };
       body.window = lb[1];
       return json(body, 200, { "x-credits-cost": "250", "x-credits-remaining": "99000" });
     }
@@ -853,6 +856,23 @@ describe("the research queue", () => {
     assert.deepEqual((await researchRows(db)).map((x) => x.state), ["queued", "queued"]);
     r.pass.stop();
   });
+
+  it("a refresh that is stale only by carried thesis pages is done; any other stale refresh is retried (R7)", async () => {
+    const db = await freshDb();
+    await store.enqueueResearch(db, rh("71"), "rev", 100, [T1], T0 - 2000);
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring } });
+    r.service.refreshStatus = "stale";
+    r.service.refreshReason = "carried-pages";
+    await r.run([T1]);
+    assert.deepEqual((await researchRows(db)).map((x) => x.state), ["done"], "a quick retry would only carry the same pages again");
+    assert.equal(r.service.refreshes.length, 1, "refreshed once, not until the attempts ran out");
+    await store.enqueueResearch(db, rh("72"), "rev", 100, [T1], T0 + 1000);
+    r.service.refreshReason = "provider-snapshot";
+    await r.run([T1], T0 + 15_000);
+    assert.notEqual((await researchRows(db)).find((x) => x.token_key === rh("72"))?.state, "done", "a stale thesis read is not finished");
+    assert.ok(r.service.refreshes.filter((x) => x.tokenKey === rh("72")).length > 1, "and is retried");
+    r.pass.stop();
+  });
 });
 
 describe("the cohort", () => {
@@ -889,6 +909,39 @@ describe("the cohort", () => {
     const text = r.logs.join("\n");
     assert.match(text, /cohort v1 built — \d+\/150 members/);
     for (const who of ["frankdegods", "CryptoKaleo", FRANK, KALEO, T1]) assert.ok(!text.includes(who), "a log line names someone");
+    r.pass.stop();
+  });
+
+  it("a board captured longer ago than the rankings policy scores nothing: no window, no population, no seat (R8)", async () => {
+    const ids = [uuid(901), uuid(902)];
+    let capturedAt: Record<string, number> = {};
+    const r = await rig({
+      serve: { leaderboard: (w) => ({ ...board(w, ids), ...(capturedAt[w] !== undefined ? { source: "captured", stale: true, capturedAt: new Date(capturedAt[w]!).toISOString() } : {}) }) },
+      access: { [T1]: ACCESS.monitoring },
+    });
+    const boards = () => provider(r.calls).filter((c) => c.startsWith("/v2/leaderboard/")).length;
+    // Every board is the provider's 40-day-old captured copy: bought, but nothing is built from it.
+    capturedAt = { "24h": T0 - 40 * DAY, "7d": T0 - 40 * DAY, "30d": T0 - 40 * DAY, all: T0 - 40 * DAY };
+    await r.run([T1]);
+    assert.equal(boards(), 4);
+    assert.equal(await store.latestCohort(r.db), null, "no cohort version from weeks-old copies");
+    assert.match(r.logs.join("\n"), /read nothing usable \(24h:too-old-to-score, 7d:too-old-to-score, 30d:too-old-to-score, all:too-old-to-score\)/);
+    await r.run([T1], T0 + 31 * MIN);
+    assert.equal(boards(), 4, "the same old copies are not bought again every 30 minutes");
+    // The short boards are old copies, the long ones current: only the current windows are observed and scored.
+    capturedAt = { "24h": T0 + 6 * HOUR - 40 * DAY, "7d": T0 + 6 * HOUR - 40 * DAY };
+    await r.run([T1], T0 + 6 * HOUR);
+    assert.equal(boards(), 8);
+    const built = await store.latestCohort(r.db);
+    assert.ok(built);
+    const inputs = built.inputs as { windows: string[]; boardsTooOldToScore: Record<string, { providerAsOf: number | null; stale: boolean | null }> };
+    assert.deepEqual(inputs.windows, ["30d", "all"]);
+    assert.deepEqual(Object.keys(inputs.boardsTooOldToScore), ["24h", "7d"]);
+    assert.equal(inputs.boardsTooOldToScore["24h"]?.stale, true);
+    for (const m of built.cohort.members) {
+      const pr = m.evidence.providerReported as Record<string, unknown>;
+      assert.ok(!Object.keys(pr).some((k) => /24h|7d/.test(k)), `no 24h or 7d figure from an old copy: ${JSON.stringify(pr)}`);
+    }
     r.pass.stop();
   });
 
@@ -1221,6 +1274,18 @@ describe("adapters", () => {
     assert.equal((await store.getCheckpoint(db, "alerts"))?.updatedAtMs, T0);
   });
 
+  it("the ingest port lists walkable gaps before old unrecoverable ones, so they cannot be crowded out (R5)", async () => {
+    const db = await freshDb();
+    const time = new ManualTime();
+    const port = ingestStoreOver(db, time);
+    assert.ok(isUnrecoverableGap(`${UNRECOVERABLE_GAP_PREFIX}page-cap`), "the prefix is the one ingest.ts never retries");
+    for (let i = 0; i < 500; i++) await store.recordGap(db, "alerts", T0 - 25 * DAY + i * HOUR, T0 - 25 * DAY + i * HOUR + 1000, "unrecoverable:page-cap", T0);
+    const id = await port.recordGap("alerts", T0 - 3 * HOUR, T0 - 2 * HOUR, "recovery-failed");
+    const listed = await port.listOpenGaps("alerts");
+    assert.equal(listed.length, 500);
+    assert.deepEqual(listed[0], { id, fromMs: T0 - 3 * HOUR, toMs: T0 - 2 * HOUR, reason: "recovery-failed" }, "the walkable gap is on the page, first");
+  });
+
   it("REST recovery keeps the stream's chain filter and asks the budget before every page", async () => {
     const db = await freshDb();
     const time = new ManualTime();
@@ -1407,7 +1472,7 @@ describe("honest state the pass keeps", () => {
     assert.ok(built, "built once the retry delay passed");
     // The boards' own capture time travels with the version.
     const inputs = built.inputs as { boardsAsOf?: Record<string, { providerAsOf: number | null }> };
-    assert.equal(inputs.boardsAsOf?.["24h"]?.providerAsOf, Date.parse("2026-08-25T18:04:00Z"));
+    assert.equal(inputs.boardsAsOf?.["24h"]?.providerAsOf, T0 + 31 * MIN - MIN);
     r.pass.stop();
   });
 
@@ -1435,13 +1500,23 @@ describe("honest state the pass keeps", () => {
     assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: captured, stale: true } })[0]?.lastActiveAt, captured - DAY);
     assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: null, stale: null } })[0]?.lastActiveAt, T0 - DAY, "a live board is read as of now");
     const old = { providerAsOf: T0 - 40 * DAY, stale: true };
-    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": old, "7d": old })[0]?.lastActiveAt, null, "weeks-old copies say nothing about this week");
+    // R8: a weeks-old captured copy fills no rank or P&L either, so it cannot score (or seat) a trader who has gone quiet.
+    assert.deepEqual(cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": old, "7d": old }), [], "weeks-old copies say nothing about this week");
+    const mixed = cohortCandidatesFrom({ "24h": page("24h", 3), "30d": { ...page("24h", 3), window: "30d" } as never }, T0, { "24h": old });
+    assert.deepEqual(Object.keys(mixed[0]?.windows ?? {}), ["30d"], "only the current board's window is filled");
+    assert.equal(mixed[0]?.lastActiveAt, null);
     assert.equal(
-      cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": { providerAsOf: T0 - 3 * DAY, stale: true }, "7d": { providerAsOf: T0 - 3 * DAY, stale: true } })[0]?.lastActiveAt,
-      T0 - 10 * DAY,
-      "a 7d board captured three days ago still floors activity, from its capture",
+      cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": { providerAsOf: T0 - 20 * HOUR, stale: true }, "7d": { providerAsOf: T0 - 20 * HOUR, stale: true } })[0]?.lastActiveAt,
+      T0 - 20 * HOUR - DAY,
+      "a copy captured within the rankings policy floors activity from its capture",
     );
-    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: null, stale: true } })[0]?.lastActiveAt, null, "stale and undated");
+    // Older than the rankings policy ever shows a copy (24h), or stale and undated: no candidate at all.
+    assert.deepEqual(
+      cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": { providerAsOf: T0 - 3 * DAY, stale: true }, "7d": { providerAsOf: T0 - 3 * DAY, stale: true } }),
+      [],
+      "a 7d board captured three days ago scores and floors nothing",
+    );
+    assert.deepEqual(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: null, stale: true } }), [], "stale and undated");
     assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: T0 + HOUR, stale: false } })[0]?.lastActiveAt, T0 - DAY, "a capture time ahead of our clock is read as now");
   });
 });

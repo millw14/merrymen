@@ -65,6 +65,7 @@ import {
   type CohortCandidate,
   type CohortWindowStats,
 } from "./fomo/cohort";
+import { policyFor } from "./fomo/freshness";
 import { isRobinhoodToken, robinhoodChain, tokenFromKey, tokenIdentity } from "./fomo/identity";
 import {
   createIngestor,
@@ -517,6 +518,9 @@ export function normalizeAlertFrame(frame: unknown, observedAt: number, source: 
   return alertFrameToEvent(frame, observedAt, source);
 }
 
+/** The reason prefix ingest.ts isUnrecoverableGap reads as "never retried, never closed". */
+export const UNRECOVERABLE_GAP_PREFIX = "unrecoverable:";
+
 /**
  * The ingestor's store port over store.ts: gap ids stringified both ways, the
  * clock injected where the store wants a write time. insertEvents and the
@@ -538,8 +542,10 @@ export function ingestStoreOver(db: Db, clock: ClockPort): IngestStorePort {
     },
     setCheckpoint: (stream, cursor, newestTsMs) => setCheckpoint(db, stream, cursor, newestTsMs, clock.now()),
     recordGap: async (stream, fromMs, toMs, reason) => String((await recordGap(db, stream, fromMs, toMs, reason, clock.now())).id),
+    // Walkable gaps first: unrecoverable ones stay open for the whole retention, and
+    // oldest-first they would fill the page and hide the gaps a walk can still close.
     listOpenGaps: async (stream) =>
-      (await listOpenGaps(db, stream, 500)).map((g) => ({ id: String(g.id), fromMs: g.fromMs, toMs: g.toMs, reason: g.reason })),
+      (await listOpenGaps(db, stream, 500, { lastReasonPrefix: UNRECOVERABLE_GAP_PREFIX })).map((g) => ({ id: String(g.id), fromMs: g.fromMs, toMs: g.toMs, reason: g.reason })),
     markGapRecovered: (id) => markGapRecovered(db, gapId(id), clock.now()),
     deadLetter: (stream, payload, error) => deadLetter(db, stream, payload, error, clock.now()),
     markProcessed: (keys) => markEventsProcessed(db, keys, clock.now()),
@@ -615,6 +621,24 @@ export interface BoardFreshness {
   stale: boolean | null;
 }
 
+/** The oldest board capture that may still score a cohort: the oldest rankings copy ever shown (freshness.ts). */
+export const BOARD_SCORING_MAX_AGE_MS = policyFor("rankings").staleServeMaxMs;
+
+/**
+ * Whether a leaderboard answer may drive cohort scoring at all. A copy the
+ * provider captured longer ago than the rankings policy would ever show, or
+ * marks stale without saying when, is not current standing: its ranks, P&L
+ * and population stay out of the candidates, the observed windows and the
+ * activity floor, so a trader who has since gone quiet is not scored (or
+ * seated) on it. No freshness stated at all is a live answer, read as of now.
+ */
+export function boardFitForScoring(f: BoardFreshness | undefined, now: number): boolean {
+  if (!f) return true;
+  const asOf = typeof f.providerAsOf === "number" && Number.isFinite(f.providerAsOf) ? Math.min(f.providerAsOf, now) : null;
+  if (asOf === null) return f.stale !== true;
+  return now - asOf <= BOARD_SCORING_MAX_AGE_MS;
+}
+
 /**
  * Leaderboard pages to cohort candidates, one per trader with every window it
  * appeared in. Nothing is invented: a trader's profile, exits and the rest are
@@ -637,6 +661,11 @@ export interface BoardFreshness {
  * this never manufactures an inactivity verdict out of a stale source: a floor
  * it does set is at most two windows old. The 30d and all-time boards prove
  * nothing inside the cohort's 14-day inactivity rule, so they set nothing.
+ *
+ * A board that is not fit to score at all (boardFitForScoring: captured longer
+ * ago than the rankings policy ever shows a copy, or stale and undated) is
+ * skipped outright: no window stats, no floor. The cohort refresh leaves it out
+ * of the observed windows and the population too.
  */
 export function cohortCandidatesFrom(
   pages: Partial<Record<RankingWindow, LeaderboardPage>>,
@@ -658,7 +687,8 @@ export function cohortCandidatesFrom(
   }
   for (const w of RANKING_WINDOWS) {
     const page = pages[w];
-    if (!page) continue;
+    // A board too old to score (boardFitForScoring) fills no window stats and sets no floor.
+    if (!page || !boardFitForScoring(freshness[w], now)) continue;
     for (const row of page.rows) {
       const id = row.trader.userId;
       if (typeof id !== "string" || id === "") continue;
@@ -968,6 +998,15 @@ const RESEARCH_DONE: ReadonlySet<ResultStatus> = new Set<ResultStatus>(["ok", "e
 /** Outcomes that mean "not now": the item goes back, and the pass stops spending on the queue. */
 const RESEARCH_BACK_OFF: ReadonlySet<ResultStatus> = new Set<ResultStatus>(["budget-limited", "unavailable"]);
 
+/**
+ * Finished at this revision. A "stale" refresh whose only stale part is thesis pages carried from a
+ * deeper read ("carried-pages") is done too: page one was read live, and a quick retry would carry
+ * the same pages again, paying for the same read until the attempts run out.
+ */
+function researchDone(r: { status: ResultStatus; reason: string | null }): boolean {
+  return RESEARCH_DONE.has(r.status) || (r.status === "stale" && r.reason === "carried-pages");
+}
+
 export function makeFomoPass(deps: FomoPassDeps): FomoPass {
   const knobs: FomoPassKnobs = { ...FOMO_PASS_DEFAULTS, ...(deps.knobs ?? {}) };
   const { db, clock, timers } = deps;
@@ -1243,6 +1282,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     const boardAge: Partial<Record<RankingWindow, BoardFreshness>> = {};
     const population: Partial<Record<RankingWindow, number>> = {};
     const failures: string[] = [];
+    /** Boards that answered with a copy too old to score (boardFitForScoring). */
+    const staleBoards: RankingWindow[] = [];
     let billed = 0;
     let billedKnown = true;
     let reached = 0;
@@ -1263,10 +1304,20 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
           failures.push(`${w}:${r.failure}`);
           continue;
         }
-        pages[w] = r.data;
         // The board's own capture time, not our read time: a captured copy is
-        // not current activity (cohortCandidatesFrom).
-        boardAge[w] = { providerAsOf: r.meta.providerAsOf, stale: r.meta.providerStale };
+        // not current activity (cohortCandidatesFrom). A fallback source is
+        // stale whether or not the flag says so; its stated age dates it when
+        // no capture time is given.
+        const fallback = r.meta.providerStale === true || r.meta.providerSource === "captured" || r.meta.providerSource === "snapshot";
+        const age = r.meta.providerAgeSeconds;
+        const asOf = r.meta.providerAsOf ?? (fallback && age !== null && Number.isFinite(age) ? r.meta.retrievedAt - Math.round(age * 1000) : null);
+        boardAge[w] = { providerAsOf: asOf, stale: fallback ? true : r.meta.providerStale };
+        if (!boardFitForScoring(boardAge[w], now)) {
+          // Too old to say who is good now: bought, but it scores nothing and counts as no window.
+          staleBoards.push(w);
+          continue;
+        }
+        pages[w] = r.data;
         population[w] = r.data.providerCount ?? r.data.rows.length + r.data.dropped;
       }
     } catch (e) {
@@ -1281,8 +1332,13 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     }
     const observed = RANKING_WINDOWS.filter((w) => pages[w] !== undefined);
     if (observed.length === 0) {
-      cohortRetryAt = now + COHORT_RETRY_MS;
-      deps.log(`fomo: cohort refresh read nothing (${scrubLogText(failures.join(", "), 120)}); keeping the current cohort and trying again in 30 min`);
+      // Every board that answered was an old copy, bought at full price: asking again in 30 minutes would most
+      // likely buy the same copies again, so the next try waits a normal refresh interval.
+      const allOld = failures.length === 0 && staleBoards.length > 0;
+      const waitMs = allOld ? Math.max(COHORT_RETRY_MS, knobs.cohortRefreshMs) : COHORT_RETRY_MS;
+      cohortRetryAt = now + waitMs;
+      const why = [...failures, ...staleBoards.map((w) => `${w}:too-old-to-score`)];
+      deps.log(`fomo: cohort refresh read nothing usable (${scrubLogText(why.join(", "), 120)}); keeping the current cohort and trying again in ${Math.round(waitMs / MIN)} min`);
       return;
     }
     const scoring = { windowPopulation: population, observedWindows: observed };
@@ -1299,6 +1355,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         withMeasuredEvidence: enriched.measured,
         // How old each board said it was, so a cohort built from captured copies says so.
         boardsAsOf: Object.fromEntries(observed.map((w) => [w, { providerAsOf: boardAge[w]?.providerAsOf ?? null, stale: boardAge[w]?.stale ?? null }])),
+        // Boards that answered with a copy too old to score, and so shaped nothing here.
+        boardsTooOldToScore: Object.fromEntries(staleBoards.map((w) => [w, { providerAsOf: boardAge[w]?.providerAsOf ?? null, stale: boardAge[w]?.stale ?? null }])),
       });
     } catch (e) {
       // The boards are already bought: a failed write (a deadlock, a blip)
@@ -1534,7 +1592,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         const r = await withDeadline(timers, REFRESH_DEADLINE_MS, (signal) =>
           deps.service.refreshDossier(token, label, { priority: priorityOfQueue(claim.priority), depth: "quick", now: clock.now(), signal }),
         );
-        if (RESEARCH_DONE.has(r.status)) outcome = "done";
+        if (researchDone(r)) outcome = "done";
         backOff = RESEARCH_BACK_OFF.has(r.status);
       } catch (e) {
         noteFailure("research", e);

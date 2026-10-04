@@ -1726,14 +1726,46 @@ function gapOf(r: Row): CoverageGap | null {
   return { id, stream, fromMs: from, toMs: to, reason: str(r.reason) ?? "", recovered: num(r.recovered) === 1, detectedAtMs: detected, recoveredAtMs: num(r.recovered_at_ms) };
 }
 
-/** Gaps not yet recovered, oldest span first; one stream or all. */
-export async function listOpenGaps(db: Db, stream: string | null, limit: number): Promise<CoverageGap[]> {
+/**
+ * Gaps not yet recovered, oldest span first; one stream or all. With
+ * `lastReasonPrefix`, gaps whose reason starts with it come after every other
+ * one, so a page of old never-retried gaps cannot crowd out walkable ones.
+ */
+export async function listOpenGaps(db: Db, stream: string | null, limit: number, o: { lastReasonPrefix?: string } = {}): Promise<CoverageGap[]> {
+  const prefix = o.lastReasonPrefix;
+  if (prefix !== undefined && (prefix === "" || /[%_\\]/.test(prefix))) throw new TypeError("fomo store: a reason prefix must be plain text");
+  const order = prefix !== undefined ? "CASE WHEN reason LIKE ? THEN 1 ELSE 0 END, from_ms, id" : "from_ms, id";
+  const lead = prefix !== undefined ? [`${prefix}%`] : [];
   const rows = (
     stream === null
-      ? await db.prepare(`SELECT ${GAP_COLUMNS} FROM fomo_coverage_gaps WHERE recovered = 0 ORDER BY from_ms, id LIMIT ?`).all(pageOf(limit))
+      ? await db.prepare(`SELECT ${GAP_COLUMNS} FROM fomo_coverage_gaps WHERE recovered = 0 ORDER BY ${order} LIMIT ?`).all(...lead, pageOf(limit))
       : await db
-          .prepare(`SELECT ${GAP_COLUMNS} FROM fomo_coverage_gaps WHERE recovered = 0 AND stream = ? ORDER BY from_ms, id LIMIT ?`)
-          .all(keyOf(stream, "stream", 64), pageOf(limit))
+          .prepare(`SELECT ${GAP_COLUMNS} FROM fomo_coverage_gaps WHERE recovered = 0 AND stream = ? ORDER BY ${order} LIMIT ?`)
+          .all(keyOf(stream, "stream", 64), ...lead, pageOf(limit))
+  ) as Row[];
+  return rows.flatMap((r) => gapOf(r) ?? []);
+}
+
+/**
+ * Open gaps that overlap [sinceMs, untilMs], newest end first; one stream or all.
+ *
+ * listOpenGaps is oldest first and unbounded in time, so a page of it is the
+ * OLDEST open gaps: unrecoverable ones stay open for the whole retention, and
+ * fifty of them hide every newer hole. This asks for the window itself, on the
+ * to_ms index (a gap ending before the window cannot overlap it). A full page
+ * means "at least this many", never "these are all".
+ */
+export async function listOpenGapsOverlapping(db: Db, stream: string | null, sinceMs: number, untilMs: number, limit: number): Promise<CoverageGap[]> {
+  const since = intOf(sinceMs, "sinceMs");
+  const until = intOf(untilMs, "untilMs");
+  const rows = (
+    stream === null
+      ? await db
+          .prepare(`SELECT ${GAP_COLUMNS} FROM fomo_coverage_gaps WHERE to_ms >= ? AND from_ms <= ? AND recovered = 0 ORDER BY to_ms DESC, id DESC LIMIT ?`)
+          .all(since, until, pageOf(limit))
+      : await db
+          .prepare(`SELECT ${GAP_COLUMNS} FROM fomo_coverage_gaps WHERE to_ms >= ? AND from_ms <= ? AND recovered = 0 AND stream = ? ORDER BY to_ms DESC, id DESC LIMIT ?`)
+          .all(since, until, keyOf(stream, "stream", 64), pageOf(limit))
   ) as Row[];
   return rows.flatMap((r) => gapOf(r) ?? []);
 }

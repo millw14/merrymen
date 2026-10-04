@@ -388,6 +388,28 @@ describe("stream bookkeeping", () => {
     assert.deepEqual((await S.listOpenGaps(db, "alerts", 10)).map((x) => x.id), [h.id]);
   });
 
+  it("a window's open gaps are found however many older ones stay open (R5)", async () => {
+    const { db } = await fresh();
+    const H = 3_600_000;
+    // Old never-closed gaps: oldest first, a page of them is all listOpenGaps returns.
+    for (let i = 0; i < 60; i++) await S.recordGap(db, "alerts", T0 - 25 * 24 * H + i * H, T0 - 25 * 24 * H + i * H + 1000, "unrecoverable:page-cap", T0);
+    const fresh1 = await S.recordGap(db, "alerts", T0 - 3 * H, T0 - 2 * H, "recovery-failed", T0);
+    const straddle = await S.recordGap(db, "alerts", T0 - 30 * H, T0 - 23 * H, "stream-backpressure", T0);
+    const other = await S.recordGap(db, "other", T0 - H, T0, "x", T0);
+    const closed = await S.recordGap(db, "alerts", T0 - 4 * H, T0 - 3.5 * H, "x", T0);
+    await S.markGapRecovered(db, closed.id, T0);
+    assert.ok(!(await S.listOpenGaps(db, null, 50)).some((g) => g.id === fresh1.id), "the oldest-first page hides it");
+    const since = T0 - 24 * H;
+    assert.deepEqual((await S.listOpenGapsOverlapping(db, null, since, T0, 50)).map((g) => g.id), [other.id, fresh1.id, straddle.id], "overlapping, open, newest end first");
+    assert.deepEqual((await S.listOpenGapsOverlapping(db, "alerts", since, T0, 50)).map((g) => g.id), [fresh1.id, straddle.id]);
+    assert.deepEqual((await S.listOpenGapsOverlapping(db, "alerts", since, T0, 1)).map((g) => g.id), [fresh1.id], "a page is the newest");
+    assert.deepEqual(await S.listOpenGapsOverlapping(db, "alerts", T0 + H, T0 + 2 * H, 50), []);
+    // The ingestor's listing: walkable gaps first, so old unrecoverable ones cannot fill the page.
+    const walkable = await S.listOpenGaps(db, "alerts", 2, { lastReasonPrefix: "unrecoverable:" });
+    assert.deepEqual(walkable.map((g) => g.id), [straddle.id, fresh1.id]);
+    await assert.rejects(S.listOpenGaps(db, "alerts", 2, { lastReasonPrefix: "un%" }), /plain text/);
+  });
+
   it("dead letters are capped, NUL-free and newest first", async () => {
     const { db } = await fresh();
     const id1 = await S.deadLetter(db, "alerts", `{"x":"\u0000${"y".repeat(20_000)}`, "parse error", T0);
