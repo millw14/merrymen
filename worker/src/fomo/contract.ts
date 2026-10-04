@@ -73,12 +73,29 @@ export type BrokerReport =
   /** The coins this tenant holds now, so ingestion can prioritise position protection. */
   | { kind: "held-tokens"; tokenKeys: string[]; atMs: number };
 
+/**
+ * A STRICT memory read: what the store itself answered, or that it did not
+ * answer. `ok` with `value: null` means the store was asked and holds nothing
+ * under the key; every failure is `ok: false`, never a null.
+ */
+export type MemoryRead = { ok: true; value: string | null } | { ok: false; reason: string };
+
 export interface FomoBroker {
   /** One registered tool call. Always resolves (a failure is an envelope with a failed status). */
   call(tool: FomoToolName, args: Record<string, unknown>, opts: BrokerCallOptions): Promise<FomoEnvelope>;
   /** Conversation subject memory (subject-memory.ts serialize() strings), tenant-scoped by the host. */
   memory: {
+    /** LENIENT: null for "nothing stored" AND for any failure. Fine for chat memory; never for money state. */
     get(conversationKey: string): Promise<string | null>;
+    /**
+     * STRICT, for money state (fomo-child.ts brokerDurableState): `ok` with
+     * `value: null` ONLY when the store answered that nothing is stored. No
+     * channel, the child's in-flight cap, a refusal or rate limit, a timeout,
+     * a store error or a malformed answer is `ok: false`. Never throws.
+     * Optional so a chat-only wrapper may leave it out; a broker without it
+     * can never prove that a key is absent.
+     */
+    read?(conversationKey: string): Promise<MemoryRead>;
     set(conversationKey: string, json: string): Promise<void>;
     clear(conversationKey: string): Promise<void>;
   };
@@ -96,7 +113,14 @@ export interface FomoBroker {
  */
 export interface FomoService {
   invoke(ctx: FomoCallContext, tool: FomoToolName, args: Record<string, unknown>): Promise<FomoEnvelope>;
+  /** LENIENT: a store error is logged and answered as null (chat memory). */
   memoryGet(tenant: string, conversationKey: string): Promise<string | null>;
+  /**
+   * STRICT (FomoBroker.memory.read): a store error is `ok: false`, never a
+   * null. Optional; a service without it cannot prove a key absent, so the
+   * brokers answer `ok: false` for it.
+   */
+  memoryRead?(tenant: string, conversationKey: string): Promise<MemoryRead>;
   memorySet(tenant: string, conversationKey: string, json: string, nowMs: number): Promise<void>;
   memoryClear(tenant: string, conversationKey: string): Promise<void>;
   report(tenant: string, r: BrokerReport, nowMs: number): Promise<void>;
@@ -173,6 +197,8 @@ export interface ChildSignal {
 export type BrokerRequest =
   | { fomo: 1; id: string; op: "call"; tool: FomoToolName; args: Record<string, unknown>; opts: Omit<BrokerCallOptions, "signal"> }
   | { fomo: 1; id: string; op: "memory-get"; conversationKey: string }
+  /** The strict read: answered `{ value: string | null }` only when the store answered; refused otherwise. */
+  | { fomo: 1; id: string; op: "memory-read"; conversationKey: string }
   | { fomo: 1; id: string; op: "memory-set"; conversationKey: string; json: string }
   | { fomo: 1; id: string; op: "memory-clear"; conversationKey: string }
   | { fomo: 1; id: string; op: "report"; report: BrokerReport }

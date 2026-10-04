@@ -22,7 +22,7 @@ import {
   type BrokerCallContext,
   type BrokerPort,
 } from "./broker";
-import type { BrokerCallOptions, BrokerReport, FomoService, FomoServiceHealth } from "./contract";
+import type { BrokerCallOptions, BrokerReport, FomoService, FomoServiceHealth, MemoryRead } from "./contract";
 import type { CoinDossier, FollowAssessment, FomoCallContext, FomoEnvelope, FomoToolName } from "./types";
 
 const NOW = 1_800_000_000_000;
@@ -65,6 +65,12 @@ class FakeService implements FomoService {
     this.memoryCalls.push(`get:${tenant}:${key}`);
     if (this.failMemory) throw new Error("db down postgres://user:SECRET@host/db");
     return this.memory.get(`${tenant}|${key}`) ?? null;
+  }
+  /** Strict, as service.ts: a store error is a failure, never a null. */
+  async memoryRead(tenant: string, key: string): Promise<MemoryRead> {
+    this.memoryCalls.push(`read:${tenant}:${key}`);
+    if (this.failMemory) return { ok: false, reason: "store-error" };
+    return { ok: true, value: this.memory.get(`${tenant}|${key}`) ?? null };
   }
   async memorySet(tenant: string, key: string, json: string, _now: number): Promise<void> {
     this.memoryCalls.push(`set:${tenant}:${key}`);
@@ -407,6 +413,32 @@ describe("createDirectBroker", () => {
     assert.equal(svc.reports[0]!.now, NOW);
   });
 
+  it("the strict read says 'nothing stored' only when the service answered; every failure is ok:false", async () => {
+    const svc = new FakeService();
+    const broker = createDirectBroker(svc, "self", { now: () => NOW });
+    const read = broker.memory.read!;
+    assert.deepEqual(await read("state:k"), { ok: true, value: null });
+    await broker.memory.set("state:k", '{"l":"15"}');
+    assert.deepEqual(await read("state:k"), { ok: true, value: '{"l":"15"}' });
+    assert.ok(svc.memoryCalls.includes("read:self:state:k"), "bound to the fixed tenant");
+    svc.failMemory = true;
+    assert.deepEqual(await read("state:k"), { ok: false, reason: "memory-read-failed" }, "a store error is not 'nothing stored'");
+    assert.equal(await broker.memory.get("state:k"), null, "the lenient read keeps its contract");
+    svc.failMemory = false;
+    const throwing = new FakeService();
+    throwing.memoryRead = async () => {
+      throw new Error("db down postgres://user:SECRET@host/db");
+    };
+    assert.deepEqual(await createDirectBroker(throwing, "self").memory.read!("state:k"), { ok: false, reason: "memory-read-failed" });
+    const malformed = new FakeService();
+    malformed.memoryRead = async () => ({ ok: true }) as unknown as MemoryRead;
+    assert.deepEqual(await createDirectBroker(malformed, "self").memory.read!("state:k"), { ok: false, reason: "memory-read-failed" });
+    const lenientOnly = new FakeService() as FomoService;
+    (lenientOnly as { memoryRead?: unknown }).memoryRead = undefined;
+    assert.equal((await createDirectBroker(lenientOnly, "self").memory.read!("state:k")).ok, false, "a service without the strict read proves nothing");
+    assert.equal((await read("")).ok, false);
+  });
+
   it("mirrors configured() and refuses to start without a tenant", () => {
     const svc = new FakeService();
     svc.isConfigured = false;
@@ -441,6 +473,12 @@ describe("parseBrokerRequest and validateBrokerReport", () => {
     assert.equal(parseBrokerRequest({ fomo: 1, id: "r", op: "call", tool: "fomo_get_rankings", args: [1], opts: DM }).ok, false);
     assert.equal(parseBrokerRequest({ fomo: 1, id: "r", op: "call", tool: "fomo_get_rankings", args: {}, opts: { ...DM, surface: "mcp" } }).ok, false);
     assert.equal(parseBrokerRequest({ fomo: 1, id: "r", op: "memory-set", conversationKey: "k", json: "x".repeat(16_385) }).ok, false);
+    assert.deepEqual(parseBrokerRequest({ fomo: 1, id: "r", op: "memory-read", conversationKey: "state:k", tenant: "0xevil" }), {
+      ok: true,
+      request: { fomo: 1, id: "r", op: "memory-read", conversationKey: "state:k" },
+      extras: ["tenant"],
+    });
+    assert.equal(parseBrokerRequest({ fomo: 1, id: "r", op: "memory-read" }).ok, false);
   });
 
   it("rebuilds reports field by field and refuses another tenant's assessment", () => {
@@ -694,6 +732,79 @@ describe("IPC broker round trip", () => {
     g.open();
     assert.equal((await a).status, "ok");
     assert.equal((await b).status, "ok");
+  });
+
+  it("the strict read crosses the wire as an answer only when the store answered", async () => {
+    const { pair, svc, broker } = setup();
+    const read = broker.memory.read!;
+    assert.deepEqual(await read("state:k"), { ok: true, value: null }, "answered: nothing stored");
+    await broker.memory.set("state:k", '{"l":"15"}');
+    assert.deepEqual(await read("state:k"), { ok: true, value: '{"l":"15"}' });
+    assert.ok(svc.memoryCalls.includes(`read:${ORCH_TENANT}:state:k`), "stamped with the orchestrator's tenant");
+    assert.ok(!("tenant" in pair.wire.fromChild.find((m) => m.op === "memory-read")!));
+    // A store error on the orchestrator is a refusal, never a null.
+    svc.failMemory = true;
+    assert.deepEqual(await read("state:k"), { ok: false, reason: "memory-read-failed" });
+    assert.equal(await broker.memory.get("state:k"), null, "the lenient read still answers null for chat memory");
+    svc.failMemory = false;
+    // An orchestrator service without the strict read refuses it.
+    const bare = setup();
+    (bare.svc as { memoryRead?: unknown }).memoryRead = undefined;
+    assert.deepEqual(await bare.broker.memory.read!("state:k"), { ok: false, reason: "memory-read-failed" });
+  });
+
+  it("a busy child, a rate limit, a timeout or a bare null answer is not 'nothing stored'", async () => {
+    // The child's own in-flight cap.
+    const busy = setup({}, { maxInFlight: 1 });
+    await flush();
+    const g = gate();
+    busy.svc.behaviour = async (ctx, tool) => {
+      await g.wait;
+      return okEnvelope(tool, ctx);
+    };
+    const held = busy.broker.call("fomo_get_rankings", {}, DM);
+    assert.deepEqual(await busy.broker.memory.read!("state:k"), { ok: false, reason: "busy" });
+    g.open();
+    await held;
+    // The orchestrator's store lane: one in flight, the next refused as rate-limited.
+    const lane = setup({ maxInFlight: 1 });
+    await flush();
+    const slow = gate();
+    lane.svc.report = async () => {
+      await slow.wait;
+    };
+    const report = lane.broker.report({ kind: "funnel", tokenKey: RH_KEY, stage: "MODEL_HOLD", detail: "x", decisionId: null, atMs: NOW });
+    await flush();
+    assert.deepEqual(await lane.broker.memory.read!("state:k"), { ok: false, reason: "rate-limited" });
+    slow.open();
+    await report;
+    // No answer at all.
+    const silent: BrokerPort = { send: () => true, onMessage: () => () => {}, connected: () => true };
+    const quiet = createIpcBroker(silent, { timeoutMs: 20 });
+    assert.deepEqual(await quiet.memory.read!("state:k"), { ok: false, reason: "timeout" });
+    quiet.close();
+    // An end that answers `ok: true, result: null` to everything (an older
+    // orchestrator's memory-set reply, say) never passes for an empty store.
+    let handler: ((m: unknown) => void) | null = null;
+    const nulls: BrokerPort = {
+      send: (m) => {
+        const id = (m as { id: string }).id;
+        setImmediate(() => handler?.({ fomo: 1, id, ok: true, result: null }));
+        return true;
+      },
+      onMessage: (h) => {
+        handler = h;
+        return () => (handler = null);
+      },
+      connected: () => true,
+    };
+    const lenient = createIpcBroker(nulls, { timeoutMs: 200 });
+    assert.deepEqual(await lenient.memory.read!("state:k"), { ok: false, reason: "bad-response" });
+    assert.equal(await lenient.memory.get("state:k"), null);
+    lenient.close();
+    // No channel.
+    const gone: BrokerPort = { send: () => false, onMessage: () => () => {}, connected: () => false };
+    assert.deepEqual(await createIpcBroker(gone).memory.read!("state:k"), { ok: false, reason: "unavailable" });
   });
 
   it("times out as 'broker-timeout' when no answer arrives", async () => {

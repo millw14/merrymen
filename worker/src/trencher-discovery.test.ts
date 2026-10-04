@@ -326,3 +326,32 @@ test("a beyond-slice coin verified only because Fomo asked never reaches the reg
   const viaBook = earlyEntryPools(tape, new Set([asked.tokenAddress]), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified });
   assert.deepEqual(viaBook.map(p => p.tokenAddress), [asked.tokenAddress]);
 });
+
+test("a verify-only coin whose own tape page ranks it INSIDE the slice is still never a regular candidate", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  // The feeds carry 12 pools; the asked coin is on NO feed page. Its own page,
+  // read only because Fomo asked to verify it, puts it on the tape — busy
+  // enough to rank inside the slice, so discovery reads it as a REGULAR pool.
+  const feeds = ranked(12);
+  const asked = { ...ranked(13)[12]!, volume24hUsd: 9_950_000 };
+  const tape = [...feeds, asked];
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, { early: [asked.tokenAddress] });
+  const q = result.qualified.find(p => p.tokenAddress === asked.tokenAddress);
+  assert.ok(q, "verified on chain");
+  assert.equal(q.early, undefined, "inside the slice: not marked early, so the flag alone cannot keep it out");
+
+  // index.ts passes the Fomo asks that hold no early-book offer as `verifyOnly`.
+  const verifyOnly = new Set([asked.tokenAddress.toUpperCase().replace("0X", "0x")]);
+  const regular = regularEntryPools(tape, result.qualified, verifyOnly);
+  assert.ok(!regular.some(p => p.tokenAddress === asked.tokenAddress), "not a regular autonomous candidate");
+  assert.deepEqual(regular.map(p => p.tokenAddress), feeds.map(p => p.tokenAddress), "the feed coins are untouched");
+  // Only an early-book offer (a follow nomination) brings it in, through the early path.
+  assert.deepEqual(earlyEntryPools(tape, new Set(), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified }), []);
+  const viaBook = earlyEntryPools(tape, new Set([asked.tokenAddress]), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified });
+  assert.deepEqual(viaBook.map(p => p.tokenAddress), [asked.tokenAddress]);
+});

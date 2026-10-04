@@ -13,7 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { CASH } from "../../packages/core/src/index";
 import type { ShadowOutcome } from "./brain-shadow";
-import { wrapSqlite } from "./db";
+import { wrapSqlite, type Db } from "./db";
 import { EarlyCandidateBook } from "./early-candidates";
 import {
   ExplorationLedger,
@@ -44,13 +44,14 @@ import {
   type OwnPrice,
   type SelfHostedJobs,
 } from "./fomo-child";
-import { brokerFailureEnvelope, validateBrokerReport, type BrokerPort } from "./fomo/broker";
+import { brokerFailureEnvelope, createIpcBroker, serveBrokerRequests, validateBrokerReport, type BrokerPort } from "./fomo/broker";
 import { writeChildFomoFile } from "./fomo/child-file";
-import type { BrokerReport, BrokerRequest, BrokerResponse, ChildFomoFile, ChildSignal, FomoBroker } from "./fomo/contract";
+import type { BrokerReport, BrokerRequest, BrokerResponse, ChildFomoFile, ChildSignal, FomoBroker, MemoryRead } from "./fomo/contract";
 import type { FollowCounters } from "./fomo/following";
 import { chainFromProvider, robinhoodChain, tokenIdentity } from "./fomo/identity";
 import { AUTONOMOUS_ENTRY_CAP_6 } from "./fomo/sizing";
-import { enqueueJob, recentJobs } from "./fomo/store";
+import { createFomoRuntime } from "./fomo/runtime";
+import { enqueueJob, getSubject, recentJobs, setSubject } from "./fomo/store";
 import type { CoinDossier, DossierClaim, FollowAssessment, TokenIdentity, TraderEvent } from "./fomo/types";
 
 const T0 = 1_800_000_000_000;
@@ -993,35 +994,124 @@ describe("the follow path's money state is durable in the tenant's store", () =>
     assert.equal(ledger.figures("paper").loss6, 0n, "a new authorisation starts afresh");
   });
 
-  it("the broker port believes 'nothing stored' only when the store demonstrably answers", async () => {
+  it("the broker port believes 'nothing stored' only when a STRICT read says the store holds nothing", async () => {
     const mem = new Map<string, string>();
-    const sw = { get: true, set: true };
-    const broker = {
-      ...recordingBroker(),
-      memory: {
-        get: async (k: string) => (sw.get ? mem.get(k) ?? null : null),
-        set: async (k: string, v: string) => {
-          if (sw.set) mem.set(k, v);
-        },
-        clear: async () => {},
+    const sw: { read: "ok" | "refused" | "throw" | "malformed"; set: boolean } = { read: "ok", set: true };
+    const lenient: string[] = [];
+    const memory = {
+      // The lenient read answers null for anything: absence must never rest on it.
+      get: async (k: string) => {
+        lenient.push(k);
+        return null;
       },
+      read: async (k: string): Promise<MemoryRead> => {
+        if (sw.read === "throw") throw new Error("ipc");
+        if (sw.read === "malformed") return { ok: true } as unknown as MemoryRead;
+        return sw.read === "ok" ? { ok: true, value: mem.get(k) ?? null } : { ok: false, reason: "rate-limited" };
+      },
+      set: async (k: string, v: string) => {
+        if (sw.set) mem.set(k, v);
+      },
+      clear: async () => {},
     };
-    let n = 0;
-    const port = brokerDurableState(() => broker, { newNonce: () => `n${++n}` });
+    const broker = { ...recordingBroker(), memory };
+    const port = brokerDurableState(() => broker);
     assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "absent" });
-    // Two loads at once (the ledger and the day count) do not read each other's probe.
     assert.deepEqual(await Promise.all([port.read(FOMO_STATE_KEYS.exploration), port.read(FOMO_STATE_KEYS.followEntries)]), [{ kind: "absent" }, { kind: "absent" }]);
-    sw.get = false;
-    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "a failed read is not an empty ledger");
-    sw.get = true;
+    for (const failure of ["refused", "throw", "malformed"] as const) {
+      sw.read = failure;
+      assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, `a ${failure} read is not an empty ledger`);
+    }
+    sw.read = "ok";
     sw.set = false;
-    mem.delete(FOMO_STATE_KEYS.probe);
-    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "the probe did not read back");
     assert.equal(await port.write(FOMO_STATE_KEYS.exploration, "{}"), false, "an unconfirmed write is not a write");
     sw.set = true;
     assert.equal(await port.write(FOMO_STATE_KEYS.exploration, "{\"a\":1}"), true);
-    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "found", text: "{\"a\":1}" });
+    sw.read = "refused";
+    assert.equal(await port.write(FOMO_STATE_KEYS.exploration, "{\"a\":2}"), false, "a write the strict read cannot confirm is not a write");
+    sw.read = "ok";
+    assert.deepEqual(await port.read(FOMO_STATE_KEYS.exploration), { kind: "found", text: "{\"a\":2}" });
+    assert.deepEqual(lenient, [], "the lenient get is never what the money state rests on");
+    const noStrict = { ...recordingBroker(), memory: { get: async () => null, set: async () => {}, clear: async () => {} } };
+    assert.deepEqual(await brokerDurableState(() => noStrict).read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "a broker without the strict read proves nothing");
     assert.deepEqual(await brokerDurableState(() => null).read(FOMO_STATE_KEYS.exploration), { kind: "unknown" }, "no broker yet");
+  });
+
+  it("a store error is unknown, never absent: over the hosted IPC path the stored ledger and day count are neither reset nor overwritten", async () => {
+    // The orchestrator's real service over sqlite; the first two reads of each
+    // state key fail as a transient Postgres error would. A good read of the
+    // store between them (a probe, another key) proves nothing about THIS read.
+    const raw = wrapSqlite(new DatabaseSync(":memory:"));
+    const reads = new Map<string, number>();
+    const blip = (db: Db): Db => ({
+      prepare(sql) {
+        const st = db.prepare(sql);
+        if (!/SELECT subject_json/.test(sql)) return st;
+        return {
+          run: (...a) => st.run(...a),
+          all: (...a) => st.all(...a),
+          get: async (...a) => {
+            const key = String(a[1]);
+            const n = (reads.get(key) ?? 0) + 1;
+            reads.set(key, n);
+            if (key.startsWith("state:") && n <= 2) throw new Error("Connection terminated unexpectedly");
+            return st.get(...a);
+          },
+        };
+      },
+      exec: (sql) => db.exec(sql),
+      tx: (fn) => db.tx((d) => fn(blip(d))),
+    });
+    const rt = await createFomoRuntime({ db: blip(raw), dialect: "sqlite", apiKey: null, access: async () => ({ dataAccess: true, monitoring: false, follow: true }), now: () => T0 });
+    const stored: ExplorationState = {
+      epochKey: "true:20000000:10000000",
+      epochSince: T0 - 3_600_000,
+      savedAt: T0 - 60_000,
+      books: { paper: { positions: [], closedLoss6: U(4) }, live: { positions: [], closedLoss6: 0n } },
+    };
+    const storedText = encodeDurableExploration(stored);
+    await setSubject(raw, TENANT, FOMO_STATE_KEYS.exploration, storedText, T0 - 60_000);
+    await setSubject(raw, TENANT, FOMO_STATE_KEYS.followEntries, JSON.stringify({ day: DAY, taken: 3 }), T0 - 60_000);
+    // An in-process IPC channel: the real child broker and the real serving end.
+    const toParent = new Set<(m: unknown) => void>();
+    const toChild = new Set<(m: unknown) => void>();
+    const deliver = (to: Set<(m: unknown) => void>, m: unknown) => {
+      const copy = JSON.parse(JSON.stringify(m)) as unknown;
+      setImmediate(() => {
+        for (const h of [...to]) h(copy);
+      });
+      return true;
+    };
+    const child: BrokerPort = { send: (m) => deliver(toParent, m), onMessage: (h) => (toChild.add(h), () => void toChild.delete(h)), connected: () => true };
+    const parent: BrokerPort = { send: (m) => deliver(toChild, m), onMessage: (h) => (toParent.add(h), () => void toParent.delete(h)), connected: () => true };
+    const stop = serveBrokerRequests(parent, TENANT, rt.service);
+    const broker = createIpcBroker(child);
+    try {
+      const port = brokerDurableState(() => broker);
+      const home = tmpHome();
+      const ledger = new ExplorationLedger(childExplorationStore(home), () => {}, { durable: port, now: () => T0 });
+      const counters = childDurableFollowCounters(home, port, undefined, () => T0);
+      // A sync queued during the load must never write over a copy nobody read.
+      ledger.syncEpoch("true:20000000:10000000", T0);
+      for (let i = 0; i < 2; i++) {
+        assert.equal(await ledger.load(), false, "a failed read: unknown, asked again later");
+        assert.equal(await counters.load(), false);
+        assert.equal(ledger.figures("paper").loss6, null, "never an empty ledger");
+        assert.equal(counters.takeFollowEntry(DAY, 3), false, "never a fresh day");
+      }
+      await ledger.settled();
+      await counters.settled();
+      assert.equal((await getSubject(raw, TENANT, FOMO_STATE_KEYS.exploration))?.json, storedText, "the stored ledger is untouched");
+      assert.deepEqual(JSON.parse((await getSubject(raw, TENANT, FOMO_STATE_KEYS.followEntries))!.json), { day: DAY, taken: 3 });
+      // The store answers again: the stored copies are adopted.
+      assert.equal(await ledger.load(), true);
+      assert.equal(await counters.load(), true);
+      assert.equal(ledger.figures("paper").loss6, U(4), "the realised loss did not refill");
+      assert.equal(counters.takeFollowEntry(DAY, 3), false, "today's three follow entries are still spent");
+    } finally {
+      broker.close();
+      stop();
+    }
   });
 
   it("the durable copy carries every accounting field and a full book fits the memory API", () => {
@@ -1159,7 +1249,79 @@ describe("one scout pool", () => {
     await k.child.settled();
     assert.equal(k.child.explorationScoutUse6(), null, "unread while following could act: the whole budget, not zero");
     k.state.settings.follow = false;
-    assert.equal(k.child.explorationScoutUse6(), 0n, "an unread ledger never blocks an owner who does not follow");
+    k.state.settings.dataAccess = false;
+    k.t.now += FOMO_CHILD.durableRetryMs;
+    k.tick();
+    await k.child.settled();
+    assert.equal(k.child.explorationScoutUse6(), null, "follow off is no proof that nothing is held: still the whole budget");
+  });
+
+  it("a closed losing follow position keeps its loss in the existing scout gate's figure; a new authorisation starts afresh", async () => {
+    const h = harness();
+    h.tick();
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    assert.equal(await h.child.persistEntry(g, "d-1"), true);
+    h.child.settleEntry(g, "paper", "d-1");
+    assert.equal(h.child.explorationScoutUse6(), U(5));
+    // Sold for nothing: the basis goes flat with no proceeds, and is closed one read later.
+    h.basis.set(h.symbol(coin(1)), { qtyRaw: 0n, costUsdg: 0n });
+    h.t.now += FOMO_CHILD.fileReadEveryMs + 1;
+    h.tick();
+    await h.child.settled();
+    h.t.now += FOMO_CHILD.flatConfirmMs + 1;
+    h.tick();
+    await h.child.settled();
+    const f = h.child.ledger.figures("paper");
+    assert.equal(f.held6, 0n, "closed");
+    assert.equal(f.loss6, U(5));
+    assert.equal(h.child.ceilingFor(coin(2), h.t.now).parts["exploration-remaining"], U(15), "the follow side counts the loss");
+    assert.equal(h.child.explorationScoutUse6(), U(5), "and so does the existing scout gate: closing a losing position never refills the pool");
+    // The owner changes the scout settings: a new authorisation, at zero loss, on both sides.
+    h.state.settings.scoutBudgetUsdg = 30;
+    assert.equal(h.child.explorationScoutUse6(), 0n, "an earlier authorisation's loss is not counted against the new one");
+    h.tick();
+    assert.equal(h.child.ledger.figures("paper").loss6, 0n);
+    assert.equal(h.child.explorationScoutUse6(), 0n);
+  });
+
+  it("follow positions held when the owner turned research off still count for the existing scout gate after a restart", async () => {
+    const d = memoryDurable();
+    const a = await loaded({ durable: d.port });
+    const g = a.child.gateEntry(a.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    assert.equal(await a.child.persistEntry(g, "d-1"), true);
+    a.child.settleEntry(g, "paper", "d-1");
+    await a.child.settled();
+    assert.equal(a.child.explorationScoutUse6(), U(5));
+    // Research off entirely (data access, monitoring, follow), then a redeploy.
+    const b = harness({ durable: d.port, now: a.t.now + 60_000 });
+    b.state.settings.dataAccess = false;
+    b.state.settings.monitoring = false;
+    b.state.settings.follow = false;
+    assert.equal(b.child.explorationScoutUse6(), null, "unread: the whole budget, never zero");
+    b.tick();
+    await b.child.settled();
+    assert.equal(b.child.ledger.loaded(), true, "the ledger is read even with research off");
+    assert.equal(b.child.explorationScoutUse6(), U(5), "the held follow position still counts");
+    assert.equal(b.durableCounters!.loaded(), false, "only the ledger is read for an owner with research off");
+    // A durable copy that cannot be parsed is unknown, follow on or off.
+    const c = memoryDurable();
+    c.map.set(FOMO_STATE_KEYS.exploration, "{not json");
+    const k = harness({ durable: c.port });
+    k.state.settings.follow = false;
+    k.state.settings.dataAccess = false;
+    k.tick();
+    await k.child.settled();
+    assert.equal(k.child.ledger.loaded(), true);
+    assert.equal(k.child.explorationScoutUse6(), null, "an unreadable ledger is not an empty one");
+    // Shown absent: nothing held, nothing lost.
+    const e = harness({ durable: memoryDurable().port });
+    e.state.settings.follow = false;
+    e.state.settings.dataAccess = false;
+    e.tick();
+    await e.child.settled();
+    assert.equal(e.child.explorationScoutUse6(), 0n, "zero only once the durable read showed no follow state");
   });
 });
 
@@ -1507,15 +1669,21 @@ describe("index.ts wires the follow path's money rules", () => {
     assert.match(CODE, /scoutHeldCost6: lastQuarantinedKnown \? lastQuarantinedUsdg : null,/);
     assert.match(CODE, /lastQuarantinedKnown = true;/);
     const fn = CODE.slice(CODE.indexOf("async function scoutContextFor("));
-    assert.match(fn.slice(0, 8000), /quarantinedUsdg: lastQuarantinedUsdg \+ \(fomoChild\.explorationScoutUse6\(\) \?\? usdg\(cfg\.scoutBudgetUsdg\)\),/);
+    assert.match(fn.slice(0, 9000), /quarantinedUsdg: lastQuarantinedUsdg \+ \(fomoChild\.explorationScoutUse6\(\) \?\? await trenchHeldCostOrBudget\(\)\),/);
+    // An unknown ledger is charged the Trencher book (the bound on what follow
+    // can hold), never silently zero, and the whole budget only if the book
+    // itself is unreadable — so the Fomo channel being down is not a scout kill switch.
+    const helper = CODE.slice(CODE.indexOf("async function trenchHeldCostOrBudget("));
+    assert.match(helper.slice(0, 400), /return \(await trenchOpen\(\)\)\.reduce\(\(sum, p\) => sum \+ p\.costUsdg, 0n\);/);
+    assert.match(helper.slice(0, 400), /catch \{\s*return usdg\(cfg\.scoutBudgetUsdg\);/);
   });
 
   it("the regular autonomous list excludes pools discovery read only for the early path", () => {
-    assert.match(CODE, /\? regularEntryPools\(freshTape, autoTrench\?\.qualified \?\? \[\]\)/);
+    assert.match(CODE, /\? regularEntryPools\(freshTape, autoTrench\?\.qualified \?\? \[\], verifyOnly\)/);
     assert.doesNotMatch(CODE, /highVolumePools\(freshTape\.filter\(p => autoTrench\?\.qualified\.some\(/);
   });
 
-  it("the paper rail's regular list leaves out coins that are on the tape only because Fomo asked to verify them", () => {
+  it("both rails' regular lists leave out coins that are on the tape only because Fomo asked to verify them", () => {
     assert.match(CODE, /const verifyOnly = new Set\(fomoChild\.verifyRequests\(\)\.filter\(\(a\) => !earlyBook\.addresses\(\)\.has\(a\)\)\);/);
     assert.match(CODE, /: highVolumePools\(freshTape\)\.filter\(\(p\) => !verifyOnly\.has\(p\.tokenAddress\.toLowerCase\(\)\)\);/);
     assert.doesNotMatch(CODE, /: highVolumePools\(freshTape\);/);

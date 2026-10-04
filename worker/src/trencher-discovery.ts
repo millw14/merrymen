@@ -25,15 +25,31 @@ export type QualifiedPool = GeckoPool & { early?: true };
  *
  * WHY `early` POOLS ARE LEFT OUT. A pool verified only because something
  * asked the early path to read it (an early-book offer, or the Fomo follow
- * path's verification-only ask) is beyond the slice by construction. Letting
- * it into this list would make an ASK into a regular candidate — reviewed in
- * the ordinary rotation, bought at the ordinary autonomous size, with no
- * follow gate, no follow-entry cap and no exploration budget, on an agent the
- * operator never allow-listed for follow. Early pools reach the candidate list
- * only through `earlyEntryPools`, which requires an early-book offer.
+ * path's verification-only ask) and ranked beyond the slice comes back
+ * `early`. Letting it into this list would make an ASK into a regular
+ * candidate — reviewed in the ordinary rotation, bought at the ordinary
+ * autonomous size, with no follow gate, no follow-entry cap and no
+ * exploration budget, on an agent the operator never allow-listed for follow.
+ * Early pools reach the candidate list only through `earlyEntryPools`, which
+ * requires an early-book offer.
+ *
+ * WHY `verifyOnly` TOO. The `early` flag alone does not cover an ask: the
+ * asked coin's own page joins the tape discovery ranks, so a busy coin that
+ * sits on no feed page can rank INSIDE the slice on that page alone and come
+ * back as a regular read. `verifyOnly` (lowercased token addresses asked of
+ * discovery with no early-book offer behind them — index.ts passes the Fomo
+ * verification asks less the book's coins) is left out whatever the slice
+ * said, as the paper rail's list leaves it out.
  */
-export function regularEntryPools(tape: readonly GeckoPool[], qualified: readonly Pick<QualifiedPool, "poolAddress" | "tokenAddress" | "early">[]): GeckoPool[] {
-  return highVolumePools(tape.filter(p => qualified.some(q => q.early !== true && q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)));
+export function regularEntryPools(
+  tape: readonly GeckoPool[],
+  qualified: readonly Pick<QualifiedPool, "poolAddress" | "tokenAddress" | "early">[],
+  verifyOnly: ReadonlySet<string> = new Set(),
+): GeckoPool[] {
+  const asked = new Set([...verifyOnly].map(a => String(a).toLowerCase()));
+  return highVolumePools(tape.filter(p =>
+    !asked.has(p.tokenAddress.toLowerCase())
+    && qualified.some(q => q.early !== true && q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)));
 }
 
 export interface DiscoveryOptions {

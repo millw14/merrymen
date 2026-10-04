@@ -30,7 +30,7 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { sanitizeText } from "../research/news";
-import type { BrokerCallOptions, BrokerReport, BrokerRequest, BrokerResponse, FomoBroker, FomoService } from "./contract";
+import type { BrokerCallOptions, BrokerReport, BrokerRequest, BrokerResponse, FomoBroker, FomoService, MemoryRead } from "./contract";
 import { tokenFromKey } from "./identity";
 import { followAssessmentOf, tenantKey } from "./store";
 import type {
@@ -156,6 +156,7 @@ const FUNNEL_STAGES: Record<FunnelStage, true> = {
 const OPS: Record<BrokerRequest["op"], readonly string[]> = {
   call: ["tool", "args", "opts"],
   "memory-get": ["conversationKey"],
+  "memory-read": ["conversationKey"],
   "memory-set": ["conversationKey", "json"],
   "memory-clear": ["conversationKey"],
   report: ["report"],
@@ -444,6 +445,7 @@ export function parseBrokerRequest(v: unknown): ParsedBrokerRequest {
       return { ok: true, request: { fomo: 1, id, op, tool: v.tool, args: v.args, opts: o.opts }, extras: [...extras, ...o.extras.map((k) => `opts.${k}`)] };
     }
     case "memory-get":
+    case "memory-read":
     case "memory-clear": {
       const conversationKey = boundedString(v.conversationKey, BROKER_LIMITS.conversationKeyChars);
       if (!conversationKey) return { ok: false, reason: "invalid-request" };
@@ -461,6 +463,20 @@ export function parseBrokerRequest(v: unknown): ParsedBrokerRequest {
     case "configured":
       return { ok: true, request: { fomo: 1, id, op }, extras };
   }
+}
+
+// ── strict memory reads ────────────────────────────────────────────────────
+
+/**
+ * A strict read as the service (or the wire) answered it, checked for shape.
+ * Anything but `ok: true` with a null or an in-bounds string value is a
+ * failure: a malformed answer never reads as "nothing stored".
+ */
+export function memoryReadOf(v: unknown, failure = "bad-response"): MemoryRead {
+  if (!isRecord(v) || v.ok !== true || !Object.hasOwn(v, "value")) return { ok: false, reason: failure };
+  if (v.value === null) return { ok: true, value: null };
+  if (typeof v.value === "string" && v.value.length <= BROKER_LIMITS.memoryJsonChars) return { ok: true, value: v.value };
+  return { ok: false, reason: failure };
 }
 
 // ── reports ─────────────────────────────────────────────────────────────────
@@ -696,6 +712,18 @@ export function createDirectBroker(service: FomoService, tenant: string, opts: D
         } catch (e) {
           log(`fomo broker: memory read failed (${errorName(e)})`);
           return null;
+        }
+      },
+      async read(conversationKey) {
+        const key = boundedString(conversationKey, BROKER_LIMITS.conversationKeyChars);
+        if (!key) return { ok: false, reason: "invalid-request" };
+        // A service that cannot tell a store error from "nothing stored" proves nothing.
+        if (typeof service.memoryRead !== "function") return { ok: false, reason: "strict-read-unsupported" };
+        try {
+          return memoryReadOf(await service.memoryRead(fixed, key), "memory-read-failed");
+        } catch (e) {
+          log(`fomo broker: strict memory read failed (${errorName(e)})`);
+          return { ok: false, reason: "memory-read-failed" };
         }
       },
       async set(conversationKey, json) {
@@ -1013,6 +1041,18 @@ export function createIpcBroker(port: BrokerPort, opts: IpcBrokerOptions = {}): 
         if (wire.kind !== "result") return null;
         return typeof wire.result === "string" && wire.result.length <= BROKER_LIMITS.memoryJsonChars ? wire.result : null;
       },
+      async read(conversationKey) {
+        const key = boundedString(conversationKey, BROKER_LIMITS.conversationKeyChars);
+        if (!key) return { ok: false, reason: "invalid-request" };
+        const { wire } = await request((id) => ({ fomo: 1, id, op: "memory-read", conversationKey: key }), defaultTimeout);
+        // Busy, unavailable, a timeout, a refusal (rate limit, store error, an
+        // orchestrator that does not know the op): not an answer.
+        if (wire.kind !== "result") return { ok: false, reason: wire.kind === "refused" ? wire.error : wire.kind };
+        // The answer is `{ value }`, never a bare null: no other reply can pass for one.
+        const res = wire.result;
+        if (!isRecord(res) || !Object.hasOwn(res, "value")) return { ok: false, reason: "bad-response" };
+        return memoryReadOf({ ok: true, value: res.value });
+      },
       async set(conversationKey, json) {
         const key = boundedString(conversationKey, BROKER_LIMITS.conversationKeyChars);
         if (!key || typeof json !== "string" || json.length === 0 || json.length > BROKER_LIMITS.memoryJsonChars) return;
@@ -1176,6 +1216,18 @@ export function serveBrokerRequests(port: BrokerPort, tenant: string, service: F
           const v = await service.memoryGet(stamped, req.conversationKey);
           const json = typeof v === "string" && v.length <= BROKER_LIMITS.memoryJsonChars ? v : null;
           reply({ fomo: 1, id, ok: true, result: json });
+          return;
+        }
+        case "memory-read": {
+          // STRICT: answered only when the store answered. A store error (or
+          // a service without the strict read) is a refusal, never a null.
+          const r = typeof service.memoryRead === "function" ? memoryReadOf(await service.memoryRead(stamped, req.conversationKey)) : null;
+          if (!r || !r.ok) {
+            sayOnce("memory-read-failed", `memory-read not answered (${r ? r.reason : "strict-read-unsupported"})`);
+            refuse(id, "memory-read-failed");
+            return;
+          }
+          reply({ fomo: 1, id, ok: true, result: { value: r.value } });
           return;
         }
         case "memory-set":

@@ -48,7 +48,6 @@
  * or a tick.
  */
 
-import { randomUUID } from "node:crypto";
 import { readFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { CASH, instrumentClassOf, isEnergyReserveToken } from "../../packages/core/src/index";
@@ -59,7 +58,7 @@ import { entryTokenOf, type Classified } from "./decision-funnel";
 import type { EarlyOffer, EarlyOfferResult } from "./early-candidates";
 import { createDirectBroker, createIpcBroker, type BrokerPort } from "./fomo/broker";
 import { readChildFomoFile, type ChildFomoRead, type ChildFomoReadReason } from "./fomo/child-file";
-import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type FomoAccess, type FomoBroker } from "./fomo/contract";
+import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type FomoAccess, type FomoBroker, type MemoryRead } from "./fomo/contract";
 import {
   FOLLOW_BOOK,
   FOLLOW_DEFAULTS,
@@ -165,8 +164,6 @@ export const FOMO_CHILD = Object.freeze({
 export const FOMO_STATE_KEYS = Object.freeze({
   exploration: "state:fomo-exploration",
   followEntries: "state:fomo-follow-entries",
-  /** A tiny nonce written and read back to tell "nothing stored" from "the read failed". */
-  probe: "state:fomo-probe",
 });
 
 // ─── The broker this child talks through ───────────────────────────────────
@@ -443,8 +440,8 @@ export type DurableRead = { kind: "found"; text: string } | { kind: "absent" } |
 
 export interface DurableStatePort {
   /**
-   * The stored text; `absent` ONLY when the store was shown to be answering
-   * reads at the time; `unknown` for anything else. Never throws.
+   * The stored text; `absent` ONLY when the store itself answered THIS read
+   * with nothing stored; `unknown` for anything else. Never throws.
    */
   read(key: string): Promise<DurableRead>;
   /** True only when the text was written AND read back unchanged. Never throws. */
@@ -457,29 +454,35 @@ export function durableWireBytes(text: string): number {
 }
 
 /**
- * The durable port over a broker's memory API.
+ * The durable port over a broker's STRICT memory read (FomoBroker.memory.read).
  *
- * NULL IS AMBIGUOUS, so it is never taken at its word. `memory.get` answers
- * null both for "nothing stored" and for a failed read (no channel yet, a
- * timeout, the orchestrator's rate limit, a store error). Reading a missing
- * ledger as an empty one would hand back the whole scout allowance and a
- * fresh day of follow entries after every redeploy. So a null is believed
- * only when the store demonstrably answers right now: a fresh nonce written
- * to the probe key reads back, and the key reads null AGAIN after it.
- * Anything short of that is `unknown`, and the caller keeps every figure
- * unknown (no follow entry sizes above zero) and asks again later.
+ * ABSENCE MUST BE PROVEN, NOT INFERRED. The lenient `memory.get` answers null
+ * both for "nothing stored" and for every failure — no channel yet, this
+ * child's in-flight cap, the orchestrator's rate limit, a timeout, a store
+ * error — so it is never used here: reading a missing ledger as an empty one
+ * would hand back the whole scout allowance and a fresh day of follow entries
+ * after every redeploy, and the next write would overwrite the real copy. A
+ * nonce probe beside a lenient read does not help either: it shows the store
+ * answered the probe, not that it answered THIS read. So `absent` comes only
+ * from a strict read the store itself answered with nothing stored. Anything
+ * else — a failed or refused read, a broker without the strict read — is
+ * `unknown`, and the caller keeps every figure unknown (no follow entry sizes
+ * above zero), adopts nothing, writes nothing over the durable copy, and asks
+ * again later.
  *
  * Writes are confirmed the same way: `memory.set` swallows its own failures,
- * so a write counts only when a read returns exactly what was written.
+ * so a write counts only when a strict read returns exactly what was written.
  */
-export function brokerDurableState(broker: () => FomoBroker | null, opts: { newNonce?: () => string } = {}): DurableStatePort {
-  const nonce = opts.newNonce ?? randomUUID;
-  const get = async (b: FomoBroker, key: string): Promise<string | null> => {
+export function brokerDurableState(broker: () => FomoBroker | null): DurableStatePort {
+  const strictRead = async (b: FomoBroker, key: string): Promise<MemoryRead> => {
     try {
-      const v = await b.memory.get(key);
-      return typeof v === "string" ? v : null;
+      const read = b.memory.read;
+      if (typeof read !== "function") return { ok: false, reason: "strict-read-unsupported" };
+      const r = (await read.call(b.memory, key)) as MemoryRead | null | undefined;
+      if (r && r.ok === true && (r.value === null || typeof r.value === "string")) return r;
+      return { ok: false, reason: r && r.ok === false && typeof r.reason === "string" ? r.reason : "bad-response" };
     } catch {
-      return null;
+      return { ok: false, reason: "threw" };
     }
   };
   const set = async (b: FomoBroker, key: string, text: string): Promise<void> => {
@@ -489,35 +492,21 @@ export function brokerDurableState(broker: () => FomoBroker | null, opts: { newN
       // confirmed (or not) by the read that follows
     }
   };
-  const readOnce = async (key: string): Promise<DurableRead> => {
-    const b = safeBroker(broker);
-    if (!b) return { kind: "unknown" };
-    const v = await get(b, key);
-    if (v !== null) return { kind: "found", text: v };
-    const probe = JSON.stringify({ probe: String(nonce()).slice(0, 64) });
-    await set(b, FOMO_STATE_KEYS.probe, probe);
-    if ((await get(b, FOMO_STATE_KEYS.probe)) !== probe) return { kind: "unknown" };
-    const again = await get(b, key);
-    return again !== null ? { kind: "found", text: again } : { kind: "absent" };
-  };
-  // ONE READ AT A TIME: two loads probing the one probe key at once would each
-  // read the other's nonce back and both answer `unknown`.
-  let queue: Promise<unknown> = Promise.resolve();
   return {
-    read(key) {
-      const run = queue.then(
-        () => readOnce(key),
-        () => readOnce(key),
-      );
-      queue = run.catch(() => undefined);
-      return run.catch((): DurableRead => ({ kind: "unknown" }));
+    async read(key) {
+      const b = safeBroker(broker);
+      if (!b) return { kind: "unknown" };
+      const r = await strictRead(b, key);
+      if (!r.ok) return { kind: "unknown" };
+      return r.value !== null ? { kind: "found", text: r.value } : { kind: "absent" };
     },
     async write(key, text) {
       if (typeof text !== "string" || text.length === 0 || durableWireBytes(text) > FOMO_CHILD.durableWireMaxBytes) return false;
       const b = safeBroker(broker);
       if (!b) return false;
       await set(b, key, text);
-      return (await get(b, key)) === text;
+      const r = await strictRead(b, key);
+      return r.ok && r.value === text;
     },
   };
 }
@@ -1344,6 +1333,24 @@ export class ExplorationLedger implements DurableBacked {
     return sum;
   }
 
+  /**
+   * WHAT EXPLORATION HAS USED OF THE ONE SCOUT POOL, for the EXISTING scout
+   * gate: what it holds now (heldForScout6 — each open position at least its
+   * entry cost, so an open position's loss is inside it) PLUS the loss
+   * realised on positions closed since the epoch, so closing a losing follow
+   * position never refills the pool for unpriceable buys either. Closed loss
+   * under a ledger epoch that is not the owner's CURRENT scout settings
+   * belongs to an earlier authorisation and is not counted (syncEpoch zeroes
+   * it as soon as following runs again). Null while the ledger is unread or
+   * unreadable.
+   */
+  scoutUse6(mode: RailBook, epochKey: string): bigint | null {
+    const held = this.heldForScout6(mode);
+    if (held === null) return null;
+    const st = this.state;
+    return held + (st && st.epochKey === epochKey ? st.books[mode].closedLoss6 : 0n);
+  }
+
   position(mode: RailBook, token: string): ExplorationPosition | null {
     const t = token.toLowerCase();
     return this.state?.books[mode].positions.find((p) => p.token === t) ?? null;
@@ -1888,15 +1895,18 @@ export class FomoChild {
       const live = this.deps.live();
       // Durable state first: a load when due (until then every exploration
       // figure is unknown and the day count refuses), a failed write retried.
-      // Nothing is read for an owner who has Fomo research off — as nothing
-      // is written for one who never follows (syncEpoch below).
-      if (live.settings.dataAccess === true || live.settings.follow === true) {
-        for (const d of this.backed()) {
-          try {
-            d.kick(now);
-          } catch {
-            // asked again next tick
-          }
+      // THE LEDGER IS READ EVEN WITH FOMO RESEARCH OFF: follow positions
+      // outlive the setting, and the existing scout gate must count what they
+      // hold (explorationScoutUse6), which it can only learn from the durable
+      // copy. That is a load only — with research off nothing else is kicked,
+      // as nothing is written for an owner who never follows (syncEpoch below).
+      const research = live.settings.dataAccess === true || live.settings.follow === true;
+      for (const d of this.backed()) {
+        if (!research && (d !== this.ledger || d.loaded())) continue;
+        try {
+          d.kick(now);
+        } catch {
+          // asked again next tick
         }
       }
       this.equity6 = input.equity6;
@@ -2150,9 +2160,10 @@ export class FomoChild {
         // nomination it could lead to would be allowed to act: the same rail
         // and live-allowlist test as the assessment's research-only reasons,
         // scout (the exploration budget) on, entries not paused. A live agent
-        // the operator never allow-listed asks for nothing. And a pool read
-        // only for this ask comes back `early`, which the regular candidate
-        // list excludes (trencher-discovery.ts regularEntryPools): only a
+        // the operator never allow-listed asks for nothing. And an asked coin
+        // stays off the regular candidate list on both rails — read as
+        // `early`, or left out as verify-only when its own page ranks it
+        // inside the slice (trencher-discovery.ts regularEntryPools): only a
         // follow nomination's early-book offer can make it a candidate.
         if (follow && this.verifyAskAllowed(live) && robinhood && !holding && tradableCoin(address) && this.verify.length < FOMO_CHILD.verifyMax) {
           if (cohortSince(s.triggers, s.token.key, now - FOLLOW_DEFAULTS.breadthWindowMs).buyers > 0) this.verify.push(address);
@@ -2534,18 +2545,25 @@ export class FomoChild {
   /**
    * WHAT EXPLORATION SPENDS OF THE SCOUT BUDGET, for the EXISTING scout gate
    * (index.ts scoutContextFor adds it to the quarantined cost): the cost
-   * follow and early positions hold, plus entries reserved and not yet
-   * settled. One pool in both directions. Null — which that gate reads as the
-   * whole budget spent — while the ledger is unread or unreadable AND follow
-   * could be acting; with follow not allowed, nothing new can be opened, and
-   * an unread ledger is not allowed to block the owner's own scout buys.
+   * follow and early positions hold, the loss realised on those closed since
+   * the epoch, plus entries reserved and not yet settled (ExplorationLedger
+   * scoutUse6). One pool in both directions.
+   *
+   * NULL WHENEVER THE LEDGER IS UNREAD OR UNREADABLE, whatever the follow
+   * setting is now — and the gate then charges the cost of every open
+   * Trencher position (the ceiling on what follow and early entries can hold),
+   * or the whole budget if even that cannot be read:
+   * follow positions outlive the setting (an owner can turn follow and data
+   * access off while they are held), so an unknown ledger is never an empty
+   * one. Zero only once the durable read has positively shown no follow state
+   * (tick reads the ledger even with research off, so that read happens).
    */
   explorationScoutUse6(): bigint | null {
     try {
       const live = this.deps.live();
-      const held = this.ledger.heldForScout6(this.mode(live));
-      if (held === null) return this.followAllowed(live) ? null : 0n;
-      return held + this.reservations.pendingAgainst(this.now(), "").exploration6;
+      const used = this.ledger.scoutUse6(this.mode(live), scoutKey(live.settings));
+      if (used === null) return null;
+      return used + this.reservations.pendingAgainst(this.now(), "").exploration6;
     } catch {
       return null;
     }

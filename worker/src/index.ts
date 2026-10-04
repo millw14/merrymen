@@ -5688,21 +5688,24 @@ async function main() {
       const freshTape = freshTrenchTape();
       // The regular list is the REGULAR reads only: a pool verified because
       // something asked the early path (an early-book offer, a Fomo follow
-      // verification ask) is `early`, beyond the slice, and reaches the list
-      // below only through earlyEntryPools — i.e. only with an early-book
-      // offer behind it (trencher-discovery.ts regularEntryPools).
-      // THE PAPER RAIL TOO. Without a trencher grant the regular list is the
-      // whole screened tape, and that tape now carries the pages a Fomo
-      // verification ask added (fomo-child verifyRequests). A coin that is on
-      // the tape ONLY because Fomo asked must not become a regular paper
-      // candidate: that would skip the follow gate (revalidate, caps,
-      // reservation) and make paper results say something the live path never
-      // would. It reaches candidates through the early path once nominated.
-      // Narrowing only — a coin the feeds carry organically is unaffected
-      // unless it is also being verify-asked, and then it waits for the gate.
+      // verification ask) is `early`, and reaches the list below only through
+      // earlyEntryPools — i.e. only with an early-book offer behind it
+      // (trencher-discovery.ts regularEntryPools).
+      // VERIFY-ONLY COINS ARE LEFT OUT ON BOTH RAILS. A Fomo verification ask
+      // (fomo-child verifyRequests) puts the coin's own page on the tape, and
+      // the tape is what discovery ranks: a busy coin on no feed page can rank
+      // INSIDE the slice on that page alone, come back as a regular (not
+      // `early`) read, and — without this — be bought live at the ordinary
+      // autonomous size with no follow gate (revalidate, caps, reservation).
+      // Without a trencher grant the regular list is the whole screened tape,
+      // which carries those pages too. A coin that is asked and holds no
+      // early-book offer reaches candidates only through the early path once
+      // nominated. Narrowing only — a coin the feeds carry organically is
+      // unaffected unless it is also being verify-asked, and then it waits
+      // for the gate.
       const verifyOnly = new Set(fomoChild.verifyRequests().filter((a) => !earlyBook.addresses().has(a)));
       const entryPools = !paperActive() && active && grantTrencher(active.grant)
-        ? regularEntryPools(freshTape, autoTrench?.qualified ?? [])
+        ? regularEntryPools(freshTape, autoTrench?.qualified ?? [], verifyOnly)
         : highVolumePools(freshTape).filter((p) => !verifyOnly.has(p.tokenAddress.toLowerCase()));
       // Screened-tape coins that never reached the verified universe, named
       // (beyond the slice, unverified pool, other venue). Filing only.
@@ -5825,6 +5828,19 @@ async function main() {
   function baseTokenAddress(address: string): boolean {
     const a = address.toLowerCase();
     return watchTokensFor(cfg.basketSymbols, cfg.customTokens, officialCoins()).some((t) => t.address.toLowerCase() === a);
+  }
+
+  /**
+   * The cost every open Trencher position holds — the ceiling on what Fomo
+   * follow and early exploration can hold, used when their ledger is unread
+   * (scoutContextFor). Unreadable ⇒ the whole scout budget (fail closed).
+   */
+  async function trenchHeldCostOrBudget(): Promise<bigint> {
+    try {
+      return (await trenchOpen()).reduce((sum, p) => sum + p.costUsdg, 0n);
+    } catch {
+      return usdg(cfg.scoutBudgetUsdg);
+    }
   }
 
   async function trenchOpen(): Promise<OpenPosition[]> {
@@ -8009,10 +8025,20 @@ async function main() {
         return (await getBasis(active.agentId, paperActive() ? "paper" : "live", s)).costUsdg;
       })(),
       // ONE POOL, BOTH WAYS: the scout budget is also what Fomo follow and
-      // early exploration holds (fomo-child.ts explorationScoutUse6), so an
-      // unpriceable buy cannot spend what a follow position already took.
-      // Unknown while following could be acting reads as the whole budget.
-      quarantinedUsdg: lastQuarantinedUsdg + (fomoChild.explorationScoutUse6() ?? usdg(cfg.scoutBudgetUsdg)),
+      // early exploration holds and has lost since the epoch (fomo-child.ts
+      // explorationScoutUse6), so an unpriceable buy cannot spend what a
+      // follow position took, nor what a closed losing one lost.
+      //
+      // AN UNREAD LEDGER IS NOT AN EMPTY ONE, AND NOT A FULL ONE EITHER.
+      // Follow and early entries are Trencher entries, so whatever they could
+      // hold is bounded by what the Trencher holds: an unknown ledger is
+      // charged the cost of EVERY open Trencher position (over-counting the
+      // ones regular Trencher bought, which errs toward refusing). Charging
+      // the whole budget instead would stop every unpriceable, curve and class
+      // buy for owners who never followed anything whenever the Fomo channel
+      // is down — the Fomo kill switch would become a scout kill switch. Only
+      // if even the Trencher book cannot be read is the whole budget charged.
+      quarantinedUsdg: lastQuarantinedUsdg + (fomoChild.explorationScoutUse6() ?? await trenchHeldCostOrBudget()),
     };
   }
 
