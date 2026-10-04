@@ -129,6 +129,47 @@ for (const [label, open] of [
       }
     });
 
+    it("counts a mixed-case account's current run consistently without taking another account's operations", async () => {
+      const raw = new DatabaseSync(":memory:");
+      try {
+        raw.exec(SCHEMA);
+        raw.exec(`INSERT INTO trades (agent_id, kind, status, user_op_hash, fill_side, buy_token, gas_wei, sponsored_gas_wei, gas_usdg, epoch, created_at) VALUES
+          ('0xab', 'swap', 'landed', '0xAA', 'buy', '0xCOIN', '100', NULL, 0.01, 2, 1000),
+          ('0xAb', 'swap', 'landed', '0xaa', NULL, NULL, '100', NULL, 0.01, 2, 5000),
+          ('0xaB', 'swap', 'landed', '0xCC', 'buy', '0xCOIN2', NULL, '100', 0, 2, 1100),
+          ('0xab', 'swap', 'reverted', '0xDD', NULL, NULL, '200', NULL, 0.2, 2, 1200),
+          ('0xAb', 'swap', 'reverted', '0xdd', NULL, NULL, '200', NULL, 0.2, 2, 5001),
+          ('0xaB', 'swap', 'reverted', '0xBB', NULL, NULL, '300', NULL, NULL, 2, 1300),
+          ('0xab', 'swap', 'reverted', '0xbb', NULL, NULL, '300', NULL, NULL, 2, 5002),
+          ('0xab', 'swap', 'paper', NULL, 'buy', '0xPAPER', NULL, NULL, NULL, 2, 1400),
+          ('0xAb', 'swap', 'paper', NULL, 'buy', '0xpaper', NULL, NULL, NULL, 2, 1500),
+          ('0xab', 'swap', 'rejected', NULL, NULL, NULL, NULL, NULL, NULL, 2, 1600),
+          ('0xaB', 'swap', 'rejected', '', NULL, NULL, NULL, NULL, NULL, 2, 1700),
+          ('0xab', 'swap', 'submitted', '0xpending', 'buy', '0xPENDING', '400', NULL, 10, 2, 1800),
+          ('0xaB', 'swap', 'submitted', '0xaa', NULL, NULL, '400', NULL, 10, 2, 800),
+          ('0xab', 'swap', 'landed', '0xAA', 'buy', '0xOLD', '500', NULL, 30, 1, 900),
+          ('0xOTHER', 'swap', 'landed', '0xAA', 'buy', '0xOTHER', '600', NULL, 50, 2, 1000),
+          ('0xOTHER', 'swap', 'reverted', '0xBB', NULL, NULL, '700', NULL, NULL, 2, 1300);`);
+        const db = open(raw);
+        const expected = { gasUsdg: 0.21, unpricedTrades: 1, landed: 2, filledPaper: 2, refused: 4, tokensTouched: 2 };
+        for (const spelling of ["0xAB", "0xab", "0xAb", "0xaB"]) {
+          const counts = await readOperationCounts(db, spelling, 2, "landed");
+          assert.ok(Math.abs(counts.gasUsdg - expected.gasUsdg) < 1e-12,
+            `${spelling} includes this run's owner expense once per operation, without paid or submitted copies`);
+          assert.deepEqual({ ...counts, gasUsdg: expected.gasUsdg }, expected,
+            "hash copies collapse across account and hash casing; unhashed paper fills and refusals remain distinct");
+          assert.equal((await readOperationCounts(db, spelling, 2, "paper")).tokensTouched, 1,
+            "the token count retains its requested paper/live book");
+        }
+        assert.deepEqual(await readOperationCounts(db, "0xAB", 1, "landed"),
+          { gasUsdg: 30, unpricedTrades: 0, landed: 1, filledPaper: 0, refused: 0, tokensTouched: 1 });
+        assert.deepEqual(await readOperationCounts(db, "0xother", 2, "landed"),
+          { gasUsdg: 50, unpricedTrades: 1, landed: 1, filledPaper: 0, refused: 1, tokensTouched: 1 });
+      } finally {
+        raw.close();
+      }
+    });
+
     it("includes proved reverted owner installation expenses and unpriced caveats within the account's run", async () => {
       const raw = new DatabaseSync(":memory:");
       try {

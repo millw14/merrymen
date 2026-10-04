@@ -349,6 +349,91 @@ test("a paper carry stands only on the period's first valuation, because a reset
 const buyRow = (id: number, token: string, qty: string, over: Record<string, unknown> = {}) =>
   sellRow(id, null, null, { fill_side: "buy", buy_token: token, sell_token: "0xusdg", fill_qty_raw: qty, ...over });
 
+test("profile fills and top trades follow mixed account spellings without mixing epochs, books, or cost evidence", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xgood", "10", { agent_id: "0xAbC" }),
+      buyRow(2, "0xquote", "10", { agent_id: "0xABC", basis_source: "quote" }),
+      sellRow(3, 1, 11, { agent_id: "0xabc", sell_token: "0xgood", fill_qty_raw: "10" }),
+      sellRow(4, 9, 10, { agent_id: "0xaBc", sell_token: "0xquote", fill_qty_raw: "10" }),
+      // The later spelling is a recovered copy, not a second filled sale.
+      sellRow(5, 99, 100, { agent_id: "0xABC", user_op_hash: "0xOP3", created_at: 100,
+        fill_side: null, fill_qty_raw: null, basis_source: null }),
+      sellRow(6, 9, 10, { agent_id: "0xother", user_op_hash: "0xop3" }),
+      sellRow(7, 9, 10, { agent_id: "0xABC", status: "paper", basis_source: "paper" }),
+      sellRow(8, 9, 10, { agent_id: "0xABC", epoch: 2 }),
+    ]);
+    for (const account of ["0xabc", "0xAbC", "0xABC"]) {
+      const history = await readProfileTrades(db, account, 1, false);
+      assert.equal(history.read, true);
+      assert.deepEqual(history.trades.map((t) => t.id), ["7", "4", "3", "2", "1"]);
+      assert.equal(history.trades.find((t) => t.id === "3")?.realizedPnlBps, 1000);
+      assert.equal(history.trades.find((t) => t.id === "4")?.realizedPnlBps, null,
+        "a differently cased quoted buy still makes the realized return unevidenced");
+      assert.ok(history.trades.every((t) => t.sizeUsdg === null && t.realizedPnlUsdg === null));
+      const live = await readTopTrades(db, account, 1, true, "landed");
+      assert.equal(live.read, true);
+      assert.deepEqual(live.trades.map((t) => [t.id, t.realizedPnlUsdg, t.realizedPnlBps]), [["3", 1, 1000]]);
+      const paper = await readTopTrades(db, account, 1, false, "paper");
+      assert.deepEqual(paper.trades.map((t) => t.id), ["7"], "rankings retain their requested book");
+    }
+  } finally { raw.close(); }
+});
+
+test("mixed-case prior fills retain carried FIFO units and collapse copies before splitting periods", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      heldBuy(1, "0xtsla", "100", 10, { agent_id: "0xABC", epoch: 0 }),
+      heldBuy(2, "0xtsla", "10", 100, { agent_id: "0xabc" }),
+      heldSell(3, "0xtsla", "10", 160, { agent_id: "0xAbC" }),
+      sellRow(4, null, null, { agent_id: "0xaBc", user_op_hash: "0xOP1", created_at: 500,
+        fill_side: null, fill_qty_raw: null, basis_source: null }),
+      heldBuy(5, "0xtsla", "1000", 1, { agent_id: "0xother", epoch: 0 }),
+      heldBuy(6, "0xtsla", "1000", 90, { agent_id: "0xABC", status: "paper", basis_source: "paper" }),
+      heldBuy(7, "0xtsla", "1000", 90, { agent_id: "0xABC", epoch: 2 }),
+    ]);
+    for (const account of ["0xabc", "0xABC"]) {
+      const trips = await readRoundTrips(db, account, 1, "landed");
+      assert.ok(trips);
+      assert.deepEqual(trips.opening, new Map([["0xtsla", 100n]]));
+      assert.deepEqual(trips.fills.map((f) => [f.side, f.qty, f.at]), [["buy", 10n, 100], ["sell", 10n, 160]]);
+      assert.equal(averageHoldSec(trips.fills, trips.opening, trips.dust), null,
+        "the trim closes carried units, rather than falsely recording a 60-second round trip");
+    }
+  } finally { raw.close(); }
+});
+
+test("a paper opening under another account spelling still distinguishes reset from carried holdings", async () => {
+  const ONE = "1000000000000000000";
+  const paper = { status: "paper", basis_source: "paper", user_op_hash: null };
+  const { raw, db } = await sellsLedger();
+  try {
+    await db.exec(`CREATE TABLE equity(id INTEGER PRIMARY KEY, agent_id TEXT, epoch INTEGER, mode TEXT,
+      cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, at INTEGER)`);
+    await insert(db, [
+      heldBuy(1, "0xtsla", ONE, 10, { ...paper, agent_id: "0xABC", epoch: 0 }),
+      heldBuy(2, "0xtsla", ONE, 100, { ...paper, agent_id: "0xabc" }),
+      heldSell(3, "0xtsla", ONE, 160, { ...paper, agent_id: "0xAbC" }),
+      heldSell(4, "0xtsla", ONE, 220, { ...paper, agent_id: "0xaBc" }),
+    ]);
+    const hold = async () => {
+      const trips = (await readRoundTrips(db, "0xabc", 1, "paper"))!;
+      return averageHoldSec(trips.fills, trips.opening, trips.dust);
+    };
+    assert.equal(await hold(), null, "no opening mark cannot prove a reset");
+    await db.exec(`INSERT INTO equity VALUES
+      (1, '0xother', 1, 'paper', 900, 0, 0, 900, 1),
+      (2, '0xABC', 0, 'paper', 900, 0, 25, 925, 2),
+      (3, '0xABC', 1, 'live', 900, 0, 25, 925, 3),
+      (4, '0xAbC', 1, 'paper', 900, 0, 0, 900, 50)`);
+    assert.equal(await hold(), 60, "only the current paper opening proves that it started flat");
+    await db.exec("UPDATE equity SET positions_usdg = 25, equity_usdg = 925 WHERE id = 4");
+    assert.equal(await hold(), 120, "a carried opening preserves prior FIFO units across account spellings");
+  } finally { raw.close(); }
+});
+
 test("a sell whose cost a QUOTED buy built is not a top trade, however good it looks", async () => {
   // realized_pnl_usdg is proceeds minus the running cost basis, and a buy whose
   // receipt could not be read books that basis from the quote — an estimate.

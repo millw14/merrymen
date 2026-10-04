@@ -83,6 +83,32 @@ describe("the transfer sub-budget", () => {
     } finally { raw.close(); }
   });
 
+  it("records delayed revert gas at observed settlement without retaining a spend reservation", async () => {
+    const account = "0x00000000000000000000000000000000000000a4";
+    const pending = hash();
+    assert.equal(await write(account, 25, "submitted", pending), true);
+    const raw = new DatabaseSync(path.join(scratch, "home", "merrymen.db"));
+    try {
+      raw.prepare("UPDATE trades SET created_at = unixepoch() - 172800 WHERE user_op_hash = ?").run(pending);
+      const before = raw.prepare("SELECT id, created_at FROM trades WHERE user_op_hash = ?").get(pending) as {id: number; created_at: number};
+      const valuationCutoff = Math.floor(Date.now() / 1000) - 3600;
+      assert.equal(await store.getOpsToday(account), 1, "the unresolved old op still reserves its slot");
+      assert.equal(await store.getSpentTodayUsdg(account), 25);
+      assert.equal(await store.addTrade({ agent_id: account, kind: "transfer", target: TARGET, amount_usdg: 25,
+        status: "reverted", user_op_hash: pending, gas_wei: "500000000000000", gas_usdg: 0.5 }), true);
+      const settled = raw.prepare("SELECT id, created_at, budget_settled_at, gas_usdg FROM trades WHERE user_op_hash = ?").get(pending) as
+        {id: number; created_at: number; budget_settled_at: number; gas_usdg: number};
+      assert.equal(settled.id, before.id, "settlement updates the original submission row");
+      assert.equal(settled.created_at, before.created_at, "submission provenance remains unchanged");
+      assert.ok(settled.budget_settled_at >= Math.floor(Date.now() / 1000) - 5);
+      assert.ok(settled.budget_settled_at > valuationCutoff, "the old submission cannot put newly observed gas before the valuation cutoff");
+      assert.equal(settled.gas_usdg, 0.5);
+      assert.equal(await store.getOpsToday(account), 0);
+      assert.equal(await store.getSpentTodayUsdg(account), 0);
+      assert.equal(await store.getTransferredTodayUsdg(account), 0);
+    } finally { raw.close(); }
+  });
+
   it("judges the exact micro-unit boundary and refuses unreadable counters", () => {
     assert.equal(transferBudgetRefusal(1n, 49.999999, 50), null);
     assert.match(transferBudgetRefusal(2n, 49.999999, 50)!, /daily transfer limit/);

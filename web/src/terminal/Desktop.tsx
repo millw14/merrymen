@@ -33,6 +33,7 @@ import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
+import { performanceOf } from "./agent-performance";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -300,7 +301,9 @@ export function DesktopSidebar({
         <div className="desktop-market-list">
           {agents
             .filter((a) => a.slug !== mine.slug)
-            .map((a) => (
+            .map((a) => {
+              const performance = performanceOf(a);
+              return (
               <button
                 className="sidebar-agent"
                 key={a.slug}
@@ -317,23 +320,28 @@ export function DesktopSidebar({
                   */}
                   <small>{tradeLine(a)}</small>
                 </span>
-                <span aria-label={`Return ${pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}, ${tradeLine(a)}`}>
+                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${pctBps(performance.bps)}, ${tradeLine(a)}`}>
+                  <strong>{performance.value}</strong>
+                  {a.performance && <small>{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
                   <strong
                     className={
-                      (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps) == null
+                      performance.bps == null
                         ? ""
-                        : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! < 0
+                        : performance.bps < 0
                           ? "down"
-                          : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! > 0
+                          : performance.bps > 0
                             ? "up"
                             : ""
                     }
                   >
-                    {pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}
+                    {pctBps(performance.bps)}
                   </strong>
+                  {performance.pnl !== null && <small>{performance.pnl} P&L</small>}
+                  {performance.gasIncomplete && <small>Gas accounting unavailable</small>}
                 </span>
               </button>
-            ))}
+              );
+            })}
         </div>
       </section>
       <section

@@ -30,6 +30,8 @@ export interface PendingRevocation {
 export interface RevocationReceipt {
   success: boolean;
   transactionHash: Hex;
+  /** State confirmation must never read a block older than this receipt. */
+  blockNumber: bigint;
 }
 
 export interface RevocationIO {
@@ -40,7 +42,9 @@ export interface RevocationIO {
   send(pending: PendingRevocation): Promise<Hex>;
   receipt(hash: Hex): Promise<RevocationReceipt | null>;
   wait(hash: Hex): Promise<RevocationReceipt>;
-  readValidNonceFrom(): Promise<number>;
+  readValidNonceFrom(receipt: RevocationReceipt): Promise<number>;
+  /** Injectable inter-attempt delay; production waits one second. */
+  waitForState?(delayMs: number): Promise<void>;
   pending(): PendingRevocation | null;
   save(pending: PendingRevocation): void;
   clear(): void;
@@ -51,6 +55,21 @@ export interface RevocationResult {
   userOpHash: Hex;
   transactionHash: Hex;
   validNonceFrom: number;
+}
+
+/** Pin the state read to an uncached head which includes the mined operation. */
+export async function readConfirmedRevocationCutoff(receipt: RevocationReceipt, io: {
+  head(): Promise<bigint>;
+  validNonceFrom(blockNumber: bigint): Promise<number>;
+}): Promise<number> {
+  if (typeof receipt.blockNumber !== "bigint" || receipt.blockNumber < 0n) {
+    throw new Error("The revocation receipt has no valid block number. Permission invalidation is unconfirmed.");
+  }
+  const head = await io.head();
+  if (typeof head !== "bigint" || head < receipt.blockNumber) {
+    throw new Error("The network state is still behind the revocation receipt.");
+  }
+  return io.validNonceFrom(head);
 }
 
 export function nextRevocationNonce(current: number): number {
@@ -116,14 +135,31 @@ export async function invalidatePermissions(io: RevocationIO): Promise<Revocatio
   try { receipt ??= await io.wait(pending.hash); } catch (e) {
     throw submitError ?? e;
   }
-  if (!receipt.success) {
+  // Unexpected relay metadata must not discard the only saved signed operation.
+  if (typeof receipt.success !== "boolean" || typeof receipt.blockNumber !== "bigint" || receipt.blockNumber < 0n ||
+      typeof receipt.transactionHash !== "string" || !/^0x[0-9a-f]{64}$/i.test(receipt.transactionHash)) {
+    throw new Error("The revocation receipt could not be verified. Permission invalidation is unconfirmed; check again.");
+  }
+  if (receipt.success === false) {
     io.clear();
     throw new Error("The revocation transaction failed. Earlier permissions may still work; your wallet was kept. You can retry.");
   }
-  const validNonceFrom = await io.readValidNonceFrom();
-  if (!Number.isSafeInteger(validNonceFrom) || validNonceFrom < pending.nonce) {
-    throw new Error("The receipt arrived, but the chain has not confirmed permission invalidation. Nothing new was signed; check again.");
+  // A bundler may return the mined receipt before the public RPC catches up.
+  // Retry only state confirmation: never reprice, re-sign or send after success.
+  io.status("Confirming permission invalidation on-chain. No replacement permission has been signed.");
+  const waitForState = io.waitForState ?? (delayMs => new Promise<void>(resolve => setTimeout(resolve, delayMs)));
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let validNonceFrom: number | undefined;
+    try {
+      validNonceFrom = await io.readValidNonceFrom(receipt);
+    } catch {
+      // Temporary RPC errors do not turn a receipt into proof of revocation.
+    }
+    if (typeof validNonceFrom === "number" && Number.isSafeInteger(validNonceFrom) && validNonceFrom >= pending.nonce && validNonceFrom <= 0xffff_ffff) {
+      io.clear();
+      return { userOpHash: confirmedHash ?? pending.hash, transactionHash: receipt.transactionHash, validNonceFrom };
+    }
+    if (attempt < 3) await waitForState(1_000);
   }
-  io.clear();
-  return { userOpHash: confirmedHash ?? pending.hash, transactionHash: receipt.transactionHash, validNonceFrom };
+  throw new Error("The receipt arrived, but the chain has not confirmed permission invalidation. Nothing new was signed; your saved revocation was kept. Check again.");
 }

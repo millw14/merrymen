@@ -100,12 +100,16 @@ describe("Kernel v3.3 actual runtime permission revocation", function () {
       expect(until === 0n || until >= now, "permission is not expired").to.equal(true);
       if (commit) await entryPointClient.writeContract({ address: signed.op.sender, abi, functionName: "validateUserOp", args });
     }
-    async function revoke(address: Address, undeployed = false) {
+    async function revoke(address: Address, undeployed = false, encoding: "wrapped" | "direct" = "wrapped") {
       const current = undeployed ? 0 : await publicClient.readContract({ address, abi, functionName: "currentNonce" });
       const target = nextRevocationNonce(current);
       if (undeployed) await deploy(address);
       const inner = encodeFunctionData({ abi, functionName: "invalidateNonce", args: [target] });
-      const callData = encodeFunctionData({ abi, functionName: "execute", args: [zeroHash, encodePacked(["address", "uint256", "bytes"], [address, 0n, inner])] });
+      // The web SDK encoder regression proves its self-call shortcut emits
+      // this raw ABI call. Exercise those bytes against real runtime here,
+      // keeping the contract harness independent of app SDK dependencies.
+      const callData = encoding === "direct" ? inner
+        : encodeFunctionData({ abi, functionName: "execute", args: [zeroHash, encodePacked(["address", "uint256", "bytes"], [address, 0n, inner])] });
       const signed = await operation(address, undefined, undefined, callData);
       await validate(signed, true);
       // EntryPoint executes only after successful root signature validation.
@@ -164,6 +168,26 @@ describe("Kernel v3.3 actual runtime permission revocation", function () {
       await h.validate(await h.operation(counterfactual));
       await h.validate(await h.operation(counterfactual, id, await h.enable(counterfactual, id, nonce)), true);
       await h.validate(await h.operation(counterfactual, id));
+    } finally { await h.restore(); }
+  });
+
+  it("executes direct self-revocation calldata with a real root signature and rejects installed and unused grants afterward", async () => {
+    const h = await setup();
+    try {
+      await h.deploy(account);
+      const installed = "0x55555555", unused = "0x66666666", fresh = "0x77777777";
+      const unusedSignature = await h.enable(account, unused, 1);
+      await h.validate(await h.operation(account, installed, await h.enable(account, installed, 1)), true);
+      const oldOperation = await h.operation(account, installed);
+      const unusedOperation = await h.operation(account, unused, unusedSignature);
+      await h.validate(oldOperation);
+      await h.validate(unusedOperation);
+      const cutoff = await h.revoke(account, false, "direct");
+      await expectRevert(h.validate(oldOperation), "InvalidNonce");
+      await expectRevert(h.validate(unusedOperation), "EnableNotApproved");
+      await h.validate(await h.operation(account));
+      await h.validate(await h.operation(account, fresh, await h.enable(account, fresh, cutoff)), true);
+      await h.validate(await h.operation(account, fresh));
     } finally { await h.restore(); }
   });
 });

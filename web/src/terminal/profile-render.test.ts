@@ -46,6 +46,36 @@ const render = (a: ProfileAgent, extra: Record<string, unknown> = {}) =>
   ui.render(React.createElement(Profile, { agent: a, theses: [], tokens: [], onBack() {}, onToken() {}, ...extra }));
 const text = () => ui.container.textContent ?? "";
 
+it("the profile uses the precise declared book return and shows its current value beside it", async () => {
+  await render(agent({ mode: "live", pnlBps: 0, paperPnlBps: 0, publicBook: true,
+    performance: { book: "paper", equityUsdg: 999.961086, equityAt: 1_790_000_200,
+      pnlUsdg: -0.038914, pnlBps: -0.38914, pnlAt: 1_790_000_100,
+      publicBook: true, gasComplete: null, held: true } }));
+  assert.equal(ui.container.querySelector(".public-return")!.textContent, "−0.0039%");
+  const current = ui.container.querySelector(".profile-current-value")!;
+  assert.match(current.textContent!, /Paper current value\$999\.96Pending reconciliation/);
+  assert.match(current.getAttribute("title")!, /Valued .*P&L measured .*pending reconciliation/);
+  assert.equal(ui.container.querySelector(".profile-pnl")!.textContent, "−$0.04 P&L");
+  assert.match(text(), /Paper return/);
+  assert.match(text(), /accounting period\. Switching between paper and live does not reset that baseline/);
+  assert.equal(ui.container.querySelector(".profile-chart"), null, "a paper valuation never borrows a live growth chart");
+});
+
+it("explicitly unavailable and private profile figures never fall back to legacy dollars or return", async () => {
+  const performance = { book: "live" as const, equityUsdg: 9876, equityAt: 1_790_000_200,
+    pnlUsdg: 5432, pnlBps: null, pnlAt: null, publicBook: false, gasComplete: false, held: false };
+  for (const isMine of [false, true]) {
+    await render(agent({ pnlBps: 9900, publicBook: false, performance }), { isMine });
+    assert.equal(ui.container.querySelector(".public-return")!.textContent, "—");
+    assert.equal(ui.container.querySelector(".profile-current-value strong")!.textContent, "Private");
+    assert.equal(ui.container.querySelector(".profile-pnl"), null);
+    assert.match(text(), /Gas accounting is incomplete; exact P&L is unavailable/);
+    assert.doesNotMatch(text(), /9876|5432|99\.0%|\$0\.00/);
+  }
+  await render(agent({ performance: { ...performance, publicBook: true, equityUsdg: null, pnlUsdg: null, gasComplete: null } }));
+  assert.equal(ui.container.querySelector(".profile-current-value strong")!.textContent, "—");
+});
+
 it("the stats line says what was read, and nothing it was not", async () => {
   await render(agent({ tradeCount: 12, tradeCountFloor: false, avgHoldSec: 3 * H + 20 * 60, joinedAt: null, gasless: true }));
   const line = ui.container.querySelector(".profile-stats")!.textContent!;
@@ -53,6 +83,23 @@ it("the stats line says what was read, and nothing it was not", async () => {
   // Nothing read, nothing printed — not "0 trades", not an empty line.
   await render(agent());
   assert.equal(ui.container.querySelector(".profile-stats"), null);
+});
+
+it("period-wide gas is separate from held P&L and private gas dollars stay hidden", async () => {
+  const performance = { book: "live" as const, equityUsdg: 105, equityAt: 1_790_000_200,
+    pnlUsdg: 0.0025, pnlBps: 0.25, pnlAt: 1_790_000_100, publicBook: true, gasComplete: true, held: true };
+  const gas = { usdg: 12.34, unpricedTrades: 1 };
+  await render(agent({ publicBook: true, performance, gas }));
+  assert.match(text(), /Recorded gas cost this accounting period: \$12\.34/);
+  assert.match(text(), /1 trades had gas we could not price/);
+  assert.doesNotMatch(text(), /Net of/);
+  for (const published of [false, true]) {
+    await render(agent({ publicBook: published, performance: { ...performance, publicBook: false }, gas }));
+    assert.doesNotMatch(text(), /\$12\.34|Recorded gas cost/);
+  }
+  await render(agent({ publicBook: false, performance: { ...performance, publicBook: false }, gas: { usdg: null, unpricedTrades: 0 }, gasless: true }));
+  assert.match(text(), /Recorded trades this accounting period were all sponsored/);
+  assert.doesNotMatch(text(), /\$12\.34|Net of/);
 });
 
 it("TOP TRADES rank by return, show dollars only when sent, and say when there are none", async () => {

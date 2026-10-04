@@ -85,7 +85,7 @@ export async function readProfileTrades(db: Db, account: string, epoch: number, 
   try {
     rows = await db.prepare(`
       SELECT ${TRADE_COLUMNS}, ${OP_KEY} AS op_key, LOWER(t.sell_token) AS coin_token
-      FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")}
+      FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?) AND t.epoch = ?")}
       ${DECISION_JOIN}
       WHERE t.status IN ('landed', 'paper') AND t.kind IN ('swap', 'curve-trade')
       ORDER BY t.created_at DESC, t.id DESC LIMIT 100
@@ -180,7 +180,7 @@ export async function readTopTrades(
   try {
     const ranked = db.prepare(`
       SELECT ${TRADE_COLUMNS}, ${OP_KEY} AS op_key, LOWER(t.sell_token) AS coin_token
-      FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")}
+      FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?) AND t.epoch = ?")}
       ${DECISION_JOIN}
       WHERE t.status = ? AND t.basis_source = ? AND t.kind IN ('swap', 'curve-trade')
         AND (t.fill_side = 'sell' OR ((t.fill_side IS NULL OR t.fill_side NOT IN ('buy', 'sell')) AND d.action = 'sell'))
@@ -310,7 +310,7 @@ export async function readRoundTrips(
   try {
     const rows = await db.prepare(`
       SELECT ${ROUND_TRIP_COLUMNS}
-      FROM ${distinctTrades("t.agent_id = ?")}
+      FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?)")}
       ${DECISION_JOIN}
       WHERE t.status = ? AND t.kind IN ('swap', 'curve-trade') AND t.epoch = ?
       ORDER BY t.created_at ASC, t.id ASC LIMIT ?
@@ -335,7 +335,7 @@ export async function readRoundTrips(
     // OLDEST fills, and says so, rather than silently missing the newest.
     const prior = (await db.prepare(`
       SELECT ${ROUND_TRIP_COLUMNS}
-      FROM ${distinctTrades("t.agent_id = ?")}
+      FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?)")}
       ${DECISION_JOIN}
       WHERE t.status = ? AND t.kind IN ('swap', 'curve-trade') AND t.epoch < ?
       ORDER BY t.created_at DESC, t.id DESC LIMIT ?
@@ -408,7 +408,7 @@ async function paperOpeningMark(
 ): Promise<"flat" | "carried" | "unknown"> {
   const mark = (await db
     .prepare(
-      `SELECT cash_usdg, vault_usdg, positions_usdg, equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'paper'
+      `SELECT cash_usdg, vault_usdg, positions_usdg, equity_usdg, at FROM equity WHERE LOWER(agent_id) = LOWER(?) AND epoch = ? AND mode = 'paper'
         ORDER BY at ASC, id ASC LIMIT 1`,
     )
     .get(account, epoch)) as Record<string, unknown> | undefined;

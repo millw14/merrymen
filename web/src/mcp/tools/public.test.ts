@@ -299,6 +299,56 @@ test("a live heartbeat over a paper valuation publishes no live return (the +264
   assert.ok(profile.sc.warnings.some((w: string) => /newest valuation is from the paper book/.test(w)), profile.json);
 });
 
+test("the actual public tools enrich the canonical account's current epoch and valuation across casing aliases", async () => {
+  const { d, connect } = await setup();
+  const alias = ACCOUNT_A.toUpperCase();
+  // The old alias has the same registration time and a fresher heartbeat.
+  // Epoch 3 remains current; registration insertion order cannot choose epoch 2.
+  d.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(T - 1, ACCOUNT_A);
+  d.raw.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps,
+    granted_at, expires_at, status, mode, beat_at, epoch, contributions_known, created_at)
+    SELECT ?, 'Current Shogun', owner_address, session_key_address, chain_id, caps,
+      granted_at, expires_at, status, 'live', ?, 3, 1, created_at FROM agents WHERE smart_account = ?`)
+    .run(alias, T - 5, ACCOUNT_A);
+  d.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, at)
+    VALUES (?, 'in', 100, 'chain-log', 3, ?)`).run(ACCOUNT_A, T - 10);
+  d.raw.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, epoch, mode, at)
+    VALUES (?, '0', 105, 0, 105, 3, 'live', ?)`).run(ACCOUNT_A, T - 2);
+  d.raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, fill_side,
+    fill_symbol, fill_qty_raw, fill_cash_usdg, basis_source, gas_usdg, epoch, created_at)
+    VALUES (?, 'swap', 'private-target', 5, '0xcanonical-fill', 'landed', 'buy', 'NVDA', '1', 5, 'receipt', 0, 3, ?)`)
+    .run(alias, T - 3);
+  const principal = await connect(OWNER_B);
+  const list = await call(principal, "list_public_agents", {});
+  const row = list.sc.agents.find((r: { agent: string }) => r.agent === SLUG_A);
+  assert.equal(row.name, "Current Shogun");
+  assert.equal(row.last_heartbeat_at, new Date((T - 5) * 1000).toISOString());
+  assert.equal(row.ranked, true);
+  assert.equal(row.live.return_bps, 500);
+  assert.equal(row.live.landed_trades, 1);
+  assert.deepEqual(row.last_valuation, { at: new Date((T - 2) * 1000).toISOString(), book: "live" });
+  const profile = await call(principal, "get_public_agent", { agent: SLUG_A });
+  assert.equal(profile.sc.name, "Current Shogun");
+  assert.equal(profile.sc.live.return_bps, 500);
+  assert.deepEqual(profile.sc.valuation, row.last_valuation);
+  assertAbsent(list.json + profile.json, [...PRIVATE_A, alias, "private-target", ...SECRETS], "canonical public account");
+
+  // A subsequent paper valuation in the same current run still uses the
+  // existing live-heartbeat refusal; the old live epoch cannot keep it ranked.
+  d.raw.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, epoch, mode, at)
+    VALUES (?, '0', 1000, 0, 1000, 3, 'paper', ?)`).run(alias, T - 1);
+  const after = await call(principal, "list_public_agents", {});
+  const changed = after.sc.agents.find((r: { agent: string }) => r.agent === SLUG_A);
+  const changedProfile = await call(principal, "get_public_agent", { agent: SLUG_A });
+  for (const r of [changed, changedProfile.sc]) {
+    assert.equal(r.live.return_bps, null);
+    assert.equal(r.unranked.code, "valuation-not-live");
+  }
+  assert.deepEqual(changed.last_valuation, { at: new Date((T - 1) * 1000).toISOString(), book: "paper" });
+  assert.deepEqual(changedProfile.sc.valuation, changed.last_valuation);
+  assertAbsent(after.json + changedProfile.json, [...PRIVATE_A, alias, "private-target", ...SECRETS], "changed canonical book");
+});
+
 test("theses: dollars only for public books, third-party text labelled untrusted, fills labelled by book", async () => {
   const { connect } = await setup();
   const { res, sc, json } = await call(await connect(OWNER_B), "get_public_theses", {});

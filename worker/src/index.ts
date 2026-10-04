@@ -6016,9 +6016,8 @@ async function main() {
           "real positions and trades are never deleted.",
       };
     }
-    await resetPaperLedger(id, cfg.paperStartUsdg);
+    const opened = await resetPaperLedger(id, cfg.paperStartUsdg);
     if (trenchBrain.reset()) tgDeliver(tgBook.reset());
-    const opened = await openNextEpoch(id, cfg.paperStartUsdg);
     await addEvent(
       id,
       "ok",
