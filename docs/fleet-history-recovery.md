@@ -91,9 +91,14 @@ resume the affected production fleet.
    triggers on every affected service before merging a branch that can deploy.
 2. Review this application/trading change and its prerequisite memory/source
    retention change with Milla. Passing CI alone is not approval.
-3. Deploy only through the reviewed rollout. A status-only first pass may publish
-   source failures, including for expired tenants; it must not clear original
-   source fences or rearm an incident tenant.
+3. Ordinary supervisor startup still requires a verified persistent root. A
+   nonempty root without its manifest refuses before recovery reporting. A held
+   manifest retains `FLEET_HALT` and skips reconciliation, so it also publishes
+   no new recovery reports. These changes include no separate status-only
+   startup path and do not make the reported incident volume deployment-ready.
+   Any incident reporting or initialization plan needs separate reviewed work;
+   retain all existing holds and source proof requirements. Do not clear a halt,
+   disable proof, copy a manifest or mark handover complete to obtain UI status.
 4. Verify authenticated owner views show the hold and qualify saved figures.
    Check narration with stale active/energy state and model failure. Do not use a
    live financial probe as a UI verification step.
