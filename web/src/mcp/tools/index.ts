@@ -16,6 +16,7 @@ import { STAFF_TOOLS } from "./staff";
 import { JOBS_TOOLS } from "./jobs";
 import { NOTIFICATIONS_TOOLS } from "./notifications";
 import { SOCIAL_TOOLS } from "./social";
+import { FOMO_MCP_TOOLS } from "./fomo";
 import { withAppMeta } from "../apps";
 
 // withAppMeta attaches the MCP Apps view (ui:// resource) to the tools that have one.
@@ -31,5 +32,6 @@ export const ALL_TOOLS: readonly ToolDef[] = withAppMeta([
   ...JOBS_TOOLS,
   ...NOTIFICATIONS_TOOLS,
   ...SOCIAL_TOOLS,
+  ...FOMO_MCP_TOOLS,
   ...STAFF_TOOLS,
 ] as unknown as readonly ToolDef[]);

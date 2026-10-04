@@ -7,6 +7,7 @@ import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
 import { ledgerChatReply } from "@/lib/chat-ledger-facts";
+import { fomoChatTurn } from "@/lib/fomo-chat";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,27 @@ export async function POST(req: Request) {
       { status: 409 },
     );
   }
+  // STREAMED ONLY WHEN ASKED. The chat screen sends `Accept: text/event-stream`
+  // and reads the agent's words as they arrive; anything that did not ask gets
+  // the one JSON answer it always got. See agentReplyResponse for what may be
+  // shown before the reply is complete — nothing of a command marker, ever.
+  const stream = /text\/event-stream/i.test(req.headers.get("accept") ?? "");
+
+  // FOMO RESEARCH, BEFORE THE LEDGER — decided on the server by the
+  // deterministic planner (lib/fomo-chat.ts), for the session's own tenant (or
+  // this install's), never from the body. The planner leaves the owner's own
+  // book alone ("what did you buy today?" is the ledger's), so ordering it
+  // first cannot steal a ledger question; ordering it second would let the
+  // ledger's trade-history patterns answer a question about somebody else's
+  // trades with ours. A factual answer is sent as one, JSON even for a stream;
+  // an analysis question hands the model the server's evidence, with the
+  // deterministic answer as the reply when there is no model or it fails.
+  const fomoTurn = await fomoChatTurn(body, { tenant, now: Date.now(), hosted }).catch(() => null);
+  if (fomoTurn && "factualReply" in fomoTurn) {
+    return agentReplyResponse(body, { stream, signal: req.signal }, { factualReply: fomoTurn.factualReply });
+  }
+  const fomo = fomoTurn && "fomo" in fomoTurn ? fomoTurn.fomo : null;
+
   // THE AGENT'S ENERGY, FROM ITS WORKER — read here, on the server, and never
   // taken from the body. The browser's `state` is the browser's own account of
   // things and iOS sends none at all; this is the report of the one process
@@ -49,15 +71,10 @@ export async function POST(req: Request) {
   // the worker may not have published since (currentEnergy) — so it is no
   // report, and the model says it cannot see its energy instead of blaming it.
   const account = hosted ? await hostedAgentFor(req) : await diskAgent();
-  const factualReply = await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
+  const factualReply = fomo ? undefined : await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
   const report = currentEnergy(account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report
     ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
     : null;
-  // STREAMED ONLY WHEN ASKED. The chat screen sends `Accept: text/event-stream`
-  // and reads the agent's words as they arrive; anything that did not ask gets
-  // the one JSON answer it always got. See agentReplyResponse for what may be
-  // shown before the reply is complete — nothing of a command marker, ever.
-  const stream = /text\/event-stream/i.test(req.headers.get("accept") ?? "");
-  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply });
+  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo });
 }
