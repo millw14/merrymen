@@ -164,6 +164,7 @@ export interface OrderPlaced {
 export type PlaceResult =
   | { ok: true; duplicate?: true }
   | { ok: false; why: "in-flight" }
+  | { ok: false; why: "recovery" }
   | { ok: false; why: "unreachable"; detail?: string };
 
 /**
@@ -192,6 +193,9 @@ export function placedResponse(
   }
   if (r.why === "in-flight") {
     return { status: 409, body: { error: "you already have an order waiting. Let that one finish first." } };
+  }
+  if (r.why === "recovery") {
+    return { status: 409, body: { error: "Trading is paused for recovery. No new order was queued. Please wait for the trading records to be checked." } };
   }
   return {
     status: 503,

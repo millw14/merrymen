@@ -35,6 +35,7 @@ import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
+import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -46,6 +47,8 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 
 export interface AgentStatus {
   exists: boolean;
+  /** Authenticated owner's source hold; independent of saved balances or old worker status. */
+  recovery?: FleetRecoveryView | null;
   /** Hosted GET only: the authenticated tenant this status was read for. */
   tenant?: `0x${string}` | null;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
@@ -503,6 +506,8 @@ export async function GET(req: Request) {
   let gasSponsored: boolean | null = null;
   let liveBlocker: string | null = null;
   try {
+    // Hosted status must come from this authenticated account, never a web-service file.
+    if (hostedTenant !== undefined) throw new Error("Hosted heartbeat is account-scoped.");
     const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as {
       at: number;
       mode?: AgentStatus["mode"];
@@ -561,6 +566,19 @@ export async function GET(req: Request) {
   // deployments. Best effort: an unreadable report is null, never an error.
   const energy = await readAgentEnergy(grant.smartAccount);
 
+  let recovery: FleetRecoveryView | null = null;
+  if (hostedTenant) {
+    try {
+      recovery = await withReadDb(db => {
+        if (!db) throw new Error("Hosted recovery ledger is unavailable.");
+        return readFleetRecoveryView(db,
+          { tenant: hostedTenant, smartAccount: grant.smartAccount, chainId: grant.chainId }, workerAliveAt);
+      });
+    } catch {
+      return NextResponse.json({ error: "Couldn't confirm this agent's recovery status. Please try again.", ownerFacing: true }, { status: 503 });
+    }
+  }
+
   // Never echo key material to the browser: the serialized session account, the
   // session key, AND the generated owner key (which custodies the funds).
   const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
@@ -576,6 +594,7 @@ export async function GET(req: Request) {
     gasSponsored,
     liveBlocker,
     energy,
+    ...(hostedTenant ? { recovery } : {}),
   };
   return NextResponse.json(status);
 }

@@ -39,6 +39,8 @@ import { count } from "@/lib/format";
 import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
 import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
 import { EnergyNote } from "../EnergyNote";
+import { RecoveryNotice } from "../RecoveryNotice";
+import { ownerTradeEmptyTitle, pausedRecovery, recoveryAutonomy } from "../recovery-view";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
@@ -205,7 +207,9 @@ export function Agent({
    * tick. Right after a top-up the two disagree, and it is the worker — the
    * process that actually runs or idles the strategy — that is current.
    */
-  const energyNow = energyView(energy, Date.now() / 1000);
+  const recovery = pausedRecovery(mine.recovery);
+  const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
+  const energyNow = energyView(recovery ? null : energy, Date.now() / 1000);
   const remedies = energyRemedies(energy, chainId);
   /**
    * Has this owner chosen a strategy their tier will not run?
@@ -216,7 +220,7 @@ export function Agent({
    * change here.
    */
   const circleLocked =
-    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
+    !recovery && isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
     !workerSaysFull(energy);
   /**
    * THE SAME SENTENCE ONCE. The worker writes one dated warn event the first
@@ -241,7 +245,7 @@ export function Agent({
   const change = dailyChange(mine);
   // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
   // chat-payload.ts by the controller, from this screen's own view of it.
-  const context: ChatContext = { mine, liveBlocker, perTrade, perDay, stopped };
+  const context: ChatContext = { mine, liveBlocker: recovery ? null : liveBlocker, perTrade, perDay, stopped: stopped || recovery !== null };
   /**
    * ASK, AND SHOW IT AT ONCE.
    *
@@ -519,6 +523,7 @@ export function Agent({
   const blockerIsStale = staleBlocker === true;
   return (
     <div className="desk-page">
+      <RecoveryNotice recovery={recovery}/>
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
           The sentence existed — status-line.ts has had a testnet branch for
           months — but it renders on /you, and an owner who thinks their agent
@@ -528,7 +533,7 @@ export function Agent({
           to trade. Their owners are the ones reporting "it doesn't trade".
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
-      {blocked && !blockerIsStale && (
+      {blocked && !blockerIsStale && !recovery && (
         /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
            rendered for every blocker there is — including the one that means
            "your agent is practising, exactly as you asked". An owner who had
@@ -582,9 +587,9 @@ export function Agent({
               finds out, and names it in one tap. Renders nothing otherwise. */}
           <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
-        <span className={`desk-status ${stopped ? "paused" : ""}`}>
+        <span className={`desk-status ${stopped || recovery ? "paused" : ""}`}>
           <i />
-          {mine.statusLabel ?? "Offline"}
+          {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
         </span>
       </header>
       <section className="desk-portfolio">
@@ -596,12 +601,12 @@ export function Agent({
           onClick={() => setExpanded((value) => !value)}
         >
           <div>
-            <span className="account-label">Agent balance</span>
+            <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded agent balance" : "Agent balance"}</span>
             <strong className="desk-equity">
               <BalanceFigure value={mine.equity} />
             </strong>
-            <span className={mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
-              {mine.chg24 == null
+            <span className={recovery || mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
+              {recovery ? "Reconciliation pending" : mine.chg24 == null
                 ? "Daily change unavailable"
                 : `${mine.chg24 >= 0 ? "+" : "−"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
             </span>
@@ -614,11 +619,13 @@ export function Agent({
         {
           <div className="agent-portfolio-meta">
             <span>
-              {positions.length}{" "}
-              {positions.length === 1 ? "position" : "positions"}
+              {recovery && positions.length === 0 ? "Saved positions pending" : <>
+                {positions.length}{" "}{recovery ? "saved " : ""}
+                {positions.length === 1 ? "position" : "positions"}
+              </>}
             </span>
             {mine.glance.cashUsd != null && (
-              <span>{money(mine.glance.cashUsd)} cash</span>
+              <span>{recovery ? "Last recorded cash: " : ""}{money(mine.glance.cashUsd)}{recovery ? "" : " cash"}</span>
             )}
           </div>
         }
@@ -632,7 +639,7 @@ export function Agent({
         >
           <header className="portfolio-dialog-header">
             <div>
-              <h2 id="portfolio-title">Portfolio</h2>
+              <h2 id="portfolio-title">{recovery ? "Last recorded portfolio" : "Portfolio"}</h2>
               <p>
                 {mine.name} · {money(mine.equity)}
               </p>
@@ -664,7 +671,7 @@ export function Agent({
                 aria-pressed={view === "positions"}
                 onClick={() => setView("positions")}
               >
-                Positions · {positions.length}
+                {recovery ? "Saved positions" : "Positions"} · {recovery && positions.length === 0 ? "—" : positions.length}
               </button>
               <button
                 type="button"
@@ -681,7 +688,7 @@ export function Agent({
             {view === "positions" ? (
               <>
                 {positions.length === 0 && (
-                  <Empty compact kind="positions" title="No positions reported yet."/>
+                  <Empty compact kind="positions" title={recovery ? "Saved positions pending reconciliation." : "No positions reported yet."}/>
                 )}
                 {positions.map((p) => {
                   const token = tokens.find(
@@ -714,7 +721,7 @@ export function Agent({
                   );
                 })}
                 <div className={mine.autonomy.simulated ? "desk-cash is-simulated" : "desk-cash"}>
-                  <span>{mine.autonomy.moneyLabel}</span>
+                  <span>{displayedAutonomy.moneyLabel}</span>
                   <strong>{money(mine.glance.cashUsd ?? null)}</strong>
                 </div>
                 {mine.glance.vaultUsd != null && (
@@ -737,7 +744,7 @@ export function Agent({
                   showMoney
                   allowPnlCards
                   tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
-                  emptyTitle="No trades yet."
+                  emptyTitle={ownerTradeEmptyTitle(recovery)}
                   onToken={onToken}
                 />
               </div>
@@ -770,7 +777,7 @@ export function Agent({
           setAway(isAway);
         }}
       >
-        <TrencherAnnouncement hasAgent={!!mine} />
+        {!recovery && <TrencherAnnouncement hasAgent={!!mine} />}
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only
             flexible row on a fixed-height screen: measured at 375px, the
@@ -842,12 +849,12 @@ export function Agent({
             onResign={onResign}
           />
         )}
-        {!blocked && !circleLocked && notice && (
+        {!recovery && !blocked && !circleLocked && notice && (
           <section className="desk-notice" role="status">
             <p>{notice.message}</p>
           </section>
         )}
-        <Proposals onResign={onResign} />
+        {!recovery && <Proposals onResign={onResign} />}
         <div className="chat-divider">
           <span>Conversation</span>
         </div>
@@ -856,7 +863,7 @@ export function Agent({
           <div>
             <strong>{mine.name}</strong>
             <p>
-              {stopped
+              {stopped || recovery
                 ? "I’m not trading right now. You can review my portfolio and trading limits here."
                 : latest
                   ? "Here’s my latest recorded trade."
@@ -959,7 +966,7 @@ export function Agent({
             The sentence below is OURS, from the registry — if the model wrote
             it, it could describe one action and request another, and this
             would be confirming the description rather than the act. */}
-        {pending && commandFor(pending.id) && (
+        {!recovery && pending && commandFor(pending.id) && (
           <section
             className={`desk-confirm${commandFor(pending.id)!.weighty ? " is-weighty" : ""}`}
             role="group"
@@ -993,8 +1000,8 @@ export function Agent({
         {!chat.sending && !pending && (
           <div className="desk-prompts">
             {chatChips({
-              liveBlocker,
-              stopped,
+              liveBlocker: recovery ? null : liveBlocker,
+              stopped: stopped || recovery !== null,
               latestSymbol: latest?.symbol ?? null,
               holding: positions.map((p) => p.symbol),
               lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,

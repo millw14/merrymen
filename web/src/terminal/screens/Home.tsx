@@ -18,6 +18,7 @@ import {
 import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
 import { usd, usdParts } from "@/lib/format";
+import { pausedRecovery } from "../recovery-view";
 
 export function Home({
   tokens,
@@ -122,7 +123,8 @@ export function Home({
 
   const visibleTokens = showAll ? shown : shown.slice(0, 8);
   const eq = mine?.equity ?? null;
-  const chg = mine?.chg24 ?? null;
+  const recovery = pausedRecovery(mine?.recovery);
+  const chg = recovery ? null : mine?.chg24 ?? null;
   // WAS `money(eq).replace("$", "").split(".")`, and both halves of that were
   // English-shaped. The symbol is a SUFFIX in Spanish, Vietnamese, Russian and
   // Indonesian so the replace missed it, and the decimal mark is a COMMA in
@@ -142,7 +144,7 @@ export function Home({
               <Face name={mine.name} slug={mine.slug} />
               <NameBlock title={mine.name} owner={mine.owner ?? "you"} />
             </div>
-            <span className="home-balance-label">Portfolio balance</span>
+            <span className="home-balance-label">{recovery ? "Last recorded portfolio" : "Portfolio balance"}</span>
               <div className="balance">
                 {lead}
                 {fraction !== null && <sup>{fraction}</sup>}
@@ -183,7 +185,7 @@ export function Home({
           A reading, not a second set of controls: it says what the settings
           say and links to them. It renders nothing for a visitor with no
           agent, who has no bot to connect and no strategy to run. */}
-      <AgentStrip hasAgent={hasAgent} />
+      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery}/>
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.

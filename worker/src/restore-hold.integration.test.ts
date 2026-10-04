@@ -52,6 +52,8 @@ const {
   hasLeaseForTest,
   honourFleetHalt,
   setHeldResetDbForTest,
+  setPersistentHomeVerifierForTest,
+  setRetirementMemoryStoreForTest,
 } = await import("./orchestrator");
 const { applyLedgerSchema } = await import("./store");
 const { PAPER_CHECKPOINT_SCHEMA, restorePaperCheckpoint } = await import("./paper-checkpoint");
@@ -1164,6 +1166,39 @@ describe("a practice reset its owner asks for while held", () => {
       assert.equal(workers().length, 1);
     });
   });
+
+  for (const source of ["ledger-source-blocked.json", "ledger-import.pending.json", "unconfirmed-root"] as const) {
+    it(`a legacy holder cannot retry or reset across ${source} before a health report exists`, async () => {
+      const db=await useLedger();await store.put(TENANT,grant());
+      await withClock(async()=>{
+        await reconcile();assert.ok(isHeldForTest(TENANT));assert.equal(restores,1);
+        await ask(db,"preserved-reset",Date.now());
+        await db.exec("CREATE TABLE mirror_state(tenant TEXT,table_name TEXT,last_id INTEGER,last_stamp INTEGER,updated_at INTEGER)");
+        await db.prepare("INSERT INTO mirror_state VALUES(?,'trades',1,11,11)").run(TENANT);
+        assert.equal(shared!.raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='fleet_recovery_health'").get()!.n,0);
+        const tables=["agents","trades","equity","positions","cost_basis","position_floors","flows","fee_accruals","paper_checkpoints","mirror_state","agent_commands"];
+        const before=tables.map(name=>JSON.stringify(shared!.raw.prepare(`SELECT * FROM ${name}`).all()));
+        const file=source === "unconfirmed-root" ? null : path.join(childHome(TENANT),source);
+        if(file) writeFileSync(file,"preserved source fence");
+        else setPersistentHomeVerifierForTest(()=>{throw new Error("unconfirmed original volume");});
+        // Metadata publication is permitted with this unchanged chat-only holder;
+        // it cannot clear the source or restore/reset the financial source.
+        setRetirementMemoryStoreForTest({shared:db,dek:Buffer.alloc(32,9),dialect:"sqlite"});
+        try {
+          mock.timers.tick(15_000);await reconcile();
+          assert.equal(restores,1,"source refused before the restore writes");
+          assert.equal(workers().length,0);assert.ok(isHeldForTest(TENANT));
+          assert.deepEqual(tables.map(name=>JSON.stringify(shared!.raw.prepare(`SELECT * FROM ${name}`).all())),before);
+          assert.deepEqual(await commandRow(db,"preserved-reset"),{claimed_at:null,done_at:null,result:null});
+          assert.equal(Number(shared!.raw.prepare("SELECT held FROM fleet_recovery_health WHERE tenant=?").get(TENANT)!.held),1);
+          if(file) assert.equal(readFileSync(file,"utf8"),"preserved source fence");
+        } finally {
+          setRetirementMemoryStoreForTest(null);setPersistentHomeVerifierForTest(null);
+          if(file) rmSync(file,{force:true});
+        }
+      });
+    });
+  }
 
   it("THE RESET IS OFFERED ONLY WHERE IT WOULD BE HONOURED, AND THE OFFER FOLLOWS THE SETTINGS", async () => {
     await useLedger();

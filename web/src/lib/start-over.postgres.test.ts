@@ -20,8 +20,9 @@
  * WHY. A held practice reset moves the accounting epoch and deletes the
  * practice book's positions and basis. Run twice it would open two epochs; run
  * on a live account it would hide real history. The claim that makes it at most
- * once is a row lock in Postgres, and sqlite, which every other test uses,
- * serialises the two attempts before they can race. The other guard,
+ * once is a shared account advisory lock plus conditional row claim in
+ * Postgres, and sqlite serialises them through the same account-lock seam.
+ * The other guard,
  * `UPDATE agents ... AND epoch = ?`, is Postgres's alone in the same way: it
  * decides only when another writer commits inside the reset's transaction,
  * and sqlite runs that transaction alone. And some books here are written in
@@ -37,6 +38,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { getAddress } from "viem";
 
 import { makePgDb, wrapSqlite, type Db } from "../../../worker/src/db";
@@ -54,6 +56,8 @@ import {
 import { resetBlockedPaperBook, restorePaperCheckpoint } from "../../../worker/src/paper-checkpoint";
 import { deriveBootstrapAccounting } from "../../../worker/src/bootstrap-source";
 import { queuePaperReset } from "./start-over";
+import { queueRecoveryCheckedCommand } from "./recovery-commands";
+import { recordFleetRecoveryHold, recordFleetSourceVerified } from "../../../worker/src/fleet-recovery";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 interface PgClient {
@@ -283,19 +287,28 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
 
     await t.test("TWO REPLICAS AT ONCE: each reset claimed once, its epoch moved once, its book cleared once", async () => {
       const now = Date.now();
-      // Both attempts read the unclaimed row before either writes: each is held
-      // at its settings read (which comes after it has read the row) until the
-      // other has got there too. From there the claim's row lock decides.
-      const race = (acct: string) => {
-        let arrived = 0;
-        let go!: () => void;
-        const both = new Promise<void>((r) => (go = r));
-        const readSettings = async () => {
-          if (++arrived === 2) go();
-          await both;
+      // A replica paused at settings already holds the account lock. The
+      // other pool must wait before reading/claiming, then see the committed
+      // answer. Do not rendezvous both readers inside one exclusive lock.
+      const race = async (acct: string) => {
+        let entered!: () => void, go!: () => void;
+        const firstEntered = new Promise<void>(r => { entered = r; });
+        const release = new Promise<void>(r => { go = r; });
+        const first = applyHeldReset(one, acct, opts(now, { readSettings: async () => {
+          entered(); await release;
           return { paperTradingEnabled: true };
-        };
-        return Promise.all([applyHeldReset(one, acct, opts(now, { readSettings })), applyHeldReset(two, acct, opts(now, { readSettings }))]);
+        } }));
+        await firstEntered;
+        let secondRead = false, secondDone = false;
+        const second = applyHeldReset(two, acct, opts(now, { readSettings: async () => {
+          secondRead = true; return { paperTradingEnabled: true };
+        } })).then(result => { secondDone = true; return result; });
+        try {
+          await delay(35);
+          assert.equal(secondRead, false, "the second pool cannot read the selected command across the account lock");
+          assert.equal(secondDone, false, "the second pool waits for the first's transaction");
+        } finally { go(); }
+        return Promise.all([first, second]);
       };
       const results = await Promise.all(RACED.map(race));
       for (const [i, acct] of RACED.entries()) {
@@ -305,7 +318,7 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
         const newest = asked.get(acct)!.at(-1)!;
         assert.deepEqual(won[0], { applied: true, id: newest, from: EPOCH, epoch: EPOCH + 2 }, "one past the highest epoch any row carries");
         const lost = pair.find((o) => !o.applied)!;
-        assert.deepEqual(lost, { applied: false, id: newest, why: "another pass or replica claimed the reset", transient: false });
+        assert.deepEqual(lost, { applied: false, id: null, why: "no practice reset is waiting", transient: false });
 
         assert.equal(await epochOf(acct), EPOCH + 2, "moved once, not twice");
         assert.deepEqual((({ claimed_at, done_at, result }) => [claimed_at, done_at, result])(await command(newest)), [now, now, HELD_RESET_DONE]);
@@ -434,6 +447,39 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       assert.deepEqual((({ claimed_at, done_at, result }) => [claimed_at, done_at, result])(await command(id)), [later, later, HELD_RESET_EXPIRED]);
       assert.equal(await epochOf(OLD), EPOCH);
       assert.equal(await count("positions", OLD), 1);
+    });
+
+    await t.test("SOURCE HELD: hosted reset/probe admission and held reset execution preserve the pending rows and book", async () => {
+      const acct = account(0x21), tenant = account(0x22), nowSec = Math.floor(Date.now() / 1000);
+      const scope = { tenant, smartAccount: acct, chainId: 4663 };
+      await heldBook(one, acct);
+      const id = await queue(acct);
+      await recordFleetRecoveryHold(two, scope, "source-continuity", nowSec, () => true);
+      const refused = await queuePaperReset(true, acct);
+      assert.ok(!refused.ok && refused.status === 409);
+      assert.deepEqual(await queueRecoveryCheckedCommand(one, { id: "held-probe", agent: acct, kind: "selftest", at: Date.now() }),
+        { ok: false, why: "recovery" });
+      const out = await applyHeldReset(one, acct, opts(Date.now()));
+      assert.ok(!out.applied && /source recovery/.test(out.why));
+      const row = await command(id);
+      assert.deepEqual([row.claimed_at, row.done_at, row.result], [null, null, null]);
+      assert.equal(await epochOf(acct), EPOCH);
+      assert.equal(await count("positions", acct), 1);
+      assert.equal(await count("cost_basis", acct), 2);
+      assert.equal(await count("agent_commands", acct), 1, "no refused admission wrote a new row");
+
+      const checkedAt = nowSec + 2, cutoff = (checkedAt + 1) * 1000;
+      await recordFleetSourceVerified(two, scope, checkedAt, () => true);
+      for (const kind of ["selftest", "paper-reset"] as const) {
+        assert.deepEqual(await queueRecoveryCheckedCommand(one, { id: `equal-${kind}`, agent: acct, kind, at: cutoff }),
+          { ok: false, why: "recovery" });
+        assert.deepEqual(await queueRecoveryCheckedCommand(one, { id: `new-${kind}`, agent: acct, kind, at: cutoff + 1 }), { ok: true });
+      }
+      const applied = await applyHeldReset(two, acct, opts(cutoff + 1));
+      assert.ok(applied.applied && applied.id === "new-paper-reset");
+      const old = await command(id);
+      assert.deepEqual([old.claimed_at, old.done_at, old.result], [null, null, null], "legacy refusal is not marked as execution or supersession");
+      assert.equal(await epochOf(acct), EPOCH + 2);
     });
   } finally {
     await admin.query(`DROP SCHEMA ${schema} CASCADE`).catch(() => {});

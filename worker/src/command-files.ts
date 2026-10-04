@@ -258,6 +258,8 @@ export async function runTickCommand(
   deps: {
     now: () => number;
     run: (cmd: FileCommand) => Promise<CommandOutcome>;
+    /** A durable recovery fence can retain old intents without claiming or unlinking them. */
+    mayRun?: (cmd: FileCommand) => boolean;
     told: (cmd: FileCommand, outcome: CommandOutcome) => Promise<void>;
     /**
      * The receipt for a command answered here as expired, when it has one.
@@ -272,6 +274,7 @@ export async function runTickCommand(
 ): Promise<void> {
   const dir = commandDir(home);
   for (const { n, cmd } of pendingCommands(dir)) {
+    if (deps.mayRun && !deps.mayRun(cmd)) continue;
     if (!claimFile(dir, n)) continue;
     const now = deps.now();
     if (isExpired(cmd, now)) {

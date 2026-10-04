@@ -205,10 +205,12 @@ function coerceParams(params: unknown[]): unknown[] {
 }
 
 class PgDb implements Db {
+  private lockedTransactionRunning = false;
   constructor(
     private q: PgQueryable,
     /** For a connection pinned from a pool (sessionLock), the pool's own Db: see rootDb. */
     readonly root?: PgDb,
+    private readonly transactionScoped = false,
   ) {}
   prepare(sql: string): Stmt {
     const text = translateQuery(sql);
@@ -235,14 +237,33 @@ class PgDb implements Db {
     await this.q.query(translateSchema(sql));
   }
   async tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+    if (this.transactionScoped) throw new Error("nested transactions are not supported");
     // Pin the transaction to ONE checked-out connection. A pool.query-per-statement
     // transaction would scatter BEGIN/…/COMMIT across connections and never commit
     // as a unit — the reason the seam routes transactions through tx() at all.
     const pool = this.q as PgPoolLike;
+    if (this.root) {
+      // A session-lock callback already owns this connection. Do not check
+      // out a second connection while holding it (a full pool would deadlock).
+      // Transaction-scoped handles have no root and cannot nest transactions.
+      if (this.lockedTransactionRunning) throw new Error("nested or concurrent transactions are not supported");
+      this.lockedTransactionRunning = true;
+      try {
+        await this.q.query("BEGIN");
+        const out = await fn(new PgDb(this.q, undefined, true));
+        await this.q.query("COMMIT");
+        return out;
+      } catch (error) {
+        try { await this.q.query("ROLLBACK"); } catch { /* original error wins */ }
+        throw error;
+      } finally {
+        this.lockedTransactionRunning = false;
+      }
+    }
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const out = await fn(new PgDb(client));
+      const out = await fn(new PgDb(client, undefined, true));
       await client.query("COMMIT");
       return out;
     } catch (e) {
@@ -259,7 +280,8 @@ class PgDb implements Db {
   /** withAdvisoryLock's Postgres half: see there. */
   async sessionLock<T>(cls: number, key: number, deadline: number, fn: (db: Db) => Promise<T>, held: () => void): Promise<T> {
     const pool = this.q as PgPoolLike;
-    if (typeof pool.connect !== "function") throw new Error("an advisory session lock is taken on a pool, not inside a transaction");
+    if (this.root || this.transactionScoped || typeof pool.connect !== "function")
+      throw new Error("an advisory session lock is taken on a pool, not inside a transaction or session lock");
     for (let pause = 20; ; pause = Math.min(pause * 2, 250)) {
       const client = await pool.connect();
       let got = false;
