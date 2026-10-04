@@ -107,7 +107,7 @@ function assertReadOnlyDescriptorOpens(raw: string): void {
     // scripts. Such embedded calls cannot receive the AST readonly exception.
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node)
         || ts.isTemplateMiddle(node) || ts.isTemplateTail(node))
-      assert.doesNotMatch(node.text, /\bopenSync\s*\(/, "embedded descriptor code must not bypass source inspection");
+      assert.doesNotMatch(node.text, /\bopenSync\b/, "embedded descriptor code must not bypass source inspection");
     if (ts.isIdentifier(node) && node.text === "openSync") {
       assert.ok(imported(node, openBinding), "openSync must resolve to its real node:fs import");
       assert.ok((ts.isImportSpecifier(node.parent) && node.parent.name === node)
@@ -199,6 +199,8 @@ describe("the orchestrator writes nothing in a child's home in place", () => {
       'const fs=await import("node:fs"); fs[method](file,0);',
       `${header}eval("openSync(file,constants.O_RDWR | constants.O_TRUNC)");`,
       `${header}new Function(\`openSync(file,constants.O_WRONLY)\`)();`,
+      `${header}eval("openSync/* comment */(file,constants.O_RDWR | constants.O_TRUNC)");`,
+      `${header}new Function(\`openSync/* comment */(file,constants.O_WRONLY)\`)();`,
     ]) assert.throws(() => assertReadOnlyDescriptorOpens(source), source);
   });
 
