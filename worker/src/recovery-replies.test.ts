@@ -12,7 +12,7 @@ import { RecoveryReplyBotLeases } from "./recovery-reply-lease";
 import { openRecoveryReplyState, readRecoveryReplyOffset, readReplyPrivacy, RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import { PgTenantLeaseManager, leaseKey } from "./tenant-lease";
 import { openSecret, sealSecret } from "./store-crypto";
-import { createRecoveryPublicReply, RECOVERY_PUBLIC_HELP } from "./telegram/recovery-public-reply";
+import { createRecoveryPublicReply, RECOVERY_PUBLIC_CONTEXT } from "./telegram/recovery-public-reply";
 import type { Db } from "./db";
 import type { TelegramOpts, TgMessage } from "./telegram/api";
 
@@ -374,11 +374,35 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     }
   });
 
-  await t.test("a why reply to this bot gets public help without reading prior messages or guessing WHY", async s => {
+  await t.test("a why reply to this bot asks for context without reading prior messages or guessing WHY", async s => {
     const f = await fixture(s), a = f.actors[0]!; let reads = 0;
     f.transport.getUpdates = async () => updates([f.msg(1, "why", 0, { chatId: a.room, fromId: 777, replyTo: { messageId: 98, fromId: Number(a.botId), fromIsBot: true, text: "unavailable prior private context about FROG" } })]);
     await f.run({ reply: createRecoveryPublicReply({ now: f.clock, look: async () => { reads++; throw new Error("must not guess an asset"); } }) });
-    assert.equal(reads, 0); assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.text, RECOVERY_PUBLIC_HELP); assert.equal(Number((await f.offset())!.offset_id), 2);
+    assert.equal(reads, 0); assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.text, RECOVERY_PUBLIC_CONTEXT); assert.equal(Number((await f.offset())!.offset_id), 2);
+  });
+
+  await t.test("casual DMs and addressed approved-room greetings reply without lookup or changing financial state", async s => {
+    const f = await fixture(s), a = f.actors[0]!; let reads = 0;
+    const rows = await f.original(), files = fileFacts(f.home);
+    f.transport.getUpdates = async () => updates([
+      f.msg(1, "Hiii"), f.msg(2, "eh"), f.msg(3, "how are you?"),
+      f.msg(4, "Hiii", 0, { chatId: 777, fromId: 777 }),
+      f.msg(5, "Hiii", 0, { chatId: a.room, fromId: 777 }),
+      f.msg(6, "Robin, Hiii!", 0, { chatId: a.room, fromId: 777 }),
+      f.msg(7, "eh", 0, { chatId: a.room, fromId: 777, replyTo: { messageId: 98, fromId: Number(a.botId), fromIsBot: true, text: "private earlier context must not be used" } }),
+      f.msg(8, "@bot_801 Hiii", 0, { chatId: a.room - 100, fromId: 777 }),
+      f.msg(9, "hi, buy FROG"),
+    ]);
+    await f.run({ reply: createRecoveryPublicReply({ now: f.clock, look: async () => { reads++; throw new Error("casual messages must not look up coins"); } }) });
+    assert.equal(reads, 0); assert.equal(f.sends.length, 6);
+    assert.equal(f.sends.filter(sent => sent.chatId === a.room).length, 2);
+    const held = f.sends.filter(sent => /Trading remains held/.test(sent.text));
+    assert.equal(held.length, 1);
+    for (const sent of f.sends.filter(sent => sent !== held[0])) assert.doesNotMatch(sent.text, /fresh public data|Trading|earlier context/);
+    assert.ok(f.sends.some(sent => /I'm here/.test(sent.text))); assert.ok(f.sends.some(sent => /ask/.test(sent.text)));
+    assert.equal(Number((await f.offset())!.offset_id), 10);
+    assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
+    assert.equal((await f.pool.query("SELECT child_state FROM tenant_telegram WHERE tenant=$1", [a.tenant])).rows[0]!.child_state, "held:recovery-replies");
   });
 
   await t.test("slash research reaches public code; financial slash/button instructions stay held", async s => {

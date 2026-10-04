@@ -4,8 +4,9 @@ import type { TgDeskAsk, TgDeskEvidence, TgDeskThought } from "./tg-groups/types
 import type { RecoveryPublicLook } from "./recovery-public-transport";
 
 export const RECOVERY_PUBLIC_UNAVAILABLE = "I can't verify fresh public data for that right now. Trading remains held.";
-export const RECOVERY_PUBLIC_HELP = "I can read fresh public charts and published project descriptions. Ask for the market, or send a coin ticker or contract with a chart or lore question. Trading remains held; historical memory is unavailable.";
+export const RECOVERY_PUBLIC_HELP = "Send me a coin ticker or contract for a chart read or its published story, or ask about the market. Trading is paused during recovery.";
 export const RECOVERY_PUBLIC_HELD = "Trading remains held. I can't place orders, change trading limits or confirm account positions.";
+export const RECOVERY_PUBLIC_CONTEXT = "Tell me which coin or question you mean. I don't have earlier chat context during recovery.";
 const MAX_TEXT = 800;
 const MAX_REPLY = 1000;
 const MAX_FRESH_MS = 60_000;
@@ -13,6 +14,31 @@ const ADDRESS = /^0x[0-9a-f]{40}$/i;
 const ticker = (text: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/.test(text);
 const QUESTION_WORDS = new Set("chart charts lore story description project theme read show me please public fresh current currently overview of for on about what whats is are does do it this the a an can you tell explain look at how why has changed trend structure price hourly candle candles history volume participation buyers sellers flow liquidity depth momentum rsi rsi14 ema ema20 ema50 vwap atr atr14 indicator indicators news safety safe rug scam audit risk invalidation support resistance target targets prediction forecast bottom timeframe freshness old recent stale now from quote index published token coin and thoughts opinion take check out entry quick analysis i think good".split(" "));
 const CONVERSATION_WORDS = new Set("help hi hello gm gn hey status thanks thankyou yes no okay ok sure cool sorry welcome bye goodbye".split(" "));
+const CONVERSATION = Object.freeze({
+  greeting: "Hey, I'm here. What are we looking at?",
+  morning: "Morning. What's on your radar?",
+  farewell: "Catch you later.",
+  thanks: "You're welcome.",
+  ack: "Got you.",
+  clarify: "I'm here. What did you want to ask?",
+  repair: RECOVERY_PUBLIC_CONTEXT,
+  status: "I'm here and replying. Trading is paused while the saved accounting is reconciled.",
+});
+type ConversationIntent = keyof typeof CONVERSATION;
+/** Exact phrases only; explicit asset syntax is parsed before this stateless small-talk lane. */
+function conversationIntent(text: string): ConversationIntent | "help" | null {
+  const phrase = text.toLowerCase().replace(/’/g, "'").replace(/\s+/g, " ").replace(/[!?.,]+$/, "").trim();
+  if (/^(?:h+i+|h+e+y+|h+e+l+o+)(?: there)?$/.test(phrase)) return "greeting";
+  if (["how are you", "how's it going", "are you there", "you there"].includes(phrase)) return "greeting";
+  if (/^g+m+$/.test(phrase) || phrase === "good morning") return "morning";
+  if (/^g+n+$/.test(phrase) || ["good night", "bye", "goodbye"].includes(phrase)) return "farewell";
+  if (/^thanks+$/.test(phrase) || ["thank you", "thankyou", "ty", "thx"].includes(phrase)) return "thanks";
+  if (["ok", "okay", "yes", "no", "sure", "cool", "sorry", "welcome"].includes(phrase)) return "ack";
+  if (/^(?:e+h+|h+u+h+)$/.test(phrase)) return "clarify";
+  if (["why", "what", "what do you mean", "what does that mean", "what was that", "explain"].includes(phrase)) return "repair";
+  if (["status", "are you back", "are you working", "are you online"].includes(phrase)) return "status";
+  return ["help", "/help"].includes(phrase) ? "help" : null;
+}
 const surroundingQuestion = (text: string, asset: string): boolean => text.replace(asset, " ").toLowerCase().replace(/[\/?.,!:'’()-]/g, " ").trim().split(/\s+/).filter(Boolean).every((word) => QUESTION_WORDS.has(word) || /^\d{1,3}[mhd]$/.test(word));
 
 export interface RecoveryPublicRequest {
@@ -31,14 +57,14 @@ export interface RecoveryPublicEvidence {
   readonly reference: Readonly<TgDeskAsk>;
 }
 export interface RecoveryPublicReply {
-  readonly kind: "public" | "unavailable" | "help" | "held";
+  readonly kind: "public" | "unavailable" | "help" | "held" | "conversation";
   /** Plain text: the caller must not enable Telegram markup parsing. */
   readonly text: string;
   readonly photo?: Uint8Array;
   readonly evidence?: RecoveryPublicEvidence;
 }
 export interface RecoveryPublicReplyDeps { look: RecoveryPublicLook; now?: () => number; }
-type Parsed = { ask: TgDeskAsk; lore: boolean } | "help" | "held";
+type Parsed = { ask: TgDeskAsk; lore: boolean } | "help" | "held" | ConversationIntent;
 
 /** No arbitrary URLs, fuzzy asset guessing, financial commands or implicit follow-up memory. */
 export function parseRecoveryPublicAsk(raw: string): Parsed {
@@ -59,6 +85,8 @@ export function parseRecoveryPublicAsk(raw: string): Parsed {
   if (named && surroundingQuestion(text, named[1]!)) return { ask: { kind: "coin", query: named[1]! }, lore };
   const suffix = /^([A-Za-z0-9][A-Za-z0-9._-]{0,15})\s+(?:chart|lore|story|description|entry)[?.!]*$/i.exec(text);
   if (suffix) return { ask: { kind: "coin", query: suffix[1]! }, lore };
+  const conversation = conversationIntent(text);
+  if (conversation) return conversation;
   return ticker(text) && !QUESTION_WORDS.has(text.toLowerCase()) && !CONVERSATION_WORDS.has(text.toLowerCase()) ? { ask: { kind: "coin", query: text }, lore: false } : "help";
 }
 
@@ -70,7 +98,10 @@ export function isRecoveryPublicRequest(text: string): boolean {
   return /\b(?:chart|lore|story|description|thoughts|opinion|take|check|analysis|entry|news)\b|\bwhat\s+about\b/i.test(text);
 }
 
-const fixed = (kind: "unavailable" | "help" | "held"): RecoveryPublicReply => Object.freeze({ kind, text: kind === "help" ? RECOVERY_PUBLIC_HELP : kind === "held" ? RECOVERY_PUBLIC_HELD : RECOVERY_PUBLIC_UNAVAILABLE });
+const fixed = (kind: "unavailable" | "help" | "held" | ConversationIntent): RecoveryPublicReply => {
+  if (kind === "unavailable" || kind === "help" || kind === "held") return Object.freeze({ kind, text: kind === "help" ? RECOVERY_PUBLIC_HELP : kind === "held" ? RECOVERY_PUBLIC_HELD : RECOVERY_PUBLIC_UNAVAILABLE });
+  return Object.freeze({ kind: "conversation", text: CONVERSATION[kind] });
+};
 const plain = (raw: unknown, max: number): string | null => typeof raw === "string" && raw.length <= max && !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/u.test(raw) ? raw.replace(/\s+/g, " ").trim() : null;
 const fresh = (at: number, now: number): boolean => Number.isSafeInteger(at) && at > 0 && at <= now && now - at <= MAX_FRESH_MS;
 const reference = (e: TgDeskEvidence, ask: TgDeskAsk): Readonly<TgDeskAsk> | null => {
