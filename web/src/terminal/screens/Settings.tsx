@@ -211,11 +211,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   ): string => {
     if (code === "key_rejected") {
       const whose =
-        source === "typed" ? "the one just typed" : source === "house" ? "the shared key" : "the saved key";
-      const where = provider.keyUrl ? ` — check it at ${provider.keyUrl.replace(/^https?:\/\//, "")}` : "";
-      return `the ${provider.label} key was refused (${whose}${where})`;
+        source === "typed" ? t("settings.msg.keyJustTyped") : source === "house" ? t("settings.msg.keySharedKey") : t("settings.msg.theSavedKey");
+      const where = provider.keyUrl ? t("settings.msg.keyCheckAt", { host: provider.keyUrl.replace(/^https?:\/\//, "") }) : "";
+      return t("settings.msg.keyRefused", { provider: provider.label, whose, where });
     }
-    return `couldn't reach ${provider.label} — check connection`;
+    return t("settings.msg.keyUnreachable", { provider: provider.label });
   };
   /**
    * This account standing against the Circle rule.
@@ -386,7 +386,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   // as the placeholder, so the masked value is never in an editable input.
   const urlPlaceholder = (k: keyof SettingsView["values"], fallback: string): string => {
     const stored = view?.values[k];
-    return typeof stored === "string" && stored ? `saved: ${stored}` : fallback;
+    return typeof stored === "string" && stored ? t("settings.msg.savedRedacted", { value: stored }) : fallback;
   };
 
   function toggleSymbol(sym: string) {
@@ -404,22 +404,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       decimals: Number(newToken.decimals),
     };
     if (!isValidCustomToken(candidate)) {
-      setTokenError("needs a short symbol, a full 0x… address (42 chars) and whole-number decimals");
+      setTokenError(t("settings.msg.needsAShortSymbol"));
       return;
     }
     // $MERRYMEN IS ENERGY, NOT A COIN TO TRADE. Every signer drops it from the
     // sealed tokens and the worker never watches it, so adding it here would
     // only produce a token that can never be covered, whatever gets re-signed.
     if (isEnergyReserveToken(candidate.address)) {
-      setTokenError(
-        "that's $MERRYMEN — your agent's energy, not a coin it trades, so it isn't added here. " +
-          "Ask your agent in chat to get its $MERRYMEN, or send it to the agent's account on Robinhood Chain.",
-      );
+      setTokenError(t("settings.msg.energyIsNotACoin"));
       return;
     }
     const current = tokens ?? (view?.values.customTokens as CustomToken[] | undefined) ?? [];
     if (current.some((t) => t.address.toLowerCase() === candidate.address.toLowerCase())) {
-      setTokenError(`${candidate.address.slice(0, 10)}… is already in the list`);
+      setTokenError(t("settings.msg.tokenAlreadyListed", { address: candidate.address.slice(0, 10) }));
       return;
     }
     setTokens([...current, candidate]);
@@ -511,12 +508,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       // ANOTHER AGENT HOLDS THIS BOT. Not an error in the form: a question for
       // the owner, asked beside the button they pressed. Nothing was saved.
       if (res.status === 409 && json.error === "bot_claimed") {
-        setBotClaimed(json.errors?.[0] ?? "This bot is already connected to another Merrymen agent.");
+        setBotClaimed(json.errors?.[0] ?? t("settings.msg.botClaimedFallback"));
         setStatus(null);
         return;
       }
       if (!res.ok) {
-        setErrors(json.errors ?? ["save failed"]);
+        setErrors(json.errors ?? [t("settings.msg.saveFailed")]);
         setStatus(null);
         return;
       }
@@ -578,8 +575,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       statusTimer.current = setTimeout(() => setStatus(null), 4000);
     } catch {
       setErrors([accepted
-        ? "Your save was accepted, but the saved settings could not be checked. Your edits are still shown. Reload Settings to confirm before renewing permission."
-        : "could not reach the settings API"]);
+        ? t("settings.msg.saveAcceptedUnverified")
+        : t("settings.msg.couldNotReachThe")]);
       setStatus(null);
     } finally {
       saveInFlight.current = false;
@@ -589,9 +586,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   if (view === null) {
     return (
       <AppShell>
-        <PageHeader title="Settings" />
+        <PageHeader title={t("settings.msg.settings")} />
         <div className="mm-wrap">
-          {loadError ? <><p role="alert" className="mm-note">Could not load your settings.</p><button className="mm-btn" onClick={()=>setLoadAttempt(x=>x+1)}>Try again</button></> : <p role="status" className="mm-note">Loading settings…</p>}
+          {loadError ? <><p role="alert" className="mm-note">{t("settings.text.couldNotLoadYour")}</p><button className="mm-btn" onClick={()=>setLoadAttempt(x=>x+1)}>{t("settings.text.tryAgain")}</button></> : <p role="status" className="mm-note">{t("settings.text.loadingSettings")}</p>}
         </div>
       </AppShell>
     );
@@ -618,7 +615,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   // note, this screen has no `tokenCoverage` union of its own to double-report.
   const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant, activeTokens);
   const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
-    s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
+    s.set ? t("settings.msg.savedWithHint", { hint: s.hint ?? "" }) : t("settings.msg.notSet");
 
   // ── AI provider (bring any key) ──────────────────────────────────────────
   // One picker drives which key/model fields show. Groq & Anthropic reuse their
@@ -684,20 +681,20 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const toggleCap = (c: string) =>
     setCaps(capsVal.includes(c) ? capsVal.filter((x) => x !== c) : [...capsVal, c]);
   const PC_CAPS: { id: string; label: string }[] = [
-    { id: "screen", label: "📸 screen" },
-    { id: "vision", label: "👁️ vision" },
-    { id: "apps", label: "🚀 apps & web" },
-    { id: "system", label: "⚙️ system" },
-    { id: "files", label: "📂 files" },
-    { id: "clipboard", label: "📋 clipboard" },
-    { id: "shell", label: "🖥️ shell" },
-    { id: "keyboard", label: "⌨️ keyboard" },
-    { id: "voice", label: "🎙️ voice" },
-    { id: "watchers", label: "👀 watchers" },
+    { id: "screen", label: t("settings.msg.screen") },
+    { id: "vision", label: t("settings.msg.vision") },
+    { id: "apps", label: t("settings.msg.appsWeb") },
+    { id: "system", label: t("settings.msg.system") },
+    { id: "files", label: t("settings.msg.files") },
+    { id: "clipboard", label: t("settings.msg.clipboard") },
+    { id: "shell", label: t("settings.msg.shell") },
+    { id: "keyboard", label: t("settings.msg.keyboard") },
+    { id: "voice", label: t("settings.msg.voice") },
+    { id: "watchers", label: t("settings.msg.watchers") },
   ];
 
   async function testTelegram() {
-    setTgTest("testing…");
+    setTgTest(t("settings.msg.testingState"));
     try {
       const res = await fetch("/api/telegram", {
         method: "POST",
@@ -705,10 +702,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
         body: JSON.stringify({ action: "test", token: draft.telegramBotToken || undefined }),
       });
       const j = (await res.json()) as { ok?: boolean; username?: string; reason?: string };
-      setTgTest(j.ok ? `✓ connected as @${j.username}` : `✗ ${j.reason ?? "failed"}`);
+      setTgTest(j.ok ? t("settings.msg.tgTestOk", { user: j.username ?? "" }) : t("settings.msg.tgTestFail", { reason: j.reason ?? t("settings.msg.failedWord") }));
       void loadTelegram();
     } catch {
-      setTgTest("✗ could not reach the API");
+      setTgTest(t("settings.msg.tgTestUnreachable"));
     }
   }
 
@@ -718,7 +715,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           page has ever had. Clicking Settings in the rail used to drop the
           reader onto a screen with no navigation at all and a brand mark as
           the only way back. */}
-      <PageHeader title="Settings" />
+      <PageHeader title={t("settings.msg.settings")} />
 
       {/* SAY IT, THEN APPROVE IT. The first thing on the page is the way most
           owners will change anything: describe it, see the before and after,
@@ -738,7 +735,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
       <fieldset className="mm-wrap" disabled={status === "saving…"} style={{ border: 0, minWidth: 0, margin: 0, padding: 0 }}>
         <p className="mm-note">
-            Leave an API key blank to keep the saved key.
+            {t("settings.text.leaveAnApiKey")}
         </p>
 
         {/* Setup steps live here after the /app muster is done — a quiet, honest
@@ -773,14 +770,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 />
                 <span className="mm-unit">
                   {liveTradingVal
-                    ? "ON — real orders, real money, within your signed caps"
-                    : "OFF — Paper mode: practising with simulated money at live prices"}
+                    ? t("settings.msg.onRealOrdersReal")
+                    : t("settings.msg.offPaperModePractising")}
                 </span>
               </span>
               <span className="mm-hint">
                 {liveTradingVal
-                  ? "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way."
-                  : "Nothing your agent does costs real money while this is off. Funding the account does NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does."}
+                  ? t("settings.msg.yourAgentPlacesReal")
+                  : t("settings.msg.nothingYourAgentDoes")}
               </span>
             </label>
           </div>
@@ -794,11 +791,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                Nothing warns about it anywhere else, and switching back is the
                only thing that restores it. */
             <p className="mm-hint" style={{ marginTop: 8 }}>
-              <b>If your agent holds positions bought with real funds, read this first.</b> In Paper
-              mode it stops managing them — no stop-loss, no take-profit, no exits — and the screen
-              shows its simulated book instead. The tokens stay in the account and nothing is sold;
-              they are simply left alone until you turn Live trading back on. If you want out of a
-              real position, close it first and switch afterwards.
+              <b>{t("settings.text.ifYourAgentHolds")}</b> {t("settings.text.inPaperModeIt")}
             </p>
           )}
           {liveTradingVal && !(view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
@@ -806,9 +799,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                but not yet pressed save, which is the last moment this sentence
                can still be useful to them. */
             <p className="mm-hint" style={{ marginTop: 8 }}>
-              <b>This spends real money.</b> Once you save, your agent can open positions with the
-              funds in its account, up to the per-trade and daily caps in the permission you signed.
-              It will not exceed those caps, and you can switch back to Paper at any time.
+              <b>{t("settings.text.thisSpendsRealMoney")}</b> {t("settings.text.onceYouSaveYour")}
             </p>
           )}
 
@@ -831,12 +822,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               live account. */}
           <div className="mm-section">{t("settings.section.whatItTrades")}</div>
           <div id="trencher-setup" className="mm-hint" aria-labelledby="trencher-mode">
-            <b id="trencher-mode">Trencher mode · fast memecoin setup</b>
-            <p>Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells.
-              Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds.
-              New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.</p>
-            <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
-              With Autonomous Trencher permission, it finds verified pool tokens itself; no custom-token list is required. Existing positions remain monitored for exits.</p>
+            <b id="trencher-mode">{t("settings.text.trencherModeFastMemecoin")}</b>
+            <p>{t("settings.text.yourMerrymanTracksActive")}</p>
+            <p>{t("settings.text.entriesRemain5Subject")}</p>
             <button type="button" className="mm-btn" disabled={status === "saving…"} onClick={() => {
               setAssetMode("crypto");
               setOfficialCoins(true);
@@ -849,14 +837,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               setSettingsVerified(false);
               setStatus(null);
               setErrors([]);
-            }}>Prepare Trencher mode</button>
+            }}>{t("settings.text.prepareTrencherMode")}</button>
             {trencherPrepared && hasUnsavedChanges && <p role="status">{trencherPresetSelected
-              ? "Trencher settings prepared. Save settings to apply them. Selected: Trencher strategy, crypto, coin discovery, fast exits and 15-second checks."
-              : "You have unsaved settings. Save settings to apply your changes."}</p>}
+              ? t("settings.text.trencherPresetReady")
+              : t("settings.text.unsavedSettingsSave")}</p>}
             <label className="mm-field">
               <span className="mm-input"><input type="checkbox" style={{ width: "auto" }}
                 checked={trencherFast ?? view.values.trencherFastEnabled ?? d.trencherFastEnabled}
-                onChange={event => setTrencherFast(event.target.checked)} />Use fast Trencher exits</span>
+                onChange={event => setTrencherFast(event.target.checked)} />{t("settings.text.useFastTrencherExits")}</span>
               <span className="mm-hint">{t("settings.hint.appliesWhenTheStrategy")}</span>
             </label>
             {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN, NOW BESIDE ITS OWN EXPLANATION.
@@ -887,23 +875,22 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
+                  {trencherLiveVal ? t("settings.msg.trencherCanOpenReal") : t("settings.msg.paperOnly")}
                 </span>
               </span>
               <span className="mm-hint">{t("settings.hint.allowsLiveTrencherTrades")}</span>
             </label>
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
-              You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
+              {t("settings.text.youDoNotNeed")}
             </p>}
-            <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>Save settings</button>
-            <p className="mm-hint">Saves all changes on this page. Preparing settings does not turn on real-money trading or change your signed limits.</p>
-            {status === "saving…" && <p role="status">Saving settings…</p>}
-            {settingsVerified && !hasUnsavedChanges && <p role="status">Settings saved. <Link href="/grant#resign">Review trading permission</Link> to check Autonomous Trencher access.</p>}
+            <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>{t("settings.msg.saveSettings")}</button>
+            <p className="mm-hint">{t("settings.text.savesAllChangesPage")}</p>
+            {status === "saving…" && <p role="status">{t("settings.msg.savingSettingsLong")}</p>}
+            {settingsVerified && !hasUnsavedChanges && <p role="status">{t("settings.text.settingsSavedLead")}<Link href="/grant#resign">{t("settings.link.reviewTradingPermission")}</Link>{t("settings.text.checkTrencherAccessTail")}</p>}
             {errors.length > 0 && <div className="mm-danger" role="alert">{errors.map((error, i) => <div key={i}>{error}</div>)}</div>}
-            {botClaimed && <p className="mm-danger" role="alert">{botClaimed} Nothing has been saved. Resolve the bot choice at the bottom of this page, then save again.</p>}
-            <p>After saving, review your trading permission and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
-              Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
-            <p>Already saved and renewed? Preparation does not force a trade. The agent still waits for an eligible pool and fresh Brain approval within your limits. Check your agent’s status for a pause, expired permission or accounting blocker.</p>
+            {botClaimed && <p className="mm-danger" role="alert">{botClaimed} {t("settings.text.nothingSavedResolve")}</p>}
+            <p>{t("settings.text.afterSavingReviewPre")}{t("settings.text.andSelectAutonomousTrencher")}</p>
+            <p>{t("settings.text.alreadySavedRenewed")}</p>
           </div>
           <div className="mm-grid">
             <label className="mm-field">
@@ -913,17 +900,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   value={assetModeVal}
                   onChange={(e) => setAssetMode(e.target.value as "all" | "stocks" | "crypto")}
                 >
-                  <option value="all">All assets</option>
-                  <option value="stocks">Stocks only</option>
-                  <option value="crypto">Crypto only</option>
+                  <option value="all">{t("settings.text.allAssets")}</option>
+                  <option value="stocks">{t("settings.text.stocksOnly")}</option>
+                  <option value="crypto">{t("settings.text.cryptoOnly")}</option>
                 </select>
               </span>
               <span className="mm-hint">
                 {assetModeVal === "stocks"
-                  ? "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket."
+                  ? t("settings.msg.onlyTokenisedEquitiesAnd")
                   : assetModeVal === "crypto"
-                    ? "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought."
-                    : "Everything your basket and your signed permission allow."}
+                    ? t("settings.msg.onlyCoinsStocksIn")
+                    : t("settings.msg.everythingYourBasketAnd")}
               </span>
             </label>
           </div>
@@ -932,9 +919,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                leg's weight, and even-keel acts on a 500bps band — so this is a
                dropdown that moves real money for some owners. */
             <p className="mm-hint" style={{ marginTop: 8 }}>
-              Anything you already hold stays priced, valued and sellable — including its
-              stop-loss and take-profit. This only changes what your agent may <b>buy</b>.
-              {activeSymbols.length > 0 && " If it leaves you with nothing to buy, your agent will say so rather than going quiet."}
+              {t("settings.text.anythingYouAlreadyHold")} <b>{t("settings.text.buyVerb")}</b>.
+              {activeSymbols.length > 0 && t("settings.msg.ifItLeavesYou")}
             </p>
           )}
 
@@ -943,7 +929,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               page should be "wayyyy easier"; most of this block is the AI
               provider's plumbing, and the parts most owners change — the
               strategy, the name — can be changed by saying so at the top. */}
-          <details className="settings-group" id="agent-settings"><summary>{t("settings.section.agentSettings")} — name, picture, strategy and AI provider</summary>
+          <details className="settings-group" id="agent-settings"><summary>{t("settings.section.agentSettings")}{t("settings.text.agentSettingsTail")}</summary>
           <div className="mm-section">{t("settings.section.agentSettings")}</div>
           <div className="mm-grid">
             {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
@@ -959,8 +945,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             {/* ── AI provider · bring any key ──────────────────────────── */}
               <Field
                 label={t("settings.label.aiProvider")}
-                action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
-                hint={hosted ? "Optional. Add your own provider for chat and the Strategist." : "Required for chat and the Strategist."}
+                action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? t("settings.msg.getAKey") : t("settings.msg.installAction") } : undefined}
+                hint={hosted ? t("settings.msg.optionalOwnProvider") : t("settings.msg.requiredForChatAnd")}
               >
                 <select value={llmProviderVal} onChange={(e) => setDraft((d) => ({ ...d, ...providerChange(e.target.value) }))}>
                   {providers.map((p) => (
@@ -976,8 +962,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               </Field>
               {providerNeedsKey && (
                 <Field
-                  label={`${prov.label} API key`}
-                  action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
+                  label={t("settings.msg.providerApiKey", { provider: prov.label })}
+                  action={prov.keyUrl ? { href: prov.keyUrl, label: t("settings.msg.getAKey") } : undefined}
                 >
                   <input
                     type="password"
@@ -988,7 +974,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   />
                   {(providerKeyView.set || !!draft[providerKeyField]) && (
                     <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
-                      {hosted ? "Use shared key" : "Clear key"}
+                      {hosted ? t("settings.msg.useSharedKey") : t("settings.msg.clearKey")}
                     </button>
                   )}
                 </Field>
@@ -1002,18 +988,18 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               )}
               <Field
                 label={t("settings.label.model")}
-                hint={`Leave blank to use the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.`}
+                hint={t("settings.hint.leaveBlankProviderDefault", { model: prov.defaultModel ? ` (${prov.defaultModel})` : "" })}
               >
                 {modelsLoading ? (
-                  <span className="mm-loading">listing models…</span>
+                  <span className="mm-loading">{t("settings.text.listingModels")}</span>
                 ) : availableModels.length > 0 ? (
                   <select
                     value={providerModelVal}
                     onChange={setProviderModel}
                   >
-                    <option value="">default{prov.defaultModel ? ` (${prov.defaultModel})` : ""}</option>
+                    <option value="">{t("settings.msg.defaultModelOption", { model: prov.defaultModel ? ` (${prov.defaultModel})` : "" })}</option>
                     {providerModelVal && !availableModels.includes(providerModelVal) && (
-                      <option value={providerModelVal}>{providerModelVal} (saved; not in this provider's list)</option>
+                      <option value={providerModelVal}>{t("settings.msg.savedModelNotListed", { model: providerModelVal })}</option>
                     )}
                     {availableModels.map((m) => (
                       <option key={m} value={m}>{m}</option>
@@ -1022,7 +1008,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 ) : (
                   <input
                     type="text"
-                    placeholder={prov.defaultModel || "model id"}
+                    placeholder={prov.defaultModel || t("settings.msg.modelId")}
                     value={providerModelVal}
                     onChange={setProviderModel}
                   />
@@ -1035,7 +1021,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <>
             <Field
                 label={t("settings.label.pimlicoApiKey")}
-                action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
+                action={{ href: "https://dashboard.pimlico.io", label: t("settings.msg.getAFreeKey") }}
                 hint={t("settings.hint.requiredForRealTrading")}
               >
                 <input
@@ -1046,7 +1032,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 />
                 {view.bundlerApiKey.set && (
                   <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
-                    clear
+                    {t("settings.msg.clearShort")}
                   </button>
                 )}
               </Field>
@@ -1092,13 +1078,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                         census in app/settings/honesty.test.ts counts the literal
                         string, and it is more useful dumb than clever.) */}
                     {s}
-                    {isCircleStrategyId(s) ? " · holders only" : ""}
+                    {isCircleStrategyId(s) ? t("settings.msg.holdersOnlySuffix") : ""}
                   </option>
                 ))}
-                {view.strategies.custom.length > 0 && <option disabled>── your strategies ──</option>}
+                {view.strategies.custom.length > 0 && <option disabled>{t("settings.text.yourStrategies")}</option>}
                 {view.strategies.custom.map((s) => (
                   <option key={s} value={s}>
-                    {s} (custom)
+                    {t("settings.msg.customStrategyOption", { name: s })}
                   </option>
                 ))}
               </select>
@@ -1113,21 +1099,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               tier.why !== "sign-in" &&
               !tier.bonusStrategies && (
                 <div className="create-locked" role="status">
-                  <strong>That one won&apos;t run yet.</strong>
+                  <strong>{t("settings.text.thatOneWonT")}</strong>
                   {tier.why === "unreadable" ? (
                     <p>
-                      We couldn&apos;t read your $MERRYMEN balance just now, so we can&apos;t tell
-                      whether it will run. That&apos;s our read failing, not your wallet.
+                      {t("settings.text.weCouldnTRead")}
                     </p>
                   ) : (
                     /* THE COMBINED FIGURE, the one the worker counts — the
                        owner's wallet and this agent's account together — and
                        a dash for a count nobody read, never `?? 0`. */
                     <p>
-                      Your wallet and your agent&apos;s account hold {count(tier.tokens)} $MERRYMEN and it
-                      needs {count(tier.needTokens)}. Until you hold enough it opens nothing new and leaves
-                      its basket as it is; positions in a class vault are still closed by their own exit
-                      rules. Saving this won&apos;t change that.
+                      {t("settings.text.holdingShortfall", { have: count(tier.tokens), need: count(tier.needTokens) })}
                     </p>
                   )}
                 </div>
@@ -1140,17 +1122,16 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               sentence — never raw provider text. */}
           {modelsError === "missing_key" && (
             <p role="status" className="mm-hint">
-              Enter a {prov.label} API key above to load the model list — or just type a model id below.
+              {t("settings.msg.enterApiKeyForModels", { provider: prov.label })}
             </p>
           )}
           {modelsError && modelsError !== "missing_key" && (
             <p role="status" className="mm-danger">
-              Could not load the model list — {modelsError}.{" "}
-              You can still type a model name below and save; the list is a convenience, not a requirement.
+              {t("settings.msg.modelListFailed", { error: modelsError })}
             </p>
           )}
           </details>
-          <details className="settings-group" id="trading-basket"><summary>{t("settings.section.tradingBasket")} — which stocks it may buy</summary>
+          <details className="settings-group" id="trading-basket"><summary>{t("settings.section.tradingBasket")}{t("settings.text.tradingBasketTail")}</summary>
           <div className="mm-section">{t("settings.section.tradingBasket")}</div>
           {/* GROUPED, because one undifferentiated run of chips is what an owner
               meant by "trading basket in settings is full of all stocks". It was
@@ -1159,8 +1140,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               one was his. Two headed groups cost nothing and answer that. */}
           {(
             [
-              ["Stocks & ETFs", view.knownSymbols],
-              ["Coins", activeTokens.map((t) => t.symbol)],
+              [t("settings.msg.stocksEtfs"), view.knownSymbols],
+              [t("settings.msg.coins"), activeTokens.map((t) => t.symbol)],
             ] as const
           ).map(([heading, syms]) => (
             <div key={heading}>
@@ -1192,15 +1173,15 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           ))}
           <div className="mm-hint">
             {activeSymbols.length === 0
-              ? "select at least one symbol (empty falls back to the default basket)"
-              : `trading ${activeSymbols.join(" · ")}`}
+              ? t("settings.msg.selectAtLeastOne")
+              : t("settings.msg.tradingListPreview", { list: activeSymbols.join(" · ") })}
           </div>
           {/* Selecting a symbol the signed key can't sell used to mean buying a
               position with no exit. The buy is refused now, but say why here —
               at the moment of choosing — rather than in the event feed later. */}
           {unsellable.length > 0 && (
             <div className="mm-danger">
-              Update your <Link href="/grant">trading permissions</Link> to buy or sell <b>{unsellable.join(", ")}</b>.
+              {t("settings.text.updateYour")}<Link href="/grant">{t("settings.text.tradingPermissions")}</Link>{t("settings.text.toBuyOrSell")}<b>{unsellable.join(", ")}</b>.
             </div>
           )}
           </details>
@@ -1211,16 +1192,16 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               Adding one here does NOT make it tradable — the tradable list is
               sealed into the signed key — so the /grant re-sign is spelled out
               rather than left to be discovered as a reverted trade. */}
-          <details className="settings-group"><summary>Custom tokens & discovery</summary>
+          <details className="settings-group"><summary>{t("settings.text.customTokensDiscovery")}</summary>
           {activeTokens.length > 0 && (
             <div className="mm-rows">
-              {activeTokens.map((t) => (
-                <div key={t.address.toLowerCase()} className="mm-row mono">
-                  <b>{t.symbol}</b>
-                  <span className="addr">{t.address}</span>
-                  <span className="dim">{t.decimals}dp</span>
-                  <button type="button" className="copy-btn" onClick={() => removeToken(t.address)}>
-                    remove
+              {activeTokens.map((tok) => (
+                <div key={tok.address.toLowerCase()} className="mm-row mono">
+                  <b>{tok.symbol}</b>
+                  <span className="addr">{tok.address}</span>
+                  <span className="dim">{tok.decimals}dp</span>
+                  <button type="button" className="copy-btn" onClick={() => removeToken(tok.address)}>
+                    {t("settings.msg.removeTokenBtn")}
                   </button>
                 </div>
               ))}
@@ -1260,11 +1241,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               onChange={(e) => setTradeNewToken(e.target.checked)}
             />
             <span>
-              Trade this one too — add it to the trading basket, not just the watch list.
+              {t("settings.text.tradeThisOneToo")}
             </span>
           </label>
           <button type="button" className="copy-btn" onClick={addToken}>
-            add token
+            {t("settings.text.addToken")}
           </button>
           {tokenError && <div className="mm-danger">{tokenError}</div>}
 
@@ -1300,16 +1281,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               up doing everything he was told and getting nowhere. This said
               "save your tokens, then update trading permissions" and omitted
               the basket entirely — the one gate that was invisible. */}
-          <div className="mm-hint">{t("settings.hint.threeThingsHaveTo")}<b>in your trading basket</b> above (the checkbox does that when you
-            add it), you&apos;ve <b>saved</b>, and your{" "}
-            <Link href="/grant">trading permission</Link> covers it — re-sign after
-            saving, and it will. Adding a token on its own only means &ldquo;watch this&rdquo;.
-          </div>
+          <div className="mm-hint">{t("settings.hint.threeThingsHaveTo")}<b>{t("settings.text.inYourTradingBasket")}</b> {t("settings.text.aboveTheCheckboxDoes")} <b>{t("settings.text.savedWord")}</b>{t("settings.text.andYourFrag")}<Link href="/grant">{t("settings.text.tradingPermission")}</Link>{" "}{t("settings.text.coversItReSign")}</div>
 
           {/* ── DISCOVERY ──────────────────────────────────────────────────
               Read-only and message-only. Worth surfacing next to the token
               editor because the action it prompts is "add a token here". */}
-          <div className="mm-subtle mono">discovery · new pairs as they launch</div>
+          <div className="mm-subtle mono">{t("settings.text.discoveryNewPairsAs")}</div>
           <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">{t("settings.label.watchForNewPairs")}</span>
@@ -1321,7 +1298,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {discoveryEnabledVal ? "tells you when something launches" : "off"}
+                  {discoveryEnabledVal ? t("settings.msg.tellsYouWhenLaunches") : t("settings.msg.offState")}
                 </span>
               </span>
               <span className="mm-hint">{t("settings.hint.requiresABitqueryKey")}</span>
@@ -1350,19 +1327,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                       with no verified listing, and is a different fact from
                       'official coins are turned off' — which is a setting." */}
                   {!officialCoinsVal
-                    ? "stocks only"
+                    ? t("settings.text.stocksOnly")
                     : listedCoins.length > 0
-                      ? `${listedCoins.length} in your basket: ${listedCoins.join(", ")}`
-                      : "on — but none are listed on this chain yet"}
+                      ? t("settings.msg.officialCoinsInBasket", { count: String(listedCoins.length), list: listedCoins.join(", ") })
+                      : t("settings.msg.onButNoneAre")}
                 </span>
               </span>
               <span className="mm-hint">
                 {listedCoins.length > 0
-                  ? "Verified coins we publish, watched and traded without you adding them. Coins trade"
-                  : "When we publish verified coins on this chain they appear here automatically. There are none yet, so this setting changes nothing today. Coins trade"}{" "}
-                around the clock, so your agent keeps working when the stock market is shut. Your
-                caps, budgets and trading permissions still apply — and a coin listed after you
-                signed needs renewal at /grant before your key can touch it. Revocation requires network fees.
+                  ? t("settings.msg.verifiedCoinsWePublish")
+                  : t("settings.msg.whenWePublishVerified")}{" "}
+                {t("settings.text.verifiedCoinsTrailing")}
               </span>
             </label>
             <Field
@@ -1376,16 +1351,15 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               />
             </Field>
           </div>
-          <div className="mm-hint">{t("settings.hint.discoverySendsAlertsAutonomous")}<Link href="/grant">trading permission</Link>. The individual-token route still requires adding and authorizing each token.
-          </div>
+          <div className="mm-hint">{t("settings.hint.discoverySendsAlertsAutonomous")}<Link href="/grant">{t("settings.text.tradingPermission")}</Link>{t("settings.text.theIndividualTokenRoute")}</div>
 
           {/* ── SCOUT MODE ─────────────────────────────────────────────────
               The one place merrymen will knowingly hold something it cannot
               value. The copy has to be blunt about what that costs, because
               the usual safety net genuinely does not apply here. */}
-          <div className="mm-subtle mono">scout mode · buying what can&apos;t be priced yet</div>
+          <div className="mm-subtle mono">{t("settings.text.scoutModeBuyingWhat")}</div>
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost.
+            {t("settings.text.buyTokensWithoutA")}
           </p>
           <div className="mm-grid">
             <label className="mm-field">
@@ -1399,8 +1373,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 />
                 <span className="mm-unit">
                   {deskEnabledVal
-                    ? "the strategist looks things up before it commits"
-                    : "off — one shot from a fixed set of numbers"}
+                    ? t("settings.msg.theStrategistLooksThings")
+                    : t("settings.msg.offOneShotFrom")}
                 </span>
               </span>
               <span className="mm-hint">{t("settings.hint.llmStrategistOnlyOn")}</span>
@@ -1415,7 +1389,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {scoutEnabledVal ? "may buy unpriceable tokens, up to the budget" : "off — unpriceable tokens are never bought"}
+                  {scoutEnabledVal ? t("settings.msg.mayBuyUnpriceable") : t("settings.msg.offUnpriceableTokensAre")}
                 </span>
               </span>
             </label>
@@ -1443,16 +1417,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             </Field>
           </div>
           <div className="mm-danger">
-            <b>The drawdown breaker cannot protect this money.</b> These positions stay valued at
-            purchase cost even if they lose value, so if one goes to zero your equity will not show
-            it and the breaker will not fire. <b>The budget is the risk control here</b>, not the
-            breaker — set it to what you have decided you can lose.
+            <b>{t("settings.text.theDrawdownBreakerCannot")}</b> {t("settings.text.thesePositionsStayValued")}{" "}
+            <b>{t("settings.text.theBudgetIsThe")}</b>{t("settings.text.notTheBreakerTail")}
             {scoutEnabledVal && Number(v("scoutBudgetUsdg") || d.scoutBudgetUsdg) === 0 && (
               <>
                 <br />
                 <br />
-                Scout mode is on but the budget is <b>0</b>, so nothing will be bought. Set a budget
-                or turn it back off.
+                {t("settings.text.scoutModeIsOn")} <b>0</b>{t("settings.text.soNothingWillBe")}
               </>
             )}
           </div>
@@ -1475,12 +1446,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               owner sent here looking for launchpad buying found nothing by
               that name. #launchpad-buying is where the chat's button lands,
               and the effect above opens this group for it. */}
-          <div className="mm-subtle mono" id="launchpad-buying">launchpad buying · class route · buying a coin nobody listed</div>
+          <div className="mm-subtle mono" id="launchpad-buying">{t("settings.text.launchpadBuyingPre")} · {t("settings.text.classRouteBuyingA")}</div>
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Buy a coin straight off a Pons launchpad&apos;s bonding curve, held in your own vault so
-            it can be sold again. It buys nothing until scout mode above is on, with its budget and max
-            per token each at least one entry; live trading is on; and a class vault factory is set in
-            Connections, with your key re-signed after.
+            {t("settings.text.buyATokenStraight")}
           </p>
           <div className="mm-grid">
             <label className="mm-field">
@@ -1493,7 +1461,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {classSnipeVal ? "may buy newly launched coins" : "off — no coin is bought unless you listed it"}
+                  {classSnipeVal ? t("settings.msg.mayBuyNewCoins") : t("settings.msg.offNoCoinIs")}
                 </span>
               </span>
               <span className="mm-hint">{t("settings.hint.separateFromSealingA")}</span>
@@ -1537,14 +1505,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           </div>
           {classSnipeVal && Number(v("classPerEntryUsdg") || d.classPerEntryUsdg) === 0 && (
             <div className="mm-danger">
-              The class route is on but the size is <b>0</b>, so nothing will be bought. Two
-              switches rather than one, because they fail differently — set a size or turn the
-              route back off.
+              {t("settings.text.theClassRouteIs")} <b>0</b>{t("settings.text.soNothingWillBe2")}
             </div>
           )}
 
           </details>
-          <details className="settings-group" id="telegram"><summary>Telegram</summary>
+          <details className="settings-group" id="telegram"><summary>{t("settings.text.telegram")}</summary>
           {/* THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT.
 
               These were in two different collapsed drawers: this sentence
@@ -1558,18 +1524,16 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               its next pass after a token is saved, so the copy says that
               rather than claiming there is no code. */}
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Create a bot with @BotFather and add its token below.
+            {t("settings.text.createABotWith")}
           </p>
           <TelegramListeningNote row={telegramRow(tg)} />
           {tg?.linkCode ? (
-            <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
+            <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code>{t("settings.hint.linkCodeToBot")}{" "}
               {tg.botUsername ? (
-                <a href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noreferrer">Open Telegram →</a>
+                <a href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noreferrer">{t("settings.text.openTelegram")}</a>
               ) : null}
               <br />
-              {/* A BEARER CREDENTIAL. `/link <code>` is accepted from ANY chat,
-                  first come, and grants control of this agent. */}
-              Anyone who has this code can control your agent — do not share or screenshot it.
+              {t("strip.tg.codeWarning")}
             </p>
           ) : (
             <p className="mm-hint">
@@ -1583,8 +1547,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 : tg?.linkPending && tg.enabled
                 ? t("settings.tg.pickingUp")
                 : view.telegramBotToken.set
-                  ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
-                  : "Your link code appears here once a token is saved."}
+                  ? t("settings.msg.noLinkCodeYet")
+                  : t("settings.msg.yourLinkCodeAppears")}
             </p>
           )}
           <div className="mm-grid">
@@ -1600,13 +1564,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               />
               {view.telegramBotToken.set && (
                 <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
-                  clear
+                  {t("settings.msg.clearShort")}
                 </button>
               )}
             </Field>
             <Field label={t("settings.label.connection")}>
               <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
-                test connection
+                {t("settings.text.testConnection")}
               </button>
               {/* AN UNREAD BRIDGE IS NOT A MISSING TOKEN.
 
@@ -1626,7 +1590,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 {/* WHAT THE SWITCH SAYS, NOT WHAT WAS HEARD. "the bot is
                     listening" was printed here for a bot nothing had polled in
                     days; whether it is heard is the connection field above. */}
-                <span className="mm-unit">{tgEnabledVal ? "on" : "off"}</span>
+                <span className="mm-unit">{tgEnabledVal ? t("settings.msg.onState") : t("settings.msg.offState")}</span>
               </span>
             </label>
           </div>
@@ -1642,7 +1606,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.hangOutInTelegramGroups")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgGroupsVal} onChange={(e) => setTgGroups(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgGroupsVal ? "answers when called, joins in now and then" : "silent in every group"}</span>
+                <span className="mm-unit">{tgGroupsVal ? t("settings.msg.answersWhenCalled") : t("settings.msg.silentInGroups")}</span>
               </span>
               <span className="mm-hint">{t("settings.hint.hangOutInTelegramGroups")}</span>
             </label>
@@ -1650,7 +1614,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.lookAtCoinsPeoplePost")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgGroupCoinsVal} onChange={(e) => setTgGroupCoins(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgGroupCoinsVal ? "looks, then its Brain decides" : "leaves coins alone"}</span>
+                <span className="mm-unit">{tgGroupCoinsVal ? t("settings.msg.looksThenBrain") : t("settings.msg.leavesCoinsAlone")}</span>
               </span>
               <span className="mm-hint">{t("settings.hint.lookAtCoinsPeoplePost")}</span>
             </label>
@@ -1693,14 +1657,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               is saved by "Save changes". The owner it sends is the one this
               form was read for (SettingsView.owner). */}
           {hosted === true && (
-            <details className="settings-group" id="x-posting"><summary>Posting on X</summary>
+            <details className="settings-group" id="x-posting"><summary>{t("settings.text.postingOnX")}</summary>
               <XPosting owner={view.owner} hosted={hosted} />
             </details>
           )}
 
           {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
           <details className="mm-advanced">
-            <summary>Advanced settings</summary>
+            <summary>{t("settings.text.advancedSettings")}</summary>
 
             <div className="mm-section">{t("settings.section.telegramControls")}</div>
             <div className="mm-grid">
@@ -1708,7 +1672,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.allowControlCommands")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgControlVal} onChange={(e) => setTgControl(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgControlVal ? "pause/strategy/trade/kill" : "read + chat only"}</span>
+                <span className="mm-unit">{tgControlVal ? t("settings.msg.controlCommandList") : t("settings.msg.readChatOnly")}</span>
               </span>
               <span className="mm-hint">{t("settings.hint.offTheBotCan")}</span>
             </label>
@@ -1724,7 +1688,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.allowTransfers")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgTransferVal} onChange={(e) => setTgTransfer(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
+                <span className="mm-unit">{tgTransferVal ? t("settings.msg.transferWithConfirm") : t("settings.msg.offState")}</span>
               </span>
               <span className="mm-hint">{t("settings.hint.requiresExistingTransferPermission")}</span>
             </label>
@@ -1740,7 +1704,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.proactivePings")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgNotifyVal} onChange={(e) => setTgNotify(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgNotifyVal ? "trade pings + warnings + daily report" : "quiet"}</span>
+                <span className="mm-unit">{tgNotifyVal ? t("settings.msg.tradePingsWarnings") : t("settings.msg.quietWord")}</span>
               </span>
               <span className="mm-hint">{t("settings.hint.theBotMessagesYou")}</span>
             </label>
@@ -1750,11 +1714,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 hint={t("settings.hint.batchTheRoutineTrade")}
               >
                 <select value={v("telegramNotifyEveryMin") || "0"} onChange={set("telegramNotifyEveryMin")}>
-                  <option value="0">Every trade</option>
-                  <option value="5">A summary every 5 minutes</option>
-                  <option value="15">A summary every 15 minutes</option>
-                  <option value="30">A summary every 30 minutes</option>
-                  <option value="60">A summary every hour</option>
+                  <option value="0">{t("settings.text.everyTrade")}</option>
+                  <option value="5">{t("settings.text.aSummaryEvery5")}</option>
+                  <option value="15">{t("settings.text.aSummaryEvery15")}</option>
+                  <option value="30">{t("settings.text.aSummaryEvery30")}</option>
+                  <option value="60">{t("settings.text.aSummaryEveryHour")}</option>
                 </select>
               </Field>
             )}
@@ -1770,21 +1734,21 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <div className="mm-hint" style={{ marginTop: 4 }}>
             {tg?.linkCode ? (
               <>
-                link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
+                {t("settings.text.linkCode")} <b className="mono">{tg.linkCode}</b> {t("settings.text.send")} <code>/link {tg.linkCode}</code> {t("settings.text.fromTelegram")}
               </>
             ) : tg?.botElsewhere ? (
               t("settings.tg.elsewhereShort")
             ) : tg?.linkPending && tg.enabled ? (
               t("settings.tg.pickingUp")
             ) : (
-              "save a token to generate your link code"
+              t("settings.msg.saveATokenTo")
             )}
           </div>
           {/* The same warning where the code is repeated: this one is read on
               its own, far from the first. */}
           <TelegramListeningNote row={telegramRow(tg)} />
           <div className="mm-chips" style={{ marginTop: 6 }}>
-            {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
+            {allowlistVal.length === 0 && <span className="dim mono">{t("settings.text.noLinkedChatsYet")}</span>}
             {allowlistVal.map((id) => (
               <span key={id} className="mm-toggle on">
                 {id}
@@ -1800,7 +1764,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             <input
               type="text"
               inputMode="numeric"
-              placeholder="add chat id…"
+              placeholder={t("settings.msg.addChatId")}
               className="mono"
               style={{ width: 120, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
               onKeyDown={(e) => {
@@ -1817,17 +1781,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           {/* ── remote control · your PC (OpenClaw-style) ─────────────────── */}
           <div className="mm-section">{t("settings.section.computerAccess")}</div>
           <div className="mm-danger" style={{ marginBottom: 12 }}>
-            <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
-            screenshots, open apps, browse a folder you pick, and — if you enable them — run
-            allowlisted shell commands and type keystrokes. Everything is <b>off by default</b>,
-            enabled one capability at a time, and the sharp ones (shell, keyboard, files, power)
-            always ask you to <code>/confirm</code> first. Only turn on what you want.
+            <b>{t("settings.text.thisLetsTelegramTouch")}</b> {t("settings.text.withItOnAn")} <b>{t("settings.text.offByDefault")}</b>{t("settings.text.enabledOneCapabilityAt")} <code>{t("settings.text.confirm")}</code> {t("settings.text.firstOnlyTurnOn")}
           </div>
           <label className="mm-field">
             <span className="mm-label">{t("settings.label.enableRemoteControl")}</span>
             <span className="mm-input">
               <input type="checkbox" checked={pcEnabledVal} onChange={(e) => setPcEnabled(e.target.checked)} style={{ width: "auto" }} />
-              <span className="mm-unit">{pcEnabledVal ? "ON — capabilities below apply" : "off — no PC command runs"}</span>
+              <span className="mm-unit">{pcEnabledVal ? t("settings.msg.onCapabilitiesApply") : t("settings.msg.offNoPcCommand")}</span>
             </span>
             <span className="mm-hint">{t("settings.hint.theMasterSwitchOff")}</span>
           </label>
@@ -1866,12 +1826,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
           {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard")) && (
             <div className="mm-danger">
-              ⚠️ <b>This is remote control of your computer.</b> <b>Keyboard</b> types keystrokes into
-              whatever window is focused, and <b>shell</b> runs your allowlisted commands — together
-              they can do essentially anything you can. Allowlisting an <b>interpreter</b> (python,
-              node, bash, powershell, git…) hands over <b>everything that program can do</b>, not just
-              one command. Only enable these on a machine you trust, keep the shell allowlist as
-              narrow as possible, and note each one still asks for <code>/confirm</code> first.
+              ⚠️ <b>{t("settings.text.thisIsRemoteControl")}</b> <b>{t("settings.text.keyboard")}</b> {t("settings.text.typesKeystrokesIntoWhatever")} <b>{t("settings.text.shellWord")}</b> {t("settings.text.runsYourAllowlistedCommands")} <b>{t("settings.text.interpreterWord")}</b> {t("settings.text.pythonNodeBashPowershell")} <b>{t("settings.text.everythingThatProgramCan")}</b>{t("settings.text.notJustOneCommand")} <code>{t("settings.text.confirm")}</code> {t("settings.text.first")}
             </div>
           )}
 
@@ -1887,10 +1842,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 disabled={!pcEnabledVal}
               />
               <span className="mm-unit">
-                {!pcEnabledVal ? "needs remote control ON" : agentEnabledVal ? "ON — /agent works multi-step tasks" : "off"}
+                {!pcEnabledVal ? t("settings.msg.needsRemoteControlOn") : agentEnabledVal ? t("settings.msg.onAgentMultistep") : t("settings.msg.offState")}
               </span>
             </span>
-            <span className="mm-hint">{t("settings.hint.sendATaskWith")}<code>/agent</code>. It uses your enabled capabilities. Send <b>stop</b> to halt it.
+            <span className="mm-hint">{t("settings.hint.sendATaskWith")}<code>{t("settings.text.agent")}</code>{t("settings.text.itUsesYourEnabled")} <b>{t("settings.text.stopWord")}</b> {t("settings.text.toHaltIt")}
             </span>
           </label>
           {agentEnabledVal && pcEnabledVal && (
@@ -1904,17 +1859,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                     onChange={(e) => setAgentAutoShell(e.target.checked)}
                     style={{ width: "auto" }}
                   />
-                  <span className="mm-unit">{agentAutoShellVal ? "ON — beyond the allowlist, no per-command confirm" : "off — allowlist only"}</span>
+                  <span className="mm-unit">{agentAutoShellVal ? t("settings.msg.onBeyondAllowlist") : t("settings.msg.offAllowlistOnly")}</span>
                 </span>
                 <span className="mm-hint">{t("settings.hint.offAgentMayOnly")}</span>
               </label>
               {agentAutoShellVal && (
                 <div className="mm-danger">
-                  <b>Free-form shell is remote code execution by an AI.</b> Your agent can control
-                  this computer without asking for each action — running commands, typing, and
-                  opening links. It may damage files or expose private information. The destructive
-                  blocklist and the secret redaction are a <b>seatbelt, not a cage</b>: they narrow
-                  the damage, they do not prevent it. Send <code>/agent stop</code> to halt it.
+                  <b>{t("settings.text.freeFormShellIs")}</b> {t("settings.text.yourAgentCanControl")} <b>{t("settings.text.seatbeltNotACage")}</b>{t("settings.text.theyNarrowTheDamage")} <code>{t("settings.text.agentStop")}</code> {t("settings.text.toHaltIt")}
                 </div>
               )}
               <div className="mm-grid">
@@ -1931,7 +1882,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               label={t("settings.label.filesRoot")}
               hint={t("settings.hint.folderAvailableToLs")}
             >
-              <input type="text" placeholder="C:\\Users\\you\\Documents\\shared" value={v("telegramFilesRoot")} onChange={set("telegramFilesRoot")} />
+              <input type="text" placeholder={t("settings.msg.cUsersYouDocuments")} value={v("telegramFilesRoot")} onChange={set("telegramFilesRoot")} />
             </Field>
             <Field
               label={t("settings.label.transcriptionKeyVoice")}
@@ -1957,7 +1908,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               ))}
               <input
                 type="text"
-                placeholder="exact command, e.g. git status ↵"
+                placeholder={t("settings.msg.exactCommandEG")}
                 style={{ width: 220, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return;
@@ -1983,7 +1934,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               ))}
               <input
                 type="text"
-                placeholder="app name, e.g. spotify ↵"
+                placeholder={t("settings.msg.appNameEG")}
                 style={{ width: 180, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return;
@@ -2012,11 +1963,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               described while nothing is limited is a false reason to buy. */}
           {tier?.energyGate && (
             <p className="mm-hint">
-              On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
-              {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of a standard day&apos;s AI reviews and
-              new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
-              reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
-              capacity, nothing else — we make no promise about its price.
+              {t("settings.text.energyGateExplain", { tokens: count(ENERGY.fullTokens) })}
             </p>
           )}
           <div className="mm-section">{t("settings.section.connections")}</div>
@@ -2025,10 +1972,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               label={t("settings.label.mainnetRpcOverride")}
               hint={t("settings.hint.optionalCustomConnectionTo")}
             >
-              <input type="url" placeholder={urlPlaceholder("rpcMainnet", "default: rpc.mainnet.chain.robinhood.com")} value={draft.rpcMainnet ?? ""} onChange={set("rpcMainnet")} />
+              <input type="url" placeholder={urlPlaceholder("rpcMainnet", t("settings.msg.defaultRpcMainnetChain"))} value={draft.rpcMainnet ?? ""} onChange={set("rpcMainnet")} />
             </Field>
             <Field label={t("settings.label.testnetRpcOverride")} hint={t("settings.hint.optional")}>
-              <input type="url" placeholder={urlPlaceholder("rpcTestnet", "default: rpc.testnet.chain.robinhood.com")} value={draft.rpcTestnet ?? ""} onChange={set("rpcTestnet")} />
+              <input type="url" placeholder={urlPlaceholder("rpcTestnet", t("settings.msg.defaultRpcTestnetChain"))} value={draft.rpcTestnet ?? ""} onChange={set("rpcTestnet")} />
             </Field>
             <Field
               label={t("settings.label.bundlerUrlOverride")}
@@ -2077,11 +2024,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               />
               {view.rialtoApiKey.set && (
                 <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, rialtoApiKey: "" }))}>
-                  clear
+                  {t("settings.msg.clearShort")}
                 </button>
               )}
             </Field>
-            <Field label={t("settings.label.rialtoKeyHeader")} hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
+            <Field label={t("settings.label.rialtoKeyHeader")} hint={t("settings.hint.rialtoHeaderName", { header: d.rialtoApiKeyHeader })}>
               <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
             </Field>
           </div>
@@ -2092,10 +2039,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.streamToVirtuals")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={virtualsEnabledVal} onChange={(e) => setVirtualsEnabled(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{virtualsEnabledVal ? "live activity → your $MERRYMEN agent page" : "off"}</span>
+                <span className="mm-unit">{virtualsEnabledVal ? t("settings.msg.liveActivityPage") : t("settings.msg.offState")}</span>
               </span>
-              <span className="mm-hint">{t("settings.hint.publishesLandedTradesAnd")}<b>Outbound &amp; public</b> — off by default; nothing streams until
-                you turn this on and add a key.
+              <span className="mm-hint">{t("settings.hint.publishesLandedTradesAnd")}<b>{t("settings.text.outboundPublic")}</b> {t("settings.text.offByDefaultNothing")}
               </span>
             </label>
             <Field
@@ -2110,13 +2056,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               />
               {view.virtualsApiKey.set && (
                 <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, virtualsApiKey: "" }))}>
-                  clear
+                  {t("settings.msg.clearShort")}
                 </button>
               )}
             </Field>
             <Field
               label={t("settings.label.bitqueryApiKey")}
-              action={{ href: "https://account.bitquery.io/", label: "get a key" }}
+              action={{ href: "https://account.bitquery.io/", label: t("settings.msg.getAKey") }}
               hint={t("settings.hint.requiredForTokenDiscovery")}
             >
               <input
@@ -2127,13 +2073,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               />
               {view.bitqueryApiKey.set && (
                 <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, bitqueryApiKey: "" }))}>
-                  clear
+                  {t("settings.msg.clearShort")}
                 </button>
               )}
             </Field>
             <Field
               label={t("settings.label.merryCircleToken")}
-              action={{ href: `${MERRYMEN_GATEWAY_ORIGIN}/claim`, label: "claim one" }}
+              action={{ href: `${MERRYMEN_GATEWAY_ORIGIN}/claim`, label: t("settings.msg.claimOne") }}
               hint={t("settings.hint.claimWithYourMerrymen")}
             >
               <input
@@ -2144,7 +2090,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               />
               {view.merrymenToken.set && (
                 <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, merrymenToken: "" }))}>
-                  clear
+                  {t("settings.msg.clearShort")}
                 </button>
               )}
             </Field>
@@ -2205,14 +2151,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           </details>
 
           <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
-            {hasUnsavedChanges && status === "Changes saved" ? "Save changes" : status ?? "Save changes"}
+            {hasUnsavedChanges && status === "Changes saved" ? t("settings.msg.saveChanges") : status === "saving…" ? t("settings.msg.savingState") : status === "Changes saved" ? t("settings.msg.changesSaved") : status ?? t("settings.msg.saveChanges")}
           </button>
           {botClaimed && (
             <div className="mm-note" role="alert">
               <p style={{ marginTop: 0 }}>{botClaimed}</p>
-              <p className="mm-hint">Nothing has been saved yet.</p>
+              <p className="mm-hint">{t("settings.text.nothingSavedYet")}</p>
               <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
-                Move it here
+                {t("settings.msg.moveItHere")}
               </button>{" "}
               {/* KEEPING IT THERE TAKES THE TOKEN OUT OF THE FORM. Left in the
                   draft, it rode along with every later save, each one was
@@ -2225,14 +2171,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   setBotClaimed(null);
                 }}
               >
-                Keep it there
+                {t("settings.msg.keepItThere")}
               </button>
             </div>
           )}
           {botMoved && (
             <p className="mm-note" role="status">
-              The bot answers this agent now, and has stopped answering the other one. Link your chat to it here: send it
-              /link with the code shown under Telegram once it appears.
+              {t("settings.text.botMovedNote")}
             </p>
           )}
           {errors.length > 0 && (

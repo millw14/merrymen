@@ -25,6 +25,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import { EN, type MessageKey } from "@/lib/messages/en";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
@@ -247,15 +248,22 @@ describe("whose tokens each screen counts", () => {
 
   it("SETTINGS STATES THE COMBINED FIGURE about the agent that exists", () => {
     const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
-    assert.match(settings, /Your wallet and your agent&apos;s account hold \{count\(tier\.tokens\)\} \$MERRYMEN/);
+    // The figure renders through the catalogue, with the live counts in
+    // {have} and {need} — never `?? 0`.
+    assert.match(settings, /t\("settings\.text\.holdingShortfall", \{ have: count\(tier\.tokens\), need: count\(tier\.needTokens\) \}\)/);
+    assert.match(
+      EN["settings.text.holdingShortfall" as MessageKey] as string,
+      /Your wallet and your agent's account hold \{have\} \$MERRYMEN and it needs \{need\}/,
+    );
     assert.doesNotMatch(settings, /tier\.tokens \?\? 0/);
   });
 
   it("THE ENERGY LINE SHOWS ONLY WHILE THE DEPLOYMENT GATES ENERGY — as CreateAgent's does", () => {
     // The gate is off until an operator turns it on; describing a throttle
-    // while nothing is limited is a false reason to buy.
+    // while nothing is limited is a false reason to buy. The paragraph renders
+    // through the catalogue; the guard around it is what this pins.
     const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
-    const at = settings.indexOf("On the hosted service your agent runs at full energy");
+    const at = settings.indexOf('t("settings.text.energyGateExplain"');
     assert.ok(at > 0);
     const guard = settings.lastIndexOf("{tier?.energyGate && (", at);
     assert.ok(guard > 0 && at - guard < 200, "the paragraph sits directly inside the energyGate guard");
@@ -264,10 +272,10 @@ describe("whose tokens each screen counts", () => {
   });
 
   it("AND SAYS WHAT THE TOKEN IS FOR, and only that", () => {
-    const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
-    assert.match(settings, /\$MERRYMEN buys\s+capacity, nothing else — we make no promise about its price\./);
-    assert.match(settings, /Stop-losses, take-profits and your own orders are never limited; its own AI\s+reviews — including of its open positions — are paced along with the rest\./);
-    assert.doesNotMatch(settings, /Selling, stop-losses/, "an exit the AI decides is paced; 'selling is never limited' was false");
+    const energy = EN["settings.text.energyGateExplain" as MessageKey] as string;
+    assert.match(energy, /\$MERRYMEN buys\s+capacity, nothing else — we make no promise about its price\./);
+    assert.match(energy, /Stop-losses, take-profits and your own orders are never limited; its own AI\s+reviews — including of its open positions — are paced along with the rest\./);
+    assert.doesNotMatch(energy, /Selling, stop-losses/, "an exit the AI decides is paced; 'selling is never limited' was false");
   });
 });
 
@@ -297,11 +305,19 @@ describe("every surface says what a short Circle agent still does", () => {
   });
 
   it("SETTINGS AND CREATE, WEB: the same sentence, never 'stay idle'", () => {
-    for (const f of ["./screens/Settings.tsx", "./screens/CreateAgent.tsx"]) {
-      const src = flat(read(f));
-      assert.match(src, SENTENCE, f);
-      assert.doesNotMatch(src, /stays? idle until you hold enough/, f);
-    }
+    // Settings renders the sentence through the catalogue; CreateAgent still
+    // carries it literally. Both ends are pinned: the key on one side, the
+    // words on the other, and the catalogue holding the sentence itself.
+    const settings = flat(read("./screens/Settings.tsx"));
+    assert.match(settings, /t\("settings\.text\.holdingShortfall"/);
+    assert.doesNotMatch(settings, /stays? idle until you hold enough/);
+    assert.match(
+      EN["settings.text.holdingShortfall" as MessageKey] as string,
+      /opens nothing new and leaves its basket as it is/,
+    );
+    const create = flat(read("./screens/CreateAgent.tsx"));
+    assert.match(create, SENTENCE);
+    assert.doesNotMatch(create, /stays? idle until you hold enough/);
   });
 
   it("iOS AND ANDROID: the same sentence in the native strings", () => {

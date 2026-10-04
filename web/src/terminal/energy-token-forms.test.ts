@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN, type MessageKey } from "@/lib/messages/en";
 
 /**
  * $MERRYMEN CANNOT BE ADDED AS A TRADABLE COIN.
@@ -22,7 +23,10 @@ describe("the token-add forms refuse the energy reserve", () => {
     assert.ok(at > 0);
     const body = src.slice(at, src.indexOf("setTokens([...current, candidate])", at));
     assert.match(body, /if \(isEnergyReserveToken\(candidate\.address\)\) \{/);
-    assert.match(body, /get its \$MERRYMEN/);
+    // The refusal renders through the catalogue, naming the two ways energy
+    // actually arrives.
+    assert.match(body, /t\("settings\.msg\.energyIsNotACoin"\)/);
+    assert.match(EN["settings.msg.energyIsNotACoin" as MessageKey] as string, /get its \$MERRYMEN/);
   });
 
   it("CREATE REFUSES IT BEFORE THE WIZARD LIST GROWS", () => {
@@ -33,11 +37,13 @@ describe("the token-add forms refuse the energy reserve", () => {
   });
 
   it("neither refusal talks about price", () => {
-    for (const p of ["./screens/Settings.tsx", "./screens/CreateAgent.tsx"]) {
-      const src = read(p);
-      for (const line of src.split("\n").filter((l) => l.includes("your agent's energy, not a coin it trades"))) {
-        assert.doesNotMatch(line, /\bprice\b|\breturns\b|\bprofit/i, `${p}: ${line.trim()}`);
-      }
+    for (const refusal of [
+      EN["settings.msg.energyIsNotACoin" as MessageKey] as string,
+      ...read("./screens/CreateAgent.tsx")
+        .split("\n")
+        .filter((l) => l.includes("your agent's energy, not a coin it trades")),
+    ]) {
+      assert.doesNotMatch(refusal, /\bprice\b|\breturns\b|\bprofit/i, refusal.trim());
     }
   });
 });

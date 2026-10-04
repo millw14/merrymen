@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useT, type Vars } from "../lib/i18n";
+import { EN, type MessageKey } from "../lib/messages/en";
 
 /**
  * LINK A WALLET THAT HOLDS $MERRYMEN, BY PROVING YOU CONTROL IT.
@@ -59,37 +61,34 @@ export function LinkedWallet({
   onRelink: () => void;
   onUnlink: () => void;
 }) {
+  const t = useT();
   const relink = (
     <button type="button" className="copy-btn" onClick={onRelink} disabled={busy}>
-      link it again
+      {t("settings.holder.linkItAgain")}
     </button>
   );
   return (
     <div className="holder-linked">
       {standing === "counting" ? (
         <p>
-          Your tier reads <span className="mono">{address}</span>, proved by a signature from that wallet.
+          {t("settings.holder.tierReadsProved", { address })}
         </p>
       ) : standing === "unclaimed" ? (
         <p>
-          <span className="mono">{address}</span> is linked but not counting yet. Link it again — one more
-          signature from it — and it counts here.
+          {t("settings.holder.linkedNotCounting", { address })}
         </p>
       ) : standing === "claimed-elsewhere" ? (
         <p>
-          <span className="mono">{address}</span> is linked but not counting here: it powers another merrymen
-          account right now, and a wallet powers one at a time. Link it again with a fresh signature from it to
-          move it here — a wallet can move once every 24 hours, and can always come back to the account it last left — or
-          link a different wallet.
+          {t("settings.holder.powersAnother", { address })}
         </p>
       ) : (
         <p>
-          <span className="mono">{address}</span> is linked, proved by a signature from that wallet.
+          {t("settings.holder.linkedProved", { address })}
         </p>
       )}
       {(standing === "unclaimed" || standing === "claimed-elsewhere") && relink}
       <button type="button" className="copy-btn" onClick={onUnlink} disabled={busy}>
-        unlink
+        {t("settings.holder.unlinkBtn")}
       </button>
     </div>
   );
@@ -106,18 +105,16 @@ export function LinkedWallet({
  * the login wallet's own signature from this account, which the once-a-day
  * limit never refuses. Unknown (the read failed) claims nothing.
  */
-export function unlinkedNote(reads: Reads): string {
-  if (reads === "login") return "Unlinked. Your tier reads the wallet you sign in with again.";
+export function unlinkedNote(reads: Reads, t: (key: MessageKey, vars?: Vars) => string = (key) => EN[key]): string {
+  if (reads === "login") return t("settings.holder.unlinkedLogin");
   if (reads === "none") {
-    return (
-      "Unlinked. The wallet you sign in with powers another merrymen account right now, so your tier reads no " +
-      "wallet here. To bring it back, link it below with a signature from it."
-    );
+    return t("settings.holder.unlinkedNone");
   }
-  return "Unlinked.";
+  return t("settings.holder.unlinkedPlain");
 }
 
 export function HolderLink() {
+  const t = useT();
   const [linked, setLinked] = useState<Linked | null>(null);
   const [reads, setReads] = useState<Reads>(null);
   const [standing, setStanding] = useState<ProofStanding>(null);
@@ -155,7 +152,7 @@ export function HolderLink() {
     try {
       const r = await fetch(`/api/holder?holder=${encodeURIComponent(address)}`, { cache: "no-store" });
       const j = (await r.json()) as { message?: string; nonce?: string; error?: string };
-      if (!r.ok || !j.message || !j.nonce) throw new Error(j.error ?? "could not start");
+      if (!r.ok || !j.message || !j.nonce) throw new Error(j.error ?? t("settings.holder.couldNotStart"));
       setChallenge({ message: j.message, nonce: j.nonce });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -177,7 +174,7 @@ export function HolderLink() {
     const eth = (globalThis as { ethereum?: { request(a: { method: string; params?: unknown[] }): Promise<unknown> } })
       .ethereum;
     if (!eth) {
-      setNote("No wallet extension found here — sign the message elsewhere and paste it below.");
+      setNote(t("settings.holder.noExtension"));
       return;
     }
     setError("");
@@ -189,12 +186,12 @@ export function HolderLink() {
         params: [challenge.message, holder.trim().toLowerCase()],
       })) as string;
       setSignature(String(sig));
-      setNote("Signed. Submit it below to finish linking.");
+      setNote(t("settings.holder.signedSubmitBelow"));
     } catch (e) {
       setError(
         e instanceof Error && /reject|denied/i.test(e.message)
-          ? "That request was rejected in your wallet."
-          : "Your wallet could not sign that — check it is set to the wallet you named, or paste a signature below.",
+          ? t("settings.holder.rejectedInWallet")
+          : t("settings.holder.couldNotSign"),
       );
     } finally {
       setBusy(false);
@@ -212,7 +209,7 @@ export function HolderLink() {
         body: JSON.stringify({ holder: holder.trim(), signature: signature.trim(), nonce: challenge.nonce }),
       });
       const j = (await r.json()) as { error?: string; moved?: boolean };
-      if (!r.ok) throw new Error(j.error ?? "could not link that wallet");
+      if (!r.ok) throw new Error(j.error ?? t("settings.holder.couldNotLink"));
       setChallenge(null);
       setSignature("");
       setHolder("");
@@ -220,8 +217,8 @@ export function HolderLink() {
       // where it no longer counts. The server never says which account.
       setNote(
         j.moved
-          ? "Linked. This wallet moved here from another merrymen account, where it no longer counts. Your tier now reads its balance."
-          : "Linked. Your tier now reads this wallet's balance.",
+          ? t("settings.holder.linkedMovedHere")
+          : t("settings.holder.linkedReadsBalance"),
       );
       await refresh();
     } catch (e) {
@@ -239,8 +236,8 @@ export function HolderLink() {
       const j = (await r.json().catch(() => ({}))) as { error?: string };
       // A refused unlink must not read as done: the wallet would still be
       // held by this account, and unavailable to the one it was meant for.
-      if (!r.ok) throw new Error(j.error ?? "could not unlink that wallet");
-      setNote(unlinkedNote(await refresh()));
+      if (!r.ok) throw new Error(j.error ?? t("settings.holder.couldNotUnlink"));
+      setNote(unlinkedNote(await refresh(), t));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -266,13 +263,9 @@ export function HolderLink() {
       ) : (
         <p className="mm-hint">
           {reads === "none"
-            ? "The wallet you sign in with powers another merrymen account right now, so it does not count here. To bring it back, link it below with a signature from it. "
-            : "By default your tier reads the wallet you sign in with. "}
-          If your $MERRYMEN is somewhere else, name that wallet and prove it with a signature from it.
-          A wallet powers one merrymen account at a time: signing for it here moves it from any other
-          account. It can move once every 24 hours, and can always come back to the account it last left or to the
-          account that signs in with it. Your agent&apos;s own account counts too. The wallet stays
-          read-only — it is never a spend key and never joins your agent&apos;s permission.
+            ? t("settings.holder.powersAnotherIntro")
+            : t("settings.holder.defaultReadsLogin")}
+          {t("settings.holder.somewhereElse")}
         </p>
       )}
 
@@ -280,7 +273,7 @@ export function HolderLink() {
         <div className="holder-row">
           <input
             className="mm-input mono"
-            placeholder="0x… the wallet holding $MERRYMEN"
+            placeholder={t("settings.holder.addressPlaceholder")}
             value={holder}
             onChange={(e) => setHolder(e.target.value)}
           />
@@ -290,7 +283,7 @@ export function HolderLink() {
             disabled={busy || !/^0x[0-9a-fA-F]{40}$/.test(holder.trim())}
             onClick={() => void start()}
           >
-            {linked ? "link a different wallet" : "link this wallet"}
+            {linked ? t("settings.holder.linkDifferent") : t("settings.holder.linkThis")}
           </button>
         </div>
       )}
@@ -298,29 +291,27 @@ export function HolderLink() {
       {challenge && (
         <div className="holder-challenge">
           <p className="mm-hint">
-            Sign this exact message with <span className="mono">{holder.trim().toLowerCase()}</span>.
-            Any wallet works — extension, hardware, or a phone. It moves no funds. If this wallet
-            powers another merrymen account, signing moves it here.
+            {t("settings.holder.signExactMessage", { address: holder.trim().toLowerCase() })}
           </p>
           <textarea className="mm-input mono" readOnly rows={9} value={challenge.message} />
           <div className="holder-row">
             <button type="button" className="copy-btn" disabled={busy} onClick={() => void signHere()}>
-              sign with my wallet
+              {t("settings.holder.signWithWallet")}
             </button>
             <button
               type="button"
               className="copy-btn"
               onClick={() => void navigator.clipboard?.writeText(challenge.message).catch(() => {})}
             >
-              copy message
+              {t("settings.holder.copyMessage")}
             </button>
             <button type="button" className="copy-btn" onClick={() => setChallenge(null)} disabled={busy}>
-              cancel
+              {t("settings.holder.cancelBtn")}
             </button>
           </div>
           <input
             className="mm-input mono"
-            placeholder="0x… paste the signature"
+            placeholder={t("settings.holder.signaturePlaceholder")}
             value={signature}
             onChange={(e) => setSignature(e.target.value)}
           />
@@ -330,7 +321,7 @@ export function HolderLink() {
             disabled={busy || !signature.trim()}
             onClick={() => void submit()}
           >
-            {busy ? "checking…" : "finish linking"}
+            {busy ? t("settings.holder.checkingState") : t("settings.holder.finishLinking")}
           </button>
         </div>
       )}

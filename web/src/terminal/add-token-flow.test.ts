@@ -29,6 +29,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { basketAfterAdd, basketNow, withSymbol } from "./basket";
+import { EN, type MessageKey } from "@/lib/messages/en";
 
 const src = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 /** Comments stripped — these files argue at length about what they will not do. */
@@ -112,7 +113,9 @@ describe("the settings screen writes both gates", () => {
     // token, rather than hunting an unselected chip among twenty-five stocks.
     assert.match(settings, /tradeNewToken/, "there is a control");
     assert.match(settings, /useState\(true\)/, "defaulted on — it is what they came to do");
-    assert.match(src("./screens/Settings.tsx"), /Trade this one too/, "and it says so in words");
+    // The offer renders through the catalogue like the rest of the screen.
+    assert.match(src("./screens/Settings.tsx"), /t\("settings\.text\.tradeThisOneToo"\)/, "and it says so in words");
+    assert.match(EN["settings.text.tradeThisOneToo" as MessageKey] as string, /Trade this one too/);
   });
 });
 
@@ -120,9 +123,13 @@ describe("the copy stops promising things it cannot deliver", () => {
   it("SETTINGS NAMES ALL THREE STEPS, not two", () => {
     // It said "Save your tokens, then update trading permissions to enable
     // trading them" — which omits the basket, the one gate that was invisible.
+    // The three steps render through the catalogue now; the keys below are
+    // the tripwire that all three still say what they must.
     const hint = src("./screens/Settings.tsx");
-    assert.match(hint, /in your trading basket/i);
-    assert.match(hint, /only means .+watch this/i, "and says what adding alone does");
+    assert.match(hint, /t\("settings\.hint\.threeThingsHaveTo"\)/);
+    assert.match(hint, /t\("settings\.text\.inYourTradingBasket"\)/);
+    assert.match(EN["settings.hint.threeThingsHaveTo" as MessageKey] as string, /Three things have to be true/);
+    assert.match(EN["settings.text.coversItReSign" as MessageKey] as string, /only means.+watch this/);
   });
 
   it("AND THE WALLET STOPS SAYING A SIGNATURE FIXES A SELECTION PROBLEM", () => {

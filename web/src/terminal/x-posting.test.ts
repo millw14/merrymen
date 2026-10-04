@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
 import { X_COPY, type XAccountBody } from "@/lib/x-connect";
+import { EN, type MessageKey } from "@/lib/messages/en";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
 
@@ -765,6 +766,9 @@ describe("the warning keeps its words", () => {
   });
 
   it("is mounted on Settings as its own section, hosted only, with the form's owner", () => {
-    assert.match(SETTINGS, /\{hosted === true && \(\s*<details className="settings-group" id="x-posting"><summary>Posting on X<\/summary>\s*<XPosting owner=\{view\.owner\} hosted=\{hosted\} \/>/);
+    // The heading renders through the catalogue like the rest of the screen —
+    // the mount (hosted-only, form's owner) is what this pins.
+    assert.match(SETTINGS, /\{hosted === true && \(\s*<details className="settings-group" id="x-posting"><summary>\{t\("settings\.text\.postingOnX"\)\}<\/summary>\s*<XPosting owner=\{view\.owner\} hosted=\{hosted\} \/>/);
+    assert.equal(EN["settings.text.postingOnX" as MessageKey] as string, "Posting on X");
   });
 });

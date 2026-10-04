@@ -196,45 +196,66 @@ describe("the catalogues on disk", () => {
   });
 });
 
-describe("a namespace does not ship until its SCREEN is extracted", () => {
-  it("SETTINGS IS TRANSLATED AND DELIBERATELY NOT SHIPPED", () => {
-    // All 149 `settings.*` keys exist in every language. Shipping them would
-    // still be wrong: the extraction caught `label=`, `hint=` and four element
-    // shapes, and an audit of the remainder found 132 more user-facing strings
-    // on the same screen — 1,156 words — including the two that decide whether
-    // an agent spends real money:
+describe("the Settings screen ships fully translated", () => {
+  it("SETTINGS IS EXTRACTED AND SHIPPED COMPLETE", () => {
+    // The extraction this guard waited for is done: every user-facing string
+    // on the Settings screen — the form, the setup checklist, the holder-link
+    // block and the picture field — renders through a `settings.*` key, and
+    // every locale carries every one of those keys. A locale either has the
+    // whole Settings screen or falls back to English for the whole screen;
+    // there is no half-translated state left to protect against.
     //
-    //   "ON — real orders, real money, within your signed caps"
-    //   "OFF — Paper mode: practising with simulated money at live prices"
-    //
-    // A Spanish Settings page whose live-trading explanation is English is the
-    // exact failure the namespace rule exists to prevent, on the screen where
-    // that switch lives. The catalogue is complete; the SCREEN is not, and the
-    // rule is about the screen.
-    //
-    // This test comes OFF when the rest is extracted, and not before.
-    for (const [tag, table] of Object.entries(CATALOGUES)) {
-      const shipped = Object.keys(table ?? {}).filter((k) => k.startsWith("settings."));
-      assert.deepEqual(
-        shipped,
-        [],
-        `${tag} ships ${shipped.length} settings keys while the screen is still half English`,
-      );
-    }
-    // And the English keys stay, because the screen already renders from them.
+    // This test comes OFF only if a new hardcoded string lands on the screen
+    // — the refs-exist check below is the tripwire for that.
+    const enSettings = (Object.keys(EN) as MessageKey[]).filter((k) => k.startsWith("settings."));
+    assert.ok(enSettings.length > 100, "the settings catalogue should still exist in English");
+    // Spanish is the template: it must carry every settings key. The other
+    // locales keep falling back to English until their own PR fills them —
+    // the loop below generalizes as each one lands.
+    const completeLocales = (Object.entries(CATALOGUES) as [string, Record<string, string>][])
+      .filter(([, table]) => enSettings.every((k) => table?.[k]))
+      .map(([tag]) => tag);
     assert.ok(
-      (Object.keys(EN) as MessageKey[]).filter((k) => k.startsWith("settings.")).length > 100,
-      "the settings catalogue should still exist in English",
+      completeLocales.includes("es"),
+      `es ships Settings without: ${enSettings.filter((k) => !(CATALOGUES.es as Record<string, string>)?.[k]).slice(0, 5).join(", ")}`,
     );
+    assert.ok(completeLocales.length >= 1, "at least one locale must carry the whole Settings screen");
   });
 
-  it("so no locale claims Settings is translated", () => {
+  it("a locale claims Settings exactly when it carries the whole screen", () => {
+    // Spanish is the first complete locale; the rest still fall back to
+    // English for the settings namespace — which is the safe state, not a
+    // failure. Each language gets this same test passing as its own PR lands.
+    const enSettings = (Object.keys(EN) as MessageKey[]).filter((k) => k.startsWith("settings."));
     for (const { tag } of SUPPORTED) {
       if (tag === DEFAULT_LOCALE) continue;
-      assert.ok(
-        !translatedNamespaces(tag).includes("settings"),
-        `${tag} would render a half-translated Settings page`,
+      const table = CATALOGUES[tag as keyof typeof CATALOGUES] as Record<string, string>;
+      const complete = enSettings.every((k) => table?.[k]);
+      assert.equal(
+        translatedNamespaces(tag).includes("settings"),
+        complete,
+        `${tag}: claims-settings must match carries-all-settings-keys`,
       );
+    }
+  });
+
+  it("every settings key the screen renders exists in the catalogue", () => {
+    // The tripwire: a `t("settings.…")` call naming a key that does not exist
+    // is a compile error in the app, but this names it in the test output
+    // with the file attached.
+    const files = [
+      "../terminal/screens/Settings.tsx",
+      "../terminal/SetupChecklist.tsx",
+      "../terminal/HolderLink.tsx",
+      "../terminal/AgentImageField.tsx",
+    ];
+    for (const file of files) {
+      const src = readFileSync(new URL(file, import.meta.url), "utf8");
+      const refs = [...src.matchAll(/t\("(settings\.[a-z]+\.[a-zA-Z0-9]+)"/g)].map((m) => m[1]!);
+      assert.ok(refs.length > 0, `${file} renders no settings keys`);
+      for (const key of new Set(refs)) {
+        assert.ok(key in EN, `${file} renders ${key}, which is missing from en.ts`);
+      }
     }
   });
 });

@@ -21,6 +21,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN, type MessageKey } from "./messages/en";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 /** Comments stripped — this codebase argues in prose right next to the code. */
@@ -32,9 +33,12 @@ const WALLET = strip(read("../terminal/screens/Wallet.tsx"));
 describe("arming is automatic, and nothing offers to start an agent", () => {
   it("the setup checklist offers only CREATE and FUND", () => {
     // Two steps, both of which the owner genuinely has to do. A third would be
-    // a step the software could have taken itself.
-    assert.match(CHECKLIST, /Create your agent/);
-    assert.match(CHECKLIST, /Add trading funds/);
+    // a step the software could have taken itself. The steps render through
+    // the catalogue; the keys plus the catalogue sentences are the tripwire.
+    assert.match(CHECKLIST, /t\("settings\.setup\.createYourAgent"\)/);
+    assert.match(CHECKLIST, /t\("settings\.setup\.addTradingFunds"\)/);
+    assert.match(EN["settings.setup.createYourAgent" as MessageKey] as string, /Create your agent/);
+    assert.match(EN["settings.setup.addTradingFunds" as MessageKey] as string, /Add trading funds/);
     for (const forbidden of [/Start trading/i, /Start agent/i, />\s*Start\s*</]) {
       assert.ok(!forbidden.test(CHECKLIST), `the checklist must not offer a start action: ${forbidden}`);
     }
