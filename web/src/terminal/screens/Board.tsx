@@ -171,7 +171,8 @@ function Rank({
           <div className="rank-meta">
             {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
             <span className="rank-trades">{tradeLine(a)}</span>
-            {a.mode && a.mode !== "live" && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
+            {a.mode && a.mode !== "live" && (!a.performance || a.mode !== performance.book)
+              && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
           </div>
         </div>
         <div className="rank-nums">

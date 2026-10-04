@@ -973,6 +973,30 @@ const SQLITE_ALTERS: string[] = [
   "ALTER TABLE class_positions ADD COLUMN swept_raw TEXT",
 ];
 
+// Financial readers treat account casing as one account and scope every read
+// to its run. Plain agent_id indexes cannot serve LOWER(agent_id), so without
+// these the board scans the whole fleet for every row. Install after ALTERs:
+// existing ledgers acquire epoch there. These indexes do not change uniqueness
+// or the canonical receipt/operation rules.
+const LEDGER_READ_INDEXES = [
+  "CREATE INDEX IF NOT EXISTS equity_agent_run_normalized ON equity (LOWER(agent_id), epoch, at DESC, id DESC)",
+  "CREATE INDEX IF NOT EXISTS flows_agent_run_normalized ON flows (LOWER(agent_id), epoch, at, id)",
+  "CREATE INDEX IF NOT EXISTS trades_agent_run_normalized ON trades (LOWER(agent_id), epoch, created_at, id)",
+];
+
+/** Each index is a standalone build; catalog races retry, other errors surface. */
+async function execReadIndexes(db: Db): Promise<void> {
+  for (const ddl of LEDGER_READ_INDEXES) {
+    for (let run = 1; ; run++) {
+      try { await db.exec(ddl); break; }
+      catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (run >= 3 || (code !== "23505" && code !== "42P07" && code !== "42710")) throw error;
+      }
+    }
+  }
+}
+
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
  *  Sqlite allows synchronous DDL, which keeps self-hosted's lazy-on-first-use init
  *  byte-for-byte; only the per-query calls the store makes go through the async
@@ -990,6 +1014,9 @@ function initSqlite(): Db {
       // column already exists
     }
   }
+  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed.
+  try { for (const ddl of LEDGER_READ_INDEXES) db.exec(ddl); }
+  catch (error) { db.close(); throw error; }
   // stderr, not stdout: `merrymen export` writes the audit journal to stdout,
   // and a diagnostic line landing in the middle of it corrupts the file. A log
   // is not data.
@@ -1021,6 +1048,7 @@ export async function applyLedgerSchema(db: Db): Promise<void> {
       // column already exists — the same no-op the two init paths rely on
     }
   }
+  await execReadIndexes(db);
 }
 
 /**
@@ -1067,6 +1095,7 @@ async function initPostgres(url: string): Promise<Db> {
       // surfaces on the first real query rather than being masked here.
     }
   }
+  await execReadIndexes(d);
   console.error("[store] postgres ledger");
   return d;
 }

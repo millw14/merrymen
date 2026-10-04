@@ -343,3 +343,47 @@ test("funding quality uses the same epoch, heartbeat and spelling tie-break as t
     assert.equal((await readBookPerformance(db, CASED, 2, true)).performance.pnlBps, 1000, "a newer old-epoch heartbeat cannot override current-run quality");
   } finally { raw.close(); }
 });
+
+test("the actual financial reads use applied account/run indexes rather than scanning the fleet", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await op(db, 5);
+    await mark(db, 110, 10);
+    const equity = raw.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode)
+      VALUES (?, '0', 0, 0, 100, ?, 2, 'live')`);
+    const flow = raw.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at)
+      VALUES (?, 2, 'in', 1, 'chain-log', ?)`);
+    const trade = raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, user_op_hash,
+      fill_side, gas_usdg, created_at, epoch) VALUES (?, 'swap', 'x', 1, 'landed', ?, 'buy', 0, ?, 2)`);
+    raw.exec("BEGIN");
+    for (let agent = 1; agent <= 100; agent++) {
+      const account = `0x${agent.toString(16).padStart(40, "0")}`;
+      for (let at = 1; at <= 40; at++) equity.run(account, at);
+      for (let at = 1; at <= 5; at++) flow.run(account, at);
+      for (let at = 1; at <= 20; at++) trade.run(account, `${account}-op-${at}`, at);
+    }
+    raw.exec("COMMIT; ANALYZE");
+    const plans: { sql: string; details: string }[] = [];
+    const actual: Db = { ...db, prepare(sql) {
+      const statement = db.prepare(sql);
+      return { ...statement, async get(...params) {
+        if (sql.includes("LOWER(agent_id)") || sql.includes("LOWER(t.agent_id)")) {
+          const rows = raw.prepare("EXPLAIN QUERY PLAN " + sql).all(...params as never[]);
+          plans.push({ sql, details: rows.map((row) => String(row.detail)).join("\n") });
+        }
+        return statement.get(...params);
+      } };
+    } };
+    assert.equal((await readBookPerformance(actual, CASED, 2, true)).performance.pnlBps, 1000);
+    const equities = plans.filter((p) => p.sql.includes("FROM equity"));
+    assert.equal(equities.length, 2, "both raw current and measured financial marks are checked");
+    for (const plan of equities) {
+      assert.match(plan.details, /SEARCH equity USING INDEX equity_agent_run_normalized \(<expr>=\? AND epoch=\?\)/);
+      assert.doesNotMatch(plan.details, /SCAN equity/);
+    }
+    const flows = plans.find((p) => p.sql.includes("FROM flows"))!;
+    assert.match(flows.details, /SEARCH flows USING INDEX flows_agent_run_normalized \(<expr>=\? AND epoch=\?\)/);
+    const trades = plans.find((p) => p.sql.includes("FROM trades"))!;
+    assert.match(trades.details, /SEARCH t USING INDEX trades_agent_run_normalized \(<expr>=\? AND epoch=\?\)/);
+  } finally { raw.close(); }
+});
