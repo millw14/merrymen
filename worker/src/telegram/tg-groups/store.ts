@@ -239,6 +239,22 @@ function parseLine(v: unknown): TgLine | null {
   };
   if (isInt(v.replyTo)) line.replyTo = v.replyTo;
   if (v.own === true) line.own = true;
+  if (isInt(v.threadId) && v.threadId > 0) line.threadId = v.threadId;
+  // Only our own research answers carry this reference. Disk metadata is
+  // still untrusted: validate its closed shape and bounded lookup key.
+  if (line.own && isObj(v.deskAsk)) {
+    const ask = v.deskAsk;
+    if (ask.kind === "market") line.deskAsk = { kind: "market" };
+    else if (ask.kind === "comparison" && Array.isArray(ask.queries) && ask.queries.length === 2
+      && ask.queries.every(q => typeof q === "string" && /^(?:0x[0-9a-fA-F]{40}|[\p{L}\p{N}][\p{L}\p{N} ._-]{1,79})$/u.test(q))) {
+      line.deskAsk = { kind: "comparison", queries: [ask.queries[0] as string, ask.queries[1] as string] };
+    }
+    else if (ask.kind === "coin" && typeof ask.address === "string" && /^0x[0-9a-fA-F]{40}$/.test(ask.address)) {
+      line.deskAsk = { kind: "coin", address: ask.address.toLowerCase() };
+    } else if (ask.kind === "coin" && typeof ask.query === "string" && /^[\p{L}\p{N}][\p{L}\p{N} ._-]{1,79}$/u.test(ask.query)) {
+      line.deskAsk = { kind: "coin", query: ask.query };
+    }
+  }
   return line;
 }
 

@@ -360,6 +360,13 @@ describe("tg-groups reaches nothing that trades", () => {
     { target: /^worker\/src\/telegram\/agent$/, names: ["containsSecret", "redactSecrets"] },
     { target: /^worker\/src\/telegram\/interpreter$/, names: ["stripThinkingBlock"] },
     { target: /^worker\/src\/social-post$/, names: ["REPEAT_LIMIT", "similarity"] },
+    // Pure public intent/focus helpers only: no network, ledger or executor.
+    // The transitive walk below still rejects any future trading dependency.
+    { target: /^worker\/src\/desk\/questions$/, names: ["deskAnswerFocus", "deskQuestionIntent", "deskQuestionIndicator", "thoughtAnswersIntent"] },
+    // Pure extraction from the public brief; no external reads or financial writes.
+    { target: /^worker\/src\/desk\/prices$/, names: ["labelledPriceBrief"] },
+    // Public board metadata/floors only; no owner records, reads or execution.
+    { target: /^worker\/src\/desk\/market-scenarios$/, names: ["marketFallbackScenario", "marketObservationBrief"] },
     { target: /^worker\/src\/(?:llm|llm-failure|settings)$/ },
     { target: /^worker\/src\/memory\/tokens$/ },
     { target: /^packages\/core\/src\/[^/]+$/ },

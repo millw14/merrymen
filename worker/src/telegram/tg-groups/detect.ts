@@ -1505,6 +1505,13 @@ export function isPrivateAsk(text: string): boolean {
 }
 
 const MONEYISH = String.raw`(?:\$?\d|money|funds|crypto|coins?|tokens?|usdg|usdc|usdt|eth|weth|sol|btc|bucks|dollars|cash|everything|it all|merrymen|bags?|stack|keys?|seed|a tip|some)`;
+const MONEY_TRADE_STEERING = /\b(?:buy|sell|ape|dump|market buy)\s+(?:me\s+)?(?:\$?\d|all\b|everything|max\b|your (?:whole|entire))/u;
+/** Research questions stay read-only; this never grants command authority. */
+export function isReadOnlyTradeQuestion(text: string): boolean {
+  const t = norm(text);
+  return /\b(?:what if|should (?:i|we|you)|would (?:you|i|we)|could (?:i|we)|(?:i|we) should|can you explain)\b[^.!;\n]{0,120}\b(?:buy|buying|sell|selling)\b/u.test(t)
+    || /\b(?:is|are)\s+(?:buying|selling)\b/u.test(t);
+}
 const INJECTION_RES: readonly RegExp[] = [
   /\b(?:ignore|disregard|forget|override|bypass|drop) (?:all |any |your |the |my |previous |prior |above |earlier |these |those |every |of |ur )*(?:instructions?|rules|prompts?|guidelines|directives|programming|system|guardrails|restrictions|limits|constraints|training)\b/u,
   /\bsystem ?prompt\b|\bprompt injection\b|\bjailbr[eo]a?k\w*/u,
@@ -1522,7 +1529,7 @@ const INJECTION_RES: readonly RegExp[] = [
   /\b(?:give|hand|pass|dm) (?:me|us) (?:your |ur |the |all |some |\$?\d+ ?)?(?:keys?|private keys?|seed(?: phrase)?|mnemonic|money|funds|cash|coins?|tokens?|usdg|usdc|eth|weth|bags?|stack|wallet|password|access)\b/u,
   /\b(?:airdrop|tip|pay|venmo|cashapp|zelle) (?:me|us)\b/u,
   /\b(?:withdraw|drain|empty|liquidate|sell) (?:all|everything|your (?:whole|entire|wallet|bags?|stack|portfolio|funds))\b/u,
-  /\b(?:buy|sell|ape|dump|market buy)\s+(?:me\s+)?(?:\$?\d|all\b|everything|max\b|your (?:whole|entire))/u,
+  MONEY_TRADE_STEERING,
 ];
 
 /**
@@ -1533,7 +1540,7 @@ const INJECTION_RES: readonly RegExp[] = [
  */
 export function isInjection(text: string): boolean {
   const t = norm(text);
-  return !!t && INJECTION_RES.some((re) => re.test(t));
+  return !!t && INJECTION_RES.some((re) => re.test(t) && (re !== MONEY_TRADE_STEERING || !isReadOnlyTradeQuestion(t)));
 }
 
 // ─── What the room is talking about ────────────────────────────────────────
@@ -1638,8 +1645,8 @@ export function lineMood(text: string): ReactionMood | null {
  * coin or question it follows. A discussion needs that context; it cannot
  * silently become a market read. Null: not a desk ask.
  */
-export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "analysis" }
-  | { kind: "discussion"; topic: "lore" | "explanation" };
+export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
+  | { kind: "discussion"; topic: "lore" | "explanation" | "setup" };
 
 /** Words that sit where a coin's name would and are not one. */
 const DESK_STOP: ReadonlySet<string> = new Set([
@@ -1660,14 +1667,22 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "cool", "sick", "crazy", "proper", "fresh", "clean", "do", "did", "does", "make", "give", "run", "get",
   // Chart words that sit where a name would: "support levels", "key levels".
   "support", "resistance", "key", "major", "nearest", "exit", "lore", "story", "origin", "narrative", "background", "about", "behind", "of", "for",
+  "minute", "minutes", "hour", "hours", "hourly", "daily", "weekly", "monthly", "timeframe", "timeframes", "second", "seconds",
+  "data", "wanna", "want", "wanting", "scalp", "scalping", "stop", "stops", "target", "targets", "invalidation", "confirmation", "risk", "reward", "profit",
+  "rsi", "ema", "vwap", "breakout", "retest", "sizing", "leverage", "bull", "bear", "bullish", "bearish",
+  "cpu", "gpu", "ram", "ssd", "usb", "html", "css", "api", "utc", "usd", "dollars", "dollar", "worth",
+  "yesterday", "yesterdays", "tomorrow", "week", "weeks", "month", "months", "days", "year", "years", "quarter", "quarters", "earlier", "previous", "prior", "past", "before", "then", "session",
 ]);
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
 const DESK_TRADING_CUE =
   /\b(?:entry|entries|chart|charts|ta|buy|buying|sell|selling|ape|aping|bag|coin|token|price|pump|pumping|dump|dumping|send|sending|ca|liq|liquidity|volume|mcap|fdv|holders|bullish|bearish|dip|setup|levels?|support|resistance|breakout|analysis|analy[sz]e|legit|rug|runner|moon|mooning|cooked)\b/u;
-const NAME = String.raw`\$?([\p{L}\p{N}][\p{L}\p{N}._-]{1,23})`;
+const NAME = String.raw`\$?([\p{L}\p{N}][\p{L}\p{N}._-]{1,23})(?![\p{L}\p{N}._-])`;
 /** Patterns that name a coin AND ask for a read on it. */
 const DESK_COIN_STRONG: readonly RegExp[] = [
+  new RegExp(String.raw`\b(?:entry|entries|stop|stops|targets?|setup|invalidation|risk|liquidity|volume|rsi|ema|vwap|scalp|scalping|timeframe)\s+(?:on|for|of)\s+${NAME}`, "u"),
+  new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:entry|targets?|stop|invalidation|scalp|scalping|setup)\b`, "u"),
+  new RegExp(String.raw`\bwhat if\s+${NAME}\s+(?:breaks?|loses?|reclaims?|holds?)\b`, "u"),
   new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of)|analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:a\s+)?(?:good|decent|nice|solid|bad|safe)\s+(?:entry|buy|play|bag|hold)\b`, "u"),
   new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|bullish|bearish|a hold)\b`, "u"),
@@ -1714,7 +1729,11 @@ const DESK_ANALYSIS_WEAK = /\b(?:entry|support|resistance|breakdown|deep dive)\b
 const DESK_CONTEXT =
   /\b(?:coin|coins|token|tokens|chart|charts|market|markets|chain|price|buy|buying|sell|selling|ape|aping|bag|bags|pump|pumping|dump|dumping|dip|trade|trading|bullish|bearish|liq|liquidity|volume|mcap|fdv|memecoin|memecoins|trenches|ca)\b|\$[a-z]/u;
 const DESK_REQUEST =
-  /\b(?:do|give|run|show|pull|need|want|drop|got|any|what|whats|how|where|is|can|could|would|pls|please|quick)\b|[?？]/u;
+  /\b(?:do|give|run|show|pull|chart|need|want|drop|got|any|what|whats|how|where|is|can|could|would|should|pls|please|quick)\b|[?？]/u;
+
+/** Follow-ups require a prior public read or a quoted subject. Without one
+ * they request clarification, never a guessed market or trade execution. */
+const DESK_SETUP = /\b(?:scalp|scalping|stops?|stop[- ]?loss|take[- ]?profit|targets?|invalidat\w*|news|risk[- /]?reward|r[ /:]r|position sizing|slippage|timeframes?|candles?|rsi|ema\d*|vwap|macd|breakouts?|retests?|momentum|buyers?|sellers?|liquidity|pool depth|volume|bull(?:ish)?|bear(?:ish)?|fake pump|confirmation|win rate|odds|probability|guarantee(?:d)?|leverage)\b|\b(?:cut (?:the|this) trade|what (?:has )?changed|still valid|still (?:a )?good (?:entry|setup)|news (?:behind|about)|compare (?:it|this|them)|which (?:one|coin) is (?:better|safer)|hold (?:it|this) (?:longer|overnight)|chase (?:it|this)|too late|data (?:fresh|old)|how (?:fresh|old) (?:is|are) (?:the|this|these) (?:data|chart|read)|bull.?base.?bear|would you wait|(?:where|nearest|key|breaks?|loses?|holds?|reclaims?) (?:is |the )?(?:support|resistance))\b/u;
 
 /**
  * IS THIS A DESK ASK, AND FOR WHAT? Read on the line without its names and
@@ -1736,9 +1755,38 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
     return n;
   };
   const tags = extractCashtags(raw);
+  const comparison = /\b(?:compar(?:e|ed|ing|ison)|versus|vs\.?|better than|stronger than|which (?:(?:one|coin|token) )?(?:(?:is|looks) )?(?:stronger|better|safer))\b/u.test(t);
+  if (comparison) {
+    const hits = extractCaHits(raw);
+    if (hits.some(h => h.chain === "other") || hasOtherChainLink(raw) || hasForeignMint(raw)) return null;
+    if (hits.length === 2) return { kind: "comparison", names: [hits[0]!.address, hits[1]!.address] };
+    if (hits.length > 2 || tags.length > 2) return { kind: "discussion", topic: "setup" };
+    if (tags.length === 2) return { kind: "comparison", names: [tags[0]!.toLowerCase(), tags[1]!.toLowerCase()] };
+    const pair = new RegExp(String.raw`(?:\bcompare\s+)?${NAME}\s+(?:versus|vs\.?|with|to|against|and|or|compared (?:with|to)|better than|stronger than)\s+(?:the\s+)?${NAME}`, "u").exec(t);
+    if (pair) {
+      const a = ok(pair[1]), b = ok(pair[2]);
+      const temporal = /^(?:today|yesterday|yesterdays|tomorrow|last|previous|prior|past|earlier|before|then|day|days|week|weeks|month|months|year|years|quarter|quarters|session)$/u;
+      // A prior-time comparison refreshes the real coin. Time words are not
+      // a second asset, and current measurements cannot invent an old read.
+      if (temporal.test(pair[2] ?? "")) return a ? { kind: "coin", name: a } : { kind: "discussion", topic: "setup" };
+      if (temporal.test(pair[1] ?? "")) return b ? { kind: "coin", name: b } : { kind: "discussion", topic: "setup" };
+      const capital = (name: string) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name.toUpperCase())}(?![\\p{L}\\p{N}])`, "u").test(text);
+      if (a && b && a !== b && (DESK_TRADING_CUE.test(t) || (capital(a) && capital(b)))) return { kind: "comparison", names: [a, b] };
+    }
+  }
   if (tags.length === 1) {
     const n = ok(tags[0]!.toLowerCase());
     if (n) return { kind: "coin", name: n };
+  }
+  const research = DESK_REQUEST.test(t) && (DESK_SETUP.test(t) || DESK_ANALYSIS.test(t) || isReadOnlyTradeQuestion(t));
+  const hits = extractCaHits(raw);
+  if (research && hits.length === 1 && hits[0]!.chain !== "other" && !hasOtherChainLink(raw) && !hasForeignMint(raw)) {
+    return { kind: "coin", name: hits[0]!.address };
+  }
+  if (isReadOnlyTradeQuestion(t)) {
+    const trade = new RegExp(String.raw`\b(?:buy|buying|sell|selling)\s+(?:\$?\d+(?:\.\d+)?\s+)?(?:(?:dollars?|usd|usdg|usdc|usdt|shares?|tokens?)\s+)?(?:(?:worth\s+)?of\s+)?${NAME}`, "u").exec(t);
+    const name = ok(trade?.[1]);
+    return name ? { kind: "coin", name } : { kind: "discussion", topic: "setup" };
   }
   // The EARLIEST name any pattern finds: "check out cashcat, i think good
   // entry?" names cashcat, not the "think" before "good entry".
@@ -1764,5 +1812,6 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
   if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
   if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
+  if (DESK_SETUP.test(t) && DESK_REQUEST.test(t)) return { kind: "discussion", topic: "setup" };
   return null;
 }
