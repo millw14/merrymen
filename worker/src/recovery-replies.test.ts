@@ -138,6 +138,111 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     assert.deepEqual(await f.original(), original); assert.deepEqual(fileFacts(f.home), files);
   });
 
+  await t.test("text send refusal and uncertain delivery are sanitized without stopping another bot or replaying committed updates", async s => {
+    const warnings: unknown[][] = [];
+    s.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args); });
+    for (const definite of [true, false]) {
+      warnings.length = 0;
+      const f = await fixture(s, 2), bad = f.actors[0]!, good = f.actors[1]!;
+      await f.prime(40, 100);
+      const rows = await f.original(), files = fileFacts(f.home), offsets: number[] = [];
+      f.transport.getUpdates = async (opts, offset) => { offsets.push(offset); return updates([f.msg(41, "$PUBLIC chart", opts.token === bad.token ? 0 : 1)], 42); };
+      const baseSend = f.transport.sendMessage;
+      let failedAttempts = 0;
+      f.transport.sendMessage = async (opts, chat, text, extra) => {
+        if (opts.token !== bad.token) return baseSend(opts, chat, text, extra);
+        failedAttempts++;
+        assert.equal(Number((await f.offset(bad.botId))!.offset_id), 42, "cursor committed before a refused or uncertain send");
+        return { ok: false, reason: `403 synthetic private reason ${bad.token} ${chat}`, ...(definite ? { noDelivery: true } : {}) };
+      };
+      await f.run();
+      assert.deepEqual(warnings, [[definite
+        ? "Reply-only Telegram send refused without delivery; update remains acknowledged."
+        : "Reply-only Telegram send delivery unconfirmed; update remains acknowledged."]]);
+      assert.equal(failedAttempts, 1); assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.botId, good.botId);
+      for (const a of f.actors) assert.equal(Number((await f.offset(a.botId))!.offset_id), 42);
+      await f.run();
+      assert.deepEqual(offsets, [40, 40, 42, 42]); assert.equal(failedAttempts, 1); assert.equal(f.sends.length, 1); assert.equal(warnings.length, 1);
+      assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
+    }
+  });
+
+  await t.test("photo outcomes report the final fallback result and never retry uncertain delivery or replay", async s => {
+    const warnings: unknown[][] = [];
+    s.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args); });
+    for (const scenario of ["text-refused", "text-uncertain", "photo-uncertain", "text-delivered"] as const) {
+      warnings.length = 0;
+      const f = await fixture(s, 2), bad = f.actors[0]!, good = f.actors[1]!;
+      await f.prime(40, 100);
+      const rows = await f.original(), files = fileFacts(f.home), offsets: number[] = [];
+      f.transport.getUpdates = async (opts, offset) => { offsets.push(offset); return updates([f.msg(41, opts.token === bad.token ? "$PHOTO chart" : "$GOOD chart", opts.token === bad.token ? 0 : 1)], 42); };
+      let photoAttempts = 0, fallbackAttempts = 0;
+      f.transport.sendPhotoBytes = async (opts, chat) => {
+        assert.equal(opts.token, bad.token); photoAttempts++;
+        assert.equal(Number((await f.offset(bad.botId))!.offset_id), 42);
+        return { ok: false, reason: `synthetic private photo reason ${bad.token} ${chat}`, ...(scenario === "photo-uncertain" ? {} : { noDelivery: true }) };
+      };
+      const baseSend = f.transport.sendMessage;
+      f.transport.sendMessage = async (opts, chat, text, extra) => {
+        if (opts.token !== bad.token) return baseSend(opts, chat, text, extra);
+        fallbackAttempts++;
+        if (scenario === "text-delivered") return baseSend(opts, chat, text, extra);
+        return { ok: false, reason: `synthetic private fallback reason ${bad.token} ${chat}`, ...(scenario === "text-refused" ? { noDelivery: true } : {}) };
+      };
+      const reply: NonNullable<RecoveryReplyOptions["reply"]> = async req => ({ kind: "public", text: req.text, ...(req.text.includes("PHOTO") ? { photo: new Uint8Array([1, 2, 3]) } : {}) });
+      await f.run({ reply });
+      assert.deepEqual(warnings, scenario === "text-delivered" ? [] : [[scenario === "text-refused"
+        ? "Reply-only Telegram send refused without delivery; update remains acknowledged."
+        : "Reply-only Telegram send delivery unconfirmed; update remains acknowledged."]]);
+      assert.equal(photoAttempts, 1); assert.equal(fallbackAttempts, scenario === "photo-uncertain" ? 0 : 1);
+      assert.equal(f.sends.filter(sent => sent.botId === good.botId).length, 1);
+      assert.equal(f.sends.filter(sent => sent.botId === bad.botId).length, scenario === "text-delivered" ? 1 : 0);
+      for (const a of f.actors) assert.equal(Number((await f.offset(a.botId))!.offset_id), 42);
+      await f.run({ reply });
+      assert.deepEqual(offsets, [40, 40, 42, 42]); assert.equal(photoAttempts, 1); assert.equal(fallbackAttempts, scenario === "photo-uncertain" ? 0 : 1);
+      assert.equal(warnings.length, scenario === "text-delivered" ? 0 : 1);
+      assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
+    }
+  });
+
+  await t.test("failed or uncertain forget acknowledgements retain durable erasure and receipt without replay or stopping another bot", async s => {
+    const warnings: unknown[][] = [];
+    s.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args); });
+    for (const definite of [true, false]) {
+      warnings.length = 0;
+      const f = await fixture(s, 2), bad = f.actors[0]!, good = f.actors[1]!;
+      await f.prime(40, 100);
+      const rows = await f.original(["tenant_telegram", "tenant_personal_memory", "tenant_tg_groups"]), files = fileFacts(f.home);
+      f.transport.getUpdates = async opts => updates([f.msg(41, opts.token === bad.token ? "/forget" : "$GOOD chart", opts.token === bad.token ? 0 : 1)], 42);
+      const baseSend = f.transport.sendMessage;
+      let failedAttempts = 0, receiptId: string | undefined;
+      f.transport.sendMessage = async (opts, chat, text, extra) => {
+        if (opts.token !== bad.token) return baseSend(opts, chat, text, extra);
+        failedAttempts++; assert.match(text, /forget request was applied/);
+        assert.equal(Number((await f.offset(bad.botId))!.offset_id), 42);
+        const stored = (await f.pool.query("SELECT sealed FROM tenant_recovery_reply_state WHERE tenant=$1", [bad.tenant])).rows[0]!;
+        const state = openRecoveryReplyState(bad.tenant, stored.sealed, DEK);
+        assert.equal(state.privacy.length, 1); assert.equal(state.privacy[0]!.kind, "personal-chat"); receiptId = state.privacy[0]!.id;
+        const memory = (await f.pool.query("SELECT sealed FROM tenant_personal_memory WHERE tenant=$1", [bad.tenant])).rows[0]!;
+        const plain = JSON.parse(openSecret(String(memory.sealed), DEK).split("\n").slice(1).join("\n")) as { chats: Array<{ chatId: number }>; applied: Record<string, string> };
+        assert.deepEqual(plain.chats.map(c => c.chatId), [9999]); assert.equal(plain.applied[`chat:${bad.ownerId}`], receiptId);
+        return { ok: false, reason: `synthetic private acknowledgement reason ${bad.token} ${chat}`, ...(definite ? { noDelivery: true } : {}) };
+      };
+      await f.run();
+      assert.deepEqual(warnings, [[definite
+        ? "Reply-only Telegram send refused without delivery; update remains acknowledged."
+        : "Reply-only Telegram send delivery unconfirmed; update remains acknowledged."]]);
+      assert.equal(failedAttempts, 1); assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.botId, good.botId);
+      await f.run();
+      assert.equal(failedAttempts, 1); assert.equal(f.sends.length, 1); assert.equal(warnings.length, 1);
+      const stored = (await f.pool.query("SELECT sealed FROM tenant_recovery_reply_state WHERE tenant=$1", [bad.tenant])).rows[0]!;
+      const state = openRecoveryReplyState(bad.tenant, stored.sealed, DEK);
+      assert.equal(state.privacy.length, 1); assert.equal(state.privacy[0]!.id, receiptId);
+      for (const a of f.actors) assert.equal(Number((await f.offset(a.botId))!.offset_id), 42);
+      assert.deepEqual(await f.original(["tenant_telegram", "tenant_personal_memory", "tenant_tg_groups"]), rows); assert.deepEqual(fileFacts(f.home), files);
+    }
+  });
+
   await t.test("missing/malformed modes and unsafe halt refuse before any shared SQL", async s => {
     for (const mode of [undefined, "0", "true", " 1", ""]) {
       const f = await fixture(s); f.env.MERRYMEN_FLEET_RECOVERY_REPLIES = mode;

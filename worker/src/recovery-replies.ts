@@ -479,15 +479,20 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     result ??= { text: text! };
                     await transaction(shared, guard, async (db) => {
                         await authority(db, s, true);
+                        let sent: Awaited<ReturnType<typeof sendMessage>>;
                         if (result!.photo) {
-                            const sent = await checked(() => transport.sendPhotoBytes(opts(s, deadline), msg.chatId, result!.photo!, esc(result!.text), { replyToMessageId: msg.messageId }), deadline);
+                            sent = await checked(() => transport.sendPhotoBytes(opts(s, deadline), msg.chatId, result!.photo!, esc(result!.text), { replyToMessageId: msg.messageId }), deadline);
                             if (!sent.ok && sent.noDelivery === true && now() < deadline) {
                                 await authority(db, s, true);
-                                await checked(() => transport.sendMessage(opts(s, deadline), msg.chatId, esc(result!.text), { replyToMessageId: msg.messageId }), deadline);
+                                sent = await checked(() => transport.sendMessage(opts(s, deadline), msg.chatId, esc(result!.text), { replyToMessageId: msg.messageId }), deadline);
                             }
                         }
                         else
-                            await checked(() => transport.sendMessage(opts(s, deadline), msg.chatId, esc(result!.text), { replyToMessageId: msg.messageId }), deadline);
+                            sent = await checked(() => transport.sendMessage(opts(s, deadline), msg.chatId, esc(result!.text), { replyToMessageId: msg.messageId }), deadline);
+                        if (!sent.ok)
+                            console.warn(sent.noDelivery === true
+                                ? "Reply-only Telegram send refused without delivery; update remains acknowledged."
+                                : "Reply-only Telegram send delivery unconfirmed; update remains acknowledged.");
                         await authority(db, s, true);
                     }, now, Math.min(deadline, now() + 5000));
                 };
