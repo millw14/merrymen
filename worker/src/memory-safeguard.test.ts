@@ -183,5 +183,7 @@ test("reviewed bootstrap bundle verifies an encrypted fixture from the repositor
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).operation, "verified");
   assert.ok(!result.stdout.includes(TENANT) && !result.stdout.includes("orchid") && !result.stdout.includes(SECRET));
-  assert.equal(result.stderr, "");
+  // Node 22 warns when loading node:sqlite; every other stderr byte is still rejected.
+  const otherStderr = result.stderr.replace(/^\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\r?\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\r?\n/, "");
+  assert.equal(otherStderr, "");
 });
