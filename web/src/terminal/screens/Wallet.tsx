@@ -4,7 +4,7 @@ import Link from "next/link";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { revokeFromBrowser } from "@/lib/revoke-client";
-import { stopAgent } from "@/lib/stop-agent";
+import { stopAgentForReplacement } from "@/lib/stop-agent";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
@@ -918,7 +918,11 @@ export default function GrantPage() {
         markPermissionForReplacement(previousGrant);
         setReplacementRequired(true);
       }
-      await stopAgent(session?.hosted ? session.address : undefined);
+      await stopAgentForReplacement(
+        session?.hosted ? session.address : undefined,
+        previousGrant?.smartAccount ?? expectedAccount,
+        previousGrant?.sessionKeyAddress,
+      );
       setServerArmed(false);
       // A network move leaves funds and copied session keys on the old chain.
       // Both chains must confirm revocation before replacement can overwrite it.
@@ -1008,14 +1012,12 @@ export default function GrantPage() {
         if (revoke) throw e;
         setSecurityError("Browser recovery details could not be saved. Keep this page open to manage this wallet after stopping.");
       }
-      if (revoke) {
-        markPermissionForReplacement(grant);
-        setReplacementRequired(true);
-      }
+      markPermissionForReplacement(grant);
+      setReplacementRequired(true);
       // A service outage must not veto the owner’s separate on-chain authority.
       try {
         await verifyCurrentAccount();
-        await stopAgent(session?.hosted ? session.address : undefined);
+        await stopAgentForReplacement(session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
         setServerArmed(false);
         setSecurityMessage("Stop request accepted. The worker stops on its next check; earlier session keys are not yet revoked on-chain.");
       } catch (e) {
@@ -1142,7 +1144,7 @@ export default function GrantPage() {
       saveRecoveryGrant(grant);
       markPermissionForReplacement(grant);
       setReplacementRequired(true);
-      await stopAgent(session?.hosted ? session.address : undefined);
+      await stopAgentForReplacement(session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
       stopped = true;
       let revocation = await revokeFromBrowser(ownerWallet(), setStatus);
       if (chainId !== grant.chainId) revocation = await revokeFromBrowser(ownerWallet(chainId), setStatus);
@@ -1501,7 +1503,7 @@ export default function GrantPage() {
         <div className="grant-shell">
         {grant && !switching && <section id="permission-security" className="grant-summary" style={{ marginBottom: 16 }}>
           <h2>Stop or revoke permissions</h2>
-          <p>Stopping this service needs no wallet signature. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>
+          <p>Stopping this service needs no wallet signature and keeps your agent's memory. Sign a fresh permission to restart. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>
           <button className="copy-btn" disabled={securityBusy || renewing} onClick={() => void stopOrRevoke(false)}>Stop agent now</button>
           {resignBy ? <>
             <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={revokeAck} disabled={securityBusy || renewing} onChange={e => setRevokeAck(e.target.checked)} /><span>I understand revocation uses ETH for network fees on this network and stops all earlier permissions for this account.</span></label>

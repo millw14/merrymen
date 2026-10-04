@@ -188,7 +188,8 @@ describe("the surfaces that feed it", () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(src, /THE TAPE IS RECENT AND PARTIAL/);
-    assert.match(src, /fitChatState\(body\.state\)/, "the blind slice must be gone");
+    assert.match(src, /stateForPrompt\(body\.state, recovery\)/, "qualify recovery before fitting the state");
+    assert.match(src, /fitChatState\(JSON\.stringify\(/, "the blind slice must be gone");
     assert.ok(!src.includes("body.state.slice(0, 6000)"), "no prefix clamp may return");
   });
 });
@@ -241,6 +242,7 @@ describe("the agent is told what it holds", () => {
       { symbol: "QQQ", value_usdg: 40, price_stale: 1, cost_usdg: null },
     ]);
     const state = chatStateOf({ mine, settings: null, liveBlocker: null, perTrade: null, perDay: null, stopped: false });
+    assert.ok(state.positions, "a normal display sends its holdings");
     assert.deepEqual(
       state.positions.map((p) => [p.symbol, p.valueUsd]),
       [
@@ -260,7 +262,9 @@ describe("the agent is told what it holds", () => {
       { symbol: "NVDA", value_usdg: 60, price_stale: 0, cost_usdg: 50, cost_from_quote: false },
       { symbol: "QQQ", value_usdg: 40, price_stale: 0, cost_usdg: 0 },
     ]);
-    const [nvda, qqq] = chatStateOf({ mine, settings: null, liveBlocker: null, perTrade: null, perDay: null, stopped: false }).positions;
+    const positions = chatStateOf({ mine, settings: null, liveBlocker: null, perTrade: null, perDay: null, stopped: false }).positions;
+    assert.ok(positions, "a normal display sends its holdings");
+    const [nvda, qqq] = positions;
     assert.equal(nvda!.costUsd, 50);
     assert.equal(nvda!.unrealisedPct, 20);
     // NULL, never 0. Zero says the position was free, which is the accounting

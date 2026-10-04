@@ -25,7 +25,14 @@ import { describe, it } from "node:test";
 import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { EnergyStatus } from "@merrymen/core";
+import { ENERGY_NOTICE_PREFIX, REAL_LABEL, SIMULATED_LABEL, autonomyOf, type EnergyStatus } from "@merrymen/core";
+import { JSDOM } from "jsdom";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
+import type { ChatController } from "./chat-controller";
+import type { LiveMine } from "./live";
+import { Agent } from "./screens/Agent";
+import { json, testDom } from "./test-dom";
+import { UNREADABLE_TIER } from "./tier";
 import { energyRemedies, energyView, type EnergyRemedies, type EnergyView } from "./energy-view";
 
 (globalThis as unknown as { React: typeof React }).React = React;
@@ -46,6 +53,14 @@ const NOTE = code(raw("./EnergyNote.tsx"));
 const ACCOUNT = "0x1234567890abcdef1234567890abcdef12345678";
 const NOW = 1_790_500_000;
 const noop = () => {};
+const held: FleetRecoveryView = { state: "history-only", tradingPaused: true, history: "available",
+  memory: "unknown", checkedAt: NOW, lastVerifiedHeartbeatAt: null };
+const mine: LiveMine = { name: "Example Robin", slug: "example", handle: null, owner: "you", mode: "live",
+  equity: 120, chg24: null, moves: [], thesis: null, statusLabel: "LIVE", glance: { id: "custom", label: "", cashUsd: 95 },
+  autonomy: autonomyOf({ mode: "live", liveBlocker: null }) };
+const chat = { draft: "", setDraft: noop, proposal: null, setProposal: noop, confirming: false,
+  messages: [], sending: false, streaming: "", ceiling: 10 } as unknown as ChatController;
+const ordinaryNotice = { level: "warn", message: "An ordinary recorded warning", at: "2026-09-27 12:00:00" };
 
 const report = (over: Partial<EnergyStatus> = {}): EnergyStatus => ({
   v: 1,
@@ -65,6 +80,37 @@ const report = (over: Partial<EnergyStatus> = {}): EnergyStatus => ({
   at: NOW - 60,
   ...over,
 });
+
+const freshReport = (over: Partial<EnergyStatus> = {}) => report({ day: new Date().toISOString().slice(0, 10),
+  resetsAt: Math.floor(Date.now() / 1000) + 3600, at: Math.floor(Date.now() / 1000) - 60, ...over });
+const deskElement = (energy: EnergyStatus | null, over: Partial<LiveMine> = {}, liveBlocker: string | null = null) =>
+  createElement(Agent, { mine: { ...mine, ...over }, tokens: [], stopped: false, chat, perTrade: 10, perDay: 20,
+    liveBlocker, energy, account: ACCOUNT, chainId: 4663, onToken: noop, onDeposit: noop, onWithdraw: noop,
+    onLimits: noop, onResign: noop, onSettings: noop });
+const desk = (energy: EnergyStatus | null, over: Partial<LiveMine> = {}, liveBlocker: string | null = null) =>
+  new JSDOM(renderToStaticMarkup(deskElement(energy, over, liveBlocker))).window.document;
+
+/** Mount the actual screen so its fetched Circle standing reaches the banner. */
+async function withCircleDesk(energy: EnergyStatus, over: Partial<LiveMine>, inspect: (page: Document) => void) {
+  const ui = testDom();
+  const originalFetch = globalThis.fetch;
+  const observer = Object.getOwnPropertyDescriptor(globalThis, "ResizeObserver");
+  const self = Object.getOwnPropertyDescriptor(globalThis, "self");
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, value: class { observe() {} disconnect() {} } });
+  Object.defineProperty(globalThis, "self", { configurable: true, value: ui.dom.window });
+  globalThis.fetch = (async input => String(input) === "/api/tier"
+    ? json({ ...UNREADABLE_TIER, why: "ok", tokens: 12345, holderTokens: 10345, agentTokens: 2000 })
+    : json({}, 404)) as typeof fetch;
+  try {
+    await ui.render(deskElement(energy, over));
+    inspect(ui.dom.window.document);
+  } finally {
+    await ui.close();
+    globalThis.fetch = originalFetch;
+    if (observer) Object.defineProperty(globalThis, "ResizeObserver", observer); else Reflect.deleteProperty(globalThis, "ResizeObserver");
+    if (self) Object.defineProperty(globalThis, "self", self); else Reflect.deleteProperty(globalThis, "self");
+  }
+}
 
 /** What a reader sees: tags dropped, the entities React escapes decoded. */
 const text = (html: string) =>
@@ -104,11 +150,17 @@ describe("where the panel sits", () => {
     assert.ok(proposals > panel, "and above the proposals, still inside the scroller");
   });
 
-  it("CIRCLE BANNER, THEN ENERGY, THEN THE NOTICE", () => {
-    const circle = AGENT_CODE.indexOf("{circleLocked && (");
-    const panel = AGENT_CODE.indexOf("<EnergyNote");
-    const notice = AGENT_CODE.indexOf("{!blocked && !circleLocked && notice && (");
-    assert.ok(circle > 0 && panel > circle && notice > panel, "the harder stop outranks energy; energy outranks a log line");
+  it("CIRCLE OUTRANKS ENERGY AND NOTICES; OTHERWISE ENERGY PRECEDES THE NOTICE", async () => {
+    const normal = desk(freshReport(), { notice: ordinaryNotice });
+    const energy = normal.querySelector(".desk-energy"), notice = normal.querySelector("section.desk-notice");
+    assert.ok(energy && notice, "ordinary energy and an unrelated recorded warning are both visible");
+    assert.ok(energy.compareDocumentPosition(notice) & 4, "energy appears before the log line");
+    await withCircleDesk(freshReport({ spent: true }), { glance: { ...mine.glance, id: "even-keel" }, notice: ordinaryNotice }, page => {
+      const circle = page.querySelector(".desk-circle-locked");
+      assert.ok(circle && page.querySelector(".desk-conversation")?.contains(circle));
+      assert.equal(page.querySelector(".desk-energy"), null, "the same energy remedy is not repeated below Circle");
+      assert.equal(page.querySelector("section.desk-notice"), null, "a log line cannot displace the resolved Circle stop");
+    });
   });
 
   it("AND NEVER BESIDE THE CIRCLE BANNER — one number lifts both, one banner says it", () => {
@@ -117,7 +169,12 @@ describe("where the panel sits", () => {
 
   it("IT IS MOUNTED — imported by the screen that ships", () => {
     assert.match(AGENT, /import \{ EnergyNote \} from "\.\.\/EnergyNote";/);
-    assert.match(AGENT_CODE, /energyView\(energy, Date\.now\(\) \/ 1000\)/, "from the worker's report, against now");
+    const current = desk(freshReport());
+    const panel = current.querySelector(".desk-energy");
+    assert.ok(panel && current.querySelector(".desk-conversation")?.contains(panel), "the actual screen mounts the worker report inside its scroller");
+    assert.match(panel.textContent!, /2 of 3 AI reviews and 1 of 2 new trades used today/);
+    assert.equal(desk(freshReport({ spent: true, resetsAt: Math.floor(Date.now() / 1000) - 1 })).querySelector(".desk-energy"), null,
+      "yesterday's spent report cannot be presented as current energy");
   });
 
   it("THE WORKER'S 'full' STANDS THE CIRCLE BANNER DOWN, appended after the tier's own test", () => {
@@ -132,6 +189,32 @@ describe("where the panel sits", () => {
     assert.match(n, /energyNow\.kind !== "none" && energyNow\.spent/);
     assert.match(n, /startsWith\(ENERGY_NOTICE_PREFIX\)/, "matched on core's prefix, never a retyped string");
     assert.match(AGENT_CODE, /<p>\{notice\.message\}<\/p>/);
+  });
+
+  it("recovery outranks stale energy, Circle, renewal and log remedies without hiding Withdraw", async () => {
+    for (const buy of ["ready", "paper", "resign"] as const) {
+      await withCircleDesk(freshReport({ spent: true, buy }), { recovery: held,
+        glance: { ...mine.glance, id: "even-keel" }, notice: ordinaryNotice }, page => {
+        assert.match(page.body.textContent!, /Trading paused for recovery/);
+        assert.equal(page.querySelector(".desk-circle-locked"), null);
+        assert.equal(page.querySelector(".desk-energy"), null);
+        assert.equal(page.querySelector("section.desk-notice"), null);
+        assert.doesNotMatch(page.body.textContent!, /Energy spent for today|Ask me to get it|How to top up|Re-sign my permission|Stop-losses, take-profits and your own orders still run/);
+        assert.ok([...page.querySelectorAll("button")].some(button => button.textContent === "Withdraw"));
+      });
+      const expired = desk(freshReport({ spent: true, buy }), { recovery: held, notice: ordinaryNotice }, "dead-policy");
+      assert.equal(expired.querySelector(".desk-blocked"), null, "the held owner is not sent to renew as a recovery remedy");
+    }
+  });
+
+  it("a dated energy log is hidden only while current spent energy explains it", () => {
+    const notice = { ...ordinaryNotice, message: `${ENERGY_NOTICE_PREFIX}2026-09-27 — recorded energy warning` };
+    const current = desk(freshReport({ spent: true }), { notice });
+    assert.ok(current.querySelector(".desk-energy.spent"));
+    assert.equal(current.querySelector("section.desk-notice"), null);
+    const past = desk(freshReport({ spent: true, resetsAt: Math.floor(Date.now() / 1000) - 1 }), { notice });
+    assert.equal(past.querySelector(".desk-energy"), null);
+    assert.equal(past.querySelector("section.desk-notice")?.textContent, notice.message, "the dated evidence remains visible when there is no current report");
   });
 });
 
@@ -156,7 +239,18 @@ describe("what the panel may do", () => {
   });
 
   it("NO SECOND REAL-MONEY LABEL on the desk", () => {
-    assert.equal((AGENT.match(/autonomy\.moneyLabel/g) ?? []).length, 1);
+    for (const mode of ["live", "paper"] as const) for (const recovery of [undefined, held]) {
+      const page = desk(freshReport({ spent: true }), { recovery, autonomy: autonomyOf({ mode, liveBlocker: null }) });
+      const label = recovery ? mode === "paper" ? "Last recorded paper cash" : "Last recorded cash"
+        : mode === "paper" ? SIMULATED_LABEL : REAL_LABEL;
+      const cashRows = [...page.querySelectorAll(".desk-cash")];
+      assert.equal(cashRows.length, 1, "the fixture has one cash balance row");
+      assert.equal(cashRows[0]!.querySelector("span")?.textContent, label);
+      assert.equal(cashRows[0]!.querySelector("strong")?.textContent, "$95.00");
+      const energy = page.querySelector(".desk-energy")?.textContent ?? "";
+      for (const moneyLabel of [REAL_LABEL, SIMULATED_LABEL, "Last recorded cash", "Last recorded paper cash"])
+        assert.ok(!energy.includes(moneyLabel), "capacity remedies cannot add a second cash-balance promise");
+    }
     assert.ok(!/moneyLabel/.test(NOTE));
   });
 });
@@ -180,6 +274,18 @@ describe("what the panel says", () => {
     const html = await note(report({ reviews: null, entries: { used: 1, allowed: null } }));
     assert.ok(!/<progress/.test(html), "no bar against an unread allowance");
     assert.ok(!/AI reviews/.test(text(html)), "an agent with no paid reviewer is not told it has — of them");
+  });
+
+  it("known zero usage and balances stay zero; unread allowances never acquire a progress bar", () => {
+    const zero = freshReport({ agentTokens: 0, holderTokens: 0,
+      reviews: { used: 0, allowed: 3 }, entries: { used: 0, allowed: 2 } });
+    const page = desk(zero);
+    assert.match(page.querySelector(".desk-energy")!.textContent!, /0 of 3 AI reviews and 0 of 2 new trades used today/);
+    assert.deepEqual([...page.querySelectorAll<HTMLProgressElement>(".desk-energy progress")].map(bar => [bar.value, bar.max]), [[0, 3], [0, 2]]);
+    assert.match(desk({ ...zero, spent: true }).querySelector(".desk-energy")!.textContent!, /You and I hold 0 \$MERRYMEN — 100,000 short/);
+    const unread = desk(freshReport({ reviews: null, entries: { used: 1, allowed: null } }));
+    assert.equal(unread.querySelector(".desk-energy progress"), null);
+    assert.doesNotMatch(unread.querySelector(".desk-energy")!.textContent!, /AI reviews/);
   });
 
   it("UNREAD: our read failing, never their wallet, and never a number", async () => {
@@ -279,7 +385,7 @@ describe("what the panel says", () => {
  * and a copyable address reach every client at once.
  */
 describe("the funding screen", () => {
-  async function funding(e: EnergyStatus | null, chainId = 4663): Promise<string> {
+  async function funding(e: EnergyStatus | null, chainId = 4663, recovery?: FleetRecoveryView): Promise<string> {
     const { FundingPanel } = await import("./HostedControls");
     // The panel judges the report against the real clock, so its day must
     // still be running now.
@@ -294,6 +400,7 @@ describe("the funding screen", () => {
             status: {
               exists: true,
               energy: e,
+              recovery,
               grant: { smartAccount: ACCOUNT, chainId, caps: { perTradeUsdg: 10, dailyUsdg: 50 } },
             },
           },
@@ -333,6 +440,14 @@ describe("the funding screen", () => {
 
   it("SPENT says the reset", async () => {
     assert.match(await funding(report({ spent: true })), /spent for today, back at 00:00 UTC/);
+  });
+
+  it("a recovery hold suppresses energy purchase and renewal remedies while keeping the deposit address", async () => {
+    for (const buy of ["ready", "paper", "resign"] as const) {
+      const t = await funding(report({ spent: true, buy }), 4663, held);
+      assert.doesNotMatch(t, /Energy|spent for today|turn on Live trading first|renew your agent's permission|ask your agent in chat to get its \$MERRYMEN/);
+      assert.match(t, /Copy deposit address/);
+    }
   });
 
   it("UNREAD is our read, never a number", async () => {

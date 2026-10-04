@@ -31,7 +31,7 @@ before(async () => {
   delete process.env.MERRYMEN_HOSTED;
   resetGrantStoreForTest();
   for (const [tenant, smartAccount] of [[OWNER, ACCOUNT], [OTHER, OTHER_ACCOUNT]] as const) {
-    await getGrantStore().put(tenant, { smartAccount, chainId: 4663, serialized: "test-only", demoSessionPrivateKey: "" } as unknown as StoredGrant);
+    await getGrantStore().put(tenant, { smartAccount, chainId: 4663, serialized: "test-only", demoSessionPrivateKey: "0x" + "11".repeat(32) } as unknown as StoredGrant);
   }
   process.env.MERRYMEN_HOSTED = "1";
   process.chdir(fileURLToPath(new URL("../../../../", import.meta.url)));

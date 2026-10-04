@@ -46,6 +46,7 @@ import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-bound
 import { DERIVED_ID } from "./thesis-policy";
 // The coin's name a fill is stored with — see fillSymbolOfRow.
 import { fillSymbolFor, nonCashLeg } from "./token-label";
+import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 let driver: Db | null = null;
 /** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
@@ -3933,10 +3934,15 @@ export async function lastChatTurnAt(chatId: number): Promise<number | null> {
 /** Forget one chat's conversation — what /forget must actually do now that
  * turns persist to disk rather than dying with the process. */
 export async function clearChatTurns(chatId: number): Promise<void> {
+  // DM turns are the personal ferry's scope. Legacy group rows stay local;
+  // current group privacy is handled by its own memory/forget journal.
+  const request = chatId > 0 ? recordPersonalMemoryForget({ kind: "chat", chatId }) : null;
   try {
     await getDb().prepare("DELETE FROM chat_turns WHERE chat_id = ?").run(chatId);
-  } catch (e) {
-    console.error("[store] chat turn clear failed:", e);
+    if (request) completePersonalMemoryForget(request);
+  } catch {
+    console.error("[store] chat turn clear failed; durable forget will be retried");
+    throw new Error("conversation could not yet be forgotten");
   }
 }
 

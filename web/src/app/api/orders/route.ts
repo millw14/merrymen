@@ -68,11 +68,11 @@ import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { ceilingFor } from "@/lib/order-ceiling";
 import { OWNER_CHANGED, OWNER_CHANGED_LOOKUP, ownerMismatch } from "@/lib/order-owner";
+import { placeRecoveryCheckedOrder } from "@/lib/recovery-orders";
 import {
   LEDGER_UNREADABLE,
   orderTtlMs,
   placedResponse,
-  placeHostedOrder,
   placeSelfHostedOrder,
   readHostedOrder,
   readOrder,
@@ -198,7 +198,7 @@ export async function POST(req: Request) {
   // against each open order's own `expiresAt`, and only a key collision is a
   // duplicate.
   const result = isHostedMode()
-    ? await withReadDb((db) => placeHostedOrder(db, { agent, id, args, expiresAt, now })).catch(
+    ? await withReadDb((db) => placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now })).catch(
         () => ({ ok: false as const, why: "unreachable" as const }),
       )
     : // The web process and the worker share one MERRYMEN_HOME — no table, no ferry.

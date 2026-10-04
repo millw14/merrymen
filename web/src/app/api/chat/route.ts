@@ -1,12 +1,15 @@
 /** Dashboard narration. The partner adapter supplies its own authoritative state. */
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
+import { isHostedMode, type StoredGrant } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { agentReplyResponse, currentEnergy, type AgentChatBody } from "@/lib/agent-chat";
-import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
+import { diskAgent } from "@/lib/agent-for";
+import { getGrantStore } from "@merrymen/grant-store";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
 import { ledgerChatReply } from "@/lib/chat-ledger-facts";
+import { withReadDb } from "@/lib/ledger";
+import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 
 export const dynamic = "force-dynamic";
 
@@ -48,9 +51,25 @@ export async function POST(req: Request) {
   // ONLY WHILE ITS DAY LASTS. A report whose day has ended is not today's —
   // the worker may not have published since (currentEnergy) — so it is no
   // report, and the model says it cannot see its energy instead of blaming it.
-  const account = hosted ? await hostedAgentFor(req) : await diskAgent();
+  // Resolve the account and recovery scope from the same authenticated grant.
+  // Browser state and older agents rows cannot choose whose hold we read.
+  let grant: StoredGrant | null = null;
+  let recovery: FleetRecoveryView | null = null;
+  try {
+    grant = hosted && tenant ? await getGrantStore().get(tenant) : null;
+    if (tenant && grant) {
+      const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+      recovery = await withReadDb(db => {
+        if (!db) throw new Error("Recovery status is unavailable.");
+        return readFleetRecoveryView(db, scope, null);
+      });
+    }
+  } catch {
+    return NextResponse.json({ reply: null, why: "recovery-unavailable" }, { status: 503 });
+  }
+  const account = hosted ? grant?.smartAccount ?? null : await diskAgent();
   const factualReply = await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
-  const report = currentEnergy(account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
+  const report = currentEnergy(!recovery && account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report
     ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
     : null;
@@ -59,5 +78,5 @@ export async function POST(req: Request) {
   // the one JSON answer it always got. See agentReplyResponse for what may be
   // shown before the reply is complete — nothing of a command marker, ever.
   const stream = /text\/event-stream/i.test(req.headers.get("accept") ?? "");
-  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply });
+  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, recovery });
 }

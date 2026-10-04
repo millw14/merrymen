@@ -966,7 +966,47 @@ child's own memory has caught up too. A `/forgetme` made while a child runs
 held off is therefore not undone by the restore that ends the hold. The loss
 window is one mirror pass.
 
-The row goes with the grant. The kill switch deletes it with the child home,
+Permission renewal, network moves and the wallet's stop/revoke controls retain
+the tenant's grant row as an inactive replacement record: expiry zero, both
+stored signing-key copies removed. The tenant stays in the roster, so its home
+and sealed group memory remain. Only a validated grant with a fresh signing
+key can replace that record; retrying the stopped key cannot restart trading.
+The orchestrator waits for any retiring writer and its final ledger and memory saves
+before starting a replacement in the retained home. A missing usable key or
+an unreadable roster is not proof that memory was discarded. Old hosted
+clients sending a bare DELETE are refused and must reload.
+
+Owner memory uses a separate tenant-bound encrypted row,
+`tenant_personal_memory` (`worker/src/personal-memory-ferry.ts`). Its whitelist
+is the five soul documents (`IDENTITY.md`, `OWNER.md`, `NOTES.md`, `JOURNAL.md`,
+`ARCHIVE.md`) and the latest 40 turns in each positive-ID DM. No grant, key,
+settings file or financial table enters that snapshot. A snapshot is capped at
+1 MiB and 64 DMs; an oversized or unreadable source is refused rather than
+silently truncated. The existing shared ledger remains responsible for trades,
+capital flows and accounting.
+
+This snapshot is published under the tenant lease on the mirror clock and
+after a retiring writer exits. It restores missing components before a worker
+or hold bot starts. An unreadable snapshot or incomplete restore prevents a
+writer from starting; a durable pending marker prevents a partial restore
+from being published as complete. As with the group ferry, an abrupt container
+loss can lose changes since the last successful mirror pass. Renewal waits for
+the final save instead of accepting that window.
+
+DM `/forget` journals the privacy request before wiping owner facts, the mixed
+owner/notes archive and that DM's transcript. It acknowledges success only
+after those local writes complete. The journal follows the snapshot so a
+restored older copy cannot bring forgotten data back. A crash before a local
+wipe completes blocks restoration over the stale facts; retry `/forget` to
+complete the wipe. Group forgetting remains confined to its group.
+
+Existing hosted homes must be captured and verified before the first deploy
+of this ferry: the previous runtime has no durable owner-memory row, and its
+ephemeral homes disappear on deployment. See [the predeployment safeguard
+procedure](memory-safeguard.md) for the halt, encrypted capture, restore verification and final
+ledger checkpoint. Adding the ferry does not recover a home already erased.
+
+Explicit deletion removes the row with the grant. The kill switch deletes it with the child home,
 a `/kill` that removes the grant deletes it at once, and every reconcile pass
 deletes the row of any tenant the grant store no longer lists (a grant
 discarded while its child was not running on that replica, or a delete that

@@ -59,12 +59,15 @@ import { useT } from "@/lib/i18n";
 import { shortDateTime } from "@/lib/format";
 import { heldNotice, telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
+import { RecoveryNotice } from "./RecoveryNotice";
+import { pausedRecovery, recoveryTelegram } from "./recovery-view";
 
 interface SettingsShape {
   values?: { strategy?: string | null; trencherLiveEnabled?: boolean | null; assetMode?: string | null };
 }
 
-export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
+export function AgentStrip({ hasAgent, recovery }: { hasAgent: boolean; recovery?: FleetRecoveryView | null }) {
   const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
@@ -90,11 +93,20 @@ export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
 
   const row = telegramRow(tg);
   const held = heldNotice(tg, row);
+  const recovering = pausedRecovery(recovery);
+  const bot = recoveryTelegram(tg);
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
-      {held !== null ? <HeldLine reason={held} /> : null}
-      <TelegramLine row={row} />
-      <TrencherLine row={trencherRow(settings)} />
+      {recovering ? <>
+        <RecoveryNotice recovery={recovering}/>
+        <Row tone="warn" label="Telegram" value={bot.label}
+          action={bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>
+        <Row tone="quiet" label="Trencher" value="Trading paused"/>
+      </> : <>
+        {held !== null ? <HeldLine reason={held} /> : null}
+        <TelegramLine row={row} />
+        <TrencherLine row={trencherRow(settings)} />
+      </>}
     </section>
   );
 }

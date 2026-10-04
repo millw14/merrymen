@@ -18,6 +18,9 @@ let DELETE: (req: Request) => Promise<Response>;
 let auth: typeof import("@/lib/auth");
 const asked: string[] = [];
 const removed: string[] = [];
+const replacements: unknown[][] = [];
+let replacementState: "stopped" | "absent" | "changed" = "stopped";
+let replacementError = false;
 
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-grant-tenant-"));
@@ -35,6 +38,11 @@ before(async () => {
     return null;
   });
   mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { removed.push(tenant); });
+  mock.method(grants.getGrantStore(), "stopForReplacement", async (...args: unknown[]) => {
+    replacements.push(args);
+    if (replacementError) throw new Error("database unavailable");
+    return replacementState;
+  });
   ({ GET, DELETE } = await import("./route"));
 });
 
@@ -46,7 +54,7 @@ after(() => {
   }
   rmSync(home, { recursive: true, force: true });
 });
-beforeEach(() => { asked.length = 0; removed.length = 0; });
+beforeEach(() => { asked.length = 0; removed.length = 0; replacements.length = 0; replacementState = "stopped"; replacementError = false; });
 
 it("binds an empty hosted grant response to the tenant authenticated by the cookie", async () => {
   for (const tenant of [A, B]) {
@@ -69,7 +77,7 @@ it("binds a signed-out hosted response to null without reading any grant", async
 it("a stop cannot remove a different tenant after a login switches", async () => {
   const request = (expectedTenant: unknown) => new Request(`${ORIGIN}/api/grants`, {
     method: "DELETE", headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(B)}`, "content-type": "application/json" },
-    body: JSON.stringify({ expectedTenant }),
+    body: JSON.stringify({ expectedTenant, purpose: "delete-agent" }),
   });
   for (const expected of [A, null, 42]) {
     assert.equal((await DELETE(request(expected))).status, 409);
@@ -77,4 +85,67 @@ it("a stop cannot remove a different tenant after a login switches", async () =>
   }
   assert.equal((await DELETE(request(B))).status, 200);
   assert.deepEqual(removed, [B]);
+});
+
+const replacementRequest = (body: unknown, tenant: string | null = A) => new Request(`${ORIGIN}/api/grants`, {
+  method: "DELETE",
+  headers: { "content-type": "application/json", ...(tenant ? { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(tenant as `0x${string}`)}` } : {}) },
+  body: JSON.stringify(body),
+});
+
+it("permission replacement uses the authenticated tenant and retains the destructive kill as a separate path", async () => {
+  const response = await DELETE(replacementRequest({ expectedTenant: A, purpose: "permission-replacement", expectedAccount: B, expectedSession: A }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, replacement: true, state: "stopped" });
+  assert.deepEqual(replacements, [[A, B, A]]);
+  assert.deepEqual(removed, []);
+});
+
+it("a legacy open renewal tab's bare DELETE cannot erase its agent or group approvals", async () => {
+  const response = await DELETE(replacementRequest({ expectedTenant: A }));
+  assert.equal(response.status, 400);
+  const body = await response.json() as { error: string; ownerFacing: boolean };
+  assert.match(body.error, /Reload your wallet/);
+  assert.equal(body.ownerFacing, true);
+  assert.deepEqual(replacements, []);
+  assert.deepEqual(removed, []);
+});
+
+it("requires an identified account and refuses malformed or unknown stop purposes without deleting anything", async () => {
+  for (const body of [
+    { purpose: "permission-replacement" }, { purpose: "permission-replacement", expectedAccount: 1 },
+    { purpose: "permission-replacement", expectedAccount: B, expectedSession: null },
+    { purpose: "permission-replacement", expectedAccount: B, expectedSession: "0x" },
+    { purpose: "keep-everything", expectedAccount: B },
+  ]) {
+    assert.equal((await DELETE(replacementRequest(body))).status, 400);
+  }
+  assert.deepEqual(replacements, []);
+  assert.deepEqual(removed, []);
+});
+
+it("a switched login and a signed-out request cannot replace another tenant's permission", async () => {
+  const body = { expectedTenant: A, purpose: "permission-replacement", expectedAccount: B };
+  assert.equal((await DELETE(replacementRequest(body, B))).status, 409);
+  assert.equal((await DELETE(replacementRequest(body, null))).status, 401);
+  assert.deepEqual(replacements, []);
+  assert.deepEqual(removed, []);
+});
+
+it("a concurrent new permission refuses the stale stop, while a missing grant is an idempotent stop", async () => {
+  replacementState = "changed";
+  assert.equal((await DELETE(replacementRequest({ purpose: "permission-replacement", expectedAccount: B }))).status, 409);
+  replacementState = "absent";
+  const response = await DELETE(replacementRequest({ purpose: "permission-replacement", expectedAccount: B }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, replacement: true, state: "absent" });
+  assert.deepEqual(removed, []);
+});
+
+it("failed persistence does not claim an accepted stop or fall back to destructive deletion", async () => {
+  replacementError = true;
+  const response = await DELETE(replacementRequest({ purpose: "permission-replacement", expectedAccount: B }));
+  assert.equal(response.status, 503);
+  assert.equal((await response.json() as { ownerFacing: boolean }).ownerFacing, true);
+  assert.deepEqual(removed, []);
 });

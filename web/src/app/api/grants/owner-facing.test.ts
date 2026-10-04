@@ -19,6 +19,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, it, mock } from "node:test";
+import { encodeErrorResult, toFunctionSelector } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { bindingMessage } from "@merrymen/core";
 import { signerGrant } from "@/lib/canonical-wall-fixture";
@@ -115,4 +116,33 @@ it("and the shell shows the owner that sentence, not a bare status", async () =>
   } finally {
     fetch.mock.restore();
   }
+});
+
+it("a full replacement history is an owner-facing 409 that explains the support path", async t => {
+  const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
+  const store = grants.getGrantStore();
+  t.mock.method(store, "tenantForAccount", async () => null);
+  t.mock.method(store, "put", async () => { throw new grants.GrantReplacementConflict(); });
+  // The real derivation still runs, but its EntryPoint view call is answered
+  // offline. No network or signing authority is needed to reach the store.
+  const result = encodeErrorResult({
+    abi: [{ type: "error", name: "SenderAddressResult", inputs: [{ name: "sender", type: "address" }] }],
+    errorName: "SenderAddressResult",
+    args: [SMART],
+  });
+  t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body));
+    const answer = (rpc: { id: number; method: string; params: [{ data?: string }] }) => {
+      if (rpc.method === "eth_chainId") return { jsonrpc: "2.0", id: rpc.id, result: `0x${CHAIN.toString(16)}` };
+      assert.equal(rpc.method, "eth_call");
+      assert.ok(rpc.params[0].data?.startsWith(toFunctionSelector("getSenderAddress(bytes)")));
+      return { jsonrpc: "2.0", id: rpc.id, error: { code: -32000, message: "execution reverted", data: result } };
+    };
+    return Response.json(Array.isArray(payload) ? payload.map(answer) : answer(payload));
+  });
+  const res = await POST(await claim());
+  const body = await res.json() as { error?: string; ownerFacing?: unknown };
+  assert.equal(res.status, 409, JSON.stringify(body));
+  assert.equal(body.ownerFacing, true);
+  assert.match(body.error ?? "", /history is full.*contact support/);
 });
