@@ -12,7 +12,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { mintSession, SESSION_COOKIE } from "@/lib/auth";
-import { createWebFomoRuntime, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
+import { createWebFomoRuntime, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
 import { projectSettings, setSettingsReaderForTest } from "@/lib/services/settings-view";
 import { wrapSqlite } from "../../../../../worker/src/db";
 import { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } from "../../../../../worker/src/fomo/render";
@@ -83,6 +83,8 @@ before(() => {
     throw new Error(`unexpected network call: ${url}`);
   });
   setSettingsReaderForTest({ async settingsFor(t) { return projectSettings(settings[t.toLowerCase()] ?? null); } });
+  // Fomo research is for owners with an agent (hosted): A and B each own one here.
+  setFomoOwnerReaderForTest({ async hasAgent(t) { return t === A || t === B; } });
 });
 
 beforeEach(async () => {
@@ -103,6 +105,7 @@ afterEach(() => setFomoRuntimeForTest(null));
 after(() => {
   mock.restoreAll();
   setSettingsReaderForTest(null);
+  setFomoOwnerReaderForTest(null);
   for (const k of ENV_KEYS) {
     const v = saved.get(k);
     if (v === undefined) delete process.env[k];

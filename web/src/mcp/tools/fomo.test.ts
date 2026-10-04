@@ -8,8 +8,9 @@
  * mutation; public reads need market:read and the owner's own research
  * state needs agents:read; the tenant is the connection's owner, never an
  * argument; the registry's validator has the last word on arguments; an
- * owner who switched Fomo off gets not-authorized with no provider call; the
- * output is the research envelope with third-party text labelled.
+ * owner who switched Fomo off gets not-authorized with no provider call; a
+ * connection whose owner has no agent (no grant) is refused with no provider
+ * call; the output is the research envelope with third-party text labelled.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -17,7 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { createWebFomoRuntime, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
+import { createWebFomoRuntime, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
 import { wrapSqlite } from "../../../../worker/src/db";
 import { FOMO_ATTRIBUTION } from "../../../../worker/src/fomo/render";
 import { FOMO_TOOL_DEFS, MUTATION_TOOL_NAMES, READ_TOOL_NAMES } from "../../../../worker/src/fomo/tools";
@@ -48,13 +49,17 @@ afterEach(() => {
   restore?.();
   restore = null;
   setFomoRuntimeForTest(null);
+  setFomoOwnerReaderForTest(null);
   resetMetricsForTest();
 });
 
-async function setup(o: { scopes?: string[]; settings?: Record<string, Record<string, unknown>> } = {}) {
+async function setup(o: { scopes?: string[]; settings?: Record<string, Record<string, unknown>>; withAgent?: string[] } = {}) {
   const d = await makeTestDb();
   const deps = makeDeps(d);
   restore = installFixtures(d, { settings: o.settings ?? {} });
+  // Who owns an agent (a grant): both fixture owners, unless the test says otherwise.
+  const withAgent = new Set(o.withAgent ?? [OWNER_A, OWNER_B]);
+  setFomoOwnerReaderForTest({ async hasAgent(t) { return withAgent.has(t); } });
   const provider: string[] = [];
   const fetchImpl = (async (input: RequestInfo | URL) => {
     const u = new URL(String(input));
@@ -188,6 +193,28 @@ test("an owner who switched Fomo data off gets not-authorized, with no provider 
   assert.deepEqual(provider, []);
   // Owner A's permission is A's own.
   assert.notEqual((await ok(a, "fomo_get_token_theses", { token: "PONS" })).status, "not-authorized");
+});
+
+test("a connection whose owner has no agent is refused — public reads and status alike — with no provider call", async () => {
+  // market:read needs no agent and sign-in is open: without this, any fresh
+  // wallet's connection spent the fleet's one shared credit pool.
+  const { provider, raw, a, b } = await setup({ withAgent: [OWNER_A] });
+  for (const [name, args] of [["fomo_get_token_theses", { token: "PONS" }], ["fomo_find_opportunities", {}], ["fomo_get_research_status", {}]] as const) {
+    const r = await call(b, name, args);
+    assert.equal(r.isError, true, name);
+    assert.equal(errorOf(r).code, "forbidden", name);
+    assert.match(errorOf(r).message, /no agent/, name);
+  }
+  assert.deepEqual(provider, []);
+  assert.equal(Number((raw.prepare("SELECT COUNT(*) AS n FROM fomo_requests").get() as { n: number }).n), 0);
+  assert.notEqual((await ok(a, "fomo_get_token_theses", { token: "PONS" })).status, "not-authorized", "the owner with an agent still reads");
+});
+
+test("an unreadable grant store is retryable, never 'no agent' and never a read", async () => {
+  const { provider, a } = await setup();
+  setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("grants down"); } });
+  assert.equal(await errCode(a, "fomo_get_token_theses", { token: "PONS" }), "upstream_unavailable");
+  assert.deepEqual(provider, []);
 });
 
 test("the provider-reading tools share one per-connection bucket", async () => {

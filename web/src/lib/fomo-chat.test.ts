@@ -11,7 +11,12 @@
  *     with no call of any kind;
  *   - an owner who switched Fomo data off is refused with no provider call;
  *   - one owner's subject memory is invisible to another;
- *   - body.state is never read; a watch happens only when asked, expiring.
+ *   - body.state is never read; a watch happens only when asked, expiring;
+ *   - hosted, a signed-in wallet that owns no agent is told so, with no
+ *     lookup of any kind (the credits are the fleet's owners');
+ *   - an analysis turn takes one call from the tenant's daily model
+ *     allowance before the evidence is handed on, and a refused (or
+ *     uncheckable) allowance is the deterministic answer, saying so.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -20,8 +25,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { wrapSqlite } from "../../../worker/src/db";
 import { FOMO_ATTRIBUTION, FOMO_CHAT_RULES, NOT_PERMISSION_LINE } from "../../../worker/src/fomo/render";
 import { deserialize } from "../../../worker/src/fomo/subject-memory";
-import { FOMO_UNREACHABLE, fomoChatTurn, type FomoChatTurn } from "./fomo-chat";
-import { createWebFomoRuntime, type FomoRuntime } from "./fomo-runtime";
+import { FOMO_ANALYSIS_CAPPED, FOMO_ANALYSIS_UNCHECKED, FOMO_CHAT_MAX_CHARS, FOMO_UNREACHABLE, fomoChatTurn, type FomoChatTurn } from "./fomo-chat";
+import { createWebFomoRuntime, FOMO_MODEL_BUDGET, FOMO_NEEDS_AGENT, setFomoOwnerReaderForTest, type FomoRuntime } from "./fomo-runtime";
 import { projectSettings, setSettingsReaderForTest } from "./services/settings-view";
 
 type Rec = Record<string, unknown>;
@@ -48,6 +53,8 @@ interface World {
 }
 
 const settings: Record<string, Record<string, unknown> | null> = {};
+/** Hosted wallets that own an agent (a grant). A and B unless a test says otherwise. */
+const agents = new Set<string>();
 
 async function world(): Promise<World> {
   const raw = new DatabaseSync(":memory:");
@@ -106,9 +113,13 @@ const factual = (t: FomoChatTurn): string => {
 beforeEach(() => {
   for (const k of Object.keys(settings)) delete settings[k];
   setSettingsReaderForTest({ async settingsFor(t) { return projectSettings(settings[t.toLowerCase()] ?? null); } });
+  agents.clear();
+  agents.add(A).add(B);
+  setFomoOwnerReaderForTest({ async hasAgent(t) { return agents.has(t); } });
 });
 afterEach(() => {
   setSettingsReaderForTest(null);
+  setFomoOwnerReaderForTest(null);
 });
 
 describe("a factual Fomo question", () => {
@@ -230,5 +241,107 @@ describe("the owner's permission and tenant", () => {
     const span = Number(rows[0]!.expires_at_ms) - Number(rows[0]!.created_at_ms);
     assert.ok(span > 0 && span <= 30 * 86_400_000, "bounded and expiring");
     assert.equal(w.count("SELECT COUNT(*) AS n FROM fomo_watches WHERE tenant = ?", B), 0);
+  });
+});
+
+describe("hosted, only an owner with an agent", () => {
+  const C = `0x${"c".repeat(40)}`;
+
+  it("a signed-in wallet that owns no agent is told why, and nothing is looked up or logged", async () => {
+    const w = await world();
+    assert.equal(factual(await w.ask(C, "what are the theses on $PONS")), FOMO_NEEDS_AGENT);
+    assert.equal(factual(await w.ask(C, "refresh theses on $PONS")), FOMO_NEEDS_AGENT, "not even a forced refresh");
+    assert.deepEqual(w.provider, [], "no provider credit spent for a wallet that is not an owner");
+    assert.equal(w.count("SELECT COUNT(*) AS n FROM fomo_requests"), 0);
+    // A message that is not about Fomo is left to the existing handlers, as for anyone.
+    assert.equal(await w.ask(C, "hello there"), null);
+  });
+
+  it("the access reader refuses it too, so a caller that skipped the question still gets nothing", async () => {
+    const w = await world();
+    const env = await w.rt.service.invoke(
+      { tenant: C, surface: "app-chat", audience: "owner", conversationKey: null, requestId: "direct-c", now: w.clock.now, priority: "interactive" },
+      "fomo_get_token_theses",
+      { token: PONS, chain: "robinhood" },
+    );
+    assert.equal(env.status, "not-authorized");
+    assert.deepEqual(w.provider, []);
+  });
+
+  it("an unreadable grant store is 'can't reach', never 'not an owner', and nothing is looked up", async () => {
+    const w = await world();
+    setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("grants down"); } });
+    assert.equal(factual(await w.ask(A, "what are the theses on $PONS")), FOMO_UNREACHABLE);
+    assert.equal(await w.ask(A, "hello there"), null);
+    assert.deepEqual(w.provider, []);
+  });
+
+  it("self-hosted asks no such question: the install's own tenant is its owner", async () => {
+    const w = await world();
+    setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked self-hosted"); } });
+    const t = await fomoChatTurn({ message: "what are the theses on $PONS" }, { tenant: null, now: NOW + 60_000, hosted: false }, { runtime: async () => w.rt });
+    assert.ok(t && "factualReply" in t);
+    assert.notEqual(t.factualReply, FOMO_UNREACHABLE);
+  });
+});
+
+describe("the per-tenant model allowance on analysis", () => {
+  const modelCalls = (w: World): Rec[] =>
+    w.raw.prepare("SELECT k, n FROM fomo_meta WHERE k LIKE 'allowance:fomo:model:%:calls'").all() as Rec[];
+
+  it("an analysis turn handed to the model takes exactly one call from the asking tenant's allowance", async () => {
+    const w = await world();
+    await w.ask(A, "what are the theses on $PONS");
+    assert.deepEqual(modelCalls(w), [], "a factual answer uses no model and takes nothing");
+    const t = await w.ask(A, "should we follow this?");
+    assert.ok(t && "fomo" in t);
+    const rows = modelCalls(w);
+    assert.equal(rows.length, 1);
+    assert.equal(Number(rows[0]!.n), 1);
+    assert.ok(String(rows[0]!.k).includes(A), "charged to the asking tenant");
+  });
+
+  it("refused: the deterministic answer, saying so, with no evidence for a model", async () => {
+    const w = await world();
+    const day = w.clock.now + 60_000;
+    for (let i = 0; i < FOMO_MODEL_BUDGET.callsPerDay; i++) await w.rt.modelBudget.tryStart({ tenant: A, estimatedTokens: 1, now: day });
+    await w.ask(A, "what are the theses on $PONS");
+    const t = await w.ask(A, "should we follow this?");
+    const reply = factual(t);
+    assert.ok(reply.startsWith(`${FOMO_ANALYSIS_CAPPED}\n`), reply.slice(0, 200));
+    assert.ok(reply.includes(NOT_PERMISSION_LINE) && reply.endsWith(FOMO_ATTRIBUTION), "still the facts, the not-permission line and the attribution");
+    assert.ok(reply.length <= FOMO_CHAT_MAX_CHARS, `inside the chat bound: ${reply.length}`);
+    // Another owner's allowance is untouched.
+    await w.ask(B, "what are the theses on $PONS");
+    const b = await w.ask(B, "should we follow this?");
+    assert.ok(b && "fomo" in b, "B's analysis still reaches the model");
+  });
+
+  it("an allowance that cannot be checked spends no model: the facts, saying why", async () => {
+    const w = await world();
+    const broken = { ...w.rt, modelBudget: { tryStart: async () => { throw new Error("meta down"); } } } as unknown as FomoRuntime;
+    w.clock.now += 30_000;
+    await fomoChatTurn({ message: "what are the theses on $PONS" }, { tenant: A, now: w.clock.now, hosted: true }, { runtime: async () => broken });
+    w.clock.now += 30_000;
+    const t = await fomoChatTurn({ message: "should we follow this?" }, { tenant: A, now: w.clock.now, hosted: true }, { runtime: async () => broken });
+    assert.ok(factual(t).startsWith(`${FOMO_ANALYSIS_UNCHECKED}\n`));
+    const none = { ...w.rt, modelBudget: undefined } as unknown as FomoRuntime;
+    w.clock.now += 30_000;
+    const u = await fomoChatTurn({ message: "should we follow this?" }, { tenant: A, now: w.clock.now, hosted: true }, { runtime: async () => none });
+    assert.ok(factual(u).startsWith(`${FOMO_ANALYSIS_UNCHECKED}\n`), "no budget object is no allowance");
+  });
+});
+
+describe("the agent's own name", () => {
+  it("is read from the owner's stored settings and never researched as a Fomo trader", async () => {
+    const w = await world();
+    settings[A] = { agentName: "Robin" };
+    // A live Fomo conversation, then a possessive on the agent's own name.
+    await w.ask(A, "what are the theses on $PONS");
+    const before = w.provider.length;
+    const t = await w.ask(A, "what are Robin's holdings?");
+    // The owner's own book is the ledger's question, not a trader lookup on Fomo.
+    assert.ok(t === null || !("factualReply" in t && /Fomo trader/.test(t.factualReply)), JSON.stringify(t)?.slice(0, 200));
+    assert.equal(w.provider.filter((p) => p.startsWith("/v2/search")).slice(before).length, 0, "no trader search for the agent's own name");
   });
 });

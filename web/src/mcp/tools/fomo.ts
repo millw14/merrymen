@@ -15,7 +15,8 @@
  *
  * WHO IS ASKING is the connection's principal — never an argument. Public
  * research needs market:read; the owner's own research state (watches, jobs,
- * assessments, the decision funnel) needs agents:read.
+ * assessments, the decision funnel) needs agents:read. Either way the
+ * principal must own an agent: the provider credits are the fleet's.
  *
  * WHAT IS NOT HERE, ON PURPOSE:
  *
@@ -36,7 +37,7 @@
  */
 import { randomUUID } from "node:crypto";
 import * as z from "zod";
-import { fomoRuntime, fomoTenantFor } from "@/lib/fomo-runtime";
+import { fomoRuntime, fomoTenantFor, hostedFomoOwner } from "@/lib/fomo-runtime";
 import { FOMO_ATTRIBUTION, renderEnvelope } from "../../../../worker/src/fomo/render";
 import { BOARDS, DEPTHS, FOMO_TOOL_DEFS, FRESHNESS_MODES, RANKING_WINDOWS, TOOL_LIMITS, TOOL_WINDOWS } from "../../../../worker/src/fomo/tools";
 import type { EvidenceKind, FomoEnvelope, FomoReadToolName, FreshnessClass, Freshness, ResultStatus } from "../../../../worker/src/fomo/types";
@@ -289,6 +290,8 @@ const PROVIDER_BUDGET: Budget = { bucket: "fomo-provider", perMinute: 10, perHou
 /** The owner's research status reads only Merrymen's own store. */
 const STATUS_BUDGET: Budget = { bucket: "fomo-status", perMinute: 30, perHour: 600 };
 const TIMEOUT_MS = 25_000;
+/** The refusal for a connection whose owner has no agent (no grant): the research credits are the fleet's owners'. */
+const NEEDS_AGENT = "Fomo research is for Merrymen owners, and this account has no agent yet.";
 
 const TITLES: Record<FomoReadToolName, string> = {
   fomo_resolve_subject: "Resolve a Fomo coin or trader",
@@ -310,6 +313,18 @@ async function invokeFor(name: FomoReadToolName, args: Record<string, unknown>, 
   // MCP runs on hosted Merrymen only (mcp/config.ts refuses to enable it otherwise), so the mode is hosted.
   const tenant = fomoTenantFor(ctx.principal.tenant, true);
   if (!tenant) throw new McpError("forbidden", "This connection has no owner Merrymen can vouch for.");
+  // ONLY AN OWNER WITH AN AGENT. market:read needs no agent, and sign-in is
+  // open, so without this any fresh wallet's connection spent the fleet's one
+  // shared credit pool under caps of its own. The access reader refuses such
+  // a tenant too (fomo-runtime.ts hostedFomoAccess); asking here first is what
+  // makes the refusal say why. An unreadable grant store is "retry", never "no".
+  let owner: boolean;
+  try {
+    owner = await hostedFomoOwner(tenant);
+  } catch {
+    throw new McpError("upstream_unavailable", "Fomo research is not reachable right now.", { retryAfterSec: 30 });
+  }
+  if (!owner) throw new McpError("forbidden", NEEDS_AGENT);
   let rt;
   try {
     rt = await fomoRuntime(true);

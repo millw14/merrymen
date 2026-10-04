@@ -1,13 +1,15 @@
 /**
  * GET /api/fomo/status: hosted, a session is required and decides whose state
  * is read; the answer is the owner's own research status (through the
- * registered tool) and the service's health. Offline: in-memory SQLite, no key.
+ * registered tool) and the service's health. Hosted, the session must also
+ * own an agent (a grant). Self-hosted, the answer says monitoring and
+ * following do not run on this install. Offline: in-memory SQLite, no key.
  */
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { after, afterEach, before, beforeEach, it } from "node:test";
 import { mintSession, SESSION_COOKIE } from "@/lib/auth";
-import { createWebFomoRuntime, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
+import { createWebFomoRuntime, FOMO_NEEDS_AGENT, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
 import { projectSettings, setSettingsReaderForTest } from "@/lib/services/settings-view";
 import { wrapSqlite } from "../../../../../../worker/src/db";
 import { FOMO_ATTRIBUTION } from "../../../../../../worker/src/fomo/render";
@@ -18,7 +20,10 @@ const B = `0x${"b".repeat(40)}` as `0x${string}`;
 const PONS = "0x39dbed3a00000000000000000000000000000c0d";
 const ENV_KEYS = ["MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET"] as const;
 const saved = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
+const C = `0x${"c".repeat(40)}` as `0x${string}`;
 const settings: Record<string, Record<string, unknown> | null> = {};
+/** Hosted wallets that own an agent (a grant). */
+const agents = new Set<string>([A, B]);
 let rt: FomoRuntime;
 let raw: DatabaseSync;
 
@@ -26,6 +31,7 @@ before(() => {
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_SESSION_SECRET = "test-fomo-status-secret-at-least-32-characters";
   setSettingsReaderForTest({ async settingsFor(t) { return projectSettings(settings[t.toLowerCase()] ?? null); } });
+  setFomoOwnerReaderForTest({ async hasAgent(t) { return agents.has(t); } });
 });
 
 beforeEach(async () => {
@@ -36,10 +42,15 @@ beforeEach(async () => {
   setFomoRuntimeForTest(rt);
 });
 
-afterEach(() => setFomoRuntimeForTest(null));
+afterEach(() => {
+  setFomoRuntimeForTest(null);
+  setFomoOwnerReaderForTest({ async hasAgent(t) { return agents.has(t); } });
+  process.env.MERRYMEN_HOSTED = "1";
+});
 
 after(() => {
   setSettingsReaderForTest(null);
+  setFomoOwnerReaderForTest(null);
   for (const k of ENV_KEYS) {
     const v = saved.get(k);
     if (v === undefined) delete process.env[k];
@@ -95,4 +106,32 @@ it("a store that cannot be reached is a 503, not an empty status", async () => {
   setFomoRuntimeForTest(Promise.reject(new Error("db down")) as never);
   const res = await get(A);
   assert.equal(res.status, 503);
+});
+
+it("hosted: a signed-in wallet that owns no agent is told so (403), and nothing is read or logged", async () => {
+  const res = await get(C);
+  assert.equal(res.status, 403);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await res.json(), { error: FOMO_NEEDS_AGENT });
+  assert.equal(Number((raw.prepare("SELECT COUNT(*) AS n FROM fomo_requests").get() as { n: number }).n), 0);
+});
+
+it("hosted: an unreadable grant store is a 503, never 'no agent'", async () => {
+  setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("grants down"); } });
+  const res = await get(A);
+  assert.equal(res.status, 503);
+  assert.equal(Number((raw.prepare("SELECT COUNT(*) AS n FROM fomo_requests").get() as { n: number }).n), 0);
+});
+
+it("says plainly where cohort monitoring and following can run: hosted yes, self-hosted no", async () => {
+  const hosted = (await (await get(A)).json()) as { monitoring: { available: boolean; note: string | null } };
+  assert.deepEqual(hosted.monitoring, { available: true, note: null });
+  delete process.env.MERRYMEN_HOSTED;
+  // Self-hosted asks no grant question: the install's own tenant is its owner.
+  setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked self-hosted"); } });
+  const res = await get(null);
+  assert.equal(res.status, 200);
+  const self = (await res.json()) as { monitoring: { available: boolean; note: string } };
+  assert.equal(self.monitoring.available, false);
+  assert.match(self.monitoring.note, /only on the hosted service/);
 });

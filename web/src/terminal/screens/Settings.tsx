@@ -680,6 +680,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const fomoDataVal = fomoData ?? view.values.fomoDataAccess ?? d.fomoDataAccess ?? true;
   const fomoMonitoringVal = fomoMonitoring ?? view.values.fomoMonitoringEnabled ?? d.fomoMonitoringEnabled ?? false;
   const fomoFollowVal = fomoFollow ?? view.values.fomoFollowEnabled ?? d.fomoFollowEnabled ?? false;
+  // COHORT MONITORING AND RESEARCH-LED FOLLOWING ARE HOSTED ONLY. Both are
+  // produced by the hosted orchestrator's fleet pass (the stream, the cohort,
+  // the child's fomo.json), which a self-hosted install never runs: there the
+  // two switches would store a value and change nothing while this page said
+  // "researches what the watched traders do". So, on a RESOLVED self-hosted
+  // answer only, they show off, cannot be changed, and say why. Untouched,
+  // their save guards send nothing, so a stored value is left as it was.
+  const fomoFleetOnly = hosted === false;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
   // this is the one setting whose default is ON, so an owner who has never saved
@@ -1504,12 +1512,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-input">
                 <input
                   type="checkbox"
-                  checked={fomoMonitoringVal}
+                  checked={fomoFleetOnly ? false : fomoMonitoringVal}
+                  disabled={fomoFleetOnly}
                   onChange={(e) => setFomoMonitoring(e.target.checked)}
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {fomoMonitoringVal ? "researches what the watched traders do" : "off — research only when asked"}
+                  {fomoFleetOnly
+                    ? "hosted only — not available on this install"
+                    : fomoMonitoringVal
+                      ? "researches what the watched traders do"
+                      : "off — research only when asked"}
                 </span>
               </span>
             </label>
@@ -1518,17 +1531,23 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-input">
                 <input
                   type="checkbox"
-                  checked={fomoFollowVal}
+                  checked={fomoFleetOnly ? false : fomoFollowVal}
+                  disabled={fomoFleetOnly}
                   onChange={(e) => setFomoFollow(e.target.checked)}
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {fomoFollowVal ? "may suggest coins to the memecoin review" : "off — research never leads to a trade"}
+                  {fomoFleetOnly
+                    ? "hosted only — not available on this install"
+                    : fomoFollowVal
+                      ? "may suggest coins to the memecoin review"
+                      : "off — research never leads to a trade"}
                 </span>
               </span>
               <span className="mm-hint">{t("settings.hint.fomoFollow")}</span>
             </label>
           </div>
+          {fomoFleetOnly && <p className="mm-hint">{t("settings.hint.fomoHostedOnly")}</p>}
 
           {/* ── THE CLASS ROUTE ────────────────────────────────────────────
               Four settings that had a type, a PUT-allowlist entry and a worker

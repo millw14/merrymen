@@ -425,3 +425,40 @@ describe("Telegram groups (docs/tg-groups.md)", () => {
     assert.match(code, /tg\?\.canJoinGroups === false && /);
   });
 });
+
+describe("Fomo monitoring and following say they are hosted only where they cannot run", () => {
+  // Cohort monitoring and research-led following are produced only by the
+  // hosted orchestrator's fleet pass (the stream, the cohort, the child's
+  // fomo.json). A self-hosted install builds a lookup broker and nothing
+  // else, so on it these two switches stored a value and did nothing while
+  // the page said "researches what the watched traders do". The census above
+  // is unchanged: the checkboxes stay on the page, disabled and labelled.
+  const fomo = code.slice(code.indexOf('t("settings.label.fomoMonitoring")'), code.indexOf('t("settings.hint.fomoFollow")'));
+
+  it("the flag is a RESOLVED self-hosted answer, never the unresolved one", () => {
+    assert.match(code, /const fomoFleetOnly = hosted === false;/);
+  });
+
+  it("both switches are disabled, shown off and labelled hosted-only there", () => {
+    assert.ok(fomo.length > 0, "the Fomo monitoring and follow controls were not found");
+    for (const [val, setter] of [["fomoMonitoringVal", "setFomoMonitoring"], ["fomoFollowVal", "setFomoFollow"]] as const) {
+      const at = fomo.indexOf(`onChange={(e) => ${setter}(e.target.checked)}`);
+      assert.ok(at > 0, `${setter} lost its binding`);
+      const tag = fomo.slice(fomo.lastIndexOf("<input", at), fomo.indexOf("/>", at));
+      assert.match(tag, new RegExp(`checked=\\{fomoFleetOnly \\? false : ${val}\\}`), `${val} reads as on where nothing runs`);
+      assert.match(tag, /disabled=\{fomoFleetOnly\}/, `${setter} can be changed where it does nothing`);
+    }
+    assert.equal((fomo.match(/fomoFleetOnly\s*\?\s*"hosted only — not available on this install"/g) ?? []).length, 2);
+  });
+
+  it("the data-access switch is NOT gated: lookups work on every install", () => {
+    const data = code.slice(code.indexOf('t("settings.label.fomoDataAccess")'), code.indexOf('t("settings.label.fomoMonitoring")'));
+    assert.ok(data.includes("onChange={(e) => setFomoData(e.target.checked)}"));
+    assert.doesNotMatch(data, /fomoFleetOnly/);
+  });
+
+  it("the page says why, in plain words, only where it applies", () => {
+    assert.match(code, /\{fomoFleetOnly && <p className="mm-hint">\{t\("settings\.hint\.fomoHostedOnly"\)\}<\/p>\}/);
+    assert.match(EN["settings.hint.fomoHostedOnly"], /only on the hosted service/);
+  });
+});
