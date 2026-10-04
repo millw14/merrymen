@@ -21,6 +21,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setImmediate } from "node:timers/promises";
 import { after, before, beforeEach, describe, it } from "node:test";
+import { EN, type MessageKey } from "@/lib/messages/en";
 
 import { mintSession } from "@/lib/auth";
 import { BOT_CLAIMED_TEXT, NOT_A_BOT_TOKEN_TEXT, SETTINGS_SAVE_LOCK, settingsSaveLockKey, useBotClaimsDbForTest } from "@/lib/telegram-claims";
@@ -357,6 +358,9 @@ describe("the Settings screen's answer to bot_claimed", () => {
     const keep = src.slice(at, src.indexOf("Keep it there", at));
     assert.match(keep, /setDraft\(\(\{ telegramBotToken: _kept, \.\.\.rest \}\) => rest\);/);
     assert.match(keep, /setBotClaimed\(null\);/);
-    assert.match(keep, /Nothing has been saved yet\./, "and the owner is told the save did not land");
+    // The notice renders through the catalogue; the key in the slice plus the
+    // sentence in the catalogue is the tripwire.
+    assert.match(keep, /t\("settings\.text\.nothingSavedYet"\)/, "and the owner is told the save did not land");
+    assert.match(EN["settings.text.nothingSavedYet" as MessageKey] as string, /Nothing has been saved yet/);
   });
 });

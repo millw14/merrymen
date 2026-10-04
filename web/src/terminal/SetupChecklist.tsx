@@ -1,3 +1,4 @@
+import { useT } from "../lib/i18n";
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import type { AgentStatus } from "@/app/api/grants/route";
@@ -6,8 +7,8 @@ import { fetchAccountForSession } from "./account-session";
 import { SIGNED_IN_EVENT } from "@/lib/resign-anchor";
 import type { AccountState } from "./HostedControls";
 
-export default function SetupChecklist({onFund,paper}:{onFund:()=>void;paper:boolean}) {
-  const [status,setStatus]=useState<AgentStatus|null>(null);
+export default function SetupChecklist({ onFund, paper }: { onFund: () => void; paper: boolean }) {
+  const [status, setStatus] = useState<AgentStatus | null>(null);
   useEffect(()=>{
     let active=true;
     let previous:AccountState["session"]|null=null;
@@ -43,11 +44,12 @@ export default function SetupChecklist({onFund,paper}:{onFund:()=>void;paper:boo
  * telling an owner who may be funded to fund again.
  */
 export function SetupProgress({status,paper,onFund}:{status:AgentStatus;paper:boolean;onFund:()=>void}) {
+  const t = useT();
   const step=setupStep(status,paper);
   if(step==="done") return null;
-  return <section className="setup-progress" aria-label="Agent setup">
-    <header><h2>Finish setting up</h2><span>{status.exists ? "1" : "0"} of {paper ? "1" : "2"}</span></header>
-    <div><span className="setup-check">{status.exists && <Check size={14}/>}</span><span><strong>Create your agent</strong><small>A strategy and signed trading limits.</small></span>{!status.exists && <a href="/create">Create agent</a>}</div>
-    {!paper && <div><span className="setup-check"/><span><strong>Add trading funds</strong><small>{step==="unread" ? "We couldn’t read your balance just now, so we can’t say whether this is done." : "Fund your agent when you’re ready."}</small></span>{step==="fund" && <button onClick={onFund}>Add funds</button>}</div>}
+  return <section className="setup-progress" aria-label={t("settings.setup.agentSetup")}>
+    <header><h2>{t("settings.setup.finishSettingUp")}</h2><span>{t("settings.setup.progressOf", { done: status.exists ? "1" : "0", total: paper ? "1" : "2" })}</span></header>
+    <div><span className="setup-check">{status.exists && <Check size={14}/>}</span><span><strong>{t("settings.setup.createYourAgent")}</strong><small>{t("settings.setup.strategyAndLimits")}</small></span>{!status.exists && <a href="/create">{t("settings.setup.createAgentLink")}</a>}</div>
+    {!paper && <div><span className="setup-check"/><span><strong>{t("settings.setup.addTradingFunds")}</strong><small>{step==="unread" ? t("settings.setup.unreadBalance") : t("settings.setup.fundWhenReady")}</small></span>{step==="fund" && <button onClick={onFund}>{t("settings.setup.addFundsBtn")}</button>}</div>}
   </section>;
 }

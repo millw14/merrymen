@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../lib/i18n";
 import { publishAgentImage, useAgentImageSrc } from "./agent-image-state";
 
 /**
@@ -40,6 +41,7 @@ export function AgentImageField({
   label: string;
   hint: string;
 }) {
+  const t = useT();
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,7 +70,7 @@ export function AgentImageField({
         // THE SERVER'S SENTENCE, NOT A GENERIC ONE. It distinguishes "that is
         // not an image" from "this deployment cannot process images", and only
         // one of those is the owner's to act on.
-        setError(body.error ?? "that upload did not go through");
+        setError(body.error ?? t("settings.image.uploadFailed"));
         setPreview(null);
         return;
       }
@@ -76,7 +78,7 @@ export function AgentImageField({
       setFailed(false);
       setPreview(null);
     } catch {
-      setError("that upload did not go through");
+      setError(t("settings.image.uploadFailed"));
       setPreview(null);
     } finally {
       URL.revokeObjectURL(local);
@@ -92,13 +94,13 @@ export function AgentImageField({
       const response = await fetch(`/api/agent-image/me/${kind}`, { method: "DELETE" });
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string };
-        setError(body.error ?? "that removal did not go through");
+        setError(body.error ?? t("settings.image.removalFailed"));
         return;
       }
       if (slug) publishAgentImage(slug, kind, null);
       setPreview(null);
     } catch {
-      setError("that did not go through");
+      setError(t("settings.image.removeFailedShort"));
     } finally {
       setBusy(false);
     }
@@ -108,7 +110,7 @@ export function AgentImageField({
     return (
       <div className="mm-field setting-field">
         <span className="mm-label">{label}</span>
-        <p className="mm-hint">Deploy an agent first — a picture needs something to belong to.</p>
+        <p className="mm-hint">{t("settings.image.deployFirst")}</p>
       </div>
     );
   }
@@ -140,13 +142,13 @@ export function AgentImageField({
           />
           {shown && (
             <button type="button" className="mm-btn danger sm" disabled={busy} onClick={() => void remove()}>
-              remove
+              {t("settings.image.removeBtn")}
             </button>
           )}
         </div>
       </div>
       <p className="mm-hint">{hint}</p>
-      {busy && <p className="mm-hint">updating…</p>}
+      {busy && <p className="mm-hint">{t("settings.image.updatingState")}</p>}
       {error && <p className="mm-hint mm-bad">{error}</p>}
     </div>
   );

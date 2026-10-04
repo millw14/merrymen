@@ -213,13 +213,13 @@ section { padding: 96px 0; }
 pre.code {
   font-family: var(--font-mono); font-size: 13px; line-height: 1.75;
   background: var(--bg-1); border: 1px solid var(--border); border-radius: 12px;
-  padding: 16px 18px; overflow-x: auto; color: var(--text-dim); margin: 0;
+  padding: 16px 18px; overflow-x: auto; max-width: 100%; color: var(--text-dim); margin: 0;
 }
 pre.code .tok { color: var(--lime); }
 code.inline {
   font-family: var(--font-mono); font-size: 0.86em;
   background: var(--bg-2); border: 1px solid var(--border-soft);
-  border-radius: 5px; padding: 1px 6px; color: var(--text);
+  border-radius: 5px; padding: 1px 6px; color: var(--text); overflow-wrap: anywhere;
 }
 
 .chat { padding: 20px; display: flex; flex-direction: column; gap: 11px; }
@@ -313,7 +313,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 .foot-bottom span { color: var(--text-faint); font-size: 13px; }
 
 /* ---------- docs / legal ---------- */
-.doc-shell { display: grid; grid-template-columns: 230px 1fr; gap: 56px; padding: 52px 0 96px; align-items: start; }
+.doc-shell { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 56px; padding: 52px 0 96px; align-items: start; }
 .doc-side { position: sticky; top: 88px; }
 .doc-side h6 { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-faint); margin: 20px 0 10px; font-weight: 500; }
 .doc-side a { display: block; color: var(--text-dim); font-size: 14px; padding: 5px 0 5px 14px; border-left: 1px solid var(--border); margin-left: -1px; transition: color .15s, border-color .15s; }
@@ -326,7 +326,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 .doc-body p, .doc-body li { color: var(--text-dim); font-size: 15.5px; line-height: 1.78; }
 .doc-body ul, .doc-body ol { padding-left: 22px; }
 .doc-body li { margin: 6px 0; }
-.doc-body a.link { color: var(--lime); }
+.doc-body a.link { color: var(--lime); overflow-wrap: anywhere; }
 .doc-body a.link:hover { text-decoration: underline; }
 .doc-body strong { color: var(--text); font-weight: 600; }
 .doc-body pre.code { margin: 16px 0; }

@@ -24,6 +24,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import { EN, type MessageKey } from "./messages/en";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
@@ -65,13 +66,23 @@ describe("the model list falls back to the house key", () => {
     // somebody to check a working key because we sent no key is the same shape
     // as reporting the market closed when it was our read that failed.
     const ui = read("../terminal/screens/Settings.tsx");
-    assert.match(ui, /Could not load the model list — \{modelsError\}/);
+    // The sentence moved into the catalogue with the rest of the screen and
+    // renders through its key, with the live route error in {error} — never
+    // raw provider text, never the reader's fault.
+    assert.match(ui, /t\("settings\.msg\.modelListFailed", \{ error: modelsError \}\)/);
+    assert.match(
+      EN["settings.msg.modelListFailed" as MessageKey] as string,
+      /Could not load the model list/,
+    );
     assert.ok(
       !/Could not load AI models\. Check your provider and key, or enter a model name\.<\/p>/.test(ui),
       "the fixed key-blaming sentence must be gone",
     );
     // And it still says the list is optional, because it is.
-    assert.match(ui, /the list is a convenience, not a requirement/);
+    assert.match(
+      EN["settings.msg.modelListFailed" as MessageKey] as string,
+      /the list is a convenience, not a requirement/,
+    );
   });
 });
 

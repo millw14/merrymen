@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { EN } from "@/lib/messages/en";
+import { EN, type MessageKey } from "@/lib/messages/en";
 
 /**
  * WHAT /settings MUST STILL DO AFTER IT IS RESTYLED.
@@ -310,13 +310,22 @@ describe("the hosted refusals stay refused", () => {
     // `pc-danger` blocks and failed the moment they were renamed — which is a
     // test measuring the styling rather than the property. What must survive a
     // restyle is the sentence that tells an owner what they are arming.
-    for (const said of [
-      "This lets Telegram touch this computer",
-      "This is remote control of your computer",
-      "Free-form shell is remote code execution by an AI",
-      "The drawdown breaker cannot protect this money",
-    ]) {
-      assert.ok(SRC.includes(said), `this warning went missing: "${said}"`);
+    //
+    // The warnings themselves moved into the catalogue with the rest of the
+    // screen, so each pair asserts both ends: the catalogue still says the
+    // sentence, and the screen still renders that key. Either half going
+    // missing fails loudly instead of silently un-translating a warning.
+    for (const [said, key] of [
+      ["This lets Telegram touch this computer", "settings.text.thisLetsTelegramTouch"],
+      ["This is remote control of your computer", "settings.text.thisIsRemoteControl"],
+      ["Free-form shell is remote code execution by an AI", "settings.text.freeFormShellIs"],
+      ["The drawdown breaker cannot protect this money", "settings.text.theDrawdownBreakerCannot"],
+    ] as const) {
+      assert.ok(
+        (EN[key as MessageKey] as string).includes(said),
+        `the catalogue stopped saying: "${said}"`,
+      );
+      assert.ok(SRC.includes(`t("${key}")`), `the screen stopped rendering ${key}: "${said}"`);
     }
   });
 
