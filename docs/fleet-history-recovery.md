@@ -52,6 +52,38 @@ never change permissions. An orphan publication lock is never automatically
 stolen or removed: preserve it until an operator verifies the original source,
 exclusive writer absence and the publication boundary.
 
+## Reporting while the fleet remains halted
+
+`MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1` selects a separate supervisor entry
+before ordinary persistent-home preparation. It only publishes failure reports;
+it does not enter the normal supervisor loop or start workers, holders, ferries,
+financial jobs, imports or repairs. An unset flag follows ordinary startup. An
+invalid flag or malformed accounting hold list refuses before reporting.
+
+The reporter requires a canonical, owned, private root on the configured exact
+durable Railway mount and an unchanged private `FLEET_HALT` on that device. It
+does not initialize a root, create or copy a manifest, change permissions or
+remove the halt. A missing manifest is evidence of the ordinary startup refusal.
+An unsafe, corrupt or mismatched manifest publishes nothing. A valid held or
+complete manifest alone does not prove a tenant's original book is missing:
+publication then requires a retained source barrier, or an absent book with a
+positive existing mirror cursor. Present or uncertain books are not opened.
+
+Public grant projections use existing tables without the grant-store bootstrap
+or signing-key decryption. Each report requires a newly acquired healthy
+PostgreSQL tenant lease, no local writer or holder, an exact unchanged grant at
+commit, and the common account lock. The only schema or row writes allowed are
+the nonfinancial `fleet_recovery_health` metadata. Original grants, financial
+tables, source cursors, books, keys, memory and queued commands remain unchanged.
+The reporter cannot clear a report or create a command cutoff.
+
+The separate halted loop releases each temporary tenant lease after reporting.
+A changed halt or root aborts that entry; shutdown never invokes the normal
+pending-kill writer and cannot fall through to normal startup. Filesystem proof
+and a PostgreSQL commit cannot be atomic: a change during the commit itself may
+leave a stale failure report. That report remains a refusal and grants no
+execution or source clearance.
+
 ## Preparing a continuation from retained records
 
 `worker/src/fleet-recovery-preview.ts` is a pure review helper. It accepts a
@@ -92,13 +124,14 @@ resume the affected production fleet.
 2. Review this application/trading change and its prerequisite memory/source
    retention change with Milla. Passing CI alone is not approval.
 3. Ordinary supervisor startup still requires a verified persistent root. A
-   nonempty root without its manifest refuses before recovery reporting. A held
-   manifest retains `FLEET_HALT` and skips reconciliation, so it also publishes
-   no new recovery reports. These changes include no separate status-only
-   startup path and do not make the reported incident volume deployment-ready.
-   Any incident reporting or initialization plan needs separate reviewed work;
-   retain all existing holds and source proof requirements. Do not clear a halt,
-   disable proof, copy a manifest or mark handover complete to obtain UI status.
+   nonempty root without its manifest refuses before recovery reporting; a held
+   manifest retains `FLEET_HALT` and skips normal reconciliation. Before using
+   the explicit report-only entry, preserve and verify the current volume,
+   halt, existing books and grants, exclusive ownership and deployment holds.
+   This code alone does not establish those production prerequisites. Review
+   the exact entry and rollout with Milla before executing it. Retain all
+   source proof requirements; do not clear a halt, disable proof, copy a
+   manifest or mark handover complete to obtain UI status.
 4. Verify authenticated owner views show the hold and qualify saved figures.
    Check narration with stale active/energy state and model failure. Do not use a
    live financial probe as a UI verification step.
@@ -117,8 +150,16 @@ old JSON/running-marker preservation and execution of only a later fixture
 command. Held-reset tests verify a late local-boundary or lease refusal rolls back
 claims, book changes and events.
 
+Report-only entry tests use a populated unmanifested fixture with an existing
+halt, undecryptable signing keys and no DEK. They verify unchanged original
+tables and filesystem files, audit allowed SQL, and exercise absent/invalid
+configuration, healthy or uncertain source refusal, active writers and lease
+contention. Actual PostgreSQL cases cover the public grant incarnation,
+replacement row-lock serialization and changed-halt rollback.
+
 UI fixtures use synthetic names, balances and times with the actual components
-and CSS. Chrome verification covers desktop and a 390-pixel phone frame. They are
+and CSS. Chrome verification covers desktop and a 390-pixel phone frame,
+including the visibility of saved-balance labels. They are
 layout evidence, not a production recovery or current portfolio observation.
 Standard CI covers the whole application suite, typechecks, build and packaging;
 the opt-in PostgreSQL tests were executed locally against a disposable loopback

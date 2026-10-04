@@ -422,7 +422,7 @@ export function DesktopPortfolio({
           </span>
           <ArrowUpRight size={16} />
         </button>
-        {recovery && <span className="account-label">Last recorded balance</span>}
+        {recovery && <span className="account-label recovery-balance-label">Last recorded balance</span>}
         <div className="desktop-balance">
           <BalanceFigure value={mine.equity} />
         </div>

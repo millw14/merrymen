@@ -69,7 +69,7 @@ export function You({
       </div>
       <RecoveryNotice recovery={recovery}/>
       <section className="account-balance" aria-label="Account balance">
-        <span className="account-label">{recovery ? "Last recorded portfolio balance" : "Portfolio balance"}</span>
+        <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded portfolio balance" : "Portfolio balance"}</span>
         <strong>
           <BalanceFigure value={mine.equity} />
         </strong>

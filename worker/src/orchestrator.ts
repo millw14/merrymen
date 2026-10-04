@@ -40,7 +40,7 @@ import { readRiskPeriod, RISK_PERIOD_SCHEMA } from "./risk-period";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
-import { recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
+import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
@@ -65,7 +65,7 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, type BigIntStats } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
@@ -99,7 +99,7 @@ import { parseLinkedChatAt, parsePollHealth, tokenTagOf, type PollHealth } from 
 import { conditionAlertTimes } from "./telegram/condition-alert-state";
 import { linksToPromote } from "./telegram/link";
 import { livenessAlertLine, telegramLivenessVerdict } from "./telegram-liveness";
-import { makePgDb, translateSchema, type Db } from "./db";
+import { makePgDb, translateSchema, withAdvisoryLock, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
@@ -119,7 +119,7 @@ import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
-import { preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
+import { PERSISTENT_HOME_MANIFEST, preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
 import { scrubHostedGrantCache } from "./hosted-grant-cache";
 import {
   clearHoldNotified,
@@ -9002,18 +9002,231 @@ export async function honourFleetHalt(): Promise<void> {
   for (const held of holders.values()) pressLeaving(held);
 }
 
+// This deliberately does not use getGrantStore, pausedSourceCause, or the
+// ordinary halt/stop paths: those can initialize schemas, unseal keys, open
+// SQLite WAL files, or persist kill requests. This branch only reports failures.
+interface RecoveryReportTestOptions {
+  shared: Db;
+  dialect: "postgres" | "sqlite";
+  readMountInfo: () => string;
+  acquireLease: (tenant: `0x${string}`) => Promise<TenantLease | null>;
+  onePass: true;
+}
+let recoveryReportTestOptions: RecoveryReportTestOptions | null = null;
+export function setRecoveryReportOnlyForTest(options: RecoveryReportTestOptions | null): void {
+  recoveryReportTestOptions = options;
+}
+const reportRefused = () => new Error("Recovery report-only prerequisites changed or could not be proved; fleet remains held.");
+const reportMissing = (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT";
+const reportStat = (s: BigIntStats) => [s.dev, s.ino, s.mode, s.uid, s.nlink, s.size, s.mtimeNs, s.ctimeNs].map(String).join(":");
+function reportIdle(): boolean {
+  return !stopping && !children.size && !holders.size && !spawning.size && !restartPending.size
+    && !exitingChildren.size && !retiringExpired.size && !leaseLossDraining.size && !leases.size && !removedLedgerPending.size;
+}
+function reportFile(file: string, device: bigint): string | null {
+  let fd: number;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (e) { if (reportMissing(e)) return null; throw reportRefused(); }
+  try {
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isFile() || st.nlink !== 1n || st.dev !== device || (st.mode & 0o7777n) !== 0o600n
+        || st.uid !== BigInt(process.geteuid!()) || st.size > 8192n) throw reportRefused();
+    const bytes = Buffer.alloc(8193); let n = 0;
+    while (n < bytes.length) { const got = readSync(fd, bytes, n, bytes.length - n, n); if (!got) break; n += got; }
+    if (BigInt(n) !== st.size || reportStat(fstatSync(fd, { bigint: true })) !== reportStat(st)
+        || reportStat(lstatSync(file, { bigint: true })) !== reportStat(st)) throw reportRefused();
+    return JSON.stringify([reportStat(st), bytes.subarray(0, n).toString("base64")]);
+  } finally { closeSync(fd); }
+}
+function reportRootProof(env: NodeJS.ProcessEnv, readMountInfo: () => string): { device: bigint; assert: () => void; manifest: string | null } {
+  const home = env.MERRYMEN_HOME, volume = env.MERRYMEN_HOME_VOLUME_ID;
+  if (env.MERRYMEN_PERSISTENT_HOME_REQUIRED !== "1" || !home || !path.isAbsolute(home) || path.resolve(home) !== home
+      || home === path.parse(home).root || home.includes("\0") || home !== env.RAILWAY_VOLUME_MOUNT_PATH
+      || !volume || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(volume) || !process.geteuid
+      || (env.MERRYMEN_INITIAL_HANDOVER !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(env.MERRYMEN_INITIAL_HANDOVER))
+      || !constants.O_NOFOLLOW || !constants.O_DIRECTORY || !constants.O_NONBLOCK) throw reportRefused();
+  const st = lstatSync(home, { bigint: true });
+  const root = () => {
+    const current = lstatSync(home, { bigint: true });
+    if (!current.isDirectory() || realpathSync(home) !== home || (current.mode & 0o7777n) !== 0o700n
+        || current.uid !== BigInt(process.geteuid!()) || reportStat(current) !== reportStat(st)) throw reportRefused();
+    const fd = openSync(home, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { if (reportStat(fstatSync(fd, { bigint: true })) !== reportStat(st)) throw reportRefused(); }
+    finally { closeSync(fd); }
+    // Same physical mount checks as persistent-home, without initializing a
+    // manifest in the incident's already populated root.
+    const text = readMountInfo();
+    if (!text || text.length > 1024 * 1024) throw reportRefused();
+    let exact = 0;
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      const parts = line.split(" - "), before = parts[0]?.split(" "), after = parts[1]?.split(" ");
+      if (parts.length !== 2 || !before || before.length < 6 || !after || after.length !== 3
+          || !/^\d+:\d+$/.test(before[2]!) || /\\(?!040|011|012|134)/.test(before[4]!)) throw reportRefused();
+      const mount = before[4]!.replace(/\\(040|011|012|134)/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+      if (mount.startsWith(`${home}/`)) throw reportRefused();
+      if (mount !== home) continue;
+      exact++;
+      const major = ((st.dev >> 8n) & 0xfffn) | ((st.dev >> 32n) & 0xfffff000n);
+      const minor = (st.dev & 0xffn) | ((st.dev >> 12n) & 0xffffff00n);
+      if (before[2] !== `${major}:${minor}` || new Set(["overlay", "overlayfs", "tmpfs", "ramfs", "rootfs", "devtmpfs",
+        "proc", "sysfs", "cgroup", "cgroup2", "mqueue", "hugetlbfs", "debugfs", "tracefs", "securityfs"]).has(after[0]!)
+          || !before[5]!.split(",").includes("rw") || !after[2]!.split(",").includes("rw")) throw reportRefused();
+    }
+    if (exact !== 1) throw reportRefused();
+  };
+  root();
+  const halt = reportFile(path.join(home, "FLEET_HALT"), st.dev);
+  if (halt === null) throw reportRefused(); // Existing empty halts are valid presence; never create one.
+  const manifest = reportFile(path.join(home, PERSISTENT_HOME_MANIFEST), st.dev);
+  if (manifest !== null && !verifyPersistentHome(env, { readMountInfo })) throw reportRefused();
+  const frozen = JSON.stringify([env.MERRYMEN_HOME, env.RAILWAY_VOLUME_MOUNT_PATH, env.MERRYMEN_HOME_VOLUME_ID,
+    env.MERRYMEN_PERSISTENT_HOME_REQUIRED, env.MERRYMEN_INITIAL_HANDOVER, env.DATABASE_URL]);
+  return { device: st.dev, manifest, assert() {
+    if (process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY !== "1" || !isHostedMode() || !reportIdle()
+        || frozen !== JSON.stringify([process.env.MERRYMEN_HOME, process.env.RAILWAY_VOLUME_MOUNT_PATH,
+          process.env.MERRYMEN_HOME_VOLUME_ID, process.env.MERRYMEN_PERSISTENT_HOME_REQUIRED,
+          process.env.MERRYMEN_INITIAL_HANDOVER, process.env.DATABASE_URL])) throw reportRefused();
+    accountingHoldTenants(process.env); root();
+    if (reportFile(path.join(home, "FLEET_HALT"), st.dev) !== halt
+        || reportFile(path.join(home, PERSISTENT_HOME_MANIFEST), st.dev) !== manifest) throw reportRefused();
+  } };
+}
+interface ReportGrant { tenant: `0x${string}`; account: string; chain: number; incarnation: string; public: string }
+function reportGrantProjection(dialect: "postgres" | "sqlite"): string {
+  const json = (key: string) => dialect === "postgres" ? `grant_json->>'${key}'` : `json_extract(grant_json,'$.${key}')`;
+  const stop = (key: string) => dialect === "postgres" ? `grant_json#>>'{replacementStop,${key}}'` : `json_extract(grant_json,'$.replacementStop.${key}')`;
+  // Return only a validity bit for the stop's digest, never its key hash.
+  const stopHash = dialect === "postgres" ? `COALESCE(${stop("sessionKeyHash")} ~ '^[0-9a-f]{64}$',false)`
+    : `CASE WHEN length(${stop("sessionKeyHash")})=64 AND ${stop("sessionKeyHash")} NOT GLOB '*[^0-9a-f]*' THEN 1 ELSE 0 END`;
+  const token = dialect === "postgres"
+    ? "xmin::text || ':' || ctid::text || ':' || encode(sha256(convert_to(grant_json::text,'UTF8')),'hex')"
+    : "CAST(rowid AS TEXT) || ':' || report_sha256(grant_json)";
+  return `SELECT tenant,chain_id,updated_at,${json("smartAccount")} AS account,${json("owner")} AS owner,
+    ${json("sessionKeyAddress")} AS session,${json("chainId")} AS grant_chain,${json("grantedAt")} AS granted,
+    ${json("expiresAt")} AS expires,${stop("sessionKeyAddress")} AS stop_session,${stop("stoppedAt")} AS stop_at,
+    ${stopHash} AS stop_hash_valid,${token} AS incarnation FROM grants`;
+}
+function reportGrants(rows: unknown[]): ReportGrant[] {
+  if (rows.length > 256) throw reportRefused();
+  const tenants = new Set<string>(), accounts = new Set<string>();
+  return rows.map(value => {
+    const r = value as Record<string, unknown>, address = (v: unknown) => typeof v === "string" && /^0x[0-9a-f]{40}$/i.test(v);
+    const integer = (v: unknown) => (typeof v === "number" || (typeof v === "string" && /^(?:0|[1-9][0-9]{0,15})$/.test(v)))
+      && Number.isSafeInteger(Number(v));
+    const chain = Number(r.chain_id), granted = Number(r.granted), expires = Number(r.expires), updated = Number(r.updated_at);
+    if (!address(r.tenant) || r.tenant !== String(r.tenant).toLowerCase() || !address(r.account) || !address(r.owner)
+        || !address(r.session) || !integer(r.chain_id) || chain <= 0
+        || chain > 2_147_483_647 || !integer(r.grant_chain) || Number(r.grant_chain) !== chain || !integer(r.granted) || granted <= 0
+        || !integer(r.expires) || (expires !== 0 && expires <= granted) || !integer(r.updated_at) || updated <= 0
+        || (expires === 0 && (!address(r.stop_session) || !integer(r.stop_at) || Number(r.stop_at) <= 0
+          || (r.stop_hash_valid !== true && r.stop_hash_valid !== 1)))
+        || typeof r.incarnation !== "string" || r.incarnation.length > 192 || !/^[0-9]+:(?:\([0-9]+,[0-9]+\):)?[0-9a-f]{64}$/.test(r.incarnation)) throw reportRefused();
+    const tenant = r.tenant as `0x${string}`, account = String(r.account).toLowerCase();
+    if (tenants.has(tenant) || accounts.has(account)) throw reportRefused();
+    tenants.add(tenant); accounts.add(account);
+    return { tenant, account, chain, incarnation: r.incarnation, public: JSON.stringify(r) };
+  });
+}
+function reportSourceFacts(home: string, device: bigint): { cause: "source-barrier" | null; absent: boolean; pin: string } {
+  const directories: string[] = [];
+  for (const dir of [path.dirname(home), home]) {
+    let st: BigIntStats;
+    try { st = lstatSync(dir, { bigint: true }); } catch (e) { if (reportMissing(e)) { directories.push("absent"); continue; } throw reportRefused(); }
+    if (!st.isDirectory() || realpathSync(dir) !== dir || st.dev !== device || st.uid !== BigInt(process.geteuid!())
+        || (st.mode & 0o022n) !== 0n) throw reportRefused();
+    directories.push(reportStat(st));
+  }
+  const markers = [LEDGER_SOURCE_BLOCK, LEDGER_IMPORT_PENDING_FILE].map(name => reportFile(path.join(home, name), device));
+  let absent = false;
+  try { lstatSync(path.join(home, "merrymen.db")); } catch (e) { if (!reportMissing(e)) throw reportRefused(); absent = true; }
+  return { cause: markers.some(marker => marker !== null) ? "source-barrier" : null, absent, pin: JSON.stringify([directories, markers, absent]) };
+}
+async function runRecoveryReportOnly(): Promise<void> {
+  if (!process.env.DATABASE_URL || !reportIdle()) throw reportRefused();
+  const tests = recoveryReportTestOptions, env = { ...process.env };
+  const readMountInfo = tests?.readMountInfo ?? (() => readFileSync("/proc/self/mountinfo", "utf8"));
+  const root = reportRootProof(env, readMountInfo);
+  const dialect = tests?.dialect ?? "postgres";
+  let stopped = false;
+  const assert = () => { if (stopped) throw reportRefused(); root.assert(); };
+  const checked = async <T>(fn: () => Promise<T>, guard = assert): Promise<T> => { guard(); const value = await fn(); guard(); return value; };
+  const shared = tests?.shared ?? await checked(() => makePgDb(env.DATABASE_URL!));
+  const projection = reportGrantProjection(dialect);
+  let wake: (() => void) | null = null;
+  const stop = () => { stopped = true; wake?.(); };
+  process.on("SIGINT", stop); process.on("SIGTERM", stop);
+  log("failure-only recovery reporter: existing fleet halt retained; no worker or holder startup");
+  try {
+    do {
+      const roster = reportGrants(await checked(() => shared.prepare(`${projection} ORDER BY tenant LIMIT 257`).all()));
+      for (const grant of roster) {
+        assert();
+        const lease = await (tests ? tests.acquireLease(grant.tenant) : acquireTenantLease(grant.tenant));
+        if (!lease) { assert(); continue; }
+        try {
+          const owned = () => { assert(); if (lease.backend !== "postgres" || lease.tenant !== grant.tenant || !lease.healthy()) throw reportRefused(); };
+          owned();
+          const home = childHome(grant.tenant), facts = reportSourceFacts(home, root.device);
+          let cause: RecoveryCause | null = root.manifest === null ? "persistent-source" : facts.cause;
+          let cursors: unknown[] | null = null;
+          const cursorSql = "SELECT table_name,last_id,last_stamp FROM mirror_state WHERE tenant=? ORDER BY table_name LIMIT 65";
+          if (!cause && facts.absent) {
+            cursors = await checked(() => shared.prepare(cursorSql).all(grant.tenant), owned);
+            if (cursors.length > 64 || cursors.some(r => !/^(?:0|[1-9][0-9]{0,18})$/.test(String((r as { last_id: unknown }).last_id)))) throw reportRefused();
+            if (cursors.some(r => BigInt(String((r as { last_id: unknown }).last_id)) > 0n)) cause = "source-continuity";
+          }
+          if (!cause) continue; // No source success/clearance; uncertain present books remain unopened.
+          const proof = () => { owned(); if (reportSourceFacts(home, root.device).pin !== facts.pin) throw reportRefused(); };
+          // The only initialization allowed in this branch is recovery metadata.
+          await checked(() => withAdvisoryLock(shared, 0x4d525644, 1, locked => locked.tx(async tx => {
+            if (dialect === "postgres") await checked(() => tx.exec("SET LOCAL lock_timeout='1000ms'; SET LOCAL statement_timeout='5000ms'"), proof);
+            await checked(() => tx.exec(FLEET_RECOVERY_SCHEMA), proof);
+          }), 5_000), proof);
+          await checked(() => withFleetRecoveryLock(shared, grant.account, locked => locked.tx(async tx => {
+            proof();
+            if (dialect === "postgres") await checked(() => tx.exec("SET LOCAL lock_timeout='1000ms'; SET LOCAL statement_timeout='5000ms'"), proof);
+            const current = reportGrants(await checked(() => tx.prepare(`${projection} ORDER BY tenant LIMIT 257${dialect === "postgres" ? " FOR SHARE NOWAIT" : ""}`).all(), proof));
+            const latest = current.find(r => r.tenant === grant.tenant);
+            if (!latest || latest.public !== grant.public) throw reportRefused();
+            if (cursors !== null && JSON.stringify(await checked(() => tx.prepare(`${cursorSql}${dialect === "postgres" ? " FOR SHARE NOWAIT" : ""}`).all(grant.tenant), proof)) !== JSON.stringify(cursors)) throw reportRefused();
+            const now = Math.floor(Date.now() / 1000);
+            await checked(() => tx.prepare(`INSERT INTO fleet_recovery_health(tenant,smart_account,chain_id,held,cause,since_at,checked_at)
+              VALUES(?,?,?,1,?,?,?) ON CONFLICT(tenant,smart_account,chain_id) DO UPDATE SET held=1,cause=excluded.cause,
+              since_at=CASE WHEN fleet_recovery_health.held=1 THEN fleet_recovery_health.since_at ELSE excluded.since_at END,
+              checked_at=excluded.checked_at WHERE fleet_recovery_health.checked_at<=excluded.checked_at`)
+              .run(grant.tenant, grant.account, grant.chain, cause, now, now), proof);
+            proof(); // Final synchronous file/lease check before the driver's COMMIT.
+          })), proof);
+        } finally { await lease.release(); }
+      }
+      assert();
+      if (tests?.onePass) return;
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, RECONCILE_MS); wake = () => { clearTimeout(timer); resolve(); }; });
+      wake = null;
+    } while (!stopped);
+  } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+  // This branch owns no ordinary shutdown jobs. Exit closes the idle DB pools
+  // and the dedicated lease session after every temporary lease was released.
+  if (!tests) process.exit(0);
+}
+
 export async function runOrchestrator(): Promise<void> {
   if (!isHostedMode()) {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
+  // Validate operator intent before either entry path can initialize anything.
+  const accountingHolds = accountingHoldTenants(process.env);
+  const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
+  if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
+  if (reportMode === "1") { await runRecoveryReportOnly(); return; }
   // A new mounted home first writes its own durable halt. No child, holder,
   // accounting repair or ordinary writer may precede this preparation.
   const persistent = preparePersistentHomeForHandover();
   if (persistent?.handoverState === "held") log("persistent home awaits verified original-book and memory handover; fleet remains halted");
   // Validate the complete operator list before any diagnosis, mutation or
   // child starts. A malformed entry must never silently drop from a hold.
-  const accountingHolds = accountingHoldTenants(process.env);
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);

@@ -9,8 +9,8 @@ export function pausedRecovery(value: FleetRecoveryView | null | undefined): Fle
 
 export function recoveryDetail(recovery: FleetRecoveryView): string {
   return recovery.history === "available"
-    ? "Saved history is available. We’re checking the trading records before this agent resumes."
-    : "We’re checking the saved trading records before this agent resumes.";
+    ? "Some saved history is available. Trading remains paused pending reconciliation."
+    : "Saved trading records have not yet been verified. Trading remains paused.";
 }
 
 export function recoveryMemory(recovery: FleetRecoveryView): string | null {
@@ -26,7 +26,7 @@ export function ownerTradeEmptyTitle(recovery: FleetRecoveryView | null | undefi
 export function recoveryAutonomy(autonomy: Autonomy, recovery: FleetRecoveryView | null | undefined): Autonomy {
   if (!pausedRecovery(recovery)) return autonomy;
   return { ...autonomy, state: "checking", label: "RECOVERING", rule: null,
-    reason: "Trading is paused while the saved records are checked.",
+    reason: "Trading remains paused pending reconciliation.",
     headline: null, action: null, needsOwnerAction: false,
     moneyLabel: autonomy.simulated ? "Last recorded paper cash" : "Last recorded cash" };
 }

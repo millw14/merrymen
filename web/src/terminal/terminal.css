@@ -4080,6 +4080,12 @@ html[lang|="ko"] .terminal-host {
 :where(.terminal-host) .account-balance > .account-label {
   display: none;
 }
+/* Saved balances need their qualifier even where ordinary balance labels hide. */
+:where(.terminal-host) .desk-portfolio .portfolio-summary .recovery-balance-label,
+:where(.terminal-host) .account-balance > .recovery-balance-label,
+:where(.terminal-host) .desktop-portfolio .recovery-balance-label {
+  display: block;
+}
 :where(.terminal-host) .account-balance > strong {
   font-family: var(--pixel);
   font-size: 52px;

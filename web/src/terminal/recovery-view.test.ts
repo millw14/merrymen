@@ -49,11 +49,14 @@ describe("owner recovery presentation", () => {
 
   it("only describes available history and preserved/recovered memory when proved", () => {
     const saved = doc(React.createElement(RecoveryNotice, { recovery: held }));
-    assert.match(saved.body.textContent!, /Trading paused for recovery.*Saved history is available/);
+    assert.match(saved.body.textContent!, /Trading paused for recovery.*Some saved history is available/);
+    assert.match(saved.body.textContent!, /Trading remains paused pending reconciliation/);
     assert.match(saved.body.textContent!, /Last verified activity/);
     assert.doesNotMatch(saved.body.textContent!, /memories|lost|zero|restored|complete/i);
     const unknown = doc(React.createElement(RecoveryNotice, { recovery: { ...held, history: "unknown", lastVerifiedHeartbeatAt: null } }));
+    assert.match(unknown.body.textContent!, /Saved trading records have not yet been verified.*Trading remains paused/);
     assert.doesNotMatch(unknown.body.textContent!, /history is available|Last verified activity|no history/i);
+    for (const page of [saved, unknown]) assert.doesNotMatch(page.body.textContent!, /before this agent resumes|automatically resumes/i);
     assert.equal(recoveryMemory({ ...held, memory: "preserved" }), "Its saved memories are preserved.");
     assert.equal(recoveryMemory({ ...held, memory: "recovered" }), "Its saved memories have been recovered.");
   });
@@ -65,6 +68,7 @@ describe("owner recovery presentation", () => {
     assert.equal(panel.querySelector(".desktop-running")!.textContent, "RECOVERING");
     assert.ok(panel.querySelector(".desktop-running")!.classList.contains("paused"));
     assert.match(panel.body.textContent!, /Last recorded balance.*\$42.*Reconciliation pending/);
+    assert.equal(panel.querySelector(".recovery-balance-label")!.textContent, "Last recorded balance");
     assert.match(panel.body.textContent!, /Last recorded cash/);
     assert.match(panel.body.textContent!, /Withdraw/);
     assert.equal(panel.querySelector(".desktop-blocked"), null);
@@ -87,6 +91,7 @@ describe("owner recovery presentation", () => {
     assert.equal(page.querySelector(".desk-status")!.textContent, "RECOVERING");
     assert.ok(page.querySelector(".desk-status")!.classList.contains("paused"));
     assert.match(page.body.textContent!, /Trading paused for recovery.*Last recorded agent balance/);
+    assert.equal(page.querySelector(".portfolio-summary .recovery-balance-label")!.textContent, "Last recorded agent balance");
     assert.equal(page.querySelector(".desk-blocked"), null);
     assert.equal(page.querySelector(".desk-confirm"), null);
     assert.doesNotMatch(page.body.textContent!, /Fix it.*re-sign|Start live trading/);
@@ -108,6 +113,7 @@ describe("owner recovery presentation", () => {
       stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
     assert.equal(profile.querySelector(".profile-mode")!.textContent, "RECOVERING");
     assert.match(profile.body.textContent!, /Last recorded portfolio balance/);
+    assert.equal(profile.querySelector(".account-balance > .recovery-balance-label")!.textContent, "Last recorded portfolio balance");
     assert.match(profile.querySelector(".profile-usage")!.textContent!, /Daily usageReconciliation pending/);
     assert.equal(profile.querySelector(".profile-usage progress"), null);
     assert.doesNotMatch(profile.body.textContent!, /Used today|\+\$2.*today/);

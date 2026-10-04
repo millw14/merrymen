@@ -147,6 +147,9 @@ describe("held tenants reach only the loops they belong in", () => {
       "reconcile",
       "refreshGrantForChild",
       "reportFleetSource",
+      // The explicit failure-only reporter refuses any local holder; it never
+      // starts, visits or services one (entry-path tests exercise that refusal).
+      "reportIdle",
       "retireExpiredGrants",
       "retryHold",
       "runOrchestrator",

@@ -601,7 +601,7 @@ export function Agent({
           onClick={() => setExpanded((value) => !value)}
         >
           <div>
-            <span className="account-label">{recovery ? "Last recorded agent balance" : "Agent balance"}</span>
+            <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded agent balance" : "Agent balance"}</span>
             <strong className="desk-equity">
               <BalanceFigure value={mine.equity} />
             </strong>
