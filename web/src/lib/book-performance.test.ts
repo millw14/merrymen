@@ -73,7 +73,8 @@ test("canonical fills cannot double gas, and a late bare copy cannot resurrect a
     await db.prepare("DELETE FROM trades WHERE kind <> 'key-install' AND user_op_hash <> '0xinstall'").run();
     const onlyInstall = await readBookPerformance(db, ACCOUNT, 2, true);
     assert.equal(onlyInstall.liveRank.unrankedWhy, "never-filled");
-    assert.equal(onlyInstall.performance.pnlBps, null);
+    assert.ok(Math.abs(onlyInstall.performance.pnlBps! - 990) < 1e-9,
+      "measured book performance includes installation expense without awarding a trading rank");
     assert.equal(onlyInstall.performance.equityUsdg, 110);
   } finally { raw.close(); }
 });
@@ -128,6 +129,29 @@ test("exact live performance and rank refuse unpriced or unrecorded gas, while p
   }
 });
 
+test("an evidenced live book has net P&L before a first fill while trading rank remains withheld", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, 100, 10);
+    const initial = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(initial.performance.pnlUsdg, 0);
+    assert.equal(initial.performance.pnlBps, 0);
+    assert.equal(initial.liveRank.pnlBps, null);
+    assert.equal(initial.liveRank.unrankedWhy, "never-filled");
+    await op(db, 5, { kind: "key-install", gas: 0.25, wei: "2000", bare: true });
+    const installed = await readBookPerformance(db, ACCOUNT, 2, false);
+    assert.equal(installed.performance.pnlBps, -25);
+    assert.equal(installed.performance.pnlUsdg, null);
+    assert.equal(installed.liveRank.unrankedWhy, "never-filled");
+    await db.prepare("UPDATE agents SET contributions_known = 0").run();
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).performance.pnlBps, null);
+    await db.prepare("UPDATE agents SET contributions_known = 1").run();
+    await db.prepare("UPDATE equity SET mode = NULL").run();
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).performance.pnlBps, null,
+      "a legacy valuation of unknown book cannot be treated as live cash");
+  } finally { raw.close(); }
+});
+
 test("a delayed landed or reverted operation is charged when observed settlement reaches the measured valuation", async () => {
   for (const status of ["landed", "reverted"]) {
     const { raw, db } = await ledger();
@@ -149,6 +173,39 @@ test("a delayed landed or reverted operation is charged when observed settlement
   }
 });
 
+test("receipt-backed recovered fees use execution time without changing risk settlement windows", async () => {
+  for (const status of ["landed", "reverted"]) {
+    const { raw, db } = await ledger();
+    try {
+      // Rolling deployments may still have the old ledger schema.
+      try { await db.exec("ALTER TABLE trades ADD COLUMN gas_recorded_at INTEGER"); } catch { /* already migrated */ }
+      await op(db, 5);
+      await op(db, 7, { status, gas: 2, wei: "2000", hash: "0xRECOVERED" });
+      await db.prepare("UPDATE trades SET user_op_nonce = '123', gas_recorded_at = 20 WHERE user_op_hash = '0xRECOVERED'").run();
+      await mark(db, 110, 10);
+      await mark(db, 120, 30, "live", true);
+      for (const reader of [db, translated(raw)]) {
+        const before = await readBookPerformance(reader, CASED, 2, true);
+        assert.equal(before.performance.pnlUsdg, 10);
+        assert.equal(before.performance.gasComplete, true);
+      }
+      await mark(db, 120, 40);
+      for (const reader of [db, translated(raw)]) {
+        const after = await readBookPerformance(reader, CASED, 2, false);
+        assert.equal(after.performance.pnlBps, 1800);
+        assert.equal(after.performance.gasComplete, true);
+        assert.equal(after.performance.pnlUsdg, null);
+        assert.equal(after.performance.equityUsdg, null);
+      }
+      const row = await db.prepare("SELECT budget_settled_at FROM trades WHERE user_op_hash = '0xRECOVERED'").get() as { budget_settled_at: null };
+      assert.equal(row.budget_settled_at, null);
+      await db.prepare("UPDATE trades SET gas_usdg = NULL WHERE user_op_hash = '0xRECOVERED'").run();
+      assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).performance.gasComplete, false,
+        "receipt time alone does not establish an owner fee's USDG price");
+    } finally { raw.close(); }
+  }
+});
+
 test("an unread settlement-column probe cannot fall back to a submission-time cost", async () => {
   const { raw, db } = await ledger();
   try {
@@ -156,7 +213,7 @@ test("an unread settlement-column probe cannot fall back to a submission-time co
     await op(db, 7, { gas: 2, wei: "2000", hash: "0xDELAYED" });
     await db.prepare("UPDATE trades SET budget_settled_at = 20, user_op_nonce = '123' WHERE user_op_hash = '0xDELAYED'").run();
     await mark(db, 110, 10);
-    for (const column of ["budget_settled_at", "user_op_nonce"]) {
+    for (const column of ["budget_settled_at", "user_op_nonce", "gas_recorded_at"]) {
       const failing: Db = { ...db, prepare(sql) {
         if (sql === `SELECT ${column} FROM trades WHERE 1 = 0`) throw new Error("permission denied");
         return db.prepare(sql);

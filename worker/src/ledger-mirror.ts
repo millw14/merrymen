@@ -100,6 +100,7 @@ const LOG_TABLES = [
       "epoch",
       "created_at",
       "budget_settled_at",
+      "gas_recorded_at",
     ],
   },
   // `positions_usdg` is part of the equity identity (cash + vault + positions +
@@ -285,6 +286,68 @@ function spellingsOf(r: Record<string, unknown>): string[] {
   return [account, lower, checksummed(lower), hash, hash.toLowerCase()];
 }
 
+/** Missing receipt evidence may be filled, but an existing fact must agree. */
+async function enrichSettledTrade(db: Db, r: Record<string, unknown>, hasGasTime: boolean): Promise<number> {
+  const account = String(r.agent_id ?? "");
+  const hash = String(r.user_op_hash ?? "");
+  const receipt = String(r.tx_hash ?? "");
+  const epoch = Number(r.epoch);
+  // A replayed source row is not permission to rewrite an outcome. Only a
+  // confirmed receipt, operation and current row's own epoch join this path.
+  if (!isAddress(account, { strict: false }) || !/^0x[\da-f]{64}$/i.test(hash) ||
+      !/^0x[\da-f]{64}$/i.test(receipt) || !Number.isSafeInteger(epoch) || epoch < 1 ||
+      (r.status !== "landed" && r.status !== "reverted")) return 0;
+
+  const wei = (column: string): string | null => {
+    const value = r[column];
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value !== "string" || !/^\d+$/.test(value)) throw new Error(`Invalid settled ${column}`);
+    return value;
+  };
+  const owner = wei("gas_wei");
+  const sponsor = wei("sponsored_gas_wei");
+  const units = wei("gas_units");
+  const gas = r.gas_usdg == null ? null : Number(r.gas_usdg);
+  if (gas !== null && (r.gas_usdg === "" || typeof r.gas_usdg === "boolean" ||
+      !Number.isFinite(gas) || gas < 0)) throw new Error("Invalid settled gas_usdg");
+  const time = (column: string): number | null => {
+    if (r[column] == null) return null;
+    const value = Number(r[column]);
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid settled ${column}`);
+    return value;
+  };
+  const sponsored = sponsor !== null && BigInt(sponsor) > 0n;
+  const owned = (owner !== null && BigInt(owner) > 0n) || (gas !== null && gas > 0);
+  const freeOwner = owner !== null && BigInt(owner) === 0n;
+  if ((sponsored || freeOwner) && owned) throw new Error("Conflicting settled gas payer");
+  const available: [string, string | number | null, boolean][] = [
+    ["tx_hash", receipt, true], ["gas_wei", owner, true], ["sponsored_gas_wei", sponsor, true],
+    ["gas_usdg", gas, false], ["gas_units", units, true],
+    ...(hasGasTime ? [["gas_recorded_at", time("gas_recorded_at"), false] as [string, number | null, boolean]] : []),
+  ];
+  const evidence = available.filter(([, value]) => value !== null);
+  const absent = (column: string, text: boolean) => text ? `NULLIF(${column}, '')` : column;
+  const parameters: unknown[] = evidence.map(([, value]) => value);
+  const where = ["LOWER(agent_id) = ?", "LOWER(user_op_hash) = ?", "epoch = ?", "status = ?"];
+  parameters.push(account.toLowerCase(), hash.toLowerCase(), epoch, r.status);
+  for (const [column, value, text] of evidence) {
+    const held = absent(column, text);
+    where.push(`(${held} IS NULL OR ${column === "tx_hash" ? `LOWER(${column}) = LOWER(?)` : `${column} = ?`})`);
+    parameters.push(value);
+  }
+  // A known payer cannot acquire the opposite payer's receipt fields merely
+  // because that opposite column is NULL. Sponsored fees are not owner costs.
+  if (sponsored) where.push("COALESCE(gas_wei, '') IN ('', '0')", "COALESCE(gas_usdg, 0) = 0");
+  if (owned) where.push("COALESCE(sponsored_gas_wei, '') IN ('', '0')");
+  if (freeOwner) where.push("COALESCE(gas_usdg, 0) = 0");
+  if (gas !== null && gas > 0) where.push("COALESCE(gas_wei, '') <> '0'");
+  where.push(`(${evidence.map(([column, , text]) => `${absent(column, text)} IS NULL`).join(" OR ")})`);
+  const result = await db.prepare(`UPDATE trades SET ${evidence
+    .map(([column, , text]) => `${column} = COALESCE(${absent(column, text)}, ?)`).join(", ")}
+    WHERE ${where.join(" AND ")}`).run(...parameters);
+  return result.changes;
+}
+
 /**
  * THE ORCHESTRATOR'S LINE FOR ONE PASS: the rows that arrived, and beside them,
  * never inside them, the copies that were refused.
@@ -393,28 +456,34 @@ export async function mirrorTenant(args: {
   const failed: Record<string, string> = {};
   const restarted: Record<string, { was: number }> = {};
   let hasMore = false;
-  let budgetSettlementColumn: boolean | undefined;
-  const hasBudgetSettlement = async () => {
-    if (budgetSettlementColumn !== undefined) return budgetSettlementColumn;
+  const tradeColumns = new Map<string, boolean>();
+  const hasTradeColumn = async (column: "budget_settled_at" | "gas_recorded_at") => {
+    if (tradeColumns.has(column)) return tradeColumns.get(column)!;
     try {
-      await child.prepare("SELECT budget_settled_at FROM trades LIMIT 0").all();
-      return (budgetSettlementColumn = true);
+      await child.prepare(`SELECT ${column} FROM trades LIMIT 0`).all();
+      tradeColumns.set(column, true);
+      return true;
     } catch (e) {
       // A rolling deploy can still have children on the old schema. Only a
       // specifically missing column permits the legacy timestamp fallback.
-      if (e instanceof Error && /\bbudget_settled_at\b/.test(e.message) &&
+      if (e instanceof Error && new RegExp(`\\b${column}\\b`).test(e.message) &&
           (/no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703")) {
-        return (budgetSettlementColumn = false);
+        tradeColumns.set(column, false);
+        return false;
       }
       throw e;
     }
   };
+  const hasBudgetSettlement = () => hasTradeColumn("budget_settled_at");
 
   // ── append-only tables ────────────────────────────────────────────────────
   for (const { table, cols: declaredCols, stamp, probe } of LOG_TABLES) {
     try {
-      const cols = table === "trades" && !await hasBudgetSettlement()
-        ? declaredCols.filter((column) => column !== "budget_settled_at") : declaredCols;
+      const optional = table === "trades" ? new Set([
+        ...(!await hasBudgetSettlement() ? ["budget_settled_at"] : []),
+        ...(!await hasTradeColumn("gas_recorded_at") ? ["gas_recorded_at"] : []),
+      ]) : new Set<string>();
+      const cols = declaredCols.filter((column) => !optional.has(column));
       const mark = (await shared
         .prepare(`SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?`)
         .get(tenant, table)) as { last_id: number; last_stamp: number | null } | undefined;
@@ -731,11 +800,12 @@ export async function mirrorTenant(args: {
   // and only ever from `submitted`.
   try {
     const hasSettlement = await hasBudgetSettlement();
+    const hasGasTime = await hasTradeColumn("gas_recorded_at");
     const resolved = (await child
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol${hasSettlement ? ", budget_settled_at" : ""}
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol${hasSettlement ? ", budget_settled_at" : ""}${hasGasTime ? ", gas_recorded_at" : ""}
            FROM trades
           WHERE user_op_hash IS NOT NULL AND status <> 'submitted'
             AND (created_at > ?${hasSettlement ? " OR budget_settled_at > ?" : ""})
@@ -755,7 +825,7 @@ export async function mirrorTenant(args: {
                              sponsored_gas_wei = COALESCE(?, sponsored_gas_wei),
                              gas_usdg = COALESCE(?, gas_usdg), gas_units = COALESCE(?, gas_units),
                              fill_cash_usdg = COALESCE(?, fill_cash_usdg),
-                             fill_symbol = COALESCE(?, fill_symbol)${hasSettlement ? ", budget_settled_at = COALESCE(?, budget_settled_at)" : ""}
+                             fill_symbol = COALESCE(?, fill_symbol)${hasSettlement ? ", budget_settled_at = COALESCE(?, budget_settled_at)" : ""}${hasGasTime ? ", gas_recorded_at = COALESCE(gas_recorded_at, ?)" : ""}
             WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) AND status = 'submitted'`,
         );
         for (const r of resolved) {
@@ -766,6 +836,7 @@ export async function mirrorTenant(args: {
             r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
             r.fill_symbol ?? null,
             ...(hasSettlement ? [r.budget_settled_at ?? null] : []),
+            ...(hasGasTime ? [r.gas_recorded_at ?? null] : []),
             ...spellingsOf(r),
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports
@@ -782,6 +853,36 @@ export async function mirrorTenant(args: {
     }
   } catch (e) {
     failed.trades_resolved = e instanceof Error ? e.message : String(e);
+  }
+
+  // Late receipt/gas recovery updates an already-settled source row behind the
+  // append cursor. Replay the historical evidence in bounded batches. At the
+  // end the cursor cycles, so an old row enriched after a pass is retried;
+  // rebuilt child ids cannot strand this cursor permanently either. Missing
+  // fields only, with receipt/outcome/epoch and all existing facts agreeing.
+  // Historical recovery never changes budget_settled_at: gas_recorded_at is
+  // the receipt's time; the budget's observation window is a separate fact.
+  try {
+    const table = "trades_settled_evidence";
+    const hasGasTime = await hasTradeColumn("gas_recorded_at");
+    const cursor = await shared.prepare("SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?")
+      .get(tenant, table) as { last_id: number } | undefined;
+    const rows = await child.prepare(`SELECT id, agent_id, user_op_hash, tx_hash, status, epoch,
+        gas_wei, sponsored_gas_wei, gas_usdg, gas_units${hasGasTime ? ", gas_recorded_at" : ""}
+      FROM trades WHERE id > ? AND status IN ('landed', 'reverted')
+        AND COALESCE(user_op_hash, '') <> '' AND COALESCE(tx_hash, '') <> ''
+      ORDER BY id ASC LIMIT ?`).all(Number(cursor?.last_id ?? 0), batch) as Record<string, unknown>[];
+    let enriched = 0;
+    await shared.tx(async (db) => {
+      for (const row of rows) enriched += await enrichSettledTrade(db, row, hasGasTime);
+      await db.prepare(`INSERT INTO mirror_state (tenant, table_name, last_id, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT (tenant, table_name) DO UPDATE
+        SET last_id = excluded.last_id, updated_at = excluded.updated_at`)
+        .run(tenant, table, rows.length === batch ? Number(rows[rows.length - 1]!.id) : 0, nowSec);
+    });
+    if (enriched > 0) copied.trades_enriched = enriched;
+  } catch (e) {
+    failed.trades_settled_evidence = e instanceof Error ? e.message : String(e);
   }
 
   // ── decisions: append-only, globally unique, and now watermarked ──────────

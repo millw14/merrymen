@@ -28,6 +28,19 @@ type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
  */
 const MARK_TOLERANCE_USDG = 0.00001;
 
+/** Compare cash-only marks in the ledger's six-decimal units, without accepting
+ * a small positive holdings value as floating-point reconciliation slack. */
+function cashOnlyPaperMark(mark: Record<string, unknown>): boolean {
+  if (Number(mark.positions_usdg) !== 0 || Number(mark.flows_held ?? 0) !== 0) return false;
+  const units = [mark.cash_usdg, mark.vault_usdg, mark.equity_usdg].map((value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const n = Number(value), scaled = n * 1e6, whole = Math.round(scaled);
+    if (!Number.isFinite(n) || n < 0 || !Number.isSafeInteger(whole) || Math.abs(scaled - whole) > 0.0001) return null;
+    return whole;
+  });
+  return units.every((n) => n !== null) && Number.isSafeInteger(units[0]! + units[1]!) && units[0]! + units[1]! === units[2];
+}
+
 /**
  * BASIS_UNITS — WHAT A PAPER BASIS QUANTITY IS COUNTED IN, AND WHY IT IS TWO THINGS.
  *
@@ -291,6 +304,17 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     const later = await shared.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND status='paper' AND created_at>=?`)
       .get(account,Number(mark.epoch),Number(mark.at)) as {n:number};
     if (Number(later.n)>0) throw new Error('paper fills are newer than the recoverable valuation');
+    const terms = [mark.cash_usdg, mark.vault_usdg, mark.positions_usdg, mark.equity_usdg];
+    if (terms.some((v) => v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) || Number(v) < 0)) {
+      throw new Error('the recoverable valuation does not add up (unreadable valuation terms)');
+    }
+    const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
+    let untouchedCashOnly = false;
+    if (cashOnlyPaperMark(mark) && basis.length === 0) {
+      const paperOperations = await shared.prepare(`SELECT COUNT(*) AS n FROM trades
+        WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND status='paper'`).get(account, Number(mark.epoch)) as {n:number};
+      untouchedCashOnly = Number(paperOperations.n) === 0;
+    }
     /**
      * ── THE CHECK THAT USED TO BE HERE, AND WHY IT COULD NEVER PASS ──────
      *
@@ -328,7 +352,13 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
      *
      *   the VALUE is readable at all. A NaN would otherwise become an equity.
      */
-    const positions = await shared.prepare(`SELECT symbol,token,raw_balance,value_usdg FROM positions WHERE LOWER(agent_id)=LOWER(?)`).all(account) as Record<string,unknown>[];
+    // A rail change can replace the mutable positions snapshot with LIVE
+    // holdings. It cannot give an untouched cash-only paper book those shares.
+    // This narrow recovery requires a complete recorded cash/vault valuation,
+    // no paper operation in its whole epoch and no retained paper basis. It
+    // uses the recorded cash, never the configured starting stake. A book that
+    // ever traded still needs the existing reconciled inventory/basis path.
+    const positions = untouchedCashOnly ? [] : await shared.prepare(`SELECT symbol,token,raw_balance,value_usdg FROM positions WHERE LOWER(agent_id)=LOWER(?)`).all(account) as Record<string,unknown>[];
     const value = positions.reduce((sum,p)=>sum+Number(p.value_usdg),0);
     if (!Number.isFinite(value)) throw new Error(`paper positions do not value (positions=${positions.length})`);
     const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)-Number(mark.equity_usdg);
@@ -349,7 +379,6 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
       const symbol=String(p.symbol);
       return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18}];
     }));
-    const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
     const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};
     /**
      * THE HIGH-WATER MARK TAKES TODAY'S VALUATION TOO.

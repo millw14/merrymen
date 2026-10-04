@@ -41,6 +41,80 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { repairHistoricalFills } from "./history-fill-repair";
+import { createPublicClient as gasPublicClient, http as gasHttp } from "viem";
+import { GAS_RECOVERY_SCHEMA, gasRecoveryAccounts, gasRecoveryChain, recordRecoveredGas, recoverSettledGas } from "./receipt-gas-recovery";
+import { refreshIdlePaperValuations } from "./paper-idle-valuation";
+
+let gasRecoveryRunning = false;
+let gasRecoveryNextAt = 0;
+const gasRecoveryCursors = new Map<string, number>();
+let gasRecoveryDb: Db | null = null;
+let gasRecoveryRpc = "";
+let gasReceiptChain: ReturnType<typeof gasRecoveryChain> | null = null;
+
+/** Read-only chain recovery beside the fleet loop. No grant or signer is needed, including for idle accounts. */
+function startGasRecovery(): void {
+  if (gasRecoveryRunning || stopping || !process.env.DATABASE_URL || Date.now() < gasRecoveryNextAt) return;
+  gasRecoveryRunning = true;
+  void (async () => {
+    if (!gasRecoveryDb) {
+      const db = await makePgDb(process.env.DATABASE_URL!);
+      await applyLedgerSchema(db);
+      await db.exec(GAS_RECOVERY_SCHEMA);
+      gasRecoveryDb = db;
+    }
+    const rpc = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    if (rpc !== gasRecoveryRpc || !gasReceiptChain) {
+      gasRecoveryRpc = rpc;
+      gasReceiptChain = gasRecoveryChain(gasPublicClient({ transport: gasHttp(rpc, { timeout: 2_000, retryCount: 0 }) }));
+    }
+    const accounts = await gasRecoveryAccounts(gasRecoveryDb);
+    // Sequential, bounded batches share the public RPC with live trading.
+    // Cursors revisit failures after reaching the end instead of blocking later receipts.
+    for (const { account, epoch, chainId } of accounts) {
+      if (stopping || haltRequested()) break;
+      const key = `${account}:${epoch}`;
+      const result = await recoverSettledGas({ db: gasRecoveryDb, chain: gasReceiptChain, account, epoch, chainId,
+        afterId: gasRecoveryCursors.get(key) ?? 0,
+        record: (row, proof) => stopping || haltRequested() ? Promise.resolve(false) : recordRecoveredGas(gasRecoveryDb!, row, proof),
+      });
+      gasRecoveryCursors.set(key, result.afterId);
+      if (result.recovered) log(`historical gas: ${result.recovered} receipt-backed expense(s) recovered for ${account}; budget charges unchanged`);
+    }
+  })().catch(e => log(`historical gas recovery unavailable — ${e instanceof Error ? e.message : String(e)}`))
+    .finally(() => { gasRecoveryRunning = false; gasRecoveryNextAt = Date.now() + 10_000; });
+}
+
+let idlePaperRunning = false;
+let idlePaperNextAt = 0;
+let idlePaperAfter = "";
+/** An expired or stopped worker does not stop its durable practice book being valued. */
+function startIdlePaperRefresh(): void {
+  if (idlePaperRunning || stopping || haltRequested() || !gasRecoveryDb || Date.now() < idlePaperNextAt) return;
+  idlePaperRunning = true;
+  void refreshIdlePaperValuations(gasRecoveryDb, {
+    now: Math.floor(Date.now() / 1000), afterAccount: idlePaperAfter,
+    isRunning: account => stopping || haltRequested()
+      || [...children.values()].some(child => child.smartAccount.toLowerCase() === account)
+      || [...holders.values()].some(holder => holder.smartAccount.toLowerCase() === account),
+    lockIdleAccount: async (tx, account) => {
+      if (stopping || haltRequested()) return false;
+      // The durable account claim names its tenant even after a grant expires.
+      // A transaction lock conflicts with every replica's normal worker lease
+      // and protects the valuation until COMMIT, including spawn preparation.
+      const claims = await tx.prepare("SELECT DISTINCT LOWER(tenant) AS tenant FROM agent_account WHERE LOWER(smart_account) = ?")
+        .all(account) as { tenant: string }[];
+      if (claims.length !== 1 || !/^0x[0-9a-f]{40}$/.test(claims[0]!.tenant)) return false;
+      const lock = await tx.prepare("SELECT pg_try_advisory_xact_lock(CAST(? AS BIGINT)) AS held")
+        .get(leaseKey(claims[0]!.tenant).toString()) as { held: boolean } | undefined;
+      return lock?.held === true && !stopping && !haltRequested();
+    },
+  }).then(result => {
+    idlePaperAfter = result.nextAccount ?? "";
+    if (result.written) log(`paper valuation: ${result.written} stopped book(s) measured from durable checkpoints`);
+  }).catch(error => log(`paper valuation unavailable — ${error instanceof Error ? error.message : String(error)}`))
+    .finally(() => { idlePaperRunning = false; idlePaperNextAt = Date.now() + 30_000; });
+}
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
@@ -74,7 +148,7 @@ import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease, leaseKey, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -8471,6 +8545,8 @@ export async function runOrchestrator(): Promise<void> {
       telegramLiveness();
       await mirrorLedgers();
       startHistoryRepair();
+      startGasRecovery();
+      startIdlePaperRefresh();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
       // costs a vendor request; most passes it costs a file write.

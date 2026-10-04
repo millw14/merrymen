@@ -91,7 +91,7 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. Funded live books show their measured net return before the first completed trade, but remain outside live rankings until a trade fills. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
       )}
 
       {rows.length === 0 ? (

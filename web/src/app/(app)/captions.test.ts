@@ -26,7 +26,8 @@ describe("the leaderboard explains its two refusals", () => {
     // a penny into — and the second is a dormant account while the first is the
     // exact shape that once published +2643%.
     assert.match(PAGE, /no capital to measure a return against/);
-    assert.match(PAGE, /no return to measure/);
+    assert.match(PAGE, /measured net return before the first completed trade/);
+    assert.match(PAGE, /outside live rankings until a trade fills/);
   });
 
   it("says why a simulated book cannot be divided by a real deposit", () => {

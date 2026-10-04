@@ -6579,7 +6579,7 @@ html[lang|="ko"] .terminal-host {
     font-size: 12px;
   }
   :where(.terminal-host) .desktop-sidebar .board-page .rank-hit {
-    grid-template-columns: 16px 30px minmax(0, 1fr) auto;
+    grid-template-columns: 16px 30px minmax(0, 1.15fr) minmax(0, 0.85fr);
     gap: 8px;
     padding: 16px 2px;
   }
@@ -6619,6 +6619,10 @@ html[lang|="ko"] .terminal-host {
   }
   :where(.terminal-host) .desktop-sidebar .board-page .rank .chg {
     font-size: 14px;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: right;
   }
 }
 @media (min-width: 1100px) and (max-width: 1199px) {
