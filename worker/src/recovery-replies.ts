@@ -8,7 +8,7 @@ import { RECOVERY_REPLY_SCHEMA, type ReplyPrivacyOp } from "./recovery-reply-sta
 import { assertReplySnapshot, advanceReplyOffset, bindReplyOffset, readReplyRoster, readReplySnapshot, type ReplyQuery, type ReplySnapshot, type ReplyGrant } from "./recovery-reply-store";
 import { RecoveryReplyBotLeases, type ReplyLease } from "./recovery-reply-lease";
 import { getMe, getUpdates, sendMessage, sendPhotoBytes, esc, answerCallbackQuery, type TgMessage, type TgCallback, type TelegramOpts } from "./telegram/api";
-import { createRecoveryPublicReply, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_UNAVAILABLE, isRecoveryPublicRequest, parseRecoveryPublicAsk } from "./telegram/recovery-public-reply";
+import { createRecoveryPublicReply, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_UNAVAILABLE, RECOVERY_PUBLIC_BUSY, RECOVERY_PUBLIC_BUTTON_HELD, isRecoveryPublicRequest, parseRecoveryPublicAsk } from "./telegram/recovery-public-reply";
 import { createRecoveryPublicLook } from "./telegram/recovery-public-transport";
 interface ReplyConnection extends ReplyQuery {
     release(error?: Error): void;
@@ -438,7 +438,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                             return;
                         await transaction(shared, guard, async (db) => {
                             await authority(db, s, true);
-                            await checked(() => transport.answerCallbackQuery(opts(s, deadline), cb.id, "Trading remains held; that button cannot authorize an action."), deadline);
+                            await checked(() => transport.answerCallbackQuery(opts(s, deadline), cb.id, RECOVERY_PUBLIC_BUTTON_HELD), deadline);
                             await authority(db, s, true);
                         }, now, Math.min(deadline, now() + 5000));
                         return;
@@ -451,11 +451,11 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                         const question = publicText(msg, s, username, firstName);
                         if (question === null)
                             return;
-                        const fixed = overload ? "I'm handling several public requests. Please ask again shortly; trading remains held." : /^\/(?:start|help|status)\s*$/i.test(question) ? RECOVERY_PUBLIC_HELP : question.startsWith("/") && !/^\/(?:chart|lore|market)\b/i.test(question) ? RECOVERY_PUBLIC_HELD : null;
+                        const fixed = overload ? RECOVERY_PUBLIC_BUSY : /^\/(?:start|help|status)\s*$/i.test(question) ? RECOVERY_PUBLIC_HELP : question.startsWith("/") && !/^\/(?:chart|lore|market)\b/i.test(question) ? RECOVERY_PUBLIC_HELD : null;
                         if (fixed)
                             text = fixed;
                         else if (publicWork >= 8)
-                            text = "I'm handling several public requests. Please ask again shortly; trading remains held.";
+                            text = RECOVERY_PUBLIC_BUSY;
                         else {
                             publicWork++;
                             try {

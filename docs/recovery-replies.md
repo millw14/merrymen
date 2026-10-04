@@ -76,6 +76,15 @@ that request indefinitely. The service uses bounded
 public reads without account state, local financial caches or model keys.
 Published descriptions are attributed claims, not verified coin history.
 
+Allowlisted direct messages and explicitly addressed messages in approved rooms
+also accept short greetings, acknowledgments and status questions. These use
+fixed conversational replies without a public lookup or earlier chat context.
+The public notice explains that an agent upgrade is underway and automated
+trading is temporarily paused; it does not promise a completion time or resumed
+trading. Greetings also explain that coin and chart questions remain available.
+Ordinary room chatter stays quiet. Explicit coin requests such as `chart HI`
+still use the public research path; trading commands remain held.
+
 Durable message progress is keyed by the bot stream. Restarts, token changes
 and claim changes preserve its high-water mark. The ordinary worker handoff
 reads that progress only after its existing source, grant and lease gates.
