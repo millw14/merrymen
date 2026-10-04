@@ -7,6 +7,7 @@
  */
 import { chatPositionsOf } from "./account";
 import type { LiveMine } from "./live";
+import { pausedRecovery } from "./recovery-view";
 
 /**
  * How many recent moves the agent is shown.
@@ -88,28 +89,41 @@ export function chatStateOf(args: {
     const v = pick(k);
     return typeof v === "number" ? v : null;
   };
-  return {
-    name: mine.name,
+  const recovery = pausedRecovery(mine.recovery);
+  const recorded = {
     equity: mine.equity,
-    strategy: pick("strategy") ?? mine.glance.id,
-    basketSymbols: (pick("basketSymbols") ?? null) as string[] | null,
-    paperTradingEnabled: pick("paperTradingEnabled") ?? null,
-    liveTradingEnabled: pick("liveTradingEnabled") ?? null,
-    workerStatus: mine.statusLabel ?? "Unknown",
-    liveBlocker: liveBlocker ?? null,
-    positions: chatPositionsOf(mine),
+    positions: mine.positions ? chatPositionsOf(mine) : null,
     cashUsd: mine.glance.cashUsd ?? null,
     vaultUsd: mine.glance.vaultUsd ?? null,
+    paperTradingEnabled: pick("paperTradingEnabled") ?? null,
+    liveTradingEnabled: pick("liveTradingEnabled") ?? null,
+    stopLossBps: num("strategistStopLossBps"),
+    takeProfitBps: num("takeProfitBps"),
+  };
+  return {
+    name: mine.name,
+    equity: recovery ? null : recorded.equity,
+    strategy: pick("strategy") ?? mine.glance.id,
+    basketSymbols: (pick("basketSymbols") ?? null) as string[] | null,
+    paperTradingEnabled: recovery ? null : recorded.paperTradingEnabled,
+    liveTradingEnabled: recovery ? null : recorded.liveTradingEnabled,
+    workerStatus: recovery ? "Trading paused for recovery" : mine.statusLabel ?? "Unknown",
+    liveBlocker: recovery ? null : liveBlocker ?? null,
+    positions: recovery ? null : chatPositionsOf(mine),
+    cashUsd: recovery ? null : recorded.cashUsd,
+    vaultUsd: recovery ? null : recorded.vaultUsd,
+    // Displayed records remain useful history, never proof of the current book.
+    ...(recovery ? { recovery, lastRecorded: recorded } : {}),
     // The two rules that answer "what would make you get out" — the levels
     // that sell WITHOUT asking the model. Null means none is armed, which
     // is a different answer from a level at zero.
-    stopLossBps: num("strategistStopLossBps"),
-    takeProfitBps: num("takeProfitBps"),
+    stopLossBps: recovery ? null : recorded.stopLossBps,
+    takeProfitBps: recovery ? null : recorded.takeProfitBps,
     moves: tapeFor(mine.moves),
     movesShown: Math.min(mine.moves.length, TAPE_SHOWN),
     movesTotal: mine.moves.length,
     perTrade,
     perDay,
-    stopped,
+    stopped: recovery ? true : stopped,
   };
 }

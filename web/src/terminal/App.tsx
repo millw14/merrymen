@@ -22,6 +22,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { autonomyOf } from "@merrymen/core";
+import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
 import { chatTape } from "./chat-thread";
@@ -413,7 +414,8 @@ export function App() {
    * /api/grants — NOT `glance.cashUsd`, which is the book and is exactly the
    * figure that must not be trusted to say whether money exists.
    */
-  const autonomy = autonomyOf({
+  const recovery = pausedRecovery(account?.status.recovery);
+  const autonomy = recoveryAutonomy(autonomyOf({
     mode: account?.status.mode ?? null,
     liveBlocker: account?.status.liveBlocker ?? null,
     expired:
@@ -439,8 +441,9 @@ export function App() {
       account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
         ? account.status.grant.grantedAt > account.status.workerAliveAt
         : false,
-  });
-  const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy} : null;
+  }), recovery);
+  const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
+    ...(recovery ? { chg24: null } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
    *
@@ -510,12 +513,12 @@ export function App() {
             it is true on every screen, and handed `exists` straight from the
             server so it cannot flash for an owner whose account is still
             loading. It navigates to the one signing control; it never signs. */}
-        <ResignPrompt
+        {!recovery && <ResignPrompt
           exists={account ? account.status.exists : null}
           grantedAt={account?.status.grant?.grantedAt ?? null}
           tenant={account?.session.hosted ? account.session.address : null}
           href={resignHref}
-        />
+        />}
         <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
           if (desktop && next.kind === "tab" && ["home", "agent", "feed"].includes(next.tab)) {
             // Desktop tabs live in the rail/dock, not the phone's routes.
@@ -578,7 +581,7 @@ export function App() {
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
             staleBlocker={autonomy.state === "checking"}
-            energy={account?.status.energy}
+            energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
           />
@@ -812,7 +815,7 @@ export function App() {
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
             staleBlocker={autonomy.state === "checking"}
-            energy={account?.status.energy}
+            energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
           />

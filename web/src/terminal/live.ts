@@ -21,6 +21,7 @@ import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
 import { performanceFromWire, type AgentPerformance } from "./agent-performance";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 
 /**
  * THE FIVE THINGS THE BAR CAN BE ON.
@@ -284,6 +285,8 @@ export interface LiveMine {
    * book. Computed once in App.tsx from /api/grants, never re-derived.
    */
   autonomy: import("@merrymen/core").Autonomy;
+  /** Owner-only, proven recovery hold. Saved records are not current trading authority. */
+  recovery?: FleetRecoveryView | null;
   /**
    * The newest thing the worker warned about, or null.
    *

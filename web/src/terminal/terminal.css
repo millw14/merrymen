@@ -8471,6 +8471,32 @@ html[lang|="ko"] .terminal-host {
   flex-direction: column;
   gap: 10px;
 }
+:where(.terminal-host) .agent-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 15px;
+  margin: 0 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--tx) 5%, transparent);
+}
+:where(.terminal-host) .agent-recovery strong {
+  color: var(--warn, #fbbf24);
+  font-size: 13px;
+  line-height: 1.4;
+}
+:where(.terminal-host) .agent-recovery p {
+  margin: 0;
+  color: var(--tx);
+  font-size: 13px;
+  line-height: 1.5;
+}
+:where(.terminal-host) .agent-recovery small {
+  color: var(--tx-2);
+  font-size: 12px;
+}
+:where(.terminal-host) .agent-strip .agent-recovery { margin-bottom: 0; }
 :where(.terminal-host) .agent-strip-row {
   display: flex;
   flex-wrap: wrap;

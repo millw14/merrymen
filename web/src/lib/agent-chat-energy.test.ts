@@ -197,13 +197,14 @@ describe("/api/chat injects it on the server", () => {
 
   it("READS THE REPORT FOR THE CALLER'S OWN AGENT", () => {
     assert.match(ROUTE, /readAgentEnergy\(/);
-    assert.match(ROUTE, /hosted \? await hostedAgentFor\(req\) : await diskAgent\(\)/, "the caller cannot name the agent");
+    assert.match(ROUTE, /getGrantStore\(\)\.get\(tenant\)/, "the grant is resolved from the authenticated tenant");
+    assert.match(ROUTE, /const account = hosted \? grant\?\.smartAccount \?\? null : await diskAgent\(\)/, "the caller cannot name the agent");
     assert.match(ROUTE, /ceilingFor\(req, hosted\)/);
-    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply \}\)/);
+    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply, recovery \}\)/);
   });
 
   it("AND ONLY WHILE ITS DAY LASTS — a stale report is no ENERGY block", () => {
-    assert.match(ROUTE, /const report = currentEnergy\(account \? await readAgentEnergy\(account\) : null, Math\.floor\(Date\.now\(\) \/ 1000\)\);/);
+    assert.match(ROUTE, /const report = currentEnergy\(!recovery && account \? await readAgentEnergy\(account\) : null, Math\.floor\(Date\.now\(\) \/ 1000\)\);/);
     assert.match(ROUTE, /const energy = report\s*\?/, "the ceiling is only added to a current report");
   });
 

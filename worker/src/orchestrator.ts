@@ -40,6 +40,8 @@ import { readRiskPeriod, RISK_PERIOD_SCHEMA } from "./risk-period";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
+import { recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
+import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
@@ -1589,7 +1591,7 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount
   }
 
   const home = childHome(tenant);
-  mkdirSync(home, { recursive: true });
+  mkdirSync(home, { recursive: true, mode: 0o700 });
   // grant.json holds the SESSION key (the store already refused any owner key),
   // so keep it owner-only. Replaced whole — see refreshGrantForChild for what a
   // child makes of half a grant.
@@ -2426,6 +2428,100 @@ const LEDGER_SOURCE_BLOCK = "ledger-source-blocked.json";
 // in this supervisor. Keep the deployment for recovery if durable storage fails.
 const blockedLedgerHomes = new Set<string>();
 const removedLedgerPending = new Map<string, TenantLease>();
+
+/** Publish the source gate without changing any ledger, cursor, permission or source barrier. */
+async function reportFleetSource(tenant: `0x${string}`, grant: StoredGrant, lease: TenantLease, cause: RecoveryCause | null): Promise<boolean> {
+  if (!process.env.DATABASE_URL && !retirementMemoryStoreForTest) return true;
+  const observedHolder = holders.get(tenant);
+  // A chat-only holder cannot execute financial work. Its failure report may
+  // be published, but clearing a hold or publishing a cutoff requires no holder.
+  const owned = () => leases.get(tenant) === lease && lease.healthy() && !children.has(tenant)
+    && (cause ? holders.get(tenant) === observedHolder : !holders.has(tenant));
+  try {
+    const latest = await getGrantStore().get(tenant);
+    if (!owned() || !latest || JSON.stringify(latest) !== JSON.stringify(grant)) return false;
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+    const now = Math.floor(Date.now() / 1000);
+    if (cause) await recordFleetRecoveryHold(shared, scope, cause, now, owned);
+    else {
+      const held = await readFleetRecoveryHold(shared, scope);
+      if (held) {
+        if (held.checkedAt > now || !owned()) return false;
+        // Publish before clearing the display report and before any fork. A
+        // crash leaves a conservative file fence, never an executable old intent.
+        writeRecoveryCommandBarrier(childHome(tenant),
+          { smartAccount: scope.smartAccount, chainId: scope.chainId }, (now + 1) * 1000);
+      }
+      if (!(await recordFleetSourceVerified(shared, scope, now, owned))) return false;
+    }
+    return owned();
+  } catch {
+    log(`[alert] ${tenant}: recovery status could not be published — source protection remains in place`);
+    return false;
+  }
+}
+/** Synchronous original-source fence rechecked immediately before financial mutations. */
+function originalSourceRefused(tenant: string): boolean {
+  try { persistentFleetHome(); return ledgerSourceBlocked(childHome(tenant)); }
+  catch { return true; }
+}
+
+/** Diagnose inactive/held tenants without preparing a key, book, import, reset or worker. */
+async function pausedSourceCause(tenant: string): Promise<RecoveryCause | null> {
+  try { persistentFleetHome(); } catch { return "persistent-source"; }
+  const home = childHome(tenant);
+  if (blockedLedgerHomes.has(home)) return "source-barrier";
+  for (const name of [LEDGER_SOURCE_BLOCK, LEDGER_IMPORT_PENDING_FILE]) {
+    try { lstatSync(path.join(home, name)); return "source-barrier"; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "source-barrier"; }
+  }
+  if (!process.env.DATABASE_URL && !retirementMemoryStoreForTest) return null;
+  const handle = openChildLedger(home);
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    if (!handle) {
+      // No DDL and no zero substitution: an old cursor is evidence that an
+      // absent local file is an accounting blocker, including before renewal.
+      const marks = await shared.prepare("SELECT last_id FROM mirror_state WHERE tenant=? LIMIT 65").all(tenant) as
+        Array<{ last_id?: unknown }>;
+      if (marks.length > 64 || marks.some(mark => String(mark.last_id) !== "0")) return "source-continuity";
+      try { lstatSync(path.join(home, "merrymen.db")); return "source-continuity"; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "source-continuity"; }
+    }
+    await mirrorSerially(tenant, () => assertLedgerSourceContinuity(handle.db, shared, tenant));
+    return null;
+  } catch { return "source-continuity"; }
+  finally { handle?.close(); }
+}
+
+/** Publish only failures. An expired or maintenance-held permission cannot activate recovery. */
+async function reportPausedFleetSources(tenants: readonly `0x${string}`[]): Promise<void> {
+  if (!process.env.DATABASE_URL && !retirementMemoryStoreForTest) return;
+  for (const sourceTenant of tenants) {
+    const tenant = sourceTenant.toLowerCase() as `0x${string}`;
+    if (children.has(tenant) || spawning.has(tenant) || exitingChildren.has(tenant)) continue;
+    let temporary = false, lease = leases.get(tenant);
+    try {
+      if (!lease) {
+        const acquired = await acquireTenantLease(tenant);
+        if (!acquired) continue;
+        lease = acquired; leases.set(tenant, lease); temporary = true;
+      }
+      if (!lease.healthy()) continue;
+      const grant = await getGrantStore().get(tenant);
+      if (!grant) continue;
+      const cause = await pausedSourceCause(tenant);
+      if (cause) await reportFleetSource(tenant, grant, lease, cause);
+    } catch { log(`[alert] ${tenant}: paused source check deferred; preserving its existing holds and home`); }
+    finally {
+      // A status-only pass never keeps a cold tenant's execution lease. Existing
+      // retirement/source leases remain held by their original owner.
+      if (temporary && leases.get(tenant) === lease && !localMemoryWriterPresent(tenant) && !spawning.has(tenant))
+        await releaseLease(tenant);
+    }
+  }
+}
 let persistentHomeVerifierForTest: (() => PersistentHomeIdentity | null) | null = null;
 /** Filesystem integration tests substitute only the kernel/provider proof. */
 export function setPersistentHomeVerifierForTest(verifier: typeof persistentHomeVerifierForTest): void {
@@ -2736,7 +2832,24 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       return;
     }
     // Check the fleet root before writing a tenant key or any bootstrap file.
-    persistentFleetHome();
+    try { persistentFleetHome(); }
+    catch {
+      // The root fence runs before grant.json or any seed is written. Publish
+      // the pause from the stored identity even when that fence prevents a child home.
+      try {
+        const blockedGrant = await getGrantStore().get(tenant);
+        if (blockedGrant) await reportFleetSource(tenant, blockedGrant, lease, "persistent-source");
+      } catch { /* keep the original refusal even when the status store is unavailable */ }
+      log(`[alert] ${tenant}: persistent storage is unconfirmed — retaining its data without starting a worker`);
+      return;
+    }
+    const storedGrant = await getGrantStore().get(tenant);
+    if (storedGrant && (!Number.isFinite(storedGrant.expiresAt) || storedGrant.expiresAt <= Math.floor(Date.now() / 1000))) {
+      const cause = await pausedSourceCause(tenant);
+      if (cause) await reportFleetSource(tenant, storedGrant, lease, cause);
+      log(`${tenant}: signed grant expired — source status checked without writing a key or starting a worker`);
+      return;
+    }
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
       log(`${tenant}: no usable signed grant in the store — not spawning`);
@@ -2757,8 +2870,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: signed grant expired or has no valid expiry — not starting a worker; re-sign required`);
       return;
     }
-    if (!(await preparePersistentLedgerForChild(tenant, grantForChild.grant, lease))) return;
-    if (!(await ledgerSourceAllowsResume(tenant))) return;
+    if (!(await preparePersistentLedgerForChild(tenant, grantForChild.grant, lease))) {
+      await reportFleetSource(tenant, grantForChild.grant, lease, "persistent-source"); return;
+    }
+    if (!(await ledgerSourceAllowsResume(tenant))) {
+      await reportFleetSource(tenant, grantForChild.grant, lease, "source-continuity"); return;
+    }
     // The settings the child will actually read, so the watchdog can size its
     // patience to the tick that child will actually run. `tickSeconds` resolves
     // file-before-env (settings.ts), and the file is what we just wrote.
@@ -2770,7 +2887,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     await writeBootstrapForChild(tenant, smartAccount);
     // The bootstrap's final mirror may have detected an unexpected source
     // change (or an interrupted copy). Never arm over its durable barrier.
-    if (ledgerSourceBlocked(childHome(tenant))) return;
+    if (ledgerSourceBlocked(childHome(tenant))) {
+      await reportFleetSource(tenant, grantForChild.grant, lease, "source-barrier"); return;
+    }
     // Before the practice-book gate too: its holder may answer DMs and /forget,
     // so it must not run over an unreadable or partially restored snapshot.
     if (!(await restorePersonalMemoryForChild(tenant))) return;
@@ -2823,7 +2942,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // A cold deploy had no ledger at the entry gate. Book and DM restores can
     // create it during preparation, so prove its original shared cursors again
     // before either that new book or its restored memory can start trading.
-    if (!(await ledgerSourceAllowsResume(tenant, true))) return;
+    if (!(await ledgerSourceAllowsResume(tenant, true))) {
+      await reportFleetSource(tenant, grantForChild.grant, lease, "source-continuity"); return;
+    }
+    if (!(await reportFleetSource(tenant, grantForChild.grant, lease, null))) return;
     // This wait is shared by the roster and crash-restart paths. It also lets
     // a resource failure in another tenant pause forks across the container.
     await waitForSpawnSlot();
@@ -3045,10 +3167,15 @@ async function honourHeldPaperReset(
   try {
     const db = await heldResetDb();
     if (!db) return { applied: false, looked: null, transient: false };
+    const grant = await getGrantStore().get(tenant);
+    if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase())
+      return { applied: false, looked: null, transient: true };
     out = await applyHeldReset(db, smartAccount, {
       now: Date.now(),
       readSettings: () => getSettingsStore().get(tenant),
       consentEnforced: liveConsentEnforced(),
+      commandRefused: cmd => originalSourceRefused(tenant) || recoveryCommandRefused(childHome(tenant),
+        { smartAccount, chainId: grant.chainId }, cmd),
       mayWrite: () => (lease ? lateSpawnRefusal(tenant, lease) : "it holds no lease"),
     });
   } catch (e) {
@@ -3410,6 +3537,17 @@ function holdMayLeave(tenant: `0x${string}`): boolean {
 async function retryHold(held: Holder): Promise<boolean> {
   const tenant = held.tenant;
   if (!holdMayLeave(tenant)) return false;
+  // A practice restore/reset is a financial writer too. A holder predating the
+  // report schema must obey the root and original-source gates before trying it.
+  const cause = await pausedSourceCause(tenant);
+  if (cause) {
+    const lease = leases.get(tenant), grant = await getGrantStore().get(tenant);
+    if (lease && grant && holders.get(tenant) === held)
+      await reportFleetSource(tenant, grant, lease, cause);
+    scheduleHoldRetry(held, UNCLASSIFIED_BLOCK);
+    return false;
+  }
+  if (holders.get(tenant) !== held || !holdMayLeave(tenant) || originalSourceRefused(tenant)) return false;
   held.retrying = true;
   let restore: PaperRestore;
   let unsure = false;
@@ -4122,6 +4260,7 @@ export async function reconcile(): Promise<void> {
     standDownHolder(tenant);
   }
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
+  await reportPausedFleetSources(tenants);
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
@@ -4710,26 +4849,31 @@ async function deliverCommand(
   home: string,
   tenant: string,
   r: { id: string; kind: string; args: string | null; created_at: number },
+  smartAccount: string,
 ): Promise<void> {
-  const claim = await shared
-    .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
-    .run(Date.now(), r.id);
-  if (claim.changes === 0) return; // another replica — or the other loop — took it
-  // `expiresAt` rides in the same payload and is LIFTED OUT here rather
-  // than given a column of its own. It is not part of what the order
-  // means — it is how long the order is willing to wait — and the worker
-  // checks it before it looks at a single argument.
-  const args = r.args ? parseArgs(r.args) : {};
-  const expiresAt = typeof args.expiresAt === "number" ? args.expiresAt : undefined;
-  delete args.expiresAt;
-  writeCommand(home, {
-    id: String(r.id),
-    kind: String(r.kind),
-    at: Number(r.created_at),
-    ...(Object.keys(args).length ? { args } : {}),
-    ...(expiresAt ? { expiresAt } : {}),
+  await withFleetRecoveryLock(shared, smartAccount, async locked => {
+    if (["trade", "selftest", "paper-reset"].includes(r.kind)
+        && await readFleetCommandRefusal(locked, smartAccount, Number(r.created_at))) return;
+    const claim = await locked
+      .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
+      .run(Date.now(), r.id);
+    if (claim.changes === 0) return; // another replica — or the other loop — took it
+    // `expiresAt` rides in the same payload and is LIFTED OUT here rather
+    // than given a column of its own. It is not part of what the order
+    // means — it is how long the order is willing to wait — and the worker
+    // checks it before it looks at a single argument.
+    const args = r.args ? parseArgs(r.args) : {};
+    const expiresAt = typeof args.expiresAt === "number" ? args.expiresAt : undefined;
+    delete args.expiresAt;
+    writeCommand(home, {
+      id: String(r.id),
+      kind: String(r.kind),
+      at: Number(r.created_at),
+      ...(Object.keys(args).length ? { args } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+    });
+    log(`command ${String(r.id).slice(0, 8)} → ${tenant.slice(0, 8)} (${r.kind})`);
   });
-  log(`command ${String(r.id).slice(0, 8)} → ${tenant.slice(0, 8)} (${r.kind})`);
 }
 
 /**
@@ -4866,21 +5010,27 @@ export async function ferryOrders(
   if (targets.length === 0) return;
   const byAccount = new Map(targets.map((t) => [t.smartAccount, t]));
   try {
-    const accounts = [...byAccount.keys()];
-    const rows = (await shared
-      .prepare(
-        // ORDER BY (created_at, id) for the reason the reconcile pass gives:
-        // two orders really do land in the same millisecond.
-        `SELECT id, agent_id, kind, args, created_at FROM agent_commands
-          WHERE kind = 'trade' AND claimed_at IS NULL AND agent_id IN (${accounts.map(() => "?").join(", ")})
-          ORDER BY created_at ASC, id ASC LIMIT 50`,
-      )
-      .all(...accounts)) as { id: string; agent_id: string; kind: string; args: string | null; created_at: number }[];
+    // Exclude retained recovery-fenced rows BEFORE LIMIT. Otherwise a full
+    // window of preserved old intents prevents later eligible requests forever.
+    // Delivery rechecks under the account lock, so a concurrent new hold still wins.
+    const eligible: string[] = [], params: unknown[] = [];
+    for (const account of byAccount.keys()) {
+      const boundary = await readFleetCommandBoundary(shared, account);
+      if (boundary === "held") continue;
+      eligible.push(boundary === null ? "agent_id = ?" : "(agent_id = ? AND created_at > ?)");
+      params.push(account);
+      if (boundary !== null) params.push(boundary);
+    }
+    const rows = eligible.length === 0 ? [] : (await shared.prepare(
+      `SELECT id, agent_id, kind, args, created_at FROM agent_commands
+        WHERE kind = 'trade' AND claimed_at IS NULL AND (${eligible.join(" OR ")})
+        ORDER BY created_at ASC, id ASC LIMIT 50`,
+    ).all(...params)) as { id: string; agent_id: string; kind: string; args: string | null; created_at: number }[];
     for (const r of rows) {
       const t = byAccount.get(String(r.agent_id));
       if (!t) continue;
       try {
-        await deliverCommand(shared, t.home, t.tag, r);
+        await deliverCommand(shared, t.home, t.tag, r, t.smartAccount);
       } catch {
         /* this order waits for the next pass; the others still cross */
       }
@@ -4913,28 +5063,20 @@ export async function ferryForChild(
   {
     // ── down: unclaimed commands become files ──
     try {
-      const rows = (await shared
-        .prepare(
-          // BOUND TO THE SMART ACCOUNT, NOT THE TENANT. `agent_id` is the
-          // ERC-4337 account everywhere in this schema, and the web enqueues
-          // under exactly that (agent-for.ts). Binding the SIWE wallet here
-          // matched zero rows for every hosted tenant, always — so a queued
-          // command sat with claimed_at NULL forever while the dashboard said
-          // "queued", which its own comment reads as a worker that is not
-          // draining. The same mismatch agent-for.ts exists to prevent, one
-          // hop over, on the leg nothing tested.
-          //
-          // ORDER BY (created_at, id), never time alone: two commands really
-          // do land in the same millisecond, and neither backend has a
-          // portable insertion-order tiebreak. store.ts:1757 argues this at
-          // length for the queue nobody calls; the live path needs it more,
-          // because for two ORDERS "which one first" is a question about
-          // somebody's money.
-          `SELECT id, kind, args, created_at FROM agent_commands
-            WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 5`,
-        )
-        .all(smartAccount)) as { id: string; kind: string; args: string | null; created_at: number }[];
-      for (const r of rows) await deliverCommand(shared, home, tag, r);
+      // Bind to the ERC-4337 account, not the owner wallet. A deterministic
+      // (created_at,id) order also resolves requests in the same millisecond.
+      // Retained financial intents are excluded before the bounded window.
+      const boundary = await readFleetCommandBoundary(shared, smartAccount);
+      const financial = "kind IN ('trade','selftest','paper-reset')";
+      const filter = boundary === "held" ? ` AND NOT (${financial})`
+        : boundary === null ? "" : ` AND (NOT (${financial}) OR created_at > ?)`;
+      const rows = (await shared.prepare(
+        `SELECT id, kind, args, created_at FROM agent_commands
+          WHERE agent_id = ? AND claimed_at IS NULL${filter}
+          ORDER BY created_at ASC, id ASC LIMIT 5`,
+      ).all(smartAccount, ...(typeof boundary === "number" ? [boundary] : []))) as
+        { id: string; kind: string; args: string | null; created_at: number }[];
+      for (const r of rows) await deliverCommand(shared, home, tag, r, smartAccount);
     } catch {
       /* a child that misses a command this pass gets it next pass */
     }
@@ -4995,11 +5137,15 @@ export async function ferryForChild(
         // ONE ROW AT A TIME: a write that failed leaves its own row open for
         // the next pass, and does not cost every row after it this one.
         try {
+          await withFleetRecoveryLock(shared, smartAccount, async locked => {
+          // An original queue that was lost remains unresolved. A later check
+          // cannot turn an old intent into a truthful 'never ran' result.
+          if (await readFleetCommandRefusal(locked, smartAccount, Number(r.created_at))) return;
           const closesAt = orderClosesAt(r);
-          if (now <= closesAt) continue;
+          if (now <= closesAt) return;
           const id = String(r.id);
           const where = commandWhereabouts(home, id);
-          if (where === "answered") continue;
+          if (where === "answered") return;
           const args = r.args ? parseArgs(r.args) : undefined;
           // "NEVER RAN" IS C3's `expired`, whichever process noticed it: the
           // child answers an order that expired in its queue with this same
@@ -5010,31 +5156,32 @@ export async function ferryForChild(
           if (r.claimed_at === null || r.claimed_at === undefined) {
             // Undelivered, so no file can exist yet; a replica that delivers it
             // in the meantime wins the `claimed_at IS NULL` race and we stand down.
-            if (where !== "gone") continue;
+            if (where !== "gone") return;
             await closeWithReceipt(
-              shared,
+              locked,
               { sql: "done_at = ?, claimed_at = ?, result = ?", args: [now, now, neverRan] },
               expired,
               { sql: "id = ? AND done_at IS NULL AND claimed_at IS NULL", args: [id] },
             );
-            continue;
+            return;
           }
           const expiresAt = args?.expiresAt;
           if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
             await closeWithReceipt(
-              shared,
+              locked,
               { sql: "done_at = ?, result = ?", args: [now, neverRan] },
               expired,
               { sql: "id = ? AND done_at IS NULL", args: [id] },
             );
-            continue;
+            return;
           }
           // Taken, or a deadline-less file the child would still run: either
           // way it may go out, so nothing is said until it no longer can.
-          if (now <= closesAt + ORDER_IN_FLIGHT_MS) continue;
-          await shared
+          if (now <= closesAt + ORDER_IN_FLIGHT_MS) return;
+          await locked
             .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
             .run(now, unanswered, id);
+          });
         } catch {
           /* left open (done_at NULL): the next pass retries this row whole */
         }

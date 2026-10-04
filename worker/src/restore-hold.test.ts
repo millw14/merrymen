@@ -146,6 +146,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
+      "reportFleetSource",
       "retireExpiredGrants",
       "retryHold",
       "runOrchestrator",
@@ -420,7 +421,9 @@ describe("a held tenant's practice reset", () => {
 
   it("A RESET THAT COULD NOT BE DECIDED IS ASKED ABOUT AGAIN AT THE QUICK PACE, AND ONLY A RETRY THAT RAN USES UP A PRESS", () => {
     const retry = fn("retryHold");
-    const pace = calls(retry, "scheduleHoldRetry")[0]!;
+    const pace = calls(retry, "scheduleHoldRetry").find(call =>
+      call.arguments[1]?.getText() === "unsure ? UNCLASSIFIED_BLOCK : cls")!;
+    assert.ok(pace, "the reset outcome retains its own retry pace after the source preflight");
     assert.equal(pace.arguments[1]!.getText(), "unsure ? UNCLASSIFIED_BLOCK : cls", "an unsure honour does not wait out the backoff");
     // The first thing it does is decline when holdMayLeave says no, and it
     // says so: `return false`, before anything is tried.

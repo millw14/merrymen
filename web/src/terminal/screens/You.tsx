@@ -7,6 +7,8 @@ import { BalanceFigure } from "../studio";
 import Link from "next/link";
 import { SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
+import { RecoveryNotice } from "../RecoveryNotice";
+import { pausedRecovery } from "../recovery-view";
 
 export function You({
   onLimits,
@@ -49,6 +51,7 @@ export function You({
       : owner;
   const spent = spentToday(mine, Date.now());
   const change = dailyChange(mine);
+  const recovery = pausedRecovery(mine.recovery);
   return (
     <div className="account-page">
       <header className="account-header">
@@ -62,15 +65,16 @@ export function You({
           <h2>{ownerLabel}</h2>
           <p>1 agent</p>
         </div>
-        <span className="profile-mode">{mine.statusLabel ?? "Offline"}</span>
+        <span className="profile-mode">{recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}</span>
       </div>
+      <RecoveryNotice recovery={recovery}/>
       <section className="account-balance" aria-label="Account balance">
-        <span className="account-label">Portfolio balance</span>
+        <span className="account-label">{recovery ? "Last recorded portfolio balance" : "Portfolio balance"}</span>
         <strong>
           <BalanceFigure value={mine.equity} />
         </strong>
-        <p className={mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
-          {mine.chg24 == null
+        <p className={recovery || mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
+          {recovery ? "Reconciliation pending" : mine.chg24 == null
             ? "Daily change unavailable"
             : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
         </p>
@@ -97,7 +101,7 @@ export function You({
           </span>
           <span className="account-agent-value">
             <strong>{money(mine.equity)}</strong>
-            <small>{mine.statusLabel ?? "Offline"} ↗</small>
+            <small>{recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"} ↗</small>
           </span>
         </button>
       </section>
@@ -121,6 +125,7 @@ export function You({
         {/* Hosted only: a self-hosted install has no assistant connections (assistant-connect.ts). */}
         {assistants && <Link className="account-control" href={CONNECT_ASSISTANT_HREF}><Plug size={24} aria-hidden="true"/><span><strong>Connect to Claude</strong><small>Ask Claude about your agent</small></span><ChevronRight size={18} aria-hidden="true"/></Link>}
         <section className="profile-usage" aria-label="Daily limit usage">
+        {recovery ? <div className="account-usage"><span>Daily usage</span><span>Reconciliation pending</span></div> : <>
         <div className="account-usage">
           <div>
             <span>Used today</span>
@@ -139,6 +144,7 @@ export function You({
             />
           )}
         </div>
+        </>}
         </section>
       </section>
     </div>
