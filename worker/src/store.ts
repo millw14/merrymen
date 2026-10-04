@@ -429,6 +429,9 @@ const SQLITE_ALTERS: string[] = [
     // EntryPoint still reports actualGasCost for a sponsored op, so the number
     // survives sponsorship — only its owner changes.
     "ALTER TABLE trades ADD COLUMN sponsored_gas_wei TEXT",
+    // The receipt's block time for historical gas. Kept separate from budget
+    // settlement time: repairing a return must never re-date risk-cap charges.
+    "ALTER TABLE trades ADD COLUMN gas_recorded_at INTEGER",
     // EPOCH. Everything written before the accounting was fixed stays epoch 1
     // and is excluded from performance reporting — kept for forensics, never
     // presented as measured. The first tick after the fix opens epoch 2. This
