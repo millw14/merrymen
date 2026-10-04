@@ -179,7 +179,7 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
-import { reconstructionRoster, type ReconstructionGrant } from "./accounting-roster";
+import { reconstructionRoster, reconstructionCustodyRefusal, type ReconstructionGrant } from "./accounting-roster";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -7335,7 +7335,8 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash, tenantByAccount });
     for (const plan of plans) {
       const refusal = roster.refusals.get(plan.smartAccount.toLowerCase()) ??
-        (!claimsRead ? "durable account claims unreadable" : null);
+        (!claimsRead ? "durable account claims unreadable" : null) ??
+        reconstructionCustodyRefusal(roster, plan.smartAccount, chain.get(plan.smartAccount.toLowerCase()));
       if (refusal) {
         plan.blocked = refusal;
         plan.contributionsKnownAfter = false;

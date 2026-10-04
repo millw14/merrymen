@@ -11,6 +11,8 @@ export interface ReconstructionRoster {
   agents: Record<string, unknown>[];
   tenantByAccount: Map<string, string>;
   custodyVaults: Map<string, readonly string[]>;
+  /** A valid current grant proves its custody set, including an empty set. */
+  grantCustodyKnown: Set<string>;
   /** A conflicting claim must not be resolved by input order or by a grant. */
   refusals: Map<string, string>;
   rosterOnly: number;
@@ -43,7 +45,8 @@ export function reconstructionRoster(args: {
   claims: readonly Record<string, unknown>[];
 }): ReconstructionRoster {
   const result: ReconstructionRoster = {
-    agents: [], tenantByAccount: new Map(), custodyVaults: new Map(), refusals: new Map(), rosterOnly: 0,
+    agents: [], tenantByAccount: new Map(), custodyVaults: new Map(), grantCustodyKnown: new Set(),
+    refusals: new Map(), rosterOnly: 0,
   };
   const aliases = new Map<string, Record<string, unknown>[]>();
   const grantRows = new Map<string, ReconstructionGrant[]>();
@@ -129,10 +132,29 @@ export function reconstructionRoster(args: {
         chain_id: grants[0].chainId, epoch: 1, mode: null, hwm_usdg: 0, contributions_known: null });
     }
     if (result.refusals.has(account)) continue;
+    if (grants.length) result.grantCustodyKnown.add(account);
     // No grant: exactly one normalized, valid durable tenant is required.
     if (tenants.size === 1) result.tenantByAccount.set(account, [...tenants][0]!);
     const vaults = [...custody.values()][0];
     if (vaults?.length) result.custodyVaults.set(account, vaults);
   }
   return result;
+}
+
+/**
+ * A durable claim cannot prove a removed grant's historic custody. An outward
+ * cash leg might buy assets in the account's own vault; classifying it without
+ * that vault would invent a withdrawal and inflate its return. The full chain
+ * scan may therefore repair a claim-only account only when it contains no
+ * outward USDG movement. Never infer a historic vault from a claim or settings.
+ */
+export function reconstructionCustodyRefusal(
+  roster: ReconstructionRoster,
+  account: string,
+  capital: { movements: readonly { direction: "in" | "out" }[] } | undefined,
+): string | null {
+  if (roster.grantCustodyKnown.has(account.toLowerCase())) return null;
+  return capital?.movements.some((movement) => movement.direction === "out")
+    ? "historic custody is unverified after grant removal; outward USDG movements require signed custody evidence"
+    : null;
 }

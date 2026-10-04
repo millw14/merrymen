@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { reconstructionRoster, type ReconstructionGrant } from "./accounting-roster";
+import { reconstructionRoster, reconstructionCustodyRefusal, type ReconstructionGrant } from "./accounting-roster";
 import { accountingCommitRefusal, ACCOUNTING_HOLD_ENV } from "./accounting-maintenance";
 import { planReconstruction, FLOW_SNAPSHOT_COLUMNS } from "./accounting-reconstruction";
 import { runRepair } from "./accounting-repair";
-import { totalCapital } from "../../packages/core/src/index";
+import { classifyUsdgMovement, totalCapital } from "../../packages/core/src/index";
 import { wrapSqlite } from "./db";
 import { applyLedgerSchema } from "./store";
 
@@ -32,6 +32,7 @@ test("a stopped account resolves from its durable claim without recreating a gra
   assert.equal(roster.agents[0], row, "raw mixed-case ledger identity remains the mutation key");
   assert.equal(roster.tenantByAccount.get(key), TENANT);
   assert.equal(roster.custodyVaults.size, 0, "a claim cannot supply custody permission");
+  assert.equal(roster.grantCustodyKnown.size, 0, "a claim cannot prove an empty historic custody set");
   assert.equal(roster.refusals.size, 0);
   assert.equal(roster.rosterOnly, 0);
   assert.equal(accountingCommitRefusal({ mode: "commit", accounts: [ACCOUNT],
@@ -45,6 +46,47 @@ test("agreement between a signed grant and normalized durable aliases retains on
   assert.equal(roster.tenantByAccount.get(key), TENANT);
   assert.deepEqual(roster.custodyVaults.get(key), [VAULT]);
   assert.equal(roster.refusals.size, 0);
+  assert.equal(roster.grantCustodyKnown.has(key), true);
+});
+
+test("a removed grant's deposit-only history may be reconstructed, but every outward USDG movement refuses", () => {
+  const roster = reconstructionRoster({ ledgerAgents: [ledger()], grants: [], claims: [claim()] });
+  assert.equal(reconstructionCustodyRefusal(roster, ACCOUNT, { movements: [{ direction: "in" }] }), null);
+  assert.equal(reconstructionCustodyRefusal(roster, key, { movements: [] }), null);
+  assert.equal(reconstructionCustodyRefusal(roster, ACCOUNT, undefined), null,
+    "the existing missing-scan gate still owns absent chain evidence");
+  for (const movements of [[{ direction: "out" as const }], [{ direction: "in" as const }, { direction: "out" as const }]]) {
+    assert.match(reconstructionCustodyRefusal(roster, ACCOUNT, { movements })!, /historic custody.*unverified/);
+  }
+});
+
+test("an unambiguous signed grant proves custody, including an empty set, while conflicting grants never do", () => {
+  for (const custodyAddresses of [[], [VAULT]]) {
+    const roster = reconstructionRoster({ ledgerAgents: [ledger()], grants: [grant({ custodyAddresses })], claims: [claim()] });
+    assert.equal(roster.grantCustodyKnown.has(key), true);
+    assert.equal(reconstructionCustodyRefusal(roster, ACCOUNT, { movements: [{ direction: "out" }] }), null);
+  }
+  const conflicted = reconstructionRoster({ ledgerAgents: [ledger()],
+    grants: [grant(), grant({ custodyAddresses: [VAULT] })], claims: [claim()] });
+  assert.equal(conflicted.grantCustodyKnown.has(key), false);
+  assert.match(reconstructionCustodyRefusal(conflicted, ACCOUNT, { movements: [{ direction: "out" }] })!, /signed custody evidence/);
+});
+
+test("a removed grant's own-vault purchase refuses the false withdrawal classification", () => {
+  const roster = reconstructionRoster({ ledgerAgents: [ledger()], grants: [], claims: [claim()] });
+  const cash = OTHER_ACCOUNT, token = OTHER_TENANT;
+  const legs = [{ token: cash, from: ACCOUNT, to: VAULT, amountRaw: "25000000" },
+    { token: cash, from: VAULT, to: OWNER, amountRaw: "25000000" },
+    { token, from: OWNER, to: VAULT, amountRaw: "400000000000000000000" }];
+  const classification = classifyUsdgMovement({ account: ACCOUNT, usdg: legs[0]!, txLegs: legs,
+    usdgToken: cash, custodyAddresses: roster.custodyVaults.get(key) });
+  assert.equal(classification.kind, "capital-out", "unknown historic custody cannot pair the vault's token leg");
+  const capital = { account: ACCOUNT, complete: true, notes: [],
+    movements: [{ txHash: TX, blockNumber: 10, logIndex: 0, at: 90, direction: "out" as const,
+      amountRaw: "25000000", counterparty: VAULT, classification }],
+    totals: totalCapital([{ amountRaw: "25000000", classification }]) };
+  const refusal = reconstructionCustodyRefusal(roster, ACCOUNT, capital);
+  assert.match(refusal!, /historic custody.*unverified/);
 });
 
 test("a current grant without an existing claim retains the previous grant roster behavior", () => {
