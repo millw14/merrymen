@@ -3195,12 +3195,23 @@ html[lang|="ko"] .terminal-host {
   letter-spacing: -0.02em;
 }
 
+:where(.terminal-host) .rank-name .name-block {
+  min-width: 0;
+}
+
 :where(.terminal-host) .rank-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-top: 2px;
   min-width: 0;
+}
+
+:where(.terminal-host) .rank-meta > * {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 :where(.terminal-host) .rank-trades {
@@ -3222,6 +3233,29 @@ html[lang|="ko"] .terminal-host {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .rank-value,
+:where(.terminal-host) .rank-return {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .rank-book,
+:where(.terminal-host) .rank-pnl {
+  font-size: 10px;
+  color: var(--tx-2);
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .sidebar-agent-performance {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 
 :where(.terminal-host) .rank .chg {

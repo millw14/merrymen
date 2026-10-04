@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { coinPrice, lastLine, pctBps, type LiveAgent, type LiveToken } from "../live";
 import { Coin, Face, Empty, NameBlock } from "../ui";
+import { performanceOf } from "../agent-performance";
 
 export function Search({
   tokens,
@@ -50,16 +51,19 @@ export function Search({
           onChange={(e) => setQ(e.target.value)}
         />
       </div>
-      {ags.map((a) => (
+      {ags.map((a) => {
+        const performance = performanceOf(a);
+        return (
         <button key={a.slug} type="button" className="tok" onClick={() => onProfile(a.slug)}>
           <Face name={a.name} slug={a.slug} />
           <div>
             <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
             {a.last && <p className="meta">{lastLine(a.last)}</p>}
           </div>
-          <span className={`px ${(a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps) == null ? "" : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! >= 0 ? "up" : "down"}`}>{pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}</span>
+          <span title={performance.title} className={`px ${performance.bps == null || performance.bps === 0 ? "" : performance.bps > 0 ? "up" : "down"}`}>{pctBps(performance.bps)}</span>
         </button>
-      ))}
+        );
+      })}
       {toks.map((t) => (
         <button key={t.id} type="button" className="tok" onClick={() => onToken(t.id)}>
           <Coin symbol={t.symbol} logo={t.logo} />

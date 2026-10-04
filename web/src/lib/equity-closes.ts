@@ -87,7 +87,7 @@ export async function readEquityCloses(
                 ROW_NUMBER() OVER (PARTITION BY COALESCE(mode, ''), held ORDER BY at ASC, id ASC) AS open_rank,
                 ROW_NUMBER() OVER (ORDER BY at DESC, id DESC) AS newest_rank
            FROM (SELECT equity_usdg, at, id, mode, ${held.flag()} AS held
-                   FROM equity WHERE agent_id = ? AND epoch = ?) e
+                   FROM equity WHERE LOWER(agent_id) = LOWER(?) AND epoch = ?) e
        ) marks
        WHERE (held = 0 AND (close_rank = 1 OR open_rank = 1)) OR newest_rank = 1
        ORDER BY at DESC, id DESC LIMIT ?`,

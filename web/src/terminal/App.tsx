@@ -1,4 +1,5 @@
 "use client";
+import { performanceFromWire } from "./agent-performance";
 import { usePathname, useRouter } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
@@ -376,7 +377,7 @@ export function App() {
       // that published none stays unpublished rather than guessed.
       // The rest past `glance` is the profile's own: the chart's timestamps and
       // whether they reach the whole period, TOP TRADES, and the stats line.
-      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
+      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,performance:p.performance === undefined ? undefined : performanceFromWire(p.performance),unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
         growthPoints:p.growth,growthComplete:p.growthComplete,topTrades:p.topTrades,topTradesRead:p.topTradesRead,tradeCount:p.tradeCount,tradeCountFloor:p.tradeCountFloor,avgHoldSec:p.avgHoldSec,joinedAt:p.joinedAt,gasless:p.gasless});
     }).catch(e=>{if(alive)setProfileError(e.message);});
     void refresh();

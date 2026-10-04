@@ -112,6 +112,19 @@ describe("what an English reader sees, pinned", () => {
     assert.ok(!pctBps(-1234).includes("-"), "a hyphen is not a minus here");
   });
 
+  it("small measured gains and losses never become a flat return", () => {
+    assert.equal(pctBps(0), "0.0%");
+    assert.equal(pctBps(1), "+0.01%");
+    assert.equal(pctBps(-1), "−0.01%");
+    assert.equal(pctBps(-0.38914), "−0.0039%");
+    assert.equal(pctBps(0.000203), "+0.000002%");
+    assert.equal(pctBps(0.0000001), "+<0.00000001%");
+    assert.equal(pctBps(-Number.MIN_VALUE), "−<0.00000001%");
+    assert.equal(pctBps(null), "—");
+    assert.equal(pctBps(Number.NaN), "—");
+    assert.equal(pctBps(1234), "+12.3%", "ordinary rows retain their compact precision");
+  });
+
   it("token amounts preserve eight fractional places without inventing trailing zeroes", () => {
     assert.equal(decimalAmount(1234.12345678), "1,234.12345678");
     assert.equal(decimalAmount(0.00000001), "0.00000001");

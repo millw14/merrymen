@@ -314,11 +314,11 @@ export function decimalAmount(n: number | null): string {
  * is what Turkish writes. What must NOT happen is prefixing a sign to an
  * already-signed string, which is how `+%40,8` becomes `+%+40,8`.
  */
-function signedPct(value: number, places: number, sign: string): string {
+function signedPct(value: number, places: number, sign: string, minimumPlaces = places): string {
   const body = nf({
     style: "percent",
     signDisplay: "never",
-    minimumFractionDigits: places,
+    minimumFractionDigits: minimumPlaces,
     maximumFractionDigits: places,
   }).format(Math.abs(value) / 100);
   return `${sign}${body}`;
@@ -331,10 +331,16 @@ export function pctPts(n: number | null): string {
   return signedPct(n, places, n > 0 ? "+" : n < 0 ? "-" : "");
 }
 
-/** A change in BASIS POINTS, to one place. Below half a tenth reads as flat. */
+/** Basis points, with enough precision to keep a small gain or loss visible. */
 export function pctBps(bps: number | null): string {
   if (bps === null || !Number.isFinite(bps)) return DASH;
+  if (bps === 0) return signedPct(0, 1, "");
+  const sign = bps > 0 ? "+" : "−";
+  // Bound exceptionally tiny values rather than rounding them to a flat return.
+  // Check before division, which can underflow for a finite nonzero number.
+  if (Math.abs(bps) < 0.000001) return `${sign}<${signedPct(0.00000001, 8, "")}`;
   const points = bps / 100;
-  if (Math.abs(points) < 0.05) return signedPct(0, 1, "");
-  return signedPct(points, 1, points > 0 ? "+" : "−");
+  if (Math.abs(points) >= 0.05) return signedPct(points, 1, sign);
+  const places = Math.min(8, Math.max(2, Math.ceil(-Math.log10(Math.abs(points))) + 1));
+  return signedPct(points, places, sign, 0);
 }
