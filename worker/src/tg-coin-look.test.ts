@@ -1291,7 +1291,9 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     // (trencher-discovery.ts) and changes what is re-read, never what qualifies.
     const refresh = CODE.slice(CODE.indexOf("const autoTrenchRefresh = new CoalescedRefresh("), CODE.indexOf("function refreshAutoTrench("));
     assert.match(refresh, /const poolCache = trenchPoolCache;/);
-    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache\s*\}\)/);
+    // The early-candidate set (early-candidates.ts) rides beside both; it
+    // too changes what is read, never the verification (trencher-discovery.ts).
+    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*earlyBook\.addresses\(\))?\s*\}\)/);
     assert.match(refresh, /autoTrenchContext === context && trenchPoolCache === poolCache && active/,
       "a result from an old grant or connection cannot replace the current discovery");
   });

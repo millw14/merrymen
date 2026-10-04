@@ -197,6 +197,8 @@ test("changing the connection discards cached evidence and a discovery already i
     const tgNominated = new Set(), coinNames = {}, poolPrices = { reset() {} };
     const warmHeldNames = () => { names++; }, trenchNotice = () => {};
     const wakeQualifiedNominations = () => {};
+    // The early-candidate book (early-candidates.ts) and its funnel filing.
+    const earlyBook = { addresses: () => new Set() }, noteEarlyDiscovery = () => {};
     ${refresh}
     return {
       tick: refreshAutoTrench,

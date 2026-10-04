@@ -12,6 +12,7 @@ import { applyFill, ZERO_BASIS } from "./basis";
 import { checkPolicy, type AgentLimits } from "./policy";
 import { CASH } from "../../packages/core/src/index";
 import { NominationBook } from "./trencher-nominate";
+import { EARLY_PAGES_MAX, earlyScreenReason } from "./early-candidates";
 
 const TOKEN = "0x0000000000000000000000000000000000000011" as const;
 const USDG = "0x0000000000000000000000000000000000000022" as const;
@@ -556,4 +557,91 @@ test("a review that produced no decision leaves an earlier ready order alone", a
   await setImmediate();
   assert.deepEqual(drops, []);
   assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5)?.decisionId, "decision-1");
+});
+
+// ─── Early candidates (early-candidates.ts) ───────────────────────────────
+//
+// A separate page set and a separate, route-specific screen for coins the
+// early book holds. Everything below pins that the REGULAR tape — and
+// highVolumePools itself — is exactly what it was.
+
+const EARLY_COIN = "0x00000000000000000000000000000000000000e1" as const;
+const earlyPool = (over: Partial<GeckoPool> = {}) => pool({
+  tokenAddress: EARLY_COIN, poolAddress: EARLY_COIN, poolId: EARLY_COIN, dex: "uniswap-v3-robinhood", reserveUsd: 30_000,
+  volume24hUsd: 20_000, buyers24h: 12, buys24h: 40, sells24h: 25, ...over,
+});
+
+test("regular tape and highVolumePools are unchanged by the early path; early coins ride beside them", async () => {
+  const regular = [pool(), pool({ tokenAddress: ROUTER, poolAddress: ROUTER, volume24hUsd: 400_000 }), pool({ tokenAddress: AGENT as `0x${string}`, poolAddress: AGENT as `0x${string}`, volume24hUsd: 5 })];
+  const make = () => new TrenchTapeReader(async (feed, opts) => feed === "pools" && opts?.page === 1 ? { failed: false, pools: regular, observedAt: 1000 } : { failed: false, pools: [], observedAt: 1000 },
+    () => 1000, async (address) => ({ failed: false, pools: address === EARLY_COIN ? [earlyPool(), earlyPool({ poolAddress: `0x${"e".repeat(40)}`, poolId: "x", sells24h: 0 })] : [], observedAt: 1000 }));
+  const plain = make();
+  const before = await plain.refresh();
+  assert.deepEqual(before.pools, highVolumePools(regular, true), "no early set: exactly highVolumePools");
+  assert.deepEqual(before.early, []);
+  const withEarly = make();
+  withEarly.setEarly([EARLY_COIN, "junk"]);
+  const after = await withEarly.refresh();
+  assert.deepEqual(after.pools.slice(0, before.pools.length), before.pools, "the regular part is identical, in the same order");
+  assert.deepEqual(after.early.map(p => p.poolAddress), [EARLY_COIN], "only the early pool that passes the early screen");
+  assert.deepEqual(after.pools.slice(before.pools.length), after.early);
+  assert.equal(trenchScreenReason(earlyPool()), "volume-below-min");
+  assert.equal(earlyScreenReason(earlyPool()), null);
+  // A quiet NON-early coin on the same tape is still dropped, and still filed under the volume screen.
+  assert.deepEqual(withEarly.screenedOut(), plain.screenedOut());
+  assert.ok(withEarly.screenedOut().every(s => s.tokenAddress !== EARLY_COIN), "an early coin is answered by its own screen");
+  assert.deepEqual(withEarly.earlyScreenedOut(), [], "it passed one");
+  // highVolumePools never admits it, whatever is set on a reader.
+  assert.deepEqual(highVolumePools([...regular, earlyPool()], true), highVolumePools(regular, true));
+  // Leaving the book drops the page now.
+  withEarly.setEarly([]);
+  assert.deepEqual(withEarly.snapshot().pools, before.pools);
+});
+
+test("early pages: bounded, separate from nominations, never read twice, and a screened-out coin is named by the early rule", async () => {
+  const reads: string[] = [];
+  const reader = new TrenchTapeReader(async () => ({ failed: false, pools: [] }), () => 1000, async (address) => {
+    reads.push(address);
+    return { failed: false, pools: address === EARLY_COIN ? [earlyPool({ sells24h: 0 }), earlyPool({ poolAddress: `0x${"e".repeat(40)}`, dex: "uniswap-v4-robinhood", volume24hUsd: 900 })] : [], observedAt: 1000 };
+  });
+  reader.setEarly(Array.from({ length: EARLY_PAGES_MAX + 2 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`));
+  await reader.refreshEarly();
+  assert.equal(reads.length, EARLY_PAGES_MAX);
+  reads.length = 0;
+  reader.setNominated([EARLY_COIN]);
+  reader.setEarly([EARLY_COIN]);
+  await reader.refresh();
+  assert.deepEqual(reads, [EARLY_COIN], "a coin both nominated and early is read once");
+  assert.deepEqual(reader.earlyScreenedOut(), [{ tokenAddress: EARLY_COIN, reason: "no-sells-24h" }], "the supported venue's reason wins over a busier v4 pool's");
+  assert.deepEqual(reader.screenedOut(), []);
+  assert.equal(reader.snapshot().pools.length, 0);
+});
+
+test("recentLaunches records reviews actually launched, and a context change forgets them", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  review.reset("live");
+  review.launch("live", input, TOKEN, async () => answer({ action: "hold" }), () => {});
+  review.launch("live", input, ROUTER, async () => answer({ action: "hold" }), () => {}); // inside the interval: not launched
+  await setImmediate();
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  review.launch("live", input, ROUTER.toUpperCase().replace("0X", "0x"), async () => answer({ action: "hold" }), () => {});
+  await setImmediate();
+  assert.deepEqual(review.recentLaunches(), [TOKEN, ROUTER]);
+  review.reset("other");
+  assert.deepEqual(review.recentLaunches(), []);
+});
+
+test("without an early lane the rotation is exactly what it was", () => {
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("live");
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: EARLY_COIN, volume24hUsd: 20_000 }];
+  assert.equal(review.candidate(eligible)?.token, TOKEN);
+  review.earlyLane = () => null;
+  assert.equal(review.candidate(eligible)?.token, TOKEN);
+  review.earlyLane = () => ({ held: new Set(), waiting: [], reserved: true });
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "an empty lane is no lane");
+  review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN], reserved: true });
+  assert.equal(review.candidate(eligible)?.token, EARLY_COIN, "a reserved slot with an eligible waiting coin");
+  assert.equal(review.candidate([{ token: TOKEN }], new Set())?.token, TOKEN, "an early coin that is not eligible gets nothing");
 });

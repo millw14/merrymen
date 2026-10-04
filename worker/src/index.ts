@@ -153,6 +153,7 @@ import { renderBuilder } from "./research/coin-builder";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
 import { FunnelRecorder, candidateSkipOf, classifyReview, classifyStage, entryTokenOf, installDecisionFunnel, trenchReviewBlock, trencherSymbol, unqualifiedReasons, type Classified } from "./decision-funnel";
+import { EarlyCandidateBook, earlyEntryBound, earlyEntryPools, earlyFunnelOf, installEarlyCandidateBook } from "./early-candidates";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -780,10 +781,31 @@ async function main() {
     const token = entryTokenOf(intent as { kind: string; sellToken?: string; buyToken?: string });
     if (token) funnel.note(token, funnelSymbol(token), { ...c, decisionId: c.decisionId ?? intent.decisionId ?? null });
   }
+  /**
+   * THE EARLY-CANDIDATE BOOK (early-candidates.ts): the smaller-coin path into
+   * discovery and review. One per process — this child's one agent — and
+   * installed so a source running in this process (the Fomo child-file
+   * reader) can offer a coin with `earlyCandidateBook()?.offer(address, {...})`
+   * without reaching into main(). An offer buys a tape page, an on-chain
+   * verification attempt and a reserved share of review slots; never capital.
+   * Every execution guard below (shouldEnter, pool pricing, policy, the vault)
+   * is unchanged, and take() can only be LOWERED by its per-coin ceiling.
+   */
+  const earlyBook = new EarlyCandidateBook();
+  installEarlyCandidateBook(earlyBook);
+  // Reserved review capacity: the rotation asks the book on every pick
+  // (trencher-brain.ts candidate). One slot in four at most, unless nothing
+  // else is eligible; the lane only chooses among coins already eligible.
+  trenchBrain.earlyLane = (recent) => ({ held: earlyBook.addresses(), waiting: earlyBook.priority(), reserved: earlyBook.reservedSlot(recent) });
   trenchBrain.onReviewed = ({ token, symbol, held, priceStale, outcome }) => {
     // Entry reviews only: a held coin's review is about its exit, which is
     // mechanical and not a place a candidate stops.
     if (!held) funnel.note(token, symbol, classifyReview(outcome, { held, priceStale }));
+    // An early coin the Brain answered leaves the waiting list (a BUY stays
+    // until its entry tick) and starts its cooldown. The book ignores others.
+    if (!held && outcome.ran && outcome.result.ok) {
+      earlyBook.onReviewed(token, { action: outcome.result.decision.action, decisionId: outcome.result.decision.decision_id });
+    }
   };
   trenchBrain.onDrop = (why, decisionId, info) => {
     console.log(`[trencher] ${why}`);
@@ -810,11 +832,14 @@ async function main() {
     try {
       // Nominations change which pools are read, never the chain verification
       // or the grant/custody checks that admit one to the trading universe.
-      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache });
+      // Early candidates are read beside them, through the same verification,
+      // without the volume screen or the top slice (trencher-discovery.ts).
+      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyBook.addresses() });
       if (autoTrenchContext === context && trenchPoolCache === poolCache && active && `${active.agentId}:${active.grant.grantedAt}` === context) {
         autoTrench = result;
         warmHeldNames(coinNames, result);
         wakeQualifiedNominations();
+        noteEarlyDiscovery(result.early);
       }
       return true;
     } catch {
@@ -854,6 +879,8 @@ async function main() {
       if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
       // The coins the tape screen dropped, once per refresh, by the rule each failed.
       for (const s of trenchTapeReader.screenedOut()) funnel.note(s.tokenAddress, null, classifyStage({ kind: "discovery", screen: s.reason }));
+      // Early candidates are answered by their own screen, with its own words.
+      for (const s of trenchTapeReader.earlyScreenedOut()) funnel.note(s.tokenAddress, null, earlyFunnelOf({ kind: "screen", reason: s.reason }));
       // Discovery otherwise runs against the preceding tape and then waits a
       // full minute even though a new tape has just arrived.
       refreshAutoTrench(true);
@@ -867,6 +894,57 @@ async function main() {
     trenchTapeAt = snapshot.observedAt;
     return snapshot.pools;
   };
+  /**
+   * What discovery's early path did, filed ON CHANGE only: every pass would
+   * otherwise re-file "early-verified" over the later stage (an entry screen,
+   * a Brain hold) that is the true answer to "why did you skip that coin?".
+   */
+  const earlyDiscoveryNoted = new Map<string, string>();
+  function noteEarlyDiscovery(early: { verified: string[]; unverified: string[]; deferred: string[] }): void {
+    const now = new Map<string, "verified" | "not-verified" | "verify-deferred">();
+    for (const a of early.deferred) now.set(a, "verify-deferred");
+    for (const a of early.unverified) now.set(a, "not-verified");
+    for (const a of early.verified) now.set(a, "verified");
+    for (const [a, kind] of now) {
+      if (earlyDiscoveryNoted.get(a) === kind) continue;
+      funnel.note(a, null, earlyFunnelOf({ kind }));
+    }
+    earlyDiscoveryNoted.clear();
+    for (const [a, kind] of now) earlyDiscoveryNoted.set(a, kind);
+  }
+  /**
+   * A NEW EARLY CANDIDATE'S PAGE, READ NOW, like a new nomination's: one
+   * request per early coin, then discovery runs against it.
+   */
+  const earlyTapeRefresh = new CoalescedRefresh({ run: async () => {
+    const failures = await trenchTapeReader.refreshEarly();
+    if (failures.length) console.warn(`[trencher] ${failures.length} early-candidate tape page(s) could not be read; retried with the tape.`);
+    refreshAutoTrench(true);
+    return failures.length === 0;
+  } });
+  let earlyTapeKey = "";
+  let earlyContext: string | null = null;
+  /**
+   * Once per tick: expire offers, forget them all on a context change (a
+   * paper/live flip or new grant — the source offers again if the setup still
+   * holds; the book's caps survive), and hand the tape reader the current set.
+   * A changed set has its pages read now rather than on the tape's minute.
+   */
+  function syncEarlyCandidates(context: string): void {
+    try {
+      if (earlyContext !== null && earlyContext !== context) earlyBook.reset();
+      earlyContext = context;
+      earlyBook.expire();
+      const addresses = earlyBook.addresses();
+      const key = [...addresses].join(",");
+      if (key === earlyTapeKey) return;
+      earlyTapeKey = key;
+      trenchTapeReader.setEarly(addresses);
+      if (addresses.size > 0 && cfg.strategy === "trencher" && cfg.trencherFastEnabled) earlyTapeRefresh.request();
+    } catch (e) {
+      console.warn(`[trencher] early-candidate sync failed: ${e instanceof Error ? e.name : "error"}`);
+    }
+  }
   /**
    * Which rail this agent is on, asked in ONE place.
    *
@@ -3001,7 +3079,10 @@ async function main() {
       // filtered against a setting the owner has since changed.
       assetMode: c.assetMode,
       trench: {
-        brainOrder: (symbol, token, price8, held) => trenchBrain.take(symbol, token, price8, Math.min(c.llmMaxActionUsdg, active ? Number(active.limits.perTradeUsdg) / 1e6 : 0), held),
+        // An early candidate's own ceiling (early-candidates.ts) can only LOWER
+        // an ENTRY's bound, never raise it — and never touches a held coin's
+        // SELL: an entry ceiling must not shrink an exit.
+        brainOrder: (symbol, token, price8, held) => trenchBrain.take(symbol, token, price8, earlyEntryBound(Math.min(c.llmMaxActionUsdg, active ? Number(active.limits.perTradeUsdg) / 1e6 : 0), earlyBook.maxUsdgFor(token), held), held),
         usdgToken: CASH.USDG as `0x${string}`,
         candidates: trenchCandidates,
         open: trenchOpen,
@@ -5495,8 +5576,22 @@ async function main() {
       const unqualified = autoTrench && active && grantTrencher(active.grant)
         ? unqualifiedReasons({ tape: freshTape, qualified: autoTrench.qualified, nominated: tgNominated, slice: DISCOVERY_SLICE })
         : null;
-      for (const [token, why] of unqualified ?? []) funnel.note(token, null, why);
-      for (const p of entryPools) {
+      // Early coins are explained by the early path's own notes (discovery's
+      // early-verified / early-not-verified), not as a missed slice.
+      const earlyNow = earlyBook.addresses();
+      for (const [token, why] of unqualified ?? []) if (!earlyNow.has(token)) funnel.note(token, null, why);
+      // THE EARLY PATH, BESIDE THE REGULAR LIST AND NEVER INSTEAD OF IT
+      // (early-candidates.ts). An early coin the volume screen dropped is
+      // added when its pool passes the early screen — and, on the autonomous
+      // path, when discovery verified that exact pool on chain. From here it
+      // runs the loop below exactly like a regular coin: watchTokens, the
+      // allowlist, the vault budget, createdAt and FDV present, pool-grade
+      // pricing, then shouldEnter and everything after it.
+      const earlyPools = earlyEntryPools(freshTape, earlyNow, {
+        regular: new Set(entryPools.map(p => p.tokenAddress.toLowerCase())),
+        qualified: !paperActive() && active && grantTrencher(active.grant) ? autoTrench?.qualified ?? [] : null,
+      });
+      for (const p of [...entryPools, ...earlyPools]) {
         const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
         const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
         if (autonomous && !autonomousBudget) {
@@ -5531,7 +5626,8 @@ async function main() {
           // disagree — they did, and the owner read the disagreement.
           ...priceability(quote, true),
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
-          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, volume24hUsd: p.volume24hUsd! });
+          // An early pool may not report 24h volume: absent, never 0.
+          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, ...(p.volume24hUsd !== null ? { volume24hUsd: p.volume24hUsd } : {}) });
       }
       return out;
     }
@@ -10535,6 +10631,7 @@ async function main() {
     // resets a cap (trencher-nominate.ts reset).
     if (trenchBrain.reset(trenchContext)) tgDeliver(tgBook.reset());
     tgDeliver(tgBook.expire());
+    syncEarlyCandidates(trenchContext);
     // The funnel answers for one agent; at most one aggregated line per 10 minutes.
     if (active) funnel.scope(active.agentId);
     if (fastTrencher && active) {

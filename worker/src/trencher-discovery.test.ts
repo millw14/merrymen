@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { keccak256, type PublicClient } from "viem";
 import { CASH, UNISWAP, GRANT_TRENCHER, MERRYMEN_TOKEN, type StoredGrant } from "../../packages/core/src/index";
-import { NOMINATED_VERIFY_MAX, discoverTrencherUniverse } from "./trencher-discovery";
+import { EARLY_VERIFY_MAX, NOMINATED_VERIFY_MAX, discoverTrencherUniverse } from "./trencher-discovery";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
 const token="0x1111111111111111111111111111111111111111";
@@ -212,4 +212,86 @@ test("verification beyond the slice is bounded by the nomination queue", async (
   const result = await discoverTrencherUniverse(c.client, grant, tape, { nominated: new Set(tape.slice(20).map(p => p.tokenAddress)) });
   assert.equal(result.qualified.length, 20 + NOMINATED_VERIFY_MAX);
   assert.equal(new Set(reads).size, 20 + NOMINATED_VERIFY_MAX);
+});
+
+// ─── Early candidates (early-candidates.ts) ────────────────────────────────
+//
+// The smaller-coin path: no volume screen and no top slice, but exactly the
+// same on-chain verification, bounded on its own.
+
+test("an early coin below the volume screen and beyond the slice is verified by the same on-chain checks, marked early", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(25);
+  const small = { ...pool, tokenAddress: `0x${"d".repeat(38)}01`, poolAddress: `0x${"e".repeat(38)}01`, poolId: `0x${"e".repeat(38)}01`,
+    volume24hUsd: 20_000, buyers24h: 12, reserveUsd: 30_000, fdvUsd: 60_000 } as GeckoPool;
+  const far = tape[23]!; // passes highVolumePools, outside the slice, not nominated
+  const all = [...tape, small];
+  const reads: string[] = [];
+  const c = chain(new Set(all.map(p => p.tokenAddress.toLowerCase())), reads);
+  all.forEach(p => c.register(p));
+
+  const plain = await discoverTrencherUniverse(c.client, grant, all);
+  const emptyEarly = await discoverTrencherUniverse(c.client, grant, all, { early: [] });
+  assert.deepEqual(emptyEarly.qualified, plain.qualified, "no early coins: identical result");
+  assert.deepEqual(plain.early, { verified: [], unverified: [], deferred: [] });
+  assert.ok(!plain.qualified.some(p => p.tokenAddress === small.tokenAddress || p.tokenAddress === far.tokenAddress));
+
+  reads.length = 0;
+  const result = await discoverTrencherUniverse(c.client, grant, all, { early: [small.tokenAddress.toUpperCase().replace("0X", "0x"), far.tokenAddress] });
+  assert.ok(reads.includes(small.poolAddress!.toLowerCase()) && reads.includes(far.poolAddress!.toLowerCase()));
+  for (const p of [small, far]) {
+    const q = result.qualified.find(x => x.tokenAddress === p.tokenAddress);
+    assert.equal(q?.early, true, p.name);
+    assert.ok(result.tokens.some(tok => tok.address === p.tokenAddress && tok.symbol === `T${p.tokenAddress.slice(-11).toUpperCase()}`));
+  }
+  assert.deepEqual(result.qualified.filter(p => !p.early).map(p => p.tokenAddress), plain.qualified.map(p => p.tokenAddress), "the slice is untouched");
+  assert.deepEqual(result.early.verified.sort(), [small.tokenAddress, far.tokenAddress].sort());
+
+  // A coin the slice already reads is not read twice and is not marked early.
+  const top = tape[0]!;
+  reads.length = 0;
+  const covered = await discoverTrencherUniverse(c.client, grant, all, { early: [top.tokenAddress] });
+  assert.equal(covered.qualified.find(p => p.tokenAddress === top.tokenAddress)?.early, undefined);
+  assert.equal(reads.filter(r => r === top.poolAddress!.toLowerCase()).length, 3, "token0, token1, fee once");
+});
+
+test("an early coin still needs the canonical factory, the v3 route, two-sided flow and never the energy reserve", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const mk = (i: number, over: Partial<GeckoPool> = {}) => ({ ...pool, tokenAddress: `0x${"d".repeat(38)}${i.toString(16).padStart(2, "0")}`,
+    poolAddress: `0x${"e".repeat(38)}${i.toString(16).padStart(2, "0")}`, poolId: `p${i}`, volume24hUsd: 20_000, buyers24h: 12, ...over } as GeckoPool);
+  const lookalike = mk(1);
+  const v4 = mk(2, { dex: "uniswap-v4-robinhood" });
+  const oneSided = mk(3, { sells24h: 0 });
+  const reserve = mk(4, { tokenAddress: MERRYMEN_TOKEN.address });
+  const all = [lookalike, v4, oneSided, reserve];
+  const reads: string[] = [];
+  const c = chain(new Set([v4, oneSided, reserve].map(p => p.tokenAddress.toLowerCase())), reads); // the factory does not know `lookalike`
+  all.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, all, { early: all.map(p => p.tokenAddress) });
+  assert.equal(result.qualified.length, 0);
+  assert.equal(result.tokens.length, 0, "nothing becomes a known Trencher asset without verification");
+  assert.ok(reads.includes(lookalike.poolAddress!.toLowerCase()), "read, and refused: an offer is not provenance");
+  for (const p of [v4, oneSided, reserve]) assert.ok(!reads.includes(p.poolAddress!.toLowerCase()), `${p.poolId} never read on chain`);
+  assert.deepEqual(result.early.unverified, [lookalike.tokenAddress]);
+});
+
+test("early verification is bounded by EARLY_VERIFY_MAX, beside the slice and the nominations", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(40);
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, {
+    nominated: new Set(tape.slice(20, 30).map(p => p.tokenAddress)),
+    early: tape.slice(30).map(p => p.tokenAddress),
+  });
+  assert.equal(result.qualified.length, 20 + NOMINATED_VERIFY_MAX + EARLY_VERIFY_MAX);
+  assert.equal(new Set(reads).size, 20 + NOMINATED_VERIFY_MAX + EARLY_VERIFY_MAX);
+  assert.equal(result.early.deferred.length, 10 - EARLY_VERIFY_MAX);
 });
