@@ -95,8 +95,7 @@ function startIdlePaperRefresh(): void {
   void refreshIdlePaperValuations(gasRecoveryDb, {
     now: Math.floor(Date.now() / 1000), afterAccount: idlePaperAfter,
     isRunning: account => stopping || haltRequested()
-      || [...children.values()].some(child => child.smartAccount.toLowerCase() === account)
-      || [...holders.values()].some(holder => holder.smartAccount.toLowerCase() === account),
+      || [...children.values()].some(child => child.smartAccount.toLowerCase() === account),
     lockIdleAccount: async (tx, account) => {
       if (stopping || haltRequested()) return false;
       // The durable account claim names its tenant even after a grant expires.
