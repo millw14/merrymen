@@ -1,0 +1,43 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "nextCursor": "sw-0002",
+  "moreAvailable": true,
+  "swaps": [
+    {
+      "swapId": "sw-0001",
+      "chainId": 4663,
+      "chain": "robinhood",
+      "tokenIn": {
+        "address": "0x1111111111111111111111111111111111111111",
+        "amount": 3000,
+        "usd": 3000
+      },
+      "tokenOut": {
+        "address": "0x39DBED3A00000000000000000000000000000C0D",
+        "amount": 1500,
+        "usd": 3000
+      },
+      "tradeIdIn": null,
+      "tradeIdOut": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+      "at": "2026-09-20T10:00:00Z"
+    },
+    {
+      "swapId": "sw-0002",
+      "chainId": 1399811149,
+      "chain": "solana",
+      "tokenIn": {
+        "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump",
+        "amount": 1000,
+        "usd": 3
+      },
+      "tokenOut": {
+        "address": "So11111111111111111111111111111111111111112",
+        "amount": 0.02,
+        "usd": 3
+      },
+      "tradeIdIn": "5c1d2e3f-0000-4000-8000-000000000001",
+      "tradeIdOut": null,
+      "at": "2026-09-22T09:00:00Z"
+    }
+  ]
+}

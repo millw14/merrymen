@@ -1,0 +1,48 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "window": "24h",
+  "source": "fomo",
+  "capturedAt": "2026-08-25T18:04:00Z",
+  "count": 2,
+  "traders": [
+    {
+      "rank": 1,
+      "handle": "CryptoKaleo",
+      "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+      "displayName": "K A L E O",
+      "pnlUsd": 151383,
+      "volumeUsd": 119165,
+      "trades": 73,
+      "followers": 19967,
+      "holdings": 4,
+      "wallets": {
+        "solana": "5AhfPStn66hRYoNNDfJHSDgCH7fBbwMQZUECRrhTo62F",
+        "evm": "0x7b4d16237683fe1765e727eadf99c6f02adf0b59"
+      },
+      "topTokens": [
+        "0x7fe995",
+        "0x51fb76"
+      ],
+      "verified": true
+    },
+    {
+      "rank": 2,
+      "handle": "frankdegods",
+      "userId": "6dcf7c78-2537-522a-8307-3f9970c081be",
+      "displayName": "frank",
+      "pnlUsd": -4210.5,
+      "volumeUsd": 88000,
+      "trades": 41,
+      "followers": 249483,
+      "holdings": 12,
+      "wallets": {
+        "solana": "5AhfPStn66hRYoNNDfJHSDgCH7fBbwMQZUECRrhTo62F",
+        "evm": null
+      },
+      "topTokens": [
+        "0x39dbed"
+      ],
+      "verified": false
+    }
+  ]
+}

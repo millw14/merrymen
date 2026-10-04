@@ -1,0 +1,37 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "tradeId": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+  "count": 2,
+  "hasNextPage": false,
+  "note": "authors are bare userIds",
+  "comments": [
+    {
+      "id": "cm-0001",
+      "text": "Adding more here, thesis unchanged.",
+      "userId": "6dcf7c78-2537-522a-8307-3f9970c081be",
+      "likes": 4,
+      "createdAt": "2026-10-04T15:20:00Z",
+      "parentId": null,
+      "isReply": false,
+      "links": [],
+      "olderThesisCount": 1,
+      "newerThesisCount": 0
+    },
+    {
+      "id": "cm-0002",
+      "text": "What is the exit plan?",
+      "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+      "likes": 0,
+      "createdAt": "2026-10-04T15:25:00Z",
+      "parentId": "cm-0001",
+      "isReply": true,
+      "links": [
+        {
+          "text": "chart",
+          "link": "https://example.invalid/chart",
+          "provider": "web"
+        }
+      ]
+    }
+  ]
+}

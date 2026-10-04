@@ -1,0 +1,46 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "handle": "starcatcher444",
+  "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+  "note": "FOMO picks these, not us",
+  "bestTrades": [
+    {
+      "tradeId": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "chain": "robinhood",
+      "chainId": 4663,
+      "avgEntryPrice": 2,
+      "avgExitPrice": null,
+      "costBasisUsd": 3000,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": 120.5,
+      "thesis": "PONS to the moon",
+      "thesisLikes": 12,
+      "openedAt": "2026-09-20T10:00:00Z",
+      "closedAt": null
+    }
+  ],
+  "bestTheses": [
+    {
+      "tradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01",
+      "token": {
+        "symbol": "plumber",
+        "address": "0x51fb760000000000000000000000000000000b0b"
+      },
+      "chain": "robinhood",
+      "chainId": 4663,
+      "avgEntryPrice": 0.5,
+      "avgExitPrice": 0.31,
+      "costBasisUsd": 28000,
+      "realizedPnlUsd": -10856.33,
+      "unrealizedPnlUsd": 0,
+      "thesis": "plumber fixes the pipes",
+      "thesisLikes": 40,
+      "openedAt": "2026-09-10T12:00:00Z",
+      "closedAt": "2026-09-29T15:00:00Z"
+    }
+  ]
+}
