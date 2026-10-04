@@ -27,6 +27,7 @@ import {
   robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
+  type SecretSettingKey,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
@@ -67,8 +68,16 @@ export interface SettingsView {
   virtualsApiKey: SecretView;
   bitqueryApiKey: SecretView;
   merrymenToken: SecretView;
-  // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "llmApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey" | "bitqueryApiKey" | "merrymenToken">;
+  /**
+   * The Fomo data provider key (self-hosted settings `fomoApiKey`), masked like
+   * every other secret. GET always sends it; it is optional in the type only
+   * because client fixtures written before the key existed do not name it.
+   */
+  fomoApiKey?: SecretView;
+  // everything else, verbatim (undefined = using env/default). The Omit is the
+  // shared SECRET_SETTING_KEYS list, not a hand-written one: a hand-written
+  // list here is how fomoApiKey came back in plaintext under `values`.
+  values: Omit<MerrymenSettings, SecretSettingKey>;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   /**
@@ -165,6 +174,27 @@ function mask(value: string | undefined): SecretView {
   return { set: true, hint: value.length > 4 ? value.slice(-4) : "••••" };
 }
 
+/**
+ * Every SECRET_SETTING_KEYS member masked, and the stored settings without any
+ * of them.
+ *
+ * DERIVED FROM THE SHARED LIST, NOT A DESTRUCTURE OF NAMES. GET used to pull
+ * ten secrets out by name and return the rest verbatim, so `fomoApiKey` — added
+ * to SECRET_SETTING_KEYS, and so accepted and stored by PUT — went back to the
+ * browser in clear under `values`. Iterating the list means the next secret
+ * added to core is masked here the day it is added.
+ */
+function splitSecrets(stored: MerrymenSettings): { secrets: Record<SecretSettingKey, SecretView>; values: Omit<MerrymenSettings, SecretSettingKey> } {
+  const values: Record<string, unknown> = { ...stored };
+  const secrets = {} as Record<SecretSettingKey, SecretView>;
+  for (const key of SECRET_SETTING_KEYS) {
+    const raw: unknown = stored[key];
+    secrets[key] = mask(typeof raw === "string" ? raw : undefined);
+    delete values[key];
+  }
+  return { secrets, values: values as Omit<MerrymenSettings, SecretSettingKey> };
+}
+
 /** ASCII sentinel that cannot appear in a real URL path — encoding-robust
  * (a unicode marker can get mangled across clients and defeat the keep-guard). */
 const REDACT_MARK = "[key hidden]";
@@ -190,7 +220,7 @@ export async function GET(req: Request) {
   // defaults — nothing personal, no secrets). Self-hosted: the single file.
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
-  const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
+  const { secrets, values } = splitSecrets(stored);
   const servedTokens = withoutEnergyReserve(values.customTokens);
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
@@ -208,16 +238,7 @@ export async function GET(req: Request) {
     basketSymbols: withoutReserveBasket(values.basketSymbols, values.customTokens, selectableSymbols(servedTokens)),
   };
   const view: SettingsView = {
-    bundlerApiKey: mask(bundlerApiKey),
-    groqApiKey: mask(groqApiKey),
-    anthropicApiKey: mask(anthropicApiKey),
-    llmApiKey: mask(llmApiKey),
-    rialtoApiKey: mask(rialtoApiKey),
-    telegramBotToken: mask(telegramBotToken),
-    telegramTranscribeKey: mask(telegramTranscribeKey),
-    virtualsApiKey: mask(virtualsApiKey),
-    bitqueryApiKey: mask(bitqueryApiKey),
-    merrymenToken: mask(merrymenToken),
+    ...secrets,
     values: safeValues,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
