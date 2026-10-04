@@ -361,6 +361,18 @@ describe("stream bookkeeping", () => {
     assert.equal(await S.setCheckpoint(db, "rest", "x4", null, T0 + 3), false);
   });
 
+  it("a checkpoint stored ahead of the writer's clock is not progress: a sane write replaces it", async () => {
+    const { db } = await fresh();
+    // A bad provider timestamp, a day ahead, written before the ingestor refused such times.
+    assert.equal(await S.setCheckpoint(db, "alerts", "bogus", T0 + DAY, T0), true);
+    assert.equal(await S.setCheckpoint(db, "alerts", null, T0 - 5_000, T0 + 1), true, "not pinned until the clock catches up");
+    assert.deepEqual(await S.getCheckpoint(db, "alerts"), { stream: "alerts", cursor: null, newestTsMs: T0 - 5_000, updatedAtMs: T0 + 1 });
+    // Inside the tolerance it is plain monotonic.
+    assert.equal(await S.setCheckpoint(db, "alerts", null, T0 + S.CHECKPOINT_FUTURE_TOLERANCE_MS, T0 + 2), true);
+    assert.equal(await S.setCheckpoint(db, "alerts", null, T0, T0 + 3), false);
+    assert.equal(await S.setCheckpoint(db, "alerts", null, null, T0 + 4), false, "and an untimed write still never replaces a timed one");
+  });
+
   it("a gap recorded twice is one gap, recovered once", async () => {
     const { db } = await fresh();
     const g = await S.recordGap(db, "alerts", 100, 200, "socket-closed", T0);
@@ -570,6 +582,30 @@ describe("cohorts", () => {
     assert.equal(first?.cohort.members[0]?.sampleSize, 40);
     assert.equal(first?.cohort.shortfallReason, "too-few-qualified");
     assert.equal(await S.cohortByVersion(db, 3), null);
+  });
+
+  // Postgres deadlocks two transactions that lock the same trader rows in
+  // opposite orders (a cohort build in rank order against a rankings page in
+  // another window's order). Both writers must take them in one order.
+  it("several traders in one transaction are written in user-id order, whatever order the caller gave", async () => {
+    const { db } = await fresh();
+    const order: string[] = [];
+    const spy = (inner: Db): Db => ({
+      prepare(sql: string): Stmt {
+        const s = inner.prepare(sql);
+        if (!/INSERT INTO fomo_traders\b/.test(sql)) return s;
+        return { run: (...p) => (order.push(String(p[0])), s.run(...p)), get: (...p) => s.get(...p), all: (...p) => s.all(...p) };
+      },
+      exec: (sql: string) => inner.exec(sql),
+      tx: (fn) => inner.tx((scoped) => fn(spy(scoped))),
+    });
+    const t = (id: string) => ({ userId: id, handle: `h${id}`, displayName: null, verified: null });
+    await S.upsertTraders(spy(db), [t("u-3"), t("u-1"), t("u-2")], T0);
+    assert.deepEqual(order, ["u-1", "u-2", "u-3"]);
+    order.length = 0;
+    await S.insertCohortVersion(spy(db), cohort(1, [member("u-9", "z", 0.9), member("u-4", "y", 0.8), member("u-6", "x", 0.7)]));
+    assert.deepEqual(order, ["u-4", "u-6", "u-9"]);
+    assert.deepEqual((await S.latestCohort(db))?.cohort.members.map((m) => m.trader.userId), ["u-9", "u-4", "u-6"], "rank order itself is kept");
   });
 
   it("a malformed version writes nothing", async () => {
@@ -782,6 +818,27 @@ describe("jobs", () => {
     assert.equal(await S.sweepJobs(db, T0 + 2 * MIN), 1);
     assert.deepEqual((await S.getJob(db, A, "late"))?.result, { reason: "deadline" });
     assert.deepEqual((await S.recentJobs(db, A, 10)).map((j) => [j.id, j.status]), [["cancel-me", "cancelled"], ["late", "failed"], ["big", "failed"]]);
+  });
+
+  it("the sweep settles every job nobody will finish, and leaves live work alone", async () => {
+    const { db, raw } = await fresh();
+    await S.enqueueJob(db, { ...base, tenant: A, idempotencyKey: null, params: {}, deadlineMs: T0 + MIN, nowMs: T0, id: "crashed" });
+    await S.enqueueJob(db, { ...base, tenant: A, idempotencyKey: null, params: {}, deadlineMs: T0 + MIN, nowMs: T0 + 1, id: "leaseless" });
+    await S.enqueueJob(db, { ...base, tenant: A, idempotencyKey: null, params: {}, deadlineMs: T0 + HOUR, nowMs: T0 + 2, id: "alive" });
+    // Leased past its deadline, as the runner leases (deadline + 1 min), and then its worker died.
+    assert.equal((await S.claimJob(db, T0 + 10, 2 * MIN))?.id, "crashed");
+    raw.prepare("UPDATE fomo_jobs SET status = 'running', lease_until_ms = NULL WHERE id = 'leaseless'").run();
+    assert.equal(await S.sweepJobs(db, T0 + MIN + 1), 1, "a running row with no lease past its deadline has no worker");
+    assert.equal((await S.getJob(db, A, "crashed"))?.status, "running", "its lease is still live");
+    assert.equal(await S.sweepJobs(db, T0 + 3 * MIN), 1);
+    assert.deepEqual(
+      (await S.recentJobs(db, A, 10)).map((j) => [j.id, j.status, j.result]),
+      [
+        ["alive", "queued", null],
+        ["leaseless", "failed", { reason: "worker-lost" }],
+        ["crashed", "failed", { reason: "worker-lost" }],
+      ],
+    );
   });
 });
 
@@ -1117,6 +1174,30 @@ describe("retention", () => {
     );
     assert.deepEqual(await S.heldTokensFor(db, B, 0), ["k:held-new"]);
     assert.deepEqual(await S.routedTenants(db, "monitoring"), [B]);
+  });
+
+  it("never prunes an owner's durable state: subjects, however old, and takes 16 KiB of it", async () => {
+    const { db, raw } = await fresh();
+    const old = T0 - 400 * DAY;
+    const ledger = JSON.stringify({ ledger: "x".repeat(store.FOMO_LIMITS.subjectJsonChars - 20) });
+    assert.ok(ledger.length > 16_000 && ledger.length <= 16 * 1024);
+    assert.equal(S.FOMO_STATE_KEY_PREFIX, "state:");
+    assert.equal(await S.setSubject(db, A, "state:exploration", ledger, old), true, "16 KiB of state is accepted");
+    await S.setSubject(db, B, "state:exploration", "{}", old);
+    await S.setSubject(db, A, "STATE:shouting", "{}", old); // not the prefix: only the exact one is state
+    await S.setSubject(db, A, "tg:1", "{}", old);
+    await S.setSubject(db, A, "app:fresh", "{}", T0);
+    await S.pruneFomo(db, T0);
+    const rows = raw.prepare("SELECT tenant, conversation_key FROM fomo_subjects ORDER BY conversation_key, tenant").all() as { tenant: string; conversation_key: string }[];
+    assert.deepEqual(
+      rows.map((r) => [r.conversation_key, r.tenant]),
+      [
+        ["app:fresh", a],
+        ["state:exploration", a],
+        ["state:exploration", B],
+      ],
+    );
+    assert.equal((await S.getSubject(db, A, "state:exploration"))?.json, ledger);
   });
 });
 

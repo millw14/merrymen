@@ -1271,6 +1271,181 @@ describe("adapters", () => {
   });
 });
 
+describe("honest state the pass keeps", () => {
+  it("a newest-event time ahead of our clock is not a fresh feed", async () => {
+    const db = await freshDb();
+    // A bad provider timestamp stored before the ingestor refused such times.
+    assert.ok(await store.setCheckpoint(db, "alerts", null, T0 + DAY, T0 - MIN));
+    const r = await rig({ db, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    assert.equal(r.last(T1).health.state, "watching-condition", "not 'receiving-fresh-data'");
+    assert.equal(r.last(T1).health.lastEventAt, null);
+    assert.equal(r.pass.health().lastEventAt, null);
+    r.pass.stop();
+
+    // A real recent event still reads as fresh.
+    const db2 = await freshDb();
+    assert.ok(await store.setCheckpoint(db2, "alerts", null, T0 - MIN, T0 - MIN));
+    const ok = await rig({ db: db2, access: { [T1]: ACCESS.monitoring } });
+    await ok.run([T1]);
+    assert.equal(ok.last(T1).health.state, "receiving-fresh-data");
+    ok.pass.stop();
+  });
+
+  it("the leader settles deep jobs nobody will finish, and leaves live ones alone", async () => {
+    const db = await freshDb();
+    const job = { tenant: T1, conversationKey: null, surface: "app-chat" as const, kind: "research-coin", params: {}, costAllowanceCredits: null };
+    // Claimed, leased past its deadline as the runner leases, and its worker died.
+    await store.enqueueJob(db, { ...job, idempotencyKey: "lost", deadlineMs: T0 - 5 * MIN, nowMs: T0 - 15 * MIN, id: "lost" });
+    assert.equal((await store.claimJob(db, T0 - 14 * MIN, 11 * MIN))?.id, "lost");
+    // Queued past its deadline: no claim can ever take it (claimJob needs deadline_ms > now).
+    await store.enqueueJob(db, { ...job, idempotencyKey: "late", deadlineMs: T0 - 10 * MIN, nowMs: T0 - 13 * MIN, id: "late" });
+    await store.enqueueJob(db, { ...job, idempotencyKey: "live", deadlineMs: T0 + 9 * MIN, nowMs: T0 - MIN, id: "live" });
+    const r = await rig({ db, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    assert.deepEqual(
+      [await store.getJob(db, T1, "late"), await store.getJob(db, T1, "lost"), await store.getJob(db, T1, "live")].map((j) => [j?.id, j?.status, j?.result]),
+      [
+        ["late", "failed", { reason: "deadline" }],
+        ["lost", "failed", { reason: "worker-lost" }],
+        ["live", "queued", null],
+      ],
+    );
+    r.pass.stop();
+  });
+
+  it("a follower settles nothing: the sweep is fleet work", async () => {
+    const db = await freshDb();
+    const lease = new FleetLease();
+    await store.enqueueJob(db, {
+      tenant: T1, conversationKey: null, surface: "app-chat", kind: "research-coin", params: {}, costAllowanceCredits: null,
+      idempotencyKey: "late", deadlineMs: T0 - 10 * MIN, nowMs: T0 - 20 * MIN, id: "late",
+    });
+    assert.ok(await lease.for(9).acquire(), "another replica leads");
+    const r = await rig({ db, lease: lease.for(2), access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    assert.equal((await store.getJob(db, T1, "late"))?.status, "queued");
+    r.pass.stop();
+  });
+
+  it("the live stream records what it proves about ws-alerts in the capability table", async () => {
+    const db = await freshDb();
+    const r = await rig({ db, serve: { alerts: true }, stream: true, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    const cap = async () => (await store.listCapabilities(db)).find((c) => c.capability === "ws-alerts");
+    assert.equal(await cap(), undefined, "nothing until the stream says something");
+    // A free key: the welcome announces a delivery delay.
+    r.sockets[0]!.frame({ ...WELCOME, realtime: false, delaySeconds: 15 });
+    await r.pass.idle();
+    assert.equal((await cap())?.status, "PARTIAL");
+    assert.match((await cap())!.evidence, /delayed 15 s/);
+    // A drop after a welcome is no verdict; a refusal for the plan before any welcome is.
+    r.sockets[0]!.onclose?.({ code: 1006, reason: "gone" });
+    await r.pass.idle();
+    assert.equal((await cap())?.status, "PARTIAL");
+    await r.time.advance(2_000);
+    const second = r.sockets[1];
+    assert.ok(second, "reconnected");
+    second.onclose?.({ code: 1008, reason: "plan does not include the app feed" });
+    await r.pass.idle();
+    const blocked = await cap();
+    assert.equal(blocked?.status, "ENTITLEMENT_BLOCKED");
+    assert.match(blocked!.evidence, /close 1008/);
+    assert.ok(!JSON.stringify(blocked).includes(KEY), "the key never reaches the table");
+    r.pass.stop();
+    await r.pass.idle();
+  });
+
+  it("a stream that never says welcome is recorded unavailable after a few tries, and a welcome lifts it", async () => {
+    const db = await freshDb();
+    const r = await rig({ db, serve: { alerts: true }, stream: true, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    const cap = async () => (await store.listCapabilities(db)).find((c) => c.capability === "ws-alerts");
+    for (let i = 0; i < 5; i++) {
+      r.sockets.at(-1)!.onclose?.({ code: 1006, reason: "refused" });
+      await r.pass.idle();
+      if (i < 4) assert.equal(await cap(), undefined, `no verdict after ${i + 1} failed connect(s)`);
+      await r.time.advance(10_000);
+    }
+    assert.equal((await cap())?.status, "UNAVAILABLE");
+    r.sockets.at(-1)!.frame(WELCOME);
+    await r.pass.idle();
+    assert.equal((await cap())?.status, "AUTHENTICATED_TESTED");
+    r.pass.stop();
+    await r.pass.idle();
+  });
+
+  it("a cohort write that fails does not make the very next pass buy the boards again", async () => {
+    const inner = await freshDb();
+    let failures = 1;
+    const wrap = (d: Db): Db => ({
+      prepare(sql: string) {
+        const s = d.prepare(sql);
+        if (!/INSERT INTO fomo_cohort_versions/.test(sql)) return s;
+        return {
+          run: (...p: unknown[]) => s.run(...p),
+          all: (...p: unknown[]) => s.all(...p),
+          get: async (...p: unknown[]) => {
+            if (failures-- > 0) throw new Error("deadlock detected");
+            return s.get(...p);
+          },
+        };
+      },
+      exec: (sql: string) => d.exec(sql),
+      tx: (fn) => d.tx((scoped) => fn(wrap(scoped))),
+    });
+    const r = await rig({ db: wrap(inner), serve: { leaderboard: true, positions: true }, access: { [T1]: ACCESS.monitoring } });
+    const boards = () => provider(r.calls).filter((c) => c.startsWith("/v2/leaderboard/")).length;
+    await r.run([T1]);
+    assert.equal(boards(), 4);
+    assert.equal(await store.latestCohort(inner), null, "the write failed");
+    await r.run([T1], T0 + 15_000);
+    assert.equal(boards(), 4, "not bought again on the next pass");
+    await r.run([T1], T0 + 31 * MIN);
+    assert.equal(boards(), 8);
+    const built = await store.latestCohort(inner);
+    assert.ok(built, "built once the retry delay passed");
+    // The boards' own capture time travels with the version.
+    const inputs = built.inputs as { boardsAsOf?: Record<string, { providerAsOf: number | null }> };
+    assert.equal(inputs.boardsAsOf?.["24h"]?.providerAsOf, Date.parse("2026-08-25T18:04:00Z"));
+    r.pass.stop();
+  });
+
+  it("anchors the activity floor at a board's capture time, and an old or undated stale copy proves nothing", () => {
+    const page = (window: "24h" | "7d", trades: number) => ({
+      window,
+      providerCount: 1,
+      dropped: 0,
+      rows: [
+        {
+          rank: 1,
+          window,
+          trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+          pnlUsd: 10,
+          volumeUsd: 100,
+          trades,
+          followers: 5,
+          holdingsCount: null,
+          topTokenHints: [],
+          hasEvmWallet: false,
+        },
+      ],
+    });
+    const captured = T0 - 2 * HOUR;
+    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: captured, stale: true } })[0]?.lastActiveAt, captured - DAY);
+    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: null, stale: null } })[0]?.lastActiveAt, T0 - DAY, "a live board is read as of now");
+    const old = { providerAsOf: T0 - 40 * DAY, stale: true };
+    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": old, "7d": old })[0]?.lastActiveAt, null, "weeks-old copies say nothing about this week");
+    assert.equal(
+      cohortCandidatesFrom({ "24h": page("24h", 3), "7d": page("7d", 3) }, T0, { "24h": { providerAsOf: T0 - 3 * DAY, stale: true }, "7d": { providerAsOf: T0 - 3 * DAY, stale: true } })[0]?.lastActiveAt,
+      T0 - 10 * DAY,
+      "a 7d board captured three days ago still floors activity, from its capture",
+    );
+    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: null, stale: true } })[0]?.lastActiveAt, null, "stale and undated");
+    assert.equal(cohortCandidatesFrom({ "24h": page("24h", 3) }, T0, { "24h": { providerAsOf: T0 + HOUR, stale: false } })[0]?.lastActiveAt, T0 - DAY, "a capture time ahead of our clock is read as now");
+  });
+});
+
 describe("the orchestrator's wiring", () => {
   const SRC = readFileSync(path.join(HERE, "orchestrator.ts"), "utf8");
   const MINE = readFileSync(path.join(HERE, "orchestrator-fomo.ts"), "utf8")

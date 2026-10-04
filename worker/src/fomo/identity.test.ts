@@ -160,4 +160,42 @@ describe("event identity", () => {
     assert.equal(merged.verification, "provider-verified");
     assert.equal(merged.observedAt, 50);
   });
+
+  // The normal caller order is stored copy first, REST copy second; the first
+  // (live) copy is kept, and every field it lacks must come from the second.
+  it("fills missing fields from a richer copy that arrives second", () => {
+    const mk = (over: Partial<TraderEvent>): TraderEvent => ({
+      eventKey: "ev:x", identityBasis: "provider-event-id", identityAmbiguous: false, source: "stream", kind: "buy",
+      trader: { userId: "u1", handle: "a", displayName: null, verified: null }, token: null, tokenLabel: { symbol: null, name: null },
+      tradeId: "t1", swapId: null, transferId: null, txHash: null, fillUsd: null, fillUsdBasis: null, positionValueUsd: 4000,
+      positionRealizedPnlUsdCumulative: null, sourceEventAt: 1, execAt: null, observedAt: 100, verification: "provider-reported",
+      text: null, replay: false, ...over,
+    });
+    const tx = "0x" + "d".repeat(64);
+    const out = dedupeEvents([
+      mk({ observedAt: 40 }),
+      mk({ source: "rest-recovery", fillUsd: 123, fillUsdBasis: "onchain-exact", txHash: tx, swapId: "s1", execAt: 7, verification: "provider-verified", observedAt: 90 }),
+    ]);
+    assert.equal(out.events.length, 1);
+    const merged = out.events[0]!;
+    assert.equal(merged.source, "stream", "the first live copy is the one kept");
+    assert.equal(merged.fillUsd, 123);
+    assert.equal(merged.fillUsdBasis, "onchain-exact");
+    assert.equal(merged.txHash, tx);
+    assert.equal(merged.swapId, "s1");
+    assert.equal(merged.execAt, 7);
+    assert.equal(merged.verification, "provider-verified");
+    assert.equal(merged.observedAt, 40);
+
+    // And a live copy replacing a replayed one still fills what only the replay knew.
+    const swapped = dedupeEvents([
+      mk({ replay: true, fillUsd: 55, fillUsdBasis: "onchain-exact", txHash: tx, verification: "provider-verified" }),
+      mk({ source: "rest-recovery" }),
+    ]).events[0]!;
+    assert.equal(swapped.source, "rest-recovery", "the live copy replaces the replayed one");
+    assert.equal(swapped.replay, false);
+    assert.equal(swapped.fillUsd, 55);
+    assert.equal(swapped.txHash, tx);
+    assert.equal(swapped.verification, "provider-verified");
+  });
 });

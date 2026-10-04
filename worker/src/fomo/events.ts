@@ -123,8 +123,13 @@ export function dedupeEvents(events: readonly TraderEvent[]): { events: TraderEv
 
 /** Two copies of the same event: keep what is known, never invent what is not. */
 export function mergeCopies(a: TraderEvent, b: TraderEvent): TraderEvent {
-  const base = a.replay && !b.replay ? { ...b } : { ...a };
-  const other = base === a ? b : a;
+  // Pick the kept and the filling copy BEFORE spreading. Comparing a spread copy
+  // to `a` is never true, which once made `other` always `a`: the normal case
+  // (first copy kept) then filled every field from itself and silently dropped a
+  // later REST copy's matched fill, tx hash and verification upgrade.
+  const keepB = a.replay && !b.replay;
+  const base = keepB ? b : a;
+  const other = keepB ? a : b;
   return {
     ...base,
     replay: a.replay && b.replay,

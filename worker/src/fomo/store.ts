@@ -541,7 +541,7 @@ export const FOMO_LIMITS = {
   jobParamsChars: 16_384,
   jobResultChars: 256_000,
   metaJsonChars: 8_192,
-  /** subject-memory.ts MAX_SERIALIZED_LENGTH, with room. */
+  /** subject-memory.ts MAX_SERIALIZED_LENGTH, with room; also the cap for a `state:` key's durable state (16 KiB). */
   subjectJsonChars: 16_384,
   keyChars: 256,
   /** Coins one owner's held set may name (a book this large is already beyond what the routing reads). */
@@ -1059,11 +1059,28 @@ export async function upsertTrader(db: Db, trader: TraderIdentity, seenAtMs: num
   await db.tx((tx) => writeTrader(tx, trader, seenAtMs));
 }
 
-/** Many traders seen at once (a leaderboard page), in one transaction. */
+/**
+ * LOCK ORDER FOR TRADER ROWS: by user id, never the caller's order. Every
+ * writer that upserts several traders in one transaction (a rankings page in
+ * window rank order, a cohort version in cohort rank order) takes their row
+ * locks in this one order, so two of them covering the same traders cannot
+ * each hold a row the other waits on (Postgres 40P01). insertEvents sorts its
+ * keys for the same reason. The sort is stable: a trader listed twice is
+ * still written in the order given.
+ */
+function inLockOrder<T>(xs: readonly T[], idOf: (x: T) => unknown): T[] {
+  return [...xs].sort((x, y) => {
+    const a = String(idOf(x));
+    const b = String(idOf(y));
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+/** Many traders seen at once (a leaderboard page), in one transaction, in lock order. */
 export async function upsertTraders(db: Db, traders: readonly TraderIdentity[], seenAtMs: number): Promise<void> {
   if (traders.length === 0) return;
   await db.tx(async (tx) => {
-    for (const t of traders) await writeTrader(tx, t, seenAtMs);
+    for (const t of inLockOrder(traders, (x) => x.userId)) await writeTrader(tx, t, seenAtMs);
   });
 }
 
@@ -1283,7 +1300,8 @@ export async function insertCohortVersion(db: Db, cohort: CohortVersion, inputs:
         .prepare(`INSERT INTO fomo_cohort_changes (version, user_id, change, reason, at_ms) VALUES ${valuesList(5, part.length)}`)
         .run(...part.flat());
     }
-    for (const m of cohort.members) await writeTrader(tx, m.trader, createdAt);
+    // Lock order, not rank order: see inLockOrder.
+    for (const m of inLockOrder(cohort.members, (x) => x.trader.userId)) await writeTrader(tx, m.trader, createdAt);
     return true;
   });
 }
@@ -1608,6 +1626,9 @@ export async function getCheckpoint(db: Db, stream: string): Promise<StreamCheck
   return { stream: String(r.stream), cursor: str(r.cursor), newestTsMs: num(r.newest_ts_ms), updatedAtMs: updated };
 }
 
+/** How far ahead of the writer's clock a stored checkpoint may be before a sane write may replace it. */
+export const CHECKPOINT_FUTURE_TOLERANCE_MS = 2 * 60_000;
+
 /**
  * Advance a stream's checkpoint. MONOTONIC: a write whose newest timestamp is
  * older than the stored one is refused in the statement itself, so a slow
@@ -1617,16 +1638,25 @@ export async function getCheckpoint(db: Db, stream: string): Promise<StreamCheck
  *
  * A write with no timestamp cannot be ordered against one that has one, so it
  * lands only while the stored row has none either: an untimed cursor never
- * replaces a timed checkpoint. True when written.
+ * replaces a timed checkpoint.
+ *
+ * A stored time further ahead of the writer's clock than
+ * CHECKPOINT_FUTURE_TOLERANCE_MS is not progress but a bad provider timestamp
+ * (or a clock that stepped back), and monotonicity would otherwise pin it
+ * there until the wall clock caught up: any timed write replaces it. True
+ * when written.
  */
 export async function setCheckpoint(db: Db, stream: string, cursor: string | null, newestTsMs: number | null, nowMs: number): Promise<boolean> {
+  const now = intOf(nowMs, "nowMs");
   const row = await db
     .prepare(
       `INSERT INTO fomo_stream_checkpoints (stream, cursor, newest_ts_ms, updated_at_ms) VALUES (?, ?, ?, ?)
        ON CONFLICT (stream) DO UPDATE SET cursor = excluded.cursor, newest_ts_ms = excluded.newest_ts_ms,
          updated_at_ms = excluded.updated_at_ms
        WHERE (excluded.newest_ts_ms IS NOT NULL
-              AND (fomo_stream_checkpoints.newest_ts_ms IS NULL OR fomo_stream_checkpoints.newest_ts_ms <= excluded.newest_ts_ms))
+              AND (fomo_stream_checkpoints.newest_ts_ms IS NULL
+                   OR fomo_stream_checkpoints.newest_ts_ms <= excluded.newest_ts_ms
+                   OR fomo_stream_checkpoints.newest_ts_ms > ?))
           OR (excluded.newest_ts_ms IS NULL AND fomo_stream_checkpoints.newest_ts_ms IS NULL)
        RETURNING stream`,
     )
@@ -1634,7 +1664,8 @@ export async function setCheckpoint(db: Db, stream: string, cursor: string | nul
       keyOf(stream, "stream", 64),
       textOf(cursor, FOMO_LIMITS.keyChars),
       newestTsMs === null ? null : intOf(newestTsMs, "newestTsMs"),
-      intOf(nowMs, "nowMs"),
+      now,
+      now + CHECKPOINT_FUTURE_TOLERANCE_MS,
     );
   return row !== undefined && row !== null;
 }
@@ -2562,10 +2593,11 @@ export async function sweepJobs(db: Db, nowMs: number): Promise<number> {
   const late = await db
     .prepare("UPDATE fomo_jobs SET status = 'failed', result_json = ? WHERE status = 'queued' AND deadline_ms <= ?")
     .run(JSON.stringify({ reason: "deadline" }), now);
+  // A running row with no lease at all has no worker that could finish it.
   const lost = await db
     .prepare(
       `UPDATE fomo_jobs SET status = 'failed', result_json = ?, lease_until_ms = NULL
-        WHERE status = 'running' AND lease_until_ms < ? AND (deadline_ms <= ? OR attempts >= ?)`,
+        WHERE status = 'running' AND (lease_until_ms IS NULL OR lease_until_ms < ?) AND (deadline_ms <= ? OR attempts >= ?)`,
     )
     .run(JSON.stringify({ reason: "worker-lost" }), now, now, FOMO_LIMITS.jobMaxAttempts);
   return late.changes + lost.changes;
@@ -2589,10 +2621,18 @@ export async function getSubject(db: Db, tenant: string, conversationKey: string
 }
 
 /**
- * Remember a conversation's subject memory (a serialised string). It must be
- * JSON and within the cap; an over-long one is refused rather than cut,
- * because cut JSON would read back as no memory at all. An older write never
- * replaces a newer one. True when written.
+ * Keys under this prefix hold an owner's DURABLE child state (an exploration
+ * ledger, say), not a conversation's memory: retention never prunes them
+ * (fomoRetentionStatements), and they share setSubject's 16 KiB cap.
+ */
+export const FOMO_STATE_KEY_PREFIX = "state:";
+
+/**
+ * Remember a conversation's subject memory (a serialised string), or a
+ * `state:` key's durable state. It must be JSON and within the cap
+ * (subjectJsonChars: 16,384 characters, 16 KiB of ASCII JSON); an over-long
+ * one is refused rather than cut, because cut JSON would read back as nothing
+ * at all. An older write never replaces a newer one. True when written.
  */
 export async function setSubject(db: Db, tenant: string, conversationKey: string, json: string, nowMs: number): Promise<boolean> {
   if (typeof json !== "string" || json.length > FOMO_LIMITS.subjectJsonChars || parseJson(json) === null) {
@@ -3457,7 +3497,8 @@ export const FOMO_RETENTION: Readonly<FomoRetentionPolicy> = {
  * Not pruned here: traders and handle history (identity is kept), cohort
  * versions, dossiers and assessments (later answers cite them), publications
  * (the outbox is the audit trail), outcomes, capabilities, the budget
- * counters in fomo_meta (keyed by their own day or hour).
+ * counters in fomo_meta (keyed by their own day or hour), and an owner's
+ * durable `state:` subjects (FOMO_STATE_KEY_PREFIX).
  */
 export function fomoRetentionStatements(nowMs: number, policy: FomoRetentionPolicy = FOMO_RETENTION): Array<[string, unknown[]]> {
   const now = intOf(nowMs, "nowMs");
@@ -3475,7 +3516,14 @@ export function fomoRetentionStatements(nowMs: number, policy: FomoRetentionPoli
     ["DELETE FROM fomo_jobs WHERE status IN ('done', 'failed', 'cancelled') AND created_at_ms < ?", [now - policy.jobsMs]],
     // A claimed row is somebody's live work; it goes once it is finished or lapses to failed.
     ["DELETE FROM fomo_research_queue WHERE requested_at_ms < ? AND state <> 'claimed'", [now - policy.researchQueueMs]],
-    ["DELETE FROM fomo_subjects WHERE updated_at_ms < ?", [now - policy.subjectsMs]],
+    // A conversation's memory ages out; a child's durable state (key prefix
+    // FOMO_STATE_KEY_PREFIX, e.g. its exploration ledger) is not a
+    // conversation and is never pruned here. substr, not LIKE: sqlite's LIKE
+    // ignores case, and only the exact prefix is state.
+    [
+      `DELETE FROM fomo_subjects WHERE updated_at_ms < ? AND substr(conversation_key, 1, ${FOMO_STATE_KEY_PREFIX.length}) <> '${FOMO_STATE_KEY_PREFIX}'`,
+      [now - policy.subjectsMs],
+    ],
     ["DELETE FROM fomo_watches WHERE expires_at_ms < ?", [now - policy.expiredWatchesMs]],
     ["DELETE FROM fomo_position_deps WHERE expires_at_ms < ?", [now]],
     ["DELETE FROM fomo_usage WHERE day < ?", [usageDay(Math.max(0, now - policy.usageDays * DAY_MS))]],

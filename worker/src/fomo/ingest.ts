@@ -42,6 +42,13 @@
  * insert) are folded into the next recovery's floor and closed only when a
  * walk reaches that floor, or when everything they covered is either
  * persisted or inside an unrecoverable gap that has itself been recorded.
+ * An outage is one of them from the moment its walk starts: the walk records
+ * it ("recovery-pending") BEFORE live frames may move the checkpoint past it,
+ * so a process that dies mid-walk leaves the hole for the next one to walk.
+ *
+ * THE PROVIDER'S CLOCK IS NOT OURS. An event dated further ahead of our clock
+ * than `futureSkewMs` is stored and routed, but its time is not progress: it
+ * never moves the checkpoint or the newest-event time.
  *
  * THE PROVIDER'S TEXT IS DATA. Thesis, handle and token text arrives already
  * sanitised by the injected normaliser and is carried, never interpreted; a
@@ -202,6 +209,16 @@ export interface IngestConfig {
   /** Recently routed events remembered for corrections and task dedupe. */
   recentMemory: number;
   maxPendingTokens: number;
+  /**
+   * How far ahead of our own clock a provider event time may be and still
+   * count as progress. The checkpoint is monotonic, so ONE frame dated in the
+   * future would otherwise pin it there: every later recovery would ask for
+   * events "since the future" and find none, and the feed would read as fresh
+   * until the wall clock caught up. Kept below `resumeOverlapMs`, so a frame
+   * at the edge of the tolerance cannot push the resume point past real
+   * progress by more than the overlap re-reads.
+   */
+  futureSkewMs: number;
 }
 
 export const INGEST_DEFAULTS: IngestConfig = {
@@ -217,6 +234,7 @@ export const INGEST_DEFAULTS: IngestConfig = {
   freshFrameMs: 90_000,
   recentMemory: 10_000,
   maxPendingTokens: 2_000,
+  futureSkewMs: 30_000,
 };
 
 export interface IngestorDeps {
@@ -312,6 +330,12 @@ export interface Ingestor {
 export const GAP_REASONS = {
   backpressure: "stream-backpressure",
   persistFailed: "persist-failed",
+  /**
+   * Written before a reconnect's walk lets live progress move the checkpoint,
+   * and closed only when the walk reaches its floor (or its shortfall is
+   * recorded). Until then it is the outage's only durable record.
+   */
+  recoveryPending: "recovery-pending",
   recoveryFailed: "recovery-failed",
   pageCap: "unrecoverable:page-cap",
   noOldestCursor: "unrecoverable:no-oldest-cursor",
@@ -381,6 +405,17 @@ function maxPriorityOf(m: ReadonlyMap<string, RetrievalPriority>): RetrievalPrio
   return p;
 }
 
+/** True when the union of `spans` covers [fromMs, toMs]. */
+export function spanCovered(fromMs: number, toMs: number, spans: ReadonlyArray<{ fromMs: number; toMs: number }>): boolean {
+  let reach = fromMs;
+  for (const s of [...spans].sort((a, b) => a.fromMs - b.fromMs)) {
+    if (reach >= toMs) break;
+    if (s.fromMs > reach) break;
+    if (s.toMs > reach) reach = s.toMs;
+  }
+  return reach >= toMs;
+}
+
 class DelayRing {
   private xs: number[] = [];
   private i = 0;
@@ -441,6 +476,28 @@ interface Audience {
   reasons: Map<string, InterestReason[]>;
 }
 
+/** Where one recovery walk starts, and the retryable gaps it can close. */
+interface WalkPlan {
+  request: RecoverRequest;
+  floorMs: number | null;
+  mode: "cursor" | "since";
+  retryable: IngestGap[];
+}
+
+/** What a recovery read under the checkpoint lock, and what it did about the hold. */
+interface Snapshot {
+  cp: IngestCheckpoint | null;
+  gaps: readonly IngestGap[];
+  /** The stored checkpoint was unusable (dated past our clock). */
+  cpLost: boolean;
+  /** The durable record of this connection's outage, written before the hold was released. */
+  pending: IngestGap | null;
+  /** Release the hold as soon as the snapshot is read. */
+  release: boolean;
+  /** This walk owns the hold but nothing durable covers the outage: release only once its outcome is written. */
+  holdUntilDone: boolean;
+}
+
 interface RecentRouted {
   tokenKey: string | null;
   tenants: Array<[string, RetrievalPriority]>;
@@ -464,13 +521,18 @@ class IngestorImpl implements Ingestor {
 
   /** Cached checkpoint; this ingestor is the only writer for its stream (fleet singleton lease). */
   private cp: IngestCheckpoint | null | undefined = undefined;
+  /** The stored checkpoint was dated ahead of our clock when last read: it says nothing about where we are. */
+  private cpFromFuture = false;
   private lockTail: Promise<unknown> = Promise.resolve();
   /**
    * Live progress is held back from the checkpoint from the moment a new
    * socket starts connecting (and at process start) until that connection's
-   * recovery has read its resume point. Otherwise a replayed or early frame
-   * of the new connection could move the checkpoint past the outage before
-   * recovery looked at it. Held progress is applied afterwards, never lost.
+   * recovery has read its resume point AND written the outage down as a
+   * pending gap (when it cannot, until the walk's own outcome is written).
+   * Otherwise a replayed or early frame of the new connection could move the
+   * checkpoint past the outage before anything durable recorded it. A
+   * recovery that runs while no socket is open does not release it: the
+   * outage is still going on. Held progress is applied afterwards, never lost.
    */
   private checkpointHeld = true;
   private heldMaxTs: number | null = null;
@@ -522,6 +584,7 @@ class IngestorImpl implements Ingestor {
       freshFrameMs: pos(c.freshFrameMs, INGEST_DEFAULTS.freshFrameMs),
       recentMemory: Math.floor(pos(c.recentMemory, INGEST_DEFAULTS.recentMemory)),
       maxPendingTokens: Math.floor(pos(c.maxPendingTokens, INGEST_DEFAULTS.maxPendingTokens)),
+      futureSkewMs: Number.isFinite(c.futureSkewMs) && c.futureSkewMs >= 0 ? c.futureSkewMs : INGEST_DEFAULTS.futureSkewMs,
     };
     this.emittedTasks = new BoundedMap(this.cfg.recentMemory);
     this.recent = new BoundedMap(this.cfg.recentMemory);
@@ -685,17 +748,26 @@ class IngestorImpl implements Ingestor {
     const fresh = unique.filter((e) => insertedKeys.has(e.eventKey));
     this.counters.duplicates += unique.length - fresh.length;
     this.counters.persisted += fresh.length;
+    // An event dated past our clock is still a real event (stored and routed
+    // above), but its time is not progress: it would pin the monotonic
+    // checkpoint in the future and make a dead feed look fresh.
+    const horizon = persistedAt + this.cfg.futureSkewMs;
     let maxTs: number | null = null;
     for (const e of unique) {
       const ts = finite(e.sourceEventAt);
-      if (ts !== null && (maxTs === null || ts > maxTs)) maxTs = ts;
+      if (ts === null) continue;
+      if (ts > horizon) {
+        this.drop("future-timestamp");
+        continue;
+      }
+      if (maxTs === null || ts > maxTs) maxTs = ts;
     }
     if (maxTs !== null && (this.lastEventAt === null || maxTs > this.lastEventAt)) this.lastEventAt = maxTs;
     for (const e of fresh) {
       this.ingestionDelay.add(persistedAt - e.observedAt);
       // Replays and recovered rows would measure our outage, not the provider's delay.
       const ts = finite(e.sourceEventAt);
-      if (opts.live && !e.replay && ts !== null) this.sourceDelay.add(e.observedAt - ts);
+      if (opts.live && !e.replay && ts !== null && ts <= horizon) this.sourceDelay.add(e.observedAt - ts);
     }
     return { fresh, maxTs };
   }
@@ -703,7 +775,13 @@ class IngestorImpl implements Ingestor {
   private async currentCheckpoint(): Promise<IngestCheckpoint | null> {
     if (this.cp === undefined) {
       const raw = await this.d.store.getCheckpoint(this.name);
-      this.cp = raw ? { cursor: cleanCursor(raw.cursor), newestTsMs: finite(raw.newestTsMs) } : null;
+      const ts = raw ? finite(raw.newestTsMs) : null;
+      // A stored time ahead of our clock (written before this guard existed,
+      // or our clock stepped back) is not a resume point, and its cursor sits
+      // at that same bogus event. Neither is used; recovery walks what the
+      // provider's ring still holds instead (planWalk).
+      this.cpFromFuture = ts !== null && ts > this.now() + this.cfg.futureSkewMs;
+      this.cp = !raw ? null : this.cpFromFuture ? { cursor: null, newestTsMs: null } : { cursor: cleanCursor(raw.cursor), newestTsMs: ts };
     }
     return this.cp;
   }
@@ -741,11 +819,15 @@ class IngestorImpl implements Ingestor {
    * read, out-of-order delivery may have left holes behind them that only an
    * inclusive `since` with overlap would revisit, so the cursor is dropped.
    */
-  private completeCheckpoint(cursor: string | null, newestTs: number | null): Promise<void> {
+  private completeCheckpoint(cursor: string | null, newestTsIn: number | null): Promise<void> {
     return this.withLock(async () => {
       try {
         const cur = await this.currentCheckpoint();
         const curTs = cur?.newestTsMs ?? null;
+        // A page whose newest row is dated past our clock gives neither a time
+        // nor a cursor worth keeping: the provider orders by time, so a cursor
+        // AT that row would skip every real event dated before it.
+        const newestTs = newestTsIn !== null && newestTsIn > this.now() + this.cfg.futureSkewMs ? null : newestTsIn;
         let nextCursor: string | null;
         let ts: number | null;
         if (newestTs === null) {
@@ -825,20 +907,90 @@ class IngestorImpl implements Ingestor {
     return this.track(run);
   }
 
+  /**
+   * Where a walk starts: the cursor when no open gap reaches further back,
+   * otherwise an inclusive `since` at the lowest of the checkpoint (less the
+   * overlap), the oldest retryable gap and, when the stored checkpoint was
+   * unusable, the edge of the provider's ring. Null when there is nothing to
+   * resume from (a first start).
+   */
+  private planWalk(cp: IngestCheckpoint | null, gaps: readonly IngestGap[], cpLost: boolean, now: number): WalkPlan | null {
+    const retryable = gaps.filter((g) => !isUnrecoverableGap(g.reason) && finite(g.fromMs) !== null);
+    const gapFloor = retryable.length > 0 ? Math.min(...retryable.map((g) => g.fromMs)) : null;
+    const cpTs = cp?.newestTsMs ?? null;
+    // We held progress once but cannot say how far: walk what the ring still holds.
+    const lostFloor = cpLost ? now - this.cfg.ringRetentionMs : null;
+    if (!cp?.cursor && cpTs === null && gapFloor === null && lostFloor === null) return null;
+    if (cp?.cursor && (gapFloor === null || (cpTs !== null && gapFloor >= cpTs))) {
+      return { request: { cursor: cp.cursor }, floorMs: cpTs, mode: "cursor", retryable };
+    }
+    const candidates = [cpTs !== null ? cpTs - this.cfg.resumeOverlapMs : null, gapFloor, lostFloor].filter((x): x is number => x !== null);
+    const floorMs = Math.min(...candidates);
+    return { request: { since: floorMs }, floorMs, mode: "since", retryable };
+  }
+
+  /**
+   * Close the walk's "recovery-pending" record once the hole it stands for is
+   * durably accounted for: walked from `reachedMs` onwards, or inside gaps
+   * that are themselves recorded. Otherwise it stays open as the record.
+   */
+  private async settlePending(pending: IngestGap | null, reachedMs: number | null, cover: readonly IngestGap[], report: RecoveryReport): Promise<void> {
+    if (!pending) return;
+    const spans: Array<{ fromMs: number; toMs: number }> = cover.filter((g) => g.id !== pending.id);
+    if (reachedMs !== null) spans.push({ fromMs: reachedMs, toMs: Number.POSITIVE_INFINITY });
+    if (spanCovered(pending.fromMs, pending.toMs, spans)) await this.closeGaps([pending], report);
+  }
+
   private async runRecovery(trigger: string): Promise<RecoveryReport> {
+    // Once the resume point is read, held live progress may move the
+    // checkpoint (unless a newer connection began meanwhile: its own recovery
+    // releases it).
+    const epoch = this.holdEpoch;
     // Queue the read of the resume point before anything else can await.
-    const snapshotP = this.withLock(async () => {
+    const snapshotP = this.withLock(async (): Promise<Snapshot> => {
+      // Gaps a store outage kept out of the table go in FIRST, so the list
+      // below, this walk's floor and health() all include them. Recorded after
+      // the read, they were in the table but in none of those.
+      await this.retryUnrecordedGaps();
       // Always re-read: recovery is rare, and an operator may have reset the row.
       this.cp = undefined;
       const cp = await this.currentCheckpoint();
+      const cpLost = this.cpFromFuture;
       const gaps = await this.d.store.listOpenGaps(this.name);
-      return { cp, gaps };
+      // Replaced here, in the same step as the read: a gap a live frame
+      // records from now on lands in the map after this, never under it.
+      this.openGaps = new Map(gaps.map((g) => [g.id, g]));
+      // THIS CONNECTION'S HOLD. Releasing it lets live frames move the
+      // checkpoint past the outage while the walk below is still running; if
+      // the process dies mid-walk, the next one would resume after the outage
+      // and never see it. So the outage is written down FIRST, as a retryable
+      // gap from the walk's floor to where live coverage began, and closed
+      // only when the walk accounts for it. A recovery that runs while the
+      // socket is not open does not own a hold: the outage is still going on.
+      const owns = !this.stopped && this.checkpointHeld && epoch === this.holdEpoch && this.connected && this.connectedAt !== null;
+      const base = { cp, gaps, cpLost, pending: null, holdUntilDone: false };
+      if (!owns) return { ...base, release: this.connected };
+      const plan = this.planWalk(cp, gaps, cpLost, this.now());
+      if (!plan) return { ...base, release: true };
+      if (plan.floorMs === null) return { ...base, release: false, holdUntilDone: true };
+      const fromMs = plan.floorMs;
+      const toMs = Math.max(fromMs, this.connectedAt ?? fromMs);
+      try {
+        const id = await this.d.store.recordGap(this.name, fromMs, toMs, GAP_REASONS.recoveryPending);
+        const pending: IngestGap = { id, fromMs, toMs, reason: GAP_REASONS.recoveryPending };
+        this.openGaps.set(id, pending);
+        return { ...base, pending, release: true };
+      } catch {
+        // Nothing durable stands for the outage, so the hold stays until the
+        // walk's own outcome is written.
+        this.drop("gap-record-failed");
+        return { ...base, release: false, holdUntilDone: true };
+      }
     });
-    // Once the resume point is read, held live progress may move the checkpoint
-    // (unless a newer connection began meanwhile: its own recovery releases it).
-    const epoch = this.holdEpoch;
     void snapshotP.then(
-      () => this.releaseCheckpoint(epoch),
+      (s) => {
+        if (s.release) this.releaseCheckpoint(epoch);
+      },
       () => undefined,
     );
     const startedAt = this.now();
@@ -866,7 +1018,7 @@ class IngestorImpl implements Ingestor {
     if (this.stopped) return finish("stopped", null);
     this.cancelRecoveryRetry();
 
-    let snapshot: { cp: IngestCheckpoint | null; gaps: readonly IngestGap[] };
+    let snapshot: Snapshot;
     try {
       snapshot = await snapshotP;
     } catch (err) {
@@ -874,36 +1026,34 @@ class IngestorImpl implements Ingestor {
       this.scheduleRecoveryRetry();
       return finish("failed", `store-unavailable: ${errText(err)}`);
     }
-    await this.retryUnrecordedGaps();
     await this.routeOrphans();
-    this.openGaps = new Map(snapshot.gaps.map((g) => [g.id, g]));
-    const retryable = snapshot.gaps.filter((g) => !isUnrecoverableGap(g.reason) && finite(g.fromMs) !== null);
-    const gapFloor = retryable.length > 0 ? Math.min(...retryable.map((g) => g.fromMs)) : null;
-    const cp = snapshot.cp;
-    const cpTs = cp?.newestTsMs ?? null;
-
-    if (!cp?.cursor && cpTs === null && gapFloor === null) return finish("no-checkpoint", null);
-
-    // Resume from the cursor only when no open gap reaches further back than it.
-    let request: RecoverRequest;
-    let floorMs: number | null;
-    if (cp?.cursor && (gapFloor === null || (cpTs !== null && gapFloor >= cpTs))) {
-      request = { cursor: cp.cursor };
-      floorMs = cpTs;
-      report.floor = { mode: "cursor", sinceMs: cpTs };
-    } else {
-      const candidates = [cpTs !== null ? cpTs - this.cfg.resumeOverlapMs : null, gapFloor].filter((x): x is number => x !== null);
-      floorMs = Math.min(...candidates);
-      request = { since: floorMs };
-      report.floor = { mode: "since", sinceMs: floorMs };
+    const { pending, holdUntilDone } = snapshot;
+    /** A hold this walk owns but could not cover with a pending gap is let go once the walk's outcome is durable. */
+    const releaseHeld = () => {
+      if (holdUntilDone) this.releaseCheckpoint(epoch);
+    };
+    const known = pending ? [...snapshot.gaps, pending] : snapshot.gaps;
+    const plan = this.planWalk(snapshot.cp, snapshot.gaps, snapshot.cpLost, startedAt);
+    if (!plan) {
+      releaseHeld();
+      return finish("no-checkpoint", null);
     }
+    const retryable = plan.retryable;
+    let request = plan.request;
+    let floorMs = plan.floorMs;
+    report.floor = { mode: plan.mode, sinceMs: floorMs };
+    /** Gaps this walk wrote down, with their spans, so the pending record can be settled against them. */
+    const recorded: IngestGap[] = [];
 
     // An outage longer than the provider's ring is lost before we ask. Say so,
     // then recover what the ring can still hold.
     const ringEdge = startedAt - this.cfg.ringRetentionMs;
     if (floorMs !== null && floorMs < ringEdge) {
       const id = await this.recordGap(floorMs, ringEdge, GAP_REASONS.beyondRetention);
-      if (id) report.gapsRecorded.push(id);
+      if (id !== null) {
+        report.gapsRecorded.push(id);
+        recorded.push({ id, fromMs: floorMs, toMs: ringEdge, reason: GAP_REASONS.beyondRetention });
+      }
       floorMs = ringEdge;
       request = { since: ringEdge };
       report.floor = { mode: "since", sinceMs: ringEdge };
@@ -942,7 +1092,8 @@ class IngestorImpl implements Ingestor {
         firstNextCursor = cleanCursor(page.nextCursor);
         firstNewestTs = finite(page.newestTs);
       }
-      const pageOldest = finite(page.oldestTs);
+      // A row dated past our clock must not stretch a recorded gap into the future.
+      const pageOldest = finite(page.oldestTs) === null ? null : Math.min(finite(page.oldestTs) as number, this.now());
       if (pageOldest !== null) oldestSeen = oldestSeen === null ? pageOldest : Math.min(oldestSeen, pageOldest);
       try {
         const fresh = await this.ingestRecovered(page.events, page.normalized === true);
@@ -971,9 +1122,11 @@ class IngestorImpl implements Ingestor {
 
     if (outcome === "complete") {
       await this.completeCheckpoint(firstNextCursor, firstNewestTs);
+      releaseHeld();
       this.retryAttempt = 0;
       await this.closeGaps(retryable, report);
-      this.rerunForLateGaps(snapshot.gaps);
+      await this.settlePending(pending, floorMs, recorded, report);
+      this.rerunForLateGaps(known);
       return finish("complete", null);
     }
 
@@ -984,12 +1137,16 @@ class IngestorImpl implements Ingestor {
       // persisted or inside a recorded unrecoverable gap.
       const from = floorMs ?? oldestSeen ?? startedAt;
       const to = Math.max(from, oldestSeen ?? startedAt);
-      const id = await this.recordGap(from, to, why === "page-cap" ? GAP_REASONS.pageCap : GAP_REASONS.noOldestCursor);
-      if (id) {
+      const reason = why === "page-cap" ? GAP_REASONS.pageCap : GAP_REASONS.noOldestCursor;
+      const id = await this.recordGap(from, to, reason);
+      if (id !== null) {
         report.gapsRecorded.push(id);
+        recorded.push({ id, fromMs: from, toMs: to, reason });
         await this.completeCheckpoint(firstNextCursor, firstNewestTs);
+        releaseHeld();
         await this.closeGaps(retryable, report);
-        this.rerunForLateGaps(snapshot.gaps);
+        await this.settlePending(pending, from, recorded, report);
+        this.rerunForLateGaps(known);
       }
       return finish("truncated", why);
     }
@@ -999,10 +1156,19 @@ class IngestorImpl implements Ingestor {
     const holeFrom = floorMs ?? oldestSeen ?? startedAt;
     const holeTo = Math.max(holeFrom, this.connected && this.connectedAt !== null ? this.connectedAt : startedAt);
     const covered = retryable.some((g) => g.fromMs <= holeFrom && g.toMs >= holeTo);
+    let durable = covered;
     if (!covered) {
       const id = await this.recordGap(holeFrom, holeTo, GAP_REASONS.recoveryFailed);
-      if (id) report.gapsRecorded.push(id);
+      if (id !== null) {
+        report.gapsRecorded.push(id);
+        recorded.push({ id, fromMs: holeFrom, toMs: holeTo, reason: GAP_REASONS.recoveryFailed });
+        durable = true;
+      }
     }
+    // The failure gap now stands for the hole; the pending one is let go only
+    // if everything it covered is inside a recorded gap.
+    await this.settlePending(pending, null, [...retryable, ...recorded], report);
+    if (durable) releaseHeld();
     this.scheduleRecoveryRetry();
     return finish("failed", why);
   }

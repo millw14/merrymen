@@ -69,6 +69,7 @@ import { isRobinhoodToken, robinhoodChain, tokenFromKey, tokenIdentity } from ".
 import {
   createIngestor,
   higherPriority,
+  INGEST_DEFAULTS,
   type IngestConfig,
   type IngestHealth,
   type IngestStorePort,
@@ -126,6 +127,7 @@ import {
   insertPublicationDraft,
   latestCohort,
   latestDossier,
+  listCapabilities,
   listOpenGaps,
   markEventsProcessed,
   markGapRecovered,
@@ -146,11 +148,13 @@ import {
   setHeldTokens,
   setTenantRoute,
   subjectPublicationCount,
+  sweepJobs,
   tenantKey,
   tenantsWatching,
   traderEvidence,
   transitionPublication,
   unprocessedEvents,
+  upsertCapability,
   usageDay,
   watchedTokenKeys,
   type ActiveToken,
@@ -160,7 +164,8 @@ import {
   type StoredTraderEvent,
   type StoredTraderEvidence,
 } from "./fomo/store";
-import { AlertStream, type ClockPort, type SocketLike, type TimerPort } from "./fomo/stream";
+import { AlertStream, type ClockPort, type SocketLike, type StreamState, type StreamStateDetail, type TimerPort } from "./fomo/stream";
+import { capabilityFromStream, mergeCapability, type StreamProbe } from "./fomo/capabilities";
 import type {
   CoinDossier,
   CohortVersion,
@@ -284,8 +289,14 @@ const TRIGGER_SCAN = 200;
 const ASSESSMENTS_PER_PASS = 10;
 /** With monitoring on, the shared feed counts as fresh while its newest event is this recent. */
 const FRESH_FEED_MS = 10 * MIN;
+/** A newest-event time further ahead of our clock than this is a bad provider timestamp (the ingestor's own bound). */
+const FUTURE_EVENT_SKEW_MS = INGEST_DEFAULTS.futureSkewMs;
 /** Health and repeated failures are logged at most this often. */
 const LOG_EVERY_MS = 20 * MIN;
+/** The stream's unchanged capability verdict is re-written at most this often. */
+const STREAM_CAPABILITY_EVERY_MS = 10 * MIN;
+/** Connects in a row that end before any welcome, after which the stream is recorded UNAVAILABLE. */
+const STREAM_UNAVAILABLE_AFTER = 5;
 /** Leaderboard rows per window: the provider's documented maximum. */
 const LEADERBOARD_LIMIT = 150;
 /** REST recovery page size: the provider's documented maximum for /v2/alerts. */
@@ -596,6 +607,14 @@ export function recoverVia(client: FomoClient, o: { db: Db; clock: ClockPort; bu
   };
 }
 
+/** What a leaderboard answer said about its own age (CallMeta). */
+export interface BoardFreshness {
+  /** When the provider says its copy was captured, ms; null when it did not say. */
+  providerAsOf: number | null;
+  /** The provider's own stale flag. */
+  stale: boolean | null;
+}
+
 /**
  * Leaderboard pages to cohort candidates, one per trader with every window it
  * appeared in. Nothing is invented: a trader's profile, exits and the rest are
@@ -604,13 +623,39 @@ export function recoverVia(client: FomoClient, o: { db: Db; clock: ClockPort; bu
  * score holds at the prior. A short cohort says why rather than being padded.
  *
  * lastActiveAt is the one inference, and it is a FLOOR: a trader with trades on
- * the 24h board was active at some point in the last 24 hours, so "at least as
- * recently as now − 24h" is true. The 30d and all-time boards prove nothing
- * inside the cohort's 14-day inactivity rule, so they set nothing.
+ * the 24h board was active at some point in the 24 hours before THE BOARD WAS
+ * CAPTURED. When the provider serves its last captured copy (its upstream did
+ * not answer), that is not the last 24 hours before our read, so the floor is
+ * anchored at the board's own capture time (`providerAsOf`), and:
+ *
+ *   a board older than its own window (a 24h board captured two days ago) no
+ *     longer says anything about the window it names, and sets nothing;
+ *   a board the provider marks stale without saying when it was captured
+ *     sets nothing.
+ *
+ * Unknown is not inactive (cohort.ts COHORT_DEFAULTS.inactiveAfterMs), so
+ * this never manufactures an inactivity verdict out of a stale source: a floor
+ * it does set is at most two windows old. The 30d and all-time boards prove
+ * nothing inside the cohort's 14-day inactivity rule, so they set nothing.
  */
-export function cohortCandidatesFrom(pages: Partial<Record<RankingWindow, LeaderboardPage>>, now: number): CohortCandidate[] {
+export function cohortCandidatesFrom(
+  pages: Partial<Record<RankingWindow, LeaderboardPage>>,
+  now: number,
+  freshness: Partial<Record<RankingWindow, BoardFreshness>> = {},
+): CohortCandidate[] {
   const byId = new Map<string, CohortCandidate>();
-  const activeFloor: Partial<Record<RankingWindow, number>> = { "24h": now - 24 * HOUR, "7d": now - 7 * 24 * HOUR };
+  const windowMs: Partial<Record<RankingWindow, number>> = { "24h": 24 * HOUR, "7d": 7 * 24 * HOUR };
+  const activeFloor: Partial<Record<RankingWindow, number>> = {};
+  for (const w of RANKING_WINDOWS) {
+    const span = windowMs[w];
+    if (span === undefined) continue;
+    const f = freshness[w];
+    const asOf = f && typeof f.providerAsOf === "number" && Number.isFinite(f.providerAsOf) ? Math.min(f.providerAsOf, now) : null;
+    if (asOf === null && f?.stale === true) continue;
+    const anchor = asOf ?? now;
+    if (now - anchor > span) continue;
+    activeFloor[w] = anchor - span;
+  }
   for (const w of RANKING_WINDOWS) {
     const page = pages[w];
     if (!page) continue;
@@ -1195,6 +1240,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     }
     cohortWaitingOnBudget = false;
     const pages: Partial<Record<RankingWindow, LeaderboardPage>> = {};
+    const boardAge: Partial<Record<RankingWindow, BoardFreshness>> = {};
     const population: Partial<Record<RankingWindow, number>> = {};
     const failures: string[] = [];
     let billed = 0;
@@ -1218,6 +1264,9 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
           continue;
         }
         pages[w] = r.data;
+        // The board's own capture time, not our read time: a captured copy is
+        // not current activity (cohortCandidatesFrom).
+        boardAge[w] = { providerAsOf: r.meta.providerAsOf, stale: r.meta.providerStale };
         population[w] = r.data.providerCount ?? r.data.rows.length + r.data.dropped;
       }
     } catch (e) {
@@ -1237,16 +1286,26 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       return;
     }
     const scoring = { windowPopulation: population, observedWindows: observed };
-    const enriched = await enrich(cohortCandidatesFrom(pages, now), prev, scoring, now);
+    const enriched = await enrich(cohortCandidatesFrom(pages, now, boardAge), prev, scoring, now);
     const candidates = enriched.candidates;
     const next = selectCohort(prev, candidates, { now, target: knobs.cohortTarget, ...scoring });
-    const inserted = await insertCohortVersion(db, next, {
-      windows: observed,
-      failedWindows: failures.length,
-      candidates: candidates.length,
-      enrichedThisRefresh: enriched.read,
-      withMeasuredEvidence: enriched.measured,
-    });
+    let inserted: boolean;
+    try {
+      inserted = await insertCohortVersion(db, next, {
+        windows: observed,
+        failedWindows: failures.length,
+        candidates: candidates.length,
+        enrichedThisRefresh: enriched.read,
+        withMeasuredEvidence: enriched.measured,
+        // How old each board said it was, so a cohort built from captured copies says so.
+        boardsAsOf: Object.fromEntries(observed.map((w) => [w, { providerAsOf: boardAge[w]?.providerAsOf ?? null, stale: boardAge[w]?.stale ?? null }])),
+      });
+    } catch (e) {
+      // The boards are already bought: a failed write (a deadlock, a blip)
+      // must not have the very next pass buy all four again.
+      cohortRetryAt = now + COHORT_RETRY_MS;
+      throw e;
+    }
     cohortCache = null;
     let added = 0;
     let removed = 0;
@@ -1294,6 +1353,62 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     track(live.ingestor.idle());
   };
 
+  /**
+   * WHAT THE LIVE STREAM PROVES ABOUT ws-alerts, into fomo_capabilities, so
+   * the capability table moves as the stream is observed (as REST calls
+   * already move theirs) instead of keeping the documented baseline:
+   *
+   *   welcome                         AUTHENTICATED_TESTED, or PARTIAL when the
+   *                                   provider says it delays delivery (a free
+   *                                   key's 15 s)
+   *   the vendor's close 1008 before  ENTITLEMENT_BLOCKED (its documented close
+   *   any welcome                     for a plan without the stream)
+   *   STREAM_UNAVAILABLE_AFTER        UNAVAILABLE
+   *   connects in a row, no welcome
+   *
+   * A drop AFTER a welcome is not a verdict on the capability (servers
+   * restart), and nor is any close of our own. The same verdict is written at
+   * most once per STREAM_CAPABILITY_EVERY_MS: a flapping socket is not a
+   * database load. A failed write is logged and retried on the next change.
+   */
+  const streamCapabilityObserver = () => {
+    let welcomed = false;
+    let failedConnects = 0;
+    let written: { at: number; status: string } | null = null;
+    return (state: StreamState, detail: StreamStateDetail): void => {
+      if (state === "connecting") {
+        welcomed = false;
+        return;
+      }
+      let probe: StreamProbe | null = null;
+      if (state === "open") {
+        welcomed = true;
+        failedConnects = 0;
+        probe = { welcome: true, delaySeconds: detail.delaySeconds ?? null };
+      } else if (state === "backoff" && !welcomed) {
+        failedConnects++;
+        const vendorClose = /^closed\b/.test(detail.reason ?? "") ? (detail.code ?? null) : null;
+        if (vendorClose === 1008) probe = { welcome: false, closeCode: 1008 };
+        else if (failedConnects >= STREAM_UNAVAILABLE_AFTER) probe = { welcome: false, closeCode: vendorClose };
+      }
+      if (!probe) return;
+      const at = clock.now();
+      const next = capabilityFromStream("ws-alerts", "/ws/alerts", probe, at);
+      if (written && written.status === next.status && at - written.at < STREAM_CAPABILITY_EVERY_MS) return;
+      const prior = written;
+      written = { at, status: next.status };
+      track(
+        (async () => {
+          const stored = (await listCapabilities(db)).find((c) => c.capability === next.capability) ?? null;
+          await upsertCapability(db, mergeCapability(stored, next));
+        })().catch((e) => {
+          written = prior;
+          noteFailure("capability", e);
+        }),
+      );
+    };
+  };
+
   const enqueueTask = (task: ResearchTask): void => {
     track(
       enqueueResearch(db, task.tokenKey, task.evidenceRev, RESEARCH_PRIORITY[task.priority], task.tenants, clock.now()).catch((e) =>
@@ -1333,6 +1448,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       },
       config: deps.ingestConfig,
     });
+    const callbacks = ingestor.streamCallbacks();
+    const observe = streamCapabilityObserver();
     const stream = new AlertStream({
       endpoint: deps.streamEndpoint!,
       createSocket: deps.createSocket,
@@ -1342,7 +1459,11 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       // Re-sent after every reconnect: the URL's filter applies from the first
       // frame, and the subscription keeps it if the server ever resets it.
       subscription: { chain: "robinhood" },
-      ...ingestor.streamCallbacks(),
+      ...callbacks,
+      onState: (state, detail) => {
+        callbacks.onState(state, detail);
+        observe(state, detail);
+      },
     });
     ingest = { stream, ingestor };
     stream.start();
@@ -1726,6 +1847,10 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
           noteFailure("checkpoint", e);
         }
       }
+      // A newest-event time ahead of our clock is a bad provider timestamp,
+      // not a fresh feed: `now - lastEventAt` would be negative and pass any
+      // freshness test until the wall clock caught up.
+      if (lastEventAt !== null && lastEventAt > now + FUTURE_EVENT_SKEW_MS) lastEventAt = null;
       fleetFreshness = { lastEventAt };
       const fresh = live?.state === "receiving-fresh-data" || (lastEventAt !== null && now - lastEventAt <= FRESH_FEED_MS);
       ctx = {
@@ -1838,6 +1963,13 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
   const fleetWork = async (now: number): Promise<void> => {
     await step("cohort", () => refreshCohort(now));
     await step("research", () => runResearch());
+    // SETTLE WHAT NOBODY WILL FINISH, before claiming more. A job still queued
+    // at its deadline, or running on a lease that lapsed after it (its worker
+    // died), can never be claimed again (claimJob needs deadline_ms > now) and
+    // retention keeps only finished rows' clocks: unswept, it would read as
+    // "in progress" for ever. The sweep fails it with a reason the owner can
+    // be told; a live lease is left alone.
+    await step("jobs-sweep", async () => void (await sweepJobs(db, clock.now())));
     startJobs(now);
     await step("outbox", () => runOutbox(now));
     if (now - lastPruneAt >= PRUNE_EVERY_MS) {

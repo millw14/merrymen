@@ -7,6 +7,7 @@ import {
   createIngestor,
   createTenantRouter,
   evidenceRevOf,
+  spanCovered,
   type IngestCheckpoint,
   type IngestConfig,
   type GapId,
@@ -24,6 +25,7 @@ import { AlertStream, type ClockPort, type SocketLike, type StreamState, type St
 import type { ActivityKind, EventSource, TraderEvent } from "./types";
 
 const T0 = 1_790_000_000_000;
+const DAY_MS = 86_400_000;
 const RH_A = "0x1111111111111111111111111111111111111111";
 const RH_B = "0x2222222222222222222222222222222222222222";
 const RH_C = "0x3333333333333333333333333333333333333333";
@@ -136,6 +138,7 @@ class MemoryStore implements IngestStorePort {
   deadLetters: Array<{ payload: string; error: string }> = [];
   log: string[] = [];
   failInsert = false;
+  failGap = false;
   gate: Promise<void> | null = null;
   listGate: Promise<void> | null = null;
   private gapSeq = 0;
@@ -166,6 +169,7 @@ class MemoryStore implements IngestStorePort {
     this.checkpointWrites.push({ cursor, newestTsMs });
   }
   recordGap(_stream: string, fromMs: number, toMs: number, reason: string): GapId {
+    if (this.failGap) throw new Error("db unavailable");
     const id = ++this.gapSeq; // numbered rows, like the real store
     this.gaps.set(id, { id, fromMs, toMs, reason, recovered: false });
     return id;
@@ -508,6 +512,151 @@ describe("checkpoint hold across overlapping connections", () => {
     assert.equal(s.rest.calls.length, 2, "recovery ran again for the new connection");
     assert.deepEqual(s.rest.calls[1], { since: T0 - 600_000 - 60_000 }, "#2 still resumes from before the outage");
     assert.equal(s.store.checkpoints.get("alerts")?.newestTsMs, T0 - 1_000, "held progress applied after #2 read its floor");
+  });
+
+  it("a recovery that runs while no socket is open does not release the hold: the outage is still going on", async () => {
+    const s = setup();
+    s.store.checkpoints.set("alerts", { cursor: null, newestTsMs: T0 - 600_000 });
+    const d = (connection: number): StreamStateDetail => ({ endpoint: "r", connection, attempt: 0 });
+    s.ing.handleState("connecting", d(1));
+    s.ing.handleState("open", d(1));
+    await s.ing.idle();
+    s.ing.handleState("backoff", d(1));
+    s.ing.handleState("connecting", d(2));
+    await s.ing.recoverNow("retry"); // e.g. a retry timer firing between sockets
+    await s.ing.handleFrame({ ...raw(9, T0 - 1_000), replay: true }, { replay: true, receivedAt: T0 });
+    await s.ing.idle();
+    assert.equal(s.store.checkpoints.get("alerts")?.newestTsMs, T0 - 600_000, "still held: nobody has walked this outage");
+    s.ing.handleState("open", d(2));
+    await s.time.advance(30_000);
+    await s.ing.idle();
+    assert.deepEqual(s.rest.calls.at(-1), { since: T0 - 600_000 - 60_000 }, "the new connection's recovery resumes from before the outage");
+    assert.equal(s.store.checkpoints.get("alerts")?.newestTsMs, T0 - 1_000);
+  });
+});
+
+describe("an outage and a crash during its recovery walk", () => {
+  it("the outage is on record before live frames may move the checkpoint, and the next process walks it", async () => {
+    const store = new MemoryStore();
+    const time = new ManualTime();
+    store.checkpoints.set("alerts", { cursor: null, newestTsMs: T0 - 600_000 });
+    const restA = new FakeRest();
+    restA.items.push(raw(1, T0 - 300_000)); // happened while we were disconnected
+    restA.gate = new Promise<void>(() => undefined); // the walk never returns: this process dies inside it
+    const a = setup({ store, rest: restA, time });
+    a.ing.handleState("connecting", { endpoint: "r", connection: 1, attempt: 0 });
+    a.ing.handleState("open", { endpoint: "r", connection: 1, attempt: 0 });
+    await settle();
+    // The resume point is read and the walk waits on the provider; a live frame moves the checkpoint past the outage.
+    await a.ing.handleFrame(raw(2, T0 - 1_000), { replay: false, receivedAt: T0 });
+    await settle();
+    assert.equal(store.checkpoints.get("alerts")?.newestTsMs, T0 - 1_000);
+    const open = [...store.gaps.values()].filter((g) => !g.recovered);
+    assert.deepEqual(
+      open.map((g) => [g.fromMs, g.toMs, g.reason]),
+      [[T0 - 660_000, T0, GAP_REASONS.recoveryPending]],
+      "the outage is durable before the walk returns",
+    );
+    assert.equal(a.ing.health().openGaps, 1, "and visible while the walk runs");
+
+    // The crash: `a` never finishes. The next process finds the hole and walks it.
+    const restB = new FakeRest();
+    restB.items = restA.items;
+    const b = setup({ store, rest: restB, time });
+    await b.open();
+    assert.deepEqual(restB.calls[0], { since: T0 - 660_000 }, "resumes from before the outage, not from the live frame");
+    assert.ok(store.events.has(keyOf(1)), "the outage's event was recovered");
+    assert.equal([...store.gaps.values()].filter((g) => !g.recovered).length, 0, "and the record closed once walked");
+    assert.equal(b.ing.health().openGaps, 0);
+    assert.equal(b.ing.health().recovery.lastStatus, "complete");
+  });
+
+  it("a failed walk leaves the outage open as a retryable gap, and the retry closes it", async () => {
+    const s = setup();
+    s.store.checkpoints.set("alerts", { cursor: null, newestTsMs: T0 - 600_000 });
+    s.rest.items.push(raw(1, T0 - 300_000));
+    s.rest.failCalls.add(1);
+    await s.open();
+    await s.live(raw(2, T0 - 1_000));
+    const open = [...s.store.gaps.values()].filter((g) => !g.recovered);
+    assert.ok(open.length >= 1 && open.every((g) => !g.reason.startsWith("unrecoverable:")));
+    assert.ok(spanCovered(T0 - 660_000, T0, open), "the whole outage is still on record after the failure");
+    assert.equal(s.ing.health().openGaps, open.length);
+    await s.time.advance(60_000);
+    await s.ing.idle();
+    assert.ok(s.store.events.has(keyOf(1)));
+    assert.equal([...s.store.gaps.values()].filter((g) => !g.recovered).length, 0);
+    assert.equal(s.ing.health().openGaps, 0);
+  });
+
+  it("spanCovered reads a union of spans", () => {
+    assert.equal(spanCovered(0, 10, [{ fromMs: 0, toMs: 4 }, { fromMs: 4, toMs: 10 }]), true);
+    assert.equal(spanCovered(0, 10, [{ fromMs: 5, toMs: 10 }, { fromMs: 0, toMs: 4 }]), false);
+    assert.equal(spanCovered(3, 3, []), true);
+    assert.equal(spanCovered(0, 10, [{ fromMs: -5, toMs: Number.POSITIVE_INFINITY }]), true);
+  });
+});
+
+describe("provider timestamps from the future", () => {
+  it("never pin the checkpoint or the newest-event time, and a later outage is still recovered", async () => {
+    const s = setup();
+    s.store.checkpoints.set("alerts", { cursor: null, newestTsMs: T0 - 120_000 });
+    await s.open();
+    await s.live(raw(1, T0 - 10_000));
+    const bogus = raw(2, T0 + DAY_MS);
+    await s.live(bogus);
+    assert.ok(s.store.events.has(keyOf(2)), "the event itself is kept");
+    assert.equal(s.routed.filter((r) => r.item.eventKey === keyOf(2)).length, 1, "and routed");
+    assert.equal(s.store.checkpoints.get("alerts")?.newestTsMs, T0 - 10_000, "its time is not progress");
+    assert.equal(s.ing.health().lastEventAt, T0 - 10_000, "nor does it make the feed look fresh");
+    assert.equal(s.ing.health().dropped["future-timestamp"], 1);
+
+    // An outage, recovered over REST, whose page also carries the bogus row first.
+    s.drop();
+    await s.time.advance(10 * 60_000);
+    s.rest.items.push(raw(3, T0 + 300_000), bogus);
+    await s.open();
+    assert.deepEqual(s.rest.calls.at(-1), { since: T0 - 10_000 - 60_000 }, "resumes from real progress");
+    assert.ok(s.store.events.has(keyOf(3)), "the outage's event was recovered");
+    const cp = s.store.checkpoints.get("alerts");
+    assert.ok(cp && (cp.newestTsMs ?? 0) <= s.time.now(), "the page's future newest row did not move the checkpoint");
+    assert.equal(cp?.cursor, null, "nor leave a cursor at that row");
+  });
+
+  it("a checkpoint already stored in the future is not a resume point: recovery walks what the ring holds", async () => {
+    const s = setup({ config: { ringRetentionMs: 3_600_000 } });
+    s.store.checkpoints.set("alerts", { cursor: `${T0 + DAY_MS}.x`, newestTsMs: T0 + DAY_MS });
+    s.rest.items.push(raw(1, T0 - 600_000));
+    await s.open();
+    assert.deepEqual(s.rest.calls[0], { since: T0 - 3_600_000 });
+    assert.ok(s.store.events.has(keyOf(1)));
+    assert.equal(s.store.checkpoints.get("alerts")?.newestTsMs, T0 - 600_000, "replaced with real progress");
+  });
+});
+
+describe("gaps the store could not record", () => {
+  it("are written before the next walk reads its floor, so the walk covers them and health counts them", async () => {
+    const s = setup();
+    s.store.checkpoints.set("alerts", { cursor: null, newestTsMs: T0 - 100_000 });
+    await s.open();
+    // A database outage: the insert fails, and so does writing the hole down.
+    s.store.failInsert = true;
+    s.store.failGap = true;
+    const lost = raw(1, T0 - 5_000);
+    s.rest.items.push(lost);
+    await s.live(lost);
+    assert.equal(s.ing.health().openGaps, 1, "kept in memory and counted");
+    // The database is back, and live frames move the checkpoint more than the overlap past the hole.
+    s.store.failInsert = false;
+    s.store.failGap = false;
+    await s.time.advance(58_000);
+    await s.live(raw(2, T0 + 58_000));
+    assert.equal(s.store.checkpoints.get("alerts")?.newestTsMs, T0 + 58_000);
+    await s.time.advance(2_000); // the scheduled retry
+    await s.ing.idle();
+    assert.ok(s.store.events.has(keyOf(1)), "the hole was walked");
+    assert.equal([...s.store.gaps.values()].filter((g) => !g.recovered).length, 0, "and closed");
+    assert.equal(s.ing.health().openGaps, 0);
   });
 });
 
