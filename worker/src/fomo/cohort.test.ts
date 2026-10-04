@@ -1,20 +1,23 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  COHORT_DEFAULTS,
   COHORT_TARGET,
   PNL_RANK_WEIGHT_CAP,
   POSITION_DEP_MAX_TTL_MS,
   SCORE_PRIOR,
   cohortDiff,
+  measurePositions,
   planCohort,
   positionDependencies,
   scoreCandidate,
   selectCohort,
+  withEvidence,
   type CohortCandidate,
   type CohortWindowStats,
   type PositionDependency,
 } from "./cohort";
-import type { RankingWindow } from "./types";
+import type { PositionRow, RankingWindow, TokenIdentity } from "./types";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -432,6 +435,188 @@ describe("selectCohort", () => {
     assert.equal(v2.version, 2);
     assert.equal(v2.members.length, 2);
     assert.equal(v2.changes.filter((c) => c.change === "removed" && c.reason === "target reduced to 2").length, 1);
+  });
+});
+
+// ── Leaderboard evidence alone, and what enrichment adds ──────────────────
+
+const WINDOWS = ["24h", "7d", "30d", "all"] as const;
+const BOARD = { "24h": 150, "7d": 150, "30d": 150, all: 150 } as const;
+
+/** A board-only candidate on the first `k` windows at one rank, with `n` trades stated. */
+function boardOnly(id: number, k: number, rank: number, n: number): CohortCandidate {
+  const windows: Partial<Record<RankingWindow, CohortWindowStats>> = {};
+  for (const w of WINDOWS.slice(0, k)) windows[w] = { rank, pnlUsd: 1_000, volumeUsd: 5_000, trades: n };
+  return { trader: { userId: uid(id), handle: `b${id}`, displayName: null, verified: null }, windows, lastActiveAt: T0 - HOUR };
+}
+
+/**
+ * What four 150-row leaderboards look like: 300 distinct traders, a core that
+ * persists across windows and a churn of one-window names, with the trade
+ * counts each window would state (short windows few, all-time many).
+ */
+function fourBoards(seed: number): { candidates: CohortCandidate[]; presentIn: Map<string, number> } {
+  const r = lcg(seed);
+  const byId = new Map<string, CohortCandidate>();
+  for (const w of WINDOWS) {
+    const pool = Array.from({ length: 300 }, (_, i) => i + 1);
+    // Traders 1-90 are the persistent core: likelier on every board.
+    const key = new Map(pool.map((i) => [i, i <= 90 ? r() * 0.4 : r()]));
+    pool.sort((a, b) => key.get(a)! - key.get(b)!);
+    pool.slice(0, 150).forEach((n, i) => {
+      const id = uid(n);
+      const c = byId.get(id) ?? { trader: { userId: id, handle: `h${n}`, displayName: null, verified: null }, windows: {}, lastActiveAt: null };
+      const trades = w === "24h" ? 1 + Math.floor(r() * 15) : w === "7d" ? 3 + Math.floor(r() * 60) : w === "30d" ? 10 + Math.floor(r() * 200) : 30 + Math.floor(r() * 800);
+      c.windows[w] = { rank: i + 1, pnlUsd: 1_000 * (150 - i), volumeUsd: 5_000 + i, trades };
+      if (w === "24h" || w === "7d") c.lastActiveAt = T0 - (w === "24h" ? DAY : 7 * DAY);
+      byId.set(id, c);
+    });
+  }
+  const candidates = [...byId.values()];
+  return { candidates, presentIn: new Map(candidates.map((c) => [c.trader.userId, Object.keys(c.windows).length])) };
+}
+
+const pos = (o: Partial<PositionRow> & { key?: string }): PositionRow => {
+  const key = o.key ?? `eip155:4663:0x${"ab".repeat(20)}`;
+  const [namespace, net, address] = key.split(":") as [TokenIdentity["chain"]["namespace"], string, string];
+  const { key: _k, ...rest } = o;
+  return {
+    tradeId: null,
+    token: { chain: { namespace, networkId: Number(net), slug: null }, address, key },
+    label: { symbol: null, name: null },
+    status: "closed",
+    costBasisUsd: 1_000,
+    boughtAmount: 10,
+    soldAmount: 10,
+    transferredInAmount: 0,
+    transferredOutAmount: 0,
+    amount: 0,
+    avgEntryPrice: 1,
+    avgExitPrice: 1,
+    realizedPnlUsd: 100,
+    unrealizedPnlUsd: null,
+    openedAt: T0 - 10 * DAY,
+    closedAt: T0 - 9 * DAY,
+    source: "captured",
+    ...rest,
+  };
+};
+const SOL_KEY = `solana:1399811149:So11111111111111111111111111111111111111112`;
+
+describe("leaderboard-only evidence", () => {
+  it("is calibrated as documented: four boards clear the floor, three clear it with a real record, two never do", () => {
+    const at = (k: number, rank: number, n: number) => scoreCandidate(boardOnly(1, k, rank, n), { windowPopulation: BOARD, observedWindows: WINDOWS }).score;
+    const floor = COHORT_DEFAULTS.minScore;
+    for (const rank of [1, 75, 150]) {
+      assert.ok(at(4, rank, 14) >= floor && at(4, rank, 800) <= 0.54, `4 of 4 at rank ${rank}: ${at(4, rank, 14)}..${at(4, rank, 800)}`);
+      assert.ok(at(3, rank, 50) >= floor && at(3, rank, 800) <= 0.49, `3 of 4 at rank ${rank}: ${at(3, rank, 50)}..${at(3, rank, 800)}`);
+      assert.ok(at(3, rank, 20) < floor, `3 of 4 on 20 trades is still shrunk under the floor (rank ${rank})`);
+      assert.ok(at(2, rank, 10_000) < floor - 0.02, `2 of 4 never clears on boards alone (rank ${rank}): ${at(2, rank, 10_000)}`);
+      assert.ok(at(1, rank, 10_000) < SCORE_PRIOR, "1 of 4 sits under the prior");
+    }
+    assert.ok(at(4, 1, 5) < floor, "a small record still shrinks: four boards on five trades is not enough");
+    const s = scoreCandidate(boardOnly(1, 4, 1, 800), { windowPopulation: BOARD, observedWindows: WINDOWS });
+    assert.ok(s.reasons.some((r) => r.startsWith("flag:leaderboard-only")));
+    assert.ok(s.reasons.some((r) => r.startsWith("strength:consistency") && r.includes("4 of 4")));
+    assert.ok(Math.abs(s.confidence - 0.2391) < 0.001, `measured weight ${s.confidence}`);
+  });
+
+  it("300 rows across four overlapping windows give a non-empty cohort, every member explained, the rest left empty", () => {
+    const { candidates, presentIn } = fourBoards(7);
+    assert.ok(candidates.length > 200 && candidates.length <= 300, `${candidates.length} distinct traders`);
+    const plan = planCohort(null, candidates, { now: T0, windowPopulation: BOARD, observedWindows: [...WINDOWS] });
+    const v = plan.version;
+    assert.ok(v.members.length >= 40, `members ${v.members.length}`);
+    assert.ok(v.members.length < COHORT_TARGET, "short of 150, honestly");
+    assert.ok(v.shortfallReason && /seats filled/.test(v.shortfallReason) && /below the score floor/.test(v.shortfallReason));
+    assert.equal(plan.diagnostics.belowFloor + plan.diagnostics.eligibleChallengers, candidates.length);
+    for (const m of v.members) {
+      assert.ok((presentIn.get(m.trader.userId) ?? 0) >= 3, "only traders on three or four boards are in");
+      assert.ok(m.score >= COHORT_DEFAULTS.minScore);
+      assert.ok(m.reasons.some((r) => r.startsWith("flag:leaderboard-only")), "says what it rests on");
+      assert.ok(m.reasons.some((r) => r.startsWith("strength:consistency")));
+      assert.ok(m.reasons.some((r) => r.startsWith("score:")));
+      assert.equal(m.followable, false, "nothing on a board establishes a holding period");
+      assert.equal(v.changes.find((c) => c.userId === m.trader.userId)?.change, "added");
+    }
+    const fours = [...presentIn.entries()].filter(([, k]) => k === 4).map(([id]) => id);
+    const ids = new Set(v.members.map((m) => m.trader.userId));
+    assert.ok(fours.length > 0 && fours.every((id) => ids.has(id)), "everyone on all four boards (with a real record) is in");
+    // Followers never entered: the same boards with absurd follower counts select the same people.
+    const loud = candidates.map((c, i) => ({ ...c, followers: i * 1_000_003 }));
+    assert.deepEqual(selectCohort(null, loud, { now: T0, windowPopulation: BOARD, observedWindows: [...WINDOWS] }), v);
+  });
+});
+
+describe("enrichment", () => {
+  it("measures chain share, holding period, exits, concentration and size from positions, and nothing from a thin sample", () => {
+    const rows: PositionRow[] = [
+      pos({ tradeId: "t1", openedAt: T0 - 10 * DAY, closedAt: T0 - 10 * DAY + 6 * 3_600_000, realizedPnlUsd: 500, costBasisUsd: 2_000 }),
+      pos({ tradeId: "t2", openedAt: T0 - 8 * DAY, closedAt: T0 - 8 * DAY + 2 * 3_600_000, realizedPnlUsd: -200, costBasisUsd: 1_000 }),
+      pos({ tradeId: "t3", openedAt: T0 - 6 * DAY, closedAt: T0 - 6 * DAY + 4 * 3_600_000, realizedPnlUsd: 0, costBasisUsd: 3_000 }),
+      pos({ tradeId: "t4", status: "open", closedAt: null, realizedPnlUsd: 0, unrealizedPnlUsd: -50, costBasisUsd: 6_000 }),
+      pos({ tradeId: "t5", status: "open", closedAt: null, realizedPnlUsd: 0, unrealizedPnlUsd: 80, costBasisUsd: 2_000, key: SOL_KEY }),
+      pos({ tradeId: "t5", status: "open", closedAt: null, costBasisUsd: 9e9 }), // a duplicate row of t5: ignored
+      pos({ tradeId: "t6", status: "open", boughtAmount: 0, avgEntryPrice: null, costBasisUsd: 12.5, key: SOL_KEY }), // received, never bought
+      pos({ tradeId: "t7", token: null, status: "closed", realizedPnlUsd: Number.NaN, openedAt: null, costBasisUsd: null }),
+    ];
+    const m = measurePositions(rows);
+    assert.equal(m.sampleSize, 6);
+    assert.deepEqual(m.chainActivity, { robinhoodShare: 4 / 5, sampleSize: 5 });
+    assert.deepEqual(m.holding, { averageHoldSeconds: 4 * 3_600, sampleSize: 3 });
+    assert.deepEqual(m.exits, { closedWithGain: 1, closedWithLoss: 1, heldUnderwater: 1 });
+    assert.deepEqual(m.concentration, { topPositionShare: 6_000 / 8_000 });
+    assert.deepEqual(m.executionCapacity, { medianPositionUsd: 2_000 });
+    const thin = measurePositions([rows[0]!, rows[3]!]);
+    assert.equal(thin.holding?.averageHoldSeconds, null, "one closed position is not an average");
+    assert.equal(thin.concentration, null, "one open position is not a book");
+    assert.equal(thin.executionCapacity, null);
+    assert.deepEqual(measurePositions([]), { sampleSize: 0, chainActivity: null, holding: { averageHoldSeconds: null, sampleSize: 0 }, exits: null, concentration: null, executionCapacity: null });
+  });
+
+  it("moves a board-only score either way on what it finds, and makes a sound trader followable", () => {
+    const base = boardOnly(5, 4, 30, 300);
+    const opts = { windowPopulation: BOARD, observedWindows: WINDOWS };
+    const before = scoreCandidate(base, opts);
+    const good = Array.from({ length: 20 }, (_, i) =>
+      pos({ tradeId: `g${i}`, openedAt: T0 - 30 * DAY + i * DAY, closedAt: T0 - 30 * DAY + i * DAY + 8 * 3_600_000, realizedPnlUsd: i % 4 === 0 ? -100 : 400, costBasisUsd: 2_500 }),
+    ).concat([0, 1, 2, 3].map((i) => pos({ tradeId: `go${i}`, status: "open", closedAt: null, unrealizedPnlUsd: 50, costBasisUsd: 2_000 })));
+    // Two-minute flips off our chain, and a book of bags: one oversized, all underwater.
+    const bad = Array.from({ length: 6 }, (_, i) =>
+      pos({ tradeId: `b${i}`, key: SOL_KEY, openedAt: T0 - 30 * DAY + i * DAY, closedAt: T0 - 30 * DAY + i * DAY + 120_000, realizedPnlUsd: -80, costBasisUsd: 40 }),
+    ).concat(
+      Array.from({ length: 14 }, (_, i) =>
+        pos({ tradeId: `bo${i}`, ...(i === 0 ? {} : { key: SOL_KEY }), status: "open", closedAt: null, unrealizedPnlUsd: -50, costBasisUsd: i === 0 ? 9_000 : 30 }),
+      ),
+    );
+    const up = scoreCandidate(withEvidence(base, measurePositions(good)), opts);
+    const down = scoreCandidate(withEvidence(base, measurePositions(bad)), opts);
+    assert.ok(up.score > before.score + 0.05, `good evidence raises it: ${before.score} -> ${up.score}`);
+    assert.ok(down.score < before.score - 0.05, `bad evidence lowers it: ${before.score} -> ${down.score}`);
+    assert.ok(down.score < COHORT_DEFAULTS.minScore, `and a challenger with that record is not admitted: ${down.score}`);
+    assert.ok(up.confidence > before.confidence + 0.3, "measured weight rose");
+    assert.equal(before.followable, false);
+    assert.equal(up.followable, true, "a reconstructed hold of hours is positive evidence for following");
+    assert.ok(up.reasons.some((r) => r.includes("reconstructed from 20 closed positions")));
+    assert.equal(down.followable, false);
+    assert.ok(down.reasons.some((r) => r.startsWith("flag:short-hold")));
+    assert.equal(up.evidence.reconstructed.robinhoodShare, 1);
+    assert.equal(up.evidence.reconstructed.holdSampleSize, 20);
+    // A provider-stated hold wins over the reconstruction.
+    const stated = scoreCandidate(withEvidence({ ...base, profile: { averageHoldTimeSeconds: 600, accountAgeDays: null, trades: null } }, measurePositions(good)), opts);
+    assert.equal(stated.followable, false);
+  });
+
+  it("small samples still shrink: the same evidence on a three-trade record stays near the prior", () => {
+    const opts = { windowPopulation: BOARD, observedWindows: WINDOWS };
+    const good = measurePositions(
+      Array.from({ length: 6 }, (_, i) => pos({ tradeId: `s${i}`, openedAt: T0 - 9 * DAY + i * DAY, closedAt: T0 - 9 * DAY + i * DAY + 6 * 3_600_000, realizedPnlUsd: 300 })),
+    );
+    const tiny = scoreCandidate(withEvidence(boardOnly(9, 4, 1, 3), good), opts);
+    const big = scoreCandidate(withEvidence(boardOnly(9, 4, 1, 300), good), opts);
+    assert.ok(tiny.score < COHORT_DEFAULTS.minScore, `three trades: ${tiny.score}`);
+    assert.ok(Math.abs(tiny.score - SCORE_PRIOR) < 0.08);
+    assert.ok(big.score > tiny.score + 0.1);
   });
 });
 

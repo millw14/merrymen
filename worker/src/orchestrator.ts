@@ -159,6 +159,7 @@ import type { FomoClient } from "./fomo/provider";
 import { SYSTEM_TIMERS } from "./fomo/stream";
 import {
   FOMO_FLEET_LEASE,
+  FOMO_FLEET_PAYER,
   heldTokensFrom,
   makeFomoPass,
   mergeHeldTokens,
@@ -554,6 +555,12 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  // WHICH TENANT THIS CHILD IS, lowercased. Not a secret and not authority:
+  // the child uses it only to refuse a fomo.json written for someone else
+  // (fomo/child-file.ts readChildFomoFile). Nothing on this side reads it
+  // back — the IPC broker stamps the tenant this process spawned the child
+  // for (attachFomoBroker), never one the child names.
+  env.MERRYMEN_TENANT = tenant.toLowerCase();
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
@@ -8289,10 +8296,13 @@ interface FomoRuntimeHandle {
   db: Db;
   service: FomoService & { heldTokensSnapshot?(now?: number): Map<string, string[]> };
   client: FomoClient | null;
-  budget: FomoBudget | null;
+  /**
+   * The budget fleet reads are charged to: the shared pool and its class
+   * shares, without one owner's hourly and daily caps (runtime.ts). Owners'
+   * own reads go through the service's owner budget; nothing here uses it.
+   */
+  backgroundBudget: FomoBudget | null;
   runJobs(now: number): Promise<unknown>;
-  /** Who fleet-wide reads are charged to: nobody's tenant (fomo/service.ts SHARED_RESEARCH_TENANT). */
-  payer: string;
 }
 
 interface FomoBoot {
@@ -8354,7 +8364,13 @@ async function fomoAccessFor(tenant: string): Promise<FomoAccess> {
   };
 }
 
-/** The runtime's credit budget as the pass charges it, payer stamped here: fleet reads belong to no tenant. */
+/**
+ * The runtime's credit budget as the pass charges it, payer stamped here:
+ * fleet reads (stream recovery, the cohort's boards and enrichment) belong to
+ * no tenant. Charged to the BACKGROUND budget so one owner's caps never
+ * throttle them, under their own payer so the research queue's cap
+ * (fomo/service.ts BACKGROUND_RESEARCH_CAP) leaves them room.
+ */
 function fomoBudgetPort(budget: FomoBudget | null, payer: string): FomoBudgetPort | undefined {
   if (!budget) return undefined;
   return {
@@ -8376,17 +8392,16 @@ async function fomoRuntimeNow(boot: FomoBoot): Promise<FomoRuntimeHandle | null>
   if (Date.now() < fomoRuntimeRetryAt) return null;
   try {
     const db = await makePgDb(process.env.DATABASE_URL!);
-    const [{ createFomoRuntime }, { SHARED_RESEARCH_TENANT }] = await Promise.all([import("./fomo/runtime"), import("./fomo/service")]);
+    const { createFomoRuntime } = await import("./fomo/runtime");
     const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits });
     fomoRuntime = {
       db,
       service: rt.service,
       client: rt.client,
-      budget: rt.budget,
+      backgroundBudget: rt.backgroundBudget,
       // One deep job per leader pass, under the pass's own jobs latch, on the
       // live clock: a job runs for minutes and stamps its finish when it ends.
       runJobs: () => rt.runJobs(undefined, 1),
-      payer: SHARED_RESEARCH_TENANT,
     };
     // Children spawned before the runtime existed get their broker now.
     for (const [tenant, child] of children) attachFomoBroker(tenant, child.proc);
@@ -8479,7 +8494,7 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       writeChildFile: writeChildFomoFile,
       xConsent: xpostConsentLookup(rt.db),
       runJobs: rt.runJobs,
-      budget: fomoBudgetPort(rt.budget, rt.payer),
+      budget: fomoBudgetPort(rt.backgroundBudget, FOMO_FLEET_PAYER),
       log,
     });
     // THE SAME ROSTER AS THE ROOM'S AND X'S: only who this replica speaks for.

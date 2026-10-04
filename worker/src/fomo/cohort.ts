@@ -41,16 +41,50 @@
  * ── UNKNOWN IS NOT BAD, AND IT IS NOT GOOD EITHER ─────────────────────────
  *
  * Most candidates arrive with holes: no profile fetched, no thesis history,
- * no Merrymen measurement yet. A component without data gets NO weight (it is
- * never scored as zero and never filled in), and what was not measured lowers
- * CONFIDENCE instead. Confidence and the trade count together decide how far
- * the raw score is trusted:
+ * no Merrymen measurement yet. A component without data is never scored as
+ * zero and never filled in with a guess. `raw` is the weighted mean of what
+ * WAS measured; the design weight that was not measured sits at the prior.
+ * Then the trade count decides how far that is trusted:
  *
- *   score = (n_eff · raw + K · PRIOR) / (n_eff + K),  n_eff = trades × confidence
+ *   coverage = measured share of the design weight (P&L capped, below)
+ *   blended  = coverage · raw + (1 − coverage) · PRIOR
+ *   score    = (n · blended + K · PRIOR) / (n + K),   n = trades × completeness
  *
  * PRIOR sits below the admission floor on purpose. A trader we know nothing
  * about is not penalised for it, but nobody is admitted for being unknown:
- * admission takes evidence.
+ * admission takes evidence, and how much evidence is visible in coverage.
+ *
+ * WHY THE BLEND, AND NOT `n × coverage` (the first version). Shrinking only
+ * by `trades × coverage` let a big lifetime trade count swamp the prior: a
+ * leaderboard-only trader (24% of the design weight measured) on all four
+ * boards with 800 trades scored 0.92, above a fully measured good trader, and
+ * a trader on two of four boards cleared the floor. And a trader whose trade
+ * count is unknown sat at exactly the prior whatever the boards said. With
+ * the blend, a component nobody measured can neither lift nor sink a score,
+ * and measured evidence always outranks the same record with holes in it.
+ *
+ * ── CALIBRATION ON LEADERBOARD EVIDENCE ALONE ─────────────────────────────
+ *
+ * Before any enrichment the measured weight is consistency (0.22) plus the
+ * capped P&L rank (≈0.019): coverage ≈ 0.239. With all four windows read and
+ * the default floor 0.45 (retention 0.42), large n:
+ *
+ *   on 4 of 4 boards   blended ≈ 0.53–0.54   admitted from n ≈ 12–14 trades
+ *   on 3 of 4 boards   blended ≈ 0.47–0.48   admitted from n ≈ 35–50 trades
+ *   on 2 of 4 boards   blended ≈ 0.42–0.43   never on boards alone
+ *   on 1 of 4 boards   blended ≈ 0.36–0.37   never
+ *
+ * (n is the largest trade count any window states; the range is P&L rank 1
+ * to 150 of 150.) Small records still shrink: 4 of 4 boards on 5 trades is
+ * 0.43, under the floor.
+ *
+ * Presence across the 24h, 7d, 30d and all-time boards IS evidence of
+ * persistence, which is what consistency weighs; this is the moderate
+ * confidence it earns. Enrichment (measurePositions: chain share, holding
+ * period, exits, concentration, typical size) raises coverage to ≈ 0.68 and
+ * moves a score either way on what it finds. These are reasoned defaults, not
+ * fitted ones: no provider key was available. Recalibrate once real boards
+ * and positions have been read (cohort.test.ts pins the table above).
  *
  * ── WHY THE COHORT CHANGES SLOWLY ─────────────────────────────────────────
  *
@@ -76,7 +110,8 @@
 
 import { sanitizeText } from "../research/news";
 import { EVENT_GUARDS } from "./events";
-import type { CohortChange, CohortMember, CohortVersion, RankingWindow, TraderIdentity } from "./types";
+import { isRobinhoodToken } from "./identity";
+import type { CohortChange, CohortMember, CohortVersion, PositionRow, RankingWindow, TraderIdentity } from "./types";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -180,6 +215,12 @@ export interface CohortCandidate {
   profile?: CohortCandidateProfile | null;
   /** Reconstructed from the trader's history: share of activity on Robinhood Chain. */
   chainActivity?: { robinhoodShare: number | null; sampleSize: number | null } | null;
+  /**
+   * Reconstructed from closed positions (opened → closed). Used when the
+   * provider's own profile does not state an average hold; the profile wins
+   * when both exist.
+   */
+  holding?: { averageHoldSeconds: number | null; sampleSize: number | null } | null;
   /** Measured by Merrymen: coins bought before broad cohort participation, out of `sample` coins. */
   earlyDiscoveries?: { count: number; sample: number } | null;
   /** Reconstructed from positions: how closed and open positions ended up. */
@@ -229,6 +270,8 @@ export interface CandidateScore {
   components: Record<string, CohortComponent>;
   /** Weighted mean of the measured components before shrinkage; null when nothing was measured. */
   raw: number | null;
+  /** `raw` over the measured weight, the prior over the rest: what the record's size then shrinks. */
+  blended: number;
   /** Share of the design weight that was measured, times the caller's completeness. */
   confidence: number;
   evidence: CohortMember["evidence"];
@@ -341,6 +384,7 @@ export interface NormalizedCandidate {
   windows: Partial<Record<RankingWindow, CohortWindowStats>>;
   profile: CohortCandidateProfile | null;
   chainActivity: { robinhoodShare: number | null; sampleSize: number | null } | null;
+  holding: { averageHoldSeconds: number | null; sampleSize: number | null } | null;
   earlyDiscoveries: { count: number; sample: number } | null;
   exits: { closedWithGain: number | null; closedWithLoss: number | null; heldUnderwater: number | null } | null;
   concentration: { topPositionShare: number | null } | null;
@@ -379,6 +423,7 @@ function normalize(c: CohortCandidate, userId: string): NormalizedCandidate {
       }
     : null;
   const ca = c.chainActivity;
+  const ho = c.holding;
   const ed = c.earlyDiscoveries;
   const ex = c.exits;
   const tu = c.thesisUsefulness;
@@ -391,6 +436,7 @@ function normalize(c: CohortCandidate, userId: string): NormalizedCandidate {
     windows,
     profile,
     chainActivity: ca ? { robinhoodShare: share(ca.robinhoodShare), sampleSize: count(ca.sampleSize) } : null,
+    holding: ho ? { averageHoldSeconds: nonNegNum(ho.averageHoldSeconds), sampleSize: count(ho.sampleSize) } : null,
     earlyDiscoveries:
       edCount !== null && edSample !== null && edSample > 0 ? { count: Math.min(edCount, edSample), sample: edSample } : null,
     exits: ex ? { closedWithGain: count(ex.closedWithGain), closedWithLoss: count(ex.closedWithLoss), heldUnderwater: count(ex.heldUnderwater) } : null,
@@ -467,6 +513,7 @@ function mergeGroup(group: NormalizedCandidate[]): NormalizedCandidate {
     windows,
     profile,
     chainActivity: firstNonNull(g.map((c) => c.chainActivity)),
+    holding: firstNonNull(g.map((c) => c.holding)),
     earlyDiscoveries: firstNonNull(g.map((c) => c.earlyDiscoveries)),
     exits: firstNonNull(g.map((c) => c.exits)),
     concentration: firstNonNull(g.map((c) => c.concentration)),
@@ -553,6 +600,10 @@ function evidenceOf(c: NormalizedCandidate): CohortMember["evidence"] {
     reconstructed.robinhoodShare = c.chainActivity.robinhoodShare;
     reconstructed.chainSampleSize = c.chainActivity.sampleSize;
   }
+  if (c.holding) {
+    reconstructed.averageHoldSeconds = c.holding.averageHoldSeconds;
+    reconstructed.holdSampleSize = c.holding.sampleSize;
+  }
   if (c.exits) {
     reconstructed.closedWithGain = c.exits.closedWithGain;
     reconstructed.closedWithLoss = c.exits.closedWithLoss;
@@ -573,6 +624,19 @@ function evidenceOf(c: NormalizedCandidate): CohortMember["evidence"] {
 }
 
 type Measured = { value: number | null; note: string };
+
+/** The provider's stated average hold, else the one reconstructed from closed positions, with where it came from. */
+function holdOf(c: NormalizedCandidate): { hold: number | null; basis: string } {
+  const reported = c.profile?.averageHoldTimeSeconds ?? null;
+  if (reported !== null) return { hold: reported, basis: "" };
+  const rebuilt = c.holding?.averageHoldSeconds ?? null;
+  if (rebuilt === null) return { hold: null, basis: "" };
+  const n = c.holding?.sampleSize ?? null;
+  return { hold: rebuilt, basis: ` (reconstructed from ${n ?? "?"} closed position${n === 1 ? "" : "s"})` };
+}
+
+/** Components a leaderboard row alone can measure. */
+const BOARD_ONLY: ReadonlySet<ScoredComponentKey> = new Set<ScoredComponentKey>(["consistency", "pnlRank"]);
 
 function measure(c: NormalizedCandidate, opts: CohortScoringOptions, minHold: number): Record<ScoredComponentKey, Measured> {
   const { observed, present } = windowFacts(c, opts.observedWindows);
@@ -610,15 +674,15 @@ function measure(c: NormalizedCandidate, opts: CohortScoringOptions, minHold: nu
     ? { value: shrinkRate(clamp01(ed.count / ed.sample / 0.5), ed.sample), note: `${ed.count} of ${ed.sample} coins bought before broad participation` }
     : { value: null, note: "early discovery not yet measured" };
 
-  const hold = c.profile?.averageHoldTimeSeconds ?? null;
+  const { hold, basis } = holdOf(c);
   const holdingPeriod: Measured =
     hold === null
       ? { value: null, note: "average hold not reported" }
       : hold < minHold
-        ? { value: 0.15, note: `average hold ${humanDuration(hold)} is under the ${humanDuration(minHold)} followable minimum` }
+        ? { value: 0.15, note: `average hold ${humanDuration(hold)}${basis} is under the ${humanDuration(minHold)} followable minimum` }
         : {
             value: clamp01(0.5 + (0.5 * Math.log(hold / minHold)) / Math.log(Math.max(2, 86_400 / minHold))),
-            note: `average hold ${humanDuration(hold)} outlasts our latency`,
+            note: `average hold ${humanDuration(hold)}${basis} outlasts our latency`,
           };
 
   const ex = c.exits;
@@ -700,12 +764,14 @@ function scoreNormalized(c: NormalizedCandidate, opts: CohortScoringOptions): Ca
     raw = acc / total;
   }
 
-  const coverage = total; // design weights sum to 1
+  const coverage = clamp01(total); // design weights sum to 1
   const completeness = c.completeness ?? 1;
   const confidence = clamp01(coverage * completeness);
   const sampleSize = sampleSizeOf(c);
-  const nEff = (sampleSize ?? 0) * confidence;
-  const score = round4(raw === null ? SCORE_PRIOR : (nEff * raw + SHRINK_K * SCORE_PRIOR) / (nEff + SHRINK_K));
+  // The unmeasured share of the design weight sits at the prior (see the module note), then the record's size decides trust.
+  const blended = raw === null ? SCORE_PRIOR : coverage * raw + (1 - coverage) * SCORE_PRIOR;
+  const nEff = (sampleSize ?? 0) * completeness;
+  const score = round4((nEff * blended + SHRINK_K * SCORE_PRIOR) / (nEff + SHRINK_K));
 
   const components: Record<string, CohortComponent> = {};
   for (const k of keys) {
@@ -715,12 +781,12 @@ function scoreNormalized(c: NormalizedCandidate, opts: CohortScoringOptions): Ca
   components.completeness = {
     value: round4(confidence),
     weight: 0,
-    note: `${Math.round(coverage * 100)}% of the design weight measured, caller completeness ${Math.round(completeness * 100)}%; acts through shrinkage, not the raw score`,
+    note: `${Math.round(coverage * 100)}% of the design weight measured (the rest held at the prior), caller completeness ${Math.round(completeness * 100)}%`,
   };
 
   const isPrivate = c.profile?.private === true;
   const isRestricted = c.profile?.restricted === true;
-  const hold = c.profile?.averageHoldTimeSeconds ?? null;
+  const { hold } = holdOf(c);
   const holdOk = hold !== null && hold >= minHold;
   const followable = !isPrivate && !isRestricted && holdOk;
 
@@ -732,6 +798,9 @@ function scoreNormalized(c: NormalizedCandidate, opts: CohortScoringOptions): Ca
   if (sampleSize === null) reasons.push("flag:sample-unknown trade count unknown; score held at the prior");
   else if (sampleSize < SHRINK_K) reasons.push(`flag:small-sample ${sampleSize} trade(s); shrunk toward the prior`);
   if (pnlCapped) reasons.push(`flag:pnl-rank-capped P&L rank limited to ${Math.round(PNL_RANK_WEIGHT_CAP * 100)}% of the measured weight`);
+  if (raw !== null && keys.every((k) => m[k].value === null || BOARD_ONLY.has(k))) {
+    reasons.push(`flag:leaderboard-only scored from leaderboard windows alone; ${Math.round((1 - coverage) * 100)}% of the design weight held at the prior`);
+  }
   const byWeight = [...keys].sort((a, b) => COMPONENT_WEIGHTS[b] - COMPONENT_WEIGHTS[a] || cmpStr(a, b));
   for (const k of byWeight) {
     const v = m[k].value;
@@ -744,10 +813,20 @@ function scoreNormalized(c: NormalizedCandidate, opts: CohortScoringOptions): Ca
   const unknown = byWeight.filter((k) => m[k].value === null);
   if (unknown.length) reasons.push(`unknown:${unknown.join(",")} not measured; no weight, lower confidence`);
   reasons.push(
-    `score:${score.toFixed(4)} raw ${raw === null ? "none" : raw.toFixed(4)}, confidence ${confidence.toFixed(2)}, n ${sampleSize ?? "unknown"}`,
+    `score:${score.toFixed(4)} raw ${raw === null ? "none" : raw.toFixed(4)}, blended ${blended.toFixed(4)}, confidence ${confidence.toFixed(2)}, n ${sampleSize ?? "unknown"}`,
   );
 
-  return { score, reasons, followable, sampleSize, components, raw: raw === null ? null : round4(raw), confidence: round4(confidence), evidence: evidenceOf(c) };
+  return {
+    score,
+    reasons,
+    followable,
+    sampleSize,
+    components,
+    raw: raw === null ? null : round4(raw),
+    blended: round4(blended),
+    confidence: round4(confidence),
+    evidence: evidenceOf(c),
+  };
 }
 
 /**
@@ -758,6 +837,123 @@ function scoreNormalized(c: NormalizedCandidate, opts: CohortScoringOptions): Ca
 export function scoreCandidate(c: CohortCandidate, opts: CohortScoringOptions = {}): CandidateScore {
   const id = canonicalUserId(c?.trader?.userId) ?? "";
   return scoreNormalized(normalize(c, id), opts);
+}
+
+// ── Enrichment: measured inputs from a trader's positions ──────────────────
+
+/**
+ * What one read of a trader's positions supports. Each figure is null when
+ * the sample is too thin to say anything (see the minimums below); a null is
+ * "not measured", which the score treats as unknown, never as bad.
+ */
+export interface MeasuredEvidence {
+  /** Positions read (after dropping ones never bought). */
+  sampleSize: number;
+  chainActivity: { robinhoodShare: number | null; sampleSize: number | null } | null;
+  holding: { averageHoldSeconds: number | null; sampleSize: number | null } | null;
+  exits: { closedWithGain: number | null; closedWithLoss: number | null; heldUnderwater: number | null } | null;
+  concentration: { topPositionShare: number | null } | null;
+  executionCapacity: { medianPositionUsd: number | null } | null;
+}
+
+/** Closed positions with both ends known before an average hold is stated. */
+export const MIN_HOLD_SAMPLE = 3;
+/** Open positions with a known cost before the book's concentration is stated (one position is not a book). */
+export const MIN_BOOK_POSITIONS = 2;
+/** Positions with a known cost before a typical size is stated. */
+export const MIN_SIZE_SAMPLE = 3;
+
+function median(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/**
+ * Measure a trader from a page of their positions (provider `positions`,
+ * status all). PURE: rows in, figures out, no clock.
+ *
+ *   chain share     positions on Robinhood Chain (network 4663 as RETURNED)
+ *                   out of positions whose chain is known
+ *   holding period  mean opened → closed time over closed positions
+ *   exits           closed with realised gain / closed at a loss, and open
+ *                   positions sitting on an unrealised loss
+ *   concentration   the largest open position's share of the open book's cost
+ *   typical size    median cost basis, USD (research only, never sizing)
+ *
+ * A position that was only ever received (no buy, no entry price) is not a
+ * trading decision, so it is left out of all of them. Provider figures are
+ * read as data; a non-finite value is unknown.
+ */
+export function measurePositions(rows: readonly PositionRow[]): MeasuredEvidence {
+  const seen = new Set<string>();
+  const traded: PositionRow[] = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    if (r.tradeId) {
+      if (seen.has(r.tradeId)) continue;
+      seen.add(r.tradeId);
+    }
+    if ((r.boughtAmount ?? null) === 0 && r.avgEntryPrice === null) continue;
+    traded.push(r);
+  }
+
+  const chained = traded.filter((r) => r.token !== null);
+  const onRh = chained.filter((r) => isRobinhoodToken(r.token)).length;
+  const chainActivity = chained.length > 0 ? { robinhoodShare: onRh / chained.length, sampleSize: chained.length } : null;
+
+  const holds: number[] = [];
+  for (const r of traded) {
+    const o = num(r.openedAt);
+    const c = num(r.closedAt);
+    if (r.status === "closed" && o !== null && c !== null && c >= o) holds.push((c - o) / 1000);
+  }
+  const holding = { averageHoldSeconds: holds.length >= MIN_HOLD_SAMPLE ? holds.reduce((a, b) => a + b, 0) / holds.length : null, sampleSize: holds.length };
+
+  let gain = 0;
+  let loss = 0;
+  let under = 0;
+  let exitN = 0;
+  for (const r of traded) {
+    if (r.status === "closed") {
+      const p = num(r.realizedPnlUsd);
+      if (p === null) continue;
+      exitN++;
+      if (p > 0) gain++;
+      else if (p < 0) loss++;
+    } else if (r.status === "open") {
+      const u = num(r.unrealizedPnlUsd);
+      if (u === null) continue;
+      exitN++;
+      if (u < 0) under++;
+    }
+  }
+  const exits = exitN > 0 ? { closedWithGain: gain, closedWithLoss: loss, heldUnderwater: under } : null;
+
+  const openCosts = traded.filter((r) => r.status === "open").flatMap((r) => (num(r.costBasisUsd) ?? 0) > 0 ? [r.costBasisUsd as number] : []);
+  const bookTotal = openCosts.reduce((a, b) => a + b, 0);
+  const concentration = openCosts.length >= MIN_BOOK_POSITIONS && bookTotal > 0 ? { topPositionShare: Math.max(...openCosts) / bookTotal } : null;
+
+  const costs = traded.flatMap((r) => ((num(r.costBasisUsd) ?? 0) > 0 ? [r.costBasisUsd as number] : []));
+  const executionCapacity = costs.length >= MIN_SIZE_SAMPLE ? { medianPositionUsd: median(costs) } : null;
+
+  return { sampleSize: traded.length, chainActivity, holding, exits, concentration, executionCapacity };
+}
+
+/**
+ * A candidate with measured evidence folded in. Only the reconstructed inputs
+ * are replaced; leaderboard windows, the provider profile and anything else
+ * the candidate carries are kept as they are.
+ */
+export function withEvidence(c: CohortCandidate, e: Omit<MeasuredEvidence, "sampleSize">): CohortCandidate {
+  return {
+    ...c,
+    chainActivity: e.chainActivity ?? c.chainActivity ?? null,
+    holding: e.holding ?? c.holding ?? null,
+    exits: e.exits ?? c.exits ?? null,
+    concentration: e.concentration ?? c.concentration ?? null,
+    executionCapacity: e.executionCapacity ?? c.executionCapacity ?? null,
+  };
 }
 
 // ── Selection ─────────────────────────────────────────────────────────────

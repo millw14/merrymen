@@ -19,17 +19,28 @@
  *
  * WHO DOES WHAT, AND WHY IT IS SPLIT THAT WAY
  *
- *   every replica, for ITS roster   tenant routes, child files, publication
- *                                   drafts. A tenant is ours to act for only
- *                                   while this replica holds its lease
- *                                   healthily; the roster is exactly those.
- *   one replica (the fleet lease)   the stream, REST recovery, the cohort,
- *                                   the research queue, jobs, the outbox and
- *                                   retention. One stream per FLEET: the
- *                                   provider bills per connection and per
- *                                   recovery page, and N replicas each
- *                                   ingesting would spend N times for the
- *                                   same events.
+ *   every replica, for ITS roster   tenant routes, held sets, child files,
+ *                                   publication drafts. A tenant is ours to
+ *                                   act for only while this replica holds its
+ *                                   lease healthily; the roster is exactly
+ *                                   those.
+ *   one replica (the fleet lease)   the stream, REST recovery, the cohort and
+ *                                   its enrichment, the research queue, jobs,
+ *                                   the outbox and retention. One stream per
+ *                                   FLEET: the provider bills per connection
+ *                                   and per recovery page, and N replicas
+ *                                   each ingesting would spend N times for
+ *                                   the same events.
+ *
+ * THE SHARED STORE IS THE MEETING POINT, NOT THE LEADER'S MEMORY. The leader
+ * persists every event before routing it; each replica writes its roster's
+ * routes and held sets (fomo_tenant_routes, fomo_held_tokens); the leader's
+ * interest is read back from those (fleetInterest), and every replica builds
+ * its children's files from the same rows (signalsFor). So an owner whose
+ * child runs on a follower gets the cohort's coins and has its holdings
+ * protected exactly as one on the leader, and a lease handover loses nothing
+ * that was not already durable. An owner who leaves every roster stops being
+ * refreshed, and its route goes stale and routes nothing (ROUTE_STALE_MS).
  *
  * WHAT IT NEVER DOES. It places no order, builds no calldata, reads no key
  * (the stream URL arrives built; only its redacted form is ever logged),
@@ -44,16 +55,19 @@ import { sanitizeText } from "./research/news";
 import { postingAccounts } from "./xpost/store";
 import type { ChildFomoFile, ChildSignal, FomoAccess, FomoService } from "./fomo/contract";
 import {
+  canonicalUserId,
   COHORT_TARGET,
+  measurePositions,
   RANKING_WINDOWS,
+  scoreCandidate,
   selectCohort,
+  withEvidence,
   type CohortCandidate,
   type CohortWindowStats,
 } from "./fomo/cohort";
 import { isRobinhoodToken, robinhoodChain, tokenFromKey, tokenIdentity } from "./fomo/identity";
 import {
   createIngestor,
-  createTenantRouter,
   higherPriority,
   type IngestConfig,
   type IngestHealth,
@@ -63,7 +77,6 @@ import {
   type NormalizedFrame,
   type RecoverPort,
   type ResearchTask,
-  type RoutedItem,
 } from "./fomo/ingest";
 import { lensRefs, renderTraderFlowLens } from "./fomo/lens";
 import {
@@ -75,6 +88,7 @@ import {
   type AlertsQuery,
   type FomoClient,
   type LeaderboardPage,
+  type ProviderFailure,
 } from "./fomo/provider";
 import {
   admitDraft,
@@ -105,6 +119,8 @@ import {
   fleetCount,
   FOMO_LIMITS,
   getCheckpoint,
+  heldTokensFleet,
+  heldTokensFor,
   insertCohortVersion,
   insertEvents,
   insertPublicationDraft,
@@ -118,6 +134,8 @@ import {
   publicationByIdForPass,
   publicationsByState,
   publicationsInState,
+  putTraderEvidence,
+  recentActiveTokens,
   recentAssessments,
   recentPublications,
   recordGap,
@@ -125,18 +143,22 @@ import {
   RESEARCH_PRIORITY,
   routedTenants,
   setCheckpoint,
+  setHeldTokens,
   setTenantRoute,
   subjectPublicationCount,
   tenantKey,
   tenantsWatching,
+  traderEvidence,
   transitionPublication,
   unprocessedEvents,
   usageDay,
   watchedTokenKeys,
+  type ActiveToken,
   type FomoDialect,
   type FomoPublication,
   type StoredDossier,
   type StoredTraderEvent,
+  type StoredTraderEvidence,
 } from "./fomo/store";
 import { AlertStream, type ClockPort, type SocketLike, type TimerPort } from "./fomo/stream";
 import type {
@@ -160,6 +182,13 @@ const HOUR = 60 * MIN;
 export const FOMO_FLEET_LEASE = "0xfomo-fleet-ingest" as const;
 /** The stream name checkpoints, gaps and dead letters are filed under. */
 export const FOMO_STREAM = "alerts";
+/**
+ * Who the fleet's own maintenance reads are charged to: stream recovery, the
+ * cohort's leaderboards and its enrichment. Nobody's tenant, and not the
+ * research queue's payer (fomo/service.ts SHARED_RESEARCH_TENANT), so each
+ * has its own counters and the research cap there leaves this one room.
+ */
+export const FOMO_FLEET_PAYER = "fomo-fleet-maintenance" as const;
 
 /** The operator's knobs, with their defaults. */
 export interface FomoPassKnobs {
@@ -174,6 +203,14 @@ export interface FomoPassKnobs {
   ingestEnabled: boolean;
   /** Draft publications from new assessments (they stay blocked by policy; nothing is sent). */
   publishDrafts: boolean;
+  /**
+   * Traders whose positions are read per cohort refresh (250 credits each,
+   * discovery class) to measure what a leaderboard row cannot. Incumbents
+   * first, then the strongest challengers.
+   */
+  enrichPerRefresh: number;
+  /** A trader's measured evidence is reused this long before it is read again. */
+  traderEvidenceTtlMs: number;
 }
 
 export const FOMO_PASS_DEFAULTS: Readonly<FomoPassKnobs> = Object.freeze({
@@ -183,6 +220,8 @@ export const FOMO_PASS_DEFAULTS: Readonly<FomoPassKnobs> = Object.freeze({
   childFileEveryMs: MIN,
   ingestEnabled: true,
   publishDrafts: true,
+  enrichPerRefresh: 20,
+  traderEvidenceTtlMs: 3 * 24 * HOUR,
 });
 
 /** Signals one child file may carry (the contract's bound). */
@@ -201,6 +240,27 @@ export const SIGNAL_WINDOW_MS = 30 * MIN;
 const ACCESS_TTL_MS = MIN;
 /** An unchanged route is re-written this often (a change is written at once). */
 const ROUTE_REFRESH_MS = 5 * MIN;
+/**
+ * A route nobody has re-written for this long routes nothing (store
+ * routedTenants freshSinceMs). Every replica rewrites its healthy-lease
+ * roster's routes every ROUTE_REFRESH_MS, so twelve missed refreshes means no
+ * replica acts for that owner any more: grant revoked, killed or expired. The
+ * retire paths themselves are left untouched; staleness is what retires the
+ * route, on every replica alike, including after a crash.
+ */
+export const ROUTE_STALE_MS = HOUR;
+/** An unchanged held set is re-written this often, so its freshness says a replica still reads that book. */
+const HELD_REWRITE_MS = 5 * MIN;
+/** A held set no replica has re-written for this long is not used for routing (that replica is gone). */
+export const HELD_FRESH_MS = 30 * MIN;
+/** Coins with recent cohort activity considered per pass (shared by every tenant's file). */
+const COHORT_SIGNAL_SCAN = 60;
+/** Coins one owner's own dependency traders touched, per file. */
+const DEPENDENCY_SIGNAL_SCAN = 20;
+/** Robinhood Chain coins with a recent thesis from anyone, per pass: open-ended discovery, so few. */
+const THESIS_SIGNAL_SCAN = 10;
+/** Robinhood Chain token keys, for the thesis read's prefix. */
+const ROBINHOOD_KEY_PREFIX = "eip155:4663:";
 /** A replica that is not the leader asks for the lease this often. */
 const LEASE_RETRY_MS = MIN;
 /** The leader's interest snapshot (cohort, deps, watches, holdings) is rebuilt this often. */
@@ -220,10 +280,6 @@ const REFRESH_DEADLINE_MS = 90 * SEC;
 const MAX_WATCHED_TOKENS = 500;
 /** Events read per coin before the cohort filter (newest first). */
 const TRIGGER_SCAN = 200;
-/** Routed coins remembered per tenant between file writes. */
-const MAX_MEMORY_PER_TENANT = 200;
-/** A per-tenant routing queue's bound (protection items are kept past it; see createTenantRouter). */
-const ROUTER_MAX_PER_TENANT = 500;
 /** Assessments looked at per tenant per draft pass. */
 const ASSESSMENTS_PER_PASS = 10;
 /** With monitoring on, the shared feed counts as fresh while its newest event is this recent. */
@@ -234,6 +290,19 @@ const LOG_EVERY_MS = 20 * MIN;
 const LEADERBOARD_LIMIT = 150;
 /** REST recovery page size: the provider's documented maximum for /v2/alerts. */
 const RECOVERY_PAGE_LIMIT = 100;
+/** Positions read per trader for enrichment: one page, the provider's documented maximum. */
+const ENRICH_POSITIONS_LIMIT = 100;
+/** Failures after which no further trader is read this refresh: the provider (or our standing with it) is the problem. */
+const ENRICH_STOP_ON: ReadonlySet<ProviderFailure> = new Set<ProviderFailure>([
+  "no-key",
+  "unauthorized",
+  "credits-exhausted",
+  "entitlement",
+  "rate-limited",
+  "server-error",
+  "unreachable",
+  "timeout",
+]);
 
 // ── the dependencies ────────────────────────────────────────────────────────
 
@@ -253,6 +322,11 @@ export interface FomoLeaseHandle {
  * settled with what was billed. Null is a refusal. Optional because the
  * runtime may not expose one; without it the pass records usage and relies on
  * its own cadence (one cohort refresh per six hours, recoveries spaced 30 s).
+ *
+ * THE FLEET'S BUDGET, NOT AN OWNER'S. orchestrator.ts backs this with the
+ * runtime's background budget charged as FOMO_FLEET_PAYER: the shared pool and
+ * its class shares bind, one owner's hourly and daily caps do not (they would
+ * throttle fleet maintenance by a cap meant for one person's chat).
  */
 export interface FomoBudgetPort {
   charge(req: { priority: RetrievalPriority; credits: number; now: number }): Promise<{
@@ -277,7 +351,13 @@ export interface FomoPassDeps {
   lease: { acquire(): Promise<FomoLeaseHandle | null> };
   /** A tenant's Fomo permissions from TRUSTED settings. A throw skips that tenant this pass. */
   access(tenant: string): Promise<FomoAccess>;
-  /** Coins this replica's tenants hold: tokenKey → tenants (the orchestrator's mirror). */
+  /**
+   * Coins this replica's tenants hold: tokenKey → tenants (the orchestrator's
+   * mirror plus the children's IPC reports). The pass writes each roster
+   * tenant's set to the shared store (fomo_held_tokens), which is what the
+   * ingestion leader and the child files read, so a holding on any replica
+   * protects the same way.
+   */
   heldTokens(): Map<string, string[]>;
   /**
    * Whether this replica has read the tenant's holdings at all. A draft says
@@ -308,11 +388,17 @@ export interface FomoPassHealth {
   deadLetters: number | null;
   /** Stream frames waiting to be persisted. */
   queueDepth: number;
-  /** Routed items not yet folded into a child file (this process's routing queues). */
-  routedPending: number;
+  /**
+   * Events the leader's ingestion found of interest to someone since this
+   * process started. Child files no longer wait on an in-process queue: every
+   * replica builds them from the shared store (see signalsFor).
+   */
+  routed: number;
   lastCohortAt: number | null;
   cohortSize: number | null;
   cohortVersion: number | null;
+  /** A due cohort refresh is waiting on the discovery budget; discovery research waits with it. */
+  cohortWaitingOnBudget: boolean;
   research: { done: number; retried: number; failed: number };
   childFilesWritten: number;
   drafts: { admitted: number; duplicate: number };
@@ -463,7 +549,11 @@ export function recoverVia(client: FomoClient, o: { db: Db; clock: ClockPort; bu
     let grant: Awaited<ReturnType<FomoBudgetPort["charge"]>> = null;
     if (o.budget) {
       try {
-        grant = await o.budget.charge({ priority: "interactive", credits: expectedCredits("alerts"), now });
+        // THE PROTECTION CLASS. A gap in the stream is a gap in what the fleet
+        // knows about the traders behind held coins; recovery is what closes
+        // it, so it draws on the reserve no discovery or chat read can touch
+        // (and background research is capped short of the pool besides).
+        grant = await o.budget.charge({ priority: "position-protection", credits: expectedCredits("alerts"), now });
       } catch {
         // The budget's own store is unreachable: no charge, so no call. A
         // retryable gap and the ingestor's backoff take it from here.
@@ -509,8 +599,9 @@ export function recoverVia(client: FomoClient, o: { db: Db; clock: ClockPort; bu
 /**
  * Leaderboard pages to cohort candidates, one per trader with every window it
  * appeared in. Nothing is invented: a trader's profile, exits and the rest are
- * unmeasured (null) until other modules measure them, which keeps scores near
- * the prior and the cohort honestly short of its target rather than padded.
+ * unmeasured (null) here; the cohort refresh's enrichment (positions, for a
+ * bounded few) measures some of them, and the rest stay unknown, which the
+ * score holds at the prior. A short cohort says why rather than being padded.
  *
  * lastActiveAt is the one inference, and it is a FLOOR: a trader with trades on
  * the 24h board was active at some point in the last 24 hours, so "at least as
@@ -744,6 +835,57 @@ export function mergeHeldTokens(...maps: ReadonlyArray<ReadonlyMap<string, reado
   return out;
 }
 
+/**
+ * WHO CARES ABOUT WHAT, READ FROM THE SHARED STORE: the ingestion leader's
+ * interest snapshot. Everything in it is durable and fleet-wide, so a tenant
+ * whose child runs on another replica is interested exactly as one here is:
+ *
+ *   routable      owners with data access and monitoring or follow, whose
+ *                 route some replica refreshed within ROUTE_STALE_MS. A
+ *                 departed owner's stale row routes nothing.
+ *   cohort        the latest cohort version's members
+ *   dependencies  routable owners' unexpired position dependencies
+ *   watched       routable owners' unexpired watches (≤ MAX_WATCHED_TOKENS)
+ *   held          fomo_held_tokens rows any replica wrote within
+ *                 HELD_FRESH_MS, plus `local` (this replica's own book, in
+ *                 case its write of this pass has not landed), for routable
+ *                 owners only
+ *
+ * For the leader's routing and research priority ONLY. A child's file reads
+ * its own owner's rows, never this snapshot.
+ */
+export async function fleetInterest(
+  db: Db,
+  now: number,
+  cohort: CohortVersion | null,
+  local: ReadonlyMap<string, readonly string[]> = new Map(),
+): Promise<InterestSnapshot> {
+  const fresh = { freshSinceMs: now - ROUTE_STALE_MS };
+  // ONLY OPTED-IN TENANTS ARE INTERESTED IN ANYTHING. routedTenants already
+  // requires data access; monitoring or follow decides whether the shared
+  // feed routes to a tenant at all (the settings' own words), so a holding or
+  // a watch of a tenant with neither is not interest.
+  const routable = new Set([...(await routedTenants(db, "monitoring", fresh)), ...(await routedTenants(db, "follow", fresh))]);
+  const dependencies = new Set((await activePositionDeps(db, now)).filter((d) => routable.has(d.tenant)).map((d) => d.userId));
+  const watchedTokens = new Map<string, string[]>();
+  for (const key of await watchedTokenKeys(db, now, MAX_WATCHED_TOKENS)) {
+    const who = (await tenantsWatching(db, key, now)).filter((t) => routable.has(t));
+    if (who.length > 0) watchedTokens.set(key, who);
+  }
+  const heldTokens = new Map<string, string[]>();
+  for (const [key, tenants] of mergeHeldTokens(await heldTokensFleet(db, now - HELD_FRESH_MS), local)) {
+    const who = tenants.filter((t) => routable.has(t)).sort();
+    if (who.length > 0) heldTokens.set(key, who);
+  }
+  return {
+    cohort: new Set((cohort?.members ?? []).map((m) => m.trader.userId)),
+    dependencies,
+    watchedTokens,
+    heldTokens,
+    monitoringTenants: [...routable].sort(),
+  };
+}
+
 // ── the pass ────────────────────────────────────────────────────────────────
 
 /**
@@ -758,14 +900,6 @@ function neverSend(onCall: () => void): PublicationSender {
     onCall();
     return { ok: false, retryable: false, reason: "delivery-disabled" };
   };
-}
-
-interface SignalMemo {
-  priority: RetrievalPriority;
-  reasons: Set<ChildSignal["reasons"][number]>;
-  firstSeenAt: number;
-  lastSeenAt: number;
-  label: TokenLabel | null;
 }
 
 interface Candidate {
@@ -792,7 +926,6 @@ const RESEARCH_BACK_OFF: ReadonlySet<ResultStatus> = new Set<ResultStatus>(["bud
 export function makeFomoPass(deps: FomoPassDeps): FomoPass {
   const knobs: FomoPassKnobs = { ...FOMO_PASS_DEFAULTS, ...(deps.knobs ?? {}) };
   const { db, clock, timers } = deps;
-  const router = createTenantRouter({ maxPerTenant: ROUTER_MAX_PER_TENANT });
   const outbox = publicationStoreOver(db);
   const pending = new Set<Promise<unknown>>();
 
@@ -809,18 +942,27 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
 
   let cohortCache: { at: number; cohort: CohortVersion | null } | null = null;
   let cohortRetryAt = Number.NEGATIVE_INFINITY;
+  /**
+   * A due cohort refresh the budget refused. While it waits, the research
+   * queue serves only protection and interactive items, so discovery-priority
+   * dossier refreshes cannot keep spending the discovery share the cohort
+   * needs (the cohort is first in line again the moment the day's counters
+   * reset, because fleetWork runs it before the queue).
+   */
+  let cohortWaitingOnBudget = false;
   let lastPruneAt = Number.NEGATIVE_INFINITY;
   let lastDraftAt = Number.NEGATIVE_INFINITY;
 
   const accessCache = new Map<string, { at: number; access: FomoAccess }>();
   const routeWritten = new Map<string, { at: number; key: string }>();
   const fileWritten = new Map<string, { at: number; key: string }>();
-  const memory = new Map<string, Map<string, SignalMemo>>();
+  const heldWritten = new Map<string, { at: number; key: string }>();
   /** When each coin first went into a tenant's file: the honest "first seen" of a holding or watch with no cohort activity. */
   const firstTracked = new Map<string, Map<string, number>>();
   const assessmentSeen = new Map<string, number>();
 
   const counters = {
+    routed: 0,
     researchDone: 0,
     researchRetried: 0,
     researchFailed: 0,
@@ -894,6 +1036,34 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     }
   };
 
+  /**
+   * THIS REPLICA'S ROSTER'S BOOKS, TO THE SHARED STORE (fomo_held_tokens), so
+   * the ingestion leader — whichever replica that is — protects them, and
+   * every replica builds the same file for its own roster.
+   *
+   * Only an owner who is monitored (data access and monitoring or follow) has
+   * a set kept at all; turning that off clears it. An UNREAD book is not an
+   * empty one: nothing is written for an owner whose holdings this replica
+   * has not read and who has reported none. Unchanged sets are re-written
+   * every HELD_REWRITE_MS so their age says a replica still reads that book.
+   */
+  const syncHeld = async (roster: readonly string[], now: number): Promise<void> => {
+    const local = deps.heldTokens();
+    for (const tenant of roster) {
+      const access = await accessFor(tenant, now);
+      if (!access) continue;
+      const monitored = access.dataAccess && (access.monitoring || access.follow);
+      const mine = [...local].filter(([key, ts]) => ts.map(tenantKey).includes(tenant) && tokenFromKey(key)?.key === key).map(([key]) => key);
+      if (monitored && mine.length === 0 && !deps.holdingsKnown?.(tenant)) continue;
+      const keys = monitored ? [...new Set(mine)].sort().slice(0, FOMO_LIMITS.heldTokensPerTenant) : [];
+      const key = keys.join(",");
+      const prior = heldWritten.get(tenant);
+      if (prior && prior.key === key && (key === "" || now - prior.at < HELD_REWRITE_MS)) continue;
+      // Refused only when a newer set is stored (a child's report landed after this pass began); the next pass writes again.
+      if (await setHeldTokens(db, tenant, keys, now)) heldWritten.set(tenant, { at: now, key });
+    }
+  };
+
   // ── cohort (cached read; leader refresh) ──
 
   const cohortNow = async (now: number, force = false): Promise<CohortVersion | null> => {
@@ -903,21 +1073,127 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     return cohortCache.cohort;
   };
 
+  /**
+   * MEASURE WHAT A LEADERBOARD ROW CANNOT, FOR A BOUNDED FEW. A board row says
+   * where a trader ranked; it says nothing of which chain they trade, how long
+   * they hold, how they exit or how they size, so on boards alone a score can
+   * only move a little off the prior (cohort.ts CALIBRATION). One positions
+   * read (250 credits, discovery class, the fleet's budget) measures those for
+   * one trader, and the result is kept in fomo_trader_evidence and reused
+   * until it is traderEvidenceTtlMs old, so a refresh re-reads only what went
+   * stale. At most enrichPerRefresh reads per refresh: incumbents first (they
+   * hold seats on evidence that should be checked), then challengers by their
+   * board-only score. A budget refusal or a provider-level failure ends the
+   * round; what was measured is still used. Nothing is invented for a trader
+   * whose positions were not read: they stay board-only.
+   */
+  const enrich = async (
+    candidates: CohortCandidate[],
+    prev: CohortVersion | null,
+    scoring: { windowPopulation: Partial<Record<RankingWindow, number>>; observedWindows: RankingWindow[] },
+    now: number,
+  ): Promise<{ candidates: CohortCandidate[]; read: number; measured: number; stoppedBy: string | null }> => {
+    const client = deps.client;
+    const ids = candidates.map((c) => canonicalUserId(c.trader.userId));
+    let stored = new Map<string, StoredTraderEvidence>();
+    try {
+      stored = await traderEvidence(db, ids.filter((x): x is string => x !== null));
+    } catch (e) {
+      noteFailure("cohort-evidence", e);
+    }
+    const fresh = (e: StoredTraderEvidence | undefined): e is StoredTraderEvidence => !!e && e.measuredAtMs >= now - knobs.traderEvidenceTtlMs;
+    const seated = new Set((prev?.members ?? []).map((m) => canonicalUserId(m.trader.userId)));
+    const due = candidates
+      .flatMap((c, i) => {
+        const id = ids[i];
+        return id && !fresh(stored.get(id)) ? [{ id, seated: seated.has(id), board: scoreCandidate(c, scoring).score }] : [];
+      })
+      .sort((a, b) => Number(b.seated) - Number(a.seated) || b.board - a.board || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, Math.max(0, Math.floor(knobs.enrichPerRefresh)));
+    let read = 0;
+    let stoppedBy: string | null = null;
+    for (const d of due) {
+      if (!client || stopped || !lease || (lease.healthy && !lease.healthy())) {
+        stoppedBy = "leadership";
+        break;
+      }
+      const at = clock.now();
+      const grant = deps.budget ? await deps.budget.charge({ priority: "discovery", credits: expectedCredits("positions"), now: at }) : null;
+      if (deps.budget && !grant) {
+        stoppedBy = "budget";
+        break;
+      }
+      let r: Awaited<ReturnType<FomoClient["positions"]>>;
+      try {
+        r = await client.positions(d.id, { status: "all", limit: ENRICH_POSITIONS_LIMIT });
+      } catch (e) {
+        // The client returns failures; a throw is a bug or an abort. Billed or not is unknown: keep the estimate.
+        await grant?.settle(null);
+        throw e;
+      }
+      if (r.meta.attempts === 0) await grant?.refund();
+      else {
+        await grant?.settle(r.meta.creditsCost);
+        try {
+          await recordUsage(db, usageDay(at), "cohort-enrichment", 1, r.meta.creditsCost);
+        } catch (e) {
+          noteFailure("usage", e);
+        }
+      }
+      if (!r.ok && ENRICH_STOP_ON.has(r.failure)) {
+        stoppedBy = r.failure;
+        break;
+      }
+      // A trader the provider has no positions for is measured as "nothing to
+      // measure" and kept for the TTL like any reading, so the same unknown is
+      // not re-bought every refresh. Any other failure is simply not a reading.
+      if (!r.ok && r.failure !== "not-found") continue;
+      read++;
+      const m = measurePositions(r.ok ? r.data.rows : []);
+      const ev: StoredTraderEvidence = { userId: d.id, measuredAtMs: at, ...m };
+      try {
+        await putTraderEvidence(db, ev);
+      } catch (e) {
+        noteFailure("cohort-evidence", e);
+      }
+      stored.set(d.id, ev);
+    }
+    let measured = 0;
+    const out = candidates.map((c, i) => {
+      const e = ids[i] ? stored.get(ids[i]!) : undefined;
+      if (!fresh(e)) return c;
+      measured++;
+      return withEvidence(c, e);
+    });
+    return { candidates: out, read, measured, stoppedBy };
+  };
+
   const refreshCohort = async (now: number): Promise<void> => {
     const client = deps.client;
-    if (!configured() || !client || now < cohortRetryAt) return;
+    if (!configured() || !client) {
+      cohortWaitingOnBudget = false;
+      return;
+    }
+    if (now < cohortRetryAt) return;
     const prev = await cohortNow(now, true);
     // DUE BY THE DURABLE VERSION'S AGE, not by an in-memory timer: a restart
     // or a lease handover to another replica must not re-spend 1,000 credits
     // on a cohort that is an hour old.
-    if (prev && now - prev.createdAt < knobs.cohortRefreshMs) return;
+    if (prev && now - prev.createdAt < knobs.cohortRefreshMs) {
+      cohortWaitingOnBudget = false;
+      return;
+    }
     const credits = RANKING_WINDOWS.length * expectedCredits("leaderboard");
     const grant = deps.budget ? await deps.budget.charge({ priority: "discovery", credits, now }) : null;
     if (deps.budget && !grant) {
       cohortRetryAt = now + COHORT_RETRY_MS;
-      deps.log("fomo: cohort refresh skipped — the discovery budget refused it; trying again in 30 min");
+      if (!cohortWaitingOnBudget) {
+        deps.log("fomo: cohort refresh skipped — the discovery budget refused it; discovery research waits for it, trying again in 30 min");
+      }
+      cohortWaitingOnBudget = true;
       return;
     }
+    cohortWaitingOnBudget = false;
     const pages: Partial<Record<RankingWindow, LeaderboardPage>> = {};
     const population: Partial<Record<RankingWindow, number>> = {};
     const failures: string[] = [];
@@ -960,9 +1236,17 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       deps.log(`fomo: cohort refresh read nothing (${scrubLogText(failures.join(", "), 120)}); keeping the current cohort and trying again in 30 min`);
       return;
     }
-    const candidates = cohortCandidatesFrom(pages, now);
-    const next = selectCohort(prev, candidates, { now, target: knobs.cohortTarget, windowPopulation: population, observedWindows: observed });
-    const inserted = await insertCohortVersion(db, next, { windows: observed, failedWindows: failures.length, candidates: candidates.length });
+    const scoring = { windowPopulation: population, observedWindows: observed };
+    const enriched = await enrich(cohortCandidatesFrom(pages, now), prev, scoring, now);
+    const candidates = enriched.candidates;
+    const next = selectCohort(prev, candidates, { now, target: knobs.cohortTarget, ...scoring });
+    const inserted = await insertCohortVersion(db, next, {
+      windows: observed,
+      failedWindows: failures.length,
+      candidates: candidates.length,
+      enrichedThisRefresh: enriched.read,
+      withMeasuredEvidence: enriched.measured,
+    });
     cohortCache = null;
     let added = 0;
     let removed = 0;
@@ -975,7 +1259,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     // COUNTS ONLY. cohortDiff names handles; a log line names nobody.
     deps.log(
       `fomo: cohort v${next.version} ${inserted ? "built" : "already built elsewhere"} — ${next.members.length}/${next.target} members ` +
-        `(+${added} −${removed} =${retained}) from ${candidates.length} candidates over ${observed.length}/${RANKING_WINDOWS.length} windows` +
+        `(+${added} −${removed} =${retained}) from ${candidates.length} candidates over ${observed.length}/${RANKING_WINDOWS.length} windows, ` +
+        `${enriched.measured} with measured evidence (${enriched.read} read this refresh${enriched.stoppedBy ? `, stopped: ${enriched.stoppedBy}` : ""})` +
         (next.shortfallReason ? `; short of target: ${scrubLogText(next.shortfallReason, 160)}` : ""),
     );
   };
@@ -984,32 +1269,10 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
 
   const refreshInterest = async (now: number, force = false): Promise<void> => {
     if (!force && now - interestAt < INTEREST_REFRESH_MS) return;
-    // ONLY OPTED-IN TENANTS ARE INTERESTED IN ANYTHING. routedTenants already
-    // requires data access; monitoring or follow decides whether the shared
-    // feed routes to a tenant at all (the settings' own words), so a holding or
-    // a watch of a tenant with neither is not interest.
-    const routable = new Set([...(await routedTenants(db, "monitoring")), ...(await routedTenants(db, "follow"))]);
-    const cohort = await cohortNow(now);
-    const dependencies = new Set(
-      (await activePositionDeps(db, now)).filter((d) => routable.has(d.tenant)).map((d) => d.userId),
-    );
-    const watchedTokens = new Map<string, string[]>();
-    for (const key of await watchedTokenKeys(db, now, MAX_WATCHED_TOKENS)) {
-      const who = (await tenantsWatching(db, key, now)).filter((t) => routable.has(t));
-      if (who.length > 0) watchedTokens.set(key, who);
-    }
-    const heldTokens = new Map<string, string[]>();
-    for (const [key, tenants] of deps.heldTokens()) {
-      const who = tenants.map(tenantKey).filter((t) => routable.has(t));
-      if (who.length > 0) heldTokens.set(key, who);
-    }
-    interest = {
-      cohort: new Set((cohort?.members ?? []).map((m) => m.trader.userId)),
-      dependencies,
-      watchedTokens,
-      heldTokens,
-      monitoringTenants: [...routable].sort(),
-    };
+    // From the shared store, so an owner on another replica is interested
+    // exactly as one here is (fleetInterest); this replica's own book is
+    // folded in too in case this pass's write has not landed yet.
+    interest = await fleetInterest(db, now, await cohortNow(now), deps.heldTokens());
     interestAt = now;
   };
 
@@ -1054,7 +1317,13 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       store: ingestStoreOver(db, clock),
       recover: recoverVia(deps.client!, { db, clock, budget: deps.budget, onUsageError: (e) => noteFailure("usage", e) }),
       interest: () => interest,
-      route: (tenant, item) => router.route(tenant, item),
+      // Nothing is queued per tenant in this process: every replica builds its
+      // children's files from the shared store, where the ingestor has already
+      // persisted the event. Routing still decides research priority (the
+      // tasks below); here it is only counted.
+      route: () => {
+        counters.routed++;
+      },
       onResearchTask: enqueueTask,
       clock,
       timers,
@@ -1125,8 +1394,11 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     // Without a key every refresh would answer not-configured and burn the
     // item's attempts; the queue waits for a key instead.
     if (!configured()) return;
+    // COHORT FIRST in the discovery class: while a due refresh waits on the
+    // budget, discovery-priority items stay queued (untouched, attempts kept).
+    const floor = cohortWaitingOnBudget ? { minPriority: RESEARCH_PRIORITY.interactive } : {};
     for (let i = 0; i < knobs.maxDossierRefreshesPerPass; i++) {
-      const claim = await claimNextResearch(db, clock.now(), RESEARCH_LEASE_MS);
+      const claim = await claimNextResearch(db, clock.now(), RESEARCH_LEASE_MS, floor);
       if (!claim) return;
       const token = tokenFromKey(claim.tokenKey);
       if (!token) {
@@ -1279,6 +1551,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     lastEventAt: number | null;
     fresh: boolean;
     tokens: Map<string, Promise<{ events: StoredTraderEvent[]; dossier: CoinDossier | null }>>;
+    cohortActive: Promise<ActiveToken[]> | null;
+    thesisActive: Promise<ActiveToken[]> | null;
   }
 
   const tokenData = (ctx: FileContext, tokenKey: string) => {
@@ -1312,44 +1586,39 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     return { state: "watching-condition", detail: "Monitoring is on; the shared trader feed has delivered nothing in the last ten minutes.", ...base };
   };
 
-  const foldRouted = (tenant: string, now: number, keep: boolean): Map<string, SignalMemo> => {
-    let mem = memory.get(tenant);
-    if (!mem) {
-      mem = new Map();
-      memory.set(tenant, mem);
-    }
-    // Always drained: a tenant that turned monitoring off must not find a
-    // backlog the day it turns it back on.
-    const items: RoutedItem[] = router.take(tenant);
-    if (keep) {
-      for (const item of items) {
-        if (item.kind !== "event" || !item.tokenKey) continue;
-        const prior = mem.get(item.tokenKey);
-        const seenAt = item.event?.observedAt ?? item.routedAt;
-        const reasons = new Set(prior?.reasons ?? []);
-        for (const r of item.reasons) reasons.add(r);
-        mem.set(item.tokenKey, {
-          priority: prior ? higherPriority(prior.priority, item.priority) : item.priority,
-          reasons,
-          firstSeenAt: prior ? Math.min(prior.firstSeenAt, seenAt) : seenAt,
-          lastSeenAt: prior ? Math.max(prior.lastSeenAt, item.routedAt) : item.routedAt,
-          label: prior?.label ?? item.event?.tokenLabel ?? null,
-        });
-      }
-    } else {
-      mem.clear();
-    }
-    for (const [key, m] of mem) if (m.lastSeenAt < now - SIGNAL_WINDOW_MS) mem.delete(key);
-    if (mem.size > MAX_MEMORY_PER_TENANT) {
-      const order = [...mem.entries()].sort((x, y) => PRIORITY_ORDER[x[1].priority] - PRIORITY_ORDER[y[1].priority] || y[1].lastSeenAt - x[1].lastSeenAt);
-      for (const [key] of order.slice(MAX_MEMORY_PER_TENANT)) mem.delete(key);
-    }
-    return mem;
+  /** The cohort's recent coins: PUBLIC activity, read once per pass and shared by every owner's file. */
+  const cohortActivity = (ctx: FileContext): Promise<ActiveToken[]> => {
+    ctx.cohortActive ??= (async () => {
+      const ids = (ctx.cohort?.members ?? []).map((m) => m.trader.userId);
+      return ids.length === 0 ? [] : recentActiveTokens(db, ctx.now - SIGNAL_WINDOW_MS, COHORT_SIGNAL_SCAN, { userIds: ids });
+    })();
+    return ctx.cohortActive;
   };
 
+  /** Robinhood Chain coins anyone wrote a thesis on lately: public, open-ended discovery, bounded small. */
+  const thesisActivity = (ctx: FileContext): Promise<ActiveToken[]> => {
+    ctx.thesisActive ??= recentActiveTokens(db, ctx.now - SIGNAL_WINDOW_MS, THESIS_SIGNAL_SCAN, { kinds: ["thesis"], tokenKeyPrefix: ROBINHOOD_KEY_PREFIX });
+    return ctx.thesisActive;
+  };
+
+  /**
+   * ONE OWNER'S SIGNALS, FROM THE SHARED STORE, the same on whichever replica
+   * holds the owner's lease:
+   *
+   *   cohort            coins the cohort touched in the breadth window (public)
+   *   robinhood-thesis  Robinhood Chain coins with a fresh thesis (public)
+   *   dependency        coins THIS owner's own dependency traders touched
+   *   held              THIS owner's held set (fomo_held_tokens, plus this
+   *                     replica's own reading of the book)
+   *   watched           THIS owner's unexpired watches
+   *
+   * Nothing of any other owner's: no other owner's holdings, watches or
+   * dependencies reach the file, as a coin, a reason or a trigger. A coin
+   * another owner holds appears here only if the public cohort touched it,
+   * and then only as "cohort".
+   */
   const signalsFor = async (tenant: string, ctx: FileContext): Promise<ChildSignal[]> => {
     const now = ctx.now;
-    const mem = foldRouted(tenant, now, true);
     const cand = new Map<string, Candidate>();
     const add = (key: string, priority: RetrievalPriority, reason: ChildSignal["reasons"][number], at: number | null, lastSeenAt: number, label: TokenLabel | null) => {
       const prior = cand.get(key);
@@ -1363,12 +1632,21 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       prior.lastSeenAt = Math.max(prior.lastSeenAt, lastSeenAt);
       prior.label ??= label;
     };
-    for (const [key, m] of mem) for (const r of m.reasons) add(key, m.priority, r, m.firstSeenAt, m.lastSeenAt, m.label);
-    // THIS TENANT'S OWN HOLDINGS AND WATCHES, and nobody else's: the held map
-    // is filtered to this tenant, and the watch read is scoped by the store.
-    for (const [key, tenants] of deps.heldTokens()) {
-      if (tenants.map(tenantKey).includes(tenant)) add(key, "position-protection", "held", null, now, null);
+    for (const a of await cohortActivity(ctx)) add(a.tokenKey, "discovery", "cohort", null, a.newestAt, null);
+    for (const a of await thesisActivity(ctx)) add(a.tokenKey, "discovery", "robinhood-thesis", null, a.newestAt, null);
+    // This tenant's own position dependencies only: whom ANOTHER tenant
+    // depends on is that tenant's private state.
+    const depIds = [...new Set((await activePositionDeps(db, now, tenant)).map((d) => d.userId))];
+    if (depIds.length > 0) {
+      for (const a of await recentActiveTokens(db, now - SIGNAL_WINDOW_MS, DEPENDENCY_SIGNAL_SCAN, { userIds: depIds })) {
+        add(a.tokenKey, "discovery", "dependency", null, a.newestAt, null);
+      }
     }
+    // THIS TENANT'S OWN HOLDINGS AND WATCHES: the held read and the local map
+    // are filtered to this tenant, and the watch read is scoped by the store.
+    const held = new Set(await heldTokensFor(db, tenant, now - HELD_FRESH_MS));
+    for (const [key, tenants] of deps.heldTokens()) if (tenants.map(tenantKey).includes(tenant)) held.add(key);
+    for (const key of held) add(key, "position-protection", "held", null, now, null);
     for (const w of await activeWatches(db, tenant, now)) add(w.tokenKey, "interactive", "watched", w.createdAtMs, w.createdAtMs, w.label);
 
     const ordered = [...cand.entries()]
@@ -1381,16 +1659,16 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     for (const [key] of ordered) if (!tracked.has(key)) tracked.set(key, now);
     firstTracked.set(tenant, tracked);
     const cohortIds = new Set((ctx.cohort?.members ?? []).map((m) => m.trader.userId));
-    // This tenant's own position dependencies only: whom ANOTHER tenant
-    // depends on is that tenant's private state.
-    const depIds = new Set((await activePositionDeps(db, now, tenant)).map((d) => d.userId));
+    const ownDeps = new Set(depIds);
     const out: ChildSignal[] = [];
     for (const [key, c] of ordered) {
       const token = tokenFromKey(key);
       if (!token) continue;
       const { events, dossier } = await tokenData(ctx, key);
+      // A coin known only from activity takes its label from the newest event that named it.
+      const named = events.find((e) => e.tokenLabel.symbol || e.tokenLabel.name)?.tokenLabel ?? null;
       const triggers = events
-        .filter((e) => cohortIds.has(e.trader.userId) || depIds.has(e.trader.userId))
+        .filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId))
         .slice(0, MAX_SIGNAL_TRIGGERS)
         .map(asTraderEvent);
       const oldestTrigger = triggers.length > 0 ? Math.min(...triggers.map((e) => e.observedAt)) : null;
@@ -1407,7 +1685,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       }
       out.push({
         token,
-        label: sanitizedLabel(c.label ?? dossier?.label ?? null),
+        label: sanitizedLabel(c.label ?? named ?? dossier?.label ?? null),
         priority: c.priority,
         reasons: [...c.reasons].sort(),
         triggers,
@@ -1450,7 +1728,18 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       }
       fleetFreshness = { lastEventAt };
       const fresh = live?.state === "receiving-fresh-data" || (lastEventAt !== null && now - lastEventAt <= FRESH_FEED_MS);
-      ctx = { now, configured: isConfigured, serviceState, serviceDetail, cohort: await cohortNow(now), lastEventAt, fresh, tokens: new Map() };
+      ctx = {
+        now,
+        configured: isConfigured,
+        serviceState,
+        serviceDetail,
+        cohort: await cohortNow(now),
+        lastEventAt,
+        fresh,
+        tokens: new Map(),
+        cohortActive: null,
+        thesisActive: null,
+      };
       return ctx;
     };
     for (const tenant of roster) {
@@ -1465,10 +1754,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         // turned access off must not leave yesterday's signals in the home for
         // the child to keep reading; this overwrites them with nothing.
         const monitored = access.dataAccess && (access.monitoring || access.follow);
-        if (!monitored) {
-          foldRouted(tenant, now, false);
-          firstTracked.delete(tenant);
-        }
+        if (!monitored) firstTracked.delete(tenant);
         const file: ChildFomoFile = {
           version: 1,
           writtenAt: now,
@@ -1500,10 +1786,11 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       openGaps: live ? live.openGaps : null,
       deadLetters: live ? live.deadLetters : null,
       queueDepth: live?.queueDepth ?? 0,
-      routedPending: router.stats().depth,
+      routed: counters.routed,
       lastCohortAt: cohort?.createdAt ?? null,
       cohortSize: cohort ? cohort.members.length : null,
       cohortVersion: cohort ? cohort.version : null,
+      cohortWaitingOnBudget,
       research: { done: counters.researchDone, retried: counters.researchRetried, failed: counters.researchFailed },
       childFilesWritten: counters.childFiles,
       drafts: { admitted: counters.draftsAdmitted, duplicate: counters.draftsDuplicate },
@@ -1524,6 +1811,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       `fomo: ${h.configured ? "configured" : "not configured"}, ${h.leader ? "leading" : "following"}, ingest ${h.ingest}` +
         `${h.leader ? `, stream ${h.connected ? "connected" : "not connected"}, ${h.openGaps ?? 0} open gap(s), ${h.deadLetters ?? 0} dead letter(s)` : ""}` +
         `, last event ${ago(h.lastEventAt, now)}, cohort ${h.cohortVersion === null ? "none" : `v${h.cohortVersion} ${h.cohortSize}/${knobs.cohortTarget}`}` +
+        (h.cohortWaitingOnBudget ? " (refresh waiting on the budget)" : "") +
         `, research ${h.research.done} done ${h.research.retried} retried ${h.research.failed} failed` +
         `, ${h.childFilesWritten} child file(s), ${h.drafts.admitted} draft(s) held by policy, sender calls ${h.senderCalls}` +
         (h.lastFailure ? `, last failure in ${h.lastFailure.step} ${ago(h.lastFailure.at, now)}` : ""),
@@ -1576,6 +1864,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       return;
     }
     await step("routes", () => syncRoutes(roster, now));
+    await step("held", () => syncHeld(roster, now));
     let leading = false;
     await step("lease", async () => {
       leading = await lead(now);
@@ -1594,7 +1883,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     // A tenant whose lease moved away is not ours to remember; if it comes
     // back, its route and file are written afresh.
     const here = new Set(roster);
-    for (const m of [accessCache, routeWritten, fileWritten, memory, firstTracked, assessmentSeen] as Map<string, unknown>[]) {
+    for (const m of [accessCache, routeWritten, heldWritten, fileWritten, firstTracked, assessmentSeen] as Map<string, unknown>[]) {
       for (const t of [...m.keys()]) if (!here.has(t)) m.delete(t);
     }
     lastPassAt = now;

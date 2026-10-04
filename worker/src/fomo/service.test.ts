@@ -22,7 +22,16 @@ import { FomoBudget, MemoryAllowance, UsageMeter, type FomoBudgetConfig } from "
 import type { FomoAccess } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
 import { createFomoClient } from "./provider";
-import { cacheKeyOf, createFomoService, DEEP_JOB_DEADLINE_MS, runPendingJobs, type FomoInvokeContext, type FomoServiceExt } from "./service";
+import {
+  BACKGROUND_RESEARCH_CAP,
+  cacheKeyOf,
+  createFomoService,
+  DEEP_JOB_DEADLINE_MS,
+  runPendingJobs,
+  SHARED_RESEARCH_TENANT,
+  type FomoInvokeContext,
+  type FomoServiceExt,
+} from "./service";
 import * as store from "./store";
 import type {
   OpportunitiesData,
@@ -78,6 +87,8 @@ interface Harness {
   db: Db;
   raw: DatabaseSync;
   service: FomoServiceExt;
+  budget: FomoBudget;
+  backgroundBudget: FomoBudget | null;
   calls: string[];
   routes: Map<string, Handler>;
   logs: string[];
@@ -128,7 +139,9 @@ function routeOf(p: string): string {
   return "unknown";
 }
 
-async function harness(opts: { key?: boolean; access?: FomoAccess; budget?: FomoBudgetConfig; db?: Db; raw?: DatabaseSync; latencyMs?: number } = {}): Promise<Harness> {
+async function harness(
+  opts: { key?: boolean; access?: FomoAccess; budget?: FomoBudgetConfig; background?: FomoBudgetConfig; db?: Db; raw?: DatabaseSync; latencyMs?: number } = {},
+): Promise<Harness> {
   const raw = opts.raw ?? new DatabaseSync(":memory:");
   const db = opts.db ?? wrapSqlite(raw);
   await store.ensureFomoSchema(db, "sqlite");
@@ -145,8 +158,21 @@ async function harness(opts: { key?: boolean; access?: FomoAccess; budget?: Fomo
   }) as typeof fetch;
   const client = opts.key === false ? null : createFomoClient({ apiKey: KEY, fetchImpl, now: () => clock.now, sleep: async () => {}, random: () => 0 });
   const access = opts.access ?? { dataAccess: true, monitoring: true, follow: false };
-  const budget = new FomoBudget({ port: new MemoryAllowance(), config: opts.budget ?? GENEROUS, now: () => clock.now });
-  const service = createFomoService({ db, dialect: "sqlite", client, access: async () => access, budget, usage: new UsageMeter(), now: () => clock.now, log: (l) => logs.push(l) });
+  const port = new MemoryAllowance();
+  const budget = new FomoBudget({ port, config: opts.budget ?? GENEROUS, now: () => clock.now });
+  // The runtime's shape: the same counters, owner caps lifted to the pool.
+  const backgroundBudget = opts.background ? new FomoBudget({ port, config: opts.background, now: () => clock.now }) : null;
+  const service = createFomoService({
+    db,
+    dialect: "sqlite",
+    client,
+    access: async () => access,
+    budget,
+    ...(backgroundBudget ? { backgroundBudget } : {}),
+    usage: new UsageMeter(),
+    now: () => clock.now,
+    log: (l) => logs.push(l),
+  });
   let n = 0;
   const ctx = (over: Partial<FomoInvokeContext> = {}): FomoInvokeContext => ({
     tenant: OWNER,
@@ -162,6 +188,8 @@ async function harness(opts: { key?: boolean; access?: FomoAccess; budget?: Fomo
     db,
     raw,
     service,
+    budget,
+    backgroundBudget,
     calls,
     routes,
     logs,
@@ -734,6 +762,37 @@ describe("refreshDossier (background)", () => {
     assert.equal(r.changed, false);
     assert.equal(tight.calls.length, 0);
   });
+
+  it("is capped short of the pool, so stream recovery still finds its credits after research has spent all it may", async () => {
+    // The runtime's background budget: one pool of 20,000 a day, owner caps lifted to it.
+    const pool = 20_000;
+    const h = await harness({ background: { sharedDailyCredits: pool, tenantHourlyCredits: pool, tenantDailyCredits: pool, groupHourlyCredits: pool } });
+    const bg = h.backgroundBudget!;
+    const day = new Date(NOW).toISOString().slice(0, 10);
+    const coin = (n: number) => tokenIdentity(robinhoodChain(), `0x${n.toString(16).padStart(40, "0")}`)!;
+    // A research queue that never runs dry, on held coins: the protection class may borrow the whole pool.
+    const statuses: string[] = [];
+    for (let i = 1; i <= 20; i++) {
+      const r = await h.service.refreshDossier(coin(i), { symbol: null, name: null }, { priority: "position-protection", depth: "quick", now: NOW });
+      statuses.push(r.status);
+      if (r.status === "budget-limited") break;
+    }
+    assert.ok(statuses.length > 2 && statuses.at(-1) === "budget-limited", `research ran, then was refused: ${statuses.join(",")}`);
+    const researchAll = (await store.readAllowance(h.db, `fomo:research:all:d:${day}`)) ?? 0;
+    assert.ok(researchAll <= pool * BACKGROUND_RESEARCH_CAP.poolShare, `research took ${researchAll} of ${pool}`);
+    // Stream recovery (the protection class, under the fleet's own payer) still has pages left.
+    const recovery = () => bg.tryCharge({ tenant: "fomo-fleet-maintenance", surface: "background", priority: "position-protection", credits: 125, now: NOW });
+    for (let i = 0; i < 20; i++) assert.equal((await recovery()).ok, true, `recovery page ${i + 1}`);
+    // The research counter never touches an owner's own reads: a tool call is unaffected.
+    const owner = await h.invoke<RankingsData>("fomo_get_rankings", { board: "traders" });
+    assert.notEqual(owner.status, "budget-limited");
+    // A refusal by the research counter takes nothing from the budget, and a grant that is refunded gives its counter back.
+    const before = (await store.readAllowance(h.db, `fomo:research:all:d:${day}`)) ?? 0;
+    const refused = await h.service.refreshDossier(coin(99), { symbol: null, name: null }, { priority: "discovery", depth: "quick", now: NOW });
+    assert.equal(refused.status, "budget-limited");
+    assert.equal((await store.readAllowance(h.db, `fomo:research:all:d:${day}`)) ?? 0, before);
+    assert.equal(SHARED_RESEARCH_TENANT, "fomo-shared-research", "research pays as its own payer, apart from the fleet's maintenance payer");
+  });
 });
 
 describe("reports, memory, health", () => {
@@ -770,6 +829,12 @@ describe("reports, memory, health", () => {
     await h.service.report("0xother", { kind: "held-tokens", tokenKeys: [PONS_KEY], atMs: NOW }, NOW);
     assert.deepEqual(h.service.heldTokensSnapshot(NOW).get(PONS_KEY), ["0xother", OWNER]);
     assert.equal(h.service.heldTokensSnapshot(NOW).size, 1);
+    // Durable too, per reporting tenant only, so another replica and the ingestion leader read the same book.
+    assert.deepEqual(await store.heldTokensFor(h.db, OWNER, 0), [PONS_KEY]);
+    assert.deepEqual([...(await store.heldTokensFleet(h.db, 0))], [[PONS_KEY, ["0xother", OWNER]]]);
+    await h.service.report("0xother", { kind: "held-tokens", tokenKeys: [], atMs: NOW + 1 }, NOW + 1);
+    assert.deepEqual(await store.heldTokensFor(h.db, "0xother", 0), [], "a report of nothing held clears that tenant's set");
+    assert.deepEqual(await store.heldTokensFor(h.db, OWNER, 0), [PONS_KEY], "and only that tenant's");
   });
 
   it("subject memory is tenant-scoped", async () => {

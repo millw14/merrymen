@@ -47,7 +47,7 @@
 import { createHash } from "node:crypto";
 import type { Db } from "../db";
 import { sanitizeText } from "../research/news";
-import type { FomoBudget, ChargeResult } from "./budget";
+import { utcDay, type ChargeRequest, type ChargeResult, type FomoBudget } from "./budget";
 import { CAPABILITY_FOR_ROUTE, capabilityFromCall, mergeCapability } from "./capabilities";
 import type { BrokerReport, FomoAccess, FomoService, FomoServiceHealth } from "./contract";
 import {
@@ -161,6 +161,11 @@ export interface FomoServiceDeps {
    * not by one owner's caps. Defaults to `budget`.
    */
   backgroundBudget?: FomoBudget;
+  /**
+   * How much of the daily pool background dossier research may take (see
+   * BACKGROUND_RESEARCH_CAP). Construction-time configuration only.
+   */
+  researchCap?: Partial<BackgroundResearchCap>;
   flight?: SingleFlight<unknown>;
   usage?: UsageMeter;
   now?: () => number;
@@ -213,6 +218,125 @@ export interface FomoServiceExt extends FomoService {
 
 /** Background shared research is charged to this pseudo-tenant: it belongs to nobody. */
 export const SHARED_RESEARCH_TENANT = "fomo-shared-research";
+
+export interface BackgroundResearchCap {
+  /** Share of the shared daily pool background dossier research may take, every priority together. */
+  poolShare: number;
+}
+
+/**
+ * BACKGROUND RESEARCH LEAVES THE POOL'S LAST FIFTH ALONE.
+ *
+ * The research queue can always find another coin to refresh, three per pass
+ * every fifteen seconds, and held coins' refreshes run in the protection
+ * class, which may borrow the whole pool. Unchecked, the queue alone could
+ * spend the day's pool before the next stream recovery asks, and recovery is
+ * what lets the fleet see a held coin's traders at all (orchestrator-fomo.ts
+ * charges it in the protection class, first in line). So the background
+ * refresh path takes a counter of its own BEFORE the budget's:
+ *
+ *   fomo:research:all:d:<day>   ≤ poolShare × daily pool   (every class)
+ *
+ * which leaves at least a fifth of the pool to everything that is not
+ * background research (Free plan: ≥ 1,290 of 6,451 a day, ten recovery pages
+ * and a cohort refresh). The cohort's own claim on the DISCOVERY share is
+ * kept by the pass instead (research of discovery priority waits while a due
+ * cohort refresh is waiting on the budget): a fixed discovery cap small
+ * enough to reserve a cohort refresh on the Free plan would be smaller than
+ * one thesis page, which would ban discovery research there outright.
+ * Owner-paid reads (tools, deep jobs) never touch this counter.
+ */
+export const BACKGROUND_RESEARCH_CAP: Readonly<BackgroundResearchCap> = Object.freeze({ poolShare: 0.8 });
+
+/** What a read is charged through: a budget, or a budget behind the research cap. */
+type BudgetLike = Pick<FomoBudget, "tryCharge">;
+
+function capFraction(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : fallback;
+}
+
+/**
+ * `inner` behind the background research counter. Its refusal is the
+ * budget's own `class-reserve` refusal; settle and refund move
+ * the counters exactly as they move the budget's (an unknown charge keeps the
+ * estimate, an overrun is recorded past the limit because it was spent).
+ */
+function researchCapped(inner: FomoBudget, db: Db, cap: BackgroundResearchCap, clock: () => number, log: (l: string) => void): BudgetLike {
+  return {
+    async tryCharge(req: ChargeRequest): Promise<ChargeResult> {
+      const amount = typeof req.credits === "number" && Number.isFinite(req.credits) ? Math.ceil(req.credits) : 0;
+      if (!(amount > 0) || typeof req.now !== "number" || !Number.isFinite(req.now)) return inner.tryCharge(req);
+      const c = inner.config;
+      const day = utcDay(req.now);
+      const steps = [{ key: `fomo:research:all:d:${day}`, limit: Math.floor(c.sharedDailyCredits * cap.poolShare) }];
+      const taken: string[] = [];
+      const giveBack = async (n: number): Promise<void> => {
+        for (const key of taken) {
+          try {
+            await store.returnAllowance(db, key, n, clock());
+          } catch (e) {
+            // A counter left high under-spends research until its day ends: the safe side.
+            log(`fomo: research counter give-back failed: ${errText(e)}`);
+          }
+        }
+      };
+      for (const st of steps) {
+        let ok = false;
+        try {
+          ok = st.limit > 0 && amount <= st.limit && (await store.takeAllowance(db, st.key, amount, st.limit, req.now));
+        } catch (e) {
+          await giveBack(amount);
+          throw e;
+        }
+        if (!ok) {
+          await giveBack(amount);
+          return { ok: false, reason: "class-reserve" };
+        }
+        taken.push(st.key);
+      }
+      let g: ChargeResult;
+      try {
+        g = await inner.tryCharge(req);
+      } catch (e) {
+        await giveBack(amount);
+        throw e;
+      }
+      if (!g.ok) {
+        await giveBack(amount);
+        return g;
+      }
+      const grant = g;
+      let done = false;
+      return {
+        ok: true,
+        charged: grant.charged,
+        async settle(actual: number | null): Promise<void> {
+          await grant.settle(actual);
+          if (done) return;
+          done = true;
+          if (actual === null || typeof actual !== "number" || !Number.isFinite(actual) || actual < 0) return;
+          const real = Math.ceil(actual);
+          if (real < amount) await giveBack(amount - real);
+          else if (real > amount) {
+            for (const key of taken) {
+              try {
+                await store.takeAllowance(db, key, real - amount, Number.MAX_SAFE_INTEGER, clock());
+              } catch (e) {
+                log(`fomo: research counter overrun not recorded: ${errText(e)}`);
+              }
+            }
+          }
+        },
+        async refund(): Promise<void> {
+          await grant.refund();
+          if (done) return;
+          done = true;
+          await giveBack(amount);
+        },
+      };
+    },
+  };
+}
 /** A deep read: bounded in time and credits, registered before anything promises it. */
 export const DEEP_JOB_KIND = "research-coin-deep";
 export const DEEP_JOB_DEADLINE_MS = 10 * 60_000;
@@ -440,7 +564,7 @@ interface ChargeContext {
   signal?: AbortSignal;
   cap: { limit: number; spent: number } | null;
   /** Which budget pays; the tenant budget unless this is background shared research. */
-  budget?: FomoBudget;
+  budget?: BudgetLike;
 }
 
 function localSection<T>(name: string, data: T, retrievedAt: number | null, servedFrom: Freshness["servedFrom"] = "cache"): Section<T> {
@@ -572,6 +696,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   const usage = deps.usage ?? null;
   const log = deps.log ?? (() => {});
   const selfNames = deps.selfNames ?? [];
+  // Background shared research pays through the research cap (BACKGROUND_RESEARCH_CAP); owners never do.
+  const researchBudget = researchCapped(
+    deps.backgroundBudget ?? budget,
+    db,
+    { poolShare: capFraction(deps.researchCap?.poolShare, BACKGROUND_RESEARCH_CAP.poolShare) },
+    clock,
+    log,
+  );
 
   let lastProviderOkAt: number | null = null;
   let lastProviderFailure: { at: number; reason: string; down: boolean } | null = null;
@@ -2369,7 +2501,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     token: TokenIdentity,
     label: TokenLabel,
     opts: { depth: "quick" | "standard" | "deep"; now: number; signal?: AbortSignal; creditCap?: number | null; mode?: FreshnessMode },
-    payWith: FomoBudget = budget,
+    payWith: BudgetLike = budget,
   ): Promise<RefreshOutcome> {
     const now = finite(opts.now) ? opts.now : clock();
     const cc: ChargeContext = {
@@ -2441,7 +2573,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
             return;
           case "held-tokens": {
             const keys = Array.isArray(r.tokenKeys) ? [...new Set(r.tokenKeys.filter((k) => typeof k === "string" && tokenFromKey(k)?.key === k))].slice(0, 200) : [];
-            held.set(t, { keys, at: finite(r.atMs) ? Math.min(r.atMs, nowMs) : nowMs });
+            const at = finite(r.atMs) ? Math.min(r.atMs, nowMs) : nowMs;
+            held.set(t, { keys, at });
+            // DURABLE TOO, so the fleet's ingestion leader and every replica read
+            // the same book (store.setHeldTokens); the in-process copy above only
+            // serves this process. Only the reporting tenant's own set is written.
+            await store.setHeldTokens(db, t, keys, at);
             return;
           }
           default:
@@ -2463,7 +2600,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         token,
         label,
         { depth: opts.depth, now: opts.now, signal: opts.signal },
-        deps.backgroundBudget ?? budget,
+        researchBudget,
       );
       return { dossier: r.dossier, changed: r.changed, status: r.status, reason: r.reason };
     },

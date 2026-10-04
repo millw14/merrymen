@@ -7,13 +7,15 @@
  * directory. There are two kinds of table, and the difference is the point:
  *
  *   SHARED      public research data, the same for every owner: traders and
- *               their handle history, cohort versions, the deduplicated event
- *               log, stream checkpoints and coverage gaps, the response cache,
- *               dossiers, budgets and the research queue. No tenant column,
- *               because nothing in them belongs to anybody.
+ *               their handle history, the evidence measured about them, cohort
+ *               versions, the deduplicated event log, stream checkpoints and
+ *               coverage gaps, the response cache, dossiers, budgets and the
+ *               research queue. No tenant column, because nothing in them
+ *               belongs to anybody.
  *   PER TENANT  an owner's own state: requests, jobs, conversation subjects,
- *               watches, the ingestion route, assessments, position
- *               dependencies, publication drafts, outcomes and the funnel.
+ *               watches, the ingestion route, the coins it holds, assessments,
+ *               position dependencies, publication drafts, outcomes and the
+ *               funnel.
  *               Every row carries `tenant`, lowercased HERE (a checksummed
  *               caller must not split one owner into two). Every read takes a
  *               tenant and filters on it, and another owner's row reads as
@@ -122,6 +124,13 @@ CREATE TABLE IF NOT EXISTS fomo_trader_handles (
   PRIMARY KEY (user_id, handle)
 );
 CREATE INDEX IF NOT EXISTS fomo_trader_handles_handle ON fomo_trader_handles (handle, last_seen_ms);
+CREATE TABLE IF NOT EXISTS fomo_trader_evidence (
+  user_id TEXT PRIMARY KEY,                -- the provider user id
+  measured_at_ms INTEGER NOT NULL,         -- when the positions behind it were read
+  sample_size INTEGER NOT NULL,            -- positions the measurement used
+  evidence_json TEXT NOT NULL              -- reconstructed cohort inputs, never a provider body
+);
+CREATE INDEX IF NOT EXISTS fomo_trader_evidence_measured ON fomo_trader_evidence (measured_at_ms);
 CREATE TABLE IF NOT EXISTS fomo_cohort_versions (
   version INTEGER PRIMARY KEY,
   created_at_ms INTEGER NOT NULL,
@@ -310,6 +319,14 @@ CREATE TABLE IF NOT EXISTS fomo_tenant_routes (
   follow INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS fomo_tenant_routes_updated ON fomo_tenant_routes (updated_at_ms);
+CREATE TABLE IF NOT EXISTS fomo_held_tokens (
+  tenant TEXT NOT NULL,
+  token_key TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,          -- when the replica holding the lease last wrote the set
+  PRIMARY KEY (tenant, token_key)
+);
+CREATE INDEX IF NOT EXISTS fomo_held_tokens_updated ON fomo_held_tokens (updated_at_ms);
 CREATE TABLE IF NOT EXISTS fomo_assessments (
   id TEXT PRIMARY KEY,
   tenant TEXT NOT NULL,
@@ -527,6 +544,9 @@ export const FOMO_LIMITS = {
   /** subject-memory.ts MAX_SERIALIZED_LENGTH, with room. */
   subjectJsonChars: 16_384,
   keyChars: 256,
+  /** Coins one owner's held set may name (a book this large is already beyond what the routing reads). */
+  heldTokensPerTenant: 200,
+  traderEvidenceJsonChars: 4_096,
   handleChars: 64,
   nameChars: 128,
   pageMax: 500,
@@ -919,7 +939,7 @@ export function followAssessmentOf(v: unknown): FollowAssessment | null {
  * row. sqlite gets the same from its single writer. Unlike an advisory lock it
  * needs no dialect and no second key namespace to keep distinct.
  */
-async function lockTenant(tx: Db, tenant: string, scope: "jobs" | "watches" | "position-deps", nowMs: number): Promise<void> {
+async function lockTenant(tx: Db, tenant: string, scope: "jobs" | "watches" | "position-deps" | "held-tokens", nowMs: number): Promise<void> {
   await tx
     .prepare(
       `INSERT INTO fomo_tenant_locks (tenant, lock_scope, touched_at_ms) VALUES (?, ?, ?)
@@ -1097,6 +1117,99 @@ export async function handleHistory(db: Db, userId: string): Promise<{ handle: s
     const last = num(r.last_seen_ms);
     return handle && first !== null && last !== null ? [{ handle, firstSeenMs: first, lastSeenMs: last }] : [];
   });
+}
+
+// ── trader evidence (cohort enrichment) ─────────────────────────────────────
+
+/**
+ * What Merrymen MEASURED about a trader from their positions, for the cohort
+ * score (cohort.ts CohortCandidate's reconstructed inputs). Shared: it is a
+ * fact about a public trader, not about any owner. Every figure is null when
+ * the sample could not support it; nothing here is a provider body.
+ */
+export interface StoredTraderEvidence {
+  userId: string;
+  measuredAtMs: number;
+  /** Positions the measurement read. */
+  sampleSize: number;
+  chainActivity: { robinhoodShare: number | null; sampleSize: number | null } | null;
+  holding: { averageHoldSeconds: number | null; sampleSize: number | null } | null;
+  exits: { closedWithGain: number | null; closedWithLoss: number | null; heldUnderwater: number | null } | null;
+  concentration: { topPositionShare: number | null } | null;
+  executionCapacity: { medianPositionUsd: number | null } | null;
+}
+
+const shareOf = (v: unknown): number | null => {
+  const n = finite(v);
+  return n !== null && n >= 0 && n <= 1 ? n : null;
+};
+const nonNegOf = (v: unknown): number | null => {
+  const n = finite(v);
+  return n !== null && n >= 0 ? n : null;
+};
+const countFigure = (v: unknown): number | null => {
+  const n = finite(v);
+  return n !== null && n >= 0 && Number.isSafeInteger(n) ? n : null;
+};
+
+/** The evidence fields in today's shape, field by field, on the way in and out. */
+function evidenceFields(v: unknown): Omit<StoredTraderEvidence, "userId" | "measuredAtMs" | "sampleSize"> {
+  const r = record(v);
+  const ca = record(r?.chainActivity);
+  const ho = record(r?.holding);
+  const ex = record(r?.exits);
+  const co = record(r?.concentration);
+  const ec = record(r?.executionCapacity);
+  return {
+    chainActivity: ca ? { robinhoodShare: shareOf(ca.robinhoodShare), sampleSize: countFigure(ca.sampleSize) } : null,
+    holding: ho ? { averageHoldSeconds: nonNegOf(ho.averageHoldSeconds), sampleSize: countFigure(ho.sampleSize) } : null,
+    exits: ex ? { closedWithGain: countFigure(ex.closedWithGain), closedWithLoss: countFigure(ex.closedWithLoss), heldUnderwater: countFigure(ex.heldUnderwater) } : null,
+    concentration: co ? { topPositionShare: shareOf(co.topPositionShare) } : null,
+    executionCapacity: ec ? { medianPositionUsd: nonNegOf(ec.medianPositionUsd) } : null,
+  };
+}
+
+/**
+ * Keep a trader's measured evidence. The NEWER measurement wins: a slow
+ * refresh that read positions earlier cannot replace a later reading. True
+ * when written.
+ */
+export async function putTraderEvidence(db: Db, e: StoredTraderEvidence): Promise<boolean> {
+  const fields = evidenceFields(e);
+  const row = await db
+    .prepare(
+      `INSERT INTO fomo_trader_evidence (user_id, measured_at_ms, sample_size, evidence_json) VALUES (?, ?, ?, ?)
+       ON CONFLICT (user_id) DO UPDATE SET measured_at_ms = excluded.measured_at_ms, sample_size = excluded.sample_size,
+         evidence_json = excluded.evidence_json
+       WHERE fomo_trader_evidence.measured_at_ms <= excluded.measured_at_ms
+       RETURNING user_id`,
+    )
+    .get(
+      keyOf(e.userId, "userId", 128),
+      intOf(e.measuredAtMs, "measuredAtMs"),
+      countOf(e.sampleSize, "sampleSize"),
+      jsonOf(fields, FOMO_LIMITS.traderEvidenceJsonChars, "trader evidence"),
+    );
+  return row !== undefined && row !== null;
+}
+
+/** Stored evidence for these traders, by user id. A trader never measured is absent. */
+export async function traderEvidence(db: Db, userIds: readonly string[]): Promise<Map<string, StoredTraderEvidence>> {
+  const out = new Map<string, StoredTraderEvidence>();
+  const ids = [...new Set(userIds.map((u) => keyOf(u, "userId", 128)))];
+  for (const part of chunksOf(ids, 200)) {
+    const rows = (await db
+      .prepare(`SELECT user_id, measured_at_ms, sample_size, evidence_json FROM fomo_trader_evidence WHERE user_id IN (${marks(part.length)})`)
+      .all(...part)) as Row[];
+    for (const r of rows) {
+      const userId = str(r.user_id);
+      const measured = num(r.measured_at_ms);
+      const sample = num(r.sample_size);
+      if (!userId || measured === null || sample === null) continue;
+      out.set(userId, { userId, measuredAtMs: measured, sampleSize: sample, ...evidenceFields(parseJson(r.evidence_json)) });
+    }
+  }
+  return out;
 }
 
 // ── cohort versions ─────────────────────────────────────────────────────────
@@ -1358,6 +1471,101 @@ export async function eventsForTrader(db: Db, userId: string, sinceMs: number, l
     )
     .all(keyOf(userId, "userId", 128), intOf(sinceMs, "sinceMs"), pageOf(limit))) as Row[];
   return storedEventsOf(rows);
+}
+
+/** One coin's recent activity, summarised (recentActiveTokens). */
+export interface ActiveToken {
+  tokenKey: string;
+  events: number;
+  distinctTraders: number;
+  /** Newest observation among the counted events. */
+  newestAt: number;
+}
+
+export interface ActiveTokenOptions {
+  /**
+   * Only these traders' events (the cohort, one owner's dependencies). An
+   * EMPTY list means nobody, never everybody: a cohort that is empty routes
+   * nothing.
+   */
+  userIds?: readonly string[];
+  /** Only these event kinds (default every kind). */
+  kinds?: readonly ActivityKind[];
+  /** Only token keys starting with this (for example `eip155:4663:`, Robinhood Chain). */
+  tokenKeyPrefix?: string;
+}
+
+/** Traders per IN list: well inside both backends' bound-parameter limits. */
+const ACTIVE_USERS_PER_QUERY = 500;
+/** Rows one chunk may return before the merge: far past what a breadth window holds. */
+const ACTIVE_ROWS_PER_CHUNK = 5_000;
+/** Without a trader filter, the newest this many events in the window are summarised. */
+const ACTIVE_SCAN_EVENTS = 20_000;
+
+/**
+ * The coins with activity since `sinceMs`, newest activity first: what the
+ * cohort (or an owner's dependencies) touched lately, as one grouped read per
+ * chunk of traders instead of one read per trader. Retracted events and
+ * events without a coin are not counted.
+ *
+ * INDEX-BACKED. With `userIds` the read walks fomo_events_user (user_id,
+ * observed_at_ms) once per trader. Without, it walks fomo_events_observed
+ * backwards over the window and summarises at most the newest
+ * ACTIVE_SCAN_EVENTS of them: the inner, ordered and limited read is what
+ * keeps a planner from walking the token index end to end to save a sort.
+ * store.test.ts checks every plan.
+ *
+ * The result is the same on every replica that reads the shared store, which
+ * is the point: a child's file no longer depends on which replica ingested.
+ */
+export async function recentActiveTokens(db: Db, sinceMs: number, limit: number, o: ActiveTokenOptions = {}): Promise<ActiveToken[]> {
+  const since = intOf(sinceMs, "sinceMs");
+  const n = pageOf(limit);
+  const kinds = o.kinds ? [...new Set(o.kinds)] : null;
+  if (kinds) for (const k of kinds) if (!isIn(ACTIVITY_KINDS, k)) throw new TypeError("fomo store: unknown activity kind");
+  if (kinds && kinds.length === 0) return [];
+  const prefix = o.tokenKeyPrefix === undefined ? null : keyOf(o.tokenKeyPrefix, "tokenKeyPrefix", 64);
+  if (prefix !== null && /[%_\\]/.test(prefix)) throw new TypeError("fomo store: tokenKeyPrefix must be a plain prefix");
+  const users = o.userIds ? [...new Set(o.userIds.map((u) => keyOf(u, "userId", 128)))] : null;
+  if (users && users.length === 0) return [];
+  // No `token_key IS NOT NULL` here: sqlite would then walk the token index
+  // end to end instead of the time window. Coin-less events group under a
+  // NULL key, which the fold skips and the limit allows one extra row for.
+  const tail = `observed_at_ms >= ? AND retracted = 0${kinds ? ` AND kind IN (${marks(kinds.length)})` : ""}${prefix !== null ? " AND token_key LIKE ?" : ""}`;
+  const tailParams: unknown[] = [since, ...(kinds ?? []), ...(prefix !== null ? [`${prefix}%`] : [])];
+  const select = "SELECT token_key, COUNT(*) AS events, COUNT(DISTINCT user_id) AS traders, MAX(observed_at_ms) AS newest_at FROM fomo_events";
+  const order = "GROUP BY token_key ORDER BY newest_at DESC, token_key LIMIT ?";
+  const merged = new Map<string, ActiveToken>();
+  const fold = (rows: Row[]) => {
+    for (const r of rows) {
+      const tokenKey = str(r.token_key);
+      const events = num(r.events);
+      const traders = num(r.traders);
+      const newest = num(r.newest_at);
+      if (!tokenKey || events === null || traders === null || newest === null) continue;
+      const prior = merged.get(tokenKey);
+      // Chunks partition the traders, so their counts add up exactly.
+      merged.set(
+        tokenKey,
+        prior
+          ? { tokenKey, events: prior.events + events, distinctTraders: prior.distinctTraders + traders, newestAt: Math.max(prior.newestAt, newest) }
+          : { tokenKey, events, distinctTraders: traders, newestAt: newest },
+      );
+    }
+  };
+  if (users === null) {
+    const inner = `SELECT token_key, user_id, observed_at_ms FROM fomo_events WHERE ${tail} ORDER BY observed_at_ms DESC LIMIT ?`;
+    const outer = "SELECT token_key, COUNT(*) AS events, COUNT(DISTINCT user_id) AS traders, MAX(observed_at_ms) AS newest_at";
+    fold((await db.prepare(`${outer} FROM (${inner}) AS w ${order}`).all(...tailParams, ACTIVE_SCAN_EVENTS, n + 1)) as Row[]);
+  } else {
+    const chunks = chunksOf(users, ACTIVE_USERS_PER_QUERY);
+    // One chunk is exact under its own LIMIT. Several are merged first, so each reads past the limit.
+    const perChunk = chunks.length === 1 ? n + 1 : ACTIVE_ROWS_PER_CHUNK;
+    for (const part of chunks) {
+      fold((await db.prepare(`${select} WHERE user_id IN (${marks(part.length)}) AND ${tail} ${order}`).all(...part, ...tailParams, perChunk)) as Row[]);
+    }
+  }
+  return [...merged.values()].sort((a, b) => b.newestAt - a.newestAt || (a.tokenKey < b.tokenKey ? -1 : a.tokenKey > b.tokenKey ? 1 : 0)).slice(0, n);
 }
 
 /** Mark events routed. Only the first mark counts; returns how many changed. */
@@ -1915,22 +2123,40 @@ export async function enqueueResearch(
  * gets it back; the loser looks again. A lapsed row with no attempts left is
  * failed first, so it cannot sit "claimed" for ever.
  */
-export async function claimNextResearch(db: Db, nowMs: number, leaseMs: number): Promise<ResearchClaim | null> {
+export async function claimNextResearch(
+  db: Db,
+  nowMs: number,
+  leaseMs: number,
+  o: {
+    /** Only items at least this urgent (RESEARCH_PRIORITY); the rest stay queued, untouched, for later. */
+    minPriority?: number;
+  } = {},
+): Promise<ResearchClaim | null> {
   const now = intOf(nowMs, "nowMs");
   const until = now + countOf(leaseMs, "leaseMs");
   const max = FOMO_LIMITS.researchMaxAttempts;
+  const floor = o.minPriority === undefined ? null : intOf(o.minPriority, "minPriority");
   await db
     .prepare("UPDATE fomo_research_queue SET state = 'failed', claimed_until_ms = NULL WHERE state = 'claimed' AND claimed_until_ms < ? AND attempts >= ?")
     .run(now, max);
   for (let attempt = 0; attempt < 5; attempt++) {
-    const pick = (await db
-      .prepare(
-        `SELECT token_key, evidence_rev FROM fomo_research_queue
-          WHERE state = 'queued' OR (state = 'claimed' AND claimed_until_ms < ? AND attempts < ?)
-          ORDER BY priority DESC, requested_at_ms, token_key, evidence_rev
-          LIMIT 1`,
-      )
-      .get(now, max)) as Row | undefined;
+    const pick = (await (floor === null
+      ? db
+          .prepare(
+            `SELECT token_key, evidence_rev FROM fomo_research_queue
+              WHERE state = 'queued' OR (state = 'claimed' AND claimed_until_ms < ? AND attempts < ?)
+              ORDER BY priority DESC, requested_at_ms, token_key, evidence_rev
+              LIMIT 1`,
+          )
+          .get(now, max)
+      : db
+          .prepare(
+            `SELECT token_key, evidence_rev FROM fomo_research_queue
+              WHERE (state = 'queued' OR (state = 'claimed' AND claimed_until_ms < ? AND attempts < ?)) AND priority >= ?
+              ORDER BY priority DESC, requested_at_ms, token_key, evidence_rev
+              LIMIT 1`,
+          )
+          .get(now, max, floor))) as Row | undefined;
     if (!pick) return null;
     const r = (await db
       .prepare(
@@ -2537,15 +2763,90 @@ export async function getTenantRoute(db: Db, tenant: string): Promise<TenantRout
  * Owners routed for a purpose. Data access is the master switch: a tenant with
  * monitoring or follow on but data access off is routed for nothing.
  */
-export async function routedTenants(db: Db, purpose: "data-access" | "monitoring" | "follow"): Promise<string[]> {
-  const sql =
-    purpose === "monitoring"
-      ? "SELECT tenant FROM fomo_tenant_routes WHERE data_access = 1 AND monitoring = 1 ORDER BY tenant"
-      : purpose === "follow"
-        ? "SELECT tenant FROM fomo_tenant_routes WHERE data_access = 1 AND follow = 1 ORDER BY tenant"
-        : "SELECT tenant FROM fomo_tenant_routes WHERE data_access = 1 ORDER BY tenant";
-  const rows = (await db.prepare(sql).all()) as Row[];
+export async function routedTenants(
+  db: Db,
+  purpose: "data-access" | "monitoring" | "follow",
+  o: {
+    /**
+     * Only routes written at or after this. A route is rewritten every few
+     * minutes by whichever replica holds the owner's lease healthily, so a
+     * row nobody has refreshed for a long while belongs to an owner nobody
+     * acts for any more (grant revoked, killed, expired): it routes nothing.
+     */
+    freshSinceMs?: number;
+  } = {},
+): Promise<string[]> {
+  const where =
+    purpose === "monitoring" ? "data_access = 1 AND monitoring = 1" : purpose === "follow" ? "data_access = 1 AND follow = 1" : "data_access = 1";
+  const fresh = o.freshSinceMs === undefined ? null : intOf(o.freshSinceMs, "freshSinceMs");
+  const rows = (await (fresh === null
+    ? db.prepare(`SELECT tenant FROM fomo_tenant_routes WHERE ${where} ORDER BY tenant`).all()
+    : db.prepare(`SELECT tenant FROM fomo_tenant_routes WHERE ${where} AND updated_at_ms >= ? ORDER BY tenant`).all(fresh))) as Row[];
   return rows.flatMap((r) => (typeof r.tenant === "string" ? [r.tenant] : []));
+}
+
+// ── held tokens ─────────────────────────────────────────────────────────────
+
+/**
+ * REPLACE an owner's held set: the coins it holds now, as Robinhood token keys
+ * (or any token key the caller validated). Written by whoever can see the
+ * owner's book — the replica holding its lease (the ledger mirror) or the
+ * owner's own child reporting through the broker — so every replica, and the
+ * fleet's ingestion leader, can read the same answer. An empty list clears
+ * the set.
+ *
+ * Duplicates collapse; more than `heldTokensPerTenant` keys is refused rather
+ * than cut (a truncated book would read as "does not hold" for the rest). A
+ * write older than the stored set is refused, so a slow writer cannot bring
+ * back a coin the owner has since sold. Serialised per owner on its lock row.
+ * Opens its own transaction: pass the ROOT Db. Returns false when refused.
+ */
+export async function setHeldTokens(db: Db, tenant: string, tokenKeys: readonly string[], nowMs: number): Promise<boolean> {
+  const t = tenantOf(tenant);
+  const now = intOf(nowMs, "nowMs");
+  const keys = [...new Set(tokenKeys.map((k) => keyOf(k, "tokenKey")))].sort();
+  if (keys.length > FOMO_LIMITS.heldTokensPerTenant) throw new RangeError(`fomo store: at most ${FOMO_LIMITS.heldTokensPerTenant} held tokens per owner`);
+  return db.tx(async (tx) => {
+    await lockTenant(tx, t, "held-tokens", now);
+    const newest = (await tx.prepare("SELECT MAX(updated_at_ms) AS newest FROM fomo_held_tokens WHERE tenant = ?").get(t)) as Row | undefined;
+    const prior = num(newest?.newest);
+    if (prior !== null && prior > now) return false;
+    await tx.prepare("DELETE FROM fomo_held_tokens WHERE tenant = ?").run(t);
+    for (const part of chunksOf(keys, 100)) {
+      await tx
+        .prepare(`INSERT INTO fomo_held_tokens (tenant, token_key, updated_at_ms) VALUES ${valuesList(3, part.length)}`)
+        .run(...part.flatMap((k) => [t, k, now]));
+    }
+    return true;
+  });
+}
+
+/** One owner's held coins, as last written at or after `sinceMs`, sorted. Another owner's rows never answer. */
+export async function heldTokensFor(db: Db, tenant: string, sinceMs: number): Promise<string[]> {
+  const rows = (await db
+    .prepare("SELECT token_key FROM fomo_held_tokens WHERE tenant = ? AND updated_at_ms >= ? ORDER BY token_key")
+    .all(tenantOf(tenant), intOf(sinceMs, "sinceMs"))) as Row[];
+  return rows.flatMap((r) => (typeof r.token_key === "string" ? [r.token_key] : []));
+}
+
+/**
+ * Every owner's held coins written at or after `sinceMs`: tokenKey → owners
+ * (sorted). FOR THE FLEET'S INGESTION ONLY — it decides which events protect
+ * a position and to whom they matter; nothing that answers an owner may read
+ * another owner's holdings from here. Bounded by `limit` rows.
+ */
+export async function heldTokensFleet(db: Db, sinceMs: number, limit = 20_000): Promise<Map<string, string[]>> {
+  const rows = (await db
+    .prepare("SELECT tenant, token_key FROM fomo_held_tokens WHERE updated_at_ms >= ? ORDER BY token_key, tenant LIMIT ?")
+    .all(intOf(sinceMs, "sinceMs"), pageOf(limit, 20_000))) as Row[];
+  const out = new Map<string, string[]>();
+  for (const r of rows) {
+    if (typeof r.tenant !== "string" || typeof r.token_key !== "string") continue;
+    const list = out.get(r.token_key) ?? [];
+    list.push(r.tenant);
+    out.set(r.token_key, list);
+  }
+  return out;
 }
 
 // ── assessments ─────────────────────────────────────────────────────────────
@@ -3122,6 +3423,12 @@ export interface FomoRetentionPolicy {
   subjectsMs: number;
   expiredWatchesMs: number;
   usageDays: number;
+  /** Measured trader evidence older than this is gone (the cohort re-measures within days). */
+  traderEvidenceMs: number;
+  /** A held set no replica has rewritten for this long describes a book nobody is acting for. */
+  heldTokensMs: number;
+  /** A route nobody has refreshed for this long belongs to an owner who left the fleet. */
+  staleRoutesMs: number;
 }
 
 export const FOMO_RETENTION: Readonly<FomoRetentionPolicy> = {
@@ -3135,6 +3442,9 @@ export const FOMO_RETENTION: Readonly<FomoRetentionPolicy> = {
   subjectsMs: 30 * DAY_MS,
   expiredWatchesMs: 7 * DAY_MS,
   usageDays: 400,
+  traderEvidenceMs: 30 * DAY_MS,
+  heldTokensMs: 2 * DAY_MS,
+  staleRoutesMs: 30 * DAY_MS,
 };
 
 /**
@@ -3146,7 +3456,8 @@ export const FOMO_RETENTION: Readonly<FomoRetentionPolicy> = {
  *
  * Not pruned here: traders and handle history (identity is kept), cohort
  * versions, dossiers and assessments (later answers cite them), publications
- * (the outbox is the audit trail), outcomes, capabilities.
+ * (the outbox is the audit trail), outcomes, capabilities, the budget
+ * counters in fomo_meta (keyed by their own day or hour).
  */
 export function fomoRetentionStatements(nowMs: number, policy: FomoRetentionPolicy = FOMO_RETENTION): Array<[string, unknown[]]> {
   const now = intOf(nowMs, "nowMs");
@@ -3168,6 +3479,10 @@ export function fomoRetentionStatements(nowMs: number, policy: FomoRetentionPoli
     ["DELETE FROM fomo_watches WHERE expires_at_ms < ?", [now - policy.expiredWatchesMs]],
     ["DELETE FROM fomo_position_deps WHERE expires_at_ms < ?", [now]],
     ["DELETE FROM fomo_usage WHERE day < ?", [usageDay(Math.max(0, now - policy.usageDays * DAY_MS))]],
+    ["DELETE FROM fomo_trader_evidence WHERE measured_at_ms < ?", [now - policy.traderEvidenceMs]],
+    ["DELETE FROM fomo_held_tokens WHERE updated_at_ms < ?", [now - policy.heldTokensMs]],
+    // Already routing nothing (routedTenants' freshness rule); this only stops the table growing.
+    ["DELETE FROM fomo_tenant_routes WHERE updated_at_ms < ?", [now - policy.staleRoutesMs]],
   ];
 }
 
