@@ -12,6 +12,12 @@ accounting blocker is visible before an owner tries renewal. The dashboard and
 its chat qualify saved balances, positions and history while recovery is held;
 withdrawal access remains available. These reports never grant execution authority.
 
+Owner recovery reporting currently covers agents with a stored current grant,
+including expired grants. Grantless retained agents have no new private recovery
+endpoint: `/api/grants` still returns `exists: false`, and chat does not infer
+recovery ownership without that grant. This change does not rebuild their access
+or make universal fleet readiness claims.
+
 ## What this change does
 
 - `fleet_recovery_health` stores a tenant/account/chain-bound source report. It

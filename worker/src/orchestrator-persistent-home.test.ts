@@ -233,12 +233,27 @@ it("a final source larger than one batch retains its recovery lease until every 
 
 it("a failed persistent root proof writes no cached key, child book or partial restore", async () => {
   const f = await fixture(); setTenantLeaseForTest(f.tenant, f.lease); const before = spawned.length;
+  const sharedFacts = () => Object.fromEntries((raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name<>'fleet_recovery_health' ORDER BY name").all() as Array<{ name: string }>).map(({ name }) =>
+    [name, raw.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY 1`).all()]));
+  const expectedShared = sharedFacts(), expectedGrant = await getGrantStore().get(f.tenant), checkedAfter = Math.floor(Date.now() / 1000);
+  assert.equal(existsSync(f.home), false);
   let paperCalls = 0; setPaperRestoreForTest(async () => { paperCalls++; return { ok: true, line: null }; });
   setPersistentHomeVerifierForTest(() => { throw new Error("disposable volume proof failure"); });
   try {
-    await assert.rejects(reconcile(), /disposable volume proof failure/);
+    await reconcile();
+    const report = raw.prepare("SELECT tenant,smart_account,chain_id,held,cause,since_at,checked_at FROM fleet_recovery_health WHERE tenant=?").get(f.tenant)!;
+    assert.deepEqual({ tenant: report.tenant, smartAccount: report.smart_account, chainId: report.chain_id, held: report.held, cause: report.cause },
+      { tenant: f.tenant, smartAccount: f.account, chainId: 4663, held: 1, cause: "persistent-source" });
+    assert.equal(report.since_at, report.checked_at);
+    assert.ok(Number(report.checked_at) >= checkedAfter && Number(report.checked_at) <= Math.floor(Date.now() / 1000));
+    await reconcile();
+    assert.equal(raw.prepare("SELECT since_at FROM fleet_recovery_health WHERE tenant=?").get(f.tenant)!.since_at, report.since_at);
     assert.equal(spawned.length, before); assert.equal(paperCalls, 0);
+    assert.equal(existsSync(f.home), false);
     assert.equal(existsSync(path.join(f.home, "grant.json")), false); assert.equal(existsSync(path.join(f.home, "merrymen.db")), false);
+    assert.equal(existsSync(path.join(f.home, "recovery-command-barrier.json")), false);
+    assert.deepEqual(await getGrantStore().get(f.tenant), expectedGrant); assert.deepEqual(sharedFacts(), expectedShared);
+    assert.equal(hasLeaseForTest(f.tenant), true); assert.equal(f.releases.n, 0);
   } finally {
     setPersistentHomeVerifierForTest(() => volume); setPaperRestoreForTest(async () => ({ ok: true, line: null })); await remove(f);
   }

@@ -16,12 +16,32 @@
  * balance added next month with a hardcoded label would reopen the incident
  * while every render test still passed.
  *
- * Source scans, in the idiom of app/settings/honesty.test.ts.
+ * Source scans protect the verdict's inputs; rendered assertions protect each
+ * cash slot when presentation adds a qualified recovery label.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import { REAL_LABEL, SIMULATED_LABEL, autonomyOf } from "@merrymen/core";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
+import type { ChatController } from "./chat-controller";
+import type { LiveMine } from "./live";
+import { DesktopHeader, DesktopPortfolio } from "./Desktop";
+import { Agent } from "./screens/Agent";
+
+(globalThis as unknown as { React: typeof React }).React = React;
+const noop = () => {};
+const held: FleetRecoveryView = { state: "history-only", tradingPaused: true, history: "available",
+  memory: "unknown", checkedAt: 1_791_111_100, lastVerifiedHeartbeatAt: null };
+const mine: LiveMine = { name: "Example Robin", slug: "example", handle: null, owner: "you", mode: "live",
+  equity: 120, chg24: 5, moves: [], thesis: null, statusLabel: "LIVE", glance: { id: "custom", label: "", cashUsd: 95 },
+  autonomy: autonomyOf({ mode: "live", liveBlocker: null }) };
+const chat = { draft: "", setDraft: noop, proposal: null, setProposal: noop, confirming: false,
+  messages: [], sending: false, streaming: "", ceiling: 10 } as unknown as ChatController;
+const doc = (node: React.ReactElement) => new JSDOM(renderToStaticMarkup(node)).window.document;
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 /** Comments stripped — this codebase argues in prose beside the code it argues about. */
@@ -46,21 +66,37 @@ describe("practice money can never wear the label real money wears", () => {
     }
   });
 
-  it("every balance in the terminal is labelled from the autonomy verdict", () => {
-    // Count the label slots, not the renders: a balance whose label is a literal
-    // is exactly the bug, and it would otherwise be invisible to a render test.
-    const desktop = SURFACES["Desktop.tsx"];
-    const agent = SURFACES["screens/Agent.tsx"];
-    assert.equal(
-      (desktop.match(/autonomy\.moneyLabel/g) ?? []).length,
-      2,
-      "Desktop has two balance surfaces — the header and the portfolio panel",
-    );
-    assert.equal(
-      (agent.match(/autonomy\.moneyLabel/g) ?? []).length,
-      1,
-      "the agent screen's cash row must take its label from the verdict",
-    );
+  it("each rendered cash amount has the real, practice or recovery label its verdict requires", () => {
+    // Each independently selected slot must carry BOTH the cash amount and its
+    // meaning. Recovery must qualify saved cash without turning paper cash real.
+    const cases = [
+      { name: "real", mode: "live" as const, recovery: undefined, label: REAL_LABEL, simulated: false },
+      { name: "practice", mode: "paper" as const, recovery: undefined, label: SIMULATED_LABEL, simulated: true },
+      { name: "recovering real", mode: "live" as const, recovery: held, label: "Last recorded cash", simulated: false },
+      { name: "recovering practice", mode: "paper" as const, recovery: held, label: "Last recorded paper cash", simulated: true },
+    ];
+    for (const expected of cases) for (const cashUsd of [95, 0, undefined]) {
+      const snapshot = { ...mine, recovery: expected.recovery, glance: { ...mine.glance, cashUsd },
+        autonomy: autonomyOf({ mode: expected.mode, liveBlocker: null }) };
+      const header = doc(React.createElement(DesktopHeader, { mine: snapshot, onScreen: noop, onTab: noop }));
+      const panel = doc(React.createElement(DesktopPortfolio, { mine: snapshot, tokens: [], stopped: false,
+        perTrade: 10, perDay: 20, onScreen: noop, onTab: noop }));
+      const agent = doc(React.createElement(Agent, { mine: snapshot, tokens: [], stopped: false, chat,
+        perTrade: 10, perDay: 20, liveBlocker: null, onToken: noop, onDeposit: noop, onWithdraw: noop,
+        onLimits: noop, onResign: noop, onSettings: noop }));
+      const slots = [
+        { name: "desktop header", row: header.querySelector(".desktop-header-account > span"), label: "small" },
+        { name: "desktop portfolio", row: panel.querySelector(".desktop-cash"), label: "span" },
+        { name: "agent portfolio", row: agent.querySelector(".desk-cash"), label: "span" },
+      ];
+      for (const slot of slots) {
+        const context = `${expected.name}, ${slot.name}, cash ${cashUsd}`;
+        assert.ok(slot.row, `${context}: the cash row must be rendered`);
+        assert.equal(slot.row.querySelector(slot.label)?.textContent, expected.label, context);
+        assert.equal(slot.row.querySelector("strong")?.textContent, cashUsd === undefined ? "—" : `$${cashUsd.toFixed(2)}`, context);
+        assert.equal(slot.row.classList.contains("is-simulated"), expected.simulated, context);
+      }
+    }
   });
 
   it("simulated balances are marked in the markup, not only in words", () => {
