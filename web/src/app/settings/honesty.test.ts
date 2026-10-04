@@ -177,7 +177,11 @@ describe("every control survives the restyle", () => {
     // groups" and "Look at coins people post". Both default ON, so — like the
     // platform coin list — the control is what makes OFF reachable, and both
     // are dashboard-only: the chat refuses them and points here.
-    assert.equal(count(/type="checkbox"/g), 19, "checkboxes");
+    // 22 since FOMO RESEARCH (docs/fomo.md): three separate permissions —
+    // answering Fomo questions (defaults ON, so the control is what makes OFF
+    // reachable), the trader cohort, and acting on research. Dashboard-only;
+    // the chat refuses all three (DASHBOARD_ONLY.fomo).
+    assert.equal(count(/type="checkbox"/g), 22, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -222,7 +226,7 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 7, "selects");
   });
 
-  it("sends exactly the 26 fields save() guards", () => {
+  it("sends exactly the 29 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -250,7 +254,10 @@ describe("every control survives the restyle", () => {
     // unguarded they would write whatever the form held for every owner who
     // saved anything — silently taking a bot out of its groups, or switching
     // coin-looking off, by visiting a page.
-    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 26);
+    // 29 since the three Fomo research permissions (docs/fomo.md). One of them
+    // (fomoDataAccess) defaults ON, so unguarded it would silently switch an
+    // owner's lookups off by visiting the page.
+    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 29);
   });
 });
 
@@ -360,7 +367,7 @@ describe("nothing is left behind after a save", () => {
     assert.ok(refetch > 0 && saved > refetch && resetEnd > saved, "saved values must be read back before clearing the draft");
     const reset = save.slice(saved, resetEnd);
     const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
-    assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
+    assert.equal(guarded.length, 29, "every guard has the `if (x !== null) body.key = x;` shape");
     const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));
     assert.deepEqual(left, [], "sent by save() but not reset after it");
   });

@@ -113,6 +113,17 @@ export interface ResolvedConfig {
   /** Poll Bitquery for new pairs and report them. Never trades. */
   discoveryEnabled: boolean;
   discoveryIntervalMin: number;
+  /** Answer Fomo questions when asked. Read-only; enforced on every surface (docs/fomo.md). */
+  fomoDataAccess: boolean;
+  /** Let the shared trader cohort and watched coins route research to this agent. Never trades. */
+  fomoMonitoringEnabled: boolean;
+  /** Let Fomo research nominate coins into the existing memecoin review. Not a copy-trade. */
+  fomoFollowEnabled: boolean;
+  /**
+   * Fomo data key (secret). Self-hosted only: a house field hosted, and removed
+   * from every hosted child's environment (CHILD_SECRET_STRIP).
+   */
+  fomoApiKey: string | undefined;
   /** Scout mode: may the agent buy tokens it cannot price? Off by default. */
   trencherLiveEnabled: boolean;
   trencherFastEnabled: boolean;
@@ -432,6 +443,13 @@ export function mergeSettings(
     maxPriceDivergenceBps: num(file.maxPriceDivergenceBps, env.MERRYMEN_MAX_PRICE_DIVERGENCE_BPS, d.maxPriceDivergenceBps, 10, 10_000),
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),
     discoveryIntervalMin: num(file.discoveryIntervalMin, env.MERRYMEN_DISCOVERY_INTERVAL_MIN, d.discoveryIntervalMin, 1, 1440),
+    fomoDataAccess: bool(file.fomoDataAccess, env.MERRYMEN_FOMO_DATA_ACCESS, d.fomoDataAccess ?? true),
+    fomoMonitoringEnabled: bool(file.fomoMonitoringEnabled, env.MERRYMEN_FOMO_MONITORING, d.fomoMonitoringEnabled ?? false),
+    fomoFollowEnabled: bool(file.fomoFollowEnabled, env.MERRYMEN_FOMO_FOLLOW, d.fomoFollowEnabled ?? false),
+    // MERRYMEN_FOMO_API_KEY is the house convention; FOMO_API_KEY is the name
+    // the provider's own docs use, accepted so an operator following them is
+    // not silently unconfigured. Both are stripped from hosted children.
+    fomoApiKey: str(file.fomoApiKey, env.MERRYMEN_FOMO_API_KEY ?? env.FOMO_API_KEY),
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
     trencherFastEnabled: bool(file.trencherFastEnabled, env.MERRYMEN_TRENCHER_FAST, d.trencherFastEnabled),
     sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),

@@ -355,6 +355,13 @@ const BOOL_FIELDS = [
   // MerrymenSettings.officialCoinsEnabled.
   "officialCoinsEnabled",
   "discoveryEnabled",
+  // FOMO RESEARCH (docs/fomo.md): three separate permissions. fomoDataAccess
+  // defaults ON, so — like the two opt-outs around it — this entry is what
+  // makes OFF reachable; the other two are opt-ins. Dashboard-only (the chat
+  // refuses them, DASHBOARD_ONLY.fomo).
+  "fomoDataAccess",
+  "fomoMonitoringEnabled",
+  "fomoFollowEnabled",
   // TELEGRAM GROUPS (docs/tg-groups.md "Settings"). Both default ON, so — like
   // officialCoinsEnabled above — this entry is what makes OFF reachable: missing
   // here, an owner's "stop looking at coins people post" would come back
