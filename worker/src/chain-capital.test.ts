@@ -187,6 +187,40 @@ describe("the fleet sweep", () => {
     assert.equal(shapes[1]!.length, 3, "inbound filters on topic2 and stops");
     for (const t of shapes) assert.notEqual(t[t.length - 1], null, "no trailing null");
   });
+
+  it("reads both small-scope accounts with scalar topics without losing or duplicating deposits", async () => {
+    const other = "0x0000000000000000000000000000000000000022";
+    const second = transferLog({ from: OWNER, to: other, amount: 60_000_000n, tx: "0xsecond", block: 4_200_000, idx: 1 });
+    const filters: (string | string[] | null)[][] = [];
+    const rpc: RpcCall = async (method, params) => {
+      if (method === "eth_getTransactionReceipt") return { logs: (params[0] === DEPOSIT.transactionHash ? [DEPOSIT] : [second]) };
+      const p = params[0] as { topics: (string | string[] | null)[] };
+      filters.push(p.topics);
+      return [DEPOSIT, second].filter(log => p.topics.every((topic, i) => topic === null || topic === log.topics[i]));
+    };
+    const out = await scanFleetCapital(rpc, { accounts: [ACCT, other], usdgToken: USDG, fromBlock: 0n, toBlock: 9_000_000n });
+    assert.equal(filters.length, 4);
+    assert.deepEqual(filters.map(topics => topics.at(-1)), [pad32(ACCT), pad32(other), pad32(ACCT), pad32(other)]);
+    assert.equal(out.get(ACCT)!.totals.netContributionsRaw, "10000000");
+    assert.equal(out.get(other)!.totals.netContributionsRaw, "60000000");
+    for (const book of out.values()) {
+      assert.equal(book.complete, true);
+      assert.equal(book.movements.length, 1);
+    }
+  });
+
+  it("retains the indexed OR-list for larger fleets", async () => {
+    const accounts = [ACCT, "0x0000000000000000000000000000000000000022", "0x0000000000000000000000000000000000000033"];
+    const filters: unknown[][] = [];
+    const rpc: RpcCall = async (_method, params) => {
+      filters.push((params[0] as { topics: unknown[] }).topics);
+      return [];
+    };
+    const out = await scanFleetCapital(rpc, { accounts, usdgToken: USDG, fromBlock: 0n, toBlock: 100n });
+    assert.equal(filters.length, 2);
+    for (const topics of filters) assert.deepEqual(topics.at(-1), accounts.map(pad32));
+    for (const book of out.values()) assert.equal(book.complete, true);
+  });
 });
 
 /**

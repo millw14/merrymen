@@ -180,6 +180,10 @@ export async function scanFleetCapital(
   const span = args.maxSpan ?? args.toBlock - args.fromBlock + 1n;
   const wanted = new Map(args.accounts.map((a) => [pad32(a), a]));
   const topicList = [...wanted.keys()];
+  // This RPC permits a much wider indexed range for a scalar topic than an
+  // OR-list. Small maintenance scopes read each exact address separately;
+  // the same receipt classifier and complete-coverage requirement still apply.
+  const topicFilters: (string | string[])[] = topicList.length <= 2 ? topicList : [topicList];
   const usdg = args.usdgToken.toLowerCase();
 
   const result = new Map<string, AccountCapital>();
@@ -208,9 +212,10 @@ export async function scanFleetCapital(
     pos: number,
     dir: string,
     depth: number,
+    accountTopic: string | string[],
   ): Promise<void> => {
     const topics: (string | string[] | null)[] = [TRANSFER_TOPIC, null, null];
-    topics[pos] = topicList;
+    topics[pos] = accountTopic;
 
     for (let attempt = 0; attempt < RATE_LIMIT_ATTEMPTS; attempt++) {
       try {
@@ -242,8 +247,8 @@ export async function scanFleetCapital(
           }
           const mid = from + (to - from) / 2n;
           args.log?.(`range ${from}-${to} (${dir}) too large — splitting at ${mid}`);
-          await sweep(from, mid, pos, dir, depth + 1);
-          await sweep(mid + 1n, to, pos, dir, depth + 1);
+          await sweep(from, mid, pos, dir, depth + 1, accountTopic);
+          await sweep(mid + 1n, to, pos, dir, depth + 1, accountTopic);
           return;
         }
 
@@ -273,7 +278,7 @@ export async function scanFleetCapital(
     // because the node's own refusal is a better guide than a guess.
     for (let from = args.fromBlock; from <= args.toBlock; from += span) {
       const to = from + span - 1n > args.toBlock ? args.toBlock : from + span - 1n;
-      await sweep(from, to, pos, dir, 0);
+      for (const accountTopic of topicFilters) await sweep(from, to, pos, dir, 0, accountTopic);
       // A courtesy pause between top-level ranges. The fleet's 24 children share
       // this endpoint, and a reconstruction that rate-limits them is a
       // reconstruction that breaks the thing it is measuring.

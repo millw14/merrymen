@@ -179,6 +179,7 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import { reconstructionRoster, type ReconstructionGrant } from "./accounting-roster";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -7152,10 +7153,12 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
   try {
     const shared = await makePgDb(url);
     const ledgerAgents = (await shared
-      .prepare("SELECT smart_account, owner_address, epoch, mode, hwm_usdg, contributions_known FROM agents")
+      .prepare("SELECT smart_account, owner_address, chain_id, epoch, mode, hwm_usdg, contributions_known, beat_at, created_at FROM agents")
       .all()) as unknown as Record<string, unknown>[];
 
-    // THE ROSTER IS THE GRANT STORE, NOT THE LEDGER.
+    // Include every grant, even before its first ledger mirror. A removed
+    // grant's existing financial account may instead resolve through its
+    // durable account claim; that supplies identity, never signing authority.
     //
     // The first dry run covered 22 of 24 tenants and could not say what happened
     // to the other two, because it enumerated `agents` — a table a tenant only
@@ -7167,14 +7170,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // synthesised from its grant and comes out of the planner as exactly what it
     // is — no chain history, no rows to remove, nothing to do — recorded rather
     // than absent.
-    const tenantByAccount = new Map<string, string>();
-    const ambiguousAccounts = new Set<string>();
-    const byAccount = new Map<string, Record<string, unknown>>();
-    /** account → the class vault holding its assets, for the classifier. */
-    const custodyVaults = new Map<string, readonly string[]>();
-    for (const a of ledgerAgents) byAccount.set(String(a.smart_account ?? "").toLowerCase(), a);
-
-    let rosterOnly = 0;
+    const grants: ReconstructionGrant[] = [];
     let rosterRead = true;
     try {
       const gs = getGrantStore();
@@ -7185,25 +7181,12 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
           log(`recon| tenant ${tenant} holds a grant with no smart account — it cannot be planned`);
           continue;
         }
-        const previousTenant = tenantByAccount.get(acct.toLowerCase());
-        if (previousTenant && previousTenant.toLowerCase() !== tenant.toLowerCase()) ambiguousAccounts.add(acct.toLowerCase());
-        tenantByAccount.set(acct.toLowerCase(), tenant);
         // FROM THE GRANT, which is the only place a class vault can honestly
         // come from: it is CREATE2-salted with one smart account, so there is no
         // fleet-wide list, and a settings-sourced value would point one owner's
         // reader at another owner's vault (custody.ts).
-        const vaults = custodyAddressesOf(g);
-        if (vaults.length > 0) custodyVaults.set(acct.toLowerCase(), vaults);
-        if (byAccount.has(acct.toLowerCase())) continue;
-        rosterOnly += 1;
-        byAccount.set(acct.toLowerCase(), {
-          smart_account: acct,
-          owner_address: g?.owner ?? null,
-          epoch: 1,
-          mode: null,
-          hwm_usdg: 0,
-          contributions_known: null,
-        });
+        grants.push({ tenant, smartAccount: acct, owner: g?.owner ?? null,
+          chainId: Number(g?.chainId), custodyAddresses: custodyAddressesOf(g) });
       }
     } catch (e) {
       // LOUD, and the run continues on the ledger roster alone — but the count
@@ -7212,15 +7195,25 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       rosterRead = false;
       log(`recon| GRANT ROSTER UNREADABLE (${e instanceof Error ? e.message : String(e)}) — tenants may be missing`);
     }
-    const agents = [...byAccount.values()];
+    let claims: Record<string, unknown>[] = [];
+    let claimsRead = true;
+    try {
+      claims = await shared.prepare("SELECT smart_account, tenant FROM agent_account").all() as Record<string, unknown>[];
+    } catch (e) {
+      claimsRead = false;
+      log(`recon| ACCOUNT CLAIMS UNREADABLE (${e instanceof Error ? e.message : String(e)}) — ownership cannot be verified`);
+    }
+    const roster = reconstructionRoster({ ledgerAgents, grants, claims });
+    const { agents, tenantByAccount, custodyVaults, rosterOnly } = roster;
     log(
       `recon| roster: ${agents.length} account(s) — ${ledgerAgents.length} from the ledger, ` +
-        `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead}`,
+        `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead} · account claims read ${claimsRead}`,
     );
     const repairOptions = parseRepairOptions(process.env);
     if (repairOptions?.mode === "commit") {
-      const refusal = !rosterRead ? "grant roster unreadable" :
-        repairOptions.accounts.some((account) => ambiguousAccounts.has(account)) ? "selected account resolves to multiple tenants" : accountingCommitRefusal({
+      const conflict = repairOptions.accounts.find((account) => roster.refusals.has(account));
+      const refusal = !rosterRead ? "grant roster unreadable" : !claimsRead ? "durable account claims unreadable" :
+        conflict ? `${conflict}: ${roster.refusals.get(conflict)}` : accountingCommitRefusal({
         ...repairOptions,
         plans: agents.map((agent) => ({
           smartAccount: String(agent.smart_account),
@@ -7340,6 +7333,15 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     }
 
     const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash, tenantByAccount });
+    for (const plan of plans) {
+      const refusal = roster.refusals.get(plan.smartAccount.toLowerCase()) ??
+        (!claimsRead ? "durable account claims unreadable" : null);
+      if (refusal) {
+        plan.blocked = refusal;
+        plan.contributionsKnownAfter = false;
+        plan.pnlPublishableAfter = false;
+      }
+    }
 
     // ONE REPORT, NOT TWO — AND IT HAS TO FIT IN THE WINDOW YOU CAN READ IT IN.
     //
