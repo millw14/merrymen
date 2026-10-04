@@ -68,6 +68,37 @@ test("each book closes on its own marks, so the switch hour cannot borrow the ot
   } finally { raw.close(); }
 });
 
+test("mixed account spellings share hourly closes while book, epoch, and held-mark boundaries remain intact", async () => {
+  const { raw, db } = await ledger([
+    [1, "0xAbC", 2, T0 + 10, 1000, "paper"],
+    [2, "0xABC", 2, T0 + 20, 50, "live"],
+    [3, "0xabc", 2, T0 + 30, 52, "live"],
+    [4, "0xaBc", 2, T0 + 40, 53, "live"],
+    [5, "0xABC", 2, T0 + 50, 1001, "paper"],
+    [6, "0xabc", 2, T0 + 60, 60, "live"],
+    [7, "0xAbC", 2, T0 + H + 5, 55, "live"],
+    [8, "0xABC", 1, T0 + 2 * H, 999, "live"],
+    [9, "0xother", 2, T0 + 2 * H, 999, "live"],
+  ]);
+  try {
+    await db.exec("ALTER TABLE equity ADD COLUMN flows_held INTEGER; UPDATE equity SET flows_held = 1 WHERE id IN (6,7)");
+    for (const account of ["0xabc", "0xAbC", "0xABC"]) {
+      const closes = await readEquityCloses(db, account, 2);
+      assert.equal(closes.complete, true);
+      assert.deepEqual(closes.marks.map((m) => [m.at, m.mode, m.equity_usdg, m.held]), [
+        [T0 + 10, "paper", 1000, false],
+        [T0 + 20, "live", 50, false],
+        [T0 + 40, "live", 53, false],
+        [T0 + 50, "paper", 1001, false],
+        [T0 + H + 5, "live", 55, true],
+      ]);
+      const capped = await readEquityCloses(db, account, 2, 3);
+      assert.equal(capped.complete, false);
+      assert.deepEqual(capped.marks.map((m) => m.at), [T0 + 20, T0 + 40, T0 + 50, T0 + H + 5]);
+    }
+  } finally { raw.close(); }
+});
+
 test("a read that reaches its cap says the series is not the whole period", async () => {
   const rows: [number, string, number, number, number, string | null][] = [];
   for (let i = 0; i < 6; i++) rows.push([i + 1, "a", 1, T0 + i * H, 100 + i, null]);

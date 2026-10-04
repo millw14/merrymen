@@ -57,8 +57,8 @@ function missingColumns(error: unknown): boolean {
   return e.code === "42703" || (typeof e.message === "string" && /^no such column: /i.test(e.message));
 }
 const flowIdentityColumns = new WeakSet<object>();
-/** Receipt spelling and late mirror copies cannot count one deposit twice. */
-async function flowCapital(db: Db, account: string, epoch: number, at?: number): Promise<number | null> {
+/** Current account/epoch flows, with receipt copies collapsed before any time cutoff. */
+export async function capitalFlowsSql(db: Db): Promise<string> {
   let hasIdentity = flowIdentityColumns.has(db);
   if (!hasIdentity) {
     try {
@@ -68,7 +68,7 @@ async function flowCapital(db: Db, account: string, epoch: number, at?: number):
     } catch (error) { if (!missingColumns(error)) throw error; }
   }
   const scope = "LOWER(agent_id) = ? AND epoch = ?";
-  const rows = hasIdentity ? `(WITH candidates AS (
+  return hasIdentity ? `(WITH candidates AS (
       SELECT *, ROW_NUMBER() OVER (PARTITION BY CASE
         WHEN chain_id IS NOT NULL AND COALESCE(tx_hash, '') <> '' AND log_index IS NOT NULL AND source <> 'epoch-carry'
           THEN 'log:' || CAST(chain_id AS TEXT) || ':' || LOWER(tx_hash) || ':' || CAST(log_index AS TEXT)
@@ -76,6 +76,11 @@ async function flowCapital(db: Db, account: string, epoch: number, at?: number):
       FROM flows WHERE ${scope}
     ) SELECT * FROM candidates WHERE receipt_copy = 1) f`
     : `(SELECT * FROM flows WHERE ${scope}) f`;
+}
+
+/** Receipt spelling and late mirror copies cannot count one deposit twice. */
+async function flowCapital(db: Db, account: string, epoch: number, at?: number): Promise<number | null> {
+  const rows = await capitalFlowsSql(db);
   const row = await db.prepare(`SELECT COUNT(*) AS n,
       SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END) AS net
     FROM ${rows}${at === undefined ? "" : " WHERE at <= ?"}`)

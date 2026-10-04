@@ -101,3 +101,86 @@ test("a distinct account re-grant still wins by registration time after alias ca
     assert.deepEqual(board.agents[0]!.performance, profile.performance);
   } finally { raw.close(); }
 });
+
+test("profile history and operation counts agree with consolidated performance across address spellings", async () => {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  try {
+    await applyLedgerSchema(db);
+    await registration(db, ACCOUNT, "Current desk", 2, NOW, 100, "live", 1);
+    await registration(db, ALIAS, "Stale desk", 1, NOW - 100, 50, "paper", 0);
+    await mark(db, ALIAS, 2, 100, "live", NOW - 7200);
+    await mark(db, ACCOUNT, 2, 132, "live", NOW);
+    const flow = db.prepare(`INSERT INTO flows
+      (agent_id, epoch, direction, amount_usdg, tx_hash, log_index, chain_id, source, at)
+      VALUES (?, ?, 'in', ?, ?, ?, ?, 'chain-log', ?)`);
+    await flow.run(ALIAS, 2, 100, "0xDEPOSIT", 0, 4663, NOW - 7300);
+    await flow.run(ACCOUNT, 2, 100, "0xdeposit", 0, 4663, NOW - 10);
+    await flow.run(ALIAS, 2, 10, "0xDEPOSIT", 1, 4663, NOW - 1800);
+    await flow.run(ACCOUNT, 2, 10, "0xdeposit", 0, 1, NOW - 1700);
+    await flow.run(ALIAS, 1, 5000, "0xold", 0, 4663, NOW - 8000);
+    await flow.run(REGRANT, 2, 5000, "0xother", 0, 4663, NOW - 7000);
+    const cash = "0x00000000000000000000000000000000000000c0";
+    const coin = "0xdddddddddddddddddddddddddddddddddddddddd";
+    const fill = db.prepare(`INSERT INTO trades
+      (agent_id, epoch, kind, target, sell_token, buy_token, amount_usdg, user_op_hash,
+       status, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg,
+       basis_source, gas_wei, gas_usdg, sponsored_gas_wei, created_at)
+      VALUES (?, ?, 'swap', 'PRIVATE-TARGET', ?, ?, 10, ?, 'landed', ?, 'CASH',
+       '1000000000000000000', ?, ?, 'receipt', ?, ?, ?, ?)`);
+    await fill.run(ALIAS, 2, cash, coin, "0xBUY", "buy", 10, null, "100", 0.25, null, NOW - 600);
+    await fill.run(ACCOUNT, 2, cash, coin, "0xbuy", "buy", 10, null, "100", 0.25, null, NOW - 500);
+    await fill.run(ACCOUNT, 2, coin, cash, "0xsell", "sell", 11, 1, null, null, "100", NOW - 60);
+    await fill.run(REGRANT, 2, cash, coin, "0xBUY", "buy", 10, null, null, null, "100", NOW - 1);
+    await fill.run(ALIAS, 1, cash, coin, "0xOLD", "buy", 10, null, null, null, "100", NOW - 9000);
+    await fill.run(ALIAS, 1, coin, cash, "0xOLDCLOSE", "sell", 10, 0, null, null, "100", NOW - 8500);
+    await db.prepare(`INSERT INTO decisions (id, agent_id, source, provider, model, at)
+      VALUES ('alias-decision', ?, 'strategist', 'anthropic', 'model-v1', ?)`)
+      .run(ALIAS, NOW - 100);
+    // Snapshot tables retain the selected registration's own coherent copy.
+    // A stale alias holding must not be resurrected when history is combined.
+    const position = db.prepare(`INSERT INTO positions
+      (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, value_usdg, updated_at)
+      VALUES (?, ?, ?, '1000000000000000000', '1', 10, 10, ?)`);
+    await position.run(ACCOUNT, "CASH", coin, NOW);
+    await position.run(ALIAS, "SOLD", cash, NOW - 100);
+    await db.prepare(`INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+      VALUES (?, 'live', 'CASH', '1000000000000000000', '10000000', ?)`)
+      .run(ACCOUNT, NOW);
+    const identity: PublicIdentity = { tenant: TENANT, slug: "current-desk", accounts: [ALIAS], createdAt: 100, updatedAt: 100 };
+    for (const publicBook of [false, true]) {
+      const board = await readLeaderboard(fn => fn(db), async () => [identity], () => NOW,
+        async () => ({ publicBook }));
+      const profile = await profileOf(db, identity, publicBook);
+      assert.ok(profile);
+      const row = board.agents[0]!;
+      assert.equal(row.landed, 2, "both spellings form two operations, not three rows");
+      assert.equal(profile.landed, 2);
+      assert.equal(profile.tokensTouched, 1);
+      assert.equal(profile.tradeCount, 2);
+      assert.equal(profile.avgHoldSec, 540);
+      assert.equal(profile.recentTrades.length, 2);
+      assert.equal(profile.topTrades.length, 1);
+      assert.equal(profile.topTrades[0]!.realizedPnlBps, 1000);
+      assert.equal(profile.gas.usdg, publicBook ? 0.25 : null);
+      assert.equal(profile.gasless, false);
+      assert.equal(profile.flowsTotal, 3, "receipt copies collapse; distinct log and chain survive");
+      assert.equal(profile.flowsWithTx, 3);
+      assert.equal(profile.funded, true);
+      assert.equal(profile.growth[0]!.at, NOW - 7200);
+      assert.ok(Math.abs(profile.growth.at(-1)!.g - 1.12) < 1e-9,
+        "20 in later deposits are removed from the 32 increase over the opening 100");
+      assert.deepEqual(profile.how, { kind: "model", provider: "anthropic", model: "model-v1" });
+      assert.deepEqual(row.performance, profile.performance);
+      assert.equal(profile.performance!.equityUsdg, publicBook ? 132 : null);
+      assert.equal(profile.performance!.pnlUsdg, publicBook ? 11.75 : null);
+      assert.ok(Math.abs(profile.performance!.pnlBps! - (11.75 / 120 * 10_000)) < 1e-9);
+      assert.deepEqual(profile.holdings.map(h => h.symbol), publicBook ? ["CASH"] : []);
+      if (publicBook) assert.equal(profile.holdings[0]!.heldSince, NOW - 600);
+      else {
+        assert.ok(profile.recentTrades.every(t => t.realizedPnlUsdg === null));
+        assert.ok(profile.topTrades.every(t => t.realizedPnlUsdg === null));
+      }
+    }
+  } finally { raw.close(); }
+});

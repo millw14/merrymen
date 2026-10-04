@@ -1,4 +1,4 @@
-import { readBookPerformance, type BookPerformance } from "./book-performance";
+import { capitalFlowsSql, readBookPerformance, type BookPerformance } from "./book-performance";
 /**
  * One agent, in public.
  *
@@ -404,10 +404,9 @@ export async function profileOf(
   try {
     const rows = (await db
       .prepare(
-        `SELECT direction, amount_usdg, at, source FROM flows
-           WHERE agent_id = ? AND epoch = ? ORDER BY at ASC`,
+        `SELECT direction, amount_usdg, at, source FROM ${await capitalFlowsSql(db)} ORDER BY at ASC`,
       )
-      .all(account, epoch)) as {
+      .all(account.toLowerCase(), epoch)) as {
       direction: string;
       amount_usdg: number;
       at: number;
@@ -534,9 +533,9 @@ export async function profileOf(
     const s = (await db
       .prepare(
         `SELECT source, provider, model FROM decisions
-          WHERE agent_id = ? AND at >= ? ORDER BY at DESC LIMIT 1`,
+          WHERE LOWER(agent_id) = ? AND at >= ? ORDER BY at DESC, id ASC LIMIT 1`,
       )
-      .get(account, sinceAt)) as
+      .get(account.toLowerCase(), sinceAt)) as
       | { source: string | null; provider: string | null; model: string | null }
       | undefined;
     const source = String(s?.source ?? "");
@@ -559,6 +558,9 @@ export async function profileOf(
   let holdingsRead = false;
   if (publicBook) {
     try {
+      // Positions and basis are mutable snapshots, unlike the append-only tape.
+      // Keep the selected registration's spelling: merging old alias snapshots
+      // could resurrect holdings already removed from the current snapshot.
       const rows = (await db
         .prepare(
           `SELECT p.symbol AS symbol, p.token AS token, p.value_usdg AS value_usdg,
@@ -588,11 +590,11 @@ export async function profileOf(
         const fills = (await db
           .prepare(
             `SELECT buy_token, created_at, basis_source FROM trades
-              WHERE agent_id = ? AND epoch = ? AND fill_side = 'buy'
+              WHERE LOWER(agent_id) = ? AND epoch = ? AND fill_side = 'buy'
                 AND status IN ('landed','paper') AND buy_token IS NOT NULL
               ORDER BY created_at ASC LIMIT 500`,
           )
-          .all(account, epoch)) as Record<string, unknown>[];
+          .all(account.toLowerCase(), epoch)) as Record<string, unknown>[];
         for (const f of fills) {
           const tok = String(f.buy_token).toLowerCase();
           if (first.has(tok)) continue;
