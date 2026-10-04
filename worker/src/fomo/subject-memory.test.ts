@@ -158,6 +158,25 @@ describe("applyPlan (before the lookup)", () => {
     assert.deepEqual(resolved, [{ kind: "token", symbol: "PEPE" }]);
   });
 
+  // C11: a chain stated for a still-unplaced coin is kept on it; a placed coin keeps its own.
+  for (const [text, before, want] of [
+    ["the one on base", { kind: "token", symbol: "PEPE", chain: null }, { kind: "token", symbol: "PEPE", chain: "base" }],
+    ["on solana", { kind: "token", symbol: "PEPE", chain: null }, { kind: "token", symbol: "PEPE", chain: "solana" }],
+    ["theses on $PEPE on base", { kind: "token", symbol: "PEPE", chain: null }, { kind: "token", symbol: "PEPE", chain: "base" }],
+    ["on base", { kind: "token", address: A, chain: null }, { kind: "token", address: A, chain: "base" }],
+    [`theses on ${A} on robinhood`, { kind: "token", tokenKey: `eip155:4663:${A}`, address: A, chain: "robinhood", symbol: "PEPE" }, { kind: "token", tokenKey: `eip155:4663:${A}`, address: A, chain: "robinhood", symbol: "PEPE" }],
+  ] as const) {
+    it(`C11: ${JSON.stringify(text)} after ${JSON.stringify(before)} remembers ${JSON.stringify(want)}`, () => {
+      const prior: SubjectMemory = { ...emptyMemory(NOW - 60_000), subjects: [{ ...before }], lastIntent: "token-theses", lastRequestId: "req-1", turn: 2 };
+      const p = plan(text, prior);
+      assert.equal(p.clarification, null, p.clarification ?? "");
+      const { memory } = applyPlan(prior, p, NOW);
+      assert.deepEqual(memory.subjects, [want]);
+      // Persisted as-is: the chain survives a round trip through the store.
+      assert.deepEqual(deserialize(serialize(memory))?.subjects, [want]);
+    });
+  }
+
   it("stale memory contributes nothing but the turn count", () => {
     const stale = resolvedMemory({ updatedAt: NOW - MEMORY_TTL_MS - 5_000, window: "7d" });
     const p = plan("what about the sellers?", stale);

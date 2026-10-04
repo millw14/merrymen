@@ -374,12 +374,47 @@ const usd = (n: number): string => `$${Math.round(n).toString().replace(/\B(?=(\
 const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
 const cmpStr = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Address-, hex- and link-shaped runs are replaced before any excerpt is kept. */
+/**
+ * Every link form a reader (or Telegram's own autolinker) would follow. WHY
+ * SO BROAD: an excerpt is third-party text quoted to the owner and handed to
+ * a composer. "claim at www.pons-claim.xyz" or "join t.me/ponsclaim" in a
+ * thesis would otherwise arrive as a tappable link (with a preview card) in
+ * the owner's own agent's message: a wallet-drainer path. Over-redacting a
+ * missing space ("undervalued.Strong") costs one word of a quote; missing a
+ * link costs far more. Order matters: schemes and www. first, then the
+ * spaced and spelled-out dots, then any bare dotted name.
+ */
+const LOOKALIKE_DOT = "[.。｡·•・‧∙⋅]";
+/** The rest of a link up to whitespace, leaving the sentence's own closing punctuation outside it. */
+const TAIL = String.raw`(?:\S*[^\s.,;:!?)\]}'"”’»])?`;
+const LINK_RULES: readonly RegExp[] = [
+  // Any scheme: https://, ipfs://, tg://resolve…
+  new RegExp(String.raw`\b[a-z][a-z0-9+.-]{1,15}:\/\/${TAIL}`, "gi"),
+  // Schemes without slashes that open something: mailto:, tg:, magnet:, wc:…
+  new RegExp(String.raw`(?<![\p{L}\p{N}_])(?:mailto|tg|tel|sms|javascript|data|magnet|ipfs|ipns|wc|intent|bitcoin|ethereum|solana):[^\s.,;:!?]${TAIL}`, "giu"),
+  new RegExp(String.raw`\bwww\d*${LOOKALIKE_DOT}${TAIL}`, "giu"),
+  // t.me/x, telegram.me/x, "t . me / x".
+  new RegExp(`\\b(?:t|telegram)\\s*${LOOKALIKE_DOT}\\s*me\\b(?:\\s*\\/\\s*[\\p{L}\\p{N}_+/-]*)?`, "giu"),
+  // "pons-claim dot xyz", "pons-claim [.] xyz", "pons-claim (dot) xyz", "pons-claim . xyz". Not "it. So": a
+  // sentence end has no space before its dot.
+  /[\p{L}\p{N}_-]+\s*(?:[[({<]\s*(?:\.|dot)\s*[\])}>]|\bdot\b|\s\.\s)\s*(?:com|net|org|io|xyz|gg|ly|fun|app|me|co|ai|so|to|tv|dev|sh|cc|info|site|link|pro|club|online|live|lol|wtf|money|cash|finance|exchange|family|eth|sol|vip|top|meme|news|bot|claims?|gift|airdrop|network|world|zone|page|art|one|games?)\b(?:\/\S*)?/giu,
+  // Any bare dotted name with a letter TLD: pons-airdrop.io/claim, PONS-CLAIM.XYZ, docs.example.co.uk.
+  new RegExp(`(?<![\\p{L}\\p{N}_-])(?:[\\p{L}\\p{N}_-]+${LOOKALIKE_DOT})+\\p{L}{2,24}\\b(?:[/:?#]${TAIL})?`, "giu"),
+];
+
+/**
+ * Address-, hex-, link- and mention-shaped runs are replaced before any
+ * excerpt is kept. A third party's @mention ("DM @pons_support") is a lure
+ * too: handles we show come from the provider's author fields, never from
+ * the text.
+ */
 export function redactExecutables(text: string): string {
-  return text
-    .replace(/https?:\/\/\S+/gi, "[link]")
+  let out = text;
+  for (const re of LINK_RULES) out = out.replace(re, "[link]");
+  return out
     .replace(/0x[0-9a-fA-F]{6,}/g, "[address]")
-    .replace(/[1-9A-HJ-NP-Za-km-z]{32,}/g, "[address]");
+    .replace(/[1-9A-HJ-NP-Za-km-z]{32,}/g, "[address]")
+    .replace(/(^|[^\p{L}\p{N}_])[@＠﹫][\p{L}\p{N}_]{1,32}/gu, "$1[handle]");
 }
 
 function quoteOf(text: string): string | null {

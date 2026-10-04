@@ -291,6 +291,16 @@ export interface FomoDmInput {
    * ordinary DM never pays for them here).
    */
   persona?: () => Promise<{ name: string; identity: string; history: { role: "user" | "assistant"; content: string }[] }>;
+  /** The agent's own names and the bot's @username (trusted: getName(), getMe), never researched as a trader. */
+  selfNames?: readonly string[];
+  /**
+   * The message replies to one of my messages that was not a research answer
+   * (a trade receipt, a market read). Its "it" is that message's subject, so
+   * only a self-contained research question is taken, and it is planned
+   * without the research's memory: the answer loop, which resolves the coin
+   * from the replied-to message first, gets everything else.
+   */
+  repliesToOther?: boolean;
   /** Test seam: the whole budget. */
   deadlineMs?: number;
   /** Test seam: the one-shot model call (llm.ts llmText). */
@@ -362,9 +372,10 @@ function statusTokenOf(env: FomoEnvelope): TokenIdentity | null {
 export async function answerFomoDm(i: FomoDmInput): Promise<FomoDmAnswer> {
   const text = typeof i.text === "string" ? i.text.trim() : "";
   if (!text || text.startsWith("/")) return { handled: false };
+  const selfNames = Array.isArray(i.selfNames) ? i.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
   let local: FomoQuestionPlan | null = null;
   try {
-    local = classifyFomoQuestion(text, { memory: null, now: i.nowMs });
+    local = classifyFomoQuestion(text, { memory: null, now: i.nowMs, selfNames });
   } catch {
     local = null;
   }
@@ -380,8 +391,9 @@ export async function answerFomoDm(i: FomoDmInput): Promise<FomoDmAnswer> {
   });
   if (!i.broker) return local ? answered(FOMO_UNAVAILABLE_TEXT) : { handled: false };
   // No research cue and no research conversation: nothing is asked of the
-  // broker at all (not even the subject memory, an IPC round trip).
-  if (!local && !i.active) return { handled: false };
+  // broker at all (not even the subject memory, an IPC round trip). A reply
+  // to a non-research message continues THAT message, not the research.
+  if (!local && (!i.active || i.repliesToOther === true)) return { handled: false };
 
   const started = Date.now();
   const budget = i.deadlineMs ?? FOMO_DM_DEADLINE_MS;
@@ -435,6 +447,8 @@ export async function answerFomoDm(i: FomoDmInput): Promise<FomoDmAnswer> {
         audience: i.audience,
         conversationKey: i.conversationKey,
         maxChars: FOMO_DM_MAX_CHARS,
+        selfNames,
+        ...(i.repliesToOther === true ? { ignoreMemory: true } : {}),
         ...(compose ? { compose } : {}),
       }),
       remaining(),

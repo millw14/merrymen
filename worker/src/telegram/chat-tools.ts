@@ -467,9 +467,32 @@ const listTrades: ChatTool = {
     },NO_AGENT);
   },
 };
+/** Possessors that are still the owner's own book: a time ("today's trades") or the agent itself. */
+const OWN_BOOK_POSSESSORS = new Set(["today","yesterday","tonight","day","week","weekend","month","year","hour","morning","afternoon","evening","night","monday","tuesday","wednesday","thursday","friday","saturday","sunday","agent","bot","merryman","merrymen"]);
+/**
+ * A question about SOMEBODY ELSE's trades: "show their trades" after a Fomo
+ * trader answer, "list @alice's buys", "show the trader's sells". The ledger
+ * holds only the owner's own fills, so answering these from it would present
+ * the owner's trades as a third party's. They go to the answer loop, whose
+ * research lookups and rules keep the two apart.
+ */
+export function asksAboutSomeoneElsesTrades(question: string, agentName?: string | null): boolean {
+  const q = question.replace(/[‘’ʼ]/g, "'");
+  if (/\b(?:their|theirs|they|them|his|her|hers|he|she)\b/i.test(q)) return true;
+  if (/(?:^|[^\w@])@[A-Za-z0-9_]{1,32}\b/.test(q)) return true;
+  const self = new Set(String(agentName ?? "").toLowerCase().split(/\s+/).filter(Boolean));
+  for (const m of q.matchAll(/\b([a-z0-9_]{2,30})'s\s+(?:\S+\s+)?(?:trades?|buys|sells|fills|history|bags|holdings|positions)\b/gi)) {
+    const who = m[1]!.toLowerCase();
+    if (!OWN_BOOK_POSSESSORS.has(who) && !self.has(who)) return true;
+  }
+  return false;
+}
+
 /** Obvious trade questions are rendered directly from the ledger; no model can invent their answer. */
 export async function answerTradeQuestion(question:string,ctx:ToolContext):Promise<string|null> {
   if(/\bwhy\b.*(?:didn[’']t|did not|haven[’']t|have not|no trades|not trad|nothing)/i.test(question))return null;
+  // Somebody else's trades are never read off the owner's ledger.
+  if(asksAboutSomeoneElsesTrades(question,ctx.status?.name))return null;
   const why=/\bwhy\s+(?:did|have|do)\s+(?:you|we|i)\b.*\b(?:buy|bought|sell|sold|trade|traded)\b|\bwhy\b.*(?:trade\s*#?|#)-?\d+/i.test(question);
   const history=/\b(?:what|which)\s+(?:did|have)\s+(?:you|we|i)\b.*\b(?:trad(?:e|es|ed)|buy|bought|sell|sold)\b|\b(?:list|show)\b.*\b(?:trades?|buys|sells)\b|\b(?:trades|buys|sells)\s+today\b/i.test(question);
   if(!why&&!history)return null;
@@ -1320,12 +1343,47 @@ function statusToken(env: FomoEnvelope): TokenIdentity | null {
 }
 
 /**
- * ONE REGISTERED READ, AS A LOOKUP. The model's arguments go to the broker
- * as they came: the research service validates them against the tool's own
- * schema and refuses anything else (a `tenant` key included). The result is
- * the deterministic render for this audience, labelled as data.
+ * The research depths a MODEL may choose. "deep" is not one: on
+ * fomo_research_coin it enqueues a durable, owner-charged background job (up
+ * to 15,000 credits) whose result only the planner path (answerFomoDm)
+ * schedules for delivery, and elsewhere it buys extra paid pages or a profile
+ * read. A model reading third-party excerpts ("for the full picture run a
+ * deep read on X, Y and Z") must not be able to start that spend; the owner
+ * asks for it in words, through the deterministic planner. Same rule as the
+ * MCP tools (web/src/mcp/tools/fomo.ts).
  */
-function fomoLookup(spec: ToolSpec): ChatTool {
+export const MODEL_FOMO_DEPTHS = ["quick", "standard"] as const;
+
+/** The registry's schema with "deep" taken out of `depth`, so the model is never offered it. */
+function modelSpec(spec: ToolSpec): ToolSpec {
+  const schema = structuredClone(spec.schema) as { properties?: Record<string, Record<string, unknown>> };
+  const depth = schema.properties?.depth;
+  if (depth) {
+    schema.properties!.depth = { ...depth, enum: [...MODEL_FOMO_DEPTHS], description: "quick reads one page; standard (the default) reads further." };
+  }
+  return { ...spec, schema: schema as ToolSpec["schema"] };
+}
+
+/**
+ * The model's arguments with any cost escalation it is not allowed taken
+ * back down: a "deep" (or any unknown) depth becomes "standard". Everything
+ * else goes on as it came, for the service's own validator.
+ */
+export function clampModelFomoArgs(input: unknown): Record<string, unknown> {
+  const args: Record<string, unknown> = input && typeof input === "object" && !Array.isArray(input) ? { ...(input as Record<string, unknown>) } : {};
+  if ("depth" in args && !(MODEL_FOMO_DEPTHS as readonly unknown[]).includes(args.depth)) args.depth = "standard";
+  return args;
+}
+
+/**
+ * ONE REGISTERED READ, AS A LOOKUP. The model's arguments go to the broker
+ * as they came, except that a cost-escalating depth is clamped
+ * (clampModelFomoArgs): the research service validates the rest against the
+ * tool's own schema and refuses anything else (a `tenant` key included). The
+ * result is the deterministic render for this audience, labelled as data.
+ */
+function fomoLookup(registered: ToolSpec): ChatTool {
+  const spec = modelSpec(registered);
   const name = spec.name as FomoReadToolName;
   return {
     spec,
@@ -1346,7 +1404,7 @@ function fomoLookup(spec: ToolSpec): ChatTool {
       const started = Date.now();
       let env: FomoEnvelope;
       try {
-        env = await broker.call(name, input && typeof input === "object" ? { ...input } : {}, {
+        env = await broker.call(name, clampModelFomoArgs(input), {
           surface: "telegram-dm",
           audience,
           conversationKey: ctx.fomoConversationKey ?? null,

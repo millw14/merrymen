@@ -2334,7 +2334,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
-  const readFomo = async (port: TgFomoPort, q: { text: string; chatId: number; threadId?: number }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+  const readFomo = async (port: TgFomoPort, q: { text: string; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
     if (ms <= 0) return "timeout";
     const ask = { ...q, timeoutMs: ms };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2392,7 +2392,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const slot = fomoRoom(chatId);
     if (!slot) return send(FOMO_BUSY);
     stageOf(chatId, "research: ask");
-    const r = await readFomo(port, { text: j.line.text, chatId, ...(j.threadId !== undefined ? { threadId: j.threadId } : {}) }, replyByMs - RESEARCH_SEND_MS - clock());
+    // The bot's own names go with the line: an addressed line almost always
+    // carries "@thisbot", which the research must not read as a trader.
+    const selfNames = selfNamesOf(selfNow());
+    const r = await readFomo(port, { text: j.line.text, chatId, ...(j.threadId !== undefined ? { threadId: j.threadId } : {}), ...(selfNames.length ? { selfNames } : {}) }, replyByMs - RESEARCH_SEND_MS - clock());
     if (r === null) {
       fomoRefund(slot);
       return "not-research";

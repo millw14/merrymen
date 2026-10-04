@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import type { AgentMsg, AgentTurn, LlmCreds } from "../llm";
 import { brokerFailureEnvelope } from "../fomo/broker";
 import type { FomoBroker } from "../fomo/contract";
+import { serialize, type SubjectMemory } from "../fomo/subject-memory";
 import type { FomoToolName } from "../fomo/types";
 import { FOMO_LATE_TEXT, FOMO_UNAVAILABLE_TEXT, MAX_ROUNDS, answerFomoDm, answerQuestion, answerSystem, type AnswerInput, type FomoDmInput } from "./answer";
 import type { ToolContext } from "./chat-tools";
@@ -405,6 +406,47 @@ describe("answerFomoDm — research first, bounded", () => {
     assert.ok(seenOpts[0]!.signal instanceof AbortSignal);
     assert.equal(seenOpts[0]!.signal!.aborted, true, "aborted once the answer is done: nothing outlives it");
   });
+
+  // A live research conversation: a coin and a trader remembered a minute ago.
+  const AAA = `0x${"a1".repeat(20)}`;
+  const live: SubjectMemory = {
+    version: 1,
+    subjects: [{ kind: "token", tokenKey: `eip155:4663:${AAA}`, address: AAA, chain: "robinhood", symbol: "AAA" }],
+    window: null,
+    side: null,
+    lastIntent: "token-theses",
+    dossierRevision: null,
+    lastRequestId: "req-1",
+    updatedAt: NOW - 60_000,
+    turn: 1,
+  };
+  const liveTrader: SubjectMemory = { ...live, subjects: [{ kind: "trader", userId: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b", handle: "CryptoKaleo" }], lastIntent: "trader-holdings" };
+
+  for (const row of [
+    // C13: the owner replied to a non-research message of mine (a trade receipt): its "it" is that message's coin.
+    { id: "C13", text: "What about the sellers?", mem: live, over: { repliesToOther: true }, handled: false },
+    { id: "C13", text: "should we follow this?", mem: live, over: { repliesToOther: true }, handled: false },
+    // C13: managing the owner's own position is never research because a research conversation is fresh.
+    { id: "C13", text: "should we take profit?", mem: live, over: {}, handled: false },
+    { id: "C13", text: "should we exit?", mem: live, over: {}, handled: false },
+    { id: "C13", text: "is it worth holding?", mem: live, over: {}, handled: false },
+    { id: "C13", text: "should I add more?", mem: live, over: {}, handled: false },
+    // C10: the agent's own name is the owner's book, never a stranger's Fomo profile.
+    { id: "C10", text: "show me Robin's trades", mem: liveTrader, over: { selfNames: ["Robin"] }, handled: false },
+    { id: "C10", text: "what are Robin's holdings?", mem: null, over: { selfNames: ["Robin"] }, handled: false },
+    // Controls: the same follow-up without a reply elsewhere is still research.
+    { id: "control", text: "What about the sellers?", mem: live, over: {}, handled: true },
+    { id: "control", text: "what are the theses on $PONS?", mem: live, over: { repliesToOther: true }, handled: true },
+  ] as const) {
+    it(`${row.id}: ${JSON.stringify(row.text)}${"repliesToOther" in row.over ? " (a reply to a non-research message)" : ""} is ${row.handled ? "" : "not "}research`, async () => {
+      const reads: string[] = [];
+      const { b, seen } = broker({ get: async (k) => (reads.push(k), row.mem ? serialize(row.mem) : null) });
+      const r = await answerFomoDm(input(b, { text: row.text, active: true, ...row.over }));
+      assert.equal(r.handled, row.handled, JSON.stringify(seen));
+      if (!row.handled) assert.deepEqual(seen.filter((x) => x.startsWith("call:")), [], "nothing was looked up");
+      if ("repliesToOther" in row.over && row.handled) assert.deepEqual(reads, [], "a reply elsewhere never reads the research's memory");
+    });
+  }
 
   it("a composer still writing at the deadline is dropped for the deterministic answer", async () => {
     const { b } = broker();

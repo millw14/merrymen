@@ -25,7 +25,7 @@ import { FunnelRecorder, installDecisionFunnel } from "../decision-funnel";
 import { EarlyCandidateBook, installEarlyCandidateBook } from "../early-candidates";
 import type { AgentMsg, AgentTurn, LlmCreds } from "../llm";
 import { answerQuestion, answerSystem } from "./answer";
-import { CHAT_TOOLS, FOMO_TOOL_LABEL, FOMO_TOOL_MAX_CALLS, FOMO_TOOL_TIMEOUT_MS, TOOL_OUTPUT_MAX, localResearchLines, toolByName, type ToolContext } from "./chat-tools";
+import { CHAT_TOOLS, FOMO_TOOL_LABEL, FOMO_TOOL_MAX_CALLS, FOMO_TOOL_TIMEOUT_MS, MODEL_FOMO_DEPTHS, TOOL_OUTPUT_MAX, answerTradeQuestion, asksAboutSomeoneElsesTrades, clampModelFomoArgs, localResearchLines, toolByName, type ToolContext } from "./chat-tools";
 
 const NOW_SEC = 1_790_000_000;
 const NOW_MS = NOW_SEC * 1000;
@@ -206,10 +206,89 @@ describe("the DM model loop and the research lookups", () => {
     assert.match(results.results[0]!.output, /no lookup called fomo_watch_coin/);
   });
 
+  it("C30: the model loop cannot start a deep research job, whatever an excerpt asks for", async () => {
+    const { broker, calls } = spyBroker((tool) => okEnvelope(tool, null));
+    const turns: AgentTurn[] = [
+      {
+        text: "",
+        toolUses: [
+          { id: "d1", name: "fomo_research_coin", input: { token: "PONS", depth: "deep" } },
+          { id: "d2", name: "fomo_research_coin", input: { token: "ZORP", depth: "deep", freshness: "force-refresh" } },
+        ],
+      },
+      { text: "done", toolUses: [] },
+    ];
+    let i = 0;
+    let offered: { name: string; input_schema?: unknown; parameters?: unknown; schema?: unknown }[] = [];
+    const turn = (async (_c: LlmCreds, o: { tools: typeof offered }) => {
+      if (i === 0) offered = o.tools;
+      return turns[Math.min(i++, turns.length - 1)]!;
+    }) as never;
+    await answerQuestion({ question: "hello there", name: "Shogun", identity: "", memory: "", gap: "", history: [], tools: ctx({ fomo: broker, fomoAudience: "owner" }), creds, turn });
+    assert.deepEqual(calls.map((c) => [c.tool, c.args.depth]), [["fomo_research_coin", "standard"], ["fomo_research_coin", "standard"]]);
+    const research = offered.find((t) => t.name === "fomo_research_coin")!;
+    assert.doesNotMatch(JSON.stringify(research), /"deep"/, "deep is never offered to the model");
+  });
+
+  for (const name of ["fomo_research_coin", "fomo_get_token_theses", "fomo_get_trader_context"] as const) {
+    it(`C30: ${name} offers the model quick or standard depth only, and clamps anything else to standard`, async () => {
+      const tool = toolByName(name)!;
+      const depth = (tool.spec.schema as { properties: Record<string, { enum?: unknown[] }> }).properties.depth;
+      assert.ok(depth, `${name} has a depth`);
+      assert.deepEqual(depth.enum, [...MODEL_FOMO_DEPTHS]);
+      const base = name === "fomo_get_trader_context" ? { trader: "CryptoKaleo" } : { token: "PONS" };
+      for (const [given, sent] of [["deep", "standard"], ["DEEP", "standard"], ["max", "standard"], [7, "standard"], ["quick", "quick"], ["standard", "standard"]] as const) {
+        const { broker, calls } = spyBroker((t) => okEnvelope(t, null));
+        await tool.run({ ...base, depth: given }, ctx({ fomo: broker, fomoAudience: "owner" }));
+        assert.equal(calls[0]!.args.depth, sent, `${name} depth ${String(given)}`);
+      }
+      const { broker, calls } = spyBroker((t) => okEnvelope(t, null));
+      await tool.run({ ...base }, ctx({ fomo: broker, fomoAudience: "owner" }));
+      assert.ok(!("depth" in calls[0]!.args), "no depth stays no depth (the tool's own default)");
+    });
+  }
+
+  it("C30: clampModelFomoArgs keeps every other argument as given, for the service's own validator", () => {
+    assert.deepEqual(clampModelFomoArgs({ token: "PONS", chain: "robinhood", depth: "deep", tenant: "x" }), { token: "PONS", chain: "robinhood", depth: "standard", tenant: "x" });
+    assert.deepEqual(clampModelFomoArgs(null), {});
+    assert.deepEqual(clampModelFomoArgs(["deep"]), {});
+  });
+
   it("the rules tell the model research is never an order and public activity is not the owner's", () => {
     const sys = answerSystem("Shogun", "YOUR IDENTITY: Shogun.");
     assert.match(sys, /fomo_\* lookups are read-only research/);
     assert.match(sys, /never place an order, a post or a watch/);
     assert.match(sys, /a trader's public activity is not what you or the owner traded/);
   });
+});
+
+describe("C12: somebody else's trades are never read off the owner's ledger", () => {
+  const ROWS: Array<[string, boolean]> = [
+    ["show their trades", true],
+    ["show me their trades", true],
+    ["list their sells", true],
+    ["show his buys today", true],
+    ["list her trades", true],
+    ["show @alice's trades", true],
+    ["list @alice’s buys", true],
+    ["show the trader's sells", true],
+    ["show CryptoKaleo's trades", true],
+    ["what did they trade today? show the trades", true],
+    // The owner's own book still takes the deterministic ledger answer.
+    ["show trades today", false],
+    ["show today's trades", false],
+    ["show yesterday's buys", false],
+    ["show my trades", false],
+    ["list trades for $PRISM", false],
+    ["show the agent's trades", false],
+    ["show Shogun's trades", false],
+    ["what did you trade today?", false],
+  ];
+  for (const [q, someoneElse] of ROWS) {
+    it(`${JSON.stringify(q)} is ${someoneElse ? "somebody else's" : "the owner's"}`, async () => {
+      assert.equal(asksAboutSomeoneElsesTrades(q, "Shogun"), someoneElse);
+      // Returned before any ledger is opened: the answer loop gets it.
+      if (someoneElse) assert.equal(await answerTradeQuestion(q, ctx()), null);
+    });
+  }
 });

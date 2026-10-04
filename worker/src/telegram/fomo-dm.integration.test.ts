@@ -139,8 +139,10 @@ interface Harness {
   state: () => TelegramState;
   setState: (s: TelegramState) => void;
   cfg: Record<string, unknown>;
-  /** A live DM from `from`. */
-  say: (text: string, from?: number) => void;
+  /** A live DM from `from`, optionally replying to a message (Telegram's reply_to_message). */
+  say: (text: string, from?: number, replyTo?: Record<string, unknown>) => void;
+  /** The message_id Telegram gave each sendMessage, in order. */
+  sentIds: (chat: number) => number[];
   sentTo: (chat: number) => string[];
   /** Tick the mocked clock until `done()` or `ms` have passed. */
   until: (done: () => boolean, ms?: number) => Promise<void>;
@@ -174,6 +176,7 @@ async function withDm(
   let state = blankState();
   const queue: unknown[] = [];
   let updateId = 1;
+  let nextMessageId = 50_000;
   const realFetch = globalThis.fetch;
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: T0 });
   globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
@@ -187,7 +190,11 @@ async function withDm(
     const ok = (result: unknown) => ({ ok: true, status: 200, json: async () => ({ ok: true, result }) });
     if (call.method === "getMe") return ok({ id: 111, username: "bot111", first_name: "Pine" });
     if (call.method === "getUpdates") return ok(queue.splice(0));
-    if (call.method === "sendMessage") return ok({ message_id: 1 });
+    if (call.method === "sendMessage") {
+      const message_id = nextMessageId++;
+      call.body.__message_id = message_id;
+      return ok({ message_id });
+    }
     return ok(true);
   }) as typeof fetch;
   const fx = await fomoFixture();
@@ -201,14 +208,22 @@ async function withDm(
       state = s;
     },
     cfg,
-    say: (text, from = OWNER) => {
+    say: (text, from = OWNER, replyTo) => {
       const id = updateId++;
       queue.push({
         update_id: id,
-        message: { message_id: 1000 + id, text, date: Math.floor(Date.now() / 1000), chat: { id: from, type: "private" }, from: { id: from, is_bot: false, first_name: "Owner" } },
+        message: {
+          message_id: 1000 + id,
+          text,
+          date: Math.floor(Date.now() / 1000),
+          chat: { id: from, type: "private" },
+          from: { id: from, is_bot: false, first_name: "Owner" },
+          ...(replyTo ? { reply_to_message: replyTo } : {}),
+        },
       });
     },
     sentTo: (chat) => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).map((c) => plain(String(c.body.text))),
+    sentIds: (chat) => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).map((c) => Number(c.body.__message_id)),
     until: async (done, ms = 20_000) => {
       for (let t = 0; t < ms && !done(); t += 250) {
         mock.timers.tick(250);
@@ -251,9 +266,9 @@ async function withDm(
 }
 
 /** Say it, and wait for the next reply to that chat. */
-async function ask(h: Harness, text: string, from = OWNER): Promise<string> {
+async function ask(h: Harness, text: string, from = OWNER, replyTo?: Record<string, unknown>): Promise<string> {
   const before = h.sentTo(from).length;
-  h.say(text, from);
+  h.say(text, from, replyTo);
   await h.until(() => h.sentTo(from).length > before);
   const out = h.sentTo(from);
   assert.ok(out.length > before, `no reply to ${JSON.stringify(text)}`);
@@ -410,6 +425,57 @@ describe("social-trading research in a DM", () => {
       const before = h.sentTo(OWNER).length;
       await h.advance(3 * 60_000);
       assert.equal(h.sentTo(OWNER).length, before);
+    });
+  });
+
+  it("C13: a reply to one of my non-research messages is not answered from the research's memory; a reply to a research answer is", async () => {
+    await withDm({}, async (h) => {
+      await ask(h, "what are the theses on $PONS");
+      const researchId = h.sentIds(OWNER).at(-1)!;
+      const looked = h.fx.calls.length;
+      // The owner replies to a trade receipt of mine: "the sellers" are that coin's, not PONS's.
+      const receipt = { message_id: 777, from: { id: 111, is_bot: true, first_name: "Pine" }, text: "Bought $PEPE for $5.00 (trade #3, from the fomo-follow review)." };
+      for (const t of ["What about the sellers?", "should we follow this?"]) {
+        const r = await ask(h, t, OWNER, receipt);
+        assert.match(r, /pick an AI provider/, `${t}: went on to the existing path`);
+      }
+      // Position management is the owner's book even with no reply at all.
+      for (const t of ["should we take profit?", "should we exit?", "is it worth holding?"]) {
+        assert.match(await ask(h, t), /pick an AI provider/, t);
+      }
+      assert.equal(h.fx.calls.length, looked, "nothing was looked up for any of them");
+      // A reply to the research answer itself continues the research.
+      await ask(h, "What about the sellers?", OWNER, { message_id: researchId, from: { id: 111, is_bot: true, first_name: "Pine" }, text: "PONS on robinhood: 3 theses" });
+      const last = h.fx.calls.at(-1)!;
+      assert.equal(last.tool, "fomo_get_token_activity");
+      assert.deepEqual(last.args, { token: PONS, chain: "robinhood", side: "sell" });
+      // So does a reply to an older research answer this process never sent (after a restart): it carries the attribution.
+      const n = h.fx.calls.length;
+      await ask(h, "and the buyers?", OWNER, { message_id: 12, from: { id: 111, is_bot: true, first_name: "Pine" }, text: `PONS on robinhood: 3 theses\n${FOMO_ATTRIBUTION}` });
+      assert.equal(h.fx.calls.length, n + 1);
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { token: PONS, chain: "robinhood", side: "buy" });
+    });
+  });
+
+  it("C10: the agent's own name is the owner's book, never a Fomo trader, even inside a research conversation", async () => {
+    await withDm({}, async (h) => {
+      await ask(h, "what are the theses on $PONS");
+      const looked = h.fx.calls.length;
+      for (const t of ["show me Robin's trades", "what are Robin's holdings?", "how is Robin's pnl?"]) {
+        assert.match(await ask(h, t), /pick an AI provider/, t);
+      }
+      assert.equal(h.fx.calls.length, looked, "no trader search for the agent's own (default) name");
+    });
+  });
+
+  it("C29: a research answer is sent without a link preview card; an ordinary reply is unchanged", async () => {
+    await withDm({}, async (h) => {
+      await ask(h, "what are the theses on $PONS");
+      const research = h.calls.filter((c) => c.method === "sendMessage").at(-1)!;
+      assert.deepEqual(research.body.link_preview_options, { is_disabled: true });
+      await ask(h, "hello there");
+      const other = h.calls.filter((c) => c.method === "sendMessage").at(-1)!;
+      assert.equal(other.body.link_preview_options, undefined);
     });
   });
 

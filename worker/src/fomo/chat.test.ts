@@ -205,6 +205,64 @@ describe("answerFomoQuestion", () => {
     assert.ok(mem?.subjects.every((x) => x.kind !== "token" || !x.tokenKey));
   });
 
+  it("C11: answering the which-chain question places the coin on that chain instead of asking again", async () => {
+    for (const [answer, chain, address] of [
+      ["the one on robinhood", "robinhood", PONS],
+      ["on solana", "solana", FU2O],
+      ["I mean on robinhood", "robinhood", PONS],
+    ] as const) {
+      const s = await setup();
+      s.serve.set("/v2/tokens/search", () => {
+        const b = fixture("tokens-search");
+        (b.tokens as Rec[]).push({ symbol: "PONS", address: FU2O, name: "Other Pons", networkId: 1399811149 });
+        return json(b);
+      });
+      const first = await s.ask("what are the theses on $PONS");
+      assert.ok(first.handled && first.envelopes[0]!.status === "needs-clarification");
+      const r = await s.ask(answer);
+      assert.ok(r.handled, answer);
+      assert.equal(r.clarification, false, answer);
+      assert.deepEqual(s.brokerCalls[1]!.args, { token: "PONS", chain }, answer);
+      assert.notEqual(r.envelopes[0]!.status, "needs-clarification", `${answer}: the same question came back`);
+      const mem = deserialize(await s.service.memoryGet(OWNER, "conv-1"));
+      const t = mem?.subjects.find((x) => x.kind === "token");
+      assert.ok(t && t.kind === "token" && t.address === address, `${answer}: remembered ${JSON.stringify(t)}`);
+    }
+  });
+
+  it("C8/C10: the agent's own names are never researched as a trader", async () => {
+    const s = await setup();
+    const self = { selfNames: ["Robin", "@robin_merry_bot"] };
+    await s.ask("what is @CryptoKaleo holding?", self);
+    const calls = s.brokerCalls.length;
+    for (const t of ["show me Robin's trades", "what are Robin's holdings?", "how is Robin's pnl?"]) {
+      const r = await s.ask(t, self);
+      assert.equal(r.handled, false, t);
+    }
+    assert.equal(s.brokerCalls.length, calls, "no trader search for the agent's own name");
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1", ...self };
+    for (const t of ["@robin_merry_bot what are the theses on $PONS?", "what are the theses on $PONS @robin_merry_bot", "hey @robin_merry_bot theses on $PONS?"]) {
+      const r = await s.ask(t, g);
+      assert.ok(r.handled, t);
+      assert.notEqual(r.text, GROUP_DM_DEFLECTION, `${t}: the bot's own handle was read as a trader`);
+      assert.deepEqual(r.toolsCalled, ["fomo_get_token_theses"], t);
+      assert.ok(!r.plan.subjects.some((x) => x.kind === "trader"), t);
+    }
+  });
+
+  it("C13: a message replying to something else plans without the research's memory", async () => {
+    const s = await setup();
+    await s.ask("what are the theses on $PONS");
+    const calls = s.brokerCalls.length;
+    const r = await s.ask("What about the sellers?", { ignoreMemory: true });
+    assert.equal(r.handled, false, "its 'it' is the replied-to message's subject, not PONS");
+    const own = await s.ask("should we take profit?");
+    assert.equal(own.handled, false, "position management is the owner's book even in a fresh Fomo conversation");
+    assert.equal(s.brokerCalls.length, calls);
+    const still = await s.ask("What about the sellers?");
+    assert.ok(still.handled, "without a reply elsewhere the follow-up still works");
+  });
+
   it("keeps injected thesis text as quoted data; neither it nor the message can add a call", async () => {
     const s = await setup();
     s.serve.set("thesis-token", () => {
@@ -281,5 +339,26 @@ describe("answerFomoQuestion", () => {
     assert.equal(r.envelopes[0]!.status, "unavailable");
     assert.ok(!/theses from/.test(r.text));
     assert.match(r.text, /not available/);
+  });
+});
+
+describe("a composed answer that types an address", () => {
+  it("is replaced by the deterministic answer, which shortens addresses", async () => {
+    const s = await setup();
+    await s.ask("what are the theses on $PONS");
+    const r = await s.ask("should we follow this?", {
+      compose: async () => `Looks interesting. Buy at ${PONS} before it runs.`,
+    });
+    assert.ok(r.handled);
+    assert.ok(!r.text.includes(PONS), "a full address never reaches the owner from a composer");
+    assert.ok(r.text.includes(NOT_PERMISSION_LINE));
+  });
+
+  it("an address-free composition is kept", async () => {
+    const s = await setup();
+    await s.ask("what are the theses on $PONS");
+    const r = await s.ask("should we follow this?", { compose: async () => "Thin support on the record read; I would watch, not enter." });
+    assert.ok(r.handled);
+    assert.match(r.text, /^Thin support on the record read/);
   });
 });

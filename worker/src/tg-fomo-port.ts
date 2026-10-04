@@ -96,6 +96,12 @@ export function groupWords(text: string): string {
 
 const isUsableChatId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v !== 0;
 
+/** The handler's selfNamesOf list, bounded: strings only, at most 16 of 64 characters. */
+function selfNamesOf(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((n): n is string => typeof n === "string" && n.trim() !== "" && n.length <= 64).slice(0, 16);
+}
+
 /** One lookup's longest share of a group answer. */
 const CALL_MS = 15_000;
 
@@ -169,9 +175,13 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         if (!q || typeof q.text !== "string" || !q.text.trim() || !isUsableChatId(q.chatId)) return null;
         const b = brokerNow();
         const t = now();
+        // The bot's own @username and names (trusted: from getMe and the
+        // soul, via the handler), so "@thisbot theses on $PONS?" is a coin
+        // question and not a question about a trader called thisbot.
+        const selfNames = selfNamesOf(q.selfNames);
         if (!b) {
           // Honest about it, but only for a question the research would have taken.
-          return classifyFomoQuestion(q.text, { memory: null, now: t }) ? { text: TG_FOMO_UNAVAILABLE, deflect: false } : null;
+          return classifyFomoQuestion(q.text, { memory: null, now: t, selfNames }) ? { text: TG_FOMO_UNAVAILABLE, deflect: false } : null;
         }
         const conversationKey = tgGroupConversationKey(q.chatId, q.threadId);
         const timeoutMs = typeof q.timeoutMs === "number" && Number.isFinite(q.timeoutMs) ? Math.max(1, Math.min(q.timeoutMs, 30_000)) : 25_000;
@@ -187,6 +197,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           // group charge without it is refused (fail closed).
           groupId: String(q.chatId),
           maxChars,
+          selfNames,
         }).finally(() => bounded.done());
         if (!r.handled) return null;
         remember(q.chatId, conversationKey);

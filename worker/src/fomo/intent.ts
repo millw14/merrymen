@@ -101,6 +101,16 @@ export interface FomoQuestionPlan {
 export interface FomoQuestionContext {
   memory: SubjectMemory | null;
   now: number;
+  /**
+   * The agent's own names (soul name, aliases) and @handle(s), from trusted
+   * context (getName(), getMe), never from the message. WHY: a group line
+   * almost always carries the bot's @username, and "Robin's trades" asks
+   * about the owner's own agent (Robin is the default name). Without these
+   * the planner reads the bot as a Fomo trader: the room is deflected, a
+   * paid trader search runs, or a stranger's book answers a question about
+   * our own.
+   */
+  selfNames?: readonly string[];
 }
 
 /** The only argument names a plan may emit. */
@@ -263,6 +273,24 @@ const OWN_LEDGER: readonly RegExp[] = [
 ];
 
 /**
+ * Managing the owner's OWN position: "should we take profit?", "should I
+ * exit my PEPE?", "where's the stop loss?", "is it worth holding?". These are
+ * about the owner's book, cost basis and the market read (the answer loop's
+ * job, which resolves the coin from the replied-to message first). A fresh
+ * Fomo conversation is not enough to make them research: answered from
+ * social theses they would describe a possibly different coin, with none of
+ * the owner's numbers. Only an explicit Fomo cue (the platform, theses,
+ * traders, a named trader) keeps them here.
+ */
+const OWN_POSITION: readonly RegExp[] = [
+  /\bshould (?:we|i|you) (?:\S+ )?(?:sell|hold|exit|trim|add|close|cut|keep|dump|bail|stay|average|top up|scale out|scale in|take (?:some |the |a )?(?:profits?|gains?|loss)|buy more|get out|stop out)\b/,
+  /\b(?:our|my|your) (?:position|bag|stack|entry|exit|stop|stops|stop loss|stop-loss|take profit|tp|sl|cost basis|average)\b/,
+  /\bstop[- ]?loss(?:es)?\b|\btake[- ]?profits?\b|\btrailing stop\b|\bcut (?:my|our|the) loss(?:es)?\b/,
+  /\b(?:worth|keep|continue|still) holding\b|\bhold or (?:sell|fold|exit)\b|\b(?:sell|exit) or hold\b/,
+  /\b(?:sell|exit|close|trim|dump) (?:my|our|your)\b/,
+];
+
+/**
  * An order is not a question. These go to the existing command gates, which
  * own confirmation and permission; a research planner must not intercept them.
  */
@@ -376,6 +404,14 @@ const CORRECTION_SOFT = /^(?:actually|no|nope|nah|i mean|rather)\b|\binstead\b/;
 const TOKEN_DEIXIS = /\b(?:this|that|the same|said|these|those) (?:coin|token|one|ticker|project|memecoin|meme|contract|address)s?\b|\bthe (?:coin|token|ticker|project|contract)\b|\b(?:it|its)\b|\bthis\b(?! (?:trader|guy|person|account|user|wallet|dude|week|month|year|morning|afternoon|evening|hour|time|weekend))/;
 const TOKEN_DEIXIS_WEAK = /\bthe (?:sellers|buyers|holders|theses|flow|activity|trades)\b/;
 const TRADER_DEIXIS = /\b(?:this|that|the same|said|the) (?:trader|guy|person|account|user|dude|degen)(?:'s)?\b|\b(?:he|she|him|his|her|hers)\b/;
+/**
+ * Singular "they": the usual way to refer to a handle. Trader deixis only
+ * while a trader is remembered and nothing points at a coin, so "what are
+ * they saying about it?" stays about the coin. Without it, "show their
+ * trades" after a trader answer fell through to the ledger patterns and was
+ * answered with the OWNER's fills.
+ */
+const THEY_DEIXIS = /\b(?:they|them|their|theirs|themselves|themself)\b/;
 
 const WINDOW_RULES: ReadonlyArray<readonly [PlanWindow, RegExp]> = [
   ["1h", /\b(?:(?:past|last|previous|this) hour|(?:1|one) ?(?:h|hr|hrs|hour)|60 ?(?:m|min|mins|minutes))\b/],
@@ -405,6 +441,8 @@ const NOT_TICKERS = new Set([
   "ME", "MY", "WE", "OUR", "YOU", "YOUR", "HE", "SHE", "THEY", "TRADER", "TRADERS", "THESIS", "THESES", "COIN",
   "COINS", "TOKEN", "TOKENS", "SOLANA", "ROBINHOOD", "HOOD", "BASE", "ARC", "TWITTER", "DOWN", "UP", "PNL", "P",
   "L", "X", "AT", "BY", "IF", "SO", "DO", "BE", "GO", "AN", "AS", "AM", "RT", "PR", "QA", "UI", "UX", "DEV", "DEVS",
+  // Machine words a PC watcher names ("watch CPU", "monitor RAM"): never a coin to watch.
+  "CPU", "GPU", "RAM", "SSD", "HDD", "PID", "OS",
 ]);
 
 /** Words that follow "trader" without being a handle. */
@@ -426,8 +464,14 @@ const POSSESSED = new Set([
 const NOT_POSSESSORS = new Set([
   "it", "that", "this", "what", "who", "there", "here", "let", "he", "she", "one", "everyone", "everybody", "someone",
   "somebody", "anyone", "today", "yesterday", "week", "month", "year", "fomo", "trader", "coin", "token", "market",
-  "merrymen", "agent", "bot", "the", "today's", "my", "your", "our", "their", "his", "her",
+  "merrymen", "merryman", "agent", "bot", "the", "today's", "my", "your", "our", "their", "his", "her",
+  // People and things in the owner's own life ("my wife's bags"), never a Fomo handle on their own.
+  "you", "we", "they", "them", "us", "me", "mine", "yours", "ours", "theirs", "owner", "wife", "husband", "mom", "mum",
+  "dad", "mother", "father", "brother", "sister", "bro", "sis", "friend", "buddy", "boss", "partner", "girlfriend",
+  "boyfriend", "gf", "bf", "son", "daughter", "family", "team", "whale", "whales", "people", "nobody",
 ]);
+/** A determiner before "X's": "my wife's bags", "the whale's bags", "a friend's trades" name a person or thing, not a handle. */
+const POSSESSOR_DETERMINER = /^(?:my|your|our|his|her|their|the|a|an|some|this|that|these|those)$/;
 
 /** Words that are never a coin name after "about"/"on". */
 const NOT_NAMES = new Set([
@@ -455,6 +499,16 @@ interface Extracted {
   consumed: Set<number>;
   /** "this trader's" etc. */
   traderPossessiveDeixis: boolean;
+  /**
+   * A trader named on its own terms: an @handle, a user id or "trader X". A
+   * bare "X's bags" is a trader only inside a Fomo context: "Robin's trades"
+   * is as likely the owner's own agent, and "my wife's bags" nobody on Fomo.
+   */
+  traderNamed: boolean;
+  /** "Robin's trades" with Robin one of the agent's own names: the owner's book. */
+  selfPossessive: boolean;
+  /** "my wife's bags", "our friend's trades": somebody in the owner's own circle, never a Fomo subject. */
+  ownerCircle: boolean;
 }
 
 function isAllCaps(ws: readonly Word[]): boolean {
@@ -468,12 +522,16 @@ function chainSlug(word: string): string | null {
   return c?.slug ?? null;
 }
 
-function extract(ws: readonly Word[]): Extracted {
+function extract(ws: readonly Word[], self: SelfRef): Extracted {
   const tokens: Extracted["tokens"] = [];
   const traders: Extracted["traders"] = [];
   const chains: string[] = [];
   const consumed = new Set<number>();
   let traderPossessiveDeixis = false;
+  let selfPossessive = false;
+  let ownerCircle = false;
+  /** Lowercased handles named by @, "trader X" (not just "X's"). */
+  const named = new Set<string>();
   const shouting = isAllCaps(ws);
 
   const addToken = (t: Extract<SubjectQuery, { kind: "token" }>) => {
@@ -535,10 +593,12 @@ function extract(ws: readonly Word[]): Extracted {
     const at = /^@([A-Za-z0-9_]{1,30})$/.exec(b);
     if (at) {
       addTrader({ kind: "trader", handle: at[1]! });
+      named.add(at[1]!.toLowerCase());
       consumed.add(i);
       continue;
     }
-    // "X's bags" — a trader, unless X is a pronoun or a shouted ticker.
+    // "X's bags" — a trader, unless X is a pronoun, a shouted ticker, the
+    // agent itself or somebody in the owner's own life.
     const poss = /^([A-Za-z0-9_]{2,30})'s$/i.exec(w.bare);
     if (poss && POSSESSED.has(ws[i + 1]?.canon ?? "")) {
       const who = poss[1]!;
@@ -547,6 +607,19 @@ function extract(ws: readonly Word[]): Extracted {
         if (/^(?:this|that|the|same|said)$/.test(ws[i - 1]?.canon ?? "")) traderPossessiveDeixis = true;
         continue;
       }
+      // "Robin's holdings" where Robin is this agent: the owner's own book,
+      // which the ledger answers. Never a stranger's Fomo profile.
+      if (self.words.has(lower)) {
+        selfPossessive = true;
+        consumed.add(i);
+        continue;
+      }
+      const det = ws[i - 1]?.canon ?? "";
+      if (/^(?:my|our|your)$/.test(det)) {
+        ownerCircle = true;
+        continue;
+      }
+      if (POSSESSOR_DETERMINER.test(det)) continue;
       if (!NOT_POSSESSORS.has(lower)) {
         if (/^[A-Z0-9]+$/.test(who) && !NOT_TICKERS.has(who)) addToken({ kind: "token", symbol: who });
         else addTrader({ kind: "trader", handle: who });
@@ -563,6 +636,7 @@ function extract(ws: readonly Word[]): Extracted {
         const h = cand.bare.replace(/^@/, "").replace(/'s$/i, "");
         if (HANDLE.test(h) && h.length >= 2 && !NOT_HANDLES.has(h.toLowerCase()) && !EVM_ADDRESS.test(h) && !/^\d+$/.test(h)) {
           addTrader({ kind: "trader", handle: h });
+          named.add(h.toLowerCase());
           consumed.add(j);
         }
       }
@@ -579,7 +653,98 @@ function extract(ws: readonly Word[]): Extracted {
   if (chains.length === 1) {
     for (const t of tokens) t.chain = chains[0]!;
   }
-  return { tokens, traders, chains, consumed, traderPossessiveDeixis };
+  const traderNamed = traders.some((t) => !!t.userId || (!!t.handle && named.has(t.handle.toLowerCase())));
+  return { tokens, traders, chains, consumed, traderPossessiveDeixis, traderNamed, selfPossessive, ownerCircle };
+}
+
+// ── The agent's own names ───────────────────────────────────────────────
+
+interface SelfRef {
+  /** @usernames, lowercased, without the @. */
+  handles: ReadonlySet<string>;
+  /** Each name as lowercased words ("pine heron" → ["pine", "heron"]). */
+  names: ReadonlyArray<readonly string[]>;
+  /** Every word of every name, lowercased: "X's bags" with X one of these is the agent's own book. */
+  words: ReadonlySet<string>;
+}
+
+const NO_SELF: SelfRef = { handles: new Set(), names: [], words: new Set() };
+
+function selfRefOf(raw: readonly unknown[] | undefined): SelfRef {
+  if (!Array.isArray(raw) || raw.length === 0) return NO_SELF;
+  const handles = new Set<string>();
+  const names: string[][] = [];
+  const words = new Set<string>();
+  for (const r of raw.slice(0, 16)) {
+    if (typeof r !== "string") continue;
+    const t = sanitizeText(r.normalize("NFKC"), 64).trim();
+    const h = /^@([A-Za-z0-9_]{1,32})$/.exec(t);
+    if (h) {
+      handles.add(h[1]!.toLowerCase());
+      continue;
+    }
+    const parts = t.toLowerCase().split(/\s+/).map((p) => p.replace(EDGE, "")).filter(Boolean);
+    if (parts.length === 0 || parts.length > 4 || !parts.every((p) => /^[\p{L}\p{N}_-]{1,30}$/u.test(p))) continue;
+    names.push(parts);
+    for (const p of parts) if (p.length >= 2) words.add(p);
+  }
+  return { handles, names, words };
+}
+
+/** Greetings that may come before a vocative name ("hey pine, ..."). */
+const GREETING = new Set(["hey", "hi", "hello", "yo", "oi", "ok", "okay", "gm", "sup", "ser"]);
+
+/**
+ * The message without the agent's own @handle (anywhere: it addresses us,
+ * it is never a subject) and without its name used as a vocative at the
+ * start or the end ("pine, theses on $PONS?", "trending on fomo, robin?").
+ * A lone name word is dropped only when it is not planner filler, so a name
+ * like "One" never eats a real word.
+ */
+function withoutSelf(ws: readonly Word[], self: SelfRef): { ws: Word[]; selfPossessive: boolean } {
+  if (self === NO_SELF) return { ws: [...ws], selfPossessive: false };
+  let selfPossessive = false;
+  let out: Word[] = [];
+  for (let i = 0; i < ws.length; i++) {
+    const w = ws[i]!;
+    const m = /^@([A-Za-z0-9_]{1,32})('s)?$/i.exec(w.bare);
+    if (m && self.handles.has(m[1]!.toLowerCase())) {
+      if (m[2] && POSSESSED.has(ws[i + 1]?.canon ?? "")) selfPossessive = true;
+      continue;
+    }
+    out.push(w);
+  }
+  const seqs: string[][] = [];
+  for (const n of self.names) {
+    seqs.push([...n]);
+    if (n.length > 1) {
+      for (const one of [n[0]!, n[n.length - 1]!]) if (one.length >= 3 && !FILLER.has(one)) seqs.push([one]);
+    } else if (FILLER.has(n[0]!)) {
+      seqs.pop();
+    }
+  }
+  seqs.sort((a, b) => b.length - a.length);
+  // A ticker-shaped word ("ROBIN theses?") is a coin before it is a vocative.
+  const nameAt = (w: Word | undefined, x: string): boolean => !!w && w.bare.toLowerCase() === x && !/^[A-Z0-9]{2,}$/.test(w.bare);
+  const at = (list: readonly Word[], from: number): number => {
+    for (const q of seqs) {
+      if (from + q.length > list.length) continue;
+      if (q.every((x, k) => nameAt(list[from + k], x))) return q.length;
+    }
+    return 0;
+  };
+  // Leading: "pine ...", "hey pine ...". Something must be left to plan.
+  const greet = out.length > 1 && GREETING.has(out[0]!.canon) ? 1 : 0;
+  const lead = at(out, greet);
+  if (lead > 0 && out.length > greet + lead) out = out.slice(greet + lead);
+  // Trailing: "..., pine?"
+  for (const q of seqs) {
+    if (out.length > q.length && q.every((x, k) => nameAt(out[out.length - q.length + k], x))) {
+      out = out.slice(0, out.length - q.length);
+      break;
+    }
+  }
+  return { ws: out, selfPossessive };
 }
 
 /** "what are people saying about pepe" — a lowercase coin name in the last position. */
@@ -633,6 +798,8 @@ interface Signals {
   fomo: boolean;
   cohort: boolean;
   traderSubject: boolean;
+  /** A trader named by @handle, user id or "trader X" (Extracted.traderNamed). */
+  traderNamed: boolean;
   traderDeixis: boolean;
   tokenDeixis: boolean;
   tokenCount: number;
@@ -648,9 +815,9 @@ function detectIntent(s: Signals): Detected | null {
   if (any(HEALTH, c)) return { intent: "health", inherent: true };
   if (UNWATCH.test(c)) return { intent: "unwatch", inherent: false };
   if (WATCH.test(c)) return { intent: "watch", inherent: false };
-  if (any(WHY_SKIPPED, c)) return { intent: "why-skipped", inherent: tradersWord || s.traderSubject };
+  if (any(WHY_SKIPPED, c)) return { intent: "why-skipped", inherent: tradersWord || s.traderNamed };
   if (any(CHANGES_SINCE, c)) return { intent: "changes-since", inherent: false };
-  if (any(WORDS_VS_ACTIONS, c)) return { intent: "words-vs-actions", inherent: tradersWord || s.traderSubject || theses };
+  if (any(WORDS_VS_ACTIONS, c)) return { intent: "words-vs-actions", inherent: tradersWord || s.traderNamed || theses };
   if (COMPARE.test(c) && (theses || saying || s.tokenCount >= 2 || TWO_DEIXIS.test(c) || (s.tokenCount === 1 && s.tokenDeixis))) {
     return { intent: "compare-theses", inherent: theses };
   }
@@ -660,8 +827,10 @@ function detectIntent(s: Signals): Detected | null {
   const traderTopic = s.traderSubject || s.traderDeixis
     || (s.memoryTrader && !s.memoryToken && s.tokenCount === 0 && (HOLDINGS.test(c) || TRADER_CONTEXT.test(c)));
   if (traderTopic) {
-    // "This trader" names a third party as clearly as a handle does; "he" does not.
-    const inherent = s.traderSubject || /\b(?:this|that) trader\b/.test(c);
+    // "This trader" names a third party as clearly as a handle does; "he"
+    // does not, and neither does a bare "X's bags" (the agent's own name, a
+    // friend): those need a Fomo mention or a live Fomo conversation.
+    const inherent = s.traderNamed || /\b(?:this|that) trader\b/.test(c);
     if (theses || saying) return { intent: "token-theses", inherent };
     if (HOLDINGS.test(c)) return { intent: "trader-holdings", inherent };
     if (BUY_WORDS.test(c) || SELL_WORDS.test(c)) return { intent: "trader-activity", inherent };
@@ -702,6 +871,20 @@ function residue(ws: readonly Word[], consumed: ReadonlySet<number>): string[] {
   return c.split(" ").filter((w) => w && !FILLER.has(w));
 }
 
+/** The words a watch or unwatch command is made of, beyond filler: what may surround "it" in one. */
+const WATCH_WORDS = new Set(
+  ("watch watching watched monitor monitoring track tracking start stop quit cease pause keep eye close closely add put " +
+    "remove drop take off from list watchlist watch-list unwatch longer my our your fomo app go ahead day days week weeks " +
+    "month months should we let maybe").split(" "),
+);
+const DURATION = /\b\d{1,3} (?:days?|weeks?|months?)\b/g;
+
+/** What is left of a watch/unwatch message once its command words are gone. Non-empty: something else is being watched. */
+function watchResidue(ws: readonly Word[], consumed: ReadonlySet<number>): string[] {
+  const kept = ws.filter((_, i) => !consumed.has(i)).map((w) => w.canon).join(" ").replace(DURATION, " ");
+  return residue(words(kept), new Set()).filter((w) => !WATCH_WORDS.has(w));
+}
+
 function label(q: SubjectQuery): string {
   if (q.kind === "token") {
     if (q.symbol && SYMBOL.test(q.symbol)) return q.symbol;
@@ -722,9 +905,14 @@ const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
  */
 export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): FomoQuestionPlan | null {
   if (typeof text !== "string" || !text.trim()) return null;
-  let ws = words(text);
+  const self = selfRefOf(ctx.selfNames);
+  // The agent's own @handle anywhere, and its name as a vocative, address
+  // US: read as a subject they would research (or deflect) the bot itself.
+  const unaddressed = withoutSelf(words(text), self);
+  let ws = unaddressed.ws;
   // "@merrymen_bot what is @x holding": a leading @mention followed by a
-  // question addresses US. Treating it as the subject would research the bot.
+  // question addresses US even when the caller could not say which handle is
+  // ours. Treating it as the subject would research the bot.
   if (ws.length > 2 && /^@[A-Za-z0-9_]{1,30}$/.test(ws[0]!.bare) && VOCATIVE_NEXT.test(ws[1]!.canon)) ws = ws.slice(1);
   const c = ws.map((w) => w.canon).join(" ");
   if (!c || ORDER.test(c) || OWN_LEDGER.some((re) => re.test(c))) return null;
@@ -733,15 +921,27 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const usable = isMemoryUsable(memory, ctx.now);
   const history = !!memory?.lastIntent;
   const stale = history && !usable;
-  const ex = extract(ws);
+  const ex = extract(ws, self);
+  // "Robin's trades" / "@ourbot's holdings": the owner's own book. "My
+  // wife's bags": not a Fomo subject, and not the remembered trader either.
+  if (unaddressed.selfPossessive || ex.selfPossessive || (ex.ownerCircle && !ex.traderNamed)) return null;
+  const fomo = any(FOMO_PLATFORM, c);
+  const cohort = COHORT.test(c);
   const memTokens = rememberedSubjects(memory, "token", ctx.now);
   const memTraders = rememberedSubjects(memory, "trader", ctx.now);
   const deixisText = c.replace(TIME_PHRASES, " ");
   const tokenDeixis = TOKEN_DEIXIS.test(deixisText);
   const tokenDeixisWeak = TOKEN_DEIXIS_WEAK.test(deixisText);
-  const traderDeixis = TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis;
-  const fomo = any(FOMO_PLATFORM, c);
-  const cohort = COHORT.test(c);
+  const traderDeixis = TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis
+    || (memTraders.length > 0 && !tokenDeixis && THEY_DEIXIS.test(deixisText));
+  // Position management on the owner's own holding stays with the ledger and
+  // the answer loop unless the message itself is about Fomo or a third party
+  // ("did he take profit?"). A watch ("should we keep an eye on it?") is not
+  // position management.
+  if (any(OWN_POSITION, c) && !WATCH.test(c) && !UNWATCH.test(c)
+    && !(fomo || cohort || THESES.test(c) || TRADERS_WORD.test(c) || ex.traderNamed || traderDeixis)) {
+    return null;
+  }
   const explicitCount = ex.tokens.length + ex.traders.length;
   const correction = CORRECTION_STRONG.test(c) || (CORRECTION_SOFT.test(c) && explicitCount > 0);
   const statedWindow = windowOf(c);
@@ -755,6 +955,7 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     fomo,
     cohort,
     traderSubject: ex.traders.length > 0,
+    traderNamed: ex.traderNamed,
     traderDeixis,
     tokenDeixis,
     tokenCount: ex.tokens.length,
@@ -796,8 +997,12 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const analysisCue = ANALYSIS.test(c.replace(PRIOR_ANALYSIS, " ")) || RESEARCH_VERB.test(c);
   const analysisRequested = !infoOnly && (analysisCue || intent === "research-coin");
 
+  const mutation = intent === "watch" || intent === "unwatch";
   const explicitTokens = [...ex.tokens];
-  if (SUBJECT_NEEDS[intent].token > 0 && explicitTokens.length === 0 && !tokenDeixis) {
+  // A lowercase trailing word is a guess at a coin name ("what are people
+  // saying about pepe"). Fine for a read; a write ("keep an eye on battery")
+  // takes it only when the message also names Fomo.
+  if (SUBJECT_NEEDS[intent].token > 0 && explicitTokens.length === 0 && !tokenDeixis && (!mutation || fomo)) {
     const name = trailingName(c);
     if (name) explicitTokens.push(ex.chains.length === 1 ? { kind: "token", symbol: name, chain: ex.chains[0]! } : { kind: "token", symbol: name });
   }
@@ -828,6 +1033,20 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   });
   const ask = (question: string) => plan(question, []);
 
+  // A WATCH IS A WRITE, so it never infers its subject. It takes an explicit
+  // coin, or an explicit reference to the remembered one ("watch this coin",
+  // "stop watching it") with nothing else in the message. "watch cpu>80",
+  // "track my order", "unwatch 2", "watch @alice", "monitor him", "watch
+  // out" are not Fomo coin watches at all (a PC watcher, an order, a
+  // trader): not planned, so the existing command path still gets them.
+  if (mutation) {
+    if (ex.traders.length > 0 || traderDeixis) return null;
+    if (explicitTokens.length === 0) {
+      if (watchResidue(ws, ex.consumed).length > 0) return null;
+      if (!tokenDeixis) return ask(intent === "watch" ? ASK_WATCH : ASK_UNWATCH);
+    }
+  }
+
   // A correction that names nothing: the remembered subject is wrong and
   // there is no replacement, so nothing may be looked up yet.
   if (correction && explicitTokens.length === 0 && ex.traders.length === 0 && !detected) {
@@ -854,6 +1073,13 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   let tokenFromMemory = false;
   let traderFromMemory = false;
   const traderAvailable = ex.traders.length > 0 || (traderDeixis && memTraders.length === 1);
+  // The remembered coin is still unplaced (a ticker the provider found on
+  // several chains, so it asked "which one?"), and this message names one
+  // chain: that chain IS the answer ("on base", "the one on base"). Without
+  // it the follow-up re-sent the bare ticker and got the same question back.
+  const onlyMem = memTokens.length === 1 && memTokens[0]!.kind === "token" ? memTokens[0]! : null;
+  const answersChain = ex.chains.length === 1 && explicitTokens.length === 0 && onlyMem !== null && !onlyMem.chain;
+  let chained: Extract<SubjectQuery, { kind: "token" }> | null = null;
 
   if (need.token === 2) {
     if (explicitTokens.length > 2) return ask("I can compare two coins at a time. Which two?");
@@ -871,12 +1097,21 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   } else if (need.token === 1 && explicitTokens.length === 0 && !(need.traderSuffices && traderAvailable && !tokenDeixis)) {
     // A required coin always falls back to the remembered one; an optional
     // coin ("who is selling?") only when something points at it.
-    const pointed = !need.tokenOptional || tokenDeixis || tokenDeixisWeak || fromMemory || correction;
+    const pointed = !need.tokenOptional || tokenDeixis || tokenDeixisWeak || fromMemory || correction || answersChain;
     if (!pointed) {
       if (intent === "token-sellers" || intent === "token-buyers") intent = "token-activity";
     } else if (ex.chains.length === 1 && memTokens.length > 0 && memTokens.every((m) => m.kind === "token" && !!m.chain && m.chain !== ex.chains[0])) {
       return ask(`Which coin on ${titleCase(ex.chains[0]!)} do you mean? Send its ticker or contract address.`);
     } else if (memTokens.length === 1) {
+      if (answersChain && onlyMem?.kind === "token") {
+        const slug = ex.chains[0]!;
+        const chain = chainFromUserText(slug);
+        if (onlyMem.address && chain) {
+          const fits = EVM_ADDRESS.test(onlyMem.address) ? chain.namespace === "eip155" : chain.namespace === "solana";
+          if (!fits) return ask(`That address can't be on ${titleCase(slug)}. Which chain is it on?`);
+        }
+        chained = { ...onlyMem, chain: slug };
+      }
       tokenFromMemory = true;
     } else if (memTokens.length > 1) {
       return ask(`Which coin do you mean: ${label(memTokens[0]!)} or ${label(memTokens[1]!)}?`);
@@ -901,6 +1136,12 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   }
   if (tokenFromMemory) usesMemory.push("token");
   if (traderFromMemory) usesMemory.push("trader");
+  // The placed coin is this message's subject from here on: the lookup
+  // carries the chain, and applyPlan remembers it on the stored coin.
+  if (chained) {
+    explicitTokens.push(chained);
+    if (subjects.length < 2) subjects.unshift(chained);
+  }
 
   // Window and side carry over only when this message continues the last
   // question. A new question with its own subject starts from defaults.
@@ -956,6 +1197,8 @@ const ASK_TRADER_CORRECTION = "Which trader did you mean? Send their Fomo handle
 const ASK_TWO = "Which two coins should I compare?";
 const ASK_TWO_STALE = "It has been a while since we looked at those coins. Which two should I compare?";
 const ASK_RANK_WINDOW = "Trader rankings cover 24h, 7d, 30d or all time. Which window do you want?";
+const ASK_WATCH = "Which coin should I watch? Send its ticker or contract address.";
+const ASK_UNWATCH = "Which coin should I stop watching? Send its ticker or contract address.";
 
 function boardOf(c: string): RankingBoard {
   return /\bgraduat/.test(c) ? "graduated-tokens" : /\bmost[- ]held\b/.test(c) ? "most-held-tokens" : "trending-tokens";

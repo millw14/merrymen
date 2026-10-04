@@ -211,6 +211,34 @@ describe("createTgFomoPort", () => {
     assert.equal(count(s.raw, "fomo_watches"), 0);
   });
 
+  it("C8: the bot's own @username, anywhere in the line, addresses the bot and is never researched as a trader", async () => {
+    const selfNames = ["Pine", "@pinebot"];
+    for (const [q, tool] of [
+      ["@pinebot theses on $PONS?", "fomo_get_token_theses"],
+      ["hey @pinebot what's trending on fomo?", "fomo_get_rankings"],
+      ["what are the theses on $PONS @pinebot", "fomo_get_token_theses"],
+      ["@pinebot trending on fomo?", "fomo_get_rankings"],
+      ["@PineBot who is buying $PONS on fomo?", "fomo_get_token_activity"],
+      ["pine, theses on $PONS?", "fomo_get_token_theses"],
+    ] as const) {
+      const s = await setup();
+      const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+      const a = await port.ask({ text: q, chatId: GROUP, selfNames });
+      assert.ok(a, q);
+      assert.equal(a.deflect, false, `${q}: deflected as if the bot were a trader`);
+      assert.deepEqual(s.calls.map((c) => c.tool), [tool], q);
+      assert.ok(!s.calls.some((c) => typeof c.args.trader === "string"), q);
+      // The room's remembered subjects never include the bot.
+      const stored = await s.broker.memory.get(`tg-group:${GROUP}:0`);
+      assert.doesNotMatch(String(stored), /pinebot/i, q);
+    }
+    // Another account's handle is still a trader, and still deflected.
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    assert.deepEqual(await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.equal(s.calls.length, 0);
+  });
+
   it("a line that is not research is left to the desk and the persona, with no lookup", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
@@ -381,5 +409,21 @@ describe("a group research question, end to end", () => {
     assert.equal(second.length, 2);
     assert.equal(second[1], TG_FOMO_DEFLECTION);
     assert.equal(s.calls.length, 1, "the trader question cost no lookup");
+
+    // C8: addressed by @username (privacy mode's usual form), leading or trailing, it is still a coin question.
+    for (const line of ["@pinebot theses on $PONS?", "what are the theses on $PONS @pinebot"]) {
+      clock += 120_000;
+      s.clock.now += 120_000;
+      const before = tg.texts(GROUP).length;
+      const looked: number = s.calls.length;
+      groups!.onMessage(msg(line));
+      await groups!.drain();
+      const out = tg.texts(GROUP);
+      assert.equal(out.length, before + 1, line);
+      assert.notEqual(out[out.length - 1], TG_FOMO_DEFLECTION, `${line}: the bot's handle was read as a trader`);
+      assert.match(out[out.length - 1]!, /3 theses/, line);
+      assert.equal(s.calls.length, looked + 1, line);
+      assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_get_token_theses", line);
+    }
   });
 });

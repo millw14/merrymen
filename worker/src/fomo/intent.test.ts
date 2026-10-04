@@ -70,7 +70,7 @@ const CORPUS: Row[] = [
   { text: "what are the theses on $PEPE", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PEPE" }]] },
   { text: `What are the theses on this coin ${A}?`, intent: "token-theses", calls: [["fomo_get_token_theses", { token: A }]] },
   { text: "what is @CryptoKaleo holding?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
-  { text: "show me CryptoKaleo's bags", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
+  { text: "show me CryptoKaleo's bags on fomo", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
   { text: "what has trader laifu bought this week", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: "laifu", side: "buy", window: "7d" }]] },
   { text: "who is @degen_42 on fomo?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: "degen_42" }]] },
   { text: "show me the leading traders this week", intent: "rankings-traders", calls: [["fomo_get_rankings", { board: "traders", window: "7d" }]] },
@@ -215,6 +215,166 @@ const CORPUS: Row[] = [
   { text: "What about the sellers?" },
   { text: "refresh it" },
 ];
+
+/**
+ * REVIEW FINDINGS, one table each: a row is a message, the memory it meets,
+ * the agent's own names when they matter, and exactly what must (or must
+ * not) be planned.
+ */
+const PENDING = mem({ subjects: [{ kind: "token", symbol: "PEPE", chain: null }], lastIntent: "token-sellers" });
+const PENDING_ADDR = mem({ subjects: [{ kind: "token", address: A, chain: null }], lastIntent: "token-theses" });
+const BOTH = mem({
+  subjects: [
+    { kind: "token", tokenKey: `eip155:4663:${A}`, address: A, chain: "robinhood", symbol: "AAA" },
+    { kind: "trader", userId: USER, handle: "CryptoKaleo" },
+  ],
+  lastIntent: "token-theses",
+});
+const FINDING_MEMORIES: Record<string, SubjectMemory> = { ...MEMORIES, pending: PENDING, pendingAddr: PENDING_ADDR, both: BOTH };
+const PINE = ["Pine Heron", "Pine", "@pinebot"];
+const ROBIN = ["Robin", "@robin_merry_bot"];
+
+interface FindingRow extends Omit<Row, "mem"> {
+  id: string;
+  mem?: keyof typeof FINDING_MEMORIES;
+  self?: string[];
+}
+
+const FINDINGS: FindingRow[] = [
+  // C8: the bot's own @username (and its name) addresses us, wherever it sits; it is never a trader.
+  { id: "C8", self: PINE, text: "@pinebot theses on $PONS?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PONS" }]] },
+  { id: "C8", self: PINE, text: "hey @pinebot what's trending on fomo?", intent: "rankings-tokens", calls: [["fomo_get_rankings", { board: "trending-tokens" }]] },
+  { id: "C8", self: PINE, text: "what are the theses on $PONS @pinebot", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PONS" }]] },
+  { id: "C8", self: PINE, text: "@PineBot trending on fomo?", intent: "rankings-tokens", calls: [["fomo_get_rankings", { board: "trending-tokens" }]] },
+  { id: "C8", self: PINE, text: "@pinebot who is selling $WIF on fomo", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "WIF", side: "sell" }]] },
+  { id: "C8", self: PINE, text: "@pinebot what is @CryptoKaleo holding?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
+  { id: "C8", self: PINE, text: "pine, what are the theses on $PONS?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PONS" }]] },
+  { id: "C8", self: PINE, text: "theses on $PONS on fomo, pine heron?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PONS" }]] },
+  { id: "C8", self: PINE, mem: "token", text: "pine refresh it", intent: "token-theses", calls: [["fomo_get_token_theses", { ...RH, freshness: "force-refresh" }]] },
+  { id: "C8", self: PINE, mem: "token", text: "@pinebot and the sellers?", intent: "token-sellers", calls: [["fomo_get_token_activity", { ...RH, side: "sell" }]] },
+  { id: "C8", self: ROBIN, text: "ROBIN theses on fomo?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "ROBIN" }]] },
+
+  // C9: a watch never infers its coin; other objects are not Fomo watches at all.
+  { id: "C9", mem: "token", text: "watch cpu>80" },
+  { id: "C9", mem: "token", text: "watch CPU usage" },
+  { id: "C9", mem: "token", text: "watch file /var/log/x" },
+  { id: "C9", mem: "token", text: "track proc node" },
+  { id: "C9", mem: "token", text: "keep an eye on my battery" },
+  { id: "C9", mem: "token", text: "keep an eye on battery" },
+  { id: "C9", mem: "token", text: "watch @alice" },
+  { id: "C9", mem: "token", text: "watch this trader" },
+  { id: "C9", mem: "token", text: "monitor him" },
+  { id: "C9", mem: "token", text: "watch out" },
+  { id: "C9", mem: "token", text: "track my order" },
+  { id: "C9", mem: "token", text: "unwatch 2" },
+  { id: "C9", mem: "token", text: "stop tracking @bob" },
+  { id: "C9", mem: "token", text: "watch", intent: "watch", clarify: "Which coin should I watch? Send its ticker or contract address." },
+  { id: "C9", mem: "token", text: "stop watching", intent: "unwatch", clarify: "Which coin should I stop watching? Send its ticker or contract address." },
+  { id: "C9", mem: "token", text: "keep an eye on it", intent: "watch", calls: [["fomo_watch_coin", RH]] },
+  { id: "C9", mem: "token", text: "add it to my watchlist", intent: "watch", calls: [["fomo_watch_coin", RH]] },
+  { id: "C9", mem: "token", text: "watch it for 3 days", intent: "watch", calls: [["fomo_watch_coin", RH]] },
+  { id: "C9", mem: "token", text: "stop watching it", intent: "unwatch", calls: [["fomo_unwatch_coin", RH]] },
+  { id: "C9", mem: "token", text: "watch $WIF", intent: "watch", calls: [["fomo_watch_coin", { token: "WIF" }]] },
+  { id: "C9", text: "keep an eye on pepe on fomo", intent: "watch", calls: [["fomo_watch_coin", { token: "PEPE" }]] },
+
+  // C10: "<Name>'s holdings" is the owner's own agent when Name is ours, and a bare possessive needs a Fomo cue.
+  { id: "C10", self: ROBIN, text: "what are Robin's holdings?" },
+  { id: "C10", self: ROBIN, text: "how is Robin's pnl?" },
+  { id: "C10", self: ROBIN, text: "show me Robin's trades" },
+  { id: "C10", self: ROBIN, mem: "trader", text: "show me Robin's trades" },
+  { id: "C10", self: ROBIN, text: "what are Robin's holdings on fomo?" },
+  { id: "C10", self: ROBIN, text: "@robin_merry_bot's holdings on fomo" },
+  { id: "C10", self: PINE, text: "show me Heron's trades" },
+  { id: "C10", text: "what are Robin's holdings?" },
+  { id: "C10", text: "show me CryptoKaleo's bags" },
+  { id: "C10", text: "my wife's bags" },
+  { id: "C10", mem: "trader", text: "what's in my wife's bags" },
+  { id: "C10", text: "the whale's bags" },
+  { id: "C10", self: ROBIN, text: "what is @Robin holding on fomo?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "Robin" }]] },
+  { id: "C10", self: ROBIN, text: "what is trader Robin holding?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "Robin" }]] },
+  { id: "C10", mem: "trader", text: "show me Ansem's bags", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "Ansem" }]] },
+
+  // C11: a chain named in answer to "which one?" places the remembered coin and keeps that chain.
+  { id: "C11", mem: "pending", text: "on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "the one on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "base chain", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "I mean on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "on solana", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "solana", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "sellers on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pendingAddr", text: "on base", intent: "token-theses", calls: [["fomo_get_token_theses", { token: A, chain: "base" }]] },
+  { id: "C11", mem: "pendingAddr", text: "on solana", intent: "token-theses", clarify: "That address can't be on Solana. Which chain is it on?" },
+  { id: "C11", mem: "two", text: "on base", intent: "token-theses", clarify: "Which coin do you mean: PEPE or WIF?" },
+  { id: "C11", mem: "token", text: "what about on solana?", intent: "token-theses", clarify: /^Which coin on Solana do you mean\?/ },
+
+  // C12: singular they/their/them after a trader answer is that trader, never the owner's ledger.
+  { id: "C12", mem: "trader", text: "show their trades", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER }]] },
+  { id: "C12", mem: "trader", text: "show me their trades", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER }]] },
+  { id: "C12", mem: "trader", text: "list their sells", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER, side: "sell" }]] },
+  { id: "C12", mem: "trader", text: "what did they buy today?", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER, side: "buy", window: "24h" }]] },
+  { id: "C12", mem: "trader", text: "what trades did they make?", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER }]] },
+  { id: "C12", mem: "trader", text: "how much did they make?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: USER }]] },
+  { id: "C12", mem: "trader", text: "what are they holding?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: USER }]] },
+  { id: "C12", mem: "both", text: "show their trades", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER }]] },
+  { id: "C12", mem: "token", text: "what are they saying about it", intent: "token-theses", calls: [["fomo_get_token_theses", RH]] },
+  { id: "C12", text: "show their trades" },
+
+  // C13: managing the owner's own position is the ledger's, even inside a fresh Fomo conversation.
+  { id: "C13", mem: "token", text: "should we take profit?" },
+  { id: "C13", mem: "token", text: "should we exit?" },
+  { id: "C13", mem: "token", text: "is it worth holding?" },
+  { id: "C13", mem: "token", text: "should we hold our bag?" },
+  { id: "C13", mem: "token", text: "should I add more?" },
+  { id: "C13", mem: "token", text: "should we buy more of it?" },
+  { id: "C13", mem: "token", text: "where should the stop loss go?" },
+  { id: "C13", mem: "token", text: "should I sell my $PEPE?" },
+  { id: "C13", mem: "token", text: "should we sell $PEPE?" },
+  { id: "C13", mem: "trader", text: "should we trim?" },
+  { id: "C13", mem: "token", text: "should we sell? what are traders on fomo saying", intent: "token-theses", calls: [["fomo_get_token_theses", RH]], flags: { analysisRequested: true } },
+  { id: "C13", mem: "token", text: "should we follow this?", intent: "research-coin", calls: [["fomo_research_coin", { ...RH, depth: "standard" }]], flags: { analysisRequested: true } },
+  { id: "C13", mem: "token", text: "should we keep an eye on it?", intent: "watch", calls: [["fomo_watch_coin", RH]] },
+  // A third party's profit-taking is still a question about that trader, not the owner's position.
+  { id: "C13", mem: "trader", text: "did he take profit?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: USER }]] },
+  { id: "C13", mem: "token", text: "did @CryptoKaleo take profit on it?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
+];
+
+describe("review findings, planned", () => {
+  for (const row of FINDINGS) {
+    const label = `${row.id} ${row.mem ? `[${row.mem}] ` : ""}${row.self ? `(self ${row.self[0]}) ` : ""}${JSON.stringify(row.text)}`;
+    it(label, () => {
+      const plan = classifyFomoQuestion(row.text, { memory: row.mem ? FINDING_MEMORIES[row.mem]! : null, now: NOW, ...(row.self ? { selfNames: row.self } : {}) });
+      if (!row.intent) {
+        assert.equal(plan, null, `planned as ${plan?.intent}: ${JSON.stringify(plan?.toolCalls)}`);
+        return;
+      }
+      assert.ok(plan, "not planned");
+      assert.equal(plan.intent, row.intent);
+      if (row.clarify) {
+        assert.ok(plan.clarification, "expected a clarification");
+        if (typeof row.clarify === "string") assert.equal(plan.clarification, row.clarify);
+        else assert.match(plan.clarification, row.clarify);
+        assert.deepEqual(plan.toolCalls, []);
+      } else {
+        assert.equal(plan.clarification, null, `unexpected clarification: ${plan.clarification}`);
+        assert.deepEqual(plan.toolCalls.map((c) => [c.tool, c.args]), row.calls);
+      }
+      for (const [k, v] of Object.entries(row.flags ?? {})) assert.deepEqual(plan[k as keyof FomoQuestionPlan], v, `flag ${k}`);
+      // The bot is never a subject.
+      for (const s of plan.subjects) if (s.kind === "trader") assert.doesNotMatch(s.handle ?? "", /^(?:pinebot|robin_merry_bot)$/i);
+    });
+  }
+
+  it("C11: the chain the user picked is remembered, so a later follow-up keeps it even if this lookup never completes", () => {
+    const p1 = classifyFomoQuestion("the one on base", { memory: PENDING, now: NOW });
+    assert.ok(p1);
+    const step = applyPlan(PENDING, p1, NOW);
+    // The service answered with another clarification or failed: no applyResult.
+    assert.deepEqual(step.memory.subjects, [{ kind: "token", symbol: "PEPE", chain: "base" }]);
+    assert.deepEqual(step.resolved, [{ kind: "token", symbol: "PEPE", chain: "base" }]);
+    const p2 = classifyFomoQuestion("refresh it", { memory: step.memory, now: NOW + 30_000 });
+    assert.ok(p2);
+    assert.deepEqual(p2.toolCalls, [{ tool: "fomo_get_token_activity", args: { token: "PEPE", chain: "base", side: "sell", freshness: "force-refresh" } }]);
+  });
+});
 
 describe("the question corpus", () => {
   it("has at least seventy phrasings, positive and negative", () => {

@@ -57,6 +57,17 @@ export interface AnswerFomoInput {
   groupId?: string | null;
   maxChars?: number;
   compose?: (c: FomoComposeInput) => Promise<string | null>;
+  /**
+   * The agent's own names and @handle(s), from trusted context (intent.ts
+   * FomoQuestionContext.selfNames): never researched as a trader.
+   */
+  selfNames?: readonly string[];
+  /**
+   * Plan as if the conversation had no memory: the message replies to
+   * something that is not a Fomo answer (a trade receipt), so its "it" is
+   * that message's subject, never the coin a research answer left behind.
+   */
+  ignoreMemory?: boolean;
 }
 
 export type AnswerFomoResult =
@@ -145,15 +156,18 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 1. Memory, strictly re-validated.
   let stored: string | null = null;
-  try {
-    stored = await broker.memory.get(conversationKey);
-  } catch {
-    stored = null;
+  if (!input.ignoreMemory) {
+    try {
+      stored = await broker.memory.get(conversationKey);
+    } catch {
+      stored = null;
+    }
   }
   const memory = deserialize(stored);
 
   // 2. The deterministic plan.
-  const plan = classifyFomoQuestion(input.text, { memory, now });
+  const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
+  const plan = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
   if (!plan) return { handled: false };
 
   // 3. Record what was asked about BEFORE any lookup.
@@ -211,7 +225,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
         rules: FOMO_CHAT_RULES,
         deterministic,
       });
-      if (typeof composed === "string" && composed.trim()) {
+      if (typeof composed === "string" && composed.trim() && !typesExecutable(composed)) {
         // The composer's words get the same group scrub as ours: no handles, addresses, links or cashtags.
         const t = composed.trim().slice(0, maxChars);
         text = audience === "group" ? groupScrub(t) : t;
@@ -223,4 +237,17 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
     if (!text.includes(FOMO_ATTRIBUTION)) text = `${text}\n${FOMO_ATTRIBUTION}`;
   }
   return { handled: true, text, plan, envelopes, toolsCalled, analysis, clarification: false };
+}
+
+/**
+ * A COMPOSED ANSWER THAT TYPES AN ADDRESS IS NOT SENT. The evidence carries
+ * shortened addresses only, so a full 20-byte hex, a tx-hash-length hex or a
+ * mint-length base58 run in the reply came from the model (or from text it
+ * was shown and echoed). One wrong character in a retyped address sends
+ * someone's funds where nobody can recover them, and the house rule is that a
+ * model never types one; the deterministic answer, which renders addresses
+ * shortened, is used instead.
+ */
+export function typesExecutable(text: string): boolean {
+  return /0x[0-9a-fA-F]{40}/.test(text) || /\b[1-9A-HJ-NP-Za-km-z]{32,}\b/.test(text) || /\b[0-9a-fA-F]{64}\b/.test(text);
 }

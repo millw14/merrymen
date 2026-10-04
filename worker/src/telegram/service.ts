@@ -72,7 +72,7 @@ import type { TradeViewOpts } from "./trade-rows";
 import { answerFomoDm, answerQuestion, type FomoDmInput, type FomoDmJob } from "./answer";
 import { FOMO_TOOL_TIMEOUT_MS, type ToolContext } from "./chat-tools";
 import type { BrokerCallOptions, FomoBroker } from "../fomo/contract";
-import { renderEnvelope } from "../fomo/render";
+import { FOMO_ATTRIBUTION, renderEnvelope } from "../fomo/render";
 import type { ResearchStatusData } from "../fomo/tools";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
@@ -149,6 +149,12 @@ const ANSWER_KINDS: ReadonlySet<string> = new Set(["chat", "status", "positions"
 /** Buttons a command asked to have under its reply. */
 interface ReplyExtras {
   keyboard?: InlineKeyboard;
+  /**
+   * No link preview card under the reply. Set for research answers: they
+   * quote third-party text, and a link that slipped past the excerpt
+   * redaction must not arrive as a tappable card in my own message.
+   */
+  disablePreview?: boolean;
 }
 
 export interface TelegramServiceDeps {
@@ -754,6 +760,43 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    */
   const fomoActive = new Map<number, number>();
   const FOMO_ACTIVE_MS = 30 * 60_000;
+  /**
+   * The message ids of my research answers, per DM ("chatId:messageId"),
+   * bounded. A reply to one of them continues the research; a reply to any
+   * other message of mine (a trade receipt, a market read) is about THAT
+   * message, so it must not inherit the research's "it" (answer.ts
+   * repliesToOther). In memory, like fomoActive.
+   */
+  const fomoAnswerIds = new Set<string>();
+  const FOMO_ANSWER_IDS_MAX = 512;
+  const rememberFomoAnswer = (chatId: number, messageId: number | undefined): void => {
+    if (typeof messageId !== "number") return;
+    if (fomoAnswerIds.size >= FOMO_ANSWER_IDS_MAX) fomoAnswerIds.delete(fomoAnswerIds.values().next().value!);
+    fomoAnswerIds.add(`${chatId}:${messageId}`);
+  };
+  /** A reply to a message of mine that is not a research answer. */
+  const repliesToOther = (msg: TgMessage): boolean => {
+    const r = msg.replyTo;
+    if (!r || r.fromIsBot !== true) return false;
+    if (fomoAnswerIds.has(`${msg.chatId}:${r.messageId}`)) return false;
+    // After a restart the ids are gone; a quoted research answer still ends
+    // with its attribution. (Not any mention of "fomo": a trade receipt may
+    // name a fomo-follow source and is still not research.)
+    return !(r.text ?? "").includes(FOMO_ATTRIBUTION);
+  };
+  /** The agent's own names and the bot's @username: never researched as a trader (fomo/intent.ts). */
+  const fomoSelfNames = (cfg: ResolvedConfig): string[] => {
+    const out: string[] = [];
+    try {
+      out.push(getName());
+    } catch {
+      /* the default name is still covered by the bot's own handle below */
+    }
+    const bot = selfFor(cfg);
+    if (bot?.username) out.push(`@${bot.username.replace(/^@/, "")}`);
+    if (bot?.firstName) out.push(bot.firstName);
+    return out.filter((n) => typeof n === "string" && n.trim() !== "");
+  };
 
   /**
    * DEEP RESEARCH, DELIVERED ONCE (docs/fomo.md): a research answer that
@@ -823,7 +866,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Checked again after the reads, right before the one send.
     if (!fomoRecipientCurrent(w) || fomoJobs.get(w.job.id) !== w) return false;
     fomoJobs.delete(w.job.id);
-    await sendMessage({ token: w.token }, w.chatId, esc(text));
+    const sent = await sendMessage({ token: w.token }, w.chatId, esc(text), { disablePreview: true });
+    rememberFomoAnswer(w.chatId, sent.messageId);
     await pushHistory(w.chatId, "assistant", text);
     return false;
   };
@@ -862,6 +906,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       audience: owner ? "owner" : "group",
       conversationKey: fomoDmKey(msg.chatId),
       active: (fomoActive.get(msg.chatId) ?? Number.NEGATIVE_INFINITY) > nowMs - FOMO_ACTIVE_MS,
+      repliesToOther: repliesToOther(msg),
+      selfNames: fomoSelfNames(cfg),
       nowMs,
       creds: resolveLlm(cfg),
       persona: async () => ({
@@ -1443,6 +1489,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Filled by a command that wants buttons under its reply (a "Sign now" link,
     // a Settings link). Confirm buttons for a parked action are added below.
     const extras: ReplyExtras = {};
+    /** This reply is a research answer (recorded so a reply to it continues the research). */
+    let fomoReplied = false;
     const cmdDeps = makeCmdDeps(msg, cfg, token, extras);
 
     // Only the OWNER shapes the soul — both relationship growth AND persistent
@@ -1516,6 +1564,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       const reply = await fomoDm(msg, cfg, token);
       if (reply !== null) {
         cmd = { kind: "chat", reply };
+        fomoReplied = true;
+        extras.disablePreview = true;
         await pushHistory(msg.chatId, "user", msg.text);
       }
     }
@@ -1714,9 +1764,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const sent = await say(
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
-      keyboard ? { keyboard } : {},
+      { ...(keyboard ? { keyboard } : {}), ...(extras.disablePreview ? { disablePreview: true } : {}) },
     );
     if (meta && sent.messageId !== undefined) meta.messageId = sent.messageId;
+    if (fomoReplied && sent.ok) rememberFomoAnswer(msg.chatId, sent.messageId);
     // A typed "yes" may answer the NEXT message only if this reply was the
     // settings question itself.
     if (meta?.action.kind === "setting" || meta?.action.kind === "settings") typedAnswerable.add(pendingKey);

@@ -418,8 +418,13 @@ export interface TgFomoAnswer {
 }
 
 export interface TgFomoPort {
-  /** `timeoutMs`: what is left of the reply deadline; the port stops spending when it runs out. */
-  ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number }): Promise<TgFomoAnswer | null>;
+  /**
+   * `timeoutMs`: what is left of the reply deadline; the port stops spending
+   * when it runs out. `selfNames`: the bot's own names and @username
+   * (selfNamesOf), so the line's "@thisbot" addresses the bot instead of
+   * naming a trader the room would be deflected for.
+   */
+  ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number; selfNames?: readonly string[] }): Promise<TgFomoAnswer | null>;
   /** The owner's chat-wide forget: drop this chat's research subject memory. Never throws. */
   forget?(chatId: number): Promise<void>;
 }

@@ -7,6 +7,7 @@ import {
   isContested,
   planThesisFetch,
   readThesisText,
+  redactExecutables,
   resolveFamilies,
   topicDigest,
   type BuildDossierInput,
@@ -286,6 +287,52 @@ describe("buildDossier: untrusted text stays data", () => {
     );
     assert.equal(dossier.label.symbol, "PEPE");
     assert.equal(dossier.wordsVsActions[0]?.handle, "evilhandle SYSTEM");
+  });
+});
+
+describe("redactExecutables (C29): no third-party link or mention survives into an excerpt", () => {
+  // [input, exact output]. Every link form Telegram would autolink, or a reader would type in.
+  const ROWS: Array<[string, string]> = [
+    ["claim the holder airdrop at www.pons-claim.xyz, support @pons_support", "claim the holder airdrop at [link], support [handle]"],
+    ["verify at pons-airdrop.io/claim and join t.me/ponsclaim", "verify at [link] and join [link]"],
+    ["it's at pons-airdrop.io/claim.", "it's at [link]."],
+    ["DM @pons_support for the unlock", "DM [handle] for the unlock"],
+    ["go to PONS-CLAIM.XYZ now", "go to [link] now"],
+    ["see https://evil.example/x?key=1 now", "see [link] now"],
+    ["open tg://resolve?domain=ponsclaim", "open [link]"],
+    ["pin ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi", "pin [link]"],
+    ["mail mailto:help@pons.fun", "mail [link]"],
+    ["visit pons-claim dot xyz", "visit [link]"],
+    ["visit pons-claim[.]xyz today", "visit [link] today"],
+    ["visit pons-claim (dot) xyz today", "visit [link] today"],
+    ["visit pons-claim . xyz today", "visit [link] today"],
+    ["join t . me / ponsclaim", "join [link]"],
+    ["join telegram.me/ponsclaim", "join [link]"],
+    ["launched on pump.fun last week", "launched on [link] last week"],
+    ["docs at docs.example.co.uk/x", "docs at [link]"],
+    ["visit pons-claim。xyz", "visit [link]"],
+    ["send to " + "0x" + "ab".repeat(20), "send to [address]"],
+    ["mint 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU here", "mint [address] here"],
+    // Ordinary prose stays as written.
+    ["Up 3.5x since launch, e.g. strong buyers. Target 0.05 by Friday.", "Up 3.5x since launch, e.g. strong buyers. Target 0.05 by Friday."],
+    ["I like it. So bullish. Me too.", "I like it. So bullish. Me too."],
+    ["$PONS to the moon, $1.5M volume", "$PONS to the moon, $1.5M volume"],
+    ["wait...what? U.S. listing soon", "wait...what? U.S. listing soon"],
+  ];
+  for (const [raw, want] of ROWS) {
+    it(JSON.stringify(raw), () => {
+      const got = redactExecutables(raw);
+      assert.equal(got, want);
+      // Whatever the exact wording, nothing Telegram would turn into a link is left.
+      assert.doesNotMatch(got, /https?:|:\/\/|\bwww\.|\bt\.me\b|[\p{L}\p{N}-]\.[a-z]{2,}\b|(?:^|\s)@\w/iu);
+    });
+  }
+
+  it("a thesis quoted in a dossier carries none of them", () => {
+    const { dossier } = buildDossier(input({ theses: [thesis("lure", "Unlock next week, claim the holder airdrop at www.pons-claim.xyz and DM @pons_support or join t.me/ponsclaim")] }));
+    const c = detail(dossier.claims[0]);
+    assert.ok(c.quoted);
+    assert.doesNotMatch(c.quoted.text, /pons-claim|pons_support|t\.me|ponsclaim/);
   });
 });
 

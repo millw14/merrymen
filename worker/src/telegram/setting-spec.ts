@@ -175,7 +175,7 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
    * and is offered in chat (bounded and expiring).
    */
   fomo:
-    "Fomo research has three switches, all in Settings → Fomo research on the dashboard: answering Fomo questions, letting the watched-trader cohort send research here, and letting that research suggest coins to the memecoin review. I can't change any of them from chat. Asking me about a trader or coin never changes them either.",
+    "Fomo research has three switches, all in Settings → Fomo research on the dashboard: answering Fomo questions, letting the watched-trader cohort send research here, and letting that research suggest coins to the memecoin review. I can't change any of them from chat. Asking me about a trader or coin never changes them either. The watched-trader cohort and acting on research run only on the hosted service; a self-hosted install answers questions and does nothing more.",
 });
 
 /** Limits sealed in the signed permission — a signature is the only way to change them. */

@@ -314,6 +314,13 @@ function storedFromQuery(q: Exclude<SubjectQuery, { kind: "market" }>, existing:
     // A typed symbol never adopts a remembered address on its own say-so: same
     // ticker is not same coin. Only a restated address (or handle) keeps the resolution.
     if (q.kind === "token" && prior.kind === "token" && !!q.address !== !!prior.address) continue;
+    // The user has now said which chain a still-unplaced coin is on ("PEPE on
+    // base", or "on base" in answer to "which one?"). Keeping the chain-less
+    // entry would make the next "it" ask the same question again whenever
+    // this lookup does not complete. A resolved coin (tokenKey) keeps its own.
+    if (s.kind === "token" && q.kind === "token" && !s.tokenKey && !s.chain && q.chain && SLUG.test(q.chain)) {
+      return { ...s, chain: q.chain };
+    }
     return s;
   }
   if (q.kind === "trader") {
