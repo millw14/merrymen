@@ -331,6 +331,62 @@ target metadata, cursors and recipient opt-outs are persisted alongside the
 outgoing drafts. See [Posting on X](x-posting.md#selective-comment-replies) for
 selection, freshness and durable delivery rules.
 
+### Fomo research (read-only; works, honestly, without a key)
+
+Research on what traders on fomo.family are doing, read from **fomoapi.io**, an
+independent read-only data service that states it is not affiliated with
+fomo.family. Merrymen claims no partnership with either. It answers owners'
+questions (app chat, Telegram, MCP), keeps a shared cohort of up to 150
+traders, and routes their activity to agents whose owners opted in. Research
+proposes; it never places an order, and every trading guard still applies.
+Design and stages: [`docs/fomo.md`](fomo.md).
+
+| Var | Service | Value |
+|---|---|---|
+| `MERRYMEN_FOMO_API_KEY` *(alias `FOMO_API_KEY`)* | **web + orchestrator** | the provider key. The house name wins when both are set; a blank value is no key. **Stripped from every worker child under both names** |
+| `MERRYMEN_FOMO_PLAN_CREDITS` *(optional)* | **web + orchestrator, the same value on both** | credits per month on the provider plan; the shared daily budget is derived from it. Default: the Free plan's `250000`. Both services draw on the same durable counters, so both must size them the same |
+| `MERRYMEN_FOMO_ENABLED` *(optional)* | orchestrator | `0` switches the orchestrator's Fomo pass off: no stream, no cohort, no research files, and worker children are spawned without the IPC channel, so their Fomo tools answer *unavailable* at once. The web's own lookups are unaffected |
+
+> **The key lives on the two services that broker reads, and nowhere else.**
+> `CHILD_SECRET_STRIP` removes both names at fork, because a tenant's worker
+> could otherwise put it in a prompt, a decision row or a log line. A hosted
+> child still answers Fomo questions on Telegram: it asks the orchestrator.
+>
+> **The IPC channel.** While the pass is on, worker children are spawned with
+> `stdio: ["ignore", "pipe", "pipe", "ipc"]`; stdin stays closed and the log
+> pipes are unchanged. The orchestrator answers each child's Fomo requests on
+> that channel **as the tenant it spawned that child for** — the channel is the
+> identity, and nothing a child sends can name another tenant, a key, a host or
+> a URL. Each child may run 4 tool calls at once and start 30 a minute; one call
+> is cut off at 30 s. Hold processes (a held tenant's Telegram answerer) get no
+> channel.
+>
+> **One stream per fleet.** The orchestrator replica that holds the
+> `0xfomo-fleet-ingest` lease opens the provider's alert stream (Robinhood Chain
+> only — the one network the executor reaches; lookups still cover every
+> chain), recovers gaps over REST with the same filter, rebuilds the cohort every
+> six hours from the four leaderboards (1,000 credits), and works the shared
+> research queue (three quick dossier refreshes a pass). Every replica writes
+> `fomo.json` into its own children's homes at most once a minute, and only with
+> signals for owners who turned monitoring or following on; an owner with data
+> access off gets a file that says so and carries nothing.
+>
+> **Without a key** nothing is spent and nothing pretends: the pass still writes
+> each child's file with `not-configured` health, and lookups over the channel
+> answer *not configured*. Without `DATABASE_URL` the pass is off and says so
+> once.
+>
+> **Nothing is posted.** Research and watching notes are drafted into the
+> `fomo_publications` outbox only for owners with a connected X account, and
+> every one is stored *blocked by policy* (`policy-review-required`): X's
+> automation rules and the provider's redistribution terms need review first.
+> The outbox's sender is never called in this release.
+>
+> **What the log says**: one boot line (`fomo: on — …`, `fomo: on without a
+> provider key — …` or `fomo: off — …`), cohort lines with counts only, lease
+> changes, and a health line at most every 20 minutes — never a tenant, a
+> trader, a token or the stream URL's key.
+
 ### Telegram groups (on by default per owner; works without a key)
 
 An owner can add their Merryman's Telegram bot to a Telegram group, and it

@@ -1,0 +1,1021 @@
+/**
+ * The fleet's Fomo pass, as the orchestrator runs it: over a real in-memory
+ * store, the real provider client answering from fixtures, the real stream
+ * and ingestor on a fake socket, and fakes for the service, the lease and the
+ * child homes. Plus the few lines of orchestrator.ts that wire it, pinned by
+ * reading the source.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { wrapSqlite, type Db } from "./db";
+import {
+  FOMO_PASS_DEFAULTS,
+  cohortCandidatesFrom,
+  dossierFromStored,
+  heldTokensFrom,
+  ingestStoreOver,
+  makeFomoPass,
+  mergeHeldTokens,
+  normalizeAlertFrame,
+  publicationStoreOver,
+  recoverVia,
+  scrubLogText,
+  streamEndpointFor,
+  xpostConsentLookup,
+  type FomoBudgetPort,
+  type FomoLeaseHandle,
+  type FomoPass,
+  type FomoPassKnobs,
+} from "./orchestrator-fomo";
+import type { ChildFomoFile, FomoAccess, FomoService, FomoServiceHealth } from "./fomo/contract";
+import { normalizeChildFomoFile } from "./fomo/child-file";
+import { buildDossier } from "./fomo/dossier";
+import { tokenFromKey } from "./fomo/identity";
+import type { IngestConfig } from "./fomo/ingest";
+import { createFomoClient, type FomoClient } from "./fomo/provider";
+import { draftPublication, type PublicationDraft } from "./fomo/publish";
+import * as store from "./fomo/store";
+import type { ClockPort, SocketLike, TimerPort } from "./fomo/stream";
+import type {
+  CohortMember,
+  FollowAssessment,
+  FomoEnvelope,
+  ResearchState,
+  RetrievalPriority,
+  TokenIdentity,
+  TokenLabel,
+  TraderEvent,
+} from "./fomo/types";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+/** A minute after the fixtures' newest event, so recovery reads them as recent. */
+const T0 = 1_788_378_060_000;
+const KEY = "fomo_live_TESTKEY_0123456789abcdef";
+const STREAM_URL = `wss://stream.test/ws/alerts?chain=robinhood&key=${KEY}`;
+const STREAM = { url: STREAM_URL, redacted: "wss://stream.test/ws/alerts?chain=robinhood&key=***" };
+
+const T1 = `0x${"a1".repeat(20)}`;
+const T2 = `0x${"b2".repeat(20)}`;
+const T3 = `0x${"c3".repeat(20)}`;
+
+const FRANK = "6dcf7c78-2537-522a-8307-3f9970c081be";
+const KALEO = "1f08e6ab-5c73-5443-9225-bfc496cde51f";
+const STAR = "254245a7-575a-51be-9bc3-090a924789eb";
+
+const rh = (hex: string) => `eip155:4663:0x${hex.repeat(40 / hex.length)}`;
+const PONS = "eip155:4663:0x39dbed3a00000000000000000000000000000c0d";
+const X1 = rh("11");
+const X2 = rh("22");
+const Y1 = rh("33");
+const tok = (key: string): TokenIdentity => {
+  const t = tokenFromKey(key);
+  assert.ok(t, `fixture token ${key}`);
+  return t;
+};
+const addressOf = (key: string) => key.split(":")[2]!;
+
+// ── harness ────────────────────────────────────────────────────────────────
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 25; i++) await new Promise<void>((r) => setImmediate(r));
+}
+
+class ManualTime implements ClockPort, TimerPort {
+  t = T0;
+  private seq = 0;
+  private timers = new Map<number, { at: number; fn: () => void }>();
+  now(): number {
+    return this.t;
+  }
+  setTimeout(fn: () => void, ms: number): unknown {
+    const id = ++this.seq;
+    this.timers.set(id, { at: this.t + Math.max(0, ms), fn });
+    return id;
+  }
+  clearTimeout(handle: unknown): void {
+    this.timers.delete(handle as number);
+  }
+  async advance(ms: number): Promise<void> {
+    const target = this.t + ms;
+    for (;;) {
+      let next: [number, { at: number; fn: () => void }] | null = null;
+      for (const e of this.timers) {
+        if (e[1].at > target) continue;
+        if (!next || e[1].at < next[1].at || (e[1].at === next[1].at && e[0] < next[0])) next = e;
+      }
+      if (!next) break;
+      this.timers.delete(next[0]);
+      this.t = next[1].at;
+      next[1].fn();
+      await settle();
+    }
+    this.t = target;
+    await settle();
+  }
+}
+
+class Sock implements SocketLike {
+  closed: number | null = null;
+  sent: string[] = [];
+  onopen: SocketLike["onopen"] = null;
+  onmessage: SocketLike["onmessage"] = null;
+  onclose: SocketLike["onclose"] = null;
+  onerror: SocketLike["onerror"] = null;
+  send(d: string): void {
+    this.sent.push(d);
+  }
+  close(code?: number): void {
+    this.closed = code ?? null;
+  }
+  frame(o: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(o) });
+  }
+}
+
+const WELCOME = { type: "welcome", stream: "alerts", realtime: true, delaySeconds: 0, heartbeatSeconds: 20, filter: { chain: "robinhood" } };
+
+class FakeService implements FomoService {
+  isConfigured = true;
+  refreshStatus: FomoEnvelope["status"] = "ok";
+  refreshes: { tokenKey: string; priority: RetrievalPriority; depth: string }[] = [];
+  async invoke(): Promise<FomoEnvelope> {
+    throw new Error("the pass never invokes a tool");
+  }
+  async memoryGet(): Promise<string | null> {
+    return null;
+  }
+  async memorySet(): Promise<void> {}
+  async memoryClear(): Promise<void> {}
+  async report(): Promise<void> {}
+  configured(): boolean {
+    return this.isConfigured;
+  }
+  async refreshDossier(token: TokenIdentity, _label: TokenLabel, opts: { priority: RetrievalPriority; depth: "quick" | "standard" | "deep" }) {
+    this.refreshes.push({ tokenKey: token.key, priority: opts.priority, depth: opts.depth });
+    return { dossier: null, changed: false, status: this.refreshStatus, reason: null };
+  }
+  async health(): Promise<FomoServiceHealth> {
+    return {
+      state: this.isConfigured ? "research-only" : "not-configured",
+      configured: this.isConfigured,
+      detail: this.isConfigured ? "Fomo research is configured." : "No provider key is configured.",
+      lastProviderOkAt: null,
+      lastProviderFailure: null,
+      creditsRemaining: null,
+      budgetLimited: false,
+    };
+  }
+}
+
+/** A fleet singleton like the advisory lease: one holder; a lost connection frees it. */
+class FleetLease {
+  holder: number | null = null;
+  releases = 0;
+  for(id: number): { acquire(): Promise<FomoLeaseHandle | null> } {
+    return {
+      acquire: async () => {
+        if (this.holder !== null && this.holder !== id) return null;
+        this.holder = id;
+        return {
+          release: async () => {
+            if (this.holder === id) this.holder = null;
+            this.releases++;
+          },
+          healthy: () => this.holder === id,
+        };
+      },
+    };
+  }
+  /** The lease's connection dropped: Postgres let the lock go. */
+  lose(): void {
+    this.holder = null;
+  }
+}
+
+function fixture(name: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.join(HERE, "fomo", "testdata", `${name}.json`), "utf8")) as Record<string, unknown>;
+}
+
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+
+/** The real client, answering from the fixtures. `serve` says which routes exist; everything else is a 404. */
+function fixtureClient(serve: { leaderboard?: boolean; alerts?: boolean }, calls: string[], time: ManualTime): FomoClient {
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    calls.push(url.pathname + url.search);
+    const board = /^\/v2\/leaderboard\/(24h|7d|30d|all)$/.exec(url.pathname);
+    if (board && serve.leaderboard) {
+      const body = fixture("leaderboard-24h");
+      body.window = board[1];
+      return json(body, 200, { "x-credits-cost": "250", "x-credits-remaining": "99000" });
+    }
+    if (url.pathname === "/v2/alerts" && serve.alerts) return json(fixture("alerts"), 200, { "x-credits-cost": "125" });
+    return json({ error: "not_found" }, 404);
+  }) as typeof fetch;
+  return createFomoClient({ apiKey: KEY, fetchImpl, now: () => time.now(), sleep: async () => {}, random: () => 0.5, maxAttempts: 1 });
+}
+
+async function freshDb(): Promise<Db> {
+  const db = wrapSqlite(new DatabaseSync(":memory:"));
+  await store.ensureFomoSchema(db, "sqlite");
+  return db;
+}
+
+const ACCESS = {
+  monitoring: { dataAccess: true, monitoring: true, follow: false },
+  lookupsOnly: { dataAccess: true, monitoring: false, follow: false },
+  none: { dataAccess: false, monitoring: true, follow: true },
+} satisfies Record<string, FomoAccess>;
+
+interface Rig {
+  pass: FomoPass;
+  db: Db;
+  time: ManualTime;
+  service: FakeService;
+  files: Map<string, ChildFomoFile[]>;
+  sockets: Sock[];
+  calls: string[];
+  logs: string[];
+  access: Map<string, FomoAccess>;
+  held: Map<string, string[]>;
+  run(roster: string[], at?: number): Promise<void>;
+  last(tenant: string): ChildFomoFile;
+}
+
+async function rig(o: {
+  db?: Db;
+  time?: ManualTime;
+  lease?: { acquire(): Promise<FomoLeaseHandle | null> };
+  configured?: boolean;
+  serve?: { leaderboard?: boolean; alerts?: boolean };
+  stream?: boolean;
+  access?: Record<string, FomoAccess>;
+  held?: Map<string, string[]>;
+  xConsent?: Record<string, string>;
+  knobs?: Partial<FomoPassKnobs>;
+  ingestConfig?: Partial<IngestConfig>;
+  calls?: string[];
+  budget?: FomoBudgetPort;
+} = {}): Promise<Rig> {
+  const db = o.db ?? (await freshDb());
+  const time = o.time ?? new ManualTime();
+  const service = new FakeService();
+  service.isConfigured = o.configured ?? true;
+  const calls = o.calls ?? [];
+  const client = service.isConfigured ? fixtureClient(o.serve ?? {}, calls, time) : null;
+  const files = new Map<string, ChildFomoFile[]>();
+  const sockets: Sock[] = [];
+  const logs: string[] = [];
+  const access = new Map(Object.entries(o.access ?? {}));
+  const held = o.held ?? new Map<string, string[]>();
+  const pass = makeFomoPass({
+    db,
+    dialect: "sqlite",
+    service,
+    client,
+    streamEndpoint: o.stream && service.isConfigured ? STREAM : null,
+    createSocket: () => {
+      const s = new Sock();
+      sockets.push(s);
+      return s;
+    },
+    clock: time,
+    timers: time,
+    random: () => 0.5,
+    lease: o.lease ?? new FleetLease().for(1),
+    access: async (t) => {
+      const a = access.get(t);
+      if (!a) throw new Error(`no settings for ${t}`);
+      return a;
+    },
+    heldTokens: () => held,
+    holdingsKnown: () => true,
+    childHome: (t) => `/homes/${t}`,
+    writeChildFile: (home, file) => {
+      // The child's own reader must accept every file the pass writes.
+      assert.ok(normalizeChildFomoFile(file), "the child reader refuses this file");
+      const list = files.get(home) ?? [];
+      list.push(structuredClone(file));
+      files.set(home, list);
+    },
+    xConsent: async (t) => (o.xConsent?.[t] ? { accountId: o.xConsent[t]! } : null),
+    log: (l) => logs.push(l),
+    knobs: o.knobs,
+    ingestConfig: o.ingestConfig,
+    budget: o.budget,
+  });
+  return {
+    pass,
+    db,
+    time,
+    service,
+    files,
+    sockets,
+    calls,
+    logs,
+    access,
+    held,
+    async run(roster, at) {
+      if (at !== undefined) time.t = at;
+      pass.start(
+        roster.map((tenant) => ({ tenant, agentId: tenant })),
+        time.now(),
+      );
+      await pass.idle();
+    },
+    last(tenant) {
+      const list = files.get(`/homes/${tenant}`);
+      assert.ok(list && list.length > 0, `no file was written for ${tenant.slice(0, 6)}`);
+      return list[list.length - 1]!;
+    },
+  };
+}
+
+const member = (userId: string, handle: string): CohortMember => ({
+  trader: { userId, handle, displayName: null, verified: null },
+  score: 0.6,
+  reasons: ["score:seed"],
+  followable: false,
+  evidence: { providerReported: {}, reconstructed: {}, prospective: {} },
+  sampleSize: null,
+  includedAt: T0,
+});
+
+async function seedCohort(db: Db, members: CohortMember[], createdAt = T0): Promise<void> {
+  assert.ok(
+    await store.insertCohortVersion(db, {
+      version: 1,
+      createdAt,
+      target: 150,
+      members,
+      shortfallReason: "seeded for a test",
+      changes: members.map((m) => ({ userId: m.trader.userId, change: "added" as const, reason: "seed" })),
+    }),
+  );
+}
+
+const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+
+function event(n: number, userId: string, tokenKey: string, observedAt: number, kind: TraderEvent["kind"] = "buy"): TraderEvent {
+  return {
+    eventKey: `ev:${uuid(n)}`,
+    identityBasis: "provider-event-id",
+    identityAmbiguous: false,
+    source: "stream",
+    kind,
+    trader: { userId, handle: null, displayName: null, verified: null },
+    token: tok(tokenKey),
+    tokenLabel: { symbol: "TKN", name: null },
+    tradeId: null,
+    swapId: null,
+    transferId: null,
+    txHash: null,
+    fillUsd: null,
+    fillUsdBasis: null,
+    positionValueUsd: null,
+    positionRealizedPnlUsdCumulative: null,
+    sourceEventAt: observedAt,
+    execAt: null,
+    observedAt,
+    verification: "provider-reported",
+    text: null,
+    replay: false,
+  };
+}
+
+async function seedDossier(db: Db, key: string, marketLine: string, at: number) {
+  const built = buildDossier({
+    token: tok(key),
+    label: { symbol: "PONS", name: "Pons" },
+    theses: [],
+    thesisCoverage: { pagesRequested: 1, pagesReturned: 1, providerTotal: null, capped: false, stale: false, ageSeconds: null, chainFilterHonoured: true },
+    events: [],
+    cohortUserIds: new Set(),
+    stats: null,
+    marketContext: [marketLine],
+    routeContext: [],
+    ownFamilies: new Set(),
+    selfNames: [],
+    previous: dossierFromStored(await store.latestDossier(db, key), key),
+    now: at,
+    window: "24h",
+  });
+  return store.insertDossierRevision(db, key, built.dossier.inputsHash, built.dossier, at);
+}
+
+function assessment(id: string, tenant: string, state: ResearchState, createdAt: number, key = PONS): FollowAssessment {
+  return {
+    id,
+    tenant,
+    token: tok(key),
+    label: { symbol: "PONS", name: "Pons" },
+    triggerEventKeys: [],
+    state,
+    reasonCodes: [],
+    supporting: [],
+    opposing: [],
+    signalDelayMs: null,
+    researchDelayMs: null,
+    priceMovePct: null,
+    decisionQuote: null,
+    setupExpiresAt: null,
+    horizon: null,
+    invalidation: [],
+    sizeCeilingUsdg6: null,
+    dossierRevision: null,
+    executionAvailability: "unsupported-venue",
+    createdAt,
+  };
+}
+
+async function researchRows(db: Db): Promise<{ token_key: string; state: string; tenants_json: string; priority: number }[]> {
+  return (await db.prepare("SELECT token_key, state, tenants_json, priority FROM fomo_research_queue ORDER BY token_key").all()) as never;
+}
+
+const provider = (calls: string[]) => calls.filter((c) => c.startsWith("/v2/"));
+
+// ── the tests ──────────────────────────────────────────────────────────────
+
+describe("leadership", () => {
+  it("only the lease holder does fleet work; a replica that does not lead still writes its own children's files", async () => {
+    const db = await freshDb();
+    const time = new ManualTime();
+    const lease = new FleetLease();
+    const callsA: string[] = [];
+    const callsB: string[] = [];
+    const access = { [T1]: ACCESS.monitoring, [T2]: ACCESS.monitoring };
+    const a = await rig({ db, time, lease: lease.for(1), serve: { leaderboard: true, alerts: true }, stream: true, access, calls: callsA });
+    const b = await rig({ db, time, lease: lease.for(2), serve: { leaderboard: true, alerts: true }, stream: true, access, calls: callsB });
+    await a.run([T1]);
+    await b.run([T2]);
+    a.sockets[0]?.frame(WELCOME);
+    await a.pass.idle();
+
+    assert.equal(a.pass.health().leader, true);
+    assert.equal(b.pass.health().leader, false);
+    assert.equal(b.pass.health().ingest, "follower");
+    assert.equal(a.sockets.length, 1, "one stream for the fleet");
+    assert.equal(b.sockets.length, 0, "no second stream");
+    assert.equal(provider(callsA).filter((c) => c.startsWith("/v2/leaderboard/")).length, 4, "the leader built the cohort");
+    assert.deepEqual(provider(callsB), [], "a follower spends nothing");
+    assert.ok(await store.latestCohort(db));
+
+    // Each replica wrote exactly its own roster's files.
+    assert.equal(a.last(T1).tenant, T1);
+    assert.equal(b.last(T2).tenant, T2);
+    assert.equal(a.files.has(`/homes/${T2}`), false);
+    assert.equal(b.files.has(`/homes/${T1}`), false);
+    // And routed only its own roster.
+    assert.equal((await store.getTenantRoute(db, T1))?.monitoring, true);
+    assert.equal((await store.getTenantRoute(db, T2))?.monitoring, true);
+
+    // Queued research is the leader's to spend on, never a follower's.
+    await store.enqueueResearch(db, X1, "rev", 300, [T2], T0 + 1_000);
+    await b.run([T2], T0 + 15_000);
+    assert.deepEqual(b.service.refreshes, [], "a follower refreshed a dossier");
+    await a.run([T1], T0 + 15_000);
+    assert.deepEqual(a.service.refreshes.map((x) => x.tokenKey), [X1]);
+    a.pass.stop();
+    b.pass.stop();
+    await a.pass.idle();
+  });
+
+  it("lease loss stops the stream, and another replica takes over", async () => {
+    const db = await freshDb();
+    const time = new ManualTime();
+    const lease = new FleetLease();
+    const access = { [T1]: ACCESS.monitoring, [T2]: ACCESS.monitoring };
+    await seedCohort(db, [member(FRANK, "frankdegods")]);
+    const a = await rig({ db, time, lease: lease.for(1), serve: { alerts: true }, stream: true, access });
+    const b = await rig({ db, time, lease: lease.for(2), serve: { alerts: true }, stream: true, access });
+    await a.run([T1]);
+    const sock = a.sockets[0];
+    assert.ok(sock);
+    sock.frame(WELCOME);
+    await a.pass.idle();
+    assert.equal(a.pass.health().connected, true);
+
+    lease.lose();
+    await a.run([T1], T0 + 15_000);
+    assert.equal(sock.closed, 1000, "the stream was shut down");
+    assert.equal(a.pass.health().leader, false);
+    assert.equal(a.pass.health().connected, false);
+    assert.equal(a.pass.health().ingest, "follower");
+    assert.ok(a.logs.some((l) => /lease was lost/.test(l)));
+    await time.advance(5 * MIN);
+    assert.equal(a.sockets.length, 1, "no reconnect after the stream was stopped");
+
+    await b.run([T2]);
+    assert.equal(b.pass.health().leader, true);
+    assert.equal(b.sockets.length, 1, "the new leader opened the fleet's stream");
+    b.pass.stop();
+    a.pass.stop();
+  });
+});
+
+describe("child files", () => {
+  it("only data-access tenants get signals, and a file never carries another tenant's holdings, watches or dependencies", async () => {
+    const db = await freshDb();
+    await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
+    await store.addWatch(db, { tenant: T1, tokenKey: Y1, label: { symbol: "YONE", name: null }, nowMs: T0 - HOUR, expiresAtMs: T0 + DAY, createdVia: "app-chat" });
+    assert.deepEqual(await store.addPositionDep(db, { tenant: T2, userId: FRANK, tokenKey: X2, reason: "entered with this trader", nowMs: T0, expiresAtMs: T0 + DAY }), { ok: true, created: true });
+    await store.insertEvents(db, [
+      event(1, KALEO, X1, T0 - 5 * MIN), // a cohort member on T1's coin
+      event(2, FRANK, X1, T0 - 4 * MIN), // a stranger to T1 (only T2 depends on him)
+      event(3, FRANK, X2, T0 - 3 * MIN), // T2's dependency on T2's coin
+      event(4, STAR, X2, T0 - 2 * MIN), // nobody's
+    ]);
+    await seedDossier(db, X1, "Merrymen's own quote: liquidity is thin.", T0 - 10 * MIN);
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring, [T2]: ACCESS.monitoring, [T3]: ACCESS.none },
+      held: new Map([
+        [X1, [T1]],
+        [X2, [T2]],
+      ]),
+    });
+    await r.run([T1, T2, T3]);
+
+    const f1 = r.last(T1);
+    const f2 = r.last(T2);
+    const f3 = r.last(T3);
+    assert.deepEqual(
+      f1.signals.map((s) => [s.token.key, s.reasons, s.priority]),
+      [
+        [X1, ["held"], "position-protection"],
+        [Y1, ["watched"], "interactive"],
+      ],
+    );
+    assert.deepEqual(f1.signals[0]!.triggers.map((e) => e.trader.userId), [KALEO], "cohort events only; T2's dependency is not T1's");
+    assert.equal(f1.signals[0]!.dossier?.revision, 1);
+    assert.equal(f1.signals[1]!.label.symbol, "YONE");
+    assert.deepEqual(
+      f2.signals.map((s) => [s.token.key, s.reasons]),
+      [[X2, ["held"]]],
+    );
+    assert.deepEqual(f2.signals[0]!.triggers.map((e) => e.trader.userId), [FRANK], "T2's own dependency counts for T2");
+
+    const s1 = JSON.stringify(f1);
+    const s2 = JSON.stringify(f2);
+    for (const other of [addressOf(X2)]) assert.ok(!s1.includes(other), "T1's file names T2's coin");
+    for (const other of [addressOf(X1), addressOf(Y1), "YONE"]) assert.ok(!s2.includes(other), "T2's file names T1's coin or watch");
+
+    assert.deepEqual(f3.access, ACCESS.none);
+    assert.deepEqual(f3.signals, [], "no data access, no signals, even with monitoring on");
+    assert.equal(f3.health.state, "permission-required");
+    assert.equal((await store.getTenantRoute(db, T3))?.dataAccess, false);
+    assert.equal(f1.health.cohortSize, 1);
+    assert.equal(f1.health.cohortTarget, 150);
+    r.pass.stop();
+  });
+
+  it("is rewritten at most once a minute, and at once (with no signals) when the owner turns monitoring off", async () => {
+    const r = await rig({ serve: {}, access: { [T1]: ACCESS.monitoring }, held: new Map([[X1, [T1]]]) });
+    await r.run([T1]);
+    await r.run([T1], T0 + 30_000);
+    assert.equal(r.files.get(`/homes/${T1}`)?.length, 1, "not again inside the minute");
+    r.access.set(T1, ACCESS.lookupsOnly);
+    await r.run([T1], T0 + 61_000);
+    assert.equal(r.files.get(`/homes/${T1}`)?.length, 2);
+    assert.deepEqual(r.last(T1).signals, []);
+    assert.equal(r.last(T1).health.state, "research-only");
+    r.pass.stop();
+  });
+});
+
+describe("the research queue", () => {
+  it("turns at most maxDossierRefreshesPerPass items into quick refreshes per pass, most urgent first", async () => {
+    const db = await freshDb();
+    const keys = [rh("41"), rh("42"), rh("43"), rh("44"), rh("45")];
+    const priorities = [100, 300, 100, 200, 100];
+    for (let i = 0; i < keys.length; i++) await store.enqueueResearch(db, keys[i]!, `rev${i}`, priorities[i]!, [T1], T0 - (10 - i) * 1000);
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    assert.equal(r.service.refreshes.length, FOMO_PASS_DEFAULTS.maxDossierRefreshesPerPass);
+    assert.deepEqual(
+      r.service.refreshes.map((x) => [x.tokenKey, x.priority, x.depth]),
+      [
+        [keys[1], "position-protection", "quick"],
+        [keys[3], "interactive", "quick"],
+        [keys[0], "discovery", "quick"],
+      ],
+    );
+    assert.deepEqual((await researchRows(db)).map((x) => x.state), ["done", "done", "queued", "done", "queued"]);
+    await r.run([T1], T0 + 15_000);
+    assert.equal(r.service.refreshes.length, 5);
+    assert.ok((await researchRows(db)).every((x) => x.state === "done"));
+    assert.equal(r.pass.health().research.done, 5);
+    r.pass.stop();
+  });
+
+  it("stops spending for the pass when the budget refuses, and gives the item back", async () => {
+    const db = await freshDb();
+    for (const k of [rh("51"), rh("52")]) await store.enqueueResearch(db, k, "rev", 100, [T1], T0 - 1000);
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring } });
+    r.service.refreshStatus = "budget-limited";
+    await r.run([T1]);
+    assert.equal(r.service.refreshes.length, 1);
+    assert.deepEqual((await researchRows(db)).map((x) => x.state), ["queued", "queued"]);
+    r.pass.stop();
+  });
+});
+
+describe("the cohort", () => {
+  it("is rebuilt at most every cohortRefreshMs from four leaderboard windows, never padded, and logged as counts only", async () => {
+    const r = await rig({ serve: { leaderboard: true }, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    const boards = () => provider(r.calls).filter((c) => c.startsWith("/v2/leaderboard/"));
+    assert.deepEqual(boards().map((c) => c.split("?")[0]), ["/v2/leaderboard/24h", "/v2/leaderboard/7d", "/v2/leaderboard/30d", "/v2/leaderboard/all"]);
+    const v1 = (await store.latestCohort(r.db))?.cohort;
+    assert.ok(v1);
+    assert.equal(v1.version, 1);
+    assert.equal(v1.target, 150);
+    assert.ok(v1.members.length <= 2, "no more members than distinct traders read");
+    assert.ok(v1.members.length < v1.target);
+    assert.ok(v1.shortfallReason, "a short cohort says why");
+    assert.deepEqual(await store.usageForDay(r.db, store.usageDay(T0)), [{ bucket: "leaderboard", calls: 4, credits: 1000, uncountedCalls: 0 }]);
+
+    await r.run([T1], T0 + HOUR);
+    assert.equal(boards().length, 4, "not again inside the refresh interval");
+    await r.run([T1], T0 + 6 * HOUR);
+    assert.equal(boards().length, 8);
+    assert.equal((await store.latestCohort(r.db))?.cohort.version, 2);
+
+    const text = r.logs.join("\n");
+    assert.match(text, /cohort v1 built — \d+\/150 members/);
+    for (const who of ["frankdegods", "CryptoKaleo", FRANK, KALEO, T1]) assert.ok(!text.includes(who), "a log line names someone");
+    r.pass.stop();
+  });
+
+  it("charges the discovery budget first: a refusal spends nothing, a grant is settled with what was billed", async () => {
+    const charges: { priority: RetrievalPriority; credits: number }[] = [];
+    const settled: (number | null | "refund")[] = [];
+    let allow = false;
+    const budget: FomoBudgetPort = {
+      async charge(req) {
+        charges.push({ priority: req.priority, credits: req.credits });
+        return allow ? { settle: async (n) => void settled.push(n), refund: async () => void settled.push("refund") } : null;
+      },
+    };
+    const r = await rig({ serve: { leaderboard: true }, access: { [T1]: ACCESS.monitoring }, budget });
+    await r.run([T1]);
+    assert.deepEqual(charges, [{ priority: "discovery", credits: 1000 }]);
+    assert.deepEqual(provider(r.calls), [], "refused: no leaderboard was read");
+    assert.equal(await store.latestCohort(r.db), null);
+    allow = true;
+    await r.run([T1], T0 + 31 * MIN);
+    assert.equal(provider(r.calls).length, 4);
+    assert.deepEqual(settled, [1000], "settled with the billed x-credits-cost");
+    r.pass.stop();
+  });
+
+  it("merges a trader's windows into one candidate and infers activity only as a floor from the short boards", () => {
+    const page = (window: "24h" | "30d", trades: number) => ({
+      window,
+      providerCount: 2,
+      dropped: 0,
+      rows: [
+        {
+          rank: 1,
+          window,
+          trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+          pnlUsd: 10,
+          volumeUsd: 100,
+          trades,
+          followers: 5,
+          holdingsCount: null,
+          topTokenHints: [],
+          hasEvmWallet: false,
+        },
+      ],
+    });
+    const [c] = cohortCandidatesFrom({ "24h": page("24h", 3), "30d": page("30d", 9) }, T0);
+    assert.ok(c);
+    assert.deepEqual(Object.keys(c.windows).sort(), ["24h", "30d"]);
+    assert.equal(c.lastActiveAt, T0 - DAY);
+    const [quiet] = cohortCandidatesFrom({ "30d": page("30d", 9) }, T0);
+    assert.equal(quiet?.lastActiveAt, null, "a 30-day board proves nothing inside the inactivity rule");
+  });
+});
+
+describe("shared ingestion", () => {
+  it("persists first: recovery, a replayed frame and a second recovery after a reconnect enqueue ONE research task", async () => {
+    const db = await freshDb();
+    await seedCohort(db, [member(FRANK, "frankdegods")]);
+    assert.ok(await store.setCheckpoint(db, "alerts", null, 1_788_377_900_000, T0 - MIN));
+    const r = await rig({ db, serve: { alerts: true }, stream: true, access: { [T1]: ACCESS.monitoring }, ingestConfig: { coalesceWindowMs: 5_000 } });
+    await r.run([T1]);
+    const first = r.sockets[0];
+    assert.ok(first);
+    first.frame(WELCOME);
+    await r.pass.idle();
+    const alertCalls = () => r.calls.filter((c) => c.startsWith("/v2/alerts"));
+    assert.equal(alertCalls().length, 1, "recovered once on connect");
+    assert.match(alertCalls()[0]!, /chain=robinhood/, "recovery uses the stream's own chain filter");
+    // The provider replays the newest alert on connect, then a live one we already hold from REST.
+    const frames = (fixture("ws-alerts-frames").frames as Record<string, unknown>[]).filter((f) => f.type === "alert");
+    for (const f of frames) first.frame(f);
+    await r.pass.idle();
+    await r.time.advance(6_000);
+    await r.pass.idle();
+
+    let rows = await researchRows(db);
+    assert.deepEqual(rows.map((x) => x.token_key), [PONS], "one task for the coin the cohort member bought");
+    assert.deepEqual(JSON.parse(rows[0]!.tenants_json), [T1]);
+    const persisted = (await db.prepare("SELECT COUNT(*) AS n FROM fomo_events").get()) as { n: number };
+    assert.ok(Number(persisted.n) >= 9, "every recovered event was persisted, of interest or not");
+
+    // A reconnect: the stream comes back, recovery reads the same page again.
+    first.onclose?.({ code: 1006, reason: "gone" });
+    await r.time.advance(2_000);
+    const second = r.sockets[1];
+    assert.ok(second, "reconnected");
+    second.frame(WELCOME);
+    await r.time.advance(31_000);
+    await r.pass.idle();
+    await r.time.advance(6_000);
+    await r.pass.idle();
+    assert.equal(alertCalls().length, 2, "recovered again after the reconnect");
+    rows = await researchRows(db);
+    assert.equal(rows.length, 1, "duplicates from the second recovery made no second task");
+
+    // The routed coin reaches T1's next file with the cohort member's events as triggers.
+    await r.run([T1], T0 + 2 * MIN);
+    const sig = r.last(T1).signals.find((s) => s.token.key === PONS);
+    assert.ok(sig, "the routed coin is in the child's file");
+    assert.ok(sig.reasons.includes("cohort"));
+    assert.ok(sig.triggers.length >= 1 && sig.triggers.every((e) => e.trader.userId === FRANK));
+    assert.ok(sig.firstSeenAt <= T0 + 2 * MIN);
+    assert.equal(r.service.refreshes[0]?.tokenKey, PONS, "the leader turned the task into a dossier refresh");
+
+    const everything = JSON.stringify({ logs: r.logs, health: r.pass.health() });
+    assert.ok(!everything.includes(KEY), "the key reached a log or the health");
+    r.pass.stop();
+    await r.pass.idle();
+  });
+});
+
+describe("publication drafts", () => {
+  it("end blocked by policy, stay visible, and the sender is never called", async () => {
+    const db = await freshDb();
+    await seedDossier(db, PONS, "Merrymen's own quote: liquidity is thin.", T0 - HOUR);
+    await store.insertAssessment(db, assessment("as-1", T1, "WATCH", T0 - 30 * MIN));
+    await store.insertAssessment(db, assessment("as-2", T2, "WATCH", T0 - 30 * MIN));
+    await store.insertAssessment(db, assessment("as-3", T1, "REJECT_SETUP", T0 - 20 * MIN, X1));
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.lookupsOnly, [T2]: ACCESS.lookupsOnly }, xConsent: { [T1]: "1234567" } });
+    await r.run([T1, T2]);
+
+    let mine = await store.recentPublications(db, T1, 10);
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0]!.kind, "watching");
+    assert.equal(mine[0]!.state, "blocked-policy");
+    assert.equal(mine[0]!.reason, "policy-review-required");
+    assert.equal(mine[0]!.destinationAccount, "1234567");
+    assert.deepEqual(await store.recentPublications(db, T2, 10), [], "no X consent, no draft");
+
+    // The same evidence again is not a new revision.
+    await store.insertAssessment(db, assessment("as-4", T1, "WATCH", T0 + 10_000));
+    await r.run([T1, T2], T0 + 61_000);
+    assert.equal((await store.recentPublications(db, T1, 10)).length, 1);
+
+    // A dossier that moved forward is.
+    await seedDossier(db, PONS, "Merrymen's own quote: liquidity is deeper now.", T0 + 90_000);
+    await store.insertAssessment(db, assessment("as-5", T1, "WATCH", T0 + 100_000));
+    await r.run([T1, T2], T0 + 122_000);
+    mine = await store.recentPublications(db, T1, 10);
+    assert.deepEqual(mine.map((p) => [p.contentRev, p.state]), [
+      [2, "blocked-policy"],
+      [1, "blocked-policy"],
+    ]);
+
+    // A row that somehow reached the queue is held by policy at the outbox, unsent.
+    const queued = draftPublication({
+      tenant: T1,
+      destination: { channel: "x", accountId: "1234567" },
+      kind: "watching",
+      tokenKey: X1,
+      facts: { coinName: "Tokn", claims: [], uncertainty: [], interest: "no-position" },
+      dossierRef: null,
+      decisionId: null,
+      consentScope: "x-research-posts",
+      now: T0,
+      contentRev: 1,
+    });
+    const out = publicationStoreOver(db);
+    const id = await out.insertDraft({ ...queued, state: "queued", dueAt: T0 } as PublicationDraft);
+    assert.ok(id);
+    await r.run([T1, T2], T0 + 183_000);
+    assert.equal((await out.get(id))?.state, "blocked-policy");
+    assert.equal(r.pass.health().senderCalls, 0);
+    r.pass.stop();
+  });
+
+  it("are not drafted while the tenant holds the coin: the interest line could not be stated truthfully", async () => {
+    const db = await freshDb();
+    await store.insertAssessment(db, assessment("as-1", T1, "WATCH", T0 - 30 * MIN));
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.lookupsOnly }, xConsent: { [T1]: "1234567" }, held: new Map([[PONS, [T1]]]) });
+    await r.run([T1]);
+    assert.deepEqual(await store.recentPublications(db, T1, 10), []);
+    r.pass.stop();
+  });
+});
+
+describe("without a provider key", () => {
+  it("degrades honestly: files say not-configured, nothing is spent, the queue waits", async () => {
+    const db = await freshDb();
+    await store.enqueueResearch(db, X1, "rev", 300, [T1], T0 - 1000);
+    const r = await rig({ db, configured: false, stream: true, access: { [T1]: ACCESS.monitoring }, held: new Map([[X1, [T1]]]) });
+    await r.run([T1]);
+    const f = r.last(T1);
+    assert.equal(f.health.state, "not-configured");
+    assert.match(f.health.detail, /not configured/);
+    assert.deepEqual(f.access, ACCESS.monitoring);
+    assert.equal(r.sockets.length, 0);
+    assert.deepEqual(r.calls, []);
+    assert.deepEqual(r.service.refreshes, []);
+    assert.deepEqual((await researchRows(db)).map((x) => x.state), ["queued"], "attempts are not burned on answers that cannot come");
+    assert.equal((await store.getTenantRoute(db, T1))?.monitoring, true, "routes are still kept");
+    const h = r.pass.health();
+    assert.equal(h.configured, false);
+    assert.equal(h.ingest, "not-configured");
+    assert.equal(streamEndpointFor(null), null);
+    assert.equal(streamEndpointFor("short"), null, "a key the provider would refuse builds no URL");
+    const ep = streamEndpointFor(KEY);
+    assert.ok(ep && ep.url.includes("chain=robinhood") && !ep.redacted.includes(KEY));
+    r.pass.stop();
+  });
+
+  it("an unreadable owner setting skips that owner this pass rather than writing anything for them", async () => {
+    const r = await rig({ serve: {}, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1, T2]);
+    assert.equal(r.files.has(`/homes/${T2}`), false);
+    assert.equal(await store.getTenantRoute(r.db, T2), null);
+    assert.ok(r.files.has(`/homes/${T1}`));
+    assert.match(r.pass.health().lastFailure?.step ?? "", /settings/);
+    assert.ok(r.logs.every((l) => !l.includes(T2)), "the failure line names nobody");
+    r.pass.stop();
+  });
+});
+
+describe("adapters", () => {
+  it("the outbox port round-trips a draft through the shared table and refuses an illegal move", async () => {
+    const db = await freshDb();
+    const out = publicationStoreOver(db);
+    const d = draftPublication({
+      tenant: T1,
+      destination: { channel: "x", accountId: "42" },
+      kind: "watching",
+      tokenKey: PONS,
+      facts: { coinName: "Pons", claims: ["holders keep adding"], uncertainty: ["whether the volume is organic"], interest: "no-position" },
+      dossierRef: { dossierId: "dsr_x", revision: 3 },
+      decisionId: null,
+      consentScope: "x-research-posts",
+      now: T0,
+      contentRev: 2,
+    });
+    const id = await out.insertDraft({ ...d, state: "blocked-policy", reason: "policy-review-required" });
+    assert.ok(id);
+    assert.equal(await out.insertDraft({ ...d, state: "blocked-policy" }), null, "the dedupe key is used once");
+    const back = await out.get(id);
+    assert.ok(back);
+    assert.deepEqual(
+      [back.tenant, back.destination, back.kind, back.tokenKey, back.subjectKey, back.contentRev, back.dossierRef, back.basis, back.interest, back.coinName],
+      [T1, { channel: "x", accountId: "42" }, "watching", PONS, PONS, 2, { dossierId: "dsr_x", revision: 3 }, { dossierRevision: 3, decisionStatus: null }, "no-position", d.coinName],
+    );
+    await assert.rejects(out.transition(id, "blocked-policy", "sending", { at: T0 }), /not a legal move/);
+    assert.equal(await out.get("not-a-number"), null);
+  });
+
+  it("the ingest port stringifies gap ids and stamps the clock", async () => {
+    const db = await freshDb();
+    const time = new ManualTime();
+    const port = ingestStoreOver(db, time);
+    const id = await port.recordGap("alerts", T0 - 1000, T0, "stream-backpressure");
+    assert.equal(typeof id, "string");
+    assert.deepEqual(await port.listOpenGaps("alerts"), [{ id, fromMs: T0 - 1000, toMs: T0, reason: "stream-backpressure" }]);
+    await port.markGapRecovered(id);
+    assert.deepEqual(await port.listOpenGaps("alerts"), []);
+    assert.equal(await port.setCheckpoint("alerts", null, T0), true);
+    assert.equal((await store.getCheckpoint(db, "alerts"))?.updatedAtMs, T0);
+  });
+
+  it("REST recovery keeps the stream's chain filter and asks the budget before every page", async () => {
+    const db = await freshDb();
+    const time = new ManualTime();
+    const calls: string[] = [];
+    const client = fixtureClient({ alerts: true }, calls, time);
+    const refused = recoverVia(client, { db, clock: time, budget: { charge: async () => null } });
+    assert.deepEqual(await refused({ since: T0 - HOUR }), { ok: false, reason: "budget-limited" });
+    const broken = recoverVia(client, { db, clock: time, budget: { charge: async () => Promise.reject(new Error("db down")) } });
+    assert.deepEqual(await broken({ since: T0 - HOUR }), { ok: false, reason: "budget-unavailable" });
+    assert.deepEqual(calls, [], "nothing was asked without a charge");
+    const page = await recoverVia(client, { db, clock: time })({ cursor: "c1" });
+    assert.ok(page.ok && page.normalized === true && page.events.length > 0);
+    assert.match(calls[0]!, /chain=robinhood/);
+    assert.match(calls[0]!, /cursor=c1/);
+    assert.deepEqual(await store.usageForDay(db, store.usageDay(T0)), [{ bucket: "alerts-recovery", calls: 1, credits: 125, uncountedCalls: 0 }]);
+  });
+
+  it("a retraction becomes the event key the alert was filed under", () => {
+    const id = "149318d0-70af-4acb-a607-b126dd4db4a3";
+    assert.deepEqual(normalizeAlertFrame({ type: "retract", id }, T0, "stream"), { retract: `ev:${id}` });
+    assert.equal(normalizeAlertFrame({ type: "heartbeat" }, T0, "stream"), null);
+  });
+
+  it("held coins become Robinhood token keys per tenant, and child reports merge in", () => {
+    const held = heldTokensFrom(new Map([[T1.toUpperCase().replace("0X", "0x"), [addressOf(X1), "not-an-address"]]]));
+    assert.deepEqual([...held], [[X1, [T1]]]);
+    assert.deepEqual([...mergeHeldTokens(held, new Map([[X1, [T2]]]), null)], [[X1, [T1, T2]]]);
+  });
+
+  it("an unreadable X consent table is no consent", async () => {
+    assert.equal(await xpostConsentLookup(await freshDb())(T1), null);
+  });
+
+  it("log text loses keys and wallets", () => {
+    const line = scrubLogText(`connect failed for ${STREAM_URL} (owner ${T1})`);
+    assert.ok(!line.includes(KEY));
+    assert.ok(!line.includes(T1));
+  });
+
+  it("a misfiled stored dossier is absent, not trusted", async () => {
+    const db = await freshDb();
+    const { dossier } = await seedDossier(db, PONS, "Merrymen's own quote: liquidity is thin.", T0);
+    assert.ok(dossierFromStored(dossier, PONS));
+    assert.equal(dossierFromStored({ ...dossier, tokenKey: X1 }, X1), null);
+    assert.equal(dossierFromStored({ ...dossier, dossier: { nonsense: true } }, PONS), null);
+  });
+});
+
+describe("the orchestrator's wiring", () => {
+  const SRC = readFileSync(path.join(HERE, "orchestrator.ts"), "utf8");
+  const MINE = readFileSync(path.join(HERE, "orchestrator-fomo.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+
+  it("spawns workers with an IPC channel and serves the broker on it, released on exit", () => {
+    const spawnChild = SRC.slice(SRC.indexOf("async function spawnChild("), SRC.indexOf("export type PaperRestore"));
+    assert.ok(spawnChild.length > 0, "spawnChild found");
+    assert.ok(
+      /WORKER_ENTRY\][\s\S]*?stdio: fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\]/.test(spawnChild),
+      "the worker child gets an ipc channel whenever the pass can answer on it",
+    );
+    assert.ok(/attachFomoBroker\(tenant, proc\);/.test(spawnChild), "and its broker is attached after spawn");
+    const attach = SRC.slice(SRC.indexOf("function attachFomoBroker("), SRC.indexOf("function noteFomoFailure("));
+    assert.ok(/serveBrokerRequests\(childProcessBrokerPort\(proc\), tenant\.toLowerCase\(\), rt\.service/.test(attach), "stamped with the tenant this process spawned");
+    assert.ok(/proc\.once\("exit", \(\) => \{[\s\S]*?release\(\);/.test(attach), "released when the child exits");
+  });
+
+  it("starts the pass after X posting, inside the not-halted branch, never awaited, and only when not switched off", () => {
+    const loop = SRC.slice(SRC.indexOf("// The main loop: honour a fleet-halt"));
+    const halted = loop.indexOf("if (haltRequested())");
+    const xpost = loop.indexOf("startXPostPass();");
+    const fomo = loop.indexOf("startFomoPass();");
+    assert.ok(halted >= 0 && xpost > halted && fomo > xpost, "startFomoPass runs after startXPostPass in the loop");
+    assert.ok(!/await\s+startFomoPass/.test(SRC));
+    assert.ok(/stopFomoPass\(\);/.test(SRC.slice(SRC.indexOf("export async function honourFleetHalt("), SRC.indexOf("export async function runOrchestrator("))), "FLEET_HALT stops the stream");
+  });
+
+  it("reads the switches once: off by switch or without a database, the key by either name, never logged", async () => {
+    process.env.MERRYMEN_HOME ??= path.join(tmpdir(), "mm-orchestrator-fomo-test-home");
+    process.env.MERRYMEN_HOSTED = "1";
+    const { childEnv, fomoSetup } = await import("./orchestrator");
+    assert.equal(fomoSetup({ MERRYMEN_FOMO_ENABLED: "0", DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: KEY }).off, true);
+    assert.equal(fomoSetup({ MERRYMEN_FOMO_API_KEY: KEY }).off, true, "no shared database, no pass");
+    const on = fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: ` ${KEY} `, MERRYMEN_FOMO_PLAN_CREDITS: "1000000" });
+    assert.deepEqual([on.off, on.apiKey, on.planCredits], [false, KEY, 1_000_000]);
+    assert.equal(fomoSetup({ DATABASE_URL: "postgres://x", FOMO_API_KEY: KEY }).apiKey, KEY, "the provider's own name works too");
+    assert.equal(fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: " ", FOMO_API_KEY: KEY }).apiKey, KEY, "a blank house name falls through");
+    const keyless = fomoSetup({ DATABASE_URL: "postgres://x" });
+    assert.deepEqual([keyless.off, keyless.apiKey], [false, null], "no key still runs: files and the broker answer honestly");
+    assert.match(keyless.lines.join(" "), /without a provider key/);
+    assert.equal(fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_PLAN_CREDITS: "lots" }).planCredits, undefined);
+    assert.ok(!JSON.stringify([on.lines, keyless.lines]).includes(KEY), "a boot line carries the key");
+    process.env.MERRYMEN_FOMO_API_KEY = KEY;
+    process.env.FOMO_API_KEY = KEY;
+    try {
+      const env = childEnv(T1);
+      assert.equal(env.MERRYMEN_FOMO_API_KEY, undefined);
+      assert.equal(env.FOMO_API_KEY, undefined);
+    } finally {
+      delete process.env.MERRYMEN_FOMO_API_KEY;
+      delete process.env.FOMO_API_KEY;
+    }
+  });
+
+  it("the pass itself reads no environment and never names the key", () => {
+    assert.ok(!/process\.env/.test(MINE));
+    assert.ok(!/FOMO_API_KEY/.test(MINE));
+  });
+});

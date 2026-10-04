@@ -151,6 +151,22 @@ import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
+import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
+import type { FomoBudget } from "./fomo/budget";
+import { writeChildFomoFile } from "./fomo/child-file";
+import type { FomoAccess, FomoService } from "./fomo/contract";
+import type { FomoClient } from "./fomo/provider";
+import { SYSTEM_TIMERS } from "./fomo/stream";
+import {
+  FOMO_FLEET_LEASE,
+  heldTokensFrom,
+  makeFomoPass,
+  mergeHeldTokens,
+  streamEndpointFor,
+  xpostConsentLookup,
+  type FomoBudgetPort,
+  type FomoPass,
+} from "./orchestrator-fomo";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -2620,7 +2636,20 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         process.execPath,
         [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
         // Groups held off when the restore above could not put them back.
-        { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
+        //
+        // AN IPC CHANNEL, for one thing only: the child's Fomo questions
+        // (fomo/broker.ts). A child holds neither the provider key nor the
+        // shared database, so it asks this process, which answers AS THE TENANT
+        // IT SPAWNED THIS CHILD FOR — the channel itself is the identity, and
+        // nothing the child sends can name another tenant. stdin stays closed
+        // and stdout/stderr stay piped to the log exactly as before. With the
+        // Fomo pass off there is nobody to answer, and no channel: the child
+        // then says "unavailable" at once instead of waiting out a timeout.
+        {
+          cwd: ROOT,
+          env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }),
+          stdio: fomoBootNow().off ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "ipc"],
+        },
       );
     } catch (error) {
       noteSpawnPressure(error);
@@ -2659,6 +2688,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       childStopped(`worker spawn failed (${spawnErrorCode(error)}): ${error.message}`, `spawn ${spawnErrorCode(error)}`, `failed to spawn (${spawnErrorCode(error)})`);
     });
     proc.on("exit", (code, signal) => childStopped(`exited (${code})`, `exit ${code}`, `exited with ${code ?? signal}`));
+    // Answer its Fomo questions on that channel, until it exits. Before the
+    // runtime is built the pass attaches it later (startFomoPass).
+    attachFomoBroker(tenant, proc);
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -7400,6 +7432,13 @@ let fleetNewsDesk: NewsDesk | null = null;
  */
 const tenantCoinAddresses = new Map<string, string[]>();
 /**
+ * Coin contracts each tenant HOLDS, and nothing it merely considers. Refreshed
+ * on the mirror, for the Fomo pass. A tenant is present here only once its
+ * ledger has been read, which is what lets a publication draft say "I hold no
+ * position in it" as a fact rather than as the absence of a reading.
+ */
+const tenantHeldCoins = new Map<string, string[]>();
+/**
  * The agent's own candidate window, restated because it cannot be imported.
  *
  * `CLASS_WINDOW_SEC` and `CLASS_LIMIT` are index.ts's, and `CLASS_LIMIT` is a
@@ -7563,6 +7602,29 @@ async function coinAddressesFor(db: Db): Promise<string[]> {
     "address",
   );
   return addressesOf([...held, ...classHeld, ...candidates]).filter((a) => !notCoins.has(a));
+}
+
+/**
+ * The coin contracts this tenant holds: the first two of coinAddressesFor's
+ * three sources, without the discovery candidates. Same filters, same
+ * never-throws contract.
+ */
+async function heldCoinAddressesFor(db: Db): Promise<string[]> {
+  const notCoins = new Set<string>([
+    ...STOCK_TOKENS.map((t) => t.address.toLowerCase()),
+    ...Object.values(CASH).map((a) => String(a).toLowerCase()),
+  ]);
+  const pull = async (sql: string): Promise<string[]> => {
+    try {
+      const rows = (await db.prepare(sql).all()) as Record<string, unknown>[];
+      return rows.map((r) => String(r.token ?? ""));
+    } catch {
+      return [];
+    }
+  };
+  const held = await pull("SELECT token FROM positions WHERE value_usdg > 0 ORDER BY value_usdg DESC");
+  const classHeld = await pull("SELECT token FROM class_positions ORDER BY first_seen DESC LIMIT 50");
+  return addressesOf([...held, ...classHeld]).filter((a) => !notCoins.has(a));
 }
 
 /**
@@ -7809,6 +7871,9 @@ async function mirrorLedgers(): Promise<void> {
       // a Trencher's universe is discovered inside the child and lives in this
       // sqlite, which nothing outside this loop opens.
       tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
+      // HELD ONLY, for the Fomo pass: a coin a tenant owns is a reason to watch
+      // its traders at position-protection priority, and a candidate is not.
+      tenantHeldCoins.set(tenant.toLowerCase(), await heldCoinAddressesFor(handle.db));
       // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
       //
       // This used to print only when n > 0, which made a stalled table and an
@@ -8208,6 +8273,230 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
   }
 }
 
+// ── FOMO RESEARCH ───────────────────────────────────────────────────────────
+//
+// docs/fomo.md. The pass lives in orchestrator-fomo.ts and the subsystem in
+// worker/src/fomo/; this is the latch, the runtime, the roster, the IPC broker
+// and the log. Built like X's: NOT AWAITED (a slow provider is a late research
+// file, never a late reconcile or watchdog), only for tenants whose lease this
+// replica holds healthily, silenced by FLEET_HALT because it starts inside the
+// not-halted branch, and stopped outright by the halt (honourFleetHalt). It
+// writes only fomo_* rows and children's fomo.json, which no trading path
+// trusts beyond its own guards (fomo/boundary.test.ts).
+
+/** What this file uses of fomo/runtime.ts, stated here so a change there fails the typecheck, not the boot. */
+interface FomoRuntimeHandle {
+  db: Db;
+  service: FomoService & { heldTokensSnapshot?(now?: number): Map<string, string[]> };
+  client: FomoClient | null;
+  budget: FomoBudget | null;
+  runJobs(now: number): Promise<unknown>;
+  /** Who fleet-wide reads are charged to: nobody's tenant (fomo/service.ts SHARED_RESEARCH_TENANT). */
+  payer: string;
+}
+
+interface FomoBoot {
+  off: boolean;
+  lines: string[];
+  apiKey: string | null;
+  planCredits: number | undefined;
+}
+
+let fomoBoot: FomoBoot | null = null;
+let fomoRuntime: FomoRuntimeHandle | null = null;
+let fomoRuntimeRetryAt = 0;
+let fomoPass: FomoPass | null = null;
+let fomoInFlight = false;
+let fomoLastFailure: { text: string; at: number } | null = null;
+/** One broker per live child process, released when that process exits. */
+const fomoBrokers = new Map<ChildProcess, () => void>();
+
+/**
+ * The Fomo switches, read once. THE KEY IS READ HERE AND NOWHERE ELSE in the
+ * worker (fomo/boundary.test.ts): the house's name first, then the provider's
+ * own docs' name, a blank value being no key. It is handed to the runtime and
+ * the stream URL builder as an argument and is stripped from every child
+ * (CHILD_SECRET_STRIP).
+ */
+export function fomoSetup(env: Record<string, string | undefined> = process.env): FomoBoot {
+  if (env.MERRYMEN_FOMO_ENABLED === "0") return { off: true, lines: ["fomo: off — MERRYMEN_FOMO_ENABLED=0"], apiKey: null, planCredits: undefined };
+  if (!env.DATABASE_URL) {
+    return { off: true, lines: ["fomo: off — no DATABASE_URL; the shared research store lives there"], apiKey: null, planCredits: undefined };
+  }
+  const apiKey = env.MERRYMEN_FOMO_API_KEY?.trim() || env.FOMO_API_KEY?.trim() || null;
+  const plan = Number(env.MERRYMEN_FOMO_PLAN_CREDITS);
+  const planCredits = Number.isFinite(plan) && plan > 0 ? plan : undefined;
+  const lines = apiKey
+    ? [`fomo: on — one shared stream per fleet under a lease, child research files every minute${planCredits ? `, plan ${planCredits} credits/month` : ""}`]
+    : ["fomo: on without a provider key — lookups answer not-configured; child files and the IPC broker still run"];
+  if (env.MERRYMEN_FOMO_PLAN_CREDITS !== undefined && env.MERRYMEN_FOMO_PLAN_CREDITS.trim() !== "" && planCredits === undefined) {
+    lines.push("fomo: MERRYMEN_FOMO_PLAN_CREDITS is not a positive number; the runtime's own default applies");
+  }
+  return { off: false, lines, apiKey, planCredits };
+}
+
+/** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */
+function fomoBootNow(): FomoBoot {
+  if (!fomoBoot) {
+    fomoBoot = fomoSetup();
+    for (const line of fomoBoot.lines) log(line);
+  }
+  return fomoBoot;
+}
+
+/** A tenant's Fomo permissions from its sealed settings, with the catalogue's defaults for an owner who never set them. */
+async function fomoAccessFor(tenant: string): Promise<FomoAccess> {
+  const s = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
+  return {
+    dataAccess: s?.fomoDataAccess ?? true,
+    monitoring: s?.fomoMonitoringEnabled ?? false,
+    follow: s?.fomoFollowEnabled ?? false,
+  };
+}
+
+/** The runtime's credit budget as the pass charges it, payer stamped here: fleet reads belong to no tenant. */
+function fomoBudgetPort(budget: FomoBudget | null, payer: string): FomoBudgetPort | undefined {
+  if (!budget) return undefined;
+  return {
+    async charge(req) {
+      const g = await budget.tryCharge({ ...req, tenant: payer, surface: "background" });
+      return g.ok ? g : null;
+    },
+  };
+}
+
+/**
+ * Build the runtime once: the shared Postgres, the key, the trusted access
+ * reader. LOADED ON FIRST USE, so a deployment with the pass switched off —
+ * and every test that imports this file — never loads the Fomo service. A
+ * failed build is retried in five minutes, not every pass.
+ */
+async function fomoRuntimeNow(boot: FomoBoot): Promise<FomoRuntimeHandle | null> {
+  if (fomoRuntime) return fomoRuntime;
+  if (Date.now() < fomoRuntimeRetryAt) return null;
+  try {
+    const db = await makePgDb(process.env.DATABASE_URL!);
+    const [{ createFomoRuntime }, { SHARED_RESEARCH_TENANT }] = await Promise.all([import("./fomo/runtime"), import("./fomo/service")]);
+    const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits });
+    fomoRuntime = {
+      db,
+      service: rt.service,
+      client: rt.client,
+      budget: rt.budget,
+      // One deep job per leader pass, under the pass's own jobs latch, on the
+      // live clock: a job runs for minutes and stamps its finish when it ends.
+      runJobs: () => rt.runJobs(undefined, 1),
+      payer: SHARED_RESEARCH_TENANT,
+    };
+    // Children spawned before the runtime existed get their broker now.
+    for (const [tenant, child] of children) attachFomoBroker(tenant, child.proc);
+    return fomoRuntime;
+  } catch (e) {
+    fomoRuntimeRetryAt = Date.now() + 5 * 60_000;
+    noteFomoFailure(`runtime unavailable, trying again in 5 min — ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/**
+ * Serve one child's Fomo requests on its IPC channel, stamped with the tenant
+ * THIS PROCESS spawned it for. Idempotent per process; a no-op until the
+ * runtime exists, and for a process without a connected channel.
+ */
+function attachFomoBroker(tenant: string, proc: ChildProcess): void {
+  const rt = fomoRuntime;
+  if (!rt || fomoBrokers.has(proc) || proc.connected !== true) return;
+  try {
+    const release = serveBrokerRequests(childProcessBrokerPort(proc), tenant.toLowerCase(), rt.service, { log });
+    fomoBrokers.set(proc, release);
+    proc.once("exit", () => {
+      fomoBrokers.delete(proc);
+      release();
+    });
+  } catch (e) {
+    noteFomoFailure(`broker not attached — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function noteFomoFailure(text: string): void {
+  const now = Date.now();
+  // Never a tenant, never a URL with its key: the same scrub the pass uses for its own lines.
+  const clean = text.replace(/0x[0-9a-fA-F]{40}/g, "0x…").replace(/([?&](?:key|apikey|api_key)=)[^&\s]*/gi, "$1***").slice(0, 300);
+  if (!fomoLastFailure || fomoLastFailure.text !== clean || now - fomoLastFailure.at > 20 * 60_000) {
+    fomoLastFailure = { text: clean, at: now };
+    log(`fomo: ${clean}`);
+  }
+}
+
+/** Stop the stream and give up the fleet lease (FLEET_HALT, shutdown). The next pass after a halt builds a new one. */
+function stopFomoPass(): void {
+  fomoPass?.stop();
+  fomoPass = null;
+}
+
+function startFomoPass(): void {
+  if (fomoInFlight || stopping) return;
+  const boot = fomoBootNow();
+  if (boot.off) return;
+  fomoInFlight = true;
+  void runFomoPass(boot).finally(() => {
+    fomoInFlight = false;
+  });
+}
+
+async function runFomoPass(boot: FomoBoot): Promise<void> {
+  try {
+    const rt = await fomoRuntimeNow(boot);
+    if (!rt || stopping) return;
+    for (const [tenant, child] of children) attachFomoBroker(tenant, child.proc);
+    fomoPass ??= makeFomoPass({
+      db: rt.db,
+      dialect: "postgres",
+      service: rt.service,
+      client: rt.client,
+      streamEndpoint: streamEndpointFor(boot.apiKey),
+      createSocket: (url) => new WebSocket(url),
+      clock: { now: () => Date.now() },
+      timers: SYSTEM_TIMERS,
+      random: Math.random,
+      lease: {
+        async acquire() {
+          const held = await acquireTenantLease(FOMO_FLEET_LEASE);
+          return held ? { release: () => held.release(), healthy: () => held.healthy() } : null;
+        },
+      },
+      access: fomoAccessFor,
+      // The mirror's holdings for the tenants still here, plus what children
+      // reported over IPC since. A tenant whose child left this replica is not
+      // ours to protect from here.
+      heldTokens: () => {
+        const here = new Set([...children.keys()].map((t) => t.toLowerCase()));
+        const mirrored = new Map([...tenantHeldCoins].filter(([t]) => here.has(t)));
+        return mergeHeldTokens(heldTokensFrom(mirrored), rt.service.heldTokensSnapshot?.());
+      },
+      holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()),
+      childHome,
+      writeChildFile: writeChildFomoFile,
+      xConsent: xpostConsentLookup(rt.db),
+      runJobs: rt.runJobs,
+      budget: fomoBudgetPort(rt.budget, rt.payer),
+      log,
+    });
+    // THE SAME ROSTER AS THE ROOM'S AND X'S: only who this replica speaks for.
+    const roster: RosterMember[] = [];
+    for (const [tenant, child] of children) {
+      const key = tenant.toLowerCase();
+      const held = leases.get(key);
+      if (!held || !held.healthy()) continue;
+      roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
+    }
+    // Started, not awaited: the pass has its own latch and its own failure lines.
+    fomoPass.start(roster, Date.now());
+  } catch (e) {
+    noteFomoFailure(`pass failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /** SIGKILL-and-restart any child whose heartbeat has gone stale past the threshold. */
 export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
   if (stopping) return;
@@ -8364,6 +8653,9 @@ function haltRequested(): boolean {
  * loop, as a pass would, and alerted once (pressLeaving).
  */
 export async function honourFleetHalt(): Promise<void> {
+  // The shared Fomo stream and its fleet lease go first: a halted replica
+  // leads nothing, and another replica may take the lease over.
+  stopFomoPass();
   // A lease kept for a hold process that has not exited (below) is waited
   // for, like its process, and not a reason to say all this again.
   const kept = (t: string) => !!holders.get(t)?.leaving || retiringExpired.has(t);
@@ -8407,6 +8699,8 @@ export async function runOrchestrator(): Promise<void> {
     log("stopping — calling the whole fleet home");
     for (const child of children.values()) child.proc.kill("SIGTERM");
     for (const held of holders.values()) held.proc?.kill("SIGTERM");
+    // The Fomo stream, and its fleet lease so another replica can lead at once.
+    stopFomoPass();
     // And any a handover or stand-down is still waiting on.
     for (const held of holders.values()) killLeaving(held);
     // Release every advisory lease so a restarting replica can take over at once
@@ -8498,6 +8792,10 @@ export async function runOrchestrator(): Promise<void> {
       // POSTING ON X, the same way and for the same reasons: after the mirror,
       // silenced by FLEET_HALT, never awaited. See startXPostPass.
       startXPostPass();
+      // FOMO RESEARCH, the same way again: after the mirror (which is what
+      // says which coins each tenant holds), silenced by FLEET_HALT, never
+      // awaited. See startFomoPass.
+      startFomoPass();
       // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
       // Started, never awaited, like the room: nothing here is on the trading
       // path, and each pass has its own budget and in-flight guard.
