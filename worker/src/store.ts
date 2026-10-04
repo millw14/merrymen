@@ -581,8 +581,10 @@ const SQLITE_ALTERS: string[] = [
     // and on rows that never had an operation: those are never judged dropped.
     "ALTER TABLE trades ADD COLUMN user_op_nonce TEXT",
     // A submitted operation can land days after its first row. Preserve that
-    // submission timestamp for provenance, but start its rolling budget window
-    // when settlement is observed. Direct/legacy fills use created_at.
+    // submission timestamp for provenance, but record when landing or reverting
+    // is observed. Landed spend starts its rolling budget window there; a revert
+    // remains excluded from spend, but its gas still needs a settlement time.
+    // Direct/legacy fills use created_at.
     "ALTER TABLE trades ADD COLUMN budget_settled_at INTEGER",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
@@ -3120,7 +3122,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
                     gas_wei = ?, sponsored_gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
                     fill_symbol = COALESCE(?, fill_symbol),
-                    budget_settled_at = CASE WHEN ? = 'landed' THEN unixepoch() ELSE budget_settled_at END
+                    budget_settled_at = CASE WHEN ? IN ('landed', 'reverted') THEN unixepoch() ELSE budget_settled_at END
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
           )
           .run(
@@ -4031,14 +4033,15 @@ export interface PaperBookRow {
   shares: Record<string, { token: `0x${string}`; shares: number }>;
 }
 
-/** Load the paper book, seeding it with the starting cash on first touch. */
-export async function getPaperBook(agentId: string, startUsdg: number): Promise<PaperBookRow> {
-  await getDb()
-    .prepare("INSERT OR IGNORE INTO paper_book (agent_id, cash_usdg) VALUES (?, ?)")
-    .run(agentId, startUsdg);
-  const row = await getDb()
-    .prepare("SELECT cash_usdg, vault_usdg, hwm_usdg, shares FROM paper_book WHERE agent_id = ?")
-    .get(agentId) as { cash_usdg: number; vault_usdg: number; hwm_usdg: number; shares: string };
+type StoredPaperBook = { agent_id: string; cash_usdg: number; vault_usdg: number; hwm_usdg: number; shares: string };
+
+/** A spelling change is the same book, never another starting bankroll. */
+async function paperBookIn(db: Db, agentId: string): Promise<StoredPaperBook | undefined> {
+  return db.prepare(`SELECT agent_id, cash_usdg, vault_usdg, hwm_usdg, shares FROM paper_book
+    WHERE LOWER(agent_id) = LOWER(?) ORDER BY updated_at DESC, agent_id LIMIT 1`).get(agentId) as Promise<StoredPaperBook | undefined>;
+}
+
+function paperBookOf(row: StoredPaperBook): PaperBookRow {
   let shares: PaperBookRow["shares"] = {};
   try {
     shares = JSON.parse(row.shares) as PaperBookRow["shares"];
@@ -4046,6 +4049,48 @@ export async function getPaperBook(agentId: string, startUsdg: number): Promise<
     // corrupt shares blob — start clean rather than crash the tick
   }
   return { cashUsdg: row.cash_usdg, vaultUsdg: row.vault_usdg, hwmUsdg: row.hwm_usdg, shares };
+}
+
+/** The actual cash-only opening, committed with its book and accounting epoch.
+ * A configured amount is evidence only when it creates/resets that book —
+ * never when an existing or recovered book is merely read. */
+async function writePaperOpening(db: Db, agentId: string, epoch: number, startUsdg: number): Promise<void> {
+  const at = Math.floor(Date.now() / 1000);
+  await db.prepare(`INSERT INTO equity
+    (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at)
+    VALUES (?, '0', ?, 0, 0, ?, ?, 'paper', 0, ?)`).run(agentId, startUsdg, startUsdg, epoch, at);
+  await appendJournalRow(db, agentId, epoch, "mark", {
+    blockNumber: null, cashUsdg: startUsdg, equityUsdg: startUsdg, ethWei: "0",
+    marks: [], mode: "paper", positionsUsdg: 0, quarantinedCostUsdg: 0, vaultUsdg: 0,
+    paperOpening: true,
+  });
+}
+
+/** Load the paper book. A fresh book records its real stake before any fill. */
+export async function getPaperBook(agentId: string, startUsdg: number): Promise<PaperBookRow> {
+  return getDb().tx(async (db) => {
+    const kept = await paperBookIn(db, agentId);
+    if (kept) return paperBookOf(kept);
+    if (!Number.isFinite(startUsdg) || startUsdg < 0) throw new Error("paper opening cash must be finite and non-negative");
+    // Lock the durable agent/epoch before inserting its first book. A reset
+    // cannot advance the epoch between this cash opening and its mark.
+    // An exact recorded alias wins, matching epochOf's subsequent valuations.
+    const account = await db.prepare(`UPDATE agents SET epoch = epoch
+      WHERE smart_account = (SELECT smart_account FROM agents WHERE LOWER(smart_account)=LOWER(?)
+        ORDER BY CASE WHEN smart_account = ? THEN 0 ELSE 1 END, epoch DESC, smart_account LIMIT 1)
+      RETURNING smart_account, epoch`).get(agentId, agentId) as {smart_account: string; epoch: number} | undefined;
+    if (!account) throw new Error(`cannot open a paper book for unknown agent ${agentId}`);
+    // Another caller may have created a differently cased book while this
+    // transaction waited for that same agent lock.
+    const raced = await paperBookIn(db, agentId);
+    if (raced) return paperBookOf(raced);
+    const inserted = await db.prepare("INSERT OR IGNORE INTO paper_book (agent_id, cash_usdg) VALUES (?, ?)")
+      .run(account.smart_account, startUsdg);
+    if (inserted.changes === 1) await writePaperOpening(db, account.smart_account, Number(account.epoch), startUsdg);
+    const row = await paperBookIn(db, account.smart_account);
+    if (!row) throw new Error("paper book was not created");
+    return paperBookOf(row);
+  });
 }
 
 /**
@@ -4071,34 +4116,43 @@ export async function getPaperBook(agentId: string, startUsdg: number): Promise<
  * WHAT IS NOT DELETED: the trade rows and the equity curve. Those are the
  * agent's history, and this repo keeps history and reporting apart with an
  * ACCOUNTING EPOCH rather than a DELETE — the same primitive that already
- * carries the pre-flow-tracking rows. The caller opens the next epoch, so the
+ * carries the pre-flow-tracking rows. This transaction opens the next epoch, so the
  * old fills stay on disk for forensics and stop counting toward anything.
  * Deleting them would also be the one operation here that could destroy
  * something irreplaceable if the rail check above it were ever wrong.
  *
- * The rail check is the caller's job and it is not optional: run this against a
- * live agent and you have cleared the cost basis it computes real P&L from.
+ * The caller checks its current execution rail; this store also requires the
+ * durable agent to report paper before clearing any derived position cache.
  */
-export async function resetPaperLedger(agentId: string, startUsdg: number): Promise<void> {
-  const db = getDb();
-  await db
-    .prepare(
-      `UPDATE paper_book SET cash_usdg = ?, vault_usdg = 0, hwm_usdg = 0, shares = '{}',
-         updated_at = unixepoch() WHERE agent_id = ?`,
-    )
-    .run(startUsdg, agentId);
-  // INSERT OR IGNORE first would be redundant: getPaperBook seeds the row on
-  // first touch, and an agent with no row has nothing to reset.
-  await db.prepare("DELETE FROM positions WHERE agent_id = ?").run(agentId);
-  await db.prepare("DELETE FROM cost_basis WHERE agent_id = ? AND mode = 'paper'").run(agentId);
-  await db.prepare("DELETE FROM position_floors WHERE agent_id = ? AND mode = 'paper'").run(agentId);
+export async function resetPaperLedger(agentId: string, startUsdg: number): Promise<number> {
+  if (!Number.isFinite(startUsdg) || startUsdg < 0) throw new Error("paper opening cash must be finite and non-negative");
+  return getDb().tx(async (db) => {
+    // Select the caller's exact row before checking its rail; a paper alias
+    // cannot stand in for a live caller or receive the caller's new epoch.
+    const account = await db.prepare(`UPDATE agents SET epoch = epoch + 1
+      WHERE smart_account = (SELECT smart_account FROM agents WHERE LOWER(smart_account)=LOWER(?)
+        ORDER BY CASE WHEN smart_account = ? THEN 0 ELSE 1 END, epoch DESC, smart_account LIMIT 1) AND mode = 'paper'
+      RETURNING smart_account, epoch`).get(agentId, agentId) as {smart_account: string; epoch: number} | undefined;
+    if (!account) throw new Error("practice reset requires an agent on the paper rail");
+    const book = await paperBookIn(db, account.smart_account);
+    await db.prepare(`INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares)
+      VALUES (?, ?, 0, 0, '{}') ON CONFLICT(agent_id) DO UPDATE SET cash_usdg=excluded.cash_usdg,
+      vault_usdg=0, hwm_usdg=0, shares='{}', updated_at=unixepoch()`).run(book?.agent_id ?? account.smart_account, startUsdg);
+    await db.prepare("DELETE FROM positions WHERE LOWER(agent_id) = LOWER(?)").run(account.smart_account);
+    await db.prepare("DELETE FROM cost_basis WHERE LOWER(agent_id) = LOWER(?) AND mode = 'paper'").run(account.smart_account);
+    await db.prepare("DELETE FROM position_floors WHERE LOWER(agent_id) = LOWER(?) AND mode = 'paper'").run(account.smart_account);
+    const epoch = Number(account.epoch);
+    await writePaperOpening(db, account.smart_account, epoch, startUsdg);
+    return epoch;
+  });
 }
 
 export async function setPaperBook(agentId: string, book: PaperBookRow): Promise<void> {
   await getDb()
     .prepare(
       `UPDATE paper_book SET cash_usdg = ?, vault_usdg = ?, hwm_usdg = ?, shares = ?, updated_at = unixepoch()
-       WHERE agent_id = ?`,
+       WHERE agent_id = (SELECT agent_id FROM paper_book WHERE LOWER(agent_id)=LOWER(?)
+         ORDER BY updated_at DESC, agent_id LIMIT 1)`,
     )
     .run(book.cashUsdg, book.vaultUsdg, book.hwmUsdg, JSON.stringify(book.shares), agentId);
 }

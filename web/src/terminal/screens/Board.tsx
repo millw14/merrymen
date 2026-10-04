@@ -11,7 +11,8 @@ import {
 } from "../live";
 import { strategyName } from "../strategy";
 import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
-import { unrankedLabel, unrankedShort } from "@/lib/rank-pnl";
+import { unrankedShort } from "@/lib/rank-pnl";
+import { performanceOf } from "../agent-performance";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
 
@@ -90,7 +91,7 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the current paper period and remain outside live rankings. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
       )}
 
       {rows.length === 0 ? (
@@ -108,7 +109,7 @@ export function Board({
             <span>#</span>
             <span>Agent</span>
             <span>Strategy / trades</span>
-            <span>Capital</span>
+            <span>Current value</span>
             <span>Return</span>
           </div>
           {(preview && !showAll ? rows.slice(0,5) : rows).map((r) => (
@@ -148,7 +149,8 @@ function Rank({
   onProfile: (slug: string) => void;
 }) {
   const a = row.agent;
-  const displayedReturn = a.mode === "paper" ? a.paperPnlBps ?? null : row.ret;
+  const performance = performanceOf(a);
+  const displayedReturn = performance.bps;
   const cls = ["rank", you ? "you" : ""].filter(Boolean).join(" ");
 
   return (
@@ -173,15 +175,16 @@ function Rank({
           </div>
         </div>
         <div className="rank-nums">
-          {/*
-            NO HOLDINGS COLUMN. `holdingsUsd` is declared on LiveAgent and set
-            by nothing — haveOf falls back to it for every agent but your own,
-            so the column rendered one figure and five long dashes, and no
-            amount of waiting would have filled them. A column that cannot be
-            filled is not an empty column, it is a promise the page cannot keep.
-          */}
-          <span title={a.unrankedWhy ? unrankedLabel(a.unrankedWhy) : undefined} className={`chg ${displayedReturn == null ? "" : displayedReturn >= 0 ? "up" : "down"}`}>
-            {displayedReturn == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn)}
+          <span className="rank-value" title={performance.title}>
+            <span className="rank-have" aria-label={`Current value ${performance.value}`}>{performance.value}</span>
+            {a.performance && <small className="rank-book">{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
+          </span>
+          <span className="rank-return" title={performance.title}>
+            <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}`}>
+              {displayedReturn == null ? performance.gasIncomplete ? "Gas accounting unavailable" : a.performance ? "Unavailable" : a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn)}
+            </span>
+            {performance.pnl !== null && <small className="rank-pnl">{performance.pnl} P&L</small>}
+            {performance.gasIncomplete && displayedReturn != null && <small className="rank-book">Gas accounting unavailable</small>}
           </span>
         </div>
       </button>

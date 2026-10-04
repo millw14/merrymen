@@ -54,7 +54,7 @@ export function portfolioReadOf(mine: ReadState, liveLoaded: boolean): ReadState
  * WHICH AGENT THE PROFILE SCREEN MAY DRAW, given where its own read stands.
  *
  * It was `profile ?? listed`, so for the whole of the fetch the page drew the
- * LEADERBOARD row — whose curve is raw equity, which the profile refuses to
+ * LEADERBOARD row — whose curve is equity ratios, not flow-adjusted growth, which the profile refuses to
  * chart — and told the reader "Performance history isn't available yet" about a
  * request that had not come back. Loading is not an answer; while it lasts the
  * screen draws a skeleton.

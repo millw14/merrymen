@@ -20,6 +20,7 @@ import { STOCK_TOKENS } from "@merrymen/core";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
+import { performanceFromWire, type AgentPerformance } from "./agent-performance";
 
 /**
  * THE FIVE THINGS THE BAR CAN BE ON.
@@ -100,8 +101,9 @@ export interface LiveToken {
 }
 
 export interface LiveAgent {
+  performance?: AgentPerformance;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
-  gas?: {usdg:number;unpricedTrades:number};
+  gas?: {usdg:number|null;unpricedTrades:number};
   holdingsRead?: boolean;
   slug: string;
   name: string;
@@ -122,11 +124,10 @@ export interface LiveAgent {
    *
    * Two different numbers shared this field. The public profile fills it from
    * `AgentProfile.growth`, the growth index with deposits divided out; the
-   * leaderboard fills it from `LeaderRow.curve`, which is raw `equity_usdg`.
-   * `read-agent.ts` deletes the raw field on purpose and says why: equity steps
-   * up the moment the owner funds the account, and a new epoch's whole opening
-   * balance is written as one inbound flow — so drawn raw it shows a book
-   * springing into existence at full value.
+   * leaderboard fills it from `LeaderRow.curve`, now dimensionless equity
+   * ratios that conceal the opening capital. Those ratios still include
+   * deposits and withdrawals, so they are not the growth index. Older servers
+   * sent raw `equity_usdg`; the chart must accept neither as performance.
    *
    * A failed profile fetch fell back to the leaderboard row, and the chart drew
    * exactly that under the label "Performance history". So the kind now travels
@@ -896,10 +897,11 @@ export function liveOf(s: LiveSources): LiveState {
       handle: a.handle,
       pnlBps: a.pnlBps,
       paperPnlBps: a.paperPnlBps,
+      performance: a.performance === undefined ? undefined : performanceFromWire(a.performance),
       unrankedWhy: a.unrankedWhy,
       curve: a.curve ?? [],
-      // RAW EQUITY from the leaderboard read — never a growth index, and the
-      // profile chart refuses to draw it.
+      // Equity shape from the leaderboard, now normalized rather than dollars.
+      // Contributions remain in it; the profile refuses to draw it as growth.
       curveKind: "equity" as const,
       landed: a.landed,
       last: latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
@@ -1393,6 +1395,7 @@ interface MarketTok {
 const finiteOrNull = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
 
 interface BoardRow {
+  performance?: AgentPerformance;
   mode?: string;
   filledPaper?: number;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;

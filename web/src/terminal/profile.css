@@ -13,6 +13,30 @@
   line-height: 1.5;
 }
 
+:where(.terminal-host) .public-performance-numbers {
+  flex-wrap: wrap;
+  gap: 18px 24px;
+}
+
+:where(.terminal-host) .profile-current-value {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+:where(.terminal-host) .profile-current-value > strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .profile-pnl,
+:where(.terminal-host) .profile-current-value > small {
+  display: block;
+  margin-top: 6px;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
 /* ── the owner's book switch ─────────────────────────────────────────────── */
 :where(.terminal-host) .profile-book {
   display: flex;

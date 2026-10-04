@@ -1,4 +1,4 @@
-import { readPaperReturn } from "./paper-return";
+import { readBookPerformance, type BookPerformance } from "./book-performance";
 import { readOperationCounts } from "./distinct-trades";
 /**
  * WHO IS ACTUALLY ANY GOOD.
@@ -11,9 +11,9 @@ import { readOperationCounts } from "./distinct-trades";
  *
  * WHAT IS DELIBERATELY NOT HERE: smart_account (the agent's public id is the
  * slug, which is exactly why the slug exists), caps, hwm_usdg, accrued_fee_usdg,
- * granted_at, expires_at, chain_id, and any absolute dollar figure. A ranking
- * needs percentages; a balance sheet is nobody else's business. The same split
- * the daily public report already makes.
+ * granted_at, expires_at and chain_id. Aggregate trading equity and P&L carry
+ * dollars only when the owner explicitly publishes the book; a private book
+ * keeps its amounts hidden. Percentages, book and valuation times stay public.
  *
  * Every agent something is still running is listed. Only live agents with
  * evidenced returns are ranked; paper and idle agents stay visible and
@@ -31,9 +31,9 @@ import { readOperationCounts } from "./distinct-trades";
 import { sameBookAsLatest } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
-import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
+import type { UnrankedWhy } from "@/lib/rank-pnl";
 import { isRetired } from "@/lib/retired-agent";
-import { readMeasuredMark } from "@/lib/held-marks";
+import { getSettingsStore } from "@merrymen/settings-store";
 
 export interface LeaderRow {
   /** The public id. Null means no identity yet, and the row renders unlinked. */
@@ -59,6 +59,8 @@ export interface LeaderRow {
   /** Return over capital contributed, in basis points. Null = unknown. */
   pnlBps: number | null;
   paperPnlBps?: number | null;
+  /** Same-book aggregate valuation/performance; dollars remain owner opt-in. */
+  performance?: BookPerformance;
   /** Deepest peak-to-trough this epoch, in bps. Null = no history to measure. */
   maxDdBps: number | null;
   mode: string;
@@ -95,11 +97,13 @@ export async function readLeaderboard(
   readDb = withReadDb,
   identities = () => getIdentityStore().all(),
   nowSec = () => Math.floor(Date.now() / 1000),
+  readSettings: (tenant: `0x${string}`) => Promise<{ publicBook?: boolean } | null> = (tenant) => getSettingsStore().get(tenant),
 ): Promise<LeaderboardRead> {
   return readDb(async (db): Promise<LeaderboardRead> => {
     if (!db) return { source: "none", agents: [], retired: null };
 
     const slugFor = new Map<string, string>();
+    const tenantFor = new Map<string, `0x${string}`>();
     // Whether the slugs were READ. Without them every row looks unlinked, and
     // the fold below retires an unlinked row that has not beaten in a day — so
     // a named agent with a good key would leave the board through a quiet
@@ -107,7 +111,10 @@ export async function readLeaderboard(
     let slugsRead = false;
     try {
       for (const id of await identities()) {
-        for (const a of id.accounts) slugFor.set(a.toLowerCase(), id.slug);
+        for (const a of id.accounts) {
+          slugFor.set(a.toLowerCase(), id.slug);
+          tenantFor.set(a.toLowerCase(), id.tenant);
+        }
       }
       slugsRead = true;
     } catch {
@@ -123,13 +130,28 @@ export async function readLeaderboard(
       mode: string;
     }[] = [];
     try {
+      // Aliases of one address describe one account, whose epoch and heartbeat
+      // identify the current run. Only after choosing that run may registration
+      // time choose among an identity's different accounts after a re-grant.
+      let beat = "COALESCE(NULL, 0)";
+      try {
+        await db.prepare("SELECT beat_at FROM agents WHERE 1 = 0").all();
+        beat = "COALESCE(beat_at, 0)";
+      } catch { /* older ledgers have no heartbeat column */ }
       rows = (await db
         .prepare(
-          `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
-                  COALESCE(epoch, 1) AS epoch, COALESCE(mode, 'idle') AS mode
-             FROM agents
-            WHERE smart_account NOT LIKE 'rh:%'
-            ORDER BY created_at DESC`,
+          `WITH registrations AS (
+             SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
+                    COALESCE(epoch, 1) AS epoch, COALESCE(mode, 'idle') AS mode, created_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY LOWER(smart_account)
+                      ORDER BY COALESCE(epoch, 1) DESC, ${beat} DESC, created_at DESC, smart_account ASC
+                    ) AS alias_rank
+               FROM agents WHERE smart_account NOT LIKE 'rh:%'
+           )
+           SELECT smart_account, name, x_handle, x_verified, epoch, mode
+             FROM registrations WHERE alias_rank = 1
+            ORDER BY created_at DESC, LOWER(smart_account) ASC`,
         )
         .all()) as typeof rows;
     } catch {
@@ -197,17 +219,15 @@ export async function readLeaderboard(
         const epoch = Number(r.epoch ?? 1);
 
         let curve: number[] = [];
-        let latest: number | null = null;
-        let latestAt: number | null = null;
         try {
           const pts = (await db
             .prepare(
               `SELECT equity_usdg, mode FROM (
                  SELECT equity_usdg, at, id, mode FROM equity
-                  WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 500
+                  WHERE LOWER(agent_id) = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 500
                ) ORDER BY at ASC, id ASC`,
             )
-            .all(account, epoch)) as { equity_usdg: number; mode: string | null }[];
+            .all(account.toLowerCase(), epoch)) as { equity_usdg: number; mode: string | null }[];
           // ONE SERIES, ONE BOOK. A curve that steps from a practice book's
           // 1,000 USDG to a funded book's real equity is published here beside
           // a return, on a page that ranks people.
@@ -223,43 +243,14 @@ export async function readLeaderboard(
           // not a dataset, and 200 agents × 500 points is a payload nobody
           // reads.
           const step = Math.max(1, Math.ceil(vals.length / CURVE_POINTS));
-          curve = vals.filter((_, i) => i % step === 0);
-          // THE RETURN'S NUMERATOR IS THE NEWEST MEASURED MARK, not the newest
-          // mark: one taken while flow inference was held can carry a top-up
-          // or a withdrawal not booked yet, and ranks it as profit or loss for
-          // as long as the hold lasts — up to 26 hours. Its own read, because
-          // a hold that long outruns the 500 rows above.
-          const measured = await readMeasuredMark(db, account, epoch);
-          latest = measured?.equity ?? null;
-          latestAt = measured?.at ?? null;
+          // A public shape must never expose the private book's absolute value.
+          // Scaling leaves the sparkline identical and gives it no dollar unit.
+          const baseline = vals.find((v) => v > 0);
+          curve = baseline === undefined ? [] : vals.filter((_, i) => i % step === 0).map((v) => v / baseline);
         } catch {
           /* no equity history yet */
         }
 
-        // Capital in, less capital out. The ARITHMETIC is never windowed, only
-        // the chart is — last-minus-first over a sliding window has a "first"
-        // that drifts forward, so the published number silently changes meaning.
-        //
-        // AS OF THE NUMERATOR. During a hold the measured mark is older than
-        // the flows booked since (an owner transfer that landed, a settled
-        // energy buy), and those are not in its cash: subtracting them ranks
-        // the transfer as profit. With no measured mark there is no return,
-        // and the reason is decided on every flow, as before.
-        let contributed: number | null = null;
-        try {
-          const f = (await db
-            .prepare(
-              `SELECT COUNT(*) AS n,
-                      COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-                 FROM flows WHERE agent_id = ? AND epoch = ?${latestAt === null ? "" : " AND at <= ?"}`,
-            )
-            .get(account, epoch, ...(latestAt === null ? [] : [latestAt]))) as { n: number; net: number } | undefined;
-          contributed = !f || Number(f.n) === 0 ? null : Number(f.net);
-        } catch {
-          /* flows arrives with a worker migration */
-        }
-
-        let gasUsdg = 0;
         let filledPaper = 0;
         let landed = 0;
         let refused = 0;
@@ -267,7 +258,6 @@ export async function readLeaderboard(
           // Operations, not rows — the same count the agent's own page shows,
           // so a redeploy's re-recorded copies cannot double a board figure.
           const t = await readOperationCounts(db, account, epoch, "landed");
-          gasUsdg = t.gasUsdg;
           landed = t.landed;
           filledPaper = t.filledPaper;
           refused = t.refused;
@@ -275,28 +265,18 @@ export async function readLeaderboard(
           /* older ledger */
         }
 
-        // THE DENOMINATOR'S EVIDENCE, straight from the worker.
-        //
-        // Read separately and defensively, like `flows` above: the column
-        // arrives with a worker migration, and folding it into the agents SELECT
-        // would make a pre-migration ledger throw into the catch that returns an
-        // EMPTY BOARD. A missing column must cost a quality signal, not the page.
-        //
-        // Either way the value is null on failure, and null is "not assessed" —
-        // which rankPnl treats as unknown rather than as permission.
-        let contributionsKnown: boolean | null = null;
+        let publicBook = false;
         try {
-          const q = (await db
-            .prepare("SELECT contributions_known FROM agents WHERE smart_account = ?")
-            .get(account)) as { contributions_known: number | null } | undefined;
-          contributionsKnown =
-            q?.contributions_known === null || q?.contributions_known === undefined
-              ? null
-              : Number(q.contributions_known) === 1;
+          const tenant = tenantFor.get(account.toLowerCase());
+          publicBook = tenant !== undefined && (await readSettings(tenant))?.publicBook === true;
         } catch {
-          /* the column arrives with a worker migration; unknown until it does */
+          /* identity/settings unavailable: no private amounts published */
         }
-        const { pnlBps, unrankedWhy } = r.mode === "live" ? rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown }) : { pnlBps: null, unrankedWhy: r.mode === "paper" ? "paper" as const : "inactive" as const };
+        const figures = await readBookPerformance(db, account, epoch, publicBook);
+        // A heartbeat is not the book evidence. Never rank a paper valuation
+        // under a live heartbeat, or an idle agent's retained book as active.
+        const { pnlBps, unrankedWhy } = r.mode === "live" ? figures.liveRank
+          : { pnlBps: null, unrankedWhy: r.mode === "paper" ? "paper" as const : "inactive" as const };
 
         const maxDdBps = drawdownBps(curve);
 
@@ -307,7 +287,8 @@ export async function readLeaderboard(
           handle: (r.x_handle ?? "").trim() || null,
           handleVerified: Number(r.x_verified ?? 0) !== 0,
           pnlBps,
-          paperPnlBps: r.mode === "paper" ? await readPaperReturn(db, account, epoch) : null,
+          paperPnlBps: r.mode === "paper" ? figures.paperPnlBps : null,
+          performance: figures.performance,
           maxDdBps: pnlBps == null ? null : maxDdBps,
           mode: r.mode,
           filledPaper,

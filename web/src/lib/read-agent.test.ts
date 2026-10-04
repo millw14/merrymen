@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
 import { ownBookOf, profileOf } from "./read-agent";
+import { readLeaderboard } from "./read-leaderboard";
 import { BASIS_REPLAY_ROWS, OPENING_READ_LIMIT } from "./profile-trades";
 
 /**
@@ -354,5 +355,67 @@ test("a return is the newest MEASURED mark over the flows booked by then, while 
     assert.equal(p.pnlBps, 0);
     assert.deepEqual(p.growth.map((g) => g.at), [T0 + 60]);
     assert.equal(p.funded, true, "funded still says flow rows exist");
+  } finally { raw.close(); }
+});
+
+test("profile and leaderboard publish the same held/as-of headline and only the owner's opted-in aggregate dollars", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE agents SET expires_at = ?, beat_at = ?").run(T0 + 100 * H, T0 + 2 * H);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, sponsored: true });
+    await mark(db, T0 + 60, 100.0025);
+    await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + H, pnl: 1, cash: 6 });
+    await heldMark(db, T0 + 2 * H, 105);
+    const ids = async () => [{ ...identity, tenant: "0x1" as const, accounts: [ACCOUNT] as `0x${string}`[], updatedAt: T0 }];
+    for (const published of [false, true]) {
+      const profile = (await profileOf(db, identity, published))!;
+      const [board] = (await readLeaderboard((fn) => fn(db), ids, () => T0 + 2 * H, async () => ({ publicBook: published }))).agents;
+      assert.deepEqual(profile.performance, board.performance);
+      assert.equal(profile.pnlBps, board.pnlBps);
+      assert.equal(profile.performance!.equityUsdg, published ? 105 : null);
+      assert.equal(profile.performance!.pnlUsdg, published ? 100.0025 - 100 : null);
+      assert.ok(Math.abs(profile.performance!.pnlBps! - 0.25) < 1e-9, "the 0.0025 USDG result is not rounded to zero");
+      assert.equal(profile.performance!.pnlAt, T0 + 60);
+      assert.equal(profile.performance!.equityAt, T0 + 2 * H);
+      assert.equal(profile.performance!.held, true);
+      assert.equal(profile.gas.usdg, published ? 0.01 : null, "the separately published all-epoch gas includes later fills but private dollars stay hidden");
+      assert.deepEqual(board.curve, [1, 105 / 100.0025], "a private sparkline has no dollar unit");
+    }
+    const [failedSettings] = (await readLeaderboard((fn) => fn(db), ids, () => T0 + 2 * H, async () => { throw new Error("settings unavailable"); })).agents;
+    assert.equal(failedSettings.performance!.publicBook, false);
+    assert.equal(failedSettings.performance!.equityUsdg, null);
+    let reads = 0;
+    const [failedIdentity] = (await readLeaderboard((fn) => fn(db), async () => { throw new Error("identity unavailable"); }, () => T0 + 2 * H,
+      async () => { reads += 1; return { publicBook: true }; })).agents;
+    assert.equal(reads, 0, "an unidentified row cannot inherit an owner's publication setting");
+    assert.equal(failedIdentity.performance!.pnlUsdg, null);
+    assert.doesNotMatch(JSON.stringify(failedIdentity), /0xa6e17|smart_account|cash_usdg|session_key|caps/);
+  } finally { raw.close(); }
+});
+
+test("a retained paper headline stays paper across live/idle heartbeats and agrees with the board", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE agents SET expires_at = ?, beat_at = ?").run(T0 + 100 * H, T0 + 2 * H);
+    const paper = db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode)
+      VALUES (?, '0', 0, 0, ?, ?, 2, 'paper')`);
+    await paper.run(ACCOUNT, 1000, T0);
+    await paper.run(ACCOUNT.toUpperCase(), 1100, T0 + H);
+    await mark(db, T0 + H + 1, 10);
+    await paper.run(ACCOUNT, 1100.025, T0 + 2 * H);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, sponsored: true });
+    const ids = async () => [{ ...identity, tenant: "0x1" as const, accounts: [ACCOUNT] as `0x${string}`[], updatedAt: T0 }];
+    for (const mode of ["live", "paper", "idle"]) {
+      await db.prepare("UPDATE agents SET mode = ?").run(mode);
+      const profile = (await profileOf(db, identity, false))!;
+      const [board] = (await readLeaderboard((fn) => fn(db), ids, () => T0 + 2 * H, async () => null)).agents;
+      assert.deepEqual(profile.performance, board.performance);
+      assert.equal(profile.pnlBps, null, `${mode} does not rank a paper valuation as live`);
+      assert.equal(board.pnlBps, null);
+      assert.equal(profile.performance!.book, "paper");
+      assert.ok(Math.abs(profile.performance!.pnlBps! - 1000.25) < 1e-9);
+      assert.equal(profile.performance!.equityAt, T0 + 2 * H);
+      assert.equal(profile.performance!.equityUsdg, null, "the book remains private");
+    }
   } finally { raw.close(); }
 });

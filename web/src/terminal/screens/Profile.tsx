@@ -15,6 +15,7 @@ import { strategyName } from "../strategy";
 import { Coin, Face, Switch } from "../ui";
 import { Allocation } from "../studio";
 import { unrankedLabel } from "@/lib/rank-pnl";
+import { performanceOf } from "../agent-performance";
 import { useAgentImageSrc } from "../agent-image-state";
 import { WireButton } from "@/components/WireButton";
 import { fullDateTime } from "@/lib/format";
@@ -89,7 +90,8 @@ export function Profile({
     .filter((t) => t.slug === agent.slug || (!t.slug && t.name === agent.name))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   const g = agent.glance;
-  const displayPnl = agent.mode === "paper" ? agent.paperPnlBps ?? null : agent.pnlBps;
+  const performance = performanceOf(agent);
+  const displayPnl = performance.bps;
   const positions =
     g.legs?.map((l) => ({
       symbol: l.symbol,
@@ -183,13 +185,20 @@ export function Profile({
       <section className="public-performance" aria-label="Agent performance">
         <div className="public-performance-numbers">
           <div>
-            <span className="account-label">{agent.mode === "paper" ? "Paper return" : "Net return on contributed capital"}</span>
+            <span className="account-label">{performance.book === "paper" ? "Paper return" : performance.book === "live" || !agent.performance ? "Net return on contributed capital" : "Return"}</span>
             <strong
-              className={`public-return ${displayPnl == null ? "" : displayPnl < 0 ? "down" : "up"}`}
+              title={performance.title}
+              className={`public-return ${displayPnl == null || displayPnl === 0 ? "" : displayPnl < 0 ? "down" : "up"}`}
             >
               {pctBps(displayPnl)}
             </strong>
+            {performance.pnl !== null && <small className="profile-pnl">{performance.pnl} P&L</small>}
           </div>
+          {agent.performance && <div className="profile-current-value" title={performance.title}>
+            <span className="account-label">{performance.bookLabel} current value</span>
+            <strong>{performance.value}</strong>
+            {performance.held && <small>Pending reconciliation</small>}
+          </div>}
           {/* BOTH COUNTERS, because `landed` alone is not "how much this agent
               has done". read-agent.ts keeps them apart deliberately — folding
               paper into landed would re-arm the +2643.3% incident — but showing
@@ -206,15 +215,17 @@ export function Profile({
             )}
           </div>
         </div>
-        {displayPnl == null && <p className="public-empty">{agent.mode === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
-        {agent.mode === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of this paper period.</p>}
-        {/* "Net of $0.00 in priced gas" under a sponsored agent's return was true
-            and read like a rounding error. When every landed operation was
-            sponsored — measured, never assumed (gasless.ts) — the sentence says
-            who paid instead. */}
-        {agent.mode !== "paper" && displayPnl != null && agent.gas && (agent.gasless === true
-          ? <p className="public-empty">No gas came out of this return: every trade was sponsored.</p>
-          : <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>)}
+        {displayPnl == null && <p className="public-empty">{performance.book === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.performance ? "Return unavailable." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
+        {performance.book === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of the paper book in this accounting period. Switching between paper and live does not reset that baseline.</p>}
+        {performance.gasIncomplete && <p className="public-empty">Gas accounting is incomplete; exact P&L is unavailable.</p>}
+        {/* This summary includes the whole epoch, which can extend beyond a
+            held return's measured cutoff. Dollars still require publication. */}
+        {performance.book !== "paper" && displayPnl != null && agent.gas && (agent.gasless === true
+          ? <p className="public-empty">Recorded trades this accounting period were all sponsored.</p>
+          : agent.publicBook === true && (!agent.performance || agent.performance.publicBook === true)
+            && agent.gas.usdg !== null && Number.isFinite(agent.gas.usdg)
+            ? <p className="public-empty">Recorded gas cost this accounting period: {money(agent.gas.usdg)}.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>
+            : null)}
         {/* THE GATE, BEFORE THE DRAW.
             Two things have to be true before a line goes under the words
             "Performance history": it must be the growth index (deposits divided
@@ -224,7 +235,7 @@ export function Profile({
             replaced it without carrying the refusal, so a failed profile fetch
             fell back to the leaderboard's raw `equity_usdg` and drew a book
             springing into existence at full value. */}
-        {agent.mode === "paper" ? null : agent.curveKind !== "growth" ? (
+        {performance.book === "paper" ? null : (agent.performance && performance.book === null) || agent.curveKind !== "growth" ? (
           <p className="public-empty">
             Performance history isn’t available yet.
           </p>

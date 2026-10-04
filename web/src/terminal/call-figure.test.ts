@@ -299,15 +299,16 @@ describe("the row", () => {
   });
 
   it("A SIGNED ZERO IS A CLAIM — under half a cent prints $0.00 with no sign (FE8)", () => {
-    assert.deepEqual(callFigureText({ basis: "realized", pct: -0.04, usd: -0.004 }), { pct: "0.0%", usd: "$0.00", tone: "flat" });
+    assert.deepEqual(callFigureText({ basis: "realized", pct: -0.04, usd: -0.004 }), { pct: "−0.04%", usd: "$0.00", tone: "down" });
     assert.equal(callFigureText({ basis: "realized", pct: 0.03, usd: 0.003 }).usd, "$0.00");
     assert.equal(callFigureText({ basis: "realized", pct: 0.2, usd: 0.005 }).usd, "+$0.01", "half a cent rounds to a cent, and is signed");
     assert.equal(callFigureText({ basis: "realized", pct: -0.2, usd: -0.006 }).usd, "−$0.01");
   });
 
-  it("a loss reads the same in both halves, and a rounded zero is not green", () => {
+  it("a loss reads the same in both halves, small returns keep their direction and genuine zero stays flat", () => {
     assert.deepEqual(callFigureText({ basis: "realized", pct: -3.2, usd: -0.16 }), { pct: "−3.2%", usd: "−$0.16", tone: "down" });
     assert.deepEqual(callFigureText({ basis: "realized", pct: 12.5, usd: 0.62 }), { pct: "+12.5%", usd: "+$0.62", tone: "up" });
-    assert.equal(callFigureText({ basis: "since entry", pct: 0.01, usd: null }).tone, "flat", "prints 0.0%, so it is not a gain");
+    assert.deepEqual(callFigureText({ basis: "since entry", pct: 0.01, usd: null }), { pct: "+0.01%", usd: null, tone: "up" });
+    assert.deepEqual(callFigureText({ basis: "since entry", pct: 0, usd: null }), { pct: "0.0%", usd: null, tone: "flat" });
   });
 });
