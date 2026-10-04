@@ -163,10 +163,31 @@ text remain unchanged and the exact old deployment is still active. A
 pre-existing or changed halt stays in place. This resumes the old fleet without
 another approval question; completed mirror batches remain safe to retry.
 
-During permission retirement, `ledger-source-blocked.json` in a tenant's home
-records an interrupted final mirror or unexpected source rewind. It prevents
-restarting over a book whose final copy is uncertain. Retain that home and its
+During live trading-worker mirroring and final accounting copies, `ledger-source-blocked.json`
+in a tenant's home records an interrupted copy or unexpected source rewind. It
+prevents restarting over a book whose copy is uncertain. A cold startup proves
+the ledger's original shared cursors again after restoring or creating its local
+book and before trading starts; an unconfirmed or rebuilt accounting book holds
+trading until reviewed recovery. Retain that home and its
 lease, then verify source continuity and the protected shared positions before
 an explicitly reviewed recovery removes the marker. Ordinary continuity-read
 failures leave the cursor untouched and may retry. Do not reset accounting or
 clear the marker automatically to make a renewal pass.
+
+Positive legacy cursors without a saved creation-time witness (`last_stamp`),
+and cursors whose original source row is absent or different, also hold trading.
+They require reviewed recovery that proves the original book and protects its
+shared accounting; the guard does not hydrate a witness from an unverified new
+row, clear a cursor or grant a fresh accounting allowance.
+
+A missing financial witness alone does not disable the held privacy bot, which
+does not read or write financial tables. Its existing personal/group-memory
+restore gates and durable-source-marker rules still apply. If a missing live
+source's marker cannot be persisted, the supervisor also holds that home in
+memory: preserve that deployment for reviewed recovery; do not restart it to
+bypass the failed durable fence.
+
+After an unconfirmed live or final trading-source copy, full private/group
+snapshots are held too: missing SQLite must not replace saved DM history with an
+empty transcript. Valid forget journals still remove the requested memory from
+the existing sealed snapshot under the retained healthy tenant lease.

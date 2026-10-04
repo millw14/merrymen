@@ -81,6 +81,7 @@ import {
   isDistress,
   isInjection,
   isPrivateAsk,
+  isReadOnlyTradeQuestion,
   isQuestionToRoom,
   isShush,
   isTradeTalk,
@@ -88,7 +89,7 @@ import {
   type BotSelf,
   type SmallTalk,
 } from "./detect";
-import { admitThought, deskCaption, deskMissLine, thinkWithModel } from "./desk";
+import { admitThought, deskCaption, deskMissLine, deskQuestionEvidence, deskQuestionIntent, thinkWithModel } from "./desk";
 import { admitTgLine } from "./gate";
 import { publicCoinReason, publicCoinStatus, publicFactRequest, type PublicFactRequest } from "./facts";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
@@ -1238,7 +1239,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /** Its own line, remembered so the next prompt sees it and the repeat clause can refuse an echo. */
-  const recordOwn = (chatId: number, messageId: number | undefined, text: string, replyTo: number | undefined): void => {
+  const recordOwn = (chatId: number, messageId: number | undefined, text: string, replyTo: number | undefined, deskAsk?: TgDeskAsk, threadId?: number): void => {
     const now = clock();
     const me = selfNow();
     if (isMsgId(messageId)) {
@@ -1250,6 +1251,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         atMs: now,
         ...(isMsgId(replyTo) ? { replyTo } : {}),
         own: true,
+        ...(deskAsk ? { deskAsk } : {}),
+        ...(threadId !== undefined ? { threadId } : {}),
       });
     }
     store.update(chatId, (r) => {
@@ -1713,7 +1716,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     landedOn.deleteWhere((k) => k.startsWith(prefix));
     coinMissed.deleteWhere((k) => k.startsWith(prefix));
     askedIn.deleteWhere((k) => k.startsWith(prefix));
-    lastDesk.delete(chatId);
+    for (const key of lastDesk.keys()) if (key.startsWith(prefix)) lastDesk.delete(key);
   };
 
   // ─── The memory pass ─────────────────────────────────────────────────────
@@ -2017,7 +2020,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // A coin read is wanted only while the coins switch stays on, like the public-fact lane's.
         const timedOpts = { ...replyOpts, replyByMs: j.bornAtMs + RESEARCH_REPLY_MS,
           accountAnswer: accountResearchAnswer(j.line, j.seenAtMs) };
-        const deskOpts = deskAsk.kind === "coin" ? { ...timedOpts, stillWanted: () => wanted() && coinFactsOn() } : timedOpts;
+        const deskOpts = deskAsk.kind !== "market" ? { ...timedOpts, stillWanted: () => wanted() && coinFactsOn() } : timedOpts;
         track((async () => {
           const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, note, allowed);
           if (!sent) { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
@@ -2025,7 +2028,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         return null;
       }
       if (!request && dec.mood !== "private-ask" && !isInjection(j.line.text)
-        && deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "discussion") {
+        && (deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "discussion"
+          || (deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "analysis" && deskQuestionIntent(j.line.text) !== "overview"))) {
         const sent = await deskClarify(chatId, replyOpts, j);
         if (!sent) { releaseReply(chatId, messageId); return whyLost(); }
         return null;
@@ -2195,12 +2199,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return true;
   };
   /** What each chat last asked the desk, so "do a quick analysis" right after reads the same thing. */
-  const lastDesk = new Map<number, { ask: TgDeskAsk; atMs: number; ingressOrder: number }>();
+  const lastDesk = new Map<string, { ask: TgDeskAsk; atMs: number; ingressOrder: number; migrated?: boolean }>();
+  const deskKey = (chatId: number, threadId?: number): string => `${chatId}:${threadId ?? 0}`;
   const DESK_FOLLOW_MS = 15 * MIN;
-  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined): void => {
-    if (order === undefined || (lastDesk.get(chatId)?.ingressOrder ?? -1) >= order) return;
-    if (lastDesk.size > 256 && !lastDesk.has(chatId)) lastDesk.delete(lastDesk.keys().next().value!);
-    lastDesk.set(chatId, { ask, atMs, ingressOrder: order });
+  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined, threadId?: number, migrated = false): void => {
+    const key = deskKey(chatId, threadId);
+    if (order === undefined || (lastDesk.get(key)?.ingressOrder ?? -1) >= order) return;
+    if (lastDesk.size > 256 && !lastDesk.has(key)) lastDesk.delete(lastDesk.keys().next().value!);
+    lastDesk.set(key, { ask, atMs, ingressOrder: order, ...(migrated ? { migrated: true } : {}) });
   };
 
   /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
@@ -2214,10 +2220,25 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (seen.has(id)) break;
       seen.add(id);
       const line = room.lines.find((l) => l.messageId === id);
+      // A recorded answer keeps its public subject across pruning/restarts.
+      // Quotes and persisted references select research only, never a trade.
+      if (line?.own && line.deskAsk) return line.deskAsk;
       const text = line?.text ?? (depth === 0 && j.msg.replyTo?.messageId === id ? j.msg.replyTo.text ?? "" : "");
+      const quote = j.msg.replyTo;
+      if (depth === 0 && quote && typeof quote.fromId === "number" && quote.fromId === selfNow()?.id && (!line || line.own)) {
+        // Older stored answers contain prose but no subject metadata; the
+        // authenticated Telegram photo caption still carries its safe header.
+        const head = (quote.text ?? text).split(/\r?\n/u)[0]?.trim() ?? "";
+        if (head === "Robinhood Chain market") return { kind: "market" };
+        // Own photo captions start with a code-owned safe subject, unlike
+        // project claims further down the caption. Ambiguous ticker lookup
+        // remains an honest miss in the desk.
+        if (/^[\p{L}][\p{L}\p{N}._-]{1,23}$/u.test(head) && coinFactsOn()) return { kind: "coin", query: head };
+      }
       if (!line?.own) {
         const intent = deskAskOf(text, selfNamesOf(selfNow()));
         if (intent?.kind === "market") return { kind: "market" };
+        if (intent?.kind === "comparison" && coinFactsOn()) return { kind: "comparison", queries: intent.names };
         if (intent?.kind === "coin" && coinFactsOn()) return { kind: "coin", query: intent.name };
       }
       if (!line) break;
@@ -2247,8 +2268,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const deskAskFor = (j: LineJob, context: { address: string; memo?: TgCoinMemo } | null, coinQuestion: boolean): TgDeskAsk | null => {
     if (!d.desk) return null;
     const intent = deskAskOf(j.line.text, selfNamesOf(selfNow()));
+    if (deskQuestionIntent(j.line.text) === "comparison" && (extractCaHits(j.line.text).length > 2 || extractCashtags(j.line.text).length > 2)) return null;
+    if (intent?.kind === "comparison") return coinFactsOn() ? { kind: "comparison", queries: intent.names } : null;
     if (intent?.kind === "coin") {
       if (!coinFactsOn()) return null;
+      if (/^0x[0-9a-f]{40}$/iu.test(intent.name)) return { kind: "coin", address: intent.name.toLowerCase() };
       if (context?.memo?.name && context.memo.name.toLowerCase() === intent.name.toLowerCase()) return { kind: "coin", address: context.address };
       return { kind: "coin", query: intent.name };
     }
@@ -2256,14 +2280,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // "why" under a coin is a desk ask too: the chart and the read, with the
     // recorded reason under it (deskNoteFor) — not a one-line snapshot.
     const complaint = j.addressed !== null && /\b(?:vibes|asked you|asked a question|answer|chart|analysis)\b/iu.test(j.line.text) && /\b(?:just|nothing|not|deal|why|how|asked|single|entire)\b|[?？]/iu.test(j.line.text);
-    const discussion = intent?.kind === "discussion";
-    const lore = discussion && intent.topic === "lore";
+    const discussion = intent?.kind === "discussion" || (intent?.kind === "analysis" && deskQuestionIntent(j.line.text) !== "overview");
+    const lore = intent?.kind === "discussion" && intent.topic === "lore";
     const bare = intent?.kind === "analysis" || discussion || (!intent && context !== null && coinQuestion) || complaint;
     if (!bare) return null;
     if (context) return coinFactsOn() ? { kind: "coin", address: context.address } : null;
     const chained = repliedDesk(j);
-    if (chained) return !lore || chained.kind === "coin" ? chained : null;
-    const prev = lastDesk.get(j.msg.chatId);
+    if (chained) {
+      if (chained.kind !== "market" && !coinFactsOn()) return null;
+      if (chained.kind === "comparison" && intent?.kind === "discussion" && intent.topic === "setup" && deskQuestionIntent(j.line.text) !== "comparison") return null;
+      return !lore || chained.kind === "coin" ? chained : null;
+    }
+    // An unresolved explicit reply must not silently borrow a newer coin.
+    if (j.line.replyTo !== undefined && discussion) return null;
+    const general = lastDesk.get(deskKey(j.msg.chatId));
+    const prev = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
+    if (prev?.ask.kind === "comparison" && intent?.kind === "discussion" && intent.topic === "setup" && deskQuestionIntent(j.line.text) !== "comparison") return null;
     if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return !lore || prev.ask.kind === "coin" ? prev.ask : null;
     if (discussion) return null;
     return { kind: "market" };
@@ -2322,7 +2354,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     question: string,
     note: string | undefined,
     replyByMs: number,
-  ): Promise<{ ok: true; html: string; read: string; chart: Uint8Array | null; kind: "market" | "coin" } | { ok: false; why: "not-found" | "ambiguous" | "unavailable" }> => {
+  ): Promise<{ ok: true; html: string; read: string; chart: Uint8Array | null; kind: "market" | "coin"; reference: TgDeskAsk } | { ok: false; why: "not-found" | "ambiguous" | "unavailable" }> => {
     const desk = deskNow();
     if (!desk) return { ok: false, why: "unavailable" };
     const started = clock();
@@ -2332,7 +2364,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const lookMs = Math.min(DESK_LOOK_MS, left());
     const looked = await readDesk(() => desk.look(ask, { timeoutMs: lookMs }), lookMs);
     if (!looked || !looked.ok) return { ok: false, why: looked && !looked.ok ? looked.why : "unavailable" };
-    const e = looked.evidence;
+    const e = deskQuestionEvidence(looked.evidence, question);
     const req = { kind: e.kind, subject: e.subject, question: question.slice(0, 400), brief: e.brief, voice: deskVoice(),
       ...(e.lore ? { lore: { description: e.lore.description, source: e.lore.source, ...(e.lore.name ? { name: e.lore.name } : {}) } } : {}) };
     let thought: TgDeskThought | null = null;
@@ -2351,17 +2383,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (thought) by = "model";
     }
     if (left() <= 0) thought = null;
-    const admitted = admitThought(thought, e, selfNow()?.name ?? "");
+    const admitted = admitThought(thought, e, selfNow()?.name ?? "", question);
     // Which kind of read went out, how long it took and, when a model's was
     // refused, the gate's reason code — never the text, the question or the coin.
     log(`[tg-groups] desk ${e.kind} read: ${admitted.from === "model" ? by : "floor"}${admitted.refused ? ` (${by} read refused: ${admitted.refused})` : ""} in ${Math.round((clock() - started) / 100) / 10}s`);
-    return { ok: true, html: deskCaption(e, admitted.thought, note), read: admitted.thought.read, chart: e.chart, kind: e.kind };
+    return { ok: true, html: deskCaption(e, admitted.thought, note, question), read: admitted.thought.read, chart: e.chart, kind: e.kind, reference: e.reference ?? ask };
   };
 
   /** One desk answer out: a photo, or the caption as a message with no chart. Recorded as its own line. */
   const deskDeliver = async (
     chatId: number,
-    composed: { html: string; read: string; chart: Uint8Array | null },
+    composed: { html: string; read: string; chart: Uint8Array | null; reference: TgDeskAsk },
     o: SpeakOpts,
   ): Promise<{ chatId: number; messageId?: number } | null> => {
     stageOf(chatId, "desk: send");
@@ -2381,7 +2413,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.accountAnswer ? { accountAnswer: o.accountAnswer } : {}),
       desk: { html: composed.html, photo: composed.chart },
     });
-    if (sent) recordOwn(sent.chatId, sent.messageId, composed.read.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined);
+    if (sent) recordOwn(sent.chatId, sent.messageId, composed.read.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined, composed.reference, sent.chatId === chatId ? o.threadId : undefined);
     return sent;
   };
 
@@ -2396,7 +2428,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   /** A service miss is stated by code, never answered with invented market banter. */
   const deskMiss = async (chatId: number, ask: TgDeskAsk, why: "not-found" | "ambiguous" | "unavailable" | "rate-limit", o: SpeakOpts, note?: string): Promise<{ chatId: number; messageId?: number } | null> => {
-    const text = [deskMissLine(why, ask.kind), note].filter(Boolean).join(". ");
+    const text = [deskMissLine(why, ask.kind === "comparison" ? "coin" : ask.kind), note].filter(Boolean).join(". ");
     const sent = await deliver({
       chatId, intent: { kind: "answer", mood: "normal" }, text,
       ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
@@ -2435,7 +2467,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const opts = { ...o, replyByMs };
     // Remember the actual subject even on failure: a reply asking for a proper
     // analysis should retry that subject, not turn into unrelated banter.
-    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder);
+    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder, j.threadId);
     if (!allowed) return deskMiss(chatId, ask, "rate-limit", opts, note);
     deskTyping(chatId, replyByMs, o.threadId);
     const composed = await deskCompose(chatId, ask, j.line.text, note, replyByMs);
@@ -2479,7 +2511,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     };
     const ask: TgDeskAsk = { kind: "coin", address };
     const order = messageIngressOrder.get(msgKey(chatId, poster.messageId));
-    rememberDesk(chatId, ask, seenAt, order);
+    rememberDesk(chatId, ask, seenAt, order, threadId);
     const note = deskNoteFor(store.coin(chatId, address)) ?? o.note;
     let sent: { chatId: number; messageId?: number } | null;
     if (o.busy) sent = await deskMiss(chatId, ask, "rate-limit", opts, note);
@@ -2495,7 +2527,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (sent && sent.chatId !== chatId && !forgottenSince(chatId, poster.fromId, seenAt) && !forgottenSince(sent.chatId, poster.fromId, seenAt)) {
       // Migration carries the subject, retaining its original receipt order
       // and lifetime; a newer destination ask still wins.
-      rememberDesk(sent.chatId, ask, seenAt, order);
+      rememberDesk(sent.chatId, ask, seenAt, order, undefined, true);
     }
     return sent !== null;
   };
@@ -2645,7 +2677,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // dropped in the room, or when there is no desk.
       const deskTicker = j.addressed !== null && !asked && cas.length === 0 && !foreignMint && cashtags.length > 0 && deskNow() !== null && coinFactsOn()
         && deskAskOf(text, selfNamesOf(selfNow()))?.kind === "coin";
-      if (!rememberedAsk && !deskTicker && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
+      const researchIntent = deskAskOf(text, selfNamesOf(selfNow()));
+      const deskResearch = j.addressed !== null && deskNow() !== null && coinFactsOn() && !foreignMint && otherChain.length === 0 && !isInjection(text)
+        && (deskQuestionIntent(text) === "comparison" || (cas.length === 1 && researchIntent?.kind === "coin"
+          && (deskQuestionIntent(text) !== "overview" || isReadOnlyTradeQuestion(text) || /\b(?:chart|analy[sz]e|analysis|read[- ]only|research)\b/iu.test(text))));
+      if (!rememberedAsk && !deskTicker && !deskResearch && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,
@@ -3000,6 +3036,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           text,
           atMs,
           ...(msg.replyTo && isMsgId(msg.replyTo.messageId) ? { replyTo: msg.replyTo.messageId } : {}),
+          ...(msg.isTopicMessage === true && isMsgId(msg.messageThreadId) ? { threadId: msg.messageThreadId } : {}),
         };
         // A redelivered update (a replayed batch) is already remembered, and was already answered.
         if (!store.addLine(chatId, line)) return;

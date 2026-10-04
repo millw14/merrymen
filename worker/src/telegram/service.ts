@@ -1336,7 +1336,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = await readLlmState(statusCtx());
-        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId) };
+        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId), replyContext: msg.replyTo?.text };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
         // Strip any thinking dump that slipped through llmText (defense in depth)
@@ -1375,6 +1375,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           void sendChatAction({ token }, msg.chatId);
           const ans = await answerQuestion({
             question: msg.text,
+            replyContext: msg.replyTo?.text,
             name: getName(),
             identity: narratorIdentityBlock(st.linkedAt, st.messageCount, now()),
             memory: recalledNow.block,
@@ -1409,6 +1410,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           // volatile (gap+recalled+liveState) in user STATE — so model follows role, doesn't narrate it.
           const narratorIdentity = narratorIdentityBlock(st.linkedAt, st.messageCount, now());
           const chatCtx = {
+            replyContext: msg.replyTo?.text,
             state: [
               gap ? `TIME SINCE THEIR LAST MESSAGE: ${gap}` : "",
               recalled.block,

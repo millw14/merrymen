@@ -1521,7 +1521,7 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.ok(gate > 0, "the mirror's lease gate");
     assert.ok(call > gate, "only for a tenant whose lease this replica holds healthily");
     assert.ok(mirror.indexOf("await publishTgGroups({", call + 1) < 0, "one call site");
-    assert.match(mirror, /await ensureTgGroupsSchema\(shared, "postgres"\);/, "the schema is ensured where the other shared schemas are");
+    assert.match(mirror, /await ensureTgGroupsSchema\(shared, liveMirrorStoreForTest\?\.dialect \?\? "postgres"\);/, "the production schema stays Postgres, with an explicit SQLite test seam");
     assert.equal(ORCH.split("publishTgGroups(").length - 1, 2, "the live and final retirement mirror publish under leases");
     const final = body("async function mirrorRetiredMemory(");
     assert.ok(final.indexOf("!lease.healthy()") < final.indexOf("await publishTgGroups({"), "retirement also checks its lease before publishing");
@@ -1560,7 +1560,9 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.ok(holder.includes("HOLD_ENTRY") && holder.includes("env: childEnv(tenant)"), "the other one is the hold process");
 
     const mirror = body("async function mirrorLedgers(");
-    assert.match(mirror, /if \(tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
+    assert.match(mirror, /if \(tgGroupsDekThisPass && mayPublishMemory\(\) && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
+    assert.match(mirror, /const mayPublishMemory = \(\) => sourceConfirmed && children\.get\(tenant\) === worker/);
+    assert.match(mirror, /leases\.get\(tenant\.toLowerCase\(\)\) === lease && lease\.healthy\(\) && !ledgerSourceBlocked\(childHome\(tenant\)\)/);
 
     const forget = body("async function forgetTgGroups(");
     assert.match(forget, /tgGroupsHeld\.delete\(/, "cleared with the grant");

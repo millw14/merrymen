@@ -78,6 +78,10 @@ async function restoredText(tenant: string): Promise<string> {
   assert.equal(await restoreTgGroups({ tenant, home, shared: db, dek, log: () => {} }), "restored");
   return readFileSync(path.join(home, "tg-groups.json"), "utf8");
 }
+async function emptyLedger(home: string): Promise<void> {
+  const local = new DatabaseSync(path.join(home, "merrymen.db"));
+  try { await applyLedgerSchema(wrapSqlite(local)); } finally { local.close(); }
+}
 
 it("keeps the old process and failed final group save as barriers, then saves its latest approval and summary before rearming", async () => {
   const tenant = address(0xb11), account = address(0xb12);
@@ -92,6 +96,7 @@ it("keeps the old process and failed final group save as barriers, then saves it
   // This change came after the regular mirror's last pass.
   writeFileSync(path.join(home, "tg-groups.json"), memory("final memory from the stopped worker"));
   writeFileSync(path.join(home, "soul", "OWNER.md"), "final owner memory from the stopped worker");
+  await emptyLedger(home);
   let failed = true;
   const unavailable: Db = {
     exec: (sql) => db.exec(sql), tx: (fn) => db.tx(fn),
@@ -174,6 +179,7 @@ it("a missing DEK keeps the final-memory barrier until a sealed save can succeed
   const old = new FakeProc(64_003), releases = { n: 0 }, home = childHome(tenant);
   mkdirSync(home, { recursive: true });
   writeFileSync(path.join(home, "tg-groups.json"), memory("memory requiring encryption"));
+  await emptyLedger(home);
   setRetirementMemoryStoreForTest({ shared: db, dek: null, dialect: "sqlite" });
   await getGrantStore().put(tenant, grant(account));
   adoptChildForTest(tenant, account, old, lease(tenant, releases));

@@ -29,10 +29,11 @@ export function publicFactRequest(text: string, names: readonly string[] = []): 
   if (math) {
     return { kind: "calculation", fact: { kind: "calculation", input: math } };
   }
-  const s = raw.toLowerCase().replace(/[’]/g, "'");
+  const s = raw.normalize("NFKC").toLowerCase().replace(/[’]/g, "'");
+  if (/^(?:why|how come)\s+(?:(?:can'?t|cannot|won'?t)\s+(?:you|u)\s+trade|(?:are\s+)?(?:you|u)\s+not\s+trading)[\s?!.]*$/iu.test(s)) return { kind: "site", topic: "readiness" };
   const ownTrade = /\b(?:what|which|show|tell|list|anything|have|did)\b.*\b(?:you|your|u|ur)\b.*\b(?:trade[ds]?|buy|bought|sell|sold|trading)\b|\b(?:what|which)\b.*\b(?:trade[ds]?|coins?|tokens?)\b.*\b(?:you|u)\b.*\b(?:today|buy|bought|sell|sold)\b/iu;
   const ownWhy = /\bwhy\b/iu.test(s) && /\b(?:you|u)\b.*\b(?:buy|bought|sell|sold|trade[ds]?)\b/iu.test(s);
-  if ((ownTrade.test(s) || ownWhy) && /\b(?:didn'?t|did not|haven'?t|have not|not|never|couldn'?t|could not)\b/iu.test(s)) return { kind: "site", topic: "attempts" };
+  if ((ownTrade.test(s) || ownWhy) && /\b(?:didn'?t|did not|haven'?t|have not|not|never|couldn'?t|could not|can'?t|cannot|won'?t)\b/iu.test(s)) return { kind: "site", topic: "attempts" };
   const symbol = /\b(?:buy|bought|sell|sold|trade[ds]?)\s+\$?([a-z][a-z0-9]{1,15})\b/iu.exec(raw)?.[1];
   const named = symbol && !/^(?:today|yesterday|it|that|this|anything|any|some|the|a|in|on|for)$/i.test(symbol) ? symbol : undefined;
   const side = /\b(?:buy|bought)\b/iu.test(s) && !/\b(?:sell|sold)\b/iu.test(s) ? "buy" as const
@@ -46,6 +47,26 @@ export function publicFactRequest(text: string, names: readonly string[] = []): 
   }
   // Site questions describe features, never the owner's settings or grant.
   const site = /\b(?:site|website|web|merrymen|app|dashboard)\b/iu.test(s);
+  // Public help can explain the route without reading a person's account.
+  // Specific remedies precede generic site/history questions and market asks;
+  // they never assert that a reported blocker is present or has been fixed.
+  if (/\b(?:v4\s*(?:adapter|permission)|v4selfswap)\b/iu.test(s)
+    || /\buniswap\s*v4\b/iu.test(s) && /\b(?:grant\w*|permission|adapter|wallet|settings?|renew\w*|re[ -]?sign|trad\w*|use|enable|connect\w*)\b/iu.test(s)) return { kind: "site", topic: "v4" };
+  if (/\b(?:drawdown\s*(?:breaker|limit)|breaker\s*(?:tripped|trips|triggered|limit)|high[ -]water\s*mark)\b/iu.test(s)) return { kind: "site", topic: "drawdown" };
+  if (/\b(?:sign[ -]?up|register|create\s+(?:(?:my|an?|the|new)\s+)?(?:agent|merryman)|get\s+started|start\s+using\s+merrymen|join\s+merrymen)\b/iu.test(s)) return { kind: "site", topic: "onboarding" };
+  if (/\b(?:paper|practice|simulated)\b/iu.test(s) && /\b(?:withdraw\w*|cash\s*out)\b/iu.test(s)) return { kind: "site", topic: "modes" };
+  if (/\b(?:withdraw\w*|cash\s*out|recover(?:y)?\s+(?:key|wallet|funds)|(?:lost|restore)\s+(?:(?:my|the)\s+)?(?:wallet|recovery\s*key))\b/iu.test(s)) return { kind: "site", topic: "withdrawals" };
+  if (/\b(?:add\s+(?:funds|money|usdg)|deposit(?:ed)?\s*(?:funds|money|usdg|address)?|top[ -]?up|fund\s+(?:(?:my|the|an?|your)\s+)?(?:agent|merryman|account|wallet))\b/iu.test(s)) return { kind: "site", topic: "funding" };
+  if (/\b(?:paper\s*(?:trading|trades?|mode|money)|practice\s*(?:trading|mode|money)|simulated\s*(?:money|funds|trades?)|real\s*(?:money|funds)|paper\s*(?:and|or|vs\.?|versus)\s*live|live\s*(?:and|or|vs\.?|versus)\s*paper|(?:switch|turn|enable)\b.{0,25}\blive\s*trading)\b/iu.test(s)) return { kind: "site", topic: "modes" };
+  if (/\b(?:public\s*(?:group|chat)|in\s+(?:the\s+)?group|private\s*(?:chat|details|portfolio|account|wallet)|dm|direct\s*message)\b/iu.test(s)
+    && /\b(?:private|privacy|portfolio|balance|holdings|sizes?|wallet|difference|details|share|see|show|ask|tell)\b/iu.test(s)) return { kind: "site", topic: "privacy" };
+  if (/\b(?:botfather|privacy\s*mode)\b/iu.test(s)
+    || /\btelegram\b/iu.test(s) && /\b(?:bot|link|linked|connect\w*|connection|settings|status|silent|down|not\s*(?:replying|responding|working)|doesn'?t\s*(?:reply|respond|work)|replies?|messages?|approval|approved|mentions?|tags?|read|hear|listen)\b/iu.test(s)
+    || /\b(?:group|bot)\b/iu.test(s) && /\b(?:silent|not\s*(?:replying|responding|working)|doesn'?t\s*(?:reply|respond|work)|approve|approved|approval|link|reply|replies|respond|mentions?|tags?|read|hear|listen)\b/iu.test(s)) return { kind: "site", topic: "groups" };
+  if (/\b(?:re[ -]?sign|resign|renew\w*|expir\w*|signing\s*(?:failed|stuck|error)|permission\s*(?:renewal|not\s*granted|missing)|trading\s*permission|wallet\s*(?:inactive|isn'?t\s*active))\b/iu.test(s)
+    && (site || /\b(?:wallet|grant|key|permission|sign|signing|trading)\b/iu.test(s))) return { kind: "site", topic: "wallet" };
+  if (/\b(?:agent|merryman|you|your|u|ur)\b/iu.test(s)
+    && /\b(?:idle|blocked|not\s*(?:buying|trading|active)|(?:can'?t|cannot|won'?t|doesn'?t)\s*trade|stopped\s*buying|live\s*(?:off|disabled)|no\s*(?:cash|gas))\b/iu.test(s)) return { kind: "site", topic: "readiness" };
   if ((site || /\b(?:print|download|pnl image|p&l image|pnl card|p&l card)\b/iu.test(s)) && /\b(?:pnl|p&l|profit|loss|trade image)\b/iu.test(s)) return { kind: "site", topic: "pnl" };
   if (site && /\b(?:history|trades?|reason|why)\b/iu.test(s)) return { kind: "site", topic: "trades" };
   if (site && /\b(?:wallet|connect|stuck|renew|permission)\b/iu.test(s)) return { kind: "site", topic: "wallet" };
@@ -207,11 +228,19 @@ export function publicFactLine(fact: TgPublicFact): string | null {
     case "site": {
       const answers = {
         overview: "Merrymen runs your trading agent. the web shows its trades, decisions and controls; Telegram is another view of the same agent.",
+        onboarding: "open Merrymen on the web, sign in, then choose Create agent. pick a strategy and trading mode, review the limits and sign the permission. finish the wallet's backup or login steps, then check your agent's status. you can start with paper trading.",
+        funding: "open Add funds on the web and copy the agent account shown there. send only the supported funds on that account's displayed network. check the recorded balance and agent status afterward; a deposit alone doesn't enable live trading or renew permission.",
+        withdrawals: "open Withdraw from Profile on the web and use the owner recovery/signing flow shown for your wallet. stopping an agent doesn't withdraw funds or confirm revocation. never paste a recovery key into chat; account recovery requires your owner access.",
+        modes: "paper trading uses simulated money that can't be withdrawn. Settings → Trading mode controls real orders; funding alone isn't proof of live execution. live trading needs signed permission and readiness checks. switching to paper doesn't sell real positions.",
+        v4: "for Uniswap v4, save a deployed V4SelfSwap adapter for the correct network in Settings, then review and renew permission in Wallet. the adapter must pass deployment checks. saving its address alone doesn't grant access; check Trading permissions afterward.",
+        readiness: "open your agent's status on the web or ask /status in your linked DM. idle or blocked can mean missing cash, gas, live consent, permission or another check. use the reported reason; a group chart read doesn't establish that your account can trade.",
+        drawdown: "the drawdown breaker pauses new buys at the signed limit; this rule still permits sell attempts. renewing the same limit doesn't clear it. check your recorded peak and equity in private; if they look wrong, ask for an accounting check rather than bypassing it.",
+        privacy: "group replies use public market evidence and public trade summaries. balances, trade sizes, wallet controls and detailed account reasons belong in your linked DM or signed-in web account. a group message can't authorize a wallet change or trade.",
         pnl: "on the web: Trades → P&L image → Download PNG or Print. cards are available for verified completed live sells with recorded cost basis.",
         trades: "open your agent's Trades on the web for confirmed fills and decision reasons. pending or refused attempts aren't completed trades.",
         attempts: "for why a trade didn't happen, ask me in DM or check Decisions on the web. a pending, refused or failed attempt isn't a completed trade.",
-        wallet: "open Wallet on the web and follow the current signing step. after renewal, return to your agent; share a screenshot if it still looks stuck. never share a recovery key.",
-        groups: "i can follow an approved group's coin posts without a tag when Telegram lets me read all messages. privacy mode can hide posts; disable it in BotFather and re-add me, or make me an admin.",
+        wallet: "open Wallet & permissions on the web and follow the current review/renew step. revocation needs network fees; an interrupted renewal must be resumed before trading. after signing, check agent status. never share a recovery key or bot token.",
+        groups: "check Settings → Telegram and test the bot; /status in your linked DM checks the connection. groups also need owner approval. privacy mode can hide posts: disable it in BotFather and re-add the bot, or make it admin. mentions and direct replies can help.",
         limits: "buys still need a Brain decision and must fit the owner's signed permissions and trading limits. group messages can't raise those limits or authorize a wallet change.",
       } as const;
       line = answers[fact.topic] ?? null;

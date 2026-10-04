@@ -309,7 +309,8 @@ describe("a stood-down tenant's home goes with it", () => {
     const loop = rec.body!.getText().slice(rec.body!.getText().indexOf("for (const tenant of childHomeTenants())"));
     const mirror = loop.indexOf("await finalMirrorBeforeAnchor(tenant,");
     assert.ok(mirror > 0 && mirror < loop.indexOf("rmSync(childHome(tenant)"));
-    assert.match(loop, /if \(url && leases\.get\(tenant\)\?\.healthy\(\) && !holders\.has\(tenant\)\) \{/);
+    assert.match(loop, /const expectedLease = leases\.get\(tenant\);\s*if \(url && expectedLease\?\.healthy\(\) && !holders\.has\(tenant\)\) \{/);
+    assert.match(loop, /finalMirrorBeforeAnchor\(tenant, await makePgDb\(url\), childHome\(tenant\), expectedLease\)/, "the captured lease survives the connection await");
     // Never a held book, even one whose lease is kept while its hold process
     // has not exited: restore-hold.test.ts pins the same guard.
   });
