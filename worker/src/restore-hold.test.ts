@@ -190,10 +190,13 @@ describe("held tenants reach only the loops they belong in", () => {
     const skip = loop.indexOf("if (held.stoodDown) continue;");
     assert.ok(gate >= 0 && skip > gate && skip < loop.indexOf("publishChildTelegram("), "stood-down tenants are skipped before anything is published");
     // And the sweep of homes never mirrors a held book on its way out, lease or no lease.
-    const sweep = calls(rec, "finalMirrorBeforeAnchor")[0]!;
-    let guard: ts.Node = sweep;
-    while (!ts.isIfStatement(guard)) guard = guard.parent;
-    assert.match((guard as ts.IfStatement).expression.getText(), /!holders\.has\(tenant\)/);
+    const sweep = loopsOver(rec, "childHomeTenants").find((l) => calls(l.statement, "finalMirrorBeforeAnchor").length === 1);
+    assert.ok(sweep, "the removed-home cleanup, independently of the pending-copy retry loop");
+    const mirror = calls(sweep.statement, "finalMirrorBeforeAnchor")[0]!;
+    let guard: ts.Node | undefined = mirror.parent;
+    while (guard && guard !== sweep && !(ts.isIfStatement(guard) && /!holders\.has\(tenant\)/.test(guard.expression.getText()))) guard = guard.parent;
+    assert.ok(guard && ts.isIfStatement(guard), "the final copy remains inside the holder exclusion");
+    assert.match(guard.expression.getText(), /expectedLease\?\.healthy\(\)/, "and under the retained healthy lease");
   });
 
   it("RECONCILE STEPS ROUND A HELD TENANT, RETRIES ITS RESTORE, AND REFRESHES IT FIRST", () => {
@@ -217,10 +220,31 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.match(leaseLoss, /for \(const \[tenant, lease\] of \[\.\.\.leases\]\)/);
     assert.ok(leaseLoss.indexOf("killChild(tenant)") >= 0 && leaseLoss.indexOf("killChild(tenant)") < leaseLoss.indexOf("standDownHolder(tenant)"));
     assert.match(leaseLoss, /standDownHolder\(tenant\);/);
-    // The kill switch, with the home.
+    // The kill switch stops the holder before requesting privacy cleanup;
+    // its still-running writer cannot lose its home or financial source.
     const kill = loopsOver(fn("reconcile"), "holders").find((l) => /standDownHolder/.test(l.statement.getText()));
-    assert.ok(kill && /rmSync\(childHome\(tenant\)/.test(kill.statement.getText()) && /wanted\.has\(tenant\)/.test(kill.statement.getText()));
+    assert.ok(kill && /wanted\.has\(tenant\)/.test(kill.statement.getText()));
+    const stop = calls(kill.statement, "standDownHolder")[0], forget = calls(kill.statement, "forgetTgGroups")[0];
+    assert.ok(stop && forget && stop.getEnd() < forget.getStart(), "stand down before privacy cleanup");
+    assert.equal(calls(kill.statement, "rmSync").length, 0, "the holder's home is retained until its writer exits");
     assert.ok(!/finalMirrorBeforeAnchor/.test(kill.statement.getText()), "a held book is never mirrored on the way out");
+    const cleanup = loopsOver(fn("reconcile"), "childHomeTenants").find((l) => calls(l.statement, "forgetPersonalMemoryHome").length === 1);
+    assert.ok(cleanup && ts.isBlock(cleanup.statement), "deferred removed-home privacy cleanup");
+    const writerGuard = cleanup.statement.statements[0];
+    assert.ok(writerGuard && ts.isIfStatement(writerGuard) && ts.isContinueStatement(writerGuard.thenStatement));
+    for (const writer of ["children", "spawning", "exitingChildren", "holders"]) {
+      assert.match(writerGuard.expression.getText(), new RegExp(`\\b${writer}\\.has\\(tenant\\)`), `${writer} prevents cleanup`);
+    }
+    const retainedBook = all(cleanup.statement, (n) => ts.isIfStatement(n) && n.expression.getText() === 'existsSync(path.join(home, "merrymen.db"))')[0] as ts.IfStatement | undefined;
+    assert.ok(retainedBook, "the original financial book gets a retained-home branch");
+    for (const name of ["scrubHostedGrantCache", "forgetTgGroupsHome", "forgetPersonalMemoryHome"]) {
+      const clear = calls(cleanup.statement, name)[0];
+      assert.ok(clear && clear.getEnd() < retainedBook.getStart(), `${name} clears only obsolete authority or private memory`);
+    }
+    const removedFiles = all(retainedBook.thenStatement, ts.isArrayLiteralExpression)[0] as ts.ArrayLiteralExpression | undefined;
+    assert.ok(removedFiles);
+    assert.deepEqual(removedFiles.elements.map((e) => ts.isStringLiteral(e) ? e.text : e.getText()), ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"]);
+    assert.doesNotMatch(retainedBook.thenStatement.getText(), /recursive:\s*true|rmSync\(home\b|ledger-source-blocked|ledger-import/, "retaining accounting also retains its recovery barriers");
     // FLEET_HALT, one loop of which the main loop runs in place of a pass, and stop().
     const halt = fn("honourFleetHalt").body!.getText();
     assert.match(halt, /for \(const t of \[\.\.\.holders\.keys\(\)\]\) standDownHolder\(t\);/);

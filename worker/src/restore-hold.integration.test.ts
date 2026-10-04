@@ -22,7 +22,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, it, mock } from "node:test";
@@ -31,7 +31,8 @@ import { DatabaseSync } from "node:sqlite";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { wrapSqlite, type Db } from "./db";
 
-const FLEET = mkdtempSync(path.join(os.tmpdir(), "merrymen-restore-hold-"));
+// The real cache-erasure guard requires plain ancestors; macOS /var is a symlink.
+const FLEET = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-restore-hold-")));
 process.env.MERRYMEN_HOME = FLEET;
 process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
@@ -74,7 +75,8 @@ const grant = (): StoredGrant =>
     smartAccount: ACCOUNT,
     owner: "0x00000000000000000000000000000000000000b8",
     sessionKeyAddress: "0x00000000000000000000000000000000000000d8",
-    serialized: "eyJ-a-zerodev-blob-restore-hold",
+    // Only a disposable session key appears in the serialized fixture.
+    serialized: Buffer.from(JSON.stringify({ key: "0x" + "cd".repeat(32) })).toString("base64"),
     chainId: 4663,
     grantedAt: Math.floor(Date.now() / 1000) - 3600,
     expiresAt: Math.floor(Date.now() / 1000) + 7 * 86_400,
@@ -216,6 +218,40 @@ async function withClock(fn: () => Promise<void>) {
 const paperWithBot = { paperTradingEnabled: true, telegramEnabled: true, telegramBotToken: "111:a", telegramAllowlist: [4242] };
 const readSettings = (t: string) =>
   JSON.parse(readFileSync(path.join(childHome(t), "settings.json"), "utf8")) as { telegramBotToken?: string };
+
+/** Real local accounting and personal data, kept apart at the writer-exit boundary. */
+async function seedRetainedHome() {
+  const home = childHome(TENANT), file = path.join(home, "merrymen.db"), raw = new DatabaseSync(file);
+  try {
+    await applyLedgerSchema(wrapSqlite(raw));
+    raw.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,hwm_usdg) VALUES(?,?,?,4663,'{}',1,9999999999,120)")
+      .run(ACCOUNT, grant().owner, grant().sessionKeyAddress);
+    raw.prepare("INSERT INTO events(id,agent_id,message,created_at) VALUES(8765,?,'original accounting witness',1)").run(ACCOUNT);
+    raw.prepare("INSERT INTO chat_turns(chat_id,role,content,at) VALUES(4242,'user','private owner memory',1)").run();
+  } finally { raw.close(); }
+  mkdirSync(path.join(home, "soul"), { recursive: true });
+  writeFileSync(path.join(home, "soul", "OWNER.md"), "private owner notes");
+  const barriers = ["restore-blocked.json", "ledger-source-blocked.json", "ledger-import.pending.json"]
+    .filter(name => existsSync(path.join(home, name)))
+    .map(name => ({ name, bytes: readFileSync(path.join(home, name)) }));
+  return { home, file, inode: lstatSync(file, { bigint: true }).ino, barriers };
+}
+type RetainedHome = Awaited<ReturnType<typeof seedRetainedHome>>;
+function assertOriginalHomeKept(saved: RetainedHome) {
+  assert.equal(lstatSync(saved.file, { bigint: true }).ino, saved.inode, "the actual original accounting file stays");
+  const raw = new DatabaseSync(saved.file, { readOnly: true });
+  try {
+    assert.equal(raw.prepare("SELECT message FROM events WHERE id=8765").get()?.message, "original accounting witness");
+    assert.equal(raw.prepare("SELECT hwm_usdg FROM agents WHERE smart_account=?").get(ACCOUNT)?.hwm_usdg, 120);
+  } finally { raw.close(); }
+  for (const barrier of saved.barriers) assert.deepEqual(readFileSync(path.join(saved.home, barrier.name)), barrier.bytes, `${barrier.name} is retained`);
+}
+function assertPrivateMemory(saved: RetainedHome, present: boolean) {
+  assert.equal(existsSync(path.join(saved.home, "soul", "OWNER.md")), present);
+  const raw = new DatabaseSync(saved.file, { readOnly: true });
+  try { assert.equal(raw.prepare("SELECT count(*) AS n FROM chat_turns WHERE chat_id=4242").get()?.n, present ? 1 : 0); }
+  finally { raw.close(); }
+}
 
 beforeEach(async () => {
   // A hold process an earlier test left stuck, gone now, so the stand-down
@@ -536,6 +572,7 @@ describe("when the restore takes, trading comes back", () => {
     await store.put(TENANT, grant());
     await withClock(async () => {
       const hold = await stuckHandover();
+      const retained = await seedRetainedHome();
       assert.equal(workers().length, 0);
       await store.remove(TENANT);
       for (let i = 0; i < 2; i++) {
@@ -544,7 +581,8 @@ describe("when the restore takes, trading comes back", () => {
       }
       await settle();
       assert.equal(spawned.length, 1, `nothing started for a revoked tenant:\n${said.join("\n")}`);
-      assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
+      assertOriginalHomeKept(retained);
+      assertPrivateMemory(retained, true);
       assert.equal(said.filter((l) => l.includes(`${TENANT} grant removed — standing its hold down`)).length, 1, "stood down once, not every pass");
       assert.ok(isHeldForTest(TENANT), "and still counted until its process is seen to go");
       // Signed again before the old process has gone: still nothing beside it.
@@ -656,16 +694,24 @@ describe("when the restore takes, trading comes back", () => {
 });
 
 describe("a held tenant is stood down like any other", () => {
-  it("ITS GRANT GOES: THE HOLD PROCESS IS STOPPED AND THE HOME WIPED", async () => {
+  it("ITS GRANT GOES: THE HOLD PROCESS EXITS BEFORE PRIVATE MEMORY IS CLEARED AND ORIGINAL ACCOUNTING STAYS", async () => {
     await store.put(TENANT, grant());
     await reconcile();
     const hold = holds()[0]!;
+    hold.deaf = true;
+    const retained = await seedRetainedHome();
     await store.remove(TENANT);
     await reconcile();
     await settle();
     assert.equal(hold.signals[0], "SIGTERM");
+    assert.ok(isHeldForTest(TENANT), "the still-running holder remains counted");
+    assertOriginalHomeKept(retained); assertPrivateMemory(retained, true);
+    assert.ok(existsSync(path.join(retained.home, "grant.json")), "a live writer's key cache is untouched");
+    hold.die(null, "SIGKILL"); await reconcile(); await settle();
     assert.ok(!isHeldForTest(TENANT));
-    assert.equal(existsSync(childHome(TENANT)), false, "the revoked session key and the bot token go with it");
+    assertOriginalHomeKept(retained); assertPrivateMemory(retained, false);
+    assert.equal(existsSync(path.join(retained.home, "grant.json")), false, "the revoked key cache is cleared after exit");
+    assert.equal(existsSync(path.join(retained.home, "settings.json")), false, "the bot token is cleared after exit");
     assert.equal(workers().length, 0);
   });
 
@@ -724,13 +770,16 @@ describe("a held tenant is stood down like any other", () => {
     await store.put(TENANT, grant());
     await reconcile();
     assert.ok(isHeldForTest(TENANT));
+    const retained = await seedRetainedHome();
     await getSettingsStore().put(TENANT, paperWithBot as never);
     await store.remove(TENANT);
     await reconcile();
     await settle();
-    assert.equal(spawned.length, 0, "no process started to poll a revoked tenant's bot, only to be killed in a wiped home");
+    assert.equal(spawned.length, 0, "a revoked tenant never gets a bot process");
     assert.ok(!isHeldForTest(TENANT));
-    assert.equal(existsSync(childHome(TENANT)), false);
+    assertOriginalHomeKept(retained); assertPrivateMemory(retained, false);
+    assert.equal(existsSync(path.join(retained.home, "grant.json")), false);
+    assert.equal(existsSync(path.join(retained.home, "settings.json")), false);
   });
 
   /**
@@ -748,11 +797,12 @@ describe("a held tenant is stood down like any other", () => {
       await reconcile();
       const hold = holds()[0]!;
       hold.deaf = true;
+      const retained = await seedRetainedHome();
       await store.remove(TENANT);
       mock.timers.tick(15_000);
       await reconcile();
       assert.equal(hold.signals[0], "SIGTERM");
-      assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
+      assertOriginalHomeKept(retained); assertPrivateMemory(retained, true);
       assert.ok(isHeldForTest(TENANT), "still counted until its process is seen to go");
       assert.ok(hasLeaseForTest(TENANT), "and its lease kept, so no other replica starts one beside it either");
       // Signed again, with a book that restores now: still nothing beside it.
