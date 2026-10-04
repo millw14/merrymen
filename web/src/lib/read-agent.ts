@@ -1,4 +1,4 @@
-import { readPaperReturn } from "./paper-return";
+import { capitalFlowsSql, readBookPerformance, type BookPerformance } from "./book-performance";
 /**
  * One agent, in public.
  *
@@ -25,14 +25,14 @@ import { readPaperReturn } from "./paper-return";
 import { readProfileTrades, readRoundTrips, readTopTrades, type ProfileTrade, type TradeBook } from "./profile-trades";
 import { readOperationCounts } from "./distinct-trades";
 import { readEquityCloses } from "./equity-closes";
-import { measuredMarks, netFlowsUpTo } from "./held-marks";
+import { measuredMarks } from "./held-marks";
 import { everyLandedOpSponsored } from "./gasless";
 import { averageHoldSec } from "./hold-time";
 import type { Db } from "../../../worker/src/db";
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { basisUsdg } from "@/lib/basis-usdg";
-import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
+import type { UnrankedWhy } from "@/lib/rank-pnl";
 import { growthIndex, drawdownBps } from "@/lib/growth-index";
 import { PUBLISHABLE_STRATEGIES } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
@@ -101,6 +101,8 @@ export interface AgentProfile {
   /** The published return, or null. Exactly one of this and unrankedWhy is set. */
   pnlBps: number | null;
   paperPnlBps?: number | null;
+  /** Same-book aggregate figures; private book dollars are withheld. */
+  performance?: BookPerformance;
   /** Why there is no return to show. The page says which, rather than assuming. */
   unrankedWhy: UnrankedWhy | null;
   /**
@@ -126,7 +128,7 @@ export interface AgentProfile {
   /** Distinct tokens bought, in this agent's own evidence class only. */
   tokensTouched: number;
   /** Gas charged against the return, and how many fills we could not price. */
-  gas: { usdg: number; unpricedTrades: number };
+  gas: { usdg: number | null; unpricedTrades: number };
   /** Whether any deposit or withdrawal is on record at all. */
   funded: boolean;
   /**
@@ -290,11 +292,18 @@ async function agentRowOf(db: Db, identity: ProfileIdentity): Promise<AgentRow |
   try {
     const row = (await db
       .prepare(
-        `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
-                COALESCE(mode, 'idle') AS mode,
-                COALESCE(epoch, 1) AS epoch, beat_at
-           FROM agents WHERE LOWER(smart_account) IN (${inList})
-          ORDER BY created_at DESC LIMIT 1`,
+        `WITH registrations AS (
+           SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
+                  COALESCE(mode, 'idle') AS mode, COALESCE(epoch, 1) AS epoch, beat_at, created_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(smart_account)
+                    ORDER BY COALESCE(epoch, 1) DESC, COALESCE(beat_at, 0) DESC, created_at DESC, smart_account ASC
+                  ) AS alias_rank
+             FROM agents WHERE LOWER(smart_account) IN (${inList})
+         )
+         SELECT smart_account, name, x_handle, x_verified, mode, epoch, beat_at
+           FROM registrations WHERE alias_rank = 1
+          ORDER BY created_at DESC, LOWER(smart_account) ASC LIMIT 1`,
       )
       .get(...accounts)) as AgentRow | undefined;
     return row ?? null;
@@ -395,10 +404,9 @@ export async function profileOf(
   try {
     const rows = (await db
       .prepare(
-        `SELECT direction, amount_usdg, at, source FROM flows
-           WHERE agent_id = ? AND epoch = ? ORDER BY at ASC`,
+        `SELECT direction, amount_usdg, at, source FROM ${await capitalFlowsSql(db)} ORDER BY at ASC`,
       )
-      .all(account, epoch)) as {
+      .all(account.toLowerCase(), epoch)) as {
       direction: string;
       amount_usdg: number;
       at: number;
@@ -434,9 +442,6 @@ export async function profileOf(
   let growth: { at: number; g: number }[] = [];
   let growthFull: number[] = [];
   let growthComplete = false;
-  let latest: number | null = null;
-  /** When `latest` was taken: the flows the return may pair with it are those booked by then. */
-  let latestAt: number | null = null;
   let equityRead = false;
   let sinceAt = 0;
   try {
@@ -459,8 +464,6 @@ export async function profileOf(
     const clean = measuredMarks(pts)
       .map((p) => ({ v: Number(p.equity_usdg), at: Number(p.at) }))
       .filter((p) => Number.isFinite(p.v));
-    latest = clean.length ? clean[clean.length - 1]!.v : null;
-    latestAt = clean.length ? clean[clean.length - 1]!.at : null;
     sinceAt = clean.length ? clean[0]!.at : 0;
 
     // Every flow is attributed to the hour it fell in: growthIndex takes the
@@ -530,9 +533,9 @@ export async function profileOf(
     const s = (await db
       .prepare(
         `SELECT source, provider, model FROM decisions
-          WHERE agent_id = ? AND at >= ? ORDER BY at DESC LIMIT 1`,
+          WHERE LOWER(agent_id) = ? AND at >= ? ORDER BY at DESC, id ASC LIMIT 1`,
       )
-      .get(account, sinceAt)) as
+      .get(account.toLowerCase(), sinceAt)) as
       | { source: string | null; provider: string | null; model: string | null }
       | undefined;
     const source = String(s?.source ?? "");
@@ -555,6 +558,9 @@ export async function profileOf(
   let holdingsRead = false;
   if (publicBook) {
     try {
+      // Positions and basis are mutable snapshots, unlike the append-only tape.
+      // Keep the selected registration's spelling: merging old alias snapshots
+      // could resurrect holdings already removed from the current snapshot.
       const rows = (await db
         .prepare(
           `SELECT p.symbol AS symbol, p.token AS token, p.value_usdg AS value_usdg,
@@ -584,11 +590,11 @@ export async function profileOf(
         const fills = (await db
           .prepare(
             `SELECT buy_token, created_at, basis_source FROM trades
-              WHERE agent_id = ? AND epoch = ? AND fill_side = 'buy'
+              WHERE LOWER(agent_id) = ? AND epoch = ? AND fill_side = 'buy'
                 AND status IN ('landed','paper') AND buy_token IS NOT NULL
               ORDER BY created_at ASC LIMIT 500`,
           )
-          .all(account, epoch)) as Record<string, unknown>[];
+          .all(account.toLowerCase(), epoch)) as Record<string, unknown>[];
         for (const f of fills) {
           const tok = String(f.buy_token).toLowerCase();
           if (first.has(tok)) continue;
@@ -647,8 +653,8 @@ export async function profileOf(
   let contributionsKnown: boolean | null = null;
   try {
     const q = (await db
-      .prepare("SELECT contributions_known FROM agents WHERE LOWER(smart_account) = ?")
-      .get(account.toLowerCase())) as { contributions_known: number | null } | undefined;
+      .prepare("SELECT contributions_known FROM agents WHERE smart_account = ?")
+      .get(account)) as { contributions_known: number | null } | undefined;
     contributionsKnown =
       q?.contributions_known === null || q?.contributions_known === undefined
         ? null
@@ -657,14 +663,11 @@ export async function profileOf(
     /* the column arrives with a worker migration; unknown until it does */
   }
 
-  // THE RETURN'S DENOMINATOR IS WHAT WAS ON RECORD BY ITS NUMERATOR. `latest`
-  // is the newest measured mark, which during a hold is older than the flows
-  // booked since — an owner transfer that landed, a settled energy buy — and
-  // those are not in its cash. Pairing them publishes the transfer as profit
-  // for as long as the hold lasts. With no measured mark there is no numerator
-  // either, and the reason rankPnl gives is decided as before, on every flow.
-  const contributed = latestAt === null ? onRecord : netFlowsUpTo(flows, latestAt);
-  const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown });
+  // The profile and board share the exact same book, measured mark and as-of
+  // flow/gas inputs. The chart and the all-epoch gas summary remain separate.
+  const figures = await readBookPerformance(db, account, epoch, publicBook);
+  const { pnlBps, unrankedWhy } = row.mode === "live" ? figures.liveRank
+    : { pnlBps: null, unrankedWhy: paper ? "paper" as const : "inactive" as const };
 
   return {
     slug: identity.slug,
@@ -677,7 +680,8 @@ export async function profileOf(
     beatAt: row.beat_at ? Number(row.beat_at) : null,
     how,
     pnlBps,
-    paperPnlBps: paper ? await readPaperReturn(db, account, epoch) : null,
+    paperPnlBps: paper ? figures.paperPnlBps : null,
+    performance: figures.performance,
     unrankedWhy,
     // REFUSED ON THE SAME CONDITION AS THE RETURN. An agent that has never
     // filled has produced no drawdown either, and the figure it showed came
@@ -691,7 +695,7 @@ export async function profileOf(
     filledPaper,
     refused,
     tokensTouched,
-    gas: { usdg: gasUsdg, unpricedTrades },
+    gas: { usdg: publicBook ? gasUsdg : null, unpricedTrades },
     funded: onRecord !== null,
     contributionsEvidenced: contributionsKnown === true,
     flowsWithTx,

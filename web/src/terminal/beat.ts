@@ -523,16 +523,14 @@ export function callFigure(b: TradeBeat | ViewBeat, livePriceUsd: number | null)
  * realized −$0.16", not a hyphen beside a minus).
  */
 export function callFigureText(f: CallFigure): { pct: string; usd: string | null; tone: "up" | "down" | "flat" } {
-  // THE SIGN FOLLOWS THE PRINTED CENTS, as the colour below follows the printed
-  // percent: under half a cent prints "$0.00", and "−$0.00" beside a flat
-  // "0.0%" claimed a loss the number does not show.
+  // Dollar figures retain cent precision without a signed zero. The percent
+  // keeps smaller measured changes visible even when dollars round to zero.
   const usd =
     f.usd === null
       ? null
       : `${Math.abs(f.usd) < 0.005 ? "" : f.usd > 0 ? "+" : "−"}${usdText(Math.abs(f.usd))}`;
-  // The colour follows the printed figure: under half a tenth prints "0.0%",
-  // and a green "0.0%" would claim a gain the number does not show.
-  const tone = Math.abs(f.pct) < 0.05 ? "flat" : f.pct > 0 ? "up" : "down";
+  // pctBps preserves every finite nonzero return, so only actual zero is flat.
+  const tone = !Number.isFinite(f.pct) || f.pct === 0 ? "flat" : f.pct > 0 ? "up" : "down";
   return { pct: pctBps(f.pct * 100), usd, tone };
 }
 

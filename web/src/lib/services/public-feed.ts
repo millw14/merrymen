@@ -179,8 +179,8 @@ const bookOf = (mode: string | null | undefined): Book => (mode === "paper" || m
 /** The newest valuation of this run: when, and which book wrote it. */
 async function latestValuation(db: Db, account: string, epoch: number): Promise<{ at: number; book: Book } | null> {
   const row = (await db
-    .prepare("SELECT at, mode FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1")
-    .get(account, epoch)) as { at: number; mode: string | null } | undefined;
+    .prepare("SELECT at, mode FROM equity WHERE LOWER(agent_id) = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1")
+    .get(account.toLowerCase(), epoch)) as { at: number; mode: string | null } | undefined;
   return row ? { at: Number(row.at), book: bookOf(row.mode) } : null;
 }
 
@@ -306,15 +306,15 @@ export async function readPublicBoard(
     // outage, not an empty leaderboard — and no reason to read the fleet.
     throw new PublicDirectoryUnavailable();
   }
-  const board = await readLeaderboard((fn) => fn(db), async () => ids, () => args.nowSec);
+  const board = await readLeaderboard((fn) => fn(db), async () => ids, () => args.nowSec,
+    async (tenant) => ({ publicBook: (await ownerBits(deps.settings, tenant))?.publicBook === true }));
 
   const bySlug = new Map(ids.map((i) => [i.slug, i]));
   const slugOf = new Map<string, string>();
   for (const i of ids) for (const a of i.accounts) slugOf.set(a.toLowerCase(), i.slug);
 
-  // The account the board's row is built from: the newest by created_at per
-  // slug, the same pick read-leaderboard's dedupe makes. Read with the stored
-  // spelling so the per-agent reads below hit the (agent_id, …) indexes.
+  // Match the readers: pick the current epoch/heartbeat within account casing
+  // aliases, then the newest registration among a slug's distinct re-grants.
   // One row per account ever granted — fleet-sized, as the board's own reads
   // are — capped so a runaway table costs rows their heartbeat (null), never
   // the call.
@@ -323,8 +323,15 @@ export async function readPublicBoard(
   try {
     agents = (await db
       .prepare(
-        `SELECT smart_account, beat_at, COALESCE(epoch, 1) AS epoch FROM agents
-          WHERE smart_account NOT LIKE 'rh:%' ORDER BY created_at DESC LIMIT 20000`,
+        `WITH registrations AS (
+           SELECT smart_account, beat_at, COALESCE(epoch, 1) AS epoch, created_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(smart_account)
+                    ORDER BY COALESCE(epoch, 1) DESC, COALESCE(beat_at, 0) DESC, created_at DESC, smart_account ASC
+                  ) AS alias_rank
+             FROM agents WHERE smart_account NOT LIKE 'rh:%'
+         ) SELECT smart_account, beat_at, epoch FROM registrations WHERE alias_rank = 1
+           ORDER BY created_at DESC, LOWER(smart_account) ASC LIMIT 20000`,
       )
       .all()) as typeof agents;
   } catch {
@@ -438,9 +445,11 @@ export async function readPublicBoard(
     const ranked = isRanked(r);
     const unranked: Unranked | null = ranked
       ? null
+      : r.mode === "live" && valuation?.book === "paper"
+        ? VALUATION_NOT_LIVE
       : r.pnlBps !== null || !r.unrankedWhy
         ? notLive(valuation?.book)
-        : !reasonRead || (!countsRead && r.unrankedWhy === "never-filled")
+        : !reasonRead || (!countsRead && (r.unrankedWhy === "never-filled" || r.unrankedWhy === "quality-unknown"))
           ? RECORDS_UNREADABLE
           : { code: r.unrankedWhy, label: unrankedLabel(r.unrankedWhy) };
     return {
@@ -813,7 +822,15 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
   let valuation: { at: number | null; book: Book } = { at: null, book: "unknown" };
   try {
     const run = (await db
-      .prepare(`SELECT smart_account, COALESCE(epoch, 1) AS epoch FROM agents WHERE LOWER(smart_account) IN (${accounts.map(() => "?").join(", ")}) ORDER BY created_at DESC LIMIT 1`)
+      .prepare(`WITH registrations AS (
+          SELECT smart_account, COALESCE(epoch, 1) AS epoch, created_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY LOWER(smart_account)
+                   ORDER BY COALESCE(epoch, 1) DESC, COALESCE(beat_at, 0) DESC, created_at DESC, smart_account ASC
+                 ) AS alias_rank
+            FROM agents WHERE LOWER(smart_account) IN (${accounts.map(() => "?").join(", ")})
+        ) SELECT smart_account, epoch FROM registrations WHERE alias_rank = 1
+          ORDER BY created_at DESC, LOWER(smart_account) ASC LIMIT 1`)
       .get(...accounts)) as { smart_account: string; epoch: number } | undefined;
     const v = run ? await latestValuation(db, run.smart_account, Number(run.epoch)) : null;
     if (v) valuation = v;
@@ -825,7 +842,8 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
   // as "no deposit", no trades or no equity as "never filled".
   const why = profile.unrankedWhy;
   const reasonUnread = (why === "no-deposit" && !profile.flowsRead)
-    || (why === "never-filled" && (!profile.tradesRead || !profile.equityRead));
+    || (why === "never-filled" && (!profile.tradesRead || !profile.equityRead))
+    || (why === "quality-unknown" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead));
   // The board's order, so the list and the profile give the same reason for
   // the same agent: the heartbeat's mode first, then rankPnl's own refusal
   // (true whichever book the newest mark is), and only a return rankPnl would
@@ -836,6 +854,8 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
       ? { code: "paper", label: unrankedLabel("paper") }
       : profile.mode !== "live"
         ? { code: "inactive", label: unrankedLabel("inactive") }
+        : valuation.book === "paper"
+          ? VALUATION_NOT_LIVE
         : why
           ? reasonUnread
             ? RECORDS_UNREADABLE

@@ -86,7 +86,7 @@ describe("the board folds retired agents into a count", () => {
       { tenant: "0x5" as const, slug: "eeeeeeeeeeeeeeee", accounts: ["0xe1"] as `0x${string}`[], createdAt: 1, updatedAt: 1 },
     ];
     try {
-      return await readLeaderboard((fn) => fn(db), identities, () => NOW);
+      return await readLeaderboard((fn) => fn(db), identities, () => NOW, async () => null);
     } finally {
       raw.close();
     }
@@ -152,6 +152,7 @@ describe("when the identity store cannot be read", () => {
           { tenant: "0x2" as const, slug: "sirsendsirsendsi", accounts: ["0xs2"] as `0x${string}`[], createdAt: 1, updatedAt: 1 },
         ],
         () => NOW,
+        async () => null,
       );
       assert.deepEqual(readable.agents.map((a) => a.name).sort(), ["Shogun", "SirSendIt"]);
       assert.equal(readable.retired, 0);
@@ -161,6 +162,7 @@ describe("when the identity store cannot be read", () => {
           throw new Error("identity store down");
         },
         () => NOW,
+        async () => null,
       );
       assert.deepEqual(unreadable.agents.map((a) => a.name).sort(), ["Shogun", "SirSendIt"]);
       assert.equal(unreadable.retired, null);

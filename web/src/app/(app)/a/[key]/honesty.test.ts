@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../../../../worker/src/db";
+import { applyLedgerSchema } from "../../../../../../worker/src/store";
 import { readEquityCloses } from "@/lib/equity-closes";
+import { profileOf } from "@/lib/read-agent";
+import { readLeaderboard } from "@/lib/read-leaderboard";
 
 /**
  * WHAT AN AGENT'S PROFILE IS ALLOWED TO SAY ABOUT IT.
@@ -38,17 +41,33 @@ const GROWTH = at("../../../../lib/growth-index.ts");
 const TAPE = at("../../../../lib/read-wall-tape.ts");
 
 describe("a return is published under one rule, not two", () => {
-  it("the profile uses the same gate as the leaderboard", () => {
-    // These computed the identical arithmetic and disagreed about when to show
-    // it: the board called an agent unranked while its own profile published a
-    // figure, for the same agent on the same data at the same moment.
-    assert.match(READ, /import \{ rankPnl/);
-    assert.match(READ, /rankPnl\(\{ contributed, latest, gasUsdg, landed, contributionsKnown \}\)/);
-    // AND IT PASSES THE QUALITY TERM. Omitting it is not a compile error — the
-    // field is optional so pre-quality callers still build — so the pin is what
-    // stops the profile silently reverting to publishing over an unevidenced
-    // denominator while the board refuses to.
-    assert.match(READ, /contributionsKnown/);
+  it("the profile uses the same gate as the leaderboard", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    const account = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const identity = { tenant: "0x1" as const, slug: "honesty", accounts: [account] as `0x${string}`[], createdAt: 1, updatedAt: 1 };
+    try {
+      await applyLedgerSchema(db);
+      await db.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps,
+        granted_at, expires_at, mode, epoch, beat_at, contributions_known)
+        VALUES (?, 'Honesty', 'private-owner', 'private-key', 4663, '{}', 0, 1000, 'live', 2, 10, 1)`).run(account);
+      await db.prepare("INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', 100, 'chain-log', 1)").run(account);
+      await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode)
+        VALUES (?, '0', 0, 0, 110, 10, 2, 'live')`).run(account);
+      await db.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, gas_usdg, created_at, epoch)
+        VALUES (?, 'swap', 'private-target', 5, 'landed', 0, 5, 2)`).run(account);
+      for (const known of [1, 0]) {
+        await db.prepare("UPDATE agents SET contributions_known = ?").run(known);
+        const profile = (await profileOf(db, identity, false))!;
+        const [board] = (await readLeaderboard((fn) => fn(db), async () => [identity], () => 10, async () => null)).agents;
+        assert.deepEqual(profile.performance, board.performance);
+        assert.equal(profile.pnlBps, known ? 1000 : null);
+        assert.equal(profile.unrankedWhy, known ? null : "contributions-unevidenced");
+        assert.equal(board.pnlBps, profile.pnlBps);
+        assert.equal(board.unrankedWhy, profile.unrankedWhy);
+        assert.equal(profile.performance!.pnlUsdg, null, "private dollar amounts stay hidden in either quality state");
+      }
+    } finally { raw.close(); }
   });
 
   it("no second copy of the P&L arithmetic survives", () => {

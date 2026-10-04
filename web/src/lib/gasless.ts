@@ -26,7 +26,7 @@ export async function everyLandedOpSponsored(db: Db, account: string, epoch: num
     .prepare(
       `SELECT COUNT(*) AS landed,
               COALESCE(SUM(CASE WHEN t.sponsored_gas_wei IS NULL OR t.sponsored_gas_wei = '' THEN 1 ELSE 0 END), 0) AS self_paid
-         FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")}
+         FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?) AND t.epoch = ?")}
         WHERE t.status = 'landed'`,
     )
     .get(account, epoch)) as { landed: number | null; self_paid: number | null } | undefined;

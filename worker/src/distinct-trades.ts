@@ -103,13 +103,17 @@ export interface OperationCounts {
 
 /**
  * What one run of one account did, counted in operations.
+ * The account scope is case-insensitive, like the operation key and the
+ * financial readers: registration and ledger rows may spell the same address
+ * differently. The epoch still isolates this run from previous ones.
  *
  * THROWS on a failed read, so each caller keeps saying what an unread tape
  * means on its own page — never a zero standing in for it.
  *
- * Gas is still summed per row. The reconciler's copies carry no gas, so the
- * copies this exists for add nothing to it; a byte-for-byte duplicate would,
- * and that is the repair's job rather than a reader's.
+ * Select the canonical operation before aggregating, just as the financial
+ * reader does. Paid copies under another spelling of the account must not
+ * become a second gas charge, and a still-submitted copy must not override a
+ * settled outcome. Rows without a hash remain separate operations.
  * Reverted operations with owner gas proof also spent money, even though
  * their trade outcome and refusal counts remain unchanged.
  */
@@ -130,7 +134,7 @@ export async function readOperationCounts(
               COUNT(DISTINCT CASE WHEN t.status IN ('rejected','reverted') THEN ${op} END) AS refused,
               COUNT(DISTINCT CASE WHEN t.fill_side = 'buy' AND t.status = ?
                                   THEN LOWER(t.buy_token) END) AS tokens
-         FROM trades t WHERE t.agent_id = ? AND t.epoch = ?`,
+         FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?) AND t.epoch = ?")}`,
     )
     .get(tokensFrom, account, epoch)) as Record<string, number | null> | undefined;
   return {
