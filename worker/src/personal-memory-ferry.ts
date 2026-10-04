@@ -21,6 +21,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { Db } from "./db";
 import { merrymenHome } from "./home";
 import { openSecret, sealSecret } from "./store-crypto";
+import { readReplyPrivacy, eraseLegacyReplyMemory } from "./recovery-reply-state";
 
 export const PERSONAL_MEMORY_FILES = ["IDENTITY.md", "OWNER.md", "NOTES.md", "JOURNAL.md", "ARCHIVE.md"] as const;
 type SoulFile = typeof PERSONAL_MEMORY_FILES[number];
@@ -348,6 +349,13 @@ export async function publishPersonalMemory(o: {
       // Stored tombstones may outlive this home. Do not discard their privacy effect.
       snapshot = applyForgets(snapshot, old.forgets);
     }
+    const recoveryOps = await readReplyPrivacy(o.shared, tenant, o.dek);
+    if (recoveryOps.some(op => op.kind === "personal-chat" || op.kind === "personal-owner")) {
+      const erased = eraseLegacyReplyMemory("personal", tenant, sealedSnapshot(tenant, snapshot, o.dek).sealed, o.dek, recoveryOps);
+      const clean = openSnapshot(tenant, erased.sealed, o.dek);
+      if (!clean) return "failed";
+      snapshot = clean;
+    }
     const text = JSON.stringify(snapshot);
     if (Buffer.byteLength(text) > PERSONAL_MEMORY_MAX_BYTES) return "too-big";
     const digest = hash(text);
@@ -394,6 +402,16 @@ export async function restorePersonalMemory(o: {
     const localOps = readForgets(o.home);
     if (!pendingLocalForgetsAreClear(o.home, localOps)) return "failed";
     const shared = typeof o.shared === "function" ? await o.shared() : o.shared;
+    const recoveryOps = await readReplyPrivacy(shared, tenant, o.dek);
+    if (recoveryOps.some(op => op.kind === "personal-chat" || op.kind === "personal-owner")) {
+      const local = localSnapshot(o.home, localOps);
+      const erased = eraseLegacyReplyMemory("personal", tenant, sealedSnapshot(tenant, local, o.dek).sealed, o.dek, recoveryOps);
+      const clean = openSnapshot(tenant, erased.sealed, o.dek);
+      if (!clean) return "failed";
+      // A retained source must prove its local erasure before accepting turns.
+      // Never acknowledge a remote request over existing stale DM/soul data.
+      if (JSON.stringify(clean.soul) !== JSON.stringify(local.soul) || JSON.stringify(clean.chats) !== JSON.stringify(local.chats)) return "failed";
+    }
     const row = await shared.prepare(SELECT).get(tenant) as { sealed?: unknown } | undefined;
     if (!row) {
       if (present(markerFile)) return "failed";
@@ -402,7 +420,8 @@ export async function restorePersonalMemory(o: {
       for (const op of localOps.filter((o) => !o.completed)) completePersonalMemoryForget(op, o.home);
       return "none";
     }
-    const stored = openSnapshot(tenant, row.sealed, o.dek);
+    const restoredSealed = recoveryOps.length ? eraseLegacyReplyMemory("personal", tenant, String(row.sealed), o.dek, recoveryOps).sealed : row.sealed;
+    const stored = openSnapshot(tenant, restoredSealed, o.dek);
     if (!stored) { fail(log, tenant, "restore refused: unreadable ciphertext"); return "unreadable"; }
     const snapshot = applyForgets(stored, localOps);
     const digest = hash(JSON.stringify(snapshot));

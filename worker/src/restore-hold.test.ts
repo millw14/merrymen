@@ -55,6 +55,13 @@ const all = (root: ts.Node, keep: (n: ts.Node) => boolean): ts.Node[] => {
 };
 const calls = (root: ts.Node, name: string) =>
   all(root, (n) => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name) as ts.CallExpression[];
+// Preparation callbacks also check the lease. The fork invariant concerns the
+// guard executed in the spawning function, after those callbacks finish.
+const bodyCalls = (root: ts.FunctionDeclaration, name: string) => calls(root, name).filter((call) => {
+  let enclosing: ts.Node = call.parent;
+  while (!ts.isFunctionLike(enclosing)) enclosing = enclosing.parent;
+  return enclosing === root;
+});
 /** Every `for (const … of <expr>)` in `root` whose iterated expression reads `name`. */
 const loopsOver = (root: ts.Node, name: string) =>
   all(root, (n) => ts.isForOfStatement(n) && new RegExp(`\\b${name}\\b`).test(n.expression.getText())) as ts.ForOfStatement[];
@@ -83,7 +90,7 @@ describe("the restore gate holds instead of returning", () => {
     assert.ok(link.getEnd() < start.getStart(), "the link first: a link restored after the bot is polled is read from a replaced file");
     assert.equal(link.arguments.map((a) => a.getText()).join(","), "tenant");
     // Under the lease spawnChild checked, asked again after the last await.
-    const late = calls(hold, "lateSpawnRefusal")[0];
+    const late = bodyCalls(hold, "lateSpawnRefusal")[0];
     assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());
     for (const a of all(hold, ts.isAwaitExpression)) {
       if (ts.isAwaitExpression(a) && a.expression.getText() === "startHolderProcess(held)") continue;
@@ -93,7 +100,7 @@ describe("the restore gate holds instead of returning", () => {
     // halt and kill conditions again after that wait and before the OS fork.
     const started = fn("startHolderProcess");
     const slot = calls(started, "waitForSpawnSlot")[0];
-    const last = calls(started, "lateSpawnRefusal")[0];
+    const last = bodyCalls(started, "lateSpawnRefusal")[0];
     const fork = calls(started, "spawn")[0];
     assert.ok(slot && last && fork && slot.getEnd() < last.getStart() && last.getEnd() < fork.getStart());
     // A tenant with no bot is still recorded, so reconcile stops retrying it every pass.
