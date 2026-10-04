@@ -204,6 +204,29 @@ describe("the newest trades, in true time", () => {
   });
 });
 
+describe("quoted trade references keep the owner boundary", () => {
+  it("a foreign owner's canonical trade ID cannot reveal their private trade facts", async () => {
+    const other = "0x1111111111111111111111111111111111111111";
+    const w = new DatabaseSync(homePaths.db());
+    let id: number;
+    try {
+      w.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'other-owner','other-session',4663,'{}',0,9999999999,1)").run(other);
+      const result = w.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, fill_side, fill_cash_usdg, fill_qty_raw, fill_symbol, basis_source, created_at) VALUES (?, 'swap', ?, ?, ?, 12345, 'landed', 'buy', 12345, '100', 'PRIVATEFACT', 'receipt', ?)`).run(other, other, USDG, coin(989), NOW - 60);
+      id = Number(result.lastInsertRowid);
+    } finally { w.close(); }
+    let seeded = "";
+    const turn = (async (_c: unknown, opts: { messages: { role: string; text?: string }[] }) => {
+      seeded = opts.messages.find((m) => m.role === "user")!.text!;
+      return { text: "That trade isn't in my current-run records.", toolUses: [] };
+    }) as never;
+    const answer = await answerQuestion({ question: "why that buy?", replyContext: `trade #${id!}`, name: "Shogun", identity: "", memory: "", gap: "", history: [], tools: tools(), creds, turn });
+    assert.ok(answer!.used.includes("trade_details"));
+    assert.match(seeded, /That trade is not in this owner's current-run records/);
+    assert.doesNotMatch(seeded, /PRIVATEFACT|12345/);
+    assert.equal(toolSessionStatsForTest().open, 0);
+  });
+});
+
 describe("the copy's query plans", () => {
   it("a coin-name lookup searches the coin indexes, not every row of the agent", () => {
     // Enough rows that a whole-agent scan and an index search cost differently.

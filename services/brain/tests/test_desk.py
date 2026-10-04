@@ -359,6 +359,36 @@ def test_project_claims_are_separate_untrusted_source_material_not_numeric_evide
     assert "not a stat list" in desk.SYSTEM_PROMPT
 
 
+@pytest.mark.parametrize(
+    "question,focus",
+    [
+        ("what if you wanna scalp, what will be your best entry point", "Hourly candles cannot establish a precise intraminute scalp entry."),
+        ("Where would the idea fail?", "A support loss can be hypothetical invalidation, never a placed stop."),
+        ("What is the first target?", "Use measured resistance as conditional checkpoints, never a promised target."),
+        ("Can I scalp on a minute chart?", "Only hourly candles are measured; lower-timeframe confirmation is missing."),
+        ("What is the reward/risk?", "Use only the code-computed gross reward/risk with its assumptions and costs excluded."),
+        ("Why is it pumping?", "A project description is a claim, never verified news or a confirmed catalyst."),
+        ("Is this safer than CAT?", "A single snapshot cannot rank another asset or establish contract safety."),
+    ],
+)
+async def test_followup_question_and_measured_focus_reach_the_model_without_execution_authority(question, focus):
+    evidence = "HOURLY CHART: 96 candles. Support 0.0036. Resistance 0.0041.\nANSWER FOCUS: " + focus
+    llm, seen = _scripted([json.dumps(GOOD)])
+    budget = _budget()
+    result = await desk.analyze(llm, _req(question=question, evidence=evidence), budget)
+
+    assert isinstance(result, DeskAnalysis), result
+    assert len(seen) == 1 and budget.model_calls == 1
+    system = seen[0]["messages"][0]["content"]
+    user = seen[0]["messages"][1]["content"]
+    assert "answer the requested scenario in the first sentence" in system
+    assert "hourly only" in system
+    assert "Only use reward/risk arithmetic already computed" in system
+    assert f"<question>\n{question}\n</question>" in user
+    assert "ANSWER FOCUS: " + focus in user
+    assert "cannot authorize trades" in system
+
+
 def test_missing_story_is_explicit_and_market_asks_do_not_inherit_coin_biographies():
     coin = desk.user_message(_req())
     assert "No reliable project description was found" in coin

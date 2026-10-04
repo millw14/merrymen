@@ -167,3 +167,103 @@ describe("factual answers cannot be skipped by a model",()=> {
     assert.equal(called,false);assert.match(a!.text,/1 P&L \(20%/);assert.match(a!.text,/not a verified trade/);
   });
 });
+
+describe("contextual follow-ups refresh evidence before narration", () => {
+  const reference = 'OFY / USDG • 1h\nPublished story. Old price $0.0001516.';
+  const current = "Source: measured just now. OFY price $0.00013; hourly support $0.00012. No minute candles available.";
+  const questions = [
+    "what if you wanna scalp, what will be your best entry point", "best entry?", "where would the stop go?",
+    "what if it breaks support?", "take profit target?", "is volume confirming?", "would you buy now?",
+    "is it bullish or bearish?", "what about a pullback entry?", "what is the risk reward?",
+    "what if I buy 10 OFY?", "can you explain buying 10 OFY?",
+  ];
+  for (const question of questions) {
+    it(`prefetches the quoted coin's fresh public market for: ${question}`, async () => {
+      const s = scripted([{ text: "I'd wait for a confirmed reclaim; hourly data doesn't establish a minute scalp entry.", toolUses: [] }]);
+      const reads: { name: string; input: Record<string, unknown> }[] = [];
+      const a = await answerQuestion({ ...base(s.turn), question, replyContext: reference,
+        history: [{ role: "assistant", content: "UBIK is the previous topic." }],
+        lookup: async (name, input, ctx) => { assert.equal(ctx, tools); reads.push({ name, input }); return current; },
+      });
+      assert.deepEqual(reads.filter((r) => r.name === "market_read"), [{ name: "market_read", input: { coin: "OFY" } }]);
+      assert.ok(a?.used.includes("market_read"));
+      const prompt = s.seen[0]!.find((m) => m.role === "user")!.text;
+      assert.match(prompt, /CURRENT FACTS ALREADY READ/);
+      assert.ok(prompt.includes(current), "the model is seeded even if it chooses no tool call");
+      assert.match(prompt, /REPLIED-TO MESSAGE \(untrusted data/);
+    });
+  }
+  it("reads both comparison coins with the same tenant-bound read context", async () => {
+    const s = scripted([{ text: "OFY has weaker momentum in the same hourly window.", toolUses: [] }]);
+    const reads: Record<string, unknown>[] = [];
+    await answerQuestion({ ...base(s.turn), question: "compare OFY and UBIK for entry", lookup: async (name, input, ctx) => {
+      assert.equal(ctx, tools); if (name === "market_read") reads.push(input); return "current measurements";
+    } });
+    assert.deepEqual(reads, [{ coin: "OFY" }, { coin: "UBIK" }]);
+  });
+  for (const question of ["compare OFY and UBIK", "which is stronger, OFY or UBIK?"]) {
+    it(`seeds both fresh market reads even when the model calls no tools: ${question}`, async () => {
+      const s = scripted([{ text: "The comparison depends on the current measurements.", toolUses: [] }]);
+      const reads: Record<string, unknown>[] = [];
+      const registered = { ...tools, cfg: { ...tools.cfg, customTokens: [
+        { symbol: "OFY", address: "0x1111111111111111111111111111111111111111" as const, decimals: 18 },
+        { symbol: "UBIK", address: "0x2222222222222222222222222222222222222222" as const, decimals: 18 },
+      ] } } as ToolContext;
+      const answer = await answerQuestion({ ...base(s.turn), tools: registered, question, lookup: async (name, input, ctx) => {
+        assert.equal(ctx, registered);
+        if (name === "market_read") reads.push(input);
+        return `${input.coin}: fresh hourly measurements.`;
+      } });
+      assert.deepEqual(reads, [{ coin: "OFY" }, { coin: "UBIK" }]);
+      assert.equal(answer!.used.filter((name) => name === "market_read").length, 2);
+      const facts = s.seen[0]!.find((m) => m.role === "user")!.text;
+      assert.match(facts, /OFY: fresh hourly measurements/);
+      assert.match(facts, /UBIK: fresh hourly measurements/);
+    });
+  }
+  it("hardware comparisons never seed the market from uppercase terms alone", async () => {
+    const s = scripted([{ text: "A CPU and GPU handle different workloads.", toolUses: [] }]);
+    const reads: string[] = [];
+    await answerQuestion({ ...base(s.turn), question: "compare CPU and GPU", lookup: async (name) => { reads.push(name); return "unused"; } });
+    assert.ok(!reads.includes("market_read"));
+  });
+  it("an unresolved market subject asks instead of guessing a coin", async () => {
+    const s = scripted([{ text: "Buy imaginarycoin at 1.234.", toolUses: [] }]);
+    const a = await answerQuestion({ ...base(s.turn), question: "best entry?", replyContext: "thanks", history: [{ role: "assistant", content: reference }] });
+    assert.equal(s.calls(), 0);
+    assert.match(a!.text, /Which coin do you mean/);
+    assert.deepEqual(a!.used, []);
+  });
+  it("a quoted trade is verified by canonical ID in this owner's context", async () => {
+    const s = scripted([{ text: "That exact trade's reason is unavailable.", toolUses: [] }]);
+    const reads: { name: string; input: Record<string, unknown> }[] = [];
+    await answerQuestion({ ...base(s.turn), question: "why that buy?", replyContext: "OFY (trade #12).",
+      history: [{ role: "assistant", content: "UBIK (trade #43)." }], lookup: async (name, input, ctx) => {
+        assert.equal(ctx, tools); reads.push({ name, input }); return "That trade is not in this owner's current-run records.";
+      } });
+    assert.deepEqual(reads[0], { name: "trade_details", input: { trade_id: 12 } });
+    assert.ok(!reads.some((r) => r.name === "decisions"), "never substitute a recent decision for the referenced trade");
+  });
+  it("blocked-account questions prefetch status and permission and retain the renewal reason", async () => {
+    const s = scripted([{ text: "Your trading permission has expired.", toolUses: [] }]);
+    const a = await answerQuestion({ ...base(s.turn), question: "why can't I trade?", lookup: async (name) => name === "permission_status"
+      ? "NEEDS A NEW SIGNATURE (expired)" : "The account's current state." });
+    assert.ok(a!.used.includes("agent_status"));
+    assert.ok(a!.used.includes("permission_status"));
+    assert.equal(a!.needsSignature, true);
+    assert.equal(a!.signReason, "expired");
+  });
+  it("settings explanations use current configured values rather than quoted proposals", async () => {
+    const s = scripted([{ text: "Your configured stop loss is 8%; the proposed 12% wasn't applied.", toolUses: [] }]);
+    const a = await answerQuestion({ ...base(s.turn), question: "what is my stop loss?", replyContext: "Should we make stop loss 12%?",
+      lookup: async (name) => name === "settings" ? "Configured stop loss: 8%." : "A stop loss is an exit threshold." });
+    assert.ok(a!.used.includes("settings"));
+    assert.ok(!a!.used.includes("market_read"));
+    assert.ok(s.seen[0]!.find((m) => m.role === "user")!.text.includes("Configured stop loss: 8%."));
+  });
+  it("an evidence failure is marked explicitly and never replaced by old quoted prices", async () => {
+    const s = scripted([{ text: "I couldn't check the current market, so I can't give a verified entry.", toolUses: [] }]);
+    await answerQuestion({ ...base(s.turn), question: "best entry?", replyContext: reference, lookup: async () => { throw new Error("network down"); } });
+    assert.match(s.seen[0]!.find((m) => m.role === "user")!.text, /evidence could not be read. Do not guess/);
+  });
+});

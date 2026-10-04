@@ -406,9 +406,11 @@ one-liner from a model that was given no data.
 * the market's own words with a question or request ("how's the market",
   "market update"), or "what's pumping / moving", "any setups"; "what's up /
   hot" only beside a trading word;
-* a bare "do a quick analysis" / "good entry?" — bound to the coin it replies
-  under, else a desk ask up the reply chain, else what this chat last asked
-  within 15 minutes, else the market. Words with an everyday meaning
+* a bare "do a quick analysis" — bound to the coin it replies
+  under, else a desk ask up the reply chain, else what this topic last asked
+  within 15 minutes, else the market. A specific entry, stop, target or other
+  setup follow-up requires an identifiable subject and otherwise asks which
+  coin. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
 * a coin's story or background ("what's RHOOKS about", "what's its lore"),
   or a request to explain the previous read more clearly ("not clean enough",
@@ -416,6 +418,27 @@ one-liner from a model that was given no data.
   recent chat subject. Without a subject they ask which coin, never default
   to an unrelated market read. A lore follow-up is read-only and cannot
   nominate a token for trading. Chat-wide forgetting clears this subject.
+
+**Follow-up situations.** Replies preserve the public resolved subject on
+the agent's own research answer, so pruning the earlier human question or a
+worker restart does not change which coin is being discussed. A direct reply
+to an older read wins over a newer room subject; an unresolved reply asks for
+clarification. Implicit subjects in different forum topics stay separate.
+
+| Question | Evidence used and answer boundary |
+| --- | --- |
+| Scalp or best entry | Measured support/resistance, conditional confirmation and invalidation; hourly candles cannot confirm a precise minute-scale entry |
+| Stop, invalidation, failed breakout | A measured failure level and close/retest conditions; this answer places no stop or order |
+| Targets or take profit | Measured resistance checkpoints; no invented future price |
+| Risk/reward | Code-calculated hypothetical map with explicit assumptions; costs and fill probability excluded |
+| RSI, EMA, VWAP, timeframe | The requested measured indicator/window; missing values are stated as missing |
+| Buyers, sellers, volume, liquidity | Indexed participation and reserves; no invented whale identity, executable depth or slippage |
+| Safety, sizing, leverage | States the checks and private inputs missing from a public chart |
+| Two-coin comparison | Refreshes both named assets under one deadline; compares measured structure, participation and indexed depth, with mismatched windows disclosed |
+| Prediction, news | Conditional scenarios; a snapshot cannot establish win odds or verified news |
+| Hypothetical buys/sells with amounts | Research only, including contract-address questions; no order or token nomination is staged |
+| What changed or how old is this? | Refreshes the current read and preserves its source time; no invented before/after without comparable snapshots |
+| Signup, funding, withdrawal, renewal, idle, drawdown, Telegram | Public product steps; account-specific details move to the owner's private view |
 
 Concurrent reads retain the subject of the latest received question, even
 when an older lookup finishes later. The follow-up lifetime starts at receipt.
@@ -538,6 +561,9 @@ levels and volume; or the 24h board), with a caption built by code — the
 short ticker title, attributed project description, a conversational take,
 one compact market context line, the next confirmation to watch, the public
 screen or trade verdict, and the stance with "GeckoTerminal HH:MM UTC".
+For a specific follow-up, the direct answer comes first, followed by its
+confirmation and invalidation. These survive caption shortening ahead of
+optional prose; the project story is included only when relevant to the ask.
 The take interprets the story and measured evidence without repeating the
 biography or every chart statistic. The model is forbidden from adding origin,
 affiliation or social-activity claims; common claim patterns also trigger a

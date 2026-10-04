@@ -18,7 +18,7 @@ import { deskAskOf, type BotSelf } from "./detect";
 import { admitDeskText, admitTgLine, deskFiguresGrounded } from "./gate";
 import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
-import { TgGroupsStore, emptyTgGroupsState } from "./store";
+import { TgGroupsStore, emptyTgGroupsState, parseTgGroupsState } from "./store";
 import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskEvidence, TgDeskOutcome, TgDeskPort, TgDeskThinkRequest, TgDeskThought, TrencherReadiness } from "./types";
 
 const BRIEF = [
@@ -499,7 +499,7 @@ describe("the desk lane", () => {
     desk = Object.assign(new FakeDesk(), {
       think: async (req: TgDeskThinkRequest): Promise<TgDeskThought> => {
         (desk as FakeDesk).thinks.push(req);
-        return { read: "rsi 37.5 under the ema20 at 0.159: sellers in control until 0.1605 is reclaimed.", stance: "cautious", watch: "0.1605", invalidation: "0.1643 reclaimed" };
+        return { read: "price is under the ema20 at 0.159; rsi 37.5 confirms weak momentum. sellers in control until 0.1605 is reclaimed.", stance: "cautious", watch: "0.1605", invalidation: "0.1643 reclaimed" };
       },
     });
     make();
@@ -1082,5 +1082,186 @@ describe("the desk lane", () => {
     make();
     await said(msg("how is the market?"));
     assert.equal(desk!.asks.length, 0);
+  });
+});
+
+describe("public research follow-up contexts", () => {
+  const questions = [
+    "what if you wanna scalp, what will be your best entry point",
+    "where would you cut the trade?", "where is the stop loss?",
+    "what are the take profit targets?", "what would invalidate this setup?",
+    "what confirmation would you want?", "what if it breaks support?",
+    "what if it reclaims resistance?", "is that breakout real?",
+    "how would you wait for a retest?", "can we use a 5 minute chart?",
+    "what does the RSI tell us?", "how does VWAP change the setup?",
+    "what does EMA alignment mean?", "is the volume backing this move?",
+    "are buyers stronger than sellers?", "is the liquidity deep enough?",
+    "what about slippage?", "is it too late to chase this?",
+    "what are the bull and bear cases?", "what risk reward is possible?",
+    "is this guaranteed to go up?", "what are the odds?",
+    "which timeframe would you use?", "how old is this chart?",
+    "what has changed since the last read?", "is the setup still valid?",
+    "how would position sizing work?", "would you hold it overnight?",
+    "can you compare it with another coin?", "what news is behind the move?",
+  ];
+  for (const question of questions) it(`binds a fresh read-only answer: ${question}`, async () => {
+    let nominations = 0;
+    const port = new FakePort();
+    port.nominate = () => { nominations++; return { ok: true }; };
+    make({ port: () => port });
+    await said(msg("pine thoughts on OFY?"));
+    clock += 16_000;
+    const m = msg(question, { replyTo: { messageId: 5_000, fromId: BOT.id, text: "OFY\n\nPublished story: a project description" } });
+    await said(m);
+    assert.deepEqual(desk!.asks, [{ kind: "coin", query: "ofy" }, { kind: "coin", query: "ofy" }]);
+    assert.equal(tg.of("sendPhoto").length, 2);
+    assert.equal(nominations, 0, "an analysis follow-up cannot authorize a buy");
+    assert.equal(store.room(CHAT)!.lines.find(l => l.messageId === 5_001)?.deskAsk?.kind, "coin");
+  });
+
+  it("keeps the exact public subject after a restart and pruning the human source", async () => {
+    make();
+    await said(msg("pine thoughts on OFY?"));
+    store.update(CHAT, r => { r.lines = r.lines.filter(l => l.own); });
+    groups.stop();
+    await groups.drain();
+    store.close();
+    store = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+    make();
+    clock += 16_000;
+    await said(msg("pine thoughts on OTHERCOIN?"));
+    clock += 16_000;
+    await said(msg("where is the stop loss?", { replyTo: { messageId: 5_000, fromId: BOT.id, text: FLOOR.read } }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "ofy" });
+  });
+
+  it("uses an own photo's quoted subject when no source line was stored", async () => {
+    make();
+    await said(msg("pine thoughts on OTHERCOIN?"));
+    clock += 16_000;
+    await said(msg("where is the stop loss?", { replyTo: { messageId: 98, fromId: BOT.id, text: "OFY\n\nPublished story: a coin story\n\nGeckoTerminal 00:11 UTC" } }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "OFY" });
+  });
+
+  it("uses a genuine quoted caption for a legacy own answer without subject metadata", async () => {
+    store.addLine(CHAT, { messageId: 98, fromId: BOT.id, name: "Pine", text: "An older public chart interpretation.", atMs: clock, own: true });
+    make();
+    await said(msg("where is the stop?", { replyTo: { messageId: 98, fromId: BOT.id, text: "OFY\n\nAn older public chart interpretation." } }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "OFY" });
+  });
+
+  it("clarifies a missing explicit reply subject instead of using the newer room coin", async () => {
+    make();
+    await said(msg("pine thoughts on OTHERCOIN?"));
+    clock += 16_000;
+    await said(msg("where is the stop loss?", { replyTo: { messageId: 98, fromId: BOT.id, text: "An earlier idea I cannot identify." } }));
+    assert.equal(desk!.asks.length, 1);
+    assert.match(String(tg.of("sendMessage").at(-1)?.body.text), /which coin or read do you mean/);
+  });
+
+  it("keeps implicit subjects separate between forum topics", async () => {
+    make();
+    await said(msg("pine thoughts on OFY?", { isTopicMessage: true, messageThreadId: 19 }));
+    clock += 16_000;
+    await said(msg("pine thoughts on OTHERCOIN?", { isTopicMessage: true, messageThreadId: 29 }));
+    clock += 16_000;
+    await said(msg("pine where is the stop loss?", { isTopicMessage: true, messageThreadId: 19 }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "ofy" });
+    assert.equal(tg.of("sendPhoto").at(-1)?.body.message_thread_id, "19");
+    clock += 16_000;
+    await said(msg("pine where is the stop loss?", { isTopicMessage: true, messageThreadId: 39 }));
+    assert.equal(desk!.asks.length, 3);
+    assert.match(String(tg.of("sendMessage").at(-1)?.body.text), /which coin or read do you mean/);
+  });
+
+  it("does not mistake timeframe units for tickers or personal support for analysis", () => {
+    for (const q of ["can we use a 5 minute chart?", "what about an hourly chart?", "can we use a daily chart?"]) {
+      assert.notEqual(deskAskOf(q)?.kind, "coin");
+    }
+    assert.equal(deskAskOf("can you support me on this?"), null);
+    assert.equal(deskAskOf("is there any entry fee?"), null);
+  });
+
+  it("does not borrow a General-topic read in a new forum topic", async () => {
+    make();
+    await said(msg("pine thoughts on OFY?"));
+    clock += 16_000;
+    await said(msg("pine where is the stop loss?", { isTopicMessage: true, messageThreadId: 19 }));
+    assert.equal(desk!.asks.length, 1);
+    assert.match(String(tg.of("sendMessage").at(-1)?.body.text), /which coin or read do you mean/);
+  });
+
+  it("does not research a persisted quoted coin after coins are switched off", async () => {
+    make();
+    await said(msg("pine thoughts on OFY?"));
+    cfg.telegramGroupCoinsEnabled = false;
+    clock += 16_000;
+    await said(msg("pine where is the stop?", { replyTo: { messageId: 5_000, fromId: BOT.id, text: "OFY" } }));
+    assert.equal(desk!.asks.length, 1);
+  });
+
+  for (const question of ["pine compare OFY versus ROO", "pine which is stronger, OFY or UBIK?", "pine compare $OFY and $ROO", `pine compare 0x${"a".repeat(40)} versus 0x${"b".repeat(40)}`]) {
+    it(`compares two explicit public subjects without nominating: ${question}`, async () => {
+      let nominations = 0;
+      const port = new FakePort();
+      port.nominate = () => { nominations++; return { ok: true }; };
+      make({ port: () => port });
+      await said(msg(question));
+      const ask = desk!.asks[0];
+      assert.equal(ask?.kind, "comparison");
+      assert.equal(ask?.kind === "comparison" && ask.queries.length, 2);
+      assert.equal(nominations, 0);
+      assert.equal(tg.of("sendPhoto").length, 1);
+    });
+  }
+
+  for (const question of ["pine should I buy 10 dollars of OFY?", "pine should I buy $10 worth of OFY?", "pine what if I buy 10 USDG of OFY?"]) {
+    it(`uses the token rather than a currency/unit as the hypothetical subject: ${question}`, async () => {
+      make();
+      await said(msg(question));
+      assert.deepEqual(desk!.asks[0], { kind: "coin", query: "ofy" });
+    });
+  }
+
+  it("does not classify hardware/prose comparisons as a market request", () => {
+    assert.equal(deskAskOf("pine compare CPU and GPU", ["Pine"]), null);
+    assert.equal(deskAskOf("compare dinner with lunch"), null);
+  });
+
+  for (const question of ["pine what if I buy 10 OFY?", "pine should I sell 5 OFY?", "pine would you buy 10 OFY at support?", `pine where is the stop loss for 0x${"a".repeat(40)}?`, `pine where is the stop for 0x${"a".repeat(40)}?`, `pine can you scalp 0x${"a".repeat(40)}?`, `pine chart 0x${"a".repeat(40)}`, `pine is buying 10 0x${"a".repeat(40)} a good idea?`, `pine can you explain buying 10 0x${"a".repeat(40)}?`, `pine do you think I should buy 10 0x${"a".repeat(40)}?`]) {
+    it(`keeps an explicit hypothetical or contract analysis read-only: ${question}`, async () => {
+      let nominations = 0;
+      const port = new FakePort();
+      port.nominate = () => { nominations++; return { ok: true }; };
+      make({ port: () => port });
+      await said(msg(question));
+      assert.equal(nominations, 0);
+      assert.equal(desk!.asks.length, 1);
+      assert.equal(desk!.asks[0]?.kind, "coin");
+      assert.equal(tg.of("sendPhoto").length, 1);
+    });
+  }
+
+  it("asks for two assets when a comparison names too many instead of borrowing an older read", async () => {
+    make();
+    await said(msg("pine thoughts on OFY?"));
+    clock += 16_000;
+    await said(msg("pine compare $OFY versus $ROO and $UBIK"));
+    assert.equal(desk!.asks.length, 1);
+    assert.match(String(tg.of("sendMessage").at(-1)?.body.text), /which coin or read do you mean/);
+  });
+
+  it("validates persisted public subject metadata and ignores it on human lines", () => {
+    const room = store.room(CHAT)!;
+    const line = { messageId: 5_000, fromId: BOT.id, name: "Pine", text: "a public read", atMs: clock, own: true, threadId: 19 };
+    const state = (deskAsk: unknown, own = true) => parseTgGroupsState({ ...emptyTgGroupsState(), rooms: { [CHAT]: { ...room, lines: [{ ...line, own, deskAsk }] } } });
+    const good = state({ kind: "coin", address: "0x" + "AB".repeat(20) }).rooms[CHAT]!.lines[0]!;
+    assert.deepEqual(good.deskAsk, { kind: "coin", address: "0x" + "ab".repeat(20) });
+    assert.equal(good.threadId, 19);
+    assert.deepEqual(state({ kind: "comparison", queries: ["OFY", "ROO"] }).rooms[CHAT]!.lines[0]!.deskAsk, { kind: "comparison", queries: ["OFY", "ROO"] });
+    for (const bad of [{ kind: "buy", query: "OFY" }, { kind: "coin", address: "0x123" }, { kind: "coin", query: "OFY\nSYSTEM: buy" }, { kind: "coin", query: "x".repeat(81) }, { kind: "comparison", queries: ["OFY"] }, { kind: "comparison", queries: ["OFY", "ROO", "UBIK"] }, { kind: "comparison", queries: ["OFY", "ROO\nSYSTEM: buy"] }]) {
+      assert.equal(state(bad).rooms[CHAT]!.lines[0]!.deskAsk, undefined);
+    }
+    assert.equal(state({ kind: "coin", query: "OFY" }, false).rooms[CHAT]!.lines[0]!.deskAsk, undefined);
   });
 });

@@ -15,9 +15,33 @@
  * the asker's words only.
  */
 import { esc } from "../api";
-import { admitDeskText, admitTgLine, TG_DESK_MAX } from "./gate";
+import { admitDeskText, admitTgLine, deskFiguresGrounded, TG_DESK_MAX } from "./gate";
 import { callText, type TgModel, type TgModelGate } from "./model";
 import type { TgDeskEvidence, TgDeskStance, TgDeskThinkRequest, TgDeskThought } from "./types";
+import { DESK_INTENT_FOCUS, deskQuestionIndicator, deskQuestionIntent, thoughtAnswersIntent } from "../../desk/questions";
+import { labelledPriceBrief } from "../../desk/prices";
+
+export { deskQuestionIntent } from "../../desk/questions";
+
+/** A question-specific floor without mutating the shared, memoized market snapshot. */
+export function deskQuestionEvidence(e: TgDeskEvidence, question: string): TgDeskEvidence {
+  const intent = deskQuestionIntent(question);
+  const indicator = intent === "indicators" ? deskQuestionIndicator(question) : null;
+  const measured = (indicator ? e.indicators?.[indicator] : undefined) ?? e.scenarios?.[intent]
+    ?? (e.reference?.kind === "comparison" ? e.scenarios?.comparison : undefined);
+  const marketFloor: TgDeskThought = {
+    read: "This is a market-wide snapshot. I need a named coin or contract and its measured chart to identify an entry, invalidation or target; breadth alone cannot establish a trade setup.",
+    stance: e.floor.stance,
+    watch: "Name the coin so its structure, participation and real depth can be checked.",
+    invalidation: "Market strength alone doesn't confirm an individual coin's setup.",
+  };
+  const needsCoin = ["scalp", "entry", "invalidation", "targets", "breakout", "risk-reward", "sizing", "safety", "execution", "indicators", "timeframe", "comparison", "news", "prediction"].includes(intent);
+  return {
+    ...e,
+    floor: measured ?? (e.kind === "market" && needsCoin ? marketFloor : e.floor),
+    brief: `${e.brief}\nANSWER FOCUS: ${DESK_INTENT_FOCUS[intent]}`,
+  };
+}
 
 /**
  * The longest caption sent, counted in UTF-16 units as Telegram counts them,
@@ -47,7 +71,8 @@ export function deskSystem(voice: string): string {
     "- Liquidity health: liquidity versus FDV, 24h turnover, pool age, how concentrated activity is in one pool.",
     "- For a market question: breadth (how many are up), where the volume is rotating, risk-on or risk-off, what is leading and what is bleeding.",
     "Weigh the signals against each other: say which dominates and why, and name contradictions (price up on fading volume, strong flow into a thin pool). Answer the question actually asked. If they ask about an entry, name where the chart offers better risk/reward (a level from the brief), what confirmation you would want first, and where the idea is wrong. Be concrete and decisive when the evidence is clear, and say what is missing when it is not.",
-    "For a coin, the caption already prints the sourced project description and a small market context. Add a human take on that story and the evidence: what is interesting about the theme, whether the trading supports the attention, and what keeps you cautious. Don't repeat the biography or list the price, liquidity, volume and buyer counts again. A sharp two or three sentences beat a dashboard recital.",
+    "For a follow-up, answer the requested scenario in the first sentence. Entry/scalp, invalidation, target, breakout/retest, timeframe, reward/risk, participation, safety and sizing are different questions. Follow ANSWER FOCUS from the evidence. Do not repeat the project biography or a generic overview when a specific question is asked; confirmation and invalidation are printed alongside your read. Discuss the theme only for a story or overview question. A sharp two or three sentences beat a dashboard recital.",
+    "The measured execution chart is hourly only. Indexed short-window price change is not a lower-timeframe candle series. Precise scalp entries, future prices, trader identities, executable slippage, safe position size, contract safety and exact changes since a prior reply cannot be established without the corresponding evidence. Only use reward/risk arithmetic already computed in the evidence, with its assumptions and costs excluded.",
     "",
     "Rules:",
     "- Use only numbers that appear in the brief, written the same way (you may round to fewer digits). Never invent prices, levels, percentages, holder counts, news or social claims. Do not compute new numbers.",
@@ -74,7 +99,7 @@ export function deskUser(req: TgDeskThinkRequest): string {
   const project = req.kind === "coin"
     ? `\n\n<project_claims>\n${lore ? `${lore.name ? `PUBLISHED NAME: ${fence(lore.name).replace(/\s+/g, " ")}\n` : ""}SOURCE: ${fence(lore.source).replace(/\s+/g, " ")}\nDESCRIPTION: ${fence(lore.description)}` : "No reliable project description was found. Do not guess its story from the name."}\n</project_claims>`
     : "";
-  return `KIND: ${req.kind}\nSUBJECT: ${fence(req.subject || "the market").replace(/\s+/g, " ")}\n<question>\n${fence(req.question.slice(0, 400))}\n</question>${project}\n\nEVIDENCE BRIEF:\n${fence(req.brief)}`;
+  return `KIND: ${req.kind}\nSUBJECT: ${fence(req.subject || "the market").replace(/\s+/g, " ")}\nANSWER FOCUS: ${DESK_INTENT_FOCUS[deskQuestionIntent(req.question)]}\n<question>\n${fence(req.question.slice(0, 400))}\n</question>${project}\n\nEVIDENCE BRIEF:\n${fence(req.brief)}`;
 }
 
 /** The outermost JSON object in a model's answer, as a thought. Null for anything else. */
@@ -112,8 +137,12 @@ export async function thinkWithModel(model: TgModel, gate: TgModelGate, chatId: 
  * gate against the brief, the floor's piece in its place when it is refused.
  * `from` says whose words the read is, for the log.
  */
-export function admitThought(t: TgDeskThought | null, e: TgDeskEvidence, agentName: string): { thought: TgDeskThought; from: "model" | "floor"; refused?: string } {
+export function admitThought(t: TgDeskThought | null, e: TgDeskEvidence, agentName: string, question?: string): { thought: TgDeskThought; from: "model" | "floor"; refused?: string } {
   if (!t) return { thought: e.floor, from: "floor" };
+  if (question && !thoughtAnswersIntent(t, deskQuestionIntent(question))) return { thought: e.floor, from: "floor", refused: "question-focus" };
+  // Numeric grounding cannot license a new kind of fact: RSI isn't odds,
+  // transaction counts aren't actor identities, reserves aren't a tax audit.
+  if (unsupportedPublicClaim(t.read)) return { thought: e.floor, from: "floor", refused: "unsupported-public-claim" };
   // Biography is a code-quoted, attributed excerpt. The prose gate checks
   // public numbers, not the truth of a model's new origin or social claim.
   const narrativeClaim = /\b(?:named after|inspired by|created by|founded by|launched by|started by|developed by|built by|backed by|endorsed by|affiliat\w*|partnerships?|partnered|official|(?:coin|token|project|meme|it)\s+(?:was\s+)?(?:began|started|originated|launched|created|founded|made|built|developed)\s+(?:as|by|from|in|for)|(?:founders?|developers?|team)\s+(?:is|was|has|have|built|created|announced|runs?|owns?)|went viral|gone viral|viral on|trending on|twitter|tiktok|telegram community|social activity)\b/iu;
@@ -123,8 +152,11 @@ export function admitThought(t: TgDeskThought | null, e: TgDeskEvidence, agentNa
   }
   const read = admitDeskText(t.read, { agentName, brief: e.brief, max: READ_MAX });
   if (!read.ok) return { thought: e.floor, from: "floor", refused: read.reason };
+  if (!priceRolesGrounded(read.text, e.priceBrief ?? labelledPriceBrief(e.brief))) return { thought: e.floor, from: "floor", refused: "ungrounded-price-role" };
   const side = (s: string, fallback: string): string => {
     if (!s) return fallback;
+    if (!priceRolesGrounded(s, e.priceBrief ?? labelledPriceBrief(e.brief))) return fallback;
+    if (unsupportedPublicClaim(s)) return fallback;
     const v = admitDeskText(s, { agentName, brief: e.brief, max: SIDE_MAX });
     return v.ok ? v.text : fallback;
   };
@@ -132,6 +164,56 @@ export function admitThought(t: TgDeskThought | null, e: TgDeskEvidence, agentNa
     thought: { read: read.text, stance: t.stance, watch: side(t.watch, e.floor.watch), invalidation: side(t.invalidation, e.floor.invalidation), ...(t.confidence !== undefined ? { confidence: t.confidence } : {}) },
     from: "model",
   };
+}
+
+/** Prices asserted as entries/levels cannot borrow RSI, counts, percentages or volume figures. */
+function priceRolesGrounded(text: string, priceBrief: string): boolean {
+  const roles = "(?:entry|price|support|resistance|stop(?:[- ]?loss)?|invalidation|targets?|checkpoint|ema\\s*(?:20|50)|vwap)";
+  const figure = "(?:\\$?\\d+(?:\\.\\d+)?(?:%|x)?)";
+  const words = "(?:at|is|of|near|around|about|roughly|approximately|above|below|under|over|sits?|stands?|lies?|would|be|the|a|next|first|current|measured|reference|range|level|point|zone)";
+  const before = new RegExp(`\\b${roles}\\b(?:\\s+${words}){0,6}\\s*[:=]?\\s*(${figure})`, "giu");
+  const after = new RegExp(`(${figure})(?:\\s+${words}){0,6}\\s+${roles}\\b`, "giu");
+  const normalized = text.normalize("NFKC");
+  const matches = [...normalized.matchAll(before), ...normalized.matchAll(after)];
+  const values = matches.map((m) => m[1]!);
+  const action = new RegExp(`\\b(?:reclaim(?:ed)?|retest|holds?|los(?:e|ing)|clos(?:e|ing)|breakout|breakdown)\\b(?:\\s+${words}){0,6}\\s*[:=]?\\s*(${figure})`, "giu");
+  for (const m of normalized.matchAll(action)) {
+    // "RSI reclaims 47.2" describes an indicator, not an entry price.
+    if (/\b(?:rsi(?:14)?|atr(?:14)?)\b[^.!?;]{0,24}$/iu.test(normalized.slice(Math.max(0, m.index! - 35), m.index))) continue;
+    matches.push(m);
+    values.push(m[1]!);
+  }
+  const continuation = new RegExp(`^\\s*(?:,|and|or|to|–|-)\\s*(${figure})`, "iu");
+  for (const m of matches) {
+    let rest = normalized.slice(m.index! + m[0].length);
+    for (let i = 0; i < 6; i++) {
+      const extra = continuation.exec(rest);
+      if (!extra) break;
+      values.push(extra[1]!);
+      rest = rest.slice(extra[0].length);
+    }
+  }
+  // Prefixing a dollar also removes the prose gate's free small-count exception.
+  return values.every((value) => deskFiguresGrounded(`$${value.replace(/^\$/, "")}`, priceBrief));
+}
+
+/** These sources have no actor identities, contract audit, verified news or prediction statistics. */
+function unsupportedPublicClaim(text: string): boolean {
+  const absence = /\b(?:cannot|can't|couldn't|unable|unknown|unverified|unconfirmed|unavailable|missing|insufficient|not (?:verified|confirmed|established|evidence)|no (?:evidence|verified|reliable|measured)|doesn't (?:establish|confirm|verify)|don't (?:have|know)|isn't (?:verified|confirmed|established|evidence))\b/iu;
+  const security = /\b(?:safe|safety|sellability|transfer tax(?:es)?|tax[- ]free|no taxes|ownership powers?|liquidity lock(?:ed)?|locked liquidity|audit(?:ed)?|honeypot)\b/iu;
+  const actors = /\b(?:whales?|insiders?|institutions?|institutional|bots?|team wallets?|organic (?:activity|volume)|manipulat\w*)\b/iu;
+  const news = /\b(?:(?:verified|confirmed|official|recent|new) (?:news|announcement|catalyst)|(?:news|announcement|catalyst)\b[^.!?]{0,40}\b(?:caused|triggered|drove|explains)|(?:because|due to)\b[^.!?]{0,40}\b(?:news|announcement|catalyst))\b/iu;
+  const probability = /\b(?:win (?:probability|rate)|winning chance|success rate|probability|likelihood|odds|chance of (?:winning|profit)|forecast|predict(?:ion)?|guarantee\w*)\b/iu;
+  const future = /\bwill (?:hit|reach|recover|rise|fall|pump|dump|bounce|rebound|go (?:up|down))\b/iu;
+  const normalized = text.normalize("NFKC").replace(/[’']/g, "'");
+  if (/\band\s+(?:it|the (?:token|coin|contract|liquidity|sellability))\s+(?:is|are|has been)\s+(?:safe|verified|locked|audited)\b/iu.test(normalized)) return true;
+  for (const part of normalized.split(/(?<=[.!?])\s+|\s*;\s*|\s+(?:but|although|however|while)\s+/iu)) {
+    if (probability.test(part) && /\d/.test(part)) return true;
+    if (absence.test(part)) continue;
+    if (security.test(part) || actors.test(part) || news.test(part) || probability.test(part)) return true;
+    if (future.test(part) && !/\b(?:if|unless|conditional|would need|depends on)\b/iu.test(part)) return true;
+  }
+  return false;
 }
 
 /**
@@ -163,11 +245,37 @@ function renamed(text: string, from: string, to: string): string {
  * public status and source. Optional parts and whole sentences make room;
  * nothing is cut mid-sentence and a trading verdict is never discarded.
  */
-export function deskCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string): string {
+export function deskCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string, question?: string): string {
+  if (question && deskQuestionIntent(question) !== "overview") {
+    const story = deskQuestionIntent(question) === "news";
+    return scenarioCaption(e, t, note, story) ?? scenarioCaption(e, e.floor, note, story) ?? "";
+  }
   const html = fitCaption(e, t, note);
   // One sentence too long to fit even alone: the code's read, which always
   // does, rather than a caption that loses its source.
   return html ?? fitCaption(e, e.floor, note) ?? fitCaption(e, { ...e.floor, read: "" }, note) ?? "";
+}
+
+/** Follow-up answers retain confirmation and invalidation before optional prose. */
+function scenarioCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string, story = false): string | null {
+  const subject = safeSubject(e.subject);
+  const fix = (s: string) => renamed(s, e.subject, subject);
+  const head = `<b>${esc(e.kind === "coin" || e.reference?.kind === "comparison" ? subject : "Robinhood Chain market")}</b>`;
+  const tail = `${STANCE_LINE[t.stance]} · ${esc(e.source)}`;
+  const status = note ? publicStatus(fix(note)) : "";
+  let sentences = sentenceParts(fix(t.read));
+  let about = story && e.kind === "coin" ? aboutLine(e) : "";
+  const next = t.watch ? `Confirmation: ${esc(sentence(fix(t.watch)))}` : "";
+  const invalidation = t.invalidation ? `Invalidation: ${esc(sentence(fix(t.invalidation)))}` : "";
+  const build = () => [head, esc(sentences.join(" ")), next, invalidation, about, status ? esc(status) : "", tail].filter(Boolean).join("\n\n");
+  let html = build();
+  while (captionText(html).length > CAPTION_MAX) {
+    if (about) about = "";
+    else if (sentences.length <= 1) return null;
+    else sentences = sentences.slice(0, -1);
+    html = build();
+  }
+  return html;
 }
 
 /** Visible text of caption HTML: what Telegram counts. */
@@ -182,7 +290,7 @@ export function captionText(html: string): string {
 function fitCaption(e: TgDeskEvidence, t: TgDeskThought, note?: string): string | null {
   const subject = safeSubject(e.subject);
   const fix = (s: string) => renamed(s, e.subject, subject);
-  const head = `<b>${esc(e.kind === "coin" ? subject : "Robinhood Chain market")}</b>`;
+  const head = `<b>${esc(e.kind === "coin" || e.reference?.kind === "comparison" ? subject : "Robinhood Chain market")}</b>`;
   const tail = `${STANCE_LINE[t.stance]} · ${esc(e.source)}`;
   let sentences = sentenceParts(fix(t.read));
   const about = e.kind === "coin" ? aboutLine(e) : "";

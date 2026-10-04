@@ -22,6 +22,9 @@ import { readHourlyBars, searchPools } from "./gecko";
 import { DeskBudget, lookupTimeout, type DeskReadOptions } from "./deadline";
 import type { PublicClient } from "viem";
 import { createLoreReader, readCoinLore } from "./lore";
+import { coinIndicatorFloors, coinScenarioBrief, coinScenarioFloors } from "./scenarios";
+import { comparisonBrief, comparisonFloor } from "./comparison";
+import { coinPriceBrief } from "./prices";
 
 export const LIVE_READS: DeskReads = {
   search: (q, options) => searchPools(q, Math.min(8000, options?.timeoutMs ?? 8000), options?.signal),
@@ -49,13 +52,14 @@ export const GROUP_SAYABLE: Sayable = (ticker) => safeSubject(ticker) === ticker
 const MEMO_MS = 60_000;
 
 const keyOf = (ask: TgDeskAsk): string =>
-  ask.kind === "market" ? "market" : "address" in ask ? `a:${ask.address.toLowerCase()}` : `q:${ask.query.toLowerCase().replace(/^\$/, "")}`;
+  ask.kind === "market" ? "market" : ask.kind === "comparison" ? `comparison:${JSON.stringify(ask.queries.map((q) => q.toLowerCase().replace(/^\$/, "")))}` : "address" in ask ? `a:${ask.address.toLowerCase()}` : `q:${ask.query.toLowerCase().replace(/^\$/, "")}`;
 
 const unavailable = (): TgDeskOutcome => ({ ok: false, why: "unavailable" });
 
 function coinOutcome(c: CoinMeasure, chart: Uint8Array | null = null): TgDeskOutcome {
   return { ok: true, evidence: {
-    kind: "coin", subject: c.symbol, header: coinHeader(c), brief: coinBrief(c), floor: coinFloor(c),
+    kind: "coin", subject: c.symbol, reference: { kind: "coin", address: c.token }, header: coinHeader(c),
+    brief: `${coinBrief(c)}\n${coinScenarioBrief(c)}`, priceBrief: coinPriceBrief(c), floor: coinFloor(c), scenarios: coinScenarioFloors(c), indicators: coinIndicatorFloors(c),
     source: `GeckoTerminal ${utcClock(c.observedAtMs)} UTC`, observedAtMs: c.observedAtMs, chart,
     ...(c.lore ? { lore: {
       description: c.lore.description,
@@ -67,8 +71,17 @@ function coinOutcome(c: CoinMeasure, chart: Uint8Array | null = null): TgDeskOut
 
 function marketOutcome(m: MarketMeasure, chart: Uint8Array | null = null): TgDeskOutcome {
   return { ok: true, evidence: {
-    kind: "market", subject: "market", header: marketHeader(m), brief: marketBrief(m), floor: marketFloor(m),
+    kind: "market", subject: "market", reference: { kind: "market" }, header: marketHeader(m), brief: marketBrief(m), floor: marketFloor(m),
     source: `GeckoTerminal ${utcClock(m.observedAtMs)} UTC`, observedAtMs: m.observedAtMs, chart,
+  } };
+}
+
+function comparisonOutcome(a: CoinMeasure, b: CoinMeasure): TgDeskOutcome {
+  const floor = comparisonFloor(a, b);
+  const observedAtMs = Math.min(a.observedAtMs, b.observedAtMs);
+  return { ok: true, evidence: {
+    kind: "market", subject: `${a.symbol} versus ${b.symbol}`, reference: { kind: "comparison", queries: [a.token, b.token] }, header: [], brief: comparisonBrief(a, b), priceBrief: `${coinPriceBrief(a)} ${coinPriceBrief(b)}`, floor,
+    scenarios: { comparison: floor }, source: `GeckoTerminal ${utcClock(observedAtMs)} UTC`, observedAtMs, chart: null,
   } };
 }
 
@@ -82,6 +95,19 @@ export async function lookOnce(ask: TgDeskAsk, reads: DeskReads, render: NonNull
     } catch { return null; }
   };
   try {
+    if (ask.kind === "comparison") {
+      if (ask.queries.length !== 2 || ask.queries.some((q) => typeof q !== "string" || !q.trim() || q.length > 80)) return { ok: false, why: "not-found" };
+      let a: CoinMeasure | undefined;
+      let b: CoinMeasure | undefined;
+      const publish = () => { if (a && b) onPartial?.(comparisonOutcome(a, b)); };
+      const queries = ask.queries.map((query) => /^0x[\da-f]{40}$/i.test(query) ? { kind: "coin" as const, address: query } : { kind: "coin" as const, query });
+      const [first, second] = await Promise.all([
+        measureCoin(queries[0]!, reads, sayable, budget, (c) => { a = c; publish(); }),
+        measureCoin(queries[1]!, reads, sayable, budget, (c) => { b = c; publish(); }),
+      ]);
+      if (!first.ok || !second.ok) return { ok: false, why: !first.ok ? first.why : !second.ok ? second.why : "unavailable" };
+      return comparisonOutcome(first.coin, second.coin);
+    }
     if (ask.kind === "market") {
       const m = await measureMarket(reads, sayable, budget, (partial) => onPartial?.(marketOutcome(partial)));
       if (!m.ok) return { ok: false, why: m.why };

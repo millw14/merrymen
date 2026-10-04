@@ -85,6 +85,13 @@ export interface CoinMeasure {
   lore?: CoinProfile;
 }
 
+/** Fetch time and candle time are different: a fresh HTTP result may contain old activity. */
+export function latestCandle(c: CoinMeasure): { openedUtc: string; forming: boolean } | null {
+  const bar = c.bars.filter((b) => Number.isFinite(b.time) && b.time > 0 && b.time * 1000 <= c.nowMs).sort((a, b) => a.time - b.time).at(-1);
+  if (!bar) return null;
+  return { openedUtc: new Date(bar.time * 1000).toISOString().slice(0, 16).replace("T", " "), forming: c.nowMs < (bar.time + 3600) * 1000 };
+}
+
 export type CoinMeasured = { ok: true; coin: CoinMeasure } | { ok: false; why: "not-found" | "ambiguous" | "unavailable" };
 
 /**
@@ -312,6 +319,8 @@ export function coinBrief(c: CoinMeasure): string {
     return L.join("\n");
   }
   L.push(`HOURLY CHART: ${t.bars} candles covering ${t.hours}h`);
+  const latest = latestCandle(c);
+  L.push(latest ? `- newest hourly candle opened ${latest.openedUtc} UTC; ${latest.forming ? "still forming" : "completed historical candle; a fresh index fetch does not establish a fresh execution chart"}` : "- newest hourly candle time unavailable; execution-chart freshness cannot be confirmed");
   const emaPart = [t.ema20 !== null ? `EMA20 ${fmtPrice(t.ema20)}` : null, t.ema50 !== null ? `EMA50 ${fmtPrice(t.ema50)}` : null].filter(Boolean).join(", ");
   L.push(`- trend: ${t.trend}${emaPart ? ` (price ${fmtPrice(t.last)} vs ${emaPart}${t.ema20Slope6hPct !== null ? `; EMA20 ${fmtPct(t.ema20Slope6hPct)} over 6h` : ""})` : ""}`);
   L.push(`- structure: ${t.structure}`);
@@ -329,7 +338,7 @@ export function coinBrief(c: CoinMeasure): string {
   const lv = (l: { price: number; label: string }) => `${fmtPrice(l.price)} (${l.label})`;
   L.push(`- supports below: ${t.supports.length ? t.supports.map(lv).join(", ") : "none in the window"}`);
   L.push(`- resistances above: ${t.resistances.length ? t.resistances.map(lv).join(", ") : "none in the window (price is at the window high)"}`);
-  if (t.lastBarsPct.length) L.push(`- last ${t.lastBarsPct.length} hourly candles: ${t.lastBarsPct.map((x) => fmtPct(x)).join(", ")} (the last is still forming)`);
+  if (t.lastBarsPct.length) L.push(`- last ${t.lastBarsPct.length} hourly candles: ${t.lastBarsPct.map((x) => fmtPct(x)).join(", ")}${latest?.forming ? " (the last is still forming)" : ""}`);
   return L.join("\n");
 }
 
