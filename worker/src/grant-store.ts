@@ -52,7 +52,7 @@ export type ReplacementStopResult = "stopped" | "absent" | "changed";
 
 export class GrantReplacementConflict extends Error {
   constructor() {
-    super("This permission was stopped for replacement. Sign a fresh permission; the previous session key cannot be re-armed.");
+    super("This permission cannot be armed: its session key was stopped, or permission replacement history is full. Nothing was changed; contact support if a fresh permission is rejected.");
     this.name = "GrantReplacementConflict";
   }
 }
@@ -170,7 +170,10 @@ function retiredSessionKeys(grant: StoredRecord["grant"]): string[] {
     if (typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key)) throw new Error("The stopped permission could not be verified. Nothing was replaced.");
     if (!retired.includes(key)) retired.push(key);
   }
-  if (retired.length > MAX_RETIRED_SESSION_KEYS) throw new Error("Permission replacement history is full. Nothing was replaced; contact support.");
+  // At capacity, the current key can still be stopped in replacementStop
+  // without evicting any historical hash. A fresh put must retain room for
+  // its own eventual stop and refuses when this effective history is full.
+  if (retired.length > MAX_RETIRED_SESSION_KEYS + 1) throw new Error("Permission replacement history is full. Nothing was replaced; contact support.");
   return retired;
 }
 
@@ -188,11 +191,13 @@ function replacementRecord(rec: StoredRecord, expectedAccount?: string, expected
     };
   }
   if (expectedSession !== undefined && stop.sessionKeyAddress.toLowerCase() !== expectedSession.toLowerCase()) return null;
-  const retired = retiredSessionKeys(rec.grant);
-  if (!retired.includes(stop.sessionKeyHash)) {
-    if (retired.length >= MAX_RETIRED_SESSION_KEYS) throw new Error("Permission replacement history is full. Nothing was stopped; contact support.");
+  retiredSessionKeys(rec.grant); // Validate every existing historical fence.
+  const retired = [...new Set(rec.grant.retiredSessionKeyHashes ?? [])];
+  if (!retired.includes(stop.sessionKeyHash) && retired.length < MAX_RETIRED_SESSION_KEYS) {
     retired.push(stop.sessionKeyHash);
   }
+  // A full array stays intact; replacementStop separately fences the current
+  // key. No later put may clear that marker at full effective capacity.
   return {
     ...rec,
     grant: { ...rec.grant, expiresAt: 0, serialized: "", replacementStop: stop, retiredSessionKeyHashes: retired },
@@ -287,7 +292,7 @@ export class FileGrantStore implements GrantStore {
       try { prior = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const retired = prior ? retiredSessionKeys(prior.grant) : [];
-      if (retired.includes(sessionKeyHash(grant.demoSessionPrivateKey))) {
+      if (retired.length >= MAX_RETIRED_SESSION_KEYS || retired.includes(sessionKeyHash(grant.demoSessionPrivateKey))) {
         throw new GrantReplacementConflict();
       }
       // Stamped inside the lock, so `updatedAt` is when the record landed.
@@ -488,9 +493,13 @@ export class PgGrantStore implements GrantStore {
          sealed_session_key = EXCLUDED.sealed_session_key, updated_at = EXCLUDED.updated_at
        WHERE (grants.grant_json->'replacementStop' IS NULL
           OR grants.grant_json->'replacementStop'->>'sessionKeyHash' <> $6)
-         AND (grants.grant_json->'retiredSessionKeyHashes' IS NULL OR
-           (jsonb_typeof(grants.grant_json->'retiredSessionKeyHashes') = 'array'
-            AND jsonb_array_length(grants.grant_json->'retiredSessionKeyHashes') <= $7))
+         AND CASE WHEN grants.grant_json->'retiredSessionKeyHashes' IS NULL
+                    OR jsonb_typeof(grants.grant_json->'retiredSessionKeyHashes') = 'array'
+           THEN jsonb_array_length(COALESCE(grants.grant_json->'retiredSessionKeyHashes', '[]'::jsonb))
+             + CASE WHEN grants.grant_json->'replacementStop'->>'sessionKeyHash' IS NOT NULL
+                      AND NOT COALESCE(grants.grant_json->'retiredSessionKeyHashes' ? (grants.grant_json->'replacementStop'->>'sessionKeyHash'), FALSE)
+               THEN 1 ELSE 0 END < $7
+           ELSE FALSE END
          AND NOT COALESCE(grants.grant_json->'retiredSessionKeyHashes' ? $6, FALSE)
        RETURNING tenant`,
       [rec.tenant, rec.chainId, JSON.stringify(rec.grant), rec.sealedSessionKey, rec.updatedAt, sessionKeyHash(grant.demoSessionPrivateKey), MAX_RETIRED_SESSION_KEYS],

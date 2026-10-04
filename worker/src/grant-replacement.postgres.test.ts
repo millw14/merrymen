@@ -10,7 +10,7 @@ import test from "node:test";
 import { privateKeyToAccount } from "viem/accounts";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { GrantReplacementConflict, MAX_RETIRED_SESSION_KEYS, PgGrantStore } from "./grant-store";
-import { openSecret } from "./store-crypto";
+import { openSecret, sealSecret } from "./store-crypto";
 
 interface Client {
   connect(): Promise<void>;
@@ -161,15 +161,47 @@ test("Postgres: durable replacement stop, fresh-key fencing and concurrent grant
     assert.ok(!(await one.listTenants()).includes(tenant));
   });
 
-  await t.test("bounded history never evicts a previously stopped key", async () => {
+  await t.test("full history can stop its existing key but cannot arm a new key or evict history", async () => {
     const tenant = address(207), account = address(307);
+    await admin.query(`CREATE TABLE IF NOT EXISTS ${schema}.tenant_personal_memory (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL)`);
+    const memory = sealSecret(`personal-memory/v1 ${tenant}\nfixture memory`, Buffer.alloc(32, 31));
+    await admin.query(`INSERT INTO ${schema}.tenant_personal_memory VALUES ($1, $2)`, [tenant, memory]);
     await one.put(tenant, grant(account));
     const fences = Array.from({ length: MAX_RETIRED_SESSION_KEYS }, (_, i) => i.toString(16).padStart(64, "0"));
     await admin.query(`UPDATE ${schema}.grants SET grant_json=jsonb_set(grant_json,'{retiredSessionKeyHashes}',$2::jsonb) WHERE tenant=$1`, [tenant, JSON.stringify(fences)]);
-    await assert.rejects(one.stopForReplacement(tenant, account, OLD_SESSION), /history is full/);
-    assert.equal((await two.get(tenant))?.demoSessionPrivateKey, OLD_KEY);
-    await two.put(tenant, grant(account, FRESH_KEY));
+    assert.equal(await one.stopForReplacement(tenant, account, OLD_SESSION), "stopped");
+    assert.equal(await two.get(tenant), null);
     const row = (await admin.query(`SELECT grant_json FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!;
     assert.deepEqual((row.grant_json as Record<string, unknown>).retiredSessionKeyHashes, fences);
+    const before = (await admin.query(`SELECT * FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!;
+    assert.equal(await two.stopForReplacement(tenant, account, OLD_SESSION), "stopped");
+    await assert.rejects(two.put(tenant, grant(account, FRESH_KEY)), /history is full.*contact support/);
+    assert.deepEqual((await admin.query(`SELECT * FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!, before);
+    assert.equal(await one.get(tenant), null);
+    assert.equal(await one.tenantForAccount(account), tenant);
+    assert.equal((await admin.query(`SELECT sealed FROM ${schema}.tenant_personal_memory WHERE tenant=$1`, [tenant])).rows[0]!.sealed, memory);
+  });
+
+  await t.test("last accepted fresh key remains stoppable and a marker-only legacy fence consumes capacity", async () => {
+    const tenant = address(208), account = address(308);
+    await one.put(tenant, grant(account));
+    const fences = Array.from({ length: MAX_RETIRED_SESSION_KEYS - 2 }, (_, i) => i.toString(16).padStart(64, "0"));
+    await admin.query(`UPDATE ${schema}.grants SET grant_json=jsonb_set(grant_json,'{retiredSessionKeyHashes}',$2::jsonb) WHERE tenant=$1`, [tenant, JSON.stringify(fences)]);
+    await one.stopForReplacement(tenant, account, OLD_SESSION);
+    await two.put(tenant, grant(account, FRESH_KEY));
+    assert.equal((await one.get(tenant))?.demoSessionPrivateKey, FRESH_KEY);
+    assert.equal(await two.stopForReplacement(tenant, account, FRESH_SESSION), "stopped");
+    const nextKey = `0x${"39".repeat(32)}` as `0x${string}`;
+    const before = (await admin.query(`SELECT * FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!;
+    assert.equal(((before.grant_json as Record<string, unknown>).retiredSessionKeyHashes as unknown[]).length, MAX_RETIRED_SESSION_KEYS);
+    await assert.rejects(one.put(tenant, grant(account, nextKey)), GrantReplacementConflict);
+    assert.deepEqual((await admin.query(`SELECT * FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!, before);
+    const data = before.grant_json as { replacementStop: { sessionKeyHash: string }; retiredSessionKeyHashes: string[] };
+    const oldArray = data.retiredSessionKeyHashes.filter(hash => hash !== data.replacementStop.sessionKeyHash);
+    await admin.query(`UPDATE ${schema}.grants SET grant_json=jsonb_set(grant_json,'{retiredSessionKeyHashes}',$2::jsonb) WHERE tenant=$1`, [tenant, JSON.stringify(oldArray)]);
+    const legacy = (await admin.query(`SELECT * FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!;
+    await assert.rejects(two.put(tenant, grant(account, nextKey)), GrantReplacementConflict);
+    assert.deepEqual((await admin.query(`SELECT * FROM ${schema}.grants WHERE tenant=$1`, [tenant])).rows[0]!, legacy);
+    assert.equal(await two.get(tenant), null);
   });
 });

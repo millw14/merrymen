@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
@@ -131,17 +131,49 @@ describe("FileGrantStore durable permission replacement stop", () => {
     await assert.rejects(store.put(address(17), { ...grant(address(107)), retiredSessionKeyHashes: [] } as StoredGrant), /managed by the service/);
   });
 
-  it("does not evict a previous fence when the bounded history is full", async () => {
+  it("a full history can stop the existing key but cannot arm another or evict a previous fence", async () => {
     const tenant = address(18), account = address(108);
+    const soul = path.join(home, "children", tenant, "soul");
+    mkdirSync(soul, { recursive: true });
+    writeFileSync(path.join(soul, "OWNER.md"), "retained owner-memory fixture");
     await store.put(tenant, grant(account));
     const record = JSON.parse(readFileSync(file(tenant), "utf8"));
     const fences = Array.from({ length: MAX_RETIRED_SESSION_KEYS }, (_, i) => i.toString(16).padStart(64, "0"));
     record.grant.retiredSessionKeyHashes = fences;
     writeFileSync(file(tenant), JSON.stringify(record));
-    await assert.rejects(store.stopForReplacement(tenant, account, OLD_SESSION), /history is full/);
-    assert.equal((await store.get(tenant))?.demoSessionPrivateKey, OLD_KEY, "no stop is claimed without a durable fence");
+    assert.equal(await store.stopForReplacement(tenant, account, OLD_SESSION), "stopped", "an already active key stays stoppable at full capacity");
+    assert.equal(await store.get(tenant), null);
     assert.deepEqual(JSON.parse(readFileSync(file(tenant), "utf8")).grant.retiredSessionKeyHashes, fences);
+    const stopped = readFileSync(file(tenant), "utf8");
+    assert.equal(await store.stopForReplacement(tenant, account, OLD_SESSION), "stopped", "last-key stop retry remains idempotent");
+    await assert.rejects(store.put(tenant, grant(account, FRESH_KEY)), /history is full.*contact support/);
+    assert.equal(readFileSync(file(tenant), "utf8"), stopped, "capacity rejection preserves inactive grant and every fence");
+    assert.equal(await store.get(tenant), null);
+    assert.equal(await store.tenantForAccount(account), tenant);
+    assert.equal(readFileSync(path.join(soul, "OWNER.md"), "utf8"), "retained owner-memory fixture");
+  });
+
+  it("the last accepted fresh grant reserves its own stop and a legacy marker counts toward capacity", async () => {
+    const tenant = address(19), account = address(109);
+    await store.put(tenant, grant(account));
+    const record = JSON.parse(readFileSync(file(tenant), "utf8"));
+    record.grant.retiredSessionKeyHashes = Array.from({ length: MAX_RETIRED_SESSION_KEYS - 2 }, (_, i) => i.toString(16).padStart(64, "0"));
+    writeFileSync(file(tenant), JSON.stringify(record));
+    await store.stopForReplacement(tenant, account, OLD_SESSION);
     await store.put(tenant, grant(account, FRESH_KEY));
-    assert.deepEqual(JSON.parse(readFileSync(file(tenant), "utf8")).grant.retiredSessionKeyHashes, fences, "a put preserves every existing fence");
+    assert.equal((await store.get(tenant))?.demoSessionPrivateKey, FRESH_KEY);
+    await store.stopForReplacement(tenant, account, FRESH_SESSION);
+    const stopped = readFileSync(file(tenant), "utf8"), row = JSON.parse(stopped);
+    assert.equal(row.grant.retiredSessionKeyHashes.length, MAX_RETIRED_SESSION_KEYS);
+    const nextKey = `0x${"39".repeat(32)}` as `0x${string}`;
+    await assert.rejects(store.put(tenant, grant(account, nextKey)), GrantReplacementConflict);
+    assert.equal(readFileSync(file(tenant), "utf8"), stopped);
+    // Older marker-only records have 255 array hashes plus one stopped hash.
+    row.grant.retiredSessionKeyHashes = row.grant.retiredSessionKeyHashes.filter((hash: string) => hash !== row.grant.replacementStop.sessionKeyHash);
+    writeFileSync(file(tenant), JSON.stringify(row));
+    const legacy = readFileSync(file(tenant), "utf8");
+    await assert.rejects(store.put(tenant, grant(account, nextKey)), GrantReplacementConflict);
+    assert.equal(readFileSync(file(tenant), "utf8"), legacy);
+    assert.equal(await store.get(tenant), null);
   });
 });
