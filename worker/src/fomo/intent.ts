@@ -149,6 +149,8 @@ interface Word {
   bare: string;
   /** Lowercase, contractions expanded, misspellings of our keywords corrected. */
   canon: string;
+  /** Punctuation right after it ("pine, ...", "...on fomo? robin"): where a vocative can start or end. */
+  pause?: boolean;
 }
 
 const CONTRACTIONS: Readonly<Record<string, string>> = {
@@ -246,13 +248,23 @@ function canonOf(bare: string): string {
   return correctWord(lower);
 }
 
+const PAUSE = /[,;:!?.…|–—]/;
+const TAIL = /[\s"“”'‘’()[\]{}<>,.;:!?¿¡…*~`]+$/;
+
 function words(text: string): Word[] {
   const cleaned = sanitizeText(text.normalize("NFKC"), MAX_TEXT).replace(/[‘’ʼ]/g, "'");
   const out: Word[] = [];
-  for (const piece of cleaned.split(/[\s,;|]+|\/(?!\/)/)) {
+  // Odd entries are the separators: kept only to see where the writer paused.
+  const parts = cleaned.split(/([\s,;|]+|\/(?!\/))/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const piece = parts[i]!;
     const bare = piece.replace(EDGE, "");
+    const prev = out[out.length - 1];
+    // A lone "?", "-" or "—" between words is a pause after the previous one.
+    if (prev && ((!bare && PAUSE.test(piece)) || /^[-–—]+$/.test(bare))) prev.pause = true;
     if (!bare) continue;
-    out.push({ bare, canon: canonOf(bare) });
+    const after = `${TAIL.exec(piece)?.[0] ?? ""}${parts[i + 1] ?? ""}`;
+    out.push(PAUSE.test(after) ? { bare, canon: canonOf(bare), pause: true } : { bare, canon: canonOf(bare) });
   }
   return out;
 }
@@ -412,6 +424,19 @@ const TRADER_DEIXIS = /\b(?:this|that|the same|said|the) (?:trader|guy|person|ac
  * answered with the OWNER's fills.
  */
 const THEY_DEIXIS = /\b(?:they|them|their|theirs|themselves|themself)\b/;
+/**
+ * But "they" is just as often the crowd: "who is buying $WIF and what are
+ * they paying", "are they buying", "who are they", "what are they saying".
+ * It is the remembered trader only when the message asks what one person
+ * did ("what did they buy today?", "have they sold?", "how much did they
+ * make?"), holds ("what are they holding?") or has on record ("show their
+ * trades", "their bags", "their pnl"), and names no coin, crowd or board.
+ * Otherwise it is not pinned on the trader (a wrong subject, and in a group
+ * a needless deflection to DM).
+ */
+const THEY_TRADER = /\b(?:did|have|has|had) they (?:\S+ )?(?:buy|sell|trade|make|lose|take|ape|dump|exit|enter|hold|own|bought|sold|traded|made|lost|took|aped|dumped|exited|entered|held|owned)\b|\bthey (?:just |already |recently |also |still )?(?:bought|sold|traded|aped|dumped|exited|entered|took profits?)\b|\b(?:are|were) they (?:still )?holding\b|\b(?:do|does) they (?:still )?(?:hold|own)\b|\btheirs?(?: own)? (?:trades|trade history|buys|sells|bags|bag|holdings|wallet|positions|portfolio|moves|activity|book|fills|entries|exits|pnl|p&l|stats|performance|track record|win ?rate|history|profile|followers)\b|\bhow (?:are|have|did) they (?:been )?(?:doing|done|performing|performed)\b|\b(?:are|were) they (?:any good|legit|profitable)\b/;
+/** Nouns for many people (crowdQuestion adds boards and "who is buying"): never one remembered trader. */
+const CROWD = /\b(?:people|traders|wallets|whales|holders|buyers|sellers|everyone|everybody|anyone|anybody|others|users|investors|degens|folks|smart money)\b/;
 
 const WINDOW_RULES: ReadonlyArray<readonly [PlanWindow, RegExp]> = [
   ["1h", /\b(?:(?:past|last|previous|this) hour|(?:1|one) ?(?:h|hr|hrs|hour)|60 ?(?:m|min|mins|minutes))\b/],
@@ -691,15 +716,31 @@ function selfRefOf(raw: readonly unknown[] | undefined): SelfRef {
   return { handles, names, words };
 }
 
-/** Greetings that may come before a vocative name ("hey pine, ..."). */
-const GREETING = new Set(["hey", "hi", "hello", "yo", "oi", "ok", "okay", "gm", "sup", "ser"]);
+/** Greetings that make the next word a vocative ("hey pine ..."). */
+const GREETING = new Set(["hey", "hi", "hello", "yo", "oi", "gm", "sup", "ser"]);
+const TIME_WORDS = new Set([
+  "morning", "afternoon", "evening", "night", "tonight", "overnight", "midnight", "today", "yesterday", "weekend",
+  "week", "month", "year", "hour", "day",
+]);
+
+/**
+ * A word the question itself may need, whoever is named after it: the
+ * platform ("on fomo"), a chain ("on sol"), a time ("this morning") or
+ * planner vocabulary. Never dropped as the agent's name.
+ */
+function plannerWord(w: string): boolean {
+  return canonOf(w).startsWith("fomo") || FILLER.has(w) || NOT_NAMES.has(w) || TIME_WORDS.has(w) || chainSlug(w) !== null;
+}
 
 /**
  * The message without the agent's own @handle (anywhere: it addresses us,
- * it is never a subject) and without its name used as a vocative at the
- * start or the end ("pine, theses on $PONS?", "trending on fomo, robin?").
- * A lone name word is dropped only when it is not planner filler, so a name
- * like "One" never eats a real word.
+ * it is never a subject) and without its name used as a VOCATIVE: after a
+ * greeting or followed by a pause at the start ("hey pine ...", "pine, theses
+ * on $PONS?"), or the full name after a pause at the end ("trending on fomo,
+ * robin?"). A bare name inside the question is content, never a vocative:
+ * an agent called Pepe is asked "what are people saying about pepe" about
+ * the coin. Names are owner-chosen or generated ("Morning Wren", "Sol"), so a
+ * name word the question may need (plannerWord) is never dropped on its own.
  */
 function withoutSelf(ws: readonly Word[], self: SelfRef): { ws: Word[]; selfPossessive: boolean } {
   if (self === NO_SELF) return { ws: [...ws], selfPossessive: false };
@@ -714,33 +755,38 @@ function withoutSelf(ws: readonly Word[], self: SelfRef): { ws: Word[]; selfPoss
     }
     out.push(w);
   }
-  const seqs: string[][] = [];
+  // Full names (a one-word name only when the question could not need it),
+  // and the first or last word of a longer name ("pine" for "Pine Heron").
+  const full: string[][] = [];
+  const parts: string[][] = [];
   for (const n of self.names) {
-    seqs.push([...n]);
     if (n.length > 1) {
-      for (const one of [n[0]!, n[n.length - 1]!]) if (one.length >= 3 && !FILLER.has(one)) seqs.push([one]);
-    } else if (FILLER.has(n[0]!)) {
-      seqs.pop();
+      full.push([...n]);
+      for (const one of [n[0]!, n[n.length - 1]!]) if (one.length >= 3 && !plannerWord(one)) parts.push([one]);
+    } else if (!plannerWord(n[0]!)) {
+      full.push([...n]);
     }
   }
-  seqs.sort((a, b) => b.length - a.length);
+  const leading = [...full, ...parts].sort((a, b) => b.length - a.length);
+  full.sort((a, b) => b.length - a.length);
   // A ticker-shaped word ("ROBIN theses?") is a coin before it is a vocative.
   const nameAt = (w: Word | undefined, x: string): boolean => !!w && w.bare.toLowerCase() === x && !/^[A-Z0-9]{2,}$/.test(w.bare);
-  const at = (list: readonly Word[], from: number): number => {
+  const at = (list: readonly Word[], from: number, seqs: readonly string[][]): number => {
     for (const q of seqs) {
       if (from + q.length > list.length) continue;
       if (q.every((x, k) => nameAt(list[from + k], x))) return q.length;
     }
     return 0;
   };
-  // Leading: "pine ...", "hey pine ...". Something must be left to plan.
+  // Leading: "hey pine ...", "pine, ...". Something must be left to plan.
   const greet = out.length > 1 && GREETING.has(out[0]!.canon) ? 1 : 0;
-  const lead = at(out, greet);
-  if (lead > 0 && out.length > greet + lead) out = out.slice(greet + lead);
-  // Trailing: "..., pine?"
-  for (const q of seqs) {
-    if (out.length > q.length && q.every((x, k) => nameAt(out[out.length - q.length + k], x))) {
-      out = out.slice(0, out.length - q.length);
+  const lead = at(out, greet, leading);
+  if (lead > 0 && out.length > greet + lead && (greet > 0 || out[lead - 1]!.pause)) out = out.slice(greet + lead);
+  // Trailing: "..., pine heron?" — the full name, after a pause.
+  for (const q of full) {
+    const from = out.length - q.length;
+    if (from > 0 && out[from - 1]!.pause && at(out, from, [q]) === q.length) {
+      out = out.slice(0, from);
       break;
     }
   }
@@ -805,6 +851,14 @@ interface Signals {
   tokenCount: number;
   memoryTrader: boolean;
   memoryToken: boolean;
+  /** About many people or a board (crowdQuestion): never the remembered trader by default. */
+  crowd: boolean;
+}
+
+/** "What are people holding?", "who is the top trader?", "which wallets sold?": a crowd or a board, not one trader. */
+function crowdQuestion(c: string): boolean {
+  return CROWD.test(c) || COHORT.test(c) || SELLERS.test(c) || BUYERS.test(c) || HOLDERS.test(c) || GLOBAL_FLOW.test(c)
+    || RANK_TRADERS.test(c) || RANK_TOKENS.test(c);
 }
 
 function detectIntent(s: Signals): Detected | null {
@@ -825,7 +879,7 @@ function detectIntent(s: Signals): Detected | null {
 
   // A specific third-party trader: their words, holdings, trades or profile.
   const traderTopic = s.traderSubject || s.traderDeixis
-    || (s.memoryTrader && !s.memoryToken && s.tokenCount === 0 && (HOLDINGS.test(c) || TRADER_CONTEXT.test(c)));
+    || (s.memoryTrader && !s.memoryToken && s.tokenCount === 0 && !s.crowd && (HOLDINGS.test(c) || TRADER_CONTEXT.test(c)));
   if (traderTopic) {
     // "This trader" names a third party as clearly as a handle does; "he"
     // does not, and neither does a bare "X's bags" (the agent's own name, a
@@ -932,8 +986,11 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const deixisText = c.replace(TIME_PHRASES, " ");
   const tokenDeixis = TOKEN_DEIXIS.test(deixisText);
   const tokenDeixisWeak = TOKEN_DEIXIS_WEAK.test(deixisText);
-  const traderDeixis = TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis
-    || (memTraders.length > 0 && !tokenDeixis && THEY_DEIXIS.test(deixisText));
+  const crowd = crowdQuestion(c);
+  // "they" with a trader remembered; it is that trader only in a trader-shaped question (THEY_TRADER).
+  const theyPronoun = memTraders.length > 0 && THEY_DEIXIS.test(deixisText);
+  const theyTrader = theyPronoun && !tokenDeixis && ex.tokens.length === 0 && !crowd && !/\bwho\b/.test(c) && THEY_TRADER.test(c);
+  const traderDeixis = TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader;
   // Position management on the owner's own holding stays with the ledger and
   // the answer loop unless the message itself is about Fomo or a third party
   // ("did he take profit?"). A watch ("should we keep an eye on it?") is not
@@ -961,6 +1018,7 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     tokenCount: ex.tokens.length,
     memoryTrader: memTraders.length > 0,
     memoryToken: memTokens.length > 0,
+    crowd,
   });
   // A continuation: nothing left once subjects, time, chain and filler are
   // removed, and something substantive was said ("and this week?", "refresh it").
@@ -979,7 +1037,9 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     const context = detected.inherent || fomo || cohort || (usable && history) || (history && short && explicitCount === 0);
     if (!context) return null;
     intent = detected.intent;
-  } else if (history && (pureFollowUp || (correction && short))) {
+  } else if (history && (pureFollowUp || (correction && short))
+    // "are they buying?" after a trader answer: a "they" that is not the trader does not continue a trader question.
+    && !(theyPronoun && !theyTrader && TRADER_INTENTS.has(memory!.lastIntent!))) {
     intent = memory!.lastIntent!;
     usesMemory.push("intent");
   } else if (fomo && ex.tokens.length > 0) {
@@ -1040,7 +1100,8 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   // out" are not Fomo coin watches at all (a PC watcher, an order, a
   // trader): not planned, so the existing command path still gets them.
   if (mutation) {
-    if (ex.traders.length > 0 || traderDeixis) return null;
+    // "watch them" with a trader remembered is about that trader (or a crowd), never a coin watch.
+    if (ex.traders.length > 0 || traderDeixis || (theyPronoun && !tokenDeixis)) return null;
     if (explicitTokens.length === 0) {
       if (watchResidue(ws, ex.consumed).length > 0) return null;
       if (!tokenDeixis) return ask(intent === "watch" ? ASK_WATCH : ASK_UNWATCH);

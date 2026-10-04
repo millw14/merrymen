@@ -250,7 +250,8 @@ const FINDINGS: FindingRow[] = [
   { id: "C8", self: PINE, text: "@pinebot what is @CryptoKaleo holding?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
   { id: "C8", self: PINE, text: "pine, what are the theses on $PONS?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PONS" }]] },
   { id: "C8", self: PINE, text: "theses on $PONS on fomo, pine heron?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PONS" }]] },
-  { id: "C8", self: PINE, mem: "token", text: "pine refresh it", intent: "token-theses", calls: [["fomo_get_token_theses", { ...RH, freshness: "force-refresh" }]] },
+  { id: "C8", self: PINE, mem: "token", text: "pine, refresh it", intent: "token-theses", calls: [["fomo_get_token_theses", { ...RH, freshness: "force-refresh" }]] },
+  { id: "C8", self: PINE, mem: "token", text: "hey pine refresh it", intent: "token-theses", calls: [["fomo_get_token_theses", { ...RH, freshness: "force-refresh" }]] },
   { id: "C8", self: PINE, mem: "token", text: "@pinebot and the sellers?", intent: "token-sellers", calls: [["fomo_get_token_activity", { ...RH, side: "sell" }]] },
   { id: "C8", self: ROBIN, text: "ROBIN theses on fomo?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "ROBIN" }]] },
 
@@ -335,10 +336,69 @@ const FINDINGS: FindingRow[] = [
   // A third party's profit-taking is still a question about that trader, not the owner's position.
   { id: "C13", mem: "trader", text: "did he take profit?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: USER }]] },
   { id: "C13", mem: "token", text: "did @CryptoKaleo take profit on it?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: "CryptoKaleo" }]] },
+
+  // R9: after a trader answer, "they" is that trader only in a trader-shaped question. A coin or crowd
+  // question that says "they" is answered about the coin or the crowd, never with the remembered trader.
+  { id: "R9", mem: "trader", text: "who is buying $WIF and how much are they paying", intent: "token-buyers", calls: [["fomo_get_token_activity", { token: "WIF", side: "buy" }]] },
+  { id: "R9", mem: "both", text: "who is buying $WIF and how much are they paying", intent: "token-buyers", calls: [["fomo_get_token_activity", { token: "WIF", side: "buy" }]] },
+  { id: "R9", mem: "trader", text: "which wallets are buying $WIF and what are they paying", intent: "token-buyers", calls: [["fomo_get_token_activity", { token: "WIF", side: "buy" }]] },
+  { id: "R9", mem: "trader", text: "who is selling $PEPE and why are they selling?", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", side: "sell" }]] },
+  { id: "R9", mem: "trader", text: "who sold $PEPE and how much did they make?", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", side: "sell" }]] },
+  { id: "R9", mem: "trader", text: "what are people saying about $PEPE, are they bullish?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PEPE" }]] },
+  { id: "R9", mem: "trader", text: "who are the top traders and what are they buying", intent: "rankings-traders", calls: [["fomo_get_rankings", { board: "traders" }]] },
+  { id: "R9", mem: "both", text: "who are the top traders and what are they buying", intent: "rankings-traders", calls: [["fomo_get_rankings", { board: "traders" }]] },
+  { id: "R9", mem: "trader", text: "what did the top traders buy and are they still holding?", intent: "rankings-traders", calls: [["fomo_get_rankings", { board: "traders" }]] },
+  { id: "R9", mem: "trader", text: "who holds $WIF and are they in profit?", intent: "token-activity", calls: [["fomo_get_token_activity", { token: "WIF" }]] },
+  { id: "R9", mem: "trader", text: "who is the top trader", intent: "rankings-traders", calls: [["fomo_get_rankings", { board: "traders" }]] },
+  { id: "R9", mem: "trader", text: "what are they saying about it", intent: "token-theses", clarify: "Which coin do you mean? Send its ticker or contract address." },
+  { id: "R9", mem: "trader", text: "are whales selling $PEPE? why are they dumping" },
+  { id: "R9", mem: "trader", text: "what are people holding and are they in profit" },
+  { id: "R9", mem: "trader", text: "are they buying" },
+  { id: "R9", mem: "trader", text: "are they buying it?" },
+  { id: "R9", mem: "trader", text: "who are they" },
+  { id: "R9", mem: "trader", text: "watch them" },
+  // Not a third party's trade: the owner's own position, which stays with the ledger.
+  { id: "R9", mem: "trader", text: "should we take profit? they are selling" },
+  // Trader-shaped "they" still means the remembered trader.
+  { id: "R9", mem: "trader", text: "have they sold?", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER, side: "sell" }]] },
+  { id: "R9", mem: "trader", text: "what's in their wallet", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: USER }]] },
+  { id: "R9", mem: "trader", text: "are they still holding?", intent: "trader-holdings", calls: [["fomo_get_trader_context", { trader: USER }]] },
+  { id: "R9", mem: "both", text: "are they any good?", intent: "trader-context", calls: [["fomo_get_trader_context", { trader: USER }]] },
+  { id: "R9", mem: "trader", text: "show their trades this week", intent: "trader-activity", calls: [["fomo_get_trader_activity", { trader: USER, window: "7d" }]] },
+];
+
+/**
+ * R10: the agent's name is dropped only as a vocative ("hey pepe ...", "pepe, ...", "..., pepe?"),
+ * never as a bare word of the question. Owners pick coin names ("Pepe", "Doge"), the generator
+ * makes time words ("Morning Wren", "Evening Hare") and a bot's Telegram name may be "Fomo Bot".
+ */
+const NAME_ROWS: FindingRow[] = [
+  // The name IS the coin asked about.
+  { id: "R10", self: ["Pepe"], mem: "token", text: "what are people saying about pepe", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PEPE" }]] },
+  { id: "R10", self: ["Pepe"], text: "theses on pepe", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PEPE" }]] },
+  { id: "R10", self: ["Pepe", "@pepe_bot"], text: "PEPE theses on fomo?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "PEPE" }]] },
+  { id: "R10", self: ["Doge"], mem: "token", text: "what are people saying about doge", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "DOGE" }]] },
+  { id: "R10", self: ["Bonk Bot"], text: "theses on bonk", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "BONK" }]] },
+  { id: "R10", self: ["Swift Hawk"], mem: "token", text: "what are people saying about hawk", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "HAWK" }]] },
+  { id: "R10", self: ["Wif"], text: "what are the theses on wif on fomo", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "WIF" }]] },
+  // The same names as vocatives are dropped.
+  { id: "R10", self: ["Pepe"], text: "pepe, what are the theses on $WIF?", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "WIF" }]] },
+  { id: "R10", self: ["Pepe"], text: "hey pepe theses on $WIF", intent: "token-theses", calls: [["fomo_get_token_theses", { token: "WIF" }]] },
+  { id: "R10", self: ["Pepe"], mem: "token", text: "what are people saying about it, pepe?", intent: "token-theses", calls: [["fomo_get_token_theses", RH]] },
+  { id: "R10", self: ["Doge"], mem: "token", text: "doge: who is selling it?", intent: "token-sellers", calls: [["fomo_get_token_activity", { ...RH, side: "sell" }]] },
+  // The platform, a chain or a time word in the name is never dropped.
+  { id: "R10", self: ["Fomo Bot", "@fomo_bot"], text: "trending on fomo", intent: "rankings-tokens", calls: [["fomo_get_rankings", { board: "trending-tokens" }]] },
+  { id: "R10", self: ["Fomo"], text: "what's trending on fomo, fomo?", intent: "rankings-tokens", calls: [["fomo_get_rankings", { board: "trending-tokens" }]] },
+  { id: "R10", self: ["Sol"], mem: "token", text: "who is buying on sol", intent: "token-activity", calls: [["fomo_get_token_activity", { chain: "solana", side: "buy" }]] },
+  { id: "R10", self: ["Morning Wren"], text: "what did the top traders buy this morning", intent: "rankings-traders", calls: [["fomo_get_rankings", { board: "traders", window: "24h" }]] },
+  { id: "R10", self: ["Evening Hare"], mem: "token", text: "who sold this evening", intent: "token-activity", calls: [["fomo_get_token_activity", { side: "sell" }]] },
+  { id: "R10", self: ["Evening Hare"], mem: "token", text: "who sold this evening, evening hare?", intent: "token-activity", calls: [["fomo_get_token_activity", { side: "sell" }]] },
+  // A bare name at the start is content too, so this is not a pure follow-up (the comma form above is).
+  { id: "R10", self: PINE, mem: "token", text: "pine refresh it" },
 ];
 
 describe("review findings, planned", () => {
-  for (const row of FINDINGS) {
+  for (const row of [...FINDINGS, ...NAME_ROWS]) {
     const label = `${row.id} ${row.mem ? `[${row.mem}] ` : ""}${row.self ? `(self ${row.self[0]}) ` : ""}${JSON.stringify(row.text)}`;
     it(label, () => {
       const plan = classifyFomoQuestion(row.text, { memory: row.mem ? FINDING_MEMORIES[row.mem]! : null, now: NOW, ...(row.self ? { selfNames: row.self } : {}) });
@@ -373,6 +433,28 @@ describe("review findings, planned", () => {
     const p2 = classifyFomoQuestion("refresh it", { memory: step.memory, now: NOW + 30_000 });
     assert.ok(p2);
     assert.deepEqual(p2.toolCalls, [{ tool: "fomo_get_token_activity", args: { token: "PEPE", chain: "base", side: "sell", freshness: "force-refresh" } }]);
+  });
+
+  it("R9: a crowd question that says 'they' neither uses nor re-remembers the last trader, so the next one is not captured either", () => {
+    let memory: SubjectMemory | null = null;
+    let now = NOW;
+    const p0 = classifyFomoQuestion("what is @alice holding on fomo?", { memory, now });
+    assert.ok(p0);
+    memory = applyResult(applyPlan(memory, p0, now).memory, {
+      subjects: [{ kind: "trader", trader: { userId: USER, handle: "alice", displayName: null, verified: null } }],
+      requestId: "r0",
+    }, now);
+    for (const [text, tool, args] of [
+      ["who is buying $WIF and how much are they paying", "fomo_get_token_activity", { token: "WIF", side: "buy" }],
+      ["who are the top traders and what are they buying", "fomo_get_rankings", { board: "traders" }],
+    ] as const) {
+      now += 60_000;
+      const p = classifyFomoQuestion(text, { memory, now });
+      assert.ok(p, text);
+      assert.deepEqual(p.toolCalls, [{ tool, args }], text);
+      memory = applyPlan(memory, p, now).memory;
+      assert.ok(!memory.subjects.some((s) => s.kind === "trader"), `${text}: remembered ${JSON.stringify(memory.subjects)}`);
+    }
   });
 });
 
