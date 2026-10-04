@@ -164,7 +164,11 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     process.stdout.write(plainSummary(preview));
   } finally { await client.end().catch(() => {}); }
 }
-if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
+function invokedDirectly() {
+  try { return !!process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url); }
+  catch { return false; }
+}
+if (invokedDirectly()) {
   main().catch(error => {
     // Driver/RPC messages may contain credential-bearing URLs. Print only runner-owned fixed codes.
     const allowed = new Set(['invalid-arguments', 'database-url-required', 'invalid-database-url',

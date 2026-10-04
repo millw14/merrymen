@@ -54,6 +54,15 @@ function pgFixture({ hasTime = false, hasNonce = true, isolation = 'repeatable r
 }
 
 describe('standalone preview-only runner', () => {
+  it('imports as a library from stdin without treating the dash as a CLI filename', async () => {
+    const url = new URL('./preview.mjs', import.meta.url).href;
+    const program = `process.argv[1] = '-'; const { parseArgs } = await import(${JSON.stringify(url)}); console.log(parseArgs(['--help']).help);`;
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', program], {
+      env: { ...process.env, DATABASE_URL: 'DO-NOT-CONNECT' },
+    });
+    assert.equal(stdout.trim(), 'true');
+    assert.equal(stderr, '');
+  });
   it('the actual CLI executes under /tmp realpath aliases and help never loads or opens a database', async () => {
     const path=fileURLToPath(new URL('./preview.mjs',import.meta.url));
     const invocation=path.replace('/private/tmp/','/tmp/');
