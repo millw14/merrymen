@@ -63,10 +63,10 @@
  * ONE BUDGET OVER ALL OF IT, MERRYMEN_DRAIN_BUDGET_MS (default 50s), set
  * inside the platform's draining time so this process, not the platform,
  * decides how the stop ends — and cut to that time when the platform's
- * variable says it (drainBudgetMs). Every step's cap is cut to what is left of it,
- * less a reserve for the receipt and the leases. And a BACKSTOP: when the
- * budget is spent with the drain still running, the receipt says where, and
- * the process exits 1. What was interrupted then is interrupted as a crash
+ * variable says it (drainBudgetMs). Every step's cap is cut to what is left
+ * of it, less a reserve for the receipt and the leases. And a BACKSTOP: when
+ * the budget is spent with the drain still running, the receipt says where,
+ * and the process exits 1. What was interrupted then is interrupted as a crash
  * interrupts it — under its barriers, which is what they are for.
  *
  * THIS MODULE IS THE SEQUENCE AND THE CLOCK. It knows nothing of tenants;
@@ -362,8 +362,8 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
   const homes = plan.stop();
   receipt.finalPass.homes = homes.length;
 
-  // 2. ALL AT ONCE, under the one allowance. They are independent of each
-  // other, and run in turn, a first hook that hung spent the allowance and
+  // 2. ALL AT ONCE, under the one allowance: the hooks are independent of
+  // each other. Run in turn, a first hook that hung spent the allowance, and
   // every hook after it was never started at all.
   await step("hooks", () => {
     const unfinished = new Set(plan.beforeChildren);
