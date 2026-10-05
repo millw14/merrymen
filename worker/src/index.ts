@@ -240,7 +240,7 @@ import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
-import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply } from "./exec-backoff";
+import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
@@ -3216,6 +3216,15 @@ async function main() {
    * every arm, beside the map above. See exec-backoff.ts.
    */
   const execBackoff = new ExecBackoff();
+  /**
+   * The hold on `intent`, asked only while it would go out LIVE. A hold is
+   * about the checks before a live signature, and nothing else reaches them:
+   * on paper, or refused outright (live trading switched off, no gas), the
+   * intent meets its own rail's answer and not a gas rule left over from
+   * before the switch. The holds stay, and apply again if the rail comes back.
+   */
+  const liveHold = (intent: TradeIntent): Hold | null =>
+    active && execMode().mode === "live" ? execBackoff.held(intent, active.limits, Date.now()) : null;
   /**
    * Gated entries (entry-gates.ts) whose one rejected row the wall has written
    * this arm: every repeat of the same (venue, token, rule) is withheld before
@@ -8181,15 +8190,15 @@ async function main() {
 
     // ── HELD, FOR A WHILE, AFTER OUR OWN CHECKS REFUSED IT ───────────────
     // The expiring sibling of the block above (exec-backoff.ts), read in the
-    // same place for the same reason. Only a buy can be held — `held` answers
-    // null for every exit, whatever is recorded — and what reaches here has a
-    // decision already: an owner's or the Brain's order, or a strategist
+    // same place for the same reason. Only a buy bound for the live rail can
+    // be held — `liveHold` answers null for every exit, whatever is recorded —
+    // and what reaches here has a decision already: an owner's or the Brain's order, or a strategist
     // intent that journaled its own (a deterministic one with no decision was
     // skipped in the tick, before it got one). So this is never a silent
     // return: the row is a rejection carrying the rule that started the hold,
     // with the legs the refusal's own row had, and an order's reply says when
     // asking again can help (orderHeldReply).
-    const backedOff = execBackoff.held(intent, limits, Date.now());
+    const backedOff = liveHold(intent);
     if (backedOff && verdict.ok) {
       await recordTrade({
         agent_id: agentId,
@@ -13057,7 +13066,7 @@ async function main() {
       // journaled carries its decision, and goes on to processIntentLocked,
       // which books it `rejected` under the held rule rather than leaving
       // that decision without an outcome.
-      if (entry && !intent.decisionId && execBackoff.held(intent, active.limits, Date.now())) continue;
+      if (entry && !intent.decisionId && liveHold(intent)) continue;
       // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
       //
       // An entry into a coin a group nominated must also win a group-entry
@@ -13176,7 +13185,7 @@ async function main() {
       const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
       // The same hold as the strategy loop above. A class entry never has a
       // decision yet, and `gas-absurd` on the sealed vault holds the route.
-      if (entry && !intent.decisionId && execBackoff.held(intent, active.limits, Date.now())) continue;
+      if (entry && !intent.decisionId && liveHold(intent)) continue;
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);
@@ -13546,10 +13555,9 @@ async function main() {
     intent: TradeIntent,
     outcome: { status: TradeRow["status"]; rejectRule?: string } | null,
   ): Partial<OrderReply> {
-    if (!active || outcome?.status !== "rejected") return {};
-    const now = Date.now();
-    const held = execBackoff.held(intent, active.limits, now);
-    return held && held.rule === outcome.rejectRule ? no(heldReply(held, now)) : {};
+    if (outcome?.status !== "rejected") return {};
+    const held = liveHold(intent);
+    return held && held.rule === outcome.rejectRule ? no(heldReply(held, Date.now())) : {};
   }
 
   /**
