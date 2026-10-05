@@ -539,7 +539,8 @@ function verdictOf(input: AutonomyInput): Verdict {
  *
  * THE TIME IS IN THE SENTENCE because "not running" without a "since" cannot be
  * told apart from a blip. UTC and no locale, so the chat and every screen quote
- * the same instant.
+ * the same instant. The desk and the desktop render it under the pill
+ * (web/src/terminal/worker-stale.ts `notRunningNote`).
  */
 function notRunning(input: AutonomyInput, rule: RefuseRule | null, since: number): Verdict {
   return {

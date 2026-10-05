@@ -41,6 +41,7 @@ import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
 import { EnergyNote } from "../EnergyNote";
 import { RecoveryNotice } from "../RecoveryNotice";
 import { ownerTradeEmptyTitle, pausedRecovery, recoveryAutonomy } from "../recovery-view";
+import { notRunningNote } from "../worker-stale";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
@@ -543,6 +544,7 @@ export function Agent({
    * renewal while trading is paused.
    */
   const renewal = displayedAutonomy.rule === "expired" && displayedAutonomy.action ? displayedAutonomy : null;
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <div className="desk-page">
       <RecoveryNotice recovery={recovery}/>
@@ -591,6 +593,15 @@ export function Agent({
               Start live trading →
             </button>
           )}
+        </section>
+      )}
+      {/* SINCE WHEN IT HAS BEEN QUIET, under the NOT RUNNING pill. The neutral
+          panel: nothing here is the owner's to fix, and a button would be the
+          CHECKING loop again. BELOW any blocker, because that panel still names
+          something only the owner can do. Null during a hold (worker-stale.ts). */}
+      {silence && (
+        <section className="desk-note" role="status">
+          <p>{silence}</p>
         </section>
       )}
       {/* A KEY ABOUT TO EXPIRE, while it still works. The neutral panel, never

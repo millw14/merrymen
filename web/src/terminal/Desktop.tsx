@@ -35,6 +35,7 @@ import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
 import { performanceOf } from "./agent-performance";
 import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { notRunningNote } from "./worker-stale";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -405,6 +406,7 @@ export function DesktopPortfolio({
 }) {
   const recovery = pausedRecovery(mine.recovery);
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
       <section>
@@ -479,6 +481,9 @@ export function DesktopPortfolio({
             </button>
           </div>
         )}
+        {/* SINCE WHEN IT HAS BEEN QUIET: the desk's sentence, as a line. No
+            link — nothing an owner signs or sends restarts a process. */}
+        {silence && <p className="meta">{silence}</p>}
         {/* A KEY ABOUT TO EXPIRE: a line and a link, never the banner above —
             nothing is wrong yet. Never beside that banner either (the verdict
             drops the chip wherever a renewal is already offered), and never

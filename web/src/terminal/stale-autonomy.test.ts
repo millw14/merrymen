@@ -26,7 +26,7 @@ import type { ChatController } from "./chat-controller";
 import { DesktopPortfolio } from "./Desktop";
 import type { LiveMine } from "./live";
 import { Agent } from "./screens/Agent";
-import { WORKER_STALE_MARGIN_SEC, beatSeconds, workerSilentSince, workerStale } from "./worker-stale";
+import { WORKER_STALE_MARGIN_SEC, beatSeconds, notRunningNote, workerSilentSince, workerStale } from "./worker-stale";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 
@@ -210,6 +210,51 @@ describe("the desk says NOT RUNNING without losing a remedy", () => {
   it("an owner-action verdict that does NOT predate the signature is still shown in full", () => {
     const page = desk(mineFor({ mode: "paper", liveBlocker: "dead-policy", workerSilentSince: SILENT }), "dead-policy", false);
     assert.match(page.querySelector(".desk-blocked")!.textContent!, /re-sign my permission/);
+  });
+
+  it("SAYS SINCE WHEN, on the desk and the desktop — a blip and an outage are not the same news", () => {
+    // SILENT is six hours before NOW: 2026-10-05 06:00 UTC.
+    const since = /^Your agent has not reported since 2026-10-05 06:00 UTC, so it is not placing trades right now\.$/;
+    const mine = mineFor({ mode: "live", liveBlocker: null, workerSilentSince: SILENT });
+    const note = [...desk(mine, null).querySelectorAll(".desk-note")].find((n) => /not reported/.test(n.textContent!));
+    assert.ok(note, "the desk says when it went quiet");
+    assert.match(note.textContent!, since);
+    assert.equal(note.querySelector("button"), null, "nothing an owner signs or sends restarts a process");
+    const line = [...portfolio(mine).querySelectorAll(".meta")].find((n) => /not reported/.test(n.textContent!));
+    assert.ok(line, "and so does the desktop");
+    assert.match(line.textContent!, since);
+  });
+
+  it("the time sits BELOW a remedy, never in place of one", () => {
+    const page = desk(mineFor({ mode: "paper", liveBlocker: "no-gas", realCashUsd: 0, workerSilentSince: SILENT }), "no-gas");
+    const panels = [...page.querySelectorAll(".desk-blocked, .desk-note")].map((n) => n.textContent!);
+    const funding = panels.findIndex((t) => /no ETH/.test(t));
+    const quiet = panels.findIndex((t) => /not reported/.test(t));
+    assert.ok(funding >= 0 && quiet > funding, "the funding panel first, then when it went quiet");
+  });
+
+  it("no time for a running agent, and none during a hold", () => {
+    const running = mineFor({ mode: "live", liveBlocker: null });
+    assert.doesNotMatch(desk(running, null).body.textContent!, /not reported/);
+    assert.doesNotMatch(portfolio(running).body.textContent!, /not reported/);
+    // The hold explains the silence, and RecoveryNotice says so; a second,
+    // scarier sentence about the same silence would contradict it.
+    const silentHeld = { ...mineFor({ mode: "live", liveBlocker: null, workerSilentSince: SILENT }), recovery: held };
+    assert.doesNotMatch(desk(silentHeld, null).body.textContent!, /not reported/);
+    assert.doesNotMatch(portfolio(silentHeld).body.textContent!, /not reported/);
+  });
+
+  it("the note is the verdict's own sentence, and only NOT RUNNING has one", () => {
+    assert.equal(notRunningNote({ state: "not-running", reason: "your agent has not reported since X" }), "Your agent has not reported since X.");
+    for (const a of [
+      { state: "live", reason: null },
+      { state: "checking", reason: "Trading remains paused pending reconciliation." },
+      { state: "not-running", reason: null },
+      null,
+      undefined,
+    ]) {
+      assert.equal(notRunningNote(a), null, JSON.stringify(a));
+    }
   });
 });
 

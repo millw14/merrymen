@@ -126,3 +126,21 @@ export function workerSilentSince(
   if (status?.workerStale !== true) return null;
   return beatSeconds(status.workerAliveAt);
 }
+
+/**
+ * WHEN IT WENT QUIET, as the desk and the desktop say it under the pill — the
+ * verdict's own sentence, made one; null for any other state.
+ *
+ * The pill alone said NOT RUNNING and nothing else, so an owner could not tell
+ * a two-minute blip from a six-hour outage, though the verdict had the time all
+ * along (autonomy.ts `notRunning`). The words stay the verdict's, so the screen
+ * and anything else that quotes `reason` give the same instant.
+ *
+ * Read from the DISPLAYED verdict: a recovery hold replaces the state, so a
+ * held tenant is told about the hold and never about a silence the hold
+ * explains.
+ */
+export function notRunningNote(a: { state: string; reason: string | null } | null | undefined): string | null {
+  if (a?.state !== "not-running" || !a.reason) return null;
+  return `${a.reason.charAt(0).toUpperCase()}${a.reason.slice(1)}.`;
+}
