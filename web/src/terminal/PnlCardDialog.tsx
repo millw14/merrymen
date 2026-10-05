@@ -1,7 +1,24 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-type CardState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "image"; url: string };
+type CardState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "image"; url: string; blob: Blob };
+
+/** Feature-detect the system share sheet for this exact PNG: desktop browsers
+ *  that share links but not files (or no share sheet at all) get no button. */
+function canShareFile(file: File | null): file is File {
+  if (!file || typeof navigator.share !== "function" || typeof navigator.canShare !== "function") return false;
+  try { return navigator.canShare({ files: [file] }); } catch { return false; }
+}
+
+/** The owner closing the share sheet is a choice, not a failure to report.
+ *  Compared by name so a rejection from another realm still matches. */
+const dismissed = (error: unknown) => (error as { name?: unknown } | null)?.name === "AbortError";
+/** A second Share press while the first sheet is still open (desktop pickers
+ *  are not always modal) is refused with InvalidStateError, because a page may
+ *  have only one share pending. That sheet is still open and working, so the
+ *  refusal is not a failure to report either. */
+const shareDismissed = (error: unknown) =>
+  dismissed(error) || (error as { name?: unknown } | null)?.name === "InvalidStateError";
 
 /** Kept in memory, never cached or stored alongside the wallet. */
 export function PnlCardDialog({ tradeId, symbol, onClose }: {
@@ -15,6 +32,9 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<CardState>({ kind: "loading" });
   const [loaded, setLoaded] = useState(false);
+  const [notice, setNotice] = useState<{ url: string; text: string }>();
+  const presses = useRef(0);
+  const reported = useRef(0);
 
   useEffect(() => {
     const node = dialog.current!;
@@ -52,7 +72,7 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
         const blob = await response.blob();
         if (disposed) return;
         objectUrl = URL.createObjectURL(blob);
-        setState({ kind: "image", url: objectUrl });
+        setState({ kind: "image", url: objectUrl, blob });
       } catch (error) {
         if (disposed) return;
         setState({ kind: "error", message: timedOut
@@ -71,6 +91,41 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   }, [tradeId, attempt]);
 
   const filename = `${symbol.replace(/[^a-z0-9_-]/gi, "").slice(0, 40) || "trade"}-${tradeId}-pnl.png`;
+  // Share and Copy hand the same in-memory PNG to the browser, and only when
+  // the owner presses them. Each is offered only where the browser can take a
+  // file; Download stays the fallback that works everywhere.
+  const file = useMemo(() => state.kind === "image" ? new File([state.blob], filename, { type: "image/png" }) : null, [state, filename]);
+  const shareable = useMemo(() => canShareFile(file), [file]);
+  const copyable = typeof ClipboardItem === "function" && typeof navigator.clipboard?.write === "function";
+  const offer = (run: () => Promise<void>, failure: string, success = "", quiet = dismissed) => {
+    if (state.kind !== "image") return;
+    // The outcome names the preview it was about, so a press that settles
+    // after a retry or a changed trade never reports on the newer image.
+    const { url } = state;
+    // Presses are numbered, and an older press that settles after a newer one
+    // has already reported is dropped: two quick Copy presses whose first
+    // write fails last still end on "Image copied." A press that reports
+    // nothing (a dismissed sheet) does not hide the outcome of the one before.
+    const press = ++presses.current;
+    const report = (text: string) => {
+      if (press < reported.current) return;
+      reported.current = press;
+      setNotice({ url, text });
+    };
+    setNotice(undefined);
+    // An async body runs synchronously up to its first await, so the share or
+    // clipboard call still happens inside the press, as browsers require.
+    void run().then(() => report(success),
+      (error: unknown) => { if (!quiet(error)) report(failure); });
+  };
+  const share = () => {
+    if (file) offer(async () => navigator.share({ files: [file], title: `${symbol} P&L` }),
+      "Could not share this image. Use Download PNG instead.", "", shareDismissed);
+  };
+  const copy = () => {
+    if (state.kind === "image") offer(async () => navigator.clipboard.write([new ClipboardItem({ "image/png": state.blob })]),
+      "Could not copy this image. Use Download PNG instead.", "Image copied.");
+  };
   return createPortal(
     <div className="terminal-host pnl-card-layer">
       <dialog ref={dialog} className="pnl-card-dialog" aria-labelledby={titleId} aria-describedby={noteId}
@@ -94,8 +149,13 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
             onError={() => setState({ kind: "error", message: "The image could not be displayed. Please try again." })} />
           <div className="pnl-card-actions">
             {loaded ? <a href={state.url} download={filename}>Download PNG</a> : <span role="status">Loading preview…</span>}
+            {shareable && <button type="button" disabled={!loaded} onClick={share}>Share</button>}
+            {copyable && <button type="button" disabled={!loaded} onClick={copy}>Copy image</button>}
             <button type="button" disabled={!loaded} onClick={() => window.print()}>Print</button>
           </div>
+          {/* One live region for the preview whose text alone changes: screen
+              readers often skip a region inserted together with its text. */}
+          <p className="pnl-card-note" role="status">{notice?.url === state.url ? notice.text : ""}</p>
         </>}
       </dialog>
     </div>, document.body,

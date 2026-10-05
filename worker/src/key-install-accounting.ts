@@ -43,22 +43,49 @@ export async function settleKeyInstall(deps: KeyInstallAccounting, agentId: stri
   });
 }
 
-/** Runs once under the caller's intent lock; only receipt reads, never broadcasts, may be retried. */
+/**
+ * Runs once under the caller's intent lock; only receipt reads, never broadcasts, may be retried.
+ *
+ * TRUE ONLY WHEN THE INSTALL LANDED, which is the one answer the caller acts
+ * on: entries held for `enable-too-wide` (exec-backoff.ts) are released the
+ * moment the key is in place, rather than waiting out a hold whose reason is
+ * gone. Landed is read off the executor returning at all — it returns only for
+ * a successful receipt — so a later accounting failure (an unproven payer, a
+ * row that would not settle) still answers true: the key IS installed, and
+ * the 'submitted' row stays for the resolver exactly as before.
+ *
+ * ONE `[key-install]` LINE PER ATTEMPT, whatever became of it. The owner's
+ * event says what it means for them; the operator line says that it happened
+ * at all, which the event log alone could not: a refused install and an
+ * install that never ran looked the same from outside.
+ */
 export async function installKeyRecorded(deps: KeyInstallAccounting & {
   refreshBudget(): Promise<void>;
   event(level: "ok" | "warn" | "err", message: string): Promise<unknown>;
   resolveMinutes: number;
-}, agentId: string, executor: AgentExecutor): Promise<void> {
+  /**
+   * Asked at the last moment before the broadcast, after signing and before the
+   * pre-broadcast row: a throw refuses the send, with nothing written and
+   * nothing spent. index.ts throws when its worker began draining (SIGTERM)
+   * while this install was being estimated and signed.
+   */
+  beforeBroadcast?(): void;
+}, agentId: string, executor: AgentExecutor): Promise<boolean> {
   let recorded = false;
   let settled = false;
+  let landed = false;
+  let said = "failed before anything was sent";
   try {
     const exec = await executor.installKey({ onSubmitted: async (hash, op) => {
+      deps.beforeBroadcast?.();
       recorded = await deps.addTrade({
         agent_id: agentId, kind: KEY_INSTALL_KIND, target: CASH.USDG, amount_usdg: 0,
         user_op_hash: hash, ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}), status: "submitted",
       });
       if (!recorded) throw new NotRecorded(hash);
     } });
+    landed = true;
+    said = `landed ${exec.txHash}`;
     if (exec.gasPayer === undefined) throw new UserOpUnresolved(exec.userOpHash, "receipt did not prove the gas payer");
     settled = await settleKeyInstall(deps, agentId, { userOpHash: exec.userOpHash, success: true,
       proof: { txHash: exec.txHash, gasWei: exec.gasWei, gasUnits: exec.gasUnits, gasPayer: exec.gasPayer } });
@@ -69,25 +96,30 @@ export async function installKeyRecorded(deps: KeyInstallAccounting & {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (e instanceof GasRefused) {
+      said = `refused before signing (${e.rule})`;
       await deps.event("warn", `couldn't install this key's permissions on their own either — nothing was signed: ${msg.slice(0, 300)}. ` +
         `If this repeats, re-sign at /grant with fewer custom tokens or capabilities.`);
-      return;
+      return landed;
     }
     if (e instanceof NotRecorded || e instanceof SponsorRefused) {
+      said = `not sent (${e instanceof SponsorRefused ? e.rule : "not-recorded"})`;
       await deps.event("warn", `didn't install this key's permissions on their own — nothing was sent: ${msg.slice(0, 300)}`);
-      return;
+      return landed;
     }
+    if (e instanceof UserOpReverted) said = `reverted on-chain ${e.userOpHash}`;
+    else if (!landed) said = recorded ? "submitted, outcome not read yet" : "failed before anything was sent";
     if (e instanceof UserOpReverted && e.gasProof) {
       settled = await settleKeyInstall(deps, agentId, { userOpHash: e.userOpHash, success: false,
         proof: e.gasProof, rejectRule: classifyRevert(msg).rule });
       if (settled) {
         await deps.refreshBudget();
         await deps.event("err", `installing this key's permissions on their own reverted on-chain; its gas cost is recorded: ${msg.slice(0, 300)}`);
-        return;
+        return landed;
       }
     }
     // A failed terminal write, missing receipt or old error with no cost proof
     // retains its recovery row. No retry here can sign or broadcast again.
+    if (recorded && !settled) said += ", left for the resolver";
     if (recorded) await deps.refreshBudget();
     await deps.event("warn", settled
       ? `this key's installation outcome and gas are recorded, but a later step failed: ${msg.slice(0, 200)}`
@@ -95,5 +127,8 @@ export async function installKeyRecorded(deps: KeyInstallAccounting & {
         ? `installing this key's permissions on their own was submitted and its outcome or expense is not recorded yet; ` +
           `the resolver will settle it within ${deps.resolveMinutes} minutes. ${msg.slice(0, 200)}`
         : `couldn't install this key's permissions on their own: ${msg.slice(0, 300)}`);
+  } finally {
+    console.log(`[key-install] ${agentId} ${said}`);
   }
+  return landed;
 }

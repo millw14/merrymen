@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { entryGateFor } from "../entry-gates";
 import type { TradeIntent } from "../policy";
 import { breakerIdle, energyEntriesSpent, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
@@ -189,6 +190,26 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, st
         stale: p.stale,
       })),
     tradableSymbols: [...tradable],
+    // ── AND WHICH OF THEM THE KEY WILL NOT BUY ───────────────────────────
+    //
+    // Asked of the gate the wall's own branch would ask (entry-gates.ts), by
+    // the same routing proposalsToIntents uses: a symbol with a curve leg is a
+    // curve trade, anything else a swap. Told to the model so it does not
+    // spend an action slot — and a paid window — on a buy the wall refuses
+    // with `no-exit`; the buys it proposes anyway are withheld below. Left in
+    // `tradableSymbols`, because a holding in one may still be sold.
+    //
+    // Omitted when empty, like `depth`: an empty list is not a fact worth a
+    // prompt line, and an absent hint gates nothing.
+    ...(() => {
+      const cannotBuy = [...tradable].filter((symbol) => {
+        const curveToken = universe.curveLegs?.has(symbol) ? universe.curveTokens?.get(symbol) : undefined;
+        if (curveToken) return entryGateFor(snap.entryGates, curveToken, "curve") !== null;
+        const token = universe.legs.get(symbol);
+        return token !== undefined && entryGateFor(snap.entryGates, token) !== null;
+      });
+      return cannotBuy.length > 0 ? { cannotBuy } : {};
+    })(),
     // Absent when no floor is armed — never 0, which would read as a floor at
     // break-even rather than as no floor at all.
     ...(stopLossBps > 0 ? { stopLossBps } : {}),
@@ -271,6 +292,23 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
    * like from here.
    */
   const floorFired = new Set<string>();
+  /**
+   * The locked symbols the owner has already been warned about, for the gate
+   * set they were warned under (`cannotBuy`, sorted and joined) — so a withheld
+   * buy is a `warn` once per symbol per change, not once per window.
+   *
+   * A WARN, BECAUSE IT REPLACES ONE. Before the gate, the same buy reached
+   * checkPolicy and the owner's refusal notice said `no-exit` at warn; the
+   * withheld note is now where the "re-sign at /grant" remedy lives, and an
+   * `ok` line is one no owner surface renders (idle-notice.ts). Once, because
+   * a model that keeps proposing the coin must not post a warn every window —
+   * the repeats still log, at `ok`.
+   *
+   * Forgotten when the gate set changes: a re-sign or a settings change that
+   * covers a coin, or drops one, is a new fact and earns its own warning.
+   */
+  let lockedGates = "";
+  const lockedWarned = new Set<string>();
 
   return {
     name,
@@ -557,10 +595,18 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       //
       // AND WITH SOME LEFT, no more buys than are left (capEntries): the rest
       // are withheld here, counted in the same note, never journaled.
+      //
+      // AND, FIRST, ANY BUY OF A SYMBOL THE KEY WILL NOT BUY (`cannotBuy`, from
+      // the entry gates): the wall refuses it with `no-exit`, so journaling it
+      // would publish a buy that could never happen — the same reason as the
+      // two above. Counted apart, because its note names a different cause.
+      const cannotBuy = new Set(signals.cannotBuy ?? []);
+      const locked = actions.filter((a) => a.action === "buy" && cannotBuy.has(a.symbol));
+      const buyable = locked.length > 0 ? actions.filter((a) => !locked.includes(a)) : actions;
       const energySpent = energyEntriesSpent(snap);
-      const allowed = brake || energySpent ? actions.filter((a) => a.action !== "buy") : actions;
+      const allowed = brake || energySpent ? buyable.filter((a) => a.action !== "buy") : buyable;
       const capped = capEntries(allowed, universeNow, snap);
-      const withheld = actions.length - allowed.length + capped.withheld;
+      const withheld = buyable.length - allowed.length + capped.withheld;
       const { intents, accepted, rejected } = capped;
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
@@ -603,6 +649,24 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
             : `strategist: ${withheld} buy proposal(s) withheld — today's energy for new trades is used up; sells still run`,
         );
       }
+      // The symbols are the universe's own — `cannotBuy` is drawn from it —
+      // so naming them carries nothing the model wrote.
+      const gatesNow = [...cannotBuy].sort().join(",");
+      if (gatesNow !== lockedGates) {
+        lockedGates = gatesNow;
+        lockedWarned.clear();
+      }
+      if (locked.length > 0) {
+        const names = [...new Set(locked.map((a) => a.symbol))];
+        const fresh = names.some((n) => !lockedWarned.has(n));
+        for (const n of names) lockedWarned.add(n);
+        note(
+          fresh ? "warn" : "ok",
+          `strategist: ${locked.length} buy proposal(s) withheld — the signed key can't sell ` +
+            `${names.join(", ")} back, so the wall would refuse the buy; ` +
+            `re-sign at /grant to cover ${names.length === 1 ? "it" : "them"}`,
+        );
+      }
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
       // What was KEPT — a withheld buy is announced only as a count, above.
       for (const a of capped.kept) {
@@ -633,12 +697,16 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // UNDER THE BREAKER the reason is the breaker, thesis or not: that is why
       // nothing went out, and it is the owner's sentence only (publishesIdle),
       // so it cannot be the second public row for one silence.
+      //
+      // A buy withheld for the key counts as DROPPED: "my key's limits refused
+      // it" is exactly what happened, and leaving it out would have a window of
+      // nothing but locked buys say "I put 0 ideas up".
       const held = actions.filter((a) => a.action === "hold").length;
       const idle: Why | undefined =
         intents.length === 0 && brake
           ? brake
           : intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
-            ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
+            ? { code: "model-held", held, considered: actions.length, dropped: rejected.length + locked.length }
             : undefined;
       return idle ? { intents, why: intents.map(() => null), idle } : intents;
     },

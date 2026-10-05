@@ -35,6 +35,22 @@ describe("the leaderboard explains its two refusals", () => {
     assert.match(PAGE, /pretend book/);
     assert.match(PAGE, /publishes a number that never happened/);
   });
+
+  it("says that a book with no trades shows that instead of a flat return", () => {
+    // Twenty-eight paper books that had never traded measured 0.0% against
+    // themselves and were listed beside books that traded and broke even.
+    // The row now says "No trades yet"; this is the sentence that tells a
+    // reader the two are different, and why one has no percentage.
+    assert.match(PAGE, /a book that has not traded shows No trades yet rather than a flat return/);
+    assert.match(PAGE, /trades no valuation includes yet show Awaiting first valuation/);
+  });
+
+  it("says how old the figures are when nothing new has been valued, and only that", () => {
+    // A tooltip held the valuation time, and while no agent was valued every
+    // figure on the board was a day old without a word. The banner states the
+    // time — and only the time: nothing here records why valuations stopped.
+    assert.match(PAGE, /No new valuations since \{shortDateTime\(stale \* 1000\)\}\. Each figure is as of its agent&apos;s last valuation\./);
+  });
 });
 
 describe("the token page says how much of the book it is showing", () => {

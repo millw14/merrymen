@@ -35,6 +35,14 @@ export interface Signals {
   prices: { symbol: string; usd: number; stale: boolean }[];
   tradableSymbols: string[];
   /**
+   * Symbols in `tradableSymbols` the signed key will not BUY — the wall refuses
+   * them (`no-exit`, `asset-allowlist`; entry-gates.ts). Still tradable, because
+   * a holding in one may still be sold; never buyable, so any buy of one is
+   * withheld before it is journaled. ABSENT when there are none, never an empty
+   * array — the same discipline as `depth`.
+   */
+  cannotBuy?: string[];
+  /**
    * The mechanical floor sitting below the model, in bps. ABSENT when none is
    * armed — never 0, which would read as a floor at break-even rather than as
    * no floor at all. Same discipline `costUsdg` follows.
@@ -79,6 +87,9 @@ vault yield automatically — you do not manage the vault.
 
 Propose portfolio actions via the propose_trades tool. Discipline rules:
 - Only trade symbols from tradableSymbols. Sizes are in USDG and must respect maxPerActionUsdg.
+- When \`cannotBuy\` is present, never propose a buy of a symbol in it: the signed key cannot sell
+  it back, so the policy wall refuses the buy and it is withheld before it reaches the wall.
+  The list says nothing about selling one you hold.
 - Prefer few, deliberate actions; propose holds when nothing is attractive.
 - A FLOOR MAY SIT BELOW YOU. When \`stopLossBps\` is present, a mechanical rule sells a holding
   outright once it is that far below what it cost. It only ever FORCES an exit and never prevents

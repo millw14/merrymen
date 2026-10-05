@@ -124,6 +124,35 @@ for (const [label, open] of [
         assert.equal(c.tokensTouched, 1);
         assert.equal(c.gasUsdg, 0.01);
         assert.equal(c.unpricedTrades, 0);
+        assert.equal(c.liveFills, 4, "every landed operation here is a swap or curve trade");
+        assert.equal(c.paperFills, 1);
+      } finally {
+        raw.close();
+      }
+    });
+
+    it("counts trades apart from operations: a vault deposit or a simulated transfer is not a fill", async () => {
+      // An operation that landed is still evidence the account executed, so
+      // `landed` and `filledPaper` keep counting it. Only the trade counts —
+      // what a page prints as "N trades" — leave it out, on the same two
+      // kinds the profile's own trade reader keeps.
+      const raw = new DatabaseSync(":memory:");
+      try {
+        seed(raw);
+        raw.exec(`INSERT INTO trades (agent_id, kind, status, user_op_hash, epoch, created_at) VALUES
+          ('0xA', 'vault-deposit', 'landed', '0xVAULT', 2, 2000),
+          ('0xa', 'vault-deposit', 'landed', '0xvault', 2, 9000),
+          ('0xA', 'transfer', 'paper', NULL, 2, 2001),
+          ('0xA', 'energy', 'paper', NULL, 2, 2002),
+          ('0xA', 'curve-trade', 'paper', NULL, 2, 2003),
+          ('0xA', 'swap', 'paper', NULL, 1, 2004),
+          ('0xOTHER', 'swap', 'paper', NULL, 2, 2005);`);
+        const db = open(raw);
+        const c = await readOperationCounts(db, "0xA", 2, "landed");
+        assert.equal(c.landed, 5, "the deposit is one more landed operation, its copy collapsed");
+        assert.equal(c.liveFills, 4, "and not a trade");
+        assert.equal(c.filledPaper, 4, "three more simulated operations");
+        assert.equal(c.paperFills, 2, "of which only the curve trade is a fill; the old run and another account stay out");
       } finally {
         raw.close();
       }
@@ -151,7 +180,7 @@ for (const [label, open] of [
           ('0xOTHER', 'swap', 'landed', '0xAA', 'buy', '0xOTHER', '600', NULL, 50, 2, 1000),
           ('0xOTHER', 'swap', 'reverted', '0xBB', NULL, NULL, '700', NULL, NULL, 2, 1300);`);
         const db = open(raw);
-        const expected = { gasUsdg: 0.21, unpricedTrades: 1, landed: 2, filledPaper: 2, refused: 4, tokensTouched: 2 };
+        const expected = { gasUsdg: 0.21, unpricedTrades: 1, landed: 2, filledPaper: 2, refused: 4, tokensTouched: 2, paperFills: 2, liveFills: 2 };
         for (const spelling of ["0xAB", "0xab", "0xAb", "0xaB"]) {
           const counts = await readOperationCounts(db, spelling, 2, "landed");
           assert.ok(Math.abs(counts.gasUsdg - expected.gasUsdg) < 1e-12,
@@ -162,9 +191,9 @@ for (const [label, open] of [
             "the token count retains its requested paper/live book");
         }
         assert.deepEqual(await readOperationCounts(db, "0xAB", 1, "landed"),
-          { gasUsdg: 30, unpricedTrades: 0, landed: 1, filledPaper: 0, refused: 0, tokensTouched: 1 });
+          { gasUsdg: 30, unpricedTrades: 0, landed: 1, filledPaper: 0, refused: 0, tokensTouched: 1, paperFills: 0, liveFills: 1 });
         assert.deepEqual(await readOperationCounts(db, "0xother", 2, "landed"),
-          { gasUsdg: 50, unpricedTrades: 1, landed: 1, filledPaper: 0, refused: 1, tokensTouched: 1 });
+          { gasUsdg: 50, unpricedTrades: 1, landed: 1, filledPaper: 0, refused: 1, tokensTouched: 1, paperFills: 0, liveFills: 1 });
       } finally {
         raw.close();
       }

@@ -1,20 +1,26 @@
 /** Real SQLite books through the persistent cold-start and stopped-writer cleanup gates. */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, it } from "node:test";
+import { spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { wrapSqlite, type Db } from "./db";
+import { DEPLOY_GUARD_IMAGE } from "./deploy-guard-checks";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { captureLedgerImport, LEDGER_IMPORT_PENDING_FILE, registerLedgerSource, restoreLedgerImport, stageLedgerImport } from "./ledger-import";
 import { ensurePersonalMemorySchema, publishPersonalMemory } from "./personal-memory-ferry";
-import type { PersistentHomeIdentity } from "./persistent-home";
+import {
+  adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST, PERSISTENT_HOME_PREADOPTION,
+  type PersistentHomeIdentity,
+} from "./persistent-home";
 import type { TenantLease } from "./tenant-lease";
 
 const fleet = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-persistent-reconcile-")));
@@ -22,7 +28,7 @@ process.env.MERRYMEN_HOME = fleet;
 process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
 const {
-  childHome, hasLeaseForTest, reconcile, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
+  childHome, fleetHaltFile, hasLeaseForTest, honourFleetHalt, reconcile, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
   setPersonalMemoryStoreForTest, setRetirementMemoryStoreForTest, setSpawnForTest, setTenantLeaseForTest,
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
@@ -257,4 +263,127 @@ it("a failed persistent root proof writes no cached key, child book or partial r
   } finally {
     setPersistentHomeVerifierForTest(() => volume); setPaperRestoreForTest(async () => ({ ok: true, line: null })); await remove(f);
   }
+});
+
+it("an adopted fleet root spawns nothing until its reviewed release, and a hand-made FLEET_HALT afterwards still stands every child down", async () => {
+  const f = await fixture(); setTenantLeaseForTest(f.tenant, f.lease);
+  // The incident's shape on this fleet root: tenant homes from the tests
+  // above, an operator's hand-made halt, and no manifest.
+  const original = "operator incident halt\n", halt = fleetHaltFile(), token = "reviewed-adoption";
+  writeFileSync(halt, original, { mode: 0o600 });
+  const major = ((rootStat.dev >> 8n) & 0xfffn) | ((rootStat.dev >> 32n) & 0xfffff000n), minor = (rootStat.dev & 0xffn) | ((rootStat.dev >> 12n) & 0xffffff00n);
+  const options = { readMountInfo: () => `40 20 ${major}:${minor} / ${fleet} rw,relatime - ext4 /dev/volume rw\n` };
+  const adopt = { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_HOME: fleet, RAILWAY_VOLUME_MOUNT_PATH: fleet, MERRYMEN_HOME_VOLUME_ID: volume.id,
+    MERRYMEN_INITIAL_HANDOVER: token, MERRYMEN_ADOPT_HOME_HALT_SHA256: createHash("sha256").update(original).digest("hex") };
+  const release = { ...adopt, MERRYMEN_RELEASE_HOME_HALT: token, MERRYMEN_FLEET_ROLLOUT: `${f.tenant}:trade` };
+  const before = spawned.length;
+  try {
+    assert.equal(adoptPopulatedPersistentHome(adopt, options)!.handoverState, "held");
+    await reconcile(); assert.equal(spawned.length, before, "the canonical halt holds like the original");
+    assert.equal(controlAdoptedPersistentHomeHalt({ ...release, MERRYMEN_FLEET_ROLLOUT: "none" }, options)!.action, "withheld");
+    await reconcile(); assert.equal(spawned.length, before);
+    assert.equal(controlAdoptedPersistentHomeHalt(release, options)!.action, "released");
+    await reconcile(); assert.equal(spawned.length, before + 1);
+    const proc = spawned.at(-1)!;
+    writeFileSync(halt, "hand-made stop\n", { mode: 0o600 });
+    // The next start, with the release variable still set, leaves it alone.
+    assert.equal(controlAdoptedPersistentHomeHalt(release, options)!.action, "already-released");
+    await honourFleetHalt();
+    assert.deepEqual(proc.signals, ["SIGTERM"]); assert.equal(hasLeaseForTest(f.tenant), false); assert.equal(f.releases.n, 1);
+    assert.equal(readFileSync(halt, "utf8"), "hand-made stop\n");
+    proc.exit();
+  } finally {
+    for (const name of ["FLEET_HALT", PERSISTENT_HOME_MANIFEST, PERSISTENT_HOME_PREADOPTION]) rmSync(path.join(fleet, name), { force: true });
+    await remove(f);
+  }
+});
+
+it("startup adopts, then applies the env release or re-halt, then re-proves the home, all before any lease, child or writer", () => {
+  const source = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  const run = source.slice(source.indexOf("export async function runOrchestrator("));
+  // B1's boot-time refusal of a malformed rollout comes first of all.
+  const order = ["fleetRollout(process.env)", "await runRecoveryReportOnly(); return;", "adoptPopulatedPersistentHome()", "controlAdoptedPersistentHomeHalt()",
+    "preparePersistentHomeForHandover()", "setTenantLeaseLossHandler(", "await runAccountingDiagnosisIfAsked()", "void orderFerryLoop()", "await reconcile()"];
+  const at = order.map(step => run.indexOf(step));
+  order.forEach((step, k) => assert.ok(at[k]! > 0 && (k === 0 || at[k - 1]! < at[k]!), `${step} out of order`));
+  assert.equal(run.split("adoptPopulatedPersistentHome(").length, 2, "called once");
+  assert.equal(run.split("controlAdoptedPersistentHomeHalt(").length, 2, "called once");
+});
+
+/**
+ * The real entry point, in its own process: runOrchestrator() is what the
+ * container runs, and process.exit is what is being tested. Deliberately NOT
+ * process.env — this file pointed MERRYMEN_HOME at its in-process fleet, and
+ * no DATABASE_URL from a developer's shell may reach a supervisor started here.
+ * Started directly, NOT through container-start.sh: what is under test is the
+ * check that holds however the process was started. Correctly configured
+ * apart from what each test changes.
+ *
+ * That includes MERRYMEN_FLEET_ROLLOUT, as `none`: once the orchestrator
+ * reads its rollout scope at boot, a Railway-hosted one without the variable
+ * refuses to start, which would answer every test here before the check under
+ * test is reached. `none` admits nobody, and it is not `all`, so the one-shot
+ * refusal below still holds while a one-shot is set.
+ */
+const FLEET_SERVICE = "227ff49a-1111-4222-8333-444455556666";
+function hostedOrchestrator(home: string, extra: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, ["--import", "tsx", "worker/src/orchestrator.ts"], {
+    cwd: path.join(import.meta.dirname, "..", ".."), encoding: "utf8", timeout: 60_000,
+    env: { PATH: process.env.PATH, HOME: path.dirname(home), MERRYMEN_HOSTED: "1", MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home,
+      RAILWAY_ENVIRONMENT_ID: "e1e1e1e1-1111-4222-8333-444455556666", RAILWAY_SERVICE_ID: FLEET_SERVICE,
+      MERRYMEN_FLEET_SERVICE_ID: FLEET_SERVICE, MERRYMEN_IMAGE: DEPLOY_GUARD_IMAGE, MERRYMEN_FLEET_ROLLOUT: "none", ...extra },
+  });
+}
+const refusals = (stdout: string) => stdout.split("\n").filter((l) => l.startsWith("[orchestrator] refusing to start — "));
+
+it("a Railway-hosted orchestrator without the persistent-home opt-in exits 78 before it touches its home", () => {
+  for (const required of [undefined, "0", ""]) {
+    const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-hosted-ephemeral-"))), home = path.join(dir, "home");
+    mkdirSync(home, { mode: 0o700 });
+    try {
+      // The report-only entry is behind the same gate: it must not get first word.
+      const r = hostedOrchestrator(home, { MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1",
+        ...(required === undefined ? {} : { MERRYMEN_PERSISTENT_HOME_REQUIRED: required }) });
+      assert.equal(r.status, 78, `${JSON.stringify(required)}: ${r.stdout}${r.stderr}`);
+      assert.equal(refusals(r.stdout).length, 1, r.stdout);
+      assert.match(r.stdout, /^\[orchestrator\] refusing to start — MERRYMEN_PERSISTENT_HOME_REQUIRED is not 1 — a fleet role runs only on a home proven to be the mounted volume/m);
+      assert.doesNotMatch(r.stdout, /\[orchestrator\] starting/);
+      assert.deepEqual(readdirSync(home), []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+it("without the start script, a hosted orchestrator on the wrong service, or with a one-shot set mid-rollout, still exits 78", () => {
+  // A Start Command on the service, or node run by hand, never passes through
+  // container-start.sh and its guard; runOrchestrator() holds the same line.
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-hosted-unguarded-"))), home = path.join(dir, "home");
+  mkdirSync(home, { mode: 0o700 });
+  const secret = `apply-${"7".repeat(40)}`;
+  try {
+    const r = hostedOrchestrator(home, { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_FLEET_SERVICE_ID: "b72f7ad9-1111-4222-8333-444455556666",
+      MERRYMEN_REPAIR_HWM: secret, MERRYMEN_FLEET_ROLLOUT: "none" });
+    assert.equal(r.status, 78, `${r.stdout}${r.stderr}`);
+    const lines = refusals(r.stdout);
+    assert.equal(lines.length, 2, r.stdout);
+    assert.match(lines[0]!, /refusing to start — this is not the fleet's service/);
+    assert.match(lines[1]!, /refusing to start — one-shot operator variables are set \(MERRYMEN_REPAIR_HWM\) while MERRYMEN_FLEET_ROLLOUT is not all/);
+    assert.ok(!`${r.stdout}${r.stderr}`.includes(secret), "a one-shot value reached the log");
+    assert.doesNotMatch(r.stdout, /\[orchestrator\] starting/);
+    assert.deepEqual(readdirSync(home), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("with the opt-in, a hosted orchestrator goes on to the real volume proof, which still decides", () => {
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-hosted-persistent-"))), home = path.join(dir, "home");
+  mkdirSync(home, { mode: 0o700 });
+  try {
+    // No provider volume UUID: past the gate, persistent-home.ts refuses — the
+    // gate only ever adds a refusal, it never stands in for the proof.
+    const r = hostedOrchestrator(home, { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1" });
+    assert.notEqual(r.status, 0);
+    assert.notEqual(r.status, 78, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /refusing to start/);
+    assert.match(r.stderr, /Persistent home refused: an explicit provider volume UUID is required/);
+    assert.deepEqual(readdirSync(home), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

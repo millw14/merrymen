@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,13 +11,14 @@ import { telegramListening } from "@/lib/telegram-listening";
 import { runtimeFromRow } from "@/lib/telegram-runtime";
 import type { ChatController } from "./chat-controller";
 import type { LiveMine } from "./live";
-import { ownerTradeEmptyTitle, recoveryAutonomy, recoveryMemory, recoveryTelegram } from "./recovery-view";
+import { ownerTradeEmptyTitle, RECOVERY_CASH_EXCLUDES, RECOVERY_WITHDRAW_VERIFIED, recoveryAutonomy, recoveryFunds, recoveryMemory, recoveryTelegram } from "./recovery-view";
 import { RecoveryNotice } from "./RecoveryNotice";
 import { DesktopHeader, DesktopPortfolio, DesktopSidebar } from "./Desktop";
 import { Agent } from "./screens/Agent";
 import { You } from "./screens/You";
-import { AccountEntry } from "./HostedControls";
+import { AccountEntry, FundingPanel } from "./HostedControls";
 import { SwapsTable } from "./SwapsTable";
+import { AgentStrip } from "./AgentStrip";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 const noop = () => {};
@@ -136,6 +138,235 @@ describe("owner recovery presentation", () => {
       assert.doesNotMatch(table.body.textContent!, /No trades yet|never traded/);
     }
     assert.equal(ownerTradeEmptyTitle(undefined), "No trades yet.");
+  });
+});
+
+describe("where the money is during recovery", () => {
+  const ACCOUNT = "0x12aB34cD56eF7890123456789012345678abcDEF";
+  const caps = { perTradeUsdg: 10, dailyUsdg: 20 };
+  /** 12.34 USDG of cash, and 5e18 vault SHARES — a count that must never be printed as dollars. */
+  const balances = { ethWei: "1", cashUsdg: "12340000", vaultUsdg: "5000000000000000000" };
+  const status = (chainId = 4663, over: Record<string, unknown> = {}) =>
+    ({ grant: { smartAccount: ACCOUNT, chainId, caps }, balances, ...over });
+  const notice = (funds: ReturnType<typeof recoveryFunds>, recovery: FleetRecoveryView | null = held) =>
+    doc(React.createElement(RecoveryNotice, { recovery, funds }));
+  // Never a renewal remedy, never a "paused since" date, never a claim about
+  // what was lost or when trading comes back.
+  const NEVER = /renew|re-sign|resign|since|lost|zero|restored|complete|resumes/i;
+
+  it("ships without the withdraw line until R1.4 has exercised Withdraw during the hold", () => {
+    assert.equal(RECOVERY_WITHDRAW_VERIFIED, false);
+    assert.equal(recoveryFunds(status())!.withdraw, null);
+    assert.doesNotMatch(notice(recoveryFunds(status())).body.textContent!, /Withdraw/);
+  });
+
+  it("names the smart account, links it on its own chain and prints only the chain's cash", () => {
+    const funds = recoveryFunds(status())!;
+    assert.deepEqual(funds, { account: ACCOUNT, short: "0x12aB…cDEF",
+      explorer: `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`, testnet: false,
+      cash: "Cash on chain: $12.34.", excludes: RECOVERY_CASH_EXCLUDES, paper: null, withdraw: null });
+    const page = notice(funds);
+    const text = page.body.textContent!;
+    assert.match(text, /Trading paused for recovery/);
+    assert.match(text, /Your funds are in your smart account 0x12aB…cDEF and in any vaults it owns\./);
+    const link = page.querySelector(".agent-recovery a")!;
+    assert.equal(link.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
+    assert.equal(link.getAttribute("target"), "_blank");
+    assert.equal(link.getAttribute("rel"), "noreferrer");
+    assert.equal(link.getAttribute("title"), ACCOUNT);
+    assert.match(text, /Cash on chain: \$12\.34\./);
+    assert.match(text, /Only USDG held in the account itself\. Not included: USDG in the Morpho vault, anything held in vaults the account owns, and any tokens the account holds\./);
+    // The vault balance is shares: neither its raw count nor a dollar reading of it appears.
+    assert.doesNotMatch(text, /5000000000000000000|\$5\b|\$5\.00|\$17\.34/);
+    assert.doesNotMatch(text, NEVER);
+    // It owns its class and Trencher vaults; it controls nothing about the Morpho vault.
+    assert.doesNotMatch(text, /control/i);
+  });
+
+  it("links a testnet account on the testnet explorer and says it is the test network", () => {
+    const funds = recoveryFunds(status(46630))!;
+    assert.equal(funds.explorer, `https://explorer.testnet.chain.robinhood.com/address/${ACCOUNT}`);
+    assert.equal(funds.testnet, true);
+    const page = notice(funds);
+    assert.equal(page.querySelector(".agent-recovery a")!.getAttribute("href"), funds.explorer);
+    assert.match(page.body.textContent!, /smart account 0x12aB…cDEF on the test network and in any vaults it owns/);
+  });
+
+  it("on the test network says the cash isn't read there, never a figure and never a passing failure", () => {
+    // Production cannot return a testnet cashUsdg (no multicall3 on 46630, and
+    // CASH.USDG is the mainnet address), so every shape of it, including a
+    // well-formed amount, must come out the same: not read, not "just now".
+    for (const cashUsdg of ["12340000", "0", null, ""]) {
+      const funds = recoveryFunds(status(46630, { balances: { ...balances, cashUsdg } }))!;
+      assert.equal(funds.cash, "Cash on chain isn't read on the test network.", String(cashUsdg));
+      assert.equal(funds.excludes, null, "no figure, so nothing to say it leaves out");
+      const text = notice(funds).body.textContent!;
+      assert.match(text, /Cash on chain isn't read on the test network\./);
+      assert.doesNotMatch(text, /\$|couldn't be read|just now|Only USDG held|Not included/);
+      assert.doesNotMatch(text, NEVER);
+    }
+    assert.equal(recoveryFunds(status(46630, { balances: undefined }))!.cash, "Cash on chain isn't read on the test network.");
+  });
+
+  it("gives an account on a chain this product does not run on no explorer link", () => {
+    for (const chainId of [1, 8453, Number.NaN]) {
+      const funds = recoveryFunds(status(chainId))!;
+      assert.equal(funds.explorer, null);
+      assert.equal(funds.testnet, false);
+      const page = notice(funds);
+      assert.equal(page.querySelector(".agent-recovery a"), null);
+      assert.match(page.body.textContent!, /Your funds are in your smart account 0x12aB…cDEF and in any vaults it owns/);
+    }
+  });
+
+  it("an unread cash balance is said to be unread, never $0.00", () => {
+    for (const over of [{ balances: { ...balances, cashUsdg: null } }, { balances: { ...balances, cashUsdg: "" } },
+      { balances: { ...balances, cashUsdg: "not-a-number" } }, { balances: undefined }]) {
+      const funds = recoveryFunds(status(4663, over))!;
+      assert.equal(funds.cash, "Cash on chain: couldn't be read just now.");
+      const text = notice(funds).body.textContent!;
+      assert.match(text, /Cash on chain: couldn't be read just now\./);
+      assert.doesNotMatch(text, /\$0\.00|\$0\b/);
+      assert.match(text, /smart account 0x12aB…cDEF/);
+    }
+    // A measured zero is a fact and is printed as one.
+    assert.equal(recoveryFunds(status(4663, { balances: { ...balances, cashUsdg: "0" } }))!.cash, "Cash on chain: $0.00.");
+  });
+
+  it("says nothing about funds without a well-formed smart account", () => {
+    for (const s of [null, undefined, {}, { balances }, { grant: undefined, balances },
+      { grant: { smartAccount: "", chainId: 4663, caps }, balances },
+      { grant: { smartAccount: "0x1234", chainId: 4663, caps }, balances },
+      { grant: { smartAccount: ACCOUNT + "00", chainId: 4663, caps }, balances },
+      { grant: { smartAccount: "javascript:alert(1)", chainId: 4663, caps }, balances }]) {
+      assert.equal(recoveryFunds(s as Parameters<typeof recoveryFunds>[0]), null, JSON.stringify(s));
+      assert.equal(recoveryFunds(s as Parameters<typeof recoveryFunds>[0], true), null, "the flag never invents an account");
+    }
+    const page = notice(null);
+    assert.equal(page.querySelector(".agent-recovery a"), null);
+    assert.doesNotMatch(page.body.textContent!, /smart account|Cash on chain|Morpho|Withdraw/);
+    assert.match(page.body.textContent!, /Trading paused for recovery/);
+  });
+
+  it("funds never create a hold: no recovery, no notice", () => {
+    for (const absent of [null, undefined, { ...held, tradingPaused: false } as unknown as FleetRecoveryView]) {
+      assert.equal(renderToStaticMarkup(React.createElement(RecoveryNotice, { recovery: absent, funds: recoveryFunds(status(4663), true) })), "");
+    }
+  });
+
+  it("every combination of facts keeps the same promises", () => {
+    for (const chainId of [4663, 46630]) for (const cash of ["12340000", null]) for (const withdraw of [false, true])
+      for (const hasAccount of [true, false]) {
+        const input = hasAccount ? status(chainId, { balances: { ...balances, cashUsdg: cash } }) : { balances };
+        const before = JSON.stringify(input);
+        const funds = recoveryFunds(input, withdraw);
+        assert.equal(JSON.stringify(input), before, "read-only");
+        const page = notice(funds);
+        const text = page.body.textContent!;
+        const what = JSON.stringify({ chainId, cash, withdraw, hasAccount });
+        assert.match(text, /Trading paused for recovery/, what);
+        assert.doesNotMatch(text, NEVER, what);
+        assert.doesNotMatch(text, /\$0\.00/, what);
+        assert.equal(/smart account/.test(text), hasAccount, what);
+        const mainnet = hasAccount && chainId === 4663;
+        assert.equal(/Not included: USDG in the Morpho vault, anything held in vaults the account owns, and any tokens the account holds/.test(text), mainnet, what);
+        assert.equal(/on the test network/.test(text), hasAccount && chainId === 46630, what);
+        assert.equal(/Cash on chain isn't read on the test network\./.test(text), hasAccount && chainId === 46630, what);
+        assert.equal(/Cash on chain: \$12\.34\./.test(text), mainnet && cash !== null, what);
+        assert.equal(/Cash on chain: couldn't be read just now\./.test(text), mainnet && cash === null, what);
+        assert.equal(/Withdraw still works while trading is paused/.test(text), hasAccount && withdraw, what);
+        const href = page.querySelector(".agent-recovery a")?.getAttribute("href") ?? null;
+        assert.equal(href, !hasAccount ? null : chainId === 46630
+          ? `https://explorer.testnet.chain.robinhood.com/address/${ACCOUNT}`
+          : `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`, what);
+      }
+  });
+
+  it("the account entry and the funding panel say where the money is from the same grants answer", () => {
+    const account = { session: { hosted: true, address: "0x" + "a".repeat(40) },
+      status: { exists: true, recovery: held, ...status() } };
+    const entry = doc(React.createElement(AccountEntry, { account, portfolio: "ok", onRefresh: noop, onSignedIn: noop }));
+    assert.match(entry.body.textContent!, /Trading paused for recovery.*Your funds are in your smart account 0x12aB…cDEF.*Cash on chain: \$12\.34\./);
+    assert.equal(entry.querySelector(".agent-recovery a")!.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
+    assert.doesNotMatch(entry.body.textContent!, NEVER);
+    const deposit = doc(React.createElement(FundingPanel, { mode: "deposit", account, onClose: noop }));
+    assert.match(deposit.body.textContent!, /Trading paused for recovery.*Your funds are in your smart account 0x12aB…cDEF.*Cash on chain: \$12\.34\./);
+    assert.match(deposit.body.textContent!, /Copy deposit address/);
+    // The panel's own wrong-network warning mentions a re-sign; the notice never does.
+    assert.doesNotMatch(deposit.querySelector(".agent-recovery")!.textContent!, NEVER);
+    // Without a hold the funding panel is exactly what it was: no funds sentences.
+    const ordinary = doc(React.createElement(FundingPanel, { mode: "deposit", onClose: noop,
+      account: { ...account, status: { ...account.status, recovery: null } } }));
+    assert.doesNotMatch(ordinary.body.textContent!, /Trading paused for recovery|Your funds are in|Cash on chain/);
+    // An entry whose grants answer named no account keeps the plain notice.
+    const bare = doc(React.createElement(AccountEntry, { account: { ...account, status: { exists: true, recovery: held } },
+      portfolio: "ok", onRefresh: noop, onSignedIn: noop }));
+    assert.match(bare.body.textContent!, /Trading paused for recovery/);
+    assert.doesNotMatch(bare.body.textContent!, /smart account|Cash on chain/);
+  });
+
+  it("a held paper tenant is told its recorded balance is simulated, beside a measured $0.00", () => {
+    const PAPER = /This agent is in paper mode\. Its recorded balance is simulated, not real money, and is not held on chain\./;
+    const funds = recoveryFunds(status(4663, { mode: "paper", balances: { ...balances, cashUsdg: "0" } }))!;
+    assert.equal(funds.cash, "Cash on chain: $0.00.");
+    assert.match(funds.paper!, PAPER);
+    const text = notice(funds).body.textContent!;
+    assert.match(text, /Cash on chain: \$0\.00\..*This agent is in paper mode\./);
+    assert.doesNotMatch(text, NEVER);
+    // The profile, where the simulated book sits right under the notice as the
+    // "Last recorded portfolio balance": the cue is in the same card as the $0.00.
+    const profile = doc(React.createElement(You, { mine: { ...mine, mode: "paper", equity: 1000, recovery: held, recoveryFunds: funds,
+      autonomy: recoveryAutonomy(autonomyOf({ mode: "paper", liveBlocker: null }), held) }, history: [1000, 1000],
+      stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
+    assert.match(profile.querySelector(".agent-recovery")!.textContent!, PAPER);
+    assert.match(profile.body.textContent!, /Last recorded portfolio balance/);
+    // Only an explicit paper rail says so: live, idle, null and absent never do.
+    for (const mode of ["live", "idle", null, undefined] as const) {
+      const other = recoveryFunds(status(4663, { mode, balances: { ...balances, cashUsdg: "0" } }))!;
+      assert.equal(other.paper, null, String(mode));
+      assert.doesNotMatch(notice(other).body.textContent!, /paper|simulated/i, String(mode));
+    }
+  });
+
+  it("the profile and the home strip say where the money is and keep Withdraw", () => {
+    const funds = recoveryFunds(status());
+    const profile = doc(React.createElement(You, { mine: { ...mine, recovery: held, recoveryFunds: funds }, history: [40, 42],
+      stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
+    const card = profile.querySelector(".agent-recovery")!;
+    assert.match(card.textContent!, /Your funds are in your smart account 0x12aB…cDEF and in any vaults it owns\..*Cash on chain: \$12\.34\./);
+    assert.equal(card.querySelector("a")!.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
+    assert.doesNotMatch(card.textContent!, NEVER);
+    assert.ok([...profile.querySelectorAll("button")].some(b => b.textContent === "Withdraw"), "the Withdraw button stays");
+    const strip = doc(React.createElement(AgentStrip, { hasAgent: true, recovery: held, funds }));
+    assert.match(strip.querySelector(".agent-recovery")!.textContent!, /Your funds are in your smart account 0x12aB…cDEF.*Cash on chain: \$12\.34\./);
+    assert.match(strip.body.textContent!, /Trading paused/);
+    assert.doesNotMatch(strip.querySelector(".agent-recovery")!.textContent!, NEVER);
+    // No funds handed down: the strip's notice is the plain one, and no hold means no notice at all.
+    const plain = doc(React.createElement(AgentStrip, { hasAgent: true, recovery: held }));
+    assert.doesNotMatch(plain.body.textContent!, /smart account|Cash on chain/);
+    const none = doc(React.createElement(AgentStrip, { hasAgent: true, recovery: null, funds }));
+    assert.equal(none.querySelector(".agent-recovery"), null);
+  });
+
+  it("App derives the funds from the account that carried the hold, and only while it holds", () => {
+    // App renders under next/navigation and cannot be mounted here (see
+    // account-read.ts), so the one line that pairs the two is pinned in source.
+    const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    assert.match(app, /const recovery = pausedRecovery\(account\?\.status\.recovery\);/);
+    assert.match(app, /\.\.\.\(recovery \? \{ chg24: null, recoveryFunds: recoveryFunds\(account\.status\) \} : \{\}\)/);
+    assert.equal(app.match(/recoveryFunds\(/g)?.length, 1, "computed once, never re-derived");
+    assert.match(readFileSync(new URL("./screens/Home.tsx", import.meta.url), "utf8"),
+      /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\}\/>/);
+    assert.match(readFileSync(new URL("./Desktop.tsx", import.meta.url), "utf8"),
+      /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\}\/>/);
+  });
+
+  it("reads the hold without changing it, and keeps the hold's own words", () => {
+    const before = JSON.stringify(held);
+    const text = notice(recoveryFunds(status(), true)).body.textContent!;
+    assert.equal(JSON.stringify(held), before);
+    assert.match(text, /Trading paused for recovery.*Some saved history is available.*Trading remains paused pending reconciliation/);
+    assert.match(text, /Last verified activity/);
   });
 });
 

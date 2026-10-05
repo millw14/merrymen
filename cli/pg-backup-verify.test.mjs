@@ -1,0 +1,783 @@
+/**
+ * THE RESTORE DRILL'S VERIFIER (scripts/pg-backup/verify-restore.mjs).
+ *
+ * Most of this runs against a scripted stand-in for a pg client, which is
+ * enough to pin the verdicts, the refusals, the order the two databases are
+ * read in and the statements each one is sent. The SQL itself is pinned by the
+ * opt-in case at the bottom, against real Postgres:
+ *
+ *   MERRYMEN_TEST_PG_URL=postgres://merrymen@127.0.0.1:55432/postgres \
+ *     NODE_PATH=<a directory holding pg@8> npx tsx --test cli/pg-backup-verify.test.mjs
+ *
+ * It refuses any host but loopback, creates two databases of its own and drops
+ * them at the end. With no URL it is skipped, so `npm test` and CI need neither
+ * a database nor the `pg` driver, which this repository does not install.
+ */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  DEFAULT_SETTLE_SEC,
+  DRILL_KINDS,
+  DRILL_TABLES,
+  DrillRefusal,
+  FAILING_VERDICTS,
+  compareSides,
+  connectPg,
+  databaseOf,
+  parseDrillArgs,
+  runRestoreDrill,
+  validateDrillTables,
+  verdictOf,
+} from "../scripts/pg-backup/verify-restore.mjs";
+
+const SCRIPT = fileURLToPath(new URL("../scripts/pg-backup/verify-restore.mjs", import.meta.url));
+
+// The restore point, as epoch seconds, and a "now" an hour after it.
+const R = 1_790_000_000;
+const RESTORE_POINT = new Date(R * 1000).toISOString();
+const NOW_MS = (R + 3600) * 1000;
+const BEFORE = R - DEFAULT_SETTLE_SEC - 600; // safely before the cutoff
+const SETTLING = R - 60; // inside the settle margin: compared by neither side
+const LATER = R + 1800; // after the restore point: the source only
+
+const FORK_URL = "postgres://drill:fork-secret@postgres-fork.railway.internal:5432/railway";
+const SOURCE_URL = "postgres://drill:source-secret@postgres.railway.internal:5432/railway";
+const ENV = { MERRYMEN_RESTORE_FORK_URL: FORK_URL, MERRYMEN_RESTORE_SOURCE_URL: SOURCE_URL };
+const ARGV = ["--restore-point", RESTORE_POINT];
+
+const expectRefusal = (fn, code) => assert.throws(fn, (e) => e instanceof DrillRefusal && e.code === code);
+
+// ── a scripted pg client ─────────────────────────────────────────────────────
+
+/**
+ * A database as the drill sees it: `tables` maps a name to its stamp column's
+ * type and the stamp of each row. Every table the drill allowlists is present
+ * unless the spec leaves it out with `null`.
+ */
+function database({ db = "railway", started = "2026-09-01 00:00:00.000001+00", readonly = "on", isolation = "repeatable read", tables = {}, fail = {} } = {}) {
+  const all = {};
+  for (const { table, stamp } of DRILL_TABLES) {
+    if (tables[table] === null) continue;
+    const spec = tables[table] ?? { stamps: [BEFORE] };
+    all[table] = { stamp, type: spec.type ?? "bigint", stamps: spec.stamps };
+  }
+  return { db, started, readonly, isolation, tables: all, fail };
+}
+
+const seconds = (v) => (v === null ? null : v >= 100_000_000_000 ? Math.trunc(v / 1000) : v);
+
+function fakeClient(spec, log) {
+  const sent = [];
+  const client = {
+    sent,
+    ended: false,
+    async query(text, params = []) {
+      sent.push(text);
+      log?.push(text);
+      if (/^BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY$/.test(text)) return { rows: [] };
+      if (/^SET LOCAL /.test(text) || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("current_setting('transaction_read_only')")) return { rows: [{ readonly: spec.readonly, isolation: spec.isolation }] };
+      if (text.includes("pg_postmaster_start_time()")) return { rows: [{ db: spec.db, started: spec.started }] };
+      if (text.includes("pg_catalog.pg_attribute")) {
+        const rows = [];
+        for (const name of params[0]) {
+          const t = spec.tables[name];
+          if (t) rows.push({ table_name: name, column_name: t.stamp, data_type: t.type }, { table_name: name, column_name: "id", data_type: "bigint" });
+        }
+        return { rows };
+      }
+      const counted = /FROM "([a-z_]+)"\) AS stamped$/.exec(text);
+      if (counted) {
+        const name = counted[1];
+        if (spec.fail[name]) throw Object.assign(new Error(`canceling statement on ${SOURCE_URL}`), { code: spec.fail[name] });
+        const [cutoff, after] = params;
+        const s = spec.tables[name].stamps.map(seconds);
+        const old = s.filter((v) => v !== null && v <= cutoff);
+        // Counts come back as strings, as int8 does from node-postgres.
+        return {
+          rows: [{
+            rows: String(s.filter((v) => v === null || v <= cutoff).length),
+            newest: old.length ? String(Math.max(...old)) : null,
+            after: String(s.filter((v) => v !== null && v > after).length),
+            total: String(s.length),
+          }],
+        };
+      }
+      throw new Error(`unexpected SQL: ${text}`);
+    },
+    async end() {
+      client.ended = true;
+    },
+  };
+  return client;
+}
+
+/** A connect seam over two scripted databases, keyed by the URL it is handed. */
+function connector(fork, source, { failFork } = {}) {
+  const log = [];
+  const clients = {};
+  const order = [];
+  const connect = async (url) => {
+    const side = url === FORK_URL ? "fork" : url === SOURCE_URL ? "source" : null;
+    assert.ok(side, "the drill connected to a URL it was not given");
+    order.push(side);
+    if (side === "fork" && failFork) throw failFork;
+    clients[side] = fakeClient(side === "fork" ? fork : source, log);
+    return clients[side];
+  };
+  return { connect, clients, order, log };
+}
+
+const drill = (fork, source, opts = {}) => {
+  const seam = connector(fork, source, opts);
+  return runRestoreDrill({ argv: opts.argv ?? ARGV, env: opts.env ?? ENV, now: () => NOW_MS, connect: seam.connect }).then((out) => ({ ...out, ...seam }));
+};
+
+const TABLE_COUNTED = /FROM "([a-z_]+)"\) AS stamped$/;
+
+/**
+ * A client's statements, cut into its transactions: the reads of each, in
+ * order. Fails on anything sent outside BEGIN … ROLLBACK, on a transaction
+ * left open, and on one that reads before it has set both bounds and checked
+ * its own mode, in that order.
+ */
+function transactionsOf(sent) {
+  const reads = [];
+  let open = null;
+  for (const sql of sent) {
+    if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") {
+      assert.equal(open, null, "a BEGIN inside an open transaction");
+      open = [];
+    } else if (sql === "ROLLBACK") {
+      assert.ok(open, "a ROLLBACK outside a transaction");
+      assert.equal(open[0], "SET LOCAL statement_timeout = '60s'");
+      assert.equal(open[1], "SET LOCAL lock_timeout = '5s'");
+      assert.match(open[2], /current_setting\('transaction_read_only'\)/);
+      for (const read of open.slice(3)) assert.match(read, /^SELECT /, read);
+      reads.push(open.slice(3));
+      open = null;
+    } else {
+      assert.ok(open, `sent outside a transaction: ${sql}`);
+      open.push(sql);
+    }
+  }
+  assert.equal(open, null, "a transaction was left open");
+  return reads;
+}
+
+// ── the allowlist ────────────────────────────────────────────────────────────
+
+test("the allowlist names plain identifiers once each, and covers the ledger, authority and recovery tables", () => {
+  assert.equal(new Set(DRILL_TABLES.map((t) => t.table)).size, DRILL_TABLES.length);
+  for (const { table, stamp } of DRILL_TABLES) {
+    assert.match(table, /^[a-z_][a-z0-9_]*$/);
+    assert.match(stamp, /^[a-z_][a-z0-9_]*$/);
+    assert.ok(Object.isFrozen(DRILL_TABLES.find((t) => t.table === table)));
+  }
+  const names = DRILL_TABLES.map((t) => t.table);
+  for (const must of ["trades", "flows", "equity", "decisions", "fee_accruals", "risk_periods", "mirror_state", "paper_checkpoints", "grants", "tenant_settings", "fleet_recovery_health", "recovery_reply_offsets", "announcements",
+    "agent_account", "mcp_connections", "mcp_tokens", "mcp_proposals", "notify_deliveries", "announcement_attempts"]) {
+    assert.ok(names.includes(must), `${must} is allowlisted`);
+  }
+  assert.ok(Object.isFrozen(DRILL_TABLES));
+});
+
+/**
+ * THE CLASSIFICATION, PINNED. Each kind was read from the table's writers (the
+ * citations sit beside each entry in verify-restore.mjs). Only append and
+ * last-write tables may ever read `match`, so those two lists are written out
+ * here in full: moving a table into either — a claim that the drill checks its
+ * contents — has to change this test too, and so has to be argued for in
+ * review rather than slipped in with an edit to the allowlist.
+ */
+const CONTENT_VERIFIED = {
+  append: ["flows_quarantine", "equity", "decisions", "fee_accruals", "journal", "events", "agent_account", "announcements"],
+  "last-write": ["paper_book", "tenant_settings", "paper_recovery_health", "tenant_recovery_reply_state", "mcp_proposals", "tenant_personal_memory", "tenant_tg_groups"],
+};
+const PRESENCE_ONLY = DRILL_TABLES.filter((t) => t.kind === "presence-only").map((t) => t.table);
+
+test("every allowlisted table has a kind read from its writers, and only a presence-only one says why", () => {
+  assert.deepEqual([...DRILL_KINDS], ["append", "last-write", "presence-only"]);
+  for (const [kind, tables] of Object.entries(CONTENT_VERIFIED)) {
+    assert.deepEqual(DRILL_TABLES.filter((t) => t.kind === kind).map((t) => t.table).sort(), [...tables].sort(), `the ${kind} tables`);
+  }
+  for (const entry of DRILL_TABLES) {
+    assert.ok(DRILL_KINDS.includes(entry.kind), `${entry.table} has a kind`);
+    if (entry.kind === "presence-only") {
+      assert.match(entry.why, /^[\x20-\x7e]{1,160}$/, `${entry.table} says why, in one printable line`);
+      assert.doesNotMatch(entry.why, /\d{6,}|0x[0-9a-f]/i, `${entry.table}'s reason carries no value`);
+    } else {
+      assert.equal(entry.why, undefined, `${entry.table} claims its contents, so it has no reason not to`);
+    }
+  }
+  // The rows the review named: agents is upserted in place under a creation
+  // stamp, and so are the ledger rows and authority beside it.
+  for (const must of ["agents", "trades", "flows", "risk_periods", "agent_commands", "grants", "mcp_tokens", "holder_claims", "telegram_bot_claims"]) {
+    assert.ok(PRESENCE_ONLY.includes(must), `${must} is presence-only`);
+  }
+  assert.equal(PRESENCE_ONLY.length + CONTENT_VERIFIED.append.length + CONTENT_VERIFIED["last-write"].length, DRILL_TABLES.length);
+});
+
+test("the allowlist's shape is checked: an entry with no kind, a stray reason or an unknown field is refused", () => {
+  const ok = { table: "trades", stamp: "created_at", kind: "presence-only", why: "A reason." };
+  const frozen = validateDrillTables([ok, { table: "equity", stamp: "at", kind: "append" }]);
+  assert.ok(Object.isFrozen(frozen) && frozen.every((e) => Object.isFrozen(e)));
+  assert.notEqual(frozen[0], ok, "the caller's object is copied, not frozen in place");
+  const refused = [
+    [],
+    [{ table: "trades", stamp: "created_at" }], // no kind: the old shape
+    [{ ...ok, kind: "insert-only" }],
+    [{ ...ok, kind: undefined }],
+    [{ table: "trades", stamp: "created_at", kind: "presence-only" }], // no reason
+    [{ ...ok, why: "" }],
+    [{ ...ok, why: "two\nlines" }],
+    [{ ...ok, why: "x".repeat(161) }],
+    [{ ...ok, why: 7 }],
+    [{ table: "equity", stamp: "at", kind: "append", why: "A reason beside a content claim." }],
+    [{ table: "paper_book", stamp: "updated_at", kind: "last-write", why: "Likewise." }],
+    [{ ...ok, note: "an unknown field" }],
+    [{ ...ok, table: "trades; DROP TABLE trades" }],
+    [{ ...ok, stamp: "Created_At" }],
+    [{ ...ok, table: undefined }], // String(undefined) is a plain identifier; the type is checked first
+    [ok, { ...ok }], // twice
+    [null],
+  ];
+  for (const entries of refused) assert.throws(() => validateDrillTables(entries), /restore drill:/, JSON.stringify(entries));
+});
+
+// ── arguments and URLs ───────────────────────────────────────────────────────
+
+test("arguments: a zoned restore point, a default settle margin, and the window derived from both", () => {
+  const b = parseDrillArgs(ARGV, ENV, NOW_MS);
+  assert.deepEqual(
+    { restorePointSec: b.restorePointSec, settleSec: b.settleSec, cutoffSec: b.cutoffSec, afterSec: b.afterSec },
+    { restorePointSec: R, settleSec: 900, cutoffSec: R - 900, afterSec: R + 900 },
+  );
+  assert.equal(parseDrillArgs([`--restore-point=${RESTORE_POINT}`, "--settle-sec=0"], ENV, NOW_MS).cutoffSec, R);
+  assert.equal(parseDrillArgs([...ARGV, "--settle-sec", "3600"], ENV, NOW_MS).cutoffSec, R - 3600);
+  // R's wall clock two hours east, written with its offset, is the same instant.
+  const offset = new Date((R + 2 * 3600) * 1000).toISOString().replace("Z", "+02:00");
+  assert.equal(parseDrillArgs(["--restore-point", offset], ENV, NOW_MS).restorePointSec, R);
+});
+
+test("arguments: refused, by a fixed message that never repeats what it was given", () => {
+  const cases = [
+    [],
+    ["--restore-point"],
+    ["--restore-point", "2026-10-05T02:00:00"], // no zone: whose local time?
+    ["--restore-point", "yesterday"],
+    ["--restore-point", "2026-13-45T02:00:00Z"],
+    ["--restore-point", new Date(NOW_MS + 60_000).toISOString()], // the future
+    [...ARGV, "--restore-point", RESTORE_POINT],
+    [...ARGV, "--settle-sec", "-5"],
+    [...ARGV, "--settle-sec", "15m"],
+    [...ARGV, "--settle-sec", "3601"], // a margin that wide hides a fork restored an hour off
+    [...ARGV, FORK_URL], // a connection string pasted into argv
+    [...ARGV, "--fork", FORK_URL],
+  ];
+  for (const argv of cases) {
+    try {
+      parseDrillArgs(argv, ENV, NOW_MS);
+      assert.fail(`accepted ${JSON.stringify(argv)}`);
+    } catch (e) {
+      assert.ok(e instanceof DrillRefusal && e.code === "usage", JSON.stringify(argv));
+      assert.doesNotMatch(e.message, /secret|railway\.internal|yesterday|15m/);
+    }
+  }
+  expectRefusal(() => parseDrillArgs(ARGV, { MERRYMEN_RESTORE_FORK_URL: FORK_URL }, NOW_MS), "usage");
+  expectRefusal(() => parseDrillArgs(ARGV, { ...ENV, MERRYMEN_RESTORE_SOURCE_URL: "https://example.com/db" }, NOW_MS), "usage");
+});
+
+test("a URL's database is its host, port and name, whatever its credentials", () => {
+  assert.equal(databaseOf("postgres://a:b@Postgres.Railway.Internal/railway"), "postgres.railway.internal:5432/railway");
+  assert.equal(databaseOf("postgresql://a@postgres.railway.internal:5432/railway?sslmode=require"), "postgres.railway.internal:5432/railway");
+  assert.equal(databaseOf("postgres://merrymen@localhost:55432"), "localhost:55432/merrymen");
+  assert.equal(databaseOf("postgres://u@ignored/db?host=/var/run/postgresql&port=5433"), "/var/run/postgresql:5433/db");
+  for (const bad of [undefined, "", "not a url", "mysql://h/db", "postgres://h/%zz"]) assert.equal(databaseOf(bad), null);
+});
+
+test("the source is never the fork: the same database under other credentials, or this service's own DATABASE_URL", () => {
+  const same = { MERRYMEN_RESTORE_FORK_URL: "postgresql://other:pw@POSTGRES.railway.internal/railway", MERRYMEN_RESTORE_SOURCE_URL: SOURCE_URL };
+  expectRefusal(() => parseDrillArgs(ARGV, same, NOW_MS), "fork-is-source");
+  expectRefusal(() => parseDrillArgs(ARGV, { ...ENV, DATABASE_URL: FORK_URL.replace("fork-secret", "x") }, NOW_MS), "fork-is-live");
+  // Another database on the same server is a different database.
+  const sibling = { ...ENV, MERRYMEN_RESTORE_FORK_URL: SOURCE_URL.replace("/railway", "/railway_fork") };
+  assert.equal(parseDrillArgs(ARGV, sibling, NOW_MS).forkUrl, sibling.MERRYMEN_RESTORE_FORK_URL);
+  // The source being DATABASE_URL is the ordinary case.
+  assert.equal(parseDrillArgs(ARGV, { ...ENV, DATABASE_URL: SOURCE_URL }, NOW_MS).sourceUrl, SOURCE_URL);
+});
+
+// ── verdicts ─────────────────────────────────────────────────────────────────
+
+test("verdicts: the fork may hold more than the source wrote by the cutoff, never less", () => {
+  const side = (rows, newest, after = 0) => ({ present: true, stamped: true, rows, total: rows, after, newest });
+  const cases = [
+    [side(5, 100), side(5, 100), "match"],
+    [side(6, 100), side(5, 100), "source-changed"], // deleted from the source since
+    [side(5, 120), side(5, 100), "source-changed"], // re-stamped in the source since
+    [side(4, 100), side(5, 100), "fork-behind"],
+    [side(5, 90), side(5, 100), "fork-behind"], // restored to an earlier moment
+    [side(6, 90), side(5, 100), "fork-behind"], // more rows cannot excuse an older newest
+    [side(0, null), side(0, null), "match"],
+    [side(0, null), side(1, 100), "fork-behind"],
+    [side(5, 100, 1), side(5, 100), "fork-after-restore-point"],
+    [{ present: false }, { present: false }, "absent"],
+    [{ present: false }, side(1, 100), "missing-in-fork"],
+    [side(1, 100), { present: false }, "missing-in-source"],
+    [{ present: true, stamped: false }, side(1, 100), "bad-stamp"],
+    [side(1, 100), { present: true, stamped: false }, "bad-stamp"],
+  ];
+  for (const [fork, source, verdict] of cases) {
+    for (const kind of ["append", "last-write"]) assert.equal(verdictOf(fork, source, kind), verdict, JSON.stringify({ kind, fork, source }));
+    // A presence-only table is judged the same on presence, every failure
+    // included; only an outright match is renamed, because for it the rows
+    // being there is all that is known.
+    const presence = verdict === "match" ? "present-content-unverified" : verdict;
+    assert.equal(verdictOf(fork, source, "presence-only"), presence, JSON.stringify({ kind: "presence-only", fork, source }));
+  }
+  assert.deepEqual([...FAILING_VERDICTS].sort(), ["bad-stamp", "fork-after-restore-point", "fork-behind", "missing-in-fork", "missing-in-source"]);
+  assert.ok(!FAILING_VERDICTS.includes("present-content-unverified"), "stated, not failed");
+  // No kind, no verdict: a caller that cannot say what a table is cannot be told it matched.
+  for (const kind of [undefined, "", "match"]) assert.throws(() => verdictOf(side(5, 100), side(5, 100), kind), /needs the table's kind/);
+});
+
+test("a presence-only table never reads match, whatever the two sides hold", () => {
+  const side = (rows, newest, after = 0) => ({ present: true, stamped: true, rows, total: rows + 2, after, newest });
+  const shapes = [];
+  for (const rows of [0, 1, 5]) for (const newest of [null, 99, 100, 101]) shapes.push(side(rows, rows === 0 ? null : newest));
+  shapes.push({ present: false }, { present: true, stamped: false }, side(5, 100, 1));
+  for (const fork of shapes) {
+    for (const source of shapes) assert.notEqual(verdictOf(fork, source, "presence-only"), "match", JSON.stringify({ fork, source }));
+  }
+});
+
+test("the report prints counts, kinds and verdicts, never a stamp", () => {
+  const tables = (newest) => Object.fromEntries(DRILL_TABLES.map(({ table }) => [table, { present: true, stamped: true, rows: 3, total: 4, after: 0, newest }]));
+  const stamp = 1_789_999_123;
+  const report = compareSides({ tables: tables(stamp) }, { tables: tables(stamp) });
+  assert.equal(report.ok, true);
+  assert.equal(report.exact, true);
+  // Rows proven, contents not: the presence-only tables were compared.
+  assert.equal(report.contentsVerified, false);
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.summary, { match: DRILL_TABLES.length - PRESENCE_ONLY.length, "present-content-unverified": PRESENCE_ONLY.length });
+  assert.deepEqual(report.tables.equity, { verdict: "match", kind: "append", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  assert.deepEqual(report.tables.tenant_settings, { verdict: "match", kind: "last-write", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  assert.deepEqual(report.tables.trades, { verdict: "present-content-unverified", kind: "presence-only", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  // Every presence-only table compared is named, in allowlist order, with the
+  // reason written beside its entry — the gap travels with the pass.
+  assert.deepEqual(report.contentUnverified, DRILL_TABLES.filter((t) => t.kind === "presence-only").map(({ table, why }) => ({ table, why })));
+  assert.doesNotMatch(JSON.stringify(report), new RegExp(String(stamp)));
+
+  const older = compareSides({ tables: { ...tables(stamp), flows: { present: true, stamped: true, rows: 3, total: 3, after: 0, newest: stamp - 1 } } }, { tables: tables(stamp) });
+  assert.equal(older.ok, false);
+  assert.deepEqual(older.failed, ["flows"]);
+  assert.equal(older.tables.flows.newest, "fork-older");
+  assert.doesNotMatch(JSON.stringify(older), new RegExp(`${stamp - 1}|${stamp}`));
+});
+
+test("contents are verified only when no presence-only table was compared", () => {
+  const stamp = 1_789_999_123;
+  const only = (kinds) => ({ tables: Object.fromEntries(DRILL_TABLES.filter(({ kind }) => kinds.includes(kind)).map(({ table }) => [table, { present: true, stamped: true, rows: 3, total: 3, after: 0, newest: stamp }])) });
+  const exactOnly = compareSides(only(["append", "last-write"]), only(["append", "last-write"]));
+  assert.equal(exactOnly.ok, true);
+  assert.deepEqual(exactOnly.contentUnverified, []);
+  assert.equal(exactOnly.contentsVerified, true);
+  // The Codex case: one agents row stale in the fork reads exactly like a
+  // current one, so the moment agents is compared, contents are not claimed.
+  const withAgents = compareSides(only(["append", "last-write", "presence-only"]), only(["append", "last-write", "presence-only"]));
+  assert.equal(withAgents.ok, true);
+  assert.equal(withAgents.tables.agents.verdict, "present-content-unverified");
+  assert.equal(withAgents.contentsVerified, false);
+  const failing = compareSides({ tables: {} }, { tables: {} });
+  assert.equal(failing.contentsVerified, false);
+});
+
+test("a drill that compared nothing is not a pass", () => {
+  const none = { tables: Object.fromEntries(DRILL_TABLES.map(({ table }) => [table, { present: true, stamped: true, rows: 0, total: 2, after: 0, newest: null }])) };
+  const report = compareSides(none, none);
+  assert.equal(report.ok, false);
+  assert.equal(report.exact, false);
+  assert.equal(report.error.code, "nothing-to-compare");
+  const absent = compareSides({ tables: {} }, { tables: {} });
+  assert.equal(absent.ok, false);
+  assert.equal(absent.summary.absent, DRILL_TABLES.length);
+});
+
+// ── the whole drill, over scripted databases ─────────────────────────────────
+
+const FORK_SERVER = { started: "2026-10-05 03:10:00.123456+00" };
+
+test("a faithful fork of a source that kept writing: exact, read-only on both sides, and nothing but counts printed", async () => {
+  const stamps = [BEFORE - 7200, BEFORE - 3600, BEFORE, SETTLING];
+  const ms = stamps.map((s) => s * 1000 + 999); // agent_commands is Date.now()
+  const fork = database({ ...FORK_SERVER, tables: { trades: { stamps }, agent_commands: { stamps: ms } } });
+  const source = database({ tables: { trades: { stamps: [...stamps, LATER, LATER + 1] }, agent_commands: { stamps: [...ms, LATER * 1000] } } });
+  const out = await drill(fork, source);
+  assert.equal(out.exitCode, 0, JSON.stringify(out.report.error ?? out.report.failed));
+  assert.equal(out.report.ok, true);
+  assert.equal(out.report.exact, true);
+  assert.equal(out.report.restorePoint, RESTORE_POINT);
+  // trades is resolved in place, so equal counts prove the rows, not their contents.
+  assert.deepEqual(out.report.tables.trades, { verdict: "present-content-unverified", kind: "presence-only", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 6 }, newest: "equal" });
+  assert.equal(out.report.tables.agent_commands.verdict, "present-content-unverified");
+  assert.equal(out.report.tables.agent_commands.source.rows, 3);
+  assert.equal(out.report.tables.equity.verdict, "match");
+  assert.ok(out.report.contentUnverified.some((t) => t.table === "trades"));
+
+  // The fork first, so a broken fork never costs production a query.
+  assert.deepEqual(out.order, ["fork", "source"]);
+  for (const side of ["fork", "source"]) {
+    // Every read sits in a read-only transaction whose bounds (pinned to the
+    // letter: both are the point) and mode were set and proved first.
+    const reads = transactionsOf(out.clients[side].sent);
+    // The identity and the catalog first, with no table counted alongside.
+    assert.ok(reads[0].some((s) => s.includes("pg_postmaster_start_time()")) && reads[0].some((s) => s.includes("pg_catalog.pg_attribute")));
+    assert.ok(!reads[0].some((s) => TABLE_COUNTED.test(s)));
+    // Then each table alone, so no table's read lock outlives its own count.
+    assert.deepEqual(reads.slice(1).map((r) => r.map((s) => TABLE_COUNTED.exec(s)?.[1])), DRILL_TABLES.map(({ table }) => [table]));
+    assert.equal(out.clients[side].ended, true);
+  }
+
+  const printed = JSON.stringify(out.report);
+  for (const value of [...stamps, ...ms, SETTLING, LATER, "secret", "railway.internal", "railway", FORK_SERVER.started]) {
+    assert.ok(!printed.includes(String(value)), `the report must not carry ${value}`);
+  }
+});
+
+test("rows the source deleted after the restore point read as source-changed, and still pass", async () => {
+  const fork = database({ ...FORK_SERVER, tables: { grants: { stamps: [BEFORE, BEFORE - 1] } } });
+  const source = database({ tables: { grants: { stamps: [BEFORE] } } });
+  const out = await drill(fork, source);
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.report.ok, true);
+  assert.equal(out.report.exact, false);
+  assert.equal(out.report.tables.grants.verdict, "source-changed");
+  assert.deepEqual(out.report.summary, {
+    match: DRILL_TABLES.length - PRESENCE_ONLY.length,
+    "present-content-unverified": PRESENCE_ONLY.length - 1,
+    "source-changed": 1,
+  });
+  // grants is presence-only: reading `source-changed` does not take it off the list.
+  assert.ok(out.report.contentUnverified.some((t) => t.table === "grants"));
+});
+
+/**
+ * THE CASE THE REVIEW NAMED. An agents row was updated before the restore
+ * point — caps narrowed, expiry moved, HWM raised — and the fork kept the
+ * older version. created_at never moves, so both sides count the same rows
+ * under the same newest stamp. The drill cannot tell these forks apart, and
+ * now it says so instead of calling it a match: the pass stands (the fork may
+ * be right), the table is not `match`, and the JSON names it with its reason.
+ */
+test("an agents row updated in place reads present-content-unverified, is listed, and does not fail the drill", async () => {
+  const stamps = [BEFORE - 86_400, BEFORE - 3600];
+  const fork = database({ ...FORK_SERVER, tables: { agents: { stamps } } });
+  const source = database({ tables: { agents: { stamps: [...stamps, LATER] } } });
+  const out = await drill(fork, source);
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.report.ok, true);
+  assert.deepEqual(out.report.tables.agents, {
+    verdict: "present-content-unverified", kind: "presence-only",
+    fork: { rows: 2, total: 2, after: 0 }, source: { rows: 2, total: 3 }, newest: "equal",
+  });
+  assert.ok(!Object.values(out.report.tables).some((t) => t.kind === "presence-only" && t.verdict === "match"));
+  // What a script recording the evidence reads: the JSON the command line prints.
+  const printed = JSON.parse(JSON.stringify(out.report));
+  const agents = printed.contentUnverified.find((t) => t.table === "agents");
+  assert.equal(agents.why, DRILL_TABLES.find((t) => t.table === "agents").why);
+  assert.match(agents.why, /without moving created_at/);
+  assert.deepEqual(printed.contentUnverified.map((t) => t.table), PRESENCE_ONLY);
+  assert.ok(!printed.contentUnverified.some((t) => t.table === "equity" || t.table === "tenant_settings"), "content-verified kinds are not listed");
+
+  // A presence-only table the fork is behind on still fails, as before.
+  const behind = await drill(database({ ...FORK_SERVER, tables: { agents: { stamps: [stamps[0]] } } }), source);
+  assert.equal(behind.exitCode, 1);
+  assert.deepEqual(behind.report.failed, ["agents"]);
+  assert.equal(behind.report.tables.agents.verdict, "fork-behind");
+
+  // A presence-only table neither side has is absent, and not listed: there
+  // was nothing whose contents went unchecked.
+  const none = await drill(database({ ...FORK_SERVER, tables: { agents: null } }), database({ tables: { agents: null } }));
+  assert.equal(none.report.tables.agents.verdict, "absent");
+  assert.ok(!none.report.contentUnverified.some((t) => t.table === "agents"));
+});
+
+test("a fork missing a row, or restored to an earlier moment, fails", async () => {
+  const lost = await drill(database({ ...FORK_SERVER, tables: { flows: { stamps: [BEFORE] } } }), database({ tables: { flows: { stamps: [BEFORE, BEFORE - 5] } } }));
+  assert.equal(lost.exitCode, 1);
+  assert.equal(lost.report.ok, false);
+  assert.deepEqual(lost.report.failed, ["flows"]);
+  assert.equal(lost.report.tables.flows.verdict, "fork-behind");
+
+  const early = await drill(database({ ...FORK_SERVER, tables: { equity: { stamps: [BEFORE - 7200, BEFORE - 3600] } } }), database({ tables: { equity: { stamps: [BEFORE - 7200, BEFORE] } } }));
+  assert.equal(early.exitCode, 1);
+  assert.equal(early.report.tables.equity.verdict, "fork-behind");
+  assert.equal(early.report.tables.equity.newest, "fork-older");
+});
+
+test("a fork holding rows from after the restore point is not that moment's copy", async () => {
+  const out = await drill(database({ ...FORK_SERVER, tables: { decisions: { stamps: [BEFORE, LATER] } } }), database({ tables: { decisions: { stamps: [BEFORE, LATER] } } }));
+  assert.equal(out.exitCode, 1);
+  assert.equal(out.report.tables.decisions.verdict, "fork-after-restore-point");
+  assert.equal(out.report.tables.decisions.fork.after, 1);
+});
+
+test("a table the fork lacks, or a stamp that is not an integer, fails; one neither side has yet passes", async () => {
+  const fork = database({ ...FORK_SERVER, tables: { journal: null, events: { type: "text", stamps: [BEFORE] }, tg_group_notices: null } });
+  const source = database({ tables: { tg_group_notices: null } });
+  const out = await drill(fork, source);
+  assert.equal(out.exitCode, 1);
+  assert.equal(out.report.tables.journal.verdict, "missing-in-fork");
+  assert.equal(out.report.tables.events.verdict, "bad-stamp");
+  assert.equal(out.report.tables.tg_group_notices.verdict, "absent");
+  assert.deepEqual(out.report.failed.sort(), ["events", "journal"]);
+  // A text stamp is never scanned.
+  assert.ok(!out.clients.fork.sent.some((s) => s.includes('FROM "events")')));
+});
+
+test("both URLs reaching one server and database is refused before the source is counted", async () => {
+  const out = await drill(database(), database());
+  assert.equal(out.exitCode, 64);
+  assert.equal(out.report.error.code, "fork-is-source");
+  assert.equal(out.report.ok, false);
+  assert.ok(!out.clients.source.sent.some((s) => s.includes("AS stamped")), "no table of the source was scanned");
+  assert.equal(out.clients.source.sent.at(-1), "ROLLBACK");
+  assert.equal(out.clients.source.ended, true);
+});
+
+test("a fork that cannot be reached stops the drill before the source is touched, and no message is echoed", async () => {
+  const refused = Object.assign(new Error(`connect ECONNREFUSED for ${FORK_URL}`), { code: "ECONNREFUSED" });
+  const out = await drill(database(FORK_SERVER), database(), { failFork: refused });
+  assert.equal(out.exitCode, 1);
+  assert.deepEqual(out.order, ["fork"]);
+  assert.deepEqual(out.report.error, { code: "connect-failed", detail: "Could not connect.", side: "fork", cause: "ECONNREFUSED" });
+  assert.doesNotMatch(JSON.stringify(out.report), /secret|railway\.internal/);
+});
+
+test("a transaction that does not report read-only is refused before a table is read", async () => {
+  const out = await drill(database({ ...FORK_SERVER, readonly: "off" }), database());
+  assert.equal(out.exitCode, 1);
+  assert.deepEqual(out.report.error, { code: "not-read-only", detail: "The transaction did not open read-only; nothing was read.", side: "fork" });
+  assert.deepEqual(out.order, ["fork"]);
+  assert.ok(!out.clients.fork.sent.some((s) => s.includes("pg_catalog") || s.includes("AS stamped")));
+  assert.equal(out.clients.fork.sent.at(-1), "ROLLBACK");
+
+  // Read-only, but not at the isolation the BEGIN asked for: refused the same
+  // way, on the source too, before production is scanned.
+  const loose = await drill(database(FORK_SERVER), database({ isolation: "read committed" }));
+  assert.equal(loose.exitCode, 1);
+  assert.deepEqual(loose.report.error, { code: "not-read-only", detail: "The transaction did not open read-only; nothing was read.", side: "source" });
+  assert.ok(!loose.clients.source.sent.some((s) => s.includes("pg_catalog") || s.includes("pg_postmaster_start_time") || s.includes("AS stamped")));
+  assert.equal(loose.clients.source.sent.at(-1), "ROLLBACK");
+});
+
+test("a failed read names the side, the table and the driver code, and still rolls back", async () => {
+  const out = await drill(database(FORK_SERVER), database({ fail: { equity: "57014" } }));
+  assert.equal(out.exitCode, 1);
+  assert.deepEqual(out.report.error, { code: "query-failed", detail: "A read failed and the drill stopped.", side: "source", table: "equity", cause: "57014" });
+  assert.equal(out.clients.source.sent.at(-1), "ROLLBACK");
+  assert.equal(out.clients.source.ended, true);
+  assert.doesNotMatch(JSON.stringify(out.report), /secret|railway\.internal/);
+});
+
+/**
+ * A stand-in for the `pg` module itself, so connectPg runs as it does hosted.
+ * Its Client is an EventEmitter, as pg's is, and `dropAt` names a table whose
+ * count meets what pg does when the server ends the session mid-read: 'error'
+ * is emitted on the client from a socket event, outside any promise, and the
+ * read in flight then rejects with the server's code. Every later query is
+ * refused, as pg refuses a client that is no longer queryable.
+ */
+function fakePg(byUrl, { dropAt } = {}) {
+  const made = [];
+  class Client extends EventEmitter {
+    constructor(config) {
+      super();
+      this.config = config;
+      this.inner = fakeClient(byUrl[config.connectionString]);
+      this.dead = false;
+      made.push(this);
+    }
+
+    async connect() {}
+
+    query(text, params) {
+      if (this.dead) return Promise.reject(new Error("Client has encountered a connection error and is not queryable"));
+      if (dropAt && text.includes(`FROM "${dropAt}") AS stamped`)) {
+        this.dead = true;
+        return new Promise((_, reject) => setImmediate(() => {
+          this.emit("error", new Error("Connection terminated unexpectedly"));
+          reject(Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" }));
+        }));
+      }
+      return this.inner.query(text, params);
+    }
+
+    async end() {
+      this.ended = true;
+    }
+  }
+  return { Client, made };
+}
+
+test("a connection the server drops mid-read is reported by code, not by a crash", async () => {
+  const pg = fakePg({ [FORK_URL]: database(FORK_SERVER), [SOURCE_URL]: database() }, { dropAt: "positions" });
+  const client = await connectPg(FORK_URL, () => pg);
+  assert.equal(client.listenerCount("error"), 1, "connectPg hears the client's 'error' event");
+  assert.doesNotThrow(() => client.emit("error", new Error("Connection terminated unexpectedly")));
+
+  const out = await runRestoreDrill({ argv: ARGV, env: ENV, now: () => NOW_MS, connect: (url) => connectPg(url, () => pg) });
+  assert.equal(out.exitCode, 1);
+  assert.deepEqual(out.report.error, { code: "query-failed", detail: "A read failed and the drill stopped.", side: "fork", table: "positions", cause: "57P01" });
+  assert.ok(pg.made.slice(1).every((c) => c.ended), "every client the drill opened was ended");
+  assert.equal(pg.made.length, 2, "the source was never opened after the fork failed");
+  assert.doesNotMatch(JSON.stringify(out.report), /secret|railway\.internal|terminat/);
+});
+
+test("a missing driver is refused by code", async () => {
+  await assert.rejects(connectPg(FORK_URL, () => { throw new Error("Cannot find module 'pg'"); }), (e) => e instanceof DrillRefusal && e.code === "no-driver");
+});
+
+test("a millisecond stamp is read as milliseconds, row by row", async () => {
+  // Just after the cutoff in ms. Read as seconds it would be a far-future row
+  // in both; truncated wrongly it would land before the cutoff in the source.
+  const justAfter = (R - DEFAULT_SETTLE_SEC + 1) * 1000;
+  const fork = database({ ...FORK_SERVER, tables: { holder_claims: { stamps: [BEFORE * 1000, BEFORE] } } });
+  const source = database({ tables: { holder_claims: { stamps: [BEFORE * 1000, BEFORE, justAfter] } } });
+  const out = await drill(fork, source);
+  // holder_claims is presence-only (an undone move puts an older stamp back).
+  assert.equal(out.report.tables.holder_claims.verdict, "present-content-unverified");
+  assert.deepEqual(out.report.tables.holder_claims.source, { rows: 2, total: 3 });
+
+  // The same reading on a last-write table whose stamp is milliseconds.
+  const memory = await drill(
+    database({ ...FORK_SERVER, tables: { tenant_personal_memory: { stamps: [BEFORE * 1000 + 999, BEFORE] } } }),
+    database({ tables: { tenant_personal_memory: { stamps: [BEFORE * 1000 + 999, BEFORE, justAfter] } } }),
+  );
+  assert.equal(memory.report.tables.tenant_personal_memory.verdict, "match");
+  assert.deepEqual(memory.report.tables.tenant_personal_memory.source, { rows: 2, total: 3 });
+});
+
+test("the command line prints the same JSON and exit code, and refuses a URL in argv without repeating it", () => {
+  const run = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  const bare = run([]);
+  assert.equal(bare.status, 64);
+  assert.equal(JSON.parse(bare.stdout).error.code, "usage");
+  const pasted = run(["--restore-point", RESTORE_POINT, FORK_URL]);
+  assert.equal(pasted.status, 64);
+  assert.doesNotMatch(pasted.stdout + pasted.stderr, /secret|railway\.internal/);
+});
+
+// ── opt-in: real Postgres ────────────────────────────────────────────────────
+
+const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
+// LOADED ONLY WHEN A DATABASE IS NAMED: `pg` is not a dependency of this repo.
+const pg = url ? createRequire(import.meta.url)("pg") : null;
+
+test("Postgres: the drill's SQL over two real databases", { skip: !url, timeout: 60_000 }, async (t) => {
+  const target = new URL(url);
+  // The URL's own host is not the whole answer: pg takes a `host` query
+  // parameter over it (databaseOf reads it the same way), and libpq a
+  // `hostaddr`. Either could send this case's CREATE DATABASE, CREATE ROLE and
+  // DROP statements to a server behind a local-looking URL, so both are refused.
+  assert.ok(
+    ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname) && !target.searchParams.has("host") && !target.searchParams.has("hostaddr"),
+    "only a disposable local Postgres is allowed",
+  );
+  const suffix = randomBytes(6).toString("hex");
+  const names = { source: `mm_restore_source_${suffix}`, fork: `mm_restore_fork_${suffix}` };
+  const urlOf = (name) => Object.assign(new URL(target), { pathname: `/${name}` }).toString();
+  const admin = new pg.Client({ connectionString: url });
+  await admin.connect();
+  const clients = {};
+  const reader = `mm_restore_reader_${suffix}`;
+  // One hook, in this order: a database with a session open cannot be
+  // dropped, and a role cannot be dropped while a database grants it anything.
+  t.after(async () => {
+    for (const c of Object.values(clients)) await c.end().catch(() => {});
+    for (const name of Object.values(names)) await admin.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => {});
+    await admin.query(`DROP ROLE IF EXISTS ${reader}`).catch(() => {});
+    await admin.end();
+  });
+  for (const name of Object.values(names)) await admin.query(`CREATE DATABASE ${name}`);
+
+  // The production shapes of a few allowlisted tables (testdata/shared-schema-75995697.sql),
+  // and holder_claims' millisecond stamp. Every other allowlisted table is absent on both.
+  const SCHEMA = `
+    CREATE TABLE trades (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, agent_id text NOT NULL, created_at bigint);
+    CREATE TABLE flows (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, agent_id text NOT NULL, at bigint DEFAULT (EXTRACT(epoch FROM now()))::bigint NOT NULL);
+    CREATE TABLE grants (tenant text PRIMARY KEY, sealed_session_key text NOT NULL, updated_at bigint NOT NULL);
+    CREATE TABLE holder_claims (wallet text PRIMARY KEY, tenant text NOT NULL, claimed_at bigint NOT NULL);
+    CREATE TABLE tenant_settings (tenant text PRIMARY KEY, sealed text NOT NULL, updated_at integer NOT NULL);`;
+  const seed = async (client, extra = "") => {
+    await client.query(SCHEMA);
+    await client.query(`
+      INSERT INTO trades (agent_id, created_at) VALUES ('0xa', ${BEFORE - 100}), ('0xa', ${BEFORE}), ('0xb', NULL), ('0xb', ${SETTLING});
+      INSERT INTO flows (agent_id, at) VALUES ('0xa', ${BEFORE - 50}), ('0xa', ${BEFORE - 10});
+      INSERT INTO grants VALUES ('0x1', 'sealed-key-1', ${BEFORE - 30}), ('0x2', 'sealed-key-2', ${BEFORE - 20});
+      INSERT INTO holder_claims VALUES ('0xw1', '0x1', ${(BEFORE - 40) * 1000}), ('0xw2', '0x2', ${BEFORE * 1000 + 999});
+      INSERT INTO tenant_settings VALUES ('0x1', 'sealed-settings', ${BEFORE - 60});
+      ${extra}`);
+  };
+  for (const [side, name] of Object.entries(names)) {
+    clients[side] = new pg.Client({ connectionString: urlOf(name) });
+    await clients[side].connect();
+  }
+  await seed(clients.fork);
+  // The source kept going after the restore point.
+  await seed(clients.source, `INSERT INTO trades (agent_id, created_at) VALUES ('0xa', ${LATER});
+    INSERT INTO holder_claims VALUES ('0xw3', '0x3', ${LATER * 1000});
+    UPDATE grants SET updated_at = ${LATER} WHERE tenant = '0x2';`);
+
+  const env = { MERRYMEN_RESTORE_FORK_URL: urlOf(names.fork), MERRYMEN_RESTORE_SOURCE_URL: urlOf(names.source) };
+  const run = (overrides = {}) => runRestoreDrill({ argv: ARGV, env: { ...env, ...overrides }, now: () => NOW_MS });
+
+  const first = await run();
+  assert.equal(first.exitCode, 0, JSON.stringify(first.report));
+  // trades and holder_claims are presence-only: equal, and their contents unchecked.
+  assert.equal(first.report.tables.trades.verdict, "present-content-unverified");
+  assert.deepEqual(first.report.tables.trades.source, { rows: 3, total: 5 }); // the unstamped row counts as old
+  assert.equal(first.report.tables.holder_claims.verdict, "present-content-unverified");
+  assert.equal(first.report.tables.tenant_settings.verdict, "match"); // last-write, and an int4 stamp
+  // The re-signed grant left the source's old rows: the fork holds more, and that passes.
+  assert.equal(first.report.tables.grants.verdict, "source-changed");
+  assert.equal(first.report.exact, false);
+  assert.equal(first.report.tables.journal.verdict, "absent");
+  // Only the presence-only tables this database has are listed, in allowlist order.
+  assert.deepEqual(first.report.contentUnverified.map((t) => t.table), ["trades", "flows", "grants", "holder_claims"]);
+  const printed = JSON.stringify(first.report);
+  for (const value of ["sealed", "0xw", names.fork, names.source, String(BEFORE), String(BEFORE - 10)]) assert.ok(!printed.includes(value), value);
+
+  // Lose a row from the fork: the drill fails on that table.
+  await clients.fork.query(`DELETE FROM flows WHERE at = ${BEFORE - 10}`);
+  const lost = await run();
+  assert.equal(lost.exitCode, 1);
+  assert.equal(lost.report.tables.flows.verdict, "fork-behind");
+  assert.equal(lost.report.tables.flows.newest, "fork-older");
+
+  // The same database through a second spelling of its host: refused at runtime.
+  const alias = new URL(urlOf(names.source));
+  alias.hostname = alias.hostname === "localhost" ? "127.0.0.1" : "localhost";
+  const same = await run({ MERRYMEN_RESTORE_FORK_URL: alias.toString() });
+  assert.equal(same.exitCode, 64);
+  assert.equal(same.report.error.code, "fork-is-source");
+
+  // A role that may not read a table still sees it in the catalog, so the
+  // drill stops on that table instead of calling it absent on both sides.
+  await admin.query(`CREATE ROLE ${reader} LOGIN`);
+  for (const c of Object.values(clients)) await c.query(`GRANT SELECT ON trades, flows, holder_claims, tenant_settings TO ${reader}`);
+  const as = (name) => Object.assign(new URL(urlOf(name)), { username: reader, password: "" }).toString();
+  const unreadable = await run({ MERRYMEN_RESTORE_FORK_URL: as(names.fork), MERRYMEN_RESTORE_SOURCE_URL: as(names.source) });
+  assert.equal(unreadable.exitCode, 1);
+  assert.deepEqual(unreadable.report.error, { code: "query-failed", detail: "A read failed and the drill stopped.", side: "fork", table: "grants", cause: "42501" });
+
+  // Nothing above wrote: the drill's sessions were read-only and rolled back.
+  const { rows } = await clients.source.query("SELECT count(*)::int AS n FROM trades");
+  assert.equal(rows[0].n, 5);
+});

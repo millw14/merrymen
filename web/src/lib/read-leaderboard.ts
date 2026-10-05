@@ -18,7 +18,9 @@ import { readOperationCounts } from "./distinct-trades";
  * Every agent something is still running is listed. Only live agents with
  * evidenced returns are ranked; paper and idle agents stay visible and
  * explicitly unranked. Killed, lapsed and unrun agents are folded into a
- * count instead of a row each — see retired-agent.ts for which, and why.
+ * count instead of a row each — see retired-agent.ts for which, and why — but
+ * a named agent the recovery hold silenced is not over, and stays listed as
+ * "Not running".
  *
  * NULL IS NOT ZERO. An agent with no deposit on record has an UNKNOWN return,
  * not a flat one, and publishing "equity minus nothing" as performance is the
@@ -32,7 +34,7 @@ import { sameBookAsLatest } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import type { UnrankedWhy } from "@/lib/rank-pnl";
-import { isRetired } from "@/lib/retired-agent";
+import { inIncidentWindow, isRetired, notRunning as heldNotRunning, type AgentLifecycle } from "@/lib/retired-agent";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export interface LeaderRow {
@@ -64,9 +66,28 @@ export interface LeaderRow {
   /** Deepest peak-to-trough this epoch, in bps. Null = no history to measure. */
   maxDdBps: number | null;
   mode: string;
+  /**
+   * NOTHING IS RUNNING THIS, AND THE RECOVERY HOLD IS WHY.
+   *
+   * Set on a named row that has not beaten in a day and that the hold kept on
+   * the board instead of folding — see retired-agent.ts. The page says "Not
+   * running" and the time of the last valuation, and nothing else: this flag
+   * is the whole of what the row says about it, so neither the expiry nor
+   * the hold's cause reaches the public payload through it.
+   *
+   * Optional only so an older server, which does not send it, reads as false.
+   */
+  notRunning?: boolean;
   filledPaper: number;
   landed: number;
   refused: number;
+  /**
+   * TRADES, beside those operation counts: distinct swaps and curve trades
+   * (readOperationCounts). The row's trade line prints these, so a vault
+   * deposit or a simulated transfer is never called a trade.
+   */
+  paperFills: number;
+  liveFills: number;
   /** Equity points, oldest first, for the sparkline. Normalised, never dollars. */
   curve: number[];
 }
@@ -181,33 +202,63 @@ export async function readLeaderboard(
     // either, so its old ones would be counted as agents of their own. And a
     // fold with no count is rows leaving the board without a word.
     let retired: number | null = null;
+    // Rows the recovery hold kept on the board that nothing is running.
+    const notRunning = new Set<string>();
     if (slugsRead) try {
       type Lifecycle = { mode: string | null; status: string | null; beat_at: number | null; expires_at: number | null };
       const life = new Map<string, Lifecycle>();
+      // beat_at IN SECONDS, normalised on its own row: the ledger holds both
+      // units, and the incident window is judged against each account's own
+      // beat. Never against a MAX over the fleet — one millisecond stamp in it
+      // would move every other agent's verdict.
       for (const l of (await db
         .prepare(
-          `SELECT smart_account, mode, status, beat_at, expires_at FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
+          `SELECT smart_account, mode, status,
+                  CASE WHEN beat_at > 1e12 THEN beat_at / 1000 ELSE beat_at END AS beat_at,
+                  expires_at
+             FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
         )
         .all()) as (Lifecycle & { smart_account: string })[]) {
         life.set(l.smart_account, l);
       }
-      const now = nowSec();
+      // THE ACCOUNT'S OWN HOLD ROW, keyed by the tenant that owns it as well
+      // as the account, so one tenant's row never speaks for another's agent.
+      // Read on its own and defensively: a self-hosted or older ledger has no
+      // such table, and a read that fails for any reason is no hold rather
+      // than no board — the beat window below still speaks for each account.
+      // And only a hold recorded inside the incident window: a later one is
+      // the owner's report, not the board's — see inIncidentWindow.
       const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+      const held = new Set<string>();
+      try {
+        for (const h of (await db
+          .prepare(`SELECT tenant, smart_account, since_at FROM fleet_recovery_health WHERE held = 1`)
+          .all()) as { tenant: unknown; smart_account: unknown; since_at: unknown }[]) {
+          if (!inIncidentWindow(num(h.since_at))) continue;
+          held.add(`${String(h.tenant).toLowerCase()} ${String(h.smart_account).toLowerCase()}`);
+        }
+      } catch {
+        /* no recovery table: nothing is held */
+      }
+      const now = nowSec();
       const before = rows.length;
       rows = rows.filter((r) => {
         const l = life.get(r.smart_account);
-        return !isRetired(
-          {
-            slug: slugFor.get(r.smart_account.toLowerCase()) ?? null,
-            // RAW, not the COALESCEd `r.mode` above: that reads a newborn that
-            // has never beaten as idle, and would retire it before its first tick.
-            mode: l?.mode ?? null,
-            status: l?.status ?? null,
-            beatAt: num(l?.beat_at),
-            expiresAt: num(l?.expires_at),
-          },
-          now,
-        );
+        const account = r.smart_account.toLowerCase();
+        const tenant = tenantFor.get(account);
+        const lifecycle: AgentLifecycle = {
+          slug: slugFor.get(account) ?? null,
+          // RAW, not the COALESCEd `r.mode` above: that reads a newborn that
+          // has never beaten as idle, and would retire it before its first tick.
+          mode: l?.mode ?? null,
+          status: l?.status ?? null,
+          beatAt: num(l?.beat_at),
+          expiresAt: num(l?.expires_at),
+          held: tenant !== undefined && held.has(`${tenant.toLowerCase()} ${account}`),
+        };
+        if (isRetired(lifecycle, now)) return false;
+        if (heldNotRunning(lifecycle, now)) notRunning.add(r.smart_account);
+        return true;
       });
       retired = before - rows.length;
     } catch {
@@ -254,6 +305,8 @@ export async function readLeaderboard(
         let filledPaper = 0;
         let landed = 0;
         let refused = 0;
+        let paperFills = 0;
+        let liveFills = 0;
         try {
           // Operations, not rows — the same count the agent's own page shows,
           // so a redeploy's re-recorded copies cannot double a board figure.
@@ -261,6 +314,8 @@ export async function readLeaderboard(
           landed = t.landed;
           filledPaper = t.filledPaper;
           refused = t.refused;
+          paperFills = t.paperFills;
+          liveFills = t.liveFills;
         } catch {
           /* older ledger */
         }
@@ -291,9 +346,12 @@ export async function readLeaderboard(
           performance: figures.performance,
           maxDdBps: pnlBps == null ? null : maxDdBps,
           mode: r.mode,
+          notRunning: notRunning.has(account),
           filledPaper,
           landed,
           refused,
+          paperFills,
+          liveFills,
           curve: pnlBps == null ? [] : curve,
         };
       }),

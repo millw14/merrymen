@@ -321,6 +321,11 @@
   font-size: 13px;
   line-height: 1.5;
 }
+/* The Share/Copy status line stays mounted so it is announced; until it has
+   something to say it takes no space. */
+:where(.terminal-host) .pnl-card-note:empty {
+  margin: 0;
+}
 :where(.terminal-host) .pnl-card-dialog :is(button, a[download]) {
   display: inline-flex;
   align-items: center;
