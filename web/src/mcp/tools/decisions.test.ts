@@ -900,7 +900,18 @@ test("inactivity: an expired permission stays the cause while held; the hold is 
   assert.equal(r.primary.kind, "not_permitted");
   assert.equal(r.checks.worker_liveness.kind, "recovery_hold");
   assert.ok(r.sc.other_factors.some((f: any) => f.category === "worker_liveness" && f.kind === "recovery_hold" && f.status === "blocking"));
-  assert.ok(r.sc.what_owner_can_do.some((x: string) => x.includes("/grant")));
+  // No renew call to action reaches a held tenant: the cause says it expired,
+  // its evidence names the hold, and nothing asks for a re-sign (or anything else).
+  assert.ok(r.primary.evidence.some((x: string) => /held for recovery/.test(x)));
+  assert.deepEqual(r.sc.what_owner_can_do, []);
+  assert.deepEqual(r.checks.permission.what_owner_can_do, []);
+  assert.ok(!r.text.includes("/grant"), "no re-sign is asked for while held");
+  // The same expiry with the hold cleared asks for the re-sign again.
+  s.d.raw.prepare("UPDATE fleet_recovery_health SET held = 0").run();
+  const unheld = await explain(s);
+  assert.equal(unheld.primary.kind, "not_permitted");
+  assert.ok(unheld.sc.what_owner_can_do.some((x: string) => x.includes("/grant")));
+  assert.ok(!unheld.primary.evidence.some((x: string) => /held for recovery/.test(x)));
 });
 
 test("inactivity: a recovery hold outranks both books off; without one, both books off still outranks a stale worker", async () => {
@@ -911,13 +922,15 @@ test("inactivity: a recovery hold outranks both books off; without one, both boo
   const r = await explain(s);
   assert.equal(r.primary.kind, "recovery_hold");
   assert.equal(r.checks.settings_consent.status, "blocking");
-  // Still listed, with its remedy, for when the hold lifts.
+  // Still listed as a factor, but no switch is asked for: none makes it trade while held.
   assert.ok(r.sc.other_factors.some((f: any) => f.category === "settings_consent" && f.kind === "consent_off"));
-  assert.ok(r.sc.what_owner_can_do.some((x: string) => /Settings/.test(x)));
+  assert.deepEqual(r.sc.what_owner_can_do, []);
+  assert.deepEqual(r.checks.settings_consent.what_owner_can_do, []);
   s.d.raw.prepare("UPDATE fleet_recovery_health SET held = 0").run();
   const unheld = await explain(s);
   assert.equal(unheld.primary.kind, "consent_off");
   assert.equal(unheld.checks.worker_liveness.kind, "worker_not_reporting");
+  assert.ok(unheld.sc.what_owner_can_do.some((x: string) => /Settings/.test(x)), "once the hold lifts the switch is asked for again");
 });
 
 test("inactivity: a recovery hold outranks a recorded /pause; without one, the pause still outranks a stale worker", async () => {
@@ -930,11 +943,36 @@ test("inactivity: a recovery hold outranks a recorded /pause; without one, the p
   assert.equal(r.primary.kind, "recovery_hold");
   assert.equal(r.checks.paused.status, "blocking");
   assert.ok(r.sc.other_factors.some((f: any) => f.category === "paused" && f.kind === "paused"));
-  assert.ok(r.sc.what_owner_can_do.some((x: string) => x.includes("/resume")));
+  // A /resume sent while held gets the recovery reply, so it is not asked for.
+  assert.ok(!r.sc.what_owner_can_do.some((x: string) => x.includes("/resume")));
+  assert.deepEqual(r.checks.paused.what_owner_can_do, []);
   s.d.raw.prepare("UPDATE fleet_recovery_health SET held = 0").run();
   const unheld = await explain(s);
   assert.equal(unheld.primary.kind, "paused");
   assert.equal(unheld.checks.worker_liveness.kind, "worker_not_reporting");
+  assert.ok(unheld.sc.what_owner_can_do.some((x: string) => x.includes("/resume")));
+});
+
+test("inactivity: while held no check offers a remedy, so a stale blocker asks for no re-sign and no deposit", async () => {
+  // A pre-hold live_blocker still on the agents row: before this, its remedy
+  // became the owner's only action while the agent could not trade anyway.
+  for (const [blocker, cta] of [["dead-policy", /\/grant/], ["no-gas", /Send a little ETH/]] as const) {
+    const s = await setup();
+    agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live", blocker, beat: NOW - 3600 });
+    mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 3600, eth: blocker === "no-gas" ? "0" : undefined });
+    recoveryHold(s.d);
+    const r = await explain(s);
+    assert.equal(r.primary.kind, "recovery_hold", blocker);
+    assert.ok(r.sc.other_factors.some((f: any) => f.status === "blocking" && (f.kind === "live_rail_blocked" || f.kind === "unfunded")), `${blocker}: still listed as a factor`);
+    assert.deepEqual(r.sc.what_owner_can_do, [], blocker);
+    for (const c of r.sc.checks) assert.deepEqual(c.what_owner_can_do, [], `${blocker}: ${c.category}`);
+    // The same records with the hold cleared do ask for it, so the fixture would have.
+    s.d.raw.prepare("UPDATE fleet_recovery_health SET held = 0").run();
+    const unheld = await explain(s);
+    assert.ok(unheld.sc.what_owner_can_do.some((x: string) => cta.test(x)), `${blocker}: asked for once the hold lifts`);
+    restore?.();
+    restore = null;
+  }
 });
 
 test("inactivity: only this tenant's own hold on its current account and chain counts; an unreadable report is no hold", async () => {

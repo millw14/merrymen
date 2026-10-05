@@ -863,6 +863,25 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     }
   }
 
+  // ── while held: no call to action ──
+  // NOTHING THE OWNER DOES NOW MAKES A HELD AGENT TRADE: lifting the hold is on
+  // Merrymen's side. So while it is held no check offers a remedy, neither in
+  // what_owner_can_do nor in the check's own list. Otherwise every other check's
+  // remedy is promoted as the owner's only actions: a re-signed permission (which
+  // revokes the old one on-chain and costs network fees), a deposit, a /resume
+  // (answered with the recovery reply while it is held) or a Settings switch,
+  // each asked of the owner for nothing. No renew call to action reaches a held
+  // tenant; the terminal does the same (recoveryAutonomy carries no action, and
+  // its blocker and renew prompts give way to the recovery notice). Each check
+  // still says what it found, and asked again once the hold lifts, the diagnosis
+  // offers the remedies that apply then. Only a blocking permission can outrank
+  // the hold (below), so that is the one place the hold is named beside it.
+  if (i.hold) {
+    for (const c of checks) if (c.kind !== "recovery_hold") c.remedy = [];
+    const perm = checks.find((c) => c.category === "permission")!;
+    if (perm.status === "blocking") perm.evidence.push("It is also held for recovery (see worker_liveness): a held agent does not trade, and lifting the hold is on Merrymen's side, so no remedy is offered while it is held.");
+  }
+
   const by = new Map(checks.map((c) => [c.category, c]));
   const fromCheck = (c: Check): Diagnosis["primary"] => ({ category: c.category, kind: c.kind ?? "no_activity", summary: c.summary, evidence: c.evidence, since: c.since });
 
@@ -873,14 +892,15 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   //    WHERE A RECOVERY HOLD RANKS, stated because it is a choice: right after
   //    permission, and ahead of the owner's own switches.
   //    - A blocking permission stays first. An expired, killed or unarmable
-  //      permission needs the owner to re-sign whatever the hold does: the agent
-  //      cannot run on it once the hold lifts either. The hold is listed beside
-  //      it in other_factors.
+  //      permission cannot run the agent once the hold lifts either, so it is a
+  //      cause whatever the hold does. The hold is listed beside it in
+  //      other_factors and its evidence, and no re-sign is asked for while it
+  //      is held (above).
   //    - Both books off (consent_off) and a recorded /pause rank BELOW the hold.
   //      While held nothing trades whatever the owner switches (a /resume cannot
   //      make it trade before the hold lifts), so the hold is what explains the
-  //      silence now; those switches stay in other_factors, with their remedies,
-  //      for when it lifts.
+  //      silence now; those switches stay in other_factors, their remedies
+  //      withheld while it is held (above).
   //    Without a hold the order is unchanged: a worker that is not reporting
   //    still ranks after both books off and a pause.
   const held = by.get("worker_liveness")!.kind === "recovery_hold";
