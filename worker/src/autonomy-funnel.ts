@@ -189,7 +189,7 @@ export const RECEIPT_UNRESOLVED = "receipt-unresolved";
  * observation reads as "held, as asked" — never as a fleet whose policy
  * passes nothing, which is exactly what an alert on that funnel would page on.
  */
-const ADMISSION_RULES: ReadonlySet<string> = new Set(["rollout-hold", "draining"]);
+export const ADMISSION_RULES: ReadonlySet<string> = new Set(["rollout-hold", "draining"]);
 
 // ── WHICH RAIL ──────────────────────────────────────────────────────────────
 

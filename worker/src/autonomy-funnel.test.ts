@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
+  ADMISSION_RULES,
   AUTONOMY_HOLDS_SQL,
   RAIL_CONTRADICTORY,
   RAIL_NO_WORKER,
@@ -110,6 +111,14 @@ describe("stageOf: every refusal its producers write is placed on purpose", () =
   // Booked on rows that WENT OUT (status reverted or dropped), which the funnel
   // counts as sent: never asked for a stage.
   const SENT_ROW_RULES = new Set(["reverted on-chain (resolved)", "dropped: a later op used its nonce (resolved)"]);
+  // Booked by the worker's admission gate (rollout-hold, draining), which the
+  // funnel counts apart as admissionHeld before a stage is ever asked for:
+  // never the wall's, the market's or execution's.
+  const notStaged = (rule: string) => SENT_ROW_RULES.has(rule) || ADMISSION_RULES.has(rule);
+
+  it("the admission gate's rules are exactly the ones the funnel counts apart", () => {
+    assert.deepEqual([...ADMISSION_RULES].sort(), unionOf(read("worker-admission.ts"), "AdmissionRule").sort());
+  });
 
   it("index.ts: every literal it books as reject_rule, and every class-vault refusal", () => {
     const index = read("index.ts");
@@ -138,7 +147,7 @@ describe("stageOf: every refusal its producers write is placed on purpose", () =
       "energy-tax": "market",
       "energy-tax-unreadable": "market",
     };
-    const refusals = [...literals].filter((r) => !SENT_ROW_RULES.has(r));
+    const refusals = [...literals].filter((r) => !notStaged(r));
     for (const rule of refusals) {
       assert.ok(rule in PLACED, `index.ts books "${rule}" as a refusal and nobody has placed it: add it to stageOf's vocabulary (or leave it on the wall) on purpose`);
     }
