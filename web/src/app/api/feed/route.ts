@@ -398,6 +398,13 @@ export async function GET(req: Request) {
     // is one deposit. Rows that contradict each other throw, and both figures
     // stay null — no return — rather than sum them or pick one, and the
     // response says why, so the desk does not read null as "no deposit".
+    //
+    // A DELIBERATE CORRECTION, besides: under EVERY spelling of the account
+    // (LOWER(agent_id)), as the public board and the profile read it. This read
+    // `agent_id = ?`, exact, so a deposit booked under the checksummed spelling
+    // was in the book's cash and missing from what was subtracted from it —
+    // the owner's own money published as profit. The equity reads beside it
+    // are unchanged.
     let flows: FlowRecord[] | null = null;
     try {
       flows = await readDistinctFlows(db, scope, epoch);

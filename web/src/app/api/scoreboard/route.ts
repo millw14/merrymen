@@ -175,6 +175,13 @@ export async function GET(req: Request) {
       // a carry or a log on record twice is one deposit. Rows that contradict
       // each other throw, and the P&L is null rather than one of them, with
       // the reason said.
+      //
+      // A DELIBERATE CORRECTION, besides: under EVERY spelling of the account
+      // (LOWER(agent_id)), as the public board and the profile read it. This
+      // read `agent_id = ?`, exact, so a deposit booked under the checksummed
+      // spelling was in the book's cash and missing from what was subtracted
+      // from it — the owner's own money published as profit. The equity reads
+      // beside it are unchanged.
       let contributed: number | null = null;
       let contributionsWithheld: ScoreboardAgent["contributions_withheld"] = null;
       try {

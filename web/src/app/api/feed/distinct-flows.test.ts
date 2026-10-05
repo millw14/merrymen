@@ -88,6 +88,21 @@ it("gas is charged once per operation, reverts included — a deliberate correct
   assert.equal(f.gasUnpricedTrades, 1, "the unpriced revert is counted, once");
 });
 
+it("a deposit booked under another spelling of the account is subtracted too — a deliberate correction", async () => {
+  // Read exactly, `agent_id = ?`, this deposit was in the book's cash and not
+  // in what was subtracted from it: 20 USDG of the owner's own published as profit.
+  const raw = new DatabaseSync(path.join(dir, "merrymen.db"));
+  try {
+    raw.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, tx_hash, log_index, chain_id, source, at)
+      VALUES (?, 2, 'in', 20, '0xcased', 0, 4663, 'chain-log', ?)`).run(CASED, now - 3_600);
+  } finally {
+    raw.close();
+  }
+  const f = await feed();
+  assert.equal(f.netContributionsUsdg, 170);
+  assert.equal(f.measured?.netContributionsUsdg, 170);
+});
+
 it("a transfer booked as both our intent and its chain log leaves the contributions null, never summed", async () => {
   const raw = new DatabaseSync(path.join(dir, "merrymen.db"));
   try {
