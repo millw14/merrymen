@@ -192,6 +192,9 @@ Before any ordinary writer, the orchestrator creates and syncs its own
 `FLEET_HALT` and manifest. It never clears that hold automatically. Existing
 data without a manifest, a different volume, a replaced halt or a partial first
 initialization requires reviewed recovery; startup refuses and retains data.
+The one reviewed path for the incident's populated volume is adoption under
+its pinned original halt, with an explicit env release and re-halt; see
+[fleet-resume.md](fleet-resume.md).
 
 `worker/src/ledger-handover-cli.ts` is an explicit operator tool, separate from
 the normal worker and memory-only capture:
