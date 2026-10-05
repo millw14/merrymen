@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
-import { wrapSqlite } from "../../../worker/src/db";
+import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { FLEET_RECOVERY_SCHEMA } from "../../../worker/src/fleet-recovery";
 import { readLeaderboard } from "./read-leaderboard";
 import { INCIDENT_WINDOW, RECENT_BEAT_SEC, inIncidentWindow, isRetired, notRunning, type AgentLifecycle } from "./retired-agent";
@@ -200,9 +200,34 @@ describe("the recovery hold is not retirement", () => {
 });
 
 describe("the board folds retired agents into a count", () => {
-  async function board(extraSql = "", opts: { lifecycle?: boolean; now?: number } = {}) {
+  async function board(
+    extraSql = "",
+    opts: { lifecycle?: boolean; now?: number; lifecycleRows?: Record<string, unknown>[] } = {},
+  ) {
     const raw = new DatabaseSync(":memory:");
     const db = wrapSqlite(raw);
+    // `lifecycleRows` collects what the lifecycle read itself returned, so a
+    // test can check the SQL's own normalisation rather than the JS after it.
+    const seen = opts.lifecycleRows;
+    const read: Db = seen
+      ? {
+          exec: (sql) => db.exec(sql),
+          tx: (fn) => db.tx(fn),
+          prepare(sql) {
+            const stmt = db.prepare(sql);
+            if (!sql.includes("AS beat_at")) return stmt;
+            return {
+              run: (...p) => stmt.run(...p),
+              get: (...p) => stmt.get(...p),
+              all: async (...p) => {
+                const rows = await stmt.all(...p);
+                seen.push(...(rows as Record<string, unknown>[]));
+                return rows;
+              },
+            };
+          },
+        }
+      : db;
     const lifecycle = opts.lifecycle !== false;
     await db.exec(`CREATE TABLE agents(smart_account TEXT, name TEXT, x_handle TEXT, x_verified INTEGER, epoch INTEGER, mode TEXT, created_at INTEGER, contributions_known INTEGER${lifecycle ? ", status TEXT, beat_at INTEGER, expires_at INTEGER" : ""});
       CREATE TABLE equity(agent_id TEXT, epoch INTEGER, equity_usdg REAL, at INTEGER, id INTEGER, mode TEXT);
@@ -218,7 +243,7 @@ describe("the board folds retired agents into a count", () => {
       { tenant: "0x6" as const, slug: "ffffffffffffffff", accounts: ["0xf1"] as `0x${string}`[], createdAt: 1, updatedAt: 1 },
     ];
     try {
-      return await readLeaderboard((fn) => fn(db), identities, () => opts.now ?? NOW, async () => null);
+      return await readLeaderboard((fn) => fn(read), identities, () => opts.now ?? NOW, async () => null);
     } finally {
       raw.close();
     }
@@ -315,6 +340,21 @@ describe("the board folds retired agents into a count", () => {
       const shape = (r: typeof s) => ({ retired: r.retired, rows: r.agents.map((a) => [a.name, a.notRunning]).sort() });
       assert.deepEqual(shape(ms), shape(s));
       assert.equal(s.agents.length, 3);
+    });
+
+    it("the lifecycle read itself hands each beat back in seconds, whichever unit it was written in", async () => {
+      // The SQL normalises on its own row and seconds() in retired-agent.ts
+      // does again, so the board above agrees in both units with either one
+      // gone. This reads what the SQL returned, so each is tested on its own.
+      const ms: Record<string, unknown>[] = [];
+      await board(fleet((sec) => sec * 1000), { now: HELD_NOW, lifecycleRows: ms });
+      const s: Record<string, unknown>[] = [];
+      await board(fleet(seconds), { now: HELD_NOW, lifecycleRows: s });
+      const beats = (rows: Record<string, unknown>[]) =>
+        Object.fromEntries(rows.map((r) => [String(r.smart_account), Number(r.beat_at)]));
+      const want = { "0xa1": LAST_BEAT, "0xb1": LAST_BEAT, "0xc1": LAST_BEAT, "0xd1": QUIET, "0xe1": QUIET, "0xf1": BEFORE, "0xr1": LAST_BEAT };
+      assert.deepEqual(beats(ms), want);
+      assert.deepEqual(beats(s), want);
     });
 
     it("a ledger with no recovery table is no hold, and each account's own beat still speaks", async () => {
