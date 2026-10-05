@@ -202,6 +202,13 @@ describe("the chain read", () => {
     const r = await chainGapCheck({ chain, account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });
     assert.equal(r.status, "clean");
   });
+  it("a USDG leg inside an operation Postgres holds is that operation's, even where its row kept no tx hash", async () => {
+    const r = await chainGapCheck({ chain: fakeChain({ logs: [
+      { address: EP, topics: [OP, "0x" + "11".repeat(32), topic(ACC)], tx: "0xee", index: 1 },
+      { address: USDG, topics: [TR, topic(ACC), topic(addr(9))], tx: "0xee", index: 2 },
+    ] }), account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });
+    assert.equal(r.status, "clean");
+  });
   it("refuses an operation, or a deposit, Postgres lacks", async () => {
     const op = await chainGapCheck({ chain: fakeChain({ logs: [{ address: EP, topics: [OP, "0x" + "22".repeat(32), topic(ACC)], tx: "0xcc", index: 1 }] }),
       account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });

@@ -569,14 +569,18 @@ export async function chainGapCheck(o: {
     const into = await getLogsAdaptive(reader, { address: o.usdg as `0x${string}`, topics: [TRANSFER_TOPIC, null, account] }, from, head, span, o.log);
     if (!ops.complete || !out.complete || !into.complete) return { status: "unavailable", why: "the log read did not cover the whole window" };
     let missingOps = 0, missingTransfers = 0;
+    // The transactions of operations Postgres holds: a USDG leg inside one is
+    // that operation's, booked with it, even where its row kept no tx hash.
+    const bookedTxs = new Set<string>();
     for (const l of ops.logs) {
       const opHash = String(l.topics[1] ?? "").toLowerCase();
       if (!o.known.ops.has(opHash)) missingOps += 1;
+      else bookedTxs.add(String(l.transactionHash).toLowerCase());
     }
     for (const l of [...out.logs, ...into.logs]) {
       const tx = String(l.transactionHash).toLowerCase();
       const index = l.logIndex === undefined ? null : Number(BigInt(l.logIndex));
-      if (o.known.txs.has(tx)) continue;
+      if (o.known.txs.has(tx) || bookedTxs.has(tx)) continue;
       if (index !== null && o.known.flows.has(`${tx}:${index}`)) continue;
       missingTransfers += 1;
     }
