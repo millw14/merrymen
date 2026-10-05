@@ -163,6 +163,53 @@ test("REGRESSION: no stray control characters in the pattern sources", () => {
   }
 });
 
+test("REGRESSION: AA codes are word-bounded and case-sensitive, like the three-letter ones", () => {
+  // /AA23|AA24/i matched four hex characters inside the signature field of
+  // viem's request dump (0xbba115, 2026-10-03T13:07:48Z) and filed a simulation
+  // revert nobody recognised as the wall. /AA21/i could do the same to any
+  // on-chain revert whose userOpHash happened to spell it.
+  for (const innocent of [
+    "reverted on-chain (0x9f3caa21e07b5d14)",
+    "signature: 0xBFBA14D4FF10D1484c05Aa24e6d1AEBF7B5B",
+    "signature: 0xAA23ff00",
+    "aa21",
+    "aa24 reverted",
+    // Upper-case, and at one END of a hex run, so only the boundary on the
+    // OTHER side refuses it. Each half of \b…\b is pinned on its own here:
+    // without these, /AA21\b/ or /\bAA21/ alone passed this whole file, and the
+    // seeded blobs below almost never put an exact upper-case code at an edge.
+    "reverted on-chain: 0x71c4efed (0x9f3cdeadbeefAA21)",
+    "reverted on-chain: 0x71c4efed (0x9f3cdeadbeefAA23)",
+    "signature: 0xBFBA14D4FF10D1484c05AA24\n\nDetails: x",
+    "reverted on-chain: 0x71c4efed (AA21e07b5d14)",
+    "signature: AA23e6d1AEBF7B5B",
+    "signature: AA24e6d1AEBF7B5B",
+  ]) {
+    assert.equal(
+      classifyRevert(innocent).rule,
+      "unclassified",
+      `"${innocent}" must not be classified — four hex characters are not an EntryPoint code`,
+    );
+  }
+  // The real ones, in the shapes a bundler sends them, still match.
+  assert.equal(classifyRevert("UserOperation reverted during simulation with reason: AA21 didn't pay prefund").rule, "prefund");
+  assert.equal(classifyRevert('FailedOp(0, "AA23 reverted")').rule, "wall-refused");
+  assert.equal(classifyRevert("reason: AA24 signature error").rule, "wall-refused");
+  // And the prose halves keep the case-insensitive match no hex can trip.
+  assert.equal(classifyRevert("Didn't pay prefund").rule, "prefund");
+  assert.equal(classifyRevert("INSUFFICIENT FUNDS FOR GAS * price + value").rule, "prefund");
+  assert.equal(classifyRevert("invalidsignature()").rule, "wall-refused");
+  assert.equal(classifyRevert("policyfailed(2)").rule, "wall-refused");
+});
+
+test("splitting an entry by flags did not split its sentence", () => {
+  // The code and the prose of one condition are two entries now, because one
+  // regex carries one set of flags. The owner must read the same thing either way.
+  assert.equal(classifyRevert("AA21").detail, classifyRevert("didn't pay prefund").detail);
+  assert.equal(classifyRevert("AA24").detail, classifyRevert("PolicyFailed").detail);
+  assert.equal(classifyRevert("AA23").detail, classifyRevert("signature error").detail);
+});
+
 
 /**
  * PONS REVERTS — permanent conditions that used to look retryable.
@@ -260,6 +307,38 @@ describe("Pons adapter reverts", () => {
 
   it("matches whatever case the RPC hex-encodes with", () => {
     assert.equal(classifyRevert(revertData("0x025AC17E")).rule, "curve-graduated");
+  });
+
+  it("EVERY selector keeps its rule in the on-chain format, 64-hex arguments and hash included", () => {
+    // What the chain actually hands back. executor.ts builds `reverted on-chain:
+    // ${reason} (${userOpHash})`, and the reason is selector ++ abi.encode(args),
+    // so the selector sits at the front of a long hex run with a 64-character
+    // hash after it. The bare selectors above are not that shape — and a fix
+    // that stripped long hex out of the message before matching (proposed for
+    // the 2026-10-03 misreading, and refused) would have passed every one of
+    // them while un-classifying every revert below. An unclassified spend cap
+    // is retried on every tick of a day-long window.
+    //
+    // The words are adversarial on purpose: the two real arguments of that
+    // revert, plus a word and a hash that spell each AA code in both cases.
+    const real = [
+      "0000000000000000000000000000000000000000000056da51aed7bd9c526b72",
+      "0000000000000000000000000000000000000000000065fabd2ee80e162af404",
+    ];
+    const spelled = "aa21aa23aa24AA21AA23AA24".padStart(64, "0");
+    const hash = `0x${"AA23aa24aa21".padStart(64, "e")}`;
+    for (const w of [...real, spelled, hash.slice(2)]) assert.equal(w.length, 64, w);
+
+    for (const sel of PONS_ERROR_SELECTORS) {
+      const want = classifyRevert(revertData(sel));
+      assert.notEqual(want.rule, "unclassified", sel);
+      for (const args of [real.join(""), [...real, spelled].join(""), spelled]) {
+        for (const hex of [`${sel}${args}`, `0x${(sel.slice(2) + args).toUpperCase()}`]) {
+          const msg = `reverted on-chain: ${hex} (${hash})`;
+          assert.deepEqual(classifyRevert(msg), want, `${sel} lost its rule as ${msg}`);
+        }
+      }
+    }
   });
 
   it("PONS ITSELF still classifies unclassified, and that is deliberate", () => {
@@ -380,6 +459,91 @@ describe("Pons adapter reverts", () => {
     }
   });
 });
+
+/**
+ * HEX IS NOT EVIDENCE.
+ *
+ * Every entry in the table is either a four-byte selector, anchored by its 0x,
+ * or words a contract or a node wrote. A hex run that merely sits in the
+ * message — an argument, a hash, a signature in viem's request dump — is
+ * neither, and must never move a verdict in either direction. It did on
+ * 2026-10-03: `Aa24` inside a 29 KB signature filed an unrecognised simulation
+ * revert as the wall.
+ *
+ * Seeded, so a failure here is the same failure on every run.
+ */
+describe("a random hex blob containing aa21, aa23 or aa24 changes nothing", () => {
+  const rng = mulberry32(0xaa24);
+  const HEX = "0123456789abcdef";
+  const CODES = ["aa21", "aa23", "aa24"];
+  /** Random hex of random length, one AA code at a random place, each character in a random case. */
+  const blob = (): string => {
+    const len = 8 + Math.floor(rng() * 504);
+    let hex = "";
+    for (let i = 0; i < len; i++) hex += HEX[Math.floor(rng() * HEX.length)];
+    const at = Math.floor(rng() * (len + 1));
+    hex = hex.slice(0, at) + CODES[Math.floor(rng() * CODES.length)] + hex.slice(at);
+    // viem prints hex in whatever case it was handed, and the 2026-10-03
+    // signature was mixed — so the upper-case spelling has to be in here too.
+    return [...hex].map((c) => (rng() < 0.5 ? c.toUpperCase() : c)).join("");
+  };
+  const BLOBS = Array.from({ length: 200 }, blob);
+
+  it("the blobs carry what they claim to, including the upper-case spelling", () => {
+    for (const b of BLOBS) assert.match(b, /^[0-9a-fA-F]*aa2[134][0-9a-fA-F]*$/i);
+    // The case-sensitive code is only tested against hex if some blob spells it
+    // exactly; the word boundary is what has to refuse those.
+    assert.ok(BLOBS.some((b) => /AA2[134]/.test(b)), "no blob spells an upper-case AA code");
+  });
+
+  it("in a request dump or as a hash, under every message the table knows", () => {
+    const BASES = [
+      "Panic: arithmetic underflow or overflow (0x11)",
+      "execution reverted: 0x71c4efed", // Pons's own — unclassified on purpose
+      "execution reverted: Too little received",
+      "execution reverted: STF",
+      "ERC20: transfer amount exceeds balance",
+      "ERC20: transfer amount exceeds allowance",
+      "AA21 didn't pay prefund",
+      "AA23 reverted duplicate permissionHash",
+      "AA23 reverted (or OOG)",
+      "AA24 signature error",
+      "execution reverted: SPL",
+      "reverted: EXPIRED",
+      ...PONS_ERROR_SELECTORS.map((s) => `execution reverted: ${s}`),
+    ];
+    for (const base of BASES) {
+      const want = classifyRevert(base);
+      for (const b of BLOBS) {
+        const dumped = `${base}\n\nRequest Arguments:\n  signature:                      0x${b}`;
+        assert.deepEqual(classifyRevert(dumped), want, `a signature moved the verdict on "${base}": ${b}`);
+        assert.deepEqual(classifyRevert(`${base} (0x${b})`), want, `a hash moved the verdict on "${base}": ${b}`);
+      }
+    }
+  });
+
+  it("as a selector's arguments, for every selector and for one the table does not know", () => {
+    for (const sel of [...PONS_ERROR_SELECTORS, "0x71c4efed"]) {
+      const want = classifyRevert(`execution reverted: ${sel}`);
+      for (const b of BLOBS) {
+        const msg = `reverted on-chain: ${sel}${b} (0x${"0".repeat(64)})`;
+        assert.deepEqual(classifyRevert(msg), want, `arguments moved the verdict on ${sel}: ${b}`);
+      }
+    }
+  });
+});
+
+/** Deterministic PRNG so a failing fuzz case is the same case on every run. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /** Every `error Name(args);` a .sol declares, as a canonical signature. */
 function errorsIn(sol: string): string[] {

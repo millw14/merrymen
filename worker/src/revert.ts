@@ -196,6 +196,20 @@ const PONS_ERR = {
 /** The selectors, for the test that asserts they are 4 bytes and all distinct. */
 export const PONS_ERROR_SELECTORS: readonly string[] = Object.values(PONS_ERR);
 
+/**
+ * Two sentences that each answer TWO entries below, because a JS regex carries
+ * one set of flags and these conditions are spelled two ways: as an EntryPoint
+ * code that must be matched case-sensitively, and as prose that need not be.
+ * Held here so the pair can never drift into telling the owner two different
+ * things about one condition.
+ */
+const PREFUND_DETAIL =
+  "the account could not pay the EntryPoint's gas prefund. It pays its own gas and there is no paymaster, so this " +
+  "needs ETH at the smart account — not a retry.";
+const WALL_REFUSED_DETAIL =
+  "the account contract refused to validate this operation — the session key's sealed policy does not permit it. " +
+  "That is the wall working. It cannot be retried into success; the grant has to be re-signed to cover it.";
+
 const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; detail: string }[] = [
   {
     // ABOVE the other four-byte matches only for readability; they cannot
@@ -349,12 +363,30 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
   {
     // ERC-4337 EntryPoint 0.7 codes: AA21 (no prefund), AA31 (paymaster deposit).
     // merrymen uses no paymaster, so AA21 is the one that fires.
-    re: /AA21|didn'?t pay prefund|insufficient funds for gas/i,
+    //
+    // WORD-BOUNDED AND CASE-SENSITIVE, for the reason the AA23/AA24 entry below
+    // spells out: as /AA21/i this matched four hex characters anywhere in the
+    // message. The on-chain form is `reverted on-chain: <revert data> (<hash>)`
+    // (executor.ts, UserOpReverted), and a userOpHash is 64 hex characters, so
+    // about one hash in 1,070 spells aa21 somewhere by chance (61 places for
+    // four characters, 16^4 spellings each). An unrecognised revert that drew
+    // one was filed `prefund` — non-retryable, suppressed for the arm, and the
+    // owner told to send ETH that was not missing. The EntryPoint writes its
+    // codes upper-case and a bundler passes them through, so the real one still
+    // matches.
+    re: /\bAA21\b/,
     rule: "prefund",
     retryable: false,
-    detail:
-      "the account could not pay the EntryPoint's gas prefund. It pays its own gas and there is no paymaster, so this " +
-      "needs ETH at the smart account — not a retry.",
+    detail: PREFUND_DETAIL,
+  },
+  {
+    // The same condition in prose — the EntryPoint's own words and a node's.
+    // No hex run can spell these, so they keep the case-insensitive match; they
+    // are a separate entry only because one regex cannot hold both flag sets.
+    re: /didn'?t pay prefund|insufficient funds for gas/i,
+    rule: "prefund",
+    retryable: false,
+    detail: PREFUND_DETAIL,
   },
   {
     // ABOVE the generic AA23 entry, because the generic detail is WRONG for this
@@ -381,12 +413,44 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
   {
     // AA23/AA24 are validation failures. On this account the validator IS the
     // wall, so a refusal here is a permission the grant does not carry.
-    re: /AA23|AA24|signature error|InvalidSignature|PolicyFailed/i,
+    //
+    // WORD-BOUNDED AND CASE-SENSITIVE, because as /AA23|AA24/i this matched four
+    // hex characters anywhere in the message. Measured on 4663 at
+    // 2026-10-03T13:07:48Z: agent 0xbba115's class-vault buy was refused in
+    // simulation with Pons's own 0x71c4efed — deliberately unclassified above —
+    // and viem's error carried its 'Request Arguments:' dump, whose 29 KB
+    // `signature:` field happened to contain `...D1484c05Aa24e6d1...`. So a
+    // simulation revert this table does not recognise was filed `wall-refused`:
+    // a non-retryable verdict, which let the executor rename the gas refusal it
+    // really was (`enable-too-wide`), and the owner was told to re-sign a grant
+    // that was fine. On chain the same hazard sat in the userOpHash, which
+    // spells aa23 or aa24 about once in 540.
+    //
+    // A hex run is all word characters, so \b can never fall inside one, and
+    // the real code still matches: the EntryPoint reverts with
+    // `FailedOp(i, "AA24 signature error")`, upper-case, and viem keeps the
+    // bundler's words verbatim under `Details:`.
+    //
+    // WHAT WAS NOT DONE INSTEAD, because it was proposed: stripping long hex out
+    // of the message before matching. The Pons selectors at the top of this
+    // table are matched INSIDE exactly such runs — `reverted on-chain:
+    // 0x605cd727<64-hex args> (<hash>)` — so stripping would have un-classified
+    // every one of them, and an unclassified spend cap is retried on every tick
+    // of a day-long window. The fix belongs in the patterns that over-matched.
+    re: /\bAA2[34]\b/,
     rule: "wall-refused",
     retryable: false,
-    detail:
-      "the account contract refused to validate this operation — the session key's sealed policy does not permit it. " +
-      "That is the wall working. It cannot be retried into success; the grant has to be re-signed to cover it.",
+    detail: WALL_REFUSED_DETAIL,
+  },
+  {
+    // The same refusal in words — the EntryPoint's sentence and the validator's
+    // error names. None of these can be spelled in hex, so they keep the
+    // case-insensitive match the codes above had to give up; a separate entry
+    // only because one regex cannot hold both flag sets.
+    re: /signature error|InvalidSignature|PolicyFailed/i,
+    rule: "wall-refused",
+    retryable: false,
+    detail: WALL_REFUSED_DETAIL,
   },
   {
     // Uniswap v3 pool, when the swap would move the pool past its tick range.
