@@ -47,7 +47,7 @@ process.env.MERRYMEN_STORE_DEK = dek.toString("base64");
 const {
   adoptChildForTest, adoptHolderForTest, childHome, drainFleetForTest, finalMirrorBeforeAnchor, hasLeaseForTest,
   mirrorLedgersForTest, onDrainBeforeChildren, resetDrainForTest, setKillConfirmForTest, setLiveMirrorStoreForTest,
-  setRetirementMemoryStoreForTest, setTenantLeaseForTest,
+  setRetirementMemoryStoreForTest, setSpawningForTest, setTenantLeaseForTest,
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
 const { writeKillRequest } = await import("./kill-request");
@@ -438,5 +438,33 @@ it("NO COPY STARTS AFTER THE DRAIN HAS SETTLED except its own final pass: a late
     assert.equal(await sharedTrades(account), 1);
   } finally {
     setTenantLeaseForTest(tenant, null);
+  }
+});
+
+it("A SPAWN STUCK BEFORE THE STOP IS NOT WAITED FOR: the drain goes on at once, and the receipt counts it on its own line", async () => {
+  const tenant = address(0xe11), account = address(0xe12), stuck = address(0xe21);
+  await book(tenant, account);
+  const proc = new FakeProc(81_011);
+  watched = [proc];
+  adoptChildForTest(tenant, account, proc, lease(tenant, { n: 0 }));
+  // Claimed six minutes ago and never done: flagStuckSpawn's case, which a
+  // redeploy is the remedy for. Waited for, it cost that redeploy the whole
+  // settle cap (5s here) and then the rest of the budget in the late settle.
+  setSpawningForTest(stuck, 6 * 60_000);
+  try {
+    const t0 = Date.now();
+    await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+    assert.ok(Date.now() - t0 < 2_000, `neither the settle cap nor the late settle was waited out (${Date.now() - t0}ms)`);
+    const r = receipt();
+    assert.equal(r.steps.find((s) => s.step === "settle")!.outcome, "done");
+    assert.equal(r.steps.find((s) => s.step === "late-settle")!.outcome, "done");
+    assert.deepEqual(r.finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 }, "the running child's home still got its pass");
+    assert.equal(r.stuckSpawns, 1);
+    assert.equal(r.inFlightAtRelease, false, "not hidden among what was in flight");
+    assert.equal(r.clean, false);
+    assert.ok(said.some((l) => /1 spawn\(s\) stuck since before the stop are not waited for/.test(l)));
+    assert.deepEqual(exits, [0]);
+  } finally {
+    setSpawningForTest(stuck, null);
   }
 });

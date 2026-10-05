@@ -66,6 +66,7 @@ function drainPlan(overrides: Partial<FleetDrainPlan<string>> = {}, homes = ["0x
       { name: "b", run: async () => { await sleep(5); timeline.push("hook:b"); } },
     ],
     settled: () => true,
+    stuckSpawns: () => 0,
     closeCopies: () => timeline.push("closeCopies"),
     signalFleet: (signal) => {
       timeline.push(signal);
@@ -124,6 +125,21 @@ describe("the order", () => {
     assert.equal(receipt.inFlightAtRelease, true);
     assert.equal(receipt.clean, false);
     assert.deepEqual(run.exits, [0]);
+  });
+
+  it("a spawn stuck before the stop is said, counted on its own line rather than as in flight, and the stop is not clean", async () => {
+    const said: string[] = [];
+    const run = drainPlan({ stuckSpawns: () => 1, log: (line) => said.push(line) });
+    await runFleetDrain(run.plan);
+    const receipt = run.receipts[0]!;
+    assert.equal(receipt.stuckSpawns, 1);
+    assert.equal(receipt.inFlightAtRelease, false);
+    assert.equal(receipt.steps.find((s) => s.step === "settle")!.outcome, "done");
+    assert.equal(receipt.clean, false, "one stuck inside its final mirror keeps that copy's barrier");
+    assert.ok(said.some((l) => /^\[alert\] 1 spawn\(s\) stuck since before the stop are not waited for/.test(l)));
+    const dir = shutdownReceiptDir(mkdtempSync(path.join(scratch, "home-")));
+    writeShutdownReceipt(dir, receipt);
+    assert.match(takePreviousShutdown(dir).line, /1 spawn\(s\) stuck before the stop, ended by the exit/);
   });
 });
 
@@ -375,6 +391,6 @@ function receiptLike(over: Partial<ShutdownReceipt>): ShutdownReceipt {
   return {
     version: 1, signal: "SIGTERM", outcome: "drained", clean: true, startedAt: 1_760_000_000_000, finishedAt: 1_760_000_012_000,
     budgetMs: 50_000, stalledAt: null, steps: [], hooksFailed: 0, hooksUnfinished: 0, stragglers: 0,
-    finalPass: { homes: 0, saved: 0, retained: 0, skipped: 0, outOfTime: 0 }, inFlightAtRelease: false, ...over,
+    finalPass: { homes: 0, saved: 0, retained: 0, skipped: 0, outOfTime: 0 }, inFlightAtRelease: false, stuckSpawns: 0, ...over,
   };
 }
