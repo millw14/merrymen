@@ -29,9 +29,12 @@
  * could not be read leaves `complete: false` and the movements it touched
  * `ambiguous`, never guessed into capital.
  *
- * WHAT IS NOT VISIBLE AT ALL: native ETH arriving outside a UserOperation of
- * this account. A plain ETH transfer emits no log, and this public node has no
- * traces. Every result says so in its notes rather than reporting "none".
+ * WHAT IS NOT VISIBLE AT ALL: native ETH this account RECEIVES, inside its own
+ * operations or outside them. A plain ETH transfer and a contract's internal
+ * call emit no log, the calldata shows only ETH the account SENT, and this
+ * public node has no traces — so sale proceeds paid in ETH, a WETH unwrap and
+ * a curve refund are all invisible. Every result says so in its notes rather
+ * than reporting "none", and the classifier's reasons say "nothing visible".
  */
 import { decodeAbiParameters, decodeFunctionData, parseAbi, type Hex } from "viem";
 import {
@@ -352,7 +355,9 @@ export async function scanAssetMovements(
       operations: 0,
       counts: emptyCounts(),
       complete: true,
-      notes: ["native ETH received outside an operation of this account emits no log and is not visible to this read"],
+      notes: [
+        "native ETH received by this account — inside or outside its own operations — emits no log and is not visible to this read",
+      ],
     });
   }
   const all = [...result.values()];

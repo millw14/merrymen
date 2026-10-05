@@ -618,7 +618,7 @@ describe("coverage travels with the answer", () => {
 
   it("every answer says what it cannot see", async () => {
     const { me } = await scan([]);
-    assert.ok(me.notes.some((n) => /native ETH received outside an operation/.test(n)));
+    assert.ok(me.notes.some((n) => /native ETH received by this account — inside or outside its own operations/.test(n)));
   });
 
   it("calls nothing that writes", async () => {

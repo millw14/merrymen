@@ -130,9 +130,12 @@ cannot be read is marked: an unread window, receipt, calldata or block time
 leaves the account `complete: false`, and the movements it touched are
 `ambiguous`.
 
-Native ETH arriving outside an operation of the account emits no log, and
-this node has no traces. Every account's notes say this explicitly, rather
-than reporting "none".
+Native ETH that the account receives is not visible, whether it arrives
+inside one of the account's own operations or outside them. A plain ETH
+transfer and a contract's internal call emit no log, the calldata shows only
+ETH the account sent, and this node has no traces. Sale proceeds paid in ETH,
+a WETH unwrap and a curve refund are therefore all invisible. Every account's
+notes say this explicitly, rather than reporting "none".
 
 ## Output
 
