@@ -44,9 +44,9 @@ resume), and after any change to backup settings.
    ```
 
    The URLs are read from the environment only. The verifier reads the fork
-   first, then the source. It reads each one in a single
-   `REPEATABLE READ READ ONLY` transaction that ends in `ROLLBACK`, and it
-   never writes to either.
+   first, then the source. Every read is made in a short
+   `REPEATABLE READ READ ONLY` transaction that ends in `ROLLBACK`: one for
+   the catalog, then one per table. It never writes to either.
 4. **Record the JSON** with the runbook evidence. It contains the restore point,
    row counts and verdicts. It contains no row values, stamps, host names or
    URLs, and errors are reported by code.
@@ -109,9 +109,11 @@ To add a table, give it a stamp of that kind. A table without one, such as
 `energy_days`, which keys on a text day, can only be compared whole, which
 fails every drill taken while the source is still being written.
 
-On the source, the cost is one read-only transaction and one counting scan per
-allowlisted table. Do not run it during a deploy or a schema change: the scans
-hold ordinary read locks until the transaction ends.
+On the source, the cost is one counting scan per allowlisted table, each in
+its own read-only transaction. A scan holds an ordinary read lock on its one
+table until that scan ends, and no longer, so a schema change the services
+run on connect waits for at most one count (60 seconds at worst). Even so, do
+not run it during a deploy or a schema change.
 
 ## What it does not prove
 

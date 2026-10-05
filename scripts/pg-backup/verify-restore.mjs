@@ -10,13 +10,14 @@
  *   MERRYMEN_RESTORE_FORK_URL=…  MERRYMEN_RESTORE_SOURCE_URL=… \
  *     node scripts/pg-backup/verify-restore.mjs --restore-point 2026-10-05T02:00:00Z
  *
- * READ ONLY, ON BOTH SIDES. Each database is read inside ONE transaction opened
- * `REPEATABLE READ READ ONLY`, and the transaction's own report of that mode is
- * checked before a table is touched — the proof recovery-replies.ts asks for.
- * Every statement after BEGIN is a SELECT or a SET LOCAL, and the transaction
- * ends in ROLLBACK. No argument makes a write appear. The source is the live
- * database, so the fork is read first: a fork that cannot be opened never
- * costs production a query.
+ * READ ONLY, ON BOTH SIDES. Every read is made inside a short transaction
+ * opened `REPEATABLE READ READ ONLY`: one for the catalog, then one per table
+ * (readSide says why not one for all). Each transaction's own report of that
+ * mode is checked before it reads anything — the proof recovery-replies.ts
+ * asks for. Every statement inside is a SELECT or a SET LOCAL, and every
+ * transaction ends in ROLLBACK. No argument makes a write appear. The source
+ * is the live database, so the fork is read first: a fork that cannot be
+ * opened never costs production a query.
  *
  * NO VALUES LEAVE THIS PROCESS. The output is JSON holding table names (the
  * constants below), row counts and verdicts. The newest stamp of each table
@@ -281,13 +282,12 @@ function integerOf(v, nonNegative) {
 }
 
 /**
- * EVERYTHING THE DRILL READS FROM ONE DATABASE, in one read-only snapshot.
- * `admit` sees the server's identity before any table is counted, so the
- * source can be refused for being the fork without a scan of production.
- * The identity and each `newest` stay in memory: compareSides prints neither.
+ * ONE SHORT TRANSACTION, PROVED READ-ONLY BEFORE IT READS. Opened
+ * `REPEATABLE READ READ ONLY`, bounded, and checked by its own report of that
+ * mode before `read` runs — the proof recovery-replies.ts asks for. It always
+ * ends in ROLLBACK, which is also what lets go of the read locks it took.
  */
-async function readSide(client, bounds, side, admit) {
-  let table;
+async function readOnly(client, side, read) {
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   try {
     // A count that queues behind a migration's lock gives up rather than
@@ -300,24 +300,53 @@ async function readSide(client, bounds, side, admit) {
     if (mode?.readonly !== "on" || mode?.isolation !== "repeatable read") {
       throw new DrillRefusal("not-read-only", "The transaction did not open read-only; nothing was read.", { side });
     }
-    // Which postmaster and which database. A fork is a different server
-    // process, so its start time differs even when everything else is copied.
-    const who = (await client.query("SELECT current_database() AS db, pg_postmaster_start_time()::text AS started")).rows[0];
-    const identity = JSON.stringify([who?.db ?? null, who?.started ?? null]);
-    admit(identity);
-    // From the catalog, not information_schema: information_schema hides a
-    // table the role may not read, and a table hidden on both sides would read
-    // `absent` and pass. Here it is present, its count is refused, and the
-    // drill stops loudly.
-    const columns = (await client.query(
-      `SELECT c.relname AS table_name, a.attname AS column_name, format_type(a.atttypid, NULL) AS data_type
-         FROM pg_catalog.pg_class c
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
-        WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND c.relname = ANY($1::text[])
-          AND a.attnum > 0 AND NOT a.attisdropped`,
-      [DRILL_TABLES.map((t) => t.table)],
-    )).rows;
+    return await read();
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+  }
+}
+
+/**
+ * EVERYTHING THE DRILL READS FROM ONE DATABASE. The first transaction reads
+ * the server's identity and the catalog, and `admit` sees the identity before
+ * any table is counted, so the source can be refused for being the fork
+ * without a scan of production.
+ *
+ * ONE TABLE PER TRANSACTION. A table's read lock is held until its
+ * transaction ends. One snapshot across every table would hold each lock
+ * until the LAST count finished, and an ALTER the app runs on every connect
+ * (settings-store.ts adds holder_claims.moved_at, with no lock timeout) would
+ * queue behind it, with every read and write of that table queued behind the
+ * ALTER. Counted alone, a table is held for one count. Nothing is lost: each
+ * table is compared on its own, and the fork, which nothing writes, reads the
+ * same either way.
+ *
+ * The identity and each `newest` stay in memory: compareSides prints neither.
+ */
+async function readSide(client, bounds, side, admit) {
+  let table;
+  try {
+    const { identity, columns } = await readOnly(client, side, async () => {
+      // Which postmaster and which database. A fork is a different server
+      // process, so its start time differs even when everything else is copied.
+      const who = (await client.query("SELECT current_database() AS db, pg_postmaster_start_time()::text AS started")).rows[0];
+      const identity = JSON.stringify([who?.db ?? null, who?.started ?? null]);
+      admit(identity);
+      // From the catalog, not information_schema: information_schema hides a
+      // table the role may not read, and a table hidden on both sides would read
+      // `absent` and pass. Here it is present, its count is refused, and the
+      // drill stops loudly.
+      const columns = (await client.query(
+        `SELECT c.relname AS table_name, a.attname AS column_name, format_type(a.atttypid, NULL) AS data_type
+           FROM pg_catalog.pg_class c
+           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+          WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND c.relname = ANY($1::text[])
+            AND a.attnum > 0 AND NOT a.attisdropped`,
+        [DRILL_TABLES.map((t) => t.table)],
+      )).rows;
+      return { identity, columns };
+    });
     const tables = {};
     for (const entry of DRILL_TABLES) {
       table = entry.table;
@@ -330,7 +359,7 @@ async function readSide(client, bounds, side, admit) {
         tables[entry.table] = { present: true, stamped: false };
         continue;
       }
-      const r = (await client.query(countSql(entry.table, entry.stamp), [bounds.cutoffSec, bounds.afterSec])).rows[0];
+      const r = await readOnly(client, side, async () => (await client.query(countSql(entry.table, entry.stamp), [bounds.cutoffSec, bounds.afterSec])).rows[0]);
       tables[entry.table] = {
         present: true,
         stamped: true,
@@ -344,8 +373,6 @@ async function readSide(client, bounds, side, admit) {
   } catch (e) {
     if (e instanceof DrillRefusal) throw e;
     throw new DrillRefusal("query-failed", "A read failed and the drill stopped.", { side, ...(table ? { table } : {}), ...causeOf(e) });
-  } finally {
-    await client.query("ROLLBACK").catch(() => {});
   }
 }
 

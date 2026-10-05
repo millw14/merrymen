@@ -136,6 +136,38 @@ const drill = (fork, source, opts = {}) => {
   return runRestoreDrill({ argv: opts.argv ?? ARGV, env: opts.env ?? ENV, now: () => NOW_MS, connect: seam.connect }).then((out) => ({ ...out, ...seam }));
 };
 
+const TABLE_COUNTED = /FROM "([a-z_]+)"\) AS stamped$/;
+
+/**
+ * A client's statements, cut into its transactions: the reads of each, in
+ * order. Fails on anything sent outside BEGIN … ROLLBACK, on a transaction
+ * left open, and on one that reads before it has set both bounds and checked
+ * its own mode, in that order.
+ */
+function transactionsOf(sent) {
+  const reads = [];
+  let open = null;
+  for (const sql of sent) {
+    if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") {
+      assert.equal(open, null, "a BEGIN inside an open transaction");
+      open = [];
+    } else if (sql === "ROLLBACK") {
+      assert.ok(open, "a ROLLBACK outside a transaction");
+      assert.equal(open[0], "SET LOCAL statement_timeout = '60s'");
+      assert.equal(open[1], "SET LOCAL lock_timeout = '5s'");
+      assert.match(open[2], /current_setting\('transaction_read_only'\)/);
+      for (const read of open.slice(3)) assert.match(read, /^SELECT /, read);
+      reads.push(open.slice(3));
+      open = null;
+    } else {
+      assert.ok(open, `sent outside a transaction: ${sql}`);
+      open.push(sql);
+    }
+  }
+  assert.equal(open, null, "a transaction was left open");
+  return reads;
+}
+
 // ── the allowlist ────────────────────────────────────────────────────────────
 
 test("the allowlist names plain identifiers once each, and covers the ledger, authority and recovery tables", () => {
@@ -287,16 +319,14 @@ test("a faithful fork of a source that kept writing: exact, read-only on both si
   // The fork first, so a broken fork never costs production a query.
   assert.deepEqual(out.order, ["fork", "source"]);
   for (const side of ["fork", "source"]) {
-    const sent = out.clients[side].sent;
-    assert.equal(sent[0], "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    // The bounds that keep a read of production from queueing behind, or
-    // holding up, anything else. Pinned to the letter: both are the point.
-    assert.equal(sent[1], "SET LOCAL statement_timeout = '60s'");
-    assert.equal(sent[2], "SET LOCAL lock_timeout = '5s'");
-    assert.equal(sent.at(-1), "ROLLBACK");
-    for (const sql of sent.slice(1, -1)) assert.match(sql, /^(SELECT |SET LOCAL )/, sql);
-    // The mode is proved before a table is counted.
-    assert.ok(sent.findIndex((s) => s.includes("transaction_read_only")) < sent.findIndex((s) => s.includes("AS stamped")));
+    // Every read sits in a read-only transaction whose bounds (pinned to the
+    // letter: both are the point) and mode were set and proved first.
+    const reads = transactionsOf(out.clients[side].sent);
+    // The identity and the catalog first, with no table counted alongside.
+    assert.ok(reads[0].some((s) => s.includes("pg_postmaster_start_time()")) && reads[0].some((s) => s.includes("pg_catalog.pg_attribute")));
+    assert.ok(!reads[0].some((s) => TABLE_COUNTED.test(s)));
+    // Then each table alone, so no table's read lock outlives its own count.
+    assert.deepEqual(reads.slice(1).map((r) => r.map((s) => TABLE_COUNTED.exec(s)?.[1])), DRILL_TABLES.map(({ table }) => [table]));
     assert.equal(out.clients[side].ended, true);
   }
 
