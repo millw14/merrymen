@@ -32,7 +32,6 @@
  * only mislabel, which is the same contract autonomy.ts keeps.
  */
 import { freshWithin } from "@/lib/services/agent-status";
-import { ORDER_IN_FLIGHT_MS } from "@/lib/order-state";
 import type { AgentStatus } from "@/app/api/grants/route";
 
 /**
@@ -62,8 +61,9 @@ export const WORKER_STALE_MARGIN_SEC = 120;
  *
  * Floored at the bound rather than special-cased per source: self-hosted the
  * file does carry the held beat, and the floor costs it only a few minutes
- * before the label on a short tick. The default tick's window is already
- * longer than the floor. A label late by minutes is a smaller wrong than one
+ * before the label on a short tick. From a tick of 255s up the watchdog's
+ * window is the longer and the floor changes nothing; at the default 240s it
+ * adds thirty seconds. A label late by minutes is a smaller wrong than one
  * that says "not placing trades" over a trade.
  *
  * NOT COVERED: a regular tick that runs several trades back to back, each one
@@ -71,10 +71,12 @@ export const WORKER_STALE_MARGIN_SEC = 120;
  * run with no new row. Closing that needs the clock's held beat to write the
  * row too, which is worker code, not a rule this module can state.
  *
- * The same figure the order slot uses (lib/order-state.ts), which a test holds
- * equal to the worker's.
+ * STATED HERE, NOT IMPORTED. It is ORDER_IN_FLIGHT_MS in lib/order-state.ts,
+ * but that is order code, and /api/grants — which imports this module — sits on
+ * the chat model's lazily loaded path, which mcp/tools/chat.test.ts audits for
+ * reaching no order code at all. stale-autonomy.test.ts holds the two equal.
  */
-const ORDER_HOLD_SEC = ORDER_IN_FLIGHT_MS / 1000;
+export const ORDER_HOLD_SEC = 10 * 60;
 
 /**
  * A heartbeat in whole seconds, whichever unit it was written in; null when it

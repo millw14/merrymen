@@ -26,7 +26,7 @@ import type { ChatController } from "./chat-controller";
 import { DesktopPortfolio } from "./Desktop";
 import type { LiveMine } from "./live";
 import { Agent } from "./screens/Agent";
-import { WORKER_STALE_MARGIN_SEC, beatSeconds, notRunningNote, workerSilentSince, workerStale } from "./worker-stale";
+import { ORDER_HOLD_SEC, WORKER_STALE_MARGIN_SEC, beatSeconds, notRunningNote, workerSilentSince, workerStale } from "./worker-stale";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 
@@ -89,6 +89,14 @@ describe("the server decides when a worker has stopped, by one rule", () => {
     }
     // The floor only ever widens: a long tick keeps the watchdog's own window.
     assert.equal(workerStale(NOW - freshWithin(300) - WORKER_STALE_MARGIN_SEC - 1, NOW, 300), true);
+  });
+
+  it("THE FLOOR IS THE ORDER SLOT'S OWN BOUND, stated twice and held equal", () => {
+    // worker-stale.ts states it rather than importing order-state.ts, which is
+    // order code the chat model's lazy path must never reach (mcp/tools/chat.test.ts).
+    // worker/src/order-window.test.ts holds that figure equal to the worker's in turn.
+    assert.equal(ORDER_HOLD_SEC * 1000, ORDER_IN_FLIGHT_MS);
+    assert.doesNotMatch(raw("./worker-stale.ts"), /from "@\/lib\/order-state"/);
   });
 
   it("a longer tick earns a longer window, as the watchdog grants it", () => {
