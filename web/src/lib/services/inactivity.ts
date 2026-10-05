@@ -199,10 +199,12 @@ export interface InactivityInputs {
   /**
    * This tenant's own recovery hold (fleet_recovery_health, for the current
    * account and its chain), with when the supervisor last confirmed it. Null
-   * when no hold is reported AND when the report could not be read: null is
+   * when no hold is reported (no row, a cleared row, no table, no account):
    * never a claim that the agent is not held, only that no hold is known here.
+   * "unavailable" when the report could not be read; the diagnosis then reads
+   * as with null, and says that whether it is held is unknown.
    */
-  hold: { checkedAt: number } | null;
+  hold: { checkedAt: number } | null | "unavailable";
 }
 
 const holes = (n: number) => Array.from({ length: n }, () => "?").join(", ");
@@ -416,15 +418,18 @@ export async function readInactivityInputs(db: Db, a: {
   // key it: this owner, the current account and the grant's chain. Never a
   // fleet-wide flag, an operator notice or another tenant's row, so a hold here
   // is one the supervisor reported for this agent. A database without the
-  // table (self-hosted, older installs) reports none; an unreadable report or a
-  // failed read is no report either (null), so the diagnosis falls back to what
-  // it said before rather than turning a read error into a hold, or a "not held".
+  // table (self-hosted, older installs) reports none (the reader returns null).
+  // An unreadable report or a failed read is "unavailable": the diagnosis treats
+  // it as no hold, so it never turns a read error into a hold, but it says the
+  // hold could not be read rather than answering as if it had been (the grants
+  // and chat routes refuse with a 503 on the same failure; a diagnosis still
+  // has every other check to give).
   let hold: InactivityInputs["hold"] = null;
   if (current && a.chainId !== null) {
     try {
       hold = await readFleetRecoveryHold(db, { tenant: a.tenant, smartAccount: current, chainId: a.chainId });
     } catch {
-      hold = null;
+      hold = "unavailable";
     }
   }
 
@@ -518,6 +523,9 @@ export const UNKNOWN_FROM_SHARED = [
   "Orders still in flight that have not reached the shared ledger: it lags the worker by about one tick plus the ~15 s mirror.",
 ];
 
+/** Added only when this agent's recovery report could not be read (InactivityInputs.hold is "unavailable"). */
+const HOLD_UNREAD = "Whether the agent is held for recovery right now: its recovery report could not be read, so this diagnosis is made as if it were not held.";
+
 const RAIL_BLOCKERS: ReadonlySet<string> = new Set(["not-armed", "dead-policy", "grant-too-wide", "no-executor", "wrong-chain"]);
 
 function railRemedy(rule: string): string[] {
@@ -546,6 +554,9 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   const pendingGrant = i.permission.grantedAt !== null && beat !== null && i.permission.grantedAt > beat && !expired;
   const liveIntended = s ? s.liveTradingEnabled : row?.mode === "live";
   const blocker = row?.live_blocker ?? null;
+  // An unreadable recovery report judges as no hold; it is said, not hidden (below).
+  const hold = i.hold === "unavailable" ? null : i.hold;
+  const holdUnread = i.hold === "unavailable";
 
   const rows = i.trades.rows;
   const fills = countFills(rows);
@@ -588,7 +599,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   {
     const observed = { heartbeat_at: beat === null ? null : iso(beat), heartbeat_age_s: beatAge, agent_status: status };
     const threshold = { fresh_within_s: within };
-    if (i.hold) {
+    if (hold) {
       // A RECOVERY HOLD IS TESTED FIRST, before anything the heartbeat says. A
       // held tenant's supervisor runs no trading worker for it until its saved
       // records are verified (a chat-only holder at most), so a stale or missing
@@ -596,7 +607,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
       // that trades. Only this tenant's own report sets it (readInactivityInputs).
       // It carries no remedy: lifting it is on Merrymen's side. When the hold
       // started is not in the report this reads, so `since` stays unknown.
-      add({ category: "worker_liveness", status: "blocking", kind: "recovery_hold", summary: `Trading is paused for recovery: Merrymen is holding this agent until its saved trading records are verified (the hold was last confirmed at ${iso(i.hold.checkedAt)}). A held agent does not trade, so a stale or missing heartbeat here is the hold, not a worker that died. Lifting the hold is on Merrymen's side.`, observed: { ...observed, recovery_hold_confirmed_at: iso(i.hold.checkedAt) }, threshold, recorded_at: i.hold.checkedAt });
+      add({ category: "worker_liveness", status: "blocking", kind: "recovery_hold", summary: `Trading is paused for recovery: Merrymen is holding this agent until its saved trading records are verified (the hold was last confirmed at ${iso(hold.checkedAt)}). A held agent does not trade, so a stale or missing heartbeat here is the hold, not a worker that died. Lifting the hold is on Merrymen's side.`, observed: { ...observed, recovery_hold_confirmed_at: iso(hold.checkedAt) }, threshold, recorded_at: hold.checkedAt });
     } else if (!row) {
       add({ category: "worker_liveness", status: "unknown", kind: null, summary: i.account ? "The worker has never reported for this account." : "No account yet, so there is no worker to report.", observed, threshold });
     } else if (beat === null) {
@@ -610,8 +621,10 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
       // it is running, with backoff and a ceiling, and never while the fleet is
       // halted or the tenant's accounting is held; when the supervisor itself is
       // down nothing restarts at all. Shared records cannot say which of those
-      // holds, so the remedy promises nothing it cannot see.
-      add({ category: "worker_liveness", status: "blocking", kind: "worker_not_reporting", summary: `No heartbeat for ${beatAge}s (fresh within ${within}s): the worker or the ledger mirror has stopped, and shared records cannot tell which.`, observed, threshold, recorded_at: beat, since: beat, remedy: ["If it stays stale, contact Merrymen support."] });
+      // holds, so the remedy promises nothing it cannot see. An unreadable
+      // recovery report is said here, where a hold would otherwise have been.
+      add({ category: "worker_liveness", status: "blocking", kind: "worker_not_reporting", summary: `No heartbeat for ${beatAge}s (fresh within ${within}s): the worker or the ledger mirror has stopped, and shared records cannot tell which.`, observed, threshold, recorded_at: beat, since: beat, remedy: ["If it stays stale, contact Merrymen support."],
+        evidence: holdUnread ? ["Its recovery report could not be read, so whether it is held for recovery is unknown. A held agent's heartbeat goes stale too, so this may be a recovery hold rather than a stopped worker."] : [] });
     }
   }
 
@@ -876,7 +889,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   // still says what it found, and asked again once the hold lifts, the diagnosis
   // offers the remedies that apply then. Only a blocking permission can outrank
   // the hold (below), so that is the one place the hold is named beside it.
-  if (i.hold) {
+  if (hold) {
     for (const c of checks) if (c.kind !== "recovery_hold") c.remedy = [];
     const perm = checks.find((c) => c.category === "permission")!;
     if (perm.status === "blocking") perm.evidence.push("It is also held for recovery (see worker_liveness): a held agent does not trade, and lifting the hold is on Merrymen's side, so no remedy is offered while it is held.");
@@ -1018,7 +1031,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     },
     latest_view: i.latestView,
     what_owner_can_do: [...new Set(remedies)].slice(0, 8),
-    unknown_from_shared_records: [...UNKNOWN_FROM_SHARED],
+    unknown_from_shared_records: holdUnread ? [...UNKNOWN_FROM_SHARED, HOLD_UNREAD] : [...UNKNOWN_FROM_SHARED],
     truncated: { trades: i.trades.truncated, events: i.events.truncated },
   };
 }

@@ -975,25 +975,31 @@ test("inactivity: while held no check offers a remedy, so a stale blocker asks f
   }
 });
 
-test("inactivity: only this tenant's own hold on its current account and chain counts; an unreadable report is no hold", async () => {
+test("inactivity: only this tenant's own hold on its current account and chain counts; an unreadable report is no hold, and is said", async () => {
   const s = await setup();
   agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live", beat: NOW - 3600 });
   mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 3600 });
-  const notHeld = async (label: string) => {
+  const unreadLine = (r: Awaited<ReturnType<typeof explain>>) => r.sc.unknown_from_shared_records.some((x: string) => /held for recovery/.test(x) && /could not be read/.test(x));
+  const notHeld = async (label: string, unread: boolean) => {
     const r = await explain(s);
     assert.equal(r.primary.kind, "worker_not_reporting", label);
     assert.ok(!r.text.includes("recovery_hold"), label);
+    // An unreadable report never becomes a hold, but it is not passed off as a
+    // clean "not held" either: the answer says the hold could not be read.
+    assert.equal(unreadLine(r), unread, `${label}: unknown_from_shared_records`);
+    assert.equal(r.primary.evidence.some((x: string) => /may be a recovery hold/.test(x)), unread, `${label}: evidence`);
   };
+  await notHeld("no report table at all (self-hosted, older installs)", false);
   recoveryHold(s.d, { tenant: OWNER_B });
-  await notHeld("another tenant's row for this account");
+  await notHeld("another tenant's row for this account", false);
   recoveryHold(s.d, { chain: 1 });
-  await notHeld("this tenant's row on another chain");
+  await notHeld("this tenant's row on another chain", false);
   recoveryHold(s.d, { account: OLD_A });
-  await notHeld("this tenant's row for an earlier account");
+  await notHeld("this tenant's row for an earlier account", false);
   recoveryHold(s.d, { held: 7 });
-  await notHeld("an unreadable report (the reader throws): no hold, and no error");
+  await notHeld("an unreadable report (the reader throws): no hold, and no error", true);
   s.d.raw.exec("DROP TABLE fleet_recovery_health; CREATE TABLE fleet_recovery_health(wrong TEXT)");
-  await notHeld("a report table this server cannot read");
+  await notHeld("a report table this server cannot read", true);
 });
 
 /** Records every ledger statement and refuses any write, so the family is provably read-only on the ledger. */
@@ -1124,4 +1130,9 @@ test("diagnoseInactivity: a permission signed after the last heartbeat is pendin
   const held = diagnoseInactivity({ ...base, hold: { checkedAt: NOW - 60 } });
   assert.equal(held.primary.kind, "recovery_hold");
   assert.ok(held.other_factors.some((f) => f.kind === "permission_pending"));
+  // An unreadable report judges as no hold (the same answer as null), and says so.
+  const unread = diagnoseInactivity({ ...base, hold: "unavailable" });
+  assert.equal(unread.primary.kind, "permission_pending");
+  assert.ok(!dx.unknown_from_shared_records.some((x) => /held for recovery/.test(x)));
+  assert.ok(unread.unknown_from_shared_records.some((x) => /held for recovery/.test(x)));
 });
