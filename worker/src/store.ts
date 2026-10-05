@@ -3527,7 +3527,7 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
  *     transfer; for spend and ops it is nothing when the two agree.
  *
  * The seed is the LIVE rail's (a paper fill has no hash to count it once by),
- * so only a live reader adds it. `local + seeded` is the cap's settled half.
+ * so only a live reader adds it. `own + seeded` is the cap's settled half.
  */
 function withBudgetSeed(q: {
   agentId: string;
@@ -3538,22 +3538,22 @@ function withBudgetSeed(q: {
   seedFigure: string;
   seedParams?: readonly unknown[];
 }): { sql: string; params: unknown[] } {
-  const local = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
-  if (q.rail !== "live") return { sql: `SELECT (${local}) AS local, 0 AS seeded`, params: [q.agentId, ...q.params] };
+  const own = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
+  if (q.rail !== "live") return { sql: `SELECT (${own}) AS own, 0 AS seeded`, params: [q.agentId, ...q.params] };
   const live = railFilter("live");
   const sameOp = "agent_id = ? AND user_op_hash IS NOT NULL AND lower(user_op_hash) = s.op_hash";
   return {
-    sql: `SELECT (${local}) AS local,
-      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN (CASE WHEN k.current = 1 THEN k.x ELSE 0 END)
+    sql: `SELECT (${own}) AS own,
+      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN (CASE WHEN k.in_window = 1 THEN k.x ELSE 0 END)
                                 WHEN k.counting = 0 THEN 0
-                                WHEN k.x > k.local_x THEN k.x - k.local_x
+                                WHEN k.x > k.own_x THEN k.x - k.own_x
                                 ELSE 0 END), 0)
          FROM (SELECT ${q.seedFigure} AS x,
-                      CASE WHEN s.pending = 1 OR s.settled_at > unixepoch() - 86400 THEN 1 ELSE 0 END AS current,
+                      CASE WHEN s.pending = 1 OR s.settled_at > unixepoch() - 86400 THEN 1 ELSE 0 END AS in_window,
                       (SELECT COUNT(*) FROM trades WHERE ${sameOp}) AS known,
                       (SELECT COUNT(*) FROM trades WHERE ${sameOp} AND status IN (${live.sql})
                          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)) AS counting,
-                      (SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE ${sameOp} AND ${q.where}) AS local_x
+                      (SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE ${sameOp} AND ${q.where}) AS own_x
                  FROM budget_seed s
                 WHERE lower(s.agent_id) = lower(?)) k) AS seeded`,
     params: [
@@ -3569,8 +3569,8 @@ function withBudgetSeed(q: {
 
 /** Run a withBudgetSeed reader: the two halves, as numbers whatever the backend returned them as. */
 async function seededSum(q: { sql: string; params: unknown[] }): Promise<number> {
-  const row = (await getDb().prepare(q.sql).get(...q.params)) as { local?: unknown; seeded?: unknown } | undefined;
-  return Number(row?.local ?? 0) + Number(row?.seeded ?? 0);
+  const row = (await getDb().prepare(q.sql).get(...q.params)) as { own?: unknown; seeded?: unknown } | undefined;
+  return Number(row?.own ?? 0) + Number(row?.seeded ?? 0);
 }
 
 /**
