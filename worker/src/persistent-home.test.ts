@@ -336,6 +336,8 @@ test("adoption puts a canonical halt in the original's place in one rename, keep
   assert.deepEqual(preparePersistentHomeForHandover(f.env, f.options), prepared);
   const after = tree(f.home);
   assert.deepEqual(adoptPopulatedPersistentHome(f.adopt, f.options), prepared);
+  // The token may be retired once adopted; the pin left behind still changes nothing.
+  assert.deepEqual(adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_INITIAL_HANDOVER: undefined }, f.options), prepared);
   assert.deepEqual(tree(f.home), after);
   assert.throws(() => adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("another halt") }, f.options), /pinned original halt/);
 });

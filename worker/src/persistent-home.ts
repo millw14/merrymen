@@ -359,11 +359,15 @@ export function adoptPopulatedPersistentHome(
   const pinned = pinnedHalt(env);
   if (pinned === null) return null;
   const result = withRoot(env, options, root => {
-    const token = env.MERRYMEN_INITIAL_HANDOVER, i = root.identity;
+    // Adopting needs the explicit token. Once adopted, the pin may stay set
+    // for release and re-halt after the token is retired: the record must
+    // then match the manifest's own operation instead.
+    const i = root.identity, saved = readManifest(root);
+    const token = env.MERRYMEN_INITIAL_HANDOVER ?? saved?.manifest.handover.operationToken;
     if (!token) throw refuse("adoption requires the explicit initial handover operation token");
     const haltPath = path.join(i.homeRoot, "FLEET_HALT"), canonical = haltText(i.id, token);
     let record = readPreAdoption(root, pinned, token);
-    if (readManifest(root)) {
+    if (saved) {
       if (!record) throw refuse("an existing persistent manifest was not created by this adoption");
       const m = verifiedManifest(root);
       return { ...i, handoverState: m.handover.state, halt: m.handover.state === "held" ? m.handover.halt : null };
