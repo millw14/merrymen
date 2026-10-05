@@ -53,7 +53,8 @@ resume), and after any change to backup settings.
 5. **Delete the fork** service, and any proxy you added.
 
 The exit code is `0` when the drill passes, `1` when it fails or cannot
-finish, and `64` when the verifier refuses before comparing anything.
+finish, and `64` when the arguments or URLs are refused (`usage`,
+`fork-is-source`, `fork-is-live`).
 
 ## Reading the result
 

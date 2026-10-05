@@ -297,8 +297,17 @@ async function readSide(client, bounds, side, admit) {
     const who = (await client.query("SELECT current_database() AS db, pg_postmaster_start_time()::text AS started")).rows[0];
     const identity = JSON.stringify([who?.db ?? null, who?.started ?? null]);
     admit(identity);
+    // From the catalog, not information_schema: information_schema hides a
+    // table the role may not read, and a table hidden on both sides would read
+    // `absent` and pass. Here it is present, its count is refused, and the
+    // drill stops loudly.
     const columns = (await client.query(
-      "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ANY($1::text[])",
+      `SELECT c.relname AS table_name, a.attname AS column_name, format_type(a.atttypid, NULL) AS data_type
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+        WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND c.relname = ANY($1::text[])
+          AND a.attnum > 0 AND NOT a.attisdropped`,
       [DRILL_TABLES.map((t) => t.table)],
     )).rows;
     const tables = {};

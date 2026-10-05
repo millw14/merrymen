@@ -79,7 +79,7 @@ function fakeClient(spec, log) {
       if (/^SET LOCAL /.test(text) || text === "ROLLBACK") return { rows: [] };
       if (text.includes("current_setting('transaction_read_only')")) return { rows: [{ readonly: spec.readonly, isolation: "repeatable read" }] };
       if (text.includes("pg_postmaster_start_time()")) return { rows: [{ db: spec.db, started: spec.started }] };
-      if (text.includes("information_schema.columns")) {
+      if (text.includes("pg_catalog.pg_attribute")) {
         const rows = [];
         for (const name of params[0]) {
           const t = spec.tables[name];
@@ -368,7 +368,7 @@ test("a transaction that does not report read-only is refused before a table is 
   assert.equal(out.exitCode, 1);
   assert.deepEqual(out.report.error, { code: "not-read-only", detail: "The transaction did not open read-only; nothing was read.", side: "fork" });
   assert.deepEqual(out.order, ["fork"]);
-  assert.ok(!out.clients.fork.sent.some((s) => s.includes("information_schema") || s.includes("AS stamped")));
+  assert.ok(!out.clients.fork.sent.some((s) => s.includes("pg_catalog") || s.includes("AS stamped")));
   assert.equal(out.clients.fork.sent.at(-1), "ROLLBACK");
 });
 
@@ -417,10 +417,13 @@ test("Postgres: the drill's SQL over two real databases", { skip: !url, timeout:
   const admin = new pg.Client({ connectionString: url });
   await admin.connect();
   const clients = {};
-  // One hook, in this order: a database with a session open cannot be dropped.
+  const reader = `mm_restore_reader_${suffix}`;
+  // One hook, in this order: a database with a session open cannot be
+  // dropped, and a role cannot be dropped while a database grants it anything.
   t.after(async () => {
     for (const c of Object.values(clients)) await c.end().catch(() => {});
     for (const name of Object.values(names)) await admin.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => {});
+    await admin.query(`DROP ROLE IF EXISTS ${reader}`).catch(() => {});
     await admin.end();
   });
   for (const name of Object.values(names)) await admin.query(`CREATE DATABASE ${name}`);
@@ -482,6 +485,15 @@ test("Postgres: the drill's SQL over two real databases", { skip: !url, timeout:
   const same = await run({ MERRYMEN_RESTORE_FORK_URL: alias.toString() });
   assert.equal(same.exitCode, 64);
   assert.equal(same.report.error.code, "fork-is-source");
+
+  // A role that may not read a table still sees it in the catalog, so the
+  // drill stops on that table instead of calling it absent on both sides.
+  await admin.query(`CREATE ROLE ${reader} LOGIN`);
+  for (const c of Object.values(clients)) await c.query(`GRANT SELECT ON trades, flows, holder_claims, tenant_settings TO ${reader}`);
+  const as = (name) => Object.assign(new URL(urlOf(name)), { username: reader, password: "" }).toString();
+  const unreadable = await run({ MERRYMEN_RESTORE_FORK_URL: as(names.fork), MERRYMEN_RESTORE_SOURCE_URL: as(names.source) });
+  assert.equal(unreadable.exitCode, 1);
+  assert.deepEqual(unreadable.report.error, { code: "query-failed", detail: "A read failed and the drill stopped.", side: "fork", table: "grants", cause: "42501" });
 
   // Nothing above wrote: the drill's sessions were read-only and rolled back.
   const { rows } = await clients.source.query("SELECT count(*)::int AS n FROM trades");
