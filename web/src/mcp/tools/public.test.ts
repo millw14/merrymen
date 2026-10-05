@@ -605,6 +605,51 @@ test("a return under review is withheld from the list and the profile, in every 
   }
 });
 
+test("a transfer recorded as both the agent's own and its chain log puts the return under review on both surfaces", async () => {
+  const { d, connect } = await setup();
+  // C's 2045 bps rests on 100 of capital. The executor books a transfer home
+  // with its tx, and a later scan books the same transfer from its log: which
+  // one is right is a question, and summing them is the one wrong answer.
+  const flow = d.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, epoch, at)
+    VALUES (?, 'out', 10, '0xhomec', ?, 4663, ?, 1, ?)`);
+  flow.run(ACCOUNT_C, null, "transfer-intent", T - 2 * H);
+  flow.run(ACCOUNT_C, 0, "chain-log", T - 2 * H + 60);
+  const b = await connect(OWNER_B);
+  const list = await call(b, "list_public_agents", {});
+  const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.deepEqual(row.unranked, { code: "review-pending", reason: "return under review" });
+  assert.equal(row.ranked, false);
+  assert.equal(row.live.return_bps, null);
+  const profile = await call(b, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.res.isError, undefined, profile.json);
+  assert.deepEqual(profile.sc.unranked, row.unranked);
+  assert.equal(profile.sc.live.return_bps, null);
+  assert.deepEqual(profile.sc.growth.points, [], "no line is drawn over flows that were not summed");
+  assert.doesNotMatch(list.json + profile.json, /2045|20\.45/);
+});
+
+test("two different opening balances in one run make the return unavailable, and both surfaces say the records are unread", async () => {
+  const { d, connect } = await setup();
+  const carry = d.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, at) VALUES (?, 'in', ?, 'epoch-carry', 1, ?)`);
+  carry.run(ACCOUNT_C, 50, T - 4 * H);
+  // The mirror's exact copy is one carry, and C still ranks on it.
+  carry.run(ACCOUNT_C, 50, T - 4 * H);
+  const b = await connect(OWNER_B);
+  const once = (await call(b, "list_public_agents", {})).sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.equal(once.ranked, true);
+  assert.equal(once.live.return_bps, Math.round(((120.5 - 150 - 0.05) / 150) * 10_000));
+  carry.run(ACCOUNT_C, 40, T - 4 * H);
+  const list = await call(b, "list_public_agents", {});
+  const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.equal(row.ranked, false);
+  assert.equal(row.live.return_bps, null);
+  assert.equal(row.unranked.code, "records-unreadable");
+  const profile = await call(b, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.res.isError, undefined, profile.json);
+  assert.deepEqual(profile.sc.unranked, row.unranked);
+  assert.equal(profile.sc.funding.funded, null, "withheld funding is not unfunded");
+});
+
 test("a paper agent's return under review says review-pending, not 'paper' beside a null return", async () => {
   // B's paper book is up 23.45%. Under review its paper return is withheld,
   // and "paper" beside a null return would read like a paper read that did

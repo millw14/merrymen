@@ -38,6 +38,7 @@ import { profileOf, type AgentProfile, type HowItTrades } from "../read-agent";
 import { readTheses, WINDOW_SEC, type FeedThesis } from "../read-theses";
 import { unrankedLabel, type UnrankedWhy } from "../rank-pnl";
 import { readOperationCounts } from "../distinct-trades";
+import { netFlows, readDistinctFlows } from "../distinct-flows";
 import type { ProfileTrade } from "../profile-trades";
 import { PUBLISHABLE_STRATEGIES, outcomeOf } from "../thesis";
 import type { SettingsReader, SettingsView } from "./settings-view";
@@ -433,14 +434,12 @@ export async function readPublicBoard(
     // no latest mark). Each is re-asked the way the board computed it.
     let reasonRead = true;
     if (run && r.mode === "live" && r.unrankedWhy === "no-deposit") {
+      // Through the same collapse the board's figure took (distinct-flows.ts):
+      // a copy on record twice is not a second deposit, and withheld flows
+      // throw, which confirms nothing.
       reasonRead = await confirmsDefault(async () => {
-        const f = (await db
-          .prepare(
-            `SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ? AND epoch = ?`,
-          )
-          .get(run.account, run.epoch)) as { n: number; net: number } | undefined;
-        return !f || Number(f.n) === 0 || Number(f.net) <= 0;
+        const f = netFlows(await readDistinctFlows(db, run.account, run.epoch));
+        return f.n === 0 || f.net <= 0;
       });
     } else if (run && r.mode === "live" && r.unrankedWhy === "never-filled" && r.landed > 0) {
       // A mark on record (the valuation read above) means the board's own
@@ -448,6 +447,15 @@ export async function readPublicBoard(
       reasonRead = valuation === null && await confirmsDefault(async () => {
         const e = (await db.prepare("SELECT COUNT(*) AS n FROM equity WHERE agent_id = ? AND epoch = ?").get(run.account, run.epoch)) as { n: number } | undefined;
         return Number(e?.n ?? 0) === 0;
+      });
+    } else if (run && r.mode === "live" && r.unrankedWhy === "quality-unknown") {
+      // "Return unavailable" rests on the flows as well: rows that contradict
+      // each other are unread capital accounting (distinct-flows.ts), and the
+      // profile says that as records-unreadable. Only a read that answers
+      // leaves the reason standing, so both surfaces say the same thing.
+      reasonRead = await confirmsDefault(async () => {
+        await readDistinctFlows(db, run.account, run.epoch);
+        return true;
       });
     }
     const ranked = isRanked(r);
@@ -1023,6 +1031,7 @@ export function explainLeaderboard(): LeaderboardExplained {
       "The worker has assessed the contributions as evidence (chain-log receipts or a reconciling epoch carry), not inferred from a balance change.",
       "Every operation's owner gas cost up to that valuation is on record (or proved sponsored). Otherwise the return is withheld as gas-pending: it is not known exactly.",
       "The return is not under an operator's review. A return under review is withheld everywhere as review-pending (no percentage, no P&L, no growth line) until the review clears; the current valuation stays.",
+      "Each deposit and withdrawal is counted once, however many copies of it are on record, and the records agree with each other. A transfer recorded both as the agent's own transfer and as its chain log is never summed: the return is withheld as review-pending. Records that contradict each other (two different opening balances in one run) withhold it as unavailable.",
       "The newest valuation belongs to the live book (checked here in addition to the page's gates, so a paper balance is never divided by real deposits).",
     ],
     unranked_reasons: [
