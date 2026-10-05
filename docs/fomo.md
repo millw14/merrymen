@@ -19,7 +19,44 @@ client's GET-only path allowlist.
 **Hosted Fomo is opt-in.** Nothing here runs on a hosted deployment until
 `MERRYMEN_FOMO_ENABLED=1` is set on the orchestrator and the web (see Operations). Off,
 there is no Fomo pool, DDL, IPC channel, child file, Telegram research lane, chat
-interception or scout-budget charge. Landing the code changes nothing in production.
+interception, Settings section, MCP tool or scout-budget charge. Self-hosted Fomo is on
+unless the install sets `MERRYMEN_FOMO_ENABLED=0`; without a key it answers Fomo
+questions "not configured" and spends nothing.
+
+**What still changes with hosted Fomo off.** These are deliberate, and all apply from the
+next deploy of each service:
+
+- **Brain** (deploys when this merges). A request without trader-flow material makes
+  exactly the analyst calls it made before. Three changes do apply to every request:
+  - case and spacing variants of `</untrusted>` are neutralised in every fenced block (a
+    security fix);
+  - each decision also carries `proposed_action` and `proposed_delta_usdg`, record only,
+    which older workers ignore;
+  - `/health` lists `lens_keys`.
+- **Workers:**
+  - Paused stock tokens are excluded from the Brain's focus and from the fast-Trencher
+    candidate filter. Both looked the address set up by symbol, so a paused token was
+    never excluded.
+  - Instrumentation:
+    - a per-coin decision funnel, with one aggregated log line per 10 minutes for
+      fast-Trencher agents;
+    - a superseded unused BUY or SELL is logged;
+    - Brain gate fields and a `refusal_reason` are added at the end of decision rows'
+      `signals_json`.
+  - A portfolio-quality refusal is logged as itself rather than as "Brain unavailable".
+  - The regular Trencher candidate list is built by `regularEntryPools`. It is identical
+    while no early or verify-only pool exists, which is always the case with Fomo off.
+- **Orchestrator:**
+  - children receive `MERRYMEN_TENANT`;
+  - both Fomo key names are stripped from children;
+  - one boot line says Fomo is off.
+- **Web:**
+  - The chat route reads the recovery hold before anything else, which was already
+    main's order.
+  - Settings GET masks a stored `fomoApiKey` like every other secret, and PUT accepts the
+    three Fomo booleans. The page shows no Fomo section while Fomo is off.
+  - `/api/auth/session` adds a `fomo` flag.
+  - The new `/api/fomo/status` route answers 404 "not enabled".
 
 | Area | Status |
 |---|---|
@@ -443,7 +480,7 @@ answers use one call on the existing house model.
 |---|---|---|
 | `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) | web, orchestrator; self-hosted worker or settings `fomoApiKey` | provider key, stripped from hosted children |
 | `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget |
-| `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; those children run no Fomo code (no Telegram research lane, nothing charged to the scout budget), the web chat answers as before and MCP Fomo tools answer `unsupported`. Self-hosted is unaffected |
+| `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
 | `MERRYMEN_TENANT` | set by the orchestrator in each child | not a secret; the child checks `fomo.json` belongs to it. IPC never trusts it: the orchestrator stamps the tenant itself. |
