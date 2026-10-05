@@ -105,6 +105,10 @@ describe("AN EXIT IS NEVER BLOCKED", () => {
   // which isExitIntent reads as an entry (energy.ts sellsHeldLeg).
   const exits: [string, TradeIntent][] = [
     ["a swap into cash", sell()],
+    // A basket agent's stop-loss. A stock token is ON the quote side, so the
+    // quote-side test alone would hold it: only isExitIntent keeps it moving.
+    ["a stock sale into cash", sell(STOCK)],
+    ["a stock-in curve sale into cash", curve(STOCK, USDG)],
     ["a curve sale into cash", curve(COIN, USDG)],
     ["a curve sale into a built-in quote", curve(COIN, STOCK)],
     ["a curve sale into an extra quote on a legacy grant", curve(COIN, EXTRA_STOCK)],
@@ -139,6 +143,17 @@ describe("AN EXIT IS NEVER BLOCKED", () => {
       false,
       "the owner's energy buy is its own route",
     );
+  });
+
+  it("a swap ROTATING one built-in into another is held, as the breaker blocks it: it is not a way out", () => {
+    const STOCK_B = "0x00000000000000000000000000000000000000a3" as const;
+    const basket: BackoffLimits = { ...LIMITS, quoteAssets: [USDG, STOCK, STOCK_B] };
+    const rotate: TradeIntent = {
+      kind: "swap", target: ROUTER, sellToken: STOCK, buyToken: STOCK_B, sellAmountRaw: 1n, notionalUsdg: 1n,
+    };
+    assert.equal(backsOff(rotate, basket), true);
+    // While the same stock's way out, into cash, never is.
+    assert.equal(backsOff(sell(STOCK), basket), false);
   });
 });
 
