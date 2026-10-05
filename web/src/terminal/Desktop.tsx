@@ -36,6 +36,7 @@ import { Board, tradeLine } from "./screens/Board";
 import { performanceOf } from "./agent-performance";
 import { useNow } from "./clock";
 import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { notRunningNote } from "./worker-stale";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -414,12 +415,14 @@ export function DesktopPortfolio({
 }) {
   const recovery = pausedRecovery(mine.recovery);
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
       <section>
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
-          <span className={`desktop-running ${stopped || recovery ? "paused" : ""}`}>
+          {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+          <span className={`desktop-running ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
             {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
           </span>
         </div>
@@ -486,6 +489,18 @@ export function DesktopPortfolio({
               {mine.autonomy.action.label}
             </button>
           </div>
+        )}
+        {/* SINCE WHEN IT HAS BEEN QUIET: the desk's sentence, as a line. No
+            link — nothing an owner signs or sends restarts a process. */}
+        {silence && <p className="meta">{silence}</p>}
+        {/* A KEY ABOUT TO EXPIRE: a line and a link, never the banner above —
+            nothing is wrong yet. Never beside that banner either (the verdict
+            drops the chip wherever a renewal is already offered), and never
+            during a hold, which the chip itself does not know about. */}
+        {!recovery && displayedAutonomy.expiresSoon && (
+          <p className="meta">
+            <a href="/grant#resign">{displayedAutonomy.expiresSoon.label}</a>
+          </p>
         )}
         {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
 

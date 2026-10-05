@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { REAL_LABEL, SIMULATED_LABEL, autonomyOf, liveBlockerText, type RefuseRule } from "./autonomy";
+import {
+  REAL_LABEL,
+  RENEW_SOON_DAYS,
+  SIMULATED_LABEL,
+  autonomyOf,
+  isOwnerActionRule,
+  liveBlockerText,
+  type AutonomyInput,
+  type RefuseRule,
+} from "./autonomy";
 
 /**
  * THE INCIDENT THESE PIN.
@@ -293,5 +302,185 @@ describe("a verdict about a replaced key is not repeated back at its owner", () 
     // would turn "we don't know" into "nothing to see".
     const a = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain" });
     assert.equal(a.state, "blocked");
+  });
+});
+
+/**
+ * THE CHIP THAT OUTLIVED THE PROCESS.
+ *
+ * `mode` is the last thing a worker said, and a stopped worker goes on saying
+ * it: the mirrored row keeps whatever the final tick wrote. So an agent whose
+ * process had died wore LIVE or PAPER on every surface — and was described to
+ * the chat that way — while it placed nothing and watched nothing.
+ *
+ * The property is not "a silent agent says NOT RUNNING". It is that silence is
+ * said WITHOUT burying anything the owner still has to do, and without
+ * changing what the money on screen is.
+ */
+describe("a worker that has stopped reporting is not called live", () => {
+  const SILENT = Date.parse("2026-10-04T03:18:00Z") / 1000;
+  const silent = (input: Partial<AutonomyInput>) =>
+    autonomyOf({ mode: "live", liveBlocker: null, workerSilentSince: SILENT, ...input });
+
+  it("SAYS NOT RUNNING, and since when", () => {
+    const a = silent({});
+    assert.equal(a.state, "not-running");
+    assert.equal(a.label, "NOT RUNNING");
+    assert.match(a.reason!, /has not reported since 2026-10-04 03:18 UTC/);
+    assert.match(a.reason!, /not placing trades/);
+    // Nothing an owner signs or sends restarts a process.
+    assert.equal(a.needsOwnerAction, false);
+    assert.equal(a.action, null);
+    assert.equal(a.headline, null);
+  });
+
+  it("a silent PAPER agent is not running and its money is still simulated", () => {
+    const a = silent({ mode: "paper" });
+    assert.equal(a.label, "NOT RUNNING");
+    assert.equal(a.simulated, true, "a stopped process does not make a paper book real");
+    assert.equal(a.moneyLabel, SIMULATED_LABEL);
+    const live = silent({ mode: "live" });
+    assert.equal(live.simulated, false);
+    assert.equal(live.moneyLabel, REAL_LABEL);
+  });
+
+  it("EXPIRY STILL WINS: silent + expired is BLOCKED, with the renewal", () => {
+    // A key that has expired will not trade when the worker comes back either,
+    // so "not running" is the smaller truth and must not replace the remedy.
+    const a = silent({ mode: "paper", expired: true });
+    assert.equal(a.state, "blocked");
+    assert.equal(a.label, "BLOCKED");
+    assert.equal(a.rule, "expired");
+    assert.equal(a.needsOwnerAction, true);
+    assert.equal(a.action?.kind, "renew-grant");
+  });
+
+  it("and so does every owner-action remedy", () => {
+    for (const rule of ["dead-policy", "wrong-chain", "grant-too-wide", "not-armed"] as RefuseRule[]) {
+      const a = silent({ mode: "paper", liveBlocker: rule });
+      assert.equal(a.state, "blocked", rule);
+      assert.equal(a.needsOwnerAction, true, rule);
+      assert.deepEqual(a.action, autonomyOf({ mode: "paper", liveBlocker: rule }).action, `${rule} keeps its own button`);
+    }
+  });
+
+  it("THE CHECKING ARM SAYS NOT RUNNING WHEN NOTHING IS LISTENING FOR THE NEW KEY", () => {
+    // "This usually takes a few minutes" is a promise about a running worker's
+    // next tick. A silent worker has none, so for a re-signer the sentence was
+    // false from the first minute and stayed up forever.
+    const listening = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain", blockerPredatesGrant: true });
+    assert.equal(listening.state, "checking", "a running worker still gets its few minutes");
+    const a = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain", blockerPredatesGrant: true, workerSilentSince: SILENT });
+    assert.equal(a.state, "not-running");
+    assert.equal(a.label, "NOT RUNNING");
+    assert.doesNotMatch(a.reason!, /few minutes/);
+    // Still not asking for the signature it already has.
+    assert.equal(a.needsOwnerAction, false);
+    assert.equal(a.action, null);
+    assert.equal(a.headline, null);
+    assert.equal(a.rule, "wrong-chain", "the rule is still carried, not erased");
+    assert.equal(a.simulated, true);
+  });
+
+  it("is its own state, not CHECKING, so nothing keyed on CHECKING hides a funding problem", () => {
+    // The desk once hid its blocker panel on `state === "checking"`. A silent
+    // agent short of ETH must not lose "send ETH" to an unrelated fact.
+    for (const rule of ["no-gas", "no-cash", "no-executor", "live-not-enabled"] as RefuseRule[]) {
+      const a = silent({ mode: "paper", liveBlocker: rule, realCashUsd: 0 });
+      assert.equal(a.state, "not-running", rule);
+      assert.notEqual(a.state, "checking", rule);
+      assert.equal(a.rule, rule, `${rule} is carried for the surfaces that render it`);
+    }
+  });
+
+  it("fresh, never heard from, and malformed silence change nothing", () => {
+    // Null is fresh or never beaten — neither is evidence anything stopped —
+    // and a value that is not a datable second must not invent an outage.
+    for (const workerSilentSince of [null, undefined, 0, -1, 1.5, Number.NaN, Infinity, SILENT * 1000]) {
+      for (const mode of ["paper", "live", "idle", null] as const) {
+        assert.deepEqual(
+          autonomyOf({ mode, liveBlocker: "no-gas", realCashUsd: 0, workerSilentSince }),
+          autonomyOf({ mode, liveBlocker: "no-gas", realCashUsd: 0 }),
+          `${String(workerSilentSince)} on ${String(mode)}`,
+        );
+      }
+    }
+  });
+
+  it("names exactly the rules a signature clears, for the desk that reads the raw rule", () => {
+    for (const rule of ["dead-policy", "wrong-chain", "grant-too-wide", "not-armed"]) {
+      assert.equal(isOwnerActionRule(rule), true, rule);
+    }
+    for (const rule of ["no-gas", "no-cash", "no-executor", "live-not-enabled", "some-future-rule", null, undefined]) {
+      assert.equal(isOwnerActionRule(rule), false, String(rule));
+    }
+  });
+});
+
+/**
+ * THE EXPIRY NOBODY WAS TOLD ABOUT.
+ *
+ * The warning lived on the wallet page, which an owner whose agent is working
+ * has no reason to open. The first most of them heard of an expiry was the
+ * agent stopping. The chip says it while the key still works — and says it
+ * without turning anything red, because a key with two days left trades
+ * exactly like one with ninety.
+ */
+describe("a key about to expire is said before it does, without blocking anything", () => {
+  it("inside the window: a chip, and nothing else moves", () => {
+    const quiet = autonomyOf({ mode: "live", liveBlocker: null });
+    const soon = autonomyOf({ mode: "live", liveBlocker: null, expiresSoonDays: 2 });
+    assert.deepEqual(soon.expiresSoon, { days: 2, label: "Renew permission (expires in 2 days)", kind: "renew-grant" });
+    assert.deepEqual({ ...soon, expiresSoon: null }, quiet, "state, label, action and banner are exactly as before");
+    assert.equal(soon.state, "live");
+    assert.equal(soon.needsOwnerAction, false);
+    assert.equal(soon.headline, null);
+  });
+
+  it("the window is the wallet page's three days, counted up", () => {
+    for (const days of [1, 2, 3]) {
+      assert.equal(autonomyOf({ mode: "paper", liveBlocker: null, expiresSoonDays: days }).expiresSoon?.days, days);
+    }
+    for (const days of [4, 30, 0, -1, 1.5, Number.NaN, null, undefined]) {
+      assert.equal(autonomyOf({ mode: "paper", liveBlocker: null, expiresSoonDays: days }).expiresSoon, null, String(days));
+    }
+    assert.equal(RENEW_SOON_DAYS, 3);
+    assert.equal(
+      autonomyOf({ mode: "live", liveBlocker: null, expiresSoonDays: 1 }).expiresSoon?.label,
+      "Renew permission (expires in 1 day)",
+    );
+  });
+
+  it("never beside a renewal that is already on offer", () => {
+    // Two buttons saying nearly the same thing is how an owner learns to
+    // ignore both.
+    assert.equal(autonomyOf({ mode: "paper", liveBlocker: null, expired: true, expiresSoonDays: 1 }).expiresSoon, null);
+    for (const rule of ["dead-policy", "wrong-chain", "grant-too-wide", "not-armed"]) {
+      assert.equal(autonomyOf({ mode: "paper", liveBlocker: rule, expiresSoonDays: 2 }).expiresSoon, null, rule);
+    }
+  });
+
+  it("but rides with the states that offer no button", () => {
+    const SILENT = Date.parse("2026-10-04T03:18:00Z") / 1000;
+    const inputs: AutonomyInput[] = [
+      { mode: "paper", liveBlocker: "no-gas", realCashUsd: 0 },
+      { mode: "paper", liveBlocker: "live-not-enabled" },
+      { mode: "idle", liveBlocker: null },
+      { mode: "paper", liveBlocker: "wrong-chain", blockerPredatesGrant: true },
+      { mode: "live", liveBlocker: null, workerSilentSince: SILENT },
+    ];
+    for (const input of inputs) {
+      const a = autonomyOf({ ...input, expiresSoonDays: 2 });
+      assert.equal(a.expiresSoon?.kind, "renew-grant", JSON.stringify(input));
+      assert.equal(a.needsOwnerAction, false, "still non-blocking");
+    }
+  });
+
+  it("is null on every verdict that was not asked about expiry", () => {
+    for (const rule of [null, "not-armed", "dead-policy", "no-executor", "wrong-chain", "no-gas", "no-cash"]) {
+      for (const mode of ["paper", "live", "idle", null] as const) {
+        assert.equal(autonomyOf({ mode, liveBlocker: rule }).expiresSoon, null);
+      }
+    }
   });
 });

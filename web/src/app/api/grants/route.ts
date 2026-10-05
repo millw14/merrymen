@@ -36,6 +36,8 @@ import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
+import { resolveConfig } from "../../../../../worker/src/settings";
+import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -55,6 +57,20 @@ export interface AgentStatus {
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
   workerAliveAt?: number | null;
+  /**
+   * HAS THE WORKER STOPPED REPORTING? `workerAliveAt` older than the watchdog's
+   * window for this owner's tick — never shorter than one order's run, which
+   * the mirrored row can lag the file by — plus a margin for the mirror.
+   *
+   * DECIDED HERE, by this server's clock — never by the browser's, which would
+   * judge a server timestamp by however wrong that laptop's clock is — and by
+   * the one rule the MCP tools already state (terminal/worker-stale.ts).
+   *
+   * NULL IS "NEVER HEARD FROM", which is not stale and not fresh: a new agent
+   * waiting for its first tick has not stopped. Absent on an older server, and
+   * a client reads that as null.
+   */
+  workerStale?: boolean | null;
   /** "paper" (simulated fills), "live" (signing), or "idle" — from the heartbeat. */
   mode?: "paper" | "live" | "idle" | null;
   /**
@@ -476,6 +492,26 @@ export async function DELETE(req: Request) {
   return NextResponse.json({ ok: true });
 }
 
+/**
+ * The tick this owner's worker runs on, which sets how long a silence has to
+ * be before it means "stopped"; null when it cannot be read, and `freshWithin`
+ * answers null with the default tick.
+ *
+ * READ FOR THE CALLER, as the orders route reads it: hosted, this container's
+ * own settings are the house's and say nothing about this tenant's cadence;
+ * self-hosted they are the worker's own. A failed read is the default, never
+ * the house's tick — a shorter window from the wrong owner would call a healthy
+ * agent stopped.
+ */
+async function tickSecondsFor(hostedTenant: `0x${string}` | null | undefined): Promise<number | null> {
+  try {
+    const tick = hostedTenant ? (await getSettingsStore().get(hostedTenant))?.tickSeconds : resolveConfig().tickSeconds;
+    return typeof tick === "number" && Number.isFinite(tick) && tick > 0 ? tick : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(req: Request) {
   let grant: StoredGrant;
   const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
@@ -566,6 +602,12 @@ export async function GET(req: Request) {
   // deployments. Best effort: an unreadable report is null, never an error.
   const energy = await readAgentEnergy(grant.smartAccount);
 
+  // AFTER BOTH HEARTBEAT SOURCES, so it judges whichever one answered: the
+  // file self-hosted, the mirrored row hosted. See terminal/worker-stale.ts.
+  // Never heard from is null whatever the tick, so that costs no settings read.
+  const workerStale = workerAliveAt === null ? null
+    : workerStaleOf(workerAliveAt, Math.floor(Date.now() / 1000), await tickSecondsFor(hostedTenant));
+
   let recovery: FleetRecoveryView | null = null;
   if (hostedTenant) {
     try {
@@ -590,6 +632,7 @@ export async function GET(req: Request) {
     grant: publicGrant,
     balances,
     workerAliveAt,
+    workerStale,
     mode,
     gasSponsored,
     liveBlocker,

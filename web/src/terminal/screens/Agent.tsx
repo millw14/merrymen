@@ -36,11 +36,12 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
-import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
+import { ENERGY_NOTICE_PREFIX, isOwnerActionRule, type EnergyStatus } from "@merrymen/core";
 import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
 import { EnergyNote } from "../EnergyNote";
 import { RecoveryNotice } from "../RecoveryNotice";
 import { ownerTradeEmptyTitle, pausedRecovery, recoveryAutonomy } from "../recovery-view";
+import { notRunningNote } from "../worker-stale";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
@@ -243,9 +244,22 @@ export function Agent({
     (t) => t.symbol.toUpperCase() === latest?.symbol?.toUpperCase(),
   );
   const change = dailyChange(mine);
+  /**
+   * IS IT TRADING RIGHT NOW, as this screen says it everywhere at once — the
+   * chat's context, the agent's own first line and the questions offered.
+   *
+   * `stopped` comes from `mode` alone, and `mode` is the last thing a worker
+   * said: a worker that went quiet while LIVE stays "not stopped" forever. So
+   * the pill said NOT RUNNING while the agent's line below it offered "my
+   * latest recorded trade", and the chat was told `stopped: false` beside
+   * `workerStatus: "NOT RUNNING"` — two answers to one question, and the model
+   * free to pick the wrong one. The prop keeps its meaning for every other
+   * reader; this screen asks the displayed verdict too.
+   */
+  const notTrading = stopped || recovery !== null || displayedAutonomy.state === "not-running";
   // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
   // chat-payload.ts by the controller, from this screen's own view of it.
-  const context: ChatContext = { mine, liveBlocker: recovery ? null : liveBlocker, perTrade, perDay, stopped: stopped || recovery !== null };
+  const context: ChatContext = { mine, liveBlocker: recovery ? null : liveBlocker, perTrade, perDay, stopped: notTrading };
   /**
    * ASK, AND SHOW IT AT ONCE.
    *
@@ -519,8 +533,31 @@ export function Agent({
    * Deliberately wrapping the RENDER rather than folding it into `blocked`
    * above, which `live-blocker.test.ts` pins literally as the child's verdict
    * arriving unmodified.
+   *
+   * ONLY A VERDICT ABOUT THE KEY. `staleBlocker` is now the bare fact — signed
+   * since the worker last spoke — and a signature says nothing about ETH or
+   * USDG, so "your agent has no ETH" stays up through a re-sign exactly as the
+   * verdict's own CHECKING arm keeps it (`isOwnerActionRule`). This used to
+   * come for free from `state === "checking"`, and stopped doing so the day a
+   * silent worker could answer NOT RUNNING instead.
    */
-  const blockerIsStale = staleBlocker === true;
+  const blockerIsStale = staleBlocker === true && isOwnerActionRule(liveBlocker);
+  /**
+   * AN EXPIRED KEY, SAID ON THE SCREEN ITS OWNER OPENS.
+   *
+   * The desktop has rendered this banner from the verdict for a long time; the
+   * desk reads the worker's raw rule, and an expired agent has none — it is
+   * retired before the rail is assessed — so the desk said nothing about it, or
+   * worse, kept showing whatever blocker was on record before it expired.
+   *
+   * FROM THE VERDICT, NOT A RULE OF OUR OWN. There is no `expired` advice and
+   * no invented `liveBlocker`: that field carries the worker's word, and mixing
+   * ours into it is how two surfaces end up disagreeing. And from
+   * `displayedAutonomy`, so a recovery hold — which clears the rule — offers no
+   * renewal while trading is paused.
+   */
+  const renewal = displayedAutonomy.rule === "expired" && displayedAutonomy.action ? displayedAutonomy : null;
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <div className="desk-page">
       <RecoveryNotice recovery={recovery}/>
@@ -533,7 +570,18 @@ export function Agent({
           to trade. Their owners are the ones reporting "it doesn't trade".
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
-      {blocked && !blockerIsStale && !recovery && (
+      {renewal && renewal.action && (
+        <section className="desk-blocked" role="status">
+          <p>{renewal.headline}</p>
+          <button type="button" onClick={onResign}>
+            {renewal.action.label} →
+          </button>
+        </section>
+      )}
+      {/* IN PLACE OF the worker's last blocker, not beside it: an expired
+          agent was retired before the rail was assessed, so whatever blocker
+          is on record predates the expiry and is no longer the story. */}
+      {blocked && !blockerIsStale && !recovery && !renewal && (
         /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
            rendered for every blocker there is — including the one that means
            "your agent is practising, exactly as you asked". An owner who had
@@ -558,6 +606,28 @@ export function Agent({
               Start live trading →
             </button>
           )}
+        </section>
+      )}
+      {/* SINCE WHEN IT HAS BEEN QUIET, under the NOT RUNNING pill. The neutral
+          panel: nothing here is the owner's to fix, and a button would be the
+          CHECKING loop again. BELOW any blocker, because that panel still names
+          something only the owner can do. Null during a hold (worker-stale.ts). */}
+      {silence && (
+        <section className="desk-note" role="status">
+          <p>{silence}</p>
+        </section>
+      )}
+      {/* A KEY ABOUT TO EXPIRE, while it still works. The neutral panel, never
+          the red one: nothing is wrong yet, and a key with two days left trades
+          exactly like one with ninety. Gated on the hold here because the
+          verdict's chip survives `recoveryAutonomy` — no renewal is offered
+          while trading is paused. The words are the verdict's. */}
+      {!recovery && displayedAutonomy.expiresSoon && (
+        <section className="desk-note" role="status">
+          <p>Renewal happens on the wallet page, where revoking the old permission requires network fees.</p>
+          <button type="button" onClick={onResign}>
+            {displayedAutonomy.expiresSoon.label} →
+          </button>
         </section>
       )}
       {/* THE WARNINGS NOBODY HAS EVER SEEN, finally somewhere somebody looks.
@@ -587,7 +657,8 @@ export function Agent({
               finds out, and names it in one tap. Renders nothing otherwise. */}
           <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
-        <span className={`desk-status ${stopped || recovery ? "paused" : ""}`}>
+        {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+        <span className={`desk-status ${notTrading ? "paused" : ""}`}>
           <i />
           {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
         </span>
@@ -863,7 +934,7 @@ export function Agent({
           <div>
             <strong>{mine.name}</strong>
             <p>
-              {stopped || recovery
+              {notTrading
                 ? "I’m not trading right now. You can review my portfolio and trading limits here."
                 : latest
                   ? "Here’s my latest recorded trade."
@@ -1001,7 +1072,7 @@ export function Agent({
           <div className="desk-prompts">
             {chatChips({
               liveBlocker: recovery ? null : liveBlocker,
-              stopped: stopped || recovery !== null,
+              stopped: notTrading,
               latestSymbol: latest?.symbol ?? null,
               holding: positions.map((p) => p.symbol),
               lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,

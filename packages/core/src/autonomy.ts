@@ -109,13 +109,23 @@ export function liveBlockerText(rule: RefuseRule): string {
  *            that does not exist on any chain
  *   blocked  the owner has to do something, and until they do it cannot trade
  *   idle     nothing is wrong and nothing is happening: no capital to deploy
+ *   not-running
+ *            the worker has stopped reporting, so nothing above is happening
+ *            at all — whatever it last said about itself is a memory
  *
  * `blocked` OUTRANKS `paper` on purpose. Both render as "not trading for real",
  * but only one of them has an action attached, and burying a re-sign behind the
  * word "paper" is how nine owners sat in practice mode without being told that a
  * free signature would end it.
+ *
+ * `not-running` IS ITS OWN STATE, NOT A KIND OF `checking`, and the difference
+ * is load-bearing rather than cosmetic. `checking` once doubled as "the blocker
+ * on screen is about a key the owner has replaced", and the desk hid its funding
+ * panel on that word — so a silent agent short of ETH would have lost the one
+ * sentence telling its owner to send some, for a reason that has nothing to do
+ * with ETH.
  */
-export type AutonomyState = "live" | "paper" | "blocked" | "idle" | "checking";
+export type AutonomyState = "live" | "paper" | "blocked" | "idle" | "checking" | "not-running";
 
 /** Blockers only the OWNER can clear. Everything else is ours to fix. */
 const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
@@ -124,6 +134,33 @@ const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
   "wrong-chain",
   "not-armed",
 ]);
+
+/**
+ * IS THIS BLOCKER ABOUT THE KEY — one only the owner's signature clears?
+ *
+ * The same set the BLOCKED and CHECKING arms below use, for the one surface
+ * that renders the worker's raw rule rather than this module's verdict: the
+ * desk's blocker panel (`blockerAdvice`), which steps aside when the owner has
+ * re-signed since the worker last spoke (`blockerPredatesGrant`).
+ *
+ * IT MUST STEP ASIDE FOR THESE AND ONLY THESE. `no-cash` and `no-gas` are not
+ * about the key, so a fresh signature says nothing about them — hiding "your
+ * agent has no ETH" behind an unrelated signature is the suppression the
+ * CHECKING arm was careful never to be. The desk used to get this for free by
+ * reading `state === "checking"`; once a silent worker could replace CHECKING
+ * with NOT RUNNING, the set had to be asked for by name.
+ */
+export function isOwnerActionRule(rule: RefuseRule | string | null | undefined): boolean {
+  const known = normaliseRule(rule);
+  return known !== null && OWNER_ACTION.has(known);
+}
+
+/**
+ * How close to expiry a key has to be before every owner surface says so — the
+ * same three days the wallet page has always warned inside, so the two never
+ * disagree about whether a key is "expiring".
+ */
+export const RENEW_SOON_DAYS = 3;
 
 /**
  * The headline and the button, PER RULE — because "the owner can fix it" and
@@ -216,6 +253,38 @@ export interface AutonomyInput {
    * re-signed onto the sandbox again.
    */
   blockerPredatesGrant?: boolean;
+  /**
+   * WHEN THE WORKER WENT QUIET, IF IT HAS: the unix seconds of its last
+   * heartbeat, set ONLY when that heartbeat is older than the worker's own
+   * freshness window. Null or absent is fresh, or never heard from — and
+   * neither of those is evidence that anything stopped.
+   *
+   * WHY IT HAS TO EXIST. `mode` is the LAST thing the worker said, and a
+   * stopped worker goes on saying it forever: the mirrored `agents` row keeps
+   * whatever the final tick wrote. So an agent whose process had died wore the
+   * chip it died with — LIVE, PAPER — on the desk, the profile and in what the
+   * chat was told, while placing nothing and watching nothing.
+   *
+   * DECIDED ON THE SERVER, never here and never in a browser. `/api/grants`
+   * compares the heartbeat with its own clock using the watchdog's rule
+   * (`freshWithin(tickSeconds)` in agent-status.ts, widened — never narrowed —
+   * for the mirror's lag; web/src/terminal/worker-stale.ts) and says so as
+   * `workerStale`. A browser's clock against a server's timestamp would be a
+   * second staleness rule, and the MCP tools and this screen would disagree
+   * about the same agent.
+   */
+  workerSilentSince?: number | null;
+  /**
+   * WHOLE DAYS LEFT ON THE KEY, counted up — a key with two hours left has one
+   * day — or null when unknown.
+   *
+   * Only the last `RENEW_SOON_DAYS` of them raise the `expiresSoon` chip, so a
+   * caller may pass the plain count and leave the window to this module. The
+   * warning used to live only on the wallet page, which an owner whose agent is
+   * working has no reason to open; the first they heard of an expiry was the
+   * agent stopping.
+   */
+  expiresSoonDays?: number | null;
 }
 
 export interface Autonomy {
@@ -267,6 +336,24 @@ export interface Autonomy {
   simulated: boolean;
   /** What to call the balance. "Available cash" is a promise; keep it for real money. */
   moneyLabel: string;
+  /**
+   * A KEY ABOUT TO EXPIRE, said while it still works — or null.
+   *
+   * NON-BLOCKING BY CONSTRUCTION, which is why it is a field of its own rather
+   * than a state or an `action`. A key with two days left trades exactly as one
+   * with ninety: nothing here changes `state`, `label`, `needsOwnerAction`,
+   * `headline` or `action`, so no banner turns red and no pill says BLOCKED for
+   * an agent that is working.
+   *
+   * Null whenever a renewal is already on offer — the expired arm and every
+   * owner-action arm carry their own button, and a second one beside it saying
+   * nearly the same thing is how an owner learns to ignore both.
+   *
+   * NOT CLEARED BY A RECOVERY HOLD. `recoveryAutonomy` copies the fields it
+   * does not replace, so a surface that renders this must gate it on the hold
+   * itself, as it already does every other remedy.
+   */
+  expiresSoon: { days: number; label: string; kind: "renew-grant" } | null;
 }
 
 /**
@@ -279,7 +366,16 @@ export interface Autonomy {
  * cause is not. So it is carried alongside and named in its own words.
  */
 export function autonomyOf(input: AutonomyInput): Autonomy {
+  const verdict = verdictOf(input);
+  return { ...verdict, expiresSoon: expiresSoonOf(input, verdict) };
+}
+
+/** Every field but the expiry chip, which rides beside whichever arm answered. */
+type Verdict = Omit<Autonomy, "expiresSoon">;
+
+function verdictOf(input: AutonomyInput): Verdict {
   const rule = normaliseRule(input.liveBlocker);
+  const silentSince = silentSinceOf(input.workerSilentSince);
 
   if (input.expired === true) {
     const remedy = ownerRemedy("expired");
@@ -308,6 +404,19 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
    * carry on reporting normally.
    */
   if (input.blockerPredatesGrant === true && rule && OWNER_ACTION.has(rule)) {
+    /**
+     * UNLESS NOTHING IS LISTENING FOR THE NEW KEY.
+     *
+     * "This usually takes a few minutes" is a promise about a RUNNING worker:
+     * the wait it describes is the next tick picking the grant up. A worker that
+     * has stopped reporting has no next tick, so for a re-signer whose agent was
+     * not running the sentence was false from the first minute and stayed on
+     * screen forever. What is true is that it is not running, and it says that.
+     *
+     * Still no button, for the reason the arm below gives: the owner has already
+     * signed, and a stopped worker is not something another signature restarts.
+     */
+    if (silentSince !== null) return notRunning(input, rule, silentSince);
     return {
       state: "checking",
       label: "CHECKING",
@@ -343,6 +452,21 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
       moneyLabel: input.mode === "paper" ? SIMULATED_LABEL : REAL_LABEL,
     };
   }
+
+  /**
+   * A WORKER THAT HAS STOPPED REPORTING IS NOT LIVE, PAPER OR IDLE.
+   *
+   * Every arm below reads `mode`, and `mode` is only the last thing the worker
+   * said before it went quiet. Answering LIVE from it is the screen asserting a
+   * running agent on the evidence of a dead one.
+   *
+   * AFTER the expired and owner-action arms, on purpose. Those name something
+   * only the owner can do, and it stays true and still needed whether or not
+   * the process is up — a key that has expired or cannot reach the chain will
+   * not trade when the worker comes back either. Burying that remedy under
+   * "not running" would trade an action for a description.
+   */
+  if (silentSince !== null) return notRunning(input, rule, silentSince);
 
   if (input.mode === "paper") {
     // NO REAL MONEY AND NO OWNER ACTION: the honest reading is "you have not
@@ -403,6 +527,66 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
     simulated: false,
     moneyLabel: REAL_LABEL,
   };
+}
+
+/**
+ * NOT RUNNING, from either of the two places it is reached.
+ *
+ * No button and no owner action: nothing an owner signs or sends restarts a
+ * process, and offering a signature here would be the CHECKING loop again. The
+ * rule is carried, as CHECKING carries it — it is still the last thing the
+ * worker knew, just not news.
+ *
+ * THE TIME IS IN THE SENTENCE because "not running" without a "since" cannot be
+ * told apart from a blip. UTC and no locale, so the chat and every screen quote
+ * the same instant. The desk and the desktop render it under the pill
+ * (web/src/terminal/worker-stale.ts `notRunningNote`).
+ */
+function notRunning(input: AutonomyInput, rule: RefuseRule | null, since: number): Verdict {
+  return {
+    state: "not-running",
+    label: "NOT RUNNING",
+    reason: `your agent has not reported since ${utcMinute(since)}, so it is not placing trades right now`,
+    rule,
+    needsOwnerAction: false,
+    headline: null,
+    action: null,
+    // What the money IS does not change because the process stopped: a paper
+    // book is still simulated, and a live balance is still real.
+    simulated: input.mode === "paper",
+    moneyLabel: input.mode === "paper" ? SIMULATED_LABEL : REAL_LABEL,
+  };
+}
+
+/** "2026-10-04 03:18 UTC". */
+function utcMinute(sec: number): string {
+  return `${new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/** The first second of the year 10000: past it a date stops being four digits, and a seconds field holding milliseconds lands there. */
+const LAST_DATABLE_SEC = 253_402_300_800;
+
+/**
+ * The silence, when it is a real timestamp in seconds; null otherwise.
+ *
+ * Anything else — fractional, negative, milliseconds, not a number — counts as
+ * NO silence, so a malformed value leaves the agent reported as it reports
+ * itself rather than inventing an outage.
+ */
+function silentSinceOf(v: number | null | undefined): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v < LAST_DATABLE_SEC ? v : null;
+}
+
+/**
+ * The expiry chip, when the key is inside its last `RENEW_SOON_DAYS` and
+ * nothing on screen is already asking for the same signature.
+ */
+function expiresSoonOf(input: AutonomyInput, verdict: Verdict): Autonomy["expiresSoon"] {
+  // Expired is the BLOCKED arm's, with its own banner and button.
+  if (input.expired === true || verdict.action?.kind === "renew-grant") return null;
+  const days = input.expiresSoonDays;
+  if (typeof days !== "number" || !Number.isSafeInteger(days) || days < 1 || days > RENEW_SOON_DAYS) return null;
+  return { days, label: `Renew permission (expires in ${days} day${days === 1 ? "" : "s"})`, kind: "renew-grant" };
 }
 
 /** The two money labels, named once so no surface can invent a third. */
