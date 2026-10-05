@@ -67,8 +67,9 @@
  * being reported may be the child's own sqlite.
  *
  * THE LIVE RAIL ONLY. A paper fill carries no operation hash, so there is
- * nothing to count it once BY; it moves no money; and the paper book is
- * restored through its own checkpoint (paper-checkpoint.ts).
+ * nothing to count it once BY, and it moves no money: a rebuilt paper child's
+ * practice allowance restarts from its own ledger, as it always has, and its
+ * entries are never held for a seed it does not have.
  *
  * Caps only ever tighten here. Nothing is executed, signed or replayed: a seed
  * row is a number the wall is judged against, never an operation.
@@ -112,8 +113,7 @@ const markerIn = (home: string) => path.join(home, BUDGET_UNRESTORED_FILE);
  * Does a marker stand in `home` — is the trailing day NOT known to be back?
  *
  * FAILS CLOSED. Only a marker that is not there says no; one that cannot be
- * read for any other reason says yes. One stat-sized read of a small file per
- * refresh.
+ * read for any other reason says yes. One read of a small file per refresh.
  */
 export function budgetUnrestored(home: string): boolean {
   try {
