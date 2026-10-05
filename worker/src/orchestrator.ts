@@ -5939,6 +5939,11 @@ async function fleetHealth(): Promise<void> {
 // IN BOTH BRANCHES OF THE LOOP, halted or not. A halted fleet is the state an
 // operator most needs to see confirmed from outside, and the one in which the
 // log says least.
+//
+// AND ONLY IN THE LOOP: report-only (MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1)
+// returns into runRecoveryReportOnly before it, so that entry writes no row.
+// Left that way on purpose — it is the incident's minimal entry — and said in
+// fleet-heartbeat.ts, so a check does not page on the silence it causes.
 
 /** This process: when it started, and how the one before it ended (read at boot). */
 let heartbeatBoot: { startedAt: number; lastShutdown: LastShutdown | null } | null = null;
