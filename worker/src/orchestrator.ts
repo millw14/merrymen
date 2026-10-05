@@ -972,7 +972,7 @@ export function isRetiringExpiredForTest(tenant: string): boolean {
 }
 let lastRosterLog: { active: number; expired: number; at: number } | null = null;
 let lastCapacityLog: { deferred: number; at: number } | null = null;
-/** The last reconcile's count of the roster per rollout level, for the heartbeat (fleetHealth). */
+/** The last reconcile's count of the roster per rollout level, for the heartbeat (fleetHealth); null when it could not read the roster. */
 let lastRolloutCounts: RolloutCounts | null = null;
 /** Test seam: what the heartbeat's rollout line would count, as the last reconcile left it. */
 export function rolloutCountsForTest(): RolloutCounts | null {
@@ -4355,6 +4355,7 @@ export async function reconcile(): Promise<void> {
     expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
+    lastRolloutCounts = null; // the heartbeat says so, rather than repeat an older pass's figures
     return;
   }
   // A TELEGRAM KILL, CARRIED OUT HERE. It must happen before `wanted` is built.
@@ -4376,8 +4377,6 @@ export async function reconcile(): Promise<void> {
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
-  // The heartbeat's count per rollout level, of the whole roster (fleetHealth).
-  lastRolloutCounts = rolloutCounts(tenants);
   // Remain wanted: a maintenance hold must not revoke the grant or wipe its
   // home. A fresh held deployment starts no process for these tenants. Also
   // stand down a local incarnation if a hold is introduced during a test or
@@ -4425,6 +4424,10 @@ export async function reconcile(): Promise<void> {
     return typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec;
   });
   const eligible = new Set(eligibleToSpawn.map((tenant) => tenant.toLowerCase()));
+  // The heartbeat's count of the whole roster (fleetHealth): admitted per
+  // level, held by either operator hold, or expired. After the retirement
+  // above, whose re-read of a re-signed key this roster's expiries include.
+  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible });
   const expiredCount = tenants.length - eligibleToSpawn.length;
   if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
     log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
@@ -5368,7 +5371,7 @@ async function fleetHealth(): Promise<void> {
   // can fail: a deploy whose scope is not the one its operator meant (a typo
   // that leaves a named tenant held, a cohort still at `none`) is exactly what
   // this line exists to make visible, and it reads no table.
-  if (lastRolloutCounts) log(rolloutLine(lastRolloutCounts));
+  log(rolloutLine(lastRolloutCounts));
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {

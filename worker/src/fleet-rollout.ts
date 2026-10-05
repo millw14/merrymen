@@ -222,11 +222,22 @@ export function rolloutAdmitsWholeFleet(env: Env = process.env): boolean {
   }
 }
 
+/**
+ * THE ROSTER, AS THE HEARTBEAT SAYS IT. The three levels count tenants the
+ * rollout admits that have a key which has not expired and no accounting hold:
+ * admitted, which is not the same as running (a lease another replica holds,
+ * the process cap, a book whose restore failed). Everybody else is one of the
+ * two buckets nothing runs for, so a figure under `trade` is never a tenant
+ * that cannot trade whatever the rollout says.
+ */
 export interface RolloutCounts {
   trade: number;
   "exits-only": number;
   observe: number;
+  /** Not admitted by the rollout, or named by the accounting hold: the operator holds it. */
   held: number;
+  /** Admitted and not held, but its key has expired: it cannot sign, so nothing runs. */
+  expired: number;
   /**
    * Tenants the value names that the roster does not hold: a typo, or a grant
    * removed since the value was written. Either way the operator meant to admit
@@ -235,11 +246,25 @@ export interface RolloutCounts {
   absent: number;
 }
 
-/** How many of the roster sit at each level, and how many named tenants it lacks. */
-export function rolloutCounts(roster: readonly string[], env: Env = process.env): RolloutCounts {
-  const counts: RolloutCounts = { trade: 0, "exits-only": 0, observe: 0, held: 0, absent: 0 };
+/**
+ * How many of the roster sit at each level, and how many named tenants it
+ * lacks. `accountingHeld` and `unexpired` are reconcile's own answers for the
+ * same pass (lowercase); left out, nobody is accounting-held and no key has
+ * expired.
+ */
+export function rolloutCounts(
+  roster: readonly string[],
+  env: Env = process.env,
+  pass: { accountingHeld?: ReadonlySet<string>; unexpired?: ReadonlySet<string> } = {},
+): RolloutCounts {
+  const counts: RolloutCounts = { trade: 0, "exits-only": 0, observe: 0, held: 0, expired: 0, absent: 0 };
   const present = new Set(roster.map((tenant) => tenant.toLowerCase()));
-  for (const tenant of present) counts[rolloutLevel(tenant, env)] += 1;
+  for (const tenant of present) {
+    const level = rolloutLevel(tenant, env);
+    if (level === "held" || pass.accountingHeld?.has(tenant)) counts.held += 1;
+    else if (pass.unexpired && !pass.unexpired.has(tenant)) counts.expired += 1;
+    else counts[level] += 1;
+  }
   try {
     const rollout = fleetRollout(env);
     if (rollout.scope === "list") for (const tenant of rollout.levels.keys()) if (!present.has(tenant)) counts.absent += 1;
@@ -260,12 +285,17 @@ function scopeName(env: Env): string {
   }
 }
 
-/** The heartbeat's rollout line, every pass, beside the fleet's own. */
-export function rolloutLine(counts: RolloutCounts, env: Env = process.env): string {
+/**
+ * The heartbeat's rollout line, every pass, beside the fleet's own. Null
+ * counts are a pass that could not read the roster: the scope is still said,
+ * and no figure from an older pass is passed off as this one's.
+ */
+export function rolloutLine(counts: RolloutCounts | null, env: Env = process.env): string {
+  if (!counts) return `fleet| rollout ${scopeName(env)} — the last pass could not read the roster`;
   return (
-    `fleet| rollout ${scopeName(env)} — trade ${counts.trade} · exits-only ${counts["exits-only"]} · ` +
-    `observe ${counts.observe} · held ${counts.held}` +
-    (counts.absent > 0 ? ` · named but not in the roster ${counts.absent}` : "")
+    `fleet| rollout ${scopeName(env)} — admitted: trade ${counts.trade} · exits-only ${counts["exits-only"]} · ` +
+    `observe ${counts.observe}; not run: held ${counts.held} · expired ${counts.expired}` +
+    (counts.absent > 0 ? `; named but not in the roster ${counts.absent}` : "")
   );
 }
 
