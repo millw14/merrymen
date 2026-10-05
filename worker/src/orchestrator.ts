@@ -72,6 +72,7 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, type BigIntStats } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,7 +84,7 @@ import {
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
-import { armOwnerControls } from "./recovery-reply-arm";
+import { armOwnerControls, readControlsEvidence } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
@@ -143,7 +144,14 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
-import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
+import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, registerAttestedGapSource, ensureLedgerResumeSchema, invalidateLedgerImportsUnlessListed } from "./ledger-import";
+import {
+  CHAIN_CHECK_FRESH_MS, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, knownChainFacts, moveApproval,
+  parseResumeApprovals, parseResumePreview, parseResumeRevokes, previewLine, previewRunDigest, readOpenApproval, readPreRegistrationTenants,
+  readResumeEvidence, recordPreviewRun, resumeChainFor, resumePreconditions, revokeResumeApprovals, writeRecoveryGeneration,
+  RESUME_APPROVE_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
+  type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type PreviewEntry, type ResumeCheck, type ResumePreviewScope,
+} from "./ledger-resume";
 import {
   adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST,
   preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity,
@@ -3163,6 +3171,211 @@ function sayTenantAlert(tenant: string, line: string): void {
 }
 
 /**
+ * ATTESTED-GAP ADMISSION, PHASES A AND B (ledger-resume.ts says what and why).
+ *
+ * Asked by spawnChild for every tenant, after the persistent-home proof and
+ * the expiry check, under the tenant's lease and before its key or any book
+ * is written. With no open approval — every tenant the operator has not
+ * approved, and every tenant once its new book is registered — it answers
+ * `proceed` and changes nothing: the ordinary path, with its continuity gate,
+ * decides as it always has.
+ *
+ * With one: re-derive the evidence and refuse on any change; check every
+ * precondition; read the chain in the background where the account has ever
+ * been live (the tenant waits, held, for the answer); drain a continuous old
+ * book's tail through the existing guarded mirror; archive the home; and
+ * register the empty book in one transaction. Every step re-checks the lease
+ * first, and every failure leaves the tenant held at the step it reached, to
+ * resume on the next pass. A refusal of the evidence or a precondition ends
+ * the approval (`refused`): the operator previews again and approves what is
+ * true now.
+ */
+type ResumeVerdict = { go: false } | { go: true; registered: string | null };
+const resumeChecks = new Map<string, { key: string; at: number; result: GapResult | "running" }>();
+const RESUME_CHAIN_RETRY_MS = 60_000;
+let resumeChainForTest: ((chainId: number) => GapChain | null) | null = null;
+const resumeCheckPromises = new Set<Promise<void>>();
+/** Test seams: the chain the gap check reads, and a way to wait for the checks a pass started. */
+export function setResumeChainForTest(fn: ((chainId: number) => GapChain | null) | null): void { resumeChainForTest = fn; resumeChecks.clear(); }
+export async function resumeChecksSettledForTest(): Promise<void> { await Promise.all([...resumeCheckPromises]); }
+
+/** The chain read for one approval: `clean` (fresh enough to rely on), `missing`, or held while it runs or after it could not. */
+async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<"clean" | "missing" | "held"> {
+  const now = Date.now();
+  const had = resumeChecks.get(tenant);
+  if (had && had.key === approval.approvalId) {
+    if (had.result === "running") return "held";
+    if (had.result.status === "missing") return "missing";
+    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return "clean";
+    if (had.result.status === "unavailable" && now - had.at < RESUME_CHAIN_RETRY_MS) return "held";
+  }
+  const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
+  if (!chain) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume admission needs a chain read and this orchestrator has no RPC for chain ${approval.chainId} — held`);
+    return "held";
+  }
+  const known = await knownChainFacts(shared, approval.smartAccount);
+  resumeChecks.set(tenant, { key: approval.approvalId, at: now, result: "running" });
+  log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}; the tenant stays held until it answers`);
+  const p = chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, sinceSec: check.gapFromSec, known, log })
+    .then((result) => {
+      resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result });
+      log(`${tenant}: resume chain check ${result.status}${result.status === "clean" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${result.fromBlock}, all in Postgres`
+        : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) on chain that Postgres lacks` : ` — ${result.why}; tried again`}`);
+    })
+    .finally(() => { resumeCheckPromises.delete(p); });
+  resumeCheckPromises.add(p);
+  return "held";
+}
+
+/** A continuous old book's tail, copied into Postgres before the home is archived. False holds the tenant this pass. */
+async function drainContinuousBook(tenant: `0x${string}`, lease: TenantLease, shared: Db): Promise<boolean> {
+  const home = childHome(tenant);
+  if (!existsSync(path.join(home, "merrymen.db")) || ledgerSourceBlocked(home)) return true; // nothing continuous to drain: archived as it is
+  const handle = openChildLedger(home);
+  if (!handle) return true;
+  try {
+    try { await mirrorSerially(tenant, () => assertLedgerSourceContinuity(handle.db, shared, tenant)); }
+    catch { return true; } // a rebuilt source is not drained; the archive keeps it
+    for (let pass = 0; pass < 100; pass++) {
+      const r = await mirrorGuardedLedger(tenant, handle.db, shared, home, () => leases.get(tenant) === lease && lease.healthy());
+      if (r.failed && Object.keys(r.failed).length) return false;
+      if (!r.hasMore) return true;
+    }
+    return false;
+  } catch { return false; }
+  finally { handle.close(); }
+}
+
+async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant: StoredGrant | null): Promise<ResumeVerdict> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return { go: true, registered: null };
+  let shared: Db;
+  let approval: ApprovalRow | null;
+  try {
+    shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    approval = await readOpenApproval(shared, tenant);
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume approvals unreadable (${errorKind(e)}) — retaining its home without starting a worker`);
+    return { go: false };
+  }
+  if (!approval) return { go: true, registered: null };
+  if (approval.state === "registered") return { go: true, registered: approval.approvalId };
+  const held = (line: string): ResumeVerdict => { sayTenantAlert(tenant, `${tenant}: resume admission — ${line}`); return { go: false }; };
+  const home = childHome(tenant);
+  // No hold process can exist for it here: spawnChild refused a held tenant
+  // before asking, and only spawnChild starts one.
+  const owned = () => !stopping && leases.get(tenant) === lease && lease.healthy() && !children.has(tenant);
+  const refused = async (from: ApprovalState, why: string): Promise<ResumeVerdict> => {
+    await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why });
+    resumeChecks.delete(tenant);
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; preview again and approve what is true now`);
+    return { go: false };
+  };
+  let volume: PersistentHomeIdentity | null;
+  try { volume = persistentFleetHome(); } catch { return held("persistent storage is unconfirmed; held"); }
+  if (!volume) return held("needs the verified persistent volume, and this orchestrator has none; held");
+  if (!grant) return held("no stored grant; held");
+  if (grant.smartAccount.toLowerCase() !== approval.smartAccount || grant.chainId !== approval.chainId || grant.owner.toLowerCase() !== approval.owner) {
+    if (approval.state === "approved" || approval.state === "archived") return refused(approval.state, "the stored grant names a different account, chain or owner than the approval");
+    return held("the stored grant changed while the home was being archived; held");
+  }
+  if (blockedLedgerHomes.has(home)) return held("this supervisor could not persist a source barrier for the home; restart it and preview again");
+  const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+  try {
+    if (approval.state === "approved") {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const controls = await readControlsEvidence(shared, scope, Date.now());
+      const { digest, check } = await readResumeEvidence(shared, { tenant, grant, home, nowSec, controls });
+      if (digest !== approval.evidenceDigest) return refused("approved", "the evidence changed since the preview");
+      if (check.refusals.length) return refused("approved", check.refusals.join("; "));
+      if (check.chainRequired) {
+        const gate = await resumeChainGate(tenant, approval, check, shared);
+        if (gate === "missing") return refused("approved", "the chain holds operations or USDG transfers for the account that Postgres lacks");
+        if (gate !== "clean") return { go: false };
+      }
+      if (!owned()) return { go: false };
+      if (!(await drainContinuousBook(tenant, lease, shared))) return held("the old book's tail could not be drained into Postgres yet; held");
+      if (!owned()) return { go: false };
+      const generation = randomUUID();
+      if (!(await moveApproval(shared, approval.approvalId, "approved", "archiving", { generation }))) return held("the approval changed under it; held");
+      approval = { ...approval, state: "archiving", generation };
+    }
+    if (approval.state === "archiving") {
+      const archived = archiveTenantHome({ home, archiveRoot: path.join(volume.homeRoot, "archive", tenant), generation: approval.generation!, mayWrite: owned });
+      if (!(await moveApproval(shared, approval.approvalId, "archiving", "archived", { archivePath: archived.archivePath }))) return held("the approval changed under it; held");
+      log(`${tenant}: resume admission — ${archived.archivePath ? `home archived to ${path.relative(volume.homeRoot, archived.archivePath)} (keys scrubbed)` : "no home on the volume: nothing to archive"}` +
+        `; carried ${archived.carried.length ? archived.carried.join(", ") : "nothing"}`);
+      approval = { ...approval, state: "archived", archivePath: archived.archivePath };
+    }
+    // PHASE B. The preconditions again, now; the chain read again if stale;
+    // then the one transaction, which re-reads the race-prone ones inside.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const controls = await readControlsEvidence(shared, scope, Date.now());
+    const check = await resumePreconditions(shared, { tenant, account: approval.smartAccount, grantAccount: grant.smartAccount, nowSec, controls,
+      homePendingImport: existsSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)) });
+    if (check.refusals.length) return refused("archived", check.refusals.join("; "));
+    if (check.chainRequired) {
+      const gate = await resumeChainGate(tenant, approval, check, shared);
+      if (gate === "missing") return refused("archived", "the chain holds operations or USDG transfers for the account that Postgres lacks");
+      if (gate !== "clean") return { go: false };
+    }
+    const counted = async (db: Db) => {
+      const a = approval!.smartAccount;
+      const row = (await db.prepare(`SELECT (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ?) AS trades, (SELECT COUNT(*) FROM flows WHERE LOWER(agent_id) = ?) AS flows,
+        (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ? AND status IN ('submitted', 'sent', 'pending')) AS unresolved,
+        (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ? AND status NOT IN ('paper', 'rejected', 'submitted', 'sent', 'pending') AND COALESCE(budget_settled_at, created_at) > ?) AS settled`)
+        .get(a, a, a, a, Math.floor(Date.now() / 1000) - GAP_WINDOW_SEC)) as Record<string, unknown>;
+      return { trades: Number(row.trades), flows: Number(row.flows), unresolved: Number(row.unresolved), settled: Number(row.settled) };
+    };
+    const before = await counted(shared);
+    if (!owned()) return { go: false };
+    const receipt = await registerAttestedGapSource({
+      tenant, smartAccount: approval.smartAccount, chainId: approval.chainId, owner: approval.owner, home, volume, shared, lease,
+      dialect: retirementMemoryStoreForTest?.dialect ?? "postgres",
+      approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest, generation: approval.generation!,
+      archivePath: approval.archivePath, gapFromSec: check.gapFromSec,
+      recheck: async (db) => {
+        const now = await counted(db);
+        if (now.unresolved || now.settled || now.trades !== before.trades || now.flows !== before.flows) throw new Error("The gap changed during registration.");
+      },
+    });
+    writeRecoveryGeneration(home, { generation: receipt.generation, approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest,
+      gapFromSec: check.lastMirrorAt, registeredAtSec: Math.floor(Date.now() / 1000) });
+    log(`${tenant}: resume admission — new book registered as generation ${receipt.generation} (receipt ${receipt.receiptDigest.slice(0, 12)}…); ` +
+      "the lost book's cursors and snapshot rows are archived; the ordinary spawn path takes it from here");
+    resumeChecks.delete(tenant);
+    return { go: true, registered: approval.approvalId };
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume admission deferred (${errorKind(e)}) — the tenant stays held and the step resumes on the next pass`);
+    return { go: false };
+  }
+}
+
+/** The approval's last step: its first worker has started. */
+async function markResumeApplied(tenant: string, approvalId: string): Promise<void> {
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    if (await moveApproval(shared, approvalId, "registered", "applied")) log(`${tenant}: resume admission applied — its first worker has started`);
+  } catch (e) {
+    log(`${tenant}: resume approval not yet marked applied (${errorKind(e)}) — its next spawn marks it`);
+  }
+}
+
+/** Tenants whose approval has not reached its new book: their blocked homes go to spawnChild for archiving. Read once per pass. */
+let resumePendingTenants: Set<string> = new Set();
+async function refreshResumePending(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) { resumePendingTenants = new Set(); return; }
+  try {
+    resumePendingTenants = await readPreRegistrationTenants(retirementMemoryStoreForTest?.shared ?? await makePgDb(url!));
+  } catch {
+    // Unreadable: no blocked home is admitted this pass. The fence stands.
+    resumePendingTenants = new Set();
+  }
+}
+
+/**
  * APPLY THE OWNER'S RECORDED /pause AND /kill FOR ONE TENANT, under its lease,
  * before its key is written (recovery-reply-arm.ts says what, from where, and
  * why exactly once). True: nothing recorded stops this spawn. False: the
@@ -3202,7 +3415,9 @@ async function armControlsForChild(tenant: `0x${string}`, grant: StoredGrant, le
     sayTenantAlert(tenant, `${outcome.hold === "malformed" ? "[alert] " : ""}${tenant}: held by its owner's recorded controls (${outcome.hold}: ${outcome.why}) — not spawning`);
     return false;
   } catch (e) {
-    sayTenantAlert(tenant, `[alert] ${tenant}: owner controls could not be applied (${errorKind(e)}) — retaining its home without starting a worker`);
+    // By its class alone: an outage's code names the connection it failed on.
+    const kind = e instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(e.name) ? e.name : "Error";
+    sayTenantAlert(tenant, `[alert] ${tenant}: owner controls could not be applied (${kind}) — retaining its home without starting a worker`);
     return false;
   }
 }
@@ -3276,6 +3491,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: signed grant expired — source status checked without writing a key or starting a worker`);
       return;
     }
+    // A TENANT WITH HISTORY AND NO SURVIVING BOOK, under an operator's
+    // approval (ledger-resume.ts): its home archived and a new empty book
+    // registered BEFORE anything below can write a key or open a book. With
+    // no open approval this changes nothing and the ordinary gates decide.
+    const resume = await resumeAdmission(tenant, lease, storedGrant);
+    if (!resume.go) return;
     // THE OWNER'S RECORDED STOPS, BEFORE THE KEY. A /pause or a confirmed
     // /kill recorded while this tenant was held is applied here, once
     // (recovery-reply-arm.ts): a kill is carried out against the store before
@@ -3489,6 +3710,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     }
     const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
     children.set(tenant, child);
+    // An attested-gap admission's last step: its first worker is running.
+    if (resume.registered) void markResumeApplied(tenant, resume.registered);
     let stopped = false;
     const childStopped = (reason: string, restartReason: string, stoodDownReason: string): void => {
       // A failed spawn emits `error`, and some ChildProcess implementations
@@ -5201,6 +5424,7 @@ export async function reconcile(): Promise<void> {
   // crash restart); if another replica holds it, skip this tenant and try again
   // next reconcile.
   let capacityDeferred = 0;
+  await refreshResumePending();
   for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
     // First, before a lease is so much as asked for: nothing below this line
@@ -5225,7 +5449,12 @@ export async function reconcile(): Promise<void> {
     // lease before spawnChild has a chance to see its tenant-local fence.
     // The importer, under this tenant's lease, is allowed to finish its own
     // pending generation. A source-loss/mirror barrier still refuses here.
-    if (ledgerSourceBlocked(childHome(lc), false)) continue;
+    //
+    // EXCEPT A HOME AN OPERATOR HAS APPROVED FOR ATTESTED-GAP ADMISSION and
+    // whose new book is not registered yet (ledger-resume.ts): spawnChild
+    // archives exactly that home, whole, under this lease, before anything
+    // else can touch it. The fence still refuses every other blocked home.
+    if (ledgerSourceBlocked(childHome(lc), false) && !resumePendingTenants.has(lc)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
@@ -10566,6 +10795,86 @@ async function runRecoveryReportOnly(): Promise<void> {
  * Off Railway it stands aside: there is no Railway service or volume to be
  * wrong about, and local runs and the test suite start the supervisor there.
  */
+/**
+ * THE RESUME PREVIEW (MERRYMEN_RESUME_PREVIEW): one line per tenant, and one
+ * run digest over them all, printed at boot whatever the halt and the rollout
+ * say, so an operator reads it from the deploy log before approving anything.
+ *
+ * READ-ONLY toward every tenant: no lease, no home write, no book opened, no
+ * financial row. Its one write is the run itself (ledger_resume_preview_runs,
+ * insert-once by digest), which is what a batch approval binds to.
+ *
+ * Each line says whether the tenant passed every precondition Postgres can
+ * answer, every reason it did not, whether its account needs a chain read at
+ * admission (anything ever live), the level the plan starts it at (decision 6:
+ * paper → trade once the canary has; live → exits-only), and its evidence
+ * digest, which is what `0x<tenant>:<digest>` approves. The closing lines
+ * give the run digest, the batch approval and a rollout fragment for exactly
+ * the tenants that passed. Nothing here admits anybody.
+ */
+async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<void> {
+  const store = getGrantStore();
+  const roster = (await store.listTenants()).map((t) => t.toLowerCase());
+  const tenants = scope.scope === "all" ? roster : [...scope.tenants];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const entries: PreviewEntry[] = [];
+  for (const tenant of [...new Set(tenants)].sort()) {
+    const blank: PreviewEntry = { tenant, account: null, chainId: null, owner: null, digest: null, pass: false, refusals: [], chain: null,
+      suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null, evidence: null };
+    try {
+      const grant = await store.get(tenant as `0x${string}`);
+      if (!grant) { entries.push({ ...blank, refusals: ["no stored grant"] }); continue; }
+      const controls = await readControlsEvidence(shared, { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId }, Date.now());
+      const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant, home: childHome(tenant), nowSec, controls });
+      const refusals = [...check.refusals];
+      if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
+      if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
+      entries.push({
+        tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
+        chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
+        riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt, evidence,
+      });
+    } catch (e) {
+      entries.push({ ...blank, refusals: [`could not be read (${errorKind(e)})`] });
+    }
+  }
+  for (const entry of entries) log(previewLine(entry));
+  const run = await recordPreviewRun(shared, entries, Date.now());
+  const passed = entries.filter((e) => e.pass);
+  log(`[resume-preview] run ${run}: ${passed.length} of ${entries.length} tenant(s) pass every Postgres precondition` +
+    (passed.some((e) => e.chain === "required") ? "; those marked chain:required are read on chain at admission and refused if it shows anything Postgres lacks" : ""));
+  if (passed.length) {
+    log(`[resume-preview] approve every passing tenant of this run with ${RESUME_APPROVE_ENV}=run:${run}`);
+    log(`[resume-preview] rollout for them at the plan's starting levels: ${passed.map((e) => `${e.tenant}:${e.suggestedLevel}`).join(",")}`);
+  }
+  if (previewRunDigest(entries) !== run) throw new Error("preview run digest drifted");
+}
+
+/**
+ * THE OPERATOR'S RESUME CONTROLS, at boot (docs/fleet-resume.md): the preview,
+ * then revocations, then approvals, so a deploy that revokes and re-approves a
+ * tenant ends with the new approval. Standing rollout controls, not one-shots:
+ * each is idempotent, and left set it changes nothing on the next boot.
+ * Without a shared database there is nothing to preview or approve.
+ */
+async function runResumeAdmissionControls(c: { preview: ResumePreviewScope | null; approvals: ReturnType<typeof parseResumeApprovals>; revokes: string[] }): Promise<void> {
+  if (!c.preview && !c.approvals.length && !c.revokes.length) return;
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) { log("resume controls are set, but there is no shared database to read or record them in — ignored"); return; }
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    await ensureLedgerResumeSchema(shared);
+    if (c.preview) await runResumePreview(shared, c.preview);
+    await revokeResumeApprovals(shared, c.revokes, Date.now(), log);
+    await applyResumeApprovals(shared, c.approvals, Date.now(), log);
+  } catch (e) {
+    log(`[alert] resume controls could not run (${errorKind(e)}) — nothing was approved or revoked by this boot`);
+  }
+}
+export function runResumeAdmissionControlsForTest(env: NodeJS.ProcessEnv): Promise<void> {
+  return runResumeAdmissionControls({ preview: parseResumePreview(env[RESUME_PREVIEW_ENV]), approvals: parseResumeApprovals(env[RESUME_APPROVE_ENV]), revokes: parseResumeRevokes(env[RESUME_REVOKE_ENV]) });
+}
+
 function assertHostedFleetStart(): void {
   const refusals = hostedOrchestratorRefusals(process.env);
   if (refusals.length === 0) return;
@@ -10584,6 +10893,13 @@ export async function runOrchestrator(): Promise<void> {
   // THE ROLLOUT TOO, and for both paths: a malformed value, or an unset one on
   // Railway, refuses here, before the halt, the volume or a lease is touched.
   const rollout = fleetRollout(process.env);
+  // AND THE RESUME ADMISSION VARIABLES (ledger-resume.ts), on the same rule:
+  // malformed refuses boot, never a guess at which tenants were meant.
+  const resumeControls = {
+    preview: parseResumePreview(process.env[RESUME_PREVIEW_ENV]),
+    approvals: parseResumeApprovals(process.env[RESUME_APPROVE_ENV]),
+    revokes: parseResumeRevokes(process.env[RESUME_REVOKE_ENV]),
+  };
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
   if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
   // NAMED TENANTS AND THE FAILURE-ONLY REPORTER ARE TWO ANSWERS TO ONE
@@ -10641,6 +10957,9 @@ export async function runOrchestrator(): Promise<void> {
     startedAt: Math.floor(Date.now() / 1000),
     lastShutdown: lastShutdownOf({ clean: previousShutdown.clean, finishedAt: previousShutdown.at }),
   };
+  // THE RESUME PREVIEW AND APPROVALS, halted or not, before any pass can
+  // spawn: the preview reads homes no child has touched yet this boot.
+  await runResumeAdmissionControls(resumeControls);
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror

@@ -298,6 +298,19 @@ async function ownerAccounts(db: Db, scope: ControlScope): Promise<string[]> {
  *    restart, and a copy is not the agent acting again).
  */
 export async function readLegacyPause(db: Db, scope: ControlScope): Promise<LegacyPause | null> {
+  try {
+    return await readLegacyPauseFrom(db, scope);
+  } catch (e) {
+    // A database with no events, agents, decisions or trades table has never
+    // recorded a pause (a fresh self-hosted install, a test's stand-in). Any
+    // other failure throws: unreadable events are not an absent pause.
+    const err = e as { code?: unknown; message?: unknown };
+    if (err?.code === "42P01" || /no such table: (?:main\.)?(?:events|agents|decisions|trades)\b/.test(String(err?.message ?? ""))) return null;
+    throw e;
+  }
+}
+
+async function readLegacyPauseFrom(db: Db, scope: ControlScope): Promise<LegacyPause | null> {
   const accounts = await ownerAccounts(db, scope);
   const holes = accounts.map(() => "?").join(", ");
   const inList = `lower(agent_id) IN (${holes})`;
