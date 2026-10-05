@@ -107,16 +107,27 @@ const lc = (a: string) => a.toLowerCase();
 /**
  * MAY THIS INTENT BE HELD AT ALL? Only a buy, judged by what it SPENDS.
  *
+ * TWO TESTS, AND NEITHER IS REDUNDANT.
+ *
  * `isExitIntent` first — the breaker's own test, so anything the breaker calls
- * an exit is never held. But that test can read a curve SALE as an entry, on a
- * legacy grant whose curve is quoted in an owner-added stock token (energy.ts
- * sellsHeldLeg exists for exactly that), and the tick knows held legs where
- * processIntentLocked does not. So the second test is one that cannot make
- * that mistake: a swap or curve trade is held only when it spends from the
- * QUOTE side — cash, or a token the grant built in (limits.quoteAssets). A
- * sale spends the position, which is never on the quote side, so no sale of
- * any kind qualifies. A buy that this misses is merely not held, which is
- * today's behaviour; the error can only fall that way.
+ * an exit is never held. It is the ONLY thing between a stock sale into cash
+ * and a hold: a basket agent's positions ARE built-in stock tokens, which sit
+ * on the quote side, so the second test alone would hold a TSLA stop-loss
+ * into USDG. Do not drop it as covered by the test below; it is not.
+ *
+ * The second test covers what the first gets wrong the other way: it can read
+ * a curve SALE as an entry, on a legacy grant whose curve is quoted in an
+ * owner-added stock token (energy.ts sellsHeldLeg exists for exactly that),
+ * and the tick knows held legs where processIntentLocked does not. So a swap
+ * or curve trade is held only when it spends from the QUOTE side — cash, or a
+ * token the grant built in (limits.quoteAssets). No sale out of a token that
+ * is not built in — every memecoin, every owner-added extra — qualifies.
+ *
+ * What both let through is a swap ROTATING one built-in into another (TSLA →
+ * NVDA): held, as the breaker blocks it, because it is not a way out. The way
+ * out of a stock, a swap into cash, is an exit and never held. A buy this
+ * misses is merely not held, which is today's behaviour; the error can only
+ * fall that way.
  *
  * Every other kind is never held: transfers and withdrawals are money coming
  * home, a vault deposit is housekeeping, an equity order never meets the gas
