@@ -9,8 +9,9 @@
  *
  * Now the shape is fixed and these tests hold it:
  *
- *   - The Dockerfile's last ENTRYPOINT/CMD are exactly tini and the script, in
- *     exec form, with no npm and no `sh -c` anywhere in either.
+ *   - The Dockerfile's one ENTRYPOINT and one CMD are exactly tini and the
+ *     script, in exec form, with no npm and no `sh -c` anywhere in either —
+ *     read as Docker reads them, whatever the case or line breaks.
  *   - The script runs exactly package.json's `start:*` scripts — the same argv
  *     from the same directory — and it `exec`s them: the stub it runs reports
  *     the very PID the script was started as.
@@ -48,11 +49,40 @@ const tempDir = (prefix: string) => {
   return dir;
 };
 
-/** The last instruction of a kind wins in a Dockerfile, so that is the one read. */
-function lastExecForm(docker: string, instruction: "CMD" | "ENTRYPOINT"): unknown {
-  const lines = docker.split("\n").filter((l) => l.startsWith(`${instruction} `));
-  assert.ok(lines.length > 0, `the Dockerfile has no ${instruction}`);
-  const raw = lines.at(-1)!.slice(instruction.length + 1);
+/**
+ * The Dockerfile as Docker reads it: one entry per instruction, keyword in
+ * upper case. Read line by line it would lie twice over. Docker's keywords are
+ * case-insensitive — `cmd […]` IS a CMD — and a trailing backslash carries an
+ * instruction onto the next line, with comment and blank lines inside it
+ * dropped. A test that looked only for lines starting `CMD ` would keep
+ * reading a stale line while a later `cmd`, or a CMD split across lines,
+ * quietly replaced it in the image.
+ */
+function instructions(docker: string): { keyword: string; args: string }[] {
+  const out: { keyword: string; args: string }[] = [];
+  let pending: string | null = null;
+  for (const line of docker.split(/\r?\n/)) {
+    if (/^\s*#/.test(line)) continue;
+    if (pending !== null && line.trim() === "") continue;
+    const joined: string = pending === null ? line : `${pending} ${line}`;
+    if (/\\\s*$/.test(joined)) { pending = joined.replace(/\\\s*$/, ""); continue; }
+    pending = null;
+    const m = /^\s*([A-Za-z]+)(?:\s+([\s\S]*))?$/.exec(joined);
+    if (m) out.push({ keyword: m[1]!.toUpperCase(), args: (m[2] ?? "").trim() });
+  }
+  assert.equal(pending, null, "the Dockerfile ends inside a backslash continuation");
+  return out;
+}
+
+/**
+ * The image's one instruction of a kind. EXACTLY one, not "the last": the
+ * last would win in the image, so a second CMD or ENTRYPOINT anywhere is a
+ * place for the start path to change without this file noticing.
+ */
+function soleExecForm(docker: string, instruction: "CMD" | "ENTRYPOINT"): unknown {
+  const found = instructions(docker).filter((i) => i.keyword === instruction);
+  assert.equal(found.length, 1, `the Dockerfile must have exactly one ${instruction}, found: ${found.map((i) => i.args).join(" | ") || "none"}`);
+  const raw = found[0]!.args;
   // Shell form (`CMD foo bar`) is wrapped in `/bin/sh -c` by Docker itself —
   // the exact thing this path exists to remove — so only the JSON form parses.
   try { return JSON.parse(raw); }
@@ -65,13 +95,29 @@ describe("the Dockerfile starts node under tini, through the script", () => {
   it("ENTRYPOINT is tini alone, without -g, and CMD is the script under /bin/sh", () => {
     // Without -g on purpose: the orchestrator decides how its tenant workers
     // stop, so tini signals only its one child.
-    assert.deepEqual(lastExecForm(docker, "ENTRYPOINT"), ["/usr/bin/tini", "--"]);
-    assert.deepEqual(lastExecForm(docker, "CMD"), ["/bin/sh", `/app/${SCRIPT}`]);
+    assert.deepEqual(soleExecForm(docker, "ENTRYPOINT"), ["/usr/bin/tini", "--"]);
+    assert.deepEqual(soleExecForm(docker, "CMD"), ["/bin/sh", `/app/${SCRIPT}`]);
   });
 
-  it("the final CMD and ENTRYPOINT carry no npm and no `sh -c`", () => {
+  it("a second CMD or ENTRYPOINT is caught however it is spelled", () => {
+    // The very override these reads exist for: appended later, in lower case
+    // or split across lines, it would win in the image and bring npm back.
     for (const instruction of ["CMD", "ENTRYPOINT"] as const) {
-      const words = lastExecForm(docker, instruction) as string[];
+      for (const extra of [
+        `${instruction.toLowerCase()} ["sh", "-c", "npm run start:web"]`,
+        `  ${instruction[0]}${instruction.slice(1).toLowerCase()} ["sh", "-c", "npm run start:web"]`,
+        `${instruction} \\\n  # a comment inside the continuation\n  ["sh", "-c", \\\n   "npm run start:web"]`,
+      ]) {
+        assert.throws(() => soleExecForm(`${docker}\n${extra}\n`, instruction), new RegExp(`exactly one ${instruction}`), extra);
+      }
+    }
+    // …and one split across lines still reads as the array Docker sees.
+    assert.deepEqual(soleExecForm(`FROM x\ncmd ["/bin/sh", \\\n  # note\n\n  "/app/x"]\n`, "CMD"), ["/bin/sh", "/app/x"]);
+  });
+
+  it("the CMD and ENTRYPOINT carry no npm and no `sh -c`", () => {
+    for (const instruction of ["CMD", "ENTRYPOINT"] as const) {
+      const words = soleExecForm(docker, instruction) as string[];
       assert.ok(!words.some((w) => /\bnpm\b|\bnpx\b/.test(w)), `${instruction} runs npm: ${JSON.stringify(words)}`);
       assert.ok(!words.includes("-c"), `${instruction} runs a command string through a shell: ${JSON.stringify(words)}`);
     }
