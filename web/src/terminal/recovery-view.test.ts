@@ -11,7 +11,7 @@ import { telegramListening } from "@/lib/telegram-listening";
 import { runtimeFromRow } from "@/lib/telegram-runtime";
 import type { ChatController } from "./chat-controller";
 import type { LiveMine } from "./live";
-import { ownerTradeEmptyTitle, RECOVERY_WITHDRAW_VERIFIED, recoveryAutonomy, recoveryFunds, recoveryMemory, recoveryTelegram } from "./recovery-view";
+import { ownerTradeEmptyTitle, RECOVERY_CASH_EXCLUDES, RECOVERY_WITHDRAW_VERIFIED, recoveryAutonomy, recoveryFunds, recoveryMemory, recoveryTelegram } from "./recovery-view";
 import { RecoveryNotice } from "./RecoveryNotice";
 import { DesktopHeader, DesktopPortfolio, DesktopSidebar } from "./Desktop";
 import { Agent } from "./screens/Agent";
@@ -164,7 +164,7 @@ describe("where the money is during recovery", () => {
     const funds = recoveryFunds(status())!;
     assert.deepEqual(funds, { account: ACCOUNT, short: "0x12aB…cDEF",
       explorer: `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`, testnet: false,
-      cash: "Cash on chain: $12.34.", withdraw: null });
+      cash: "Cash on chain: $12.34.", excludes: RECOVERY_CASH_EXCLUDES, withdraw: null });
     const page = notice(funds);
     const text = page.body.textContent!;
     assert.match(text, /Trading paused for recovery/);
@@ -188,6 +188,22 @@ describe("where the money is during recovery", () => {
     const page = notice(funds);
     assert.equal(page.querySelector(".agent-recovery a")!.getAttribute("href"), funds.explorer);
     assert.match(page.body.textContent!, /smart account 0x12aB…cDEF on the test network and the vaults it controls/);
+  });
+
+  it("on the test network says the cash isn't read there, never a figure and never a passing failure", () => {
+    // Production cannot return a testnet cashUsdg (no multicall3 on 46630, and
+    // CASH.USDG is the mainnet address), so every shape of it, including a
+    // well-formed amount, must come out the same: not read, not "just now".
+    for (const cashUsdg of ["12340000", "0", null, ""]) {
+      const funds = recoveryFunds(status(46630, { balances: { ...balances, cashUsdg } }))!;
+      assert.equal(funds.cash, "Cash on chain isn't read on the test network.", String(cashUsdg));
+      assert.equal(funds.excludes, null, "no figure, so nothing to say it leaves out");
+      const text = notice(funds).body.textContent!;
+      assert.match(text, /Cash on chain isn't read on the test network\./);
+      assert.doesNotMatch(text, /\$|couldn't be read|just now|Only USDG held|Not included/);
+      assert.doesNotMatch(text, NEVER);
+    }
+    assert.equal(recoveryFunds(status(46630, { balances: undefined }))!.cash, "Cash on chain isn't read on the test network.");
   });
 
   it("gives an account on a chain this product does not run on no explorer link", () => {
@@ -250,10 +266,12 @@ describe("where the money is during recovery", () => {
         assert.doesNotMatch(text, NEVER, what);
         assert.doesNotMatch(text, /\$0\.00/, what);
         assert.equal(/smart account/.test(text), hasAccount, what);
-        assert.equal(/Not included: USDG in the Morpho vault, and any tokens the account holds/.test(text), hasAccount, what);
+        const mainnet = hasAccount && chainId === 4663;
+        assert.equal(/Not included: USDG in the Morpho vault, and any tokens the account holds/.test(text), mainnet, what);
         assert.equal(/on the test network/.test(text), hasAccount && chainId === 46630, what);
-        assert.equal(/Cash on chain: \$12\.34\./.test(text), hasAccount && cash !== null, what);
-        assert.equal(/Cash on chain: couldn't be read just now\./.test(text), hasAccount && cash === null, what);
+        assert.equal(/Cash on chain isn't read on the test network\./.test(text), hasAccount && chainId === 46630, what);
+        assert.equal(/Cash on chain: \$12\.34\./.test(text), mainnet && cash !== null, what);
+        assert.equal(/Cash on chain: couldn't be read just now\./.test(text), mainnet && cash === null, what);
         assert.equal(/Withdraw still works while trading is paused/.test(text), hasAccount && withdraw, what);
         const href = page.querySelector(".agent-recovery a")?.getAttribute("href") ?? null;
         assert.equal(href, !hasAccount ? null : chainId === 46630

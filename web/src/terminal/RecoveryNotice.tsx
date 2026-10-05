@@ -1,6 +1,6 @@
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { shortDateTime } from "@/lib/format";
-import { pausedRecovery, recoveryDetail, recoveryMemory, RECOVERY_CASH_EXCLUDES, type RecoveryFunds } from "./recovery-view";
+import { pausedRecovery, recoveryDetail, recoveryMemory, type RecoveryFunds } from "./recovery-view";
 
 /**
  * `funds` is optional and separate from `recovery` on purpose: the hold comes
@@ -26,7 +26,7 @@ export function RecoveryNotice({ recovery, funds }: { recovery?: FleetRecoveryVi
         {funds.testnet ? " on the test network" : null} and the vaults it controls.
       </p>
       <p>{funds.cash}</p>
-      <small>{RECOVERY_CASH_EXCLUDES}</small>
+      {funds.excludes ? <small>{funds.excludes}</small> : null}
       {funds.withdraw ? <p>{funds.withdraw}</p> : null}
     </> : null}
     {typeof beat === "number" && Number.isFinite(beat) && beat > 0

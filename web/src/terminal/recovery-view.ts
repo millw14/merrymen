@@ -77,6 +77,16 @@ const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
  *   - A chain outside the two known ones gets the address but no link: Blockscout
  *     for the wrong chain shows an empty account, and an empty account during a
  *     pause reads as money gone.
+ *   - On the test network, no cash figure at all — and not "couldn't be read
+ *     just now" either, because that promises a retry that can never succeed.
+ *     /api/grants reads CASH.USDG, the MAINNET token address, through multicall
+ *     on whichever chain the grant is on, and robinhoodTestnet defines no
+ *     multicall3: on 46630 that read throws every time, so `cashUsdg` is null
+ *     every time (explain.ts already says the testnet USDG tile is "pinned at
+ *     '—' forever"). Were it ever to answer, it would be a mainnet address read
+ *     on the test chain, which is not this account's cash either. So testnet
+ *     says the figure isn't read there, ignores `cashUsdg` outright, and drops
+ *     the "what it counts" line, which has no figure left to qualify.
  *   - No renewal call to action and no "paused since". `since_at` on the hold
  *     row is when that row was first written, not when trading stopped, so a
  *     date from it would be a wrong fact stated precisely.
@@ -90,8 +100,10 @@ export interface RecoveryFunds {
   explorer: string | null;
   /** Test-network money is said to be test-network money. */
   testnet: boolean;
-  /** "Cash on chain: $12.34." — or the read failing, said as such. */
+  /** "Cash on chain: $12.34." — or the read failing, or not made on the test network, said as such. */
   cash: string;
+  /** RECOVERY_CASH_EXCLUDES beside a figure that can exist; null on the test network, where none does. */
+  excludes: string | null;
   /** Null until RECOVERY_WITHDRAW_VERIFIED. */
   withdraw: string | null;
 }
@@ -102,6 +114,7 @@ export function recoveryFunds(status: Pick<AccountState["status"], "grant" | "ba
   const account = grant?.smartAccount;
   if (!grant || typeof account !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(account)) return null;
   const known = Number.isSafeInteger(grant.chainId) && KNOWN_CHAINS.has(grant.chainId);
+  const testnet = grant.chainId === robinhoodTestnet.id;
   // Field by field, as grant-balances.ts carries it: no `balances` at all (an
   // older server) and a failed multicall entry are both unread, never zero.
   const cash = status?.balances ? usdgOrNull(status.balances.cashUsdg) : null;
@@ -109,8 +122,11 @@ export function recoveryFunds(status: Pick<AccountState["status"], "grant" | "ba
     account,
     short: `${account.slice(0, 6)}…${account.slice(-4)}`,
     explorer: known ? `${explorerFor(grant.chainId)}/address/${account}` : null,
-    testnet: grant.chainId === robinhoodTestnet.id,
-    cash: cash === null ? "Cash on chain: couldn't be read just now." : `Cash on chain: ${usd(cash)}.`,
+    testnet,
+    // Testnet first: whatever `cashUsdg` says there is not this account's cash (above).
+    cash: testnet ? "Cash on chain isn't read on the test network."
+      : cash === null ? "Cash on chain: couldn't be read just now." : `Cash on chain: ${usd(cash)}.`,
+    excludes: testnet ? null : RECOVERY_CASH_EXCLUDES,
     withdraw: withdrawVerified
       ? "Withdraw still works while trading is paused. It sends funds from this account to an address you choose."
       : null,
