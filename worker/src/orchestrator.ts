@@ -9704,6 +9704,12 @@ export async function runOrchestrator(): Promise<void> {
       // Beside the watchdog, and nothing like it: this one only speaks.
       telegramLiveness();
       await mirrorLedgers();
+      // CALLED HOME DURING THIS PASS: nothing after the mirror is started.
+      // The drain can now run for most of a minute rather than a second, and
+      // what follows includes a shared-ledger writer that holds no lease
+      // (startHistoryRepair), owner messages on the first pass, and background
+      // jobs — none of them waited for, all of them cut off by the exit.
+      if (stopping) return;
       startHistoryRepair();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
