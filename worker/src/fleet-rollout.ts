@@ -10,10 +10,12 @@
  *   all                                    every tenant is admitted, at trade
  *   0x<40 hex>:<level>,0x<40 hex>:<level>  only these, each at its own level
  *
- * where <level> is `observe`, `exits-only` or `trade`. The level reaches the
- * child as MERRYMEN_ADMISSION_LEVEL (childEnv) and nothing else of the value
- * does: the list names other tenants, and a child has no business knowing who
- * else is running, the same reason MERRYMEN_HOLDER_ADDRESS is stripped.
+ * where <level> is `observe`, `exits-only` or `trade`, and is accepted only
+ * once a worker in this tree obeys it (WORKER_ENFORCED_LEVELS: today, `trade`
+ * alone). The level reaches the child as MERRYMEN_ADMISSION_LEVEL (childEnv)
+ * and nothing else of the value does: the list names other tenants, and a
+ * child has no business knowing who else is running, the same reason
+ * MERRYMEN_HOLDER_ADDRESS is stripped.
  *
  * A TENANT THE VALUE DOES NOT ADMIT IS `held`. The supervisor starts nothing
  * for it, leases nothing and retires none of its expired keys, so its home on
@@ -61,6 +63,27 @@ export const ADMISSION_LEVELS = ["observe", "exits-only", "trade"] as const;
 export type AdmissionLevel = (typeof ADMISSION_LEVELS)[number];
 /** An admitted level, or `held`: the supervisor starts nothing for the tenant. */
 export type RolloutLevel = AdmissionLevel | "held";
+
+/**
+ * THE LEVELS A WORKER IN THIS TREE OBEYS, and so the only ones the rollout
+ * accepts. Today that is `trade` alone.
+ *
+ * `observe` and `exits-only` are the grammar's, and childEnv already hands a
+ * child its level, but nothing in the worker reads MERRYMEN_ADMISSION_LEVEL
+ * yet: that is the worker's admission gate (worker-admission.ts), a change of
+ * its own. Until it is here, a tenant named at `observe` would be spawned with
+ * the word in its environment and trade with full authority, while the
+ * startup line and the heartbeat reported it as only being watched. A risk
+ * control that depends on the order two changes are deployed in fails open
+ * the one time they are deployed out of order. This one fails closed: such a
+ * value refuses boot like any other the orchestrator cannot honour, and every
+ * runtime reader reads it as `held`.
+ *
+ * The change that brings the worker's gate widens this set in the same
+ * commit. fleet-rollout.test.ts fails until it does, and fails if the set is
+ * widened without the gate.
+ */
+export const WORKER_ENFORCED_LEVELS: ReadonlySet<AdmissionLevel> = new Set<AdmissionLevel>(["trade"]);
 
 export type FleetRollout =
   | { scope: "none" }
@@ -117,7 +140,13 @@ function parseRollout(raw: string): FleetRollout {
     // Twice is ambiguous even at the same level: one of the two was meant to
     // be something else, and nobody can say which.
     if (levels.has(tenant)) throw refuse(`entry ${i + 1} names a tenant an earlier entry already named`);
-    levels.set(tenant, m[2] as AdmissionLevel);
+    // Well-formed, and still not a promise this build can keep. The level is
+    // one of the grammar's three words, so naming it repeats nothing else.
+    const level = m[2] as AdmissionLevel;
+    if (!WORKER_ENFORCED_LEVELS.has(level)) {
+      throw refuse(`entry ${i + 1} asks for ${level}, which no worker in this build enforces yet (nothing reads ${ADMISSION_LEVEL_ENV}); name it at trade or leave it out`);
+    }
+    levels.set(tenant, level);
   });
   return { scope: "list", levels };
 }
@@ -167,8 +196,10 @@ export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
 /**
  * The level a child's environment carries. A held tenant is never spawned
  * (every spawn path asks rolloutHeld first), so `held` cannot reach here in
- * practice; were it to, the child gets the most restrictive level a worker
- * understands rather than an unset variable or a word it does not know.
+ * practice; were it to, the child gets the grammar's most restrictive level
+ * rather than an unset variable or a word no worker knows. (No worker in this
+ * tree obeys `observe` yet, which is why WORKER_ENFORCED_LEVELS keeps anyone
+ * who is spawned at `trade`.)
  */
 export function childAdmissionLevel(tenant: string, env: Env = process.env): AdmissionLevel {
   const level = rolloutLevel(tenant, env);

@@ -590,14 +590,17 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   /**
    * THE ROLLOUT, REDUCED TO THIS TENANT'S OWN LEVEL (fleet-rollout.ts).
    *
-   * The level is what the worker's admission gate obeys: observe refuses
-   * every order, exits-only refuses entries, trade is unchanged. Always set,
-   * and always set here, overwriting anything the orchestrator's own env
-   * carried under that name: a child must never take its level from an
-   * operator's fleet-wide variable. The rollout itself is stripped, for the
-   * reason MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an
-   * answer to a question about somebody else, and a child that read it might
-   * one day mistake another tenant's level for its own.
+   * The level is for the worker's admission gate (worker-admission.ts), which
+   * is a change of its own and not yet in this tree: nothing here reads it.
+   * So the rollout accepts `trade` alone until that gate arrives
+   * (WORKER_ENFORCED_LEVELS), and anything spawned here carries `trade`,
+   * which is what a worker does anyway. Always set, and always set here,
+   * overwriting anything the orchestrator's own env carried under that name:
+   * a child must never take its level from an operator's fleet-wide
+   * variable. The rollout itself is stripped, for the reason
+   * MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an answer to
+   * a question about somebody else, and a child that read it might one day
+   * mistake another tenant's level for its own.
    */
   delete env[FLEET_ROLLOUT_ENV];
   env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant);
