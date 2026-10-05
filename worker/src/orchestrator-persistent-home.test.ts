@@ -269,6 +269,12 @@ it("a failed persistent root proof writes no cached key, child book or partial r
  * Started directly, NOT through container-start.sh: what is under test is the
  * check that holds however the process was started. Correctly configured
  * apart from what each test changes.
+ *
+ * That includes MERRYMEN_FLEET_ROLLOUT, as `none`: once the orchestrator
+ * reads its rollout scope at boot, a Railway-hosted one without the variable
+ * refuses to start, which would answer every test here before the check under
+ * test is reached. `none` admits nobody, and it is not `all`, so the one-shot
+ * refusal below still holds while a one-shot is set.
  */
 const FLEET_SERVICE = "227ff49a-1111-4222-8333-444455556666";
 function hostedOrchestrator(home: string, extra: NodeJS.ProcessEnv) {
@@ -276,7 +282,7 @@ function hostedOrchestrator(home: string, extra: NodeJS.ProcessEnv) {
     cwd: path.join(import.meta.dirname, "..", ".."), encoding: "utf8", timeout: 60_000,
     env: { PATH: process.env.PATH, HOME: path.dirname(home), MERRYMEN_HOSTED: "1", MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home,
       RAILWAY_ENVIRONMENT_ID: "e1e1e1e1-1111-4222-8333-444455556666", RAILWAY_SERVICE_ID: FLEET_SERVICE,
-      MERRYMEN_FLEET_SERVICE_ID: FLEET_SERVICE, MERRYMEN_IMAGE: DEPLOY_GUARD_IMAGE, ...extra },
+      MERRYMEN_FLEET_SERVICE_ID: FLEET_SERVICE, MERRYMEN_IMAGE: DEPLOY_GUARD_IMAGE, MERRYMEN_FLEET_ROLLOUT: "none", ...extra },
   });
 }
 const refusals = (stdout: string) => stdout.split("\n").filter((l) => l.startsWith("[orchestrator] refusing to start — "));
