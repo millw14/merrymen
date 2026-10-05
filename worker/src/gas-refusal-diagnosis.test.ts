@@ -21,10 +21,20 @@
  * ── WHAT THESE TESTS PIN, AND WHAT THEY DELIBERATELY DO NOT ──────────────
  *
  * They pin the NAME and the SENTENCE on a refusal. They do not pin whether the
- * operation is refused — it is refused either way, before signing, and no test
- * here should be read as evidence about money moving.
+ * operation is refused — it is refused either way, before signing, and nothing
+ * here is evidence about the refused trade's money.
+ *
+ * BUT ONE NAME IS NOT ONLY A NAME. `enable-too-wide` is the refusal index.ts
+ * answers by SENDING something: installKeyAlone broadcasts the key's install
+ * on its own (executor.ts keyInstallCalls, `approve(USDG, Router02, 0)`), and
+ * that spends gas — once per executor per half hour, persisted before
+ * broadcast, nonce-bound, and refused once the key is installed. So a rename
+ * AWAY from `enable-too-wide` decides whether that operation goes out. The
+ * 2026-10-03 misreading below did exactly that, and fixing it gives the
+ * install back; the last describe pins it against the executor's own lines.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { classifyRevert } from "./revert";
 
@@ -32,6 +42,47 @@ import { classifyRevert } from "./revert";
 const LIVE_MESSAGE =
   "The `validateUserOp` function on the Smart Account reverted.\n\n" +
   "Details: UserOperation reverted during simulation with reason: AA23 reverted duplicate permissionHash\n" +
+  "Version: viem@2.56.0";
+
+/**
+ * The bundler's refusal of agent 0xbba115's class-vault buy, 2026-10-03T13:07:48Z
+ * — the message `/AA23|AA24|.../i` misread.
+ *
+ * Pons reverted the simulation with its own 0x71c4efed, which revert.ts leaves
+ * unclassified on purpose. But viem's error also carries its 'Request
+ * Arguments:' dump, and the 29 KB `signature:` field in it happened to contain
+ * `Aa24`. That was enough: the refusal was filed `wall-refused`, the executor
+ * renamed `enable-too-wide` after it, and the owner was told to re-sign a grant
+ * that was fine.
+ *
+ * VERBATIM EXCEPT FOR FOUR CUTS, each marked `…`, reassembled from the
+ * worker's log lines into viem's own layout (the log prefixes each line and
+ * drops the blank ones). The cuts are callData (2 KB), paymasterData, the
+ * account's address, and the signature, which keeps its leading bytes and the
+ * 86 characters around the `Aa24` that did the damage. The full dump holds an
+ * owner-signed enable and a sponsor's signature, which do not belong in source;
+ * it was run through classifyRevert in full when this was fixed, and came back
+ * with the verdict pinned below.
+ */
+const SIMULATION_REVERT_MESSAGE =
+  "Execution reverted with reason: UserOperation reverted during simulation with reason: " +
+  "0x71c4efed0000000000000000000000000000000000000000000056da51aed7bd9c526b72" +
+  "0000000000000000000000000000000000000000000065fabd2ee80e162af404.\n\n" +
+  "Request Arguments:\n" +
+  "  callData:                       0xe9ae5c53…\n" +
+  "  maxFeePerGas:                   0.03108168 gwei\n" +
+  "  maxPriorityFeePerGas:           0.000155408 gwei\n" +
+  "  nonce:                          456336424456981077151081705750506175129171795645840516013162862051204268032\n" +
+  "  paymaster:                      0x777777777777AeC03fd955926DbF81597e66834C\n" +
+  "  paymasterData:                  0x01000000…\n" +
+  "  paymasterPostOpGasLimit:        1\n" +
+  "  paymasterVerificationGasLimit:  200000\n" +
+  "  sender:                         0x1A7EC670…\n" +
+  "  signature:                      0x0000000000000000…" +
+  "2a00026A6F069E2a08c2468e7724Ab3250CdBFBA14D4FF10D1484c05Aa24e6d1AEBF7B5B93115f7762604f…\n\n" +
+  "Details: UserOperation reverted during simulation with reason: " +
+  "0x71c4efed0000000000000000000000000000000000000000000056da51aed7bd9c526b72" +
+  "0000000000000000000000000000000000000000000065fabd2ee80e162af404\n" +
   "Version: viem@2.56.0";
 
 describe("the duplicate-enable refusal is named and explained", () => {
@@ -71,6 +122,57 @@ describe("the duplicate-enable refusal is named and explained", () => {
   });
 });
 
+describe("a request dump that happens to spell an AA code is not the wall", () => {
+  it("the fixture still carries the hex that fooled the old pattern", () => {
+    // Without this, tidying the fixture could quietly remove the one thing that
+    // makes it a regression test. The old pattern, kept here as evidence only.
+    assert.match(SIMULATION_REVERT_MESSAGE, /Aa24/);
+    assert.ok(/AA23|AA24|signature error|InvalidSignature|PolicyFailed/i.test(SIMULATION_REVERT_MESSAGE));
+  });
+
+  it("classifies the 2026-10-03T13:07:48Z message as unclassified, and retryable", () => {
+    // Pons's own reverts stay unclassified until one is observed with the
+    // transaction that produced it (revert.ts). A dump that merely contains four
+    // letters is not that observation.
+    const v = classifyRevert(SIMULATION_REVERT_MESSAGE);
+    assert.equal(v.rule, "unclassified");
+    assert.equal(v.retryable, true);
+    assert.match(v.detail, /does not recognise/);
+  });
+
+  it("does not send the owner to re-sign a grant that was fine", () => {
+    assert.doesNotMatch(classifyRevert(SIMULATION_REVERT_MESSAGE).detail, /re-sign/i);
+  });
+
+  it("and a REAL validation revert under the same dump is still the wall", () => {
+    // The other half. Narrowing the pattern must not lose the case it exists
+    // for — the bundler's own words under `Details:`, upper-case as the
+    // EntryPoint writes them, with the same hex around them.
+    const withReason = (reason: string) =>
+      SIMULATION_REVERT_MESSAGE.replace(
+        /Details: [^\n]*/,
+        `Details: UserOperation reverted during simulation with reason: ${reason}`,
+      );
+    const policy = classifyRevert(withReason("AA24 signature error"));
+    assert.equal(policy.rule, "wall-refused");
+    assert.match(policy.detail, /sealed policy does not permit/);
+    const duplicate = classifyRevert(withReason("AA23 reverted duplicate permissionHash"));
+    assert.equal(duplicate.rule, "wall-refused");
+    assert.match(duplicate.detail, /installed twice/);
+    // And with nothing but the CODE to go on. Both reasons above also carry
+    // words a case-insensitive entry catches, so on their own they would pass
+    // with the AA-code entry gone. These are the shapes that have only the
+    // code: the account's revert data after it (measured on 4663, see
+    // session-account.ts), and the EntryPoint's out-of-gas form.
+    for (const reason of ["AA23 reverted 0xc48cf8ee", "AA23 reverted (or OOG)"]) {
+      const v = classifyRevert(withReason(reason));
+      assert.equal(v.rule, "wall-refused", reason);
+      assert.equal(v.retryable, false, reason);
+      assert.match(v.detail, /sealed policy does not permit/, reason);
+    }
+  });
+});
+
 describe("what may and may not rename a gas refusal", () => {
   /**
    * The executor renames a `gas-unreadable` refusal only when the bundler's
@@ -92,6 +194,56 @@ describe("what may and may not rename a gas refusal", () => {
     // a cause here is how a taxonomy stops being trustworthy.
     assert.equal(mayRename("connection reset by peer"), false);
     assert.equal(classifyRevert("connection reset by peer").rule, "unclassified");
+  });
+
+  it("leaves a simulation revert with the refusal it really was", () => {
+    // 2026-10-03T13:07:48Z: renamed `wall-refused` over a gas refusal that was
+    // `enable-too-wide`, because the request dump spelled Aa24. The gas verdict
+    // was the true one and must keep its name.
+    assert.equal(mayRename(SIMULATION_REVERT_MESSAGE), false);
+  });
+
+  /**
+   * The rule the executor throws, computed by ITS OWN lines rather than by the
+   * copy above — the technique reject-reason.test.ts uses on index.ts. Lifted
+   * by their text, so a rewrite of them fails here loudly instead of leaving
+   * `mayRename` to vouch for code it no longer resembles.
+   */
+  const executorRule = (estimateError: string, boundedRule: string): string => {
+    const lines = readFileSync(new URL("./executor.ts", import.meta.url), "utf8")
+      .split(/\r?\n/)
+      .map((l) => l.trim());
+    const diagnosed = lines.findIndex((l) => l.startsWith("const diagnosed = estimateError ? classifyRevert(estimateError)"));
+    const renamed = lines.findIndex((l) => l.startsWith("const renamed = diagnosed"));
+    const thrown = lines.indexOf("throw new GasRefused(", renamed);
+    assert.ok(diagnosed > 0 && renamed > diagnosed && thrown > renamed, "the executor's rename is where we think it is");
+    const rule = lines[thrown + 1]!.replace(/,$/, "");
+    assert.match(rule, /^renamed \? renamed\.rule : bounded\.rule$/, "the refusal is named by the rename or by boundGas");
+    return new Function(
+      "classifyRevert",
+      "estimateError",
+      "bounded",
+      `${lines[diagnosed]}\n${lines[renamed]}\nreturn ${rule};`,
+    )(classifyRevert, estimateError, { rule: boundedRule }) as string;
+  };
+
+  it("the copy above answers what the executor's own lines answer", () => {
+    for (const m of [LIVE_MESSAGE, SIMULATION_REVERT_MESSAGE, "connection reset by peer", "Too little received", "AA21 didn't pay prefund"]) {
+      assert.equal(executorRule(m, "gas-unreadable") !== "gas-unreadable", mayRename(m), m);
+    }
+  });
+
+  it("the 13:07:48Z refusal stays `enable-too-wide`, which index.ts answers by installing the key alone", () => {
+    // The shape that day: estimate 1 came back and boundGas refused the first
+    // enable as too wide; estimate 2 threw the simulation revert, and its text
+    // is what `estimateError` held. Under /AA23|AA24/i it renamed the refusal
+    // `wall-refused`, so index.ts never reached installKeyAlone and the owner
+    // was told to re-sign. Now the gas verdict keeps its name — and with it,
+    // the install. That is a broadcast this fix gives back, on purpose.
+    assert.equal(executorRule(SIMULATION_REVERT_MESSAGE, "enable-too-wide"), "enable-too-wide");
+    // A real validation revert in the same position still renames it, as it
+    // did before this fix.
+    assert.equal(executorRule(LIVE_MESSAGE, "enable-too-wide"), "wall-refused");
   });
 
   it("leaves a RETRYABLE class alone even though it is recognised", () => {
