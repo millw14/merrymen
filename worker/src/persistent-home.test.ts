@@ -318,8 +318,9 @@ test("adoption refuses a wrong pin, a loose or linked halt, an empty root and a 
 test("adoption puts a canonical halt in the original's place in one rename, keeps the original's bytes, and holds", t => {
   const f = populated(t), present: boolean[] = [];
   const watch = () => { present.push(existsSync(f.halt)); };
-  const prepared = adoptPopulatedPersistentHome(f.adopt, { ...f.options,
+  const { adoptedNow, ...prepared } = adoptPopulatedPersistentHome(f.adopt, { ...f.options,
     afterPreAdoptionSynced: watch, afterAdoptionHaltSynced: watch, afterAdoptionRenamed: watch })!;
+  assert.equal(adoptedNow, true);
   assert.deepEqual(present, [true, true, true], "FLEET_HALT is never absent");
   assert.equal(prepared.handoverState, "held");
   assert.equal(prepared.halt!.text, readFileSync(f.halt, "utf8"));
@@ -335,9 +336,10 @@ test("adoption puts a canonical halt in the original's place in one rename, keep
   // Ordinary startup now verifies it, and a restart with the variable still set changes nothing.
   assert.deepEqual(preparePersistentHomeForHandover(f.env, f.options), prepared);
   const after = tree(f.home);
-  assert.deepEqual(adoptPopulatedPersistentHome(f.adopt, f.options), prepared);
+  // Reported as it stands, and not as a fresh adoption, so startup logs no adoption that did not happen.
+  assert.deepEqual(adoptPopulatedPersistentHome(f.adopt, f.options), { ...prepared, adoptedNow: false });
   // The token may be retired once adopted; the pin left behind still changes nothing.
-  assert.deepEqual(adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_INITIAL_HANDOVER: undefined }, f.options), prepared);
+  assert.deepEqual(adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_INITIAL_HANDOVER: undefined }, f.options), { ...prepared, adoptedNow: false });
   assert.deepEqual(tree(f.home), after);
   assert.throws(() => adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("another halt") }, f.options), /pinned original halt/);
 });
@@ -354,6 +356,7 @@ test("every adoption crash seam converges under the same variables while ordinar
     proveRecoveryReplyRoot(f.listener, f.options.readMountInfo).assert();
     const prepared = adoptPopulatedPersistentHome(f.adopt, f.options)!;
     assert.equal(prepared.handoverState, "held", seam);
+    assert.equal(prepared.adoptedNow, true, seam); // The start that writes the manifest is the one that adopts.
     assert.equal(readFileSync(f.halt, "utf8"), prepared.halt!.text, seam);
     assert.equal(JSON.parse(readFileSync(f.record, "utf8")).halt.inode, f.originalInode, seam);
     assert.deepEqual(readdirSync(f.home).sort(), [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST, "FLEET_HALT", "children"].sort(), seam);
