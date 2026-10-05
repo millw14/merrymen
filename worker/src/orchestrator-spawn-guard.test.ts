@@ -203,6 +203,9 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     assert.equal(t.released.n, 0);
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");
     assert.equal(spawned.length, 0);
+    // A refusal like this one stands until someone repairs the row: said once
+    // for its cause, not on every fifteen-second pass.
+    assert.equal(alerts(t.tenant).filter((l) => /offset/.test(l)).length, 1, said.join("\n"));
   });
 
   it("A HANDOFF REFUSAL WHILE HOLDING: no hold process answers a bot whose offset could not be handed over", async () => {
@@ -255,8 +258,10 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
 
     await assert.doesNotReject(reconcile(), "the throw does not reject through reconcile");
     assert.equal(spawned.length, 0, "no worker starts over an anchor it cannot trust");
-    assert.ok(alerts(t.tenant).some((l) => /worker preparation failed/.test(l)), said.join("\n"));
-    assert.ok(!alerts(t.tenant).some((l) => /unsafe bootstrap anchor|EISDIR|directory/.test(l)), "said without the error's text");
+    // By its kind, so a bug that throws for every tenant can be told from this,
+    // and without its text.
+    assert.ok(alerts(t.tenant).some((l) => /worker preparation failed \(Error\)/.test(l)), said.join("\n"));
+    assert.ok(!alerts(t.tenant).some((l) => /unsafe bootstrap anchor|refusing to start|directory/.test(l)), "said without the error's text");
     assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");
     assert.equal(spawned.length, 0);
@@ -280,7 +285,9 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     await assert.doesNotReject(reconcile(), "the first pass keeps it pending");
     await assert.doesNotReject(reconcile(), "the retry's failure does not reject through reconcile");
     await assert.doesNotReject(reconcile());
-    assert.ok(alerts(tenant).some((l) => /final copy deferred/.test(l)), said.join("\n"));
+    // Said by its kind — a driver that will not load — and once, though three
+    // passes met it.
+    assert.deepEqual(alerts(tenant).filter((l) => /final copy deferred/.test(l)).map((l) => /\(([^)]*)\)/.exec(l)?.[1]), ["Error ERR_MODULE_NOT_FOUND"], said.join("\n"));
     assert.ok(!alerts(tenant).some((l) => /spawn-guard\.invalid|not-a-real-connection|pg/.test(l)), "and no connection detail is logged");
     assert.equal(hasLeaseForTest(tenant), true, "the lease that protects its final copy is kept");
     assert.ok(existsSync(path.join(home, "merrymen.db")), "and the original book stays");
