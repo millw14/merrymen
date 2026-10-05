@@ -19,9 +19,9 @@
  *     whose author believes a flag is set that is not.
  *   - Text is rendered as React text nodes, so `<script>` in a title is shown
  *     as the characters `<script>`. The validator does not try to strip markup
- *     — stripping is how markup gets through — it only refuses control and
- *     bidi-override characters, which can make a rendered line read
- *     differently from the bytes the operator reviewed.
+ *     — stripping is how markup gets through — it only refuses control,
+ *     bidi and other invisible formatting characters, which can make a
+ *     rendered line read differently from the text the operator reviewed.
  *   - A link is `https:` on an exact host from SERVICE_NOTICE_LINK_HOSTS, with
  *     no userinfo and no port. `http:`, `javascript:`, `data:`, a look-alike
  *     suffix (`app.merrymen.dev.example`) and a trailing-dot host are all
@@ -87,10 +87,30 @@ const FIELDS = new Set(["title", "body", "updatedAt", "tradingPaused", "links"])
 const LINK_FIELDS = new Set(["label", "href"]);
 
 /**
- * C0 and C1 controls, DEL, and the bidi embedding/override/isolate marks.
- * The body may carry a line feed; nothing else in this set is ever text.
+ * Every spelling of a line break: a pasted CRLF or lone CR, and the Unicode
+ * line and paragraph separators. Each becomes one line feed, which the body
+ * keeps and a one-line field refuses — so U+2028 cannot carry a second line
+ * into a title past that rule.
  */
-const FORBIDDEN = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+const LINE_BREAKS = /\r\n?|[\p{Zl}\p{Zp}]/gu;
+
+/**
+ * What is never text, by Unicode category rather than by list — a list of
+ * ranges let the bidi marks U+200E, U+200F and U+061C, the zero-width
+ * U+200B and U+2060, the BOM, the soft hyphen and the tag characters through,
+ * as one did for source files (mcp/catalog.test.ts). Every control (Cc: C0,
+ * C1, DEL), every format character (Cf: bidi marks, embeddings, overrides and
+ * isolates, zero-width characters, tags) and lone surrogates (Cs) — the
+ * classes mcp/apps.ts strips from tool output. Here they are refused instead:
+ * stripping would show a line the operator never reviewed. That includes the
+ * zero-width joiner, so a joined emoji sequence is refused with the rest; a
+ * banner does not need one. The line feed is the one exception, and only the
+ * body may keep it.
+ */
+const FORBIDDEN = /(?!\n)[\p{Cc}\p{Cf}\p{Cs}]/u;
+
+/** `U+200F`, so a refusal names a character the operator cannot see. */
+const codePoint = (char: string) => `U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`;
 
 /**
  * An instant with its zone written out. `2026-10-05 18:00` is refused: the
@@ -112,13 +132,16 @@ function onlyFields(value: Record<string, unknown>, allowed: Set<string>, where:
 
 function text(value: unknown, field: string, max: number, multiline = false): string {
   if (typeof value !== "string") throw new Refused(`${field} must be a string`);
-  // A pasted CRLF is still one line break, not a control character.
-  const normalised = (multiline ? value.replace(/\r\n?/g, "\n") : value).trim();
+  // A pasted CRLF, or a U+2028 from a document, is still one line break, not
+  // a control character — and in a one-line field it is a second line.
+  const normalised = value.replace(LINE_BREAKS, "\n").trim();
+  // Refused before the emptiness check, so a title of nothing but U+200B is
+  // refused by name rather than rendered as an empty bold line.
+  const hidden = FORBIDDEN.exec(normalised);
+  if (hidden) throw new Refused(`${field} contains a control or invisible character (${codePoint(hidden[0])})`);
+  if (!multiline && normalised.includes("\n")) throw new Refused(`${field} must be one line`);
   if (!normalised) throw new Refused(`${field} is empty`);
   if (normalised.length > max) throw new Refused(`${field} is longer than ${max} characters`);
-  if (FORBIDDEN.test(normalised) || (!multiline && normalised.includes("\n"))) {
-    throw new Refused(`${field} contains a control character`);
-  }
   return normalised;
 }
 
@@ -145,9 +168,10 @@ function link(value: unknown, i: number): ServiceNoticeLink {
   const label = text(value.label, `${where}.label`, MAX.label);
   const raw = value.href;
   // No trimming here: the URL parser forgives surrounding whitespace and
-  // embedded tabs and newlines, and a link should be exactly what was written.
-  if (typeof raw !== "string" || !raw || /[\s\u0000-\u001f\u007f]/.test(raw)) {
-    throw new Refused(`${where}.href must be a URL with no spaces`);
+  // embedded tabs and newlines, and quietly drops a soft hyphen, a zero-width
+  // space or a BOM from a host, and a link should be exactly what was written.
+  if (typeof raw !== "string" || !raw || /[\s\p{Cc}\p{Cf}\p{Cs}]/u.test(raw)) {
+    throw new Refused(`${where}.href must be a URL with no spaces or invisible characters`);
   }
   let url: URL;
   try {

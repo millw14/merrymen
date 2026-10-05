@@ -119,10 +119,47 @@ describe("a bad field turns the banner off", () => {
   });
 
   it("refuses control and bidi-override characters, and a line break in a one-line field", () => {
-    refused(env({ title: "Paused\u202eesumed" }), /title contains a control character/);
-    refused(env({ body: "bell\u0007" }), /body contains a control character/);
-    refused(env({ title: "two\nlines" }), /title contains a control character/);
-    refused(env({ links: [{ label: "a\nb", href: "https://merrymen.dev/" }] }), /label contains a control character/);
+    refused(env({ title: "Paused\u202eesumed" }), /title contains a control or invisible character \(U\+202E\)/);
+    refused(env({ body: "bell\u0007" }), /body contains a control or invisible character \(U\+0007\)/);
+    refused(env({ title: "two\nlines" }), /title must be one line/);
+    refused(env({ links: [{ label: "a\nb", href: "https://merrymen.dev/" }] }), /label must be one line/);
+  });
+
+  it("refuses every invisible character by category, not only the ones on a list", () => {
+    // Each of these made it through a list of ranges. The bidi marks move
+    // neutral characters \u2014 digits, punctuation \u2014 in mixed-direction text, so
+    // a time or an amount pasted from a chat can read differently on screen
+    // from the text that was reviewed; the rest are simply unseen.
+    const C = (cp: number) => String.fromCodePoint(cp);
+    for (const cp of [0x85, 0xad, 0x61c, 0x200b, 0x200d, 0x200e, 0x200f, 0x2060, 0xfeff, 0xe0041]) {
+      const name = `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
+      const why = new RegExp(`contains a control or invisible character \\(${name.replace("+", "\\+")}\\)`);
+      refused(env({ title: `Resumes at 18${C(cp)}:00` }), why);
+      refused(env({ body: `Resumes at 18${C(cp)}:00` }), why);
+      refused(env({ links: [{ label: `Your ${C(cp)}account`, href: "https://merrymen.dev/" }] }), why);
+    }
+    // A lone surrogate is not a character at all.
+    refused(env({ title: "broken \ud800 pair" }), /\(U\+D800\)/);
+  });
+
+  it("treats every line separator as a line break: kept in the body, refused in a title or label", () => {
+    assert.equal(ok(env({ body: "Line one.\u2028Line two.\u2029Line three.\rLine four." })).body, "Line one.\nLine two.\nLine three.\nLine four.");
+    refused(env({ title: "two\u2028lines" }), /title must be one line/);
+    refused(env({ title: "two\u2029lines" }), /title must be one line/);
+    refused(env({ title: "two\r\nlines" }), /title must be one line/);
+    refused(env({ links: [{ label: "a\u2028b", href: "https://merrymen.dev/" }] }), /label must be one line/);
+  });
+
+  it("refuses a field that is only invisible characters, rather than drawing it blank", () => {
+    refused(env({ title: "\u200b" }), /title contains a control or invisible character \(U\+200B\)/);
+    refused(env({ title: "\u200b\u200b \u200b" }), /title contains a control or invisible character/);
+    // What trim() already removes is simply empty.
+    refused(env({ title: "\u00a0\u3000" }), /title is empty/);
+  });
+
+  it("keeps ordinary non-ASCII text, emoji included", () => {
+    const title = "Trading paused \u2014 \u201cresumes\u201d at 18:00 \u00b7 \u00e9 \u65e5\u672c \u26a0\ufe0f \u{1f6a7}";
+    assert.equal(ok(env({ title })).title, title);
   });
 
   it("refuses a time with no zone, or one that is not on the calendar", () => {
@@ -166,6 +203,11 @@ describe("a link is https, on our host, and nothing more", () => {
     refused(href("https://app.merrymen.dev:8443/"), /must not name a port/);
     refused(href(" https://app.merrymen.dev/"), /no spaces/);
     refused(href("java\tscript:alert(1)"), /no spaces/);
+    // The parser would quietly drop these from the host and accept it, so
+    // the link would not be the text that was written and reviewed.
+    for (const cp of [0xad, 0x200b, 0x200e, 0x2028, 0xfeff]) {
+      refused(href(`https://app.merry${String.fromCodePoint(cp)}men.dev/you`), /no spaces or invisible characters/);
+    }
   });
 });
 
