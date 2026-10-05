@@ -33,6 +33,7 @@
  */
 import { freshWithin } from "@/lib/services/agent-status";
 import { ORDER_IN_FLIGHT_MS } from "@/lib/order-state";
+import type { AgentStatus } from "@/app/api/grants/route";
 
 /**
  * Slack on top of the watchdog's window, for the hop the watchdog never makes.
@@ -119,9 +120,15 @@ export function workerStale(
  *
  * An older server sends no `workerStale` at all, and that reads as null: the
  * agent is described as it describes itself, exactly as before.
+ *
+ * TYPED FROM THE ROUTE'S OWN DECLARATION, not restated here. The page's account
+ * type (HostedControls.tsx) does not name the field, so this read is
+ * structural; a shape spelled out here would let the route rename the field
+ * with tsc green and NOT RUNNING silently never shown. Picked from
+ * `AgentStatus`, a rename fails to compile.
  */
 export function workerSilentSince(
-  status: { workerStale?: boolean | null; workerAliveAt?: number | null } | null | undefined,
+  status: Pick<AgentStatus, "workerStale" | "workerAliveAt"> | null | undefined,
 ): number | null {
   if (status?.workerStale !== true) return null;
   return beatSeconds(status.workerAliveAt);
