@@ -90,7 +90,7 @@ const LINK_FIELDS = new Set(["label", "href"]);
  * C0 and C1 controls, DEL, and the bidi embedding/override/isolate marks.
  * The body may carry a line feed; nothing else in this set is ever text.
  */
-const FORBIDDEN = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/;
+const FORBIDDEN = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
 
 /**
  * An instant with its zone written out. `2026-10-05 18:00` is refused: the

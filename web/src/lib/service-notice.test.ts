@@ -119,7 +119,7 @@ describe("a bad field turns the banner off", () => {
   });
 
   it("refuses control and bidi-override characters, and a line break in a one-line field", () => {
-    refused(env({ title: "Paused‮esumed" }), /title contains a control character/);
+    refused(env({ title: "Paused\u202eesumed" }), /title contains a control character/);
     refused(env({ body: "bell\u0007" }), /body contains a control character/);
     refused(env({ title: "two\nlines" }), /title contains a control character/);
     refused(env({ links: [{ label: "a\nb", href: "https://merrymen.dev/" }] }), /label contains a control character/);
@@ -260,5 +260,35 @@ describe("tradingPaused is wording", () => {
       'import "./service-notice.css";',
       "<ServiceNotice />",
     ]);
+  });
+});
+
+describe("the check's own source hides nothing", () => {
+  it("writes every invisible, bidi, control or separator character as a \\u escape", () => {
+    // The validator refuses these in a notice, so its source must not carry
+    // one either: written literally they are invisible in an editor, an
+    // unterminated override reorders how the rest of its line displays in a
+    // diff, and a reviewer cannot see which characters the check refuses.
+    // The same classes as the MCP source guard in mcp/catalog.test.ts, which
+    // does not walk these files, written as property classes so this file
+    // cannot itself carry one.
+    const HIDDEN = /(?![\t\n\r])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+    const files = [
+      "web/src/lib/service-notice.ts",
+      "web/src/lib/service-notice.test.ts",
+      "web/src/app/api/service-notice/route.ts",
+      "web/src/app/api/service-notice/route.test.ts",
+      "web/src/terminal/ServiceNotice.tsx",
+      "web/src/terminal/ServiceNotice.test.ts",
+      "web/src/terminal/service-notice.css",
+    ];
+    const offenders = files.flatMap((f) => {
+      const source = readFileSync(path.join(process.cwd(), f), "utf8");
+      return [...source.matchAll(HIDDEN)].map((m) => {
+        const line = source.slice(0, m.index).split("\n").length;
+        return `${f}:${line} U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`;
+      });
+    });
+    assert.deepEqual(offenders, []);
   });
 });
