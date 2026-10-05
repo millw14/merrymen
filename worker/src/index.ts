@@ -13923,7 +13923,8 @@ async function main() {
   // between them; and never on strategyNote, which is the owner's event feed.
   const tgTally = makeChatTally(telegramLog, () => Math.floor(Date.now() / 1000));
 
-  startTelegram({
+  // Kept for the SIGTERM handler below, which stops the poll on the way out.
+  const telegramPoll = startTelegram({
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
     // and the very next message must see it — the tick-refreshed `cfg` snapshot
     // lags up to tickSeconds, which reads as "linked, then not authorized".
@@ -14268,7 +14269,13 @@ async function main() {
    *      from here on, with a row that says so (worker-admission.ts);
    *   2. the clock stops — no tick starts on the way out, and no order file is
    *      claimed only to be refused; it stays for the next process
-   *      (command-wake.ts stop);
+   *      (command-wake.ts stop). The Telegram poll stops with it: no new
+   *      getUpdates is asked, so an owner's /kill or order sent now waits
+   *      unconsumed for the next process instead of being taken by this one
+   *      and refused. A long poll already out still returns and is handled
+   *      (telegram/service.ts checks its stop between polls, not within one):
+   *      an order in it is refused `draining` and its row written, but the
+   *      reply after it is not waited for — the poll's handlers are not a tick;
    *   3. the intent chain is waited for, at most DRAIN_INTENT_CHAIN_MS: a trade
    *      already broadcast reads its receipt and writes its row; one not yet
    *      sent is refused at its broadcast (`draining`, asked again there — see
@@ -14297,6 +14304,7 @@ async function main() {
     draining = true;
     console.log(`[worker] SIGTERM — draining: nothing new starts; waiting up to ${DRAIN_INTENT_CHAIN_MS / 1000}s for the trade already on the chain`);
     tickClock.stop();
+    telegramPoll.stop();
     void drainIntentChain({
       tail: () => intentChain,
       tick: () => tickClock.settled(),
