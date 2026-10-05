@@ -246,6 +246,23 @@ describe("where the deployment does not run Fomo, the chat is as it was", () => 
   });
 });
 
+describe("a change-settings card where the deployment does not run Fomo", () => {
+  const proposing = (changes: string) => `Here it is.\n<<CMD change-settings ${JSON.stringify({ changes })}>>`;
+  it("offers no Fomo switch; the other changes are kept; a Fomo-only proposal is none", async () => {
+    const mixed = await ask("turn on fomo following and stop loss 8%", {}, proposing("fomoFollowEnabled=on; strategistStopLossBps=8%"));
+    assert.equal(mixed.out.command?.id, "change-settings");
+    assert.doesNotMatch(String(mixed.out.command?.args.changes), /fomo/i);
+    assert.match(String(mixed.out.command?.args.changes), /strategistStopLossBps=8%/);
+    const only = await ask("act on fomo research", {}, proposing("act on fomo research on"));
+    assert.equal(only.out.command, undefined, "nothing left to approve");
+    assert.equal(only.out.reply, "Here it is.");
+    const on = await ask("act on fomo research", { fomoSettings: true }, proposing("fomoFollowEnabled=on"));
+    assert.equal(on.out.command?.args.changes, "fomoFollowEnabled=on", "where Fomo runs, exactly as proposed");
+    const plain = await ask("stop loss 8%", {}, proposing("strategistStopLossBps=8%"));
+    assert.equal(plain.out.command?.args.changes, "strategistStopLossBps=8%", "no Fomo switch named: untouched");
+  });
+});
+
 describe("a Fomo turn's deterministic answer, at the edges", () => {
   it("a cancelled request gets no completion, as for recovery", async () => {
     const ac = new AbortController();

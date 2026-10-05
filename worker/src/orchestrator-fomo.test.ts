@@ -1600,6 +1600,9 @@ describe("the orchestrator's wiring", () => {
     const run = code.slice(code.indexOf("async function runFomoPass("));
     assert.ok(/const rt = await fomoRuntimeNow\(boot\);/.test(run.slice(0, 400)), "runFomoPass is the caller");
     assert.equal(count(/runFomoPass\(/g), 2, "declared once, started once");
+    // Said once at boot, so a halted fleet (nothing spawns, no pass runs) still says whether Fomo is on.
+    const boot = code.slice(code.indexOf("export async function runOrchestrator("));
+    assert.ok(/log\(`starting — home[^\n]*\n\s*fomoBootNow\(\);/.test(boot), "fomoBootNow right after the starting line");
     const start = code.slice(code.indexOf("function startFomoPass("), code.indexOf("async function runFomoPass("));
     assert.ok(/const boot = fomoBootNow\(\);\s*if \(boot\.off\) return;[\s\S]*runFomoPass\(boot\)/.test(start), "started only after the off check");
     // fomo.json: written only by the pass the runtime feeds.
@@ -1644,6 +1647,12 @@ describe("the orchestrator's wiring", () => {
     assert.match(keyless.lines.join(" "), /without a provider key/);
     assert.equal(fomoSetup({ ...ON, MERRYMEN_FOMO_PLAN_CREDITS: "lots" }).planCredits, undefined);
     assert.ok(!JSON.stringify([on.lines, keyless.lines]).includes(KEY), "a boot line carries the key");
+    // A key pasted into the switch is never written to the log.
+    const pasted = fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_ENABLED: KEY });
+    assert.equal(pasted.off, true);
+    assert.ok(!pasted.lines.join(" ").includes(KEY.slice(0, 6)), "not even its first characters");
+    assert.match(pasted.lines.join(" "), new RegExp(`${KEY.length}-character value`));
+    assert.match(fomoSetup({ MERRYMEN_FOMO_ENABLED: "true" }).lines.join(" "), /is "true", and only "1" turns it on/);
     // OPT-IN. A deployment that never set the switch — even one holding the
     // shared database AND a provider key — runs no pass.
     for (const value of [undefined, "", " ", "true", "yes", "on", "01", "1 "]) {

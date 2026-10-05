@@ -9018,9 +9018,16 @@ function fomoStillOurs(tenant: string): boolean {
  */
 export function fomoSetup(env: Record<string, string | undefined> = process.env): FomoBoot {
   if (env.MERRYMEN_FOMO_ENABLED !== "1") {
-    const why = env.MERRYMEN_FOMO_ENABLED === undefined || env.MERRYMEN_FOMO_ENABLED.trim() === ""
+    // The value is echoed only when it is one of the words an operator means
+    // as a switch: anything else (a key pasted into the wrong variable, say)
+    // is described by its length, never written to the log.
+    const raw = env.MERRYMEN_FOMO_ENABLED;
+    const said = raw === undefined ? "" : raw.trim();
+    const why = said === ""
       ? "opt-in; set MERRYMEN_FOMO_ENABLED=1 to run the research pass"
-      : `MERRYMEN_FOMO_ENABLED is ${JSON.stringify(env.MERRYMEN_FOMO_ENABLED.slice(0, 16))}, and only "1" turns it on`;
+      : /^(?:0|1|true|false|yes|no|on|off)$/i.test(said)
+        ? `MERRYMEN_FOMO_ENABLED is ${JSON.stringify(said)}, and only "1" turns it on`
+        : `MERRYMEN_FOMO_ENABLED is set to a ${raw!.length}-character value that is not "1", so it is off`;
     return { off: true, lines: [`fomo: off — ${why}`], apiKey: null, planCredits: undefined };
   }
   if (!env.DATABASE_URL) {
@@ -9617,6 +9624,10 @@ export async function runOrchestrator(): Promise<void> {
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing
+  // spawns and no pass runs, and the operator should still read whether it
+  // is on (docs/fomo.md). Reads the environment and logs; nothing else.
+  fomoBootNow();
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror

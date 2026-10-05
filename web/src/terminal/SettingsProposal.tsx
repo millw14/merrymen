@@ -22,7 +22,7 @@
  * the same PUT /api/settings the Save button does, with only these keys, bound
  * to this owner, so every bound the route enforces still applies.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PROPOSAL_PARAM,
   buildProposal,
@@ -96,8 +96,14 @@ export function SettingsProposal(props: SettingsProposalProps) {
   const [applied, setApplied] = useState<string[]>([]);
 
   // THE AGENT'S LINK, ONCE, after the saved values are in hand: a diff against
-  // defaults would show changes that are not changes.
+  // defaults would show changes that are not changes. And once the page knows
+  // whether this deployment runs Fomo (`fomo` null is not yet known): read
+  // before that, a link's Fomo switches would be shown for approval where
+  // they do nothing.
+  const linkRead = useRef(false);
   useEffect(() => {
+    if (linkRead.current || props.fomo === null) return;
+    linkRead.current = true;
     let param: string | null = null;
     try {
       param = new URLSearchParams(window.location.search).get(PROPOSAL_PARAM);
@@ -109,7 +115,7 @@ export function SettingsProposal(props: SettingsProposalProps) {
     setFromLink(true);
     setProposal(buildProposal(changes, current, { symbols: props.symbols, hosted: props.hosted }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [props.fomo]);
 
   const understand = () => {
     setError(null);

@@ -1,7 +1,7 @@
 /** Shared narration for the dashboard and consented partner integrations. */
 import Anthropic from "@anthropic-ai/sdk";
 import { fitChatState } from "./chat-state";
-import { ENERGY, SETTINGS_CATALOG, conceptsFor, llmProviderById, renderConcepts, type EnergyStatus } from "../../../packages/core/src/index";
+import { ENERGY, SETTINGS_CATALOG, conceptsFor, llmProviderById, renderConcepts, understandSettingsText, type EnergyStatus } from "../../../packages/core/src/index";
 import { COMMAND_SPEC, splitCommand } from "./chat-commands";
 import { sseEvent, streamSafe } from "./chat-stream";
 import { count } from "./format";
@@ -568,9 +568,29 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
 }
 
 /** The complete reply, split: the words, and the proposal only if it ends them. */
-function finishReply(raw: string): AgentReply {
+function finishReply(raw: string, fomoSettings = false): AgentReply {
   const { reply, command } = splitCommand(raw);
-  return { reply: reply || null, ...(command ? { command } : {}) };
+  const kept = command && !fomoSettings ? withoutFomoChanges(command) : command;
+  return { reply: reply || null, ...(kept ? { command: kept } : {}) };
+}
+
+/**
+ * A change-settings proposal WITHOUT THE FOMO SWITCHES, where this deployment
+ * does not run Fomo: the card and its ?propose= link are built in the browser
+ * from these words (chat-commands.ts), and a switch that does nothing here —
+ * "act on Fomo research" among them — must not be offered for approval. The
+ * other changes are kept, re-read the same way the card reads them; a
+ * proposal that was only Fomo switches is no proposal. Any other command, or
+ * one naming no Fomo switch, is returned exactly as it was.
+ */
+function withoutFomoChanges(command: NonNullable<ReturnType<typeof splitCommand>["command"]>): typeof command | undefined {
+  if (command.id !== "change-settings") return command;
+  const read = understandSettingsText(String(command.args.changes ?? "").slice(0, 600));
+  if (!read.some((c) => /^fomo/i.test(c.key))) return command;
+  const rest = read.filter((c) => !/^fomo/i.test(c.key));
+  if (!rest.length) return undefined;
+  const changes = rest.map((c) => `${c.key}=${c.raw ?? String(c.value)}`).join("; ");
+  return { ...command, args: { ...command.args, changes } };
 }
 
 export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}, signal?: AbortSignal): Promise<AgentReply> {
@@ -580,7 +600,7 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
     if ("early" in prepared) return prepared.early;
     const raw = (await (options.complete ?? llmText)(prepared.creds, prepared.request)).trim();
     if (prepared.fomo) return finishFomoReply(raw, prepared.fomo);
-    const result = finishReply(raw);
+    const result = finishReply(raw, options.fomoSettings === true);
     return result.reply ? result : recoveryFallback(options, signal) ?? result;
   } catch (e) {
     // A Fomo turn already has an honest answer written by code; a failed model
@@ -742,7 +762,7 @@ export async function agentReplyResponse(
           if (final.length > shown.length && final.startsWith(shown)) send(sseEvent("text", { t: final.slice(shown.length) }));
           send(sseEvent("done", done));
         } else {
-          const result = finishReply(full.trim());
+          const result = finishReply(full.trim(), options.fomoSettings === true);
           send(sseEvent("done", result.reply ? result : recoveryFallback(options, stop.signal) ?? result));
         }
       } catch (e) {
