@@ -571,3 +571,35 @@ it("A MIRROR PASS STILL IN HAND WHEN THE LEASES GO: no lease is given up by hand
     setTenantLeaseForTest(b, null);
   }
 });
+
+it("UNDER FLEET_HALT THE DRAIN COPIES NOTHING: no ledger batch, no memory row, as every other halt path", async () => {
+  const tenant = address(0xe71), account = address(0xe72), released = { n: 0 };
+  const { home } = await book(tenant, account);
+  writeFileSync(path.join(home, "tg-groups.json"), groups("stored before the halt"));
+  await publishTgGroups({ tenant, home, shared, dek, seen: new Map(), log: () => {} });
+  writeFileSync(path.join(home, "tg-groups.json"), groups("written while the halt was on"));
+  await getGrantStore().put(tenant, grant(account));
+  const proc = new FakeProc(81_041);
+  watched = [proc];
+  adoptChildForTest(tenant, account, proc, lease(tenant, released));
+  // Made by an operator a moment before the redeploy: honourFleetHalt has
+  // not yet had its pass, so the child is still running when SIGTERM comes.
+  const halt = path.join(fleet, "FLEET_HALT");
+  writeFileSync(halt, "", { mode: 0o600 });
+  try {
+    await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+
+    assert.deepEqual(proc.signals, ["SIGTERM"], "the fleet is still stopped");
+    assert.equal(await sharedTrades(account), 0, "no ledger batch written under the halt");
+    assert.equal(existsSync(marker(home)), false, "and no copy begun, so no barrier");
+    const stored = await storedGroups(tenant);
+    assert.ok(stored.includes("stored before the halt") && !stored.includes("written while the halt was on"), "no memory row either");
+    assert.ok(said.some((l) => l.includes(`${tenant}: FLEET_HALT is present — no final pass`)));
+    assert.deepEqual(receipt().finalPass, { homes: 1, saved: 0, retained: 0, skipped: 1, outOfTime: 0 });
+    assert.equal(released.n, 1, "the lease still goes, as honourFleetHalt lets it go");
+    assert.deepEqual(exits, [0]);
+  } finally {
+    rmSync(halt, { force: true });
+    await getGrantStore().remove(tenant);
+  }
+});
