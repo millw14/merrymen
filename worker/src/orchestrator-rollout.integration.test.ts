@@ -48,9 +48,10 @@ process.env.MERRYMEN_STORE_DEK = dek.toString("base64");
 
 const {
   adoptHolderForTest, childEnv, childHome, hasLeaseForTest, honourPendingKills, isHeldForTest, isRetiringExpiredForTest,
-  reconcile, rolloutCountsForTest, runOrchestrator, setKillConfirmForTest, setLeaseAcquireForTest, setPaperRestoreForTest,
-  setRetirementMemoryStoreForTest, setSpawnForTest,
+  reconcile, rolloutCountsForTest, runOrchestrator, setFleetHeartbeatDbForTest, setKillConfirmForTest, setLeaseAcquireForTest,
+  setPaperRestoreForTest, setRetirementMemoryStoreForTest, setSpawnForTest, writeOrchestratorHeartbeatForTest,
 } = await import("./orchestrator");
+const { readFleetHeartbeats } = await import("./fleet-heartbeat");
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore, useSettingsStoreForTest } = await import("./settings-store");
 const { writeKillRequest } = await import("./kill-request");
@@ -316,6 +317,19 @@ describe("a tenant the rollout does not admit", () => {
     assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 1 });
     assert.equal(spawnedFor(a)[0]?.env.MERRYMEN_ADMISSION_LEVEL, "trade");
     assert.equal(spawnedFor(b).length, 0);
+    // And the heartbeat row publishes those counts under the scope's name, as
+    // the `fleet| rollout` line says them: never a tenant.
+    const raw = new DatabaseSync(":memory:");
+    setFleetHeartbeatDbForTest(wrapSqlite(raw));
+    try {
+      assert.equal(await writeOrchestratorHeartbeatForTest(true), true);
+      const [h] = await readFleetHeartbeats(wrapSqlite(raw), nowSec() + 1);
+      assert.deepEqual(h!.rollout, { scope: "3 named", levels: { trade: 1, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 1 } });
+      assert.doesNotMatch(JSON.stringify(h), /0x[0-9a-f]{40}/i);
+    } finally {
+      setFleetHeartbeatDbForTest(null);
+      raw.close();
+    }
   });
 });
 

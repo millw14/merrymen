@@ -23,6 +23,7 @@ import {
   rolloutLevel,
   rolloutLine,
   rolloutStartupLine,
+  rolloutSummary,
   WORKER_ENFORCED_LEVELS,
 } from "./fleet-rollout";
 import { onRailway, RAILWAY_ONLY_IDENTITY } from "./deploy-guard-checks";
@@ -224,6 +225,16 @@ describe("what the readers make of it", () => {
 
   it("a pass that could not read the roster says so, and repeats no older figure", () => {
     assert.equal(rolloutLine(null, env("none")), "fleet| rollout none — the last pass could not read the roster");
+  });
+
+  it("the heartbeat row carries the line's scope and counts, and never a tenant", () => {
+    const e = env(`${A}:trade,${B}:observe,${D}:exits-only`);
+    const summary = rolloutSummary(rolloutCounts([A, B, C], e), e);
+    assert.deepEqual(summary, { scope: "3 named", levels: { trade: 1, "exits-only": 0, observe: 1, held: 1, expired: 0, absent: 1 } });
+    assert.doesNotMatch(JSON.stringify(summary), /0x/i);
+    assert.deepEqual(rolloutSummary(null, env("none")), { scope: "none", levels: {} }, "uncounted is no levels, never zeros");
+    assert.equal(rolloutSummary(null, env(undefined)).scope, "all (unset off Railway)");
+    assert.equal(rolloutSummary(null, env("halt")).scope, "REFUSED");
   });
 
   it("the startup line says the scope that took", () => {

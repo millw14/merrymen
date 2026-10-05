@@ -129,6 +129,7 @@ import {
   rolloutHeld,
   rolloutLine,
   rolloutStartupLine,
+  rolloutSummary,
   type RolloutCounts,
 } from "./fleet-rollout";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
@@ -5984,10 +5985,13 @@ async function writeOrchestratorHeartbeat(create: boolean): Promise<boolean> {
       startedAt: boot.startedAt,
       beatAt: nowSec,
       halted: haltRequested(),
-      // No rollout scope in this build: every tenant the gates admit is
-      // admitted. The rollout (MERRYMEN_FLEET_ROLLOUT) reports its level
-      // counts here once it lands.
-      rollout: null,
+      // WHO THE ROLLOUT ADMITS, AT WHAT LEVEL: the scope's name and the last
+      // reconcile's counts, as the `fleet| rollout` line says them
+      // (fleet-rollout.ts) — counts only, never the tenants it names. Before
+      // the first reconcile has counted (a fleet halted since boot never
+      // does), the scope with no levels, so a check can still expect `none`
+      // to run nobody.
+      rollout: rolloutSummary(lastRolloutCounts),
       counts,
       lastShutdown: boot.lastShutdown,
     },

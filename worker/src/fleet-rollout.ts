@@ -307,6 +307,17 @@ export function rolloutLine(counts: RolloutCounts | null, env: Env = process.env
   );
 }
 
+/**
+ * The same, for the heartbeat row (fleet-heartbeat.ts RolloutSummary): the
+ * scope's name and the last pass's count per level, never a tenant. Null
+ * counts still publish the scope, with no levels: the scope is what an outside
+ * check needs to expect a fleet that runs nobody, and an empty `levels` is
+ * "not counted", never zeros.
+ */
+export function rolloutSummary(counts: RolloutCounts | null, env: Env = process.env): { scope: string; levels: Record<string, number> } {
+  return { scope: scopeName(env), levels: counts ? { ...counts } : {} };
+}
+
 /** Said once at boot, so the operator who redeployed sees the scope took. */
 export function rolloutStartupLine(rollout: FleetRollout): string {
   if (rollout.scope === "none") {

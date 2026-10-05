@@ -215,11 +215,12 @@ describe("one orchestrator beat: what the row says about this process", () => {
 
   /** A home of its own, so FLEET_HALT here is nobody else's, and a database the beat is pointed at. */
   async function withBeat(fleet: (raw: DatabaseSync) => void, run: (raw: DatabaseSync) => Promise<void>) {
-    const saved = { home: process.env.MERRYMEN_HOME, sha: process.env.RAILWAY_GIT_COMMIT_SHA };
+    const saved = { home: process.env.MERRYMEN_HOME, sha: process.env.RAILWAY_GIT_COMMIT_SHA, rollout: process.env.MERRYMEN_FLEET_ROLLOUT };
     const home = mkdtempSync(path.join(tmpdir(), "mm-orch-beat-"));
     const raw = new DatabaseSync(":memory:");
     process.env.MERRYMEN_HOME = home;
     process.env.RAILWAY_GIT_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
+    process.env.MERRYMEN_FLEET_ROLLOUT = "none";
     try {
       fleet(raw);
       setFleetHeartbeatDbForTest(wrapSqlite(raw));
@@ -232,6 +233,8 @@ describe("one orchestrator beat: what the row says about this process", () => {
       else process.env.MERRYMEN_HOME = saved.home;
       if (saved.sha === undefined) delete process.env.RAILWAY_GIT_COMMIT_SHA;
       else process.env.RAILWAY_GIT_COMMIT_SHA = saved.sha;
+      if (saved.rollout === undefined) delete process.env.MERRYMEN_FLEET_ROLLOUT;
+      else process.env.MERRYMEN_FLEET_ROLLOUT = saved.rollout;
     }
   }
 
@@ -251,7 +254,7 @@ describe("one orchestrator beat: what the row says about this process", () => {
       assert.equal(h!.role, "orchestrator");
       assert.equal(h!.halted, true);
       assert.equal(h!.commit, "0123456789abcdef0123456789abcdef01234567");
-      assert.equal(h!.rollout, null, "no rollout in this build");
+      assert.deepEqual(h!.rollout, { scope: "none", levels: {} }, "the rollout's scope, with no levels before a reconcile has counted");
       const c = h!.counts as Record<string, any>;
       assert.equal(c.agents, 1);
       assert.deepEqual([c.children, c.holders], [0, 0], "this replica runs nothing for anyone here");
