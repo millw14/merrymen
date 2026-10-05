@@ -157,8 +157,10 @@ boot burst before), the run is also recorded in Postgres: Railway → Postgres
 `created_at_ms`; its `run` column is the run digest, and `entries_json` holds
 every line.
 
-What this halted boot does write: the preview's run row, and the resume and
-receipt tables it creates on first use (empty, additive DDL). And, as every
+What this halted boot does write: the preview's run row, and the tables and
+columns it creates on first use (the resume tables, the control receipts and
+`tenant_telegram.paused_at`: empty, additive DDL that the orchestrator would
+create on its first pass anyway). And, as every
 orchestrator boot does even under `FLEET_HALT`, it carries out any owner
 `/kill` request already waiting in a home (`honourPendingKills`), which
 removes that owner's grant and tells them; that is the owner's own request.

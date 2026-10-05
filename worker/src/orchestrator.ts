@@ -84,7 +84,7 @@ import {
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
-import { CONTROLS_ARMED_FILE, LEGACY_EVENTS_BOT, armOwnerControls, readControlsEvidence } from "./recovery-reply-arm";
+import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, readControlsEvidence } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
@@ -11030,7 +11030,15 @@ async function runResumeAdmissionControls(c: { preview: ResumePreviewScope | nul
   try {
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
     await ensureLedgerResumeSchema(shared);
-    if (c.preview) await runResumePreview(shared, c.preview);
+    if (c.preview) {
+      // What the preview's `startsPaused` reads (the receipts and
+      // tenant_telegram.paused_at) exists before any arm has created it: the
+      // same additive DDL the arm and every mirror pass run, so a halted boot
+      // reports what is on record rather than "unknown".
+      await shared.exec(CONTROL_RECEIPTS_SCHEMA);
+      await ensureTelegramSchema(shared);
+      await runResumePreview(shared, c.preview);
+    }
     await revokeResumeApprovals(shared, c.revokes, Date.now(), log);
     await applyResumeApprovals(shared, c.approvals, Date.now(), log);
   } catch (e) {
