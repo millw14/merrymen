@@ -143,6 +143,21 @@ describe("the recovery hold is not retirement", () => {
     assert.equal(isRetired(quiet, NOW), false);
     assert.equal(notRunning(quiet, NOW), false);
   });
+
+  it("an account still beating is judged by the ordinary rules: one whose key lapsed is folded", () => {
+    // A worker restarted inside the window, whose key then lapsed. It is not
+    // the hold's doing, so it is not kept as an unlabelled row for a day and
+    // relabelled "Not running" after it — it is over, as it was before.
+    const inside = INCIDENT_WINDOW.untilSec - HOUR;
+    const now = inside + HOUR;
+    for (const over of [{ status: "expired" }, { expiresAt: inside }, { status: "expired", held: true }]) {
+      const restarted = agent({ beatAt: inside, ...over });
+      assert.equal(isRetired(restarted, now), true, JSON.stringify(over));
+      assert.equal(notRunning(restarted, now), false, JSON.stringify(over));
+    }
+    // And in milliseconds, the same.
+    assert.equal(isRetired(agent({ status: "expired", beatAt: inside * 1000 }), now), true);
+  });
 });
 
 describe("the board folds retired agents into a count", () => {

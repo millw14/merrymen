@@ -130,7 +130,13 @@ export function isRetired(a: AgentLifecycle, nowSec: number): boolean {
   // beating stopped because the hold stopped it. Either way the row stays and
   // reads "Not running" — the count of retired accounts is for agents that
   // are over, and these are not.
-  if (silencedByHold(a)) return false;
+  //
+  // SILENT ones only — the same test that labels the row. An account still
+  // beating is not one the hold has stopped, whatever its evidence says, so it
+  // is judged by the ordinary rules below: a worker restarted mid-window whose
+  // key then lapses is folded as expired, as it was before, rather than kept
+  // as an unlabelled row for a day and labelled "Not running" after it.
+  if (notRunning(a, nowSec)) return false;
 
   // OVER IS OVER, whatever the heartbeat says. `expiresAt` is checked as well
   // as the status because the worker only ever retires the grant it loaded: a
