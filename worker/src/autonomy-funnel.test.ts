@@ -7,8 +7,12 @@
  * read as a refusal, and every quiet review filed as an unreported hold.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
   AUTONOMY_HOLDS_SQL,
   RAIL_NO_WORKER,
@@ -23,10 +27,11 @@ import {
   railOfTrade,
   railsLine,
   stageOf,
+  type RefusalStage,
 } from "./autonomy-funnel";
 import { PRIVATE_REVIEW_SOURCE, RESEARCH_UNAVAILABLE_SOURCE, REVIEW_SOURCE } from "./market-review";
 
-describe("stageOf: the owner's wall, or the house's own execution", () => {
+describe("stageOf: the owner's wall, the market, or the house's own execution", () => {
   it("every gas and key-install refusal is execution, prefund included", () => {
     for (const rule of [
       "gas-absurd", "gas-unstable", "gas-unreadable", "gas-paymaster-unexpected",
@@ -43,10 +48,150 @@ describe("stageOf: the owner's wall, or the house's own execution", () => {
     }
   });
 
-  it("the wall's own refusals, and the market's, are the wall", () => {
-    for (const rule of ["no-exit", "grant-too-wide", "daily-cap", "per-trade-cap", "no-route", "scout-budget", ""]) {
+  it("no ETH, no signer, a venue it cannot build for, and every failure before submit are execution", () => {
+    for (const rule of [
+      "no-gas", "no-executor", "router-migrated", "no-rialto-key", "no-curve-adapter",
+      // index.ts writes exactly this: the words, then up to 80 of the error's.
+      "couldn't submit: bundler: AA21 didn't pay prefund",
+      "couldn't submit: HTTP request failed. Status: 502",
+      "fence-recipient", "paper: paper cash short of the buy", "review: no price for NVDA",
+    ]) {
+      assert.equal(stageOf(rule), "exec", rule);
+    }
+  });
+
+  it("the market's refusals are the market's: after the wall said yes, never the wall", () => {
+    for (const rule of [
+      "no-route", "no-quote", "no-liquidity", "slippage", "curve-graduated", "insufficient-balance",
+      "impact-cap", "impact-unknown", "energy-no-quote", "energy-tax", "energy-tax-unreadable",
+    ]) {
+      assert.equal(stageOf(rule), "market", rule);
+    }
+  });
+
+  it("the wall's own refusals, on-chain ones and the rail's included, are the wall", () => {
+    for (const rule of [
+      "no-exit", "grant-too-wide", "daily-cap", "per-trade-cap", "scout-budget",
+      "wall-refused", "spend-cap", "quote-not-approved", "no-cash", "live-not-enabled", "",
+    ]) {
       assert.equal(stageOf(rule), "wall", rule);
     }
+  });
+});
+
+/**
+ * EVERY REFUSAL ITS PRODUCERS CAN WRITE IS PLACED ON PURPOSE.
+ *
+ * Read from the producers' source, not restated, so the one way this can go
+ * wrong — the executor learning a new refusal that then falls silently onto
+ * the owner's wall — fails here the day it is written. Placing it is a
+ * one-line decision in autonomy-funnel.ts and one line below.
+ */
+describe("stageOf: every refusal its producers write is placed on purpose", () => {
+  const SRC = path.dirname(fileURLToPath(import.meta.url));
+  const read = (rel: string) => readFileSync(path.join(SRC, rel), "utf8");
+  const quoted = (s: string) => [...s.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+  /** The string literals of a union type, read off the AST: its members carry comments with `;` and `|` in them. */
+  const unionOf = (src: string, name: string) => {
+    const file = ts.createSourceFile(`${name}.ts`, src, ts.ScriptTarget.Latest, true);
+    const alias = file.statements.find((s): s is ts.TypeAliasDeclaration => ts.isTypeAliasDeclaration(s) && s.name.text === name);
+    assert.ok(alias && ts.isUnionTypeNode(alias.type), `${name} is still a union of literals`);
+    return alias.type.types
+      .filter((t): t is ts.LiteralTypeNode => ts.isLiteralTypeNode(t) && ts.isStringLiteral(t.literal))
+      .map((t) => (t.literal as ts.StringLiteral).text);
+  };
+  const placed = (where: string, rules: Iterable<string>, expect: (rule: string) => RefusalStage) => {
+    const all = [...rules];
+    assert.ok(all.length > 0, `${where}: the producer was found and read`);
+    for (const rule of all) assert.equal(stageOf(rule), expect(rule), `${where} writes "${rule}"`);
+  };
+
+  // Booked on rows that WENT OUT (status reverted or dropped), which the funnel
+  // counts as sent: never asked for a stage.
+  const SENT_ROW_RULES = new Set(["reverted on-chain (resolved)", "dropped: a later op used its nonce (resolved)"]);
+
+  it("index.ts: every literal it books as reject_rule, and every class-vault refusal", () => {
+    const index = read("index.ts");
+    const literals = new Set<string>();
+    for (const m of index.matchAll(/reject_rule:([^,\n]*)/g)) for (const q of quoted(m[1]!)) literals.add(q);
+    for (const m of index.matchAll(/\brefuse\(\s*"([a-z][a-z0-9-]*)",/g)) literals.add(m[1]!);
+    const PLACED: Record<string, RefusalStage> = {
+      "transfer-daily-cap": "wall",
+      "energy-needs-live": "wall",
+      "energy-not-granted": "wall",
+      "no-executor": "exec",
+      "no-gas": "exec",
+      "not-recorded": "exec",
+      "router-migrated": "exec",
+      "no-rialto-key": "exec",
+      "no-curve-adapter": "exec",
+      "class-side-ambiguous": "exec",
+      "class-legs-unconfirmed": "exec",
+      "class-vault-unreadable": "exec",
+      "class-sell-needs-vault": "exec",
+      "no-class-vault": "exec",
+      "no-route": "market",
+      "no-quote": "market",
+      "impact-unknown": "market",
+      "energy-no-quote": "market",
+      "energy-tax": "market",
+      "energy-tax-unreadable": "market",
+    };
+    const refusals = [...literals].filter((r) => !SENT_ROW_RULES.has(r));
+    for (const rule of refusals) {
+      assert.ok(rule in PLACED, `index.ts books "${rule}" as a refusal and nobody has placed it: add it to stageOf's vocabulary (or leave it on the wall) on purpose`);
+    }
+    placed("index.ts", refusals, (rule) => PLACED[rule]!);
+  });
+
+  it("index.ts: its free-text refusals start with words stageOf knows", () => {
+    const index = read("index.ts");
+    const prefixes = new Set([...index.matchAll(/reject_rule:\s*`([^`$]*)\$\{/g)].map((m) => m[1]!));
+    assert.deepEqual([...prefixes].sort(), ["fence-", "paper: ", "review: "]);
+    assert.match(index, /`couldn't submit: \$\{/, "every failure before submit is booked under these words");
+    for (const p of [...prefixes, "couldn't submit: "]) assert.equal(stageOf(`${p}anything`), "exec", p);
+  });
+
+  it("policy.ts: every rule the wall writes is the wall", () => {
+    const policy = read("policy.ts");
+    const rules = new Set<string>();
+    for (const m of policy.matchAll(/\brule\s*:([^,\n}]*)/g)) for (const q of quoted(m[1]!)) rules.add(q);
+    placed("policy.ts", rules, () => "wall");
+  });
+
+  it("the rail's refusals: the owner's setup is the wall, a live leg with nothing to send through is execution", () => {
+    const rules = unionOf(read("../../packages/core/src/autonomy.ts"), "RefuseRule");
+    placed("RefuseRule", rules, (rule) => (rule === "no-gas" || rule === "no-executor" ? "exec" : "wall"));
+  });
+
+  it("the gas checks and the sponsor are execution, wherever they are written", () => {
+    const gas = read("gas-limits.ts");
+    const gasRules = new Set<string>();
+    for (const m of gas.matchAll(/\brule\s*:([^,\n};]*)/g)) for (const q of quoted(m[1]!)) gasRules.add(q);
+    placed("gas-limits.ts", gasRules, () => "exec");
+    placed("executor.ts", new Set([...read("executor.ts").matchAll(/new GasRefused\(\s*"([^"]+)"/g)].map((m) => m[1]!)), () => "exec");
+    placed("paymaster.ts", new Set([...read("paymaster.ts").matchAll(/"(sponsor-[a-z-]+)"/g)].map((m) => m[1]!)), () => "exec");
+  });
+
+  it("every revert class, since an estimate or a suppression can book any of them as a refusal", () => {
+    const PLACED: Record<string, RefusalStage> = {
+      slippage: "market",
+      "insufficient-balance": "market",
+      "no-liquidity": "market",
+      "curve-graduated": "market",
+      // The session key's own policy, and the vault's sealed caps: the wall, on chain.
+      "wall-refused": "wall",
+      "spend-cap": "wall",
+      "quote-not-approved": "wall",
+      allowance: "exec",
+      prefund: "exec",
+      deadline: "exec",
+      "curve-unsupported": "exec",
+      unclassified: "exec",
+    };
+    const classes = unionOf(read("revert.ts"), "RevertClass");
+    for (const rule of classes) assert.ok(rule in PLACED, `revert.ts gained the class "${rule}": place it`);
+    placed("revert.ts", classes, (rule) => PLACED[rule]!);
   });
 });
 
@@ -56,9 +201,21 @@ describe("railOfTrade: the row says its rail wherever it can", () => {
     for (const status of ["submitted", "landed", "reverted", "dropped"]) assert.equal(railOfTrade(status, "", "paper"), "live");
   });
 
-  it("an execution refusal is live: only the live rail builds an operation", () => {
+  it("an execution or market refusal is live: only the live rail builds an operation or asks a venue", () => {
     assert.equal(railOfTrade("rejected", "gas-absurd", "paper"), "live");
     assert.equal(railOfTrade("rejected", "sponsor-refused", null), "live");
+    assert.equal(railOfTrade("rejected", "couldn't submit: bundler down", "live"), "live");
+    assert.equal(railOfTrade("rejected", "no-route", "live"), "live");
+    // An agent out of ETH publishes `idle` (exec-mode.ts) — it asked for the
+    // live rail and its live leg is the one that failed.
+    assert.equal(railOfTrade("rejected", "no-gas", "idle"), "live");
+  });
+
+  it("the simulator refusing a fill is the paper rail's, and the broker's review follows the agent", () => {
+    assert.equal(railOfTrade("rejected", "paper: paper cash short of the buy", "paper"), "paper");
+    assert.equal(railOfTrade("rejected", "paper: paper cash short of the buy", "live"), "paper");
+    assert.equal(railOfTrade("rejected", "review: no price for NVDA", "paper"), "paper");
+    assert.equal(railOfTrade("rejected", "review: no price for NVDA", "live"), "live");
   });
 
   it("a wall refusal follows the agent, and an unknown agent is not counted live", () => {
@@ -86,8 +243,8 @@ describe("foldFunnel: one funnel per rail", () => {
       ],
       mode,
     );
-    assert.deepEqual(f.paper, { proposals: 194, wallRefused: 185, execRefused: 0, userops: 0, landed: 0, failed: 0, paperFills: 9 });
-    assert.deepEqual(f.live, { proposals: 92, wallRefused: 0, execRefused: 89, userops: 3, landed: 2, failed: 1, paperFills: 0 });
+    assert.deepEqual(f.paper, { proposals: 194, wallRefused: 185, marketRefused: 0, execRefused: 0, userops: 0, landed: 0, failed: 0, paperFills: 9 });
+    assert.deepEqual(f.live, { proposals: 92, wallRefused: 0, marketRefused: 0, execRefused: 89, userops: 3, landed: 2, failed: 1, paperFills: 0 });
     // The gas ceiling saying no is a PASS of policy and a failure of execution.
     assert.equal(policyPassed(f), 194 + 92 - 185);
     assert.deepEqual(f.refusals.map((r) => [r.rule, r.n, r.stage]), [
@@ -95,6 +252,41 @@ describe("foldFunnel: one funnel per rail", () => {
       ["gas-absurd", 45, "exec"],
       ["enable-too-wide", 44, "exec"],
     ]);
+  });
+
+  it("an execution outage reads as one: no ETH and a failing bundler are exec-refused, never the wall", () => {
+    // What live agents out of ETH, beside a bundler that has started failing,
+    // book in an hour. Read as wall refusals, this was "the owner's policy
+    // refused everything" with exec-refused 0 published throughout.
+    const f = foldFunnel(
+      [
+        { agent_id: LIVE, status: "rejected", rule: "no-gas", n: 40 },
+        { agent_id: "0x00000000000000000000000000000000000000c3", status: "rejected", rule: "no-gas", n: 5 },
+        { agent_id: LIVE, status: "rejected", rule: "couldn't submit: bundler: AA21 didn't pay prefund", n: 25 },
+        { agent_id: LIVE, status: "rejected", rule: "no-route", n: 3 },
+      ],
+      (id) => (id.toLowerCase() === LIVE ? "live" : "idle"),
+    );
+    assert.deepEqual(
+      [f.live.proposals, f.live.wallRefused, f.live.marketRefused, f.live.execRefused, f.live.userops],
+      [73, 0, 3, 70, 0],
+    );
+    assert.equal(f.paper.proposals, 0, "an agent that asked for the live rail and has no ETH is not paper");
+    assert.equal(policyPassed(f), 73, "the wall said yes to every one of them");
+    assert.deepEqual(f.refusals.map((r) => [r.n, r.stage]), [[45, "exec"], [25, "exec"], [3, "market"]]);
+  });
+
+  it("the simulator refusing a fill is the paper rail's own execution, not its wall", () => {
+    const f = foldFunnel(
+      [
+        { agent_id: PAPER, status: "rejected", rule: "paper: paper cash short of the buy", n: 4 },
+        { agent_id: PAPER, status: "paper", rule: "", n: 6 },
+      ],
+      mode,
+    );
+    assert.deepEqual([f.paper.proposals, f.paper.wallRefused, f.paper.execRefused, f.paper.paperFills], [10, 0, 4, 6]);
+    assert.equal(f.live.proposals, 0);
+    assert.equal(policyPassed(f), 10);
   });
 
   it("receipt-unresolved is sent with no receipt yet: a userop, never a refusal", () => {
@@ -107,7 +299,7 @@ describe("foldFunnel: one funnel per rail", () => {
       mode,
     );
     assert.equal(f.live.userops, 3);
-    assert.equal(f.live.wallRefused + f.live.execRefused + f.paper.wallRefused + f.paper.execRefused, 0);
+    for (const rail of [f.live, f.paper]) assert.equal(rail.wallRefused + rail.marketRefused + rail.execRefused, 0);
     assert.equal(f.refusals.length, 0);
   });
 
@@ -202,15 +394,16 @@ describe("the autonomy lines keep their prefixes", () => {
       [
         { agent_id: "a", status: "rejected", rule: "no-exit", n: 3 },
         { agent_id: "b", status: "rejected", rule: "gas-absurd", n: 1 },
+        { agent_id: "b", status: "rejected", rule: "no-quote", n: 1 },
         { agent_id: "b", status: "landed", rule: "", n: 1 },
       ],
       (id) => (id === "b" ? "live" : "paper"),
     );
     const lines = autonomyLines(1, f, [{ kind: "MODEL_HOLD", n: 1 }]);
-    assert.match(lines[0]!, /^autonomy\| 1h — 1 live · proposals 5 · policy-passed 2 · userops 1 · LANDED 1 · failed 0 · grant-too-wide 0 · holds /);
-    assert.match(lines[1]!, /^autonomy\| 1h live-rail — proposals 2 · wall-refused 0 · exec-refused 1 · userops 1 · LANDED 1 · failed 0$/);
-    assert.match(lines[2]!, /^autonomy\| 1h paper-rail — proposals 3 · wall-refused 3 · paper-fills 0$/);
-    assert.equal(lines[3], "autonomy| 1h refusals — no-exit 3 [wall] · gas-absurd 1 [exec]");
+    assert.match(lines[0]!, /^autonomy\| 1h — 1 live · proposals 6 · policy-passed 3 · userops 1 · LANDED 1 · failed 0 · grant-too-wide 0 · holds /);
+    assert.match(lines[1]!, /^autonomy\| 1h live-rail — proposals 3 · wall-refused 0 · market-refused 1 · exec-refused 1 · userops 1 · LANDED 1 · failed 0$/);
+    assert.match(lines[2]!, /^autonomy\| 1h paper-rail — proposals 3 · wall-refused 3 · exec-refused 0 · paper-fills 0$/);
+    assert.equal(lines[3], "autonomy| 1h refusals — no-exit 3 [wall] · gas-absurd 1 [exec] · no-quote 1 [market]");
   });
 });
 

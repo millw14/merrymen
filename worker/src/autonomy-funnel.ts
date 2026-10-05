@@ -22,15 +22,17 @@
  *     every no-exit came from agents that were not on the live rail at all. So
  *     `policy-passed − userops` read as an execution drop-off when it was the
  *     paper rail doing exactly its job. And the executor's own pre-broadcast
- *     refusals (gas, the sponsor) were counted as POLICY refusals, so a fleet
- *     whose wall said yes and whose gas ceiling said no read as a wall problem.
+ *     refusals (gas, the sponsor, no ETH at all, a bundler that would not take
+ *     the operation) and the market's (no route, no quote) were counted as
+ *     POLICY refusals, so a fleet whose wall said yes and whose gas ceiling
+ *     said no read as a wall problem.
  *
  *  3. "369 unreported" WERE NOT DECISIONS. They were the quiet market reviews
  *     (market-review.ts), written every five minutes for every quiet agent
  *     with no hold_kind — the residual bucket swallowed them, and a real
  *     unreported hold could not be seen beside them.
  */
-import { isGasRefusal } from "./thesis-policy";
+import { isGasRefusal, isMarketRefusal } from "./thesis-policy";
 import { PRIVATE_REVIEW_SOURCE, RESEARCH_UNAVAILABLE_SOURCE, REVIEW_SOURCE } from "./market-review";
 
 /**
@@ -68,26 +70,112 @@ export const FLEET_RAILS_SQL = `SELECT smart_account, mode, live_blocker, beat_a
 
 // ── WHICH STAGE TURNED IT BACK ──────────────────────────────────────────────
 
-export type RefusalStage = "wall" | "exec";
+export type RefusalStage = "wall" | "market" | "exec";
 
 /**
- * THE OWNER'S WALL, OR THE HOUSE'S OWN EXECUTION?
+ * THE EXECUTOR'S OWN REFUSALS BEYOND THE GAS SET, every one booked after the
+ * wall said yes and before anything was signed (index.ts, processIntentLocked)
+ * — or, for the first two, by the rail itself when the live leg it names is
+ * the one that failed (exec-mode.ts liveBlocker, which reaches them only for
+ * an agent that asked for real execution).
+ *
+ * Each is a literal its producer writes, and autonomy-funnel.test.ts reads
+ * those producers to hold this list to them: a refusal the executor starts
+ * writing tomorrow fails that test until somebody places it, instead of
+ * falling silently onto the owner's wall — which is how `no-gas` and every
+ * bundler failure read as "the owner's policy refused everything" while the
+ * published exec-refused said 0 through a whole execution outage.
+ */
+const EXEC_RULES: ReadonlySet<string> = new Set([
+  // Nothing to send it with. Zero ETH and no sponsor: nothing at all can be
+  // submitted, the exit included — an execution outage, however it is fixed.
+  "no-gas",
+  "no-executor",
+  // The ledger would not take the row that must exist before anything goes out.
+  "not-recorded",
+  // A venue the executor cannot build this trade for: a migrated router, no
+  // API key for the venue's calldata, no curve adapter in the grant, and the
+  // class-vault arm's own refusals to sign what it cannot read or confirm.
+  "router-migrated",
+  "no-rialto-key",
+  "no-curve-adapter",
+  "class-side-ambiguous",
+  "class-legs-unconfirmed",
+  "class-vault-unreadable",
+  "class-sell-needs-vault",
+  "no-class-vault",
+  // Revert classes (revert.ts) that are our build or our gas, not the market
+  // and not the on-chain wall. They arrive as REFUSALS two ways: executor.ts
+  // renames a GasRefused to the class its estimate diagnosed, and a
+  // suppressed intent is re-booked under the class that suppressed it.
+  "allowance",
+  "prefund",
+  "curve-unsupported",
+  "deadline",
+  "unclassified",
+]);
+
+/**
+ * THE EXECUTOR'S FREE-TEXT REFUSALS, by the fixed words they start with:
+ * every build, bundler or RPC failure before submit (`couldn't submit: …`),
+ * the calldata fence refusing to sign (`fence-…`), the paper simulator
+ * refusing a fill (`paper: …`) and the broker lane's review throwing
+ * (`review: …`).
+ */
+const PAPER_FILL_REFUSED = "paper: ";
+const BROKER_REVIEW_REFUSED = "review: ";
+const EXEC_PREFIXES: readonly string[] = ["couldn't submit:", "fence-", PAPER_FILL_REFUSED, BROKER_REVIEW_REFUSED];
+
+/**
+ * THE MARKET'S, beyond thesis-policy.ts's own set (no route, no quote, no
+ * depth, a price that moved, a launch that graduated, a balance that was not
+ * there): the impact guard finding the pool too shallow for this size or
+ * unmeasurable, and the energy route's quote and token tax.
+ */
+const MARKET_RULES: ReadonlySet<string> = new Set([
+  "impact-cap",
+  "impact-unknown",
+  "energy-no-quote",
+  "energy-tax",
+  "energy-tax-unreadable",
+]);
+
+/**
+ * THE OWNER'S WALL, THE MARKET, OR THE HOUSE'S OWN EXECUTION?
  *
  * `exec` is everything refused before broadcast for a reason that is ours and
  * not the owner's policy: the gas and key-install vocabulary (isGasRefusal —
  * the same set the notifier already uses to say "it wasn't sent" rather than
  * "the wall turned it back", prefund-* included), the gas sponsor declining
- * (paymaster.ts's `sponsor-*` literals) and the ledger refusing the row that
- * must exist before anything goes out (`not-recorded`). Reusing that set, not
- * a list of our own, is deliberate: a second copy of the vocabulary is the
- * one that drifts.
+ * (paymaster.ts's `sponsor-*` literals), and the executor's own refusals
+ * above. Reusing the gas set, not a list of our own, is deliberate: a second
+ * copy of the vocabulary is the one that drifts.
+ *
+ * `market` is a refusal made after the wall said yes because the market would
+ * not take the trade as asked (isMarketRefusal, the same set the notifier uses
+ * to stop blaming the wall for it, and MARKET_RULES). Neither the wall nor our
+ * execution: counted apart, so a fleet proposing coins nobody can trade does
+ * not page as an execution outage, and does not read as a strict wall either.
+ *
+ * `wall` is everything else: the sealed policy (policy.ts), the on-chain
+ * wall's own reverts (`wall-refused`, `spend-cap`, `quote-not-approved`), and
+ * the rail's refusals that only the owner's setup changes (exec-mode.ts — not
+ * armed, live not switched on, the wrong chain, no cash).
  *
  * `receipt-unresolved` IS NEVER A REFUSAL, and it is not asked about here at
  * all. It means "sent, outcome unknown" (index.ts, UserOpUnresolved): the
  * operation went out and may have landed. foldFunnel counts it as a userop.
  */
 export function stageOf(rule: string): RefusalStage {
-  return isGasRefusal(rule) || rule.startsWith("sponsor-") || rule === "not-recorded" ? "exec" : "wall";
+  if (
+    isGasRefusal(rule) ||
+    rule.startsWith("sponsor-") ||
+    EXEC_RULES.has(rule) ||
+    EXEC_PREFIXES.some((p) => rule.startsWith(p))
+  ) {
+    return "exec";
+  }
+  return isMarketRefusal(rule) || MARKET_RULES.has(rule) ? "market" : "wall";
 }
 
 /** Sent, outcome unknown. Counted as a userop wherever it appears, never as a refusal. */
@@ -112,14 +200,20 @@ const SENT: ReadonlySet<string> = new Set(["submitted", "landed", "reverted", "d
 
 /**
  * THE RAIL ONE TRADE ROW WAS ON. The row itself says so wherever it can, and
- * the agent's rail is asked only for the one kind of row that cannot: a wall
- * refusal, made before the execution fork.
+ * the agent's rail is asked only for the rows that cannot: a wall refusal,
+ * made before the execution fork, and the broker lane's review, which runs on
+ * whichever rail the agent is on.
  *
  *   paper                              the simulator's own literal
  *   submitted/landed/reverted/dropped  only the live rail sends anything
- *   an exec refusal                    only the live rail builds an operation
  *   receipt-unresolved                 sent, so live
- *   a wall refusal                     the agent's rail, as its row says now
+ *   `paper: …`                         the simulator refusing a fill
+ *   an exec or market refusal          only the live rail builds an operation
+ *                                      or asks a venue for one — `no-gas` and
+ *                                      `no-executor` included: the rail names
+ *                                      them only for an agent that asked for
+ *                                      real execution and could not have it
+ *   a wall refusal, a broker review    the agent's rail, as its row says now
  *
  * "Paper" is everything that is not live — an idle agent's refusals included,
  * since an agent that is refusing to trade is not trading for real either.
@@ -127,7 +221,8 @@ const SENT: ReadonlySet<string> = new Set(["submitted", "landed", "reverted", "d
 export function railOfTrade(status: string, rule: string, agentMode: string | null): Rail {
   if (status === "paper") return "paper";
   if (status !== "rejected" || rule === RECEIPT_UNRESOLVED) return "live";
-  if (stageOf(rule) === "exec") return "live";
+  if (rule.startsWith(PAPER_FILL_REFUSED)) return "paper";
+  if (stageOf(rule) !== "wall" && !rule.startsWith(BROKER_REVIEW_REFUSED)) return "live";
   return agentMode === "live" ? "live" : "paper";
 }
 
@@ -135,6 +230,8 @@ export interface RailFunnel {
   /** Every row the rail saw this window, admission refusals excluded. */
   proposals: number;
   wallRefused: number;
+  /** Refused after the wall said yes because the market would not take it. */
+  marketRefused: number;
   execRefused: number;
   /** Signed and sent: submitted, landed, reverted, dropped, or sent with no receipt yet. */
   userops: number;
@@ -155,7 +252,7 @@ export interface AutonomyFunnel {
 }
 
 const emptyRail = (): RailFunnel => ({
-  proposals: 0, wallRefused: 0, execRefused: 0, userops: 0, landed: 0, failed: 0, paperFills: 0,
+  proposals: 0, wallRefused: 0, marketRefused: 0, execRefused: 0, userops: 0, landed: 0, failed: 0, paperFills: 0,
 });
 
 /** Policy-passed, across both rails: every proposal the wall did not turn back. */
@@ -188,7 +285,9 @@ export function foldFunnel(
     const rail = f[railOfTrade(status, rule, modeOf(String(r.agent_id ?? "")))];
     rail.proposals += n;
     if (status === "rejected" && rule !== RECEIPT_UNRESOLVED) {
-      if (stageOf(rule) === "exec") rail.execRefused += n;
+      const stage = stageOf(rule);
+      if (stage === "exec") rail.execRefused += n;
+      else if (stage === "market") rail.marketRefused += n;
       else rail.wallRefused += n;
       if (rule === "grant-too-wide") f.grantTooWide += n;
       if (rule) refused.set(rule, (refused.get(rule) ?? 0) + n);
@@ -357,7 +456,8 @@ export function railsLine(rails: FleetRails): string | null {
  * `autonomy| 1h — ` or `LANDED 0` still finds them. What changed is what
  * "policy-passed" counts: every proposal the WALL did not turn back, so an
  * operation the gas ceiling or the sponsor refused is a pass of policy and a
- * failure of execution, as it is. The per-rail lines then say where each went.
+ * failure of execution, as it is, and one with no route is a pass of policy
+ * the market would not fill. The per-rail lines then say where each went.
  */
 export function autonomyLines(
   liveAgents: number | null,
@@ -376,9 +476,13 @@ export function autonomyLines(
       `userops ${userops} · LANDED ${landed} · failed ${failed} · ` +
       `grant-too-wide ${f.grantTooWide} · holds ${autonomyHolds(holds)}`,
     `autonomy| 1h live-rail — proposals ${f.live.proposals} · wall-refused ${f.live.wallRefused} · ` +
-      `exec-refused ${f.live.execRefused} · userops ${f.live.userops} · LANDED ${f.live.landed} · failed ${f.live.failed}`,
+      `market-refused ${f.live.marketRefused} · exec-refused ${f.live.execRefused} · ` +
+      `userops ${f.live.userops} · LANDED ${f.live.landed} · failed ${f.live.failed}`,
+    // No market-refused here: railOfTrade puts every market refusal on the
+    // live rail, the only one that asks a venue. The simulator's own refusals
+    // (`paper: …`) are this rail's exec-refused.
     `autonomy| 1h paper-rail — proposals ${f.paper.proposals} · wall-refused ${f.paper.wallRefused} · ` +
-      `paper-fills ${f.paper.paperFills}`,
+      `exec-refused ${f.paper.execRefused} · paper-fills ${f.paper.paperFills}`,
   ];
   // The refusals, largest first, so a new one announces itself rather than
   // hiding inside a total, each tagged with the stage that made it. Bounded —
