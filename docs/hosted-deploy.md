@@ -94,12 +94,17 @@ a browser inside the worker would be a browser per tenant.
 > whose logs say `next start`. With no path in `railway.json` the builder
 > defaults to `./Dockerfile`, which is what web and the orchestrator want.
 >
-> Its restart policy is shared the same way: `ON_FAILURE` with up to 100
+> Its restart policy is shared the same way: `ON_FAILURE` with up to 10
 > restarts, for web, orchestrator, browser and brain alike. Config-as-code
-> overrides the dashboard's restart setting, so change it in the file, not the
-> service. It was 10 until the reply listener (which now exits non-zero only
-> on a fleet-wide refusal) exhausted it in a day; see
-> docs/recovery-replies.md. Railway allows more than 10 only on paid plans.
+> overrides the dashboard's restart setting, so a change belongs in the file,
+> not the service, and it changes all four at once, the trading orchestrator
+> included. The reply listener spent those ten restarts in one day on
+> 2026-10-05; it now exits non-zero only on a fleet-wide refusal, where a
+> restart cannot help (docs/recovery-replies.md), so the cap is unchanged.
+> Raising it is a separate decision, and Railway allows more than 10 only on
+> paid plans. Railway's documentation says existing `railway.json` files keep
+> working until 2026-12-01: whatever replaces this file must carry the
+> restart policy and the "no `dockerfilePath`" rule above with it.
 
 **Give it no public domain.** It is a URL-fetching machine; exposed, it is an
 open proxy anyone could point at `*.railway.internal`. It binds the private

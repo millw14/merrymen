@@ -100,10 +100,9 @@ case $role in
     ;;
   *)
     # 64 is EX_USAGE: the configuration is wrong, not the code. Nothing has
-    # started, so nothing needs stopping; Railway's ON_FAILURE policy retries
-    # (railway.json's restartPolicyMaxRetries, each attempt failing at once)
-    # and then shows the deploy as crashed, which is the point — a loud
-    # failure instead of the wrong role running green. The value itself is
+    # started, so nothing needs stopping; Railway's ON_FAILURE policy retries a
+    # few times and then shows the deploy as crashed, which is the point — a
+    # loud failure instead of the wrong role running green. The value itself is
     # not printed: it is whatever was pasted into the variable.
     if [ -z "$role" ]; then
       echo "[start] refused: MERRYMEN_START is set but empty — delete it for the web role, or name one of: start:web start:orchestrator start:recovery-replies" >&2
