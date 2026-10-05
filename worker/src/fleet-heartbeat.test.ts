@@ -95,6 +95,11 @@ describe("the heartbeat row", () => {
       // LANDED TOTALS, the admission gate's refusals apart from them.
       assert.equal(c.funnel1h.live.landed, 1);
       assert.equal(c.funnel1h.live.proposals, 3);
+      // A failure before submit is published as execution, so a check keyed
+      // on exec-refused sees an execution outage as one.
+      assert.equal(c.funnel1h.live.execRefused, 2);
+      assert.equal(c.funnel1h.live.wallRefused, 0);
+      assert.equal(c.funnel1h.live.marketRefused, 0);
       assert.equal(c.funnel1h.admissionHeld, 7);
       assert.equal(c.funnel6h.live.landed, 1);
       // The free-text refusal rule never leaves the snapshot.
