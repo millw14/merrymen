@@ -50,7 +50,11 @@ test("held current equity and measured P&L use separate timestamps with flows an
     for (const reader of [db, translated(raw)]) {
       const result = await readBookPerformance(reader, CASED, 2, true);
       assert.deepEqual(result.performance, { book: "live", equityUsdg: 140, equityAt: 30, pnlUsdg: 9.8,
-        pnlBps: 980, pnlAt: 10, publicBook: true, gasComplete: true, held: true });
+        pnlBps: 980, pnlAt: 10, publicBook: true, gasComplete: true, held: true,
+        // The key installation is an operation, never a trade, and settles
+        // after the measured valuation besides; the deposit is as of it too.
+        fills: 1, fillsAtMark: 1, lastFillAt: 5, funded: true, valuation: "current",
+        gasOps: { sponsored: 0, priced: 1, unpriced: 0, unrecorded: 0 } });
       assert.equal(result.liveRank.pnlBps, 980);
     }
   } finally { raw.close(); }
@@ -260,7 +264,10 @@ test("an explicitly blocked paper recovery exposes no stale equity or fabricated
     await db.prepare("INSERT INTO paper_recovery_health(agent_id,blocked) VALUES (?, 1)").run(CASED);
     const result = await readBookPerformance(db, ACCOUNT, 2, true);
     assert.deepEqual(result.performance, { book: "paper", equityUsdg: null, equityAt: null, pnlUsdg: null,
-      pnlBps: null, pnlAt: null, publicBook: true, gasComplete: null, held: false });
+      pnlBps: null, pnlAt: null, publicBook: true, gasComplete: null, held: false,
+      // Nor a trade count: a book whose recovery is blocked cannot vouch for
+      // its records, so it does not get to say "no trades yet" either.
+      fills: null, fillsAtMark: null, lastFillAt: null, funded: null, valuation: null, gasOps: null });
   } finally { raw.close(); }
 });
 
@@ -403,10 +410,136 @@ test("the actual financial reads use applied account/run indexes rather than sca
     const flows = plans.find((p) => p.sql.includes("FROM flows"))!;
     assert.match(flows.details, /SEARCH flows USING INDEX flows_agent_run_normalized \(<expr>=\? AND epoch=\?(?:\)| AND )/);
     assert.doesNotMatch(flows.details, /SCAN flows/);
-    const trades = plans.find((p) => p.sql.includes("FROM trades"))!;
-    assert.match(trades.details, /SEARCH t USING INDEX trades_agent_run_normalized \(<expr>=\? AND epoch=\?(?:\)| AND )/);
-    // The outer aggregate scans its already scoped coroutine result, also
-    // named t. Only nested accesses can scan the underlying trades table.
-    assert.doesNotMatch(trades.nestedDetails, /SCAN t\b/);
+    // Gas, and the fills that say what a flat return means: both trade reads.
+    const trades = plans.filter((p) => p.sql.includes("FROM trades"));
+    assert.equal(trades.length, 2);
+    for (const plan of trades) {
+      assert.match(plan.details, /SEARCH t USING INDEX trades_agent_run_normalized \(<expr>=\? AND epoch=\?(?:\)| AND )/);
+      // The outer aggregate scans its already scoped coroutine result, also
+      // named t. Only nested accesses can scan the underlying trades table.
+      assert.doesNotMatch(plan.nestedDetails, /SCAN t\b/);
+    }
+  } finally { raw.close(); }
+});
+
+test("a paper book that has never traded says so; its flat return is the book compared with itself", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, 1000, 2, "paper");
+    await mark(db, 1000, 3, "paper");
+    // A simulated transfer is an operation, not a trade.
+    await op(db, 1, { status: "paper", kind: "transfer", hash: "" });
+    const { performance } = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(performance.pnlBps, 0, "the figure itself is unchanged");
+    assert.deepEqual([performance.fills, performance.fillsAtMark, performance.lastFillAt, performance.valuation], [0, 0, null, "current"]);
+    assert.equal(performance.funded, null, "real deposits are not a paper book's capital");
+    assert.equal(performance.gasOps, null);
+  } finally { raw.close(); }
+});
+
+test("Finley: a paper book whose only valuation predates both its buys is awaiting its first valuation", async () => {
+  const { raw, db } = await ledger();
+  try {
+    // Production's shape: one mark at 15:37:55, then two buys eight seconds
+    // later, and no valuation since — so 0.0% was published for trades that
+    // had not been valued at all.
+    const MARK = Date.UTC(2026, 9, 1, 15, 37, 55) / 1000;
+    await mark(db, 1000, MARK, "paper");
+    await op(db, MARK + 8, { status: "paper", hash: "" });
+    await op(db, MARK + 8, { status: "paper", hash: "", kind: "curve-trade" });
+    const { performance } = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(performance.pnlBps, 0);
+    assert.deepEqual([performance.fills, performance.fillsAtMark, performance.lastFillAt, performance.valuation], [2, 0, MARK + 8, "awaiting"]);
+  } finally { raw.close(); }
+});
+
+test("Ajinde: a fill newer than the measured valuation leaves a real return standing, marked awaiting", async () => {
+  const { raw, db } = await ledger();
+  try {
+    const MARK = Date.UTC(2026, 9, 1, 20, 9, 25) / 1000;
+    await mark(db, 1000, MARK - 3_600, "paper");
+    await op(db, MARK - 60, { status: "paper", hash: "" });
+    await mark(db, 999.958, MARK, "paper");
+    await op(db, MARK + 4, { status: "paper", hash: "" });
+    const { performance } = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.ok(Math.abs(performance.pnlBps! + 0.42) < 1e-9, "the measured figure is unchanged");
+    assert.equal(performance.pnlAt, MARK);
+    assert.deepEqual([performance.fills, performance.fillsAtMark, performance.lastFillAt, performance.valuation], [2, 1, MARK + 4, "awaiting"]);
+  } finally { raw.close(); }
+});
+
+test("a funded live book with no trade is funded with none; a vault deposit alone ranks without being a trade", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, 100, 10);
+    const waiting = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(waiting.liveRank.unrankedWhy, "never-filled");
+    assert.deepEqual([waiting.performance.fills, waiting.performance.funded, waiting.performance.valuation], [0, true, "current"]);
+    assert.deepEqual(waiting.performance.gasOps, { sponsored: 0, priced: 0, unpriced: 0, unrecorded: 0 });
+    // An executed vault deposit IS evidence the account ran, so the ranking
+    // gate counts it — and it is still not a trade.
+    await op(db, 5, { kind: "vault-deposit", bare: true });
+    await mark(db, 110, 20);
+    const ranked = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(ranked.liveRank.pnlBps, 1000);
+    assert.equal(ranked.performance.pnlBps, 1000);
+    assert.equal(ranked.performance.fills, 0);
+    await db.prepare("DELETE FROM flows").run();
+    const unfunded = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(unfunded.liveRank.unrankedWhy, "no-deposit");
+    assert.equal(unfunded.performance.funded, false);
+  } finally { raw.close(); }
+});
+
+test("with no valuation yet a trade of either book counts, and an unread mark or tape says nothing", async () => {
+  const { raw, db } = await ledger();
+  try {
+    const empty = await readBookPerformance(db, ACCOUNT, 2, false);
+    assert.deepEqual([empty.performance.book, empty.performance.fills, empty.performance.fillsAtMark, empty.performance.funded],
+      [null, 0, 0, true]);
+    await op(db, 5, { status: "paper", hash: "" });
+    const traded = await readBookPerformance(db, ACCOUNT, 2, false);
+    assert.deepEqual([traded.performance.fills, traded.performance.fillsAtMark, traded.performance.lastFillAt, traded.performance.valuation],
+      [1, 0, 5, null]);
+    const noMarks: Db = { ...db, prepare(sql) {
+      if (sql.includes("FROM equity")) throw new Error("permission denied");
+      return db.prepare(sql);
+    } };
+    assert.equal((await readBookPerformance(noMarks, ACCOUNT, 2, false)).performance.fills, null, "an unread mark is not an absent one");
+    await mark(db, 110, 10);
+    const noTape: Db = { ...db, prepare(sql) {
+      if (sql.includes("'swap', 'curve-trade'")) throw new Error("permission denied");
+      return db.prepare(sql);
+    } };
+    const unread = await readBookPerformance(noTape, ACCOUNT, 2, true);
+    assert.deepEqual([unread.performance.fills, unread.performance.fillsAtMark, unread.performance.valuation], [null, null, null]);
+    assert.equal(unread.performance.equityUsdg, 110, "and nothing else is lost with it");
+  } finally { raw.close(); }
+});
+
+test("gas operations are counted by what is on record; the unpriced and unrecorded ones are exactly the incomplete ones", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, 110, 10);
+    await op(db, 1, { gas: 0.2, wei: "200" });
+    await op(db, 2, { gas: null, wei: "0" });
+    await op(db, 3, { gas: null, sponsor: "300" });
+    await op(db, 4, { gas: 0, sponsor: "300" });
+    await op(db, 5, { gas: null, wei: "123" });
+    await op(db, 6, { gas: null });
+    await op(db, 7, { gas: 2, wei: "2000", hash: "0xOLD" });
+    await db.prepare("UPDATE trades SET user_op_nonce = '1' WHERE user_op_hash = '0xOLD'").run();
+    await op(db, 20, { gas: null }); // after the measured valuation
+    for (const reader of [db, translated(raw)]) {
+      const { performance } = await readBookPerformance(reader, ACCOUNT, 2, false);
+      assert.deepEqual(performance.gasOps, { sponsored: 2, priced: 2, unpriced: 1, unrecorded: 2 });
+      assert.equal(performance.gasComplete, false);
+    }
+    await db.prepare(`UPDATE trades SET gas_usdg = 0.1 WHERE gas_usdg IS NULL
+      AND COALESCE(sponsored_gas_wei, '') = '' AND COALESCE(gas_wei, '') <> '0'`).run();
+    await db.prepare("UPDATE trades SET budget_settled_at = 7 WHERE user_op_hash = '0xOLD'").run();
+    const { performance } = await readBookPerformance(db, ACCOUNT, 2, false);
+    assert.deepEqual(performance.gasOps, { sponsored: 2, priced: 5, unpriced: 0, unrecorded: 0 });
+    assert.equal(performance.gasComplete, true);
   } finally { raw.close(); }
 });

@@ -1,6 +1,6 @@
 /** One current run's public headline, from the same book and accounting time. */
 import type { Db } from "../../../worker/src/db";
-import { distinctTrades } from "./distinct-trades";
+import { distinctTrades, fillKindSql } from "./distinct-trades";
 import { heldSql, isHeld } from "./held-marks";
 import { paperRecoveryBlocked, readPaperPerformance } from "./paper-return";
 import { rankPnl, type Rank } from "./rank-pnl";
@@ -19,7 +19,56 @@ export interface BookPerformance {
   gasComplete: boolean | null;
   /** The latest valuation may be current while flow-relative performance waits. */
   held: boolean;
+  /**
+   * WHAT A MISSING OR FLAT RETURN MEANS, as counts and times — never dollars.
+   *
+   * A paper book that has never traded measured 0.0% against itself and was
+   * published as "0.0%", beside agents whose 0.0% was a real result; a paper
+   * book whose only valuation predates its buys published a flat return its
+   * trades had not been valued into; a funded live book with no fill said
+   * "Unavailable". Each was a true number answering the wrong question. These
+   * fields say which question a page is looking at, so it can print "No trades
+   * yet" or "Awaiting first valuation" instead — and they change no figure.
+   *
+   * TRADES, not operations (fillKindSql): a vault deposit is an operation and
+   * not a trade. This book's own only: paper fills for a paper book, landed
+   * ones for a live book; either, when no valuation names a book yet. Live
+   * fills count from when they settled, the time gasAt charges them by. Null
+   * when unread, and on a book whose records cannot be vouched for (a blocked
+   * paper recovery) — unread is never zero.
+   */
+  fills: number | null;
+  /** Of those, how many were made at or before the measured valuation (`pnlAt`); 0 when there is none. */
+  fillsAtMark: number | null;
+  /** When the newest of them was made, unix seconds. Null when there is none, or unread. */
+  lastFillAt: number | null;
+  /**
+   * Whether net contributions this run are above zero — a fact, never an
+   * amount, so it is the same on a private book. As of the measured valuation
+   * when there is one, like the return it explains. Null for a paper book
+   * (real deposits are not its capital) and when unread.
+   */
+  funded: boolean | null;
+  /**
+   * Whether the measured valuation has caught up with this book's trades:
+   * "awaiting" when a fill is newer than `pnlAt`, so the return does not
+   * include it yet. Null when there is no measured valuation, or the fills
+   * were unread.
+   */
+  valuation: "current" | "awaiting" | null;
+  /**
+   * How this run's operations' owner gas stands up to the measured valuation,
+   * in OPERATIONS — the same rows and cutoff gasAt charges, key installs and
+   * reverts included. Counts only: no amount, so a private book shows these as
+   * a public one does. `unpriced` has a cost in wei and no dollar price;
+   * `unrecorded` has no cost on record at all, or no evidenced time to charge
+   * it by. Those two are exactly what makes `gasComplete` false. Live books
+   * with a measured valuation only; null otherwise.
+   */
+  gasOps: GasOps | null;
 }
+
+export interface GasOps { sponsored: number; priced: number; unpriced: number; unrecorded: number }
 
 export interface BookPerformanceRead {
   performance: BookPerformance;
@@ -120,7 +169,7 @@ async function latestMark(db: Db, account: string, epoch: number): Promise<Mark 
  * cannot become a fresh trade or a second gas charge. Key installation costs
  * count as expenses, but an installation alone is not a filled trade.
  */
-async function gasAt(db: Db, account: string, epoch: number, at: number): Promise<{ gas: number; complete: boolean; landed: number }> {
+async function gasAt(db: Db, account: string, epoch: number, at: number): Promise<{ gas: number; complete: boolean; landed: number; ops: GasOps | null }> {
   const [hasSettlement, hasNonce] = await Promise.all([tradeColumn(db, "budget_settled_at"), tradeColumn(db, "user_op_nonce")]);
   const settledAt = hasSettlement ? "COALESCE(t.budget_settled_at, t.created_at)" : "t.created_at";
   const free = `(COALESCE(t.gas_usdg, -1) = 0 OR (t.gas_usdg IS NULL AND
@@ -131,6 +180,13 @@ async function gasAt(db: Db, account: string, epoch: number, at: number): Promis
   // evidenced historical time. Proved free outcomes cannot change the result.
   const ambiguous = hasNonce ? `(t.status IN ('landed', 'reverted') AND ${hasSettlement ? "t.budget_settled_at IS NULL" : "1 = 1"}
     AND COALESCE(t.user_op_nonce, '') <> '' AND NOT ${free})` : "1 = 0";
+  // `missing`, split by WHY, beside the operations that are not missing at
+  // all. Counts only; `missing` itself is unchanged and still decides
+  // completeness, and the two halves below add up to it exactly: an ambiguous
+  // time or no cost on record is unrecorded, a cost in wei without a price is
+  // unpriced. Whatever is neither was priced (a proved zero included) or
+  // sponsored, and is left to the total.
+  const sponsorProved = "COALESCE(t.sponsored_gas_wei, '') NOT IN ('', '0')";
   const row = await db.prepare(`SELECT
       COALESCE(SUM(t.gas_usdg), 0) AS gas,
       COUNT(CASE WHEN t.status = 'landed' AND COALESCE(t.kind, '') <> 'key-install' THEN 1 END) AS landed,
@@ -138,7 +194,14 @@ async function gasAt(db: Db, account: string, epoch: number, at: number): Promis
         AND COALESCE(t.gas_wei, '') <> '0'
         AND NOT ((t.gas_wei IS NULL OR t.gas_wei IN ('', '0'))
           AND t.sponsored_gas_wei IS NOT NULL AND t.sponsored_gas_wei NOT IN ('', '0'))
-        ) THEN 1 END) AS missing
+        ) THEN 1 END) AS missing,
+      COUNT(*) AS ops,
+      COUNT(CASE WHEN (${ambiguous}) OR (t.gas_usdg IS NULL AND COALESCE(t.gas_wei, '') = ''
+        AND NOT ${sponsorProved}) THEN 1 END) AS unrecorded,
+      COUNT(CASE WHEN NOT (${ambiguous}) AND t.gas_usdg IS NULL
+        AND COALESCE(t.gas_wei, '') NOT IN ('', '0') THEN 1 END) AS unpriced,
+      COUNT(CASE WHEN NOT (${ambiguous}) AND ${sponsorProved} AND COALESCE(t.gas_wei, '') IN ('', '0')
+        AND COALESCE(t.gas_usdg, 0) = 0 THEN 1 END) AS sponsored
     FROM ${distinctTrades("LOWER(t.agent_id) = ? AND t.epoch = ?")}
     WHERE t.status IN ('landed', 'reverted') AND ${settledAt} <= ?`)
     .get(account.toLowerCase(), epoch, at) as Record<string, unknown> | undefined;
@@ -146,7 +209,52 @@ async function gasAt(db: Db, account: string, epoch: number, at: number): Promis
   const landed = finite(row?.landed);
   const missing = finite(row?.missing);
   if (gas === null || gas < 0 || landed === null || missing === null) throw new Error("Unread gas accounting");
-  return { gas, complete: missing === 0, landed };
+  const [ops, unrecorded, unpriced, sponsored] = [row?.ops, row?.unrecorded, row?.unpriced, row?.sponsored].map(finite);
+  // A split that does not add up is not a split: the counts are withheld, and
+  // completeness — read above, on its own — is not touched.
+  const split = ops !== null && unrecorded !== null && unpriced !== null && sponsored !== null
+    && unrecorded + unpriced === missing && ops >= missing + sponsored
+    ? { sponsored, priced: ops - missing - sponsored, unpriced, unrecorded } : null;
+  return { gas, complete: missing === 0, landed, ops: split };
+}
+
+/**
+ * This book's TRADES, and how many of them its measured valuation includes.
+ *
+ * Collapsed to operations first and filtered by status and kind outside, as
+ * distinctTrades asks: a deposit re-recorded as a bare 'swap' collapses into
+ * its deposit instead of standing alone as a trade. A live fill is placed in
+ * time by its settlement, the time gasAt charges it by; a paper fill settles
+ * when it is written. With no book (no valuation names one yet) both kinds
+ * count, because "no trades yet" and "awaiting a first valuation" are true of
+ * the account whichever book it turns out to be. THROWS when unread.
+ */
+async function fillsOf(db: Db, account: string, epoch: number, book: "paper" | "live" | null, at: number | null):
+  Promise<{ fills: number; atMark: number; lastAt: number | null }> {
+  const settled = book === "live" && await tradeColumn(db, "budget_settled_at");
+  const time = settled ? "COALESCE(t.budget_settled_at, t.created_at)" : "t.created_at";
+  const status = book === "paper" ? "t.status = 'paper'" : book === "live" ? "t.status = 'landed'" : "t.status IN ('paper', 'landed')";
+  const row = await db.prepare(`SELECT COUNT(*) AS n,
+      ${at === null ? "0" : `COUNT(CASE WHEN ${time} <= ? THEN 1 END)`} AS at_mark, MAX(${time}) AS last
+    FROM ${distinctTrades("LOWER(t.agent_id) = ? AND t.epoch = ?")}
+    WHERE ${status} AND ${fillKindSql("t")}`)
+    .get(...(at === null ? [] : [at]), account.toLowerCase(), epoch) as Record<string, unknown> | undefined;
+  const fills = finite(row?.n);
+  const atMark = finite(row?.at_mark);
+  if (fills === null || atMark === null) throw new Error("Unread fills");
+  return { fills, atMark, lastAt: fills === 0 ? null : finite(row?.last) };
+}
+
+/** Fill the trade fields in place. A failed read leaves them null: unknown, never zero. */
+async function describeFills(db: Db, account: string, epoch: number, performance: BookPerformance): Promise<void> {
+  try {
+    const f = await fillsOf(db, account, epoch, performance.book, performance.pnlAt);
+    performance.fills = f.fills;
+    performance.fillsAtMark = f.atMark;
+    performance.lastFillAt = f.lastAt;
+    performance.valuation = performance.pnlAt === null ? null
+      : f.lastAt !== null && f.lastAt > performance.pnlAt ? "awaiting" : "current";
+  } catch { /* unread: the fields stay null */ }
 }
 
 /**
@@ -159,17 +267,23 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
   const performance: BookPerformance = {
     book: null, equityUsdg: null, equityAt: null, pnlUsdg: null, pnlBps: null, pnlAt: null,
     publicBook: publicBook === true, gasComplete: null, held: false,
+    fills: null, fillsAtMark: null, lastFillAt: null, funded: null, valuation: null, gasOps: null,
   };
   let current: Mark | null;
-  try { current = await latestMark(db, account, epoch); } catch { current = null; }
+  // An unread mark is not an absent one: only a read that found none may go on
+  // to say this account has no trades yet.
+  let markRead = true;
+  try { current = await latestMark(db, account, epoch); } catch { current = null; markRead = false; }
   if (!current) {
     // A successful empty funding read has a specific, useful refusal even
     // before the first valuation. An unread or funded book stays unknown.
     let liveRank = unavailable();
     try {
       const contributed = await flowCapital(db, account, epoch);
-      if (contributed === null || contributed <= 0) liveRank = { pnlBps: null, unrankedWhy: "no-deposit" };
+      performance.funded = contributed !== null && contributed > 0;
+      if (!performance.funded) liveRank = { pnlBps: null, unrankedWhy: "no-deposit" };
     } catch { /* unread funding is not an unfunded book */ }
+    if (markRead) await describeFills(db, account, epoch, performance);
     return { performance, liveRank, paperPnlBps: null };
   }
   performance.book = current.book;
@@ -193,6 +307,7 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
       performance.pnlBps = paper.pnlBps;
       performance.pnlAt = paper.pnlAt;
     }
+    await describeFills(db, account, epoch, performance);
     return { performance, liveRank: { pnlBps: null, unrankedWhy: "paper" }, paperPnlBps: paper ? Math.round(paper.pnlBps) : null };
   }
   if (current.book !== "live") return { performance, liveRank: unavailable(), paperPnlBps: null };
@@ -207,8 +322,13 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
     const equity = finite(row?.equity_usdg);
     const at = finite(row?.at);
     if (equity !== null && equity >= 0 && at !== null) measured = { equity, at };
-  } catch { /* unread marks do not turn into zero equity */ }
-  if (!measured) return { performance, liveRank: unavailable(), paperPnlBps: null };
+  } catch { markRead = false; /* unread marks do not turn into zero equity */ }
+  if (!measured) {
+    // Every mark is held, so nothing is measured yet; a trade made is one no
+    // measured valuation includes. An unread measured mark stays unknown.
+    if (markRead) await describeFills(db, account, epoch, performance);
+    return { performance, liveRank: unavailable(), paperPnlBps: null };
+  }
   performance.pnlAt = measured.at;
 
   const inputs = await Promise.allSettled([
@@ -229,6 +349,10 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
   // the read, and this is about the record.
   else if (!gas.complete && liveRank.pnlBps !== null) liveRank = { pnlBps: null, unrankedWhy: "gas-pending" };
   performance.gasComplete = gas?.complete ?? null;
+  performance.gasOps = gas?.ops ?? null;
+  // A read that found no flows is unfunded; an unread one is unknown.
+  if (inputs[0].status === "fulfilled") performance.funded = contributed !== null && contributed > 0;
+  await describeFills(db, account, epoch, performance);
   // Net contributions may be zero or negative after a withdrawal. A dollar
   // gain still has meaning with a proved funding history and executed trade;
   // the percentage/rank keeps refusing a nonpositive denominator.
