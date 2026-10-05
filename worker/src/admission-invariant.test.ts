@@ -98,6 +98,23 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     }
   });
 
+  it("HOWEVER IT IS SPELLED: the words `execute` and `installKey` are never written outside it", () => {
+    // `.execute(` is one spelling of a send. `ex["execute"](…)`, `const {
+    // execute } = active.executor` and `.execute.call(…)` are others, and each
+    // typechecks. index.ts has no other use for either word in code (comments
+    // are stripped), so the word itself is the pin: found outside the funnel,
+    // it is a send, or something one refactor away from being one.
+    for (const word of [/\bexecute\b/, /\binstallKey\b/]) {
+      for (const i of sites(word)) {
+        assert.ok(
+          inside(LOCKED, i),
+          `worker/src/index.ts:${lineOf(i)} — \`${word.source.replace(/\\b/g, "")}\` outside processIntentLocked. ` +
+            "If it sends, route it through processIntent; a tenant held at observe could otherwise trade.",
+        );
+      }
+    }
+  });
+
   it("the key install itself is reached only from installKeyAlone", () => {
     const owner = span("  async function installKeyAlone(");
     const at = sites(/\binstallKeyRecorded\(/);
@@ -109,6 +126,18 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     // key-install-accounting.ts's installKeyRecorded is the booking around
     // executor.installKey; it is called from installKeyAlone alone (above).
     const ALLOWED = new Set(["executor.ts", "key-install-accounting.ts", "index.ts"]);
+    // Every spelling of a send, not only the dotted call. Other modules use
+    // the bare word `execute` in prose and in ABI strings, so here it is the
+    // shapes of a call that are matched: a dotted member (`.execute(`,
+    // `.execute.call(`), a bracketed one (`ex["execute"]`) and a destructured
+    // one (`const { execute } = …`).
+    const SENDS = [
+      /\.(?:execute|installKey)\b/,
+      /\[\s*["'`](?:execute|installKey)["'`]\s*\]/,
+      /\{[^{}]*\b(?:execute|installKey)\b[^{}]*\}\s*=(?![=>])/,
+      /\binstallKeyRecorded\(/,
+      /\bcreateAgentExecutor\(/,
+    ];
     const offenders: string[] = [];
     const walk = (dir: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -121,7 +150,7 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
         const rel = path.relative(HERE, p);
         if (ALLOWED.has(rel)) continue;
         const code = codeOf(readFileSync(p, "utf8"));
-        if (/\.execute\(|\.installKey\(|\binstallKeyRecorded\(|\bcreateAgentExecutor\(/.test(code)) offenders.push(rel);
+        if (SENDS.some((re) => re.test(code))) offenders.push(rel);
       }
     };
     walk(HERE);
