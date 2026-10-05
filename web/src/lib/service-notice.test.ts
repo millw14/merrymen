@@ -246,6 +246,7 @@ describe("tradingPaused is wording", () => {
       .map((f) => path.relative(root, f))
       .sort();
     assert.deepEqual(readers, [
+      "web/src/app/api/service-notice/route.ts",
       "web/src/lib/service-notice.ts",
     ]);
   });
