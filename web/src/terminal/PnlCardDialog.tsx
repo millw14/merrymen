@@ -13,6 +13,12 @@ function canShareFile(file: File | null): file is File {
 /** The owner closing the share sheet is a choice, not a failure to report.
  *  Compared by name so a rejection from another realm still matches. */
 const dismissed = (error: unknown) => (error as { name?: unknown } | null)?.name === "AbortError";
+/** A second Share press while the first sheet is still open (desktop pickers
+ *  are not always modal) is refused with InvalidStateError, because a page may
+ *  have only one share pending. That sheet is still open and working, so the
+ *  refusal is not a failure to report either. */
+const shareDismissed = (error: unknown) =>
+  dismissed(error) || (error as { name?: unknown } | null)?.name === "InvalidStateError";
 
 /** Kept in memory, never cached or stored alongside the wallet. */
 export function PnlCardDialog({ tradeId, symbol, onClose }: {
@@ -27,6 +33,8 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   const [state, setState] = useState<CardState>({ kind: "loading" });
   const [loaded, setLoaded] = useState(false);
   const [notice, setNotice] = useState<{ url: string; text: string }>();
+  const presses = useRef(0);
+  const reported = useRef(0);
 
   useEffect(() => {
     const node = dialog.current!;
@@ -89,20 +97,30 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   const file = useMemo(() => state.kind === "image" ? new File([state.blob], filename, { type: "image/png" }) : null, [state, filename]);
   const shareable = useMemo(() => canShareFile(file), [file]);
   const copyable = typeof ClipboardItem === "function" && typeof navigator.clipboard?.write === "function";
-  const offer = (run: () => Promise<void>, failure: string, success = "") => {
+  const offer = (run: () => Promise<void>, failure: string, success = "", quiet = dismissed) => {
     if (state.kind !== "image") return;
     // The outcome names the preview it was about, so a press that settles
     // after a retry or a changed trade never reports on the newer image.
     const { url } = state;
+    // Presses are numbered, and an older press that settles after a newer one
+    // has already reported is dropped: two quick Copy presses whose first
+    // write fails last still end on "Image copied." A press that reports
+    // nothing (a dismissed sheet) does not hide the outcome of the one before.
+    const press = ++presses.current;
+    const report = (text: string) => {
+      if (press < reported.current) return;
+      reported.current = press;
+      setNotice({ url, text });
+    };
     setNotice(undefined);
     // An async body runs synchronously up to its first await, so the share or
     // clipboard call still happens inside the press, as browsers require.
-    void run().then(() => setNotice({ url, text: success }),
-      (error: unknown) => { if (!dismissed(error)) setNotice({ url, text: failure }); });
+    void run().then(() => report(success),
+      (error: unknown) => { if (!quiet(error)) report(failure); });
   };
   const share = () => {
     if (file) offer(async () => navigator.share({ files: [file], title: `${symbol} P&L` }),
-      "Could not share this image. Use Download PNG instead.");
+      "Could not share this image. Use Download PNG instead.", "", shareDismissed);
   };
   const copy = () => {
     if (state.kind === "image") offer(async () => navigator.clipboard.write([new ClipboardItem({ "image/png": state.blob })]),

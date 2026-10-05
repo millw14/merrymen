@@ -249,6 +249,51 @@ it("a copy that settles after the trade changed never reports on the new trade's
   assert.equal(notice(), "", "the old image's copy result is not shown against the new one");
 });
 
+it("two quick Copy presses end on the newer outcome, even when the older write fails last", async () => {
+  const writes: ((error?: unknown) => void)[] = [];
+  grantClipboardItem();
+  grant("clipboard", { write: () => new Promise<void>((resolve, reject) => {
+    writes.push((error) => { if (error) reject(error); else resolve(); });
+  }) });
+  await showOwnerCard();
+  await loadImage();
+  await press(buttons("Copy image")[0]);
+  await press(buttons("Copy image")[0]);
+  assert.equal(writes.length, 2);
+  await act(async () => { writes[1]!(); });
+  assert.equal(notice(), "Image copied.");
+  await act(async () => { writes[0]!(new DOMException("Document is not focused.", "NotAllowedError")); });
+  assert.equal(notice(), "Image copied.", "the image is on the clipboard, so the older failure is not shown");
+});
+
+it("a second Share while the sheet is still open is not reported as a failure", async () => {
+  let sheet: ((error?: unknown) => void) | undefined;
+  let asked = 0;
+  grant("canShare", () => true);
+  // Like a browser: one pending share per page, and a second call is refused.
+  grant("share", () => {
+    asked++;
+    if (sheet) return Promise.reject(new DOMException("An earlier share has not yet completed.", "InvalidStateError"));
+    return new Promise<void>((resolve, reject) => {
+      sheet = (error) => { sheet = undefined; if (error) reject(error); else resolve(); };
+    });
+  });
+  await showOwnerCard();
+  await loadImage();
+  await press(buttons("Share")[0]);
+  await press(buttons("Share")[0]);
+  assert.equal(asked, 2);
+  assert.equal(notice(), "", "the first sheet is still open and working");
+  await act(async () => { sheet!(); });
+  assert.equal(notice(), "", "the share went through");
+  await press(buttons("Share")[0]);
+  await press(buttons("Share")[0]);
+  await act(async () => { sheet!(new DOMException("The share target failed.", "DataError")); });
+  assert.equal(notice(), "Could not share this image. Use Download PNG instead.",
+    "a refused second press does not hide the open sheet's own failure");
+  assert.equal(download()?.getAttribute("href"), "blob:private-pnl-1", "Download stays available");
+});
+
 it("closing restores the triggering button and releases the private image", async () => {
   const opener = await showOwnerCard();
   assert.equal(ui.dom.window.document.activeElement?.textContent, "Close");
