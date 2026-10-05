@@ -48,11 +48,19 @@ export async function installKeyRecorded(deps: KeyInstallAccounting & {
   refreshBudget(): Promise<void>;
   event(level: "ok" | "warn" | "err", message: string): Promise<unknown>;
   resolveMinutes: number;
+  /**
+   * Asked at the last moment before the broadcast, after signing and before the
+   * pre-broadcast row: a throw refuses the send, with nothing written and
+   * nothing spent. index.ts throws when its worker began draining (SIGTERM)
+   * while this install was being estimated and signed.
+   */
+  beforeBroadcast?(): void;
 }, agentId: string, executor: AgentExecutor): Promise<void> {
   let recorded = false;
   let settled = false;
   try {
     const exec = await executor.installKey({ onSubmitted: async (hash, op) => {
+      deps.beforeBroadcast?.();
       recorded = await deps.addTrade({
         agent_id: agentId, kind: KEY_INSTALL_KIND, target: CASH.USDG, amount_usdg: 0,
         user_op_hash: hash, ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}), status: "submitted",

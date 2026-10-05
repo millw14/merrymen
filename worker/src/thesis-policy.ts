@@ -460,8 +460,19 @@ const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULE
  * THE OWNER STILL HEARS IT: `drawdown-breaker` is in owner-refusal.ts's
  * account-wide set, so the event line fires once per change, and the trade row
  * keeps its rule for the owner's desk. Only the public post goes.
+ *
+ * AND THE SERVICE'S OWN HOLDS, which are the same thing one step further from
+ * the coin (worker-admission.ts). `rollout-hold` refuses every intent of a
+ * tenant being brought back at `observe`, and every entry at `exits-only`;
+ * `draining` refuses everything a worker on its way out for a restart was
+ * still handed. Neither is the wall, the market or the account — it is the
+ * service holding the agent back — and a fleet coming back from a hold writes
+ * one on every tick, for every producer, the Brain's re-reviews included. Left
+ * in the feed, the recovery would be the feed. The owner still hears these
+ * on their own order (sayTradeOutcome reads the trade row's rule, which keeps
+ * its sentence below), and the row stays in the ledger.
  */
-export const ACCOUNT_HALT_RULES = ["drawdown-breaker"] as const;
+export const ACCOUNT_HALT_RULES = ["drawdown-breaker", "rollout-hold", "draining"] as const;
 const IS_ACCOUNT_HALT: ReadonlySet<string> = new Set<string>(ACCOUNT_HALT_RULES);
 
 /**
@@ -863,6 +874,16 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // gas-limits.ts `checkPrefund`: the fee the network holds up front.
   "prefund-short": "the account did not hold enough to cover the network fee up front",
   "prefund-unverified": "the up-front network fee could not be checked against the account's balance",
+  // ── THE WORKER'S OWN ADMISSION, NOT THE WALL ────────────────────────────
+  //
+  // worker-admission.ts, at the top of the intent queue: a tenant being
+  // brought back after a hold one level at a time, or a worker on its way out
+  // for a restart. Neither is the owner's signature or the market — it is the
+  // service holding the agent back, and the sentence says so, so nobody goes
+  // looking through their permissions for it. No remedy: there is nothing for
+  // the owner to change.
+  "rollout-hold": "trading is on hold for this agent while the service brings agents back",
+  draining: "the agent was restarting and took no new trades",
 });
 
 /**

@@ -553,6 +553,23 @@ export function createLiveTrades(now: () => number = Date.now): LiveTrades {
  * minutes each. The process is waiting on purpose, so the hook runs once each
  * time the tick defers. createCommandClock wires it to the heartbeat and keeps
  * beating for as long as the wait is a real one.
+ *
+ * AND IT CAN BE STOPPED, FOR GOOD (`stop`). A worker told to leave (SIGTERM,
+ * index.ts) must not start a tick on its way out: a regular tick would read
+ * the book and hand the strategy a fresh pass of intents, and a command tick
+ * would claim an owner's order file only for the draining worker to refuse it.
+ * Stopping takes the armed tick off the clock and arms nothing again. A tick
+ * already RUNNING is not cancelled — nothing here can cancel a promise — but
+ * it arms nothing when it ends, and a regular tick that was held behind a
+ * trade in flight never starts at all, not even once the trade lands. One way
+ * only: there is no restart, because nothing that stops a clock wants it back.
+ *
+ * AND WHAT IS RUNNING CAN BE WAITED FOR (`settled`). A tick's work does not
+ * end with its last trade: the strategy loop refunds an energy claim its
+ * refused intent did not consume, and a command tick writes the order's result
+ * file after its trade. Both come AFTER the intent chain has emptied, so a
+ * drain that waited only for the chain would close the ledger under them. The
+ * running tick's settle is the one promise that ends after all of it.
  */
 export interface TickClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -563,6 +580,10 @@ export interface TickClock {
   wakeCommand(): boolean;
   /** Run one research-only nomination tick, preserving the regular cadence and trade serialization. */
   wakeNomination(): boolean;
+  /** Start nothing ever again: the armed tick comes off the clock, and a running one arms nothing when it ends. */
+  stop(): void;
+  /** The tick running now — regular, command or nomination — settling when it has ended, never rejecting; null when none is. */
+  settled(): Promise<void> | null;
 }
 
 export function createTickClock(deps: {
@@ -587,8 +608,28 @@ export function createTickClock(deps: {
   let timer: unknown = null;
   let dueAt = 0;
   let nominationWanted = false;
+  // One way: set by stop(), never cleared. Every path that would START a tick
+  // or put one on the clock reads it first.
+  let stopped = false;
+  // The settle of the tick running now (settled()). Each of the three starts
+  // below hands its whole run to `track`, ending where `running` is lowered; a
+  // tick its end starts (a wanted nomination) is tracked in its place, so the
+  // end of the first does not clear the second.
+  let current: Promise<void> | null = null;
+  const track = (run: Promise<unknown>) => {
+    const settled: Promise<void> = run.then(
+      () => {
+        if (current === settled) current = null;
+      },
+      () => {
+        if (current === settled) current = null;
+      },
+    );
+    current = settled;
+  };
 
   const arm = (ms: number) => {
+    if (stopped) return;
     const wait = Number.isFinite(ms) ? Math.max(0, ms) : deps.fallbackMs;
     dueAt = deps.now() + wait;
     timer = deps.setTimer(runRegular, wait);
@@ -597,6 +638,9 @@ export function createTickClock(deps: {
   // Started at once when nothing is in flight — the common case stays
   // synchronous — and otherwise once the command lands, asking again then.
   const startRegular = (): Promise<number> => {
+    // Asked again each time a deferral ends, so a tick held behind a trade
+    // when the clock stopped does not start once the trade lands.
+    if (stopped) return Promise.resolve(deps.fallbackMs);
     let waiting: Promise<unknown> | null;
     try {
       waiting = deps.inFlight();
@@ -624,17 +668,20 @@ export function createTickClock(deps: {
   const runRegular = () => {
     timer = null;
     running = true;
-    void startRegular()
-      .catch(() => deps.fallbackMs)
-      .then((next) => {
-        running = false;
-        ticked = true;
-        arm(next);
-        if (nominationWanted) wakeNomination();
-      });
+    track(
+      startRegular()
+        .catch(() => deps.fallbackMs)
+        .then((next) => {
+          running = false;
+          ticked = true;
+          arm(next);
+          if (nominationWanted) wakeNomination();
+        }),
+    );
   };
 
   const startNomination = (): Promise<void> => {
+    if (stopped) return Promise.resolve();
     let waiting: Promise<unknown> | null;
     try { waiting = deps.inFlight(); } catch { waiting = null; }
     if (waiting) {
@@ -648,7 +695,7 @@ export function createTickClock(deps: {
   const wakeNomination = (): boolean => {
     // The first regular tick owns boot staggering, initial arming and the
     // first coherent book. A group cannot bring that initialization forward.
-    if (!deps.nomination || !ticked) return false;
+    if (!deps.nomination || !ticked || stopped) return false;
     if (running) { nominationWanted = true; return true; }
     if (timer === null) return false;
     // A regular tick already due makes the same fresh reads. Prefer it to
@@ -658,17 +705,17 @@ export function createTickClock(deps: {
     deps.clearTimer(timer);
     timer = null;
     running = true;
-    void startNomination().catch(() => {}).then(() => {
+    track(startNomination().catch(() => {}).then(() => {
       running = false;
       arm(due - deps.now());
       if (nominationWanted) wakeNomination();
-    });
+    }));
     return true;
   };
 
   return {
     start(delayMs) {
-      if (timer !== null || running) return;
+      if (stopped || timer !== null || running) return;
       arm(delayMs);
     },
     state() {
@@ -676,7 +723,7 @@ export function createTickClock(deps: {
     },
     wakeNomination,
     wakeCommand() {
-      if (timer === null || running) return false;
+      if (stopped || timer === null || running) return false;
       deps.clearTimer(timer);
       timer = null;
       const due = dueAt;
@@ -687,15 +734,24 @@ export function createTickClock(deps: {
       } catch {
         run = Promise.resolve();
       }
-      void run
-        .catch(() => {})
-        .then(() => {
-          running = false;
-          arm(due - deps.now());
-          if (nominationWanted) wakeNomination();
-        });
+      track(
+        run
+          .catch(() => {})
+          .then(() => {
+            running = false;
+            arm(due - deps.now());
+            if (nominationWanted) wakeNomination();
+          }),
+      );
       return true;
     },
+    stop() {
+      stopped = true;
+      nominationWanted = false;
+      if (timer !== null) deps.clearTimer(timer);
+      timer = null;
+    },
+    settled: () => current,
   };
 }
 
@@ -738,6 +794,12 @@ export function createTickClock(deps: {
  * preset. main() now hands it the file's path (`heartbeat`, required) and the
  * two facts a beat states, and writeHeartbeat below is the one writer — tick()'s
  * own beat goes through it too, so the two cannot drift into different shapes.
+ *
+ * STOPPED, IT IS QUIET (`stop`). The clock stops as createTickClock's does, and
+ * the poll stops with it: no order is owed a wake by a worker that is leaving,
+ * and no beat is written for it either. The beat says the process is alive and
+ * carrying on; a draining worker is neither for long, and its own drain is
+ * bounded far inside the watchdog's floor (index.ts, on SIGTERM).
  */
 export interface CommandClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -748,6 +810,10 @@ export interface CommandClock {
   wakeNomination(): boolean;
   /** The clock's own state, for logs and tests. */
   state(): { ticked: boolean; tickRunning: boolean; regularDueInMs: number | null };
+  /** Stop the clock for good, and the poll with it: no tick, no wake, no beat. See TickClock.stop. */
+  stop(): void;
+  /** The tick running now, settling when it has ended; null when none is. See TickClock.settled. */
+  settled(): Promise<void> | null;
 }
 
 export function createCommandClock(deps: {
@@ -807,13 +873,20 @@ export function createCommandClock(deps: {
     if (now - beatAt < ALIVE_BEAT_EVERY_MS) return;
     beat();
   };
+  let stopped = false;
   return {
     start: (delayMs) => clock.start(delayMs),
     poll: () => {
+      if (stopped) return false;
       alive();
       return watcher.poll();
     },
     state: () => clock.state(),
     wakeNomination: () => clock.wakeNomination(),
+    stop: () => {
+      stopped = true;
+      clock.stop();
+    },
+    settled: () => clock.settled(),
   };
 }
