@@ -93,6 +93,10 @@ cannot tell them apart.
   or `present-content-unverified` for a presence-only table. Expect this
   while trading is held. It is not a statement about the contents of the
   tables in `contentUnverified`.
+- **`contentsVerified`**: true only when the drill passed and compared no
+  presence-only table. While any table in `contentUnverified` was compared it
+  reads `false` beside `ok: true`: the rows are proven, their contents are
+  not. Do not read `exact` as a statement about contents; read this.
 - **`ok: true, exact: false`**: some tables read `source-changed`. After the
   restore point the source deleted rows stamped before the cutoff, or rewrote
   them with newer stamps. Either way the fork holds more than the source,

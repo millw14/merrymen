@@ -362,6 +362,8 @@ test("the report prints counts, kinds and verdicts, never a stamp", () => {
   const report = compareSides({ tables: tables(stamp) }, { tables: tables(stamp) });
   assert.equal(report.ok, true);
   assert.equal(report.exact, true);
+  // Rows proven, contents not: the presence-only tables were compared.
+  assert.equal(report.contentsVerified, false);
   assert.deepEqual(report.failed, []);
   assert.deepEqual(report.summary, { match: DRILL_TABLES.length - PRESENCE_ONLY.length, "present-content-unverified": PRESENCE_ONLY.length });
   assert.deepEqual(report.tables.equity, { verdict: "match", kind: "append", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
@@ -377,6 +379,23 @@ test("the report prints counts, kinds and verdicts, never a stamp", () => {
   assert.deepEqual(older.failed, ["flows"]);
   assert.equal(older.tables.flows.newest, "fork-older");
   assert.doesNotMatch(JSON.stringify(older), new RegExp(`${stamp - 1}|${stamp}`));
+});
+
+test("contents are verified only when no presence-only table was compared", () => {
+  const stamp = 1_789_999_123;
+  const only = (kinds) => ({ tables: Object.fromEntries(DRILL_TABLES.filter(({ kind }) => kinds.includes(kind)).map(({ table }) => [table, { present: true, stamped: true, rows: 3, total: 3, after: 0, newest: stamp }])) });
+  const exactOnly = compareSides(only(["append", "last-write"]), only(["append", "last-write"]));
+  assert.equal(exactOnly.ok, true);
+  assert.deepEqual(exactOnly.contentUnverified, []);
+  assert.equal(exactOnly.contentsVerified, true);
+  // The Codex case: one agents row stale in the fork reads exactly like a
+  // current one, so the moment agents is compared, contents are not claimed.
+  const withAgents = compareSides(only(["append", "last-write", "presence-only"]), only(["append", "last-write", "presence-only"]));
+  assert.equal(withAgents.ok, true);
+  assert.equal(withAgents.tables.agents.verdict, "present-content-unverified");
+  assert.equal(withAgents.contentsVerified, false);
+  const failing = compareSides({ tables: {} }, { tables: {} });
+  assert.equal(failing.contentsVerified, false);
 });
 
 test("a drill that compared nothing is not a pass", () => {

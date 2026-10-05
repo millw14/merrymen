@@ -68,7 +68,9 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DRILL_FORMAT = "merrymen-restore-drill/v1";
+// v2: tables carry their kind, presence-only tables read
+// `present-content-unverified`, and the report says `contentsVerified`.
+export const DRILL_FORMAT = "merrymen-restore-drill/v2";
 
 /**
  * THE KINDS: WHAT A VERDICT MAY SAY ABOUT A TABLE'S CONTENTS.
@@ -679,6 +681,12 @@ export function verdictOf(fork, source, kind) {
  * does not fail the drill; a presence-only table that fails on presence is in
  * `failed` like any other.
  *
+ * `contentsVerified` is the one-word answer to "did the drill see the
+ * contents": true only for a passing drill that compared no presence-only
+ * table. `exact` is about rows, and a reader skimming for a green word must
+ * not take it for more — so the word that is about contents is its own field,
+ * and it reads false whenever `contentUnverified` is not empty.
+ *
  * A drill that compared nothing — every table absent, or every source row
  * stamped after the cutoff — is not a pass, whatever the verdicts say.
  */
@@ -710,6 +718,7 @@ export function compareSides(fork, source) {
   return {
     ok,
     exact: ok && Object.values(tables).every((t) => t.verdict === "match" || t.verdict === CONTENT_UNVERIFIED || t.verdict === "absent"),
+    contentsVerified: ok && contentUnverified.length === 0,
     failed,
     summary,
     contentUnverified,
@@ -745,7 +754,7 @@ export async function runRestoreDrill({ argv = [], env = {}, now = Date.now, con
   try {
     bounds = parseDrillArgs(argv, env, now());
   } catch (e) {
-    return { exitCode: 64, report: { ...head, ok: false, exact: false, error: errorOf(e) } };
+    return { exitCode: 64, report: { ...head, ok: false, exact: false, contentsVerified: false, error: errorOf(e) } };
   }
   const window = { restorePoint: isoOf(bounds.restorePointSec), cutoff: isoOf(bounds.cutoffSec), settleSec: bounds.settleSec };
   const sides = {};
@@ -764,7 +773,7 @@ export async function runRestoreDrill({ argv = [], env = {}, now = Date.now, con
     }
   } catch (e) {
     const refused = e instanceof DrillRefusal && REFUSALS.has(e.code);
-    return { exitCode: refused ? 64 : 1, report: { ...head, ...window, ok: false, exact: false, error: errorOf(e) } };
+    return { exitCode: refused ? 64 : 1, report: { ...head, ...window, ok: false, exact: false, contentsVerified: false, error: errorOf(e) } };
   }
   const result = compareSides(sides.fork, sides.source);
   return { exitCode: result.ok ? 0 : 1, report: { ...head, ...window, ...result } };
