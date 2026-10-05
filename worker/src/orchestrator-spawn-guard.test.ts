@@ -52,6 +52,7 @@ const {
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
 const { applyLedgerSchema } = await import("./store");
+const { BOOTSTRAP_FILE } = await import("./bootstrap-state");
 const { MIRROR_STATE_DDL } = await import("./ledger-mirror");
 const { RECOVERY_REPLY_SCHEMA, sealRecoveryReplyState } = await import("./recovery-reply-state");
 
@@ -190,8 +191,8 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     setPaperRestoreForTest(PAPER_OK);
     const t = await wanted(BOT);
     live.push(t.tenant);
-    // The recovery listener's high-water mark for this bot belongs to someone
-    // else's account. Starting the bot below it could answer old updates again.
+    // The recovery listener's high-water mark for this bot names someone
+    // else's account, so the handoff cannot vouch for it and refuses.
     raw.prepare("INSERT INTO recovery_reply_offsets VALUES(?,?,?,?,?,200,101,100,1000)")
       .run("8801", addr(0x5eee), addr(0x5fff), 4663, "a".repeat(16));
 
@@ -246,10 +247,11 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     const t = await wanted(null);
     live.push(t.tenant);
     // writeBootstrapForChild refuses to start the child by throwing when the
-    // last spawn's anchor cannot be removed (bootstrap.json). Nothing named
-    // above: the catch at the bottom of spawnChild is what holds it.
-    mkdirSync(path.join(t.home, "bootstrap.json"), { recursive: true, mode: 0o700 });
-    writeFileSync(path.join(t.home, "bootstrap.json", "stuck"), "", { mode: 0o600 });
+    // last spawn's anchor cannot be removed. Here it is a directory with
+    // something in it. None of the gates above: the catch at the bottom of
+    // spawnChild is what holds it.
+    mkdirSync(path.join(t.home, BOOTSTRAP_FILE), { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(t.home, BOOTSTRAP_FILE, "stuck"), "", { mode: 0o600 });
 
     await assert.doesNotReject(reconcile(), "the throw does not reject through reconcile");
     assert.equal(spawned.length, 0, "no worker starts over an anchor it cannot trust");
