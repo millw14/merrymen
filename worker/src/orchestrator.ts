@@ -71,6 +71,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
+import {
+  drainBudgetMs, runFleetDrain, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt,
+  type DrainHook, type DrainLimits, type FinalPassOutcome,
+} from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
@@ -4289,6 +4293,216 @@ export async function honourPendingKills(): Promise<void> {
       log(`${tenant}: Telegram kill could not be honoured this time — ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+}
+
+/**
+ * THE beforeChildren HOOKS: what the drain runs once `stopping` is set and
+ * before any child is signalled (fleet-drain.ts, step 2). For work beside the
+ * children that has to stop before they do — a pass still feeding them, or a
+ * sidecar answering the bots they are about to hand back. Each runs once, in
+ * the order added; one that throws is said and the drain goes on without it;
+ * together they have DRAIN_LIMITS.hooksMs.
+ */
+const drainBeforeChildren: DrainHook[] = [];
+export function onDrainBeforeChildren(name: string, run: DrainHook["run"]): void {
+  drainBeforeChildren.push({ name, run });
+}
+
+/** What the drain wrote down about one home before it signalled anything (fleet-drain.ts, step 1). */
+interface DrainHome {
+  tenant: string;
+  /** The lease it ran under. Any other by the final pass, or none, speaks for nobody here. */
+  lease: TenantLease | null;
+  /** A worker ran in it: its ledger is a source the final pass copies. */
+  wasChild: boolean;
+  /** A hold process ran in it: its ledger is never copied, and its memory is forget-only. */
+  wasHolder: boolean;
+}
+
+/**
+ * EVERY HOME WITH A PROCESS IN IT, read before any is signalled: the maps
+ * empty as processes exit, and the final pass needs what each home WAS. A
+ * stood-down hold is not one of them: its grant is gone or its lease was
+ * lost, and the mirror does not speak for it either (mirrorLedgers). Nor is
+ * an expired grant still retiring: reconcile carries its final pass, and a
+ * restart arms nothing for it.
+ */
+function drainHomes(): DrainHome[] {
+  const homes: DrainHome[] = [];
+  for (const tenant of children.keys()) homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: true, wasHolder: false });
+  for (const [tenant, held] of holders) {
+    if (held.stoodDown) continue;
+    homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: false, wasHolder: true });
+  }
+  return homes;
+}
+
+/**
+ * SIGTERM to every child and hold process, or SIGKILL to what is still
+ * running; how many were signalled.
+ *
+ * A child goes through killChild with no SIGKILL timer: its exit is still
+ * tracked (exitingChildren), and the drain decides when SIGKILL is due. A hold
+ * process another path already told to stop (`leaving`) has its own SIGKILL
+ * due within seconds, and holds nothing but a bot: it is finished now, as the
+ * stop always did.
+ */
+function signalFleetForDrain(signal: "SIGTERM" | "SIGKILL"): number {
+  let signalled = 0;
+  if (signal === "SIGTERM") {
+    for (const tenant of [...children.keys()]) {
+      killChild(tenant, null);
+      signalled += 1;
+    }
+  } else {
+    for (const procs of exitingChildren.values()) {
+      for (const proc of procs) {
+        signalled += 1;
+        try { proc.kill("SIGKILL"); } catch { /* gone after all */ }
+      }
+    }
+  }
+  for (const held of holders.values()) {
+    if (held.proc) {
+      signalled += 1;
+      try {
+        held.proc.kill(signal);
+      } catch (error) {
+        log(`${held.tenant}: hold ${signal} failed — ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (held.leaving) {
+      signalled += 1;
+      killLeaving(held);
+    }
+  }
+  return signalled;
+}
+
+/** No child or hold process is running, whether it was stopped by the drain or before it. */
+function fleetProcessesGone(): boolean {
+  return children.size === 0 && exitingChildren.size === 0 && ![...holders.values()].some((held) => held.proc || held.leaving);
+}
+
+/**
+ * THE DRAIN'S FINAL PASS OVER ONE HOME (fleet-drain.ts, step 6): the last
+ * copy of what its process left, now that nothing writes it. Through the
+ * retirement pass, which already knows how to do this safely, as
+ * retiredWorkerPass(tenant, lease, mirrorLedger, held):
+ *
+ * - the ledger only for a worker's home, and never a held book's: a hold
+ *   process's book is empty or unrestored, and copied, it would overwrite the
+ *   checkpoint, positions and cost basis the shared ledger still holds (see
+ *   `holders`); restore-blocked.json marks such a home even when the worker
+ *   came after it;
+ * - memory published only where the home's files are authoritative and the
+ *   tenant still has its grant. A hold process's files are not its memory, so
+ *   it gets forget-only handling, as reconcile gives it: its owner's forgets
+ *   reach the stored rows and nothing stale is sealed over them. So does a
+ *   home whose grant is gone or whose Telegram kill is pending — step 5 may
+ *   have just deleted that tenant's stored memory, and a publish here would
+ *   put it back.
+ *
+ * And nothing at all — "skipped" — where the copy is not this process's to
+ * make: a lease lost or replaced since step 1, a process still running after
+ * SIGKILL, or a copy of its own still in flight that the drain could only
+ * queue behind. The next owner's spawn copies what is left
+ * (finalMirrorBeforeAnchor), as after any crash.
+ */
+async function drainFinalPass(home: DrainHome): Promise<FinalPassOutcome> {
+  const { tenant, lease } = home;
+  if (!lease || leases.get(tenant) !== lease || !lease.healthy()) {
+    log(`${tenant}: lease gone before the drain's final pass — its home is left for the next owner's spawn to copy`);
+    return "skipped";
+  }
+  const held = holders.get(tenant);
+  if (children.has(tenant) || exitingChildren.has(tenant) || held?.proc || held?.leaving) {
+    log(`[alert] ${tenant}: its process is still running after SIGKILL — no final pass over a home it may still write`);
+    return "skipped";
+  }
+  if (mirrorTails.has(tenant)) {
+    log(`[alert] ${tenant}: an earlier copy is still running — no final pass queued behind it; its own barrier decides the next start`);
+    return "skipped";
+  }
+  const dir = childHome(tenant);
+  const restoreBlocked = readRestoreBlocked(dir) !== null;
+  let authorityGone: boolean;
+  try {
+    authorityGone = !(await getGrantStore().get(tenant as `0x${string}`)) || killRequested(dir);
+  } catch {
+    // Unconfirmed is not present: never publish on it.
+    authorityGone = true;
+  }
+  return retiredWorkerPass(tenant, lease, home.wasChild && !restoreBlocked, home.wasHolder || restoreBlocked || authorityGone, true);
+}
+
+/** The drain under way, if any: every signal after the first gets this one back. */
+let draining: Promise<void> | null = null;
+
+/**
+ * CALL THE FLEET HOME: the orchestrator's half of fleet-drain.ts, which has
+ * the order, the budget and the reasons. Once per process, whatever signals
+ * follow.
+ */
+function drainFleet(
+  signal: string,
+  opts: { budgetMs?: number; limits?: Partial<DrainLimits>; exit?: (code: number) => void } = {},
+): Promise<void> {
+  if (draining) {
+    log(`${signal} again — the fleet is already being called home`);
+    return draining;
+  }
+  const budget = opts.budgetMs === undefined ? drainBudgetMs() : { ms: opts.budgetMs, refused: null };
+  if (budget.refused) log(`[alert] ${budget.refused}`);
+  draining = runFleetDrain<DrainHome>({
+    signal,
+    budgetMs: budget.ms,
+    limits: opts.limits,
+    log,
+    stop: () => {
+      stopping = true;
+      for (const wake of [...spawnSlotWaiters]) wake();
+      return drainHomes();
+    },
+    beforeChildren: drainBeforeChildren,
+    // A copy started, a spawn preparing (its own final mirror among its
+    // awaits), a mirror pass in hand, or an order ferry crossing a home.
+    settled: () => mirrorTails.size === 0 && spawning.size === 0 && mirrorPassesInFlight === 0 && !ferrying,
+    closeCopies: () => {
+      copiesClosed = true;
+    },
+    signalFleet: signalFleetForDrain,
+    fleetGone: fleetProcessesGone,
+    honourPendingKills,
+    finalPass: drainFinalPass,
+    writeReceipt: (receipt) => writeShutdownReceipt(shutdownReceiptDir(merrymenHome()), receipt),
+    // Last, and all at once: a restarting replica takes the tenants over now
+    // rather than when our dropped connections time out server-side.
+    releaseLeases: async () => {
+      await Promise.allSettled([...leases.keys()].map((tenant) => releaseLease(tenant)));
+    },
+    exit: opts.exit ?? ((code) => process.exit(code)),
+  });
+  return draining;
+}
+
+/**
+ * Test seam: the drain a signal starts, with the test's budget, caps and an
+ * `exit` in place of process.exit. A second call while one is under way gets
+ * it back, as a second signal does.
+ */
+export function drainFleetForTest(
+  signal = "SIGTERM",
+  opts: { budgetMs?: number; limits?: Partial<DrainLimits>; exit?: (code: number) => void } = {},
+): Promise<void> {
+  return drainFleet(signal, opts);
+}
+
+/** Test seam: forget a finished drain, so the next test in the file starts with a fleet that is not stopping. */
+export function resetDrainForTest(): void {
+  stopping = false;
+  copiesClosed = false;
+  draining = null;
 }
 
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
@@ -9340,6 +9554,10 @@ export async function runOrchestrator(): Promise<void> {
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
+  // (fleet-drain.ts): said once, and moved aside so that a crash of this run
+  // is never read as the clean stop of the last.
+  log(takePreviousShutdown(shutdownReceiptDir(merrymenHome())).line);
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror
@@ -9347,31 +9565,15 @@ export async function runOrchestrator(): Promise<void> {
   // this very deploy just cleared. It runs from the loop instead — see
   // COHORT_VET_AFTER_PASSES.
 
-  const stop = () => {
-    stopping = true;
-    log("stopping — calling the whole fleet home");
-    for (const child of children.values()) child.proc.kill("SIGTERM");
-    for (const held of holders.values()) held.proc?.kill("SIGTERM");
-    // And any a handover or stand-down is still waiting on.
-    for (const held of holders.values()) killLeaving(held);
-    // Release every advisory lease so a restarting replica can take over at once
-    // rather than waiting for our dropped connections to time out server-side.
-    // Best-effort and unawaited — we exit in a second regardless.
-    const release = () => {
-      for (const tenant of [...leases.keys()]) void releaseLease(tenant);
-    };
-    // A TELEGRAM KILL STILL WAITING IN A HOME goes to the store before the
-    // leases do, so the replica taking over never arms that grant. The home
-    // does not survive this container (kill-request.ts). Bounded, and it
-    // changes nothing when no kill is pending. It only helps if Railway gives
-    // the old deployment draining time. The default is none.
-    if (pendingKillTenants().length === 0) {
-      release();
-      setTimeout(() => process.exit(0), 1_000);
-      return;
-    }
-    void Promise.race([honourPendingKills(), new Promise((r) => setTimeout(r, 3_000))]).finally(release);
-    setTimeout(() => process.exit(0), 4_000);
+  // THE DRAIN, for SIGTERM (the platform's stop) and SIGINT (a hand at the
+  // terminal) alike: stop starting things, let every copy in flight finish
+  // under its lease, stop the children and wait for them, carry out pending
+  // Telegram kills, give each home its final pass, write the receipt, and
+  // release the leases last. Once, however many signals come. It used to
+  // release every lease at once and exit a second later, which left a copy in
+  // flight blocked behind its own recovery marker. See fleet-drain.ts.
+  const stop = (signal: NodeJS.Signals) => {
+    void drainFleet(signal);
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
