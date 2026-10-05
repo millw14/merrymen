@@ -975,6 +975,35 @@ test("inactivity: while held no check offers a remedy, so a stale blocker asks f
   }
 });
 
+test("inactivity: while held, an old valuation is not missing market data and a quiet mirror is not a stopped worker", async () => {
+  const s = await setup();
+  s.d.raw.exec(`CREATE TABLE mirror_state (tenant TEXT NOT NULL, table_name TEXT NOT NULL, last_id INTEGER NOT NULL DEFAULT 0, last_stamp INTEGER, updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant, table_name))`);
+  s.d.raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, 'events', 5, ?)").run(OWNER_A, NOW - 5000);
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live", beat: NOW - 30 });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 7200 });
+  recoveryHold(s.d);
+  const fresh = await explain(s);
+  assert.equal(fresh.primary.kind, "recovery_hold");
+  assert.equal(fresh.checks.market_data.status, "unknown", "a fresh heartbeat while held is not a running worker whose ticks end early");
+  assert.equal(fresh.checks.market_data.kind, null);
+  assert.ok(!/worker is running/.test(fresh.text));
+  assert.ok(!fresh.sc.other_factors.some((f: any) => f.category === "market_data"));
+  s.d.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(NOW - 5000, ACCOUNT_A);
+  const stale = await explain(s);
+  assert.equal(stale.primary.kind, "recovery_hold");
+  assert.equal(stale.checks.data_freshness.status, "unknown", "a quiet mirror is expected while held");
+  assert.ok(!/Either the worker or the mirror stopped/.test(stale.text));
+  assert.ok(!stale.sc.other_factors.some((f: any) => f.category === "data_freshness"));
+  // The same records with the hold cleared give the answers they gave before it.
+  s.d.raw.prepare("UPDATE fleet_recovery_health SET held = 0").run();
+  const unheldStale = await explain(s);
+  assert.equal(unheldStale.checks.data_freshness.kind, "stale_records");
+  s.d.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(NOW - 30, ACCOUNT_A);
+  const unheldFresh = await explain(s);
+  assert.equal(unheldFresh.checks.market_data.status, "blocking");
+  assert.equal(unheldFresh.checks.market_data.kind, "missing_data");
+});
+
 test("inactivity: only this tenant's own hold on its current account and chain counts; an unreadable report is no hold, and is said", async () => {
   const s = await setup();
   agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live", beat: NOW - 3600 });

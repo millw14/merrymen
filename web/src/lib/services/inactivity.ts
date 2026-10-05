@@ -759,6 +759,11 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     const threshold = { last_valuation_within_s: within };
     if (!v) {
       add({ category: "market_data", status: e.count ? "warning" : "unknown", kind: e.count ? "missing_data" : null, summary: `No complete valuation is on record${e.count ? `, and ${e.count} tick(s) in the window could not read the market` : ""}.`, observed, threshold, recorded_at: e.last_at });
+    } else if (hold && vAge !== null && vAge > within) {
+      // HELD: an old valuation is the hold, not ticks ending early on an
+      // unreadable market. The branch below would say "the worker is running"
+      // on any fresh heartbeat, and a held agent's is not a trading worker's.
+      add({ category: "market_data", status: "unknown", kind: null, summary: `Last complete valuation at ${iso(v.at)}. A held agent does not trade, so this says nothing about the market data itself.`, observed, threshold, recorded_at: v.at });
     } else if (heartbeatFresh && vAge !== null && vAge > within) {
       add({ category: "market_data", status: "blocking", kind: "missing_data", summary: `The worker is running, but the last complete valuation was at ${iso(v.at)}: its ticks are ending early because the market could not be read or a price was missing, and nothing trades on such a tick.`, observed, threshold, recorded_at: v.at, since: v.at, evidence: e.count ? [`${e.count} tick(s) in the window reported an unreadable market (last at ${iso(e.last_at)}).`] : [] });
     } else if (heartbeatFresh === false) {
@@ -869,6 +874,11 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
       add({ category: "data_freshness", status: "unknown", kind: null, summary: "The ledger mirror's own state is not available here, so its freshness is unknown.", observed, threshold });
     } else if (notArmed) {
       add({ category: "data_freshness", status: "ok", kind: null, summary: `The mirror last copied rows at ${iso(m)}; a worker that is not armed writes little, so a quiet mirror is expected.`, observed, threshold, recorded_at: m });
+    } else if (hold) {
+      // HELD: nothing is trading, so a quiet mirror is expected, and it cannot
+      // say whether the worker or the mirror stopped either: unknown, never the
+      // "either stopped" warning beside a hold that explains the silence.
+      add({ category: "data_freshness", status: "unknown", kind: null, summary: `The mirror last copied rows at ${iso(m)}. A held agent does not trade, so a quiet mirror is expected and says nothing about the mirror itself.`, observed, threshold, recorded_at: m });
     } else if (i.now - m > within) {
       add({ category: "data_freshness", status: "warning", kind: "stale_records", summary: `Nothing new has reached the shared records since ${iso(m)}. Either the worker or the mirror stopped; shared records cannot tell which.`, observed, threshold, recorded_at: m, since: m });
     } else {
