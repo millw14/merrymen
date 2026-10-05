@@ -14,6 +14,8 @@ import { after, describe, it } from "node:test";
 
 import {
   DRAIN_BUDGET_DEFAULT_MS,
+  DRAIN_LIMITS,
+  PLATFORM_DRAIN_MARGIN_MS,
   PREVIOUS_SHUTDOWN_FILE,
   SHUTDOWN_RECEIPT_FILE,
   drainBudgetMs,
@@ -323,14 +325,49 @@ describe("the receipt", () => {
 
 describe("the budget", () => {
   it("defaults to 50s, takes a whole number of milliseconds in range, and refuses anything else without echoing it", () => {
-    assert.deepEqual(drainBudgetMs({}), { ms: DRAIN_BUDGET_DEFAULT_MS, refused: null });
-    assert.deepEqual(drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: "" }), { ms: DRAIN_BUDGET_DEFAULT_MS, refused: null });
-    assert.deepEqual(drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: "40000" }), { ms: 40_000, refused: null });
+    assert.deepEqual(drainBudgetMs({}), { ms: DRAIN_BUDGET_DEFAULT_MS, alerts: [] });
+    assert.deepEqual(drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: "" }), { ms: DRAIN_BUDGET_DEFAULT_MS, alerts: [] });
+    assert.deepEqual(drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: "40000" }), { ms: 40_000, alerts: [] });
     for (const bad of ["abc", "0", "999", "600001", "1e4", "-5", "45.5", "0x1000", "fifty-seconds"]) {
       const r = drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: bad });
       assert.equal(r.ms, DRAIN_BUDGET_DEFAULT_MS, bad);
-      assert.match(r.refused ?? "", /^MERRYMEN_DRAIN_BUDGET_MS is not a whole number of milliseconds from 1000 to 600000 — draining within the default 50000ms$/, bad);
+      assert.equal(r.alerts.length, 1, bad);
+      assert.match(r.alerts[0]!, /^MERRYMEN_DRAIN_BUDGET_MS is not a whole number of milliseconds from 1000 to 600000 — draining within the default 50000ms$/, bad);
     }
+  });
+
+  it("ENDS BEFORE THE PLATFORM'S SIGKILL: cut to RAILWAY_DEPLOYMENT_DRAINING_SECONDS less the margin, when that is set", () => {
+    // The runbook's 75s leaves the default alone, and says nothing.
+    assert.deepEqual(drainBudgetMs({ RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "75" }), { ms: DRAIN_BUDGET_DEFAULT_MS, alerts: [] });
+    // Lowered under the default: the drain ends inside it, and says why.
+    const cut = drainBudgetMs({ RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "20" });
+    assert.equal(cut.ms, 20_000 - PLATFORM_DRAIN_MARGIN_MS);
+    assert.equal(cut.alerts.length, 1);
+    assert.match(cut.alerts[0]!, /^drain budget cut to 15000ms, to end 5000ms before RAILWAY_DEPLOYMENT_DRAINING_SECONDS sends SIGKILL/);
+    // An asked-for budget is cut the same way; one already inside it is not.
+    assert.equal(drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: "120000", RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "60" }).ms, 55_000);
+    assert.deepEqual(drainBudgetMs({ MERRYMEN_DRAIN_BUDGET_MS: "30000", RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "60" }), { ms: 30_000, alerts: [] });
+    // No draining time to speak of: the shortest budget, which gives no final
+    // pass and still releases the leases.
+    for (const none of ["0", "3"]) assert.equal(drainBudgetMs({ RAILWAY_DEPLOYMENT_DRAINING_SECONDS: none }).ms, 1_000, none);
+    // Unreadable: not used, and said — without its value.
+    const odd = drainBudgetMs({ RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "seventy-five" });
+    assert.equal(odd.ms, DRAIN_BUDGET_DEFAULT_MS);
+    assert.deepEqual(odd.alerts, ["RAILWAY_DEPLOYMENT_DRAINING_SECONDS is not a whole number of seconds — the drain budget is not cut to the platform's deadline"]);
+  });
+
+  it("a budget too short for a final pass still stops the fleet, gives no copy, and releases the leases", async () => {
+    const asked: string[] = [];
+    const run = drainPlan({
+      budgetMs: 1_000,
+      limits: { ...FAST, finalPassMinMs: DRAIN_LIMITS.finalPassMinMs },
+      finalPass: async (home) => { asked.push(home); return "saved"; },
+    });
+    await runFleetDrain(run.plan);
+    assert.deepEqual(asked, [], "no copy started that the platform could cut off");
+    assert.ok(run.timeline.includes("SIGTERM") && run.timeline.includes("release"));
+    assert.equal(run.receipts[0]!.finalPass.outOfTime, 2);
+    assert.deepEqual(run.exits, [0]);
   });
 });
 

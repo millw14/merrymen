@@ -4457,8 +4457,8 @@ function drainFleet(
     log(`${signal} again — the fleet is already being called home`);
     return draining;
   }
-  const budget = opts.budgetMs === undefined ? drainBudgetMs() : { ms: opts.budgetMs, refused: null };
-  if (budget.refused) log(`[alert] ${budget.refused}`);
+  const budget = opts.budgetMs === undefined ? drainBudgetMs() : { ms: opts.budgetMs, alerts: [] };
+  for (const line of budget.alerts) log(`[alert] ${line}`);
   draining = runFleetDrain<DrainHome>({
     signal,
     budgetMs: budget.ms,
