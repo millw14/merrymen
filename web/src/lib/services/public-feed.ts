@@ -249,6 +249,14 @@ const RECORDS_UNREADABLE: Unranked = {
   code: "records-unreadable",
   label: "the records this depends on could not be read right now",
 };
+/**
+ * A return an operator is reviewing (return-review.ts), WHATEVER the mode or
+ * book. rankPnl's reason only reaches a live agent; a paper or idle agent's
+ * row would otherwise say "paper" or "inactive" beside a null return, which
+ * reads the same as a paper return that could not be read. The web terminal
+ * says "Return under review" for the same agent, and so does this.
+ */
+const REVIEW_PENDING: Unranked = { code: "review-pending", label: unrankedLabel("review-pending") };
 
 /** Why a return the page's gates allowed is still withheld: which book the newest mark is. */
 const notLive = (book: Book | undefined): Unranked => (book === "paper" ? VALUATION_NOT_LIVE : VALUATION_UNKNOWN);
@@ -445,6 +453,8 @@ export async function readPublicBoard(
     const ranked = isRanked(r);
     const unranked: Unranked | null = ranked
       ? null
+      : r.performance?.underReview === true
+        ? REVIEW_PENDING
       : r.mode === "live" && valuation?.book === "paper"
         ? VALUATION_NOT_LIVE
       : r.pnlBps !== null || !r.unrankedWhy
@@ -851,11 +861,14 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
     // Only reachable where every gate passed, so it rests on all three reads.
     || (why === "gas-pending" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead));
   // The board's order, so the list and the profile give the same reason for
-  // the same agent: the heartbeat's mode first, then rankPnl's own refusal
-  // (true whichever book the newest mark is), and only a return rankPnl would
-  // have published is withheld for the book it was measured on.
+  // the same agent: an operator's review first (it withholds every book's
+  // return), the heartbeat's mode next, then rankPnl's own refusal (true
+  // whichever book the newest mark is), and only a return rankPnl would have
+  // published is withheld for the book it was measured on.
   const unranked: Unranked | null = ranked
     ? null
+    : profile.performance?.underReview === true
+      ? REVIEW_PENDING
     : profile.mode === "paper"
       ? { code: "paper", label: unrankedLabel("paper") }
       : profile.mode !== "live"
@@ -995,7 +1008,7 @@ export function explainLeaderboard(): LeaderboardExplained {
     },
     metrics: [
       { name: "live.return_bps", book: "live", definition: "(latest equity − net contributions − gas) ÷ net contributions × 10,000, in basis points (100 bps = 1%). Latest equity is the newest valuation of the current book not taken while flow inference was held (an operation in flight, so its cash may carry a deposit or withdrawal not yet booked); net contributions are deposits minus withdrawals recorded this run up to that valuation; gas is priced gas on landed trades. Published only when every ranking gate holds and the newest valuation is from the live book; otherwise null with an unranked reason." },
-      { name: "paper.return_bps", book: "paper", definition: "Change of the paper (simulated) book since the first valuation of its latest uninterrupted paper period. Never divided by real deposits and never ranked against live returns. Null when the latest valuation is not paper or paper recovery is blocked." },
+      { name: "paper.return_bps", book: "paper", definition: "Change of the paper (simulated) book since the first valuation of its latest uninterrupted paper period. Never divided by real deposits and never ranked against live returns. Null when the latest valuation is not paper or paper recovery is blocked, and while the return is under an operator's review (unranked code review-pending)." },
       { name: "live.max_drawdown_bps (leaderboard list)", book: "live", definition: "Deepest peak-to-trough fall of the raw equity series of the current book: the newest 500 valuations of the run, thinned to about 40 points. Deposits and withdrawals are not divided out, so a withdrawal can read as a drawdown, and a trough between kept points is missed. Every valuation counts, including one taken while flow inference was held: no flow is divided out of this series, so a late booking cannot move it. Approximate; published only when the return is." },
       { name: "live.max_drawdown_bps (agent profile)", book: "live", definition: "Deepest peak-to-trough fall of the growth index (equity with deposits and withdrawals divided out) over hourly closes of the whole run. A floor: a trough that opened and recovered inside one hour is not seen, and neither is a valuation taken while flow inference was held, which is never a close. Published only when the return is." },
       { name: "growth index", book: "either", definition: "growth_t = growth_(t−1) × (equity_t − net flow in period t) ÷ equity_(t−1), starting at 1. 1.08 means the book is up 8% on its own moves, whatever was paid in or out. One point per hourly close of the book named in `valuation.book`. A valuation taken while flow inference was held (an operation in flight) is never a close: its cash may carry a flow not yet booked, and dividing out only what was booked would draw a dip the drawdown then keeps." },

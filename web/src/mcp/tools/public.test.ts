@@ -605,6 +605,33 @@ test("a return under review is withheld from the list and the profile, in every 
   }
 });
 
+test("a paper agent's return under review says review-pending, not 'paper' beside a null return", async () => {
+  // B's paper book is up 23.45%. Under review its paper return is withheld,
+  // and "paper" beside a null return would read like a paper read that did
+  // not answer; the web terminal says "Return under review" for it.
+  const saved = process.env.MERRYMEN_RETURN_REVIEW;
+  try {
+    const { connect } = await setup();
+    process.env.MERRYMEN_RETURN_REVIEW = ACCOUNT_B;
+    const b = await connect(OWNER_B);
+    const list = await call(b, "list_public_agents", {});
+    const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_B);
+    assert.equal(row.mode, "paper", "the mode is still said");
+    assert.deepEqual(row.unranked, { code: "review-pending", reason: "return under review" });
+    assert.equal(row.paper.return_bps, null);
+    const profile = await call(b, "get_public_agent", { agent: SLUG_B });
+    assert.equal(profile.res.isError, undefined, profile.json);
+    assert.deepEqual(profile.sc.unranked, row.unranked);
+    assert.equal(profile.sc.paper.return_bps, null);
+    assert.doesNotMatch(list.json + profile.json, /2345|23\.45/);
+    // Only the listed account changes: an unlisted agent keeps its figure.
+    assert.equal(list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_A).live.return_bps, 2075);
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_RETURN_REVIEW;
+    else process.env.MERRYMEN_RETURN_REVIEW = saved;
+  }
+});
+
 test("the list and the profile name the same decider when the book changed after the last decision", async () => {
   const { d, connect } = await setup();
   // C decided (dip-hunter) while live; its newest mark is now a paper one, and
