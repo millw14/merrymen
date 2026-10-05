@@ -1,7 +1,18 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-type CardState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "image"; url: string };
+type CardState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "image"; url: string; blob: Blob };
+
+/** Feature-detect the system share sheet for this exact PNG: desktop browsers
+ *  that share links but not files (or no share sheet at all) get no button. */
+function canShareFile(file: File | null): file is File {
+  if (!file || typeof navigator.share !== "function" || typeof navigator.canShare !== "function") return false;
+  try { return navigator.canShare({ files: [file] }); } catch { return false; }
+}
+
+/** The owner closing the share sheet is a choice, not a failure to report.
+ *  Compared by name so a rejection from another realm still matches. */
+const dismissed = (error: unknown) => (error as { name?: unknown } | null)?.name === "AbortError";
 
 /** Kept in memory, never cached or stored alongside the wallet. */
 export function PnlCardDialog({ tradeId, symbol, onClose }: {
@@ -15,6 +26,7 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<CardState>({ kind: "loading" });
   const [loaded, setLoaded] = useState(false);
+  const [notice, setNotice] = useState<{ url: string; text: string }>();
 
   useEffect(() => {
     const node = dialog.current!;
@@ -52,7 +64,7 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
         const blob = await response.blob();
         if (disposed) return;
         objectUrl = URL.createObjectURL(blob);
-        setState({ kind: "image", url: objectUrl });
+        setState({ kind: "image", url: objectUrl, blob });
       } catch (error) {
         if (disposed) return;
         setState({ kind: "error", message: timedOut
@@ -71,6 +83,31 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   }, [tradeId, attempt]);
 
   const filename = `${symbol.replace(/[^a-z0-9_-]/gi, "").slice(0, 40) || "trade"}-${tradeId}-pnl.png`;
+  // Share and Copy hand the same in-memory PNG to the browser, and only when
+  // the owner presses them. Each is offered only where the browser can take a
+  // file; Download stays the fallback that works everywhere.
+  const file = useMemo(() => state.kind === "image" ? new File([state.blob], filename, { type: "image/png" }) : null, [state, filename]);
+  const shareable = useMemo(() => canShareFile(file), [file]);
+  const copyable = typeof ClipboardItem === "function" && typeof navigator.clipboard?.write === "function";
+  const offer = (run: () => Promise<void>, failure: string, success = "") => {
+    if (state.kind !== "image") return;
+    // The outcome names the preview it was about, so a press that settles
+    // after a retry or a changed trade never reports on the newer image.
+    const { url } = state;
+    setNotice(undefined);
+    // An async body runs synchronously up to its first await, so the share or
+    // clipboard call still happens inside the press, as browsers require.
+    void run().then(() => setNotice({ url, text: success }),
+      (error: unknown) => { if (!dismissed(error)) setNotice({ url, text: failure }); });
+  };
+  const share = () => {
+    if (file) offer(async () => navigator.share({ files: [file], title: `${symbol} P&L` }),
+      "Could not share this image. Use Download PNG instead.");
+  };
+  const copy = () => {
+    if (state.kind === "image") offer(async () => navigator.clipboard.write([new ClipboardItem({ "image/png": state.blob })]),
+      "Could not copy this image. Use Download PNG instead.", "Image copied.");
+  };
   return createPortal(
     <div className="terminal-host pnl-card-layer">
       <dialog ref={dialog} className="pnl-card-dialog" aria-labelledby={titleId} aria-describedby={noteId}
@@ -94,8 +131,11 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
             onError={() => setState({ kind: "error", message: "The image could not be displayed. Please try again." })} />
           <div className="pnl-card-actions">
             {loaded ? <a href={state.url} download={filename}>Download PNG</a> : <span role="status">Loading preview…</span>}
+            {shareable && <button type="button" disabled={!loaded} onClick={share}>Share</button>}
+            {copyable && <button type="button" disabled={!loaded} onClick={copy}>Copy image</button>}
             <button type="button" disabled={!loaded} onClick={() => window.print()}>Print</button>
           </div>
+          {notice?.url === state.url && notice.text && <p className="pnl-card-note" role="status">{notice.text}</p>}
         </>}
       </dialog>
     </div>, document.body,
