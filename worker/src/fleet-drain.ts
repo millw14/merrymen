@@ -27,10 +27,18 @@
  *     the whole point — and every spawn still preparing reaches its last check
  *     and refuses. Capped; once this step ends, no new copy may start except
  *     the drain's own final pass.
- *  4. CHILDREN AND HOLD PROCESSES: SIGTERM, then wait. No three-second SIGKILL:
- *     a worker answers SIGTERM by finishing the intent in hand and closing its
- *     store, and SIGKILL in the middle of that is the crash a drain exists to
- *     avoid. Only what is still running when the wait ends gets SIGKILL.
+ *  4. CHILDREN AND HOLD PROCESSES: SIGTERM, then wait; SIGKILL only to what
+ *     is still running when the wait ends, sent by the drain rather than by
+ *     killChild's three-second timer. NOT A GRACEFUL STOP OF THE WORKER: no
+ *     worker or hold process has a SIGTERM handler today (index.ts,
+ *     telegram-hold.ts — and `node --import tsx` installs none), so each ends
+ *     at once, as abruptly as on SIGKILL. An intent in hand is cut off as a
+ *     crash cuts it, and stays accounted the way it does after a crash: by the
+ *     'submitted' row written before broadcast and the in-flight reconcile at
+ *     the next arm (inflight-reconcile.ts). The wait is for each exit to be
+ *     SEEN — the final pass never reads a home its process may still write —
+ *     and for a process that is stuck or ignores the signal. It is also the
+ *     room a graceful worker-side handler would need; that is its own change.
  *  5. TELEGRAM KILLS still pending in a home, AFTER the children: a child's
  *     last act may be writing one. Capped, as the old stop's was.
  *  6. THE FINAL PASS: each home that had a child or a hold process, copied one

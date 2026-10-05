@@ -8,6 +8,11 @@
  * drain's waits are the real waits on the real maps. The caps are shrunk; the
  * order is not.
  *
+ * A real worker has no SIGTERM handler and ends at once on the signal. A
+ * fake's `lastWrite` is NOT a graceful stop: it places a write in the home
+ * after the live pass last read it and before the process is gone — the last
+ * of the worker's tick — which only a final pass after the exit can carry.
+ *
  * MERRYMEN_HOME is per process (node --test runs each file in its own), so
  * this never leaks into another test file. A drain is once per process, so
  * each test forgets the last one first (resetDrainForTest).
@@ -82,8 +87,10 @@ onDrainBeforeChildren("test-recorder", () => {
 
 /**
  * A worker or hold process reduced to what the drain does with it: it exits,
- * asynchronously as a real one does, on SIGTERM (after `onTerm`) unless it
- * ignores SIGTERM, and on SIGKILL unless it ignores that too.
+ * asynchronously as a real one does, on SIGTERM unless it ignores SIGTERM,
+ * and on SIGKILL unless it ignores that too. `lastWrite` lands just before a
+ * SIGTERM exit (see the header: a write already made, not one made on the
+ * way out).
  */
 class FakeProc extends EventEmitter {
   readonly stdout = null;
@@ -91,14 +98,14 @@ class FakeProc extends EventEmitter {
   readonly signals: string[] = [];
   signalledAt: Record<string, number> = {};
   private gone = false;
-  constructor(readonly pid: number, private readonly opts: { onTerm?: () => void; ignoreTerm?: boolean; ignoreKill?: boolean } = {}) { super(); }
+  constructor(readonly pid: number, private readonly opts: { lastWrite?: () => void; ignoreTerm?: boolean; ignoreKill?: boolean } = {}) { super(); }
   kill(signal?: NodeJS.Signals | number): boolean {
     const name = String(signal ?? "SIGTERM");
     this.signals.push(name);
     this.signalledAt[name] ??= Date.now();
     timeline.push(`${name}:${this.pid}`);
     if (name === "SIGTERM" && !this.opts.ignoreTerm) {
-      this.opts.onTerm?.();
+      this.opts.lastWrite?.();
       setImmediate(() => this.die(0, null));
     }
     if (name === "SIGKILL" && !this.opts.ignoreKill) setImmediate(() => this.die(null, "SIGKILL"));
@@ -188,8 +195,9 @@ after(() => {
 it("SIGTERM BETWEEN THE MARKER WRITE AND THE OWNERSHIP CHECK LEAVES NO ledger-source-blocked.json", async () => {
   const tenant = address(0xd11), account = address(0xd12), released = { n: 0 } as { n: number; receiptThen?: boolean };
   const { home, trade } = await book(tenant, account);
-  // The worker's last act on SIGTERM: one more row, which only a final pass after its exit can carry.
-  const proc = new FakeProc(81_001, { onTerm: () => trade(2) });
+  // One more row, the last of the worker's tick, landed after the live pass
+  // read its book: only a final pass after its exit can carry it.
+  const proc = new FakeProc(81_001, { lastWrite: () => trade(2) });
   watched = [proc];
   adoptChildForTest(tenant, account, proc, lease(tenant, released));
   // The live mirror's copy is held open at its first statement after the
@@ -228,7 +236,7 @@ it("SIGTERM BETWEEN THE MARKER WRITE AND THE OWNERSHIP CHECK LEAVES NO ledger-so
   await drained;
 
   assert.equal(existsSync(marker(home)), false, "the copy finished under its lease and cleared its own marker");
-  assert.equal(await sharedTrades(account), 2, "and the final pass carried the row the worker wrote on its way out");
+  assert.equal(await sharedTrades(account), 2, "and the final pass carried the row the worker wrote last");
   assert.deepEqual(proc.signals, ["SIGTERM"], "SIGTERM only: it exited in time, and nothing sent SIGKILL");
   assert.equal(released.n, 1);
   assert.equal(released.receiptThen, true, "the receipt was durable before the lease went");
@@ -247,8 +255,8 @@ it("A MIRROR PASS WITH ITS TENANT IN HAND IS WAITED FOR: its older memory read i
   mkdirSync(path.dirname(owner), { recursive: true });
   writeFileSync(owner, "read by the pass in hand");
   await getGrantStore().put(tenant, grant(account));
-  // The worker's last act on SIGTERM: a newer note, which only the final pass can carry.
-  const proc = new FakeProc(81_007, { onTerm: () => writeFileSync(owner, "written on the way out") });
+  // A newer note, the worker's last write before it ended: only the final pass can carry it.
+  const proc = new FakeProc(81_007, { lastWrite: () => writeFileSync(owner, "written last") });
   watched = [proc];
   adoptChildForTest(tenant, account, proc, lease(tenant, released));
   // The live pass held at its personal-memory write: its copy is done (no
@@ -285,7 +293,7 @@ it("A MIRROR PASS WITH ITS TENANT IN HAND IS WAITED FOR: its older memory read i
   assert.deepEqual(proc.signals, ["SIGTERM"]);
   const restored = mkdtempSync(path.join(fleet, "restored-personal-"));
   assert.equal(await restorePersonalMemory({ tenant, home: restored, shared, dek, log: () => {} }), "restored");
-  assert.equal(readFileSync(path.join(restored, "soul", "OWNER.md"), "utf8"), "written on the way out", "the final pass's read is the one stored last");
+  assert.equal(readFileSync(path.join(restored, "soul", "OWNER.md"), "utf8"), "written last", "the final pass's read is the one stored last");
   assert.deepEqual(receipt().finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
   assert.equal(receipt().clean, true);
   await getGrantStore().remove(tenant);
@@ -331,14 +339,14 @@ it("A HOLDER HOME GETS FORGET-ONLY MEMORY HANDLING, and its book is never copied
   await getGrantStore().remove(tenant);
 });
 
-it("THE ORDER: hooks before any signal, the kill a child leaves on its way out carried out after it exits, the receipt before the leases, exit last — and once", async () => {
+it("THE ORDER: hooks before any signal, the kill a child leaves in its home carried out after it exits, the receipt before the leases, exit last — and once", async () => {
   const tenant = address(0xd31), account = address(0xd32), released = { n: 0 } as { n: number; receiptThen?: boolean };
   const { home } = await book(tenant, account);
   await getGrantStore().put(tenant, grant(account));
   const confirmed: string[] = [];
   setKillConfirmForTest(async (t) => { confirmed.push(t); timeline.push("kill-confirmed"); });
-  // The worker's /kill lands as it stops: the request is in its home when it exits.
-  const proc = new FakeProc(81_003, { onTerm: () => writeKillRequest(home, grant(account), nowSec()) });
+  // The worker's /kill lands just before it ends: the request is in its home when it exits.
+  const proc = new FakeProc(81_003, { lastWrite: () => writeKillRequest(home, grant(account), nowSec()) });
   watched = [proc];
   adoptChildForTest(tenant, account, proc, lease(tenant, released));
 
@@ -383,7 +391,7 @@ it("A PROCESS THAT IGNORES SIGTERM gets SIGKILL only once the wait is over; one 
   const slow = address(0xd51), slowAccount = address(0xd52), stuck = address(0xd61), stuckAccount = address(0xd62);
   const slowBook = await book(slow, slowAccount), stuckBook = await book(stuck, stuckAccount);
   const slowProc = new FakeProc(81_005, { ignoreTerm: true });
-  const stuckProc = new FakeProc(81_006, { ignoreTerm: true, ignoreKill: true, onTerm: () => stuckBook.trade(2) });
+  const stuckProc = new FakeProc(81_006, { ignoreTerm: true, ignoreKill: true });
   watched = [slowProc, stuckProc];
   slowBook.trade(2);
   adoptChildForTest(slow, slowAccount, slowProc, lease(slow, { n: 0 }));

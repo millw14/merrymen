@@ -3940,11 +3940,14 @@ function envTickSeconds(): number {
  * happened to win the race against the handler's 1s timer.
  *
  * `hardAfterMs` null is the drain's (drainFleet): SIGTERM and no SIGKILL of
- * its own. A worker answers SIGTERM by finishing the intent in hand and
- * closing its store, which can take longer than three seconds, and the drain
- * gives it that time and sends SIGKILL itself to whatever is still running
- * when it ends. The process is still tracked in `exitingChildren` until its
- * exit is seen, which is what the drain waits on.
+ * its own; the drain sends SIGKILL itself to whatever is still running when
+ * its wait ends. Not because a worker stops gracefully — it has no SIGTERM
+ * handler (index.ts) and ends at once, as on SIGKILL, so an intent in hand
+ * rests on its pre-broadcast 'submitted' row and the in-flight reconcile at
+ * the next arm, as after any crash. What the drain needs is one clock for
+ * every process it waits on, and room for one that is stuck or ignores the
+ * signal. The process is still tracked in `exitingChildren` until its exit is
+ * seen, which is what the drain waits on.
  */
 function killChild(tenant: string, hardAfterMs: number | null = 3_000): void {
   const child = children.get(tenant);
