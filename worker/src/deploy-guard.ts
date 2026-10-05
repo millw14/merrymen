@@ -128,7 +128,7 @@ export function oneShotCensus(env: NodeJS.ProcessEnv): string[] {
  * mount, the volume UUID and the manifest — but only when
  * MERRYMEN_PERSISTENT_HOME_REQUIRED=1 asks it to; unset or 0, it steps aside.
  * runOrchestrator() asks this before anything else and exits 78 on a refusal.
- * Off Railway this is null: a self-hosted fleet's home is the owner's disk.
+ * Off Railway this is null: there is no Railway volume to prove.
  */
 export function hostedPersistentHomeRefusal(env: NodeJS.ProcessEnv): string | null {
   if (!onRailway(env) || env.MERRYMEN_PERSISTENT_HOME_REQUIRED === "1") return null;

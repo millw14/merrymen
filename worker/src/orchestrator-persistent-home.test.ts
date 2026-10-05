@@ -1,11 +1,12 @@
 /** Real SQLite books through the persistent cold-start and stopped-writer cleanup gates. */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, it } from "node:test";
+import { spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { wrapSqlite, type Db } from "./db";
@@ -257,4 +258,49 @@ it("a failed persistent root proof writes no cached key, child book or partial r
   } finally {
     setPersistentHomeVerifierForTest(() => volume); setPaperRestoreForTest(async () => ({ ok: true, line: null })); await remove(f);
   }
+});
+
+/**
+ * The real entry point, in its own process: runOrchestrator() is what the
+ * container runs, and process.exit is what is being tested. Deliberately NOT
+ * process.env — this file pointed MERRYMEN_HOME at its in-process fleet, and
+ * no DATABASE_URL from a developer's shell may reach a supervisor started here.
+ */
+function hostedOrchestrator(home: string, extra: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, ["--import", "tsx", "worker/src/orchestrator.ts"], {
+    cwd: path.join(import.meta.dirname, "..", ".."), encoding: "utf8", timeout: 60_000,
+    env: { PATH: process.env.PATH, HOME: path.dirname(home), MERRYMEN_HOSTED: "1", MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home,
+      RAILWAY_ENVIRONMENT_ID: "e1e1e1e1-1111-4222-8333-444455556666", RAILWAY_SERVICE_ID: "227ff49a-1111-4222-8333-444455556666", ...extra },
+  });
+}
+
+it("a Railway-hosted orchestrator without the persistent-home opt-in exits 78 before it touches its home", () => {
+  for (const required of [undefined, "0", ""]) {
+    const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-hosted-ephemeral-"))), home = path.join(dir, "home");
+    mkdirSync(home, { mode: 0o700 });
+    try {
+      // The report-only entry is behind the same gate: it must not get first word.
+      const r = hostedOrchestrator(home, { MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1",
+        ...(required === undefined ? {} : { MERRYMEN_PERSISTENT_HOME_REQUIRED: required }) });
+      assert.equal(r.status, 78, `${JSON.stringify(required)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /^\[orchestrator\] refusing to start — a Railway-hosted fleet needs MERRYMEN_PERSISTENT_HOME_REQUIRED=1/m);
+      assert.doesNotMatch(r.stdout, /\[orchestrator\] starting/);
+      assert.deepEqual(readdirSync(home), []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+it("with the opt-in, a hosted orchestrator goes on to the real volume proof, which still decides", () => {
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-hosted-persistent-"))), home = path.join(dir, "home");
+  mkdirSync(home, { mode: 0o700 });
+  try {
+    // No provider volume UUID: past the gate, persistent-home.ts refuses — the
+    // gate only ever adds a refusal, it never stands in for the proof.
+    const r = hostedOrchestrator(home, { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1" });
+    assert.notEqual(r.status, 0);
+    assert.notEqual(r.status, 78, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /refusing to start/);
+    assert.match(r.stderr, /Persistent home refused: an explicit provider volume UUID is required/);
+    assert.deepEqual(readdirSync(home), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
