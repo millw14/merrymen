@@ -2227,12 +2227,34 @@ async function writeSettingsForChild(
  * BEFORE spawn, with the grant and the anchor, and for the same reason — the
  * child reads its book while arming, and a basis that landed a moment later
  * would be read as absent.
+ *
+ * AND THE FLOORS. `position_floors` shares the basis's lifecycle and dies with
+ * it, so each restored position's graded stop is put back here too
+ * (basis-seed.ts seedPositionFloors) — beside a cost this seed wrote and
+ * nowhere else, written under `smartAccount` exactly as the grant spells it,
+ * because that is the spelling the child reads its floors back by.
+ *
+ * ASKED AGAIN AT THE WRITE, not only at the top of spawnChild. The restores
+ * ahead of this await for seconds, and both seeds write the child's original
+ * book. A replica that lost the tenant meanwhile, or a hold or source barrier
+ * that landed, refuses the write here as the late refusal would refuse the
+ * spawn: the question spawnChild's recovery-reply writers ask, with the
+ * persistent-home check originalSourceRefused adds before financial writes.
  */
 async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return; // self-hosted: the child's own sqlite is the only copy
   const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
   const handle = {db:wrapSqlite(raw),close:()=>raw.close()};
+  // The lease spawnChild checked before preparing. Lost or replaced since,
+  // lateSpawnRefusal says so; a barrier on the original book, originalSourceRefused.
+  const lease = leases.get(tenant);
+  const writeRefusal = (): string | null =>
+    !lease ? "it holds no lease"
+      : lateSpawnRefusal(tenant, lease) ?? (originalSourceRefused(tenant) ? "its original book is behind a source barrier" : null);
+  // The positions whose cost actually went back in below: the only ones a
+  // floor may follow (see seedPositionFloors).
+  const restored: { mode: string; symbol: string }[] = [];
   try {
     const { planBasisSeed, basisSeedLine } = await import("./basis-seed");
     const shared = await makePgDb(url);
@@ -2259,20 +2281,44 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
         costUsdg: String(r.cost_usdg ?? "0"),
       })),
     });
-    log(basisSeedLine(tenant, plan));
-    for (const r of plan.rows) {
-      await handle.db
-        .prepare(
-          `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
-           VALUES (?, ?, ?, ?, ?, unixepoch())
-           ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
-        )
-        .run(smartAccount, r.mode, r.symbol, r.qtyRaw, r.costUsdg);
+    const refused = plan.rows.length > 0 ? writeRefusal() : null;
+    if (refused !== null) {
+      log(`basis seed: ${tenant} — nothing written: ${refused}`);
+    } else {
+      log(basisSeedLine(tenant, plan));
+      for (const r of plan.rows) {
+        const wrote = await handle.db
+          .prepare(
+            `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+             VALUES (?, ?, ?, ?, ?, unixepoch())
+             ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
+          )
+          .run(smartAccount, r.mode, r.symbol, r.qtyRaw, r.costUsdg);
+        if (wrote.changes > 0) restored.push({ mode: r.mode, symbol: r.symbol });
+      }
     }
   } catch (e) {
     // Loud, because a silent failure here is a book that sells with no cost and
     // reports no P&L — the exact defect this exists to close.
     log(`basis seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  // AND EACH RESTORED POSITION'S GRADED FLOOR, which the same redeploy wiped
+  // beside the cost. Its own try, so a floor seed that fails cannot be read as
+  // the basis seed failing — but BEHIND the basis in what it may write: only
+  // the positions in `restored` get a floor back, because a floor with no basis
+  // beside it is one nothing ever removes. A basis seed that failed or wrote
+  // nothing restores no floor, and the owner's own number applies. See
+  // seedPositionFloors.
+  try {
+    const { seedPositionFloors, floorSeedLine } = await import("./basis-seed");
+    const plan = await seedPositionFloors({
+      child: handle.db, shared: await makePgDb(url), account: smartAccount, restored, mayWrite: writeRefusal,
+    });
+    log(floorSeedLine(tenant, plan));
+  } catch (e) {
+    // Loud for the same reason: the child arms anyway, on the owner's single
+    // number in place of each position's graded stop, and nothing else says so.
+    log(`floor seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     handle.close();
   }
