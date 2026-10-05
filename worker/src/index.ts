@@ -14321,7 +14321,13 @@ async function main() {
     draining = true;
     console.log(`[worker] SIGTERM — draining: nothing new starts; waiting up to ${DRAIN_INTENT_CHAIN_MS / 1000}s for the trade already on the chain`);
     tickClock.stop();
-    telegramPoll.stop();
+    // Guarded: a throw here would leave the handler before the drain, and the
+    // process draining for ever with nothing left to exit it.
+    try {
+      telegramPoll.stop();
+    } catch (e) {
+      console.error("[worker] stopping the Telegram poll failed:", e);
+    }
     void drainIntentChain({
       tail: () => intentChain,
       tick: () => tickClock.settled(),
