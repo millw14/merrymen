@@ -249,6 +249,20 @@ it("a copy that settles after the trade changed never reports on the new trade's
   assert.equal(notice(), "", "the old image's copy result is not shown against the new one");
 });
 
+it("Share and Copy outcomes change the text of a live region that was already in place", async () => {
+  const region = () => dialog()?.querySelector('.pnl-card-note[role="status"]');
+  grantClipboardItem();
+  grant("clipboard", { write: async () => {} });
+  await showOwnerCard();
+  const live = region();
+  assert.ok(live, "the region exists with the preview, before anything is announced");
+  assert.ok(live.matches(":empty"), "with nothing to say it has no children, so the stylesheet collapses it");
+  await loadImage();
+  await press(buttons("Copy image")[0]);
+  assert.equal(region(), live, "screen readers often skip a region inserted together with its text");
+  assert.equal(live.textContent, "Image copied.");
+});
+
 it("two quick Copy presses end on the newer outcome, even when the older write fails last", async () => {
   const writes: ((error?: unknown) => void)[] = [];
   grantClipboardItem();

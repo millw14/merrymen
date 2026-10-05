@@ -153,7 +153,9 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
             {copyable && <button type="button" disabled={!loaded} onClick={copy}>Copy image</button>}
             <button type="button" disabled={!loaded} onClick={() => window.print()}>Print</button>
           </div>
-          {notice?.url === state.url && notice.text && <p className="pnl-card-note" role="status">{notice.text}</p>}
+          {/* One live region for the preview whose text alone changes: screen
+              readers often skip a region inserted together with its text. */}
+          <p className="pnl-card-note" role="status">{notice?.url === state.url ? notice.text : ""}</p>
         </>}
       </dialog>
     </div>, document.body,
