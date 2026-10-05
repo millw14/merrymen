@@ -57,14 +57,14 @@ const expectRefusal = (fn, code) => assert.throws(fn, (e) => e instanceof DrillR
  * type and the stamp of each row. Every table the drill allowlists is present
  * unless the spec leaves it out with `null`.
  */
-function database({ db = "railway", started = "2026-09-01 00:00:00.000001+00", readonly = "on", tables = {}, fail = {} } = {}) {
+function database({ db = "railway", started = "2026-09-01 00:00:00.000001+00", readonly = "on", isolation = "repeatable read", tables = {}, fail = {} } = {}) {
   const all = {};
   for (const { table, stamp } of DRILL_TABLES) {
     if (tables[table] === null) continue;
     const spec = tables[table] ?? { stamps: [BEFORE] };
     all[table] = { stamp, type: spec.type ?? "bigint", stamps: spec.stamps };
   }
-  return { db, started, readonly, tables: all, fail };
+  return { db, started, readonly, isolation, tables: all, fail };
 }
 
 const seconds = (v) => (v === null ? null : v >= 100_000_000_000 ? Math.trunc(v / 1000) : v);
@@ -79,7 +79,7 @@ function fakeClient(spec, log) {
       log?.push(text);
       if (/^BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY$/.test(text)) return { rows: [] };
       if (/^SET LOCAL /.test(text) || text === "ROLLBACK") return { rows: [] };
-      if (text.includes("current_setting('transaction_read_only')")) return { rows: [{ readonly: spec.readonly, isolation: "repeatable read" }] };
+      if (text.includes("current_setting('transaction_read_only')")) return { rows: [{ readonly: spec.readonly, isolation: spec.isolation }] };
       if (text.includes("pg_postmaster_start_time()")) return { rows: [{ db: spec.db, started: spec.started }] };
       if (text.includes("pg_catalog.pg_attribute")) {
         const rows = [];
@@ -289,6 +289,10 @@ test("a faithful fork of a source that kept writing: exact, read-only on both si
   for (const side of ["fork", "source"]) {
     const sent = out.clients[side].sent;
     assert.equal(sent[0], "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    // The bounds that keep a read of production from queueing behind, or
+    // holding up, anything else. Pinned to the letter: both are the point.
+    assert.equal(sent[1], "SET LOCAL statement_timeout = '60s'");
+    assert.equal(sent[2], "SET LOCAL lock_timeout = '5s'");
     assert.equal(sent.at(-1), "ROLLBACK");
     for (const sql of sent.slice(1, -1)) assert.match(sql, /^(SELECT |SET LOCAL )/, sql);
     // The mode is proved before a table is counted.
@@ -372,6 +376,14 @@ test("a transaction that does not report read-only is refused before a table is 
   assert.deepEqual(out.order, ["fork"]);
   assert.ok(!out.clients.fork.sent.some((s) => s.includes("pg_catalog") || s.includes("AS stamped")));
   assert.equal(out.clients.fork.sent.at(-1), "ROLLBACK");
+
+  // Read-only, but not at the isolation the BEGIN asked for: refused the same
+  // way, on the source too, before production is scanned.
+  const loose = await drill(database(FORK_SERVER), database({ isolation: "read committed" }));
+  assert.equal(loose.exitCode, 1);
+  assert.deepEqual(loose.report.error, { code: "not-read-only", detail: "The transaction did not open read-only; nothing was read.", side: "source" });
+  assert.ok(!loose.clients.source.sent.some((s) => s.includes("pg_catalog") || s.includes("pg_postmaster_start_time") || s.includes("AS stamped")));
+  assert.equal(loose.clients.source.sent.at(-1), "ROLLBACK");
 });
 
 test("a failed read names the side, the table and the driver code, and still rolls back", async () => {
