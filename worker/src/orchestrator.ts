@@ -84,7 +84,7 @@ import {
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
-import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, readControlsEvidence } from "./recovery-reply-arm";
+import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, durablePauseLifted, readControlsEvidence, type ControlScope } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
@@ -11021,7 +11021,7 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
         tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
         chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
         riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
-        holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, tenant, evidence.home.markers ?? [], controls),
+        holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
         grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
       });
     } catch (e) {
@@ -11062,10 +11062,12 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
  * the arm would leave or put in the home — the home's own `paused` file, a
  * journalled /pause or confirmed /kill with no receipt yet (a kill may also
  * remove the grant), a pre-incident pause event with no receipt restored into
- * a home never armed, or a durable pause stamp over a home never armed.
+ * a home never armed, or a durable pause stamp over a home never armed that
+ * the owner's mirrored /resume has not since lifted (durablePauseLifted).
  */
-async function previewStartsPaused(shared: Db, tenant: string, markers: readonly string[],
+async function previewStartsPaused(shared: Db, scope: ControlScope, markers: readonly string[],
   controls: Awaited<ReturnType<typeof readControlsEvidence>>): Promise<boolean | null> {
+  const tenant = scope.tenant;
   if (markers.includes("paused")) return true;
   if (!controls.readable || !controls.fold) return null;
   let receipts = new Set<string>();
@@ -11080,7 +11082,8 @@ async function previewStartsPaused(shared: Db, tenant: string, markers: readonly
   const neverArmed = !markers.includes(CONTROLS_ARMED_FILE);
   if (neverArmed && controls.legacy && !receipts.has(`${LEGACY_EVENTS_BOT}:${controls.legacy.eventId}`)) return true;
   try {
-    if (neverArmed && (await readDurablePause(shared, tenant)) !== null) return true;
+    const durable = neverArmed ? await readDurablePause(shared, tenant) : null;
+    if (durable !== null && !(await durablePauseLifted(shared, scope, durable))) return true;
   } catch { return null; }
   return false;
 }

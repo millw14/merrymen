@@ -167,6 +167,64 @@ describe("armOwnerControls", () => {
     assert.deepEqual(rebuilt, { ok: true, paused: false, applied: [] });
   });
 
+  it("an owner /resume already mirrored is not undone when the home is lost with no arm in between", async () => {
+    // A minute after the pause, and in the pause's own second: the mirror
+    // writes the /resume after the arm's own pause row, so a tie is the resume.
+    for (const after of [60, 0]) {
+      const f = await fixture();
+      control(f.raw, f, { update: 9, kind: "pause", at: NOW_SEC - 60 });
+      await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW });
+      assert.equal(await readDurablePause(f.shared, f.tenant), NOW_SEC);
+      // The worker ran; the owner said /resume. The child removed its file and
+      // wrote the event, and a mirror pass carried the event up. Then the home
+      // was lost outright — no respawn saw the file gone first.
+      rmSync(path.join(f.home, PAUSED_FILE));
+      f.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 42', ?)").run(f.account, NOW_SEC + after);
+      rmSync(f.home, { recursive: true, force: true });
+      const rebuilt = await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 120_000 });
+      assert.deepEqual(rebuilt, { ok: true, paused: false, applied: [] }, `resume ${after}s after the pause`);
+      assert.equal(existsSync(path.join(f.home, PAUSED_FILE)), false);
+      assert.equal(await readDurablePause(f.shared, f.tenant), null, "the stamp is lifted, as the respawn would have lifted it");
+      rmSync(f.home, { recursive: true, force: true });
+      assert.deepEqual(await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 240_000 }),
+        { ok: true, paused: false, applied: [] }, "and a later rebuild leaves it so");
+      assert.equal((f.raw.prepare("SELECT count(*) AS n FROM recovery_reply_control_receipts").get() as { n: number }).n, 1, "nothing applied twice");
+    }
+  });
+
+  it("a pause newer than the mirrored /resume is still put back into a rebuilt home, and a paused file is never removed", async () => {
+    // A /pause applied after the owner's /resume: its own row is the newest.
+    const f = await fixture();
+    control(f.raw, f, { update: 9, kind: "pause", at: NOW_SEC - 60 });
+    await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW });
+    rmSync(path.join(f.home, PAUSED_FILE));
+    f.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 42', ?)").run(f.account, NOW_SEC + 30);
+    control(f.raw, f, { update: 10, kind: "pause", at: NOW_SEC + 45 });
+    assert.deepEqual(await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 60_000 }),
+      { ok: true, paused: true, applied: ["pause 111:10"] });
+    assert.equal(await readDurablePause(f.shared, f.tenant), NOW_SEC, "the earliest stamp stands");
+    rmSync(f.home, { recursive: true, force: true });
+    assert.deepEqual(await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 120_000 }),
+      { ok: true, paused: true, applied: ["durable-pause-restored"] }, "the newer pause is put back");
+    // A /resume from before the pause was applied is not newer than it.
+    const g = await fixture();
+    g.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 42', ?)").run(g.account, NOW_SEC - 300);
+    control(g.raw, g, { update: 9, kind: "pause", at: NOW_SEC - 60 });
+    await armOwnerControls({ scope: g.scope, home: g.home, shared: g.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW });
+    rmSync(g.home, { recursive: true, force: true });
+    assert.deepEqual(await armOwnerControls({ scope: g.scope, home: g.home, shared: g.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 60_000 }),
+      { ok: true, paused: true, applied: ["durable-pause-restored"] });
+    // And a mirrored /resume never takes away a `paused` file that is there:
+    // the owner paused again in the home, and Postgres has not seen it yet.
+    const h = await fixture();
+    control(h.raw, h, { update: 9, kind: "pause", at: NOW_SEC - 60 });
+    await armOwnerControls({ scope: h.scope, home: h.home, shared: h.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW });
+    h.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 42', ?)").run(h.account, NOW_SEC + 30);
+    assert.deepEqual(await armOwnerControls({ scope: h.scope, home: h.home, shared: h.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 60_000 }),
+      { ok: true, paused: true, applied: [] });
+    assert.equal(await readDurablePause(h.shared, h.tenant), NOW_SEC, "and its stamp stands with it");
+  });
+
   it("restores a legacy pause from the events table only when nothing acted after it, once", async () => {
     const f = await fixture(false);
     f.raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status) VALUES (?, ?, ?, 4663, '{}', 1, 2, 'armed')")

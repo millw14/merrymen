@@ -280,9 +280,11 @@ export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
  * NEVER WRITTEN BY THE MIRROR, and so preserved by every other writer here:
  * publishTenantTelegram, publishTelegramRuntime and publishTenantChildState
  * all name their own columns, and none of them names this one. Cleared only
- * by the arm that sees its own earlier pause lifted in the same home (the
- * owner's /resume), so a later rebuild does not pause an owner who has since
- * resumed.
+ * by an arm that sees the pause lifted by the owner's /resume — its own
+ * earlier pause gone from the same home, or the /resume itself, mirrored into
+ * the events and newer than the pause (recovery-reply-arm.ts
+ * durablePauseLifted) — so a later rebuild does not pause an owner who has
+ * since resumed.
  */
 export const TELEGRAM_PAUSED_AT_DDL = "ALTER TABLE tenant_telegram ADD COLUMN paused_at INTEGER";
 

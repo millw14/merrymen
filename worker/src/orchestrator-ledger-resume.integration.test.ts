@@ -485,6 +485,26 @@ it("a failed seed is completed before the first worker, or the spawn is held; Po
   await getGrantStore().remove(t.tenant); await reconcile();
 });
 
+it("the preview says a durable pause starts the worker paused, unless the owner's mirrored /resume is newer than it", async () => {
+  const t = await preIncident({ live: false });
+  rmSync(path.join(t.home, "paused")); // a home never armed, with no pause file of its own
+  const startsPaused = async () => {
+    // A run is recorded once per digest, and the digest binds the evidence,
+    // not the pause: drop this tenant's earlier runs so each preview is read.
+    raw.prepare("DELETE FROM ledger_resume_preview_runs WHERE entries_json LIKE ?").run(`%${t.tenant}%`);
+    const p = await preview(t.tenant);
+    return (p.entries[0] as unknown as { startsPaused: boolean | null }).startsPaused;
+  };
+  assert.equal(await startsPaused(), false, "nothing on record");
+  const stamp = nowSec() - 600;
+  raw.prepare("INSERT INTO tenant_telegram (tenant, updated_at, paused_at) VALUES (?, ?, ?)").run(t.tenant, stamp, stamp);
+  raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 7 — sent while trading was held (recorded during upgrade)', ?)").run(t.account, stamp);
+  assert.equal(await startsPaused(), true, "a durable pause over a home never armed");
+  raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 7', ?)").run(t.account, stamp + 60);
+  assert.equal(await startsPaused(), false, "the owner's /resume, mirrored after it, lifts it");
+  await getGrantStore().remove(t.tenant); await reconcile();
+});
+
 it("a paper book whose owner turned live trading on during the hold previews as chain-read and exits-only", async () => {
   const t = await preIncident({ live: false });
   const before = await preview(t.tenant);

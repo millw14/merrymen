@@ -146,6 +146,30 @@ it("a /pause recorded while held is in the home when the worker forks, once; the
   await getGrantStore().remove(tenant); await reconcile();
 });
 
+it("the owner's /resume, mirrored, stands when the home is then lost with no respawn in between", async () => {
+  const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
+  control(tenant, account, { update: 3, kind: "pause", at: nowSec() - 60 });
+  await getGrantStore().put(tenant, grant(account));
+  await reconcile();
+  assert.equal(forksOf(tenant).length, 1);
+  assert.equal(forksOf(tenant)[0]!.paused, true);
+  // The owner says /resume to the running child: it removes its file and
+  // records the event, and a mirror pass carries the event up.
+  rmSync(path.join(childHome(tenant), "paused"));
+  raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 7', ?)").run(account, nowSec());
+  // Then the child stops and its home is lost outright: nothing armed there
+  // in between, so the rebuilt home has no arm record.
+  spawned.at(-1)!.kill("SIGTERM");
+  await new Promise((r) => setTimeout(r, 10));
+  rmSync(childHome(tenant), { recursive: true, force: true });
+  await reconcile();
+  for (let i = 0; i < 40 && forksOf(tenant).length < 2; i++) { await new Promise((r) => setTimeout(r, 250)); await reconcile(); }
+  assert.equal(forksOf(tenant).length, 2, "respawned into the rebuilt home");
+  assert.equal(forksOf(tenant)[1]!.paused, false, "the mirrored /resume was not undone");
+  assert.equal((raw.prepare("SELECT paused_at FROM tenant_telegram WHERE tenant = ?").get(tenant) as { paused_at: unknown }).paused_at, null, "and the stamp is lifted");
+  await getGrantStore().remove(tenant); await reconcile();
+});
+
 it("a kill superseded by a grant signed after it keeps that grant, and the worker forks paused", async () => {
   const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
   const at = nowSec() - 600; // confirmed well before the grant now in the store

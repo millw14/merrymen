@@ -408,7 +408,12 @@ keyed by the request's bot and update id), an events row ending
 `(recorded during upgrade)`, and, for a pause, `tenant_telegram.paused_at`, in
 one transaction with the `paused` file written before the commit. So each
 applies exactly once: an owner's later `/resume` is not undone by a respawn,
-and a home rebuilt underneath the pause gets it back.
+and a home rebuilt underneath the pause gets it back — unless the owner's
+`/resume` is already in the events (mirrored) and newer than every pause
+there, in which case the stamp is lifted instead: a home lost after a
+`/resume`, with no respawn in between, comes back unpaused. A `/resume` the
+mirror had not carried up before the home was lost is nowhere, and the pause
+is put back.
 
 A confirmed `/kill` is handed to the existing `honourKill`: a kill request is
 left in the home and carried out at once, so the stored grant is removed if it

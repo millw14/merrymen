@@ -47,7 +47,8 @@
  * events row saying what was done. The receipts live in Postgres, so they
  * survive a rebuilt home: a pause applied once is not applied again after the
  * owner has lifted it with /resume, and a pause applied once IS put back into
- * a home that was rebuilt underneath it (the durable stamp, below).
+ * a home that was rebuilt underneath it (the durable stamp, below) — unless
+ * the owner's /resume, mirrored into the events, is newer than it.
  *
  * ONLY RESTRICTIVE. Nothing here unpauses, re-signs, or writes a key. A kill
  * is carried out by deleting the stored grant (or, when the owner signed a
@@ -324,22 +325,36 @@ export async function readLegacyPause(db: Db, scope: ControlScope): Promise<Lega
   }
 }
 
-async function readLegacyPauseFrom(db: Db, scope: ControlScope): Promise<LegacyPause | null> {
-  const accounts = await ownerAccounts(db, scope);
+/**
+ * The newest "Telegram: paused by chat", "Telegram: resumed by chat" or "KILL
+ * by chat … kept the grant" row across `accounts`, this file's own rows
+ * included. A tie in the second goes to the row written later: the mirror
+ * gives each copied row a new id, so a /resume mirrored after a pause this
+ * file applied is the later row.
+ */
+async function newestPauseOrResume(db: Db, accounts: readonly string[]): Promise<{ id: number; at: number; message: string } | null> {
   const holes = accounts.map(() => "?").join(", ");
-  const inList = `lower(agent_id) IN (${holes})`;
   const newest = (await db
     .prepare(
-      `SELECT id, message, created_at FROM events WHERE ${inList}
+      `SELECT id, message, created_at FROM events WHERE lower(agent_id) IN (${holes})
          AND (message LIKE 'Telegram: paused by chat%' OR message LIKE 'Telegram: resumed by chat%'
               OR message LIKE 'Telegram: KILL by chat % kept the grant %')
        ORDER BY created_at DESC, id DESC LIMIT 1`,
     )
     .get(...accounts)) as { id: unknown; message: unknown; created_at: unknown } | undefined;
   if (!newest) return null;
-  const message = String(newest.message);
   const id = safeInt(newest.id), at = safeInt(newest.created_at);
   if (id === null || at === null || at <= 0) throw new Error("a pause event is unreadable");
+  return { id, at, message: String(newest.message) };
+}
+
+async function readLegacyPauseFrom(db: Db, scope: ControlScope): Promise<LegacyPause | null> {
+  const accounts = await ownerAccounts(db, scope);
+  const holes = accounts.map(() => "?").join(", ");
+  const inList = `lower(agent_id) IN (${holes})`;
+  const newest = await newestPauseOrResume(db, accounts);
+  if (!newest) return null;
+  const { id, at, message } = newest;
   if (message.includes(RECORDED_DURING_UPGRADE)) return null;
   const paused = message.startsWith("Telegram: paused by chat") || (message.startsWith("Telegram: KILL by chat") && message.includes("paused instead"));
   if (!paused) return null;
@@ -356,6 +371,41 @@ async function readLegacyPauseFrom(db: Db, scope: ControlScope): Promise<LegacyP
     .get(...accounts, at - OP_COPY_REACH_SEC, at, ...FILL_KINDS)) as { at: unknown } | undefined;
   if (filled?.at !== null && filled?.at !== undefined) return null;
   return { eventId: id, atSec: at };
+}
+
+/**
+ * HAS THE OWNER'S OWN /resume, ALREADY IN POSTGRES, LIFTED THE DURABLE PAUSE
+ * STAMPED AT `pausedAtSec`?
+ *
+ * True only when the newest pause/resume event across every account the
+ * owner has had is a "Telegram: resumed by chat" row — the one a child writes
+ * on /resume, carried up by a mirror pass — dated at or after the stamp.
+ * Every pause this file applies writes its own "paused by chat … (recorded
+ * during upgrade)" row in the stamp's transaction, so a pause applied after
+ * the resume is the newer row and wins, and a resume from before the stamp is
+ * never the newest; a pause the child itself recorded after the resume wins
+ * the same way.
+ *
+ * Asked only where the durable pause would otherwise be put back: a home with
+ * no `paused` file and no arm record from after the stamp. That is the home
+ * lost after the owner's /resume with no respawn in between to see its file
+ * gone, and without this the stamp paused an owner whose /resume Postgres
+ * already held. A /resume the mirror had not carried up before the home was
+ * lost is in no table, and the pause is put back, as it always was.
+ *
+ * It decides only whether a pause is put back; it never removes one. A
+ * database with no events or agents table holds no resume (false); any other
+ * failure throws, and the arm holds.
+ */
+export async function durablePauseLifted(db: Db, scope: ControlScope, pausedAtSec: number): Promise<boolean> {
+  try {
+    const newest = await newestPauseOrResume(db, await ownerAccounts(db, scope));
+    return newest !== null && newest.message.startsWith("Telegram: resumed by chat") && newest.at >= pausedAtSec;
+  } catch (e) {
+    const err = e as { code?: unknown; message?: unknown };
+    if (err?.code === "42P01" || /no such table: (?:main\.)?(?:events|agents)\b/.test(String(err?.message ?? ""))) return false;
+    throw e;
+  }
 }
 
 /**
@@ -549,12 +599,23 @@ export async function armOwnerControls(o: ArmControlsOptions): Promise<ArmContro
   // lifted. Only the stamp that was read is cleared, so a pause applied
   // meanwhile stands. Anything in between — an arm record older than the
   // pause it should have seen — is not proof of a resume, and pauses again.
+  //
+  // EXCEPT WHERE POSTGRES ALREADY HOLDS THAT PROOF: the owner's /resume,
+  // mirrored, newer than the pause (durablePauseLifted). An owner who
+  // resumed, and whose home was then lost before any arm ran there again,
+  // comes back to a home with no arm record at all; putting the pause back
+  // over their /resume is the one thing this must not do. The stamp is
+  // lifted as it would have been by that respawn, and nothing is unpaused.
   const durable = await readDurablePause(o.shared, s.tenant);
   if (durable !== null && !existsSync(path.join(o.home, PAUSED_FILE))) {
     const armedAt = readArmedAtMs(o.home);
     if (!o.mayWrite()) return { ok: false, hold: "lost-writer", why: "lease lost before the durable pause was checked" };
     if (armedAt !== null && armedAt >= durable * 1000) {
       await clearDurablePause(o.shared, s.tenant, durable);
+    } else if (await durablePauseLifted(o.shared, s, durable)) {
+      if (!o.mayWrite()) return { ok: false, hold: "lost-writer", why: "lease lost before the durable pause was lifted" };
+      await clearDurablePause(o.shared, s.tenant, durable);
+      say(`${s.tenant}: the durable pause is not put back — its owner's /resume, in Postgres, is newer than it`);
     } else {
       writePaused(o.home);
       applied.push("durable-pause-restored");
