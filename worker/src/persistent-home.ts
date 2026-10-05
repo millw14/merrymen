@@ -463,12 +463,13 @@ export function adoptPopulatedPersistentHome(
 /**
  * Explicit reviewed release only: the caller must first verify the source,
  * imported original books, tenant identities and memory. Ordinary startup
- * never calls this. The one reviewed exception (decision 5 of the resume
- * plan) is controlAdoptedPersistentHomeHalt below, which calls it at startup
- * only for an ADOPTED volume, only when MERRYMEN_RELEASE_HOME_HALT names this
- * manifest's operation, the pinned original-halt hash still matches the
- * pre-adoption record, and the rollout scope is not `none`. A completed
- * receipt is durable before our own unchanged halt is removed.
+ * never calls this. The one startup exception (decision 5 of the resume plan,
+ * for Milla's review) is controlAdoptedPersistentHomeHalt below, which calls
+ * it only for an ADOPTED volume whose manifest is `held`, only when
+ * MERRYMEN_RELEASE_HOME_HALT names this manifest's operation and its standing
+ * halt generation, the pinned original-halt hash still matches the
+ * pre-adoption record, and B1's parser reads a rollout scope other than
+ * `none`. A completed receipt is durable before our own unchanged halt is removed.
  */
 export function markPersistentHomeHandoverComplete(
   proof: PersistentHomeIdentity, expectedHalt: PersistentHomeHaltProof,
