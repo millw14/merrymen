@@ -166,6 +166,25 @@ test("a real number is never replaced: a ranked return, a nonzero paper change, 
   assert.match(drift!, /\+0\.1%/);
 });
 
+test("a RANKED 0.0% stays 0.0%, even on a funded book with no trade — the rank alone holds it", async () => {
+  // Its only landed operation is a vault deposit, valued at exactly what went
+  // in with sponsored gas: ranked at 0 bps, zero fills, funded. Every other
+  // guard in stateOf would let "Funded · no trades yet" through; only the
+  // ranked return itself (liveRank.pnlBps) stops it.
+  const { agents } = await read([row("Even", { landed: 1, liveFills: 0, pnlBps: 0,
+    performance: performance({ pnlBps: 0, pnlUsdg: 0, fills: 0, fillsAtMark: 0, funded: true, valuation: "current" }) })]);
+  for (const preview of [false, true]) {
+    const r = board(agents, preview).querySelector(".rank")!;
+    assert.equal(r.querySelector(".chg")!.textContent, "0.0%");
+    assert.equal(r.querySelector(".performance-state"), null);
+  }
+  assert.doesNotMatch(sidebar(agents).querySelector(".sidebar-agent-performance")!.textContent!, /no trades yet/i);
+  const [found] = await searchRows(agents, "even");
+  assert.match(found!, /0\.0%/);
+  assert.doesNotMatch(found!, /no trades yet/i);
+  assert.equal((await profilePage(agents[0]!)).figure, "0.0%");
+});
+
 test("Finley and Ajinde: trades no valuation includes say so, without touching a measured return", async () => {
   const { agents } = await read([
     // One valuation, then two buys eight seconds later.
