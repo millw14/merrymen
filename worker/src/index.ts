@@ -853,7 +853,8 @@ async function main() {
    * research lane.
    */
   const fomoPort = processBrokerPort();
-  const fomoOff = childFomoOff(isHostedMode(), fomoPort);
+  // Self-hosted, the install's own key decides too (read at boot: adding one takes a restart).
+  const fomoOff = childFomoOff(isHostedMode(), fomoPort, process.env, cfg.fomoApiKey ?? null);
   const fomoChild = new FomoChild({
     broker: () => fomoBroker,
     off: () => fomoOff,
@@ -5725,7 +5726,10 @@ async function main() {
       // nominated. Narrowing only — a coin the feeds carry organically is
       // unaffected unless it is also being verify-asked, and then it waits
       // for the gate.
-      const verifyOnly = new Set(fomoChild.verifyRequests().filter((a) => !earlyBook.addresses().has(a)));
+      // The asks now AND every early page still on the tape: a page outlives
+      // its ask until the next sync drops it (trencher-brain.ts setEarly), and
+      // in that gap the coin would otherwise be read as a regular candidate.
+      const verifyOnly = new Set([...fomoChild.verifyRequests(), ...trenchTapeReader.earlyPageAddresses()].filter((a) => !earlyBook.addresses().has(a)));
       const entryPools = !paperActive() && active && grantTrencher(active.grant)
         ? regularEntryPools(freshTape, autoTrench?.qualified ?? [], verifyOnly)
         : highVolumePools(freshTape).filter((p) => !verifyOnly.has(p.tokenAddress.toLowerCase()));

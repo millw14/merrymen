@@ -134,6 +134,16 @@ export class TrenchTapeReader {
     this.early = next;
   }
 
+  /**
+   * The coins whose own early page is ON THE TAPE NOW: what setEarly last
+   * kept, whatever the book or the verification asks say this instant. A
+   * caller that keeps those pages off the regular list asks this, so a coin
+   * that left the asks a moment ago cannot slip on while its page remains.
+   */
+  earlyPageAddresses(): Set<string> {
+    return new Set([...this.pages.keys()].filter((k) => k.startsWith(EARLY_PREFIX)).map((k) => k.slice(EARLY_PREFIX.length)));
+  }
+
   /** Read only the early pages — what a fresh offer asks for. One request per coin, none for the feeds. */
   async refreshEarly(): Promise<string[]> {
     const failures: string[] = [];

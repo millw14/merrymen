@@ -1225,9 +1225,11 @@ describe("FOMO OFF IN THIS PROCESS (a hosted child spawned without the channel)"
     assert.equal(childFomoOff(true, port, ON), false);
     assert.equal(childFomoOff(true, port, {}), true, "a channel some other launcher gave is not a pass");
     assert.equal(childFomoOff(true, port, { MERRYMEN_FOMO_ENABLED: "true" }), true);
-    assert.equal(childFomoOff(false, null, {}), false, "self-hosted builds its own runtime");
-    assert.equal(childFomoOff(false, port, {}), false);
-    assert.equal(childFomoOff(false, null, { MERRYMEN_FOMO_ENABLED: "0" }), true, "an install that switched it off");
+    assert.equal(childFomoOff(false, null, {}, "own-key"), false, "self-hosted with its own key builds its own runtime");
+    assert.equal(childFomoOff(false, port, {}, "own-key"), false);
+    assert.equal(childFomoOff(false, null, { MERRYMEN_FOMO_ENABLED: "0" }, "own-key"), true, "an install that switched it off");
+    assert.equal(childFomoOff(false, null, {}, null), true, "no key: nothing to look up, so as before Fomo");
+    assert.equal(childFomoOff(false, null, {}, "  "), true, "a blank key is no key");
   });
 
   it("self-hosted: nothing can be owed to the scout gate, read or not (deps.explores)", async () => {
@@ -1769,13 +1771,13 @@ describe("index.ts wires the follow path's money rules", () => {
   });
 
   it("both rails' regular lists leave out coins that are on the tape only because Fomo asked to verify them", () => {
-    assert.match(CODE, /const verifyOnly = new Set\(fomoChild\.verifyRequests\(\)\.filter\(\(a\) => !earlyBook\.addresses\(\)\.has\(a\)\)\);/);
+    assert.match(CODE, /const verifyOnly = new Set\(\[\.\.\.fomoChild\.verifyRequests\(\), \.\.\.trenchTapeReader\.earlyPageAddresses\(\)\]\.filter\(\(a\) => !earlyBook\.addresses\(\)\.has\(a\)\)\);/, "the asks, and every early page still on the tape");
     assert.match(CODE, /: highVolumePools\(freshTape\)\.filter\(\(p\) => !verifyOnly\.has\(p\.tokenAddress\.toLowerCase\(\)\)\);/);
     assert.doesNotMatch(CODE, /: highVolumePools\(freshTape\);/);
   });
 
   it("FOMO OFF is decided once from the process and reaches the child, the broker choice and Telegram", () => {
-    assert.match(CODE, /const fomoPort = processBrokerPort\(\);\s*const fomoOff = childFomoOff\(isHostedMode\(\), fomoPort\);/);
+    assert.match(CODE, /const fomoPort = processBrokerPort\(\);\s*\/\/[^\n]*\n\s*const fomoOff = childFomoOff\(isHostedMode\(\), fomoPort, process\.env, cfg\.fomoApiKey \?\? null\);/);
     assert.match(CODE, /new FomoChild\(\{\s*broker: \(\) => fomoBroker,\s*off: \(\) => fomoOff,/);
     assert.match(CODE, /void chooseChildFomoBroker\(\{\s*hosted: isHostedMode\(\),\s*port: fomoPort,/);
     assert.match(CODE, /fomoGroupPort: \(\) => tgFomoPort,\s*fomoOff,/);

@@ -593,9 +593,13 @@ test("regular tape and highVolumePools are unchanged by the early path; early co
   assert.deepEqual(withEarly.earlyScreenedOut(), [], "it passed one");
   // highVolumePools never admits it, whatever is set on a reader.
   assert.deepEqual(highVolumePools([...regular, earlyPool()], true), highVolumePools(regular, true));
+  // The early page on the tape is reported as such, until a sync drops it.
+  assert.deepEqual([...withEarly.earlyPageAddresses()], [EARLY_COIN.toLowerCase()]);
+  assert.deepEqual([...plain.earlyPageAddresses()], [], "no early set, no early page");
   // Leaving the book drops the page now.
   withEarly.setEarly([]);
   assert.deepEqual(withEarly.snapshot().pools, before.pools);
+  assert.deepEqual([...withEarly.earlyPageAddresses()], []);
 });
 
 test("early pages: bounded, separate from nominations, never read twice, and a screened-out coin is named by the early rule", async () => {

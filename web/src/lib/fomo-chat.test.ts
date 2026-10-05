@@ -132,6 +132,26 @@ afterEach(() => {
   setFomoOwnerReaderForTest(null);
 });
 
+describe("a self-hosted install with no Fomo key of its own", () => {
+  it("is not a Fomo turn: no runtime, no fomo.sqlite, the model answers as before", async () => {
+    const saved = { enabled: process.env.MERRYMEN_FOMO_ENABLED, key: process.env.MERRYMEN_FOMO_API_KEY, file: process.env.MERRYMEN_SETTINGS_FILE };
+    delete process.env.MERRYMEN_FOMO_ENABLED;
+    delete process.env.MERRYMEN_FOMO_API_KEY;
+    process.env.MERRYMEN_SETTINGS_FILE = "/nonexistent/merrymen-settings-for-this-test.json";
+    try {
+      const runtime = async () => { throw new Error("the runtime must not be asked for"); };
+      for (const message of ["who are the top traders on fomo this week?", "how are you today?"]) {
+        assert.equal(await fomoChatTurn({ message }, { tenant: null, now: Date.now(), hosted: false }, { runtime }), null, message);
+      }
+    } finally {
+      for (const [k, v] of [["MERRYMEN_FOMO_ENABLED", saved.enabled], ["MERRYMEN_FOMO_API_KEY", saved.key], ["MERRYMEN_SETTINGS_FILE", saved.file]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});
+
 describe("a self-hosted install that switched Fomo off (MERRYMEN_FOMO_ENABLED=0)", () => {
   it("is not a Fomo turn at all, and nothing is built", async () => {
     const saved = process.env.MERRYMEN_FOMO_ENABLED;
@@ -236,7 +256,7 @@ describe("what is left alone", () => {
   it("self-hosted: the install's fixed tenant answers, whatever tenant is passed", async () => {
     let asked: boolean | null = null;
     const w = await world();
-    const t = await fomoChatTurn({ message: "what are the theses on $PONS" }, { tenant: A, now: NOW + 60_000, hosted: false }, { runtime: async (hosted) => ((asked = hosted), w.rt) });
+    const t = await fomoChatTurn({ message: "what are the theses on $PONS" }, { tenant: A, now: NOW + 60_000, hosted: false }, { runtime: async (hosted) => ((asked = hosted), w.rt), enabled: () => true });
     assert.equal(asked, false, "the self-hosted runtime was asked for");
     // The hosted access reader of this fixture runtime refuses "self": proof the tenant was the install's, not A.
     assert.match(factual(t), /switched off/);
@@ -323,7 +343,7 @@ describe("hosted, only an owner with an agent", () => {
   it("self-hosted asks no such question: the install's own tenant is its owner", async () => {
     const w = await world();
     setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked self-hosted"); } });
-    const t = await fomoChatTurn({ message: "what are the theses on $PONS" }, { tenant: null, now: NOW + 60_000, hosted: false }, { runtime: async () => w.rt });
+    const t = await fomoChatTurn({ message: "what are the theses on $PONS" }, { tenant: null, now: NOW + 60_000, hosted: false }, { runtime: async () => w.rt, enabled: () => true });
     assert.ok(t && "factualReply" in t);
     assert.notEqual(t.factualReply, FOMO_UNREACHABLE);
   });

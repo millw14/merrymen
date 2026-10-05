@@ -660,7 +660,10 @@ class BrainGraph:
             expected_gas_usdg=req.market.expected_trade_gas_usdg,
         )
 
-        supplied = "\n".join(req.market.signals.values())
+        # Refs are issued in the trader-flow material and nowhere else, so that
+        # is the only place a citation may point: a `[ref:...]` planted in a
+        # social or news text is not one the worker issued.
+        supplied = req.market.signals.get(TRADER_FLOW) or ""
         evidence = []
         for e in (data.get("evidence") or [])[:8]:
             if isinstance(e, dict):

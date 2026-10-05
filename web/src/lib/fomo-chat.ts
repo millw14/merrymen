@@ -45,7 +45,7 @@ import { evidenceForModel, FOMO_ATTRIBUTION, FOMO_CHAT_RULES, NOT_PERMISSION_LIN
 import type { FomoEnvelope, ResultStatus } from "../../../worker/src/fomo/types";
 import { resolveConfig } from "../../../worker/src/settings";
 import { settingsReader } from "./services/settings-view";
-import { FOMO_NEEDS_AGENT, fomoEnabledFor, fomoRuntime, fomoTenantFor, hostedFomoOwner, type FomoRuntime } from "./fomo-runtime";
+import { FOMO_NEEDS_AGENT, fomoEnabledFor, fomoRuntime, fomoTenantFor, hostedFomoOwner, selfHostedFomoReady, type FomoRuntime } from "./fomo-runtime";
 
 /** The model-bound Fomo context: fenced evidence, the rules, and what to say without a model. */
 export interface FomoChatEvidence {
@@ -126,7 +126,8 @@ export async function fomoChatTurn(body: AgentChatBody, ctx: FomoChatCaller, dep
   // (fomo-switch.ts fomoEnabledFor). Not enabled, this turn is not a Fomo turn
   // at all: nothing is read, nothing is built, and the chat answers exactly as
   // it did before Fomo existed.
-  if (!(deps.enabled ?? (() => fomoEnabledFor(ctx.hosted === true)))()) return null;
+  // Self-hosted, a key of the install's own as well (selfHostedFomoReady).
+  if (!(deps.enabled ?? (() => (ctx.hosted === true ? fomoEnabledFor(true) : selfHostedFomoReady())))()) return null;
   const tenant = fomoTenantFor(ctx.tenant, ctx.hosted === true);
   if (!tenant) return null;
   const now = Number.isFinite(ctx.now) ? ctx.now : Date.now();

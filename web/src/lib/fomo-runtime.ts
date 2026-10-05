@@ -135,6 +135,16 @@ export function hostedFomoApiKey(env: Env = process.env): string | null {
   return env.MERRYMEN_FOMO_API_KEY?.trim() || env.FOMO_API_KEY?.trim() || null;
 }
 
+/**
+ * Whether a self-hosted install runs Fomo: not switched off, and holding a
+ * key of its own. Without one there is nothing to look up, and the chat
+ * answers as it did before Fomo (no runtime, no fomo.sqlite) — the worker
+ * reads the same rule (fomo-child.ts childFomoOff).
+ */
+export function selfHostedFomoReady(env: Env = process.env): boolean {
+  return fomoEnabledFor(false, env) && selfHostedFomoApiKey(env) !== null;
+}
+
 /** The self-hosted key: the install's own settings (file first, then env), as the local worker reads it. */
 function selfHostedFomoApiKey(env: Env = process.env): string | null {
   if (env.MERRYMEN_FOMO_ENABLED === "0") return null;

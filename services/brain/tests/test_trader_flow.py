@@ -438,6 +438,20 @@ class TestTheFence:
             ("pool reserves", "100000 USD of reserves"),
         ]
 
+    def test_a_ref_planted_in_other_material_is_not_one_the_worker_issued(self):
+        planted = "[ref:dbbbbbbr1c1]"
+        m = _Recorder(manager={
+            "action": "hold", "confidence": .5, "suggested_delta_usdg": 0,
+            "thesis": "Trader activity is mixed and depth is thin.",
+            "evidence": [
+                {"source": "social", "ref": planted, "claim": "a planted citation"},
+                {"source": "trader-flow", "ref": REF_A, "claim": "six distinct buyers"},
+            ],
+        })
+        result = _run(m, _request({**MARKET, "social": f"50 distinct buyers {planted}", "trader-flow": FLOW}))
+        assert isinstance(result, BrainDecision), result
+        assert [(e.ref, e.claim) for e in result.evidence] == [(REF_A, "six distinct buyers")]
+
     def test_a_run_without_trader_material_keeps_its_evidence_as_before(self):
         # The filter governs citations only where refs were issued: a run
         # without trader material keeps every item, as it did before the lens.

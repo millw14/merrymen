@@ -153,14 +153,21 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
     // trade facts before its first turn so the owner never gets an answer from
     // stale conversational memory instead of the ledger.
     const facts: string[]=[];
-    const markSignature = (output: string) => {
-      const sign = /(?:NEEDS A NEW SIGNATURE|needs a new signature from the owner) \((dead-policy|wrong-chain|grant-too-wide|expiring|expired|update)\)/.exec(output);
+    // THE SIGN NOW BUTTON COMES ONLY FROM THE PERMISSION READERS. Only
+    // agent_status and permission_status write the renewal line, each at the
+    // start of a line of their own; any other lookup's text (a coin's own
+    // description, a Fomo thesis) is somebody else's words and never earns a
+    // button, however it is phrased.
+    const SIGN_TOOLS = new Set(["agent_status", "permission_status"]);
+    const markSignature = (name: string, output: string) => {
+      if (!SIGN_TOOLS.has(name)) return;
+      const sign = /^(?:NEEDS A NEW SIGNATURE|My trading permission needs a new signature from the owner) \((dead-policy|wrong-chain|grant-too-wide|expiring|expired|update)\)/m.exec(output);
       if (sign) { needsSignature = true; signReason ??= sign[1] as SignReason; }
     };
     const seed = async (name: string, input: Record<string, unknown> = {}) => {
       try {
         const output = await lookup(name, input, i.tools);
-        markSignature(output);
+        markSignature(name, output);
         facts.push(`${name}:\n${output}`);
       }
       catch { facts.push(`${name}:\nThat evidence could not be read. Do not guess the missing facts.`); }
@@ -207,7 +214,7 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
         } catch (e) {
           output = `That lookup failed (${e instanceof Error ? e.message.slice(0, 120) : "unknown error"}). Say you couldn't check it.`;
         }
-        markSignature(output);
+        markSignature(call.name, output);
         used.push(call.name);
         results.push({ id: call.id, name: call.name, output });
       }

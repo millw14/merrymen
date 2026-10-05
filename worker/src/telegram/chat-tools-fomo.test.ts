@@ -287,6 +287,10 @@ describe("C12: somebody else's trades are never read off the owner's ledger", ()
     // The owner's own book, with a pronoun for its coins: still the ledger's answer.
     ["what did you buy today? are they still up?", false],
     ["show my trades, are they green?", false],
+    // A ticker is a coin, and a bare list is the owner's.
+    ["show PEPE's buys", false],
+    ["list $PEPE's trades", false],
+    ["show trades today, are they any good?", false],
   ];
   for (const [q, someoneElse] of ROWS) {
     it(`${JSON.stringify(q)} is ${someoneElse ? "somebody else's" : "the owner's"}`, async () => {

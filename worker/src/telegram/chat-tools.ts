@@ -490,12 +490,21 @@ export function asksAboutSomeoneElsesTrades(question: string, agentName?: string
   const ownBook =
     /\b(?:my|mine|our|ours|your|yours)\b/i.test(q) ||
     /\b(?:did|do|does|have|has|are|were|will|would|can|could)\s+(?:you|we|i)\b/i.test(q) ||
-    /\b(?:you|we|i)\s+(?:just\s+)?(?:buy|bought|sell|sold|trade|traded|hold|held|own|got|get|ape|aped|enter|entered|exit|exited)\b/i.test(q);
+    /\b(?:you|we|i)\s+(?:just\s+)?(?:buy|bought|sell|sold|trade|traded|hold|held|own|got|get|ape|aped|enter|entered|exit|exited)\b/i.test(q) ||
+    // "show trades today, are they any good?": a list asked for with nobody's name on it.
+    /\b(?:show|list)\s+(?:me\s+)?(?:the\s+)?(?:trades?|buys|sells|fills)\b/i.test(q);
+  // A third person who TRADES ("what did they buy?", "she sold") is someone
+  // else, whatever list is asked for beside it; "are they still up?" is a
+  // state of the owner's coins, not a trader.
+  if (/\b(?:did|do|does|have|has|will)\s+(?:they|he|she)\b|\b(?:they|he|she)\s+(?:just\s+)?(?:buy|bought|sell|sold|trade|traded|ape|aped)\b/i.test(q)) return true;
   if (!ownBook && /\b(?:their|theirs|they|them|his|her|hers|he|she)\b/i.test(q)) return true;
   if (/(?:^|[^\w@])@[A-Za-z0-9_]{1,32}\b/.test(q)) return true;
   const self = new Set(String(agentName ?? "").toLowerCase().split(/\s+/).filter(Boolean));
-  for (const m of q.matchAll(/\b([a-z0-9_]{2,30})'s\s+(?:\S+\s+)?(?:trades?|buys|sells|fills|history|bags|holdings|positions)\b/gi)) {
-    const who = m[1]!.toLowerCase();
+  for (const m of q.matchAll(/(\$?)\b([a-z0-9_]{2,30})'s\s+(?:\S+\s+)?(?:trades?|buys|sells|fills|history|bags|holdings|positions)\b/gi)) {
+    // A TICKER IS A COIN, NOT A TRADER: "PEPE's buys", "$PEPE's trades" are the
+    // owner's own fills in that coin.
+    if (m[1] === "$" || /^[A-Z][A-Z0-9]{1,9}$/.test(m[2]!)) continue;
+    const who = m[2]!.toLowerCase();
     if (!OWN_BOOK_POSSESSORS.has(who) && !self.has(who)) return true;
   }
   return false;

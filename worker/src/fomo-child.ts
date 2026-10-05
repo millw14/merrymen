@@ -178,15 +178,24 @@ export type ChildBrokerKind = "ipc" | "unavailable" | "direct" | "failed";
  *                 inherited through childEnv): the orchestrator adds the
  *                 channel exactly when its pass is on, and a channel some
  *                 other launcher happened to give is not a pass.
- *   self-hosted   on unless the install switched it off (=0), like its web.
+ *   self-hosted   on only with a key of the install's own, and unless it
+ *                 switched Fomo off (=0), like its web: without a key there
+ *                 is nothing to look up, and the install behaves as before
+ *                 Fomo rather than answering "not configured".
  *
  * Off, FomoChild does nothing (deps.off), the scout gate is charged nothing
  * for Fomo (explorationScoutUse6 is exactly 0), no broker or local runtime is
  * built, and Telegram offers no research lane: the process behaves as it did
  * before Fomo existed.
  */
-export function childFomoOff(hosted: boolean, port: BrokerPort | null, env: Record<string, string | undefined> = process.env): boolean {
-  return hosted ? port === null || env.MERRYMEN_FOMO_ENABLED !== "1" : env.MERRYMEN_FOMO_ENABLED === "0";
+export function childFomoOff(
+  hosted: boolean,
+  port: BrokerPort | null,
+  env: Record<string, string | undefined> = process.env,
+  selfHostedKey: string | null | undefined = null,
+): boolean {
+  if (hosted) return port === null || env.MERRYMEN_FOMO_ENABLED !== "1";
+  return env.MERRYMEN_FOMO_ENABLED === "0" || !(typeof selfHostedKey === "string" && selfHostedKey.trim() !== "");
 }
 
 /**
