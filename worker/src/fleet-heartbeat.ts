@@ -19,6 +19,13 @@
  * orchestrator's silence — the one thing this row exists to show. Each writer
  * overwrites only its own.
  *
+ * REPORT-ONLY DOES NOT BEAT. An orchestrator started with
+ * MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 returns into its report before the
+ * main loop that beats, deliberately: that entry is kept minimal, and adding a
+ * write to it is a separate decision. So while a service runs report-only, a
+ * missing or old `orchestrator` row is the expected state, not a dead fleet —
+ * a check must know which mode it expects before it pages on that row.
+ *
  * AGGREGATES ONLY, BY CONSTRUCTION. Counts, enums and a commit hash: no
  * account, no amount, no name, no rule text (an old reject_rule can carry
  * free text). What is written is built from the snapshot field by field
