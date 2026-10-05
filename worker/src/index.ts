@@ -183,6 +183,7 @@ import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+import { entryGateLatch, entryGatesOf } from "./entry-gates";
 // ── ENERGY: how much a low-energy agent may still do on its own today ──────
 // The contract is core energy.ts; the pure throttle is energy.ts; the owner's
 // sentence is energy-copy.ts. What is wired here is where the tick asks.
@@ -3207,6 +3208,13 @@ async function main() {
    * quietly stopped proposing. Cleared at every arm.
    */
   const suppressedIntents = new Map<string, string>();
+  /**
+   * Gated entries (entry-gates.ts) whose one rejected row the wall has written
+   * this arm: every repeat of the same (venue, token, rule) is withheld before
+   * ensureDecision. Spent by `settle` with the row, never by letting an intent
+   * go. Cleared at every arm, beside suppressedIntents.
+   */
+  const entryGateRows = entryGateLatch();
   /** The last arm failure reported, so the same one is not re-logged every tick. */
   let lastArmFailure: string | null = null;
   let inFlightSpentUsdg = 0n;
@@ -7115,6 +7123,7 @@ async function main() {
     inFlightSpentUsdg = 0n;
     inFlightOps = 0;
     suppressedIntents.clear();
+    entryGateRows.clear();
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
@@ -12738,6 +12747,10 @@ async function main() {
       // does not pay for a window that could only buy; the rule is the hard
       // filter below. Null — not limited — whenever the gate is not enforcing.
       energy: energyNow.enforce ? { entriesLeft: energyNow.entries.left ?? 0 } : null,
+      // And what it will refuse to BUY at all (`asset-allowlist`, `no-exit`),
+      // from the very limits checkPolicy judges — so a leg the key cannot sell
+      // back is skipped, not proposed and refused every tick (entry-gates.ts).
+      entryGates: entryGatesOf(active.limits),
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and
       // nothing on the rest. Absent is a normal state — a cold cache, a pool
@@ -13022,6 +13035,14 @@ async function main() {
       // `continue` rather than a filtered array (`w` is paired with the intent
       // by index): no decision row, no public post, no refusal on the tape.
       const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      // ── ENTRY GATES: THE BACKSTOP (entry-gates.ts) ──────────────────────
+      //
+      // A buy the wall is certain to refuse, from a producer that did not read
+      // `snap.entryGates`. It goes on until the wall has written its one
+      // rejected row per (venue, token, rule) this arm — `settle`, below, after
+      // processIntentReporting — and every repeat after that stops here, before
+      // any claim, decision row or reservation. Entries only — never an exit.
+      if (entry && entryGateRows.withhold(intent, active.limits)) continue;
       // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
       //
       // An entry into a coin a group nominated must also win a group-entry
@@ -13059,6 +13080,10 @@ async function main() {
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
+        // The backstop's row is spent HERE, by the row the wall wrote — not
+        // above, where a refused group claim, a closed energy allowance or a
+        // failed decision row could still stop the intent with nothing written.
+        entryGateRows.settle(intent, active.limits, facts);
       } else {
         // A sale that empties a coin bought through a group may earn one
         // "out of that one" line once its row lands (tgNoteTradeRow).

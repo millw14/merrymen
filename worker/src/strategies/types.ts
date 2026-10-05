@@ -6,6 +6,7 @@
  */
 
 import type { PriceQuote } from "../../../packages/core/src/index";
+import type { EntryGates } from "../entry-gates";
 import type { TradeIntent } from "../policy";
 import type { TokenDepth } from "../venues/depth-cache";
 import type { Why } from "./reasons";
@@ -167,6 +168,23 @@ export interface Snapshot {
    * a fixture. That is not zero and must not be treated as zero.
    */
   energy?: { entriesLeft: number } | null;
+  /**
+   * WHAT THE WALL WILL REFUSE TO BUY, read before anything is proposed: the
+   * allowed and sellable lists checkPolicy judges `asset-allowlist` and
+   * `no-exit` against, built by `entryGatesOf` from the same limits. Ask it
+   * through `entryGateFor` (entry-gates.ts), never by reading the sets.
+   *
+   * A HINT EXACTLY LIKE `opsHeadroom`. A leg the key cannot sell back used to
+   * be proposed, and refused, once a tick for the life of the grant; a
+   * strategy that reads this skips it instead. It only ever SHRINKS what is
+   * proposed — checkPolicy remains the rule — and it never binds an exit:
+   * the gate is asked about what is being BOUGHT, and a sell is never asked.
+   *
+   * Absent or NULL means NOT READ — a fixture, a backtest. That gates nothing,
+   * and a strategy that went quiet on it would be inventing a refusal nobody
+   * made.
+   */
+  entryGates?: EntryGates | null;
   /** The grant's per-trade cap (6dp) — the ceiling for a single swap. Deposits are
    * capped at the DAILY limit instead (see policy.ts), hence the separate figure. */
   perTradeCapUsdg: bigint;

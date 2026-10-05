@@ -41,6 +41,11 @@ const EVERY: Every = {
   "budget-spent": [{ code: "budget-spent", capRaw: B }],
   "ops-spent": [{ code: "ops-spent" }],
   "breaker-tripped": [{ code: "breaker-tripped", limitBps: 1_000 }],
+  "legs-locked": [
+    { code: "legs-locked", legs: 3, locked: 3 },
+    { code: "legs-locked", legs: 3, locked: 1 },
+    { code: "legs-locked", legs: 1, locked: 1 },
+  ],
   "take-profit": [{ code: "take-profit", symbol: "TSLA", gainBps: 2_000, usdgRaw: C, costRaw: B }],
   "stop-floor": [
     { code: "stop-floor", symbol: "TSLA", lossBps: 1_200, usdgRaw: A, costRaw: B },

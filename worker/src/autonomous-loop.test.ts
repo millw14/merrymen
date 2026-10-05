@@ -125,3 +125,61 @@ describe("the desk is asked about what the agent actually trades", () => {
     assert.equal((ORCH.match(/tenantWatchSymbols\.set\(/g) ?? []).length, 1, "one place, not two");
   });
 });
+
+/**
+ * "BUYS; THEN IF IT IS HAPPY WITH ITS PROFIT IT SELLS" — and never buys what it
+ * can never sell. The entry gates (entry-gates.ts) close that loop in two
+ * halves, and both have to be wired where the tick actually runs:
+ *
+ *   the HINT  — every strategy is handed the gates, from the limits the wall
+ *               judges, so the builtins never propose a buy it refuses;
+ *   the BACKSTOP — anything that proposes one anyway gets ONE rejected row per
+ *               (venue, token, rule) per arm, and every repeat is withheld
+ *               before a decision row, a claim or a reservation exists.
+ */
+describe("and it never buys what it can never sell", () => {
+  const loop = INDEX.slice(INDEX.indexOf("for (const [proposedAt, intent] of proposed.entries())"));
+
+  it("THE SNAPSHOT CARRIES THE GATES, built from the limits checkPolicy reads", () => {
+    const snap = INDEX.slice(INDEX.indexOf("const snap: Snapshot = {"), INDEX.indexOf("depth: await depthReader.read("));
+    assert.match(snap, /entryGates: entryGatesOf\(active\.limits\),/);
+    assert.match(TYPES, /entryGates\?: EntryGates \| null;/);
+  });
+
+  it("ONE ROW PER ARM: the backstop sits after countsAsEntry and before every claim and the decision row", () => {
+    const at = (needle: string) => {
+      const i = loop.indexOf(needle);
+      assert.ok(i >= 0, `${needle} is still in the proposal loop`);
+      return i;
+    };
+    const entry = at("const entry = countsAsEntry(");
+    const backstop = at("if (entry && entryGateRows.withhold(intent, active.limits)) continue;");
+    assert.ok(entry < backstop, "an exit is never asked — `entry` decides first");
+    assert.ok(backstop < at("tgClaimGroupEntry(intent)"), "before a group claim is spent");
+    assert.ok(backstop < at("await claimEntry()"), "before energy is claimed");
+    assert.ok(backstop < at("await ensureDecision("), "before a decision row is written");
+  });
+
+  it("THE ROW IS SPENT BY THE ROW: settle sits after processIntentReporting, past every door that can stop an entry", () => {
+    const at = (needle: string) => {
+      const i = loop.indexOf(needle);
+      assert.ok(i >= 0, `${needle} is still in the proposal loop`);
+      return i;
+    };
+    const settle = at("entryGateRows.settle(intent, active.limits, facts);");
+    // Every `continue` between the backstop and the wall — a refused group
+    // claim, closed energy, a failed decision row — comes first, so none of
+    // them can spend the one row with nothing written.
+    assert.ok(at("if (groupEntry?.group && !groupEntry.ok) continue;") < settle);
+    assert.ok(at("await withholdEntry(agentId);") < settle);
+    assert.ok(at("if (!stamped.ok) {") < settle);
+    assert.ok(at("const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);") < settle, "with what the wall wrote");
+    assert.ok(settle < at("const exits = await proposeClassExits();"), "in the strategy loop, not the class route");
+    assert.equal((INDEX.match(/entryGateRows\.settle\(/g) ?? []).length, 1);
+  });
+
+  it("and the latch is cleared at every arm, beside suppressedIntents", () => {
+    assert.match(INDEX, /suppressedIntents\.clear\(\);\s*entryGateRows\.clear\(\);/);
+    assert.equal((INDEX.match(/entryGateRows\.withhold\(/g) ?? []).length, 1, "one backstop, in the one loop");
+  });
+});
