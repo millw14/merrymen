@@ -26,7 +26,7 @@ import { BROKER_LIMITS } from "./broker";
 import { FomoBudget, MemoryAllowance, UsageMeter, type FomoBudgetConfig } from "./budget";
 import type { FomoAccess } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
-import { createFomoClient } from "./provider";
+import { createFomoClient, expectedCredits } from "./provider";
 import {
   BACKGROUND_RESEARCH_CAP,
   cacheKeyOf,
@@ -98,6 +98,8 @@ interface Harness {
   service: FomoServiceExt;
   budget: FomoBudget;
   backgroundBudget: FomoBudget | null;
+  /** The allowance counters behind both budgets. */
+  port: MemoryAllowance;
   calls: string[];
   routes: Map<string, Handler>;
   logs: string[];
@@ -199,6 +201,7 @@ async function harness(
     service,
     budget,
     backgroundBudget,
+    port,
     calls,
     routes,
     logs,
@@ -460,6 +463,41 @@ describe("token tools", () => {
     assert.ok(capped.data!.rows.every((r) => r.marketCapUsd === null || r.marketCapUsd <= 1_000_000));
     assert.ok(capped.data!.rows.some((r) => !r.marketCapKnown), "an unknown market cap is kept");
     assert.ok(capped.data!.filteredByMarketCap >= 1);
+  });
+});
+
+describe("a call is charged for every attempt it sent", () => {
+  it("a 5xx retried past is charged to every budget, not only the answer that ended the call", async () => {
+    const h = await harness();
+    let n = 0;
+    h.routes.set("thesis-token", () => {
+      n++;
+      return n === 1
+        ? json({ error: "FOMO did not answer in time", retryable: true }, 503, { "x-credits-cost": "100" })
+        : json(fixture("theses-token"), 200, { "x-credits-cost": "1250" });
+    });
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood", freshness: "force-refresh" });
+    assert.ok(env.status === "ok" || env.status === "capped", env.status);
+    assert.equal(n, 2);
+    const charged = h.port.keys().map((k) => h.port.used(k));
+    assert.ok(charged.length > 0);
+    assert.ok(charged.every((u) => u === 1350), `every counter holds both attempts: ${JSON.stringify(charged)}`);
+  });
+
+  it("an attempt that never said what it cost is charged at the estimate", async () => {
+    const h = await harness();
+    let n = 0;
+    h.routes.set("thesis-token", () => {
+      n++;
+      return n === 1 ? json({ error: "upstream" }, 502) : json(fixture("theses-token"), 200, { "x-credits-cost": "1250" });
+    });
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood", freshness: "force-refresh" });
+    assert.ok(env.status === "ok" || env.status === "capped", env.status);
+    assert.equal(n, 2);
+    const charged = h.port.keys().map((k) => h.port.used(k));
+    // The unpriced 502 is charged at this read's reservation (a page-sized estimate), never at nothing.
+    assert.ok(charged.length > 0 && charged.every((u) => u === charged[0]), JSON.stringify(charged));
+    assert.ok(charged[0]! > 1250 && charged[0]! <= 1250 + expectedCredits("thesesByToken"), `the unpriced 502 at the estimate: ${JSON.stringify(charged)}`);
   });
 });
 

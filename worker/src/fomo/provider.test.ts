@@ -25,6 +25,7 @@ import { MAX_READ_BYTES } from "../bounded-read";
 import {
   alertFrameToEvent,
   alertsStreamUrl,
+  billedCreditsFor,
   buildFomoUrl,
   createFomoClient,
   expectedCredits,
@@ -1927,6 +1928,50 @@ describe("live shapes: slow upstreams and transient failures", () => {
     assert.equal(r.meta.creditsRemaining, 1000);
     assert.match(r.detail, /^http 503 \(FOMO did not answer in time\); then no answer within 5 ms$/);
     assert.equal(n, 2, "the timed-out attempt is still terminal");
+    assert.deepEqual([r.meta.creditsPriced, r.meta.creditsUnpricedAttempts], [0, 1]);
+    assert.equal(billedCreditsFor(r.meta, 125), 125, "the 503's reported 0, and the timed-out attempt at the estimate");
+  });
+});
+
+// ── Every attempt is billed, not just the last answer ────────────────────
+
+describe("the cost of a call is every attempt it sent", () => {
+  it("a 5xx retried past is added to the answer's cost, not dropped", async () => {
+    const { client } = harness((_u, n) =>
+      n === 1 ? json({ error: "upstream" }, 503, { "x-credits-cost": "100" }) : json(fixture("me"), 200, { "x-credits-cost": "250" }));
+    const r = await client.me();
+    assert.ok(r.ok);
+    assert.equal(r.meta.attempts, 2);
+    assert.equal(r.meta.creditsCost, 350, "both attempts");
+    assert.deepEqual([r.meta.creditsPriced, r.meta.creditsUnpricedAttempts], [350, 0]);
+    assert.equal(billedCreditsFor(r.meta, 250), 350);
+  });
+
+  it("an attempt that reported no cost is charged at the estimate, every one of them", async () => {
+    const { client } = harness((_u, n) => (n < 3 ? json({ error: "upstream" }, 502) : json(fixture("me"), 200, { "x-credits-cost": "250" })));
+    const r = await client.me();
+    assert.ok(r.ok);
+    assert.equal(r.meta.attempts, 3);
+    assert.equal(r.meta.creditsCost, null, "unknown: two attempts never said what they cost");
+    assert.deepEqual([r.meta.creditsPriced, r.meta.creditsUnpricedAttempts], [250, 2]);
+    assert.equal(billedCreditsFor(r.meta, 250), 750, "a retried outage is never cheaper than the calls it made");
+  });
+
+  it("a 429 retried past counts too, and a single clean answer is exactly its header", async () => {
+    const { client } = harness((_u, n) => (n === 1 ? json({}, 429, { "retry-after": "0", "x-credits-cost": "0" }) : json(fixture("me"), 200, { "x-credits-cost": "0" })));
+    const r = await client.me();
+    assert.ok(r.ok);
+    assert.equal(r.meta.creditsCost, 0);
+    assert.equal(billedCreditsFor(r.meta, 250), 0);
+    const one = await harness(() => json(fixture("me"), 200, { "x-credits-cost": "40" })).client.me();
+    assert.deepEqual([one.meta.creditsCost, billedCreditsFor(one.meta, 250)], [40, 40]);
+  });
+
+  it("nothing sent is nothing billed; a hand-built meta with an unknown cost is one attempt at the estimate", () => {
+    const base = { route: "/v2/me", status: null, retrievedAt: 0, creditsRemaining: null, unmetered: null, providerAsOf: null, providerSource: null, providerStale: null, providerAgeSeconds: null };
+    assert.equal(billedCreditsFor({ ...base, attempts: 0, creditsCost: null }, 250), null);
+    assert.equal(billedCreditsFor({ ...base, attempts: 1, creditsCost: null }, 250), 250);
+    assert.equal(billedCreditsFor({ ...base, attempts: 1, creditsCost: 90 }, 250), 90);
   });
 });
 

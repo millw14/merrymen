@@ -414,7 +414,7 @@ function priorityOf(p: unknown): RetrievalPriority {
  *
  *   let ran = false;
  *   try {
- *     await flight.run(key, async () => { ran = true; … grant.settle(meta.creditsCost) … }, opts);
+ *     await flight.run(key, async () => { ran = true; … grant.settle(billedCreditsFor(meta, estimate)) … }, opts);
  *   } finally {
  *     if (!ran) await grant.refund();
  *   }

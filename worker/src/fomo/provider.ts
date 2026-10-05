@@ -143,8 +143,18 @@ export interface CallMeta {
   attempts: number;
   /** When WE finished reading the answer (or gave up). */
   retrievedAt: number;
-  /** `x-credits-cost` of the last answer; null when absent. */
+  /**
+   * What this call was billed across EVERY attempt it sent: the sum of each
+   * answer's `x-credits-cost`. Null when any sent attempt's cost is unknown
+   * (no header, or no answer at all). A retried 5xx, 429 or 409 is counted,
+   * not just the answer that ended the call: settle budgets with
+   * billedCreditsFor, never with this field alone.
+   */
   creditsCost: number | null;
+  /** The part of the cost the provider reported: the sum of every answer's header. Absent: none sent. */
+  creditsPriced?: number;
+  /** Attempts sent whose cost is unknown: an answer without the header, or no answer at all. */
+  creditsUnpricedAttempts?: number;
   /** `x-credits-remaining` of the last answer; null when absent. */
   creditsRemaining: number | null;
   /** `x-credits-unmetered`; null when absent. */
@@ -154,6 +164,23 @@ export interface CallMeta {
   providerSource: "live" | "snapshot" | "captured" | null;
   providerStale: boolean | null;
   providerAgeSeconds: number | null;
+}
+
+/**
+ * WHAT A CALL COST THE BUDGET, conservatively: every cost the provider
+ * reported, plus `estimatePerAttempt` for each sent attempt whose cost is
+ * unknown — a retry during an outage is never cheaper than one call. Null
+ * only when nothing was sent (refund). Meta without the per-attempt fields
+ * (built by hand, or before them) reads as one unpriced attempt when its cost
+ * is unknown, exactly what keeping the reservation used to mean.
+ */
+export function billedCreditsFor(meta: CallMeta, estimatePerAttempt: number): number | null {
+  if (!(meta.attempts > 0)) return null;
+  const estimate = Number.isFinite(estimatePerAttempt) && estimatePerAttempt > 0 ? estimatePerAttempt : 0;
+  const unpriced = meta.creditsUnpricedAttempts ?? (meta.creditsCost === null ? 1 : 0);
+  const priced = meta.creditsPriced ?? meta.creditsCost ?? 0;
+  if (unpriced === 0) return Math.max(0, priced);
+  return Math.max(0, priced) + unpriced * estimate;
 }
 
 export type ProviderResult<T> =
@@ -2399,11 +2426,24 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
     const fits = (ms: number) => now() + ms <= ownDeadlineAt && callerLeft() - ms >= minAttemptMs;
     let attempts = 0;
     /**
+     * EVERY ATTEMPT'S COST, not just the last answer's: a 5xx, 429 or 409 we
+     * retried past may have been billed too. `priced` sums the costs the
+     * provider reported; `unpriced` counts attempts sent whose cost is unknown
+     * (an answer without the header, or a timeout or dropped connection after
+     * sending), which a budget charges at its estimate (billedCreditsFor).
+     */
+    let priced = 0;
+    let unpriced = 0;
+    const costMeta = (): Pick<CallMeta, "creditsCost" | "creditsPriced" | "creditsUnpricedAttempts"> => ({
+      creditsCost: unpriced === 0 ? priced : null,
+      creditsPriced: priced,
+      creditsUnpricedAttempts: unpriced,
+    });
+    /**
      * The last HTTP answer we chose to retry past. If the retries then end in
      * a timeout or no connection, THAT answer is what we know about the
-     * vendor: its failure and status are reported, but never its cost — the
-     * last attempt may have been billed, so the cost is unknown (null), and a
-     * budget settles it at the estimate rather than refunding.
+     * vendor: its failure and status are reported, with the cost of every
+     * attempt sent (costMeta), unknown wherever an attempt's was.
      */
     let prior: { failure: ProviderFailure; detail: string; meta: CallMeta; retryAfterMs?: number; retryable: boolean } | null = null;
     const afterPrior = (why: string): ProviderResult<T> | null =>
@@ -2411,7 +2451,7 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
         ? fail<T>(
             prior.failure,
             `${prior.detail}; then ${why}`,
-            { ...prior.meta, attempts, retrievedAt: now(), creditsCost: null },
+            { ...prior.meta, attempts, retrievedAt: now(), ...costMeta() },
             prior.retryAfterMs,
             prior.retryable,
           )
@@ -2420,16 +2460,16 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
       // The caller's limits come first: a call they no longer want is never started.
       if (callerAborted()) {
         const why = attempts === 0 ? "cancelled by the caller before it was sent" : "cancelled by the caller";
-        return afterPrior(why) ?? fail("cancelled", why, { ...meta, attempts, retrievedAt: now() });
+        return afterPrior(why) ?? fail("cancelled", why, { ...meta, attempts, retrievedAt: now(), ...(attempts > 0 ? costMeta() : {}) });
       }
       const left = callerLeft();
       if (left < minAttemptMs) {
         const why = `not sent: ${Math.max(0, Math.round(left))} ms left before the caller's deadline`;
-        return afterPrior(why) ?? fail("cancelled", why, { ...meta, attempts, retrievedAt: now() });
+        return afterPrior(why) ?? fail("cancelled", why, { ...meta, attempts, retrievedAt: now(), ...(attempts > 0 ? costMeta() : {}) });
       }
       const remaining = ownDeadlineAt - now();
       if (remaining <= 0) {
-        return afterPrior("the overall deadline passed") ?? fail("timeout", "the overall deadline passed", { ...meta, attempts, retrievedAt: now() });
+        return afterPrior("the overall deadline passed") ?? fail("timeout", "the overall deadline passed", { ...meta, attempts, retrievedAt: now(), ...(attempts > 0 ? costMeta() : {}) });
       }
       attempts++;
       const budgetMs = Math.min(timeoutMs, remaining, left);
@@ -2438,7 +2478,9 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
       const a = await attempt(built.url, budgetMs, signals);
 
       if (a.kind === "transport") {
-        const m: CallMeta = { ...meta, attempts, retrievedAt: now() };
+        // Sent, and no answer to say what it cost: possibly billed, so unpriced.
+        unpriced++;
+        const m: CallMeta = { ...meta, attempts, retrievedAt: now(), ...costMeta() };
         const failure: ProviderFailure = a.failure === "timeout" && callerCut ? "cancelled" : a.failure;
         const detail = failure === "cancelled" && a.failure === "timeout" ? `the caller's deadline passed after ${budgetMs} ms` : a.detail;
         if (a.failure === "unreachable" && attempts < maxAttempts) {
@@ -2451,12 +2493,15 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
         return afterPrior(detail) ?? fail(failure, detail, m);
       }
 
+      const cost = headerNum(a.headers, "x-credits-cost");
+      if (cost === null || cost < 0) unpriced++;
+      else priced += cost;
       const m: CallMeta = {
         ...meta,
         status: a.status,
         attempts,
         retrievedAt: now(),
-        creditsCost: headerNum(a.headers, "x-credits-cost"),
+        ...costMeta(),
         creditsRemaining: headerNum(a.headers, "x-credits-remaining"),
         unmetered: headerBool(a.headers, "x-credits-unmetered"),
         ...freshnessOf(a.body),

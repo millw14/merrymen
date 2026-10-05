@@ -77,6 +77,7 @@ import {
   type BalancesSnapshot,
   type FomoClient,
   type LeaderboardPage,
+  billedCreditsFor,
   type PositionsPage,
   type ProviderFailure,
   type ProviderResult,
@@ -1064,13 +1065,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   async function afterCall(spec: ReadSpec<unknown>, key: string, r: ProviderResult<unknown>, grant: Extract<ChargeResult, { ok: true }>, cc: ChargeContext, estimate: number): Promise<void> {
     const m = r.meta;
     const certainlyUnbilled = m.attempts === 0 || (!r.ok && (r.failure === "unauthorized" || r.failure === "credits-exhausted"));
+    // EVERY ATTEMPT SENT, not just the last answer (billedCreditsFor): a 5xx
+    // retried past may have been billed, and an unknown cost is charged at
+    // the estimate, so retries in an outage cannot outrun the budgets.
+    const billed = billedCreditsFor(m, estimate);
     try {
       if (certainlyUnbilled) await grant.refund();
-      else await grant.settle(m.creditsCost);
+      else await grant.settle(billed);
     } catch (e) {
       log(`fomo: budget settle failed: ${errText(e)}`);
     }
-    if (cc.cap && !certainlyUnbilled) cc.cap.spent += m.creditsCost ?? estimate;
+    if (cc.cap && !certainlyUnbilled) cc.cap.spent += billed ?? estimate;
     const at = m.retrievedAt;
     if (m.attempts > 0) {
       const bucket = CAPABILITY_FOR_ROUTE[spec.route];

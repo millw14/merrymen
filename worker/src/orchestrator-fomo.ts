@@ -84,6 +84,7 @@ import { lensRefs, renderTraderFlowLens } from "./fomo/lens";
 import {
   alertFrameToEvent,
   alertsStreamUrl,
+  billedCreditsFor,
   expectedCredits,
   redactUrl,
   tradeFrameToEvent,
@@ -599,7 +600,8 @@ export function recoverVia(client: FomoClient, o: { db: Db; clock: ClockPort; bu
     }
     if (r.meta.attempts === 0) await grant?.refund();
     else {
-      await grant?.settle(r.meta.creditsCost);
+      // Every attempt sent, an unknown one at the estimate (provider.ts billedCreditsFor).
+      await grant?.settle(billedCreditsFor(r.meta, expectedCredits("alerts")));
       try {
         await recordUsage(o.db, usageDay(now), "alerts-recovery", 1, r.meta.creditsCost);
       } catch (e) {
@@ -1224,7 +1226,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       }
       if (r.meta.attempts === 0) await grant?.refund();
       else {
-        await grant?.settle(r.meta.creditsCost);
+        // Every attempt sent, an unknown one at the estimate (provider.ts billedCreditsFor).
+        await grant?.settle(billedCreditsFor(r.meta, expectedCredits("positions")));
         try {
           await recordUsage(db, usageDay(at), "cohort-enrichment", 1, r.meta.creditsCost);
         } catch (e) {
@@ -1299,8 +1302,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         const r = await client.leaderboard(w, LEADERBOARD_LIMIT);
         if (r.meta.attempts > 0) {
           reached++;
-          if (r.meta.creditsCost === null) billedKnown = false;
-          else billed += r.meta.creditsCost;
+          // Every attempt sent, an unknown one at the estimate (provider.ts billedCreditsFor).
+          billed += billedCreditsFor(r.meta, expectedCredits("leaderboard")) ?? 0;
           try {
             await recordUsage(db, usageDay(now), "leaderboard", 1, r.meta.creditsCost);
           } catch (e) {
