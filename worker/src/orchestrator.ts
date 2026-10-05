@@ -4530,6 +4530,11 @@ export async function reconcile(): Promise<void> {
   // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
+    // DEFENCE IN DEPTH, and no test can tell it from the accounting-hold check
+    // it replaced: everything below that could restore or hand over (retryHold,
+    // handHoldBack) asks holdMayLeave first, which refuses an operator-held
+    // tenant on its own, even one the scope stopped admitting during the await
+    // above. Kept so a held tenant is passed over before any of that is tried.
     if (operatorHeld(held.tenant)) { pressLeaving(held); continue; }
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
