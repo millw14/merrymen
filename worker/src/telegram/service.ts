@@ -1590,7 +1590,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = await readLlmState(statusCtx());
-        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId), replyContext: msg.replyTo?.text };
+        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId), replyContext: msg.replyTo?.text, fomoOff: deps.fomoOff === true };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
         // Strip any thinking dump that slipped through llmText (defense in depth)
