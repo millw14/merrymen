@@ -1,5 +1,6 @@
 /** One current run's public headline, from the same book and accounting time. */
 import type { Db } from "../../../worker/src/db";
+import { CapitalFlowsWithheld, netFlows, readDistinctFlows } from "./distinct-flows";
 import { distinctTrades, fillKindSql } from "./distinct-trades";
 import { heldSql, isHeld } from "./held-marks";
 import { paperRecoveryBlocked, readPaperPerformance } from "./paper-return";
@@ -69,10 +70,11 @@ export interface BookPerformance {
   gasOps: GasOps | null;
   /**
    * An operator has put this account's return under review
-   * (MERRYMEN_RETURN_REVIEW, return-review.ts), so pnlBps and pnlUsdg are
-   * withheld whatever they would have been, and the page says why. On the
-   * figures rather than only in the rank, because a paper or idle book's
-   * return is shown without being ranked.
+   * (MERRYMEN_RETURN_REVIEW, return-review.ts), or its contributions are (a
+   * transfer booked both as an intent and as its chain log, distinct-flows.ts),
+   * so pnlBps and pnlUsdg are withheld whatever they would have been, and the
+   * page says why. On the figures rather than only in the rank, because a
+   * paper or idle book's return is shown without being ranked.
    */
   underReview: boolean;
 }
@@ -114,42 +116,22 @@ function missingColumns(error: unknown): boolean {
   const e = error as { code?: unknown; message?: unknown };
   return e.code === "42703" || (typeof e.message === "string" && /^no such column: /i.test(e.message));
 }
-const flowIdentityColumns = new WeakSet<object>();
-/** Current account/epoch flows, with receipt copies collapsed before any time cutoff. */
-export async function capitalFlowsSql(db: Db): Promise<string> {
-  let hasIdentity = flowIdentityColumns.has(db);
-  if (!hasIdentity) {
-    try {
-      await db.prepare("SELECT id, chain_id, tx_hash, log_index FROM flows WHERE 1 = 0").all();
-      flowIdentityColumns.add(db);
-      hasIdentity = true;
-    } catch (error) { if (!missingColumns(error)) throw error; }
-  }
-  const scope = "LOWER(agent_id) = ? AND epoch = ?";
-  return hasIdentity ? `(WITH candidates AS (
-      SELECT *, ROW_NUMBER() OVER (PARTITION BY CASE
-        WHEN chain_id IS NOT NULL AND COALESCE(tx_hash, '') <> '' AND log_index IS NOT NULL AND source <> 'epoch-carry'
-          THEN 'log:' || CAST(chain_id AS TEXT) || ':' || LOWER(tx_hash) || ':' || CAST(log_index AS TEXT)
-        ELSE 'row:' || CAST(id AS TEXT) END ORDER BY at ASC, id ASC) AS receipt_copy
-      FROM flows WHERE ${scope}
-    ) SELECT * FROM candidates WHERE receipt_copy = 1) f`
-    : `(SELECT * FROM flows WHERE ${scope}) f`;
-}
-
-/** Receipt spelling and late mirror copies cannot count one deposit twice. */
+/**
+ * Each capital flow once (distinct-flows.ts): receipt spelling, an unstamped
+ * chain and late mirror copies cannot count one deposit twice, and rows that
+ * contradict each other THROW rather than have one of them picked. Copies are
+ * collapsed over the whole run before the valuation cutoff, so a late copy can
+ * neither stand alone inside it nor drop out in place of its original.
+ */
 async function flowCapital(db: Db, account: string, epoch: number, at?: number): Promise<number | null> {
-  const rows = await capitalFlowsSql(db);
-  const row = await db.prepare(`SELECT COUNT(*) AS n,
-      SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END) AS net
-    FROM ${rows}${at === undefined ? "" : " WHERE at <= ?"}`)
-    .get(account.toLowerCase(), epoch, ...(at === undefined ? [] : [at])) as Record<string, unknown> | undefined;
-  const n = finite(row?.n);
-  if (n === null) throw new Error("Unread capital accounting");
+  const { n, net } = netFlows(await readDistinctFlows(db, account, epoch), at);
   if (n === 0) return null;
-  const net = finite(row?.net);
-  if (net === null) throw new Error("Unread capital accounting");
+  if (!Number.isFinite(net)) throw new Error("Unread capital accounting");
   return net;
 }
+
+/** A transfer booked both as our intent and as its chain log: never summed, and said so. */
+const contributionsUnderReview = (error: unknown) => error instanceof CapitalFlowsWithheld && error.verdict === "review";
 
 async function contributionQuality(db: Db, account: string, epoch: number): Promise<Record<string, unknown> | undefined> {
   let beat = true;
@@ -276,10 +258,16 @@ async function describeFills(db: Db, account: string, epoch: number, performance
  * every public surface shares — the board, the profile, the public feed and
  * MCP — so no surface can publish it by computing it again. Only the return:
  * the valuation, its time and the counts that say what it means stay.
+ *
+ * So are CONTRIBUTIONS under review (distinct-flows.ts): one transfer booked
+ * both as our intent and as its chain log is two rows that cannot both be
+ * summed, and nothing here can say which is right. The return is withheld the
+ * same way, in the same words, until somebody does.
  */
 export async function readBookPerformance(db: Db, account: string, epoch: number, publicBook: boolean): Promise<BookPerformanceRead> {
-  const read = await readBookFigures(db, account, epoch, publicBook);
-  if (!underReturnReview(account)) return read;
+  const review = { flows: false };
+  const read = await readBookFigures(db, account, epoch, publicBook, review);
+  if (!review.flows && !underReturnReview(account)) return read;
   return {
     performance: { ...read.performance, pnlUsdg: null, pnlBps: null, underReview: true },
     liveRank: { pnlBps: null, unrankedWhy: "review-pending" },
@@ -287,7 +275,8 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
   };
 }
 
-async function readBookFigures(db: Db, account: string, epoch: number, publicBook: boolean): Promise<BookPerformanceRead> {
+async function readBookFigures(db: Db, account: string, epoch: number, publicBook: boolean,
+  review: { flows: boolean }): Promise<BookPerformanceRead> {
   const performance: BookPerformance = {
     book: null, equityUsdg: null, equityAt: null, pnlUsdg: null, pnlBps: null, pnlAt: null,
     publicBook: publicBook === true, gasComplete: null, held: false,
@@ -306,7 +295,10 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
       const contributed = await flowCapital(db, account, epoch);
       performance.funded = contributed !== null && contributed > 0;
       if (!performance.funded) liveRank = { pnlBps: null, unrankedWhy: "no-deposit" };
-    } catch { /* unread funding is not an unfunded book */ }
+    } catch (error) {
+      // Unread funding is not an unfunded book; funding under review is neither.
+      if (contributionsUnderReview(error)) review.flows = true;
+    }
     if (markRead) await describeFills(db, account, epoch, performance);
     return { performance, liveRank, paperPnlBps: null };
   }
@@ -369,6 +361,7 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
   const contributionsKnown = quality?.contributions_known === null || quality?.contributions_known === undefined
     ? null : Number(quality.contributions_known) === 1;
   let liveRank = rankPnl({ contributed, latest: measured.equity, gasUsdg: gas?.gas ?? 0, landed: gas?.landed ?? 0, contributionsKnown });
+  if (inputs[0].status === "rejected" && contributionsUnderReview(inputs[0].reason)) review.flows = true;
   if (inputs[0].status === "rejected" || !gas) liveRank = unavailable();
   // A READ gas tape that is missing a cost is its own reason, and only where
   // rankPnl would have published: every other refusal is the truer thing to

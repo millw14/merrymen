@@ -1,4 +1,5 @@
-import { capitalFlowsSql, readBookPerformance, type BookPerformance } from "./book-performance";
+import { readBookPerformance, type BookPerformance } from "./book-performance";
+import { CapitalFlowsWithheld, readDistinctFlows } from "./distinct-flows";
 /**
  * One agent, in public.
  *
@@ -408,21 +409,20 @@ export async function profileOf(
   let flowsWithTx = 0;
   let flowsTotal = 0;
   let flowsRead = false;
+  /**
+   * Flows that contradict each other (distinct-flows.ts) are withheld, not
+   * read as none: the growth index divides flows out, and with none divided
+   * out every deposit on record would be drawn as a gain.
+   */
+  let flowsWithheld = false;
   try {
-    const rows = (await db
-      .prepare(
-        `SELECT direction, amount_usdg, at, source FROM ${await capitalFlowsSql(db)} ORDER BY at ASC`,
-      )
-      .all(account.toLowerCase(), epoch)) as {
-      direction: string;
-      amount_usdg: number;
-      at: number;
-      source: string | null;
-    }[];
+    // ONE ROW PER MOVEMENT: a carry, a log or a mirror copy on record twice
+    // is one deposit, and it is divided out of the growth index once.
+    const rows = await readDistinctFlows(db, account, epoch);
     flowsRead = true;
     flows = rows.map((r) => ({
-      at: Number(r.at),
-      signed: (r.direction === "in" ? 1 : -1) * Number(r.amount_usdg),
+      at: r.at,
+      signed: (r.direction === "in" ? 1 : -1) * r.amountUsdg,
     }));
     onRecord = rows.length === 0 ? null : flows.reduce((n, x) => n + x.signed, 0);
     flowsTotal = rows.length;
@@ -440,9 +440,11 @@ export async function profileOf(
     // is checkable against the prior epoch's own closing mark, which is a
     // different and sufficient kind of support. The page publishes the SHAPE of
     // the evidence, never amounts.
-    flowsWithTx = rows.filter((r) => isEvidencedFlow(String(r.source ?? ""))).length;
-  } catch {
-    /* flows arrives with a worker migration */
+    flowsWithTx = rows.filter((r) => isEvidencedFlow(r.source)).length;
+  } catch (error) {
+    // Unread: flows arrives with a worker migration, or its rows contradict
+    // each other and are withheld.
+    flowsWithheld = error instanceof CapitalFlowsWithheld;
   }
 
   // ── equity, divided by what the owner put in ─────────────────────────────
@@ -699,7 +701,7 @@ export async function profileOf(
     // Measured on the growth index rather than the equity line, so a
     // withdrawal is not a loss — and on the UNDECIMATED series, because one
     // reading in nine cannot see a trough between two kept samples.
-    maxDdBps: unrankedWhy === null ? drawdownBps(growthFull) : null,
+    maxDdBps: unrankedWhy === null && !flowsWithheld ? drawdownBps(growthFull) : null,
     landed,
     filledPaper,
     paperFills,
@@ -713,8 +715,9 @@ export async function profileOf(
     // A RETURN UNDER REVIEW IS WITHHELD IN EVERY SHAPE, and the growth index
     // is one: 0.64 is "down 36%" drawn as a line. The review exists because a
     // step like that may be a withdrawal nobody has booked (return-review.ts).
-    growth: figures.performance.underReview ? [] : growth,
-    growthComplete: figures.performance.underReview ? false : growthComplete,
+    // So is an index over withheld flows, which divided nothing out.
+    growth: figures.performance.underReview || flowsWithheld ? [] : growth,
+    growthComplete: figures.performance.underReview || flowsWithheld ? false : growthComplete,
     holdings,
     publicBook,
     tradesRead,

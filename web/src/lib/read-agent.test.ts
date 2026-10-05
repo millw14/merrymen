@@ -441,3 +441,38 @@ test("a live agent's page counts its paper TRADES as the board row does, not eve
     assert.equal(profile.paperFills, board.paperFills);
   } finally { raw.close(); }
 });
+
+test("each flow is divided out of the growth line once, and contradictory flows withhold the line and the return", async () => {
+  // A 50 USDG top-up an hour in, booked from its log — and the same log on
+  // record again with no chain stamp, which the identity index cannot see.
+  // Summed, the page drew the book halving and published -25% against 200 of
+  // capital that was 150.
+  const { raw, db } = await ledger();
+  try {
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, sponsored: true });
+    await mark(db, T0 + 60, 100);
+    const log = db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, tx_hash, log_index, chain_id, source, at)
+      VALUES (?, 2, ?, ?, ?, ?, ?, ?, ?)`);
+    await log.run(ACCOUNT, "in", 50, "0xtopup", 1, 4663, "chain-log", T0 + H);
+    await log.run(ACCOUNT, "in", 50, "0xtopup", 1, null, "chain-log", T0 + H + 30);
+    await mark(db, T0 + H + 60, 150);
+    const once = (await profileOf(db, identity, false))!;
+    assert.ok(Math.abs(once.growth.at(-1)!.g - 1) < 1e-9, "the top-up is capital, divided out once: flat");
+    assert.equal(once.flowsTotal, 2, "the deposit and the top-up, each once");
+    assert.equal(once.pnlBps, 0);
+
+    // A transfer home booked by the executor, and again from its log by a scan
+    // that no longer had the trade row to skip. Either is right; both are not.
+    await log.run(ACCOUNT, "out", 10, "0xhome", null, 4663, "transfer-intent", T0 + 2 * H);
+    await log.run(ACCOUNT, "out", 10, "0xhome", 0, 4663, "chain-log", T0 + 2 * H + 30);
+    await mark(db, T0 + 2 * H + 60, 140);
+    const review = (await profileOf(db, identity, false))!;
+    assert.equal(review.unrankedWhy, "review-pending");
+    assert.equal(review.performance?.underReview, true);
+    assert.equal(review.pnlBps, null);
+    assert.equal(review.flowsRead, false, "withheld flows are not read as none");
+    assert.deepEqual(review.growth, [], "and no line is drawn with nothing divided out");
+    assert.equal(review.growthComplete, false);
+    assert.equal(review.maxDdBps, null);
+  } finally { raw.close(); }
+});

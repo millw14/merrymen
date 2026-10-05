@@ -348,6 +348,67 @@ test("chain log copies across account/hash casing count once before the valuatio
   } finally { raw.close(); }
 });
 
+test("an exact copy of a carry counts once, and a different carry in the same run makes the return unavailable", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("DELETE FROM flows").run();
+    const flow = db.prepare("INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', ?, 'epoch-carry', ?)");
+    // The mirror's re-copy of the opening balance: summed, 200 of capital
+    // turned a 10% gain into a 45% loss.
+    await flow.run(ACCOUNT, 100, 1);
+    await flow.run(CASED, 100, 1);
+    await op(db, 5);
+    await mark(db, 110, 10);
+    for (const reader of [db, translated(raw)]) {
+      const result = await readBookPerformance(reader, ACCOUNT, 2, true);
+      assert.equal(result.performance.pnlBps, 1000);
+      assert.equal(result.performance.pnlUsdg, 10);
+    }
+    // One epoch opens once, with one balance. Two different ones cannot both
+    // be true, and neither is picked.
+    await flow.run(ACCOUNT, 90, 2);
+    for (const reader of [db, translated(raw)]) {
+      const result = await readBookPerformance(reader, ACCOUNT, 2, true);
+      assert.deepEqual(result.liveRank, { pnlBps: null, unrankedWhy: "quality-unknown" });
+      assert.equal(result.performance.pnlBps, null);
+      assert.equal(result.performance.pnlUsdg, null);
+      assert.equal(result.performance.funded, null, "unread funding is not an unfunded book");
+      assert.equal(result.performance.underReview, false);
+      assert.equal(result.performance.equityUsdg, 110, "the valuation itself is still the book's value");
+    }
+  } finally { raw.close(); }
+});
+
+test("a transfer booked as both our intent and its chain log puts the return under review, never summed", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE flows SET chain_id = 4663, tx_hash = '0xdeposit', log_index = 0").run();
+    const flow = db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at, chain_id, tx_hash, log_index)
+      VALUES (?, 2, 'out', 10, ?, ?, 4663, '0xhome', ?)`);
+    await flow.run(ACCOUNT, "transfer-intent", 5, null);
+    await op(db, 5);
+    await mark(db, 100, 10);
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).liveRank.pnlBps, 1111, "one withdrawal: 100 over 90");
+    // A scan that no longer had the transfer's trade row books it again.
+    await flow.run(CASED, "chain-log", 9, 3);
+    for (const reader of [db, translated(raw)]) {
+      const result = await readBookPerformance(reader, ACCOUNT, 2, true);
+      assert.deepEqual(result.liveRank, { pnlBps: null, unrankedWhy: "review-pending" });
+      assert.equal(result.performance.underReview, true);
+      assert.equal(result.performance.pnlBps, null);
+      assert.equal(result.performance.pnlUsdg, null);
+      assert.equal(result.performance.funded, null);
+      assert.equal(result.performance.equityUsdg, 100);
+      assert.equal(result.performance.fills, 1, "what the return means is still said");
+    }
+    // Before any valuation, the funding is under review too — not "no deposit".
+    await db.prepare("DELETE FROM equity").run();
+    const before = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.deepEqual(before.liveRank, { pnlBps: null, unrankedWhy: "review-pending" });
+    assert.equal(before.performance.funded, null);
+  } finally { raw.close(); }
+});
+
 test("funding quality uses the same epoch, heartbeat and spelling tie-break as the current account", async () => {
   const { raw, db } = await ledger();
   try {
@@ -389,14 +450,18 @@ test("the actual financial reads use applied account/run indexes rather than sca
     const plans: { sql: string; details: string; nestedDetails: string }[] = [];
     const actual: Db = { ...db, prepare(sql) {
       const statement = db.prepare(sql);
-      return { ...statement, async get(...params) {
+      const explain = (params: unknown[]) => {
         if (sql.includes("LOWER(agent_id)") || sql.includes("LOWER(t.agent_id)")) {
           const rows = raw.prepare("EXPLAIN QUERY PLAN " + sql).all(...params as never[]);
           plans.push({ sql, details: rows.map((row) => String(row.detail)).join("\n"),
             nestedDetails: rows.filter((row) => Number(row.parent) !== 0).map((row) => String(row.detail)).join("\n") });
         }
-        return statement.get(...params);
-      } };
+      };
+      // The flows are read as rows (distinct-flows.ts) and collapsed in
+      // process; every other financial read is one aggregate row.
+      return { ...statement,
+        async get(...params) { explain(params); return statement.get(...params); },
+        async all(...params) { explain(params); return statement.all(...params); } };
     } };
     assert.equal((await readBookPerformance(actual, CASED, 2, true)).performance.pnlBps, 1000);
     const equities = plans.filter((p) => p.sql.includes("FROM equity"));
