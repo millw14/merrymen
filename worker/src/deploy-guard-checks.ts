@@ -108,9 +108,11 @@ export function onRailway(env: NodeJS.ProcessEnv): boolean {
  * ENABLE/HALT/RESUME_CLASS_*. NOT counted, because they are standing
  * configuration rather than an action: MERRYMEN_ACCOUNTING_HOLD_TENANTS,
  * MERRYMEN_CLASS_* (the class-vault knobs), MERRYMEN_LIVE_INTENT_STAND_DOWN,
- * and the rollout's own controls. deploy-guard.test.ts holds every
- * orchestrator `run…IfAsked` gate to this list, so a new one-shot is counted
- * from the commit that adds it.
+ * and the rollout's own controls. deploy-guard.test.ts reads every
+ * orchestrator `run…IfAsked` body: each MERRYMEN_ name there must be counted
+ * here or listed in the test as standing, a gate read by a helper module is
+ * listed with it, and anything else runOrchestrator runs is named as a
+ * standing pass — so a new one-shot is counted from the commit that adds it.
  */
 const ONE_SHOT_EXACT: ReadonlySet<string> = new Set([
   "MERRYMEN_ACCOUNTING_RECONSTRUCT", "MERRYMEN_ACCOUNTING_DIAGNOSE", "MERRYMEN_GAS_AUDIT",
