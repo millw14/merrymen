@@ -273,7 +273,7 @@ it("an adopted fleet root spawns nothing until its reviewed release, and a hand-
   const options = { readMountInfo: () => `40 20 ${major}:${minor} / ${fleet} rw,relatime - ext4 /dev/volume rw\n` };
   const adopt = { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_HOME: fleet, RAILWAY_VOLUME_MOUNT_PATH: fleet, MERRYMEN_HOME_VOLUME_ID: volume.id,
     MERRYMEN_INITIAL_HANDOVER: token, MERRYMEN_ADOPT_HOME_HALT_SHA256: createHash("sha256").update(original).digest("hex") };
-  const release = { ...adopt, MERRYMEN_RELEASE_HOME_HALT: token, MERRYMEN_FLEET_ROLLOUT: `${f.tenant}:observe` };
+  const release = { ...adopt, MERRYMEN_RELEASE_HOME_HALT: token, MERRYMEN_FLEET_ROLLOUT: `${f.tenant}:trade` };
   const before = spawned.length;
   try {
     assert.equal(adoptPopulatedPersistentHome(adopt, options)!.handoverState, "held");
@@ -299,7 +299,8 @@ it("an adopted fleet root spawns nothing until its reviewed release, and a hand-
 it("startup adopts, then applies the env release or re-halt, then re-proves the home, all before any lease, child or writer", () => {
   const source = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
   const run = source.slice(source.indexOf("export async function runOrchestrator("));
-  const order = ["await runRecoveryReportOnly(); return;", "adoptPopulatedPersistentHome()", "controlAdoptedPersistentHomeHalt()",
+  // B1's boot-time refusal of a malformed rollout comes first of all.
+  const order = ["fleetRollout(process.env)", "await runRecoveryReportOnly(); return;", "adoptPopulatedPersistentHome()", "controlAdoptedPersistentHomeHalt()",
     "preparePersistentHomeForHandover()", "setTenantLeaseLossHandler(", "await runAccountingDiagnosisIfAsked()", "void orderFerryLoop()", "await reconcile()"];
   const at = order.map(step => run.indexOf(step));
   order.forEach((step, k) => assert.ok(at[k]! > 0 && (k === 0 || at[k - 1]! < at[k]!), `${step} out of order`));
