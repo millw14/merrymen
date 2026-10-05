@@ -92,8 +92,9 @@ import type { Db } from "./db";
  *                  whatever its age, exactly as the child's own row would
  *   settled_at     COALESCE(budget_settled_at, created_at), the window's clock
  *
- * In the store's schema, so every backend the store runs on has it; only a
- * hosted child's own sqlite is ever written. The shared copy stays empty.
+ * A child's own sqlite only: the store makes it in initSqlite and writeBudgetSeed
+ * makes it before writing, and it is NOT in the ledger schema the shared
+ * Postgres is migrated with — nothing there would ever write or read it.
  */
 export const BUDGET_SEED_SCHEMA = `CREATE TABLE IF NOT EXISTS budget_seed (
   agent_id TEXT NOT NULL, op_hash TEXT NOT NULL,

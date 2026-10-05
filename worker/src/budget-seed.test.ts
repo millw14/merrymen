@@ -407,6 +407,24 @@ describe("the seed costs one seek per operation, never a scan of the agent's his
   // refreshBudget runs every tick and after every recordTrade, on a
   // synchronous sqlite. Matched on lower(user_op_hash), each seed row
   // range-scanned every hashed row the agent ever wrote, three times over.
+  it("and the table is a child's own: the shared ledger's migration does not make it", async () => {
+    const fresh = new DatabaseSync(":memory:");
+    try {
+      await store.applyLedgerSchema(wrapSqlite(fresh));
+      const has = (name: string) => fresh.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+      assert.ok(has("trades"), "sanity: the ledger schema ran");
+      assert.equal(has("budget_seed"), false);
+    } finally {
+      fresh.close();
+    }
+    const child = new DatabaseSync(path.join(HOME, "merrymen.db"));
+    try {
+      assert.ok(child.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_seed'").get(), "the child's store makes it");
+    } finally {
+      child.close();
+    }
+  });
+
   it("EVERY CORRELATED LOOKUP IS AN EQUALITY SEEK on (agent_id, user_op_hash) — the query plan says so", () => {
     const q = store.withBudgetSeed({
       agentId: AGENT,

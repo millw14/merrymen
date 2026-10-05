@@ -50,8 +50,9 @@ import { fillSymbolFor, nonCashLeg } from "./token-label";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 let driver: Db | null = null;
-/** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
- *  the file; a running worker never closes its ledger. */
+/** The sqlite handle behind `driver`. Kept so closeStoreForTest() can release
+ *  the file — a running worker never closes its ledger — and so a cap reader can
+ *  tell it is reading a sqlite ledger, the only kind ever seeded (withBudgetSeed). */
 let ledgerFile: DatabaseSync | null = null;
 
 /**
@@ -67,7 +68,6 @@ export const getRiskPeriodPeak = (account: string, equity: number | null = null)
 const SQLITE_SCHEMA = `
     ${RISK_PERIOD_SCHEMA};
     ${ENERGY_DAYS_SCHEMA};
-    ${BUDGET_SEED_SCHEMA};
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
        decisions, positions, cost_basis, equity, fee_accruals. On the EVM rail
        it is the ERC-4337 smart-account address; on the broker rail it is the
@@ -1010,6 +1010,11 @@ function initSqlite(): Db {
   const db = new DatabaseSync(DB_FILE);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SQLITE_SCHEMA);
+  // HERE AND NOT IN SQLITE_SCHEMA: the seed lives only in a child's own sqlite
+  // (budget-seed.ts), and that batch is also the shared ledger's migration —
+  // applyLedgerSchema and initPostgres run it — where nothing would ever write
+  // or read the table.
+  db.exec(BUDGET_SEED_SCHEMA);
   for (const ddl of SQLITE_ALTERS) {
     try {
       db.exec(ddl);
@@ -3544,7 +3549,10 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
  * out stay in the table until the next seed replaces it, and must not cost.
  *
  * The seed is the LIVE rail's (a paper fill has no hash to count it once by),
- * so only a live reader adds it. `own + seeded` is the cap's settled half.
+ * so only a live reader adds it — and only on a sqlite ledger, the only kind
+ * the orchestrator seeds and the only kind with the table (initSqlite). A
+ * store on the shared Postgres reads exactly what it read before.
+ * `own + seeded` is the cap's settled half.
  *
  * Exported for its query-plan test (budget-seed.test.ts), not for use.
  */
@@ -3558,7 +3566,8 @@ export function withBudgetSeed(q: {
   seedParams?: readonly unknown[];
 }): { sql: string; params: unknown[] } {
   const own = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
-  if (q.rail !== "live") return { sql: `SELECT (${own}) AS own, 0 AS seeded`, params: [q.agentId, ...q.params] };
+  getDb(); // opened first, so `ledgerFile` says which backend this is
+  if (q.rail !== "live" || !ledgerFile) return { sql: `SELECT (${own}) AS own, 0 AS seeded`, params: [q.agentId, ...q.params] };
   const live = railFilter("live");
   const sameOp = "agent_id = ? AND user_op_hash = s.op_hash";
   return {
