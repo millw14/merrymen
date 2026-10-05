@@ -1,5 +1,5 @@
 import { readBookPerformance, type BookPerformance } from "./book-performance";
-import { CapitalFlowsWithheld, readDistinctFlows } from "./distinct-flows";
+import { readDistinctFlows } from "./distinct-flows";
 /**
  * One agent, in public.
  *
@@ -409,12 +409,6 @@ export async function profileOf(
   let flowsWithTx = 0;
   let flowsTotal = 0;
   let flowsRead = false;
-  /**
-   * Flows that contradict each other (distinct-flows.ts) are withheld, not
-   * read as none: the growth index divides flows out, and with none divided
-   * out every deposit on record would be drawn as a gain.
-   */
-  let flowsWithheld = false;
   try {
     // ONE ROW PER MOVEMENT: a carry, a log or a mirror copy on record twice
     // is one deposit, and it is divided out of the growth index once.
@@ -441,10 +435,11 @@ export async function profileOf(
     // different and sufficient kind of support. The page publishes the SHAPE of
     // the evidence, never amounts.
     flowsWithTx = rows.filter((r) => isEvidencedFlow(r.source)).length;
-  } catch (error) {
-    // Unread: flows arrives with a worker migration, or its rows contradict
-    // each other and are withheld.
-    flowsWithheld = error instanceof CapitalFlowsWithheld;
+  } catch {
+    // Unread, whatever stopped it: no flows table yet, a failed read (of the
+    // rows, or of the registration that places an unstamped one), or rows
+    // that contradict each other and are withheld (distinct-flows.ts). Not
+    // read as none — see the growth index below.
   }
 
   // ── equity, divided by what the owner put in ─────────────────────────────
@@ -478,12 +473,17 @@ export async function profileOf(
     // Every flow is attributed to the hour it fell in: growthIndex takes the
     // flows at or before each close, so a deposit between two closes is
     // divided out of exactly the period that contains it.
-    growthFull = growthIndex(clean, flows);
+    //
+    // AND ONLY OVER FLOWS THAT WERE READ. Over flows that were not, the index
+    // divides nothing out: every deposit on record is drawn as a gain and
+    // every withdrawal as a loss. So no line, and no drawdown taken from one,
+    // whatever stopped the read.
+    growthFull = flowsRead ? growthIndex(clean, flows) : [];
 
     // EVERY CLOSE, UNTHINNED. The page slices the windows, so the server no
     // longer decimates — and with no decimation there is no modulo left that
     // could drop the newest reading, which is the value the headline divides.
-    growth = clean.map((p, i) => ({ at: p.at, g: growthFull[i]! }));
+    growth = flowsRead ? clean.map((p, i) => ({ at: p.at, g: growthFull[i]! })) : [];
   } catch {
     /* no history */
   }
@@ -715,9 +715,9 @@ export async function profileOf(
     // A RETURN UNDER REVIEW IS WITHHELD IN EVERY SHAPE, and the growth index
     // is one: 0.64 is "down 36%" drawn as a line. The review exists because a
     // step like that may be a withdrawal nobody has booked (return-review.ts).
-    // So is an index over withheld flows, which divided nothing out.
-    growth: figures.performance.underReview || flowsWithheld ? [] : growth,
-    growthComplete: figures.performance.underReview || flowsWithheld ? false : growthComplete,
+    // An index over flows that were not read is not drawn at all (above).
+    growth: figures.performance.underReview ? [] : growth,
+    growthComplete: figures.performance.underReview || !flowsRead ? false : growthComplete,
     holdings,
     publicBook,
     tradesRead,

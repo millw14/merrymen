@@ -476,3 +476,45 @@ test("each flow is divided out of the growth line once, and contradictory flows 
     assert.equal(review.maxDdBps, null);
   } finally { raw.close(); }
 });
+
+test("flows that are not read draw no growth line and no drawdown, whatever stopped the read", async () => {
+  // Two different opening balances in one run are unread capital accounting,
+  // not an operator's review, so only the unread flows can withhold the line.
+  // With nothing divided out, the 50 withdrawn would be drawn as a 50% fall.
+  const { raw, db } = await ledger();
+  try {
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, sponsored: true });
+    await mark(db, T0 + 60, 100);
+    await db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, tx_hash, log_index, chain_id, source, at)
+      VALUES (?, 2, 'out', 50, '0xhome', 0, 4663, 'chain-log', ?)`).run(ACCOUNT, T0 + H);
+    await mark(db, T0 + H + 60, 50);
+    const read = (await profileOf(db, identity, false))!;
+    assert.equal(read.flowsRead, true);
+    assert.equal(read.growth.length, 2);
+    assert.ok(Math.abs(read.growth.at(-1)!.g - 1) < 1e-9, "read, the withdrawal is divided out: flat");
+
+    const carry = db.prepare("INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', ?, 'epoch-carry', ?)");
+    await carry.run(ACCOUNT, 100, T0 - 10);
+    await carry.run(ACCOUNT, 90, T0 - 5);
+    const unread = (await profileOf(db, identity, false))!;
+    assert.equal(unread.performance?.underReview, false, "unread, not under review");
+    assert.equal(unread.flowsRead, false);
+    assert.equal(unread.equityRead, true, "the valuations themselves were read");
+    assert.deepEqual(unread.growth, []);
+    assert.equal(unread.growthComplete, false);
+    assert.equal(unread.maxDdBps, null);
+
+    // And a read that fails outright, not only one that is withheld.
+    await db.prepare("DELETE FROM flows WHERE source = 'epoch-carry'").run();
+    const failing: Db = { ...db, prepare(sql) {
+      if (sql.includes("FROM flows")) throw new Error("connection reset");
+      return db.prepare(sql);
+    } };
+    const failed = (await profileOf(failing, identity, false))!;
+    assert.equal(failed.flowsRead, false);
+    assert.equal(failed.equityRead, true);
+    assert.deepEqual(failed.growth, []);
+    assert.equal(failed.growthComplete, false);
+    assert.equal(failed.maxDdBps, null);
+  } finally { raw.close(); }
+});
