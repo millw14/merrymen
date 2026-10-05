@@ -608,6 +608,10 @@ test("inactivity: a stale heartbeat on an armed agent means the worker is not re
   assert.equal(r.checks.worker_liveness.observed.heartbeat_age_s, 3600);
   assert.equal(r.checks.market_data.status, "unknown", "a stale valuation under a dead heartbeat says nothing about market data");
   assert.equal(r.checks.data_freshness.status, "unknown", "no mirror_state table in this database");
+  // Kind and status stand; the remedy no longer promises a restart nothing here can see.
+  assert.equal(r.checks.worker_liveness.status, "blocking");
+  assert.deepEqual(r.checks.worker_liveness.what_owner_can_do, ["If it stays stale, contact Merrymen support."]);
+  assert.ok(!/watchdog/i.test(r.text) && !/restart/i.test(JSON.stringify(r.checks.worker_liveness)), "no promise that a stale worker is restarted");
 });
 
 test("inactivity: killed by the owner", async () => {

@@ -567,7 +567,12 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     } else if (notArmed) {
       add({ category: "worker_liveness", status: "unknown", kind: null, summary: `Heartbeat frozen at ${iso(beat)}. That is expected: a worker stops publishing its heartbeat once it is not armed (expired, killed or unable to arm), so this does not mean the worker died.`, observed, threshold, recorded_at: beat });
     } else {
-      add({ category: "worker_liveness", status: "blocking", kind: "worker_not_reporting", summary: `No heartbeat for ${beatAge}s (fresh within ${within}s): the worker or the ledger mirror has stopped, and shared records cannot tell which.`, observed, threshold, recorded_at: beat, since: beat, remedy: ["Nothing is needed from you at first: Merrymen's watchdog restarts a worker whose heartbeat goes stale. If it stays stale, contact Merrymen support."] });
+      // NO PROMISE OF A RESTART. The supervisor's watchdog restarts only a child
+      // it is running, with backoff and a ceiling, and never while the fleet is
+      // halted or the tenant's accounting is held; when the supervisor itself is
+      // down nothing restarts at all. Shared records cannot say which of those
+      // holds, so the remedy promises nothing it cannot see.
+      add({ category: "worker_liveness", status: "blocking", kind: "worker_not_reporting", summary: `No heartbeat for ${beatAge}s (fresh within ${within}s): the worker or the ledger mirror has stopped, and shared records cannot tell which.`, observed, threshold, recorded_at: beat, since: beat, remedy: ["If it stays stale, contact Merrymen support."] });
     }
   }
 
