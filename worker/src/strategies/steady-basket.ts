@@ -15,6 +15,7 @@ import {
   curveGraduated,
   curveMinOut,
 } from "../venues/pons-price";
+import { entryGateFor, lockedLegs } from "../entry-gates";
 import { breakerIdle, breakerTripped, opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
@@ -173,6 +174,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // the cash was short — and only this function can tell them apart.
   let skippedStale = 0;
   let skippedPaused = 0;
+  let skippedLocked = 0;
 
   // ── THE DAY'S BUDGET BINDS THE BUYS, NOT JUST THE SWEEP ──────────────────
   //
@@ -210,6 +212,15 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
       if (snap.staleFeeds.has(leg.symbol)) {
         skippedStale += 1;
         continue; // no reference price → no trade
+      }
+      // A LEG THE SIGNED KEY CANNOT SELL BACK is skipped, not proposed: the wall
+      // refuses the buy (`no-exit`), and it refused it every tick for the life
+      // of the grant. AFTER the stale and paused tests, deliberately — `shut`
+      // below counts only those two, so a locked leg on a weekend is still a
+      // stale leg and the 24/7 fallback still fires exactly when it did.
+      if (entryGateFor(snap.entryGates, leg.token)) {
+        skippedLocked += 1;
+        continue;
       }
       const wanted = (buyBudget * BigInt(leg.weightBps)) / 10_000n;
       // CLAMP TO WHAT IS LEFT, per leg, as the legs consume it. Gating the loop
@@ -368,6 +379,13 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // already know. Ahead of `short` for the reason `spent` is — cash is not what
   // is stopping a buy the count forbids.
   const counted = !bought && cfg.legs.length > 0 && countSpent;
+  // EVERY LEG LEFT TO BUY IS ONE THE KEY CANNOT SELL BACK — every leg that was
+  // not stale or paused was locked. Only reachable when the loop ran, so never
+  // beside `spent` or `counted`; behind `shut`, which is the more fundamental
+  // fact (a locked leg on a closed market counts as stale and never gets here);
+  // and AHEAD of `short`, because adding funds would not buy a locked leg.
+  const locked =
+    !bought && skippedLocked > 0 && skippedStale + skippedPaused + skippedLocked === cfg.legs.length;
   // Ahead of every other silence: with the breaker tripped nothing else on
   // this list could have bought either, and this is the one that says why.
   const brake = !bought && cfg.legs.length > 0 ? breakerIdle(snap) : undefined;
@@ -381,6 +399,8 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
           // re-derived: the snapshot decided it beside the staleness it explains.
           marketShut: snap.marketShut,
         }
+      : locked
+        ? { code: "legs-locked", legs: cfg.legs.length, locked: lockedLegs(snap.entryGates, cfg.legs) }
       : spent
         ? { code: "budget-spent", capRaw: cfg.buyPerTickUsdg }
         : counted
@@ -424,6 +444,12 @@ function pickCurveBuy(
     const token = curve.tokens.get(symbol);
     if (!token) continue;
     if (snap.pausedTokens.has(token.toLowerCase())) continue;
+    // THE CURVE VENUE'S GATE: a non-class curve trade needs both legs in the
+    // signed grant, and the wall calls a miss `asset-allowlist`. `curveLegsNow`
+    // already filters on the same list, so this is the same answer asked at
+    // the point of the buy — the place a later change to that filter would
+    // otherwise go unnoticed.
+    if (entryGateFor(snap.entryGates, token, "curve")) continue;
     // NATIVE-QUOTED CURVES ARE UNREACHABLE: the adapter is non-payable and
     // every wall permission carries valueLimit 0. Same refusal proposals.ts
     // makes, for the same reason.
