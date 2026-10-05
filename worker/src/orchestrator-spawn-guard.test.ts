@@ -4,12 +4,14 @@
  * spawnChild prepares a worker through a dozen awaits, and the recovery reply
  * gates added at the end of that preparation are built to throw: the privacy
  * proof (recoveryReplyPrivacyAllowsFork) and the poll offset handoff
- * (handoffRecoveryReplyOffset) refuse by rejecting, and so does the pool
- * (makePgDb) when Postgres will not answer. Nothing between them and the main
- * loop caught it. reconcile() awaits spawnChild, the main loop awaits
- * reconcile(), runOrchestrator is started with `void`, and nothing in the
- * worker handles an unhandled rejection — so one tenant's refusal exited the
- * whole orchestrator: every other tenant's worker, hold and reply with it,
+ * (handoffRecoveryReplyOffset) refuse by rejecting, and so do their reads when
+ * Postgres will not answer, and the pool (makePgDb) when it cannot be built
+ * at all — it opens lazily, so that is a driver that will not load, not a
+ * database that is down. Nothing between them and the main loop caught it.
+ * reconcile() awaits spawnChild, the main loop awaits reconcile(),
+ * runOrchestrator is started with `void`, and nothing in the worker handles
+ * an unhandled rejection — so one tenant's refusal exited the whole
+ * orchestrator: every other tenant's worker, hold and reply with it,
  * then again on every restart, for as long as that tenant's state stayed the
  * same. The removed agent's retry at the top of reconcile() opened its pool
  * the same way.
@@ -19,7 +21,8 @@
  * carried on. Driven through the real reconcile() over the file-backed grant
  * and settings stores, with the shared database a sqlite stand-in where the
  * orchestrator has a seam for it (setRetirementMemoryStoreForTest,
- * setPersonalMemoryStoreForTest) and an address nothing answers where it does
+ * setPersonalMemoryStoreForTest) — a Postgres that is down is that stand-in
+ * refusing the gates' reads — and an address nothing answers where it does
  * not. The stores are taken before DATABASE_URL is set, so they stay on files.
  *
  * MERRYMEN_HOME is per process (node --test forks per file), so this never
@@ -61,9 +64,14 @@ const { RECOVERY_REPLY_SCHEMA, sealRecoveryReplyState } = await import("./recove
 const store = getGrantStore();
 const settingsStore = getSettingsStore();
 // A hosted deployment from here on: every recovery gate runs. Nothing answers
-// at this address (and `pg` is not installed here), so every pool the
-// orchestrator opens for itself rejects, as one does when Postgres is down.
+// at this address. Where `pg` will not load (this repo: it is runtime-only,
+// installed by the image), every pool the orchestrator builds for itself
+// rejects; where it loads, the pool builds and its queries fail instead.
 process.env.DATABASE_URL = "postgres://spawn-guard.invalid/not-a-real-connection";
+// Which of the two this run is. A specifier the type checker does not
+// resolve, as db.ts's own import of the driver is not.
+const PG_DRIVER = "pg";
+const PG_LOADS = await import(PG_DRIVER).then(() => true, () => false);
 // Not a Railway volume: the persistent-book gates stand aside, as self-hosted.
 setPersistentHomeVerifierForTest(() => null);
 
@@ -115,6 +123,23 @@ function ledger(): { raw: DatabaseSync; shared: Db } {
   return { raw, shared: wrapSqlite(raw) };
 }
 const opened: DatabaseSync[] = [];
+/**
+ * The stand-in as the shared database is while Postgres is down, for the
+ * recovery reply gates: every read of their tables rejects, as a pg query
+ * does when nothing answers, with the connection in its message, as pg's
+ * can carry. Everything else reaches the stand-in, so preparation gets as far
+ * as the gates.
+ */
+const OUTAGE = "connect ECONNREFUSED postgres://merrymen:outage-secret@spawn-guard.invalid:5432/merrymen";
+function down(inner: Db): Db {
+  const refused = (sql: string) => /recovery_reply/.test(sql);
+  const fail = () => Promise.reject(Object.assign(new Error(OUTAGE), { code: "ECONNREFUSED" }));
+  return {
+    prepare: (sql) => (refused(sql) ? { run: fail, get: fail, all: fail } : inner.prepare(sql)),
+    exec: (sql) => (refused(sql) ? fail() : inner.exec(sql)),
+    tx: (fn) => inner.tx((db) => fn(down(db))),
+  };
+}
 function useLedger(retirement: boolean): { raw: DatabaseSync; shared: Db } {
   const l = ledger();
   opened.push(l.raw);
@@ -220,17 +245,19 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
 
     await assert.doesNotReject(reconcile(), "the refusal does not reject through reconcile");
     assert.deepEqual(spawned, [], "neither a worker nor a hold process starts");
-    assert.ok(alerts(t.tenant).some((l) => /offset/.test(l)), said.join("\n"));
+    // spawnHolder's own refusal, not spawnChild's: it is the hold that was refused.
+    assert.ok(alerts(t.tenant).some((l) => /offset not handed over .*no hold process/.test(l)), said.join("\n"));
     assert.equal(isHeldForTest(t.tenant), false, "not recorded as held, so no later refresh starts a hold process without the handoff");
     assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");
     assert.deepEqual(spawned, []);
   });
 
-  it("A POSTGRES FAILURE: the pool the privacy proof needs will not open", async () => {
-    // No stand-in for the recovery store: the orchestrator opens its own pool,
-    // at an address nothing answers, as on a deploy while Postgres is down.
-    useLedger(false);
+  it("A POSTGRES OUTAGE: the shared database will not answer the privacy proof's read", async () => {
+    // The pool is built (it opens lazily); it is the query that fails, as on
+    // a deploy while Postgres is down, whether or not this run has a driver.
+    const { shared } = useLedger(true);
+    setRetirementMemoryStoreForTest({ shared: down(shared), dek: DEK, dialect: "sqlite" });
     setPaperRestoreForTest(PAPER_OK);
     const t = await wanted(null);
     live.push(t.tenant);
@@ -238,7 +265,7 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     await assert.doesNotReject(reconcile(), "the failure does not reject through reconcile");
     assert.equal(spawned.length, 0, "no worker starts without the privacy proof");
     assert.ok(alerts(t.tenant).some((l) => /privacy/.test(l)), said.join("\n"));
-    assert.ok(!alerts(t.tenant).some((l) => /spawn-guard\.invalid|not-a-real-connection|pg/.test(l)), "and no connection detail is logged");
+    assert.ok(!alerts(t.tenant).some((l) => /spawn-guard\.invalid|outage-secret|ECONNREFUSED|postgres:/.test(l)), "and no connection detail is logged");
     assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");
     assert.equal(spawned.length, 0);
@@ -268,7 +295,15 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
   });
 
   // Last: the removed agent stays pending for the rest of this process.
-  it("A POSTGRES FAILURE AT THE REMOVED AGENT'S RETRY: its lease and original book stay", async () => {
+  //
+  // Only where the driver will not load. That is the one failure the retry's
+  // own pool can meet (makePgDb opens lazily); where it loads, a Postgres
+  // that will not answer fails the copy's reads instead, which
+  // finalMirrorBeforeAnchor already answers with false, and the guard under
+  // test is never reached.
+  it("A POOL THAT CANNOT BE BUILT AT THE REMOVED AGENT'S RETRY: its lease and original book stay", {
+    skip: PG_LOADS ? "the pg driver loads here, so the retry's pool builds" : false,
+  }, async () => {
     useLedger(false);
     const n = ++next;
     const tenant = addr(0x5a00 + n);
