@@ -21,8 +21,9 @@
  *     pass needs to know what each home WAS (step 6).
  *  2. THE beforeChildren HOOKS. Work beside the children that must stop before
  *     they do: a pass still feeding them, a sidecar answering the bots they are
- *     about to hand back. Each is said and skipped if it throws; together they
- *     have an allowance, and an overrun is waited for no longer.
+ *     about to hand back. All start at once, so one that hangs never keeps
+ *     another from starting. Each is said and skipped if it throws; together
+ *     they have an allowance, and an overrun is waited for no longer.
  *  3. SETTLE. Every copy already started finishes WITH ITS LEASE STILL HELD —
  *     the whole point — and every spawn still preparing reaches its last check
  *     and refuses. Capped; once this step ends, no new copy may start except
@@ -158,6 +159,8 @@ export interface ShutdownReceipt {
   steps: { step: DrainStep; ms: number; outcome: DrainStepOutcome }[];
   /** Hooks that threw. */
   hooksFailed: number;
+  /** Hooks still running when their allowance ended (named in the log, not here). */
+  hooksUnfinished: number;
   /** Processes still running when their wait ended, and sent SIGKILL. */
   stragglers: number;
   finalPass: { homes: number; saved: number; retained: number; skipped: number; outOfTime: number };
@@ -256,7 +259,7 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
   const allow = (cap: number) => Math.max(0, Math.min(cap, remaining() - limits.reserveMs));
   const receipt: ShutdownReceipt = {
     version: 1, signal: plan.signal, outcome: "drained", clean: false, startedAt, finishedAt: startedAt,
-    budgetMs: plan.budgetMs, stalledAt: null, steps: [], hooksFailed: 0, stragglers: 0,
+    budgetMs: plan.budgetMs, stalledAt: null, steps: [], hooksFailed: 0, hooksUnfinished: 0, stragglers: 0,
     finalPass: { homes: 0, saved: 0, retained: 0, skipped: 0, outOfTime: 0 }, inFlightAtRelease: false,
   };
   let current: DrainStep | null = null;
@@ -308,20 +311,27 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
   const homes = plan.stop();
   receipt.finalPass.homes = homes.length;
 
-  // 2.
+  // 2. ALL AT ONCE, under the one allowance. They are independent of each
+  // other, and run in turn, a first hook that hung spent the allowance and
+  // every hook after it was never started at all.
   await step("hooks", () => {
-    const hooks = (async () => {
-      for (const hook of plan.beforeChildren) {
-        try {
-          await hook.run();
-        } catch (e) {
-          receipt.hooksFailed += 1;
-          plan.log(`[alert] drain hook ${hook.name} failed — ${e instanceof Error ? e.message : String(e)}; going on without it`);
-        }
+    const unfinished = new Set(plan.beforeChildren);
+    const hooks = Promise.all(plan.beforeChildren.map(async (hook) => {
+      try {
+        await hook.run();
+      } catch (e) {
+        receipt.hooksFailed += 1;
+        plan.log(`[alert] drain hook ${hook.name} failed — ${e instanceof Error ? e.message : String(e)}; going on without it`);
+      } finally {
+        unfinished.delete(hook);
       }
-    })();
-    return within(hooks, allow(limits.hooksMs)).then((outcome) => {
-      if (outcome === "timeout") plan.log(`[alert] drain hooks still running after ${seconds(allow(limits.hooksMs))} — no longer waited for`);
+    }));
+    const cap = allow(limits.hooksMs);
+    return within(hooks, cap).then((outcome) => {
+      if (outcome === "timeout") {
+        receipt.hooksUnfinished = unfinished.size;
+        plan.log(`[alert] drain hook(s) ${[...unfinished].map((hook) => hook.name).join(", ")} still running after ${seconds(cap)} — no longer waited for`);
+      }
       return outcome === "done" && receipt.hooksFailed > 0 ? "failed" : outcome;
     });
   });
@@ -431,6 +441,7 @@ function problems(r: ShutdownReceipt): string {
   const late = r.steps.filter((s) => s.outcome !== "done").map((s) => `${s.step} ${s.outcome}`);
   if (late.length) said.push(late.join(", "));
   if (r.hooksFailed) said.push(`${r.hooksFailed} hook(s) failed`);
+  if (r.hooksUnfinished) said.push(`${r.hooksUnfinished} hook(s) unfinished`);
   if (r.stragglers) said.push(`${r.stragglers} process(es) SIGKILLed`);
   const f = r.finalPass;
   if (f.retained || f.skipped || f.outOfTime) said.push(`final pass ${f.saved}/${f.homes} saved, ${f.retained} retained, ${f.skipped} skipped, ${f.outOfTime} out of time`);
