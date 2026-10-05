@@ -455,6 +455,19 @@ export function totalCapital(
  *                             Anything else arriving unasked (airdrops, dust,
  *                             poisoning) is ambiguous rather than a deposit.
  *
+ * NATIVE ETH IS FUEL, NOT BOOK. Equity is cash + vault + positions +
+ * quarantined cost (equity.ts), with no ETH in it, so an ETH movement on its
+ * own steps nothing and is `fuel` — never a candidate, never valued. The
+ * consequence that matters is the other side: a position bought WITH ETH
+ * arrives in the book with nothing leaving the book, and equity steps by its
+ * value as if it were profit. A session key cannot do that (every wall
+ * permission carries valueLimit 0) — if one ever did, it is still the agent
+ * trading. The owner's root key can, and that purchase is `ambiguous` with the
+ * rule `paid-with-fuel`, so it reaches a reviewer and is valued, rather than
+ * passing as a trade leg nobody reads. And because ETH the account RECEIVES is
+ * invisible here (no log, no traces), a sale for ETH looks like a token
+ * leaving with nothing back — which, measured against the book, it is.
+ *
  * A CANDIDATE IS NOT CAPITAL. Nothing in this section books, totals or moves a
  * peak. It answers "which movements must a reviewer look at as possible owner
  * capital", and every arm that is not a candidate says why in words.
@@ -482,6 +495,14 @@ export type AssetMovementKind =
    * buying it is already `reserve-out` above.
    */
   | "reserve"
+  /**
+   * Native ETH, in either direction, whoever signed. Excluded: ETH is fuel and
+   * sits outside the book (equity.ts composeEquityUsdg is cash + vault +
+   * positions + quarantined cost, and no ETH), so sending it home steps no
+   * equity the return is measured against. Its consequence for a POSITION is
+   * the rule `paid-with-fuel`, below.
+   */
+  | "fuel"
   /**
    * Between the account and a contract holding its own assets — its class or
    * Trencher vault. Excluded: a sweep back from the vault moves a position, not
@@ -543,6 +564,10 @@ export interface AssetClassifyInput {
    * curve buy paid in ETH has no visible pair. A root-key movement with nothing
    * paired is then `executions-unread` rather than a candidate. Pass an empty
    * list when this account did not act — there were no executions of its own.
+   *
+   * Only ETH the account SENT can appear here. ETH it RECEIVED — sale
+   * proceeds, an unwrap, a refund — arrives by internal call with no log, and
+   * this read has no traces, so it is never visible to this rule.
    */
   nativeLegs: readonly TransferLeg[] | null;
   provenance: OperationProvenance;
@@ -582,9 +607,11 @@ export interface AssetClassificationEvidence {
     | "zero-amount"
     | "not-this-account"
     | "reserve-token"
+    | "native-fuel"
     | "custody-transfer"
     | "provenance-unread"
     | "paired-movement"
+    | "paid-with-fuel"
     | "known-account"
     | "system-address"
     | "session-key-without-pair"
@@ -678,6 +705,14 @@ export function classifyAssetMovement(input: AssetClassifyInput): AssetClassific
       `${leg.token} is the energy reserve, which sits outside the trading book — moving it changes no equity the return is measured against`,
     );
   }
+  if (eq(leg.token, NATIVE_ASSET)) {
+    return notCapital(
+      "fuel",
+      "native-fuel",
+      "native ETH is fuel, which sits outside the book — equity is cash, vault, positions and quarantined cost, " +
+        "so moving ETH changes no equity the return is measured against",
+    );
+  }
   if (outbound && inbound) {
     return eq(leg.from, leg.to)
       ? notCapital("ambiguous", "not-this-account", "the account is both sender and recipient — a self-transfer says nothing about capital")
@@ -700,24 +735,45 @@ export function classifyAssetMovement(input: AssetClassifyInput): AssetClassific
 
   // ── PRIMARY: did a different asset cross the book's edge the other way? ──
   //
-  // The same test as the USDG rule, widened by ETH an execution sent: a curve
-  // buy paid in native ETH has no ERC-20 leg leaving, and without the
-  // execution's value it would look like a token arriving from nowhere.
-  const paired = [...input.opLegs, ...(input.nativeLegs ?? [])].find(
-    (l) =>
-      !eq(l.token, leg.token) &&
-      (outbound ? ours(l.to) && !ours(l.from) : ours(l.from) && !ours(l.to)) &&
-      BigInt(l.amountRaw || "0") > 0n,
-  );
+  // The same test as the USDG rule, run first over the book's own assets.
+  const crossesBack = (l: TransferLeg) =>
+    !eq(l.token, leg.token) &&
+    (outbound ? ours(l.to) && !ours(l.from) : ours(l.from) && !ours(l.to)) &&
+    BigInt(l.amountRaw || "0") > 0n;
+  const paired = input.opLegs.find(crossesBack);
   if (paired) {
-    const what = eq(paired.token, NATIVE_ASSET) ? "native ETH" : paired.token;
     return notCapital(
       "trade-leg",
       "paired-movement",
       outbound
-        ? `the same operation moved ${what} INTO the book — this ${leg.token} was spent on something, it did not leave`
-        : `the same operation moved ${what} OUT of the book — this ${leg.token} was bought, it was not deposited`,
+        ? `the same operation moved ${paired.token} INTO the book — this ${leg.token} was spent on something, it did not leave`
+        : `the same operation moved ${paired.token} OUT of the book — this ${leg.token} was bought, it was not deposited`,
       paired.token,
+    );
+  }
+  // Then ETH an execution sent: a curve buy paid in native ETH has no ERC-20
+  // leg leaving, and without the execution's value it would look like a token
+  // arriving from nowhere. But ETH is fuel, outside the book, so the book paid
+  // NOTHING for this position — the signer decides what that is.
+  const fuel = (input.nativeLegs ?? []).find(crossesBack);
+  if (fuel) {
+    if (provenance.source === "user-op" && provenance.validator === "permission") {
+      return notCapital(
+        "trade-leg",
+        "paired-movement",
+        `the same operation paid native ETH for this ${leg.token} — a session key's purchase, not a deposit; ETH is fuel ` +
+          `outside the book, so equity stepped by this position's value with nothing leaving the book`,
+        NATIVE_ASSET,
+      );
+    }
+    return notCapital(
+      "ambiguous",
+      "paid-with-fuel",
+      `${provenance.source === "user-op" && provenance.validator === "root" ? "the owner's root key" : "a secondary validator"} ` +
+        `paid native ETH for this ${leg.token} — by its shape a purchase, but ETH is fuel outside the book, so the book ` +
+        `paid nothing and equity stepped by this position's value; whether that is the owner's capital arriving in kind ` +
+        `is for a reviewer`,
+      NATIVE_ASSET,
     );
   }
 
@@ -742,7 +798,8 @@ export function classifyAssetMovement(input: AssetClassifyInput): AssetClassific
       "ambiguous",
       "session-key-without-pair",
       `a session key moved this, and its wall admits trading calls only — it cannot be the owner's capital, but nothing ` +
-        `moved the other way in the same operation, so it cannot be confirmed as a completed trade either`,
+        `visible moved the other way in the same operation (native ETH the account received is not observable), so it ` +
+        `cannot be confirmed as a completed trade either`,
     );
   }
   if (provenance.source === "user-op" && provenance.validator === "secondary") {
@@ -763,7 +820,7 @@ export function classifyAssetMovement(input: AssetClassifyInput): AssetClassific
         "ambiguous",
         "executions-unread",
         `the owner's key moved this with nothing visible the other way, but the operation's executions could not be ` +
-          `decoded — native ETH it sent may be the other half`,
+          (inbound ? `decoded — native ETH it sent may have paid for it` : `decoded — what else the operation did is unknown`),
       );
     }
     // A venue still refuses rather than guesses, exactly as the USDG rule
@@ -780,8 +837,10 @@ export function classifyAssetMovement(input: AssetClassifyInput): AssetClassific
     return {
       kind: outbound ? "asset-out" : "asset-in",
       why: outbound
-        ? `the owner's root key sent ${leg.token} to ${counterparty} with nothing coming back — a sweep of the book, in kind`
-        : `the owner's root key brought ${leg.token} in from ${counterparty} with nothing leaving — a deposit, in kind`,
+        ? `the owner's root key sent ${leg.token} to ${counterparty} and nothing visible came back into the book — a sweep ` +
+          `of the book, in kind (native ETH the account received is not observable, but it is fuel outside the book, so ` +
+          `a sale for ETH lowers the book the same way)`
+        : `the owner's root key brought ${leg.token} in from ${counterparty} with nothing leaving the book — a deposit, in kind`,
       capitalCandidate: true,
       evidence: evidence("owner-operation"),
     };

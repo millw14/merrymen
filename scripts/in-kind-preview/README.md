@@ -53,15 +53,32 @@ Shogun case) is still a swap.
 
 | Kind | Meaning |
 | --- | --- |
-| `asset-out`, `asset-in` | **Capital candidates.** An `asset-out` is the owner's root key sweeping with nothing coming back. An `asset-in` is the root key bringing an asset in, or the owner's own wallet (the owner key or the signed-in tenant wallet) sending the transaction, or the operation, that delivered it. A Transfer log that only names the owner as sender is not enough, because any token contract can write that log. |
-| `trade-leg` | A different asset crossed the book's edge the other way in the same operation. Native ETH sent by the execution counts as that other asset. |
-| `ambiguous` | The movement could not be decided, and the reason is given in words. Examples: a session key's movement with nothing paired, an unsolicited inbound transfer, a Transfer log naming the owner in a transaction the owner did not send, an allowance spent without an operation, an unread signer, or root-key executions that were not decoded. A session key's movement is never a candidate. |
+| `asset-out`, `asset-in` | **Capital candidates.** An `asset-out` is the owner's root key moving an asset out of the book with nothing visible coming back into it. A sale for native ETH reads the same way, because ETH is outside the book and ETH received is not visible. An `asset-in` is the root key bringing an asset in, or the owner's own wallet (the owner key or the signed-in tenant wallet) sending the transaction, or the operation, that delivered it. A Transfer log that only names the owner as sender is not enough, because any token contract can write that log. |
+| `trade-leg` | A different asset crossed the book's edge the other way in the same operation. For a session key, native ETH sent by the execution also counts as that other asset (a native-ETH curve buy). |
+| `ambiguous` | The movement could not be decided, and the reason is given in words. Examples: a session key's movement with nothing paired, an unsolicited inbound transfer, a Transfer log naming the owner in a transaction the owner did not send, an allowance spent without an operation, an unread signer, root-key executions that were not decoded, or a position the owner's root key paid for in native ETH (`paid-with-fuel`). A session key's movement is never a candidate. |
 | `reserve` | The energy reserve token. Excluded, because it sits outside the trading book. |
+| `fuel` | Native ETH, in either direction, whoever signed. Excluded, because equity is cash, vault, positions and quarantined cost, with no ETH (`worker/src/equity.ts`). |
 | `custody` | Between the account and its own class or Trencher vault. Excluded. |
 | `internal`, `protocol` | Another scanned account, or chain infrastructure (an EntryPoint, Permit2, the operation's own paymaster). |
 
 USDG legs are not classified here. They belong to `classifyUsdgMovement` and
 chain-capital, and they are used here only as the other half of a swap.
+
+Native ETH is treated as fuel, outside the book, because that is how equity
+is measured. Two things follow:
+
+- Sending ETH home is never a candidate. Booking it would record a withdrawal
+  of money that was never in the book.
+- A position the owner's root key buys with ETH arrives in the book with
+  nothing leaving it, so equity steps up by the position's value. It is
+  `ambiguous` (`paid-with-fuel`), so it is reviewed and valued rather than
+  passed as a trade leg. A session key cannot send ETH (every wall
+  permission carries `valueLimit` 0). If one ever did, the result is still a
+  trade leg.
+
+This is a decision for Milla's review. The alternative, keeping ETH in the
+book for this preview, would make ETH sends candidates and hide ETH-funded
+purchases from review.
 
 ## Valuation
 
@@ -71,7 +88,8 @@ Valuation runs only for the kinds a reviewer must read: the candidates,
 - **V1: the Chainlink round in force.** V1 uses the round in force when the
   movement's block was sealed. It applies the same six-hour staleness bound
   and successor-round proof as the receipt gas preview. It is reported as a
-  **candidate**. Only ETH, WETH and the registered stock tokens have a feed.
+  **candidate**. Only WETH and the registered stock tokens have a feed among
+  the kinds that are reviewed. Native ETH is `fuel` and is never valued.
   A stock token uses today's ERC-8056 multiplier, and the report says so. A
   weekend-stale stock round gives no V1.
 - **V2: the equity step.** V2 compares the funded book's last mark before the

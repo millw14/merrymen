@@ -272,7 +272,7 @@ describe('the preview', () => {
       [SWEEP.hash, TSLA.address.toLowerCase(), 'asset-out'], // an owner sudo sweep
       [SHOGUN.hash, PEPE, 'trade-leg'], // a session-key swap with no trades row
       [CURVE_BUY.hash, PEPE, 'trade-leg'], // a native-ETH curve buy…
-      [CURVE_BUY.hash, 'native', 'trade-leg'], // …and the ETH that paid for it
+      [CURVE_BUY.hash, 'native', 'fuel'], // …and the ETH that paid for it, which sits outside the book
       [ENERGY.hash, MERRYMEN, 'reserve'], // excluded
       [VAULT_SWEEP.hash, PEPE, 'custody'], // excluded
     ]);
@@ -300,8 +300,8 @@ describe('the preview', () => {
     const { p } = await preview();
     assert.equal(p.mode, 'preview-only');
     assert.deepEqual(p.summary.capitalCandidates, { 'asset-in': 0, 'asset-out': 1 });
-    assert.deepEqual(p.summary.excluded, { reserve: 1, custody: 1, protocol: 0 });
-    assert.equal(p.summary.tradeLegs, 3);
+    assert.deepEqual(p.summary.excluded, { reserve: 1, fuel: 1, custody: 1, protocol: 0 });
+    assert.equal(p.summary.tradeLegs, 2);
     assert.equal(p.summary.bookable, 0);
     assert.equal(p.summary.writesPerformed, 0);
     assert.equal(p.summary.ddlPerformed, 0);

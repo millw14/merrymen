@@ -571,11 +571,24 @@ describe("in-kind movements", () => {
       );
     });
 
-    it("native ETH sent home by the root key is asset-out too", () => {
+    it("native ETH sent home by the root key is fuel — outside the book, so never a candidate", () => {
+      // equity.ts counts cash, vault, positions and quarantined cost, and no
+      // ETH: a gas top-up sent back home steps no equity, and booking it as a
+      // withdrawal would record money that never left the book.
       const eth = leg(NATIVE_ASSET, ME, TENANT_WALLET, "50000000000000000");
-      const v = classify(eth, root, { opLegs: [], nativeLegs: [eth] });
+      for (const p of [root, sessionKey, nobody(TENANT_WALLET)]) {
+        const v = classify(eth, p, { opLegs: [], nativeLegs: [eth] });
+        assert.equal(v.kind, "fuel");
+        assert.equal(v.evidence.rule, "native-fuel");
+        assert.equal(v.capitalCandidate, false);
+      }
+    });
+
+    it("a root-key sale whose ETH proceeds are invisible still lowers the book — and says what it could not see", () => {
+      const v = classify(leg(PEPE, ME, CURVE, "400000000000000000000"), root, { nativeLegs: [] });
       assert.equal(v.kind, "asset-out");
-      assert.equal(v.capitalCandidate, true);
+      assert.match(v.why, /nothing visible came back/);
+      assert.match(v.why, /not observable/);
     });
 
     it("the same sweep signed by a SESSION KEY is never a candidate", () => {
@@ -635,18 +648,37 @@ describe("in-kind movements", () => {
       assert.match(v.why, /native ETH/);
     });
 
-    it("and the ETH leg itself is the other half of the same trade", () => {
+    it("and the ETH leg itself is fuel, outside the book — the token's verdict carries the trade", () => {
       const token = leg(PEPE, CURVE, ME, "400000000000000000000");
       const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
       const v = classify(eth, sessionKey, { opLegs: [token], nativeLegs: [eth] });
-      assert.equal(v.kind, "trade-leg");
-      assert.equal(v.pairedAsset, PEPE);
+      assert.equal(v.kind, "fuel");
+      assert.equal(v.capitalCandidate, false);
     });
 
-    it("an owner's own curve buy through the root key is a trade too, not a deposit", () => {
+    it("an owner's own curve buy paid in ETH is AMBIGUOUS for review — the book paid nothing for the position", () => {
+      // ETH is fuel outside the book, so this position arrived with nothing
+      // leaving the book and equity stepped by its value. Read as a trade leg
+      // it would never reach a reviewer; read as a deposit it would decide
+      // what only a reviewer can.
       const token = leg(PEPE, CURVE, ME, "400000000000000000000");
       const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
-      assert.equal(classify(token, root, { opLegs: [token], nativeLegs: [eth] }).kind, "trade-leg");
+      for (const p of [root, { source: "user-op", validator: "secondary", userOpHash: HASH, nonce: "2" } as const]) {
+        const v = classify(token, p, { opLegs: [token], nativeLegs: [eth] });
+        assert.equal(v.kind, "ambiguous");
+        assert.equal(v.evidence.rule, "paid-with-fuel");
+        assert.equal(v.pairedAsset, NATIVE_ASSET);
+        assert.equal(v.capitalCandidate, false);
+        assert.match(v.why, /fuel outside the book/);
+      }
+    });
+
+    it("a root-key buy the BOOK paid for is an ordinary trade leg, whatever ETH also went out", () => {
+      const legs = [leg(USDG, ME, CURVE, "25000000"), leg(PEPE, CURVE, ME, "400000000000000000000")];
+      const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
+      const v = classify(legs[1]!, root, { opLegs: legs, nativeLegs: [eth] });
+      assert.equal(v.kind, "trade-leg");
+      assert.equal(v.pairedAsset, USDG);
     });
 
     it("UNREAD executions never let an unpaired token become a candidate", () => {
@@ -810,6 +842,8 @@ describe("in-kind movements", () => {
         classify(leg(PEPE, POOL, ME, "1"), sessionKey),
         classify(leg(MERRYMEN, POOL, ME, "1"), root),
         classify(leg(PEPE, VAULT, ME, "1"), root, { custodyAddresses: [VAULT] }),
+        classify(leg(NATIVE_ASSET, ME, TENANT_WALLET, "1"), root),
+        classify(leg(PEPE, CURVE, ME, "1"), root, { nativeLegs: [leg(NATIVE_ASSET, ME, CURVE, "1")] }),
       ];
       for (const v of verdicts) {
         assert.equal(v.capitalCandidate, v.kind === "asset-in" || v.kind === "asset-out", `${v.kind} / ${v.evidence.rule}`);

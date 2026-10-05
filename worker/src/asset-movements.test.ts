@@ -343,10 +343,26 @@ describe("the four shapes", () => {
     const eth = me.movements.find((m) => m.asset === NATIVE_ASSET)!;
     assert.equal(token.classification.kind, "trade-leg");
     assert.equal(token.classification.pairedAsset, NATIVE_ASSET);
-    assert.equal(eth.classification.kind, "trade-leg");
+    assert.equal(eth.classification.kind, "fuel", "the ETH itself sits outside the book");
     assert.equal(eth.amountRaw, (10n ** 16n).toString());
     assert.equal(eth.logIndex, null, "native ETH has no log of its own");
     assert.ok(calls.some((c) => c.method === "eth_getTransactionByHash"), "the calldata is where the ETH is written");
+  });
+
+  it("the OWNER's curve buy paid in ETH reaches review, with its block time — the book paid nothing for it", async () => {
+    const { me } = await scan([
+      {
+        hash: "0xc0e2",
+        block: 310,
+        input: handleOps([{ sender: ME, nonce: rootNonce(13n), callData: single(CURVE, 10n ** 16n, "0xd96a094a") }]),
+        logs: [beforeExecution(), transfer(PEPE, CURVE, ME, 400n * 10n ** 18n), opEvent(ME, rootNonce(13n))],
+      },
+    ]);
+    const token = me.movements.find((m) => m.asset === PEPE)!;
+    assert.equal(token.classification.kind, "ambiguous");
+    assert.equal(token.classification.evidence.rule, "paid-with-fuel");
+    assert.equal(token.at, 1_790_000_310, "ambiguous is a review kind, so its block time was read");
+    assert.equal(me.counts.fuel, 1);
   });
 
   it("reserve and custody legs are excluded", async () => {
@@ -474,7 +490,7 @@ describe("a bundle is read op by op", () => {
 });
 
 describe("what only the operation sweep can find", () => {
-  it("an owner sweeping native ETH home has no Transfer log — it is found by its op and is asset-out", async () => {
+  it("an owner sending native ETH home has no Transfer log — it is found by its op, and is fuel, not a sweep", async () => {
     const { me } = await scan([
       {
         hash: "0xe7e7",
@@ -485,7 +501,9 @@ describe("what only the operation sweep can find", () => {
     ]);
     assert.equal(me.movements.length, 1);
     assert.equal(me.movements[0]!.asset, NATIVE_ASSET);
-    assert.equal(me.movements[0]!.classification.kind, "asset-out");
+    assert.equal(me.movements[0]!.classification.kind, "fuel");
+    assert.equal(me.movements[0]!.at, undefined, "fuel is not a review kind");
+    assert.equal(me.counts["asset-out"], 0);
   });
 
   it("unreadable calldata leaves an owner's unpaired token NON-capital and the scan incomplete", async () => {

@@ -291,6 +291,7 @@ const emptyCounts = (): Record<AssetMovementKind, number> => ({
   "asset-out": 0,
   "trade-leg": 0,
   reserve: 0,
+  fuel: 0,
   custody: 0,
   internal: 0,
   protocol: 0,

@@ -174,7 +174,7 @@ export async function buildPreview({ snapshot, accounts, rpc, deps, target, sour
       ambiguous: count('ambiguous'),
       internal: count('internal'),
       tradeLegs: count('trade-leg'),
-      excluded: { reserve: count('reserve'), custody: count('custody'), protocol: count('protocol') },
+      excluded: { reserve: count('reserve'), fuel: count('fuel'), custody: count('custody'), protocol: count('protocol') },
       candidatesWithoutTradeRow: every.filter(m => m.classification.capitalCandidate && !m.recordedTradeRow).length,
       ownOpMovementsWithoutTradeRow: every.filter(m => m.userOpHash && !m.recordedTradeRow).length,
       v1Candidates: every.filter(m => m.valuation?.v1.status === 'candidate').length,
@@ -192,7 +192,7 @@ export function plainSummary(preview) {
   return `PREVIEW ONLY — 0 database writes; 0 schema changes; nothing bookable.\n` +
     `Accounts: ${s.accountsRequested} requested; ${s.accountsScanned} scanned; ${s.accountsIneligible} ineligible; ${s.accountsIncomplete} with incomplete coverage.\n` +
     `Non-USDG movements: ${s.movements}; capital candidates: in=${s.capitalCandidates['asset-in']}, out=${s.capitalCandidates['asset-out']}; ambiguous: ${s.ambiguous}; internal: ${s.internal}.\n` +
-    `Trade legs: ${s.tradeLegs}; excluded: reserve=${s.excluded.reserve}, custody=${s.excluded.custody}, protocol=${s.excluded.protocol}.\n` +
+    `Trade legs: ${s.tradeLegs}; excluded: reserve=${s.excluded.reserve}, fuel (native ETH)=${s.excluded.fuel}, custody=${s.excluded.custody}, protocol=${s.excluded.protocol}.\n` +
     `Movements from an account's own operations with no trades row (observation only): ${s.ownOpMovementsWithoutTradeRow}.\n` +
     `V1 candidates (Chainlink round in force): ${s.v1Candidates}; V2 estimates (never bookable): ${s.v2Estimates}.\n` +
     `Preview SHA256: ${preview.previewDigest}\n` +
