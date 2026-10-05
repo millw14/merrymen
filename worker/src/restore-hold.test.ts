@@ -168,6 +168,9 @@ describe("held tenants reach only the loops they belong in", () => {
       "startHolderProcess",
       "sweepTgGroups",
       "watchHolder",
+      // The heartbeat COUNTS them (holders.size) and does nothing else: no
+      // held tenant is visited, started or serviced by it.
+      "writeOrchestratorHeartbeat",
     ]);
   });
 
