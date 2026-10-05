@@ -120,7 +120,10 @@ import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
-import { PERSISTENT_HOME_MANIFEST, preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
+import {
+  adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST,
+  preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity,
+} from "./persistent-home";
 import { scrubHostedGrantCache } from "./hosted-grant-cache";
 import {
   clearHoldNotified,
@@ -9248,6 +9251,20 @@ export async function runOrchestrator(): Promise<void> {
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
   if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
   if (reportMode === "1") { await runRecoveryReportOnly(); return; }
+  // THE POPULATED INCIDENT VOLUME, AND ITS REVIEWED RELEASE AND RE-HALT
+  // (docs/fleet-resume.md). Each does nothing unless its own variable is set,
+  // and each also needs the pinned hash of the volume's original halt.
+  // Adoption swaps that hand-made halt for this volume's canonical one without
+  // FLEET_HALT ever being absent; the release lifts only that canonical halt
+  // and only into a rollout scope; the re-halt puts it back for a rollback to
+  // listener-only mode. Here, before the preparation below re-proves the
+  // result, and so before any lease, child, holder or writer.
+  const adopted = adoptPopulatedPersistentHome();
+  if (adopted) log(`persistent home adopted under its original halt; handover ${adopted.handoverState}`);
+  const haltControl = controlAdoptedPersistentHomeHalt();
+  if (haltControl) {
+    log(`${haltControl.action === "withheld" ? "[alert] " : ""}persistent home halt ${haltControl.action} — ${haltControl.detail}`);
+  }
   // A new mounted home first writes its own durable halt. No child, holder,
   // accounting repair or ordinary writer may precede this preparation.
   const persistent = preparePersistentHomeForHandover();
