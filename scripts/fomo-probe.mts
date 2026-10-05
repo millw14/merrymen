@@ -14,7 +14,13 @@
  * trending board (250), one alerts page (125), stats for one Robinhood token
  * (250) — 875 credits. `--theses` adds one thesis page (1,250), `--trader` one
  * holdings read (250), `--stream` opens /ws/alerts for 15 s (0). `--budget`
- * refuses to start a call that would exceed it (default 2,000).
+ * refuses to start a call that would exceed it (default 5,000).
+ *
+ * WHAT A CALL COUNTS AGAINST THE BUDGET. The provider's own `x-credits-cost`
+ * when it sends one: a 503 that billed 0 costs the probe 0, whatever the
+ * route's list price. When it sends none (a timeout, a dropped connection),
+ * nobody knows whether the call was billed, so the route's documented price
+ * is counted: the budget errs toward stopping early, never toward overspending.
  *
  * WHAT IT NEVER DOES. No trading or payment route (the adapter refuses them),
  * no write of any kind, no key printed: stream URLs are shown redacted only.
@@ -50,7 +56,7 @@ if (!PROVIDER_GUARDS.KEY_SHAPE.test(key)) {
 }
 const args = new Set(process.argv.slice(2));
 const budgetArg = [...args].find((a) => a.startsWith("--budget="));
-const budget = budgetArg ? Number(budgetArg.slice("--budget=".length)) : 2_000;
+const budget = budgetArg ? Number(budgetArg.slice("--budget=".length)) : 5_000;
 if (!Number.isFinite(budget) || budget < 0) {
   console.error("--budget must be a non-negative number of credits");
   process.exit(2);
@@ -58,15 +64,17 @@ if (!Number.isFinite(budget) || budget < 0) {
 
 const client = createFomoClient({ apiKey: key });
 const observed: CapabilityRecord[] = [];
-let spentEstimate = 0;
+/** What the budget is charged: the provider's reported cost, or the documented price when it reported none. */
+let charged = 0;
 let spentReported = 0;
+let unknownCost = 0;
 let sent = 0;
 
 /** Refuse a call that the remaining budget cannot cover at its documented price. */
 function affordable(route: RouteName): boolean {
   const cost = ROUTE_COST[route].credits;
-  if (spentEstimate + cost > budget) {
-    console.log(`skip ${route}: would exceed the probe budget (${spentEstimate} + ${cost} > ${budget})`);
+  if (charged + cost > budget) {
+    console.log(`skip ${route}: would exceed the probe budget (${charged} + ${cost} > ${budget})`);
     return false;
   }
   return true;
@@ -79,17 +87,34 @@ async function probe<T>(route: RouteName, call: () => Promise<Awaited<ReturnType
   // means the adapter refused it locally (bad argument, refused path, no key).
   if ((r.meta?.attempts ?? 0) > 0) {
     sent++;
-    spentEstimate += ROUTE_COST[route].credits;
+    const reported = r.meta?.creditsCost;
+    if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) {
+      charged += reported;
+      spentReported += reported;
+    } else {
+      // No header (a timeout, no connection): it may have been billed, so count the list price.
+      charged += ROUTE_COST[route].credits;
+      unknownCost++;
+    }
   }
-  if (r.meta?.creditsCost != null) spentReported += r.meta.creditsCost;
   const capability = CAPABILITY_FOR_ROUTE[route];
   observed.push(capabilityFromCall(capability, ROUTE_COST[route].template, r, extra as never));
-  console.log(`${route}: ${r.ok ? "ok" : `failed (${r.failure})`} status=${r.meta?.status ?? "-"} credits=${r.meta?.creditsCost ?? "?"} remaining=${r.meta?.creditsRemaining ?? "?"}`);
+  const transient = !r.ok && r.retryable ? " (provider marked it transient)" : "";
+  console.log(`${route}: ${r.ok ? "ok" : `failed (${r.failure})${transient}`} status=${r.meta?.status ?? "-"} attempts=${r.meta?.attempts ?? 0} credits=${r.meta?.creditsCost ?? "?"} remaining=${r.meta?.creditsRemaining ?? "?"}`);
   return r.ok ? (r.data as T) : null;
 }
 
+const iso = (ms: number | null | undefined) => (typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toISOString() : "not stated");
 const me = await probe<any>("me", () => client.me());
-if (me) observed.push(...capabilityFromAccount(me, Date.now()));
+if (me) {
+  observed.push(...capabilityFromAccount(me, Date.now()));
+  const flag = (v: boolean | null) => (v === true ? "included" : v === false ? "not included" : "not stated");
+  console.log(
+    `account: plan=${me.plan ?? "?"} dailyLimit=${me.dailyLimit ?? "not stated"} planExpiresAt=${iso(me.planExpiresAt)} ` +
+      `credits remaining=${me.credits?.remaining ?? "?"} of ${me.credits?.monthly ?? "?"} monthly; ` +
+      `/ws/alerts ${flag(me.streams?.appFeed)}, /ws/trades ${flag(me.streams?.onChain)}`,
+  );
+}
 
 const board = await probe<any>("leaderboard", () => client.leaderboard("24h", 1));
 await probe<any>("tokenBoardTrending", () => client.tokenBoard("trending", 5));
@@ -114,9 +139,9 @@ if (args.has("--stream")) {
     console.log(`stream: not opened (${endpoint.failure})`);
   } else {
     console.log(`stream: opening ${endpoint.redacted} for 15 s`);
-    const result = await new Promise<{ welcome: boolean; delaySeconds?: number; closeCode?: number }>((resolve) => {
+    const result = await new Promise<{ welcome: boolean; delaySeconds?: number; closeCode?: number; closeReason?: string }>((resolve) => {
       const ws = new WebSocket(endpoint.url);
-      const done = (r: { welcome: boolean; delaySeconds?: number; closeCode?: number }) => {
+      const done = (r: { welcome: boolean; delaySeconds?: number; closeCode?: number; closeReason?: string }) => {
         clearTimeout(timer);
         try { ws.close(); } catch { /* already closed */ }
         resolve(r);
@@ -128,7 +153,8 @@ if (args.has("--stream")) {
           if (f?.type === "welcome") done({ welcome: true, delaySeconds: typeof f.delaySeconds === "number" ? f.delaySeconds : undefined });
         } catch { /* not JSON: keep waiting for a welcome */ }
       };
-      ws.onclose = (ev) => done({ welcome: false, closeCode: ev.code });
+      // The reason text only decides whether a 1008 names the key or the plan (capabilities.ts); it is never printed.
+      ws.onclose = (ev) => done({ welcome: false, closeCode: ev.code, closeReason: typeof ev.reason === "string" ? ev.reason : undefined });
       ws.onerror = () => { /* the close event carries the code */ };
     });
     observed.push(capabilityFromStream("ws-alerts", "/ws/alerts", result, Date.now()));
@@ -138,7 +164,10 @@ if (args.has("--stream")) {
 
 const merged = mergeCapabilities(DOCUMENTED_CAPABILITIES, observed);
 console.log("\n" + capabilityReport(merged));
-console.log(`\ncalls sent: ${sent}; credits: estimated ${spentEstimate}, reported by the provider ${spentReported}`);
+console.log(
+  `\ncalls sent: ${sent}; credits charged to the probe budget ${charged} of ${budget}: reported by the provider ${spentReported}` +
+    (unknownCost ? `, plus list price for ${unknownCost} call(s) that reported no cost` : ""),
+);
 
 if (process.env.MERRYMEN_FOMO_PROBE_DB === "1" && process.env.DATABASE_URL) {
   const { makePgDb } = await import("../worker/src/db");

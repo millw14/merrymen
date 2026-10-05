@@ -121,6 +121,12 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   across turns per conversation, for 30 minutes. A correction replaces the subject before
   the next lookup. A same-ticker coin on another chain triggers one focused clarification;
   it is never silently chosen.
+- **One call, one clock:** every provider read of one tool call runs inside a 40 s
+  deadline (below the broker's 50 s ceiling) and stops when the caller aborts: each
+  attempt is clamped to the time left, the fetch itself is aborted, and a read that cannot
+  start with 2 s left is skipped and named as missing (the answer is `partial`), never
+  begun. Background refreshes get 80 s (the research pass allows 90); a deep job uses its
+  own deadline.
 - **Deep research** registers a bounded job (10-minute deadline, 15,000-credit allowance)
   before later delivery is promised. Telegram delivers one consolidated result to the same
   DM after re-checking the recipient and the data-access permission.
@@ -513,7 +519,12 @@ retention, thesis-by-token Robinhood filtering, holders coverage, paid-plan dail
 
 Statuses move to AUTHENTICATED_TESTED, PARTIAL, ENTITLEMENT_BLOCKED or UNAVAILABLE as calls
 are observed. They are stored in `fomo_capabilities` and shown by
-`fomo_get_research_status`.
+`fomo_get_research_status`. Three observations move no status: a rejected key (HTTP 401, or a
+close 1008 whose reason names the key), a call our own deadline or abort cut short, and a 5xx the
+provider marked retryable (its upstream did not answer for one subject in time). The last is
+noted beside the standing verdict as transient evidence, keeping its time and last success; only
+a failure the provider did not call transient marks a route UNAVAILABLE. A close 1008 with no
+reason, or one naming neither, is recorded as "policy close (1008): key or plan".
 
 | Capability | Route | Status | Evidence | As of |
 |---|---|---|---|---|
@@ -522,7 +533,7 @@ are observed. They are stored in `fomo_capabilities` and shown by
 | trader-by-handle | `/v2/users/{handle}` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}: 2,500 credits on a hit, 250 on an unresolvable handle, refunded while wallets are resolving; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | trader-by-id | `/v2/users/id/{userId}` | DOCUMENTED | documented: openapi.json GET /v2/users/id/{userId}: same identity payload as the handle route, 2,500 credits; 404 does not consume the allowance; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | positions | `/v2/users/{userId}/positions` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/positions (userId accepted): 25 closed per cursor page, 250 credits per page; the vendor states a full history is not obtainable at any setting; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
-| swaps | `/v2/users/{userId}/swaps` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/swaps: 100 fills per cursor page, 250 credits per page; tradeIdIn/tradeIdOut join to positions; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| swaps | `/v2/users/{userId}/swaps` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/swaps: 100 fills per cursor page, 250 credits per page; tradeIdIn/tradeIdOut join to positions; observed live 2026-10-04: complete:false with a note that at most 100 swaps are served per trader and no cursor reaches past them, so fills are a recent window, not history; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | swaps-relay | `/v2/users/{userId}/swaps?source=relay` | PARTIAL | documented: listed only in the /v1 catalogue, absent from openapi.json; covers Relay-routed flow only (vendor measured 96% in-window); 409 retryable while a wallet resolves; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | balances | `/v2/users/{userId}/balances` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/balances: upstream cap of ~100 holdings with no way past it, so totalValueUsd is a floor when truncated; ?chain= narrows rows; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | following | `/v2/users/{userId}/following` | DOCUMENTED | documented: openapi.json GET /v2/users/{handle}/following: at most 200 names upstream, flat 250 credits; 503 retryable never means not-found; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
@@ -536,7 +547,7 @@ are observed. They are stored in `fomo_capabilities` and shown by
 | token-stats | `/v2/token/{address}/stats` | DOCUMENTED | documented: openapi.json GET /v2/token/{address}/stats: windows 5m\|1h\|4h\|24h, volumes sent as strings, buySellRatio null with no sells; networkId needed outside the vendor directory; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | token-devs | `/v2/token/{address}/devs` | DOCUMENTED | documented: openapi.json GET /v2/token/{address}/devs: deployer and insider positions with their theses; an empty list is not a clean bill of health; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | token-holders | `/token/{address}/holders` | PARTIAL | documented: openapi.json GET /token/{address}/holders is populated from captured balances, and GET /health and GET /v1 report a captured dataset of 8 traders, so the holder set is tiny and an absence proves nothing; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
-| token-board-trending | `/v2/leaderboard/tokens/trending` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/trending: live with a 5-minute cache; source captured means a fallback board; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| token-board-trending | `/v2/leaderboard/tokens/trending` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/trending: live with a 5-minute cache; source captured marks the provider's stored copy; observed live 2026-10-04: both token boards answered source captured with stale:false and an age of minutes, so stale and age, not the source alone, say whether it is a fallback; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | token-board-graduated | `/v2/leaderboard/tokens/graduated` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/graduated: same shape as trending; small caps by nature; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | token-board-most-held | `/v2/leaderboard/tokens/most-held` | DOCUMENTED | documented: openapi.json GET /v2/leaderboard/tokens/most-held: holders is null on this board upstream; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | token-activity | `/v2/tokens/activity` | PARTIAL | documented: openapi.json GET /v2/tokens/activity: the vendor states its upstream stopped publishing this board on 2026-08-23; answers carry stale:true; not wired into the client; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
@@ -545,6 +556,6 @@ are observed. They are stored in `fomo_capabilities` and shown by
 | tokens-search | `/v2/tokens/search` | DOCUMENTED | documented: openapi.json GET /v2/tokens/search: symbol/name to address, networkId, market cap; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | alerts-rest | `/v2/alerts` | DOCUMENTED | documented: openapi.json GET /v2/alerts: the app feed's LARGE events only (floor near $3,000 of position value), opaque cursor checkpointing, 125 credits; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | ws-alerts | `/ws/alerts` | DOCUMENTED | documented: openapi.json WSS /ws/alerts: app feed on every plan, zero credits; paid keys realtime, a free key delayed 15 s after 7 days; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
-| ws-trades | `/ws/trades` | DOCUMENTED | documented: openapi.json WSS /ws/trades: on-chain stream for Growth or Scale keys only; a lower plan is refused (403 or close 1008) and is ENTITLEMENT_BLOCKED once probed; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
+| ws-trades | `/ws/trades` | DOCUMENTED | documented: openapi.json WSS /ws/trades: on-chain stream for Growth or Scale keys only; a lower plan is refused (403, or close 1008) and is ENTITLEMENT_BLOCKED once probed; a 1008 also closes a bad key, so it blocks only when its reason names the plan; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | trading-account | `/v2/trading/*` | UNSUPPORTED | policy: the vendor's order-placing account product; Merrymen keeps its own execution system and the client refuses the path; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
 | credit-top-up | `/pay/create` | UNSUPPORTED | policy: a payment flow; Merrymen never pays through a research adapter and the client refuses the path; fetched 2026-10-04T16:05Z | 2026-10-04T16:05Z |
