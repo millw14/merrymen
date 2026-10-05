@@ -260,4 +260,67 @@ describe("draining the intent chain", () => {
     tail.catch(() => {});
     assert.equal(await drainIntentChain({ ...timers, tail: () => tail, budgetMs: 1_000 }), true);
   });
+
+  /** The running tick, as command-wake.ts TickClock.settled hands it over: null when none runs. */
+  function ticking() {
+    let current: Promise<void> | null = null;
+    return {
+      tick: () => current,
+      /** Start a tick; the returned function ends it. */
+      start: () => {
+        let end!: () => void;
+        const run = new Promise<void>((r) => (end = r));
+        const settled: Promise<void> = run.then(() => {
+          if (current === settled) current = null;
+        });
+        current = settled;
+        return end;
+      },
+    };
+  }
+
+  it("THE TICK THAT PUT THE TRADE THERE IS WAITED FOR TOO — its write after the chain emptied lands before the drain ends", async () => {
+    const c = chain();
+    const t = ticking();
+    const endTick = t.start();
+    const land = c.join();
+    let drained: boolean | null = null;
+    const run = drainIntentChain({ ...timers, tail: c.tail, tick: t.tick, budgetMs: 5_000 }).then((v) => (drained = v));
+    land();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(drained, null, "the chain is empty, but the tick is still refunding the claim its refused intent did not use");
+    endTick();
+    await run;
+    assert.equal(drained, true);
+  });
+
+  it("a tick that hands on to another as it ends is followed to the second's end", async () => {
+    const c = chain();
+    const t = ticking();
+    const endFirst = t.start();
+    let drained: boolean | null = null;
+    const run = drainIntentChain({ ...timers, tail: c.tail, tick: t.tick, budgetMs: 5_000 }).then((v) => (drained = v));
+    const endSecond = t.start();
+    endFirst();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(drained, null, "the first ending is not the end: another tick is running");
+    endSecond();
+    await run;
+    assert.equal(drained, true);
+  });
+
+  it("A TICK THAT NEVER ENDS IS LEFT AT THE BUDGET, under the chain's one deadline", async () => {
+    const c = chain();
+    const t = ticking();
+    t.start();
+    const started = Date.now();
+    assert.equal(await drainIntentChain({ ...timers, tail: c.tail, tick: t.tick, budgetMs: 60 }), false);
+    assert.ok(Date.now() - started < 1_000);
+  });
+
+  it("no tick running, an empty chain: drains at once", async () => {
+    const c = chain();
+    const t = ticking();
+    assert.equal(await drainIntentChain({ ...timers, tail: c.tail, tick: t.tick, budgetMs: 5_000 }), true);
+  });
 });

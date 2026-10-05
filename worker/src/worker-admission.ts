@@ -190,6 +190,14 @@ export const DRAIN_INTENT_CHAIN_MS = 18_000;
  * the same tail it waited for. Every pass shares one deadline, so a chain that
  * keeps growing cannot hold the process past the budget.
  *
+ * AND THE TICK THAT PUT IT THERE (`tick`, optional). The chain empties before
+ * its callers are done with what it told them: the strategy loop refunds an
+ * energy claim its refused intent did not consume, and a command tick writes
+ * the owner's result file, each a write made AFTER the intent settled. So the
+ * running tick's settle (command-wake.ts TickClock.settled) is waited for
+ * beside the tail, re-read the same way, under the same one deadline — and the
+ * drain ends only once a look finds both where it left them.
+ *
  * Never rejects: the chain's own tails never do (processIntent swallows into
  * them), and a rejection here would be read the same as settling — the work
  * that rejected is over either way.
@@ -197,28 +205,31 @@ export const DRAIN_INTENT_CHAIN_MS = 18_000;
 export async function drainIntentChain(deps: {
   /** The chain's current tail — read through a closure, each time it is asked. */
   tail: () => Promise<unknown>;
+  /** The tick running now, or null — read through a closure, each time it is asked. */
+  tick?: () => Promise<unknown> | null;
   budgetMs: number;
   now: () => number;
   setTimer: (fn: () => void, ms: number) => unknown;
   clearTimer: (handle: unknown) => void;
 }): Promise<boolean> {
   const deadline = deps.now() + deps.budgetMs;
+  const tickNow = () => deps.tick?.() ?? null;
   for (;;) {
     const tail = deps.tail();
+    const tick = tickNow();
     const left = deadline - deps.now();
     if (left <= 0) return false;
     let timer: unknown = null;
     const outOfTime = await Promise.race([
-      tail.then(
-        () => false,
-        () => false,
-      ),
+      // Settled, not all(): one that rejects is over, and must not end the
+      // wait for the other.
+      Promise.allSettled([tail, tick]).then(() => false),
       new Promise<boolean>((resolve) => {
         timer = deps.setTimer(() => resolve(true), left);
       }),
     ]);
     if (timer !== null) deps.clearTimer(timer);
     if (outOfTime) return false;
-    if (deps.tail() === tail) return true;
+    if (deps.tail() === tail && tickNow() === tick) return true;
   }
 }

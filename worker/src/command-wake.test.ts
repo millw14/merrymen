@@ -637,6 +637,64 @@ describe("the tick clock", () => {
     assert.deepEqual(k.f.pending(), []);
     assert.equal(k.c.state().tickRunning, false, "and the clock is idle once the trade it waited on has landed");
   });
+
+  // What the drain waits for besides the chain: the tick's work that comes
+  // after its trades (an energy refund, an order's result file).
+
+  it("WHAT IS RUNNING CAN BE WAITED FOR: settled() is the running tick's end, and null when none runs", async () => {
+    const k = clock();
+    assert.equal(k.c.settled(), null, "nothing runs before the first tick");
+    k.c.start(0);
+    k.f.fire();
+    const regular = k.c.settled();
+    assert.ok(regular, "a regular tick is running");
+    let ended = false;
+    void regular!.then(() => (ended = true));
+    await settle();
+    assert.equal(ended, false, "not over while the tick is");
+    await k.finishRegular();
+    assert.equal(ended, true);
+    assert.equal(k.c.settled(), null);
+
+    assert.equal(k.c.wakeCommand(), true);
+    const command = k.c.settled();
+    assert.ok(command && command !== regular, "a command tick is its own");
+    await k.failCommand();
+    assert.equal(k.c.settled(), null, "a tick that failed is over all the same — and its settle did not reject");
+  });
+
+  it("A TICK THAT STARTS ANOTHER AS IT ENDS HANDS settled() ON — the research it owed is still running", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    k.f.fire();
+    const regular = k.c.settled();
+    assert.equal(k.c.wakeNomination(), true);
+    await k.finishRegular();
+    assert.deepEqual(k.log, ["regular", "regular", "nomination"]);
+    const research = k.c.settled();
+    assert.ok(research && research !== regular, "the end of the first did not clear the second");
+    await k.finishNomination();
+    assert.equal(k.c.settled(), null);
+  });
+
+  it("STOPPED, A RUNNING TICK IS STILL WAITED FOR — and a held one ends once its trade lands, having read nothing", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    const land = k.startOrder();
+    k.f.fire();
+    await settle();
+    const held = k.c.settled();
+    assert.ok(held, "a regular tick held behind a trade is running");
+    k.c.stop();
+    assert.equal(k.c.settled(), held, "stop() cancels nothing");
+    await land();
+    assert.equal(k.c.settled(), null);
+    assert.deepEqual(k.log, ["regular", "hold"]);
+  });
 });
 
 /**

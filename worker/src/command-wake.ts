@@ -563,6 +563,13 @@ export function createLiveTrades(now: () => number = Date.now): LiveTrades {
  * it arms nothing when it ends, and a regular tick that was held behind a
  * trade in flight never starts at all, not even once the trade lands. One way
  * only: there is no restart, because nothing that stops a clock wants it back.
+ *
+ * AND WHAT IS RUNNING CAN BE WAITED FOR (`settled`). A tick's work does not
+ * end with its last trade: the strategy loop refunds an energy claim its
+ * refused intent did not consume, and a command tick writes the order's result
+ * file after its trade. Both come AFTER the intent chain has emptied, so a
+ * drain that waited only for the chain would close the ledger under them. The
+ * running tick's settle is the one promise that ends after all of it.
  */
 export interface TickClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -575,6 +582,8 @@ export interface TickClock {
   wakeNomination(): boolean;
   /** Start nothing ever again: the armed tick comes off the clock, and a running one arms nothing when it ends. */
   stop(): void;
+  /** The tick running now — regular, command or nomination — settling when it has ended, never rejecting; null when none is. */
+  settled(): Promise<void> | null;
 }
 
 export function createTickClock(deps: {
@@ -602,6 +611,22 @@ export function createTickClock(deps: {
   // One way: set by stop(), never cleared. Every path that would START a tick
   // or put one on the clock reads it first.
   let stopped = false;
+  // The settle of the tick running now (settled()). Each of the three starts
+  // below hands its whole run to `track`, ending where `running` is lowered; a
+  // tick its end starts (a wanted nomination) is tracked in its place, so the
+  // end of the first does not clear the second.
+  let current: Promise<void> | null = null;
+  const track = (run: Promise<unknown>) => {
+    const settled: Promise<void> = run.then(
+      () => {
+        if (current === settled) current = null;
+      },
+      () => {
+        if (current === settled) current = null;
+      },
+    );
+    current = settled;
+  };
 
   const arm = (ms: number) => {
     if (stopped) return;
@@ -643,14 +668,16 @@ export function createTickClock(deps: {
   const runRegular = () => {
     timer = null;
     running = true;
-    void startRegular()
-      .catch(() => deps.fallbackMs)
-      .then((next) => {
-        running = false;
-        ticked = true;
-        arm(next);
-        if (nominationWanted) wakeNomination();
-      });
+    track(
+      startRegular()
+        .catch(() => deps.fallbackMs)
+        .then((next) => {
+          running = false;
+          ticked = true;
+          arm(next);
+          if (nominationWanted) wakeNomination();
+        }),
+    );
   };
 
   const startNomination = (): Promise<void> => {
@@ -678,11 +705,11 @@ export function createTickClock(deps: {
     deps.clearTimer(timer);
     timer = null;
     running = true;
-    void startNomination().catch(() => {}).then(() => {
+    track(startNomination().catch(() => {}).then(() => {
       running = false;
       arm(due - deps.now());
       if (nominationWanted) wakeNomination();
-    });
+    }));
     return true;
   };
 
@@ -707,13 +734,15 @@ export function createTickClock(deps: {
       } catch {
         run = Promise.resolve();
       }
-      void run
-        .catch(() => {})
-        .then(() => {
-          running = false;
-          arm(due - deps.now());
-          if (nominationWanted) wakeNomination();
-        });
+      track(
+        run
+          .catch(() => {})
+          .then(() => {
+            running = false;
+            arm(due - deps.now());
+            if (nominationWanted) wakeNomination();
+          }),
+      );
       return true;
     },
     stop() {
@@ -722,6 +751,7 @@ export function createTickClock(deps: {
       if (timer !== null) deps.clearTimer(timer);
       timer = null;
     },
+    settled: () => current,
   };
 }
 
@@ -782,6 +812,8 @@ export interface CommandClock {
   state(): { ticked: boolean; tickRunning: boolean; regularDueInMs: number | null };
   /** Stop the clock for good, and the poll with it: no tick, no wake, no beat. See TickClock.stop. */
   stop(): void;
+  /** The tick running now, settling when it has ended; null when none is. See TickClock.settled. */
+  settled(): Promise<void> | null;
 }
 
 export function createCommandClock(deps: {
@@ -855,5 +887,6 @@ export function createCommandClock(deps: {
       stopped = true;
       clock.stop();
     },
+    settled: () => clock.settled(),
   };
 }
