@@ -330,8 +330,11 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
       performance.pnlUsdg = performance.publicBook ? paper.pnlUsdg : null;
       performance.pnlBps = paper.pnlBps;
       performance.pnlAt = paper.pnlAt;
+      // Only beside a paper read that answered: it reports a failed read and
+      // a book with no measured mark alike, and "awaiting first valuation"
+      // would be a claim about the second made of the first.
+      await describeFills(db, account, epoch, performance);
     }
-    await describeFills(db, account, epoch, performance);
     return { performance, liveRank: { pnlBps: null, unrankedWhy: "paper" }, paperPnlBps: paper ? Math.round(paper.pnlBps) : null };
   }
   if (current.book !== "live") return { performance, liveRank: unavailable(), paperPnlBps: null };

@@ -450,6 +450,14 @@ test("Finley: a paper book whose only valuation predates both its buys is awaiti
     const { performance } = await readBookPerformance(db, ACCOUNT, 2, true);
     assert.equal(performance.pnlBps, 0);
     assert.deepEqual([performance.fills, performance.fillsAtMark, performance.lastFillAt, performance.valuation], [2, 0, MARK + 8, "awaiting"]);
+    // The paper reader answers a failed read with the same null as a book with
+    // no measured mark, so a failure must not be told as "awaiting".
+    const unread: Db = { ...db, prepare(sql) {
+      if (sql.includes("WITH marks AS")) throw new Error("permission denied");
+      return db.prepare(sql);
+    } };
+    const failed = (await readBookPerformance(unread, ACCOUNT, 2, true)).performance;
+    assert.deepEqual([failed.book, failed.fills, failed.fillsAtMark, failed.valuation], ["paper", null, null, null]);
   } finally { raw.close(); }
 });
 
