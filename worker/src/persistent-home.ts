@@ -51,6 +51,10 @@ export interface PreparedPersistentHome extends PersistentHomeIdentity {
   handoverState: "held" | "complete";
   halt: PersistentHomeHaltProof | null;
 }
+export interface AdoptedPersistentHome extends PreparedPersistentHome {
+  /** True only on the start that wrote the adopted manifest; every later start with the pin set reports the volume as it stands. */
+  adoptedNow: boolean;
+}
 export interface PersistentHomeOptions {
   /** Trusted test seam. Production reads the kernel's mount table directly. */
   readMountInfo?: () => string;
@@ -386,7 +390,7 @@ function readPreAdoption(root: Root, pinned: string, token: string): PreAdoption
  */
 export function adoptPopulatedPersistentHome(
   env: NodeJS.ProcessEnv = process.env, options: PersistentHomeOptions = {},
-): PreparedPersistentHome | null {
+): AdoptedPersistentHome | null {
   const pinned = pinnedHalt(env);
   if (pinned === null) return null;
   const result = withRoot(env, options, root => {
@@ -403,7 +407,7 @@ export function adoptPopulatedPersistentHome(
     if (saved) {
       if (!record) throw refuse("an existing persistent manifest was not created by this adoption");
       const m = verifiedManifest(root);
-      return { ...i, handoverState: m.handover.state, halt: m.handover.state === "held" ? m.handover.halt : null };
+      return { ...i, handoverState: m.handover.state, halt: m.handover.state === "held" ? m.handover.halt : null, adoptedNow: false };
     }
     const names = readdirSync(i.homeRoot);
     if (!names.some(name => !["FLEET_HALT", PERSISTENT_HOME_PREADOPTION, ADOPTION_HALT].includes(name))) {
@@ -450,7 +454,7 @@ export function adoptPopulatedPersistentHome(
       device: i.device, inode: i.inode, handover: { state: "held", operationToken: token, halt } };
     publishFirstWrite(root, path.join(i.homeRoot, PERSISTENT_HOME_MANIFEST), JSON.stringify(manifest) + "\n");
     verifiedManifest(root);
-    return { ...i, handoverState: "held" as const, halt };
+    return { ...i, handoverState: "held" as const, halt, adoptedNow: true };
   });
   if (!result) throw refuse("persistent-home opt-in is required to adopt a populated volume");
   return result;
