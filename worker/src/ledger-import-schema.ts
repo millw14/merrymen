@@ -23,7 +23,9 @@ export const LEDGER_IMPORT_GENERATIONS_SCHEMA = `CREATE TABLE IF NOT EXISTS tena
  *    OPEN approval per tenant (approved → archiving → archived → registered);
  *    applied, refused and revoked are terminal.
  *  - ledger_resume_attestations: what each registered generation archived and
- *    replaced, with the receipt digest bound into tenant_ledger_import.
+ *    replaced, with the receipt digest bound into tenant_ledger_import, and
+ *    the chain window read for it (chain_from_block..chain_head, both
+ *    inclusive; null for a tenant that needed no chain read).
  *  - mirror_state_archive / ledger_snapshot_archive: the exact pre-images.
  */
 export const LEDGER_RESUME_SCHEMA: readonly string[] = [
@@ -42,7 +44,8 @@ export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS ledger_resume_attestations (
   generation TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE, tenant TEXT NOT NULL, smart_account TEXT NOT NULL, chain_id BIGINT NOT NULL,
   owner TEXT NOT NULL, evidence_digest TEXT NOT NULL, receipt_digest TEXT NOT NULL, mirror_state_digest TEXT NOT NULL,
-  snapshot_digest TEXT NOT NULL, archive_path TEXT, gap_from_sec BIGINT, created_at_ms BIGINT NOT NULL
+  snapshot_digest TEXT NOT NULL, archive_path TEXT, gap_from_sec BIGINT, created_at_ms BIGINT NOT NULL,
+  chain_from_block TEXT, chain_head TEXT
 )`,
   `CREATE TABLE IF NOT EXISTS mirror_state_archive (
   generation TEXT NOT NULL, tenant TEXT NOT NULL, table_name TEXT NOT NULL, last_id BIGINT NOT NULL, last_stamp BIGINT,
@@ -52,4 +55,15 @@ export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   generation TEXT NOT NULL, tenant TEXT NOT NULL, table_name TEXT NOT NULL, seq BIGINT NOT NULL, row_digest TEXT NOT NULL,
   row_json TEXT NOT NULL, archived_at_ms BIGINT NOT NULL, PRIMARY KEY (generation, table_name, seq)
 )`,
+];
+
+/**
+ * The chain window's columns, for a ledger_resume_attestations table created
+ * by an earlier build of this branch, before they were in its CREATE. Db.exec
+ * makes each `ADD COLUMN IF NOT EXISTS` on Postgres; on sqlite a re-run fails
+ * with "duplicate column name", which ensureLedgerResumeSchema expects.
+ */
+export const LEDGER_RESUME_ADDITIVE_DDL: readonly string[] = [
+  "ALTER TABLE ledger_resume_attestations ADD COLUMN chain_from_block TEXT",
+  "ALTER TABLE ledger_resume_attestations ADD COLUMN chain_head TEXT",
 ];

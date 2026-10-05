@@ -468,19 +468,27 @@ open approval:
    `archive/<tenant>/<generation>` (0700); then remove the moved Telegram
    files from the archive, write a 0600 manifest of file stats, and move the
    carry into a fresh home. Every step survives a crash or a lost lease.
-5. **Register**, in one transaction: archive and delete the tenant's
+5. **Read the chain again, immediately before registering**, where it was
+   read in step 3: from the head that read reached to the head now, awaited
+   (at most 45 seconds). Anything Postgres lacks refuses; an unanswered read
+   holds. The clean read of step 3 is spent by this attempt, so a
+   registration that fails, or a re-read that cannot finish, reads the whole
+   window again before the next attempt.
+6. **Register**, in one transaction: archive and delete the tenant's
    `mirror_state` rows; archive the positions, cost basis, floors and class
    rows; create the empty book with this generation as its identity (an
    interrupted creation is finished, never refused); bind its consumed receipt
    to `hash('attested-gap:' + approval + ':' + evidence)`; write the
-   attestation; move the approval to `registered`. No financial row is written
+   attestation, with the chain window read for it (`chain_from_block` to
+   `chain_head`, the head step 5 reached; null where no chain read was
+   needed); move the approval to `registered`. No financial row is written
    or changed.
-6. **The ordinary path, unchanged**: the original-book gates accept the
+7. **The ordinary path, unchanged**: the original-book gates accept the
    attested book, the anchor carries the same accounting epoch (lifetime PnL
    continues from Postgres), the seeds restore basis, floors, energy and the
    trailing day, the owner's controls are applied, then the privacy gate, the
    offset handoff and the source barrier.
-7. **The seed, proved**: before the first worker, every live cost basis row
+8. **The seed, proved**: before the first worker, every live cost basis row
    the seed restores (a held symbol) and the floor beside it must be in the
    book. One the ordinary seed missed is written then; if that cannot be done
    the spawn is held and asked again. `attested-seed.json` records it. Then
@@ -488,7 +496,7 @@ open approval:
    `recovery-generation.json` in the home says when the gap began, for the
    Telegram and Fomo answers.
 
-Why step 7 is not best-effort: registration removes the lost book's cursors,
+Why step 8 is not best-effort: registration removes the lost book's cursors,
 and with them the mirror's rebuilt-book guard, so the first mirror pass
 replaces the tenant's basis, floors and class rows in Postgres with what the
 new book holds. With the seed proved, that is the seeded set; their pre-images
@@ -505,9 +513,10 @@ Each refuses on its own; none fails open.
 2. Nothing on chain Postgres lacks, from the oldest financial cursor of the
    last mirror (trades, flows, equity; at least 26 hours back) to head: every
    EntryPoint `UserOperationEvent` the account sent and every USDG `Transfer`
-   to or from it. An RPC failure retries. Only a paper tenant that could not
-   arm live — no live operation, no flow, no live intent in its settings —
-   skips the read.
+   to or from it; and again, immediately before registration, from that
+   read's head to the head then (phase step 5). An RPC failure retries. Only
+   a paper tenant that could not arm live — no live operation, no flow, no
+   live intent in its settings — skips the read.
 3. Nothing settled in the last 26 hours.
 4. The flows hold no duplicate or conflicting copies (`distinct-flows.ts`).
 5. One `agent_id` spelling across the financial tables.

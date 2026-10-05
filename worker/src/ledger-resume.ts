@@ -43,9 +43,11 @@
  *      this tree, so any such row refuses that tenant).
  *   2. Nothing on chain Postgres lacks: every UserOperationEvent and USDG
  *      Transfer touching the account, from the oldest financial cursor of the
- *      last mirror (and at least 26 hours back) to head, is in Postgres. An
- *      RPC failure retries. Only a paper tenant that could not arm live — no
- *      live operation, no flow, no live intent in its settings — skips it.
+ *      last mirror (and at least 26 hours back) to head, is in Postgres; and
+ *      again, immediately before registration, from that read's head to the
+ *      head then, which is the head the attestation records. An RPC failure
+ *      retries. Only a paper tenant that could not arm live — no live
+ *      operation, no flow, no live intent in its settings — skips it.
  *   3. Nothing settled in the last 26 hours, so the new book's in-flight
  *      reconciler finds nothing to re-record.
  *   4. The flows are free of duplicate copies (distinct-flows.ts).
@@ -96,7 +98,13 @@ export const RESUME_REVOKE_ENV = "MERRYMEN_RESUME_REVOKE";
 export const RECOVERY_GENERATION_FILE = "recovery-generation.json";
 /** The 26-hour window: the in-flight reconciler's widest claimed reach, and the rolling caps' day plus slack. */
 export const GAP_WINDOW_SEC = 26 * 3600;
-/** A clean chain read older than this is read again before the empty book is registered. */
+/**
+ * A clean chain read older than this is read again, whole, before the empty
+ * book is registered. A fresh one is not taken on trust either: the window
+ * from its head to the head at registration is read immediately before the
+ * registration, and the clean read is spent by that attempt (orchestrator.ts
+ * resumeAdmission).
+ */
 export const CHAIN_CHECK_FRESH_MS = 15 * 60_000;
 /** The most tenants one variable may name: the rollout's own bound. */
 const MAX_NAMED = 512;
@@ -714,21 +722,34 @@ const BLOCKS_PER_SEC_GUESS = 12n;
  * an estimate is stepped back until its block is dated at or before
  * `sinceSec`. Any read that cannot complete is `unavailable`, which retries;
  * a window that was not fully read is never "clean".
+ *
+ * OR FROM A BLOCK ALREADY REACHED (`fromBlock`): the re-read immediately
+ * before registration (orchestrator.ts resumeAdmission), from the head an
+ * earlier clean read of the same window ended at, to the head now. A head
+ * behind that block is `unavailable`: an endpoint that lags the one read
+ * before would otherwise answer "clean" for blocks it never had.
  */
 export async function chainGapCheck(o: {
-  chain: GapChain; account: string; usdg: string; sinceSec: number;
+  chain: GapChain; account: string; usdg: string;
   known: { ops: ReadonlySet<string>; txs: ReadonlySet<string>; flows: ReadonlySet<string> };
   maxSpan?: bigint; log?: (line: string) => void;
-}): Promise<GapResult> {
+} & ({ sinceSec: number; fromBlock?: undefined } | { fromBlock: bigint; sinceSec?: undefined })): Promise<GapResult> {
   try {
     const head = await o.chain.getBlockNumber();
-    const headAt = await o.chain.getBlockTimestamp(head);
-    let back = BigInt(Math.max(0, headAt - o.sinceSec)) * BLOCKS_PER_SEC_GUESS + 1000n;
-    let from = head > back ? head - back : 0n;
-    for (let i = 0; from > 0n && (await o.chain.getBlockTimestamp(from)) > o.sinceSec; i++) {
-      if (i >= 8) return { status: "unavailable", why: "could not find a block old enough to start from" };
-      back *= 2n;
+    let from: bigint;
+    if (o.fromBlock !== undefined) {
+      if (o.fromBlock < 0n || head < o.fromBlock) return { status: "unavailable", why: "the chain's head is behind the block already read" };
+      from = o.fromBlock;
+    } else {
+      const sinceSec = o.sinceSec;
+      const headAt = await o.chain.getBlockTimestamp(head);
+      let back = BigInt(Math.max(0, headAt - sinceSec)) * BLOCKS_PER_SEC_GUESS + 1000n;
       from = head > back ? head - back : 0n;
+      for (let i = 0; from > 0n && (await o.chain.getBlockTimestamp(from)) > sinceSec; i++) {
+        if (i >= 8) return { status: "unavailable", why: "could not find a block old enough to start from" };
+        back *= 2n;
+        from = head > back ? head - back : 0n;
+      }
     }
     const span = o.maxSpan ?? 50_000n;
     const account = addressTopic(o.account);

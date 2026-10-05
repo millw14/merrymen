@@ -223,15 +223,17 @@ describe("the evidence", () => {
 describe("the chain read", () => {
   const ACC = addr(0xabc);
   const topic = (a: string) => `0x${a.slice(2).padStart(64, "0")}`;
-  function fakeChain(o: { logs?: Array<{ address: string; topics: string[]; tx: string; index: number }>; failAt?: number; stamps?: (b: bigint) => number } = {}): GapChain & { calls: number } {
+  function fakeChain(o: { logs?: Array<{ address: string; topics: string[]; tx: string; index: number; block?: bigint }>; failAt?: number; stamps?: (b: bigint) => number; head?: bigint } = {}):
+    GapChain & { calls: number; stampCalls: number; ranges: Array<[bigint, bigint]> } {
     const chain = {
-      calls: 0,
-      async getBlockNumber() { return 2_000_000n; },
-      async getBlockTimestamp(b: bigint) { return o.stamps ? o.stamps(b) : NOW - Number(2_000_000n - b) / 10; },
-      async getLogs(a: { address: string; topics: Array<string | string[] | null> }) {
+      calls: 0, stampCalls: 0, ranges: [] as Array<[bigint, bigint]>,
+      async getBlockNumber() { return o.head ?? 2_000_000n; },
+      async getBlockTimestamp(b: bigint) { chain.stampCalls += 1; return o.stamps ? o.stamps(b) : NOW - Number((o.head ?? 2_000_000n) - b) / 10; },
+      async getLogs(a: { address: string; topics: Array<string | string[] | null>; fromBlock: bigint; toBlock: bigint }) {
         chain.calls += 1;
+        chain.ranges.push([a.fromBlock, a.toBlock]);
         if (o.failAt !== undefined && chain.calls >= o.failAt) throw Object.assign(new Error("execution reverted"), { code: -32000 });
-        return (o.logs ?? []).filter((l) => l.address.toLowerCase() === a.address.toLowerCase()
+        return (o.logs ?? []).filter((l) => l.block === undefined || (l.block >= a.fromBlock && l.block <= a.toBlock)).filter((l) => l.address.toLowerCase() === a.address.toLowerCase()
           && a.topics.every((t, i) => t === null || String(t).toLowerCase() === String(l.topics[i] ?? "").toLowerCase()))
           .map((l) => ({ topics: l.topics as `0x${string}`[], data: "0x" as `0x${string}`, transactionHash: l.tx as `0x${string}`, logIndex: `0x${l.index.toString(16)}` as `0x${string}` }));
       },
@@ -276,6 +278,24 @@ describe("the chain read", () => {
     const r = await chainGapCheck({ chain, account: ACC, usdg: USDG, sinceSec: NOW - 20 * 3600, known, maxSpan: 4_000_000n });
     assert.equal(r.status, "clean");
     assert.ok(Number((r as { fromBlock: string }).fromBlock) <= 2_000_000 - 20 * 3600 * 25);
+  });
+  it("the re-read before registration starts at the block already reached and runs to the head now: what landed after it refuses", async () => {
+    const landed = { address: USDG, topics: [TR, topic(addr(9)), topic(ACC)], tx: "0xlate", index: 0, block: 2_000_400n };
+    const earlier = { address: EP, topics: [OP, "0x" + "33".repeat(32), topic(ACC)], tx: "0xold", index: 1, block: 1_999_000n };
+    // Only the window from the earlier head on is read, with no timestamp lookup: the earlier read already placed it.
+    const quiet = fakeChain({ head: 2_000_500n, logs: [earlier] });
+    const clean = await chainGapCheck({ chain: quiet, account: ACC, usdg: USDG, fromBlock: 2_000_000n, known, maxSpan: 50_000n });
+    assert.deepEqual(clean, { status: "clean", fromBlock: "2000000", head: "2000500", ops: 0, transfers: 0 });
+    assert.equal(quiet.stampCalls, 0);
+    assert.ok(quiet.ranges.every(([from, to]) => from === 2_000_000n && to === 2_000_500n), "exactly the earlier head to the head now");
+    const late = await chainGapCheck({ chain: fakeChain({ head: 2_000_500n, logs: [earlier, landed] }), account: ACC, usdg: USDG, fromBlock: 2_000_000n, known, maxSpan: 50_000n });
+    assert.deepEqual(late, { status: "missing", ops: 0, transfers: 1 });
+    // The head has not moved: the one block already read is read again, and nothing is skipped.
+    assert.equal((await chainGapCheck({ chain: fakeChain({ head: 2_000_000n }), account: ACC, usdg: USDG, fromBlock: 2_000_000n, known })).status, "clean");
+  });
+  it("a head behind the block already read is unavailable, never clean", async () => {
+    const r = await chainGapCheck({ chain: fakeChain({ head: 1_999_999n }), account: ACC, usdg: USDG, fromBlock: 2_000_000n, known });
+    assert.deepEqual(r, { status: "unavailable", why: "the chain's head is behind the block already read" });
   });
   it("knows what Postgres holds for the account", async () => {
     const f = await fixture({ live: true });
@@ -536,7 +556,8 @@ describe("registerAttestedGapSource", () => {
       trades: f.raw.prepare("SELECT * FROM trades ORDER BY id").all().map((r) => ({ ...r })),
     };
     const args = { tenant: f.tenant, smartAccount: f.account, chainId: 4663, owner: f.owner, home, volume, shared: f.shared, lease, dialect: "sqlite" as const,
-      approvalId, evidenceDigest: digest, generation, archivePath: null, gapFromSec: NOW - 3600, recheck: async () => {} };
+      approvalId, evidenceDigest: digest, generation, archivePath: null, gapFromSec: NOW - 3600,
+      chainRead: { fromBlock: "1700000", head: "2000250" } as { fromBlock: string; head: string } | null, recheck: async () => {} };
     return { f, home, volume, lease, args, before, setHealthy: (v: boolean) => { healthy = v; } };
   }
   it("archives the cursors and snapshots, creates the empty book, binds the receipt and moves the approval, all at once", async () => {
@@ -557,6 +578,8 @@ describe("registerAttestedGapSource", () => {
     assert.equal(receipt.source_inode, String(lstatSync(path.join(p.home, "merrymen.db"), { bigint: true }).ino));
     assert.equal((f.raw.prepare("SELECT state FROM ledger_resume_approvals").get() as { state: string }).state, "registered");
     assert.equal((f.raw.prepare("SELECT count(*) AS n FROM ledger_resume_attestations").get() as { n: number }).n, 1);
+    assert.deepEqual({ ...(f.raw.prepare("SELECT chain_from_block, chain_head FROM ledger_resume_attestations").get() as object) },
+      { chain_from_block: "1700000", chain_head: "2000250" }, "the attestation records the chain window read for it, to the head read last");
     const book = new DatabaseSync(path.join(p.home, "merrymen.db"), { readOnly: true });
     try { assert.equal((book.prepare("SELECT count(*) AS n FROM trades").get() as { n: number }).n, 0); } finally { book.close(); }
     assert.equal(lstatSync(path.join(p.home, "merrymen.db")).mode & 0o777, 0o600);
@@ -645,6 +668,27 @@ describe("registerAttestedGapSource", () => {
       assert.deepEqual(p.f.raw.prepare("SELECT table_name, last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? ORDER BY table_name").all(p.f.tenant).map((x) => ({ ...x })), p.before.marks);
       assert.equal(existsSync(path.join(p.home, "merrymen.db")), false);
     }
+  });
+  it("refuses a chain window that is not one, moving nothing; a tenant that needed no chain read attests none", async () => {
+    for (const chainRead of [{ fromBlock: "20", head: "19" }, { fromBlock: "0x10", head: "20" }, { fromBlock: "1", head: "-2" }]) {
+      const p = await prepared();
+      await assert.rejects(registerAttestedGapSource({ ...p.args, chainRead }), /refused/, JSON.stringify(chainRead));
+      assert.deepEqual(p.f.raw.prepare("SELECT table_name, last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? ORDER BY table_name").all(p.f.tenant).map((x) => ({ ...x })), p.before.marks);
+      assert.equal((p.f.raw.prepare("SELECT state FROM ledger_resume_approvals").get() as { state: string }).state, "archived");
+    }
+    const p = await prepared();
+    await registerAttestedGapSource({ ...p.args, chainRead: null });
+    assert.deepEqual({ ...(p.f.raw.prepare("SELECT chain_from_block, chain_head FROM ledger_resume_attestations").get() as object) }, { chain_from_block: null, chain_head: null });
+  });
+  it("an attestations table from an earlier build gains the chain window's columns", async () => {
+    const f = await fixture();
+    f.raw.exec(`CREATE TABLE ledger_resume_attestations (generation TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE, tenant TEXT NOT NULL, smart_account TEXT NOT NULL,
+      chain_id BIGINT NOT NULL, owner TEXT NOT NULL, evidence_digest TEXT NOT NULL, receipt_digest TEXT NOT NULL, mirror_state_digest TEXT NOT NULL,
+      snapshot_digest TEXT NOT NULL, archive_path TEXT, gap_from_sec BIGINT, created_at_ms BIGINT NOT NULL)`);
+    await ensureLedgerResumeSchema(f.shared);
+    await ensureLedgerResumeSchema(f.shared); // and again: a column already there is not an error
+    const columns = (f.raw.prepare("PRAGMA table_info(ledger_resume_attestations)").all() as Array<{ name: string }>).map((c) => c.name);
+    assert.ok(columns.includes("chain_from_block") && columns.includes("chain_head"), columns.join(","));
   });
 });
 

@@ -142,8 +142,11 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     assert.ok(await moveApproval(shared, approval.approvalId, "archiving", "archived", { archivePath: null }));
     const before = (await main.query("SELECT * FROM cost_basis WHERE lower(agent_id)=$1", [account])).rows;
     const r = await registerAttestedGapSource({ ...options, owner, approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest, generation,
-      archivePath: null, gapFromSec: OLD, dialect: "postgres", recheck: async () => {} });
+      archivePath: null, gapFromSec: OLD, dialect: "postgres", chainRead: { fromBlock: "100", head: "250" }, recheck: async () => {} });
     assert.equal(r.generation, generation);
+    // The chain window, as text, through the additive ALTER Postgres runs as ADD COLUMN IF NOT EXISTS on every ensure.
+    assert.deepEqual((await main.query("SELECT chain_from_block, chain_head FROM ledger_resume_attestations WHERE generation=$1", [generation])).rows[0],
+      { chain_from_block: "100", chain_head: "250" });
     assert.equal((await main.query("SELECT count(*) AS n FROM mirror_state WHERE tenant=$1", [tenant])).rows[0]!.n, "0");
     const archived = (await main.query("SELECT table_name,last_id,last_stamp,updated_at FROM mirror_state_archive WHERE generation=$1 ORDER BY table_name", [generation])).rows;
     assert.deepEqual(archived.map(a => [a.table_name, String(a.last_id)]), cursors.map(c => [c.table_name, String(c.last_id)]));

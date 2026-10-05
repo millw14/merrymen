@@ -3193,7 +3193,8 @@ function sayTenantAlert(tenant: string, line: string): void {
  *
  * With one: re-derive the evidence and refuse on any change; check every
  * precondition; read the chain in the background where the account has ever
- * been live (the tenant waits, held, for the answer); drain a continuous old
+ * been live (the tenant waits, held, for the answer), and again from that
+ * read's head immediately before the registration; drain a continuous old
  * book's tail through the existing guarded mirror; archive the home; and
  * register the empty book in one transaction. Every step re-checks the lease
  * first, and every failure leaves the tenant held at the step it reached, to
@@ -3210,14 +3211,22 @@ const resumeCheckPromises = new Set<Promise<void>>();
 export function setResumeChainForTest(fn: ((chainId: number) => GapChain | null) | null): void { resumeChainForTest = fn; resumeChecks.clear(); }
 export async function resumeChecksSettledForTest(): Promise<void> { await Promise.all([...resumeCheckPromises]); }
 
-/** The chain read for one approval: `clean` (fresh enough to rely on), `missing`, or held while it runs or after it could not. */
-async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<"clean" | "missing" | "held"> {
+/** The window a clean chain read covered: its first block and the head it reached, both inclusive. */
+type ChainWindow = { fromBlock: string; head: string };
+
+/**
+ * The chain read for one approval: the window a clean read covered (fresh
+ * enough to rely on), `missing`, or held while it runs or after it could not.
+ * A clean answer is not the whole of it in Phase B: resumeChainTail reads on
+ * from its head immediately before the registration, and spends it.
+ */
+async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<ChainWindow | "missing" | "held"> {
   const now = Date.now();
   const had = resumeChecks.get(tenant);
   if (had && had.key === approval.approvalId) {
     if (had.result === "running") return "held";
     if (had.result.status === "missing") return "missing";
-    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return "clean";
+    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return { fromBlock: had.result.fromBlock, head: had.result.head };
     if (had.result.status === "unavailable" && now - had.at < RESUME_CHAIN_RETRY_MS) return "held";
   }
   const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
@@ -3240,6 +3249,43 @@ async function resumeChainGate(tenant: string, approval: ApprovalRow, check: Res
     .finally(() => { resumeCheckPromises.delete(p); });
   resumeCheckPromises.add(p);
   return "held";
+}
+
+/**
+ * THE CHAIN AGAIN, IMMEDIATELY BEFORE THE REGISTRATION: from the head a clean
+ * read of the window reached (`fromBlock`, inclusive) to the head now.
+ *
+ * A clean read was accepted for CHAIN_CHECK_FRESH_MS, and across a failed
+ * registration and its retry, so an operation or a USDG transfer that landed
+ * after its head was in no window anyone read; and if controls, the seed or
+ * an outage then held the first worker past its own reconciler's reach, the
+ * new book never learned of it. Read here, it refuses like any other activity
+ * Postgres lacks, and the head this answers with is the head the attestation
+ * records (ledger_resume_attestations.chain_head).
+ *
+ * Awaited, not backgrounded, so nothing can land between this read and the
+ * registration but the registration's own few statements; it covers at most
+ * the clean read's freshness window, and RESUME_TAIL_READ_MS bounds how long
+ * a slow endpoint holds the supervisor. Anything but clean holds or refuses.
+ */
+const RESUME_TAIL_READ_MS = 45_000;
+async function resumeChainTail(tenant: string, approval: ApprovalRow, fromBlock: bigint, shared: Db): Promise<GapResult> {
+  const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
+  if (!chain) return { status: "unavailable", why: `no RPC for chain ${approval.chainId}` };
+  const known = await knownChainFacts(shared, approval.smartAccount);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<GapResult>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "unavailable", why: "the re-read did not finish in time" }), RESUME_TAIL_READ_MS);
+    timer.unref?.();
+  });
+  try {
+    const result = await Promise.race([chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, fromBlock, known, log }), late]);
+    log(`${tenant}: resume chain re-read before registration ${result.status}${result.status === "clean" ? ` — blocks ${result.fromBlock}..${result.head}, nothing Postgres lacks`
+      : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${fromBlock} that Postgres lacks` : ` — ${result.why}`}`);
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -3366,7 +3412,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       if (check.chainRequired) {
         const gate = await resumeChainGate(tenant, approval, check, shared);
         if (gate === "missing") return refused("approved", "the chain holds operations or USDG transfers for the account that Postgres lacks");
-        if (gate !== "clean") return { go: false };
+        if (gate === "held") return { go: false };
       }
       if (!owned()) return { go: false };
       const generation = randomUUID();
@@ -3380,17 +3426,21 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
         `; carried ${archived.carried.length ? archived.carried.join(", ") : "nothing"}`);
       approval = { ...approval, state: "archived", archivePath: archived.archivePath };
     }
-    // PHASE B. The preconditions again, now; the chain read again if stale;
-    // then the one transaction, which re-reads the race-prone ones inside.
+    // PHASE B. The preconditions again, now; the chain read again, whole, if
+    // stale (or spent by an attempt that did not register), and on from its
+    // head immediately before the registration; then the one transaction,
+    // which re-reads the race-prone ones inside.
     const nowSec = Math.floor(Date.now() / 1000);
     const controls = await readControlsEvidence(shared, scope, Date.now());
     const check = await resumePreconditions(shared, { tenant, account: approval.smartAccount, grantAccount: grant.smartAccount, nowSec, controls,
       homePendingImport: existsSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)), liveIntent });
     if (check.refusals.length) return refused("archived", check.refusals.join("; "));
+    let chainRead: ChainWindow | null = null;
     if (check.chainRequired) {
       const gate = await resumeChainGate(tenant, approval, check, shared);
       if (gate === "missing") return refused("archived", "the chain holds operations or USDG transfers for the account that Postgres lacks");
-      if (gate !== "clean") return { go: false };
+      if (gate === "held") return { go: false };
+      chainRead = gate;
     }
     const counted = async (db: Db) => {
       const a = approval!.smartAccount;
@@ -3401,12 +3451,26 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       return { trades: Number(row.trades), flows: Number(row.flows), unresolved: Number(row.unresolved), settled: Number(row.settled) };
     };
     const before = await counted(shared);
+    if (chainRead) {
+      // THE CLEAN READ IS SPENT HERE, by this attempt, whatever it comes to:
+      // a registration that fails, or a re-read that cannot finish, leaves the
+      // next attempt to read the whole window again from its start, never to
+      // stand on this one (resumeChainTail says why).
+      const first = chainRead;
+      resumeChecks.delete(tenant);
+      const tail = await resumeChainTail(tenant, approval, BigInt(first.head), shared);
+      if (tail.status === "missing") {
+        return refused("archived", "the chain holds operations or USDG transfers for the account that Postgres lacks, landed after the admission's first chain read");
+      }
+      if (tail.status !== "clean") return held(`the chain could not be read again before registration (${tail.why}); held, and read whole on the next pass`);
+      chainRead = { fromBlock: first.fromBlock, head: tail.head };
+    }
     if (!owned()) return { go: false };
     const receipt = await registerAttestedGapSource({
       tenant, smartAccount: approval.smartAccount, chainId: approval.chainId, owner: approval.owner, home, volume, shared, lease,
       dialect: retirementMemoryStoreForTest?.dialect ?? "postgres",
       approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest, generation: approval.generation!,
-      archivePath: approval.archivePath, gapFromSec: check.gapFromSec,
+      archivePath: approval.archivePath, gapFromSec: check.gapFromSec, chainRead,
       recheck: async (db) => {
         const now = await counted(db);
         if (now.unresolved || now.settled || now.trades !== before.trades || now.flows !== before.flows) throw new Error("The gap changed during registration.");
@@ -3414,8 +3478,8 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     });
     writeRecoveryGeneration(home, { generation: receipt.generation, approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest,
       gapFromSec: check.lastMirrorAt, registeredAtSec: Math.floor(Date.now() / 1000) });
-    log(`${tenant}: resume admission — new book registered as generation ${receipt.generation} (receipt ${receipt.receiptDigest.slice(0, 12)}…); ` +
-      "the lost book's cursors and snapshot rows are archived; the ordinary spawn path takes it from here");
+    log(`${tenant}: resume admission — new book registered as generation ${receipt.generation} (receipt ${receipt.receiptDigest.slice(0, 12)}…` +
+      `${chainRead ? `; chain read through block ${chainRead.head}` : ""}); the lost book's cursors and snapshot rows are archived; the ordinary spawn path takes it from here`);
     resumeChecks.delete(tenant);
     return { go: true, registered: approval.approvalId };
   } catch (e) {

@@ -72,18 +72,20 @@ setSpawnForTest((_c, _a, options) => {
   return new FakeProc(90_000 + forks.length) as unknown as ChildProcess;
 });
 
-/** The chain the gap check reads: the logs it holds, and whether it answers at all. */
-let chainLogs: Array<{ address: string; topics: string[]; tx: string; index: number }> = [];
+/** The chain the gap check reads: the logs it holds, its head, and whether it answers at all. */
+let chainLogs: Array<{ address: string; topics: string[]; tx: string; index: number; block?: bigint }> = [];
 let chainDown = false;
 const HEAD = 3_000_000n;
+let head = HEAD;
+/** Timestamp lookups: only a whole read, which finds its starting block by them, asks for one; the re-read before registration does not. */
+let stampReads = 0;
 const chain: GapChain = {
-  async getBlockNumber() { if (chainDown) throw new Error("rpc down"); return HEAD; },
-  async getBlockTimestamp(b) { return Math.floor(Date.now() / 1000) - Number(HEAD - b) / 10; },
+  async getBlockNumber() { if (chainDown) throw new Error("rpc down"); return head; },
+  async getBlockTimestamp(b) { stampReads += 1; return Math.floor(Date.now() / 1000) - Number(head - b) / 10; },
   async getLogs(a) {
     if (chainDown) throw Object.assign(new Error("rpc down"), { code: -32000 });
-    // Every fixture log sits at HEAD - 100, so it is read once, by the span that covers it.
-    if (a.fromBlock > HEAD - 100n || a.toBlock < HEAD - 100n) return [];
-    return chainLogs.filter((l) => l.address.toLowerCase() === a.address.toLowerCase()
+    // A fixture log sits at its block (HEAD - 100 unless it says), so it is read once, by the span that covers it.
+    return chainLogs.filter((l) => (l.block ?? HEAD - 100n) >= a.fromBlock && (l.block ?? HEAD - 100n) <= a.toBlock && l.address.toLowerCase() === a.address.toLowerCase()
       && a.topics.every((t, i) => t === null || String(t).toLowerCase() === String(l.topics[i] ?? "").toLowerCase()))
       .map((l) => ({ topics: l.topics as `0x${string}`[], data: "0x" as `0x${string}`, transactionHash: l.tx as `0x${string}`, logIndex: `0x${l.index.toString(16)}` as `0x${string}` }));
   },
@@ -194,7 +196,10 @@ it("a pre-incident live tenant: refused without approval; previewed, batch-appro
   assert.deepEqual(archivedSnaps.filter((r) => r.table_name === "position_floors").map((r) => JSON.parse(String(r.row_json))), preImage.position_floors);
   assert.deepEqual(archivedSnaps.filter((r) => r.table_name === "positions").map((r) => { const { custody: _c, ...rest } = JSON.parse(String(r.row_json)) as Record<string, unknown>; return rest; }),
     preImage.positions);
-  assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE generation = ?", a.generation).length, 1);
+  const attested = rows("SELECT chain_from_block, chain_head FROM ledger_resume_attestations WHERE generation = ?", a.generation);
+  assert.equal(attested.length, 1);
+  assert.equal(attested[0]!.chain_head, String(HEAD), "the attestation records the head read immediately before it");
+  assert.ok(BigInt(String(attested[0]!.chain_from_block)) < HEAD - 26n * 3600n * 10n, "from a block at least 26 hours back");
 
   // THE SEEDS RAN BEFORE THE FORK: the real basis and floor seeds (B4), then
   // the attested seed's proof, recorded in the home before the worker started.
@@ -250,6 +255,73 @@ it("an RPC failure keeps the tenant held and retries; chain activity Postgres la
     assert.equal(existsSync(path.join(u.home, "grant.json")), true, "refused before anything moved");
   } finally { chainLogs = []; }
   await getGrantStore().remove(t.tenant); await getGrantStore().remove(u.tenant); await reconcile();
+});
+
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const topicOf = (x: string) => `0x${x.slice(2).padStart(64, "0")}`;
+/** A USDG deposit into `account` that Postgres does not hold, landed at `block`. */
+const unbookedDeposit = (account: string, block: bigint, tx: string) =>
+  ({ address: String(CASH.USDG), topics: [TRANSFER_TOPIC, topicOf(addr(0xfeed)), topicOf(account)], tx, index: 0, block });
+const cursorsOf = (tenant: string) => rows("SELECT table_name, last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? ORDER BY table_name", tenant);
+
+it("activity landing after the chain read and before the registration refuses: the chain is read again, from that read's head to the head now", async () => {
+  const t = await preIncident({ live: true });
+  const p = await preview(t.tenant);
+  await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p.entries[0]!.digest}` });
+  await reconcile(); // Phase A starts the whole read; held meanwhile
+  await resumeChecksSettledForTest(); // clean, through HEAD
+  const cursors = cursorsOf(t.tenant);
+  // Before the pass that archives and registers, the chain moves on and a
+  // deposit Postgres lacks lands past the head that read reached.
+  head = HEAD + 600n;
+  chainLogs = [unbookedDeposit(t.account, HEAD + 300n, "0xlanded-late")];
+  try {
+    await reconcile(); await new Promise((r) => setTimeout(r, 20));
+    const a = approval(t.tenant)!;
+    assert.ok(a.archive_path, "Phase A archived the home on the clean read");
+    assert.equal(a.state, "refused", "and Phase B's re-read refused what landed since");
+    assert.match(String(a.reason), /Postgres lacks, landed after the admission's first chain read/);
+    assert.equal(forksOf(t.tenant).length, 0);
+    assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0, "nothing attested");
+    assert.deepEqual(cursorsOf(t.tenant), cursors, "no cursor moved");
+    assert.equal(rows("SELECT * FROM tenant_ledger_import WHERE tenant = ?", t.tenant).length, 0, "no new book registered");
+  } finally { head = HEAD; chainLogs = []; }
+  await getGrantStore().remove(t.tenant); await reconcile();
+});
+
+it("a clean chain read is not reused after a failed registration: the retry reads the whole window again first, and refuses what landed since", async () => {
+  const t = await preIncident({ live: true });
+  const p = await preview(t.tenant);
+  await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p.entries[0]!.digest}` });
+  await reconcile(); await resumeChecksSettledForTest(); // a clean whole read, through HEAD
+  // The pass archives the home, re-reads clean, and its registration fails.
+  const realTx = shared.tx.bind(shared);
+  let failRegistration = true;
+  (shared as { tx: typeof shared.tx }).tx = async (fn) => {
+    if (failRegistration && approval(t.tenant)?.state === "archived") { failRegistration = false; throw new Error("process killed mid-registration"); }
+    return realTx(fn);
+  };
+  try { await reconcile(); } finally { (shared as { tx: typeof shared.tx }).tx = realTx; }
+  assert.equal(failRegistration, false, "the registration was attempted, and failed");
+  assert.equal(approval(t.tenant)?.state, "archived");
+  // A deposit Postgres lacks lands after that attempt; the earlier read is
+  // still inside its freshness window.
+  head = HEAD + 900n;
+  chainLogs = [unbookedDeposit(t.account, HEAD + 700n, "0xlanded-after-failure")];
+  const stamps = stampReads;
+  try {
+    await reconcile();
+    assert.equal(approval(t.tenant)?.state, "archived", "the earlier clean read is not stood on: the retry is held for a whole read");
+    assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0);
+    await resumeChecksSettledForTest();
+    assert.ok(stampReads > stamps, "the whole window was read again, from its start");
+    await reconcile(); await new Promise((r) => setTimeout(r, 20));
+    assert.equal(approval(t.tenant)?.state, "refused");
+    assert.match(String(approval(t.tenant)?.reason), /Postgres lacks/);
+    assert.equal(forksOf(t.tenant).length, 0);
+    assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0);
+  } finally { head = HEAD; chainLogs = []; }
+  await getGrantStore().remove(t.tenant); await reconcile();
 });
 
 it("a paper tenant needs no chain read; evidence that changed after the preview refuses with nothing moved", async () => {

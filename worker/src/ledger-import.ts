@@ -11,7 +11,7 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import type { MemorySource } from "./memory-safeguard";
 import type { TenantLease } from "./tenant-lease";
-import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
+import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_ADDITIVE_DDL, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 
 export const LEDGER_IMPORT_PENDING_FILE = "ledger-import.pending.json";
@@ -280,6 +280,12 @@ export async function ensureLedgerImportSchema(shared: Db, dialect: Dialect = "p
 export async function ensureLedgerResumeSchema(shared: Db): Promise<void> {
   await ensureLedgerImportSchema(shared);
   for (const ddl of LEDGER_RESUME_SCHEMA) await shared.exec(ddl);
+  // A column already there is sqlite's re-run, and expected; anything else
+  // throws, and the registration that asked never writes a row without it.
+  for (const ddl of LEDGER_RESUME_ADDITIVE_DDL) {
+    try { await shared.exec(ddl); }
+    catch (e) { if (!/duplicate column name/i.test(String((e as Error)?.message ?? ""))) throw e; }
+  }
 }
 
 /** Called only by a reviewed operator after the final checkpoint, under stopped-writer/source proof. */
@@ -647,7 +653,10 @@ async function finishAttestedBook(file: string, tenant: string, account: string,
  *    earlier generation is superseded (its generation row marked deleted),
  *    never reused. A staged original import (`available`) refuses: an operator
  *    put a book there, and this does not override it;
- *  - the attestation row and the approval's move to `registered`.
+ *  - the attestation row, with the chain window the caller read for it
+ *    (`chainRead`: its first block and the head it reached, the head read
+ *    immediately before this call; null only for a tenant that needed no
+ *    chain read), and the approval's move to `registered`.
  *
  * NO FINANCIAL ROW IS WRITTEN OR CHANGED, and nothing is imported, so nothing
  * becomes replayable. The accounting epoch, peaks and fees continue from
@@ -669,11 +678,15 @@ export async function registerAttestedGapSource(o: {
   tenant: string; smartAccount: string; chainId: number; owner: string; home: string; volume: LedgerImportVolume;
   shared: Db; lease: TenantLease; dialect?: Dialect;
   approvalId: string; evidenceDigest: string; generation: string; archivePath: string | null; gapFromSec: number | null;
+  /** The chain window read for this registration, first block to head (decimal, inclusive), or null where none was needed. */
+  chainRead: { fromBlock: string; head: string } | null;
   /** The gap preconditions, re-read inside the transaction. Throws to refuse. */
   recheck: (db: Db) => Promise<void>;
 }): Promise<AttestedGapReceipt> {
   const tenant = address(o.tenant), account = address(o.smartAccount), owner = address(o.owner), dialect = o.dialect ?? "postgres";
   if (!UUID.test(o.generation) || !UUID.test(o.approvalId) || !/^[0-9a-f]{64}$/.test(o.evidenceDigest)) throw refuse();
+  const block = /^(0|[1-9][0-9]{0,29})$/;
+  if (o.chainRead && (!block.test(o.chainRead.fromBlock) || !block.test(o.chainRead.head) || BigInt(o.chainRead.head) < BigInt(o.chainRead.fromBlock))) throw refuse();
   leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
   if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
   const file = path.join(o.home, "merrymen.db");
@@ -749,8 +762,9 @@ export async function registerAttestedGapSource(o: {
     }
     await db.prepare("INSERT INTO tenant_ledger_import_generations(generation,tenant,state) VALUES(?,?,'consumed')").run(o.generation, tenant);
     await db.prepare(`INSERT INTO ledger_resume_attestations (generation, approval_id, tenant, smart_account, chain_id, owner, evidence_digest, receipt_digest,
-      mirror_state_digest, snapshot_digest, archive_path, gap_from_sec, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(o.generation, o.approvalId, tenant, account, o.chainId, owner, o.evidenceDigest, receiptDigest, mirrorStateDigest, snapshotDigest, o.archivePath, o.gapFromSec, now);
+      mirror_state_digest, snapshot_digest, archive_path, gap_from_sec, created_at_ms, chain_from_block, chain_head) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(o.generation, o.approvalId, tenant, account, o.chainId, owner, o.evidenceDigest, receiptDigest, mirrorStateDigest, snapshotDigest, o.archivePath, o.gapFromSec, now,
+        o.chainRead?.fromBlock ?? null, o.chainRead?.head ?? null);
     const moved = await db.prepare("UPDATE ledger_resume_approvals SET state = 'registered', updated_at_ms = ? WHERE approval_id = ? AND state = 'archived' AND generation = ?")
       .run(now, o.approvalId, o.generation);
     if (moved.changes !== 1) throw refuse();
