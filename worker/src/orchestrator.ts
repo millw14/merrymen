@@ -42,6 +42,8 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
+import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
+import { FLEET_HEARTBEAT_EVERY_MS, commitOf, heartbeatCounts, readLastShutdown, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
@@ -515,6 +517,15 @@ const CHILD_SECRET_STRIP = [
    */
   "MERRYMEN_X_CLIENT_SECRET",
   "MERRYMEN_XPOST_LLM_KEY",
+  /**
+   * THE OPS TOKEN, which opens the fleet heartbeat to an operator's check
+   * (web/src/app/api/ops/heartbeat). It belongs on the web and nowhere else;
+   * stripped here in case an environment shared between services ever hands
+   * it to this one. A child has no use for it, and one holding it could put
+   * it in a prompt, a decision row or a log line — the published-key reason
+   * above.
+   */
+  "MERRYMEN_OPS_TOKEN",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
@@ -5233,139 +5244,160 @@ export async function ferryForChild(
  *
  * Cheap and best-effort: one grouped count against a table the mirror has just
  * written, and a failure here must never take the fleet loop down.
+ *
+ * READ ONCE, PRINTED AND PUBLISHED. What a pass reads is a FleetSnapshot
+ * (collectFleetSnapshot); the log lines are made from it (fleetHealthLines),
+ * and so is the heartbeat row (startFleetHeartbeat), so the two can never
+ * disagree about what the fleet looked like.
  */
-export const AUTONOMY_TRADE_FUNNEL_SQL = `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
-  FROM trades WHERE created_at >= ? GROUP BY status, rule`;
+export async function collectFleetSnapshot(
+  shared: Pick<Db, "prepare">,
+  opts: {
+    nowSec: number;
+    /** When this replica started each running worker, by lowercased smart account. */
+    spawnedAt: ReadonlyMap<string, number>;
+    /** Also fold the last six hours (the heartbeat's longer window). */
+    longWindow?: boolean;
+  },
+): Promise<FleetSnapshot> {
+  // Throws to the caller: without the agents count there is no snapshot, and
+  // a health read that fails is not a fleet that is down.
+  const rows = (await shared
+    .prepare("SELECT status, COUNT(*) AS n FROM agents GROUP BY status")
+    .all()) as { status: string; n: number | string }[];
+  const byStatus: Record<string, number> = {};
+  for (const r of rows) byStatus[String(r.status)] = Number(r.n);
+  const total = Object.values(byStatus).reduce((a, b) => a + b, 0);
+  const broken = byStatus.error ?? 0;
+
+  // ── AND HOW MANY ARE ACTUALLY TRADING FOR REAL ──────────────────────
+  //
+  // `status` says whether an agent could start; `mode` says what it is doing.
+  // A fleet can be 32-of-32 armed and simulating every fill, which is exactly
+  // what a tester found by hand and reported as "I can't see an option to
+  // switch to real trading". Counted here so nobody has to find that out one
+  // agent at a time.
+  //
+  // AND ONLY WHAT THE WORKER RUNNING NOW HAS SAID. The mirror keeps a row's
+  // last mode and beat across a respawn, so `GROUP BY mode` counted the
+  // previous process's word — and an expired agent's, for good — as today's.
+  // railOf (autonomy-funnel.ts) counts a row only once it was written since
+  // this replica spawned its worker.
+  //
+  // Null means the read failed, which is not zero: the funnel below uses it
+  // to tell an IDLE fleet from an unreadable one.
+  let rails: FleetRails | null = null;
+  const modes = new Map<string, string | null>();
+  try {
+    const agents = (await shared.prepare(FLEET_RAILS_SQL).all()) as AgentRailRow[];
+    rails = fleetRails(agents, opts.spawnedAt);
+    for (const a of agents) {
+      const key = String(a.smart_account ?? "").toLowerCase();
+      if (!modes.has(key)) modes.set(key, a.mode === null || a.mode === undefined ? null : String(a.mode));
+    }
+  } catch {
+    // The column may predate this deploy on a database mid-migration. A
+    // missing breakdown is not a fleet that is down.
+  }
+  const modeOf = (agentId: string) => modes.get(agentId.toLowerCase()) ?? null;
+
+  // ── IS AUTONOMY STILL HEALTHY? FROM THE LEDGER ──────────────────────
+  //
+  // Everything below was previously answerable only by reading raw container
+  // logs, which is how a fleet that had not landed a single autonomous fill
+  // in weeks went unnoticed. The funnel is the shape that matters: a hundred
+  // proposals and zero fills is a completely different fault from zero
+  // proposals, and a count of "trades" tells you neither.
+  //
+  // ONE HOUR, because the question is "is it working NOW". A lifetime total
+  // keeps reading healthy for days after execution breaks — the canary's six
+  // fills would mask a fleet that stopped this morning. The heartbeat adds six
+  // hours beside it, for a check that runs every few minutes and keeps no
+  // state of its own.
+  //
+  // Read-only, bounded, and wrapped like the block above: a missing column on
+  // a database mid-migration is not a fleet that is down, and this must never
+  // be the thing that stops a mirror pass.
+  let funnel: FleetSnapshot["funnel"] = null;
+  let holds: FleetSnapshot["holds"] = null;
+  try {
+    const since = opts.nowSec - 3600;
+    const t = (await shared.prepare(AUTONOMY_TRADE_FUNNEL_SQL).all(since)) as {
+      agent_id: string; status: string; rule: string; n: number | string;
+    }[];
+    const h = (await shared.prepare(AUTONOMY_HOLDS_SQL).all(since)) as { kind: string; n: number | string }[];
+    funnel = foldFunnel(t, modeOf);
+    holds = h.map((r) => ({ kind: String(r.kind), n: r.n }));
+  } catch {
+    // `hold_kind` predates this deploy on a database mid-migration, and the
+    // funnel is a report rather than a guarantee.
+  }
+  let funnel6h: FleetSnapshot["funnel6h"] = null;
+  if (opts.longWindow) {
+    try {
+      const t = (await shared.prepare(AUTONOMY_TRADE_FUNNEL_SQL).all(opts.nowSec - 6 * 3600)) as {
+        agent_id: string; status: string; rule: string; n: number | string;
+      }[];
+      funnel6h = foldFunnel(t, modeOf);
+    } catch {
+      /* the hour above still stands on its own */
+    }
+  }
+  return { at: opts.nowSec, byStatus, total, broken, rails, funnel, holds, funnel6h };
+}
+
+/**
+ * THE LINES ONE SNAPSHOT PRINTS. The prefixes are what operators grep —
+ * `fleet: `, `fleet| rails — `, `autonomy| 1h — `, `autonomy| 1h refusals — `
+ * — and they are unchanged; the per-rail lines are new beside them.
+ */
+export function fleetHealthLines(s: FleetSnapshot): string[] {
+  const parts = Object.entries(s.byStatus).map(([k, v]) => `${k} ${v}`).join(", ");
+  // The word BROKEN is in the line only when it is true, so grepping for it
+  // is a working alert with no extra infrastructure.
+  const lines = [`fleet: ${s.total} agent(s) — ${parts}${s.broken > 0 ? ` — BROKEN ${s.broken}` : ""}`];
+  const rails = s.rails ? railsLine(s.rails) : null;
+  if (rails) lines.push(rails);
+  if (s.funnel && s.holds) lines.push(...autonomyLines(s.rails ? s.rails.live : null, s.funnel, s.holds));
+  return lines;
+}
+
+/** When this replica started each worker it runs, keyed the way `agents` is: by smart account. */
+function spawnedAtByAgent(): Map<string, number> {
+  const spawned = new Map<string, number>();
+  for (const child of children.values()) spawned.set(child.smartAccount.toLowerCase(), child.startedAt);
+  return spawned;
+}
 
 async function fleetHealth(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
     const shared = await makePgDb(url);
-    const rows = (await shared
-      .prepare("SELECT status, COUNT(*) AS n FROM agents GROUP BY status")
-      .all()) as { status: string; n: number | string }[];
-    const by = new Map(rows.map((r) => [r.status, Number(r.n)]));
-    const total = [...by.values()].reduce((a, b) => a + b, 0);
-    const broken = by.get("error") ?? 0;
-    const parts = [...by.entries()].map(([k, v]) => `${k} ${v}`).join(", ");
-    // The word BROKEN is in the line only when it is true, so grepping for it
-    // is a working alert with no extra infrastructure.
-    log(`fleet: ${total} agent(s) — ${parts}${broken > 0 ? ` — BROKEN ${broken}` : ""}`);
+    const snapshot = await collectFleetSnapshot(shared, {
+      nowSec: Math.floor(Date.now() / 1000),
+      spawnedAt: spawnedAtByAgent(),
+    });
+    for (const line of fleetHealthLines(snapshot)) log(line);
 
     // ── AND WHICH ONES, AND WHY ─────────────────────────────────────────
     //
-    // The line above is the alert this function was written to be, and on its
-    // own it is the same shape as the incident it was written about: it said
-    // BROKEN 12 for hours and named nobody, so finding out which twelve meant
-    // reading container logs by hand — exactly what the header promises this
-    // replaced. A count tells an operator that something is wrong; only the
-    // names tell them whether it is their canary or twelve strangers, and only
-    // the reason tells them whether to act.
+    // The `fleet:` line is the alert this function was written to be, and on
+    // its own it is the same shape as the incident it was written about: it
+    // said BROKEN 12 for hours and named nobody, so finding out which twelve
+    // meant reading container logs by hand — exactly what the header promises
+    // this replaced. A count tells an operator that something is wrong; only
+    // the names tell them whether it is their canary or twelve strangers, and
+    // only the reason tells them whether to act.
     //
     // Bounded, read-only and best-effort, like the count. Twelve rows and one
     // event each is nothing beside the mirror's own writes, and the cap means a
     // fleet that is wholly broken reports a readable summary rather than
     // several hundred lines that push everything else out of the log window.
-    // ── AND HOW MANY ARE ACTUALLY TRADING FOR REAL ──────────────────────
     //
-    // `status` says whether an agent could start; `mode` says what it is doing.
-    // A fleet can be 32-of-32 armed and simulating every fill, which is exactly
-    // what a tester found by hand and reported as "I can't see an option to
-    // switch to real trading". Counted here so nobody has to find that out one
-    // agent at a time.
-    // Carried out of the block below so the funnel can tell an IDLE fleet from
-    // an unreadable one. Null means the read failed, which is not zero.
-    let liveAgents: number | null = null;
-    try {
-      const modes = (await shared
-        .prepare("SELECT COALESCE(mode, 'unknown') AS mode, COUNT(*) AS n FROM agents GROUP BY mode")
-        .all()) as { mode: string; n: number | string }[];
-      if (modes.length) {
-        const line = modes.map((m) => `${m.mode} ${Number(m.n)}`).join(", ");
-        log(`fleet| rails — ${line}`);
-      }
-      liveAgents = modes
-        .filter((m) => String(m.mode) === "live")
-        .reduce((s, m) => s + Number(m.n), 0);
-    } catch {
-      // The column may predate this deploy on a database mid-migration. A
-      // missing breakdown is not a fleet that is down.
-    }
-
-    // ── IS AUTONOMY STILL HEALTHY? ONE LINE, FROM THE LEDGER ────────────
-    //
-    // Everything below was previously answerable only by reading raw container
-    // logs, which is how a fleet that had not landed a single autonomous fill
-    // in weeks went unnoticed. The funnel is the shape that matters: a hundred
-    // proposals and zero fills is a completely different fault from zero
-    // proposals, and a count of "trades" tells you neither.
-    //
-    // ONE HOUR, because the question is "is it working NOW". A lifetime total
-    // keeps reading healthy for days after execution breaks — the canary's six
-    // fills would mask a fleet that stopped this morning.
-    //
-    // Read-only, bounded, and wrapped like the block above: a missing column on
-    // a database mid-migration is not a fleet that is down, and this must never
-    // be the thing that stops a mirror pass.
-    try {
-      const since = Math.floor(Date.now() / 1000) - 3600;
-      const t = (await shared
-        .prepare(AUTONOMY_TRADE_FUNNEL_SQL)
-        .all(since)) as { status: string; rule: string; n: number | string }[];
-      const h = (await shared
-        .prepare(
-          `SELECT COALESCE(hold_kind, 'unreported') AS kind, COUNT(*) AS n
-             FROM decisions WHERE at >= ? AND action = 'hold' GROUP BY kind`,
-        )
-        .all(since)) as { kind: string; n: number | string }[];
-
-      const n = (f: (r: { status: string; rule: string }) => boolean) =>
-        t.filter(f).reduce((s, r) => s + Number(r.n), 0);
-      const proposals = t.reduce((s, r) => s + Number(r.n), 0);
-      const rejected = n((r) => r.status === "rejected");
-      const landed = n((r) => r.status === "landed");
-      const failed = n((r) => r.status === "reverted");
-      const submitted = n((r) => r.status === "submitted") + landed + failed;
-      const tooWide = n((r) => r.rule === "grant-too-wide");
-
-      // SILENT ONLY WHEN NOBODY IS LIVE — because silence means two things and
-      // this is a health metric.
-      //
-      // It used to be silent on any idle hour. But "no agent is trading for
-      // real" and "every agent is live and proposed nothing for an hour" are
-      // opposite facts, and the second is the one worth waking up for: it is
-      // precisely the state that went unnoticed for weeks. Rendered identically
-      // as an absent line, an operator reads the alarming case as the boring
-      // one — the same empty-versus-unavailable mistake this codebase refuses
-      // everywhere it prints a number.
-      //
-      // `liveAgents === null` is a FAILED READ and stays silent, because
-      // claiming "0 live" off a query that did not answer would be the same
-      // error pointing the other way.
-      if (proposals > 0 || h.length > 0 || (liveAgents !== null && liveAgents > 0)) {
-        log(
-          `autonomy| 1h — ${liveAgents ?? "?"} live · proposals ${proposals} · ` +
-            `policy-passed ${proposals - rejected} · ` +
-            `userops ${submitted} · LANDED ${landed} · failed ${failed} · ` +
-            `grant-too-wide ${tooWide} · holds ${autonomyHolds(h)}`,
-        );
-        // The refusals, largest first, so a new one announces itself rather
-        // than hiding inside a total. Bounded — a fleet refusing in twenty ways
-        // should report the five that matter, not push the log window out.
-        const why = t
-          .filter((r) => r.status === "rejected" && r.rule)
-          .sort((a, b) => Number(b.n) - Number(a.n))
-          .slice(0, 5)
-          .map((r) => `${r.rule} ${Number(r.n)}`)
-          .join(" · ");
-        if (why) log(`autonomy| 1h refusals — ${why}`);
-      }
-    } catch {
-      // `hold_kind` predates this deploy on a database mid-migration, and the
-      // funnel is a report rather than a guarantee.
-    }
-
+    // HERE AND NOT IN THE SNAPSHOT: it names accounts, and the snapshot is
+    // also what the heartbeat publishes.
+    const broken = snapshot.broken;
     if (broken > 0) {
       const worst = (await shared
         .prepare(
@@ -5396,34 +5428,77 @@ async function fleetHealth(): Promise<void> {
   }
 }
 
-/** The kinds the autonomy line names, in the order it names them. */
-const HOLD_BUCKETS: readonly (readonly [kind: string, label: string])[] = [
-  ["MODEL_HOLD", "model"],
-  ["GATE_FORCED_HOLD", "gate-forced"],
-  ["STALE_MARK_HOLD", "stale-mark"],
-  ["unreported", "unreported"],
-];
+// ── THE HEARTBEAT ROW ───────────────────────────────────────────────────────
+//
+// fleet-heartbeat.ts. The snapshot above, published once a minute as this
+// role's row, so an outside check can tell a live fleet from a dead or wedged
+// one without anybody reading this log. Started, never awaited, like the room:
+// a slow database is a missed beat, never a late reconcile or a late watchdog.
+//
+// IN BOTH BRANCHES OF THE LOOP, halted or not. A halted fleet is the state an
+// operator most needs to see confirmed from outside, and the one in which the
+// log says least.
 
-/**
- * THE HOLDS CLAUSE OF THE AUTONOMY LINE, and every hold the query read is in it.
- *
- * It named three kinds and summed only those. When the writer started stamping
- * a hold on a stale price as STALE_MARK_HOLD — which had counted as a model
- * hold until then — those holds fell out of the line entirely, and a fleet
- * holding on dead feeds read as a fleet holding less. So the named buckets are
- * always printed (a kind the query found none of is a measured zero), and any
- * kind this list does not know is printed under its own name rather than
- * dropped. A new kind at the writer then shows up here the first hour it
- * happens, instead of being noticed as a gap in a total.
- */
-export function autonomyHolds(rows: readonly { kind: string; n: number | string }[]): string {
-  const count = (k: string) => rows.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
-  const named = new Set(HOLD_BUCKETS.map(([k]) => k));
-  const unknown = [...new Set(rows.map((r) => r.kind).filter((k) => !named.has(k)))].sort();
-  return [
-    ...HOLD_BUCKETS.map(([k, label]) => `${count(k)} ${label}`),
-    ...unknown.map((k) => `${count(k)} ${k}`),
-  ].join(", ");
+/** This process: when it started, and how the one before it ended (read at boot). */
+let heartbeatBoot: { startedAt: number; lastShutdown: LastShutdown | null } | null = null;
+let fleetHeartbeatInFlight = false;
+let fleetHeartbeatLastMs = 0;
+let fleetHeartbeatSchemaReady = false;
+let fleetHeartbeatLastFailure: string | null = null;
+
+function startFleetHeartbeat(): void {
+  if (fleetHeartbeatInFlight || stopping || !process.env.DATABASE_URL) return;
+  if (Date.now() - fleetHeartbeatLastMs < FLEET_HEARTBEAT_EVERY_MS) return;
+  fleetHeartbeatLastMs = Date.now();
+  fleetHeartbeatInFlight = true;
+  void writeOrchestratorHeartbeat().finally(() => {
+    fleetHeartbeatInFlight = false;
+  });
+}
+
+async function writeOrchestratorHeartbeat(): Promise<void> {
+  const boot = (heartbeatBoot ??= { startedAt: Math.floor(Date.now() / 1000), lastShutdown: null });
+  try {
+    const shared = await makePgDb(process.env.DATABASE_URL!);
+    const nowSec = Math.floor(Date.now() / 1000);
+    let counts: HeartbeatCounts | null = null;
+    try {
+      const snapshot = await collectFleetSnapshot(shared, { nowSec, spawnedAt: spawnedAtByAgent(), longWindow: true });
+      counts = heartbeatCounts(snapshot, { children: children.size, holders: holders.size });
+    } catch {
+      // A beat with no counts is still a beat: the process is alive, and
+      // whether it can read the fleet is a separate question the null answers.
+    }
+    await writeFleetHeartbeat(
+      shared,
+      {
+        role: "orchestrator",
+        commit: commitOf(process.env),
+        startedAt: boot.startedAt,
+        beatAt: nowSec,
+        halted: haltRequested(),
+        // No rollout scope in this build: every tenant the gates admit is
+        // admitted. The rollout (MERRYMEN_FLEET_ROLLOUT) reports its level
+        // counts here once it lands.
+        rollout: null,
+        counts,
+        lastShutdown: boot.lastShutdown,
+      },
+      { create: !fleetHeartbeatSchemaReady },
+    );
+    fleetHeartbeatSchemaReady = true;
+    if (fleetHeartbeatLastFailure !== null) {
+      fleetHeartbeatLastFailure = null;
+      log("fleet heartbeat: writing again");
+    }
+  } catch (e) {
+    // Said once per distinct failure, not once a minute.
+    const text = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+    if (text !== fleetHeartbeatLastFailure) {
+      fleetHeartbeatLastFailure = text;
+      log(`fleet heartbeat: write failed — ${text}`);
+    }
+  }
 }
 
 /**
@@ -9257,6 +9332,9 @@ export async function runOrchestrator(): Promise<void> {
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  // HOW THE LAST PROCESS ENDED, read before this one can leave a receipt of
+  // its own; every heartbeat carries it (fleet-heartbeat.ts).
+  heartbeatBoot = { startedAt: Math.floor(Date.now() / 1000), lastShutdown: readLastShutdown(merrymenHome()) };
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror
@@ -9310,6 +9388,10 @@ export async function runOrchestrator(): Promise<void> {
   // The main loop: honour a fleet-halt, else reconcile + watchdog every tick.
   for (;;) {
     if (stopping) return;
+    // THE HEARTBEAT, halted or not, and first: a pass that wedges is then a
+    // beat that stops, which is what an outside check can see. Started, never
+    // awaited — see startFleetHeartbeat.
+    startFleetHeartbeat();
     if (haltRequested()) {
       await honourFleetHalt();
     } else {
