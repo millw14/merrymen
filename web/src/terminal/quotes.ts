@@ -130,8 +130,7 @@ const CHANGES_DOWN_AFTER = 2;
  * until the requests still out have said whether the venue is up, so nothing
  * more is sent past a failure into a venue that may be down. One answer among
  * them and all four carry on — a refused symbol is only that symbol. None, and
- * two failures end the pass; a single failure with nothing else out is tried
- * past once more, on its own.
+ * the pass ends there.
  */
 export async function loadSessionChanges(
   tokens: LiveToken[],
