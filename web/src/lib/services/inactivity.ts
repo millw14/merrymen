@@ -9,9 +9,9 @@
  * every shared record that bears on the question, turns each into a CHECK with
  * a status and the observed value it was judged on, and only then picks the
  * one cause that explains the silence best, in a fixed order: a thing that
- * stops everything (no permission, both books off, a pause, a dead worker, a
- * broken live rail, no gas) outranks what the agent did with the time it had
- * (refusals, failed quotes, reverts, holds).
+ * stops everything (no permission, a recovery hold, both books off, a pause, a
+ * dead worker, a broken live rail, no gas) outranks what the agent did with the
+ * time it had (refusals, failed quotes, reverts, holds).
  *
  * SPLIT IN TWO so the judgement can be tested without a database:
  * `readInactivityInputs` does the bounded SQL, `diagnoseInactivity` is a pure
@@ -28,9 +28,13 @@
  * `blockerAdvice`, decisions.ts (`describeRule`, `tallyRefusals`, which in
  * turn use thesis-policy's labels and remedies), and distinct-trades.ts: trade
  * rows are read one per operation, the rule the inactivity alert applies too.
+ * A recovery hold is read with fleet-recovery.ts's `readFleetRecoveryHold` (the
+ * read under the recovery view the grants and chat routes serve), for this
+ * tenant's own row only.
  */
 import { liveBlockerText, type RefuseRule } from "@merrymen/core";
 import type { Db } from "../../../../worker/src/db";
+import { readFleetRecoveryHold } from "../../../../worker/src/fleet-recovery";
 import { PRIVATE_REVIEW_SOURCE } from "../../../../worker/src/market-review";
 import { rejectRuleRemedy } from "../../../../worker/src/thesis-policy";
 import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
@@ -192,6 +196,13 @@ export interface InactivityInputs {
   expiryNoticeAt: number | null;
   /** mirror_state.updated_at for this owner; "unavailable" when the table cannot be read. */
   mirrorUpdatedAt: number | null | "unavailable";
+  /**
+   * This tenant's own recovery hold (fleet_recovery_health, for the current
+   * account and its chain), with when the supervisor last confirmed it. Null
+   * when no hold is reported AND when the report could not be read: null is
+   * never a claim that the agent is not held, only that no hold is known here.
+   */
+  hold: { checkedAt: number } | null;
 }
 
 const holes = (n: number) => Array.from({ length: n }, () => "?").join(", ");
@@ -268,6 +279,8 @@ async function collapseWindowTrades(db: Db, inList: string, accParams: readonly 
 export async function readInactivityInputs(db: Db, a: {
   tenant: string;
   account: string | null;
+  /** The chain of the current grant: with the tenant and account, the key of its recovery hold. */
+  chainId: number | null;
   accounts: readonly string[];
   grantedAt: number | null;
   expiresAt: number | null;
@@ -399,6 +412,22 @@ export async function readInactivityInputs(db: Db, a: {
     mirrorUpdatedAt = "unavailable";
   }
 
+  // THE TENANT'S OWN RECOVERY HOLD, keyed exactly as the grants and chat routes
+  // key it: this owner, the current account and the grant's chain. Never a
+  // fleet-wide flag, an operator notice or another tenant's row, so a hold here
+  // is one the supervisor reported for this agent. A database without the
+  // table (self-hosted, older installs) reports none; an unreadable report or a
+  // failed read is no report either (null), so the diagnosis falls back to what
+  // it said before rather than turning a read error into a hold, or a "not held".
+  let hold: InactivityInputs["hold"] = null;
+  if (current && a.chainId !== null) {
+    try {
+      hold = await readFleetRecoveryHold(db, { tenant: a.tenant, smartAccount: current, chainId: a.chainId });
+    } catch {
+      hold = null;
+    }
+  }
+
   return {
     now: a.now,
     windowSec: a.windowSec,
@@ -420,6 +449,7 @@ export async function readInactivityInputs(db: Db, a: {
     killAt,
     expiryNoticeAt,
     mirrorUpdatedAt,
+    hold,
   };
 }
 
@@ -437,7 +467,7 @@ export type CheckStatus = (typeof CHECK_STATUSES)[number];
 
 /** What a cause IS, in the terms an owner asks about. Distinct kinds, never merged. */
 export const CAUSE_KINDS = [
-  "not_permitted", "permission_pending", "worker_not_reporting", "live_rail_blocked", "unfunded", "consent_off",
+  "not_permitted", "permission_pending", "recovery_hold", "worker_not_reporting", "live_rail_blocked", "unfunded", "consent_off",
   "paper_by_choice", "paused", "missing_data", "provider_failure", "model_hold", "brain_gate_hold", "stale_mark_hold",
   "hold_kind_unrecorded", "brain_refused", "strategy_idle", "proposal_dropped", "no_trade_reached_wall", "policy_refusal",
   "quote_failure", "execution_failure", "awaiting_confirmation", "unrecognised_refusal", "stale_records", "trading", "no_activity",
@@ -558,7 +588,16 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   {
     const observed = { heartbeat_at: beat === null ? null : iso(beat), heartbeat_age_s: beatAge, agent_status: status };
     const threshold = { fresh_within_s: within };
-    if (!row) {
+    if (i.hold) {
+      // A RECOVERY HOLD IS TESTED FIRST, before anything the heartbeat says. A
+      // held tenant's supervisor runs no trading worker for it until its saved
+      // records are verified (a chat-only holder at most), so a stale or missing
+      // heartbeat is the hold, not a dead worker, and a fresh one is not a worker
+      // that trades. Only this tenant's own report sets it (readInactivityInputs).
+      // It carries no remedy: lifting it is on Merrymen's side. When the hold
+      // started is not in the report this reads, so `since` stays unknown.
+      add({ category: "worker_liveness", status: "blocking", kind: "recovery_hold", summary: `Trading is paused for recovery: Merrymen is holding this agent until its saved trading records are verified (the hold was last confirmed at ${iso(i.hold.checkedAt)}). A held agent does not trade, so a stale or missing heartbeat here is the hold, not a worker that died. Lifting the hold is on Merrymen's side.`, observed: { ...observed, recovery_hold_confirmed_at: iso(i.hold.checkedAt) }, threshold, recorded_at: i.hold.checkedAt });
+    } else if (!row) {
       add({ category: "worker_liveness", status: "unknown", kind: null, summary: i.account ? "The worker has never reported for this account." : "No account yet, so there is no worker to report.", observed, threshold });
     } else if (beat === null) {
       add({ category: "worker_liveness", status: "unknown", kind: null, summary: "No heartbeat is on record.", observed, threshold });
@@ -830,7 +869,25 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   // ── the one cause ──
   let primary: Diagnosis["primary"] | null = null;
   // 1. Anything that stops every tick, most fundamental first.
-  for (const cat of ["permission", "settings_consent", "paused", "worker_liveness", "live_rail", "funding", "market_data"] as const) {
+  //
+  //    WHERE A RECOVERY HOLD RANKS, stated because it is a choice: right after
+  //    permission, and ahead of the owner's own switches.
+  //    - A blocking permission stays first. An expired, killed or unarmable
+  //      permission needs the owner to re-sign whatever the hold does: the agent
+  //      cannot run on it once the hold lifts either. The hold is listed beside
+  //      it in other_factors.
+  //    - Both books off (consent_off) and a recorded /pause rank BELOW the hold.
+  //      While held nothing trades whatever the owner switches (a /resume cannot
+  //      make it trade before the hold lifts), so the hold is what explains the
+  //      silence now; those switches stay in other_factors, with their remedies,
+  //      for when it lifts.
+  //    Without a hold the order is unchanged: a worker that is not reporting
+  //    still ranks after both books off and a pause.
+  const held = by.get("worker_liveness")!.kind === "recovery_hold";
+  const stops = held
+    ? (["permission", "worker_liveness", "settings_consent", "paused", "live_rail", "funding", "market_data"] as const)
+    : (["permission", "settings_consent", "paused", "worker_liveness", "live_rail", "funding", "market_data"] as const);
+  for (const cat of stops) {
     const c = by.get(cat)!;
     if (c.status === "blocking") { primary = fromCheck(c); break; }
   }
