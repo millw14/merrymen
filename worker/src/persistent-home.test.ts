@@ -361,6 +361,31 @@ test("every adoption crash seam converges under the same variables while ordinar
   }
 });
 
+test("a first write torn or left linked by a crash never wedges adoption or the listener's proof", t => {
+  for (const name of [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST]) {
+    const manifest = name === PERSISTENT_HOME_MANIFEST;
+    // Killed mid-write: only the private name ever held the partial text.
+    const torn = populated(t), tornFile = path.join(torn.home, name);
+    if (manifest) assert.throws(() => adoptPopulatedPersistentHome(torn.adopt, { ...torn.options, afterAdoptionRenamed: crash }), /simulated crash/);
+    writeFileSync(`${tornFile}.tmp`, "{\"version\":1,\"volu", { mode: 0o600 });
+    assert.equal(existsSync(tornFile), false, name);
+    proveRecoveryReplyRoot(torn.listener, torn.options.readMountInfo).assert();
+    assert.equal(adoptPopulatedPersistentHome(torn.adopt, torn.options)!.handoverState, "held", name);
+    assert.equal(existsSync(`${tornFile}.tmp`), false, name);
+    proveRecoveryReplyRoot(torn.listener, torn.options.readMountInfo).assert();
+    // Killed after the link and before the private name went: the next start drops that name.
+    const linked = populated(t), linkedFile = path.join(linked.home, name);
+    if (manifest) adoptPopulatedPersistentHome(linked.adopt, linked.options);
+    else assert.throws(() => adoptPopulatedPersistentHome(linked.adopt, { ...linked.options, afterPreAdoptionSynced: crash }), /simulated crash/);
+    linkSync(linkedFile, `${linkedFile}.tmp`);
+    assert.equal(adoptPopulatedPersistentHome(linked.adopt, linked.options)!.handoverState, "held", name);
+    assert.equal(lstatSync(linkedFile).nlink, 1, name);
+    assert.equal(existsSync(`${linkedFile}.tmp`), false, name);
+    assert.ok(verifyPersistentHome(linked.env, linked.options));
+    proveRecoveryReplyRoot(linked.listener, linked.options.readMountInfo).assert();
+  }
+});
+
 test("the env release needs the held adopted manifest, its token, the pin and a rollout scope; asked again it changes nothing", t => {
   const f = populated(t);
   adoptPopulatedPersistentHome(f.adopt, f.options);

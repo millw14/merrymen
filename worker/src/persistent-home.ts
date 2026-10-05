@@ -321,6 +321,28 @@ function presentStat(file: string): BigIntStats | null {
   try { return lstatSync(file, { bigint: true }); }
   catch (e) { if (missing(e)) return null; throw refuse("a halt name on the volume could not be inspected"); }
 }
+/**
+ * The adoption's record and manifest are FIRST WRITES whose real name only
+ * ever appears whole, and never over an existing file: written and synced
+ * under a private name, link()ed into place (exclusive at the real name),
+ * then the private name dropped. A crash leaves at most the private name,
+ * torn or whole, alone or beside the complete file it links. settleFirstWrite
+ * drops it on the next start before anything reads the real name, which is
+ * then absent or complete and single-link, so a torn write can never wedge
+ * adoption or the listener's proof behind an incomplete file.
+ */
+const firstWriteTemp = (file: string) => `${file}.tmp`;
+function settleFirstWrite(root: Root, file: string): void {
+  if (presentStat(firstWriteTemp(file))) { unlinkSync(firstWriteTemp(file)); fsyncSync(root.fd); }
+}
+function publishFirstWrite(root: Root, file: string, text: string): void {
+  const temp = firstWriteTemp(file);
+  settleFirstWrite(root, file);
+  writeExclusive(root, temp, text);
+  try { linkSync(temp, file); }
+  catch (e) { throw (e as NodeJS.ErrnoException).code === "EEXIST" ? refuse("a file appeared under an adoption record's name") : e; }
+  finally { unlinkSync(temp); fsyncSync(root.fd); }
+}
 function readPreAdoption(root: Root, pinned: string, token: string): PreAdoption | null {
   const e = evidence(path.join(root.identity.homeRoot, PERSISTENT_HOME_PREADOPTION), root);
   if (!e) return null;
@@ -353,8 +375,9 @@ function readPreAdoption(root: Root, pinned: string, token: string): PreAdoption
  * manifest written, `held`, naming that canonical halt as its own, so the
  * existing release and verification paths work on this volume unchanged.
  *
- * A CRASH AT ANY SEAM CONVERGES on the next start with the same variables:
- * a record whose original is still in place carries on to the rename, and a
+ * A CRASH AT ANY SEAM CONVERGES on the next start with the same variables.
+ * The record and the manifest appear whole or not at all (publishFirstWrite).
+ * A record whose original is still in place carries on to the rename, and a
  * record whose FLEET_HALT is already this adoption's canonical text carries on
  * to the manifest. A restart after the manifest changes nothing. Any other
  * shape (a wrong hash, a loose or hard-linked halt, an empty root, a manifest
@@ -370,7 +393,9 @@ export function adoptPopulatedPersistentHome(
     // Adopting needs the explicit token. Once adopted, the pin may stay set
     // for release and re-halt after the token is retired: the record must
     // then match the manifest's own operation instead.
-    const i = root.identity, saved = readManifest(root);
+    const i = root.identity;
+    for (const name of [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST]) settleFirstWrite(root, path.join(i.homeRoot, name));
+    const saved = readManifest(root);
     const token = env.MERRYMEN_INITIAL_HANDOVER ?? saved?.manifest.handover.operationToken;
     if (!token) throw refuse("adoption requires the explicit initial handover operation token");
     const haltPath = path.join(i.homeRoot, "FLEET_HALT"), canonical = haltText(i.id, token);
@@ -393,7 +418,7 @@ export function adoptPopulatedPersistentHome(
       }
       const pre: PreAdoption = { version: 1, volumeId: i.id, homeRoot: i.homeRoot, inode: i.inode, operationToken: token,
         halt: { path: haltPath, inode: found.inode, size: found.bytes.length, sha256: pinned, bytes: found.bytes.toString("base64") } };
-      writeExclusive(root, path.join(i.homeRoot, PERSISTENT_HOME_PREADOPTION), JSON.stringify(pre) + "\n");
+      publishFirstWrite(root, path.join(i.homeRoot, PERSISTENT_HOME_PREADOPTION), JSON.stringify(pre) + "\n");
       options.afterPreAdoptionSynced?.();
       record = readPreAdoption(root, pinned, token);
       if (!record) throw refuse("the pre-adoption record disappeared");
@@ -423,7 +448,7 @@ export function adoptPopulatedPersistentHome(
     const halt: PersistentHomeHaltProof = { path: haltPath, device: created.device, inode: created.inode, text: created.text, operationToken: token };
     const manifest: Manifest = { version: 1, volumeId: i.id, mountPath: i.mountPath, homeRoot: i.homeRoot,
       device: i.device, inode: i.inode, handover: { state: "held", operationToken: token, halt } };
-    writeExclusive(root, path.join(i.homeRoot, PERSISTENT_HOME_MANIFEST), JSON.stringify(manifest) + "\n");
+    publishFirstWrite(root, path.join(i.homeRoot, PERSISTENT_HOME_MANIFEST), JSON.stringify(manifest) + "\n");
     verifiedManifest(root);
     return { ...i, handoverState: "held" as const, halt };
   });
