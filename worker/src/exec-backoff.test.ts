@@ -4,7 +4,8 @@
  * The holds themselves are pure and run here against a fake clock. The wiring
  * in main() cannot be booted by a test, so the half that could go wrong there
  * — an exit sent through the skip, a hold noted after the install that should
- * have cleared it, an owner's order dropped without a reply — is pinned over
+ * have cleared it, an owner's order held by somebody else's refusal or
+ * dropped without a reply — is pinned over
  * index.ts with comments stripped, the way energy-wiring.test.ts pins energy.
  */
 import assert from "node:assert/strict";
@@ -165,6 +166,54 @@ describe("AN OWNER ORDER GETS AN EXPLICIT REPLY", () => {
       heldReply({ rule: "sponsor-refused", untilMs: T0 + 15 * MIN }, T0),
       "⏳ not sent: sponsor-refused, retry after 15m. Nothing was signed and nothing was spent.",
     );
+  });
+});
+
+describe("AN ORDER IS ANSWERED BY ITS OWN REFUSAL, NEVER BY ANOTHER'S HOLD", () => {
+  it("notedBy is the hold this very intent's refusal wrote", () => {
+    const { b } = backoff();
+    const order = buy();
+    const h = b.note(order, LIMITS, "prefund-short", T0)!;
+    assert.equal(b.notedBy(order, T0 + MIN), h);
+  });
+
+  it("an order whose pair another intent's refusal holds hears nothing about that hold", () => {
+    // The strategy's 500 USDG buy was refused; the owner's 20 USDG order of
+    // the same coin was tried and refused for something else entirely.
+    const { b } = backoff();
+    b.note(buy(), LIMITS, "insufficient-balance", T0);
+    const order = buy();
+    assert.ok(b.held(order, LIMITS, T0 + MIN), "the pair IS held, for the tick");
+    assert.equal(b.notedBy(order, T0 + MIN), null, "but this order started nothing");
+  });
+
+  it("is null once its hold ran out, was cleared, or a later refusal replaced it", () => {
+    const { b } = backoff();
+    const order = buy();
+    b.note(order, LIMITS, "gas-absurd", T0);
+    assert.equal(b.notedBy(order, T0 + 5 * MIN), null, "ran out");
+
+    const installed = buy();
+    b.note(installed, LIMITS, "enable-too-wide", T0);
+    b.clearRule("enable-too-wide", "key installed");
+    assert.equal(b.notedBy(installed, T0 + MIN), null, "cleared when the install landed");
+
+    const earlier = buy(OTHER_COIN);
+    b.note(earlier, LIMITS, "gas-absurd", T0);
+    b.note(buy(OTHER_COIN), LIMITS, "sponsor-refused", T0 + MIN);
+    assert.equal(b.notedBy(earlier, T0 + 2 * MIN), null, "replaced by a later refusal of the pair");
+
+    const armed = buy(COIN);
+    b.note(armed, LIMITS, "gas-absurd", T0 + 10 * MIN);
+    b.clear("armed");
+    assert.equal(b.notedBy(armed, T0 + 11 * MIN), null, "cleared at arm");
+  });
+
+  it("an exit starts no hold, so its reply is never a held one", () => {
+    const { b } = backoff();
+    const out = sell();
+    assert.equal(b.note(out, LIMITS, "gas-absurd", T0), null);
+    assert.equal(b.notedBy(out, T0 + MIN), null);
   });
 });
 
@@ -346,7 +395,7 @@ describe("WHERE THE WORKER ASKS", () => {
   it("processIntentLocked books a held intent `rejected` under the held rule — never a silent return", () => {
     const fn = body("processIntentLocked");
     const suppressed = fn.indexOf("if (suppressed && verdict.ok) {");
-    const asked = fn.indexOf("const backedOff = liveHold(intent);");
+    const asked = fn.indexOf("const backedOff = tickEntries.has(intent) ? liveHold(intent) : null;");
     assert.ok(suppressed > 0 && asked > suppressed, "read beside suppressedIntents, after checkPolicy");
     const branch = fn.slice(asked, fn.indexOf("return;", asked));
     assert.match(branch, /if \(backedOff && verdict\.ok\) \{\s*await recordTrade\(\{/);
@@ -375,14 +424,41 @@ describe("WHERE THE WORKER ASKS", () => {
     assert.match(CODE, /suppressedIntents\.clear\(\);\n\s*execBackoff\.clear\("armed"\);/);
   });
 
-  it("BOTH ORDER PATHS say a held order as held: the owner's and the Brain's", () => {
+  it("ONLY THE TICK'S OWN ENTRIES are marked holdable, each just before it runs", () => {
+    // Exactly the two entry branches: the strategy loop's and the class route's.
+    assert.equal((CODE.match(/tickEntries\.add\(/g) ?? []).length, 2);
+    for (const loopStart of [
+      "for (const [proposedAt, intent] of proposed.entries()) {",
+      "const entries: Tick = await classGate.entries(async () => await proposeClassEntries());",
+    ]) {
+      const at = CODE.indexOf(loopStart);
+      const loop = CODE.slice(at, CODE.indexOf("\n    }\n", at));
+      assert.match(
+        loop,
+        /if \(entry\) \{\s*tickEntries\.add\(intent\);\s*const facts = await processIntentReporting\(intent, equityUsdg, !bookIncomplete\);/,
+        loopStart,
+      );
+    }
+  });
+
+  it("OWNER AND BRAIN ORDERS ARE EXEMPT: neither order path marks its intent holdable", () => {
+    // The Brain's orders go through submitChatTrade like the owner's, so these
+    // two bodies are every order path there is.
+    for (const name of ["submitChatTrade", "submitChatCurveTrade"]) {
+      assert.doesNotMatch(body(name), /tickEntries/, name);
+    }
+  });
+
+  it("BOTH ORDER PATHS say when to ask again after their OWN refusal started a hold", () => {
     const swap = body("submitChatTrade");
     assert.match(swap, /\.\.\.sayTradeOutcome\(outcome, side, named, usdgAmount, sold \?\? usdgAmount\), \.\.\.orderHeldReply\(intent, outcome\),/);
     const curveOrder = body("submitChatCurveTrade");
     assert.match(curveOrder, /\.\.\.sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\), \.\.\.orderHeldReply\(intent, outcome\),/);
     const reply = body("orderHeldReply");
     assert.match(reply, /outcome\?\.status !== "rejected"\) return \{\};/);
-    assert.match(reply, /const held = liveHold\(intent\);/);
+    // The hold THIS order's refusal wrote — never whatever hold its pair carries.
+    assert.match(reply, /const held = execBackoff\.notedBy\(intent, Date\.now\(\)\);/);
+    assert.doesNotMatch(reply, /liveHold|execBackoff\.held\(/);
     assert.match(reply, /held && held\.rule === outcome\.rejectRule \? no\(heldReply\(held, Date\.now\(\)\)\) : \{\}/);
   });
 });

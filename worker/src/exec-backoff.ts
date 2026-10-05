@@ -28,13 +28,17 @@
  *   - A REFUSAL THAT SAYS IT WAS A READ WE COULD NOT MAKE, or a race with our
  *     own landing (NOT_BACKED_OFF). `enable-unverified` tells the owner "the
  *     next tick will ask again"; holding it would make that sentence false.
- *   - ANYTHING SILENTLY, for anybody who was promised an answer. A strategy
- *     intent with no decision yet is skipped before ensureDecision (no row, no
- *     post — the hold's own `[backoff]` line said why). One that already has a
- *     decision, which is every owner and Brain order, reaches processIntentLocked
- *     and gets a `rejected` row carrying the rule that started the hold, and the
- *     order's reply says when to try again (heldReply). A silent return there
- *     was considered and dropped: it breaks provenance and owner receipts.
+ *   - AN OWNER'S OR THE BRAIN'S ORDER. Asked for once, by somebody waiting on
+ *     the answer, it is tried and hears the bundler's own word (index.ts
+ *     tickEntries). A hold another intent started is about another size and
+ *     another moment. When the order's OWN refusal starts a hold, its reply
+ *     says when asking again can help (ExecBackoff.notedBy, heldReply).
+ *   - ANYTHING SILENTLY. A strategy intent with no decision yet is skipped
+ *     before ensureDecision (no row, no post — the hold's own `[backoff]` line
+ *     said why). One that already has a decision — a strategist intent that
+ *     journaled its own — reaches processIntentLocked and gets a `rejected`
+ *     row carrying the rule that started the hold. A silent return there was
+ *     considered and dropped: it breaks provenance and owner receipts.
  *
  * NEVER PERSISTED, and cleared at every arm, for the reason suppressedIntents
  * gives: a fresh arm has fresh information (a re-signed grant, a funded
@@ -167,6 +171,8 @@ export interface Hold {
  */
 export class ExecBackoff {
   private readonly holds = new Map<string, Hold>();
+  /** The hold each intent's own refusal last wrote — for its reply (notedBy), never for holding anything. */
+  private readonly noted = new WeakMap<TradeIntent, Hold>();
 
   constructor(private readonly log: (line: string) => void = (line) => console.log(line)) {}
 
@@ -187,6 +193,7 @@ export class ExecBackoff {
     if (ms === null) return null;
     const hold: Hold = { key, rule, untilMs: nowMs + ms, strikes };
     this.holds.set(key, hold);
+    this.noted.set(intent, hold);
     this.log(`[backoff] holding ${key} for ${Math.round(ms / 60_000)}m after ${rule} (refusal ${strikes} this arm)`);
     return hold;
   }
@@ -206,6 +213,22 @@ export class ExecBackoff {
       if (h && h.untilMs > nowMs && (found === null || h.untilMs > found.untilMs)) found = h;
     }
     return found;
+  }
+
+  /**
+   * The hold `intent`'s OWN refusal started or lengthened, while it is still
+   * the one in force for its key. Null once it ran out, was cleared (a key
+   * install landed, the agent re-armed) or a later refusal replaced it, and
+   * null for an intent that started none.
+   *
+   * For the reply to an order that is never held: it was tried, refused, and
+   * its own refusal is what now holds the tick's entries. Asking `held` there
+   * instead would answer with whatever hold the pair carries, including one
+   * another intent started for a reason this order never met.
+   */
+  notedBy(intent: TradeIntent, nowMs: number): Hold | null {
+    const h = this.noted.get(intent);
+    return h !== undefined && this.holds.get(h.key) === h && h.untilMs > nowMs ? h : null;
   }
 
   /** Drop every hold started by `rule` — strikes too, because its reason is gone. */
@@ -235,13 +258,17 @@ export function retryAfterMin(hold: Pick<Hold, "untilMs">, nowMs: number): numbe
 }
 
 /**
- * WHAT AN OWNER'S OR THE BRAIN'S ORDER HEARS WHEN IT WAS HELD — the rule, and
- * when asking again can help. The rule as the slug, because that is what the
- * row carries and what support triages on; its sentence and the owner's
- * remedy beside it when the vocabulary has them (thesis-policy.ts), because
- * "retry after 15m" is no answer to `prefund-short` without "send a little
- * ETH". Nothing was signed, so nothing was spent, and the reply says that
- * rather than leaving it to be guessed.
+ * WHAT AN OWNER'S OR THE BRAIN'S ORDER HEARS WHEN ITS OWN REFUSAL STARTED A
+ * HOLD — the rule, and when asking again can help. The order itself was tried
+ * (orders are never held); the time is how long the tick will leave this pair
+ * alone, and asking sooner most likely meets the same answer.
+ *
+ * The rule as the slug, because that is what the row carries and what support
+ * triages on; its sentence and the owner's remedy beside it when the
+ * vocabulary has them (thesis-policy.ts), because "retry after 15m" is no
+ * answer to `prefund-short` without "send a little ETH". Nothing was signed,
+ * so nothing was spent, and the reply says that rather than leaving it to be
+ * guessed.
  */
 export function heldReply(hold: Pick<Hold, "rule" | "untilMs">, nowMs: number): string {
   const label = rejectRuleLabel(hold.rule);
