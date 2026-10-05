@@ -10969,11 +10969,11 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
     // THE PROCESS CAP. A rollout naming more tenants than fit runs the first
     // ones in roster order and defers the rest with "[alert] … local process
     // cap reached" until a slot frees; never raise the cap to fit (it guards
-    // the container's PID and thread limit). Live holders first, then paper
-    // in batches (docs/fleet-resume.md).
+    // the container's PID and thread limit). Live tenants that hold positions
+    // first, then paper in batches (docs/fleet-resume.md).
     if (passed.length > MAX_LOCAL_CHILD_PROCESSES - 8) {
       log(`[resume-preview] ${passed.length} passing tenant(s), and this orchestrator runs at most ${MAX_LOCAL_CHILD_PROCESSES} workers and holds at once: ` +
-        `admit them in batches of at most ${MAX_LOCAL_CHILD_PROCESSES - 8}, live holders (exits-only) first`);
+        `admit them in batches of at most ${MAX_LOCAL_CHILD_PROCESSES - 8}, live tenants holding positions (exits-only) first`);
     }
   };
   summary();

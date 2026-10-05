@@ -588,9 +588,11 @@ describe("a restored position's graded floor survives the redeploy too", () => {
 });
 
 /**
- * WHERE THE FLOOR SEED SITS IN seedBasisForChild, which has no test seam of its
- * own (it needs DATABASE_URL and makePgDb). Pinned the way the basis and energy
- * seeds' places in spawnChild are (orchestrator.test.ts, energy-durability.test.ts).
+ * WHERE THE FLOOR SEED SITS IN seedBasisForChild. Its only seam is the shared
+ * ledger it reads (sharedSeedDb: makePgDb(url) in production, a test stand-in
+ * for orchestrator-ledger-resume.integration.test.ts), so its shape is pinned
+ * here the way the basis and energy seeds' places in spawnChild are
+ * (orchestrator.test.ts, energy-durability.test.ts).
  */
 describe("seedBasisForChild runs the floor seed behind the basis", () => {
   const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
@@ -607,7 +609,9 @@ describe("seedBasisForChild runs the floor seed behind the basis", () => {
     const floor = fn.indexOf("seedPositionFloors({");
     assert.ok(basisFailed > 0 && floor > basisFailed, "after the basis seed's catch, so a failed basis cannot skip it");
     assert.ok(fn.slice(basisFailed, floor).includes("try {"), "in a try of its own");
-    assert.match(fn.slice(floor), /^seedPositionFloors\(\{\s*child: handle\.db, shared: await makePgDb\(url\), account: smartAccount, restored, mayWrite: writeRefusal,\s*\}\)/);
+    assert.match(fn.slice(floor), /^seedPositionFloors\(\{\s*child: handle\.db, shared: await sharedSeedDb\(\), account: smartAccount, restored, mayWrite: writeRefusal,\s*\}\)/);
+    // The seam reads Postgres in production: the same pool the basis seed uses.
+    assert.match(fn, /const sharedSeedDb = async \(\): Promise<Db> => basisSeedSharedForTest \?\? await makePgDb\(url!\);/);
   });
 
   it("the handle closes after it, in the finally", () => {
