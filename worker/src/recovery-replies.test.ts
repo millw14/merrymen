@@ -94,7 +94,10 @@ async function fixture(t: TestContext, count = 1) {
   const env: NodeJS.ProcessEnv = { MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home, MERRYMEN_HOME_VOLUME_ID: "d6481580-14af-430c-af4a-f3540dfb833d", MERRYMEN_HOSTED: "1", MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1", MERRYMEN_FLEET_RECOVERY_REPLIES: "1", DATABASE_URL: localUrl };
   const tables = (await pool.query("SELECT tablename FROM pg_tables WHERE schemaname=$1 ORDER BY tablename", [schema])).rows.map(r => String(r.tablename));
   const original = async (except: string[] = ["tenant_telegram"]) => { const rows: unknown[] = []; for (const table of tables.filter(name => !except.includes(name))) rows.push([table, (await pool.query(`SELECT * FROM ${table} ORDER BY ctid`)).rows]); return rows; };
-  const health = { tenant: true, bot: true, lostTenants: new Set<string>(), lostBots: new Set<string>() }, logs: string[] = [], audit: string[] = [], sends: Array<{ botId: string; chatId: number; text: string; deadline: number | undefined }> = [], polls: Array<{ botId: string; offset: number; deadline: number | undefined }> = [], replies: string[] = [];
+  // health.tenant/bot fail every lease at once; health.lost fails one lease OBJECT
+  // (health.current names the newest per tenant or bot), so a lease the
+  // listener re-acquires afterwards is healthy again.
+  const health = { tenant: true, bot: true, lost: new Set<object>(), current: new Map<string, object>(), acquired: [] as string[] }, logs: string[] = [], audit: string[] = [], sends: Array<{ botId: string; chatId: number; text: string; deadline: number | undefined }> = [], polls: Array<{ botId: string; offset: number; deadline: number | undefined }> = [], replies: string[] = [];
   let hook: ((sql: string, values: unknown[] | undefined, client: Pick<Client, "query"> | null) => Promise<void>) | undefined;
   const audited = async (sql: string, values: unknown[] | undefined, client: Pick<Client, "query"> | null) => {
     audit.push(sql); assert.doesNotMatch(sql, /sealed_session_key|serialized|(?:INSERT INTO|UPDATE|DELETE FROM|ALTER TABLE)\s+(?:agents|trades|cost_basis|risk_periods|fee_accruals|agent_commands|mirror_state|grants|tenant_settings|telegram_bot_claims|fleet_recovery_health)\b/i);
@@ -112,8 +115,8 @@ async function fixture(t: TestContext, count = 1) {
     answerCallbackQuery: async () => ({ ok: true }),
   };
   const run = (extra: Partial<RecoveryReplyOptions> = {}) => runRecoveryReplies({ env, pool: entryPool, dek: DEK, readMountInfo: () => mount, onePass: true, now: () => clock, log: (_stream, line) => { logs.push(line); },
-    acquireTenant: async tenant => { const held = await tenants.acquire(tenant); return held && { ...held, healthy: () => health.tenant && !health.lostTenants.has(tenant) && held.healthy() }; },
-    acquireBot: async id => { const held = await bots.acquire(id); return held && { ...held, healthy: () => health.bot && !health.lostBots.has(id) && held.healthy() }; },
+    acquireTenant: async tenant => { const held = await tenants.acquire(tenant); if (!held) return held; const lease = { ...held, healthy: () => health.tenant && !health.lost.has(lease) && held.healthy() }; health.current.set(tenant, lease); health.acquired.push(tenant); return lease; },
+    acquireBot: async id => { const held = await bots.acquire(id); if (!held) return held; const lease = { ...held, healthy: () => health.bot && !health.lost.has(lease) && held.healthy() }; health.current.set(id, lease); return lease; },
     transport, reply: async req => { replies.push(req.text); return { kind: "public", text: "fresh public code read; trading remains held" }; }, ...extra });
   const msg = (id: number, text = "$FROG chart", i = 0, fields: Partial<TgMessage> = {}): TgMessage => ({ updateId: id, messageId: id + 100, chatId: actors[i]!.ownerId, fromId: actors[i]!.ownerId, text, date: Math.floor(clock / 1000), ...fields });
   const offset = async (botId = actors[0]!.botId) => (await pool.query("SELECT * FROM recovery_reply_offsets WHERE bot_id=$1", [botId])).rows[0];
@@ -734,5 +737,212 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     let waiting = false;
     for (let i = 0; i < 50 && !waiting; i++) { waiting = Number((await f.pool.query("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT sealed FROM tenant_personal_memory%'")).rows[0]!.count) > 0; if (!waiting) await delay(5); }
     assert.equal(waiting, true); await locker.query("ROLLBACK"); await job; assert.equal(Number((await f.offset())!.offset_id), 2); assert.equal(f.sends.length, 1);
+  });
+});
+
+/**
+ * ONE TENANT'S PROBLEM STOPS ONE TENANT, against the actual entry, the actual
+ * supervisor and real PostgreSQL advisory locks. Each case runs the listener
+ * continuously (not one pass), with a 50ms supervisor period, and ends it with
+ * the trusted stop signal — a clean stop, so every run must resolve "stopped"
+ * unless the case is about a fleet-wide refusal.
+ */
+const until = async (what: string, ready: () => boolean | Promise<boolean>, ms = 20_000) => {
+  const end = Date.now() + ms;
+  while (!(await ready())) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await delay(20, undefined, { ref: false });
+  }
+};
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+function live(f: Fixture, extra: Partial<RecoveryReplyOptions> = {}) {
+  const stop = new AbortController();
+  const done = f.run({ onePass: undefined, stopSignal: stop.signal, supervisorEveryMs: 50, ...extra })
+    .then(value => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+  return { stop, done };
+}
+const sent = (f: Fixture, botId: string) => f.sends.filter(x => x.botId === botId).length;
+const lockFree = async (probe: Client, tenant: string) => {
+  const key = leaseKey(tenant).toString(), free = (await probe.query("SELECT pg_try_advisory_lock($1::bigint) AS held", [key])).rows[0]!.held === true;
+  if (free) await probe.query("SELECT pg_advisory_unlock($1::bigint)", [key]);
+  return free;
+};
+
+test("actual reply entry isolation: one tenant's or one bot's problem stops only that tenant or bot", { skip: !URL, timeout: 180_000 }, async t => {
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(new globalThis.URL(URL!).hostname), "LOCAL test database only");
+
+  await t.test("another tenant's grant write never stops an actor; a tenant's own write stops only it and the supervisor re-admits it", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], tagA = a.tenant.slice(0, 8), tagB = b.tenant.slice(0, 8);
+    const original = await f.original(["tenant_telegram", "grants"]), baseMe = f.transport.getMe;
+    let bIdentity = 0;
+    f.transport.getMe = async opts => { if (opts.token === b.token) bIdentity++; return baseMe(opts); };
+    f.transport.getUpdates = async (opts, offset) => opts.token === a.token ? updates([f.msg(offset, "$A chart", 0)], offset + 1) : updates();
+    const { stop, done } = live(f);
+    try {
+      await until("A's first reply", () => sent(f, a.botId) >= 1);
+      // The production trigger: a user signs a grant (any tenant's grants row is
+      // written). The whole-roster receipt used to stop every actor right here.
+      await f.pool.query("UPDATE grants SET updated_at=updated_at+1 WHERE tenant=$1", [b.tenant]);
+      const before = sent(f, a.botId);
+      await until("B stopped and re-admitted", () => bIdentity >= 2 && f.logs.filter(l => l === `[recovery-replies] actor-start tenant=${tagB}`).length >= 2);
+      await until("A still replying", () => sent(f, a.botId) >= before + 2);
+    }
+    finally { stop.abort(); }
+    const result = await done; assert.deepEqual(result, { ok: true, value: "stopped" });
+    assert.deepEqual(f.logs.filter(l => /actor-stop/.test(l)), [`[recovery-replies] actor-stop tenant=${tagB} reason=roster-changed`]);
+    assert.equal(f.logs.filter(l => l === `[recovery-replies] actor-start tenant=${tagA}`).length, 1, "A was never stopped or restarted");
+    assert.equal(Number((await f.offset(a.botId))!.offset_id), sent(f, a.botId));
+    assert.deepEqual(await f.original(["tenant_telegram", "grants"]), original);
+  });
+
+  await t.test("a tenant whose grant appears while the listener runs is fenced and gets an actor on the next supervisor pass", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect();
+    const row = (await f.pool.query("SELECT * FROM grants WHERE tenant=$1", [b.tenant])).rows[0]!;
+    await f.pool.query("DELETE FROM grants WHERE tenant=$1", [b.tenant]);
+    let aPolls = 0, bIdentityAt = -1;
+    const baseMe = f.transport.getMe;
+    f.transport.getMe = async opts => { if (opts.token === b.token && bIdentityAt < 0) bIdentityAt = f.audit.length; return baseMe(opts); };
+    f.transport.getUpdates = async (opts, offset) => { if (opts.token === a.token) { aPolls++; return updates(); } return updates([f.msg(offset, "$B chart", 1)], offset + 1); };
+    const { stop, done } = live(f, { supervisorEveryMs: 300 });
+    try {
+      await until("A polling", () => aPolls >= 1);
+      assert.equal(await lockFree(probe, b.tenant), true, "a tenant outside the roster is not fenced");
+      const insertedAt = f.audit.length;
+      await f.pool.query("INSERT INTO grants VALUES($1,$2,$3::jsonb,$4,$5)", [row.tenant, row.chain_id, JSON.stringify(row.grant_json), row.sealed_session_key, row.updated_at]);
+      await until("B admitted", () => bIdentityAt >= 0);
+      // At most ONE roster read between the insert and B's first provider call:
+      // the first supervisor pass to see the row fenced and admitted it.
+      assert.ok(f.audit.slice(insertedAt, bIdentityAt).filter(sql => /FROM grants ORDER BY tenant LIMIT/.test(sql)).length <= 1);
+      assert.equal(await lockFree(probe, b.tenant), false, "fenced once it is in the roster");
+      await until("B replying", () => sent(f, b.botId) >= 1);
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(!f.logs.some(l => /actor-stop/.test(l)), f.logs.join("\n"));
+    assert.equal(await lockFree(probe, a.tenant), true); assert.equal(await lockFree(probe, b.tenant), true);
+  });
+
+  await t.test("a 409 on one bot backs off and marks only that bot; the other bot keeps replying", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!];
+    let aPolls = 0;
+    f.transport.getUpdates = async (opts, offset) => {
+      if (opts.token === a.token) { aPolls++; return { ...updates([], offset), reason: "Conflict: terminated by other getUpdates request", errorCode: 409 }; }
+      return updates([f.msg(offset, "$B chart", 1)], offset + 1);
+    };
+    const { stop, done } = live(f);
+    try { await until("B replies", () => sent(f, b.botId) >= 3); }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.equal(aPolls, 1, "the conflicted bot waits its 60s back-off instead of fighting the other poller");
+    assert.deepEqual(f.logs.filter(l => /telegram-409/.test(l)), [`[recovery-replies] [alert] backoff tenant=${a.tenant.slice(0, 8)} reason=telegram-409 wait=60s`]);
+    assert.match(String((await f.pool.query("SELECT poll_err FROM tenant_telegram WHERE tenant=$1", [a.tenant])).rows[0]!.poll_err), /^conflict: /);
+    assert.equal((await f.pool.query("SELECT poll_err FROM tenant_telegram WHERE tenant=$1", [b.tenant])).rows[0]!.poll_err, null);
+    assert.ok(!f.logs.some(l => /actor-stop/.test(l)), f.logs.join("\n"));
+  });
+
+  await t.test("a transport exception on one bot backs off only that bot", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!];
+    let aPolls = 0;
+    f.transport.getUpdates = async (opts, offset) => {
+      if (opts.token === a.token) { aPolls++; throw new Error(`synthetic socket reset for ${a.token}`); }
+      return updates([f.msg(offset, "$B chart", 1)], offset + 1);
+    };
+    const { stop, done } = live(f);
+    try { await until("B replies", () => sent(f, b.botId) >= 3); }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(aPolls >= 1 && aPolls <= 2, `bot A was asked ${aPolls} times inside its back-off`);
+    assert.equal(f.logs.filter(l => l === `[recovery-replies] backoff tenant=${a.tenant.slice(0, 8)} reason=telegram-network wait=2s`).length, 1, f.logs.join("\n"));
+    assert.ok(!f.logs.some(l => /actor-stop/.test(l) || l.includes(`tenant=${b.tenant.slice(0, 8)} reason=telegram-network`)), f.logs.join("\n"));
+  });
+
+  await t.test("a statement timeout (57014) on one tenant's read retries that actor in place; the other never notices", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!];
+    let thrown = 0;
+    // The production trigger: `FOR SHARE NOWAIT` on one tenant's settings row
+    // cancelled by statement_timeout. It used to stop every bot.
+    f.hook(async (sql, values) => {
+      if (thrown || !/FROM tenant_settings WHERE tenant=\$1 FOR SHARE NOWAIT/.test(sql) || values?.[0] !== a.tenant) return;
+      thrown++;
+      throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+    });
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, opts.token === a.token ? "$A chart" : "$B chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    const { stop, done } = live(f);
+    try { await until("both reply after the retry", () => sent(f, a.botId) >= 1 && sent(f, b.botId) >= 3); }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.equal(thrown, 1);
+    assert.deepEqual(f.logs.filter(l => /backoff/.test(l)), [`[recovery-replies] backoff tenant=${a.tenant.slice(0, 8)} reason=db-transient wait=2s`]);
+    assert.ok(!f.logs.some(l => /actor-stop/.test(l)), f.logs.join("\n"));
+    assert.equal(f.logs.filter(l => /actor-start/.test(l)).length, 2, "retried in place, not re-admitted");
+  });
+
+  await t.test("a lost tenant lease stops only that actor; the supervisor re-acquires it after back-off and re-admits it", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], tagA = a.tenant.slice(0, 8);
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, opts.token === a.token ? "$A chart" : "$B chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    const { stop, done } = live(f);
+    let bAtLoss = 0, aAtLoss = 0;
+    try {
+      await until("both replying", () => sent(f, a.botId) >= 1 && sent(f, b.botId) >= 1);
+      f.health.lost.add(f.health.current.get(a.tenant)!);
+      await until("A stopped", () => f.logs.includes(`[recovery-replies] [alert] actor-stop tenant=${tagA} reason=lease-lost retry=5s`));
+      bAtLoss = sent(f, b.botId); aAtLoss = sent(f, a.botId);
+      await until("A re-admitted", () => f.logs.filter(l => l === `[recovery-replies] actor-start tenant=${tagA}`).length === 2);
+      assert.ok(sent(f, b.botId) >= bAtLoss + 3, "B kept replying while A waited");
+      await until("A replying again", () => sent(f, a.botId) > aAtLoss);
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.equal(f.health.acquired.filter(x => x === a.tenant).length, 2, "A's tenant lease was released and re-acquired");
+    assert.equal(f.health.acquired.filter(x => x === b.tenant).length, 1);
+    assert.deepEqual(f.logs.filter(l => /actor-stop/.test(l)), [`[recovery-replies] [alert] actor-stop tenant=${tagA} reason=lease-lost retry=5s`]);
+  });
+
+  await t.test("a changed root proof still refuses the whole fleet and releases every lease", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect();
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, "$X chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    const { stop, done } = live(f);
+    try {
+      await until("both replying", () => sent(f, a.botId) >= 1 && sent(f, b.botId) >= 1);
+      writeFileSync(f.halt, "operator halt changed\n");
+      const result = await done;
+      assert.equal(result.ok, false); assert.ok(!result.ok && result.error instanceof RecoveryReplyFleetRefusal && result.error.reason === "root-proof");
+    }
+    finally { stop.abort(); await done; }
+    assert.ok(!f.logs.some(l => /actor-stop/.test(l)), "a fleet refusal is one line from the entry, not one per actor");
+    assert.equal(await lockFree(probe, a.tenant), true); assert.equal(await lockFree(probe, b.tenant), true);
+  });
+
+  await t.test("409s on fewer than three bots stay per bot; three distinct bots in conflict refuse the fleet", async s => {
+    const conflict = { ...updates(), reason: "Conflict: terminated by other getUpdates request", errorCode: 409 };
+    const two = await fixture(s, 3);
+    two.transport.getUpdates = async opts => opts.token === two.actors[2]!.token ? updates([two.msg(1, "$C chart", 2)], 2) : conflict;
+    assert.equal(await two.run(), "one-pass");
+    assert.equal(two.sends.length, 1); assert.equal(two.sends[0]!.botId, two.actors[2]!.botId);
+    assert.equal(two.logs.filter(l => /telegram-409/.test(l)).length, 2);
+    const three = await fixture(s, 3);
+    three.transport.getUpdates = async () => conflict;
+    await assert.rejects(three.run(), (e: unknown) => e instanceof RecoveryReplyFleetRefusal && e.reason === "telegram-409-fleet");
+    assert.equal(three.sends.length, 0);
+  });
+
+  await t.test("SIGTERM is a clean stop: the entry resolves \"stopped\" and releases every lease", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect();
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, "$X chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    const before = process.listeners("SIGTERM").length;
+    const done = f.run({ onePass: undefined, supervisorEveryMs: 50 });
+    try {
+      await until("both replying", () => sent(f, a.botId) >= 1 && sent(f, b.botId) >= 1);
+      const listeners = process.listeners("SIGTERM");
+      assert.equal(listeners.length, before + 1);
+      // The entry's own handler, exactly as a SIGTERM would call it (no signal
+      // is sent to the test process, and no other listener is invoked).
+      (listeners.at(-1) as () => void)();
+      assert.equal(await done, "stopped");
+    }
+    finally { const fallback = process.listeners("SIGTERM").at(-1); if (process.listeners("SIGTERM").length > before) (fallback as () => void)(); await done.catch(() => {}); }
+    assert.equal(process.listeners("SIGTERM").length, before);
+    assert.ok(!f.logs.some(l => /actor-stop/.test(l)), f.logs.join("\n"));
+    assert.equal(await lockFree(probe, a.tenant), true); assert.equal(await lockFree(probe, b.tenant), true);
   });
 });
