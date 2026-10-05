@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { wrapSqlite } from "../../../worker/src/db";
+import { FLEET_RECOVERY_SCHEMA } from "../../../worker/src/fleet-recovery";
 import { readLeaderboard } from "./read-leaderboard";
 import { INCIDENT_WINDOW, RECENT_BEAT_SEC, isRetired, notRunning, type AgentLifecycle } from "./retired-agent";
 
@@ -145,7 +146,7 @@ describe("the recovery hold is not retirement", () => {
 });
 
 describe("the board folds retired agents into a count", () => {
-  async function board(extraSql = "", opts: { lifecycle?: boolean } = {}) {
+  async function board(extraSql = "", opts: { lifecycle?: boolean; now?: number } = {}) {
     const raw = new DatabaseSync(":memory:");
     const db = wrapSqlite(raw);
     const lifecycle = opts.lifecycle !== false;
@@ -162,7 +163,7 @@ describe("the board folds retired agents into a count", () => {
       { tenant: "0x5" as const, slug: "eeeeeeeeeeeeeeee", accounts: ["0xe1"] as `0x${string}`[], createdAt: 1, updatedAt: 1 },
     ];
     try {
-      return await readLeaderboard((fn) => fn(db), identities, () => NOW, async () => null);
+      return await readLeaderboard((fn) => fn(db), identities, () => opts.now ?? NOW, async () => null);
     } finally {
       raw.close();
     }
@@ -203,6 +204,69 @@ describe("the board folds retired agents into a count", () => {
     const r = await readLeaderboard((fn) => fn(null), async () => [], () => NOW);
     assert.equal(r.source, "none");
     assert.equal(r.retired, null);
+  });
+
+  describe("during the recovery hold", () => {
+    const HELD_NOW = INCIDENT_WINDOW.untilSec + 3 * DAY;
+    const LAST_BEAT = INCIDENT_WINDOW.fromSec + DAY + 3 * HOUR;
+    const LAPSED_AT = INCIDENT_WINDOW.untilSec;
+    const BEFORE = INCIDENT_WINDOW.fromSec - 10 * DAY;
+    const fleet = (beat: (sec: number) => number, holds = true) => `
+      INSERT INTO agents VALUES
+        ('0xa1','SirSendIt',NULL,0,1,'idle',9,1,'armed',${beat(LAST_BEAT)},${HELD_NOW + 30 * DAY}),
+        ('0xb1','Lapsed',NULL,0,1,'live',8,1,'armed',${beat(LAST_BEAT)},${LAPSED_AT}),
+        ('0xc1','Killed',NULL,0,1,'live',7,1,'killed',${beat(LAST_BEAT)},${HELD_NOW + 30 * DAY}),
+        ('0xd1','Reported',NULL,0,1,'idle',6,1,'armed',${beat(BEFORE)},${HELD_NOW + 30 * DAY}),
+        ('0xe1','Gone',NULL,0,1,'idle',5,1,'armed',${beat(BEFORE)},${HELD_NOW + 30 * DAY}),
+        ('0xr1','Robin',NULL,0,1,'idle',4,1,'armed',${beat(LAST_BEAT)},${HELD_NOW + 30 * DAY});
+      ${holds ? `${FLEET_RECOVERY_SCHEMA}
+      INSERT INTO fleet_recovery_health VALUES
+        ('0x3','0xc1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
+        ('0x4','0xd1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
+        ('0x9','0xe1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
+        ('0x5','0xe1',4663,0,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
+        ('0x0','0xr1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT});` : ""}`;
+    const seconds = (sec: number) => sec;
+
+    it("an idle named agent and one whose key lapsed stay listed as not running; killed is folded", async () => {
+      const r = await board(fleet(seconds), { now: HELD_NOW });
+      // SirSendIt and Lapsed on their own last beats inside the incident
+      // window; Reported on its own hold row, though it went quiet earlier.
+      assert.deepEqual(r.agents.map((a) => a.name).sort(), ["Lapsed", "Reported", "SirSendIt"]);
+      for (const a of r.agents) assert.equal(a.notRunning, true, a.name);
+      // Killed whatever its hold row says; Gone went quiet before the incident
+      // and only ANOTHER tenant's row, or a cleared one, names its account;
+      // Robin has no public id, held or not. The count stays exact.
+      assert.equal(r.retired, 3, "Killed, Gone and Robin");
+    });
+
+    it("the public payload says neither expired nor re-sign, and carries no expiry", async () => {
+      const r = await board(fleet(seconds), { now: HELD_NOW });
+      const wire = JSON.stringify(r);
+      assert.doesNotMatch(wire, /expire|re-?sign|renew/i);
+      assert.ok(!wire.includes(String(LAPSED_AT)), "the lapsed key's expiry is not published");
+    });
+
+    it("a heartbeat in milliseconds gives the same board as one in seconds", async () => {
+      const s = await board(fleet(seconds), { now: HELD_NOW });
+      const ms = await board(fleet((sec) => sec * 1000), { now: HELD_NOW });
+      const shape = (r: typeof s) => ({ retired: r.retired, rows: r.agents.map((a) => [a.name, a.notRunning]).sort() });
+      assert.deepEqual(shape(ms), shape(s));
+      assert.equal(s.agents.length, 3);
+    });
+
+    it("a ledger with no recovery table is no hold, and each account's own beat still speaks", async () => {
+      const r = await board(fleet(seconds, false), { now: HELD_NOW });
+      assert.deepEqual(r.agents.map((a) => a.name).sort(), ["Lapsed", "SirSendIt"]);
+      assert.equal(r.retired, 4, "Killed, Reported, Gone and Robin");
+    });
+
+    it("outside the hold nothing changes: rows still beating carry no label", async () => {
+      const r = await board(`INSERT INTO agents VALUES
+        ('0xa1','Amber Heron',NULL,0,1,'paper',9,1,'armed',${NOW - 60},${NOW + DAY}),
+        ('0xd1','Waiting',NULL,0,1,'idle',6,1,'armed',${NOW - 60},${NOW + DAY});`);
+      assert.deepEqual(r.agents.map((a) => [a.name, a.notRunning]).sort(), [["Amber Heron", false], ["Waiting", false]]);
+    });
   });
 });
 
