@@ -32,9 +32,87 @@ financial resumption.
   authenticated forget requests remain available.
 
 The entry holds the existing tenant leases for the complete current roster
-and an additional mutex per bot stream. Root, grant, settings, link, roster or
-lease changes stop the service. Individual provider refusals are quarantined
-without inventing authorization for the affected bot.
+and an additional mutex per bot stream. Individual provider refusals are
+quarantined without inventing authorization for the affected bot.
+
+## One tenant's problem stops one tenant
+
+On 2026-10-05 the listener exited ten times in a working day and Railway then
+marked it crashed. Every actor compared the whole roster before every
+operation, so any tenant signing a grant stopped every bot; one statement
+timeout on one tenant's settings read, one bot's 409, one lost lease or one
+error in one actor did the same. The entry is now a supervisor with one actor
+per serving tenant:
+
+- **The supervisor** re-reads the roster every 30 seconds, row by row. It
+  holds the tenant lease of every roster tenant whose tenant column is an
+  address, malformed grant or not (the fence), and admits an actor for each
+  tenant whose stored public scope is available: tenant lease, bot stream
+  lease, then a fresh snapshot. It stops the actor of a tenant that left the
+  roster (and then releases its leases) or whose own row changed, and
+  re-admits it on a later pass when it is still eligible. A malformed row,
+  or two rows claiming one smart account, is skipped with a redacted
+  `[alert]`; that tenant stays fenced and is never served on a guess.
+- **Each actor** re-proves only its own scope before every step: the fleet
+  root proof, its own tenant lease and bot lease, its own grant row against
+  the receipt it was admitted with, then its settings, claim, link, held
+  status and room approvals. Another tenant's write never reaches it; its own
+  change stops only it (`roster-changed`, `snapshot-invalid`).
+- **Admission window.** A tenant whose grant row first appears while the
+  listener runs is fenced on the next pass: for up to 30 seconds plus its
+  lease acquisition that brand-new tenant is not leased by this process. The
+  rollout prerequisite below (no ordinary orchestrator or worker deployment
+  running beside this one) is what covers that window, as it always has.
+- **Telegram.** A 409 marks that bot (`tenant_telegram.poll_err` as
+  `conflict: …`, the format the dashboard already reads, with
+  `poll_ok_at` cleared) and backs it off 60 seconds doubling to 10 minutes.
+  Any other failed or thrown transport call backs that bot off 2 seconds
+  doubling to 60 seconds, or Telegram's `retry_after`. 401/404 and a wrong bot
+  identity keep the existing quarantine, which now lasts until the stored
+  scope changes (a new token or claim) or the process restarts.
+- **Database weather.** A statement timeout (57014), `NOWAIT` meeting the web's
+  write to the same row (55P03), a dropped connection or a pool timeout
+  retries that actor in place after 2 seconds doubling to 60 seconds; it keeps
+  its leases and re-proves its whole scope. Statement timeouts are 2.5 seconds
+  on the server and 3 seconds on the client (they were 1 and 1.5 seconds);
+  transaction deadlines (8 seconds), the thirty-second reply deadline and the
+  500ms lock timeout are unchanged.
+- **Lost leases.** One tenant lease session carries one eighth of the fleet;
+  when it drops, only those actors stop (`lease-lost`). The supervisor
+  releases and re-acquires each lease after 5 seconds doubling to 5 minutes.
+  A lost bot stream session stops the actors on it and is replaced once they
+  have ended.
+
+**Fleet-wide refusal** (exit 1, so Railway's restart policy applies) remains
+only for conditions about the whole process: the root proof (`FLEET_HALT`, the
+mount, the frozen environment), an invalid encryption key, a roster that
+cannot be read at startup or has more than 256 rows, three distinct bots
+answering 409 within two minutes (the signature of an ordinary poller fleet
+beside this one; fewer than three serving bots cannot trip it, and each 409
+stays an `[alert]` for its bot), and a fault in the supervisor itself.
+SIGTERM is a clean stop: the entry releases every lease, prints
+`[recovery-replies] stopped on signal; leases released. …` and exits 0.
+
+**Logs.** Every actor start, stop and back-off, each admission wait and each
+fatal refusal is one line with a fixed reason code and at most an
+eight-character tenant prefix (`tenant=0x1a2b3c`); a counts-only `stats` line
+follows the first pass and then every five minutes. No line carries a token,
+owner or chat id, address, message or provider text. The codes:
+
+| Line | Reasons |
+|---|---|
+| `actor-stop` | `roster-changed`, `roster-removed`, `snapshot-invalid`, `lease-lost`, `telegram-refused`, `db-transient`, `actor-error` |
+| `admit-wait` | `lease-busy`, `bot-busy`, `lease-lost`, `snapshot-invalid`, `db-transient` |
+| `backoff` | `telegram-409`, `telegram-network`, `db-transient`, `deadline` |
+| `refused reason=` (last line, exit 1) | `root-proof`, `dek-invalid`, `roster-unreadable`, `roster-cap`, `telegram-409-fleet`, `supervisor-error`, `startup` |
+
+**Restart policy.** `railway.json` keeps `ON_FAILURE` and allows 100 restarts
+(it was 10, Railway's default). Railway applies config-as-code over the
+dashboard setting, so the cap is changed there. The file is shared by every
+service built from this repository (web, orchestrator, browser and brain), so
+the higher cap applies to each; a persistent refusal still ends as a crashed
+deploy, with one reason line per attempt. Railway allows more than 10 restarts
+only on paid plans.
 
 ## Controlled rollout
 
@@ -96,7 +174,11 @@ even when response capacity is exhausted. The journal retains scoped Telegram
 identifiers and erasure cutoffs for future retained-home reconciliation.
 Future personal/group restores and publication honor those receipts. Existing
 local memory that cannot prove the erasure stays held. An unavailable current
-privacy proof cannot mean that no forget request exists.
+privacy proof cannot mean that no forget request exists. A forget whose
+erasure cannot commit (for example corrupt retained memory) stops only that
+tenant's actor (`actor-error`, re-admitted after 1 minute doubling to 10): its
+update stays unacknowledged and is met again on each retry, never acknowledged
+without the durable erasure. Other bots keep answering meanwhile.
 
 For rollback, stop the reply deployment and verify its removal, then use the
 approved **report-only** entry with all original holds intact. Preserve the
@@ -120,4 +202,10 @@ npm run build
 
 The PostgreSQL entry test is skipped when the opt-in URL is absent. Record
 actual opted-in results separately from ordinary CI; inspecting a test is
-not evidence that it ran.
+not evidence that it ran. Its isolation block runs the entry continuously
+with a 50ms supervisor period: another tenant's grant write, a new roster
+tenant, a 409 or a transport exception on one bot, a 57014 on one tenant, a
+lost tenant lease, a changed root proof, three conflicted bots and SIGTERM.
+`worker/src/recovery-reply-isolation.test.ts` covers the reason codes,
+back-off schedules, the 409 alarm, the exit line and the row-by-row roster
+without a database, and runs in ordinary CI.

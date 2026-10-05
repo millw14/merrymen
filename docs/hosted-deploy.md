@@ -93,6 +93,13 @@ a browser inside the worker would be a browser per tenant.
 > image and comes up running the DASHBOARD. The symptom is a browser service
 > whose logs say `next start`. With no path in `railway.json` the builder
 > defaults to `./Dockerfile`, which is what web and the orchestrator want.
+>
+> Its restart policy is shared the same way: `ON_FAILURE` with up to 100
+> restarts, for web, orchestrator, browser and brain alike. Config-as-code
+> overrides the dashboard's restart setting, so change it in the file, not the
+> service. It was 10 until the reply listener (which now exits non-zero only
+> on a fleet-wide refusal) exhausted it in a day; see
+> docs/recovery-replies.md. Railway allows more than 10 only on paid plans.
 
 **Give it no public domain.** It is a URL-fetching machine; exposed, it is an
 open proxy anyone could point at `*.railway.internal`. It binds the private

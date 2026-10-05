@@ -1182,14 +1182,14 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         const running = [...seats.values()].flatMap(seat => seat.actor ? [seat.actor.done] : []);
         await Promise.allSettled(running.map(done => bounded(() => done, 15_000)));
         await Promise.allSettled([...releasing]);
-        for (const seat of [...seats.values()])
-            await releaseSeat(seat);
+        // In parallel, each bounded: a fleet of seats on an unreachable database
+        // must still finish well inside the platform's draining time (and
+        // ending the sessions below releases every lock on them regardless).
+        await Promise.allSettled([...seats.values()].map(releaseSeat));
         if (botLeases)
             await bounded(() => botLeases!.set.close(), 1500).catch(() => {
             });
-        for (const client of ownedClients)
-            await bounded(() => client.end(), 1500).catch(() => {
-            });
+        await Promise.allSettled([...ownedClients].map(client => bounded(() => client.end(), 1500)));
         if (pool && !options.pool)
             await bounded(() => pool!.end(), 1500).catch(() => {
             });
