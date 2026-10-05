@@ -168,12 +168,32 @@ describe("the hooks", () => {
     });
     await runFleetDrain(run.plan);
     assert.ok(said.some((l) => /drain hook throws failed — hook broke/.test(l)));
-    assert.ok(said.some((l) => /drain hooks still running/.test(l)));
+    assert.ok(said.some((l) => /drain hook\(s\) hangs still running/.test(l)), "the one still running is named");
     assert.ok(run.timeline.includes("SIGTERM"));
     const receipt = run.receipts[0]!;
     assert.equal(receipt.hooksFailed, 1);
+    assert.equal(receipt.hooksUnfinished, 1);
     assert.equal(receipt.steps[0]!.outcome, "timeout");
     assert.equal(receipt.clean, false);
+  });
+
+  it("A HOOK THAT HANGS NEVER KEEPS ANOTHER FROM RUNNING: they start together, not in turn", async () => {
+    const said: string[] = [];
+    let secondRan = false;
+    const run = drainPlan({
+      log: (line) => said.push(line),
+      beforeChildren: [
+        // First in line, and never done: run in turn, it would spend the
+        // whole allowance and the sidecar's stop would never start.
+        { name: "fomo", run: () => new Promise<void>(() => {}) },
+        { name: "sidecar", run: async () => { await sleep(5); secondRan = true; } },
+      ],
+    });
+    await runFleetDrain(run.plan);
+    assert.equal(secondRan, true);
+    assert.ok(said.some((l) => /drain hook\(s\) fomo still running/.test(l)));
+    assert.ok(!said.some((l) => /sidecar still running/.test(l)));
+    assert.equal(run.receipts[0]!.hooksUnfinished, 1);
   });
 });
 
@@ -317,7 +337,7 @@ describe("the budget", () => {
 function receiptLike(over: Partial<ShutdownReceipt>): ShutdownReceipt {
   return {
     version: 1, signal: "SIGTERM", outcome: "drained", clean: true, startedAt: 1_760_000_000_000, finishedAt: 1_760_000_012_000,
-    budgetMs: 50_000, stalledAt: null, steps: [], hooksFailed: 0, stragglers: 0,
+    budgetMs: 50_000, stalledAt: null, steps: [], hooksFailed: 0, hooksUnfinished: 0, stragglers: 0,
     finalPass: { homes: 0, saved: 0, retained: 0, skipped: 0, outOfTime: 0 }, inFlightAtRelease: false, ...over,
   };
 }

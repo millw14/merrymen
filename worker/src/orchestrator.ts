@@ -4302,9 +4302,10 @@ export async function honourPendingKills(): Promise<void> {
  * THE beforeChildren HOOKS: what the drain runs once `stopping` is set and
  * before any child is signalled (fleet-drain.ts, step 2). For work beside the
  * children that has to stop before they do — a pass still feeding them, or a
- * sidecar answering the bots they are about to hand back. Each runs once, in
- * the order added; one that throws is said and the drain goes on without it;
- * together they have DRAIN_LIMITS.hooksMs.
+ * sidecar answering the bots they are about to hand back. Each runs once, all
+ * of them started together, so a hook that hangs never keeps another from
+ * running; one that throws is said and the drain goes on without it; together
+ * they have DRAIN_LIMITS.hooksMs.
  */
 const drainBeforeChildren: DrainHook[] = [];
 export function onDrainBeforeChildren(name: string, run: DrainHook["run"]): void {
