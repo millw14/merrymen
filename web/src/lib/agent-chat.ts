@@ -9,6 +9,7 @@ import { resolveConfig } from "../../../worker/src/settings";
 import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
 import { describeLlmFailure, type LlmFailureKind } from "../../../worker/src/llm-failure";
 import { redactSecrets } from "../../../worker/src/telegram/agent";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 
 /**
  * THIS PROMPT ONCE TOLD THE MODEL THERE WAS NO PAPER/LIVE SWITCH.
@@ -157,6 +158,14 @@ export interface AgentChatOptions {
   surface?: "dashboard" | "partner";
   /** Read-only server facts, already formatted without a model or command marker. */
   factualReply?: string;
+  /**
+   * What `factualReply` reads: the owner's own saved records (the default), or
+   * third-party research (a Fomo lookup). Under a recovery hold the two are
+   * qualified differently — research was never a reading of the book.
+   */
+  factualSource?: "ledger" | "research";
+  /** Authenticated server report; client recovery metadata cannot establish a hold. */
+  recovery?: FleetRecoveryView | null;
   credentials?: () => LlmCreds | null;
   complete?: typeof llmText;
   /** The streamed completion, for agentReplyResponse. A test seam, like `complete`. */
@@ -208,6 +217,13 @@ THIS TURN IS FOMO RESEARCH. The server looked their question up with registered 
 `;
 
 /**
+ * A research answer to an owner whose trading is held for recovery: the hold,
+ * and that what follows is somebody else's market data, not a reading of the
+ * book the hold is about.
+ */
+const RESEARCH_DURING_RECOVERY = "My trading is paused for recovery. This is third-party research, not a reading of my portfolio.";
+
+/**
  * THE STATE A FOMO TURN SEES: a whitelist, not the browser's blob.
  *
  * On a research turn the model answers from the server's evidence block, and
@@ -216,8 +232,12 @@ THIS TURN IS FOMO RESEARCH. The server looked their question up with registered 
  * So only identity and mode reach the prompt, plus the symbols held (short
  * identifiers that cannot carry prose), enough to stay in character and to
  * say "you already hold it". Anything that will not parse is no state.
+ *
+ * UNDER A RECOVERY HOLD the browser's modes and holdings are last-recorded,
+ * not current (stateForPrompt), so they are left out and the hold is said
+ * instead; the RECOVERY block beside it is the authoritative account.
  */
-function fomoTurnState(raw: unknown): string {
+function fomoTurnState(raw: unknown, recovery: FleetRecoveryView | null): string {
   if (typeof raw !== "string" || !raw) return "";
   let o: unknown;
   try {
@@ -235,6 +255,14 @@ function fomoTurnState(raw: unknown): string {
         .filter((x): x is string => typeof x === "string" && /^[A-Za-z0-9.$_-]{1,20}$/.test(x))
         .slice(0, 30)
     : null;
+  if (recovery) {
+    return JSON.stringify({
+      name: text(s.name, 64),
+      strategy: text(s.strategy, 64),
+      workerStatus: "Trading paused for recovery",
+      note: "On a Fomo research turn during recovery only these fields of your state are shown; holdings and modes await reconciliation.",
+    });
+  }
   return JSON.stringify({
     name: text(s.name, 64),
     strategy: text(s.strategy, 64),
@@ -270,12 +298,17 @@ function finishFomoReply(raw: string, fomo: NonNullable<AgentChatOptions["fomo"]
   return { reply: out };
 }
 
-/** The Fomo option, when this surface takes one and it is usable. */
-function fomoOf(options: AgentChatOptions): NonNullable<AgentChatOptions["fomo"]> | null {
+/**
+ * The Fomo option, when this surface takes one and it is usable. Under a
+ * recovery hold its deterministic answer opens with the hold, so every way the
+ * turn can end without the model (no brain, a failed or empty completion) says
+ * it; the model itself is told by RECOVERY_SYSTEM.
+ */
+function fomoOf(options: AgentChatOptions, recovery: FleetRecoveryView | null): NonNullable<AgentChatOptions["fomo"]> | null {
   const f = options.fomo;
   if (options.surface === "partner" || !f) return null;
   if (typeof f.evidence !== "string" || typeof f.rules !== "string" || typeof f.fallback !== "string" || !f.fallback.trim()) return null;
-  return f;
+  return recovery ? { ...f, fallback: `${RESEARCH_DURING_RECOVERY}\n\n${f.fallback}` } : f;
 }
 
 /**
@@ -340,6 +373,48 @@ type Prepared =
       fomo: NonNullable<AgentChatOptions["fomo"]> | null;
     };
 
+const RECOVERY_SYSTEM = `
+
+AUTHENTICATED RECOVERY OVERRIDES THE ORDINARY RUNNING AND REMEDY RULES ABOVE:
+- The server's RECOVERY block is the reason trading is paused. Lead with recovery when asked why you are quiet, whether you are running, or whether you can trade. An old active worker label, liveTradingEnabled setting, expired permission, low/spent energy, or holder-only strategy cannot override it. Never say that funding, buying energy, re-signing or enabling Live trading clears recovery. Do not propose those as recovery remedies.
+- lastRecorded is historical display evidence awaiting reconciliation: qualify every balance, position, cost, return and setting from it as last recorded. It does not prove current cash, current holdings, executable funds, a complete portfolio or current trading authority. A missing record is unknown, never zero or evidence that funds/history were lost. Saved trades are partial history; no matching records does not establish that no trades ever happened.
+- history available means some saved history can be read, not that every record was recovered. Say memories are preserved or recovered only if RECOVERY explicitly says so; unknown means unverified. Last verified activity is historical, never proof that you are replying or trading now.
+- You may discuss saved history and research. Never claim trades, reviews, stop-losses or take-profits continue during recovery, or promise a resumption time. You may still propose open-withdraw or other read-only screens when the owner asks; opening Withdraw is not executing a withdrawal or clearing the hold. Do not claim funds are safe or gone from these records.`;
+
+/** Keep the report owner-safe even if an extra internal field rides beside it. */
+function recoveryForPrompt(recovery: FleetRecoveryView): FleetRecoveryView {
+  return { state: recovery.state, tradingPaused: true, history: recovery.history, memory: recovery.memory,
+    checkedAt: recovery.checkedAt, lastVerifiedHeartbeatAt: recovery.lastVerifiedHeartbeatAt };
+}
+
+/** The authenticated hold qualifies an old client snapshot before the model sees it. */
+function stateForPrompt(raw: unknown, recovery: FleetRecoveryView | null): string {
+  if (typeof raw !== "string") return "";
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return ""; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+  const { recovery: _clientRecovery, ...state } = parsed as Record<string, unknown>;
+  if (!recovery) return fitChatState(JSON.stringify(state));
+  const previous = state.lastRecorded && typeof state.lastRecorded === "object" && !Array.isArray(state.lastRecorded)
+    ? state.lastRecorded as Record<string, unknown> : state;
+  const recordedKeys = ["equity", "positions", "cashUsd", "vaultUsd", "paperTradingEnabled", "liveTradingEnabled",
+    "stopLossBps", "takeProfitBps"] as const;
+  const lastRecorded = Object.fromEntries(recordedKeys.map(key => [key, previous[key] ?? null]));
+  return fitChatState(JSON.stringify({ ...state, ...Object.fromEntries(recordedKeys.map(key => [key, null])),
+    workerStatus: "Trading paused for recovery", liveBlocker: null, stopped: true,
+    recovery: recoveryForPrompt(recovery), lastRecorded }));
+}
+
+function recoveryReply(recovery: FleetRecoveryView): string {
+  return `My trading is paused for recovery.${recovery.history === "available" ? " Some saved history is available." : " My saved history is still being checked."} Recorded balances and positions await reconciliation, so I can't confirm the current portfolio yet.`;
+}
+
+/** A narration failure must not send held clients back to their old book remedies. */
+function recoveryFallback(options: AgentChatOptions, signal?: AbortSignal): AgentReply | null {
+  return options.recovery?.tradingPaused === true && !signal?.aborted
+    ? { reply: recoveryReply(options.recovery) } : null;
+}
+
 /**
  * EVERYTHING UP TO THE MODEL CALL, shared by the answered and the streamed
  * reply so the two cannot drift: the same state fitting, the same definitions,
@@ -351,13 +426,22 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
   // FOMO EVIDENCE block may carry that name.
   const message = deFomo(typeof body.message === "string" ? body.message.slice(0, 2000).trim() : "");
   if (!message) return { early: { reply: null, why: "empty" } };
-  if (options.factualReply !== undefined) return { early: { reply: options.factualReply } };
-  const fomo = fomoOf(options);
+  const recovery = options.recovery?.tradingPaused === true ? options.recovery : null;
+  if (options.factualReply !== undefined) {
+    if (!recovery) return { early: { reply: options.factualReply } };
+    // Under the hold, said as what it is: a reading of the owner's saved
+    // records, or third-party research that never was one.
+    const qualifier = options.factualSource === "research"
+      ? RESEARCH_DURING_RECOVERY
+      : "My trading is paused for recovery. These saved records may be incomplete and do not confirm the current portfolio.";
+    return { early: { reply: `${qualifier}\n\n${options.factualReply}` } };
+  }
+  const fomo = fomoOf(options, recovery);
   // WHOLE ENTRIES, NEVER A PREFIX. A blind slice cut mid-object and handed the
   // model malformed JSON with no marker, which it answered from anyway. See
   // lib/chat-state.ts for the trace. On a Fomo research turn, only the
   // whitelisted identity fields (fomoTurnState): the evidence is the server's.
-  const state = deFomo(fomo ? fomoTurnState(body.state) : fitChatState(body.state));
+  const state = deFomo(fomo ? fomoTurnState(body.state, recovery) : stateForPrompt(body.state, recovery));
   const history = Array.isArray(body.history)
     ? body.history
         .filter((h): h is { role: string; content: string } => !!h && typeof (h as { content?: unknown }).content === "string")
@@ -368,9 +452,11 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
 
   const creds = (options.credentials ?? (() => resolveLlm(resolveConfig())))();
   if (!creds) {
-    // No brain configured — the client falls back to its own ledger answers.
-    // A Fomo turn already has its answer, written by code from the lookups.
+    // A Fomo turn already has its answer, written by code from the lookups
+    // (and qualified by the hold in fomoOf when there is one).
     if (fomo) return { early: { reply: fomo.fallback } };
+    if (recovery) return { early: { reply: recoveryReply(recovery) } };
+    // No brain configured — the client falls back to its own ledger answers.
     return { early: { reply: null, why: "no-llm" } };
   }
 
@@ -409,7 +495,7 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
   // speaks inside another app whose screens it cannot name, and its prompt
   // already says an unavailable fact is unavailable.
   const energy =
-    options.surface !== "partner" && options.energy
+    !recovery && options.surface !== "partner" && options.energy
       ? `ENERGY (your worker's own report — authoritative):\n${deCmd(JSON.stringify(energyForPrompt(options.energy)))}`
       : "";
 
@@ -419,6 +505,7 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
   const fomoBlock = fomo ? deCmd(fomo.evidence.slice(0, FOMO_EVIDENCE_MAX)) : "";
 
   const prompt = [
+    recovery ? `RECOVERY (authenticated server report — authoritative):\n${JSON.stringify(recoveryForPrompt(recovery))}` : "",
     state ? `STATE:\n${deCmd(state)}` : "",
     concepts ? `MERRYMEN — the house's own words for these things:\n${concepts}` : "",
     energy,
@@ -439,6 +526,7 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
 
   const request = { system: SYSTEM + COMMANDS, prompt, maxTokens: concepts ? 700 : 400 };
   if (options.surface === "partner") request.system = PARTNER_SYSTEM + PARTNER_COMMANDS;
+  if (recovery) request.system += RECOVERY_SYSTEM;
   if (fomo) {
     // Appended, like COMMANDS: the narration rules above stay as they were.
     request.system = `${request.system}${FOMO_TURN}\n${deCmd(fomo.rules.slice(0, FOMO_RULES_MAX))}`;
@@ -454,15 +542,21 @@ function finishReply(raw: string): AgentReply {
   return { reply: reply || null, ...(command ? { command } : {}) };
 }
 
-export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}): Promise<AgentReply> {
-  const prepared = prepareAgentReply(body, options);
-  if ("early" in prepared) return prepared.early;
+export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}, signal?: AbortSignal): Promise<AgentReply> {
+  let prepared: Prepared | undefined;
   try {
+    prepared = prepareAgentReply(body, options);
+    if ("early" in prepared) return prepared.early;
     const raw = (await (options.complete ?? llmText)(prepared.creds, prepared.request)).trim();
-    return prepared.fomo ? finishFomoReply(raw, prepared.fomo) : finishReply(raw);
+    if (prepared.fomo) return finishFomoReply(raw, prepared.fomo);
+    const result = finishReply(raw);
+    return result.reply ? result : recoveryFallback(options, signal) ?? result;
   } catch (e) {
     // A Fomo turn already has an honest answer written by code; a failed model does not take it away.
-    if (prepared.fomo) return { reply: prepared.fomo.fallback };
+    if (prepared && "fomo" in prepared && prepared.fomo) return { reply: prepared.fomo.fallback };
+    const fallback = recoveryFallback(options, signal);
+    if (fallback) return fallback;
+    if (!prepared || "early" in prepared) throw e;
     return failedReply(e, options, prepared.creds);
   }
 }
@@ -559,9 +653,9 @@ const json = (body: unknown, status: number) =>
  * empty message and a missing brain are known before anything is sent, and the
  * browser reads the content type before it reads the body.
  *
- * A failure after the stream opened is an `error` event with the provider's
- * own (already redacted) words, never a short reply: the owner may have watched
- * half a sentence arrive, and the half is not the answer.
+ * A recovery-held narration failure finishes with the qualified recovery
+ * answer, replacing any partial words. Other failures remain `error` events;
+ * a cancelled request never gets a recovery completion.
  */
 export async function agentReplyResponse(
   body: AgentChatBody,
@@ -569,14 +663,21 @@ export async function agentReplyResponse(
   options: AgentChatOptions = {},
 ): Promise<Response> {
   if (!how.stream) {
-    const result = await generateAgentReply(body, options);
+    const result = await generateAgentReply(body, options, how.signal);
     return json(result, result.why === "empty" ? 400 : 200);
   }
-  const prepared = prepareAgentReply(body, options);
+  let prepared: Prepared;
+  try { prepared = prepareAgentReply(body, options); }
+  catch (error) {
+    const fallback = recoveryFallback(options, how.signal);
+    if (fallback) return json(fallback, 200);
+    throw error;
+  }
   if ("early" in prepared) return json(prepared.early, prepared.early.why === "empty" ? 400 : 200);
   const { creds, request, fomo } = prepared;
   // The owner closing the chat stops the provider too — nobody is reading.
   const stop = new AbortController();
+  if (how.signal?.aborted) stop.abort();
   how.signal?.addEventListener("abort", () => stop.abort(), { once: true });
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -609,13 +710,15 @@ export async function agentReplyResponse(
           if (final.length > shown.length && final.startsWith(shown)) send(sseEvent("text", { t: final.slice(shown.length) }));
           send(sseEvent("done", done));
         } else {
-          send(sseEvent("done", finishReply(full.trim())));
+          const result = finishReply(full.trim());
+          send(sseEvent("done", result.reply ? result : recoveryFallback(options, stop.signal) ?? result));
         }
       } catch (e) {
-        if (fomo) {
-          // The deterministic answer replaces whatever half arrived: `done` is the only final reply.
-          send(sseEvent("done", { reply: fomo.fallback }));
-        } else {
+        const fallback = fomo ? { reply: fomo.fallback } : recoveryFallback(options, stop.signal);
+        // A Fomo turn's deterministic answer, or the hold's, replaces whatever
+        // half arrived: `done` is the only final reply.
+        if (fallback) send(sseEvent("done", fallback));
+        else {
           const { reply: _none, ...failed } = failedReply(e, options, creds);
           send(sseEvent("error", failed));
         }

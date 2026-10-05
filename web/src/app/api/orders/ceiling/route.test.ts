@@ -95,7 +95,7 @@ describe("the ceiling a chat order is held to", () => {
 /** The account each signed-in wallet trades through — what POST resolves the caller to. */
 const ACCOUNT = { [TENANT]: "0x00000000000000000000000000000000000000a1", [OTHER]: "0x00000000000000000000000000000000000000a2" } as const;
 const grantOf = (smartAccount: string) =>
-  ({ smartAccount, chainId: 4663, serialized: "not-a-permission-account", demoSessionPrivateKey: "" }) as unknown as StoredGrant;
+  ({ smartAccount, chainId: 4663, serialized: "not-a-permission-account", demoSessionPrivateKey: "0x" + "11".repeat(32) }) as unknown as StoredGrant;
 
 /** POST /api/orders, as the chat's card sends it. */
 async function place(tenant: `0x${string}` | null, usdgAmount: number) {

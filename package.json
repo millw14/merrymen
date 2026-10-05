@@ -47,6 +47,7 @@
     "build:sdk": "node sdk/build.mjs",
     "start:web": "cd web && next start -H 0.0.0.0 -p ${PORT:-3100}",
     "start:orchestrator": "node --import tsx worker/src/orchestrator.ts",
+    "start:recovery-replies": "node --import tsx worker/src/recovery-replies.ts",
     "prepare": "node cli/build.mjs",
     "prepublishOnly": "node cli/publish-guard.mjs",
     "pack:release": "node sdk/build.mjs && node cli/prepublish.mjs && node cli/pack-runtime.mjs",

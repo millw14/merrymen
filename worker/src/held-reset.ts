@@ -20,6 +20,9 @@
  *   longer consent must not be run by the worker a later restore hands the
  *   tenant to (the ferry delivers whatever is unclaimed), which would start
  *   over a book that had just been got back, on a request already turned down;
+ * - a source recovery hold or retained command cutoff refuses the request
+ *   before any claim. Those rows stay untouched, even when a later fresh
+ *   reset succeeds: supersession never rewrites a refused legacy intent;
  * - only a PRACTICE book: the owner's stored settings must not switch live
  *   trading on, and the ledger must say paper (the newest valuation is a paper
  *   one, and the agent did not last report the live rail). The ledger half is
@@ -46,6 +49,7 @@
  * whichever process did it.
  */
 import type { Db } from "./db";
+import { readFleetCommandBoundary, withFleetRecoveryLock } from "./fleet-recovery";
 import { PAPER_CHECKPOINT_SCHEMA, resetBlockedPaperBookIn } from "./paper-checkpoint";
 
 /** How recent a reset must be for a held tenant's book to be started over on it. */
@@ -115,6 +119,10 @@ export function settingsRefuseHeldReset(
 export function decideHeldReset(e: HeldResetEvidence): HeldResetDecision {
   if (!e.ask) return { reset: false, why: "no practice reset is waiting" };
   if (e.ask.claimed_at !== null && e.ask.claimed_at !== undefined) return { reset: false, why: "the reset was already claimed" };
+  if (!Number.isSafeInteger(e.now) || e.now <= 0 || !Number.isSafeInteger(e.ask.created_at)
+      || e.ask.created_at <= 0 || e.ask.created_at > e.now) {
+    return { reset: false, why: "the reset's time is unreadable or in the future" };
+  }
   const age = e.now - Number(e.ask.created_at);
   if (!Number.isFinite(age) || age > HELD_RESET_MAX_AGE_MS) {
     return { reset: false, why: "the reset was asked for more than seven days ago; the owner must ask again", stale: true };
@@ -214,14 +222,28 @@ class NotApplied extends Error {
   }
 }
 
+export interface HeldResetOptions {
+  now: number;
+  readSettings: () => Promise<{ paperTradingEnabled?: boolean; liveTradingEnabled?: boolean } | null>;
+  consentEnforced: boolean;
+  mayWrite: () => string | null;
+  /** Supervisor's durable home boundary. Synchronous; throws and non-booleans refuse. */
+  commandRefused?: (cmd: { kind: "paper-reset"; at: number }) => boolean;
+}
+
+// An overflow is unreadable consent, never permission to close a partial queue.
+const MAX_RESET_ASKS = 1024;
+
 /**
  * HONOUR THE NEWEST PRACTICE RESET FOR A HELD ACCOUNT, if every condition holds.
  *
  * `readSettings` is the owner's stored settings (null when none are stored; a
  * throw is unreadable). `mayWrite` is asked after every read and before any
  * write, and names why the write must not happen (the lease is gone), or
- * returns null. Reads that fail throw; the caller logs them and the next
- * attempt asks again.
+ * returns null. It is checked again within the transaction. `commandRefused`
+ * checks the selected request against the supervisor's durable home boundary,
+ * including just before claim and transaction completion. Reads that fail
+ * throw; the caller logs them and the next attempt asks again.
  *
  * A newest ask past the seven days is not honoured, and is closed, with every
  * older one, under the same `mayWrite` and with HELD_RESET_EXPIRED for an
@@ -231,16 +253,30 @@ class NotApplied extends Error {
 export async function applyHeldReset(
   shared: Db,
   account: string,
-  opts: {
-    now: number;
-    readSettings: () => Promise<{ paperTradingEnabled?: boolean; liveTradingEnabled?: boolean } | null>;
-    consentEnforced: boolean;
-    mayWrite: () => string | null;
-  },
+  opts: HeldResetOptions,
 ): Promise<HeldResetOutcome> {
+  // This is the sole account-lock acquisition. Callers must not wrap it in
+  // another withFleetRecoveryLock; PostgreSQL must keep one pinned session.
+  return withFleetRecoveryLock(shared, account, locked => applyHeldResetLocked(locked, account, opts));
+}
+
+async function applyHeldResetLocked(shared: Db, account: string, opts: HeldResetOptions): Promise<HeldResetOutcome> {
   const ask = await newestResetAsk(shared, account);
   // The common case, and it costs one indexed read: nothing was asked.
   if (!ask) return { applied: false, id: null, why: "no practice reset is waiting", transient: false };
+  // Optional legacy table is read before BEGIN: a caught missing-table error
+  // inside a PostgreSQL transaction would still leave that transaction aborted.
+  const boundary = await readFleetCommandBoundary(shared, account);
+  const commandRefused = (createdAt: number): boolean => {
+    if (!Number.isSafeInteger(createdAt) || createdAt <= 0 || createdAt > opts.now
+        || boundary === "held" || (boundary !== null && createdAt <= boundary)) return true;
+    if (!opts.commandRefused) return false;
+    try { return opts.commandRefused({ kind: "paper-reset", at: createdAt }) !== false; }
+    catch { return true; }
+  };
+  const recoveryRefused = (): HeldResetOutcome => ({ applied: false, id: ask.id,
+    why: "the practice reset is held by source recovery", transient: false });
+  if (commandRefused(ask.created_at)) return recoveryRefused();
   let settings: HeldResetEvidence["settings"];
   try {
     settings = await opts.readSettings();
@@ -264,17 +300,40 @@ export async function applyHeldReset(
   if (!decision.reset && !decision.stale) {
     return { applied: false, id: ask.id, why: decision.why, transient: decision.transient === true };
   }
+  const older = await shared.prepare(`SELECT id, created_at FROM agent_commands
+    WHERE agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND created_at <= ?
+      ${typeof boundary === "number" ? "AND created_at > ?" : ""}
+    ORDER BY created_at DESC, id DESC LIMIT ${MAX_RESET_ASKS + 1}`)
+    .all(account, ask.created_at, ...(typeof boundary === "number" ? [boundary] : [])) as Array<{ id: string; created_at: number | string }>;
+  if (older.length > MAX_RESET_ASKS) return { applied: false, id: ask.id,
+    why: "the practice reset queue is too large to check safely", transient: true };
+  // Preserve every pre-recovery intent, including when a fresh reset later
+  // succeeds. Refusal is not evidence that an old command was executed.
+  const closable = older.filter(r => !commandRefused(Number(r.created_at)));
   const refused = opts.mayWrite();
   if (refused) return { applied: false, id: ask.id, why: refused, transient: true };
+  if (commandRefused(ask.created_at)) return recoveryRefused();
   if (!decision.reset) {
-    const closed = await shared
-      .prepare(
-        `UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ?
-          WHERE agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND created_at < ?`,
-      )
-      .run(opts.now, opts.now, HELD_RESET_EXPIRED, account, opts.now - HELD_RESET_MAX_AGE_MS);
+    const closed = await shared.tx(async db => {
+      const refusal = opts.mayWrite();
+      if (refusal) throw new NotApplied(refusal, true);
+      if (commandRefused(ask.created_at)) throw new NotApplied("the practice reset is held by source recovery");
+      let count = 0;
+      for (const r of closable) {
+        if (Number(r.created_at) >= opts.now - HELD_RESET_MAX_AGE_MS || commandRefused(Number(r.created_at))) continue;
+        const result = await db.prepare(`UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ?
+          WHERE id = ? AND agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND created_at = ?`)
+          .run(opts.now, opts.now, HELD_RESET_EXPIRED, r.id, account, Number(r.created_at));
+        count += Number(result.changes);
+      }
+      const finalRefusal = opts.mayWrite();
+      if (finalRefusal) throw new NotApplied(finalRefusal, true);
+      if (commandRefused(ask.created_at)) throw new NotApplied("the practice reset is held by source recovery");
+      return count;
+    }).catch(error => { if (error instanceof NotApplied) return error; throw error; });
+    if (closed instanceof NotApplied) return { applied: false, id: ask.id, why: closed.message, transient: closed.transient };
     const why =
-      Number(closed.changes) > 0
+      closed > 0
         ? "the reset was asked for more than seven days ago, so it was closed unrun; the owner must ask again"
         : decision.why;
     return { applied: false, id: ask.id, why, transient: false };
@@ -282,21 +341,29 @@ export async function applyHeldReset(
   await shared.exec(PAPER_CHECKPOINT_SCHEMA);
   try {
     const epoch = await shared.tx(async (db) => {
-      // deliverCommand's claim, word for word: one caller wins it.
+      const refusal = opts.mayWrite();
+      if (refusal) throw new NotApplied(refusal, true);
+      if (commandRefused(ask.created_at)) throw new NotApplied("the practice reset is held by source recovery");
+      // The same conditional claim as delivery, also bound to the selected
+      // account/kind/time so a changed row cannot become a different consent.
       const claim = await db
-        .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
-        .run(opts.now, decision.id);
+        .prepare(`UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL
+          AND agent_id = ? AND kind = 'paper-reset' AND created_at = ?`)
+        .run(opts.now, decision.id, account, ask.created_at);
       if (Number(claim.changes) === 0) throw new NotApplied("another pass or replica claimed the reset");
       const reset = await resetBlockedPaperBookIn(db, account, decision.epoch);
       if (!reset.ok) throw new NotApplied(reset.why, reset.moved === true);
       await db.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(opts.now, HELD_RESET_DONE, decision.id);
-      await db
-        .prepare(
-          `UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ?
-            WHERE agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND id <> ? AND created_at <= ?`,
-        )
-        .run(opts.now, opts.now, HELD_RESET_SUPERSEDED, account, decision.id, ask.created_at);
+      for (const r of closable) {
+        if (r.id === decision.id || commandRefused(Number(r.created_at))) continue;
+        await db.prepare(`UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ?
+          WHERE id = ? AND agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND created_at = ?`)
+          .run(opts.now, opts.now, HELD_RESET_SUPERSEDED, r.id, account, Number(r.created_at));
+      }
       await db.prepare("INSERT INTO events (agent_id, level, message) VALUES (?, 'ok', ?)").run(account, heldResetEvent(decision.epoch));
+      const finalRefusal = opts.mayWrite();
+      if (finalRefusal) throw new NotApplied(finalRefusal, true);
+      if (commandRefused(ask.created_at)) throw new NotApplied("the practice reset is held by source recovery");
       return reset.epoch;
     });
     return { applied: true, id: decision.id, from: decision.epoch, epoch };

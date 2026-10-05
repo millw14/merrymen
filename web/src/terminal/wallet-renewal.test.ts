@@ -40,6 +40,8 @@ let restoredKeys: unknown[] = [];
 let previewOwner: (key: string, chainId: number) => Promise<{ smartAccount: string; owner: string }>;
 let stop: (expectedTenant?: string | null) => Promise<void>;
 let stopCalls = 0;
+let replacementStops: Array<{ tenant?: string | null; account: string; session?: string }> = [];
+let destructiveStops = 0;
 let revokeCalls = 0;
 let mintCalls = 0;
 let activeGrant = grant;
@@ -70,7 +72,12 @@ before(async () => {
       if (id === "@/lib/trencher-permission") return { TRENCHER_FACTORY: trencherFactory };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
       if (id === "@/lib/revoke-client") return { revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); } };
-      if (id === "@/lib/stop-agent") return { stopAgent: (expectedTenant?: string | null) => { stopCalls++; return stop(expectedTenant); } };
+      if (id === "@/lib/stop-agent") return {
+        deleteAgent: (expectedTenant?: string | null) => { stopCalls++; destructiveStops++; return stop(expectedTenant); },
+        stopAgentForReplacement: (tenant: string | null | undefined, account: string, session?: string) => {
+          stopCalls++; replacementStops.push({ tenant, account, session }); return stop(tenant);
+        },
+      };
       if (id === "@/lib/session") return {
         FAUCET_URL: "https://faucet.testnet.chain.robinhood.com",
         loadGrant: () => storedGrantAvailable ? activeGrant : null,
@@ -104,6 +111,8 @@ beforeEach(() => {
   mintCalls = 0;
   preflightCalls = 0;
   stopCalls = 0;
+  replacementStops = [];
+  destructiveStops = 0;
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 });
   previewOwner = async () => ({ smartAccount: address, owner: address });
   stop = async () => {};
@@ -626,6 +635,8 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.equal(revokeCalls, 1);
+    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.equal(destructiveStops, 0, "renewal never deletes the agent's memory");
     assert.equal(mintCalls, 0);
     await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
     assert.equal(mintCalls, 1);
@@ -642,6 +653,8 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.equal(mintCalls, 0);
+    assert.equal(replacementStops.length, 1);
+    assert.equal(destructiveStops, 0, "a failed renewal preserves agent memory too");
     assert.match(ui.container.textContent!, /receipt unconfirmed/);
     assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
     await ui.click("review and renew permission");
@@ -739,6 +752,8 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I understand restore first stops");
     await ui.click("Restore & arm 0x1111…1111");
     assert.deepEqual(revokeWallets.map(w => w.chainId), [46630]);
+    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.equal(destructiveStops, 0, "cross-network restore never uses destructive deletion");
     assert.equal(mintCalls, 0);
     assert.equal(input.matches(":disabled"), true);
     await act(async () => { source.resolve({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 12 }); });
@@ -922,6 +937,8 @@ describe("the funded wallet's re-sign control", () => {
     // Stop alone must remain usable and leave a renewal route after refresh.
     stop = async () => { exists = false; };
     await ui.click("Stop agent now");
+    assert.deepEqual(replacementStops, [{ tenant: owner.address, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.equal(destructiveStops, 0, "stopping permission never deletes agent memory");
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"));
     assert.equal(revokeCalls, 0);

@@ -120,6 +120,7 @@ import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
+import { recoveryCommandRefused } from "./recovery-command-barrier";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
 import { CoalescedRefresh } from "./coalesced-refresh";
@@ -6204,6 +6205,8 @@ async function main() {
         // for grants and settings. See command-files.ts.
         await runTickCommand(merrymenHome(), {
           now: Date.now,
+          mayRun: cmd => !!active && !recoveryCommandRefused(merrymenHome(),
+            { smartAccount: active.grant.smartAccount, chainId: active.grant.chainId }, cmd),
           // The unlink WAS the claim, so a command reaching here is ours and
           // will not be replayed — a lost probe is a button pressed again, a
           // replayed one is gas nobody asked to spend twice.

@@ -28,6 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { Worker } from "node:worker_threads";
+import ts from "typescript";
 import { writeFileAtomicSync } from "./atomic-write";
 import { BOOTSTRAP_FILE, readAnchor } from "./bootstrap-state";
 import { homePaths } from "./home";
@@ -52,7 +53,100 @@ function body(src: string, head: string): string {
   return src.slice(at, src.indexOf("\n}\n", at));
 }
 
-const IN_PLACE_WRITE = /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|openSync|copyFileSync)\s*\(/;
+const IN_PLACE_WRITE = /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|copyFileSync|copyFile)\s*\(/;
+/** Descriptor reads cannot truncate child files. No guessed or indirect flags qualify. */
+function assertReadOnlyDescriptorOpens(raw: string): void {
+  const filename = "/atomic-child-source.ts";
+  const tree = ts.createSourceFile(filename, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  // Resolve local bindings in memory: a same-named parameter/object must not
+  // masquerade as the actual node:fs imports. No dependencies are loaded.
+  const program = ts.createProgram([filename], { noLib: true, noResolve: true, types: [] }, {
+    getSourceFile: file => file === filename ? tree : undefined,
+    getDefaultLibFileName: () => "", writeFile() {}, getCurrentDirectory: () => "/",
+    getDirectories: () => [], fileExists: file => file === filename,
+    readFile: file => file === filename ? raw : undefined,
+    getCanonicalFileName: file => file, useCaseSensitiveFileNames: () => true, getNewLine: () => "\n",
+  });
+  assert.equal(program.getSyntacticDiagnostics(tree).length, 0, "descriptor source must parse without ambiguity");
+  const checker = program.getTypeChecker();
+  let openBinding: ts.Symbol | undefined, constantsBinding: ts.Symbol | undefined;
+  for (const statement of tree.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)
+        || !["node:fs", "fs"].includes(statement.moduleSpecifier.text)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    assert.ok(!statement.importClause?.name && bindings && ts.isNamedImports(bindings), "filesystem descriptors must use explicit named imports");
+    for (const item of bindings.elements) {
+      const imported = item.propertyName?.text ?? item.name.text;
+      if (imported !== "openSync" && imported !== "constants") continue;
+      assert.ok(!statement.importClause!.isTypeOnly && !item.isTypeOnly, "descriptor imports must be runtime value bindings");
+      assert.equal(item.name.text, imported, "descriptor imports must not be aliased");
+      const symbol = checker.getSymbolAtLocation(item.name);
+      assert.ok(symbol && symbol.declarations?.length === 1, "descriptor imports must have one unambiguous binding");
+      if (imported === "openSync") { assert.equal(openBinding, undefined); openBinding = symbol; }
+      else { assert.equal(constantsBinding, undefined); constantsBinding = symbol; }
+    }
+  }
+  const imported = (node: ts.Identifier, symbol: ts.Symbol | undefined) => symbol !== undefined && checker.getSymbolAtLocation(node) === symbol;
+  const allowed = new Set(["O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_DIRECTORY"]);
+  function flags(node: ts.Expression): string[] {
+    if (ts.isParenthesizedExpression(node)) return flags(node.expression);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.BarToken) return [...flags(node.left), ...flags(node.right)];
+    assert.ok(ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === "constants" && imported(node.expression, constantsBinding)
+      && allowed.has(node.name.text), "openSync flags must contain only explicit nonwriting node:fs constants");
+    return [node.name.text];
+  }
+  function importTarget(node: ts.Node): boolean {
+    if (ts.isIdentifier(node)) return imported(node, openBinding) || imported(node, constantsBinding);
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) || ts.isParenthesizedExpression(node))
+      return importTarget(node.expression);
+    return ts.forEachChild(node, child => importTarget(child) || undefined) === true;
+  }
+  function visit(node: ts.Node): void {
+    // The former blanket regex also caught openSync inside literal eval/VM
+    // scripts. Such embedded calls cannot receive the AST readonly exception.
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node)
+        || ts.isTemplateMiddle(node) || ts.isTemplateTail(node))
+      assert.doesNotMatch(node.text, /\bopenSync\b/, "embedded descriptor code must not bypass source inspection");
+    if (ts.isIdentifier(node) && node.text === "openSync") {
+      assert.ok(imported(node, openBinding), "openSync must resolve to its real node:fs import");
+      assert.ok((ts.isImportSpecifier(node.parent) && node.parent.name === node)
+        || (ts.isCallExpression(node.parent) && node.parent.expression === node), "openSync references must not be disguised or aliased");
+    }
+    if (ts.isIdentifier(node) && imported(node, constantsBinding)) {
+      assert.ok((ts.isImportSpecifier(node.parent) && node.parent.name === node)
+        || (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node), "filesystem constants must not be aliased or passed to a mutator");
+    }
+    if (ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression) && node.argumentExpression.text === "openSync")
+      assert.fail("computed openSync calls cannot qualify as explicit descriptor reads");
+    if (ts.isStringLiteral(node) && ["node:fs", "fs"].includes(node.text)
+        && !(ts.isImportDeclaration(node.parent) && node.parent.moduleSpecifier === node)) {
+      // Existing diagnostics dynamically destructure these three read helpers.
+      // No module object, descriptor, alias, rest/default binding or writer can
+      // hide inside that bounded exception.
+      const call = node.parent, awaited = call.parent, declaration = awaited.parent;
+      assert.ok(ts.isCallExpression(call) && call.expression.kind === ts.SyntaxKind.ImportKeyword && call.arguments.length === 1
+        && ts.isAwaitExpression(awaited) && ts.isVariableDeclaration(declaration) && declaration.initializer === awaited
+        && ts.isObjectBindingPattern(declaration.name) && declaration.name.elements.length > 0
+        && declaration.name.elements.every(element => !element.dotDotDotToken && !element.propertyName && !element.initializer
+          && ts.isIdentifier(element.name) && ["readFileSync", "existsSync", "readdirSync"].includes(element.name.text)),
+      "indirect filesystem loading cannot bypass descriptor inspection");
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment && importTarget(node.left)) assert.fail("descriptor imports must not be rebound or mutated");
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+        && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator) && importTarget(node.operand))
+      assert.fail("descriptor imports must not be mutated");
+    if (ts.isDeleteExpression(node) && importTarget(node.expression)) assert.fail("descriptor imports must not be mutated");
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && imported(node.expression, openBinding)) {
+      assert.equal(node.arguments.length, 2, "descriptor reads require exactly two explicit arguments");
+      assert.ok(!node.arguments.some(ts.isSpreadElement), "descriptor arguments must not be spread");
+      assert.ok(flags(node.arguments[1]!).includes("O_RDONLY"), "descriptor reads must explicitly require O_RDONLY");
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+}
 const posix = process.platform !== "win32";
 const tmpDir = () => mkdtempSync(path.join(os.tmpdir(), "merrymen-child-files-"));
 const leftovers = (dir: string) => readdirSync(dir).filter((n) => n.endsWith(".tmp"));
@@ -69,6 +163,50 @@ describe("the orchestrator writes nothing in a child's home in place", () => {
     // Every file it writes is one a child reads. A new one gets the helper too.
     assert.doesNotMatch(ORCH, IN_PLACE_WRITE);
     assert.doesNotMatch(ORCH, /\bwriteFileSync\b/, "not even imported");
+    assertReadOnlyDescriptorOpens(readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8"));
+  });
+
+  it("only explicit readonly flags from the real imports pass the descriptor exception", () => {
+    const header = 'import { openSync, constants } from "node:fs";\n';
+    for (const expression of [
+      "constants.O_RDONLY", "constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK",
+      "(constants.O_DIRECTORY | (constants.O_RDONLY | constants.O_NOFOLLOW))",
+    ]) assert.doesNotThrow(() => assertReadOnlyDescriptorOpens(`${header}openSync(file, ${expression});`));
+  });
+
+  it("write-capable, unknown and indirect descriptor opens remain rejected", () => {
+    const header = 'import { openSync, constants } from "node:fs";\n';
+    for (const expression of [
+      "constants.O_WRONLY", "constants.O_RDWR", "constants.O_RDONLY | constants.O_CREAT",
+      "constants.O_RDONLY | constants.O_TRUNC", "constants.O_RDONLY | constants.O_APPEND",
+      "constants.O_NOFOLLOW | constants.O_NONBLOCK", "constants.O_RDONLY | constants.UNKNOWN",
+      "'r'", "'w'", "0", "flags", "constants.O_RDONLY | flags", "constants.O_RDONLY || constants.O_NOFOLLOW",
+      "constants['O_RDONLY']", "fake.O_RDONLY", "constants.O_RDONLY & constants.O_NOFOLLOW", "readFlags()",
+    ]) assert.throws(() => assertReadOnlyDescriptorOpens(`${header}openSync(file, ${expression});`), expression);
+    for (const source of [
+      `${header}openSync(...args);`, `${header}openSync(file);`, `${header}openSync(file, constants.O_RDONLY, mode);`,
+      `${header}const alias=openSync; alias(file, 'w');`, 'import {openSync as alias,constants} from "node:fs"; alias(file,constants.O_RDONLY);',
+      `${header}openSync.call(null,file,constants.O_RDONLY);`, `${header}function f(openSync){ openSync(file,constants.O_RDONLY); }`,
+      `${header}function f(constants){ openSync(file,constants.O_RDONLY); }`,
+      `${header}constants.O_RDONLY=constants.O_WRONLY; openSync(file,constants.O_RDONLY);`,
+      `${header}constants=fake; openSync(file,constants.O_RDONLY);`, `${header}Object.assign(constants,fake); openSync(file,constants.O_RDONLY);`,
+      `${header}delete constants.O_RDONLY; openSync(file,constants.O_RDONLY);`,
+      `${header}({x:constants.O_RDONLY}=fake); openSync(file,constants.O_RDONLY);`,
+      'import type {openSync,constants} from "node:fs"; openSync(file,constants.O_RDONLY);',
+      'const constants={O_RDONLY:2}; function openSync(){}; openSync(file,constants.O_RDONLY);',
+      'import * as fs from "node:fs"; fs.openSync(file,0);', 'const fs=require("node:fs"); fs["openSync"](file,0);',
+      'const {openSync:alias}=await import("node:fs"); alias(file,0);',
+      'const fs=await import("node:fs"); fs[method](file,0);',
+      `${header}eval("openSync(file,constants.O_RDWR | constants.O_TRUNC)");`,
+      `${header}new Function(\`openSync(file,constants.O_WRONLY)\`)();`,
+      `${header}eval("openSync/* comment */(file,constants.O_RDWR | constants.O_TRUNC)");`,
+      `${header}new Function(\`openSync/* comment */(file,constants.O_WRONLY)\`)();`,
+    ]) assert.throws(() => assertReadOnlyDescriptorOpens(source), source);
+  });
+
+  it("the blanket file-write bans still reject every direct truncating writer", () => {
+    for (const name of ["writeFileSync", "writeFile", "appendFileSync", "appendFile", "createWriteStream", "copyFileSync", "copyFile"])
+      assert.match(`${name}(file, data);`, IN_PLACE_WRITE);
   });
 
   it("grant.json, at spawn and on a re-sign under a running child", () => {

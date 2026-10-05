@@ -1,13 +1,16 @@
 /** Dashboard narration. The partner adapter supplies its own authoritative state. */
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
+import { isHostedMode, type StoredGrant } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { agentReplyResponse, currentEnergy, type AgentChatBody } from "@/lib/agent-chat";
-import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
+import { diskAgent } from "@/lib/agent-for";
+import { getGrantStore } from "@merrymen/grant-store";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
 import { ledgerChatReply } from "@/lib/chat-ledger-facts";
 import { fomoChatTurn } from "@/lib/fomo-chat";
+import { withReadDb } from "@/lib/ledger";
+import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +44,26 @@ export async function POST(req: Request) {
   // shown before the reply is complete — nothing of a command marker, ever.
   const stream = /text\/event-stream/i.test(req.headers.get("accept") ?? "");
 
+  // THE RECOVERY HOLD, BEFORE ANYTHING IS ANSWERED. Resolve the account and
+  // recovery scope from the same authenticated grant. Browser state and older
+  // agents rows cannot choose whose hold we read. Read ahead of Fomo research
+  // too: an unreadable hold refuses every turn alike, and a research answer to
+  // a held owner says the hold (agent-chat.ts RESEARCH_DURING_RECOVERY).
+  let grant: StoredGrant | null = null;
+  let recovery: FleetRecoveryView | null = null;
+  try {
+    grant = hosted && tenant ? await getGrantStore().get(tenant) : null;
+    if (tenant && grant) {
+      const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+      recovery = await withReadDb(db => {
+        if (!db) throw new Error("Recovery status is unavailable.");
+        return readFleetRecoveryView(db, scope, null);
+      });
+    }
+  } catch {
+    return NextResponse.json({ reply: null, why: "recovery-unavailable" }, { status: 503 });
+  }
+
   // FOMO RESEARCH, BEFORE THE LEDGER — decided on the server by the
   // deterministic planner (lib/fomo-chat.ts), for the session's own tenant (or
   // this install's), never from the body. The planner leaves the owner's own
@@ -52,7 +75,7 @@ export async function POST(req: Request) {
   // deterministic answer as the reply when there is no model or it fails.
   const fomoTurn = await fomoChatTurn(body, { tenant, now: Date.now(), hosted }).catch(() => null);
   if (fomoTurn && "factualReply" in fomoTurn) {
-    return agentReplyResponse(body, { stream, signal: req.signal }, { factualReply: fomoTurn.factualReply });
+    return agentReplyResponse(body, { stream, signal: req.signal }, { factualReply: fomoTurn.factualReply, factualSource: "research", recovery });
   }
   const fomo = fomoTurn && "fomo" in fomoTurn ? fomoTurn.fomo : null;
 
@@ -70,11 +93,11 @@ export async function POST(req: Request) {
   // ONLY WHILE ITS DAY LASTS. A report whose day has ended is not today's —
   // the worker may not have published since (currentEnergy) — so it is no
   // report, and the model says it cannot see its energy instead of blaming it.
-  const account = hosted ? await hostedAgentFor(req) : await diskAgent();
+  const account = hosted ? grant?.smartAccount ?? null : await diskAgent();
   const factualReply = fomo ? undefined : await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
-  const report = currentEnergy(account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
+  const report = currentEnergy(!recovery && account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report
     ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
     : null;
-  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo });
+  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo, recovery });
 }

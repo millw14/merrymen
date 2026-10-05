@@ -29,12 +29,13 @@ import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { readAgentEnergy } from "@/lib/agent-energy";
-import { getGrantStore } from "@merrymen/grant-store";
+import { getGrantStore, GrantReplacementConflict } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
+import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -46,6 +47,8 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 
 export interface AgentStatus {
   exists: boolean;
+  /** Authenticated owner's source hold; independent of saved balances or old worker status. */
+  recovery?: FleetRecoveryView | null;
   /** Hosted GET only: the authenticated tenant this status was read for. */
   tenant?: `0x${string}` | null;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
@@ -367,6 +370,7 @@ export async function POST(req: Request) {
     try {
       await getGrantStore().put(tenant, grant);
     } catch (e) {
+      if (e instanceof GrantReplacementConflict) return NextResponse.json({ error: e.message, ownerFacing: true }, { status: 409 });
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
     }
 
@@ -436,10 +440,27 @@ export async function DELETE(req: Request) {
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
     // A tab can switch logins while the owner's stop request is in flight.
-    const body = await req.json().catch(() => null) as { expectedTenant?: unknown } | null;
+    const body = await req.json().catch(() => null) as { expectedTenant?: unknown; purpose?: unknown; expectedAccount?: unknown; expectedSession?: unknown } | null;
     if (body?.expectedTenant !== undefined &&
         (typeof body.expectedTenant !== "string" || body.expectedTenant.toLowerCase() !== tenant.toLowerCase())) {
       return NextResponse.json({ error: "The signed-in account changed. Check the account before stopping it." }, { status: 409 });
+    }
+    // Old renewal tabs used an unqualified DELETE. Refuse that ambiguous
+    // request instead of silently treating a permission update as a discard.
+    if (body?.purpose !== "permission-replacement" && body?.purpose !== "delete-agent") {
+      return NextResponse.json({ error: "Reload your wallet before stopping or renewing. Nothing was deleted.", ownerFacing: true }, { status: 400 });
+    }
+    if (body?.purpose === "permission-replacement") {
+      if (!isAddr(body.expectedAccount) || (body.expectedSession !== undefined && !isAddr(body.expectedSession))) {
+        return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
+      }
+      try {
+        const state = await getGrantStore().stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
+        if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
+        return NextResponse.json({ ok: true, replacement: true, state });
+      } catch {
+        return NextResponse.json({ error: "The service could not confirm the replacement stop. Your wallet was kept; try again.", ownerFacing: true }, { status: 503 });
+      }
     }
     await getGrantStore().remove(tenant);
     return NextResponse.json({ ok: true });
@@ -485,6 +506,8 @@ export async function GET(req: Request) {
   let gasSponsored: boolean | null = null;
   let liveBlocker: string | null = null;
   try {
+    // Hosted status must come from this authenticated account, never a web-service file.
+    if (hostedTenant !== undefined) throw new Error("Hosted heartbeat is account-scoped.");
     const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as {
       at: number;
       mode?: AgentStatus["mode"];
@@ -543,6 +566,19 @@ export async function GET(req: Request) {
   // deployments. Best effort: an unreadable report is null, never an error.
   const energy = await readAgentEnergy(grant.smartAccount);
 
+  let recovery: FleetRecoveryView | null = null;
+  if (hostedTenant) {
+    try {
+      recovery = await withReadDb(db => {
+        if (!db) throw new Error("Hosted recovery ledger is unavailable.");
+        return readFleetRecoveryView(db,
+          { tenant: hostedTenant, smartAccount: grant.smartAccount, chainId: grant.chainId }, workerAliveAt);
+      });
+    } catch {
+      return NextResponse.json({ error: "Couldn't confirm this agent's recovery status. Please try again.", ownerFacing: true }, { status: 503 });
+    }
+  }
+
   // Never echo key material to the browser: the serialized session account, the
   // session key, AND the generated owner key (which custodies the funds).
   const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
@@ -558,6 +594,7 @@ export async function GET(req: Request) {
     gasSponsored,
     liveBlocker,
     energy,
+    ...(hostedTenant ? { recovery } : {}),
   };
   return NextResponse.json(status);
 }

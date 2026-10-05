@@ -17,6 +17,9 @@ import type { GrantBalances } from "@/lib/grant-balances";
 import { requestJson } from "./request-json";
 import { SkeletonRows } from "./Skeleton";
 import type { ReadState } from "./live";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
+import { RecoveryNotice } from "./RecoveryNotice";
+import { pausedRecovery } from "./recovery-view";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -46,7 +49,7 @@ export interface AccountState {
    * today (AgentStatus.energy). Null or absent is "not said yet", never an
    * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
+  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";
@@ -108,6 +111,7 @@ export function WalletSignIn({onDone}:{onDone:()=>void}) {
  */
 export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh,onSignedIn}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void}) {
   if(account?.status.exists) {
+    if (pausedRecovery(account.status.recovery)) return <section className="hosted-entry"><h2>Your agent</h2><RecoveryNotice recovery={account.status.recovery}/><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     if(portfolio==="unread") return <section className="hosted-entry"><h2>Your agent</h2><SkeletonRows rows={2} label="Loading your portfolio"/></section>;
     if(portfolio==="unreadable") return <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your portfolio again…" : <>We couldn&apos;t load your portfolio. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     return <section className="hosted-entry"><h2>Your agent</h2><p>Your portfolio data is not available yet.</p><button className="flow-primary" onClick={onRefresh}>Refresh portfolio</button></section>;
@@ -132,6 +136,7 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
         missing was ETH for fees. And where money is NOT the fix, this says so
         rather than letting a deposit address imply that it is. */}
     {(() => {
+      if (pausedRecovery(account.status.recovery)) return <RecoveryNotice recovery={account.status.recovery}/>;
       const advice = blockerAdvice(account?.status.liveBlocker);
       if (!advice) return null;
       return (
@@ -139,7 +144,7 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
           {advice.say}
         </p>
       );
-    })()}<EnergyFunding energy={account.status.energy} chainId={grant.chainId}/><label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
+    })()}{!pausedRecovery(account.status.recovery) && <EnergyFunding energy={account.status.energy} chainId={grant.chainId}/>}<label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
 }
 
 /**

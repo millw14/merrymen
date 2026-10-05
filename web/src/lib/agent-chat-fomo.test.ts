@@ -20,6 +20,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { EnergyStatus } from "@merrymen/core";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import type { LlmCreds } from "../../../worker/src/llm";
 import { agentReplyResponse, generateAgentReply, type AgentChatOptions } from "./agent-chat";
 import { readReplyStream } from "./chat-stream";
@@ -172,5 +173,57 @@ describe("a Fomo research turn", () => {
   it("a malformed option is no option", async () => {
     const { seen } = await ask("should we follow this?", { fomo: { evidence: EVIDENCE, rules: RULES, fallback: "  " } });
     assert.ok(!seen!.prompt.includes("```fomo-evidence"));
+  });
+});
+
+describe("a Fomo research turn while the owner's trading is held for recovery", () => {
+  const RECOVERY: FleetRecoveryView = { state: "history-only", tradingPaused: true, history: "available", memory: "unknown",
+    checkedAt: 1_791_111_100, lastVerifiedHeartbeatAt: null };
+  const HELD = /^My trading is paused for recovery\. This is third-party research, not a reading of my portfolio\.\n\n/;
+
+  it("a factual research answer opens with the hold and says it is research, never 'saved records'", async () => {
+    const out = await generateAgentReply({ message: "who are the top traders on fomo?" }, {
+      recovery: RECOVERY, factualReply: FALLBACK, factualSource: "research", credentials: () => { throw new Error("must not call a model"); },
+    });
+    assert.match(out.reply!, HELD);
+    assert.ok(out.reply!.endsWith(FALLBACK));
+    assert.doesNotMatch(out.reply!, /saved records/);
+    // The ledger's own facts keep the hold's ledger wording.
+    const ledger = await generateAgentReply({ message: "what did you buy?" }, { recovery: RECOVERY, factualReply: "Recorded buy." });
+    assert.match(ledger.reply!, /These saved records may be incomplete/);
+    // Not held: the research answer as it is.
+    assert.equal((await generateAgentReply({ message: "x" }, { factualReply: FALLBACK, factualSource: "research" })).reply, FALLBACK);
+  });
+
+  it("the model gets the RECOVERY block and rules, the research rules after them, and no last-recorded holdings or modes", async () => {
+    const { seen, out } = await ask("should we follow this?", { fomo: FOMO, recovery: RECOVERY, energy: { ...REPORT, ceilingUsdg: 25 } });
+    assert.ok(seen);
+    assert.match(seen.prompt, /^RECOVERY \(authenticated server report — authoritative\):/);
+    assert.ok(!seen.prompt.includes("ENERGY ("), "no energy block under the hold");
+    const state = JSON.parse(seen.prompt.slice(seen.prompt.indexOf("STATE:\n") + 7, seen.prompt.indexOf("\n\n", seen.prompt.indexOf("STATE:\n")))) as Record<string, unknown>;
+    assert.equal(state.workerStatus, "Trading paused for recovery");
+    for (const k of ["heldSymbols", "liveTradingEnabled", "paperTradingEnabled", "positions", "fomo", "moves"]) assert.equal(state[k], undefined, k);
+    const recoveryAt = seen.system.indexOf("AUTHENTICATED RECOVERY OVERRIDES");
+    const fomoAt = seen.system.indexOf("THIS TURN IS FOMO RESEARCH");
+    assert.ok(recoveryAt > 0 && fomoAt > recoveryAt && seen.system.endsWith(RULES));
+    assert.ok(seen.prompt.includes("```fomo-evidence"));
+    assert.equal(out.command, undefined);
+  });
+
+  it("no brain, a failed or an empty one: the research answer, opening with the hold — streamed or not", async () => {
+    const none = await generateAgentReply({ message: "should we follow this?" }, { fomo: FOMO, recovery: RECOVERY, credentials: () => null });
+    assert.match(none.reply!, HELD);
+    assert.ok(none.reply!.endsWith(FALLBACK));
+    const failed = await generateAgentReply({ message: "should we follow this?" }, {
+      fomo: FOMO, recovery: RECOVERY, credentials, complete: async () => { throw new Error("provider 500"); },
+    });
+    assert.match(failed.reply!, HELD);
+    const empty = await generateAgentReply({ message: "should we follow this?" }, { fomo: FOMO, recovery: RECOVERY, credentials, complete: async () => "" });
+    assert.match(empty.reply!, HELD);
+    const res = await agentReplyResponse({ message: "should we follow this?" }, { stream: true }, {
+      fomo: FOMO, recovery: RECOVERY, credentials, stream: async () => { throw new Error("cut"); },
+    });
+    const streamed = await readReplyStream(res.body!, () => {});
+    assert.match(streamed.reply ?? "", HELD);
   });
 });

@@ -407,7 +407,7 @@ export function YouClient() {
               that stops an agent immediately, which is a safety regression
               rather than a simplification. */}
           <div className="mm-kill">
-            <KillSwitch />
+            <KillSwitch expectedTenant={session?.hosted ? session.address : undefined} ready={!!session && (!session.hosted || !!session.address)} />
           </div>
         </section>
       </div>

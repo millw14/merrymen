@@ -34,6 +34,7 @@ import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
 import { performanceOf } from "./agent-performance";
+import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -53,6 +54,7 @@ export function DesktopHeader({
   onScreen,
   onTab,
 }: Actions & { hasAgent?: boolean; mine: LiveMine }) {
+  const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
   // The desktop's way into the group chat; hidden where the install has no room.
@@ -89,7 +91,7 @@ export function DesktopHeader({
             already read "$964" as their deposit does not go on to read a
             footnote. See packages/core/src/autonomy.ts. */}
         <span className={mine.autonomy.simulated ? "is-simulated" : undefined}>
-          <small>{mine.autonomy.moneyLabel}</small>
+          <small>{displayedAutonomy.moneyLabel}</small>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
         </span>
         <button
@@ -291,7 +293,7 @@ export function DesktopSidebar({
           </span>
           <span>
             <strong>{money(mine.equity)}</strong>
-            <small>Open chat</small>
+            <small>{pausedRecovery(mine.recovery) ? "Last recorded balance" : "Open chat"}</small>
           </span>
         </button>}
         <div className="desktop-market-heading">
@@ -401,13 +403,15 @@ export function DesktopPortfolio({
   perTrade: number | null;
   perDay: number | null;
 }) {
+  const recovery = pausedRecovery(mine.recovery);
+  const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
       <section>
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
-          <span className={`desktop-running ${stopped ? "paused" : ""}`}>
-            {mine.statusLabel ?? "Offline"}
+          <span className={`desktop-running ${stopped || recovery ? "paused" : ""}`}>
+            {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>
@@ -418,11 +422,12 @@ export function DesktopPortfolio({
           </span>
           <ArrowUpRight size={16} />
         </button>
+        {recovery && <span className="account-label recovery-balance-label">Last recorded balance</span>}
         <div className="desktop-balance">
           <BalanceFigure value={mine.equity} />
         </div>
-        <p className={deltaClass(mine.chg24)}>
-          {mine.chg24 == null
+        <p className={recovery ? "meta" : deltaClass(mine.chg24)}>
+          {recovery ? "Reconciliation pending" : mine.chg24 == null
             ? "—"
             : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))} today`}
         </p>
@@ -437,13 +442,13 @@ export function DesktopPortfolio({
           </button>
         </div>
         <div className={mine.autonomy.simulated ? "desktop-cash is-simulated" : "desktop-cash"}>
-          <span>{mine.autonomy.moneyLabel}</span>
+          <span>{displayedAutonomy.moneyLabel}</span>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
         </div>
         {/* THE ONE THING THAT WOULD END IT, where the money is — not in a feed
             event nobody reads. Only ever rendered when the worker itself
             resolved a blocker the owner alone can clear. */}
-        {mine.autonomy.needsOwnerAction && mine.autonomy.action && mine.autonomy.headline && (
+        {!recovery && mine.autonomy.needsOwnerAction && mine.autonomy.action && mine.autonomy.headline && (
           <div className="desktop-blocked" role="status">
             {/* THE HEADLINE COMES FROM THE RULE, not from this file.
                 It was one hardcoded sentence — "needs a free permission
@@ -489,7 +494,7 @@ export function DesktopPortfolio({
             `hasAgent` is true by construction here: this component takes a
             non-nullable `LiveMine`, and App renders it only on `desktop &&
             mine`. The type is the gate. */}
-        <AgentStrip hasAgent />
+        <AgentStrip hasAgent recovery={mine.recovery}/>
       </section>
       {selectedToken && (
         <section className="desktop-token-context">
@@ -517,19 +522,20 @@ export function DesktopPortfolio({
             </strong>
           </div>
           <div className="desktop-cash">
-            <span>Your position</span>
+            <span>{recovery ? "Saved position" : "Your position"}</span>
             <strong>
               {positionsOf(mine).find((p) => p.symbol === selectedToken.symbol)
-                ?.detail ?? "Not held"}
+                ?.detail ?? (recovery ? "No saved position available" : "Not held")}
             </strong>
           </div>
         </section>
       )}
       <section>
         <div className="desktop-section-heading">
-          <h2>Positions</h2>
-          <span>{positionsOf(mine).length}</span>
+          <h2>{recovery ? "Saved positions" : "Positions"}</h2>
+          <span>{recovery && positionsOf(mine).length === 0 ? "—" : positionsOf(mine).length}</span>
         </div>
+        {recovery ? <p className="meta">Reconciliation pending</p> : null}
         {positionsOf(mine).map((p) => {
           const t = tokens.find((t) => t.symbol === p.symbol);
           // The value AND the %, never one standing in for the other — see positionFigures.
