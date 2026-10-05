@@ -192,6 +192,7 @@ import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
 import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
+import { budgetUnrestored, seedBudget } from "./budget-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
@@ -2408,6 +2409,95 @@ async function retryEnergySeed(tenant: `0x${string}`): Promise<void> {
 }
 
 /**
+ * GIVE A REBUILT CHILD BACK ITS TRAILING DAY OF SPENDING BEFORE IT ARMS.
+ *
+ * The daily spend, ops and Telegram transfer caps are judged against the
+ * child's own ledger, and a child whose sqlite is new would judge them against
+ * an empty day while the day it already spent sits in the shared ledger. The
+ * arm's in-flight reconciler re-records only part of that day, and records a
+ * transfer as a swap. budget-seed.ts carries the whole day down, one row per
+ * operation, and store.ts adds it to every cap reader. BEFORE spawn, beside
+ * the energy seed and for the same reason — the child reads its caps on its
+ * first tick. This opens the two databases; seedBudget decides.
+ *
+ * FAIL CLOSED, AND STILL ARMED. The marker goes into the child's home before
+ * anything is read, and comes out only after every row is in, so a seed that
+ * fails — or dies half way — leaves a live child that arms with no headroom
+ * for a new entry while its exits and stops run. retryBudgetSeed tries again
+ * every reconcile pass. False only when there is no marker AND no seed: the
+ * one state in which this child would arm on an empty day, so spawnChild does
+ * not start it and the next pass tries the whole spawn again.
+ *
+ * `when` is "retry" for a running child: it writes beside the live agent, so
+ * it waits only briefly for the child's write lock, and a failure leaves the
+ * marker as it is.
+ */
+const budgetSeedFailing = new Map<string, string>();
+async function seedBudgetForChild(tenant: `0x${string}`, smartAccount: string, when: "spawn" | "retry" = "spawn"): Promise<boolean> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return true; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
+  const home = childHome(tenant);
+  const opened: DatabaseSync[] = [];
+  try {
+    const r = await seedBudget({
+      home,
+      agent: smartAccount,
+      cashToken: String(CASH.USDG),
+      nowSec: Math.floor(Date.now() / 1000),
+      when,
+      local: () => {
+        const raw = new DatabaseSync(path.join(home, "merrymen.db"));
+        opened.push(raw);
+        raw.exec("PRAGMA busy_timeout = 250");
+        return wrapSqlite(raw);
+      },
+      shared: () => makePgDb(url),
+    });
+    if (r.ok) {
+      const was = budgetSeedFailing.delete(tenant);
+      if (r.restored || was) {
+        log(`budget seed: ${tenant} — ${r.restored} operation(s) of the trailing day restored${was ? " on retry; new entries have headroom again" : ""}`);
+      }
+      return true;
+    }
+    // Once per distinct failure, not once per fifteen-second pass.
+    if (when === "spawn" || budgetSeedFailing.get(tenant) !== r.why) {
+      log(
+        `${r.marked ? "" : "[alert] "}budget seed: ${tenant} FAILED — ${r.why} ` +
+          (r.marked
+            ? when === "retry"
+              ? "(still unrestored; tried again next pass)"
+              : "(the child arms with its trailing day UNRESTORED: no headroom for a new live entry until a later pass restores it; exits, stops and the owner's sales run)"
+            : "(and NO marker: not starting a worker that would read an empty day)"),
+      );
+    }
+    budgetSeedFailing.set(tenant, r.why);
+    return r.marked;
+  } finally {
+    for (const raw of opened) {
+      try {
+        raw.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
+ * A RUNNING CHILD WHOSE TRAILING DAY IS STILL MISSING, tried again.
+ *
+ * Only while its home holds the marker (budget-seed.ts), so a healthy fleet
+ * pays one missing-file read per child per pass. On success the child's next
+ * refresh reads the seeded day and its entries have headroom again.
+ */
+async function retryBudgetSeed(tenant: `0x${string}`): Promise<void> {
+  const child = children.get(tenant);
+  if (!child || !process.env.DATABASE_URL || !budgetUnrestored(childHome(tenant))) return;
+  await seedBudgetForChild(tenant, child.smartAccount, "retry");
+}
+
+/**
  * When a child's own ledger began: its earliest account-value mark, flow,
  * trade row or decision (a book that cannot be valued writes decisions and
  * nothing else), or null when it holds none (a home a redeploy just wiped, or
@@ -3070,6 +3160,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AND TODAY'S ENERGY — the counters, the notice stamp and the last good
     // balance reading the redeploy just emptied. Same placement, same reason.
     await seedEnergyForChild(tenant, smartAccount);
+    // AND THE TRAILING DAY'S SPEND, OPS AND TRANSFERS, which the caps are
+    // judged against. A failed seed still arms, held at no headroom; only a
+    // seed that could neither run nor leave its marker keeps the worker off.
+    if (!(await seedBudgetForChild(tenant, smartAccount))) return;
     // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
     // child is already polling would be read from a file the child has by then
     // replaced with a fresh, unlinked default.
@@ -5034,6 +5128,9 @@ export async function reconcile(): Promise<void> {
     // AND ITS ENERGY HISTORY, if the seed before it armed could not put it
     // back: until then its store reads those days as unreadable.
     await retryEnergySeed(tenant as `0x${string}`);
+    // AND ITS TRAILING DAY OF SPENDING, on the same terms: until then its live
+    // entries have no headroom.
+    await retryBudgetSeed(tenant as `0x${string}`);
   }
   // HELD TENANTS THE GATE NO LONGER HOLDS, handed back to trading. After the
   // children's refresh and not inside the holders' loop, so the worker each
