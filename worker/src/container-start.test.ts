@@ -1,0 +1,256 @@
+/**
+ * THE CONTAINER'S START PATH: tini → /bin/sh scripts/container-start.sh → exec node.
+ *
+ * The hosted image used to start with `sh -c "npm run ${MERRYMEN_START…}"`,
+ * which put a shell and npm between PID 1 and node. Whether Railway's SIGTERM
+ * ever reached the orchestrator's stop handler — the one that calls the fleet
+ * home and releases the tenant leases — rested on whether that shell exec'd
+ * its one command and whether npm passed the signal on. Neither is ours.
+ *
+ * Now the shape is fixed and these tests hold it:
+ *
+ *   - The Dockerfile's last ENTRYPOINT/CMD are exactly tini and the script, in
+ *     exec form, with no npm and no `sh -c` anywhere in either.
+ *   - The script runs exactly package.json's `start:*` scripts — the same argv
+ *     from the same directory — and it `exec`s them: the stub it runs reports
+ *     the very PID the script was started as.
+ *   - Unset MERRYMEN_START runs web, as it always did. SET BUT EMPTY, or any
+ *     other value, is refused with 64 and runs nothing at all.
+ *   - A real orchestrator, started through the real script, prints
+ *     "[orchestrator] stopping" on SIGTERM and exits 0 — not killed by it.
+ *   - The script is LF, and .gitattributes keeps it that way.
+ *
+ * No container runtime is needed: tini only forwards to its one child, and the
+ * child is what is tested here, under /bin/sh and under dash (the image's sh)
+ * wherever dash exists.
+ */
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+
+const ROOT = join(import.meta.dirname, "..", "..");
+const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+const SCRIPT = "scripts/container-start.sh";
+const posix = process.platform !== "win32";
+// The image's /bin/sh is Debian's dash. Run every behavioural case under it
+// too wherever it exists, so a bashism cannot pass here and fail in the image.
+const SHELLS = ["/bin/sh", "/bin/dash"].filter(existsSync);
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+const scratch: string[] = [];
+after(() => { for (const dir of scratch) rmSync(dir, { recursive: true, force: true }); });
+const tempDir = (prefix: string) => {
+  const dir = realpathSync(mkdtempSync(join(os.tmpdir(), prefix)));
+  scratch.push(dir);
+  return dir;
+};
+
+/** The last instruction of a kind wins in a Dockerfile, so that is the one read. */
+function lastExecForm(docker: string, instruction: "CMD" | "ENTRYPOINT"): unknown {
+  const lines = docker.split("\n").filter((l) => l.startsWith(`${instruction} `));
+  assert.ok(lines.length > 0, `the Dockerfile has no ${instruction}`);
+  const raw = lines.at(-1)!.slice(instruction.length + 1);
+  // Shell form (`CMD foo bar`) is wrapped in `/bin/sh -c` by Docker itself —
+  // the exact thing this path exists to remove — so only the JSON form parses.
+  try { return JSON.parse(raw); }
+  catch { assert.fail(`${instruction} must be exec form (a JSON array), not shell form: ${raw}`); }
+}
+
+describe("the Dockerfile starts node under tini, through the script", () => {
+  const docker = read("Dockerfile");
+
+  it("ENTRYPOINT is tini alone, without -g, and CMD is the script under /bin/sh", () => {
+    // Without -g on purpose: the orchestrator decides how its tenant workers
+    // stop, so tini signals only its one child.
+    assert.deepEqual(lastExecForm(docker, "ENTRYPOINT"), ["/usr/bin/tini", "--"]);
+    assert.deepEqual(lastExecForm(docker, "CMD"), ["/bin/sh", `/app/${SCRIPT}`]);
+  });
+
+  it("the final CMD and ENTRYPOINT carry no npm and no `sh -c`", () => {
+    for (const instruction of ["CMD", "ENTRYPOINT"] as const) {
+      const words = lastExecForm(docker, instruction) as string[];
+      assert.ok(!words.some((w) => /\bnpm\b|\bnpx\b/.test(w)), `${instruction} runs npm: ${JSON.stringify(words)}`);
+      assert.ok(!words.includes("-c"), `${instruction} runs a command string through a shell: ${JSON.stringify(words)}`);
+    }
+  });
+
+  it("the image installs tini and carries the start-path marker", () => {
+    assert.match(docker, /^RUN apt-get update[\s\S]*?apt-get install -y --no-install-recommends tini\b/m);
+    assert.match(docker, /^ENV MERRYMEN_IMAGE=dockerfile-v1$/m);
+  });
+
+  it("the CMD's path is where COPY puts the script, and .dockerignore keeps it", () => {
+    // WORKDIR /app + `COPY . .` puts the repo's scripts/ at /app/scripts/.
+    assert.match(docker, /^WORKDIR \/app$/m);
+    assert.match(docker, /^COPY \. \.$/m);
+    assert.ok(existsSync(join(ROOT, SCRIPT)), `${SCRIPT} is missing`);
+    const ignored = read(".dockerignore").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    assert.ok(!ignored.some((l) => /(^|\/)scripts(\/|$)|\.sh$/.test(l)), `.dockerignore drops the start script: ${ignored.join(", ")}`);
+  });
+});
+
+describe("the script's bytes", () => {
+  it("has LF endings only", () => {
+    const bytes = readFileSync(join(ROOT, SCRIPT));
+    assert.equal(bytes.indexOf(0x0d), -1, `${SCRIPT} contains a carriage return — dash would read \`exec node\\r\``);
+  });
+
+  it(".gitattributes pins *.sh to LF in every checkout", () => {
+    assert.match(read(".gitattributes"), /^\*\.sh\s+text\s+eol=lf$/m);
+  });
+});
+
+/**
+ * A copy of the script in a scratch "app root" whose `node` and `next` are
+ * stubs on PATH. The stubs print their PID, cwd and argv, so a run says which
+ * program the script became, from where, with what — without starting either.
+ */
+function sandbox() {
+  const app = tempDir("merrymen-container-start-");
+  mkdirSync(join(app, "scripts"));
+  mkdirSync(join(app, "web"));
+  mkdirSync(join(app, "stub-bin"));
+  copyFileSync(join(ROOT, SCRIPT), join(app, SCRIPT));
+  for (const name of ["node", "next"]) {
+    const stub = join(app, "stub-bin", name);
+    writeFileSync(stub, `#!/bin/sh\necho "pid=$$"\necho "ran=${name} cwd=$(pwd -P)"\nfor a in "$@"; do echo "arg=$a"; done\n`);
+    chmodSync(stub, 0o755);
+  }
+  // Deliberately NOT process.env: nothing from the developer's shell (a
+  // DATABASE_URL, a MERRYMEN_START) may leak into what these runs decide.
+  const env = (extra: Record<string, string> = {}): NodeJS.ProcessEnv => ({ PATH: `${join(app, "stub-bin")}:${process.env.PATH}`, ...extra });
+  // Started from somewhere else on purpose: the script must find its root itself.
+  const elsewhere = tempDir("merrymen-container-cwd-");
+  const run = (shell: string, extra?: Record<string, string>) => {
+    const r = spawnSync(shell, [join(app, SCRIPT)], { cwd: elsewhere, env: env(extra), encoding: "utf8", timeout: 10_000 });
+    return { status: r.status, pid: r.pid, stdout: r.stdout, stderr: r.stderr };
+  };
+  /** What `npm run <role>` would have run: the package.json line, by sh -c, from the root. */
+  const runNpmScript = (line: string, extra?: Record<string, string>) =>
+    spawnSync("/bin/sh", ["-c", line], { cwd: app, env: env(extra), encoding: "utf8", timeout: 10_000 }).stdout;
+  return { app, run, runNpmScript };
+}
+/** The stub's report without its PID, which no two processes share. */
+const invocation = (stdout: string) => stdout.split("\n").filter((l) => /^(ran|arg)=/.test(l)).join("\n");
+const stubPid = (stdout: string) => Number(/^pid=(\d+)$/m.exec(stdout)?.[1]);
+
+describe("the script runs package.json's start scripts, and only those", { skip: !posix }, () => {
+  const scripts = (JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts;
+  const startRoles = Object.keys(scripts).filter((k) => k.startsWith("start:")).sort();
+
+  it("its allowlist is exactly the package.json start:* scripts", () => {
+    const allowed = [...read(SCRIPT).matchAll(/^ {2}(start:[a-z-]+)\)$/gm)].map((m) => m[1]!).sort();
+    assert.deepEqual(allowed, startRoles, "a start:* script and the container's allowlist have drifted apart");
+  });
+
+  for (const shell of SHELLS) {
+    for (const role of startRoles) {
+      for (const port of [undefined, "4321"]) {
+        it(`${shell}: ${role}${port ? ` (PORT=${port})` : ""} execs the same argv from the same directory as npm did`, () => {
+          const box = sandbox();
+          const extra: Record<string, string> = { MERRYMEN_START: role, ...(port ? { PORT: port } : {}) };
+          const r = box.run(shell, extra);
+          assert.equal(r.status, 0, r.stderr);
+          const expected = box.runNpmScript(scripts[role]!, extra);
+          assert.ok(invocation(expected), `the package.json line for ${role} ran neither stub: ${scripts[role]}`);
+          assert.equal(invocation(r.stdout), invocation(expected));
+          // EXEC, not fork: the program the script became has the script's own
+          // PID, so the signal tini forwards to its child lands on node.
+          assert.equal(stubPid(r.stdout), r.pid, `${role} forked instead of exec'ing`);
+          assert.match(r.stdout, new RegExp(`^\\[start\\] role=${role} commit=unknown$`, "m"));
+        });
+      }
+    }
+
+    it(`${shell}: MERRYMEN_START unset runs the web role`, () => {
+      const box = sandbox();
+      const r = box.run(shell);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /^\[start\] role=start:web commit=unknown$/m);
+      assert.equal(invocation(r.stdout), [`ran=next cwd=${join(box.app, "web")}`, "arg=start", "arg=-H", "arg=0.0.0.0", "arg=-p", "arg=3100"].join("\n"));
+      assert.equal(stubPid(r.stdout), r.pid);
+    });
+
+    it(`${shell}: MERRYMEN_START set but empty is refused with 64, and nothing runs`, () => {
+      const r = sandbox().run(shell, { MERRYMEN_START: "" });
+      assert.equal(r.status, 64);
+      assert.equal(r.stdout, "", "a refused role must not print a [start] line or run anything");
+      assert.match(r.stderr, /^\[start\] refused: MERRYMEN_START is set but empty/m);
+    });
+
+    it(`${shell}: any other value is refused with 64, and is not echoed`, () => {
+      for (const value of ["start", "build", "dev:web", "start:web ", " start:web", "START:WEB", "start:web;id", "start:orchestrator\n", "$(id)", "start:*"]) {
+        const r = sandbox().run(shell, { MERRYMEN_START: value });
+        assert.equal(r.status, 64, `${JSON.stringify(value)} was not refused: ${r.stdout}${r.stderr}`);
+        assert.equal(r.stdout, "", `${JSON.stringify(value)} ran something`);
+        assert.match(r.stderr, /^\[start\] refused: MERRYMEN_START is not one of: start:web start:orchestrator start:recovery-replies$/m);
+      }
+      const r = sandbox().run(shell, { MERRYMEN_START: "$(id)" });
+      assert.ok(!r.stderr.includes("$(id)") && !r.stderr.includes("uid="), r.stderr);
+    });
+
+    it(`${shell}: the [start] line names the commit only when it is a hex SHA`, () => {
+      const box = sandbox();
+      assert.match(box.run(shell, { RAILWAY_GIT_COMMIT_SHA: SHA }).stdout, new RegExp(`^\\[start\\] role=start:web commit=${SHA}$`, "m"));
+      for (const value of ["", "not a sha; rm -rf", `${SHA}\n[start] role=start:orchestrator commit=forged`]) {
+        const r = box.run(shell, { RAILWAY_GIT_COMMIT_SHA: value });
+        assert.equal(r.status, 0, r.stderr);
+        assert.equal(r.stdout.split("\n").filter((l) => l.startsWith("[start]")).join("\n"), "[start] role=start:web commit=unknown");
+      }
+    });
+  }
+});
+
+describe("SIGTERM reaches the orchestrator's stop handler", { skip: !posix }, () => {
+  /**
+   * The real script and the real orchestrator, under the shell the test runs
+   * on — what tini's child is in the image. FLEET_HALT is present and there is
+   * no DATABASE_URL, so it starts, stays halted with nothing to supervise, and
+   * touches no network and no database: the only question is what SIGTERM does.
+   */
+  it("prints \"[orchestrator] stopping\" and exits 0, rather than dying of the signal", { timeout: 90_000 }, async () => {
+    const dir = tempDir("merrymen-container-sigterm-");
+    const home = join(dir, "home");
+    mkdirSync(home, { mode: 0o700 });
+    writeFileSync(join(home, "FLEET_HALT"), "", { mode: 0o600 });
+    // Its own process group, so cleanup can reach anything a broken exec left
+    // behind — a forked node would outlive a killed shell and keep looping.
+    const proc = spawn("/bin/sh", [join(ROOT, SCRIPT)], {
+      cwd: dir,
+      // Deliberately NOT process.env: a DATABASE_URL in the developer's shell
+      // must never reach a supervisor started by a test.
+      env: { PATH: process.env.PATH, HOME: dir, MERRYMEN_HOME: home, MERRYMEN_HOSTED: "1", MERRYMEN_START: "start:orchestrator", RAILWAY_GIT_COMMIT_SHA: SHA },
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    proc.stdout.on("data", (b: Buffer) => { stdout += b.toString(); });
+    proc.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+      proc.once("exit", (code, signal) => resolve({ code, signal })));
+    try {
+      const deadline = Date.now() + 60_000;
+      while (!stdout.includes("[orchestrator] starting")) {
+        if (proc.exitCode !== null || proc.signalCode !== null) assert.fail(`the orchestrator exited before starting:\n${stdout}${stderr}`);
+        if (Date.now() > deadline) assert.fail(`the orchestrator never started:\n${stdout}${stderr}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Its handler is installed right after the "starting" line; give it a beat.
+      await new Promise((r) => setTimeout(r, 500));
+      proc.kill("SIGTERM");
+      const { code, signal } = await Promise.race([
+        exited,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no exit 15s after SIGTERM:\n${stdout}${stderr}`)), 15_000)),
+      ]);
+      assert.match(stdout, /\[orchestrator\] stopping — calling the whole fleet home/, `${stdout}${stderr}`);
+      assert.equal(signal, null, "the process was killed by SIGTERM instead of handling it — the script did not exec node");
+      assert.equal(code, 0, `${stdout}${stderr}`);
+      assert.ok(stdout.indexOf(`[start] role=start:orchestrator commit=${SHA}`) === 0, `the [start] line must come first:\n${stdout}`);
+    } finally {
+      try { process.kill(-proc.pid!, "SIGKILL"); } catch { /* already gone, which is the expected case */ }
+    }
+  });
+});
