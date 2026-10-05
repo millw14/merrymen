@@ -447,17 +447,22 @@ function isReceipt(value: unknown): value is ShutdownReceipt {
  * before did not drain: a crash, a SIGKILL, an image without the drain, or a
  * first start — which is what the line says. Never thrown: a start is not
  * refused over a log line.
+ *
+ * `at` is when that stop finished (Unix ms), null without a readable receipt:
+ * this is the one read of it, so whatever else reports the last stop (the
+ * fleet heartbeat) takes it from here rather than from the file, which is no
+ * longer there.
  */
-export function takePreviousShutdown(dir: string): { clean: boolean | null; line: string } {
+export function takePreviousShutdown(dir: string): { clean: boolean | null; at: number | null; line: string } {
   const file = path.join(dir, SHUTDOWN_RECEIPT_FILE);
   let text: string;
   try {
     text = readFileSync(file, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-      return { clean: null, line: "previous shutdown left no receipt — it did not drain (a crash, a SIGKILL, an image without the drain, or a first start)" };
+      return { clean: null, at: null, line: "previous shutdown left no receipt — it did not drain (a crash, a SIGKILL, an image without the drain, or a first start)" };
     }
-    return { clean: false, line: "[alert] previous shutdown receipt is unreadable — read as NOT clean" };
+    return { clean: false, at: null, line: "[alert] previous shutdown receipt is unreadable — read as NOT clean" };
   }
   let moved = true;
   try {
@@ -473,10 +478,17 @@ export function takePreviousShutdown(dir: string): { clean: boolean | null; line
   } catch {
     parsed = null;
   }
-  if (!isReceipt(parsed)) return { clean: false, line: `[alert] previous shutdown receipt is malformed — read as NOT clean${stays}` };
-  const at = new Date(parsed.finishedAt).toISOString();
-  const took = seconds(parsed.finishedAt - parsed.startedAt);
-  if (parsed.clean) return { clean: true, line: `previous shutdown was clean — ${parsed.signal} drained in ${took}, finished ${at}${stays}` };
-  const where = parsed.outcome === "budget-exceeded" ? `budget exceeded${parsed.stalledAt ? ` during ${parsed.stalledAt}` : ""}` : "drained";
-  return { clean: false, line: `[alert] previous shutdown was NOT clean — ${parsed.signal}, ${where} in ${took}, finished ${at}: ${problems(parsed)}${stays}` };
+  const malformed = { clean: false, at: null, line: `[alert] previous shutdown receipt is malformed — read as NOT clean${stays}` };
+  if (!isReceipt(parsed)) return malformed;
+  // Described inside a try: a receipt shaped right on the outside (a step that
+  // is null, a time no Date can hold) is still malformed, never a throw.
+  try {
+    const at = new Date(parsed.finishedAt).toISOString();
+    const took = seconds(parsed.finishedAt - parsed.startedAt);
+    if (parsed.clean) return { clean: true, at: parsed.finishedAt, line: `previous shutdown was clean — ${parsed.signal} drained in ${took}, finished ${at}${stays}` };
+    const where = parsed.outcome === "budget-exceeded" ? `budget exceeded${parsed.stalledAt ? ` during ${parsed.stalledAt}` : ""}` : "drained";
+    return { clean: false, at: parsed.finishedAt, line: `[alert] previous shutdown was NOT clean — ${parsed.signal}, ${where} in ${took}, finished ${at}: ${problems(parsed)}${stays}` };
+  } catch {
+    return malformed;
+  }
 }

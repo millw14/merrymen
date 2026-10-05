@@ -257,11 +257,13 @@ describe("the receipt", () => {
     writeShutdownReceipt(dir, receiptLike({ clean: true }));
     const first = takePreviousShutdown(dir);
     assert.equal(first.clean, true);
+    assert.equal(first.at, 1_760_000_012_000, "when it finished, for whatever else reports the last stop");
     assert.match(first.line, /^previous shutdown was clean — SIGTERM drained in 12\.0s/);
     assert.equal(existsSync(path.join(dir, SHUTDOWN_RECEIPT_FILE)), false);
     assert.equal(existsSync(path.join(dir, PREVIOUS_SHUTDOWN_FILE)), true, "kept for an operator");
     const second = takePreviousShutdown(dir);
     assert.equal(second.clean, null);
+    assert.equal(second.at, null);
     assert.match(second.line, /left no receipt — it did not drain/);
   });
 
@@ -286,8 +288,16 @@ describe("the receipt", () => {
     writeFileSync(path.join(dir, SHUTDOWN_RECEIPT_FILE), "{\"version\":1,\"clean\":tr");
     const said = takePreviousShutdown(dir);
     assert.equal(said.clean, false);
+    assert.equal(said.at, null);
     assert.match(said.line, /malformed — read as NOT clean/);
     assert.equal(readFileSync(path.join(dir, PREVIOUS_SHUTDOWN_FILE), "utf8").startsWith("{\"version\":1"), true);
+    // Shaped right on the outside and still not a receipt: never a throw at start.
+    for (const over of [{ clean: false, steps: [null] }, { finishedAt: 1e300 }]) {
+      writeFileSync(path.join(dir, SHUTDOWN_RECEIPT_FILE), JSON.stringify(receiptLike(over as Partial<ShutdownReceipt>)));
+      const odd = takePreviousShutdown(dir);
+      assert.equal(odd.clean, false, JSON.stringify(over));
+      assert.match(odd.line, /malformed — read as NOT clean/);
+    }
   });
 });
 
