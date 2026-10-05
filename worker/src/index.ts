@@ -3207,9 +3207,10 @@ async function main() {
    */
   const suppressedIntents = new Map<string, string>();
   /**
-   * Gated entries (entry-gates.ts) whose one rejected row this arm has been let
-   * through: every repeat of the same (venue, token, rule) is withheld before
-   * ensureDecision. Cleared at every arm, beside suppressedIntents.
+   * Gated entries (entry-gates.ts) whose one rejected row the wall has written
+   * this arm: every repeat of the same (venue, token, rule) is withheld before
+   * ensureDecision. Spent by `settle` with the row, never by letting an intent
+   * go. Cleared at every arm, beside suppressedIntents.
    */
   const entryGateRows = entryGateLatch();
   /** The last arm failure reported, so the same one is not re-logged every tick. */
@@ -12995,10 +12996,10 @@ async function main() {
       // ── ENTRY GATES: THE BACKSTOP (entry-gates.ts) ──────────────────────
       //
       // A buy the wall is certain to refuse, from a producer that did not read
-      // `snap.entryGates`. The first per (venue, token, rule) this arm goes on,
-      // so the wall writes its one rejected row; every repeat stops here,
-      // before any claim, decision row or reservation. Entries only — never an
-      // exit.
+      // `snap.entryGates`. It goes on until the wall has written its one
+      // rejected row per (venue, token, rule) this arm — `settle`, below, after
+      // processIntentReporting — and every repeat after that stops here, before
+      // any claim, decision row or reservation. Entries only — never an exit.
       if (entry && entryGateRows.withhold(intent, active.limits)) continue;
       // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
       //
@@ -13037,6 +13038,10 @@ async function main() {
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
+        // The backstop's row is spent HERE, by the row the wall wrote — not
+        // above, where a refused group claim, a closed energy allowance or a
+        // failed decision row could still stop the intent with nothing written.
+        entryGateRows.settle(intent, active.limits, facts);
       } else {
         // A sale that empties a coin bought through a group may earn one
         // "out of that one" line once its row lands (tgNoteTradeRow).
