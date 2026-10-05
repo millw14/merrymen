@@ -182,9 +182,11 @@ export type Why =
    * is skipped and, when no other leg could have bought, this says so once.
    *
    * COUNTS ONLY, so it publishes by the same rule as every other reason here:
-   * how many legs, and how many of them the key does not cover. `locked` is
-   * at most `legs`; the rest, when there are any, were stale, paused, or not
-   * wanted this tick — and the sentence makes no claim about which.
+   * how many legs, and how many of them the key does not cover — counted over
+   * the whole basket (entry-gates.ts lockedLegs), so the sentence is a fact
+   * about the basket and holds still while the feeds open and shut. The
+   * legs it does not name were stale, paused, or not wanted this tick, and
+   * the sentence makes no claim about which.
    */
   | { code: "legs-locked"; legs: number; locked: number }
   /**

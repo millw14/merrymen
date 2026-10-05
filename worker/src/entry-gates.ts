@@ -103,6 +103,20 @@ export function entryGateFor(
 }
 
 /**
+ * How many of a strategy's legs the swap gate refuses — the figure a
+ * `legs-locked` reason carries.
+ *
+ * OVER THE WHOLE BASKET, not over whichever legs reached the gate this tick.
+ * A locked leg that is also stale is skipped as stale, so a per-tick count
+ * would say "1 of the 3 legs" about a basket with two locked, and would change
+ * with the feeds — which, to the once-per-change idle channel, is a new
+ * sentence every time a market opens or shuts.
+ */
+export function lockedLegs(gates: EntryGates | null | undefined, legs: readonly { token: string }[]): number {
+  return legs.filter((l) => entryGateFor(gates, l.token) !== null).length;
+}
+
+/**
  * The gate for a whole intent: which token it is ENTERING, and the rule the
  * wall would refuse it with. Null for everything a gate must not touch:
  *
