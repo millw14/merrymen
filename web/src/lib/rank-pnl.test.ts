@@ -105,12 +105,14 @@ describe("what may be ranked", () => {
     // Only one of them is fixed by depositing and only one by waiting, so a page
     // that collapses them sends an owner to do work that will not help.
     const seen = new Set<string>();
-    for (const why of ["no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown"] as const) {
+    // "gas-pending" is set by book-performance.ts, never here, but its words
+    // live in this module and must not borrow another refusal's.
+    for (const why of ["no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "gas-pending"] as const) {
       seen.add(unrankedLabel(why));
       seen.add(unrankedShort(why));
       assert.notEqual(unrankedLabel(why), "", `${why} must have words`);
     }
-    assert.equal(seen.size, 8, "no two refusals may share a label");
+    assert.equal(seen.size, 10, "no two refusals may share a label");
   });
 
   it("evidence is checked LAST, so the more basic refusals still win", () => {

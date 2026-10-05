@@ -222,7 +222,12 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
   const contributionsKnown = quality?.contributions_known === null || quality?.contributions_known === undefined
     ? null : Number(quality.contributions_known) === 1;
   let liveRank = rankPnl({ contributed, latest: measured.equity, gasUsdg: gas?.gas ?? 0, landed: gas?.landed ?? 0, contributionsKnown });
-  if (inputs[0].status === "rejected" || !gas || (!gas.complete && liveRank.pnlBps !== null)) liveRank = unavailable();
+  if (inputs[0].status === "rejected" || !gas) liveRank = unavailable();
+  // A READ gas tape that is missing a cost is its own reason, and only where
+  // rankPnl would have published: every other refusal is the truer thing to
+  // say first. An unread tape stays "quality-unknown" above — that is about
+  // the read, and this is about the record.
+  else if (!gas.complete && liveRank.pnlBps !== null) liveRank = { pnlBps: null, unrankedWhy: "gas-pending" };
   performance.gasComplete = gas?.complete ?? null;
   // Net contributions may be zero or negative after a withdrawal. A dollar
   // gain still has meaning with a proved funding history and executed trade;

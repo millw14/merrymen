@@ -123,9 +123,25 @@ test("exact live performance and rank refuse unpriced or unrecorded gas, while p
       assert.equal(result.performance.pnlUsdg, complete ? 10 : null);
       assert.equal(result.performance.pnlBps, complete ? 1000 : null);
       assert.equal(result.liveRank.pnlBps, complete ? 1000 : null);
-      assert.equal(result.liveRank.unrankedWhy, complete ? null : "quality-unknown");
+      // Its own reason: the deposits ARE evidenced (contributions_known = 1),
+      // so "quality-unknown" would say the opposite of what the profile says.
+      assert.equal(result.liveRank.unrankedWhy, complete ? null : "gas-pending");
     } finally { raw.close(); }
   }
+});
+
+test("gas-pending is said only where every other gate passed; an earlier refusal keeps its own words", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, 110, 10);
+    await op(db, 5, { gas: null, wei: "123" });
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).liveRank.unrankedWhy, "gas-pending");
+    await db.prepare("UPDATE agents SET contributions_known = 0").run();
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).liveRank.unrankedWhy, "contributions-unevidenced");
+    await db.prepare("UPDATE agents SET contributions_known = 1").run();
+    await db.prepare("DELETE FROM flows").run();
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).liveRank.unrankedWhy, "no-deposit");
+  } finally { raw.close(); }
 });
 
 test("a delayed landed or reverted operation is charged when observed settlement reaches the measured valuation", async () => {

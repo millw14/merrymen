@@ -449,7 +449,11 @@ export async function readPublicBoard(
         ? VALUATION_NOT_LIVE
       : r.pnlBps !== null || !r.unrankedWhy
         ? notLive(valuation?.book)
-        : !reasonRead || (!countsRead && (r.unrankedWhy === "never-filled" || r.unrankedWhy === "quality-unknown"))
+        // "gas-pending" rests on the trade tape too: it says a fill landed
+        // and one of its costs is missing, which a tape this page could not
+        // read again cannot vouch for.
+        : !reasonRead || (!countsRead && (r.unrankedWhy === "never-filled" || r.unrankedWhy === "quality-unknown"
+            || r.unrankedWhy === "gas-pending"))
           ? RECORDS_UNREADABLE
           : { code: r.unrankedWhy, label: unrankedLabel(r.unrankedWhy) };
     return {
@@ -843,7 +847,9 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
   const why = profile.unrankedWhy;
   const reasonUnread = (why === "no-deposit" && !profile.flowsRead)
     || (why === "never-filled" && (!profile.tradesRead || !profile.equityRead))
-    || (why === "quality-unknown" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead));
+    || (why === "quality-unknown" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead))
+    // Only reachable where every gate passed, so it rests on all three reads.
+    || (why === "gas-pending" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead));
   // The board's order, so the list and the profile give the same reason for
   // the same agent: the heartbeat's mode first, then rankPnl's own refusal
   // (true whichever book the newest mark is), and only a return rankPnl would
@@ -958,6 +964,7 @@ const UNRANKED_CODES: Record<UnrankedWhy, true> = {
   "never-filled": true,
   "contributions-unevidenced": true,
   "quality-unknown": true,
+  "gas-pending": true,
 };
 
 export interface LeaderboardExplained {
@@ -1000,6 +1007,7 @@ export function explainLeaderboard(): LeaderboardExplained {
       "Capital is on record: net contributions this run are above zero.",
       "At least one live trade landed, and there is an equity reading to measure.",
       "The worker has assessed the contributions as evidence (chain-log receipts or a reconciling epoch carry), not inferred from a balance change.",
+      "Every operation's owner gas cost up to that valuation is on record (or proved sponsored). Otherwise the return is withheld as gas-pending: it is not known exactly.",
       "The newest valuation belongs to the live book (checked here in addition to the page's gates, so a paper balance is never divided by real deposits).",
     ],
     unranked_reasons: [

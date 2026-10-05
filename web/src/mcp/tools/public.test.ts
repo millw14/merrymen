@@ -558,6 +558,25 @@ test("the list and the profile give the same reason for the same agent", async (
   assert.equal(profile.sc.valuation.book, "unknown");
 });
 
+test("a funded, evidenced live book with an unrecorded gas cost is gas-pending on both surfaces, never quality-unknown", async () => {
+  const { d, connect } = await setup();
+  // C's deposits are evidenced (contributions_known = 1) and its one fill
+  // landed; only that fill's owner gas has no price. The return is withheld,
+  // and the reason says which input is missing — not that nobody assessed it.
+  d.raw.prepare("UPDATE trades SET gas_usdg = NULL WHERE agent_id = ?").run(ACCOUNT_C);
+  const b = await connect(OWNER_B);
+  const list = await call(b, "list_public_agents", {});
+  const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.deepEqual(row.unranked, { code: "gas-pending", reason: "gas cost not yet fully recorded" });
+  assert.equal(row.live.return_bps, null);
+  assert.equal(row.ranked, false);
+  const profile = await call(b, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.res.isError, undefined, profile.json);
+  assert.deepEqual(profile.sc.unranked, row.unranked);
+  assert.equal(profile.sc.live.return_bps, null);
+  assert.doesNotMatch(list.json + profile.json, /quality-unknown/);
+});
+
 test("the list and the profile name the same decider when the book changed after the last decision", async () => {
   const { d, connect } = await setup();
   // C decided (dip-hunter) while live; its newest mark is now a paper one, and
@@ -645,7 +664,7 @@ test("explain_leaderboard states the formula, the gates, both drawdowns, the pri
   assert.match(def("live.return_bps"), /recorded this run up to that valuation/);
   assert.match(def("live.max_drawdown_bps (leaderboard list)"), /including one taken while flow inference was held/);
   const codes = sc.unranked_reasons.map((r: { code: string }) => r.code);
-  for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
+  for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "gas-pending", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
     assert.ok(codes.includes(c), c);
   }
   assert.equal(sc.period.name, "current run");
