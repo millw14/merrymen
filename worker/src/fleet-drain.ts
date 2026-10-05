@@ -167,6 +167,13 @@ export interface ShutdownReceipt {
   finalPass: { homes: number; saved: number; retained: number; skipped: number; outOfTime: number };
   /** A copy or a spawn still running when the leases were released: its barrier stays, as after a crash. */
   inFlightAtRelease: boolean;
+  /**
+   * Spawns stuck before the stop (alerted then, a redeploy the remedy), not
+   * waited for and ended by the exit. Not in inFlightAtRelease, so neither
+   * hides the other; still not clean — one stuck inside its final mirror
+   * keeps that copy's barrier, as after a crash.
+   */
+  stuckSpawns: number;
 }
 
 /**
@@ -182,8 +189,15 @@ export interface FleetDrainPlan<T> {
   stop: () => T[];
   /** Step 2. */
   beforeChildren: readonly DrainHook[];
-  /** Step 3: nothing in flight — no copy, no spawn preparing, no mirror pass. */
+  /** Step 3: nothing in flight — no copy, no spawn preparing, no mirror pass — that a wait could see finish. */
   settled: () => boolean;
+  /**
+   * Spawns already stuck before the signal came (orchestrator.ts
+   * flagStuckSpawn): left out of `settled`, because no wait ends them and
+   * waiting for one cost every stop its whole settle cap and late settle;
+   * counted here instead, on their own line of the receipt.
+   */
+  stuckSpawns: () => number;
   /** After step 3: from here, only the final pass may start a copy. */
   closeCopies: () => void;
   /** Step 4: signal every child and hold process still running; how many were. */
@@ -291,7 +305,7 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
   const receipt: ShutdownReceipt = {
     version: 1, signal: plan.signal, outcome: "drained", clean: false, startedAt, finishedAt: startedAt,
     budgetMs: plan.budgetMs, stalledAt: null, steps: [], hooksFailed: 0, hooksUnfinished: 0, stragglers: 0,
-    finalPass: { homes: 0, saved: 0, retained: 0, skipped: 0, outOfTime: 0 }, inFlightAtRelease: false,
+    finalPass: { homes: 0, saved: 0, retained: 0, skipped: 0, outOfTime: 0 }, inFlightAtRelease: false, stuckSpawns: 0,
   };
   let current: DrainStep | null = null;
   // Set by whichever ending comes first, the backstop's or the drain's own.
@@ -313,6 +327,7 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
     receipt.clean = false;
     receipt.stalledAt = current;
     receipt.inFlightAtRelease = !plan.settled();
+    receipt.stuckSpawns = plan.stuckSpawns();
     plan.log(
       `[alert] drain budget of ${seconds(plan.budgetMs)} spent during ${current ?? "the receipt"} — exiting 1; ` +
         `anything interrupted keeps its recovery barrier, as after a crash`,
@@ -369,6 +384,8 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
 
   // 3.
   await step("settle", async () => {
+    const stuck = plan.stuckSpawns();
+    if (stuck) plan.log(`[alert] ${stuck} spawn(s) stuck since before the stop are not waited for — the exit ends them, as a crash would`);
     const settled = await waitUntil(plan.settled, allow(limits.settleMs), limits.pollMs);
     if (!settled) plan.log("[alert] a copy or a spawn is still running after the settle wait — its home keeps its barrier, and no new copy starts");
     return settled ? "done" : "timeout";
@@ -435,9 +452,11 @@ export async function runFleetDrain<T>(plan: FleetDrainPlan<T>): Promise<void> {
   // 7.
   current = null;
   receipt.inFlightAtRelease = !plan.settled();
+  receipt.stuckSpawns = plan.stuckSpawns();
   const { finalPass } = receipt;
   receipt.clean = receipt.steps.every((s) => s.outcome === "done") && receipt.hooksFailed === 0 && receipt.stragglers === 0
-    && finalPass.retained === 0 && finalPass.skipped === 0 && finalPass.outOfTime === 0 && !receipt.inFlightAtRelease;
+    && finalPass.retained === 0 && finalPass.skipped === 0 && finalPass.outOfTime === 0 && !receipt.inFlightAtRelease
+    && receipt.stuckSpawns === 0;
   writeReceipt();
 
   // 8. Best-effort and briefly: a dropped connection releases its locks anyway.
@@ -477,6 +496,7 @@ function problems(r: ShutdownReceipt): string {
   const f = r.finalPass;
   if (f.retained || f.skipped || f.outOfTime) said.push(`final pass ${f.saved}/${f.homes} saved, ${f.retained} retained, ${f.skipped} skipped, ${f.outOfTime} out of time`);
   if (r.inFlightAtRelease) said.push("a copy or spawn still in flight at release");
+  if (r.stuckSpawns) said.push(`${r.stuckSpawns} spawn(s) stuck before the stop, ended by the exit`);
   return said.join("; ") || "no step reported";
 }
 

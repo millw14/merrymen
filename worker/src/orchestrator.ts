@@ -4389,6 +4389,31 @@ function fleetProcessesGone(): boolean {
 }
 
 /**
+ * A SPAWN ALREADY STUCK, by flagStuckSpawn's own rule: flagged, or preparing
+ * for SPAWN_STUCK_MS. No wait the drain can afford ends one — a Postgres lock
+ * wait or a half-open socket under its final mirror, its restore or its seeds
+ * carries no timeout — and a redeploy is the documented remedy, so waiting
+ * for it cost exactly that redeploy its whole settle cap and late settle, and
+ * the final pass that time. Left out of drainSettled with the copy it is
+ * making (its tenant's mirrorTails), and counted on its own in the receipt.
+ */
+function spawnStuck(tenant: string): boolean {
+  const prep = spawning.get(tenant);
+  return !!prep && (prep.flagged || Date.now() - prep.since >= SPAWN_STUCK_MS);
+}
+
+/**
+ * NOTHING IN FLIGHT THAT A WAIT COULD SEE FINISH (fleet-drain.ts, steps 3 and
+ * after the final pass): a copy started, a spawn preparing (its own final
+ * mirror among its awaits), the mirror's tenant in hand, or an order ferry
+ * crossing a home — except a spawn already stuck, and its copy (spawnStuck).
+ */
+function drainSettled(): boolean {
+  return [...mirrorTails.keys()].every(spawnStuck) && [...spawning.keys()].every(spawnStuck)
+    && mirrorLoopsInHand === 0 && !ferrying;
+}
+
+/**
  * THE DRAIN'S FINAL PASS OVER ONE HOME (fleet-drain.ts, step 6): the last
  * copy of what its process left, now that nothing writes it. Through the
  * retirement pass, which already knows how to do this safely, as
@@ -4469,9 +4494,8 @@ function drainFleet(
       return drainHomes();
     },
     beforeChildren: drainBeforeChildren,
-    // A copy started, a spawn preparing (its own final mirror among its
-    // awaits), the mirror's tenant in hand, or an order ferry crossing a home.
-    settled: () => mirrorTails.size === 0 && spawning.size === 0 && mirrorLoopsInHand === 0 && !ferrying,
+    settled: drainSettled,
+    stuckSpawns: () => [...spawning.keys()].filter(spawnStuck).length,
     closeCopies: () => {
       copiesClosed = true;
     },
@@ -4507,6 +4531,18 @@ export function resetDrainForTest(): void {
   stopping = false;
   copiesClosed = false;
   draining = null;
+}
+
+/**
+ * Test seam: a spawn claimed `ageMs` ago that has not finished preparing, as
+ * reconcile and the drain find one; null forgets it. Only the claim — nothing
+ * is spawned, so a test can show what the drain does around a stuck spawn
+ * without a hung database under one.
+ */
+export function setSpawningForTest(tenant: `0x${string}`, ageMs: number | null): void {
+  const lc = tenant.toLowerCase();
+  if (ageMs === null) spawning.delete(lc);
+  else spawning.set(lc, { since: Date.now() - ageMs, flagged: false });
 }
 
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
