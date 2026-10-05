@@ -105,7 +105,7 @@ export function basisSeedLine(tenant: string, plan: BasisSeedPlan): string {
   return `basis seed: ${tenant} — restored ${plan.rows.length} cost basis row(s) from the shared ledger (${what})`;
 }
 
-// ── AND EACH HELD POSITION'S FLOOR ──────────────────────────────────────────
+// ── AND EACH RESTORED POSITION'S FLOOR ──────────────────────────────────────
 //
 // `position_floors` is the stop graded for a position at its own entry
 // (store.ts setPositionFloor), and it dies with the child's sqlite exactly as
