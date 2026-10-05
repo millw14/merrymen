@@ -61,13 +61,13 @@ import { heldNotice, telegramRow, trencherRow, type TelegramRow, type TrencherRo
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { RecoveryNotice } from "./RecoveryNotice";
-import { pausedRecovery, recoveryTelegram } from "./recovery-view";
+import { pausedRecovery, recoveryTelegram, type RecoveryFunds } from "./recovery-view";
 
 interface SettingsShape {
   values?: { strategy?: string | null; trencherLiveEnabled?: boolean | null; assetMode?: string | null };
 }
 
-export function AgentStrip({ hasAgent, recovery }: { hasAgent: boolean; recovery?: FleetRecoveryView | null }) {
+export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; recovery?: FleetRecoveryView | null; funds?: RecoveryFunds | null }) {
   const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
@@ -98,7 +98,7 @@ export function AgentStrip({ hasAgent, recovery }: { hasAgent: boolean; recovery
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
       {recovering ? <>
-        <RecoveryNotice recovery={recovering}/>
+        <RecoveryNotice recovery={recovering} funds={funds}/>
         <Row tone="warn" label="Telegram" value={bot.label}
           action={bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>
         <Row tone="quiet" label="Trencher" value="Trading paused"/>

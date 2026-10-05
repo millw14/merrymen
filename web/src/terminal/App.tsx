@@ -22,7 +22,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { autonomyOf } from "@merrymen/core";
-import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { pausedRecovery, recoveryAutonomy, recoveryFunds } from "./recovery-view";
 import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
@@ -460,8 +460,10 @@ export function App() {
         ? Math.ceil((account.status.grant.expiresAt * 1000 - Date.now()) / 86_400_000)
         : null,
   }), recovery);
+  // `recoveryFunds` from the same `account` as `recovery`, so the notice never
+  // pairs one tenant's hold with another read's account or cash.
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
-    ...(recovery ? { chg24: null } : {})} : null;
+    ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
    *

@@ -300,6 +300,12 @@ export interface LiveMine {
   /** Owner-only, proven recovery hold. Saved records are not current trading authority. */
   recovery?: FleetRecoveryView | null;
   /**
+   * Where the money is while `recovery` holds — from the SAME /api/grants answer
+   * as the hold, computed once in App.tsx (recoveryFunds), never re-derived.
+   * Absent outside a hold.
+   */
+  recoveryFunds?: import("./recovery-view").RecoveryFunds | null;
+  /**
    * The newest thing the worker warned about, or null.
    *
    * ONE, NOT FORTY. These repeat: the worker latches the ones that matter to
