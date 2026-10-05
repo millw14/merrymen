@@ -133,6 +133,7 @@ test("never heard from is null — not stopped", async () => {
   const body = await status(null);
   assert.equal(body.workerAliveAt, null);
   assert.equal(body.workerStale, null);
+  assert.deepEqual(settingsReads, [], "and no tick is needed to say so");
 });
 
 test("self-hosted judges the heartbeat file, with the worker's own tick", async () => {

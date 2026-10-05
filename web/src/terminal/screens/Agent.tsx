@@ -533,8 +533,8 @@ export function Agent({
    *
    * The desktop has rendered this banner from the verdict for a long time; the
    * desk reads the worker's raw rule, and an expired agent has none — it is
-   * retired before the rail is assessed — so the phone said nothing at all, or
-   * worse, kept showing whatever blocker it had before it expired.
+   * retired before the rail is assessed — so the desk said nothing about it, or
+   * worse, kept showing whatever blocker was on record before it expired.
    *
    * FROM THE VERDICT, NOT A RULE OF OUR OWN. There is no `expired` advice and
    * no invented `liveBlocker`: that field carries the worker's word, and mixing

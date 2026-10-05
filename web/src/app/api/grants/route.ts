@@ -603,7 +603,9 @@ export async function GET(req: Request) {
 
   // AFTER BOTH HEARTBEAT SOURCES, so it judges whichever one answered: the
   // file self-hosted, the mirrored row hosted. See terminal/worker-stale.ts.
-  const workerStale = workerStaleOf(workerAliveAt, Math.floor(Date.now() / 1000), await tickSecondsFor(hostedTenant));
+  // Never heard from is null whatever the tick, so that costs no settings read.
+  const workerStale = workerAliveAt === null ? null
+    : workerStaleOf(workerAliveAt, Math.floor(Date.now() / 1000), await tickSecondsFor(hostedTenant));
 
   let recovery: FleetRecoveryView | null = null;
   if (hostedTenant) {
