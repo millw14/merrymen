@@ -149,6 +149,11 @@ describe("AN OWNER ORDER GETS AN EXPLICIT REPLY", () => {
     assert.match(line, /Nothing was signed and nothing was spent\./);
   });
 
+  it("and what the owner can do about it, where there is something", () => {
+    const line = heldReply({ rule: "prefund-short", untilMs: T0 + 15 * MIN }, T0);
+    assert.match(line, /^⏳ not sent: prefund-short, retry after 15m — .+\. Send a little ETH/);
+  });
+
   it("rounds up, and never says 0m", () => {
     assert.equal(retryAfterMin({ untilMs: T0 + 4 * MIN + 1 }, T0), 5);
     assert.equal(retryAfterMin({ untilMs: T0 + 1 }, T0), 1);
@@ -283,5 +288,91 @@ describe("CLEAR ON ARM", () => {
     assert.equal(lines.at(-1), "[backoff] cleared 3 holds: armed");
     assert.equal(b.clear("armed"), 0);
     assert.equal(lines.length, 4, "an empty clear is not a change");
+  });
+});
+
+/**
+ * THE WIRING, pinned over index.ts with comments stripped — prose about a
+ * hold is not a hold. main() cannot be booted by a test; each of these is a
+ * mistake every pure test above would pass.
+ */
+const codeOf = (src: string) =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
+    .join("\n");
+const CODE = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
+const SKIP = "if (entry && !intent.decisionId && execBackoff.held(intent, active.limits, Date.now())) continue;";
+
+/** A function declared in main() — two-space indent — up to its closing brace. */
+function body(name: string): string {
+  const at = CODE.search(new RegExp(`\\n  (async )?function ${name}\\(`));
+  assert.ok(at > 0, `${name} must exist for this pin to mean anything`);
+  return CODE.slice(at, CODE.indexOf("\n  }\n", at));
+}
+
+describe("WHERE THE WORKER ASKS", () => {
+  it("THE STRATEGY LOOP skips a held entry with no decision before anything is claimed or decided", () => {
+    const at = CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {");
+    const loop = CODE.slice(at, CODE.indexOf("\n    }\n", at));
+    const entry = loop.indexOf("const entry = countsAsEntry(");
+    const skip = loop.indexOf(SKIP);
+    assert.ok(entry > 0 && skip > entry, "asked of the entry test's answer, never of an exit");
+    assert.ok(skip < loop.indexOf("tgClaimGroupEntry(intent)"), "before the group claim");
+    assert.ok(skip < loop.indexOf("await claimEntry()"), "before the energy claim");
+    assert.ok(skip < loop.indexOf("await ensureDecision("), "before any decision row");
+  });
+
+  it("THE CLASS ENTRIES the same, and THE CLASS EXITS never ask", () => {
+    const at = CODE.indexOf("const entries: Tick = await classGate.entries(async () => await proposeClassEntries());");
+    const loop = CODE.slice(at, CODE.indexOf("\n    }\n", at));
+    const skip = loop.indexOf(SKIP);
+    assert.ok(skip > loop.indexOf("const entry = countsAsEntry("));
+    assert.ok(skip < loop.indexOf("await claimEntry()") && skip < loop.indexOf("await ensureDecision("));
+    const exits = CODE.slice(CODE.indexOf("const exits = await proposeClassExits();"), at);
+    assert.doesNotMatch(exits, /execBackoff/);
+  });
+
+  it("processIntentLocked books a held intent `rejected` under the held rule — never a silent return", () => {
+    const fn = body("processIntentLocked");
+    const suppressed = fn.indexOf("if (suppressed && verdict.ok) {");
+    const asked = fn.indexOf("const backedOff = execBackoff.held(intent, limits, Date.now());");
+    assert.ok(suppressed > 0 && asked > suppressed, "read beside suppressedIntents, after checkPolicy");
+    const branch = fn.slice(asked, fn.indexOf("return;", asked));
+    assert.match(branch, /if \(backedOff && verdict\.ok\) \{\s*await recordTrade\(\{/);
+    assert.match(branch, /status: "rejected",\s*reject_rule: backedOff\.rule,/);
+    assert.ok(asked < fn.indexOf("if (!verdict.ok) {"), "it acts only on what the policy allowed, so a cap breach still names its cap");
+  });
+
+  it("a gas refusal is noted BEFORE the key install that would clear it, and a sponsor refusal is noted too", () => {
+    const fn = body("processIntentLocked");
+    const gas = fn.slice(fn.indexOf("if (e instanceof GasRefused) {"), fn.indexOf("if (e instanceof SponsorRefused) {"));
+    const noted = gas.indexOf("execBackoff.note(intent, limits, e.rule, Date.now());");
+    assert.ok(noted > gas.indexOf("await recordTrade("), "after the refusal's own row");
+    assert.ok(noted < gas.indexOf("await installKeyAlone(agentId, executor)"), "before the install");
+    const sponsor = fn.slice(fn.indexOf("if (e instanceof SponsorRefused) {"), fn.indexOf("if (e instanceof UserOpUnresolved) {"));
+    assert.match(sponsor, /execBackoff\.note\(intent, limits, e\.rule, Date\.now\(\)\);\s*return;/);
+  });
+
+  it("CLEAR ON INSTALL SUCCESS: a landed install drops the `enable-too-wide` holds", () => {
+    const fn = body("installKeyAlone");
+    assert.match(fn, /const landed = await installKeyRecorded\(\{/);
+    assert.match(fn, /if \(landed\) execBackoff\.clearRule\("enable-too-wide", /);
+    assert.match(CODE, /const KEY_INSTALL_RETRY_MS = KEY_INSTALL_HOLD_MS;/, "the hold and the retry are one number");
+  });
+
+  it("CLEAR ON ARM, in the same breath as suppressedIntents", () => {
+    assert.match(CODE, /suppressedIntents\.clear\(\);\n\s*execBackoff\.clear\("armed"\);/);
+  });
+
+  it("BOTH ORDER PATHS say a held order as held: the owner's and the Brain's", () => {
+    const swap = body("submitChatTrade");
+    assert.match(swap, /\.\.\.sayTradeOutcome\(outcome, side, named, usdgAmount, sold \?\? usdgAmount\), \.\.\.orderHeldReply\(intent, outcome\),/);
+    const curveOrder = body("submitChatCurveTrade");
+    assert.match(curveOrder, /\.\.\.sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\), \.\.\.orderHeldReply\(intent, outcome\),/);
+    const reply = body("orderHeldReply");
+    assert.match(reply, /outcome\?\.status !== "rejected"\) return \{\};/);
+    assert.match(reply, /held && held\.rule === outcome\.rejectRule \? no\(heldReply\(held, now\)\) : \{\}/);
   });
 });

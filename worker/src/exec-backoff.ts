@@ -47,7 +47,7 @@
  */
 import { isExitIntent, type AgentLimits, type TradeIntent } from "./policy";
 import { suppressionKey, suppressionLegs } from "./revert";
-import { rejectRuleLabel } from "./thesis-policy";
+import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 
 /**
  * Minutes held after the 1st, 2nd, 3rd… refusal of one key in an arm; the last
@@ -237,14 +237,17 @@ export function retryAfterMin(hold: Pick<Hold, "untilMs">, nowMs: number): numbe
 /**
  * WHAT AN OWNER'S OR THE BRAIN'S ORDER HEARS WHEN IT WAS HELD — the rule, and
  * when asking again can help. The rule as the slug, because that is what the
- * row carries and what support triages on; its sentence beside it when the
- * vocabulary has one (thesis-policy.ts). Nothing was signed, so nothing was
- * spent, and the reply says that rather than leaving it to be guessed.
+ * row carries and what support triages on; its sentence and the owner's
+ * remedy beside it when the vocabulary has them (thesis-policy.ts), because
+ * "retry after 15m" is no answer to `prefund-short` without "send a little
+ * ETH". Nothing was signed, so nothing was spent, and the reply says that
+ * rather than leaving it to be guessed.
  */
 export function heldReply(hold: Pick<Hold, "rule" | "untilMs">, nowMs: number): string {
   const label = rejectRuleLabel(hold.rule);
+  const remedy = rejectRuleRemedy(hold.rule);
   return (
     `⏳ not sent: ${hold.rule}, retry after ${retryAfterMin(hold, nowMs)}m` +
-    `${label ? ` — ${label}` : ""}. Nothing was signed and nothing was spent.`
+    `${label ? ` — ${label}` : ""}.${remedy ? ` ${remedy}` : ""} Nothing was signed and nothing was spent.`
   );
 }
