@@ -30,7 +30,7 @@ import { PgGrantStore } from "./grant-store";
 import { leaseKey, type TenantLease } from "./tenant-lease";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
-import { applyResumeApprovals, moveApproval, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
+import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -148,6 +148,11 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const archived = (await main.query("SELECT table_name,last_id,last_stamp,updated_at FROM mirror_state_archive WHERE generation=$1 ORDER BY table_name", [generation])).rows;
     assert.deepEqual(archived.map(a => [a.table_name, String(a.last_id)]), cursors.map(c => [c.table_name, String(c.last_id)]));
     assert.equal((await main.query("SELECT state FROM ledger_resume_approvals WHERE approval_id=$1", [approval.approvalId])).rows[0]!.state, "registered");
+    // The already-admitted join, in the production dialect: this account's attested source, and no other account's.
+    assert.equal(await attestedSourceInUse(shared, tenant, account), generation);
+    assert.equal(await attestedSourceInUse(shared, tenant, address(0x99999)), null);
+    // The attested seed's plan reads Postgres as the seeds do: this book's basis is paper, so nothing live to prove.
+    assert.deepEqual(await planAttestedSeed(shared, account), { basis: [], floors: [] });
     // The ordinary path, unchanged, takes it from here.
     assert.equal(await restoreLedgerImport(options), "present");
     await registerLedgerSource(options);
