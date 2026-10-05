@@ -54,6 +54,10 @@ import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/co
 
 let historyRepairStarted = false;
 function startHistoryRepair(): void {
+  // Every tenant's shared rows at once, held ones included: only once the
+  // rollout admits the whole fleet (fleet-rollout.ts). Not latched meanwhile,
+  // so the deploy that makes it `all` runs it.
+  if (!rolloutAdmitsWholeFleet()) return;
   if (historyRepairStarted || !process.env.DATABASE_URL) return;
   historyRepairStarted = true;
   void (async () => {
@@ -77,7 +81,7 @@ import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease as acquireStoreLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings, type StoredGrant } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -109,6 +113,18 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import {
+  ADMISSION_LEVEL_ENV,
+  FLEET_ROLLOUT_ENV,
+  childAdmissionLevel,
+  fleetRollout,
+  rolloutAdmitsWholeFleet,
+  rolloutCounts,
+  rolloutHeld,
+  rolloutLine,
+  rolloutStartupLine,
+  type RolloutCounts,
+} from "./fleet-rollout";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -362,6 +378,34 @@ function nextRung(child: Child, aliveUntilMs: number): number {
 }
 
 /**
+ * WHY THE OPERATOR HOLDS THIS TENANT, or null: the accounting hold, or a
+ * rollout that does not admit it (fleet-rollout.ts).
+ *
+ * ONE PREDICATE, asked at every gate that starts or keeps a process for a
+ * tenant: the restart timer, spawnChild on the way in and again after its
+ * last await (lateSpawnRefusal), spawnHolder and the hold process it starts,
+ * holdMayLeave, and reconcile's spawn loop and stand-down. The accounting hold
+ * was asked at each of those, by name; a second kind of hold asked at only
+ * some of them would be a door left open at the rest, and nobody reading one
+ * gate could tell which kind it had forgotten.
+ *
+ * Only processes. What else an out-of-scope tenant is spared (the leased part
+ * of its expiry retirement, the paused-source report) is the rollout's alone
+ * and is asked with rolloutHeld: the accounting hold has never stopped those,
+ * and this change does not make it. Neither hold defers its owner's kill, nor
+ * keeps an expired key's copy on the volume.
+ */
+function operatorHold(tenant: string): string | null {
+  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
+  if (rolloutHeld(tenant)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
+  return null;
+}
+
+function operatorHeld(tenant: string): boolean {
+  return operatorHold(tenant) !== null;
+}
+
+/**
  * ONE RESTART POLICY, because there were two and only one of them had a brake.
  *
  * The exit handler backed off and capped. The watchdog — the path a
@@ -373,7 +417,7 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  */
 function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
   if (stopping) return;
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   if (restarts > MAX_RESTARTS) {
     gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
     log(
@@ -545,6 +589,23 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  /**
+   * THE ROLLOUT, REDUCED TO THIS TENANT'S OWN LEVEL (fleet-rollout.ts).
+   *
+   * The level is for the worker's admission gate (worker-admission.ts), which
+   * is a change of its own and not yet in this tree: nothing here reads it.
+   * So the rollout accepts `trade` alone until that gate arrives
+   * (WORKER_ENFORCED_LEVELS), and anything spawned here carries `trade`,
+   * which is what a worker does anyway. Always set, and always set here,
+   * overwriting anything the orchestrator's own env carried under that name:
+   * a child must never take its level from an operator's fleet-wide
+   * variable. The rollout itself is stripped, for the reason
+   * MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an answer to
+   * a question about somebody else, and a child that read it might one day
+   * mistake another tenant's level for its own.
+   */
+  delete env[FLEET_ROLLOUT_ENV];
+  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant);
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
@@ -707,6 +768,19 @@ let spawn: (command: string, args: readonly string[], options: SpawnOptions) => 
 /** Test seam: start children with `fn` instead of node's `spawn`. */
 export function setSpawnForTest(fn: typeof spawn): void {
   spawn = fn;
+}
+
+/**
+ * What takes a tenant's advisory lease: tenant-lease.ts's, unless a test has
+ * swapped in one that records who was asked for. The no-op lease a test runs
+ * on is taken and released without trace, so "a tenant the rollout does not
+ * admit is never leased" could not be shown without this.
+ */
+let acquireTenantLease: (tenant: `0x${string}`) => Promise<TenantLease | null> = acquireStoreLease;
+
+/** Test seam: take leases through `fn`; null puts tenant-lease.ts's back. */
+export function setLeaseAcquireForTest(fn: typeof acquireTenantLease | null): void {
+  acquireTenantLease = fn ?? acquireStoreLease;
 }
 
 /** Test seam: run the production spawn gate with short, real waits. */
@@ -899,6 +973,12 @@ export function isRetiringExpiredForTest(tenant: string): boolean {
 }
 let lastRosterLog: { active: number; expired: number; at: number } | null = null;
 let lastCapacityLog: { deferred: number; at: number } | null = null;
+/** The last reconcile's count of the roster per rollout level, for the heartbeat (fleetHealth); null when it could not read the roster. */
+let lastRolloutCounts: RolloutCounts | null = null;
+/** Test seam: what the heartbeat's rollout line would count, as the last reconcile left it. */
+export function rolloutCountsForTest(): RolloutCounts | null {
+  return lastRolloutCounts;
+}
 /** Includes children already removed by the watchdog or another stand-down. */
 const exitingChildren = new Map<string, Set<ChildProcess>>();
 
@@ -2772,7 +2852,8 @@ export async function writeBootstrapForChild(
  */
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
-  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
+  const held = operatorHold(tenant);
+  if (held) return held;
   if (haltRequested()) return "FLEET_HALT is present";
   if (retiringExpired.has(tenant)) return "the expired grant's previous process is still retiring";
   if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
@@ -2785,7 +2866,7 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   if (retiringExpired.has(tenant)) return;
   if (removedLedgerPending.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
@@ -3282,7 +3363,7 @@ async function spawnHolder(
   lease: TenantLease,
   honour: HeldHonour | null,
 ): Promise<void> {
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
@@ -3546,7 +3627,7 @@ function scheduleHoldRetry(held: Holder, cls: string): void {
  * refuse, which would leave the bot unanswered until the next pass.
  */
 function holdMayLeave(tenant: `0x${string}`): boolean {
-  if (accountingTenantHeld(tenant)) return false;
+  if (operatorHeld(tenant)) return false;
   const lease = leases.get(tenant);
   return !stopping && !haltRequested() && !retiringExpired.has(tenant) && !!lease && lease.healthy() && !killRequested(childHome(tenant));
 }
@@ -4061,6 +4142,13 @@ async function retireExpiredGrants(
     // Cold inactive tenants have no process or lease, but can still retain an
     // obsolete signing-key copy on the mounted volume.
     await scrubInactiveGrantForChild(lc, nowSec);
+    // OUT OF THE ROLLOUT (fleet-rollout.ts): that scrub, and nothing more. It
+    // only takes authority away, needs no lease or process, and leaves the
+    // book and everything else in the home alone; an expired key's copy
+    // should not sit on the volume, and in its backups, for as long as the
+    // tenant is held. What follows stops a process, mirrors its book under the
+    // lease and then lets the lease go: that waits for the pass that admits it.
+    if (rolloutHeld(lc)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
@@ -4214,6 +4302,14 @@ function childHomeTenants(): `0x${string}`[] {
  * Every child home holding a pending request, whether or not its child is
  * running. Read from the disk rather than the children map, so a kill left
  * by a child that has since crashed is not missed.
+ *
+ * WHATEVER THE ROLLOUT SAYS (fleet-rollout.ts). A kill only takes authority
+ * away, and it is the owner's: a tenant the operator has not admitted is
+ * still one its owner may revoke, as a DELETE /api/grants already does under
+ * any scope. Waiting for admission would leave a revoked grant stored, and
+ * unconfirmed, for as long as the tenant is held, behind a request that lives
+ * only in a home a redeploy may discard (kill-request.ts). The removed-agent
+ * sweep that follows keeps the original book, as it does for any revoke.
  */
 function pendingKillTenants(): `0x${string}`[] {
   return childHomeTenants().filter((n) => killRequested(childHome(n)));
@@ -4260,6 +4356,7 @@ export async function reconcile(): Promise<void> {
     expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
+    lastRolloutCounts = null; // the heartbeat says so, rather than repeat an older pass's figures
     return;
   }
   // A TELEGRAM KILL, CARRIED OUT HERE. It must happen before `wanted` is built.
@@ -4269,6 +4366,9 @@ export async function reconcile(): Promise<void> {
   // order ferry usually got there first (honourPendingKills). Then this
   // finds the grant already absent, which is also `revoked`.
   // See kill-request.ts.
+  //
+  // For a tenant the rollout does not admit too, as under FLEET_HALT: a kill
+  // only takes authority away (see pendingKillTenants).
   const nowSec = Math.floor(Date.now() / 1000);
   const kept: `0x${string}`[] = [];
   for (const tenant of tenants) {
@@ -4282,13 +4382,31 @@ export async function reconcile(): Promise<void> {
   // home. A fresh held deployment starts no process for these tenants. Also
   // stand down a local incarnation if a hold is introduced during a test or
   // by an in-process operator; its retained state will refuse repair commit.
-  for (const tenant of accountingHolds) {
+  //
+  // The same for every operator hold (operatorHold), so a tenant out of the
+  // rollout is stood down as an accounting-held one is: asked of every tenant
+  // with something local to stand down, not only the named ones.
+  //
+  // Except a tenant no longer wanted, which the rollout always "holds" (it
+  // names nobody removed): that is the kill switch's, below, as it is with no
+  // rollout at all. Stood down here first, the kill switch would skip it, and
+  // with it its "grant removed" line, its groups and its hold alerts. The
+  // accounting hold's own names are stood down here as they always were.
+  const standing = new Set([...accountingHolds, ...children.keys(), ...holders.keys(), ...restartPending.keys()]);
+  for (const tenant of standing) {
+    if (!wanted.has(tenant) && !accountingHolds.has(tenant)) continue;
+    if (!operatorHeld(tenant)) continue;
     cancelRestart(tenant);
     killChild(tenant);
     standDownHolder(tenant);
   }
+  // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: of expiry retirement,
+  // only the scrub of an expired signing-key copy (retireExpiredGrants), and
+  // no paused-source report (which takes a lease to look). The rest runs,
+  // unchanged, on the pass that admits it. The accounting hold has never
+  // skipped either.
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
-  await reportPausedFleetSources(tenants);
+  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant)));
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
@@ -4307,6 +4425,10 @@ export async function reconcile(): Promise<void> {
     return typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec;
   });
   const eligible = new Set(eligibleToSpawn.map((tenant) => tenant.toLowerCase()));
+  // The heartbeat's count of the whole roster (fleetHealth): admitted per
+  // level, held by either operator hold, or expired. After the retirement
+  // above, whose re-read of a re-signed key this roster's expiries include.
+  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible });
   const expiredCount = tenants.length - eligibleToSpawn.length;
   if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
     log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
@@ -4327,7 +4449,9 @@ export async function reconcile(): Promise<void> {
   let capacityDeferred = 0;
   for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (accountingHolds.has(lc)) continue;
+    // First, before a lease is so much as asked for: nothing below this line
+    // is for a tenant the operator holds, the lease attempt included.
+    if (operatorHeld(lc)) continue;
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
@@ -4410,7 +4534,12 @@ export async function reconcile(): Promise<void> {
   // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
-    if (accountingHolds.has(held.tenant)) { pressLeaving(held); continue; }
+    // DEFENCE IN DEPTH, and no test can tell it from the accounting-hold check
+    // it replaced: everything below that could restore or hand over (retryHold,
+    // handHoldBack) asks holdMayLeave first, which refuses an operator-held
+    // tenant on its own, even one the scope stopped admitting during the await
+    // above. Kept so a held tenant is passed over before any of that is tried.
+    if (operatorHeld(held.tenant)) { pressLeaving(held); continue; }
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
     // tenant, stood down or not, until its exit is seen.
@@ -5239,6 +5368,11 @@ export const AUTONOMY_TRADE_FUNNEL_SQL = `SELECT status, COALESCE(reject_rule, '
   FROM trades WHERE created_at >= ? GROUP BY status, rule`;
 
 async function fleetHealth(): Promise<void> {
+  // WHO THE ROLLOUT ADMITS, AT WHAT LEVEL, every pass and before anything that
+  // can fail: a deploy whose scope is not the one its operator meant (a typo
+  // that leaves a named tenant held, a cohort still at `none`) is exactly what
+  // this line exists to make visible, and it reads no table.
+  log(rolloutLine(lastRolloutCounts));
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -7269,6 +7403,11 @@ const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;
 
 async function runHolderClaimsBackfill(): Promise<void> {
   if (holderClaimsBackfilled || Date.now() < holderBackfillRetryAt) return;
+  // It claims wallets for every tenant at once, held ones included: only once
+  // the rollout admits the whole fleet (fleet-rollout.ts). An admitted child
+  // meanwhile reads its login wallet, which can only cost it a perk it owns,
+  // never grant it one it does not (see MERRYMEN_HOLDER_ADDRESS).
+  if (!rolloutAdmitsWholeFleet()) return;
   let lease: TenantLease | null;
   try {
     lease = await acquireTenantLease(HOLDER_BACKFILL_LEASE);
@@ -9275,8 +9414,19 @@ export async function runOrchestrator(): Promise<void> {
   assertHostedFleetStart();
   // Validate operator intent before either entry path can initialize anything.
   const accountingHolds = accountingHoldTenants(process.env);
+  // THE ROLLOUT TOO, and for both paths: a malformed value, or an unset one on
+  // Railway, refuses here, before the halt, the volume or a lease is touched.
+  const rollout = fleetRollout(process.env);
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
   if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
+  // NAMED TENANTS AND THE FAILURE-ONLY REPORTER ARE TWO ANSWERS TO ONE
+  // QUESTION. A list says "start these"; the reporter starts nothing and leases
+  // every tenant in turn, so the deploy would do the opposite of what half its
+  // variables say. Refused rather than resolved either way: whichever one the
+  // operator meant, the other is a mistake they should see before it runs.
+  if (reportMode === "1" && rollout.scope === "list") {
+    throw new Error(`${FLEET_ROLLOUT_ENV} names tenants to start, and MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 starts none; refusing both`);
+  }
   if (reportMode === "1") { await runRecoveryReportOnly(); return; }
   // A new mounted home first writes its own durable halt. No child, holder,
   // accounting repair or ordinary writer may precede this preparation.
@@ -9285,6 +9435,7 @@ export async function runOrchestrator(): Promise<void> {
   // Validate the complete operator list before any diagnosis, mutation or
   // child starts. A malformed entry must never silently drop from a hold.
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
+  log(rolloutStartupLine(rollout));
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   await runAccountingDiagnosisIfAsked();
@@ -9392,8 +9543,11 @@ export async function runOrchestrator(): Promise<void> {
       startXPostPass();
       // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
       // Started, never awaited, like the room: nothing here is on the trading
-      // path, and each pass has its own budget and in-flight guard.
-      (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
+      // path, and each pass has its own budget and in-flight guard. Its jobs,
+      // alerts and retention run for every owner at once, held ones included,
+      // and send through their bots: only once the rollout admits the whole
+      // fleet (fleet-rollout.ts).
+      if (rolloutAdmitsWholeFleet()) (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
       // The mirror REPLACES positions per agent, so between a child restarting
