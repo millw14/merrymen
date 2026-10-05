@@ -67,7 +67,7 @@ before(async () => {
         halted: true,
         rollout: { scope: "none", levels: { trade: 0, "exits-only": 0, observe: 0, held: 4, absent: 0 } },
         counts,
-        lastShutdown: { clean: true, at: 1_799_999_000 },
+        lastShutdown: { clean: true, finishedAt: 1_799_999_000 },
       },
       { create: true },
     );
@@ -129,7 +129,7 @@ describe("GET /api/ops/heartbeat", () => {
     assert.equal(h.halted, true);
     assert.ok(h.beatAgeSec >= 30 && h.beatAgeSec < 120, String(h.beatAgeSec));
     assert.deepEqual(h.rollout, { scope: "none", levels: { trade: 0, "exits-only": 0, observe: 0, held: 4, absent: 0 } });
-    assert.deepEqual(h.lastShutdown, { clean: true, at: 1_799_999_000 });
+    assert.deepEqual(h.lastShutdown, { clean: true, finishedAt: 1_799_999_000 });
     assert.deepEqual(h.counts.byStatus, { armed: 3 });
     assert.equal(h.counts.funnel1h.live.landed, 2);
     assert.equal(h.counts.funnel1h.live.proposals, 5, "the rollout's refusals are not proposals");

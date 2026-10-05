@@ -38,8 +38,6 @@
  * read for writing or written. Best-effort everywhere: a heartbeat that fails
  * to write is a missed beat, never a stopped fleet loop.
  */
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { translateSchema, type Db } from "./db";
 import type { AutonomyFunnel, FleetRails, RailFunnel } from "./autonomy-funnel";
 
@@ -78,14 +76,15 @@ export interface RolloutSummary {
 }
 
 /**
- * HOW THE PREVIOUS PROCESS ENDED, from the receipt its drain leaves in the
- * home. Null is "no receipt": a first boot of an image that drains, or a
- * previous process that never finished its drain — which an outside check
- * should treat as unclean.
+ * HOW THE PREVIOUS PROCESS ENDED, from the receipt its drain left in the home
+ * (fleet-drain.ts), under the receipt's own two names. Null is "no receipt":
+ * a first boot of an image that drains, or a previous process that never
+ * finished its drain — which an outside check should treat as unclean.
  */
 export interface LastShutdown {
   clean: boolean;
-  at: number | null;
+  /** Unix SECONDS, as every time in the row is (the receipt keeps ms); null when the receipt could not be read. */
+  finishedAt: number | null;
 }
 
 /**
@@ -177,32 +176,24 @@ export function commitOf(env: Record<string, string | undefined>): string | null
   return /^[0-9a-f]{7,64}$/.test(sha) ? sha : null;
 }
 
-/** Where a drain leaves its receipt, under the fleet home. */
-export const LAST_SHUTDOWN_FILE = path.join("ops", "last-shutdown.json");
-
 /**
  * The receipt's two facts the heartbeat carries, or null. Only `clean` (a
- * boolean) and `at` (unix seconds or ms) are read; anything else the receipt
- * holds stays in the home.
+ * boolean) and `finishedAt` (unix seconds or ms) are read; anything else the
+ * receipt holds stays in the home.
+ *
+ * NOT READ FROM THE FILE HERE. The orchestrator's one read of the receipt is
+ * fleet-drain.ts's takePreviousShutdown, which moves it aside so a crash of
+ * this run is never read as the clean stop of the last; a second read after it
+ * would always find nothing. Its answer is handed to this instead, and the
+ * stored row is read back through this too.
  */
 export function lastShutdownOf(value: unknown): LastShutdown | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const o = value as Record<string, unknown>;
   if (typeof o.clean !== "boolean") return null;
-  const at = typeof o.at === "number" && Number.isFinite(o.at) && o.at > 0 ? (o.at > 1e12 ? Math.floor(o.at / 1000) : Math.floor(o.at)) : null;
-  return { clean: o.clean, at };
-}
-
-/** Read once at boot, before this process can leave a receipt of its own. */
-export function readLastShutdown(home: string): LastShutdown | null {
-  try {
-    const raw = readFileSync(path.join(home, LAST_SHUTDOWN_FILE), "utf8");
-    // A receipt is a few lines. Anything larger is not one.
-    if (raw.length > 64 * 1024) return null;
-    return lastShutdownOf(JSON.parse(raw));
-  } catch {
-    return null;
-  }
+  const t = o.finishedAt;
+  const finishedAt = typeof t === "number" && Number.isFinite(t) && t > 0 ? (t > 1e12 ? Math.floor(t / 1000) : Math.floor(t)) : null;
+  return { clean: o.clean, finishedAt };
 }
 
 const missingTable = (error: unknown): boolean => {

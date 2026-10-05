@@ -15,18 +15,18 @@ import { wrapSqlite } from "./db";
 import { RAIL_CONTRADICTORY, RAIL_NO_WORKER, RAIL_RESPAWNING, foldFunnel } from "./autonomy-funnel";
 import {
   FLEET_HEARTBEAT_EVERY_MS,
-  LAST_SHUTDOWN_FILE,
   commitOf,
   heartbeatClock,
   heartbeatCounts,
+  lastShutdownOf,
   numbersOnly,
   publicHeartbeat,
   readFleetHeartbeats,
-  readLastShutdown,
   writeFleetHeartbeat,
   type FleetHeartbeat,
   type FleetSnapshot,
 } from "./fleet-heartbeat";
+import { SHUTDOWN_RECEIPT_FILE, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt, type ShutdownReceipt } from "./fleet-drain";
 
 const ADDRESS = /0x[0-9a-f]{40}/i;
 const A = "0x00000000000000000000000000000000000000a1";
@@ -40,7 +40,7 @@ function beat(over: Partial<FleetHeartbeat> = {}): FleetHeartbeat {
     halted: true,
     rollout: { scope: "2 named", levels: { trade: 0, "exits-only": 1, observe: 1, held: 40, absent: 0 } },
     counts: null,
-    lastShutdown: { clean: true, at: 1_799_999_000 },
+    lastShutdown: { clean: true, finishedAt: 1_799_999_000 },
     ...over,
   };
 }
@@ -85,7 +85,7 @@ describe("the heartbeat row", () => {
       const o = served[0]!;
       assert.equal(o.commit, "0123456789abcdef0123456789abcdef01234567");
       assert.deepEqual(o.rollout, { scope: "2 named", levels: { trade: 0, "exits-only": 1, observe: 1, held: 40, absent: 0 } });
-      assert.deepEqual(o.lastShutdown, { clean: true, at: 1_799_999_000 });
+      assert.deepEqual(o.lastShutdown, { clean: true, finishedAt: 1_799_999_000 });
       const c = o.counts as Record<string, any>;
       assert.equal(c.agents, 5);
       assert.equal(c.broken, 1);
@@ -294,17 +294,32 @@ describe("the deploy's own facts", () => {
     assert.equal(commitOf({}), null);
   });
 
-  it("the last shutdown is read from the drain's receipt, two facts only, and absent is null", () => {
-    const home = mkdtempSync(path.join(tmpdir(), "mm-heartbeat-"));
+  it("the last shutdown is the drain's receipt as its one read took it: two facts only, and absent is null", () => {
+    const dir = shutdownReceiptDir(mkdtempSync(path.join(tmpdir(), "mm-heartbeat-")));
+    // As the orchestrator builds it at boot, from takePreviousShutdown's answer.
+    const taken = () => {
+      const t = takePreviousShutdown(dir);
+      return lastShutdownOf({ clean: t.clean, finishedAt: t.at });
+    };
     try {
-      assert.equal(readLastShutdown(home), null);
-      mkdirSync(path.join(home, "ops"));
-      writeFileSync(path.join(home, LAST_SHUTDOWN_FILE), JSON.stringify({ clean: false, at: 1_800_000_000_000, tenants: [A] }));
-      assert.deepEqual(readLastShutdown(home), { clean: false, at: 1_800_000_000 });
-      writeFileSync(path.join(home, LAST_SHUTDOWN_FILE), "{ torn");
-      assert.equal(readLastShutdown(home), null);
+      assert.equal(taken(), null, "no receipt");
+      const receipt: ShutdownReceipt = {
+        version: 1, signal: "SIGTERM", outcome: "budget-exceeded", clean: false,
+        startedAt: 1_799_999_990_000, finishedAt: 1_800_000_000_000, budgetMs: 25_000, stalledAt: "final-pass",
+        steps: [{ step: "final-pass", ms: 9_000, outcome: "timeout" }], hooksFailed: 0, hooksUnfinished: 0, stragglers: 1,
+        finalPass: { homes: 2, saved: 1, retained: 0, skipped: 0, outOfTime: 1 }, inFlightAtRelease: false, stuckSpawns: 0,
+      };
+      // The receipt itself, under its own names: ms made seconds, nothing else carried.
+      assert.deepEqual(lastShutdownOf(receipt), { clean: false, finishedAt: 1_800_000_000 });
+      writeShutdownReceipt(dir, receipt);
+      assert.deepEqual(taken(), { clean: false, finishedAt: 1_800_000_000 });
+      assert.equal(taken(), null, "moved aside by that one read: a second finds no receipt");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, SHUTDOWN_RECEIPT_FILE), "{ torn");
+      assert.deepEqual(taken(), { clean: false, finishedAt: null }, "a receipt that cannot be read is NOT clean, with no time");
+      assert.deepEqual(lastShutdownOf({ clean: true, at: 1_800_000_000 }), { clean: true, finishedAt: null }, "`at` is not the receipt's name");
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(path.dirname(dir), { recursive: true, force: true });
     }
   });
 });

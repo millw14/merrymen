@@ -9925,10 +9925,11 @@ export async function runOrchestrator(): Promise<void> {
   // HOW THE LAST PROCESS ENDED, read before this one can leave a receipt of
   // its own; every heartbeat carries it (fleet-heartbeat.ts). Taken from the
   // read above, not the file: that read is the one read, and has moved the
-  // receipt aside. No receipt (clean null) is null here, as it is there.
+  // receipt aside. No receipt (clean null) is null here, as it is there;
+  // the receipt's own names, `clean` and `finishedAt`, carry it.
   heartbeatBoot = {
     startedAt: Math.floor(Date.now() / 1000),
-    lastShutdown: lastShutdownOf({ clean: previousShutdown.clean, at: previousShutdown.at }),
+    lastShutdown: lastShutdownOf({ clean: previousShutdown.clean, finishedAt: previousShutdown.at }),
   };
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
