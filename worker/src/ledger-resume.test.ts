@@ -333,6 +333,34 @@ describe("the home archive", () => {
     assert.deepEqual(readdirSync(h).sort(), ["kill-request-a.superseded.json", "paused", "telegram-promoted.json", "telegram.json"]);
     assert.equal(existsSync(path.join(archiveRoot, `.carry-${gen}`)), false);
   });
+  it("converges after a crash between the scrub and the rename: the moved Telegram files reach the new home, never the archive", () => {
+    const h = home("t2b"), archiveRoot = path.join(root, "vol", "archive", "t2b"), gen = "00000000-0000-4000-8000-000000000015";
+    let calls = 0;
+    // The third check is the one just before the rename: the stage is built
+    // and the keys are scrubbed, and the home has not moved yet.
+    assert.throws(() => archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => ++calls < 3 }), /Lost the tenant lease/);
+    assert.equal(existsSync(path.join(archiveRoot, gen)), false, "nothing renamed");
+    assert.equal(existsSync(path.join(h, "grant.json")), false, "the keys are already gone from the home");
+    assert.equal(readFileSync(path.join(h, "telegram.json"), "utf8"), '{"offset":77}', "the carried files are still in the home");
+    // The next pass (this replica or another) rebuilds the stage from the home.
+    const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.deepEqual(readdirSync(h).sort(), ["kill-request-a.superseded.json", "paused", "telegram-promoted.json", "telegram.json"]);
+    assert.equal(readFileSync(path.join(h, "telegram.json"), "utf8"), '{"offset":77}');
+    const archived = readdirSync(r.archivePath!).sort();
+    for (const moved of ["telegram.json", "telegram-promoted.json", "grant.json", "settings.json", "grants"]) assert.ok(!archived.includes(moved), `${moved} is not in the archive`);
+    assert.equal(existsSync(path.join(archiveRoot, `.carry-${gen}`)), false);
+  });
+  it("converges after a crash right after the rename, before the moved files leave the archive", () => {
+    const h = home("t2c"), archiveRoot = path.join(root, "vol", "archive", "t2c"), gen = "00000000-0000-4000-8000-000000000016";
+    let calls = 0;
+    assert.throws(() => archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => ++calls < 4 }), /Lost the tenant lease/);
+    // Simulate the crash landing between the rename and the archive's own
+    // cleanup: put the moved files back in the archive as the rename left them.
+    writeFileSync(path.join(archiveRoot, gen, "telegram.json"), '{"offset":77}');
+    const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.equal(readFileSync(path.join(h, "telegram.json"), "utf8"), '{"offset":77}');
+    assert.ok(!readdirSync(r.archivePath!).includes("telegram.json"));
+  });
   it("a lost lease before the rename moves nothing", () => {
     const h = home("t3"), archiveRoot = path.join(root, "vol", "archive", "t3"), gen = "00000000-0000-4000-8000-000000000013";
     assert.throws(() => archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => false }), /Lost the tenant lease/);

@@ -664,16 +664,24 @@ export interface ArchiveResult { archivePath: string | null; carried: string[] }
  *  1. Stage the carry beside the archive: copies of the owner's pause and
  *     arm record, every kill-request file (pending and superseded: they name
  *     the grants that were killed), the Telegram state and its promotion
- *     record. Rebuilt from the home on every attempt until the rename.
- *  2. Scrub the home: grant.json (the session key), grants/ (archived keys),
- *     settings.json (bot token and provider keys), and the moved Telegram
- *     files. Each is rewritten by the next spawn from its store, so nothing
- *     is lost and no key ever enters the archive.
+ *     record. Rebuilt from the home on every attempt until the rename — which
+ *     is only safe because, until the rename, the home still holds every
+ *     original the stage copies (step 2 removes no carried file).
+ *  2. Scrub the home of its keys and secrets: grant.json (the session key),
+ *     grants/ (archived keys), settings.json (bot token and provider keys).
+ *     Each is rewritten by the next spawn from its store, so nothing is lost
+ *     and no key ever enters the archive.
  *  3. Rename the home to archive/<tenant>/<generation> (0700) in one step on
  *     the same volume, and sync both parents.
- *  4. Write the archive's manifest (0600): every file's path, type, size and
+ *  4. Remove the MOVED Telegram files from the archive, now that the staged
+ *     copy is their only home (and re-apply the scrub, for a rename a crash
+ *     interrupted after it). Never before the rename: a crash between a
+ *     removal from the home and the rename used to leave the next attempt
+ *     rebuilding the stage from a home that no longer held them, so the
+ *     owner's link, offsets and chat settings were lost from both places.
+ *  5. Write the archive's manifest (0600): every file's path, type, size and
  *     mode — stats, not contents.
- *  5. Move the staged carry into a fresh 0700 home, never over a file already
+ *  6. Move the staged carry into a fresh 0700 home, never over a file already
  *     there.
  *
  * With no home at all there is nothing to archive, and the result says so.
@@ -698,15 +706,20 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
     }
     syncDir(stage); syncDir(o.archiveRoot);
     if (!o.mayWrite()) throw lost();
-    for (const name of [...SCRUB, ...CARRY_MOVE]) rmSync(path.join(o.home, name), { recursive: true, force: true });
+    // Keys and secrets only. The carried files stay until the rename, so a
+    // stage rebuilt after a crash here still finds every one of them.
+    for (const name of SCRUB) rmSync(path.join(o.home, name), { recursive: true, force: true });
     syncDir(o.home);
     if (!o.mayWrite()) throw lost();
     renameSync(o.home, dest);
     chmodSync(dest, 0o700);
     syncDir(o.archiveRoot); syncDir(path.dirname(o.home));
   }
-  // From here the old home is the archive. Re-entry lands here.
-  for (const name of SCRUB) rmSync(path.join(dest, name), { recursive: true, force: true });
+  // From here the old home is the archive. Re-entry lands here. The stage is
+  // never rebuilt past this point (dest exists), so it holds the only copy of
+  // the moved files from here on, until step 6 puts them in the new home.
+  for (const name of [...SCRUB, ...CARRY_MOVE]) rmSync(path.join(dest, name), { recursive: true, force: true });
+  syncDir(dest);
   if (!existsSync(path.join(dest, MANIFEST))) {
     writeFileAtomicSync(path.join(dest, MANIFEST), JSON.stringify({ version: 1, generation: o.generation, files: walk(dest) }, null, 2), 0o600, { durable: true });
   }
