@@ -3281,12 +3281,17 @@ async function drainContinuousBook(tenant: `0x${string}`, lease: TenantLease, sh
  * its rail at arm from these settings (and the cash it measures), not from
  * the last heartbeat's mode, so a tenant whose owner turned live trading on
  * during the hold is read on chain and starts exits-only (ledger-resume.ts
- * resumePreconditions). Settings that cannot be read count as live: the
- * cautious answer is a chain read, never a skipped one.
+ * resumePreconditions).
+ *
+ * Null when the settings cannot be read, and nobody guesses from that: the
+ * preview refuses the tenant ("settings could not be read"), and an admission
+ * holds it for the pass. Guessing "live" would have bound a different chain
+ * verdict into the evidence than a later clean read, and one transient store
+ * error would then have refused the operator's approval outright.
  */
-async function resumeLiveIntent(tenant: `0x${string}`): Promise<boolean> {
+async function resumeLiveIntent(tenant: `0x${string}`): Promise<boolean | null> {
   try { return (await getSettingsStore().get(tenant))?.liveTradingEnabled === true; }
-  catch { return true; }
+  catch { return null; }
 }
 
 async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant: StoredGrant | null): Promise<ResumeVerdict> {
@@ -3345,6 +3350,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
   const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
   try {
     const liveIntent = await resumeLiveIntent(tenant);
+    if (liveIntent === null) return held("the owner's settings could not be read, so whether it could arm live is unknown; held");
     if (approval.state === "approved") {
       // THE TAIL FIRST (drainContinuousBook says why), then the evidence.
       if (!owned()) return { go: false };
@@ -10942,8 +10948,9 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
       const scopeOf = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
       const controls = await readControlsEvidence(shared, scopeOf, Date.now());
       const liveIntent = await resumeLiveIntent(tenant as `0x${string}`);
-      const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant, home: childHome(tenant), nowSec, controls, liveIntent });
+      const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant, home: childHome(tenant), nowSec, controls, liveIntent: liveIntent ?? true });
       const refusals = [...check.refusals];
+      if (liveIntent === null) refusals.push("the owner's settings could not be read, so whether it could arm live is unknown: preview again");
       if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
       if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
       entries.push({

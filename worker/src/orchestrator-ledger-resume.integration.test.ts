@@ -413,6 +413,18 @@ it("a failed seed is completed before the first worker, or the spawn is held; Po
   await getGrantStore().remove(t.tenant); await reconcile();
 });
 
+it("a paper book whose owner turned live trading on during the hold previews as chain-read and exits-only", async () => {
+  const t = await preIncident({ live: false });
+  const before = await preview(t.tenant);
+  assert.deepEqual([before.entries[0]!.chain, before.entries[0]!.suggestedLevel], ["not-required", "trade"]);
+  const { getSettingsStore } = await import("./settings-store");
+  await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+  const after = await preview(t.tenant);
+  assert.deepEqual([after.entries[0]!.chain, after.entries[0]!.suggestedLevel], ["required", "exits-only"]);
+  assert.notEqual(after.entries[0]!.digest, before.entries[0]!.digest, "an approval of the paper verdict no longer matches");
+  await getGrantStore().remove(t.tenant); await reconcile();
+});
+
 it("an admitted tenant previews as already admitted, and a run approval of that preview archives nothing", async () => {
   const t = await preIncident({ live: false });
   const p = await preview(t.tenant);
