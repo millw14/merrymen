@@ -6,12 +6,13 @@
  * (`observe`), then it may close what it holds (`exits-only`), and only then
  * may it trade (`trade`). The orchestrator decides which, per tenant, and
  * hands the answer to the child it spawns as MERRYMEN_ADMISSION_LEVEL
- * (orchestrator.ts childEnv — the rollout scope's half, which this file does
- * not ship with: until childEnv sets it, every hosted child reads as
- * `observe`, below). This file is the child's half: it reads that answer, and
- * judges every intent against it at the one place every intent passes — the
- * top of processIntentLocked (index.ts), before a budget is reserved, a quote
- * is fetched or anything is signed.
+ * (orchestrator.ts childEnv, from MERRYMEN_FLEET_ROLLOUT — fleet-rollout.ts,
+ * the rollout scope's half, which accepts a level only once this file obeys
+ * it: WORKER_ENFORCED_LEVELS there is ADMISSION_LEVELS here). This file is the
+ * child's half: it reads that answer, and judges every intent against it at
+ * the one place every intent passes — the top of processIntentLocked
+ * (index.ts), before a budget is reserved, a quote is fetched or anything is
+ * signed.
  *
  * WHY THERE AND NOWHERE ELSE. An owner's typed order, a Brain order, the
  * strategy loop, the class route, a dashboard command, the energy buy and the
@@ -35,11 +36,17 @@
 import { countsAsEntry, sellsHeldLeg, type HeldCurveLeg } from "./energy";
 import { isExitIntent, type AgentLimits, type TradeIntent } from "./policy";
 
-/** Where the orchestrator puts this child's level (orchestrator.ts childEnv). */
+/**
+ * Where the orchestrator puts this child's level (orchestrator.ts childEnv).
+ * Defined here, once, with the levels below: fleet-rollout.ts imports both
+ * rather than keep a copy that could drift from what the gate reads.
+ */
 export const ADMISSION_LEVEL_ENV = "MERRYMEN_ADMISSION_LEVEL";
 
 /**
- * The three levels, least to most.
+ * The three levels, least to most — the ones this file obeys, and so the only
+ * ones the rollout accepts (fleet-rollout.ts WORKER_ENFORCED_LEVELS is built
+ * from this list).
  *
  *   observe     — run, read, decide and record; start nothing. Every intent is
  *                 refused, exits included: a tenant at this level has not been
@@ -52,9 +59,10 @@ export const ADMISSION_LEVEL_ENV = "MERRYMEN_ADMISSION_LEVEL";
  *                 is refused; everything else goes on to the usual gates.
  *   trade       — no admission refusal at all. What a worker always was.
  */
-export type AdmissionLevel = "observe" | "exits-only" | "trade";
+export const ADMISSION_LEVELS = ["observe", "exits-only", "trade"] as const;
+export type AdmissionLevel = (typeof ADMISSION_LEVELS)[number];
 
-const LEVELS: ReadonlySet<string> = new Set<AdmissionLevel>(["observe", "exits-only", "trade"]);
+const LEVELS: ReadonlySet<string> = new Set<AdmissionLevel>(ADMISSION_LEVELS);
 
 /** The level this process runs at, and the sentence its boot line says about why. */
 export interface Admission {

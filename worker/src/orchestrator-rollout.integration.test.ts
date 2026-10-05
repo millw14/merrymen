@@ -527,6 +527,13 @@ describe("childEnv", () => {
       assert.equal(childEnv(b).MERRYMEN_ADMISSION_LEVEL, "observe", "held never reaches a child; observe is the floor");
       process.env.MERRYMEN_FLEET_ROLLOUT = "all";
       assert.equal(childEnv(b).MERRYMEN_ADMISSION_LEVEL, "trade");
+      // A staged level reaches its child as itself, for the worker's gate to
+      // obey — and still not from the operator's own, now at neither.
+      process.env.MERRYMEN_ADMISSION_LEVEL = "trade";
+      process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:exits-only,${b}:observe`;
+      assert.equal(childEnv(a).MERRYMEN_ADMISSION_LEVEL, "exits-only");
+      assert.equal(childEnv(b).MERRYMEN_ADMISSION_LEVEL, "observe");
+      assert.equal(childEnv(a).MERRYMEN_FLEET_ROLLOUT, undefined);
     } finally {
       delete process.env.MERRYMEN_ADMISSION_LEVEL;
     }
@@ -582,9 +589,18 @@ describe("startup", () => {
     }
   });
 
-  it("refuses a level no worker in this build obeys, rather than start a tenant that would trade", async () => {
+  it("accepts observe and exits-only, now that the worker's admission gate obeys them", async () => {
+    // Past the rollout, to the next refusal in line: the failure-only reporter
+    // starts no tenant, so a value that names some is refused there — which
+    // is only reached once the value itself has been read and accepted.
     for (const level of ["observe", "exits-only"]) {
-      assert.match((await boot(`${address(1)}:${level}`))!, new RegExp(`asks for ${level}, which no worker in this build enforces yet`), level);
+      assert.match((await boot(`${address(1)}:${level}`))!, /names tenants to start, and MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 starts none/, level);
+    }
+  });
+
+  it("still refuses a level outside the grammar, whatever its spelling", async () => {
+    for (const level of ["held", "Observe", "exits_only", "paper"]) {
+      assert.match((await boot(`${address(1)}:${level}`))!, /MERRYMEN_FLEET_ROLLOUT entry 1 is not none, all or 0x<40 hex>:observe\|exits-only\|trade/, level);
     }
   });
 

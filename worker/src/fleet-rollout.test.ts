@@ -26,6 +26,7 @@ import {
   WORKER_ENFORCED_LEVELS,
 } from "./fleet-rollout";
 import { onRailway, RAILWAY_ONLY_IDENTITY } from "./deploy-guard-checks";
+import * as gate from "./worker-admission";
 
 const address = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
 const A = address(0xa1), B = address(0xb2), C = address(0xc3), D = address(0xd4);
@@ -84,8 +85,10 @@ describe("the grammar", () => {
     ["space inside an entry", `${A} : trade`],
     ["a tenant named twice at one level", `${A}:trade,${B}:trade,${A}:trade`],
     ["a tenant named twice at two", `${A}:trade,${A.toUpperCase().replace("0X", "0x")}:observe`],
-    ["a level no worker in this build enforces: observe", `${A}:observe`],
-    ["a level no worker in this build enforces: exits-only", `${B}:trade,${A}:exits-only`],
+    // The levels are exact words, as the keywords are: a case or a spelling
+    // the grammar does not write is a guess, and refuses with the rest.
+    ["case matters for the levels", `${A}:Observe`],
+    ["exits_only is not exits-only", `${B}:trade,${A}:exits_only`],
   ];
   for (const [why, value] of malformed) {
     it(`refuses rather than guesses: ${why}`, () => {
@@ -98,16 +101,21 @@ describe("the grammar", () => {
     });
   }
 
-  it("observe and exits-only are read, and refused by name until a worker obeys them", () => {
-    for (const level of ["observe", "exits-only"]) {
-      assert.throws(
-        () => fleetRollout(env(`${B}:trade,${A}:${level}`)),
-        new RegExp(`entry 2 asks for ${level}, which no worker in this build enforces yet \\(nothing reads ${ADMISSION_LEVEL_ENV}\\)`),
-      );
-      // The whole value, not just that entry: the tenant named at trade beside
-      // it is held as well, as for any other value that refuses.
-      assert.equal(rolloutLevel(B, env(`${B}:trade,${A}:${level}`)), "held");
-    }
+  it("observe and exits-only are accepted, now that the worker's admission gate obeys them", () => {
+    const e = env(`${B}:trade,${A}:observe,${C}:exits-only`);
+    assert.deepEqual(fleetRollout(e), { scope: "list", levels: new Map([[B, "trade"], [A, "observe"], [C, "exits-only"]]) });
+    assert.equal(rolloutLevel(A, e), "observe");
+    assert.equal(rolloutLevel(C, e), "exits-only");
+    assert.equal(rolloutLevel(B, e), "trade", "beside them, the tenant named at trade is admitted as well");
+    assert.equal(rolloutLevel(D, e), "held");
+    // Each child carries its own level, and nothing else of the value.
+    assert.equal(childAdmissionLevel(A, e), "observe");
+    assert.equal(childAdmissionLevel(C, e), "exits-only");
+    assert.equal(childAdmissionLevel(B, e), "trade");
+    // Admitted, not held: neither is a fleet-wide writer's whole fleet.
+    assert.equal(rolloutHeld(A, e), false);
+    assert.equal(rolloutAdmitsWholeFleet(e), false);
+    assert.match(rolloutStartupLine(fleetRollout(e)), /^fleet rollout: 3 named tenant\(s\) — trade 1 · exits-only 1 · observe 1; every other tenant is held/);
     // Named twice is still named twice, whichever level the second one asks for.
     assert.throws(() => fleetRollout(env(`${A}:trade,${A}:observe`)), /entry 2 names a tenant an earlier entry already named/);
   });
@@ -257,5 +265,13 @@ describe("the levels a worker in this tree obeys", () => {
         ? "worker-admission.ts is in this tree: widen WORKER_ENFORCED_LEVELS to the levels it obeys, in the same change"
         : "no worker in this tree reads MERRYMEN_ADMISSION_LEVEL, so no level but trade may be accepted",
     );
+  });
+
+  it("are the gate's own list and variable, defined once: the rollout keeps no copy to drift", () => {
+    assert.equal(ADMISSION_LEVELS, gate.ADMISSION_LEVELS);
+    assert.equal(ADMISSION_LEVEL_ENV, gate.ADMISSION_LEVEL_ENV);
+    // Every level the rollout hands a child is one the gate reads as itself,
+    // not as the `observe` it falls back to on a word it does not know.
+    for (const level of WORKER_ENFORCED_LEVELS) assert.equal(gate.admissionFrom(level, true).level, level);
   });
 });
