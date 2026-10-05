@@ -514,7 +514,14 @@ const pg = url ? createRequire(import.meta.url)("pg") : null;
 
 test("Postgres: the drill's SQL over two real databases", { skip: !url, timeout: 60_000 }, async (t) => {
   const target = new URL(url);
-  assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(target.hostname), "only a disposable local Postgres is allowed");
+  // The URL's own host is not the whole answer: pg takes a `host` query
+  // parameter over it (databaseOf reads it the same way), and libpq a
+  // `hostaddr`. Either could send this case's CREATE DATABASE, CREATE ROLE and
+  // DROP statements to a server behind a local-looking URL, so both are refused.
+  assert.ok(
+    ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname) && !target.searchParams.has("host") && !target.searchParams.has("hostaddr"),
+    "only a disposable local Postgres is allowed",
+  );
   const suffix = randomBytes(6).toString("hex");
   const names = { source: `mm_restore_source_${suffix}`, fork: `mm_restore_fork_${suffix}` };
   const urlOf = (name) => Object.assign(new URL(target), { pathname: `/${name}` }).toString();
