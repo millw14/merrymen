@@ -326,6 +326,25 @@ describe('the preview', () => {
       rpc: async (m, p) => (m === 'eth_chainId' ? '0x1' : rpc(m, p)) }), /rpc-is-not-robinhood-mainnet/);
   });
 
+  it('an account with no grant row is scanned but INCOMPLETE — its vaults are unknown', async () => {
+    // A replaced or revoked account has no grants row. Without the vault, a
+    // sweep out of it is never swept and a sweep back reads as a deposit.
+    for (const snapshot of [
+      { ...SNAPSHOT, accounts: [{ ...SNAPSHOT.accounts[0], grants: [] }] },
+      { ...SNAPSHOT, schema: { ...SNAPSHOT.schema, grantsPresent: false }, accounts: [{ ...SNAPSHOT.accounts[0], grants: [] }] },
+    ]) {
+      const { p } = await preview(snapshot);
+      assert.equal(p.scope[0].state, 'bound');
+      assert.equal(p.scope[0].grantRead, false);
+      assert.deepEqual(p.scope[0].custody, []);
+      assert.equal(p.accounts[0].complete, false);
+      assert.ok(p.accounts[0].notes.some(n => /vaults holding its assets are unknown/.test(n)));
+      assert.equal(p.summary.accountsIncomplete, 1);
+    }
+    const { p } = await preview();
+    assert.equal(p.accounts[0].complete, true, 'with the grant read, the same chain is complete');
+  });
+
   it('an ineligible account is reported and not scanned', async () => {
     const { p, calls } = await preview({ ...SNAPSHOT, accounts: [{ ...SNAPSHOT.accounts[0], registrations: [] }] });
     assert.equal(p.scope[0].state, 'account-not-registered');

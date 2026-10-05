@@ -130,6 +130,13 @@ cannot be read is marked: an unread window, receipt, calldata or block time
 leaves the account `complete: false`, and the movements it touched are
 `ambiguous`.
 
+The class and Trencher vaults come only from the grants row. An account with
+no grants row is still scanned, but it is marked `complete: false` with a note
+saying its vaults are unknown. This covers a replaced account, a revoked
+account, and a schema without `grants`. Without its vaults, a sweep out of a
+vault is never found, and a sweep back into the account can read as a
+deposit.
+
 Native ETH that the account receives is not visible, whether it arrives
 inside one of the account's own operations or outside them. A plain ETH
 transfer and a contract's internal call emit no log, the calldata shows only

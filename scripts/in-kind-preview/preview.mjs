@@ -149,7 +149,16 @@ export async function buildPreview({ snapshot, accounts, rpc, deps, target, sour
         } : null,
       });
     }
-    out.push({ account: s.account, complete: r.complete, notes: r.notes, operations: r.operations, counts: r.counts, movements });
+    // NO GRANT, NO CUSTODY. The class and Trencher vaults come only from the
+    // grants row, and grants are keyed by tenant: a replaced account loses its
+    // row, and the kill switch deletes it — exactly the accounts whose owners
+    // most plausibly swept. Scanned without its vaults, a sweep FROM a vault
+    // is never swept at all and a sweep back INTO the account reads as a
+    // deposit. So the answer is incomplete, and says why, rather than clean.
+    const notes = s.grantRead ? r.notes : [...r.notes,
+      'no grant was read for this account, so the vaults holding its assets are unknown — a sweep out of a vault is not ' +
+      'scanned at all, and a sweep from a vault back into the account can read as a deposit'];
+    out.push({ account: s.account, complete: r.complete && s.grantRead, notes, operations: r.operations, counts: r.counts, movements });
   }
 
   const every = out.flatMap(a => a.movements);
