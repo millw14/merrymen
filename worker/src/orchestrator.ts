@@ -3309,14 +3309,24 @@ async function spawnHolder(
   // a file it has already replaced with an unlinked default.
   await writeTelegramForChild(tenant);
   if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
-    const grant = await getGrantStore().get(tenant);
-    if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
-    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-    await handoffRecoveryReplyOffset({
-      tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
-      home: childHome(tenant), shared,
-      mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-    });
+    // Refused as spawnChild's handoff is (see there), and for the same reason:
+    // a throw here rejected through reconcile() and took the supervisor down.
+    // Returned before `holders`, as the refusals beside it are: recorded as held
+    // with no process, a later refresh would start one with no handoff at all.
+    // So no hold process and no worker; the next pass prepares the hold again.
+    try {
+      const grant = await getGrantStore().get(tenant);
+      if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
+      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+      await handoffRecoveryReplyOffset({
+        tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
+        home: childHome(tenant), shared,
+        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+      });
+    } catch {
+      log(`[alert] ${tenant}: recovery reply offset not handed over — trading stays held, with no hold process to answer its bot`);
+      return;
+    }
   }
   // THE LAST AWAIT IS ABOVE THIS LINE: asked again for the same reasons as
   // spawnChild's, and one more. A tenant already held is not held twice.

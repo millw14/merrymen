@@ -14,7 +14,7 @@
  * same.
  *
  * Each refusal must instead hold its own tenant: an [alert] naming it, no
- * worker, its lease and home retained, and the pass
+ * worker and no hold process, its lease and home retained, and the pass
  * carried on. Driven through the real reconcile() over the file-backed grant
  * and settings stores, with the shared database a sqlite stand-in where the
  * orchestrator has a seam for it (setRetirementMemoryStoreForTest,
@@ -45,7 +45,7 @@ process.env.MERRYMEN_STORE_DEK = DEK.toString("base64");
 process.env.MERRYMEN_TICK_SECONDS = "60";
 
 const {
-  reconcile, childHome, hasLeaseForTest, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
+  reconcile, childHome, isHeldForTest, hasLeaseForTest, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
   setPersonalMemoryStoreForTest, setRetirementMemoryStoreForTest, setSpawnForTest, setTenantLeaseForTest,
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
@@ -200,6 +200,25 @@ describe("a refusal at the end of preparation holds its tenant, not the fleet", 
     assert.equal(t.released.n, 0);
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");
     assert.equal(spawned.length, 0);
+  });
+
+  it("A HANDOFF REFUSAL WHILE HOLDING: no hold process answers a bot whose offset could not be handed over", async () => {
+    const { raw } = useLedger(true);
+    // A practice book that will not restore is held (spawnHolder), and its
+    // hold process would poll the same bot, so the same handoff runs first.
+    setPaperRestoreForTest(async () => ({ ok: false, reason: "paper fills are newer than the recoverable valuation" }));
+    const t = await wanted({ ...BOT, paperTradingEnabled: true });
+    live.push(t.tenant);
+    raw.prepare("INSERT INTO recovery_reply_offsets VALUES(?,?,?,?,?,200,101,100,1000)")
+      .run("8801", addr(0x5eee), addr(0x5fff), 4663, "a".repeat(16));
+
+    await assert.doesNotReject(reconcile(), "the refusal does not reject through reconcile");
+    assert.deepEqual(spawned, [], "neither a worker nor a hold process starts");
+    assert.ok(alerts(t.tenant).some((l) => /offset/.test(l)), said.join("\n"));
+    assert.equal(isHeldForTest(t.tenant), false, "not recorded as held, so no later refresh starts a hold process without the handoff");
+    assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
+    await assert.doesNotReject(reconcile(), "and the next pass holds it again");
+    assert.deepEqual(spawned, []);
   });
 
   it("A POSTGRES FAILURE: the pool the privacy proof needs will not open", async () => {
