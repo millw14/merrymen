@@ -65,11 +65,12 @@ import {
   THESIS_PAGE_SIZE,
   type DossierClaimDetail,
 } from "./dossier";
-import { dedupeEvents } from "./events";
+import { chronologicalOrder, dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
 import { SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
 import { chainFromUserText, executionAvailabilityOf, isRobinhoodToken, ROBINHOOD_NETWORK_ID, tokenFromKey, tokenIdentity } from "./identity";
 import {
+  MIN_ATTEMPT_MS,
   ROUTE_COST,
   expectedCredits,
   type AlertsPage,
@@ -175,7 +176,27 @@ export interface FomoServiceDeps {
   log?: (line: string) => void;
   /** Our agents' names, so a thesis that cites us is not counted as independent support. */
   selfNames?: readonly string[];
+  /**
+   * How long provider reads may run, from the start of one tool call
+   * (`invoke`) or one background dossier refresh, in ms. Construction-time
+   * configuration; see READ_DEADLINE_MS for the defaults and why.
+   */
+  readDeadlineMs?: { invoke?: number; background?: number };
 }
+
+/**
+ * THE READS OF ONE CALL SHARE ONE CLOCK. A tool call runs its provider reads
+ * one after another, each allowed up to the provider's own 45 s, and the
+ * broker answers "took too long" at 50 s (BROKER_LIMITS.serveMaxCallMs)
+ * whatever is still running. So every read of one invoke runs inside one
+ * deadline below that ceiling, through a client view bound to it and to the
+ * caller's abort signal (provider.ts `bound`): an attempt is clamped to what
+ * is left, and a read that cannot start in time is skipped, reported as
+ * missing (the answer is partial), never begun. Background refreshes get the
+ * orchestrator's 90 s research deadline less a margin; a deep job passes its
+ * own deadline.
+ */
+export const READ_DEADLINE_MS = Object.freeze({ invoke: 40_000, background: 80_000 });
 
 /**
  * The call context, plus the Telegram group id. The budget caps each group
@@ -226,7 +247,7 @@ export interface FomoServiceExt extends FomoService {
     payer: ChargeAs,
     token: TokenIdentity,
     label: TokenLabel,
-    opts: { depth: "quick" | "standard" | "deep"; now: number; signal?: AbortSignal; creditCap?: number | null; mode?: FreshnessMode },
+    opts: { depth: "quick" | "standard" | "deep"; now: number; signal?: AbortSignal; deadlineAt?: number; creditCap?: number | null; mode?: FreshnessMode },
   ): Promise<RefreshOutcome>;
   readonly usage: UsageMeter | null;
 }
@@ -397,6 +418,15 @@ const GAP_PAGE = 100;
 /** Failures that mean the provider (or our entitlement) is not answering at all. */
 const PROVIDER_DOWN: ReadonlySet<ProviderFailure> = new Set(["unauthorized", "credits-exhausted", "entitlement", "server-error", "unreachable", "no-key"]);
 
+/**
+ * Whether one failed read says the provider is down. A 5xx the vendor marked
+ * transient (`retryable`: its upstream did not answer for this one subject in
+ * time) does not: live, one such 503 arrived while nine other routes answered.
+ */
+function providerDown(r: Extract<ProviderResult<unknown>, { ok: false }>): boolean {
+  return PROVIDER_DOWN.has(r.failure) && r.retryable !== true;
+}
+
 // ── Small helpers ────────────────────────────────────────────────────────
 
 type Rec = Record<string, unknown>;
@@ -530,7 +560,24 @@ const R = {
   theses: (p: unknown) =>
     reviveRows<ThesesPage>(p, (r) => typeof r.id === "string" && typeof r.text === "string" && isObj(r.author) && typeof r.author.userId === "string" && tokenOkOrNull(r.token)),
   board: (p: unknown) => reviveRows<TokenBoardPage>(p, (r) => validToken(r.token) !== null),
-  leaderboard: (p: unknown) => reviveRows<LeaderboardPage>(p, (r) => isObj(r.trader) && typeof r.trader.userId === "string"),
+  leaderboard: (p: unknown): LeaderboardPage | null => {
+    const page = reviveRows<LeaderboardPage>(p, (r) => isObj(r.trader) && typeof r.trader.userId === "string");
+    if (!page) return null;
+    // Top-token identities are re-validated like every other token read back from the cache, and each holding
+    // is rebuilt field by field: a copy cached before the P&L was named unwindowed carries `pnlUsd`, which reads
+    // like the row's window P&L and is dropped rather than carried.
+    const rows = page.rows.map((r) =>
+      Array.isArray(r.topTokens)
+        ? {
+            ...r,
+            topTokens: r.topTokens
+              .filter((t) => isObj(t) && validToken(t.token) !== null)
+              .map((t) => ({ token: t.token, valueUsd: finite(t.valueUsd) ? t.valueUsd : null, unwindowedPnlUsd: finite(t.unwindowedPnlUsd) ? t.unwindowedPnlUsd : null })),
+          }
+        : r,
+    );
+    return { ...page, rows };
+  },
   alerts: (p: unknown): AlertsPage | null => {
     if (!isObj(p) || !Array.isArray(p.rows) || !finite(p.dropped)) return null;
     // The store's own field-by-field event normaliser is the strictest we have.
@@ -559,13 +606,30 @@ interface ProviderSnapshot {
   source: string | null;
   /** How old the provider says its copy is; null when it did not say. */
   ageSeconds: number | null;
+  /**
+   * The provider served its captured copy but called it current (`stale:
+   * false`) and minutes old. Its provenance is still noted; the answer is not
+   * downgraded to stale for it.
+   */
+  current: boolean;
 }
 
+/**
+ * The longest a `captured` copy the provider explicitly calls current
+ * (`stale: false`) may be before it is treated as a stored fallback anyway.
+ * Observed live 2026-10-04: both token boards answered `captured`,
+ * `stale: false`, 6–12 minutes old, on their normal serving path.
+ */
+const CAPTURED_CURRENT_MAX_S = 30 * 60;
+
 function snapshotOf(source: unknown, stale: unknown, ageSeconds: unknown): ProviderSnapshot | null {
-  // "captured" and "snapshot" are the provider's fallback sources (capabilities.ts: "source captured means a fallback board").
+  // "captured" and "snapshot" are the provider's stored copies; `stale` and the age say whether one is a fallback.
   const flagged = stale === true || source === "captured" || source === "snapshot";
   if (!flagged) return null;
-  return { source: typeof source === "string" ? source : null, ageSeconds: finite(ageSeconds) && ageSeconds >= 0 ? ageSeconds : null };
+  const age = finite(ageSeconds) && ageSeconds >= 0 ? ageSeconds : null;
+  // Only an explicit stale:false with a stated, short age keeps a captured copy current; silence is not a claim.
+  const current = source === "captured" && stale === false && age !== null && age <= CAPTURED_CURRENT_MAX_S;
+  return { source: typeof source === "string" ? source : null, ageSeconds: age, current };
 }
 
 /** The provider's as-of: its own capture time, or (for a copy it called stored) the retrieval time less the age it gave. */
@@ -637,6 +701,8 @@ interface ChargeContext {
   groupId: string | null;
   now: number;
   signal?: AbortSignal;
+  /** Absolute ms on the service clock past which no provider read starts or runs (READ_DEADLINE_MS). */
+  deadlineAt?: number;
   cap: { limit: number; spent: number } | null;
   /** Which budget pays; the tenant budget unless this is background shared research. */
   budget?: BudgetLike;
@@ -670,9 +736,9 @@ function failedLocalSection(name: string, reason: string): Section<never> {
   return { ...localSection<never>(name, null as never, null, "none"), data: null, status: "failed", reason };
 }
 
-function failureStatus(f: ProviderFailure | "not-configured" | "aborted" | "internal-error"): SectionStatus {
+function failureStatus(f: ProviderFailure | "not-configured" | "aborted" | "internal-error", transient = false): SectionStatus {
   if (f === "not-found") return "not-found";
-  if (f === "not-configured" || PROVIDER_DOWN.has(f as ProviderFailure)) return "unavailable";
+  if (f === "not-configured" || (PROVIDER_DOWN.has(f as ProviderFailure) && !transient)) return "unavailable";
   return "failed";
 }
 
@@ -785,6 +851,17 @@ function changeScopeOf(d: CoinDossier): string {
 
 // ── The service ──────────────────────────────────────────────────────────
 
+/**
+ * The read deadline for one invoke: the service's own limit, and inside the
+ * caller's budget (the broker's per-call timeout) with room for the answer to
+ * travel back, so the caller receives a partial answer instead of timing out.
+ */
+const BUDGET_MARGIN_MS = 1_500;
+function invokeDeadlineOf(defaultMs: number, budgetMs: number | undefined): number {
+  if (typeof budgetMs !== "number" || !Number.isFinite(budgetMs) || budgetMs <= 0) return defaultMs;
+  return Math.max(0, Math.min(defaultMs, budgetMs - BUDGET_MARGIN_MS));
+}
+
 export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   const db = deps.db;
   const client = deps.client;
@@ -794,6 +871,9 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   const usage = deps.usage ?? null;
   const log = deps.log ?? (() => {});
   const selfNames = deps.selfNames ?? [];
+  const msOr = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
+  const readDeadline = { invoke: msOr(deps.readDeadlineMs?.invoke, READ_DEADLINE_MS.invoke), background: msOr(deps.readDeadlineMs?.background, READ_DEADLINE_MS.background) };
+  const invokeDeadlineMs = (budgetMs: number | undefined): number => invokeDeadlineOf(readDeadline.invoke, budgetMs);
   // Background shared research pays through the research cap (BACKGROUND_RESEARCH_CAP); owners never do.
   const researchBudget = researchCapped(
     deps.backgroundBudget ?? budget,
@@ -1002,7 +1082,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         log(`fomo: usage write failed: ${errText(e)}`);
       }
       if (r.ok || r.failure === "not-found") lastProviderOkAt = Math.max(lastProviderOkAt ?? 0, at);
-      else lastProviderFailure = { at, reason: r.failure, down: PROVIDER_DOWN.has(r.failure) };
+      // A call our own deadline or abort cut short says nothing about the provider.
+      else if (r.failure !== "cancelled") lastProviderFailure = { at, reason: r.failure, down: providerDown(r) };
       await recordCapability(spec.route, r, spec.notFoundIsSubject === true);
     }
     try {
@@ -1016,7 +1097,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           // Metadata only; never a provider body. source/stale/ageSeconds are read back so a cached fallback stays labelled.
           meta: { route: m.route, credits: m.creditsCost, source: m.providerSource, stale: m.providerStale, ageSeconds: m.providerAgeSeconds },
         });
-      } else if (m.attempts > 0) {
+      } else if (m.attempts > 0 && r.failure !== "cancelled") {
+        // Not for a call we cut short: backing everyone off a route for our own deadline would be wrong.
         await store.cacheMarkAttempt(db, key, spec.cls, "failed", at);
       }
     } catch (e) {
@@ -1103,6 +1185,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         ? heldCopy("stale", "not-configured", state?.lastAttemptOutcome ?? null)
         : base({ status: "unavailable", reason: "not-configured" });
     }
+    // The caller's limits (READ_DEADLINE_MS): a read it can no longer wait for is skipped before anything is charged or sent.
+    const cut = cc.signal?.aborted ? "aborted" : cc.deadlineAt !== undefined && !(cc.deadlineAt - clock() >= MIN_ATTEMPT_MS) ? "deadline" : null;
+    if (cut) {
+      return first.onFailure === "serve-stale" && heldData !== null
+        ? heldCopy("stale", cut, state?.lastAttemptOutcome ?? null)
+        : base({ status: "failed", reason: cut });
+    }
+    // Every call of this read runs inside the caller's deadline and stops when the caller aborts. A caller that
+    // joins someone else's fetch (SingleFlight) shares the leader's limits; it was not charged, and its own
+    // abort (the broker's, at its ceiling) still releases it from the wait.
+    const scoped = client.bound({ signal: cc.signal ?? null, deadlineAt: cc.deadlineAt ?? null });
     const estimate = expectedCredits(spec.route, pages);
     const refused = async (reason: string): Promise<Section<T>> => {
       noteBudgetRefusal(reason, cc, now);
@@ -1127,6 +1220,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let ran = false;
     let result: ProviderResult<T> | null = null;
     let thrown: string | null = null;
+    // A caller that JOINS someone else's fetch waits only as long as its OWN
+    // deadline allows: the leader may have a later one, and outliving ours would
+    // turn a partial answer into the broker's timeout.
+    const waitLeft = cc.deadlineAt !== undefined ? Math.max(0, cc.deadlineAt - clock()) : null;
+    const deadlineSignal = waitLeft !== null ? AbortSignal.timeout(waitLeft) : null;
+    const waitSignal = deadlineSignal && cc.signal ? AbortSignal.any([cc.signal, deadlineSignal]) : (deadlineSignal ?? cc.signal);
     try {
       result = (await flight.run(
         key,
@@ -1134,7 +1233,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           ran = true;
           let r: ProviderResult<unknown>;
           try {
-            r = await spec.call(client);
+            r = await spec.call(scoped);
           } catch (e) {
             // The client promises never to throw; if it does, treat it as an unbilled-unknown failure.
             r = {
@@ -1147,10 +1246,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           await afterCall(spec as ReadSpec<unknown>, key, r, g, cc, estimate);
           return r;
         },
-        { force: mode === "force-refresh", requestedAt: now, signal: cc.signal },
+        { force: mode === "force-refresh", requestedAt: now, signal: waitSignal ?? undefined },
       )) as ProviderResult<T>;
     } catch (e) {
-      thrown = cc.signal?.aborted ? "aborted" : "internal-error";
+      thrown = cc.signal?.aborted ? "aborted" : deadlineSignal?.aborted ? "deadline" : "internal-error";
       log(`fomo: read ${spec.route} did not complete: ${errText(e)}`);
     } finally {
       // A caller that joined someone else's fetch (or never reached upstream) did not pay for one.
@@ -1178,7 +1277,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         ...callUsage,
       });
     }
-    const status = failureStatus(result.failure);
+    const status = failureStatus(result.failure, result.retryable === true);
     if (status !== "not-found" && first.onFailure === "serve-stale" && heldData !== null) {
       return { ...heldCopy("stale", result.failure, "failed"), lastAttemptAt: m.retrievedAt, ...callUsage, cacheHits: 1 };
     }
@@ -1437,7 +1536,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       } else if (a.sections.some((s) => s.status === "stale")) {
         status = "stale";
         reason = reason ?? a.sections.find((s) => s.status === "stale")?.reason ?? null;
-      } else if (a.sections.some((s) => !s.identity && s.data !== null && s.providerSnapshot)) {
+      } else if (a.sections.some((s) => !s.identity && s.data !== null && s.providerSnapshot && !s.providerSnapshot.current)) {
         // The provider said this is its stored fallback copy: a stale answer, even though we fetched it just now.
         status = "stale";
         reason = reason ?? "provider-snapshot";
@@ -1448,7 +1547,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     for (const s of a.sections) {
       if (s.identity || s.data === null || !s.providerSnapshot) continue;
       const age = s.providerSnapshot.ageSeconds !== null ? ` (about ${durationText(s.providerSnapshot.ageSeconds * 1000)} old)` : "";
-      a.note(`The provider served a stored snapshot of ${SNAPSHOT_LABEL[s.name] ?? "this data"}${age}, not a live read.`);
+      const what = SNAPSHOT_LABEL[s.name] ?? "this data";
+      a.note(
+        s.providerSnapshot.current
+          ? `The provider served its captured copy of ${what}${age}, which it marks as current.`
+          : `The provider served a stored snapshot of ${what}${age}, not a live read.`,
+      );
     }
     // The answer's age is the age of its data, not of the identity lookup that found the subject.
     const pool = a.sections.some((s) => !s.identity) ? a.sections.filter((s) => !s.identity) : a.sections;
@@ -1478,6 +1582,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       lastRefreshAttemptAt: attempts.length ? Math.max(...attempts) : null,
       lastRefreshOutcome: outcome,
     });
+    // What the time limit left unread, or cut short, is said, never left to look like "no records".
+    const skipped = a.sections.filter((s) => s.data === null && s.reason === "deadline").map((s) => s.name);
+    if (skipped.length) a.note(`Time ran out before ${skipped.join(", ")} could be read; ${skipped.length === 1 ? "it was" : "they were"} skipped, not read.`);
+    const cutShort = a.sections.filter((s) => s.data === null && s.reason === "cancelled").map((s) => s.name);
+    if (cutShort.length) a.note(`${cutShort.join(", ")} did not finish within the time allowed and ${cutShort.length === 1 ? "was" : "were"} cut short.`);
     const calls = a.sections.reduce((n, s) => n + s.providerCalls, 0);
     const unknownCredits = a.sections.some((s) => s.providerCalls > 0 && s.credits === null);
     const remaining = [...a.sections].reverse().find((s) => s.creditsRemaining !== null)?.creditsRemaining ?? null;
@@ -1673,12 +1782,15 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         robinhood: isRobinhoodToken(h.token),
       }));
       rows.sort((x, y) => (y.valueUsd ?? -1) - (x.valueUsd ?? -1));
-      const byChain = new Map<string, { rows: number; value: number | null }>();
+      // Priced rows are summed; unpriced ones are counted beside the sum, so one
+      // unpriced coin neither hides a chain's value nor reads as worth $0.
+      const byChain = new Map<string, { rows: number; value: number; unpriced: number }>();
       for (const h of rows) {
         const k = h.chain ?? "unknown";
-        const cur = byChain.get(k) ?? { rows: 0, value: 0 };
+        const cur = byChain.get(k) ?? { rows: 0, value: 0, unpriced: 0 };
         cur.rows++;
-        cur.value = cur.value === null || h.valueUsd === null ? null : cur.value + h.valueUsd;
+        if (h.valueUsd === null) cur.unpriced++;
+        else cur.value += h.valueUsd;
         byChain.set(k, cur);
       }
       holdings = {
@@ -1688,7 +1800,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         totalValueUsdFloor: snap.totalValueUsdFloor,
         complete: snap.complete,
         dropped: snap.dropped,
-        byChain: [...byChain.entries()].map(([chain, v]) => ({ chain, rows: v.rows, valueUsd: v.value })),
+        byChain: [...byChain.entries()].map(([chain, v]) => ({ chain, rows: v.rows, valueUsd: v.rows > v.unpriced ? v.value : null, unpricedRows: v.unpriced })),
       };
       a.ref("holdings", userId, bal.retrievedAt);
       if (snap.truncated) {
@@ -1697,6 +1809,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       }
       if (rows.length > MAX_HOLDINGS_SHOWN) a.note(`Showing the ${MAX_HOLDINGS_SHOWN} largest of ${rows.length} holdings.`);
       if (snap.dropped > 0) a.note(`${snap.dropped} holding row(s) could not be placed on a chain and were left out.`);
+      const unpriced = snap.rows.filter((h) => h.valueUsd === null).length;
+      if (unpriced > 0) a.note(`${unpriced} holding(s) have no provider valuation; their value is unknown, not zero, and is not in the total.`);
       a.note("Holdings are a snapshot valued at current prices: a change in value can be price, not buying. The total excludes perps and other equity.");
       a.achieved = { holdingsRows: rows.length, truncated: snap.truncated };
     }
@@ -1812,7 +1926,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         else counts.other++;
         a.sourceTimes.push(eventTime(e));
       }
-      matching.sort((x, y) => eventTime(y) - eventTime(x));
+      // Newest first in the provider's own order, so the first row's cumulative P&L is the provider-latest one.
+      matching.sort((x, y) => chronologicalOrder(y, x));
       if (matching.length > args.limit) a.capped = true;
       events = matching.slice(0, args.limit).map((e) => eventView(e, "rest-lookup", cohort.ids));
       for (const e of events) a.ref("event", e.evidenceId.slice("fomo:event/".length));
@@ -1833,6 +1948,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         })
         .filter((f) => args.side === null || f.side === args.side);
       if (all.length > args.limit || fillsRead.data.moreAvailable === true) a.capped = true;
+      // The provider serves a recent window of fills (at most 100 per trader, no cursor past them), not history.
+      if (fillsRead.data.complete === false) {
+        a.capped = true;
+        a.note("Fills cover only the provider's recent window (at most 100 per trader), not the trader's full history.");
+      }
       fills = all.slice(0, args.limit);
     }
     if (positions.length > args.limit) a.capped = true;
@@ -2132,14 +2252,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       .filter((e) => (token ? e.token?.key === token.key : chainReq ? chainMatches(chainReq, e.token) : true))
       .filter((e) => e.kind !== "thesis" && e.kind !== "listing")
       .filter((e) => !args.cohortOnly || cohort.ids.has(e.trader.userId));
-    const matching = inScope.filter((e) => (args.side === null ? true : e.kind === args.side)).sort((x, y) => eventTime(y) - eventTime(x));
+    const matching = inScope.filter((e) => (args.side === null ? true : e.kind === args.side)).sort((x, y) => chronologicalOrder(y, x));
     const anyActivityRead = essential.some((s) => s.data !== null);
     const buyers = new Set(inScope.filter((e) => e.kind === "buy").map((e) => e.trader.userId));
     const sellers = new Set(inScope.filter((e) => e.kind === "sell").map((e) => e.trader.userId));
     let cohortView: TokenActivityData["cohort"] = null;
     if (args.cohortOnly || cohort.ids.size > 0) {
       const latest = new Map<string, CohortActor>();
-      for (const e of [...inScope].sort((x, y) => eventTime(y) - eventTime(x))) {
+      for (const e of [...inScope].sort((x, y) => chronologicalOrder(y, x))) {
         if (!cohort.ids.has(e.trader.userId) || (e.kind !== "buy" && e.kind !== "sell") || latest.has(e.trader.userId)) continue;
         latest.set(e.trader.userId, { userId: e.trader.userId, handle: handleOf(e.trader.handle), latestAction: e.kind, at: eventTime(e) });
       }
@@ -2945,7 +3065,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       conversationKey: ctx?.conversationKey ?? null,
       access: null,
       // One owner is one budget: the store lowercases tenants, so the budget keys must too.
-      cc: { tenant: store.tenantKey(tenant), surface, priority: ctx?.priority ?? "interactive", groupId, now, signal: ctx?.signal, cap: null },
+      // The reads' deadline runs from when the call reached the service, on the service clock (READ_DEADLINE_MS).
+      cc: { tenant: store.tenantKey(tenant), surface, priority: ctx?.priority ?? "interactive", groupId, now, signal: ctx?.signal, deadlineAt: clock() + invokeDeadlineMs(ctx?.budgetMs), cap: null },
     };
     if (!isFomoToolName(tool)) return bare({ ...ic, tool: "fomo_resolve_subject" }, "failed", "unknown-tool", "That is not a Fomo research tool.");
     if (!tenant) return bare(ic, "failed", "no-tenant", "The request carried no trusted account.");
@@ -3032,7 +3153,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     payer: ChargeAs,
     token: TokenIdentity,
     label: TokenLabel,
-    opts: { depth: "quick" | "standard" | "deep"; now: number; signal?: AbortSignal; creditCap?: number | null; mode?: FreshnessMode },
+    opts: { depth: "quick" | "standard" | "deep"; now: number; signal?: AbortSignal; deadlineAt?: number; creditCap?: number | null; mode?: FreshnessMode },
     payWith: BudgetLike = budget,
   ): Promise<RefreshOutcome> {
     const now = finite(opts.now) ? opts.now : clock();
@@ -3064,6 +3185,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       groupId: payer.groupId ?? null,
       now,
       signal: opts.signal,
+      // A job passes its own deadline; anything else gets the background one (READ_DEADLINE_MS).
+      deadlineAt: typeof opts.deadlineAt === "number" && !Number.isNaN(opts.deadlineAt) ? opts.deadlineAt : clock() + readDeadline.background,
       cap: opts.creditCap !== undefined && opts.creditCap !== null ? { limit: opts.creditCap, spent: 0 } : null,
     };
     try {
@@ -3255,6 +3378,7 @@ export async function runPendingJobs(
         depth: "deep",
         now: started,
         signal: ac.signal,
+        deadlineAt: job.deadlineMs,
         creditCap: job.costAllowanceCredits ?? DEEP_JOB_CREDIT_ALLOWANCE,
       });
       const result = {

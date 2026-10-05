@@ -842,7 +842,26 @@ export function traderEventOf(v: unknown): TraderEvent | null {
   const token = r.token === null || r.token === undefined ? null : tokenOf(r.token);
   // A token that was there but no longer parses is corruption, not "no token".
   if (r.token !== null && r.token !== undefined && token === null) return null;
+  // Fields added after events were first stored: read back only when the stored copy has them.
+  const optional: Partial<TraderEvent> = {};
+  if ("providerAlertId" in r) optional.providerAlertId = typeof r.providerAlertId === "string" && /^alrt_\d{13}_\d{1,12}$/.test(r.providerAlertId) ? r.providerAlertId : null;
+  if ("providerAlertSeq" in r) {
+    const seq = finite(r.providerAlertSeq);
+    optional.providerAlertSeq = seq !== null && Number.isSafeInteger(seq) && seq >= 0 ? seq : null;
+  }
+  // Only a buy or a sell is a fill (provider.ts alertFrameToEvent): a copy of any other kind never reads back with one.
+  const fillKind = r.kind === "buy" || r.kind === "sell";
+  if ("fillUsdSource" in r) optional.fillUsdSource = fillKind && typeof r.fillUsdSource === "string" && /^[a-z0-9][a-z0-9_-]{0,23}$/.test(r.fillUsdSource) ? r.fillUsdSource : null;
+  if ("perp" in r) {
+    const p = record(r.perp);
+    const lev = finite(p?.leverage);
+    optional.perp =
+      p && (p.action === "open" || p.action === "close") && (p.side === "long" || p.side === "short") && lev !== null && Number.isSafeInteger(lev) && lev >= 1
+        ? { action: p.action, side: p.side, leverage: lev }
+        : null;
+  }
   return {
+    ...optional,
     eventKey: r.eventKey,
     identityBasis: r.identityBasis,
     // Unknown ambiguity is ambiguity: only an explicit false clears it.
@@ -856,14 +875,17 @@ export function traderEventOf(v: unknown): TraderEvent | null {
     swapId: str(r.swapId),
     transferId: str(r.transferId),
     txHash: str(r.txHash),
-    fillUsd: finite(r.fillUsd),
-    fillUsdBasis: r.fillUsdBasis === "onchain-exact" || r.fillUsdBasis === "ambiguous" ? r.fillUsdBasis : null,
+    fillUsd: fillKind ? finite(r.fillUsd) : null,
+    fillUsdBasis: fillKind && (r.fillUsdBasis === "onchain-exact" || r.fillUsdBasis === "ambiguous") ? r.fillUsdBasis : null,
     positionValueUsd: finite(r.positionValueUsd),
     positionRealizedPnlUsdCumulative: finite(r.positionRealizedPnlUsdCumulative),
     sourceEventAt: finite(r.sourceEventAt),
     execAt: finite(r.execAt),
     observedAt,
-    verification: r.verification,
+    // "Provider matched it on chain" is a claim about a FILL: a stored transfer,
+    // airdrop, listing or thesis row (written before the fill gate) reads back
+    // as provider-reported, so no non-trade event is ever shown as verified.
+    verification: !fillKind && r.verification === "provider-verified" ? "provider-reported" : r.verification,
     text: str(r.text),
     replay: r.replay === true,
   };

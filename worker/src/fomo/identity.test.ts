@@ -4,6 +4,7 @@ import {
   chainFromProvider,
   chainFromUserText,
   executionAvailabilityOf,
+  filterCheckIdentity,
   isRobinhoodToken,
   robinhoodChain,
   tokenFromKey,
@@ -106,6 +107,61 @@ describe("chain filter verification", () => {
   });
 });
 
+describe("network ids observed live but not documented (2026-10-04)", () => {
+  it("a bare observed id names its network; a slug alone still never becomes a number", () => {
+    assert.deepEqual(chainFromProvider(56, undefined), { namespace: "eip155", networkId: 56, slug: "bsc" });
+    assert.deepEqual(chainFromProvider(1, undefined), { namespace: "eip155", networkId: 1, slug: "eth" });
+    assert.deepEqual(chainFromProvider(8453, undefined), { namespace: "eip155", networkId: 8453, slug: "base" });
+    assert.deepEqual(chainFromProvider(1, "ethereum"), { namespace: "eip155", networkId: 1, slug: "eth" });
+    assert.deepEqual(chainFromProvider(56, "bnb"), { namespace: "eip155", networkId: 56, slug: "bsc" });
+    assert.deepEqual(chainFromProvider(undefined, "bsc"), { namespace: "eip155", networkId: null, slug: "bsc" });
+  });
+
+  it("an observed id that disagrees with the row's slug is trusted for neither", () => {
+    assert.deepEqual(chainFromProvider(56, "base"), { namespace: "unknown", networkId: null, slug: "base" });
+    assert.equal(tokenIdentity(chainFromProvider(56, "base"), EVM)?.chain.networkId, null);
+    assert.equal(chainFromProvider(56, "robinhood").namespace, "unknown");
+  });
+
+  it("an EVM address on a numbered but unknown network keeps the number, so two networks stay two tokens", () => {
+    const odd = tokenIdentity(chainFromProvider(777_777, undefined), EVM)!;
+    assert.equal(odd.key, `eip155:777777:${EVM.toLowerCase()}`);
+    const bnb = tokenIdentity(chainFromProvider(56, undefined), EVM)!;
+    const eth = tokenIdentity(chainFromProvider(1, undefined), EVM)!;
+    assert.notEqual(bnb.key, eth.key);
+    assert.equal(isRobinhoodToken(bnb), false);
+    assert.equal(executionAvailabilityOf(bnb, { routeVerified: true, permitted: true }), "unsupported-chain");
+    assert.equal(executionAvailabilityOf(odd, { routeVerified: true, permitted: true }), "unsupported-chain");
+    // A mint on a numbered unknown network is still not placed on that number.
+    assert.equal(tokenIdentity(chainFromProvider(777_777, undefined), MINT)?.key, `solana:?:${MINT}`);
+  });
+
+  it("keys round-trip with the observed slug", () => {
+    const bnb = tokenIdentity(chainFromProvider(56, undefined), EVM)!;
+    assert.deepEqual(tokenFromKey(bnb.key), bnb);
+  });
+
+  it("filters on named EVM networks are checked by the id their rows carry", () => {
+    const bsc = chainFromUserText("bsc")!;
+    assert.equal(bsc.networkId, null, "what a person types is not given a number");
+    assert.equal(filterCheckIdentity(bsc).networkId, 56);
+    assert.equal(filterCheckIdentity(chainFromUserText("ethereum")!).networkId, 1);
+    assert.equal(filterCheckIdentity(chainFromUserText("monad")!).networkId, null, "no observation, no number");
+    const bnbRow = tokenIdentity(chainFromProvider(56, "bsc"), EVM);
+    const ethRow = tokenIdentity(chainFromProvider(1, "ethereum"), EVM);
+    assert.equal(verifyChainFilter(filterCheckIdentity(bsc), [bnbRow, bnbRow]).honoured, true);
+    assert.equal(verifyChainFilter(filterCheckIdentity(bsc), [bnbRow, ethRow]).honoured, false);
+  });
+
+  it("a filter given as a number we cannot place is checked by number alone", () => {
+    const requested = chainFromProvider(777_777, undefined);
+    assert.equal(requested.namespace, "unknown");
+    const row = tokenIdentity(requested, EVM);
+    assert.equal(verifyChainFilter(requested, [row]).honoured, true);
+    assert.equal(verifyChainFilter(requested, [tokenIdentity(robinhoodChain(), EVM)]).honoured, false);
+  });
+});
+
 describe("event identity", () => {
   const base = { kind: "buy" as const, userId: "u1", tokenKey: "eip155:4663:0xabc", sourceEventAt: 1_788_378_001_234 };
 
@@ -197,5 +253,21 @@ describe("event identity", () => {
     assert.equal(swapped.fillUsd, 55);
     assert.equal(swapped.txHash, tx);
     assert.equal(swapped.verification, "provider-verified");
+  });
+});
+
+describe("verification is a claim about a fill", () => {
+  it("merging copies of a non-trade event never upgrades it to provider-verified", () => {
+    const mk = (over: Partial<TraderEvent>): TraderEvent => ({
+      eventKey: "ev:t", identityBasis: "provider-event-id", identityAmbiguous: false, source: "stream", kind: "transfer-in",
+      trader: { userId: "u1", handle: "a", displayName: null, verified: null }, token: null, tokenLabel: { symbol: null, name: null },
+      tradeId: null, swapId: null, transferId: "tr1", txHash: null, fillUsd: null, fillUsdBasis: null, positionValueUsd: null,
+      positionRealizedPnlUsdCumulative: null, sourceEventAt: 1, execAt: null, observedAt: 100, verification: "provider-reported",
+      text: null, replay: false, ...over,
+    });
+    const out = dedupeEvents([mk({}), mk({ source: "rest-recovery", verification: "provider-verified" })]);
+    assert.equal(out.events[0]!.verification, "provider-reported");
+    const buys = dedupeEvents([mk({ kind: "buy" }), mk({ kind: "buy", source: "rest-recovery", verification: "provider-verified" })]);
+    assert.equal(buys.events[0]!.verification, "provider-verified", "a buy keeps the stronger basis");
   });
 });

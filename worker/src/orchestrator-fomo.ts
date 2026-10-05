@@ -1419,8 +1419,12 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
    *   welcome                         AUTHENTICATED_TESTED, or PARTIAL when the
    *                                   provider says it delays delivery (a free
    *                                   key's 15 s)
-   *   the vendor's close 1008 before  ENTITLEMENT_BLOCKED (its documented close
-   *   any welcome                     for a plan without the stream)
+   *   the vendor's close 1008 before  ENTITLEMENT_BLOCKED only when its close
+   *   any welcome                     reason names the plan; a reason naming
+   *                                   the key, or none, is "policy close
+   *                                   (1008): key or plan" and claims no
+   *                                   status (the vendor closes a bad key with
+   *                                   1008 too; capabilities.ts)
    *   STREAM_UNAVAILABLE_AFTER        UNAVAILABLE
    *   connects in a row, no welcome
    *
@@ -1446,7 +1450,9 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       } else if (state === "backoff" && !welcomed) {
         failedConnects++;
         const vendorClose = /^closed\b/.test(detail.reason ?? "") ? (detail.code ?? null) : null;
-        if (vendorClose === 1008) probe = { welcome: false, closeCode: 1008 };
+        // The stream module reports a vendor close as "closed: <scrubbed reason>"; only its words are read.
+        const closeReason = vendorClose !== null ? (detail.reason ?? "").replace(/^closed:?\s*/, "") : null;
+        if (vendorClose === 1008) probe = { welcome: false, closeCode: 1008, closeReason };
         else if (failedConnects >= STREAM_UNAVAILABLE_AFTER) probe = { welcome: false, closeCode: vendorClose };
       }
       if (!probe) return;

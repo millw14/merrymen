@@ -43,6 +43,7 @@ import {
   type DossierClaimDetail,
   type DossierTopic,
 } from "./dossier";
+import { chronologicalOrder } from "./events";
 import type { CoinDossier, DossierClaim, EvidenceRef, Thesis, TokenIdentity, TokenLabel, TraderEvent } from "./types";
 
 /** The provider quantises event time to 5 s; buys inside one bucket are "the same moment". */
@@ -67,7 +68,7 @@ function byToken(events: readonly TraderEvent[]): Map<string, TraderEvent[]> {
     if (list) list.push(e);
     else out.set(e.token.key, [e]);
   }
-  for (const list of out.values()) list.sort((a, b) => eventTime(a) - eventTime(b) || cmpStr(a.eventKey, b.eventKey));
+  for (const list of out.values()) list.sort(chronologicalOrder);
   return out;
 }
 
@@ -228,7 +229,8 @@ export function convictionChanges(events: readonly TraderEvent[]): ConvictionCha
     else groups.set(k, [e]);
   }
   for (const [, raw] of [...groups.entries()].sort((a, b) => cmpStr(a[0], b[0]))) {
-    const list = [...raw].sort((a, b) => eventTime(a) - eventTime(b) || cmpStr(a.eventKey, b.eventKey));
+    // The provider's order (events.ts chronologicalOrder): block-time skew cannot make an earlier sell the latest.
+    const list = [...raw].sort(chronologicalOrder);
     const first = list[0]!;
     const buys = list.filter((e) => e.kind === "buy");
     const sells = list.filter((e) => e.kind === "sell");
@@ -243,22 +245,22 @@ export function convictionChanges(events: readonly TraderEvent[]): ConvictionCha
       out.push({
         ...base,
         change: "accumulation",
-        firstAt: eventTime(buys[0]!),
-        lastAt: eventTime(buys[buys.length - 1]!),
+        ...shownSpan(buys),
         evidence: buys.slice(0, MAX_REFS).map((e) => eventRef(e.eventKey)),
         note: `${buys.length} separate buys observed. Accumulation is counted from purchases only; a rising position value from price is not accumulation.`,
       });
     }
     const lastSell = sells[sells.length - 1];
     if (lastSell) {
+      // App-feed sells carry no position mark (observed live: none of 36 did), so feed-only
+      // evidence lands on sell-unclassified by design; an exit needs the positions route.
       const mark = lastSell.positionValueUsd;
       const change: ConvictionChangeKind =
         typeof mark !== "number" || !Number.isFinite(mark) ? "sell-unclassified" : mark <= 0 ? "exit" : "reduction";
       out.push({
         ...base,
         change,
-        firstAt: eventTime(sells[0]!),
-        lastAt: eventTime(lastSell),
+        ...shownSpan(sells),
         evidence: sells.slice(0, MAX_REFS).map((e) => eventRef(e.eventKey)),
         note:
           change === "exit"
@@ -585,4 +587,22 @@ export function changeSummary(prev: ChangeCheck | null, next: ChangeCheck & { su
     }
   }
   return { comparable: true, noChange: changes.length === 0, changes, reason: "compared" };
+}
+
+/**
+ * The span SHOWN for a run of events: the earliest and latest of their shown
+ * times. Events are ORDERED on the provider's clock (events.ts
+ * chronologicalOrder) but shown at their block time when matched, and the two
+ * clocks are seconds apart, so taking the first and last of the ordered list
+ * could show a span that ends before it starts.
+ */
+function shownSpan(events: readonly TraderEvent[]): { firstAt: number; lastAt: number } {
+  let firstAt = Infinity;
+  let lastAt = -Infinity;
+  for (const e of events) {
+    const t = eventTime(e);
+    if (t < firstAt) firstAt = t;
+    if (t > lastAt) lastAt = t;
+  }
+  return { firstAt, lastAt };
 }

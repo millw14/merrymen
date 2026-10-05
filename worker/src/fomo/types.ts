@@ -150,6 +150,11 @@ export interface TraderEvent {
   /**
    * The position's mark AFTER the fill (provider `positionValueUsd`). NEVER a
    * fill amount: a $40k position that added $50 shows $40k here.
+   *
+   * Feed SELLS never carry one (observed live 2026-10-04: 0 of 36 sells had
+   * `positionValueUsd`; their `usdValue` is the cumulative realised P&L). So a
+   * sell read from the app feed has this null, and an exit cannot be told from
+   * a reduction from feed evidence alone; that needs the positions route.
    */
   positionValueUsd: number | null;
   /**
@@ -159,7 +164,7 @@ export interface TraderEvent {
   positionRealizedPnlUsdCumulative: number | null;
   /** Provider event time (quantised by the provider to 5 s). */
   sourceEventAt: number | null;
-  /** Block time of the matched fill, when matched. */
+  /** Block time of the matched fill, set ONLY when the provider matched an exact fill. */
   execAt: number | null;
   /** When Merrymen received it. */
   observedAt: number;
@@ -168,6 +173,30 @@ export interface TraderEvent {
   text: string | null;
   /** The stream re-sent this on (re)connect. Already-seen replays are dropped by eventKey. */
   replay: boolean;
+  /**
+   * The app feed's own alert id (`alrt_<ms>_<sequence>`), distinct from the
+   * event id. Its sequence is the provider's tiebreak for events inside one
+   * 5 s bucket ("ts desc, then id desc"). Never the identity: that stays the
+   * event id, which REST and the stream share. Optional so events stored
+   * before it was read still parse.
+   */
+  providerAlertId?: string | null;
+  /** The numeric sequence inside `providerAlertId`; orders events with equal times. */
+  providerAlertSeq?: number | null;
+  /** Which leg priced `fillUsd` (the provider's `tradeUsdSource`, e.g. `usdg`). Null unless the fill is exact. */
+  fillUsdSource?: string | null;
+  /**
+   * A perp alert's action, side and leverage. The provider states them only in
+   * the alert text, so this is TEXT-DERIVED (provider-reported) and null
+   * whenever the text does not match the one shape it was read from.
+   */
+  perp?: PerpDetail | null;
+}
+
+export interface PerpDetail {
+  action: "open" | "close";
+  side: "long" | "short";
+  leverage: number;
 }
 
 /** One row of a holdings snapshot. A snapshot is not transaction history. */
@@ -176,10 +205,17 @@ export interface HoldingRow {
   label: TokenLabel;
   /** Token units as the provider returned them (float, display only). */
   amount: number | null;
+  /** Null when the provider has no price for the token (it sends 0); never a price of zero. */
   priceUsd: number | null;
-  /** Current valuation. A rise here can be price, not accumulation. */
+  /** Current valuation; null when the token is unpriced. A rise here can be price, not accumulation. */
   valueUsd: number | null;
   change24hPct: number | null;
+  /**
+   * Whether this row counts toward the snapshot's total: priced, and not
+   * excluded by the provider (`includeInEquity: false`). Optional so older
+   * cached snapshots still parse.
+   */
+  includedInTotal?: boolean;
 }
 
 export interface HoldingsSnapshot {
@@ -228,6 +264,13 @@ export interface FillRow {
   tradeIdIn: string | null;
   tradeIdOut: string | null;
   at: number | null;
+  /**
+   * The two legs are on different chains: the provider routes fills through
+   * a cash leg on another chain (observed live: a Solana USDC leg on a
+   * Robinhood, Ethereum or BNB fill), so `chain` describes only the non-cash
+   * leg. Null when a leg could not be placed. Optional for older cached pages.
+   */
+  crossChain?: boolean | null;
 }
 
 /** A written thesis. A claim to evaluate, never a verified fact. */
@@ -242,8 +285,19 @@ export interface Thesis {
   text: string;
   likes: number | null;
   replies: number | null;
-  /** Author's position value on the coin when known (provider float). */
+  /**
+   * Author's position value on the coin when known (provider float). Only the
+   * global thesis feed populates it; elsewhere the provider sends 0 for every
+   * row, which is "not populated", not a $0 stake, so it is null there.
+   */
   authorEquityUsd: number | null;
+  /**
+   * The author's POSITION on the coin, as the provider attaches it to the
+   * thesis: identical on every thesis that shares a position (`tradeId`), so
+   * any aggregate must dedupe by tradeId and never sum across theses.
+   * Provider floats for display. Optional for older cached pages.
+   */
+  authorPosition?: { tradeUsd: number | null; realizedPnlUsd: number | null; unrealizedPnlUsd: number | null } | null;
   isDev: boolean | null;
   postedAt: number | null;
   /**
@@ -281,6 +335,37 @@ export interface RankingRow {
   topTokenHints: string[];
   /** Whether the provider resolved an EVM wallet (the wallet itself is never surfaced). */
   hasEvmWallet: boolean;
+  /**
+   * The fields below are optional so older cached boards still parse; the
+   * adapter always sets them.
+   *
+   * The trader's top holdings when the provider sends full token objects
+   * (observed live) rather than truncated hints: identity plus the provider's
+   * value and P&L floats for display. Their P&L is NOT this row's window
+   * (see TopTokenHolding.unwindowedPnlUsd).
+   */
+  topTokens?: TopTokenHolding[];
+  /** How the provider knows the EVM wallet is theirs; `provider-claimed` is a lead, not proof. Null without one. */
+  evmWalletEvidence?: WalletEvidence | null;
+  /** The provider's own `wallets.verified` (wallet proof), NOT the profile badge in `trader.verified`. */
+  walletsVerified?: boolean | null;
+  following?: number | null;
+  /** When the provider account was created, ms. */
+  accountCreatedAt?: number | null;
+}
+
+export type WalletEvidence = "onchain-holdings" | "provider-claimed";
+
+export interface TopTokenHolding {
+  token: TokenIdentity;
+  valueUsd: number | null;
+  /**
+   * The provider's per-token P&L on this holding, with NO window: the same
+   * figure arrives on the 24h, 7d and 30d boards alike, so it is not the
+   * row's window P&L (that is `RankingRow.pnlUsd`). Named so no renderer can
+   * present it as "7d" (as `SearchHit.unwindowedRanking` is for search).
+   */
+  unwindowedPnlUsd: number | null;
 }
 
 export type TokenBoard = "trending" | "graduated" | "most-held";
@@ -519,6 +604,13 @@ export interface FomoCallContext {
   /** Retrieval priority class for budget reservation (budget.ts). */
   priority: RetrievalPriority;
   signal?: AbortSignal;
+  /**
+   * How long the CALLER will wait for this call, in ms (the broker's per-call
+   * timeout). The service fits its reads inside it, so a slow run of reads
+   * ends as a partial answer the caller still receives, not as the caller's
+   * own timeout. Absent ⇒ the service's default invoke deadline.
+   */
+  budgetMs?: number;
 }
 
 /**

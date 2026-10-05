@@ -1421,6 +1421,29 @@ describe("honest state the pass keeps", () => {
     await r.pass.idle();
   });
 
+  it("a 1008 close that names the key, or names nothing, is never recorded as a plan block", async () => {
+    const db = await freshDb();
+    const r = await rig({ db, serve: { alerts: true }, stream: true, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    const cap = async () => (await store.listCapabilities(db)).find((c) => c.capability === "ws-alerts");
+    r.sockets[0]!.onclose?.({ code: 1008, reason: `bad key ${KEY}` });
+    await r.pass.idle();
+    const keyed = await cap();
+    assert.notEqual(keyed?.status, "ENTITLEMENT_BLOCKED", "a rejected key says nothing about the plan");
+    assert.match(keyed?.evidence ?? "", /names the key/);
+    assert.ok(!JSON.stringify(keyed).includes(KEY), "the close reason is matched, never stored");
+    await r.time.advance(2_000);
+    const second = r.sockets[1];
+    assert.ok(second, "reconnected");
+    second.onclose?.({ code: 1008, reason: "" });
+    await r.pass.idle();
+    await r.time.advance(10_000);
+    const bare = await cap();
+    assert.notEqual(bare?.status, "ENTITLEMENT_BLOCKED");
+    r.pass.stop();
+    await r.pass.idle();
+  });
+
   it("a stream that never says welcome is recorded unavailable after a few tries, and a welcome lifts it", async () => {
     const db = await freshDb();
     const r = await rig({ db, serve: { alerts: true }, stream: true, access: { [T1]: ACCESS.monitoring } });

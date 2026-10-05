@@ -41,7 +41,7 @@
 
 import { createHash } from "node:crypto";
 import { sanitizeText } from "../research/news";
-import { dedupeEvents } from "./events";
+import { chronologicalOrder, dedupeEvents } from "./events";
 import type {
   ClaimSupport,
   CoinDossier,
@@ -899,7 +899,8 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
   const { events: dedupedEvents, duplicates: eventDuplicates } = dedupeEvents(input.events);
   const tokenEvents = dedupedEvents
     .filter((e) => e.token?.key === token.key)
-    .sort((a, b) => eventTime(a) - eventTime(b) || cmpStr(a.eventKey, b.eventKey));
+    // The provider's own order inside its 5 s quantum, never block time against provider time (events.ts).
+    .sort(chronologicalOrder);
   const inWindow = tokenEvents.filter((e) => windowStart === null || eventTime(e) >= windowStart);
   const buys = inWindow.filter((e) => e.kind === "buy" && e.trader.userId);
   const sells = inWindow.filter((e) => e.kind === "sell" && e.trader.userId);

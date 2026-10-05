@@ -2,7 +2,8 @@
  * THE RESEARCH SERVICE, END TO END AGAINST FIXTURES.
  *
  * Every provider answer is served from testdata/ (constructed from the
- * provider's documentation, never captured) through an injected fetch, into a
+ * provider's documentation, or mirroring the field structure of a live answer
+ * with fabricated values; never captured) through an injected fetch, into a
  * real client and an in-memory sqlite store. Nothing touches the network and
  * the key is a test string that has never been a credential.
  *
@@ -21,6 +22,7 @@ import { describe, it } from "node:test";
 
 import { wrapSqlite, type Db } from "../db";
 import { homePaths } from "../home";
+import { BROKER_LIMITS } from "./broker";
 import { FomoBudget, MemoryAllowance, UsageMeter, type FomoBudgetConfig } from "./budget";
 import type { FomoAccess } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
@@ -28,6 +30,7 @@ import { createFomoClient } from "./provider";
 import {
   BACKGROUND_RESEARCH_CAP,
   cacheKeyOf,
+  READ_DEADLINE_MS,
   createFomoService,
   DEEP_JOB_DEADLINE_MS,
   feedPageCutShort,
@@ -87,7 +90,7 @@ function alertsAt(now: number): Rec {
   return body;
 }
 
-type Handler = (url: URL) => Response | Promise<Response>;
+type Handler = (url: URL, init?: RequestInit) => Response | Promise<Response>;
 
 interface Harness {
   db: Db;
@@ -155,12 +158,12 @@ async function harness(
   const routes = defaultRoutes(clock);
   const calls: string[] = [];
   const logs: string[] = [];
-  const fetchImpl = (async (input: RequestInfo | URL) => {
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     calls.push(url.pathname + url.search);
     if (opts.latencyMs) await new Promise((r) => setTimeout(r, opts.latencyMs));
     const h = routes.get(routeOf(url.pathname));
-    return h ? h(url) : json({ error: "not_found" }, 404);
+    return h ? h(url, init) : json({ error: "not_found" }, 404);
   }) as typeof fetch;
   const client = opts.key === false ? null : createFomoClient({ apiKey: KEY, fetchImpl, now: () => clock.now, sleep: async () => {}, random: () => 0 });
   const access = opts.access ?? { dataAccess: true, monitoring: true, follow: false };
@@ -457,6 +460,130 @@ describe("token tools", () => {
     assert.ok(capped.data!.rows.every((r) => r.marketCapUsd === null || r.marketCapUsd <= 1_000_000));
     assert.ok(capped.data!.rows.some((r) => !r.marketCapKnown), "an unknown market cap is kept");
     assert.ok(capped.data!.filteredByMarketCap >= 1);
+  });
+});
+
+describe("a holding's P&L on the trader board has no window", () => {
+  it("the 7d board shows each trader's 7d P&L and never a top holding's unwindowed P&L as if it were 7d", async () => {
+    const h = await harness();
+    h.routes.set("leaderboard", () => json(fixture("live-shape-leaderboard-7d")));
+    const env = await h.invoke<RankingsData>("fomo_get_rankings", { board: "traders", window: "7d" });
+    assert.equal(env.status, "ok");
+    assert.equal(env.data?.traders[0]?.pnlUsd, 12345.5, "the row's own window P&L");
+    const payload = JSON.stringify(env.data);
+    assert.ok(!payload.includes("500.25") && !/unwindowed|topTokens/.test(payload), "no per-token P&L reaches the answer");
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 4000, now: h.clock.now });
+    assert.ok(!/500\.25|\$500\b/.test(text), text);
+    // What the cache keeps is named for what it is.
+    const cached = await store.cacheGet(h.db, cacheKeyOf("leaderboard", { window: "7d", limit: 100 }));
+    const holdings = ((cached?.payload as Rec | undefined)?.rows as Rec[] | undefined)?.[0]?.topTokens as Rec[] | undefined;
+    assert.ok(holdings && holdings.length > 0, "the board was cached with its holdings");
+    for (const t of holdings) assert.ok(!("pnlUsd" in t) && "unwindowedPnlUsd" in t, JSON.stringify(t));
+  });
+});
+
+describe("event order is the provider's order", () => {
+  it("a trader's newest event, and so the latest cumulative P&L shown, is the provider-latest one", async () => {
+    const h = await harness();
+    const T = Math.floor((NOW - 60_000) / 5_000) * 5_000;
+    const row = (seq: number, over: Rec): Rec => ({
+      id: `alrt_${T}_${seq}`,
+      alertType: "sell",
+      userId: FRANK,
+      trader: "frankdegods",
+      token: "PONS",
+      tokenAddress: PONS,
+      chainId: 4663,
+      chain: "robinhood",
+      ts: T,
+      ...over,
+    });
+    // seq 10 matched exactly and its block time is 2 s after the provider's; seq 11, the provider-latest, did not match.
+    const earlier = row(10, { fillMatch: "onchain-exact", tradeUsd: 1_000, execTs: T + 2_000, realizedPnlUsd: -100, text: "frankdegods sold $PONS" });
+    const later = row(11, { realizedPnlUsd: -250, text: "frankdegods sold $PONS" });
+    h.routes.set("alerts", () => json({ ...fixture("alerts"), alerts: [later, earlier], newestTs: T, oldestTs: T }));
+    const env = await h.invoke<TraderActivityData>("fomo_get_trader_activity", { trader: FRANK, window: "24h" });
+    const events = env.data?.events ?? [];
+    assert.equal(events.length, 2);
+    assert.equal(events[0]!.positionRealizedPnlUsdCumulative, -250, "the first (newest) row is the provider's seq 11");
+    assert.equal(events[1]!.positionRealizedPnlUsdCumulative, -100);
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 4000, now: h.clock.now });
+    assert.ok(text.indexOf("P&L to date -$250") < text.indexOf("P&L to date -$100"), text);
+  });
+});
+
+describe("one call, one clock: the reads of an invoke share its deadline and its abort", () => {
+  it("the invoke deadline sits below the broker's ceiling", () => {
+    assert.ok(READ_DEADLINE_MS.invoke < BROKER_LIMITS.serveMaxCallMs);
+    assert.ok(READ_DEADLINE_MS.invoke < BROKER_LIMITS.directTimeoutMs);
+  });
+
+  it("the caller's own budget narrows the deadline: a call the broker would cut short sends nothing it cannot finish", async () => {
+    const h = await harness();
+    // A Telegram group lookup waits 3 s: minus the margin for the answer to travel back, no read can start.
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { budgetMs: 3_000 });
+    assert.equal(h.calls.length, 0, "nothing sent that could not finish inside the caller's wait");
+    assert.notEqual(env.status, "ok");
+  });
+
+  it("a caller that joins another's fetch gives up at ITS OWN deadline, not the leader's", async () => {
+    const h = await harness({ latencyMs: 3_500 });
+    const leader = h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    await new Promise((r) => setTimeout(r, 50));
+    // Budget 4.5 s ⇒ a 3 s read deadline: enough to start, not enough to wait out a 3.5 s fetch.
+    const t0 = Date.now();
+    const joiner = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { budgetMs: 4_500 });
+    const waited = Date.now() - t0;
+    assert.ok(waited < 3_400, `the joiner stopped waiting at its own deadline (${waited} ms)`);
+    assert.notEqual(joiner.status, "ok");
+    const led = await leader;
+    assert.equal(led.status === "ok" || led.status === "capped", true, `the leader's read still completes (${led.status})`);
+    assert.equal(h.count("/v2/thesis/token/"), 1, "one fetch, shared");
+  });
+
+  it("a read that cannot start before the deadline is skipped and reported, never sent", async () => {
+    const h = await harness();
+    // The thesis read takes most of the call's time (a fake clock: 39 s of the 40).
+    h.routes.set("thesis-token", () => {
+      h.clock.now += READ_DEADLINE_MS.invoke - 1_000;
+      return json(fixture("theses-token"), 200, { "x-credits-cost": "1250" });
+    });
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: "PONS" });
+    assert.equal(h.count("/stats"), 0, "token stats was never sent");
+    assert.equal(h.count("/v2/alerts"), 0, "nor the feed");
+    assert.equal(env.status, "partial", "what was read is real; what was skipped is missing, not empty");
+    assert.ok(env.coverage.missing.includes("token-stats"), env.coverage.missing.join(","));
+    assert.ok(env.coverage.missing.includes("feed"), env.coverage.missing.join(","));
+    assert.ok(env.coverage.notes.some((n) => /Time ran out before .*token-stats.* could be read/.test(n)), env.coverage.notes.join(" | "));
+    // Nothing skipped was charged.
+    assert.equal(env.usage.providerCalls, h.calls.length);
+  });
+
+  it("the caller's abort reaches the fetch in flight: nothing keeps running after the call is gone", async () => {
+    const h = await harness();
+    const ac = new AbortController();
+    const seen = { started: 0, aborted: 0 };
+    h.routes.set("stats", (_u, init) => {
+      seen.started++;
+      setTimeout(() => ac.abort(), 5);
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          seen.aborted++;
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    });
+    const started = Date.now();
+    const env = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: "PONS" }, { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(seen.started, 1);
+    assert.equal(seen.aborted, 1, "the stats fetch was aborted, not left listening (and billing)");
+    assert.ok(Date.now() - started < 5_000);
+    assert.notEqual(env.status, "ok");
+    // Our own cut is not the provider failing.
+    assert.notEqual((await h.service.health(h.clock.now)).state, "provider-unavailable");
+    const stats = (await store.listCapabilities(h.db)).find((c) => c.capability === "token-stats");
+    assert.notEqual(stats?.status, "UNAVAILABLE");
   });
 });
 
@@ -1453,5 +1580,89 @@ describe("research status never reads a dead job as in progress, and shows capab
     assert.equal(again.data?.job?.status, "expired");
     assert.notEqual(again.reason, "deep-research-queued");
     assert.ok(!/is queued/.test(renderEnvelope(again, { audience: "owner", maxChars: 3000, now: h.clock.now })));
+  });
+});
+
+describe("live provider shapes, as the service reads them (2026-10-04)", () => {
+  it("a 5xx the provider marks transient fails that read, and is not 'provider unavailable'", async () => {
+    const h = await harness();
+    h.routes.set("leaderboard", () => json({ error: "FOMO did not answer in time", retryable: true }, 503, { "x-credits-cost": "0" }));
+    const env = await h.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal(env.status, "failed", "one subject's slow upstream is a failed read, not an outage");
+    assert.notEqual((await h.service.ownerHealth(OWNER, NOW)).state, "provider-unavailable");
+    assert.notEqual((await h.service.health(NOW)).state, "provider-unavailable");
+    // A plain 503 still is.
+    const g = await harness();
+    g.routes.set("leaderboard", () => json({ error: "down" }, 503));
+    assert.equal((await g.invoke("fomo_get_rankings", { board: "traders" })).status, "unavailable");
+    assert.equal((await g.service.ownerHealth(OWNER, NOW)).state, "provider-unavailable");
+  });
+
+  it("a transient 5xx after a success leaves the route verified, not down, in the capability table and the status", async () => {
+    const h = await harness();
+    assert.equal((await h.invoke("fomo_get_rankings", { board: "traders" })).status, "ok");
+    h.clock.now += 60_000;
+    h.routes.set("leaderboard", () => json({ error: "FOMO did not answer in time", retryable: true }, 503, { "x-credits-cost": "0" }));
+    assert.equal((await h.invoke("fomo_get_rankings", { board: "traders", freshness: "force-refresh" })).status, "stale");
+    const stored = (await store.listCapabilities(h.db)).find((c) => c.capability === "leaderboard");
+    assert.equal(stored?.status, "AUTHENTICATED_TESTED", "one subject's slow upstream does not mark the route unavailable");
+    assert.equal(stored?.verifiedAt, NOW, "the last success stays the verdict's time");
+    assert.match(stored?.evidence ?? "", /transient: server-error \(HTTP 503\)/);
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    const down = status.data?.capabilitiesDown;
+    assert.ok(Array.isArray(down));
+    assert.ok(!down.includes("leaderboard"), "the status agrees: the route is not listed as down");
+    assert.notEqual(status.data?.health.state, "provider-unavailable");
+    // A failure the provider did not call transient does mark it down, in both places.
+    h.clock.now += 6 * 60_000;
+    h.routes.set("leaderboard", () => json({ error: "down" }, 503));
+    await h.invoke("fomo_get_rankings", { board: "traders", freshness: "force-refresh" });
+    assert.equal((await store.listCapabilities(h.db)).find((c) => c.capability === "leaderboard")?.status, "UNAVAILABLE");
+    assert.ok((await h.invoke<ResearchStatusData>("fomo_get_research_status", {})).data?.capabilitiesDown?.includes("leaderboard"));
+  });
+
+  it("a captured board the provider calls current, minutes old, stays ok and says where it came from", async () => {
+    const h = await harness();
+    h.routes.set("board-trending", () => json({ ...fixture("token-board-trending"), source: "captured", stale: false, ageHours: 0.1 }));
+    const env = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" });
+    assert.equal(env.status, "ok");
+    assert.ok(env.coverage.notes.some((n) => /captured copy of the trending board .*marks as current/.test(n)), env.coverage.notes.join(" | "));
+    assert.ok(!env.coverage.notes.some((n) => /stored snapshot/.test(n)));
+
+    // Stale by its own word, or old, or silent about staleness: still a stored fallback.
+    for (const over of [{ stale: true, ageHours: 0.1 }, { stale: false, ageHours: 2 }, { ageHours: 0.1 }]) {
+      const g = await harness();
+      g.routes.set("board-trending", () => json({ ...fixture("token-board-trending"), source: "captured", stale: undefined, ...over }));
+      const e = await g.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" });
+      assert.equal(e.status, "stale", JSON.stringify(over));
+      assert.equal(e.reason, "provider-snapshot");
+    }
+  });
+
+  it("an unpriced holding is unknown, not $0: chain totals sum priced rows and count the rest", async () => {
+    const h = await harness();
+    h.routes.set("balances", () => json({ ...fixture("live-shape-balances"), key: KALEO }));
+    const env = await h.invoke<TraderContextData>("fomo_get_trader_context", { trader: KALEO, focus: "holdings" });
+    const d = env.data!.holdings!;
+    assert.equal(d.totalValueUsdFloor, 3600);
+    const base = d.byChain.find((c) => c.chain === "base")!;
+    assert.deepEqual(base, { chain: "base", rows: 1, valueUsd: null, unpricedRows: 1 });
+    assert.deepEqual(d.byChain.find((c) => c.chain === "bsc"), { chain: "bsc", rows: 1, valueUsd: 0, unpricedRows: 0 }, "dust is priced at ~0");
+    assert.deepEqual(d.byChain.find((c) => c.chain === "robinhood"), { chain: "robinhood", rows: 1, valueUsd: 2500, unpricedRows: 0 });
+    assert.equal(d.rows.find((r) => r.symbol === "FBASE")?.valueUsd, null);
+    assert.ok(env.coverage.notes.some((n) => /1 holding\(s\) have no provider valuation/.test(n)), env.coverage.notes.join(" | "));
+  });
+
+  it("fills from a provider that serves only a recent window are capped, and say so", async () => {
+    const h = await harness();
+    h.routes.set("swaps", () => json({ ...fixture("swaps"), moreAvailable: false, complete: false }));
+    const env = await h.invoke<TraderActivityData>("fomo_get_trader_activity", { trader: STAR, window: "30d", token: "PONS" });
+    assert.equal(env.status, "capped");
+    assert.ok(env.coverage.notes.some((n) => /recent window/.test(n)), env.coverage.notes.join(" | "));
+
+    const g = await harness();
+    g.routes.set("swaps", () => json({ ...fixture("swaps"), moreAvailable: false, complete: true }));
+    const whole = await g.invoke<TraderActivityData>("fomo_get_trader_activity", { trader: STAR, window: "30d", token: "PONS" });
+    assert.ok(!whole.coverage.notes.some((n) => /recent window/.test(n)));
   });
 });

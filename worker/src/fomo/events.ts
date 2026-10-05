@@ -130,17 +130,77 @@ export function mergeCopies(a: TraderEvent, b: TraderEvent): TraderEvent {
   const keepB = a.replay && !b.replay;
   const base = keepB ? b : a;
   const other = keepB ? a : b;
+  // Optional fields are filled only when one copy knows them, so a merge never adds an empty key.
+  const optional: Partial<TraderEvent> = {};
+  for (const k of ["providerAlertId", "providerAlertSeq", "fillUsdSource", "perp"] as const) {
+    const v = base[k] ?? other[k];
+    if (v !== undefined && v !== null) (optional as Record<string, unknown>)[k] = v;
+  }
   return {
     ...base,
+    ...optional,
     replay: a.replay && b.replay,
     fillUsd: base.fillUsd ?? other.fillUsd,
     fillUsdBasis: base.fillUsdBasis ?? other.fillUsdBasis,
     execAt: base.execAt ?? other.execAt,
     txHash: base.txHash ?? other.txHash,
     swapId: base.swapId ?? other.swapId,
-    verification: rankBasis(base.verification) >= rankBasis(other.verification) ? base.verification : other.verification,
+    verification: mergedVerification(base, other),
     observedAt: Math.min(a.observedAt, b.observedAt),
   };
+}
+
+/**
+ * Order for two events at the same time: the provider's alert sequence when
+ * both carry one (its own "then id desc" tiebreak inside a 5 s bucket), so a
+ * position's later sell is never sorted before its earlier one by a random
+ * event id. An event without one sorts after those with one (a total order,
+ * so a sort stays consistent on mixed input); callers then fall back to the key.
+ */
+export function providerSequenceOrder(a: TraderEvent, b: TraderEvent): number {
+  const x = typeof a.providerAlertSeq === "number" && Number.isFinite(a.providerAlertSeq) ? a.providerAlertSeq : Infinity;
+  const y = typeof b.providerAlertSeq === "number" && Number.isFinite(b.providerAlertSeq) ? b.providerAlertSeq : Infinity;
+  return x === y ? 0 : x < y ? -1 : 1;
+}
+
+/** The provider's event-time quantum (its alert times are 5 s buckets; the fingerprint above uses the same). */
+const PROVIDER_QUANTUM_MS = 5_000;
+
+const finiteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/**
+ * THE TIME AN EVENT IS ORDERED BY, which is not always the time it is shown at.
+ *
+ * An app-feed alert the provider sequenced (`alrt_<ts>_<seq>`) is ordered on
+ * the PROVIDER's clock: its event time, quantised to the provider's 5 s
+ * bucket, with the sequence deciding inside the bucket. Its block time
+ * (`execAt`, set when the fill matched exactly) is another clock, seconds
+ * away from the provider's (live, 2026-10-04: from 8 s before to 2 s after),
+ * and a sort that took the block time for one sell and the provider time for
+ * the next put a trader's later sell first, so "the latest sell" and "the
+ * latest cumulative P&L" came from the earlier one. Everything else (an
+ * on-chain trade frame, a row with no sequence) is ordered by when it
+ * happened: the block, else the provider time, else our receipt.
+ */
+export function eventOrderTime(e: TraderEvent): number {
+  if (finiteNum(e.providerAlertSeq) && finiteNum(e.sourceEventAt)) return Math.floor(e.sourceEventAt / PROVIDER_QUANTUM_MS) * PROVIDER_QUANTUM_MS;
+  return e.execAt ?? e.sourceEventAt ?? e.observedAt;
+}
+
+/**
+ * Oldest first: the order time, then the provider's sequence, then the event
+ * key. Each event sorts by its own (time, sequence, key), so this is a total
+ * order on any mix of sequenced and unsequenced events. Newest first is
+ * `(a, b) => chronologicalOrder(b, a)`.
+ */
+export function chronologicalOrder(a: TraderEvent, b: TraderEvent): number {
+  return eventOrderTime(a) - eventOrderTime(b) || providerSequenceOrder(a, b) || (a.eventKey < b.eventKey ? -1 : a.eventKey > b.eventKey ? 1 : 0);
+}
+
+/** The stronger basis of two copies, except that only a buy or sell can be provider-verified (a matched fill). */
+function mergedVerification(base: TraderEvent, other: TraderEvent): TraderEvent["verification"] {
+  const v = rankBasis(base.verification) >= rankBasis(other.verification) ? base.verification : other.verification;
+  return v === "provider-verified" && base.kind !== "buy" && base.kind !== "sell" ? "provider-reported" : v;
 }
 
 function rankBasis(b: TraderEvent["verification"]): number {

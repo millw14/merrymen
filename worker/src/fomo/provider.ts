@@ -36,10 +36,35 @@
  *                        inside the caller's overall deadline; otherwise the
  *                        wait is RETURNED so the caller's scheduler can honour
  *                        it instead of a worker sleeping on it.
- *   5xx, connect errors  bounded exponential backoff with full jitter.
+ *   5xx, connect errors  bounded exponential backoff with full jitter. Every
+ *                        5xx, 502 included (live: `upstream_unavailable`, "the
+ *                        cursor is still valid, try again"). A 5xx whose body
+ *                        says `retryable: true` or `upstream_unavailable` is
+ *                        the vendor's UPSTREAM being slow for one subject, not
+ *                        the API being down; the failure carries
+ *                        `retryable: true` so callers can tell the two apart.
  *   a timed-out attempt  terminal. The vendor may have answered and billed a
  *                        call we stopped listening to; retrying would pay
- *                        twice for one answer. The deadline is the bound.
+ *                        twice for one answer. The deadline is the bound. If
+ *                        an EARLIER attempt was answered (a 503, say), the
+ *                        result reports that answer's failure and status, with
+ *                        the cost unknown: the last attempt may have billed.
+ *
+ * TIMEOUTS. Live reads (2026-10-04) took 0.6–11 s: holdings and theses about
+ * 7 s, fills about 5 s, and token stats 11 s before the vendor's own upstream
+ * cutoff answered 503. An attempt gets 20 s, so the vendor's free, retryable
+ * 503 arrives instead of our abort; the 45 s deadline fits two such attempts.
+ *
+ * THE CALLER'S CLOCK BINDS TOO. One tool call runs several reads in a row, and
+ * the broker answers "took too long" at 50 s whatever is still running; a read
+ * left running after that keeps listening and may bill. So `bound({signal,
+ * deadlineAt})` returns a view of this client whose every call aborts its fetch
+ * the moment `signal` fires, clamps each attempt (and every retry wait) to what
+ * is left before `deadlineAt`, and does not START an attempt with less than
+ * MIN_ATTEMPT_MS left: that read is refused unsent (`cancelled`, attempts 0),
+ * never begun and then abandoned. A call our own deadline or abort cut short
+ * mid-flight is `cancelled` too, never `timeout`: it is not evidence that the
+ * vendor is slow, and its cost is unknown (it may have billed).
  *
  * ── NORMALISATION ────────────────────────────────────────────────────────
  *
@@ -56,7 +81,7 @@ import { createHash } from "node:crypto";
 import { readBoundedJson, MAX_READ_BYTES } from "../bounded-read";
 import { sanitizeText } from "../research/news";
 import { eventIdentity, EVENT_GUARDS } from "./events";
-import { chainFromProvider, chainFromUserText, IDENTITY_GUARDS, tokenIdentity, verifyChainFilter } from "./identity";
+import { chainFromProvider, chainFromUserText, filterCheckIdentity, IDENTITY_GUARDS, tokenIdentity, verifyChainFilter } from "./identity";
 import type {
   ActivityKind,
   ChainIdentity,
@@ -64,6 +89,7 @@ import type {
   FillRow,
   HoldingRow,
   HoldingsSnapshot,
+  PerpDetail,
   PositionRow,
   RankingRow,
   RankingWindow,
@@ -76,9 +102,11 @@ import type {
   TokenIdentity,
   TokenLabel,
   TokenStats,
+  TopTokenHolding,
   TraderEvent,
   TraderIdentity,
   TraderProfile,
+  WalletEvidence,
 } from "./types";
 
 /** The vendor's API origin. Fixed here, never configurable. */
@@ -100,6 +128,8 @@ export type ProviderFailure =
   | "server-error"
   | "unreachable"
   | "timeout"
+  /** The CALLER stopped the call (its abort signal, or its deadline left no time): not the vendor's answer. */
+  | "cancelled"
   | "unreadable"
   | "invalid-shape"
   | "refused-path";
@@ -128,7 +158,19 @@ export interface CallMeta {
 
 export type ProviderResult<T> =
   | { ok: true; data: T; meta: CallMeta }
-  | { ok: false; failure: ProviderFailure; detail: string; retryAfterMs?: number; meta: CallMeta };
+  | {
+      ok: false;
+      failure: ProviderFailure;
+      detail: string;
+      retryAfterMs?: number;
+      /**
+       * The vendor marked this failure transient (a 5xx with `retryable: true`
+       * or `upstream_unavailable`): its upstream did not answer for this one
+       * subject in time. Not evidence that the API is down.
+       */
+      retryable?: boolean;
+      meta: CallMeta;
+    };
 
 /** Every list answer carries what was kept AND how many rows were refused. */
 export interface RowsPage<T> {
@@ -141,6 +183,11 @@ export interface LeaderboardPage extends RowsPage<RankingRow> {
   window: RankingWindow;
   /** The vendor's own `count`, when stated. */
   providerCount: number | null;
+  /**
+   * Top-token objects across all rows that could not be placed on a chain.
+   * Always set by the adapter; optional so older cached boards still parse.
+   */
+  topTokensDropped?: number;
 }
 
 export interface PositionsPage extends RowsPage<PositionRow> {
@@ -160,7 +207,21 @@ export interface PositionsPage extends RowsPage<PositionRow> {
 export interface SwapsPage extends RowsPage<FillRow> {
   userId: string;
   nextCursor: string | null;
+  /**
+   * The vendor's `moreAvailable` when it says so. Live answers do not send it;
+   * a page that hands back a cursor is then read as "more may exist" (true),
+   * never as "this is all".
+   */
   moreAvailable: boolean | null;
+  /**
+   * The vendor's completeness flags. Live (2026-10-04): `complete: false`, with
+   * a note that at most 100 swaps are served per trader with no cursor past
+   * them: a RECENT WINDOW of fills, not the trader's history.
+   */
+  complete: boolean | null;
+  partial: boolean | null;
+  sourceCapped: boolean | null;
+  providerCount: number | null;
 }
 
 /** A holdings snapshot plus the read's own bookkeeping. Assignable to `HoldingsSnapshot`. */
@@ -168,6 +229,23 @@ export interface BalancesSnapshot extends HoldingsSnapshot {
   dropped: number;
   upstreamRows: number | null;
   available: boolean | null;
+  /** Rows the provider has no price for (it sends price 0): their value is unknown, not zero. */
+  unpricedRows: number;
+  /** Rows the provider itself excludes from its total (`includeInEquity: false`). */
+  excludedRows: number;
+  /** The vendor's own sum over the rows it served: a cross-check for the floor, never a portfolio value. */
+  providerTotalValueUsd: number | null;
+  /**
+   * What the vendor reports but EXCLUDES from every total (perps, other
+   * equity, native EVM balances). Stated so a reader knows they exist; never
+   * added to the floor.
+   */
+  excluded: {
+    otherEquityUsd: number | null;
+    livePerpPnlUsd: number | null;
+    perpPositions: number | null;
+    nativeEvmRows: number | null;
+  };
 }
 
 export interface FollowedTrader {
@@ -283,9 +361,28 @@ export interface TokenBoardPage extends RowsPage<TokenBoardRow> {
   board: TokenBoard;
 }
 
-export type SearchHit =
-  | { kind: "trader"; trader: TraderIdentity; pnlUsd: number | null; volumeUsd: number | null; followers: number | null; hasEvmWallet: boolean }
-  | { kind: "token"; token: TokenIdentity; label: TokenLabel; marketCapUsd: number | null };
+export interface TraderSearchHit {
+  kind: "trader";
+  trader: TraderIdentity;
+  volumeUsd: number | null;
+  followers: number | null;
+  /** True only when an EVM wallet is resolved. Read with `walletStatus`: false while `resolving` is not "none". */
+  hasEvmWallet: boolean;
+  evmWalletEvidence: WalletEvidence | null;
+  walletsVerified: boolean | null;
+  /** `resolving`: the provider has not finished looking; the wallets are unknown, not absent. */
+  walletStatus: TraderProfile["walletStatus"];
+  /** Where the provider found the trader: a leaderboard row (with stats) or its directory (identity only). */
+  source: "leaderboard" | "directory" | null;
+  /**
+   * The provider's leaderboard figures for this trader, from a window and a
+   * time the answer DOES NOT STATE (live: rank 2 and a P&L that matched no
+   * board we read). Never merge them into windowed P&L. Null when absent.
+   */
+  unwindowedRanking: { rank: number | null; pnlUsd: number | null; window: null } | null;
+}
+
+export type SearchHit = TraderSearchHit | { kind: "token"; token: TokenIdentity; label: TokenLabel; marketCapUsd: number | null };
 
 export type SearchPage = RowsPage<SearchHit>;
 
@@ -306,14 +403,42 @@ export interface AlertsPage extends RowsPage<TraderEvent> {
   newestTs: number | null;
   oldestTs: number | null;
   chainFilterRequested: string | null;
+  /**
+   * From the rows' own networks. When no row could speak to it, the server's
+   * echo of the filter it applied is a secondary signal that can only say
+   * "not honoured" (an echo naming another chain or none); an echo naming
+   * ours proves nothing, so it never makes this true.
+   */
   chainFilterHonoured: boolean | null;
+  /** The vendor's own `count`, when stated. */
+  providerCount: number | null;
+  available: boolean | null;
+  /**
+   * Where the vendor served the page from. Live: `memory`, its in-memory ring
+   * (the stream reports 10,000 buffered), so how far back recovery can walk is
+   * bounded by eviction. Deliberately NOT a `providerSource`: it is the live
+   * feed, not a stored fallback.
+   */
+  backend: "memory" | null;
+  /** The filter the server says it applied (sanitised short values only). */
+  filterEcho: { chain: string | null; type: string | null; source: string | null } | null;
+  /** The vendor's stated order (live: "ts desc, then id desc"), sanitised. */
+  order: string | null;
 }
 
 /** `/v2/me`: the zero-credit entitlement probe. */
 export interface AccountInfo {
   plan: string | null;
+  /** The plan's daily credit cap (live: `dailyLimit`), separate from the monthly bucket. */
+  dailyLimit: number | null;
   credits: { monthly: number | null; usedThisMonth: number | null; prepaid: number | null; remaining: number | null };
+  /** Whether the plan includes each stream. Live sends `{path, included}`; the documentation, a bare boolean. Both are read. */
   streams: { appFeed: boolean | null; onChain: boolean | null };
+  /** The socket path the vendor names for each stream, when it names one. */
+  streamPaths: { appFeed: string | null; onChain: string | null };
+  /** When the plan expires (live: `planExpiresAt`; documented as `expiresAt`). */
+  planExpiresAt: number | null;
+  /** The same instant as `planExpiresAt`, kept for existing readers. */
   expiresAt: number | null;
 }
 
@@ -365,6 +490,20 @@ export interface FomoClient {
   tokensSearch(q: string, limit?: number): Promise<ProviderResult<TokenSearchPage>>;
   alerts(query: AlertsQuery, source: "rest-recovery" | "rest-lookup"): Promise<ProviderResult<AlertsPage>>;
   me(): Promise<ProviderResult<AccountInfo>>;
+  /**
+   * This client, bound to a caller's abort signal and absolute deadline (ms on
+   * the client's clock). Every call through the view aborts its fetch when the
+   * signal fires and never runs past the deadline; binding a bound view again
+   * keeps both signals and the earlier deadline. See the module comment.
+   */
+  bound(scope: CallScope): FomoClient;
+}
+
+/** A caller's limits on the calls it makes through `FomoClient.bound`. */
+export interface CallScope {
+  signal?: AbortSignal | null;
+  /** Absolute, in ms on the client's clock (`now`). */
+  deadlineAt?: number | null;
 }
 
 export interface FomoClientOptions {
@@ -376,6 +515,8 @@ export interface FomoClientOptions {
   timeoutMs?: number;
   /** Overall, across every attempt and every wait. */
   deadlineMs?: number;
+  /** The least time left before a bound caller's deadline that an attempt may start with. Defaults to MIN_ATTEMPT_MS. */
+  minAttemptMs?: number;
   maxAttempts?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
@@ -520,6 +661,25 @@ const KEY_SHAPE = /^[\x21-\x7e]{8,512}$/;
 const TOKEN_SYMBOL = /^\$?[A-Za-z0-9._-]{1,24}$/;
 const ALERT_TYPE = /^[a-z][a-z_]{0,23}$/;
 const TOKEN_HINT = /^(?:0x[0-9a-fA-F]{1,40}|[1-9A-HJ-NP-Za-km-z]{1,44})$/;
+/** The app feed's alert id: `alrt_<13-digit ms>_<global sequence>`. */
+const PROVIDER_ALERT_ID = /^alrt_\d{13}_(\d{1,12})$/;
+/** Short provider vocabulary echoed back (filter values, a price source). */
+const SHORT_SLUG = /^[a-z0-9][a-z0-9_-]{0,23}$/;
+/** A websocket path the vendor names in `/v2/me`. */
+const STREAM_PATH = /^\/ws\/[a-z][a-z-]{0,23}$/;
+/**
+ * A perp alert's text as observed live: `<handle> Open Long 10x $SYM perp`.
+ * End-anchored and strict; anything else yields no perp detail rather than a guess.
+ */
+const PERP_TEXT = / (Open|Close) (Long|Short) (\d{1,3})x \$[A-Za-z0-9._-]{1,24} perp$/;
+/**
+ * The money parenthetical the vendor appends to buy and sell alert text:
+ * `($12K size)` is the position MARK, `(-$20K realized)` the CUMULATIVE
+ * realised P&L. Neither is the fill, and the structured fields already carry
+ * both under names that say so; left in the text, a reader takes the mark for
+ * the purchase size. Stripped, end-anchored, buy and sell only.
+ */
+const MONEY_PAREN = /\s*\((?:[+-]?\$[\d.,]+[KMBkmb]?) (?:size|realized)\)$/;
 
 const MIN_TS = Date.UTC(2015, 0, 1);
 const MAX_TS = Date.UTC(2100, 0, 1);
@@ -539,9 +699,15 @@ const HOLDINGS_CAP = 100;
 const TOKEN_HINTS_MAX = 10;
 const MAX_RETRY_AFTER_MS = 86_400_000;
 
-const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_DEADLINE_MS = 25_000;
+const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_DEADLINE_MS = 45_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
+/**
+ * An attempt is not started with less than this left before the caller's
+ * deadline. The fastest live read took 0.6 s and most took several; a call
+ * begun with less would mostly be abandoned mid-flight, after it may have billed.
+ */
+export const MIN_ATTEMPT_MS = 2_000;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 8_000;
 const RETRY_AFTER_JITTER_MS = 250;
@@ -625,10 +791,34 @@ function hasEvmWallet(wallets: unknown): boolean {
   return typeof evm === "string" && EVM_ADDRESS.test(evm.trim());
 }
 
+/**
+ * How the provider knows the EVM wallet belongs to the trader (live:
+ * `wallets.evidence.evm`). `provider-claimed` is the vendor's lead, unproven
+ * on chain; it is reported, never upgraded. Null when there is no EVM wallet.
+ */
+function evmWalletEvidenceOf(wallets: unknown): WalletEvidence | null {
+  if (!hasEvmWallet(wallets)) return null;
+  const e = obj(obj(wallets).evidence).evm;
+  return e === "onchain-holdings" || e === "provider-claimed" ? e : null;
+}
+
+/** "resolving" means the provider has not finished; holdings unknown, not empty. */
+function walletStatusOf(wallets: unknown): TraderProfile["walletStatus"] {
+  const w = obj(wallets);
+  return w.status === "resolving"
+    ? "resolving"
+    : typeof w.evm === "string" || typeof w.solana === "string"
+      ? "resolved"
+      : isObj(wallets) && (w.evm === null || w.solana === null)
+        ? "none"
+        : "unknown";
+}
+
 function sourceOf(v: unknown): CallMeta["providerSource"] {
   if (typeof v !== "string") return null;
   const s = v.trim().toLowerCase();
-  if (s === "live" || s === "live-fomo") return "live";
+  // `fomo-live` is the live leaderboard's spelling (observed 2026-10-04).
+  if (s === "live" || s === "live-fomo" || s === "fomo-live") return "live";
   if (s === "snapshot") return "snapshot";
   if (s === "captured") return "captured";
   return null;
@@ -662,7 +852,11 @@ function isTokenAddress(raw: string): boolean {
 /**
  * A chain filter as the vendor spells it, plus the identity we will check the
  * returned rows against. Raw numeric ids are accepted (the vendor documents
- * them) and checked by number.
+ * them) and checked by number. A named EVM network the vendor does not number
+ * (bsc, eth, base) is checked against the id its rows were observed carrying
+ * (`filterCheckIdentity`), so "bsc" can be verified rather than always reading
+ * "nothing to check". The PARAMETER sent is unchanged: whether the vendor
+ * wants `eth` or `ethereum` is unverified.
  */
 function chainFilter(raw: string): { param: string; identity: ChainIdentity } | null {
   const t = raw.trim().toLowerCase();
@@ -675,7 +869,7 @@ function chainFilter(raw: string): { param: string; identity: ChainIdentity } | 
   if (!c || !c.slug) return null;
   // Our canonical slugs (robinhood, solana, base, bsc, eth, arc, monad,
   // hyperliquid, …) are the vendor's own filter spellings.
-  return { param: c.slug, identity: c };
+  return { param: c.slug, identity: filterCheckIdentity(c) };
 }
 
 // ── Thesis families ──────────────────────────────────────────────────────
@@ -749,6 +943,37 @@ function txHashOf(v: unknown): string | null {
   return s.startsWith("0x") ? s.toLowerCase() : s;
 }
 
+/** The feed's `alrt_<ms>_<seq>` id and its sequence, or nulls for anything else (a doc fixture's UUID id). */
+function providerAlertIdOf(v: unknown): { id: string | null; seq: number | null } {
+  if (typeof v !== "string") return { id: null, seq: null };
+  const s = v.trim();
+  const m = PROVIDER_ALERT_ID.exec(s);
+  if (!m?.[1]) return { id: null, seq: null };
+  const seq = Number(m[1]);
+  return Number.isSafeInteger(seq) ? { id: s, seq } : { id: null, seq: null };
+}
+
+/** A perp's action, side and leverage from its (sanitised) alert text, or null when the text is not the one known shape. */
+function perpFromText(t: string | null): PerpDetail | null {
+  if (!t) return null;
+  const m = PERP_TEXT.exec(t);
+  if (!m?.[1] || !m[2] || !m[3]) return null;
+  const leverage = Number(m[3]);
+  if (!Number.isSafeInteger(leverage) || leverage < 1) return null;
+  return { action: m[1] === "Open" ? "open" : "close", side: m[2] === "Long" ? "long" : "short", leverage };
+}
+
+/**
+ * Alert text, sanitised and capped. A thesis alert carries the thesis itself
+ * (live: up to 340 characters), so it gets the thesis cap. A buy or sell loses
+ * the vendor's trailing money parenthetical (see MONEY_PAREN).
+ */
+function alertText(raw: unknown, kind: ActivityKind): string | null {
+  const t = text(raw, kind === "thesis" ? THESIS_TEXT_MAX : ALERT_TEXT_MAX);
+  if (t === null || (kind !== "buy" && kind !== "sell")) return t;
+  return t.replace(MONEY_PAREN, "").trim() || null;
+}
+
 /**
  * One app-feed alert — a REST `/v2/alerts` row or a `/ws/alerts` frame, which
  * share a shape — as a `TraderEvent`. Null for control frames and for alerts
@@ -761,10 +986,15 @@ function txHashOf(v: unknown): string | null {
  *   positionValueUsd   ONLY `positionValueUsd`: the position's mark AFTER the
  *                      fill. On an add to a $40k position it is ~$40k, however
  *                      small the add.
- *   fillUsd            ONLY `tradeUsd`, and ONLY when `fillMatch` is
+ *   fillUsd            ONLY `tradeUsd`, ONLY when `fillMatch` is
  *                      `onchain-exact` — the vendor matched exactly one on-chain
- *                      execution. `ambiguous` (several candidates) attaches no
- *                      fill, and neither does an absent match.
+ *                      execution — and ONLY on a buy or a sell. `ambiguous`
+ *                      (several candidates) attaches no fill, and neither does
+ *                      an absent match. A transfer, airdrop, listing, thesis,
+ *                      perp or unknown alert never gets a fill, a fill basis or
+ *                      `provider-verified`, whatever its `fillMatch` says: a
+ *                      received token is not a purchase, and a matched
+ *                      execution on one is not a price paid.
  *   cumulative PnL     `realizedPnlUsd` is the position's RUNNING TOTAL; it is
  *                      carried per event and never summed (summing four sells
  *                      of one position was measured at 2.6x the real loss).
@@ -772,7 +1002,14 @@ function txHashOf(v: unknown): string | null {
  * `usdValue` is NOT read for any of them. It mirrors whichever of the mark or
  * the cumulative PnL applies to that alert type, so using it as a fill size
  * would book a $40k position mark as a $40k purchase, or a running loss as a
- * sale amount.
+ * sale amount. (Live census, 2026-10-04: on every buy it equalled the mark, on
+ * every sell the cumulative P&L, and no sell carried a mark at all.)
+ *
+ * The block time (`execTs`) is gated exactly like the fill and the hash: a
+ * time from a match the vendor did not call exact is not this event's time.
+ *
+ * REST rows name the kind in `type`; stream frames say `type: "alert"` and
+ * name it in `alertType`. Both are read.
  */
 export function alertFrameToEvent(frame: unknown, observedAt: number, source: EventSource): TraderEvent | null {
   if (!isObj(frame)) return null;
@@ -794,8 +1031,10 @@ export function alertFrameToEvent(frame: unknown, observedAt: number, source: Ev
   const symbol = typeof frame.token === "string" ? frame.token : tokenObj.symbol;
 
   const exact = frame.fillMatch === "onchain-exact";
+  // Only a buy or a sell is a fill: the gate below holds whatever the vendor's match says about another kind.
+  const fillKind = kind === "buy" || kind === "sell";
   const tradeUsd = typeof frame.tradeUsd === "number" && Number.isFinite(frame.tradeUsd) && frame.tradeUsd > 0 ? frame.tradeUsd : null;
-  const fillUsd = exact ? tradeUsd : null;
+  const fillUsd = exact && fillKind ? tradeUsd : null;
   const positionValueUsd =
     typeof frame.positionValueUsd === "number" && Number.isFinite(frame.positionValueUsd) && frame.positionValueUsd >= 0
       ? frame.positionValueUsd
@@ -807,6 +1046,9 @@ export function alertFrameToEvent(frame: unknown, observedAt: number, source: Ev
   const sourceEventAt = toMs(frame.ts);
   const traderObj = obj(frame.trader);
   const handle = handleOf(typeof frame.trader === "string" ? frame.trader : traderObj.handle ?? frame.handle);
+  const alertId = providerAlertIdOf(frame.id);
+  const body = alertText(frame.text, kind);
+  const priceSource = typeof frame.tradeUsdSource === "string" ? frame.tradeUsdSource.trim().toLowerCase() : "";
 
   const ident = eventIdentity({
     eventId: frame.eventId ?? frame.id,
@@ -839,15 +1081,19 @@ export function alertFrameToEvent(frame: unknown, observedAt: number, source: Ev
     transferId: idOf(frame.transferId),
     txHash,
     fillUsd,
-    fillUsdBasis: fillUsd !== null ? "onchain-exact" : frame.fillMatch === "ambiguous" ? "ambiguous" : null,
+    fillUsdBasis: fillUsd !== null ? "onchain-exact" : fillKind && frame.fillMatch === "ambiguous" ? "ambiguous" : null,
     positionValueUsd,
     positionRealizedPnlUsdCumulative: realized,
     sourceEventAt,
-    execAt: toMs(frame.execTs),
+    execAt: exact ? toMs(frame.execTs) : null,
     observedAt,
-    verification: exact ? "provider-verified" : "provider-reported",
-    text: text(frame.text, ALERT_TEXT_MAX),
+    verification: exact && fillKind ? "provider-verified" : "provider-reported",
+    text: body,
     replay: source === "stream" && frame.replay === true,
+    providerAlertId: alertId.id,
+    providerAlertSeq: alertId.seq,
+    fillUsdSource: fillUsd !== null && SHORT_SLUG.test(priceSource) ? priceSource : null,
+    perp: kind === "perp" ? perpFromText(body) : null,
   };
 }
 
@@ -896,7 +1142,8 @@ export function tradeFrameToEvent(
   const kind: ActivityKind = side === "buy" ? "buy" : side === "sell" ? "sell" : "other";
   const tokenObj = obj(frame.token);
   const token = tokenIdentity(chain, tokenObj.address);
-  const fillUsd = typeof frame.usdValue === "number" && Number.isFinite(frame.usdValue) && frame.usdValue > 0 ? frame.usdValue : null;
+  // As on the app feed: a frame that is not a buy or a sell is not a fill, whatever value it carries.
+  const fillUsd = (kind === "buy" || kind === "sell") && typeof frame.usdValue === "number" && Number.isFinite(frame.usdValue) && frame.usdValue > 0 ? frame.usdValue : null;
   const at = toMs(frame.blockTs);
   const txHash = txHashOf(frame.txHash);
   const verified = typeof frame.verified === "string" ? frame.verified.trim().toLowerCase() : "";
@@ -932,7 +1179,8 @@ export function tradeFrameToEvent(
     sourceEventAt: at,
     execAt: at,
     observedAt,
-    verification: verified === "db" || verified === "relay" ? "provider-verified" : "provider-reported",
+    // Verification is a claim about a fill: only a buy or sell frame can carry it.
+    verification: (kind === "buy" || kind === "sell") && (verified === "db" || verified === "relay") ? "provider-verified" : "provider-reported",
     text: null,
     replay: frame.replay === true,
   };
@@ -1087,6 +1335,7 @@ function normalizeLeaderboard(body: Rec, window: RankingWindow): Norm<Leaderboar
   if (!list) return missingList("traders");
   const rows: RankingRow[] = [];
   let dropped = 0;
+  let topTokensDropped = 0;
   for (const raw of list) {
     const r = obj(raw);
     const userId = uuidOf(r.userId);
@@ -1094,16 +1343,30 @@ function normalizeLeaderboard(body: Rec, window: RankingWindow): Norm<Leaderboar
       dropped++;
       continue;
     }
-    const hints = Array.isArray(r.topTokens)
-      ? r.topTokens
-          .map((h) => sanitizeText(h, 44))
-          .filter((h) => TOKEN_HINT.test(h))
-          .slice(0, TOKEN_HINTS_MAX)
-      : [];
+    // Two shapes: the documentation's truncated address prefixes (strings),
+    // and the live answer's full objects {tokenAddress, networkId, value, pnl, …}.
+    const hints: string[] = [];
+    const topTokens: TopTokenHolding[] = [];
+    for (const el of Array.isArray(r.topTokens) ? r.topTokens : []) {
+      if (typeof el === "string") {
+        const h = sanitizeText(el, 44);
+        if (TOKEN_HINT.test(h) && hints.length < TOKEN_HINTS_MAX) hints.push(h);
+        continue;
+      }
+      const t = obj(el);
+      const token = isObj(el) ? tokenFrom(t.tokenAddress ?? t.address, t.networkId ?? t.chainId, t.chain ?? t.network) : null;
+      if (!token) {
+        topTokensDropped++;
+        continue;
+      }
+      // The per-token `pnl` carries no window, whatever board it came on: it is never the row's window P&L.
+      if (topTokens.length < TOKEN_HINTS_MAX) topTokens.push({ token, valueUsd: nonNeg(t.value ?? t.valueUsd), unwindowedPnlUsd: num(t.pnl ?? t.pnlUsd) });
+    }
     const rank = count(r.rank);
     rows.push({
       rank: rank !== null && rank >= 1 ? rank : null,
       window,
+      // `verified` here is the PROFILE badge; `wallets.verified` is a different fact (walletsVerified).
       trader: { userId, handle: handleOf(r.handle), displayName: text(r.displayName, NAME_MAX), verified: bool(r.verified) },
       pnlUsd: num(r.pnlUsd),
       volumeUsd: nonNeg(r.volumeUsd),
@@ -1113,9 +1376,14 @@ function normalizeLeaderboard(body: Rec, window: RankingWindow): Norm<Leaderboar
       topTokenHints: hints,
       // Whether one was resolved, never which: the address itself is not surfaced.
       hasEvmWallet: hasEvmWallet(r.wallets),
+      topTokens,
+      evmWalletEvidence: evmWalletEvidenceOf(r.wallets),
+      walletsVerified: bool(obj(r.wallets).verified),
+      following: count(r.following),
+      accountCreatedAt: toMs(r.createdAt),
     });
   }
-  return { ok: true, data: { rows, dropped, window, providerCount: count(body.count) } };
+  return { ok: true, data: { rows, dropped, window, providerCount: count(body.count), topTokensDropped } };
 }
 
 function normalizeProfile(body: Rec, expectUserId: string | null): Norm<TraderProfile> {
@@ -1125,15 +1393,7 @@ function normalizeProfile(body: Rec, expectUserId: string | null): Norm<TraderPr
   const pnl = obj(body.pnl);
   const profile = obj(body.profile);
   const wallets = body.wallets;
-  const w = obj(wallets);
-  const walletStatus: TraderProfile["walletStatus"] =
-    w.status === "resolving"
-      ? "resolving"
-      : typeof w.evm === "string" || typeof w.solana === "string"
-        ? "resolved"
-        : isObj(wallets) && (w.evm === null || w.solana === null)
-          ? "none"
-          : "unknown";
+  const walletStatus = walletStatusOf(wallets);
   return {
     ok: true,
     data: {
@@ -1156,9 +1416,15 @@ function normalizeProfile(body: Rec, expectUserId: string | null): Norm<TraderPr
   };
 }
 
-/** A body that names a different trader than we asked about is not an answer about ours. */
+/**
+ * A body that names a different trader than we asked about is not an answer
+ * about ours. Live per-trader answers also name the subject as `key` (the
+ * user id), and the holdings answer carries no `userId` at all, so `key` is
+ * the check there. Where `userId` is present it is the authority: `key` is
+ * not observed on every route, and its meaning is only known where it was.
+ */
 function sameUser(body: Rec, userId: string): boolean {
-  const named = uuidOf(body.userId);
+  const named = uuidOf(body.userId) ?? (body.userId === undefined || body.userId === null ? uuidOf(body.key) : null);
   return named === null || named === userId;
 }
 
@@ -1196,9 +1462,64 @@ function normalizePositions(body: Rec, userId: string): Norm<PositionsPage> {
   };
 }
 
-function leg(raw: unknown, chain: ChainIdentity): FillRow["tokenIn"] {
+const NO_CHAIN: ChainIdentity = { namespace: "unknown", networkId: null, slug: null };
+
+/** The chain a leg names for itself, when it names a recognisable one (live legs name none). */
+function legChainOf(l: Rec): ChainIdentity | null {
+  const id = l.chainId ?? l.networkId;
+  const slug = l.chain ?? l.network;
+  if ((id === undefined || id === null) && (slug === undefined || slug === null)) return null;
+  const c = chainFromProvider(id, slug);
+  return c.namespace === "unknown" ? null : c;
+}
+
+/**
+ * One leg of a fill. The row's chain describes the NON-cash leg only: live
+ * fills on Robinhood, Ethereum and BNB pay with a Solana USDC leg. So a leg is
+ * placed on the row's chain only when it IS the row's own token (`own`: the
+ * leg a position id names) or when the leg names its own chain. Any other leg
+ * is the cash side and is placed by its shape alone, on an unknown network: a
+ * base58 mint becomes Solana with no network id, a 0x address EVM with no
+ * network id. Readable, never executable: an EVM-shaped cash leg is never
+ * assumed to be on the row's chain, so a stablecoin on another EVM chain can
+ * never pass for a Robinhood token. (A base58 leg on a Solana row stays on it:
+ * its shape alone places it there.)
+ */
+function leg(raw: unknown, rowChain: ChainIdentity, own: boolean): FillRow["tokenIn"] {
   const l = obj(raw);
-  return { token: tokenIdentity(chain, l.address), amount: nonNeg(l.amount), usd: nonNeg(l.usd) };
+  const stated = legChainOf(l);
+  const place = stated ?? (own || rowChain.namespace === "solana" ? rowChain : NO_CHAIN);
+  const token = tokenIdentity(place, l.address) ?? tokenIdentity(NO_CHAIN, l.address);
+  return { token, amount: nonNeg(l.amount), usd: nonNeg(l.usd) };
+}
+
+/**
+ * Which legs are the row's own token. A position id names it (live: exactly
+ * one of `tradeIdIn`/`tradeIdOut` on every fill, the bought or sold token).
+ * With neither id, the one leg whose shape fits the row's chain is its own when
+ * exactly one does; with two EVM legs and no id, neither is assumed to be.
+ */
+function ownLegs(r: Rec, rowChain: ChainIdentity): { inOwn: boolean; outOwn: boolean } {
+  const inOwn = idOf(r.tradeIdIn) !== null;
+  const outOwn = idOf(r.tradeIdOut) !== null;
+  if (inOwn || outOwn) return { inOwn, outOwn };
+  // On an EVM row a cash leg from another EVM network has the same shape as
+  // the row's own token, so shape cannot tell them apart: with no position id,
+  // neither leg is placed on the row's network (and so neither can ever pass
+  // isRobinhoodToken). Shape still decides on a non-EVM row.
+  if (rowChain.namespace === "eip155") return { inOwn: false, outOwn: false };
+  const fits = (raw: unknown): boolean => tokenIdentity(rowChain, obj(raw).address) !== null;
+  const fi = fits(r.tokenIn);
+  const fo = fits(r.tokenOut);
+  return fi !== fo ? { inOwn: fi, outOwn: fo } : { inOwn: false, outOwn: false };
+}
+
+/** Whether two placed legs are on different chains; null when either network is not known. */
+function legsCrossChain(a: TokenIdentity | null, b: TokenIdentity | null): boolean | null {
+  if (!a || !b) return null;
+  if (a.chain.namespace !== b.chain.namespace) return true;
+  if (a.chain.networkId === null || b.chain.networkId === null) return null;
+  return a.chain.networkId !== b.chain.networkId;
 }
 
 function normalizeSwaps(body: Rec, userId: string): Norm<SwapsPage> {
@@ -1210,8 +1531,9 @@ function normalizeSwaps(body: Rec, userId: string): Norm<SwapsPage> {
   for (const raw of list) {
     const r = obj(raw);
     const chain = chainFromProvider(r.chainId, r.chain);
-    const tokenIn = leg(r.tokenIn, chain);
-    const tokenOut = leg(r.tokenOut, chain);
+    const own = ownLegs(r, chain);
+    const tokenIn = leg(r.tokenIn, chain, own.inOwn);
+    const tokenOut = leg(r.tokenOut, chain, own.outOwn);
     if (!isObj(raw) || (!tokenIn.token && !tokenOut.token)) {
       dropped++;
       continue;
@@ -1224,9 +1546,25 @@ function normalizeSwaps(body: Rec, userId: string): Norm<SwapsPage> {
       tradeIdIn: idOf(r.tradeIdIn),
       tradeIdOut: idOf(r.tradeIdOut),
       at: toMs(r.at),
+      crossChain: legsCrossChain(tokenIn.token, tokenOut.token),
     });
   }
-  return { ok: true, data: { rows, dropped, userId, nextCursor: cursorOf(body.nextCursor), moreAvailable: bool(body.moreAvailable) } };
+  const nextCursor = cursorOf(body.nextCursor);
+  return {
+    ok: true,
+    data: {
+      rows,
+      dropped,
+      userId,
+      nextCursor,
+      // A cursor handed back means more MAY exist; only the vendor's own word says there is no more.
+      moreAvailable: bool(body.moreAvailable) ?? (nextCursor !== null ? true : null),
+      complete: bool(body.complete),
+      partial: bool(body.partial),
+      sourceCapped: bool(body.sourceCapped),
+      providerCount: count(body.count),
+    },
+  };
 }
 
 function normalizeBalances(body: Rec, userId: string, filter: { slug: string; identity: ChainIdentity } | null): Norm<BalancesSnapshot> {
@@ -1235,6 +1573,8 @@ function normalizeBalances(body: Rec, userId: string, filter: { slug: string; id
   if (!list) return missingList("holdings");
   const rows: HoldingRow[] = [];
   let dropped = 0;
+  let unpricedRows = 0;
+  let excludedRows = 0;
   for (const raw of list) {
     const r = obj(raw);
     const tok = obj(r.token);
@@ -1243,21 +1583,33 @@ function normalizeBalances(body: Rec, userId: string, filter: { slug: string; id
       dropped++;
       continue;
     }
+    // The vendor sends price 0 (and value 0) for a token it cannot price,
+    // however many units are held: that is "no price", never "worthless".
+    // A nonzero price whose value rounds to 0 is real dust and stays 0.
+    const price = nonNeg(r.priceUsd);
+    const unpriced = price === 0;
+    const valueUsd = unpriced ? null : nonNeg(r.valueUsd);
+    const excluded = r.includeInEquity === false;
+    if (unpriced) unpricedRows++;
+    if (excluded) excludedRows++;
     rows.push({
       token,
       label: labelFrom(tok.symbol, tok.name),
       amount: nonNeg(r.amount),
-      priceUsd: nonNeg(r.priceUsd),
-      valueUsd: nonNeg(r.valueUsd),
+      priceUsd: unpriced ? null : price,
+      valueUsd,
       change24hPct: num(r.change24h),
+      includedInTotal: valueUsd !== null && !excluded,
     });
   }
-  // Our sum over the rows we KEPT. The vendor's totalValueUsd is the same sum
-  // over the rows it served; ours stays consistent with what we hold when a
-  // row was dropped. Either way it excludes perps, other equity and anything
-  // past the cap, so it is a floor, never the portfolio.
-  const known = rows.map((r) => r.valueUsd).filter((v): v is number => v !== null);
+  // Our sum over the rows we KEPT that count toward a total (priced, not
+  // excluded by the vendor). The vendor's totalValueUsd is the same sum over
+  // the rows it served; ours stays consistent with what we hold when a row
+  // was dropped. Either way it excludes perps, other equity and anything past
+  // the cap, so it is a floor, never the portfolio.
+  const known = rows.filter((r) => r.includedInTotal).map((r) => r.valueUsd as number);
   const floor = known.length > 0 ? known.reduce((a, b) => a + b, 0) : rows.length === 0 ? nonNeg(body.totalValueUsd) : null;
+  const perps = obj(body.hyperliquidPerps);
   const upstreamRows = count(body.upstreamRows);
   // The vendor flags the cut. A page AT the documented cap with no flag is
   // treated as cut too: "the cap was not hit" is the claim that needs proof.
@@ -1278,6 +1630,15 @@ function normalizeBalances(body: Rec, userId: string, filter: { slug: string; id
       dropped,
       upstreamRows,
       available: bool(body.available),
+      unpricedRows,
+      excludedRows,
+      providerTotalValueUsd: nonNeg(body.totalValueUsd),
+      excluded: {
+        otherEquityUsd: num(body.otherEquity),
+        livePerpPnlUsd: num(body.livePerpPnl),
+        perpPositions: Array.isArray(perps.positions) ? perps.positions.length : null,
+        nativeEvmRows: Array.isArray(body.nativeEvmBalances) ? body.nativeEvmBalances.length : null,
+      },
     },
   };
 }
@@ -1369,9 +1730,42 @@ interface ThesisContext {
   defaultAddress: string | null;
   /** For per-user routes: a row by someone else is not this user's thesis. */
   expectUserId: string | null;
+  /**
+   * Whether the route populates `equity`. Only the global feed does: the
+   * per-coin route sent `equity: 0` on every row live, including authors with
+   * open positions, so there it is "not populated", never a $0 stake.
+   */
+  equityMeaningful: boolean;
+}
+
+function sameAddress(a: string, b: string): boolean {
+  return a.startsWith("0x") || b.startsWith("0x") ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** The author's stake on the coin, only where the route populates it and only when it does not contradict the position. */
+function authorEquityOf(r: Rec, meaningful: boolean): number | null {
+  if (!meaningful) return null;
+  const e = nonNeg(r.equity);
+  if (e !== 0) return e;
+  // A zero stake beside an open position's P&L or a positive trade size is a placeholder, not a stake.
+  const unrealized = num(r.unrealizedPnlUsd);
+  const trade = nonNeg(r.tradeUsd);
+  return (unrealized !== null && unrealized !== 0) || (trade !== null && trade > 0) ? null : 0;
+}
+
+function authorPositionOf(r: Rec): Thesis["authorPosition"] {
+  const p = { tradeUsd: nonNeg(r.tradeUsd), realizedPnlUsd: num(r.realizedPnlUsd), unrealizedPnlUsd: num(r.unrealizedPnlUsd) };
+  return p.tradeUsd === null && p.realizedPnlUsd === null && p.unrealizedPnlUsd === null ? null : p;
 }
 
 function normalizeTheses(body: Rec, ctx: ThesisContext): Norm<ThesesPage> {
+  // Live per-coin answers name their subject as `key`. One that names another
+  // coin is not an answer about ours (an address-shaped key only: other routes
+  // use other key forms).
+  const keyed = typeof body.key === "string" ? body.key.trim() : "";
+  if (ctx.defaultAddress && isTokenAddress(keyed) && !sameAddress(keyed, ctx.defaultAddress)) {
+    return { ok: false, detail: "the answer is for a different token" };
+  }
   const list = listOf(body, "theses");
   if (!list) return missingList("theses");
   const rows: Thesis[] = [];
@@ -1396,7 +1790,8 @@ function normalizeTheses(body: Rec, ctx: ThesisContext): Norm<ThesesPage> {
       text: body_,
       likes: count(r.likes),
       replies: count(r.replies),
-      authorEquityUsd: nonNeg(r.equity),
+      authorEquityUsd: authorEquityOf(r, ctx.equityMeaningful),
+      authorPosition: authorPositionOf(r),
       isDev: bool(r.isDev),
       postedAt: toMs(r.ts ?? r.createdAt),
       familyKey: thesisFamilyKey(body_),
@@ -1614,14 +2009,21 @@ function normalizeSearch(body: Rec): Norm<SearchPage> {
     const r = obj(raw);
     if (r.type === "trader") {
       const userId = uuidOf(r.userId);
+      // Kept even when sparse (a `directory` row carries identity only): resolution needs the user id.
       if (userId) {
+        const rank = count(r.rank);
+        const pnlUsd = num(r.pnlUsd);
         rows.push({
           kind: "trader",
           trader: { userId, handle: handleOf(r.handle), displayName: text(r.displayName, NAME_MAX), verified: bool(r.verified) },
-          pnlUsd: num(r.pnlUsd),
           volumeUsd: nonNeg(r.volumeUsd),
           followers: count(r.followers),
           hasEvmWallet: hasEvmWallet(r.wallets),
+          evmWalletEvidence: evmWalletEvidenceOf(r.wallets),
+          walletsVerified: bool(obj(r.wallets).verified),
+          walletStatus: walletStatusOf(r.wallets),
+          source: r.source === "leaderboard" || r.source === "directory" ? r.source : null,
+          unwindowedRanking: rank === null && pnlUsd === null ? null : { rank: rank !== null && rank >= 1 ? rank : null, pnlUsd, window: null },
         });
         continue;
       }
@@ -1637,17 +2039,46 @@ function normalizeSearch(body: Rec): Norm<SearchPage> {
   return { ok: true, data: { rows, dropped } };
 }
 
+/**
+ * The live answer carries its rows under `results` (each typed `token`); the
+ * documentation names the list `tokens`. Both are read, `results` first. A
+ * typed row that says it is something other than a token is dropped.
+ */
 function normalizeTokensSearch(body: Rec): Norm<TokenSearchPage> {
-  const list = listOf(body, "tokens");
-  if (!list) return missingList("tokens");
+  const list = Array.isArray(body.results) ? body.results : Array.isArray(body.tokens) ? body.tokens : listOf(body, "results");
+  if (!list) return missingList("results");
   const rows: TokenSearchHit[] = [];
   let dropped = 0;
   for (const raw of list) {
-    const hit = isObj(raw) ? tokenHit(raw) : null;
+    const typed = isObj(raw) && raw.type !== undefined && raw.type !== null;
+    const hit = isObj(raw) && (!typed || raw.type === "token") ? tokenHit(raw) : null;
     if (hit) rows.push(hit);
     else dropped++;
   }
   return { ok: true, data: { rows, dropped } };
+}
+
+/** A short echoed value (a filter, a source) or null. Never free text. */
+function shortSlug(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim().toLowerCase();
+  return SHORT_SLUG.test(s) ? s : null;
+}
+
+/**
+ * The server's echo of the chain filter, as a secondary signal for when no
+ * row could speak to it: false when the echo names another chain or none,
+ * null when it names ours (accepting a filter proves nothing) or cannot be read.
+ */
+function echoSaysIgnored(filter: { slug: string; identity: ChainIdentity }, filters: unknown): boolean | null {
+  if (!isObj(filters) || !("chain" in filters)) return null;
+  const echoed = filters.chain;
+  if (echoed === null || echoed === undefined || echoed === "") return true;
+  const e = shortSlug(typeof echoed === "number" ? String(echoed) : echoed);
+  if (e === null) return null;
+  if (/^\d+$/.test(e)) return filter.identity.networkId !== null ? Number(e) !== filter.identity.networkId : null;
+  const c = chainFromUserText(e);
+  return c?.slug ? c.slug !== filter.slug : null;
 }
 
 function normalizeAlerts(
@@ -1667,6 +2098,11 @@ function normalizeAlerts(
   }
   // Perps carry no token, so they cannot speak to a token-chain filter either way.
   const placed = rows.filter((e) => e.kind !== "perp").map((e) => e.token);
+  const byRows = filter ? verifyChainFilter(filter.identity, placed).honoured : null;
+  // The echo only ever adds "not honoured", and only when the rows were silent.
+  const honoured = filter && byRows === null && echoSaysIgnored(filter, body.filters) === true ? false : byRows;
+  const echo = isObj(body.filters) ? body.filters : null;
+  const order = typeof body.order === "string" ? sanitizeText(body.order, 40).toLowerCase() : "";
   return {
     ok: true,
     data: {
@@ -1678,9 +2114,26 @@ function normalizeAlerts(
       newestTs: toMs(body.newestTs),
       oldestTs: toMs(body.oldestTs),
       chainFilterRequested: filter?.slug ?? null,
-      chainFilterHonoured: filter ? verifyChainFilter(filter.identity, placed).honoured : null,
+      chainFilterHonoured: honoured,
+      providerCount: count(body.count),
+      available: bool(body.available),
+      backend: body.source === "memory" ? "memory" : null,
+      filterEcho: echo
+        ? { chain: shortSlug(typeof echo.chain === "number" ? String(echo.chain) : echo.chain), type: shortSlug(echo.type), source: shortSlug(echo.source) }
+        : null,
+      order: /^[a-z ,]{1,40}$/.test(order) ? order : null,
     },
   };
+}
+
+/** A stream entitlement: the documentation's bare boolean, or the live `{path, included}` object. */
+function streamFlag(v: unknown): boolean | null {
+  return bool(v) ?? bool(obj(v).included);
+}
+
+function streamPath(v: unknown): string | null {
+  const p = obj(v).path;
+  return typeof p === "string" && STREAM_PATH.test(p.trim()) ? p.trim() : null;
 }
 
 function normalizeMe(body: Rec): Norm<AccountInfo> {
@@ -1688,18 +2141,22 @@ function normalizeMe(body: Rec): Norm<AccountInfo> {
   const streams = obj(body.streams);
   if (!isObj(body.credits) && typeof body.plan !== "string") return { ok: false, detail: "the account answer carried neither a plan nor credits" };
   const plan = sanitizeText(body.plan, PLAN_MAX).toLowerCase();
+  const expires = toMs(body.planExpiresAt ?? body.expiresAt);
   return {
     ok: true,
     data: {
       plan: /^[a-z0-9_-]{1,32}$/.test(plan) ? plan : null,
+      dailyLimit: count(body.dailyLimit ?? credits.dailyLimit),
       credits: {
         monthly: count(credits.monthly),
         usedThisMonth: count(credits.usedThisMonth),
         prepaid: count(credits.prepaid),
         remaining: count(credits.remaining),
       },
-      streams: { appFeed: bool(streams.appFeed), onChain: bool(streams.onChain) },
-      expiresAt: toMs(body.expiresAt ?? body.planExpiresAt),
+      streams: { appFeed: streamFlag(streams.appFeed), onChain: streamFlag(streams.onChain) },
+      streamPaths: { appFeed: streamPath(streams.appFeed), onChain: streamPath(streams.onChain) },
+      planExpiresAt: expires,
+      expiresAt: expires,
     },
   };
 }
@@ -1711,8 +2168,29 @@ interface HeaderView {
 }
 
 type Attempt =
-  | { kind: "transport"; failure: "timeout" | "unreachable"; detail: string }
+  | { kind: "transport"; failure: "timeout" | "unreachable" | "cancelled"; detail: string }
   | { kind: "response"; status: number; headers: HeaderView; body: unknown; readError: string | null };
+
+/** A view's limits: every signal it was bound to, and the earliest deadline. */
+interface Scope {
+  signals: readonly AbortSignal[];
+  deadlineAt: number | null;
+}
+
+const ROOT_SCOPE: Scope = { signals: [], deadlineAt: null };
+
+function isSignal(v: unknown): v is AbortSignal {
+  return typeof v === "object" && v !== null && typeof (v as AbortSignal).aborted === "boolean" && typeof (v as AbortSignal).addEventListener === "function";
+}
+
+/** A narrower scope: both signals, the earlier deadline. A deadline that is not a number fails closed (already passed). */
+function narrowScope(s: Scope, o: CallScope | null | undefined): Scope {
+  const sig = o?.signal;
+  const signals = isSignal(sig) && !s.signals.includes(sig) ? [...s.signals, sig] : s.signals;
+  const raw = o?.deadlineAt;
+  const d = raw === undefined || raw === null ? null : typeof raw === "number" && !Number.isNaN(raw) ? raw : -Infinity;
+  return { signals, deadlineAt: d === null ? s.deadlineAt : s.deadlineAt === null ? d : Math.min(s.deadlineAt, d) };
+}
 
 function headerNum(h: HeaderView, name: string): number | null {
   const v = h.get(name);
@@ -1760,6 +2238,7 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
   const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const deadlineMs = Math.max(1, opts.deadlineMs ?? DEFAULT_DEADLINE_MS);
   const maxAttempts = Math.max(1, Math.floor(opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS));
+  const minAttemptMs = typeof opts.minAttemptMs === "number" && Number.isFinite(opts.minAttemptMs) && opts.minAttemptMs > 0 ? opts.minAttemptMs : MIN_ATTEMPT_MS;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const random = opts.random ?? Math.random;
   const maxBytes = opts.maxBytes ?? MAX_READ_BYTES;
@@ -1790,8 +2269,21 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
     };
   }
 
-  function fail<T>(failure: ProviderFailure, detail: string, meta: CallMeta, retryAfterMs?: number): ProviderResult<T> {
-    return { ok: false, failure, detail: scrub(detail), meta, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
+  function fail<T>(failure: ProviderFailure, detail: string, meta: CallMeta, retryAfterMs?: number, retryable?: boolean): ProviderResult<T> {
+    return {
+      ok: false,
+      failure,
+      detail: scrub(detail),
+      meta,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      ...(retryable === true ? { retryable } : {}),
+    };
+  }
+
+  /** The vendor's word that a 5xx is its upstream being slow for this subject, not the API being down. */
+  function transient5xx(body: unknown): boolean {
+    const b = obj(body);
+    return b.retryable === true || b.error === "upstream_unavailable";
   }
 
   /** Full jitter: a uniform wait up to the capped exponential ceiling. */
@@ -1810,10 +2302,27 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
     return s !== null ? Math.min(MAX_RETRY_AFTER_MS, Math.round(s * 1000)) : undefined;
   }
 
-  async function attempt(url: string, budgetMs: number): Promise<Attempt> {
+  /**
+   * One request. Its fetch is aborted by our per-attempt timer OR by any of the
+   * caller's signals; which one fired decides `timeout` (the vendor was slow)
+   * versus `cancelled` (the caller stopped listening).
+   */
+  async function attempt(url: string, budgetMs: number, signals: readonly AbortSignal[]): Promise<Attempt> {
     const ctl = new AbortController();
+    let byCaller = false;
+    const onCallerAbort = (): void => {
+      byCaller = true;
+      ctl.abort();
+    };
+    for (const sg of signals) {
+      if (sg.aborted) onCallerAbort();
+      else sg.addEventListener("abort", onCallerAbort, { once: true });
+    }
     const timer = setTimeout(() => ctl.abort(), Math.max(1, budgetMs));
+    const stopped = (what: string): Attempt =>
+      byCaller ? { kind: "transport", failure: "cancelled", detail: "cancelled by the caller" } : { kind: "transport", failure: "timeout", detail: what };
     try {
+      if (byCaller) return stopped("");
       let res: Response;
       try {
         res = await doFetch(url, {
@@ -1824,9 +2333,7 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
           redirect: "error",
         });
       } catch (e) {
-        return ctl.signal.aborted
-          ? { kind: "transport", failure: "timeout", detail: `no answer within ${budgetMs} ms` }
-          : { kind: "transport", failure: "unreachable", detail: errText(e) };
+        return ctl.signal.aborted ? stopped(`no answer within ${budgetMs} ms`) : { kind: "transport", failure: "unreachable", detail: errText(e) };
       }
       const success = res.status >= 200 && res.status < 300;
       let body: unknown = undefined;
@@ -1834,21 +2341,40 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
       try {
         const read = await readBoundedJson<unknown>(res, success ? maxBytes : ERROR_BODY_MAX_BYTES);
         if (read.ok) body = read.value;
+        else if (ctl.signal.aborted) return stopped(`the body did not finish within ${budgetMs} ms`);
         // The bound's own wording is ours and safe. A JSON parse error is NOT:
         // current engines quote a slice of the input in the message, which
         // would echo the vendor's body into a detail string.
         else readError = /byte limit/.test(read.detail) ? read.detail : "the answer was not valid JSON";
       } catch (e) {
-        if (ctl.signal.aborted) return { kind: "transport", failure: "timeout", detail: `the body did not finish within ${budgetMs} ms` };
+        if (ctl.signal.aborted) return stopped(`the body did not finish within ${budgetMs} ms`);
         readError = "the answer could not be read";
       }
       return { kind: "response", status: res.status, headers: res.headers, body, readError };
     } finally {
       clearTimeout(timer);
+      for (const sg of signals) sg.removeEventListener("abort", onCallerAbort);
     }
   }
 
-  async function call<T>(
+  /** A retry wait that ends early when the caller aborts (the loop then stops before the next attempt). */
+  async function pause(ms: number, signals: readonly AbortSignal[]): Promise<void> {
+    if (signals.length === 0) return sleep(ms);
+    if (signals.some((sg) => sg.aborted)) return;
+    let wake: () => void = () => {};
+    const woken = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    for (const sg of signals) sg.addEventListener("abort", wake, { once: true });
+    try {
+      await Promise.race([sleep(ms), woken]);
+    } finally {
+      for (const sg of signals) sg.removeEventListener("abort", wake);
+    }
+  }
+
+  async function callIn<T>(
+    scope: Scope,
     route: RouteName,
     params: Record<string, string>,
     query: Record<string, QueryValue>,
@@ -1862,25 +2388,67 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
     const built = buildFomoUrl(template, params, query);
     if (!built.ok) return fail(built.failure, built.detail, meta);
 
-    const deadlineAt = startedAt + deadlineMs;
-    const fits = (ms: number) => now() + ms <= deadlineAt;
+    const signals = scope.signals;
+    const callerAborted = (): boolean => signals.some((sg) => sg.aborted);
+    /** Time left before the CALLER's deadline; unbounded for an unbound client. */
+    const callerLeft = (): number => (scope.deadlineAt === null ? Infinity : scope.deadlineAt - now());
+    // Our own deadline, and the earlier of it and the caller's: no wait or attempt runs past either.
+    const ownDeadlineAt = startedAt + deadlineMs;
+    const deadlineAt = Math.min(ownDeadlineAt, scope.deadlineAt ?? Infinity);
+    // A wait fits when it ends inside our deadline AND leaves the caller time for one more attempt.
+    const fits = (ms: number) => now() + ms <= ownDeadlineAt && callerLeft() - ms >= minAttemptMs;
     let attempts = 0;
+    /**
+     * The last HTTP answer we chose to retry past. If the retries then end in
+     * a timeout or no connection, THAT answer is what we know about the
+     * vendor: its failure and status are reported, but never its cost — the
+     * last attempt may have been billed, so the cost is unknown (null), and a
+     * budget settles it at the estimate rather than refunding.
+     */
+    let prior: { failure: ProviderFailure; detail: string; meta: CallMeta; retryAfterMs?: number; retryable: boolean } | null = null;
+    const afterPrior = (why: string): ProviderResult<T> | null =>
+      prior
+        ? fail<T>(
+            prior.failure,
+            `${prior.detail}; then ${why}`,
+            { ...prior.meta, attempts, retrievedAt: now(), creditsCost: null },
+            prior.retryAfterMs,
+            prior.retryable,
+          )
+        : null;
     for (;;) {
-      const remaining = deadlineAt - now();
-      if (remaining <= 0) return fail("timeout", "the overall deadline passed", { ...meta, attempts, retrievedAt: now() });
+      // The caller's limits come first: a call they no longer want is never started.
+      if (callerAborted()) {
+        const why = attempts === 0 ? "cancelled by the caller before it was sent" : "cancelled by the caller";
+        return afterPrior(why) ?? fail("cancelled", why, { ...meta, attempts, retrievedAt: now() });
+      }
+      const left = callerLeft();
+      if (left < minAttemptMs) {
+        const why = `not sent: ${Math.max(0, Math.round(left))} ms left before the caller's deadline`;
+        return afterPrior(why) ?? fail("cancelled", why, { ...meta, attempts, retrievedAt: now() });
+      }
+      const remaining = ownDeadlineAt - now();
+      if (remaining <= 0) {
+        return afterPrior("the overall deadline passed") ?? fail("timeout", "the overall deadline passed", { ...meta, attempts, retrievedAt: now() });
+      }
       attempts++;
-      const a = await attempt(built.url, Math.min(timeoutMs, remaining));
+      const budgetMs = Math.min(timeoutMs, remaining, left);
+      // The caller's deadline, not ours, sets this attempt's limit: running out of it is the caller's cut, not a slow vendor.
+      const callerCut = left < Math.min(timeoutMs, remaining);
+      const a = await attempt(built.url, budgetMs, signals);
 
       if (a.kind === "transport") {
         const m: CallMeta = { ...meta, attempts, retrievedAt: now() };
+        const failure: ProviderFailure = a.failure === "timeout" && callerCut ? "cancelled" : a.failure;
+        const detail = failure === "cancelled" && a.failure === "timeout" ? `the caller's deadline passed after ${budgetMs} ms` : a.detail;
         if (a.failure === "unreachable" && attempts < maxAttempts) {
           const d = backoff(attempts);
           if (fits(d)) {
-            await sleep(d);
+            await pause(d, signals);
             continue;
           }
         }
-        return fail(a.failure, a.detail, m);
+        return afterPrior(detail) ?? fail(failure, detail, m);
       }
 
       const m: CallMeta = {
@@ -1911,7 +2479,8 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
         if (attempts < maxAttempts) {
           const d = retryAfterMs ?? backoff(attempts);
           if (fits(d)) {
-            await sleep(d);
+            prior = { failure: "conflict-retryable", detail: `http 409${code}`, meta: m, retryAfterMs, retryable: false };
+            await pause(d, signals);
             continue;
           }
         }
@@ -1922,13 +2491,15 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
         if (attempts < maxAttempts) {
           if (retryAfterMs !== undefined) {
             if (fits(retryAfterMs)) {
-              await sleep(Math.min(retryAfterMs + Math.floor(random() * RETRY_AFTER_JITTER_MS), Math.max(0, deadlineAt - now())));
+              prior = { failure: "rate-limited", detail: `http 429${code}`, meta: m, retryAfterMs, retryable: false };
+              await pause(Math.min(retryAfterMs + Math.floor(random() * RETRY_AFTER_JITTER_MS), Math.max(0, deadlineAt - now())), signals);
               continue;
             }
           } else {
             const d = backoff(attempts);
             if (fits(d)) {
-              await sleep(d);
+              prior = { failure: "rate-limited", detail: `http 429${code}`, meta: m, retryAfterMs, retryable: false };
+              await pause(d, signals);
               continue;
             }
           }
@@ -1937,14 +2508,17 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
       }
 
       if (s >= 500 && s <= 599) {
+        // Every 5xx is retried, 502 included; the body only decides whether the failure is labelled transient.
+        const transient = transient5xx(a.body);
         if (attempts < maxAttempts) {
           const d = retryAfterMs ?? backoff(attempts);
           if (fits(d)) {
-            await sleep(d);
+            prior = { failure: "server-error", detail: `http ${s}${code}`, meta: m, retryAfterMs, retryable: transient };
+            await pause(d, signals);
             continue;
           }
         }
-        return fail("server-error", `http ${s}${code}`, m, retryAfterMs);
+        return fail("server-error", `http ${s}${code}`, m, retryAfterMs, transient);
       }
 
       const terminal: ProviderFailure =
@@ -1987,233 +2561,251 @@ export function createFomoClient(opts: FomoClientOptions): FomoClient {
 
   const userIdError = "per-trader routes are keyed on the FOMO user id (UUID); resolve a handle first";
 
-  const client: FomoClient = {
-    leaderboard(window, limit) {
-      if (window !== "24h" && window !== "7d" && window !== "30d" && window !== "all") return refuse("leaderboard", "window must be 24h, 7d, 30d or all");
-      // The board's own ceiling: 150 rows, 100 on `all`. Billed per call at any limit.
-      const l = limitOf("leaderboard", limit, window === "all" ? 100 : 150);
-      if (!l.ok) return refuse("leaderboard", "limit must be a number");
-      return call("leaderboard", { window }, { limit: l.value }, (b) => normalizeLeaderboard(b, window));
-    },
+  /**
+   * The client as one caller sees it. Every view shares this client's key,
+   * clock and policy; a bound view only adds the caller's signal and deadline.
+   */
+  function view(scope: Scope): FomoClient {
+    const call = <T>(
+      route: RouteName,
+      params: Record<string, string>,
+      query: Record<string, QueryValue>,
+      normalize: (body: Rec, retrievedAt: number) => Norm<T>,
+    ): Promise<ProviderResult<T>> => callIn<T>(scope, route, params, query, normalize);
 
-    traderByHandle(handle) {
-      const h = typeof handle === "string" ? handle.trim() : "";
-      if (!HANDLE.test(h) || /^@?\.+$/.test(h)) return refuse("traderByHandle", "not a handle");
-      return call("traderByHandle", { handle: h.replace(/^@/, "") }, {}, (b) => normalizeProfile(b, null));
-    },
+    const client: FomoClient = {
+      leaderboard(window, limit) {
+        if (window !== "24h" && window !== "7d" && window !== "30d" && window !== "all") return refuse("leaderboard", "window must be 24h, 7d, 30d or all");
+        // The board's own ceiling: 150 rows, 100 on `all`. Billed per call at any limit.
+        const l = limitOf("leaderboard", limit, window === "all" ? 100 : 150);
+        if (!l.ok) return refuse("leaderboard", "limit must be a number");
+        return call("leaderboard", { window }, { limit: l.value }, (b) => normalizeLeaderboard(b, window));
+      },
 
-    traderById(userId) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("traderById", "userId must be a UUID");
-      return call("traderById", { userId: u }, {}, (b) => normalizeProfile(b, u));
-    },
+      traderByHandle(handle) {
+        const h = typeof handle === "string" ? handle.trim() : "";
+        if (!HANDLE.test(h) || /^@?\.+$/.test(h)) return refuse("traderByHandle", "not a handle");
+        return call("traderByHandle", { handle: h.replace(/^@/, "") }, {}, (b) => normalizeProfile(b, null));
+      },
 
-    positions(userId, o = {}) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("positions", userIdError);
-      if (o.status !== undefined && o.status !== "open" && o.status !== "closed" && o.status !== "all") return refuse("positions", "status must be open, closed or all");
-      if (o.cursor !== undefined && !CURSOR.test(o.cursor)) return refuse("positions", "cursor is not one this API issued");
-      const l = limitOf("positions", o.limit);
-      if (!l.ok) return refuse("positions", "limit must be a number");
-      return call("positions", { userId: u }, { status: o.status, cursor: o.cursor, limit: l.value }, (b) => normalizePositions(b, u));
-    },
+      traderById(userId) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("traderById", "userId must be a UUID");
+        return call("traderById", { userId: u }, {}, (b) => normalizeProfile(b, u));
+      },
 
-    swaps(userId, o = {}) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("swaps", userIdError);
-      if (o.cursor !== undefined && !CURSOR.test(o.cursor)) return refuse("swaps", "cursor is not one this API issued");
-      const tokenAddress = o.tokenAddress === undefined ? undefined : addressOf(o.tokenAddress);
-      if (tokenAddress === null) return refuse("swaps", "tokenAddress must be an EVM address or a Solana mint");
-      const l = limitOf("swaps", o.limit);
-      if (!l.ok) return refuse("swaps", "limit must be a number");
-      return call("swaps", { userId: u }, { cursor: o.cursor, limit: l.value, tokenAddress }, (b) => normalizeSwaps(b, u));
-    },
+      positions(userId, o = {}) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("positions", userIdError);
+        if (o.status !== undefined && o.status !== "open" && o.status !== "closed" && o.status !== "all") return refuse("positions", "status must be open, closed or all");
+        if (o.cursor !== undefined && !CURSOR.test(o.cursor)) return refuse("positions", "cursor is not one this API issued");
+        const l = limitOf("positions", o.limit);
+        if (!l.ok) return refuse("positions", "limit must be a number");
+        return call("positions", { userId: u }, { status: o.status, cursor: o.cursor, limit: l.value }, (b) => normalizePositions(b, u));
+      },
 
-    balances(userId, o = {}) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("balances", userIdError);
-      const f = o.chain === undefined ? null : chainFilter(o.chain);
-      if (o.chain !== undefined && !f) return refuse("balances", "unknown chain filter");
-      const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
-      return call("balances", { userId: u }, { chain: f?.param }, (b) => normalizeBalances(b, u, filter));
-    },
+      swaps(userId, o = {}) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("swaps", userIdError);
+        if (o.cursor !== undefined && !CURSOR.test(o.cursor)) return refuse("swaps", "cursor is not one this API issued");
+        const tokenAddress = o.tokenAddress === undefined ? undefined : addressOf(o.tokenAddress);
+        if (tokenAddress === null) return refuse("swaps", "tokenAddress must be an EVM address or a Solana mint");
+        const l = limitOf("swaps", o.limit);
+        if (!l.ok) return refuse("swaps", "limit must be a number");
+        return call("swaps", { userId: u }, { cursor: o.cursor, limit: l.value, tokenAddress }, (b) => normalizeSwaps(b, u));
+      },
 
-    following(userId, o = {}) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("following", userIdError);
-      const l = limitOf("following", o.limit);
-      if (!l.ok) return refuse("following", "limit must be a number");
-      return call("following", { userId: u }, { limit: l.value }, (b) => normalizeFollowing(b, u));
-    },
+      balances(userId, o = {}) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("balances", userIdError);
+        const f = o.chain === undefined ? null : chainFilter(o.chain);
+        if (o.chain !== undefined && !f) return refuse("balances", "unknown chain filter");
+        const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
+        return call("balances", { userId: u }, { chain: f?.param }, (b) => normalizeBalances(b, u, filter));
+      },
 
-    spotlight(userId) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("spotlight", userIdError);
-      return call("spotlight", { userId: u }, {}, (b) => normalizeSpotlight(b, u));
-    },
+      following(userId, o = {}) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("following", userIdError);
+        const l = limitOf("following", o.limit);
+        if (!l.ok) return refuse("following", "limit must be a number");
+        return call("following", { userId: u }, { limit: l.value }, (b) => normalizeFollowing(b, u));
+      },
 
-    theses(o = {}) {
-      const f = o.chain === undefined ? null : chainFilter(o.chain);
-      if (o.chain !== undefined && !f) return refuse("theses", "unknown chain filter");
-      if (o.sort !== undefined && o.sort !== "recent" && o.sort !== "equity" && o.sort !== "pnl") return refuse("theses", "sort must be recent, equity or pnl");
-      const l = limitOf("theses", o.limit);
-      if (!l.ok) return refuse("theses", "limit must be a number");
-      const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
-      return call("theses", {}, { chain: f?.param, sort: o.sort, limit: l.value }, (b) =>
-        normalizeTheses(b, { filter, pagesRequested: 1, defaultAddress: null, expectUserId: null }),
-      );
-    },
+      spotlight(userId) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("spotlight", userIdError);
+        return call("spotlight", { userId: u }, {}, (b) => normalizeSpotlight(b, u));
+      },
 
-    thesesByToken(address, o = {}) {
-      const a = addressOf(address);
-      if (!a) return refuse("thesesByToken", "address must be an EVM address or a Solana mint");
-      const net = o.network;
-      const NETWORKS: Record<ThesisNetwork, string> = { robinhood: "robinhood", sol: "solana", bnb: "bsc", base: "base", eth: "eth", arc: "arc" };
-      if (net !== undefined && !(net in NETWORKS)) return refuse("thesesByToken", "network must be robinhood, sol, bnb, base, eth or arc");
-      const requested = net !== undefined ? chainFromUserText(NETWORKS[net]) : null;
-      if (requested && !tokenIdentity(requested, a)) return refuse("thesesByToken", "the address does not fit that network");
-      if (o.sort !== undefined && o.sort !== "likes" && o.sort !== "recent") return refuse("thesesByToken", "sort must be likes or recent");
-      if (o.pages !== undefined && !Number.isFinite(o.pages)) return refuse("thesesByToken", "pages must be a number");
-      const pages = o.pages === undefined ? 1 : Math.min(10, Math.max(1, Math.floor(o.pages)));
-      if (o.threshold !== undefined && (!Number.isFinite(o.threshold) || o.threshold < 0)) return refuse("thesesByToken", "threshold must be a non-negative number");
-      const l = limitOf("thesesByToken", o.limit);
-      if (!l.ok) return refuse("thesesByToken", "limit must be a number");
-      // THE VENDOR'S `network` ENUM HAS NO ROBINHOOD VALUE (openapi, fetched
-      // 2026-10-04: sol|bnb|base|eth|arc). Sending a value it does not know
-      // could be ignored or misread, so for Robinhood we send none and check
-      // every returned row's own network instead.
-      const param = net === undefined || net === "robinhood" ? undefined : net;
-      const filter = requested ? { slug: requested.slug ?? net ?? "", identity: requested } : null;
-      return call(
-        "thesesByToken",
-        { address: a },
-        { network: param, sort: o.sort, pages: o.pages === undefined ? undefined : pages, threshold: o.threshold, limit: l.value },
-        (b) => normalizeTheses(b, { filter, pagesRequested: pages, defaultAddress: a, expectUserId: null }),
-      );
-    },
+      theses(o = {}) {
+        const f = o.chain === undefined ? null : chainFilter(o.chain);
+        if (o.chain !== undefined && !f) return refuse("theses", "unknown chain filter");
+        if (o.sort !== undefined && o.sort !== "recent" && o.sort !== "equity" && o.sort !== "pnl") return refuse("theses", "sort must be recent, equity or pnl");
+        const l = limitOf("theses", o.limit);
+        if (!l.ok) return refuse("theses", "limit must be a number");
+        const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
+        return call("theses", {}, { chain: f?.param, sort: o.sort, limit: l.value }, (b) =>
+          normalizeTheses(b, { filter, pagesRequested: 1, defaultAddress: null, expectUserId: null, equityMeaningful: true }),
+        );
+      },
 
-    thesesByUser(userId, o = {}) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("thesesByUser", userIdError);
-      const f = o.chain === undefined ? null : chainFilter(o.chain);
-      if (o.chain !== undefined && !f) return refuse("thesesByUser", "unknown chain filter");
-      if (o.sort !== undefined && o.sort !== "likes" && o.sort !== "recent") return refuse("thesesByUser", "sort must be likes or recent");
-      const l = limitOf("thesesByUser", o.limit);
-      if (!l.ok) return refuse("thesesByUser", "limit must be a number");
-      const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
-      return call("thesesByUser", { userId: u }, { chain: f?.param, sort: o.sort, limit: l.value }, (b) =>
-        normalizeTheses(b, { filter, pagesRequested: 1, defaultAddress: null, expectUserId: u }),
-      );
-    },
+      thesesByToken(address, o = {}) {
+        const a = addressOf(address);
+        if (!a) return refuse("thesesByToken", "address must be an EVM address or a Solana mint");
+        const net = o.network;
+        const NETWORKS: Record<ThesisNetwork, string> = { robinhood: "robinhood", sol: "solana", bnb: "bsc", base: "base", eth: "eth", arc: "arc" };
+        if (net !== undefined && !(net in NETWORKS)) return refuse("thesesByToken", "network must be robinhood, sol, bnb, base, eth or arc");
+        const requested = net !== undefined ? chainFromUserText(NETWORKS[net]) : null;
+        if (requested && !tokenIdentity(requested, a)) return refuse("thesesByToken", "the address does not fit that network");
+        if (o.sort !== undefined && o.sort !== "likes" && o.sort !== "recent") return refuse("thesesByToken", "sort must be likes or recent");
+        if (o.pages !== undefined && !Number.isFinite(o.pages)) return refuse("thesesByToken", "pages must be a number");
+        const pages = o.pages === undefined ? 1 : Math.min(10, Math.max(1, Math.floor(o.pages)));
+        if (o.threshold !== undefined && (!Number.isFinite(o.threshold) || o.threshold < 0)) return refuse("thesesByToken", "threshold must be a non-negative number");
+        const l = limitOf("thesesByToken", o.limit);
+        if (!l.ok) return refuse("thesesByToken", "limit must be a number");
+        // THE VENDOR'S `network` ENUM HAS NO ROBINHOOD VALUE (openapi, fetched
+        // 2026-10-04: sol|bnb|base|eth|arc). Sending a value it does not know
+        // could be ignored or misread, so for Robinhood we send none and check
+        // every returned row's own network instead.
+        const param = net === undefined || net === "robinhood" ? undefined : net;
+        const filter = requested ? { slug: requested.slug ?? net ?? "", identity: requested } : null;
+        return call(
+          "thesesByToken",
+          { address: a },
+          { network: param, sort: o.sort, pages: o.pages === undefined ? undefined : pages, threshold: o.threshold, limit: l.value },
+          (b) => normalizeTheses(b, { filter, pagesRequested: pages, defaultAddress: a, expectUserId: null, equityMeaningful: false }),
+        );
+      },
 
-    thesesByUserToken(userId, address, o = {}) {
-      const u = uuidOf(userId);
-      if (!u) return refuse("thesesByUserToken", userIdError);
-      const a = addressOf(address);
-      if (!a) return refuse("thesesByUserToken", "address must be an EVM address or a Solana mint");
-      const l = limitOf("thesesByUserToken", o.limit);
-      if (!l.ok) return refuse("thesesByUserToken", "limit must be a number");
-      return call("thesesByUserToken", { userId: u, address: a }, { limit: l.value }, (b) =>
-        normalizeTheses(b, { filter: null, pagesRequested: 1, defaultAddress: a, expectUserId: u }),
-      );
-    },
+      thesesByUser(userId, o = {}) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("thesesByUser", userIdError);
+        const f = o.chain === undefined ? null : chainFilter(o.chain);
+        if (o.chain !== undefined && !f) return refuse("thesesByUser", "unknown chain filter");
+        if (o.sort !== undefined && o.sort !== "likes" && o.sort !== "recent") return refuse("thesesByUser", "sort must be likes or recent");
+        const l = limitOf("thesesByUser", o.limit);
+        if (!l.ok) return refuse("thesesByUser", "limit must be a number");
+        const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
+        return call("thesesByUser", { userId: u }, { chain: f?.param, sort: o.sort, limit: l.value }, (b) =>
+          normalizeTheses(b, { filter, pagesRequested: 1, defaultAddress: null, expectUserId: u, equityMeaningful: false }),
+        );
+      },
 
-    trade(tradeId) {
-      const t = typeof tradeId === "string" ? tradeId.trim() : "";
-      if (!PATH_ID.test(t)) return refuse("trade", "not a trade id");
-      return call("trade", { tradeId: t }, {}, (b) => normalizeTrade(b, t));
-    },
+      thesesByUserToken(userId, address, o = {}) {
+        const u = uuidOf(userId);
+        if (!u) return refuse("thesesByUserToken", userIdError);
+        const a = addressOf(address);
+        if (!a) return refuse("thesesByUserToken", "address must be an EVM address or a Solana mint");
+        const l = limitOf("thesesByUserToken", o.limit);
+        if (!l.ok) return refuse("thesesByUserToken", "limit must be a number");
+        return call("thesesByUserToken", { userId: u, address: a }, { limit: l.value }, (b) =>
+          normalizeTheses(b, { filter: null, pagesRequested: 1, defaultAddress: a, expectUserId: u, equityMeaningful: false }),
+        );
+      },
 
-    tradeComments(tradeId, o = {}) {
-      const t = typeof tradeId === "string" ? tradeId.trim() : "";
-      if (!PATH_ID.test(t)) return refuse("tradeComments", "not a trade id");
-      const l = limitOf("tradeComments", o.limit);
-      if (!l.ok) return refuse("tradeComments", "limit must be a number");
-      return call("tradeComments", { tradeId: t }, { limit: l.value }, (b) => normalizeComments(b, t));
-    },
+      trade(tradeId) {
+        const t = typeof tradeId === "string" ? tradeId.trim() : "";
+        if (!PATH_ID.test(t)) return refuse("trade", "not a trade id");
+        return call("trade", { tradeId: t }, {}, (b) => normalizeTrade(b, t));
+      },
 
-    tokenStats(address, o = {}) {
-      const a = addressOf(address);
-      if (!a) return refuse("tokenStats", "address must be an EVM address or a Solana mint");
-      if (o.networkId !== undefined && !(Number.isSafeInteger(o.networkId) && o.networkId > 0)) return refuse("tokenStats", "networkId must be a positive integer");
-      return call("tokenStats", { address: a }, { networkId: o.networkId }, (b) => normalizeTokenStats(b, a));
-    },
+      tradeComments(tradeId, o = {}) {
+        const t = typeof tradeId === "string" ? tradeId.trim() : "";
+        if (!PATH_ID.test(t)) return refuse("tradeComments", "not a trade id");
+        const l = limitOf("tradeComments", o.limit);
+        if (!l.ok) return refuse("tradeComments", "limit must be a number");
+        return call("tradeComments", { tradeId: t }, { limit: l.value }, (b) => normalizeComments(b, t));
+      },
 
-    tokenDevs(address, o = {}) {
-      const a = addressOf(address);
-      if (!a) return refuse("tokenDevs", "address must be an EVM address or a Solana mint");
-      if (o.networkId !== undefined && !(Number.isSafeInteger(o.networkId) && o.networkId > 0)) return refuse("tokenDevs", "networkId must be a positive integer");
-      return call("tokenDevs", { address: a }, { networkId: o.networkId }, (b) => normalizeDevs(b, a));
-    },
+      tokenStats(address, o = {}) {
+        const a = addressOf(address);
+        if (!a) return refuse("tokenStats", "address must be an EVM address or a Solana mint");
+        if (o.networkId !== undefined && !(Number.isSafeInteger(o.networkId) && o.networkId > 0)) return refuse("tokenStats", "networkId must be a positive integer");
+        return call("tokenStats", { address: a }, { networkId: o.networkId }, (b) => normalizeTokenStats(b, a));
+      },
 
-    tokenHolders(address, o = {}) {
-      const a = addressOf(address);
-      if (!a) return refuse("tokenHolders", "address must be an EVM address or a Solana mint");
-      const l = limitOf("tokenHolders", o.limit);
-      if (!l.ok) return refuse("tokenHolders", "limit must be a number");
-      return call("tokenHolders", { address: a }, { limit: l.value }, (b) => normalizeHolders(b));
-    },
+      tokenDevs(address, o = {}) {
+        const a = addressOf(address);
+        if (!a) return refuse("tokenDevs", "address must be an EVM address or a Solana mint");
+        if (o.networkId !== undefined && !(Number.isSafeInteger(o.networkId) && o.networkId > 0)) return refuse("tokenDevs", "networkId must be a positive integer");
+        return call("tokenDevs", { address: a }, { networkId: o.networkId }, (b) => normalizeDevs(b, a));
+      },
 
-    tokenBoard(board, limit) {
-      const route: RouteName | null =
-        board === "trending" ? "tokenBoardTrending" : board === "graduated" ? "tokenBoardGraduated" : board === "most-held" ? "tokenBoardMostHeld" : null;
-      if (!route) return refuse("tokenBoardTrending", "board must be trending, graduated or most-held");
-      const l = limitOf(route, limit);
-      if (!l.ok) return refuse(route, "limit must be a number");
-      return call(route, {}, { limit: l.value }, (b) => normalizeBoard(b, board));
-    },
+      tokenHolders(address, o = {}) {
+        const a = addressOf(address);
+        if (!a) return refuse("tokenHolders", "address must be an EVM address or a Solana mint");
+        const l = limitOf("tokenHolders", o.limit);
+        if (!l.ok) return refuse("tokenHolders", "limit must be a number");
+        return call("tokenHolders", { address: a }, { limit: l.value }, (b) => normalizeHolders(b));
+      },
 
-    search(q, type, limit) {
-      const s = sanitizeText(q, QUERY_MAX);
-      if (!s) return refuse("search", "empty query");
-      if (type !== undefined && type !== "traders" && type !== "tokens" && type !== "all") return refuse("search", "type must be traders, tokens or all");
-      const l = limitOf("search", limit);
-      if (!l.ok) return refuse("search", "limit must be a number");
-      return call("search", {}, { q: s, type, limit: l.value }, (b) => normalizeSearch(b));
-    },
+      tokenBoard(board, limit) {
+        const route: RouteName | null =
+          board === "trending" ? "tokenBoardTrending" : board === "graduated" ? "tokenBoardGraduated" : board === "most-held" ? "tokenBoardMostHeld" : null;
+        if (!route) return refuse("tokenBoardTrending", "board must be trending, graduated or most-held");
+        const l = limitOf(route, limit);
+        if (!l.ok) return refuse(route, "limit must be a number");
+        return call(route, {}, { limit: l.value }, (b) => normalizeBoard(b, board));
+      },
 
-    tokensSearch(q, limit) {
-      const s = sanitizeText(q, QUERY_MAX);
-      if (!s) return refuse("tokensSearch", "empty query");
-      const l = limitOf("tokensSearch", limit);
-      if (!l.ok) return refuse("tokensSearch", "limit must be a number");
-      return call("tokensSearch", {}, { q: s, limit: l.value }, (b) => normalizeTokensSearch(b));
-    },
+      search(q, type, limit) {
+        const s = sanitizeText(q, QUERY_MAX);
+        if (!s) return refuse("search", "empty query");
+        if (type !== undefined && type !== "traders" && type !== "tokens" && type !== "all") return refuse("search", "type must be traders, tokens or all");
+        const l = limitOf("search", limit);
+        if (!l.ok) return refuse("search", "limit must be a number");
+        return call("search", {}, { q: s, type, limit: l.value }, (b) => normalizeSearch(b));
+      },
 
-    alerts(query, source) {
-      if (source !== "rest-recovery" && source !== "rest-lookup") return refuse("alerts", "source must be rest-recovery or rest-lookup");
-      const q = query ?? {};
-      if (q.cursor !== undefined && !CURSOR.test(q.cursor)) return refuse("alerts", "cursor is not one this API issued");
-      if (q.before !== undefined && !CURSOR.test(q.before)) return refuse("alerts", "before is not a cursor this API issued");
-      let since: number | undefined;
-      if (q.since !== undefined) {
-        const ms = toMs(q.since);
-        if (ms === null) return refuse("alerts", "since must be a timestamp");
-        since = ms;
-      }
-      const f = q.chain === undefined ? null : chainFilter(q.chain);
-      if (q.chain !== undefined && !f) return refuse("alerts", "unknown chain filter");
-      if (q.type !== undefined && !ALERT_TYPE.test(q.type)) return refuse("alerts", "unknown alert type");
-      const userId = q.userId === undefined ? undefined : uuidOf(q.userId);
-      if (userId === null) return refuse("alerts", userIdError);
-      const token = q.token === undefined ? undefined : tokenFilter(q.token);
-      if (token === null) return refuse("alerts", "token must be a symbol or a contract address");
-      const l = limitOf("alerts", q.limit);
-      if (!l.ok) return refuse("alerts", "limit must be a number");
-      const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
-      return call(
-        "alerts",
-        {},
-        { cursor: q.cursor, before: q.before, since, chain: f?.param, type: q.type, userId, token, limit: l.value },
-        (b, at) => normalizeAlerts(b, at, source, filter),
-      );
-    },
+      tokensSearch(q, limit) {
+        const s = sanitizeText(q, QUERY_MAX);
+        if (!s) return refuse("tokensSearch", "empty query");
+        const l = limitOf("tokensSearch", limit);
+        if (!l.ok) return refuse("tokensSearch", "limit must be a number");
+        return call("tokensSearch", {}, { q: s, limit: l.value }, (b) => normalizeTokensSearch(b));
+      },
 
-    me() {
-      return call("me", {}, {}, (b) => normalizeMe(b));
-    },
-  };
-  return client;
+      alerts(query, source) {
+        if (source !== "rest-recovery" && source !== "rest-lookup") return refuse("alerts", "source must be rest-recovery or rest-lookup");
+        const q = query ?? {};
+        if (q.cursor !== undefined && !CURSOR.test(q.cursor)) return refuse("alerts", "cursor is not one this API issued");
+        if (q.before !== undefined && !CURSOR.test(q.before)) return refuse("alerts", "before is not a cursor this API issued");
+        let since: number | undefined;
+        if (q.since !== undefined) {
+          const ms = toMs(q.since);
+          if (ms === null) return refuse("alerts", "since must be a timestamp");
+          since = ms;
+        }
+        const f = q.chain === undefined ? null : chainFilter(q.chain);
+        if (q.chain !== undefined && !f) return refuse("alerts", "unknown chain filter");
+        if (q.type !== undefined && !ALERT_TYPE.test(q.type)) return refuse("alerts", "unknown alert type");
+        const userId = q.userId === undefined ? undefined : uuidOf(q.userId);
+        if (userId === null) return refuse("alerts", userIdError);
+        const token = q.token === undefined ? undefined : tokenFilter(q.token);
+        if (token === null) return refuse("alerts", "token must be a symbol or a contract address");
+        const l = limitOf("alerts", q.limit);
+        if (!l.ok) return refuse("alerts", "limit must be a number");
+        const filter = f ? { slug: f.identity.slug ?? f.param, identity: f.identity } : null;
+        return call(
+          "alerts",
+          {},
+          { cursor: q.cursor, before: q.before, since, chain: f?.param, type: q.type, userId, token, limit: l.value },
+          (b, at) => normalizeAlerts(b, at, source, filter),
+        );
+      },
+
+      me() {
+        return call("me", {}, {}, (b) => normalizeMe(b));
+      },
+
+      bound(o) {
+        return view(narrowScope(scope, o));
+      },
+    };
+    return client;
+  }
+  return view(ROOT_SCOPE);
 }
 
 /** Pinned by the tests so they restate nothing. */
@@ -2225,10 +2817,14 @@ export const PROVIDER_GUARDS = {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_DEADLINE_MS,
   DEFAULT_MAX_ATTEMPTS,
+  MIN_ATTEMPT_MS,
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
   ERROR_BODY_MAX_BYTES,
   HOLDINGS_CAP,
   THESIS_TEXT_MAX,
   ALERT_TEXT_MAX,
+  PROVIDER_ALERT_ID,
+  MONEY_PAREN,
+  PERP_TEXT,
 } as const;

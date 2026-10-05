@@ -46,6 +46,24 @@ const DOCUMENTED: ReadonlyArray<{ slugs: readonly string[]; namespace: ChainName
   { slugs: ["hyperliquid", "hl"], namespace: "hyperliquid", networkId: 1337, slug: "hyperliquid" },
 ];
 
+/**
+ * EVM network ids the provider does NOT document but was OBSERVED sending
+ * (live answers read 2026-10-04): rows carried `chain: "ethereum", chainId: 1`,
+ * `chain: "bsc", chainId: 56` and `chain: "base", networkId: 8453` together,
+ * and token-search rows carry the bare id with no slug (the ids are the
+ * provider's upstream index's, which match EVM chain ids for these three).
+ *
+ * Used in ONE direction only: a row that carries the NUMBER gets the slug, and
+ * a row whose number and slug disagree is distrusted. A slug alone is never
+ * turned into a number here; a row that did not say which network keeps
+ * `networkId: null`.
+ */
+const OBSERVED_EVM_IDS: ReadonlyMap<number, string> = new Map([
+  [1, "eth"],
+  [56, "bsc"],
+  [8453, "base"],
+]);
+
 /** EVM networks the provider names without a documented id in its own namespace. */
 const EVM_SLUGS_UNNUMBERED: ReadonlyMap<string, string> = new Map([
   ["base", "base"],
@@ -94,10 +112,16 @@ export function chainFromProvider(networkId: unknown, slug: unknown): ChainIdent
   }
   if (bySlug) return { namespace: bySlug.namespace, networkId: bySlug.networkId, slug: bySlug.slug };
   if (byId) return { namespace: byId.namespace, networkId: byId.networkId, slug: byId.slug };
+  const seen = id !== null ? OBSERVED_EVM_IDS.get(id) : undefined;
   if (s && EVM_SLUGS_UNNUMBERED.has(s)) {
+    const named = EVM_SLUGS_UNNUMBERED.get(s)!;
+    // An observed number naming a different network than the slug: trust neither.
+    if (seen !== undefined && seen !== named) return { namespace: "unknown", networkId: null, slug: s };
     // A numbered row on a named EVM network: keep the number the row carried.
-    return { namespace: "eip155", networkId: id, slug: EVM_SLUGS_UNNUMBERED.get(s)! };
+    return { namespace: "eip155", networkId: id, slug: named };
   }
+  // A bare observed number (token search sends `networkId: 56` and nothing else).
+  if (seen !== undefined && !s) return { namespace: "eip155", networkId: id, slug: seen };
   // An id we do not know and no recognisable slug. Keep the id (it is what the
   // provider said) but not a namespace we would have to guess.
   return { namespace: "unknown", networkId: id, slug: s };
@@ -124,9 +148,12 @@ export function keyOf(chain: ChainIdentity, address: string): string {
 /**
  * A token identity, or null when the address does not fit the chain.
  *
- * An EVM-shaped address on an `unknown` chain is kept as `eip155` with a null
- * network: we know it is an EVM contract, not which network, and the null
- * stops it from ever being treated as executable.
+ * An EVM-shaped address on an `unknown` chain is kept as `eip155` with the
+ * network id the row carried (null when it carried none, or when its id and
+ * slug disagreed — `chainFromProvider` already dropped the id then). Keeping
+ * the id is what keeps the same hex on two networks two tokens (rule 2); a
+ * null id stops a token from ever being treated as executable, and only 4663
+ * ever is (`isRobinhoodToken`).
  */
 export function tokenIdentity(chain: ChainIdentity, rawAddress: unknown): TokenIdentity | null {
   if (typeof rawAddress !== "string") return null;
@@ -134,7 +161,7 @@ export function tokenIdentity(chain: ChainIdentity, rawAddress: unknown): TokenI
   if (!address) return null;
   if (EVM_ADDRESS.test(address)) {
     if (chain.namespace === "solana" || chain.namespace === "hyperliquid") return null;
-    const c: ChainIdentity = chain.namespace === "eip155" ? chain : { namespace: "eip155", networkId: null, slug: chain.slug };
+    const c: ChainIdentity = chain.namespace === "eip155" ? chain : { namespace: "eip155", networkId: chain.networkId, slug: chain.slug };
     const a = address.toLowerCase();
     return { chain: c, address: a, key: keyOf(c, a) };
   }
@@ -158,7 +185,8 @@ export function tokenFromKey(key: string): TokenIdentity | null {
   const namespace = m[1] as ChainNamespace;
   const networkId = m[2] === "?" ? null : Number(m[2]);
   const documented = networkId !== null ? DOCUMENTED.find((d) => d.networkId === networkId) : undefined;
-  const chain: ChainIdentity = { namespace, networkId, slug: documented?.slug ?? null };
+  const observed = networkId !== null && namespace === "eip155" ? OBSERVED_EVM_IDS.get(networkId) : undefined;
+  const chain: ChainIdentity = { namespace, networkId, slug: documented?.slug ?? observed ?? null };
   const t = tokenIdentity(chain, m[3]);
   return t && t.key === key ? t : null;
 }
@@ -192,6 +220,10 @@ export function executionAvailabilityOf(
  * ids on the returned rows do. `honoured` is null when no row carried a
  * network at all (nothing to check), false when ANY row is on another
  * network or carries none while others do.
+ *
+ * A filter given as a bare number we cannot place in a namespace (`unknown`)
+ * is checked by number alone: the rows' own namespace is the better-informed
+ * one, and comparing it to `unknown` would call every row offending.
  */
 export function verifyChainFilter(
   requested: ChainIdentity | null,
@@ -207,10 +239,22 @@ export function verifyChainFilter(
       continue;
     }
     placed++;
-    if (r.chain.networkId !== requested.networkId || r.chain.namespace !== requested.namespace) offending++;
+    if (r.chain.networkId !== requested.networkId || (requested.namespace !== "unknown" && r.chain.namespace !== requested.namespace)) offending++;
   }
   if (placed === 0) return { honoured: null, offending, unplaced };
   return { honoured: offending === 0 && unplaced === 0, offending, unplaced };
+}
+
+/**
+ * The identity to CHECK a chain filter's rows against. A named EVM network the
+ * provider does not number (`bsc`, `eth`, `base`) gets the id its rows were
+ * observed carrying, so a filtered answer can actually be verified instead of
+ * always reading "nothing to check". Never used to label a row.
+ */
+export function filterCheckIdentity(chain: ChainIdentity): ChainIdentity {
+  if (chain.namespace !== "eip155" || chain.networkId !== null || !chain.slug) return chain;
+  for (const [id, slug] of OBSERVED_EVM_IDS) if (slug === chain.slug) return { ...chain, networkId: id };
+  return chain;
 }
 
 /** Short display form, never used for identity: `0x1234…abcd` / `So1a…xyz9`. */
@@ -218,4 +262,4 @@ export function shortAddress(address: string): string {
   return address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
 }
 
-export const IDENTITY_GUARDS = { EVM_ADDRESS, SOLANA_MINT, DOCUMENTED } as const;
+export const IDENTITY_GUARDS = { EVM_ADDRESS, SOLANA_MINT, DOCUMENTED, OBSERVED_EVM_IDS } as const;

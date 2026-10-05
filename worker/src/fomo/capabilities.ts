@@ -15,14 +15,20 @@
  *   UNAVAILABLE           it did not answer usefully the last time we asked
  *   UNSUPPORTED           Merrymen will not use it, whatever the vendor offers
  *
- * TWO RULES THE MERGE HOLDS, because a report that forgets is worse than none:
+ * THREE RULES THE MERGE HOLDS, because a report that forgets is worse than none:
  *
  *   1. Nothing silently downgrades to DOCUMENTED. A call that never reached
- *      the vendor (no key, a request we refused ourselves) is not evidence and
- *      changes nothing.
+ *      the vendor (no key, a request we refused ourselves, a call our own
+ *      deadline or cancel cut short) is not evidence and changes nothing.
  *   2. A failure after a success is recorded as the failure, AND the time of
  *      the last success stays in the evidence, so "down since" and "worked
  *      until" are both readable from one row.
+ *   3. A TRANSIENT failure (a 5xx the vendor marked retryable: its upstream did
+ *      not answer for one subject in time) is recorded as transient evidence
+ *      beside the standing verdict and changes no status. Live, one such 503
+ *      on token stats arrived while every other route answered; it says
+ *      nothing about the route for the next subject. Only a failure the
+ *      vendor did not call transient marks a route UNAVAILABLE.
  *
  * This file cites routes, never the API host: only the adapter names it.
  */
@@ -40,7 +46,14 @@ const DOCUMENTED_PREFIX = "documented: ";
 const OBSERVED_PREFIX = "observed: ";
 const POLICY_PREFIX = "policy: ";
 const NO_CONTACT_PREFIX = "no provider contact: ";
+/** The vendor answered, but about our key, not about the route. */
+const NO_ROUTE_EVIDENCE_PREFIX = "no route evidence: ";
 const ENTITLED_PREFIX = "observed: entitled";
+/** A failure the vendor marked transient: noted beside the standing verdict, never a verdict itself (rule 3). */
+const TRANSIENT_PREFIX = "transient: ";
+/** Where a transient note starts inside a merged record's evidence. */
+const TRANSIENT_NOTE = /; transient: .*$/;
+const TRANSIENT_AT = /; transient: .*? at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)/;
 
 const STATUSES: ReadonlySet<CapabilityStatus> = new Set([
   "DOCUMENTED",
@@ -97,7 +110,7 @@ export const DOCUMENTED_CAPABILITIES: readonly CapabilityRecord[] = [
   doc("trader-by-handle", T("traderByHandle"), "DOCUMENTED", "openapi.json GET /v2/users/{handle}: 2,500 credits on a hit, 250 on an unresolvable handle, refunded while wallets are resolving"),
   doc("trader-by-id", T("traderById"), "DOCUMENTED", "openapi.json GET /v2/users/id/{userId}: same identity payload as the handle route, 2,500 credits; 404 does not consume the allowance"),
   doc("positions", T("positions"), "DOCUMENTED", "openapi.json GET /v2/users/{handle}/positions (userId accepted): 25 closed per cursor page, 250 credits per page; the vendor states a full history is not obtainable at any setting"),
-  doc("swaps", T("swaps"), "DOCUMENTED", "openapi.json GET /v2/users/{handle}/swaps: 100 fills per cursor page, 250 credits per page; tradeIdIn/tradeIdOut join to positions"),
+  doc("swaps", T("swaps"), "DOCUMENTED", "openapi.json GET /v2/users/{handle}/swaps: 100 fills per cursor page, 250 credits per page; tradeIdIn/tradeIdOut join to positions; observed live 2026-10-04: complete:false with a note that at most 100 swaps are served per trader and no cursor reaches past them, so fills are a recent window, not history"),
   doc("swaps-relay", `${T("swaps")}?source=relay`, "PARTIAL", "listed only in the /v1 catalogue, absent from openapi.json; covers Relay-routed flow only (vendor measured 96% in-window); 409 retryable while a wallet resolves"),
   doc("balances", T("balances"), "DOCUMENTED", "openapi.json GET /v2/users/{handle}/balances: upstream cap of ~100 holdings with no way past it, so totalValueUsd is a floor when truncated; ?chain= narrows rows"),
   doc("following", T("following"), "DOCUMENTED", "openapi.json GET /v2/users/{handle}/following: at most 200 names upstream, flat 250 credits; 503 retryable never means not-found"),
@@ -111,7 +124,7 @@ export const DOCUMENTED_CAPABILITIES: readonly CapabilityRecord[] = [
   doc("token-stats", T("tokenStats"), "DOCUMENTED", "openapi.json GET /v2/token/{address}/stats: windows 5m|1h|4h|24h, volumes sent as strings, buySellRatio null with no sells; networkId needed outside the vendor directory"),
   doc("token-devs", T("tokenDevs"), "DOCUMENTED", "openapi.json GET /v2/token/{address}/devs: deployer and insider positions with their theses; an empty list is not a clean bill of health"),
   doc("token-holders", T("tokenHolders"), "PARTIAL", "openapi.json GET /token/{address}/holders is populated from captured balances, and GET /health and GET /v1 report a captured dataset of 8 traders, so the holder set is tiny and an absence proves nothing"),
-  doc("token-board-trending", T("tokenBoardTrending"), "DOCUMENTED", "openapi.json GET /v2/leaderboard/tokens/trending: live with a 5-minute cache; source captured means a fallback board"),
+  doc("token-board-trending", T("tokenBoardTrending"), "DOCUMENTED", "openapi.json GET /v2/leaderboard/tokens/trending: live with a 5-minute cache; source captured marks the provider's stored copy; observed live 2026-10-04: both token boards answered source captured with stale:false and an age of minutes, so stale and age, not the source alone, say whether it is a fallback"),
   doc("token-board-graduated", T("tokenBoardGraduated"), "DOCUMENTED", "openapi.json GET /v2/leaderboard/tokens/graduated: same shape as trending; small caps by nature"),
   doc("token-board-most-held", T("tokenBoardMostHeld"), "DOCUMENTED", "openapi.json GET /v2/leaderboard/tokens/most-held: holders is null on this board upstream"),
   doc("token-activity", "/v2/tokens/activity", "PARTIAL", "openapi.json GET /v2/tokens/activity: the vendor states its upstream stopped publishing this board on 2026-08-23; answers carry stale:true; not wired into the client"),
@@ -120,7 +133,7 @@ export const DOCUMENTED_CAPABILITIES: readonly CapabilityRecord[] = [
   doc("tokens-search", T("tokensSearch"), "DOCUMENTED", "openapi.json GET /v2/tokens/search: symbol/name to address, networkId, market cap"),
   doc("alerts-rest", T("alerts"), "DOCUMENTED", "openapi.json GET /v2/alerts: the app feed's LARGE events only (floor near $3,000 of position value), opaque cursor checkpointing, 125 credits"),
   doc("ws-alerts", "/ws/alerts", "DOCUMENTED", "openapi.json WSS /ws/alerts: app feed on every plan, zero credits; paid keys realtime, a free key delayed 15 s after 7 days"),
-  doc("ws-trades", "/ws/trades", "DOCUMENTED", "openapi.json WSS /ws/trades: on-chain stream for Growth or Scale keys only; a lower plan is refused (403 or close 1008) and is ENTITLEMENT_BLOCKED once probed"),
+  doc("ws-trades", "/ws/trades", "DOCUMENTED", "openapi.json WSS /ws/trades: on-chain stream for Growth or Scale keys only; a lower plan is refused (403, or close 1008) and is ENTITLEMENT_BLOCKED once probed; a 1008 also closes a bad key, so it blocks only when its reason names the plan"),
   doc("trading-account", "/v2/trading/*", "UNSUPPORTED", "the vendor's order-placing account product; Merrymen keeps its own execution system and the client refuses the path"),
   doc("credit-top-up", "/pay/create", "UNSUPPORTED", "a payment flow; Merrymen never pays through a research adapter and the client refuses the path"),
 ];
@@ -178,8 +191,15 @@ function factsOf(data: unknown, extra: CapabilityCallExtra) {
  * One call's evidence about one capability.
  *
  * A call that never reached the vendor returns DOCUMENTED — not as a verdict
- * but as "no evidence", which `mergeCapability` ignores. An UNSUPPORTED
- * capability stays UNSUPPORTED whatever a call says: that status is policy.
+ * but as "no evidence", which `mergeCapability` ignores. So does a 401: the
+ * vendor rejected the KEY (a typo, a revoked key) before looking at the route,
+ * which says nothing about what the plan reaches. So does a call WE cut short
+ * (`cancelled`: the caller's deadline or abort, not the vendor's answer). A
+ * 402 or 403 is about the plan or its credits, and stays ENTITLEMENT_BLOCKED.
+ * A 5xx the vendor marked retryable is transient evidence (DOCUMENTED, with
+ * the transient prefix), which the merge notes beside the standing verdict
+ * without changing it. An UNSUPPORTED capability stays UNSUPPORTED whatever
+ * a call says: that status is policy.
  */
 export function capabilityFromCall(
   capability: string,
@@ -213,14 +233,35 @@ export function capabilityFromCall(
   if (result.meta.attempts === 0 || failure === "no-key" || failure === "refused-path") {
     return record(capability, route, "DOCUMENTED", `${NO_CONTACT_PREFIX}${failure}`, at);
   }
-  const what = `${OBSERVED_PREFIX}${failure}${status !== null ? ` (HTTP ${status})` : ""} on ${route} at ${iso(at)}`;
-  if (failure === "entitlement" || failure === "credits-exhausted" || failure === "unauthorized") {
-    return record(capability, route, "ENTITLEMENT_BLOCKED", what, at);
+  if (failure === "unauthorized") {
+    return record(capability, route, "DOCUMENTED", `${NO_ROUTE_EVIDENCE_PREFIX}key rejected (HTTP ${status ?? 401}) on ${route} at ${iso(at)}; route not verified`, at);
+  }
+  if (failure === "cancelled") {
+    return record(capability, route, "DOCUMENTED", `${NO_ROUTE_EVIDENCE_PREFIX}our own deadline or cancel cut the call short on ${route} at ${iso(at)}; route not verified`, at);
+  }
+  const what = `${failure}${status !== null ? ` (HTTP ${status})` : ""} on ${route} at ${iso(at)}`;
+  if (failure === "entitlement" || failure === "credits-exhausted") {
+    return record(capability, route, "ENTITLEMENT_BLOCKED", `${OBSERVED_PREFIX}${what}`, at);
   }
   if (failure === "not-found" && extra.notFoundIsSubject) {
     return record(capability, route, "DOCUMENTED", `${NO_CONTACT_PREFIX}404 for an unknown subject; the route answered but no payload was verified`, at);
   }
-  return record(capability, route, "UNAVAILABLE", what, at);
+  // The vendor said its upstream did not answer for THIS subject in time: transient evidence, never a verdict (rule 3).
+  if (result.retryable === true) {
+    return record(capability, route, "DOCUMENTED", `${TRANSIENT_PREFIX}${what}, retryable upstream timeout (the provider marked it transient)`, at);
+  }
+  return record(capability, route, "UNAVAILABLE", `${OBSERVED_PREFIX}${what}`, at);
+}
+
+/**
+ * A stream entitlement as `/v2/me` states it: a bare boolean (documented) or
+ * the live `{path, included}` object. Read here as well as in the adapter so a
+ * caller holding the raw form cannot turn "excluded" into "did not say".
+ */
+function streamFlag(v: unknown): boolean | null {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "object" && v !== null && typeof (v as { included?: unknown }).included === "boolean") return (v as { included: boolean }).included;
+  return null;
 }
 
 /**
@@ -231,15 +272,20 @@ export function capabilityFromCall(
  */
 export function capabilityFromAccount(account: AccountInfo, at: number): CapabilityRecord[] {
   const plan = account.plan ?? "unknown";
-  const one = (capability: string, route: string, flag: boolean | null, field: string, need: string): CapabilityRecord =>
-    flag === false
-      ? record(capability, route, "ENTITLEMENT_BLOCKED", `${OBSERVED_PREFIX}/v2/me streams.${field}=false on plan ${plan}; ${need}`, at)
+  const one = (capability: string, route: string, raw: unknown, statedPath: string | null | undefined, field: string, need: string): CapabilityRecord => {
+    const flag = streamFlag(raw);
+    // The vendor names the socket each entitlement covers; one that is not the route we open is worth saying.
+    const path = typeof statedPath === "string" && statedPath !== route ? `; the plan names ${statedPath}, not ${route}` : "";
+    return flag === false
+      ? record(capability, route, "ENTITLEMENT_BLOCKED", `${OBSERVED_PREFIX}/v2/me streams.${field} not included on plan ${plan}; ${need}${path}`, at)
       : flag === true
-        ? record(capability, route, "DOCUMENTED", `${ENTITLED_PREFIX} per /v2/me streams.${field}=true on plan ${plan}; stream not yet probed`, at)
+        ? record(capability, route, "DOCUMENTED", `${ENTITLED_PREFIX} per /v2/me streams.${field} included on plan ${plan}; stream not yet probed${path}`, at)
         : record(capability, route, "DOCUMENTED", `${NO_CONTACT_PREFIX}/v2/me did not state streams.${field}`, at);
+  };
+  const paths = account.streamPaths ?? { appFeed: null, onChain: null };
   return [
-    one("ws-alerts", "/ws/alerts", account.streams.appFeed, "appFeed", "the app feed is on every plan, so this is unexpected"),
-    one("ws-trades", "/ws/trades", account.streams.onChain, "onChain", "the on-chain stream needs a Growth or Scale key"),
+    one("ws-alerts", "/ws/alerts", account.streams.appFeed, paths.appFeed, "appFeed", "the app feed is on every plan, so this is unexpected"),
+    one("ws-trades", "/ws/trades", account.streams.onChain, paths.onChain, "onChain", "the on-chain stream needs a Growth or Scale key"),
   ];
 }
 
@@ -250,10 +296,33 @@ export interface StreamProbe {
   /** Delivery delay the welcome frame announced (a free key goes to 15 s after 7 days). */
   delaySeconds?: number | null;
   closeCode?: number | null;
+  /**
+   * The vendor's close reason text, when the socket library hands it over.
+   * Untrusted: it is only matched against a few words, never stored.
+   */
+  closeReason?: string | null;
   /** HTTP status of a refused upgrade, when the socket library exposes one. */
   httpStatus?: number | null;
 }
 
+/** A close reason that names the plan or its entitlement. */
+const PLAN_REASON = /\b(plan|tier|entitle\w*|upgrade|subscription|not included|growth|scale|credits?)\b/i;
+/** A close reason that names the key itself. */
+const KEY_REASON = /\b(bad|invalid|unknown|revoked|expired|missing|wrong)\s+(api\s+)?key\b|\bunauthori[sz]ed\b|\bauthentication\b|\bnot authenticated\b/i;
+
+/**
+ * One stream probe's evidence. A welcome tests the stream. A refused upgrade
+ * with 403 is about the plan (ENTITLEMENT_BLOCKED); with 401 it is about the
+ * KEY and says nothing about the route (no evidence, as for REST).
+ *
+ * CLOSE 1008 IS "POLICY VIOLATION", NOT "YOUR PLAN". The vendor documents it
+ * for a plan without the stream, and it also closes a bad key with it
+ * (stream.test.ts models exactly that). So the close reason decides when it
+ * says which: plan words block the route, key words are no route evidence.
+ * A bare 1008 is recorded as what it is, "policy close (1008): key or plan",
+ * with no status claimed; the account's own stream flags (/v2/me) are the
+ * evidence for a plan block.
+ */
 export function capabilityFromStream(capability: string, route: string, probe: StreamProbe, at: number): CapabilityRecord {
   const base = BASELINE.get(capability);
   if (base?.status === "UNSUPPORTED") return { ...base };
@@ -263,10 +332,24 @@ export function capabilityFromStream(capability: string, route: string, probe: S
       ? record(capability, route, "PARTIAL", `${OBSERVED_PREFIX}welcome on ${route} at ${iso(at)}; delivery delayed ${delay} s`, at)
       : record(capability, route, "AUTHENTICATED_TESTED", `${OBSERVED_PREFIX}welcome on ${route} at ${iso(at)}; realtime`, at);
   }
-  // 1008 is the vendor's documented close for a key whose plan lacks the stream.
-  if (probe.closeCode === 1008 || probe.httpStatus === 401 || probe.httpStatus === 403) {
-    const how = probe.closeCode === 1008 ? "close 1008" : `HTTP ${probe.httpStatus}`;
-    return record(capability, route, "ENTITLEMENT_BLOCKED", `${OBSERVED_PREFIX}${how} on ${route} at ${iso(at)}`, at);
+  if (probe.httpStatus === 401) {
+    return record(capability, route, "DOCUMENTED", `${NO_ROUTE_EVIDENCE_PREFIX}key rejected (HTTP 401) on ${route} at ${iso(at)}; route not verified`, at);
+  }
+  if (probe.httpStatus === 403) {
+    return record(capability, route, "ENTITLEMENT_BLOCKED", `${OBSERVED_PREFIX}HTTP 403 on ${route} at ${iso(at)}`, at);
+  }
+  if (probe.closeCode === 1008) {
+    // Matched on a bounded copy; the reason text itself never reaches the record.
+    const reason = typeof probe.closeReason === "string" ? probe.closeReason.slice(0, 200) : "";
+    const keyWords = KEY_REASON.test(reason);
+    const planWords = PLAN_REASON.test(reason);
+    if (planWords && !keyWords) {
+      return record(capability, route, "ENTITLEMENT_BLOCKED", `${OBSERVED_PREFIX}close 1008 on ${route} at ${iso(at)}; the close reason names the plan`, at);
+    }
+    if (keyWords && !planWords) {
+      return record(capability, route, "DOCUMENTED", `${NO_ROUTE_EVIDENCE_PREFIX}close 1008 on ${route} at ${iso(at)}; the close reason names the key; route not verified`, at);
+    }
+    return record(capability, route, "DOCUMENTED", `${NO_ROUTE_EVIDENCE_PREFIX}policy close (1008): key or plan, on ${route} at ${iso(at)}; route not verified`, at);
   }
   const how = probe.closeCode != null ? `close ${probe.closeCode}` : probe.httpStatus != null ? `HTTP ${probe.httpStatus}` : "no welcome";
   return record(capability, route, "UNAVAILABLE", `${OBSERVED_PREFIX}${how} on ${route} at ${iso(at)}`, at);
@@ -284,11 +367,28 @@ function lastSuccessOf(r: CapabilityRecord): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-/** Fold newer evidence into the stored record. See the module comment for the two rules. */
+/** When the transient note in this evidence was observed, if it carries one. */
+function transientAtOf(evidence: string): number | null {
+  const m = TRANSIENT_AT.exec(evidence);
+  if (!m?.[1]) return null;
+  const t = Date.parse(m[1]);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Fold newer evidence into the stored record. See the module comment for the three rules. */
 export function mergeCapability(prior: CapabilityRecord | null | undefined, next: CapabilityRecord): CapabilityRecord {
   if (!prior) return next;
   if (prior.status === "UNSUPPORTED") return prior;
   if (next.status === "UNSUPPORTED") return next;
+  if (next.status === "DOCUMENTED" && next.evidence.startsWith(TRANSIENT_PREFIX)) {
+    // Rule 3: the standing verdict, its time and its last success stay; the newest transient failure is noted beside it.
+    const seen = Math.max(prior.verifiedAt, transientAtOf(prior.evidence) ?? -Infinity);
+    if (next.verifiedAt < seen) return prior;
+    // Nothing stood before but another transient note: the newer one replaces it.
+    if (prior.evidence.startsWith(TRANSIENT_PREFIX)) return next;
+    const standing = prior.evidence.replace(TRANSIENT_NOTE, "");
+    return { ...prior, evidence: clean(`${standing}; ${next.evidence}`, 700) };
+  }
   if (next.status === "DOCUMENTED") {
     // No evidence never downgrades. The one exception is an observed
     // entitlement lifting an observed block (the plan was upgraded).

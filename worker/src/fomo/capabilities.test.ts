@@ -20,7 +20,7 @@ import {
   mergeCapabilities,
   mergeCapability,
 } from "./capabilities";
-import { ROUTE_COST, type AccountInfo, type CallMeta, type ProviderFailure, type ProviderResult, type RouteName } from "./provider";
+import { createFomoClient, ROUTE_COST, type AccountInfo, type CallMeta, type ProviderFailure, type ProviderResult, type RouteName } from "./provider";
 import type { CapabilityRecord } from "./types";
 
 const T0 = Date.UTC(2026, 9, 5, 9, 0);
@@ -147,9 +147,48 @@ describe("capabilityFromCall", () => {
   });
 
   it("plan and credit refusals are ENTITLEMENT_BLOCKED", () => {
-    for (const f of ["entitlement", "credits-exhausted", "unauthorized"] as const) {
-      assert.equal(capabilityFromCall("leaderboard", "/r", failResult(f, { status: 403 })).status, "ENTITLEMENT_BLOCKED", f);
+    for (const [f, status] of [["entitlement", 403], ["credits-exhausted", 402]] as const) {
+      assert.equal(capabilityFromCall("leaderboard", "/r", failResult(f, { status })).status, "ENTITLEMENT_BLOCKED", f);
     }
+  });
+
+  it("a rejected key (401) is no evidence about the route, and never blocks it", () => {
+    const r = capabilityFromCall("leaderboard", "/v2/leaderboard/{window}", failResult("unauthorized", { status: 401 }));
+    assert.equal(r.status, "DOCUMENTED");
+    assert.match(r.evidence, /key rejected \(HTTP 401\)/);
+    assert.match(r.evidence, /route not verified/);
+    // Whatever the route had proved before, a bad key does not overwrite it.
+    const tested = capabilityFromCall("leaderboard", "/v2/leaderboard/{window}", okResult({ rows: [{}] }));
+    assert.equal(mergeCapability(tested, { ...r, verifiedAt: T0 + 1 }), tested);
+    assert.equal(mergeCapability(byName("leaderboard"), r).status, "DOCUMENTED");
+    // A plan or credit refusal on the same route still blocks it.
+    const blocked = capabilityFromCall("leaderboard", "/v2/leaderboard/{window}", failResult("entitlement", { status: 403, retrievedAt: T0 + 2 }));
+    assert.equal(mergeCapability(tested, blocked).status, "ENTITLEMENT_BLOCKED");
+  });
+
+  it("a 5xx the provider marked transient is transient evidence, never a verdict on the route", () => {
+    const transient: ProviderResult<unknown> = { ...(failResult("server-error", { status: 503 }) as Extract<ProviderResult<unknown>, { ok: false }>), retryable: true };
+    const r = capabilityFromCall("token-stats", "/v2/token/{address}/stats", transient);
+    assert.notEqual(r.status, "UNAVAILABLE", "one subject's slow upstream is not the route being down");
+    assert.match(r.evidence, /^transient: server-error \(HTTP 503\)/);
+    assert.match(r.evidence, /retryable upstream timeout/);
+    // On the documented baseline it is noted, and the route stays unverified, not down.
+    const onBaseline = mergeCapability(byName("token-stats"), r);
+    assert.equal(onBaseline.status, "DOCUMENTED");
+    assert.match(onBaseline.evidence, /^documented: /);
+    assert.match(onBaseline.evidence, /; transient: server-error \(HTTP 503\)/);
+    // A plain 5xx the provider did not call transient still is a verdict.
+    const plain = capabilityFromCall("token-stats", "/v2/token/{address}/stats", failResult("server-error", { status: 500 }));
+    assert.equal(plain.status, "UNAVAILABLE");
+    assert.doesNotMatch(plain.evidence, /retryable|transient/);
+  });
+
+  it("a call our own deadline or abort cut short is no evidence about the route", () => {
+    const r = capabilityFromCall("token-stats", "/v2/token/{address}/stats", failResult("cancelled", { status: null, attempts: 1 }));
+    assert.equal(r.status, "DOCUMENTED");
+    assert.match(r.evidence, /^no route evidence: our own deadline or cancel/);
+    const tested = capabilityFromCall("token-stats", "/v2/token/{address}/stats", okResult({ rows: [{}] }));
+    assert.equal(mergeCapability(tested, { ...r, verifiedAt: T0 + 1 }), tested);
   });
 
   it("a missing route, a 5xx, no connection or a timeout is UNAVAILABLE", () => {
@@ -231,6 +270,40 @@ describe("mergeCapability", () => {
     assert.equal(mergeCapability(partial, noContact(T0)).status, "PARTIAL");
   });
 
+  it("a transient failure after a success keeps the success: status, time and last-success stay", () => {
+    const S = "/v2/token/{address}/stats";
+    const tested = capabilityFromCall("token-stats", S, okResult({ rows: [{}] }));
+    const transientAt = (at: number): CapabilityRecord =>
+      capabilityFromCall("token-stats", S, { ...(failResult("server-error", { status: 503, retrievedAt: at }) as Extract<ProviderResult<unknown>, { ok: false }>), retryable: true });
+    let m = mergeCapability(tested, transientAt(T0 + 60_000));
+    assert.equal(m.status, "AUTHENTICATED_TESTED", "a retryable 503 for one subject does not downgrade a tested route");
+    assert.equal(m.verifiedAt, T0, "the verdict's time is still the success's");
+    assert.match(m.evidence, /^observed: HTTP 200/);
+    assert.ok(m.evidence.includes(`transient: server-error (HTTP 503) on ${S} at ${new Date(T0 + 60_000).toISOString()}`), m.evidence);
+    // A run of transients keeps one note, the newest; an older one arriving late changes nothing.
+    m = mergeCapability(m, transientAt(T0 + 120_000));
+    assert.equal(m.evidence.match(/transient:/g)?.length, 1);
+    assert.ok(m.evidence.includes(new Date(T0 + 120_000).toISOString()));
+    assert.equal(mergeCapability(m, transientAt(T0 + 90_000)), m);
+    // Only a failure the provider did not call transient marks it down, and the last success is still the success.
+    const down = mergeCapability(m, capabilityFromCall("token-stats", S, failResult("server-error", { status: 500, retrievedAt: T0 + 180_000 })));
+    assert.equal(down.status, "UNAVAILABLE");
+    assert.match(down.evidence, new RegExp(`last success ${new Date(T0).toISOString()}`));
+    assert.doesNotMatch(down.evidence, /transient:/);
+    // ...and a transient on a route already down keeps it down, with its last success.
+    const still = mergeCapability(down, transientAt(T0 + 240_000));
+    assert.equal(still.status, "UNAVAILABLE");
+    assert.match(still.evidence, new RegExp(`last success ${new Date(T0).toISOString()}`));
+    // A success clears the note.
+    const back = mergeCapability(still, capabilityFromCall("token-stats", S, okResult({ rows: [{}] }, { retrievedAt: T0 + 300_000 })));
+    assert.equal(back.status, "AUTHENTICATED_TESTED");
+    assert.doesNotMatch(back.evidence, /transient:/);
+    // With nothing before it, a newer transient replaces an older one rather than stacking.
+    const alone = mergeCapability(transientAt(T0), transientAt(T0 + 1));
+    assert.equal(alone.evidence.match(/transient:/g)?.length, 1);
+    assert.equal(alone.verifiedAt, T0 + 1);
+  });
+
   it("ignores evidence older than what it holds", () => {
     const later = down(T0 + 60_000);
     assert.equal(mergeCapability(later, ok), later);
@@ -255,8 +328,11 @@ describe("mergeCapability", () => {
 describe("streams and entitlements", () => {
   const account = (onChain: boolean | null, appFeed: boolean | null = true): AccountInfo => ({
     plan: "starter",
+    dailyLimit: null,
     credits: { monthly: 2_500_000, usedThisMonth: 0, prepaid: 0, remaining: 2_500_000 },
     streams: { appFeed, onChain },
+    streamPaths: { appFeed: null, onChain: null },
+    planExpiresAt: null,
     expiresAt: null,
   });
 
@@ -277,6 +353,29 @@ describe("streams and entitlements", () => {
     assert.equal(mergeCapability(blocked, capabilityFromAccount(account(null), T0 + 2)[1]!), blocked);
   });
 
+  it("the live {path, included} form, read through the adapter, blocks a plan without /ws/trades", async () => {
+    const body = JSON.parse(readFileSync(new URL("./testdata/live-shape-me.json", import.meta.url), "utf8")) as unknown;
+    const fetchImpl = (async () => new Response(JSON.stringify(body), { status: 200, headers: { "x-credits-cost": "0" } })) as typeof fetch;
+    const r = await createFomoClient({ apiKey: KEY, fetchImpl, now: () => T0 }).me();
+    assert.ok(r.ok);
+    const [alerts, trades] = capabilityFromAccount(r.data, T0);
+    assert.equal(trades!.status, "ENTITLEMENT_BLOCKED");
+    assert.match(trades!.evidence, /streams\.onChain not included on plan starter/);
+    assert.doesNotMatch(trades!.evidence, /no provider contact/);
+    assert.equal(alerts!.status, "DOCUMENTED");
+    assert.match(alerts!.evidence, /^observed: entitled/);
+    assert.equal(mergeCapability(byName("ws-trades"), trades!).status, "ENTITLEMENT_BLOCKED");
+  });
+
+  it("reads the raw object form too, and says when the plan names another socket", () => {
+    const raw = { ...account(null), streams: { appFeed: { path: "/ws/alerts", included: true }, onChain: { path: "/ws/trades", included: false } } } as unknown as AccountInfo;
+    const [alerts, trades] = capabilityFromAccount(raw, T0);
+    assert.equal(trades!.status, "ENTITLEMENT_BLOCKED");
+    assert.match(alerts!.evidence, /^observed: entitled/);
+    const moved = capabilityFromAccount({ ...account(false), streamPaths: { appFeed: "/ws/alerts", onChain: "/ws/onchain" } }, T0)[1]!;
+    assert.match(moved.evidence, /the plan names \/ws\/onchain, not \/ws\/trades/);
+  });
+
   it("a welcome frame tests the stream; a delayed feed is PARTIAL", () => {
     assert.equal(capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: true, delaySeconds: 0 }, T0).status, "AUTHENTICATED_TESTED");
     const delayed = capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: true, delaySeconds: 15 }, T0);
@@ -284,10 +383,36 @@ describe("streams and entitlements", () => {
     assert.match(delayed.evidence, /delayed 15 s/);
   });
 
-  it("a 1008 close or a refused upgrade is ENTITLEMENT_BLOCKED; anything else UNAVAILABLE", () => {
-    assert.equal(capabilityFromStream("ws-trades", "/ws/trades", { welcome: false, closeCode: 1008 }, T0).status, "ENTITLEMENT_BLOCKED");
+  it("a refused upgrade: 403 is the plan, 401 is the key and no route evidence", () => {
     assert.equal(capabilityFromStream("ws-trades", "/ws/trades", { welcome: false, httpStatus: 403 }, T0).status, "ENTITLEMENT_BLOCKED");
+    const badKey = capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: false, httpStatus: 401 }, T0);
+    assert.equal(badKey.status, "DOCUMENTED");
+    assert.match(badKey.evidence, /^no route evidence: key rejected \(HTTP 401\)/);
+    const tested = capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: true, delaySeconds: 0 }, T0);
+    assert.equal(mergeCapability(tested, { ...badKey, verifiedAt: T0 + 1 }), tested, "a bad key never blocks a stream that worked");
     assert.equal(capabilityFromStream("ws-trades", "/ws/trades", { welcome: false, closeCode: 1006 }, T0).status, "UNAVAILABLE");
+  });
+
+  it("close 1008 blocks the route only when its reason names the plan; a bad key or a bare 1008 claims nothing", () => {
+    const plan = capabilityFromStream("ws-trades", "/ws/trades", { welcome: false, closeCode: 1008, closeReason: "plan does not include the on-chain stream" }, T0);
+    assert.equal(plan.status, "ENTITLEMENT_BLOCKED");
+    assert.match(plan.evidence, /close 1008 .*names the plan/);
+
+    const key = capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: false, closeCode: 1008, closeReason: `bad key ${KEY}` }, T0);
+    assert.equal(key.status, "DOCUMENTED", "the vendor closes a bad key with 1008 too");
+    assert.match(key.evidence, /^no route evidence: close 1008 .*names the key/);
+    assert.ok(!key.evidence.includes(KEY), "the reason text is matched, never stored");
+
+    for (const closeReason of [undefined, null, "", "policy violation", "bad key for this plan"]) {
+      const bare = capabilityFromStream("ws-trades", "/ws/trades", { welcome: false, closeCode: 1008, closeReason }, T0);
+      assert.equal(bare.status, "DOCUMENTED", String(closeReason));
+      assert.match(bare.evidence, /policy close \(1008\): key or plan/);
+    }
+    // A bare 1008 changes no standing verdict: not a working stream's, and not a blocked one's.
+    const tested = capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: true }, T0);
+    const bare = capabilityFromStream("ws-alerts", "/ws/alerts", { welcome: false, closeCode: 1008 }, T0 + 1);
+    assert.equal(mergeCapability(tested, bare), tested);
+    assert.equal(mergeCapability(byName("ws-trades"), bare).status, "DOCUMENTED");
   });
 });
 

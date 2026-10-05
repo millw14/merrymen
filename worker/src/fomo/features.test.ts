@@ -163,6 +163,27 @@ describe("convictionChanges", () => {
     assert.equal(by.get("unk"), "sell-unclassified");
     assert.equal(by.has("mover"), false);
   });
+
+  it("the latest sell is the provider's latest: block time cannot reorder a trader's sells", () => {
+    const T = Math.floor((NOW - HOUR) / 5_000) * 5_000;
+    // Within one 5 s quantum: the earlier sell (seq 10) matched exactly, its block time 2 s after the provider's;
+    // the later sell (seq 11) did not match and carries only the provider time.
+    const earlier = event("alrt-a", "sell", "dana", { providerAlertSeq: 10, sourceEventAt: T, execAt: T + 2_000, positionValueUsd: 500, positionRealizedPnlUsdCumulative: -100 });
+    const later = event("alrt-b", "sell", "dana", { providerAlertSeq: 11, sourceEventAt: T, execAt: null, positionValueUsd: 0, positionRealizedPnlUsdCumulative: -250 });
+    for (const order of [[earlier, later], [later, earlier]]) {
+      const [c] = convictionChanges(order);
+      assert.equal(c!.change, "exit", "the provider-latest sell left the position at zero");
+      assert.deepEqual(c!.evidence.map((e) => e.id), ["fomo:event/alrt-a", "fomo:event/alrt-b"]);
+    }
+    // Across quanta, with the block 8 s before the provider (observed live): still the provider's order.
+    const a2 = event("alrt-c", "sell", "erin", { providerAlertSeq: 20, sourceEventAt: T, execAt: T + 1_000, positionValueUsd: 900 });
+    const b2 = event("alrt-d", "sell", "erin", { providerAlertSeq: 21, sourceEventAt: T + 5_000, execAt: T - 3_000, positionValueUsd: 0 });
+    assert.equal(convictionChanges([b2, a2])[0]!.change, "exit");
+    // Without a provider sequence, the block time is still the event's time.
+    const c1 = event("x1", "sell", "finn", { sourceEventAt: T, execAt: T + 2_000, positionValueUsd: 0 });
+    const c2 = event("x2", "sell", "finn", { sourceEventAt: T, execAt: T + 1_000, positionValueUsd: 700 });
+    assert.equal(convictionChanges([c1, c2])[0]!.change, "exit");
+  });
 });
 
 describe("thesisChanges", () => {
@@ -280,5 +301,19 @@ describe("changeSummary", () => {
     assert.ok(r.changes.includes("Distinct buyers: 1 → 2."));
     assert.ok(r.changes.includes("Distinct sellers: 0 → 1."));
     assert.ok(r.changes.some((c) => /Strongest objection is now/.test(c)));
+  });
+});
+
+describe("the span shown for a run of trades", () => {
+  it("never ends before it starts when block times and the provider's order disagree", () => {
+    // Ordered by the provider's sequence (101 then 102) in one 5 s bucket, but
+    // the first was matched to a block 2 s LATER than the second.
+    const a = event("b1", "buy", "alice", { sourceEventAt: NOW - 60_000, execAt: NOW - 58_000, providerAlertSeq: 101 });
+    const b = event("b2", "buy", "alice", { sourceEventAt: NOW - 60_000, execAt: NOW - 60_000, providerAlertSeq: 102 });
+    const [c] = convictionChanges([a, b]);
+    assert.ok(c, "two buys are accumulation");
+    assert.ok(c.firstAt <= c.lastAt, `span ${c.firstAt} → ${c.lastAt}`);
+    assert.equal(c.firstAt, NOW - 60_000);
+    assert.equal(c.lastAt, NOW - 58_000);
   });
 });

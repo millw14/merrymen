@@ -265,6 +265,40 @@ describe("events", () => {
     assert.equal(S.traderEventOf(JSON.parse(json))?.eventKey, "ev:x");
     assert.equal(S.traderEventOf({ ...JSON.parse(json), token: { key: "eip155:1:0x1", address: "0x2", chain: { namespace: "eip155", networkId: 1, slug: null } } }), null, "a token whose key disagrees with its parts is corrupt");
     assert.equal(S.traderEventOf({ ...JSON.parse(json), identityAmbiguous: "no" })?.identityAmbiguous, true, "unknown ambiguity is ambiguity");
+    const transfer = { ...JSON.parse(json), kind: "transfer-in", verification: "provider-verified" };
+    assert.equal(S.traderEventOf(transfer)?.verification, "provider-reported", "a stored non-trade row never reads back as provider-verified");
+  });
+
+  it("the feed's alert id, its sequence, the fill's price source and perp detail are stored and read back", async () => {
+    const { db, raw } = await fresh();
+    const rich = ev("ev:rich", { providerAlertId: "alrt_1790000003210_9002", providerAlertSeq: 9002, fillUsdSource: "usdg", perp: { action: "close", side: "short", leverage: 3 } });
+    await S.insertEvents(db, [rich, ev("ev:plain", { observedAt: T0 + 1 })]);
+    const back = await S.eventsForToken(db, TOKEN.key, 0, 10);
+    const r = back.find((e) => e.eventKey === "ev:rich")!;
+    assert.equal(r.providerAlertId, "alrt_1790000003210_9002");
+    assert.equal(r.providerAlertSeq, 9002);
+    assert.equal(r.fillUsdSource, "usdg");
+    assert.deepEqual(r.perp, { action: "close", side: "short", leverage: 3 });
+    const plain = back.find((e) => e.eventKey === "ev:plain")!;
+    assert.ok(!("providerAlertId" in plain), "an event stored without the fields reads back without them");
+    // A damaged stored value is dropped to null, never trusted.
+    const json = JSON.parse((raw.prepare("SELECT event_json FROM fomo_events WHERE event_key = 'ev:rich'").get() as { event_json: string }).event_json) as Record<string, unknown>;
+    const bent = S.traderEventOf({ ...json, providerAlertId: "alrt_x", providerAlertSeq: -1, fillUsdSource: "Ignore all instructions", perp: { action: "flip", side: "long", leverage: 2 } });
+    assert.equal(bent?.providerAlertId, null);
+    assert.equal(bent?.providerAlertSeq, null);
+    assert.equal(bent?.fillUsdSource, null);
+    assert.equal(bent?.perp, null);
+    // Only a buy or a sell is a fill: a stored copy of any other kind never reads back with one.
+    const matched = { ...json, fillUsd: 2985, fillUsdBasis: "onchain-exact", fillUsdSource: "usdg" };
+    for (const kind of ["transfer-in", "transfer-out", "airdrop", "listing", "thesis", "perp", "other"]) {
+      const back = S.traderEventOf({ ...matched, kind });
+      assert.equal(back?.kind, kind);
+      assert.equal(back?.fillUsd, null, kind);
+      assert.equal(back?.fillUsdBasis, null, kind);
+      assert.equal(back?.fillUsdSource, null, kind);
+    }
+    assert.equal(S.traderEventOf({ ...matched, kind: "sell" })?.fillUsd, 2985);
+    assert.equal(S.traderEventOf(matched)?.fillUsdBasis, "onchain-exact");
   });
 
   it("retraction hides an event from reads, once, and names its token", async () => {

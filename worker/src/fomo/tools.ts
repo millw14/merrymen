@@ -283,7 +283,8 @@ export interface TraderContextData {
     totalValueUsdFloor: number | null;
     complete: boolean | null;
     dropped: number;
-    byChain: { chain: string; rows: number; valueUsd: number | null }[];
+    /** Per chain: the sum of rows with a value (null when none has one) and how many rows have no value (unpriced). */
+    byChain: { chain: string; rows: number; valueUsd: number | null; unpricedRows: number }[];
   } | null;
   cohort: { member: boolean; followable: boolean | null; version: number | null; size: number | null } | null;
   profile: {

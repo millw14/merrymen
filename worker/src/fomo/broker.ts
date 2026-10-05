@@ -48,22 +48,28 @@ import type {
 // ── limits ──────────────────────────────────────────────────────────────────
 
 export const BROKER_LIMITS = Object.freeze({
-  /** A child's default bound on one request, IPC included. */
-  childTimeoutMs: 20_000,
+  /**
+   * A child's default bound on one request, IPC included. Above the
+   * orchestrator's own ceiling (serveMaxCallMs), so the orchestrator answers
+   * first, and that is above the provider's 45 s per-read deadline: live reads
+   * took up to 11 s an attempt, and a bound below the provider's would turn a
+   * slow but billed answer into "took too long".
+   */
+  childTimeoutMs: 55_000,
   /** Requests one child broker keeps open at once before answering "broker-busy". */
   childMaxInFlight: 8,
   /** The longest timeout any caller may ask for. */
   maxTimeoutMs: 120_000,
-  /** The direct broker's bound when a caller gives none. */
-  directTimeoutMs: 30_000,
+  /** The direct broker's bound when a caller gives none (above the provider's 45 s read deadline). */
+  directTimeoutMs: 50_000,
   /** Tool calls one child may have running in the orchestrator at once. */
   serveMaxInFlight: 4,
   /** Tool calls one child may start per rolling minute. */
   servePerMinute: 30,
   /** Memory and report operations get this many times the call allowance (they are cheap, but not free). */
   serveStoreFactor: 4,
-  /** The orchestrator's own ceiling on one tool call, whatever the child asked for. */
-  serveMaxCallMs: 30_000,
+  /** The orchestrator's own ceiling on one tool call, whatever the child asked for (above the provider's 45 s read deadline). */
+  serveMaxCallMs: 50_000,
   maxRequestBytes: 16 * 1024,
   maxResponseBytes: 256 * 1024,
   configuredRefreshMs: 60_000,
@@ -650,7 +656,7 @@ function envelopeFromOutcome(out: Bounded<unknown>, tool: FomoToolName, now: num
 export interface DirectBrokerOptions {
   now?: () => number;
   newId?: () => string;
-  /** Bound for a call that names no timeout (default 30 s). */
+  /** Bound for a call that names no timeout (default 50 s). */
   defaultTimeoutMs?: number;
   log?: (line: string) => void;
 }
@@ -692,6 +698,7 @@ export function createDirectBroker(service: FomoService, tenant: string, opts: D
             priority: o.priority,
             groupId: o.groupId ?? null,
             signal,
+            budgetMs: timeout,
           };
           return service.invoke(ctx, tool, args);
         },
@@ -858,7 +865,7 @@ export function childProcessBrokerPort(child: ChildProcess): BrokerPort {
 // ── IPC broker (hosted child) ───────────────────────────────────────────────
 
 export interface IpcBrokerOptions {
-  /** Default bound on one request, IPC included (20 s). A call's own timeoutMs wins. */
+  /** Default bound on one request, IPC included (55 s). A call's own timeoutMs wins. */
   timeoutMs?: number;
   now?: () => number;
   newId?: () => string;
@@ -1096,7 +1103,7 @@ export interface ServeBrokerOptions {
   perMinute?: number;
   maxRequestBytes?: number;
   maxResponseBytes?: number;
-  /** Ceiling on one tool call however long the child said it would wait (30 s). */
+  /** Ceiling on one tool call however long the child said it would wait (50 s). */
   maxCallMs?: number;
 }
 
@@ -1182,6 +1189,7 @@ export function serveBrokerRequests(port: BrokerPort, tenant: string, service: F
           priority: o.priority,
           groupId: o.groupId ?? null,
           signal,
+          budgetMs: timeoutOf(o.timeoutMs, maxCallMs, maxCallMs),
         };
         return service.invoke(ctx, tool, args);
       },
