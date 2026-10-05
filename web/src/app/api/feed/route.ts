@@ -16,6 +16,7 @@ import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
 import { readMeasuredMark } from "@/lib/held-marks";
+import { netFlows, readDistinctFlows, type FlowRecord } from "@/lib/distinct-flows";
 import type { FeedMeasured } from "@/lib/feed-pnl";
 
 /**
@@ -382,35 +383,29 @@ export async function GET(req: Request) {
     } catch {
       /* columns not migrated yet */
     }
+    // EACH MOVEMENT ONCE (distinct-flows.ts): a carry or a log on record twice
+    // is one deposit. Rows that contradict each other throw, and both figures
+    // stay null — no return — rather than sum them or pick one.
+    let flows: FlowRecord[] | null = null;
     try {
-      const row = (await db
-        .prepare(
-          `SELECT COUNT(*) AS n,
-                  COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-             FROM flows WHERE agent_id = ?${epochWhere}`,
-        )
-        .get(scope, ...epochArg)) as { n: number; net: number } | undefined;
-      netContributionsUsdg = !row || row.n === 0 ? null : row.net;
+      flows = await readDistinctFlows(db, scope, epoch);
+      const { n, net } = netFlows(flows);
+      netContributionsUsdg = n === 0 ? null : net;
     } catch {
-      /* flows arrives with a worker migration — null, never zero */
+      /* flows arrives with a worker migration, or its rows are withheld — null, never zero */
     }
     try {
       // The return's pair: the newest measured mark and what was booked by it.
       // Read on its own, not off the tail of `equity`: a dropped op holds for
       // 26 hours, and 900 rows is not always that far back.
       const m = await readMeasuredMark(db, scope, epoch);
-      if (m) {
-        const row = (await db
-          .prepare(
-            `SELECT COUNT(*) AS n,
-                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ?${epochWhere} AND at <= ?`,
-          )
-          .get(scope, ...epochArg, m.at)) as { n: number; net: number } | undefined;
-        measured = { equityUsdg: m.equity, at: fmtEpoch(m.at), netContributionsUsdg: !row || row.n === 0 ? null : row.net };
+      if (m && flows) {
+        // The same movements, collapsed over the whole run, then cut off at the mark.
+        const { n, net } = netFlows(flows, m.at);
+        measured = { equityUsdg: m.equity, at: fmtEpoch(m.at), netContributionsUsdg: n === 0 ? null : net };
       }
     } catch {
-      /* no equity or flows table yet: nothing measured, and the page says so */
+      /* no equity or flows table yet, or withheld flows: nothing measured, and the page says so */
     }
     try {
       const row = (await db

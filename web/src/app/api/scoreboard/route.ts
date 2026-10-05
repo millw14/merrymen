@@ -11,6 +11,7 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { readMeasuredMark } from "@/lib/held-marks";
+import { netFlows, readDistinctFlows } from "@/lib/distinct-flows";
 
 export const dynamic = "force-dynamic";
 
@@ -162,18 +163,17 @@ export async function GET(req: Request) {
       // AS OF THE MEASURED MARK: a flow booked after it — an owner transfer
       // that landed during a hold — is not in its cash, and subtracting it
       // publishes the transfer as profit.
+      //
+      // EACH MOVEMENT ONCE (distinct-flows.ts), collapsed before the cutoff:
+      // a carry or a log on record twice is one deposit. Rows that contradict
+      // each other throw, and the P&L is null rather than one of them.
       let contributed: number | null = null;
       try {
-        const row = (await db
-          .prepare(
-            `SELECT COUNT(*) AS n,
-                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ?${epochWhere}${latestAt === null ? "" : " AND at <= ?"}`,
-          )
-          .get(account, ...epochArg, ...(latestAt === null ? [] : [latestAt]))) as { n: number; net: number } | undefined;
-        contributed = !row || row.n === 0 ? null : row.net;
+        const flows = await readDistinctFlows(db, account, epochArg.length ? epochArg[0]! : null);
+        const { n, net } = netFlows(flows, latestAt ?? undefined);
+        contributed = n === 0 ? null : net;
       } catch {
-        /* flows arrives with a worker migration */
+        /* flows arrives with a worker migration, or its rows are withheld */
       }
       // Gas priced in USDG when it was burned, and how much could not be
       // priced — the count is what stops "net of gas" being a claim we can't
