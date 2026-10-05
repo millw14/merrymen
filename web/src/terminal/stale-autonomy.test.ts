@@ -244,6 +244,30 @@ describe("the desk says NOT RUNNING without losing a remedy", () => {
     assert.doesNotMatch(portfolio(silentHeld).body.textContent!, /not reported/);
   });
 
+  it("THE AGENT'S OWN LINE AND THE QUESTIONS OFFERED AGREE WITH THE PILL", () => {
+    // `stopped` is from `mode`, and a worker that went quiet while LIVE is
+    // never "stopped" by that reading. The desk used to put NOT RUNNING in the
+    // pill and "Here's my latest recorded trade." right under it.
+    const trade = { name: "Shogun", slug: "shogun", handle: null, action: "buy", symbol: "TSLA", sizeUsdg: 5,
+      reason: "momentum", paper: false, head: "swap", at: NOW - 7 * 3_600, outcome: "landed", outcomeText: null } as LiveMine["moves"][number];
+    const reply = (page: Document) => page.querySelector(".desk-reply p")!.textContent!;
+    const silent = desk(mineFor({ mode: "live", liveBlocker: null, workerSilentSince: SILENT }, { moves: [trade] }), null);
+    assert.match(reply(silent), /^I’m not trading right now\./);
+    assert.ok([...silent.querySelectorAll(".desk-prompts button")].some((b) => b.textContent === "Why can't you trade?"),
+      "and the first question offered is why");
+    const running = desk(mineFor({ mode: "live", liveBlocker: null }, { moves: [trade] }), null);
+    assert.equal(reply(running), "Here’s my latest recorded trade.", "a running agent still shows its trade");
+  });
+
+  it("the chat is told it is not trading, beside the NOT RUNNING it is shown", () => {
+    // The chat context is built from this screen's own view (chat-payload.ts),
+    // and `workerStatus` there is the label. `stopped` must say the same.
+    assert.match(AGENT, /const notTrading = stopped \|\| recovery !== null \|\| displayedAutonomy\.state === "not-running";/);
+    assert.match(AGENT, /const context: ChatContext = \{[^}]*stopped: notTrading \};/);
+    const chips = AGENT.slice(AGENT.indexOf("chatChips({"));
+    assert.match(chips.slice(0, chips.indexOf("})")), /stopped: notTrading,/);
+  });
+
   it("the note is the verdict's own sentence, and only NOT RUNNING has one", () => {
     assert.equal(notRunningNote({ state: "not-running", reason: "your agent has not reported since X" }), "Your agent has not reported since X.");
     for (const a of [

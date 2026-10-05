@@ -244,9 +244,22 @@ export function Agent({
     (t) => t.symbol.toUpperCase() === latest?.symbol?.toUpperCase(),
   );
   const change = dailyChange(mine);
+  /**
+   * IS IT TRADING RIGHT NOW, as this screen says it everywhere at once — the
+   * chat's context, the agent's own first line and the questions offered.
+   *
+   * `stopped` comes from `mode` alone, and `mode` is the last thing a worker
+   * said: a worker that went quiet while LIVE stays "not stopped" forever. So
+   * the pill said NOT RUNNING while the agent's line below it offered "my
+   * latest recorded trade", and the chat was told `stopped: false` beside
+   * `workerStatus: "NOT RUNNING"` — two answers to one question, and the model
+   * free to pick the wrong one. The prop keeps its meaning for every other
+   * reader; this screen asks the displayed verdict too.
+   */
+  const notTrading = stopped || recovery !== null || displayedAutonomy.state === "not-running";
   // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
   // chat-payload.ts by the controller, from this screen's own view of it.
-  const context: ChatContext = { mine, liveBlocker: recovery ? null : liveBlocker, perTrade, perDay, stopped: stopped || recovery !== null };
+  const context: ChatContext = { mine, liveBlocker: recovery ? null : liveBlocker, perTrade, perDay, stopped: notTrading };
   /**
    * ASK, AND SHOW IT AT ONCE.
    *
@@ -645,7 +658,7 @@ export function Agent({
           <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
         {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
-        <span className={`desk-status ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
+        <span className={`desk-status ${notTrading ? "paused" : ""}`}>
           <i />
           {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
         </span>
@@ -921,7 +934,7 @@ export function Agent({
           <div>
             <strong>{mine.name}</strong>
             <p>
-              {stopped || recovery
+              {notTrading
                 ? "I’m not trading right now. You can review my portfolio and trading limits here."
                 : latest
                   ? "Here’s my latest recorded trade."
@@ -1059,7 +1072,7 @@ export function Agent({
           <div className="desk-prompts">
             {chatChips({
               liveBlocker: recovery ? null : liveBlocker,
-              stopped: stopped || recovery !== null,
+              stopped: notTrading,
               latestSymbol: latest?.symbol ?? null,
               holding: positions.map((p) => p.symbol),
               lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,
