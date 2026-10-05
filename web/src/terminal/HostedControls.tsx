@@ -19,7 +19,7 @@ import { SkeletonRows } from "./Skeleton";
 import type { ReadState } from "./live";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { RecoveryNotice } from "./RecoveryNotice";
-import { pausedRecovery } from "./recovery-view";
+import { pausedRecovery, recoveryFunds } from "./recovery-view";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -111,7 +111,7 @@ export function WalletSignIn({onDone}:{onDone:()=>void}) {
  */
 export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh,onSignedIn}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void}) {
   if(account?.status.exists) {
-    if (pausedRecovery(account.status.recovery)) return <section className="hosted-entry"><h2>Your agent</h2><RecoveryNotice recovery={account.status.recovery}/><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
+    if (pausedRecovery(account.status.recovery)) return <section className="hosted-entry"><h2>Your agent</h2><RecoveryNotice recovery={account.status.recovery} funds={recoveryFunds(account.status)}/><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     if(portfolio==="unread") return <section className="hosted-entry"><h2>Your agent</h2><SkeletonRows rows={2} label="Loading your portfolio"/></section>;
     if(portfolio==="unreadable") return <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your portfolio again…" : <>We couldn&apos;t load your portfolio. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     return <section className="hosted-entry"><h2>Your agent</h2><p>Your portfolio data is not available yet.</p><button className="flow-primary" onClick={onRefresh}>Refresh portfolio</button></section>;
@@ -136,7 +136,7 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
         missing was ETH for fees. And where money is NOT the fix, this says so
         rather than letting a deposit address imply that it is. */}
     {(() => {
-      if (pausedRecovery(account.status.recovery)) return <RecoveryNotice recovery={account.status.recovery}/>;
+      if (pausedRecovery(account.status.recovery)) return <RecoveryNotice recovery={account.status.recovery} funds={recoveryFunds(account.status)}/>;
       const advice = blockerAdvice(account?.status.liveBlocker);
       if (!advice) return null;
       return (
