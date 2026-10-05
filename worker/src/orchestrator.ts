@@ -2936,22 +2936,44 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
     // child is already polling would be read from a file the child has by then
     // replaced with a fresh, unlinked default.
+    //
+    // A REFUSAL HERE HOLDS THIS TENANT, NOT THE FLEET. The privacy proof and the
+    // offset handoff refuse by throwing, and so does the pool when Postgres will
+    // not answer. Uncaught, that rejected through reconcile() and out of the
+    // main loop, and nothing handles an unhandled rejection: one tenant's
+    // refusal exited the whole supervisor, every other tenant's worker, hold
+    // and reply with it, and again on every restart while its state stood.
+    // Caught, it is what any other refusal here is: no worker, the lease and
+    // home kept, and the next pass asks again. Said without the error, which
+    // can carry a connection string or a private value.
     if (process.env.DATABASE_URL) {
-      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-      const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
-      if (!dek || !await recoveryReplyPrivacyAllowsFork({
-        tenant, home: childHome(tenant), shared, dek,
-        mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-      })) return;
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
+        if (!dek || !await recoveryReplyPrivacyAllowsFork({
+          tenant, home: childHome(tenant), shared, dek,
+          mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+        })) return;
+      } catch {
+        log(`[alert] ${tenant}: recovery privacy proof unavailable or refused — retaining its home without starting a worker`);
+        return;
+      }
     }
     await writeTelegramForChild(tenant);
     if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
-      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-      await handoffRecoveryReplyOffset({
-        tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
-        home: childHome(tenant), shared,
-        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-      });
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        await handoffRecoveryReplyOffset({
+          tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
+          home: childHome(tenant), shared,
+          mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+        });
+      } catch {
+        // The handoff is what puts the child's poll at or past what the
+        // recovery listener already answered. Without it, nothing polls the bot.
+        log(`[alert] ${tenant}: recovery reply offset not handed over — retaining its home without starting a worker`);
+        return;
+      }
     }
     // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
     // restoreTgGroupsForChild.
