@@ -414,10 +414,10 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  * some of them would be a door left open at the rest, and nobody reading one
  * gate could tell which kind it had forgotten.
  *
- * Only processes. What else an out-of-scope tenant is spared (its pending
- * kills, its expiry retirement, the paused-source report) is the rollout's
- * alone and is asked in reconcile with rolloutHeld: the accounting hold has
- * never stopped those, and this change does not make it.
+ * Only processes. What else an out-of-scope tenant is spared (its expiry
+ * retirement, the paused-source report) is the rollout's alone and is asked
+ * in reconcile with rolloutHeld: the accounting hold has never stopped those,
+ * and this change does not make it. Neither hold defers its owner's kill.
  */
 function operatorHold(tenant: string): string | null {
   if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
@@ -4365,15 +4365,16 @@ function childHomeTenants(): `0x${string}`[] {
  * running. Read from the disk rather than the children map, so a kill left
  * by a child that has since crashed is not missed.
  *
- * EXCEPT A TENANT THE ROLLOUT DOES NOT ADMIT. Its request stays in its home,
- * pending, and is carried out by the reconcile that first admits it, before
- * that pass can spawn anything (and spawnChild refuses over it regardless).
- * Nothing runs for it meanwhile, so nothing can arm the killed grant; carrying
- * it out now would delete the grant and send the removed-agent sweep through
- * a home the rollout has promised to leave as the incident left it.
+ * WHATEVER THE ROLLOUT SAYS (fleet-rollout.ts). A kill only takes authority
+ * away, and it is the owner's: a tenant the operator has not admitted is
+ * still one its owner may revoke, as a DELETE /api/grants already does under
+ * any scope. Waiting for admission would leave a revoked grant stored, and
+ * unconfirmed, for as long as the tenant is held, behind a request that lives
+ * only in a home a redeploy may discard (kill-request.ts). The removed-agent
+ * sweep that follows keeps the original book, as it does for any revoke.
  */
 function pendingKillTenants(): `0x${string}`[] {
-  return childHomeTenants().filter((n) => !rolloutHeld(n) && killRequested(childHome(n)));
+  return childHomeTenants().filter((n) => killRequested(childHome(n)));
 }
 
 /**
@@ -4715,14 +4716,13 @@ export async function reconcile(): Promise<void> {
   // finds the grant already absent, which is also `revoked`.
   // See kill-request.ts.
   //
-  // Not for a tenant the rollout does not admit: its kill waits, pending, for
-  // the pass that admits it, which carries it out here before anything can
-  // spawn (see pendingKillTenants).
+  // For a tenant the rollout does not admit too, as under FLEET_HALT: a kill
+  // only takes authority away (see pendingKillTenants).
   const nowSec = Math.floor(Date.now() / 1000);
   const kept: `0x${string}`[] = [];
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (!rolloutHeld(lc) && (await honourKill(lc, nowSec)).outcome === "revoked") continue;
+    if ((await honourKill(lc, nowSec)).outcome === "revoked") continue;
     kept.push(tenant);
   }
   tenants = kept;
