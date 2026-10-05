@@ -55,6 +55,28 @@
  * anything the child holds, so it can be neither counted once nor left out
  * safely. The seed fails, which is the marker below.
  *
+ * SO DOES A PENDING OP NOTHING IN THE FLEET WILL EVER SETTLE. An op the shared
+ * ledger still calls 'submitted' is charged, whatever its age, exactly as the
+ * child's own row would be — but the child's own row has a resolver (index.ts
+ * resolveStrandedOps) that asks the chain and settles it, and a seeded one has
+ * none. The arm's reconciler re-records only what LANDED within its 26h
+ * lookback, and the mirror settles the shared row only from a row the child
+ * holds. An op that reverted, was dropped, or landed before that lookback
+ * would be charged for ever and in silence: a day that reads as spent, a
+ * refusal that says the day rolls, no event, no alert. So once such an op was
+ * sent longer ago than that lookback (STRANDED_RESOLVE_WINDOW_SEC) and the
+ * child's ledger still holds no row for it, the day is UNKNOWN: the seed fails
+ * as above, the marker holds new entries, the orchestrator logs an [alert] and
+ * the owner is told. A child
+ * that DOES hold the hash keeps its own resolver's word, as before. Until that
+ * age the op stays charged, and the orchestrator looks again when it reaches
+ * it (BudgetSeedResult `recheckAt`) — in a running child too, not only at the
+ * next spawn. The hold lifts on the first look after the shared row stops
+ * reading 'submitted' or the child's ledger holds the op. Settling one is an
+ * operator's decision, made with a terminal receipt in hand (the plan's #258
+ * receipt classifier); nothing here guesses, and nothing here writes a trade
+ * status.
+ *
  * UNTIL A SEED EXISTS, NEW ENTRIES GET NO HEADROOM. The orchestrator writes an
  * UNRESTORED marker in the child's home BEFORE it reads anything and removes it
  * only after every seed row is in; refreshBudget reads a standing marker as a
@@ -80,6 +102,7 @@ import path from "node:path";
 import { getAddress, isAddress } from "viem";
 
 import type { Db } from "./db";
+import { STRANDED_RESOLVE_WINDOW_SEC } from "./flow-inference";
 
 /**
  * The trailing day carried down from the shared ledger, one row per operation.
@@ -178,7 +201,25 @@ export interface BudgetSeedEntry {
   transferUsdg: number;
   pending: boolean;
   settledAt: number;
+  /** When a pending op was sent: its oldest 'submitted' row's created_at. Null when not pending. */
+  pendingSince: number | null;
 }
+
+/**
+ * How long after it was sent a pending op can still be settled by something in
+ * the fleet: the resolver's and the arm reconciler's lookback. Past it, with no
+ * row in the child's ledger, nothing will (see the header).
+ */
+export const UNSETTLEABLE_AFTER_SEC = STRANDED_RESOLVE_WINDOW_SEC;
+
+/**
+ * THE TRAILING DAY IS UNKNOWN, AND WAITING WILL NOT MAKE IT KNOWN: a live row
+ * with no hash, or a pending op nothing in the fleet will settle. Told apart
+ * from a failure that a later pass can clear (an outage, a busy ledger), so the
+ * orchestrator puts it in front of an operator, and so a re-check of a running
+ * child holds its entries rather than leaving its last seed standing.
+ */
+export class BudgetDayUnknown extends Error {}
 
 /** The account as written, lowercase and EIP-55 — the spellings the mirror's own seek asks for. */
 function spellingsOf(account: string): [string, string, string] {
@@ -193,15 +234,17 @@ function spellingsOf(account: string): [string, string, string] {
  * getTransferredTodayUsdg), with `nowSec` standing in for unixepoch(). Grouped
  * by lower(user_op_hash), so an op carried up twice — once by the incarnation
  * that executed it, once as a rebuilt child's reconciled copy — is one entry,
- * at the larger of the two figures and still pending if either row is.
+ * at the larger of the two figures and still pending if either row is — since
+ * the older of its 'submitted' rows was written.
  *
- * THROWS when a live row in the window has no hash: the seed is unknown.
+ * THROWS BudgetDayUnknown when a live row in the window has no hash.
  */
 export async function readBudgetSeed(shared: Db, account: string, cashToken: string, nowSec: number): Promise<BudgetSeedEntry[]> {
   const rows = (await shared
     .prepare(
       `SELECT lower(user_op_hash) AS op_hash, COUNT(*) AS n,
               MAX(CASE WHEN status = 'submitted' THEN 1 ELSE 0 END) AS pending,
+              MIN(CASE WHEN status = 'submitted' THEN created_at END) AS pending_since,
               MAX(COALESCE(budget_settled_at, created_at)) AS settled_at,
               MAX(CASE WHEN kind != 'vault-withdraw' THEN amount_usdg ELSE 0 END) AS gross_usdg,
               MAX(CASE WHEN kind != 'vault-withdraw'
@@ -216,19 +259,40 @@ export async function readBudgetSeed(shared: Db, account: string, cashToken: str
     .all(cashToken.toLowerCase(), ...spellingsOf(account), Math.floor(nowSec) - 86_400)) as Record<string, unknown>[];
   const unhashed = rows.find((r) => r.op_hash === null || r.op_hash === undefined || r.op_hash === "");
   if (unhashed) {
-    throw new Error(
+    throw new BudgetDayUnknown(
       `${Number(unhashed.n ?? 0)} live row(s) in the trailing 24h carry no operation hash, so they cannot be told ` +
         "apart from the child's own — the trailing day is unknown",
     );
   }
-  return rows.map((r) => ({
-    opHash: String(r.op_hash),
-    spendUsdg: Number(r.spend_usdg ?? 0),
-    grossUsdg: Number(r.gross_usdg ?? 0),
-    transferUsdg: Number(r.transfer_usdg ?? 0),
-    pending: Number(r.pending ?? 0) === 1,
-    settledAt: Number(r.settled_at ?? 0),
-  }));
+  return rows.map((r) => {
+    const pending = Number(r.pending ?? 0) === 1;
+    return {
+      opHash: String(r.op_hash),
+      spendUsdg: Number(r.spend_usdg ?? 0),
+      grossUsdg: Number(r.gross_usdg ?? 0),
+      transferUsdg: Number(r.transfer_usdg ?? 0),
+      pending,
+      settledAt: Number(r.settled_at ?? 0),
+      pendingSince: pending && r.pending_since !== null && r.pending_since !== undefined ? Number(r.pending_since) : null,
+    };
+  });
+}
+
+/**
+ * The PENDING entries the child's ledger holds no row for — the ones only the
+ * seed charges, and nothing in the child will ever settle. Matched on the hash
+ * as the child writes it (lowercase; store.ts withBudgetSeed says why), under
+ * any spelling of the account. A home no worker has opened yet has no ledger,
+ * and holds none of them.
+ */
+async function unheldPending(local: Db, agent: string, entries: readonly BudgetSeedEntry[]): Promise<BudgetSeedEntry[]> {
+  const pending = entries.filter((e) => e.pending);
+  if (pending.length === 0) return [];
+  if (!(await local.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'trades'").get())) return pending;
+  const holds = local.prepare("SELECT 1 AS ok FROM trades WHERE agent_id IN (?, ?, ?) AND user_op_hash = ? LIMIT 1");
+  const unheld: BudgetSeedEntry[] = [];
+  for (const e of pending) if (!(await holds.get(...spellingsOf(agent), e.opHash))) unheld.push(e);
+  return unheld;
 }
 
 /**
@@ -254,13 +318,19 @@ export async function writeBudgetSeed(local: Db, agent: string, entries: readonl
 }
 
 export type BudgetSeedResult =
-  | { ok: true; restored: number }
+  /**
+   * `recheckAt`: when the oldest pending op only the seed charges reaches
+   * UNSETTLEABLE_AFTER_SEC, unix seconds — the orchestrator seeds again then, to
+   * learn whether anything settled it. Null when the seed charges none.
+   */
+  | { ok: true; restored: number; recheckAt: number | null }
   /**
    * `marked`: the child will read the day as unrestored, so its entries have no
    * headroom. Asked of the home itself, the way the child asks it — false only
    * when no marker could be put there and none stands.
+   * `unknown`: BudgetDayUnknown — a later pass will not clear it on its own.
    */
-  | { ok: false; why: string; marked: boolean };
+  | { ok: false; why: string; marked: boolean; unknown: boolean };
 
 /**
  * ONE SEED ATTEMPT, for one agent's child.
@@ -269,7 +339,11 @@ export type BudgetSeedResult =
  *           dies half way — the process, the database, this function — leaves
  *           a child that arms with no headroom, never one that arms on an
  *           empty day.
- *   retry — a running child whose marker stands. A failure leaves it standing.
+ *   retry — a running child whose marker stands, or whose seed charges a
+ *           pending op that has reached its `recheckAt`. A failure leaves the
+ *           marker and the seed as they were — except an UNKNOWN day, which
+ *           writes the marker: a running child that learns nothing will settle
+ *           an op it is charged for is held from then on, not at its next spawn.
  *
  * Success writes every row, THEN clears the marker. Both databases are opened
  * through the thunks inside the try, so a ledger that will not open is a
@@ -285,21 +359,39 @@ export async function seedBudget(i: {
   shared: () => Promise<Db>;
 }): Promise<BudgetSeedResult> {
   let markFailure = "";
-  if (i.when === "spawn") {
+  const mark = () => {
     try {
       markBudgetUnrestored(i.home, i.nowSec);
     } catch (m) {
       markFailure = `; the unrestored marker could not be written either (${m instanceof Error ? m.message : String(m)})`;
     }
-  }
+  };
+  if (i.when === "spawn") mark();
   try {
     const entries = await readBudgetSeed(await i.shared(), i.agent, i.cashToken, i.nowSec);
-    await writeBudgetSeed(i.local(), i.agent, entries, i.cashToken, i.nowSec);
+    const local = i.local();
+    // CHARGED ONLY HERE, AND PAST THE AGE ANYTHING COULD SETTLE THEM: unknown.
+    // An op with no recorded send time is given no benefit of the doubt.
+    const unheld = await unheldPending(local, i.agent, entries);
+    const settleBy = (e: BudgetSeedEntry) => (e.pendingSince ?? -Infinity) + UNSETTLEABLE_AFTER_SEC;
+    const stranded = unheld.filter((e) => settleBy(e) <= i.nowSec);
+    if (stranded.length > 0) {
+      const oldest = Math.min(...stranded.map((e) => e.pendingSince ?? -Infinity));
+      throw new BudgetDayUnknown(
+        `${stranded.length} op(s) the shared ledger still calls 'submitted' were sent ` +
+          `${Number.isFinite(oldest) ? `up to ${Math.round((i.nowSec - oldest) / 3_600)}h` : "at an unrecorded time"} ago ` +
+          `and this child's ledger holds none of them (${stranded.map((e) => `${e.opHash.slice(0, 10)}…`).join(", ")}): ` +
+          `nothing in the fleet will settle them, so the trailing day is unknown until an operator does`,
+      );
+    }
+    await writeBudgetSeed(local, i.agent, entries, i.cashToken, i.nowSec);
     // ONLY NOW, with every row in, may the child's caps read the day as known.
     clearBudgetUnrestored(i.home);
-    return { ok: true, restored: entries.length };
+    return { ok: true, restored: entries.length, recheckAt: unheld.length ? Math.min(...unheld.map(settleBy)) : null };
   } catch (e) {
+    const unknown = e instanceof BudgetDayUnknown;
+    if (unknown && i.when === "retry") mark();
     const why = e instanceof Error ? e.message : String(e);
-    return { ok: false, why: `${why}${markFailure}`, marked: budgetUnrestored(i.home) };
+    return { ok: false, why: `${why}${markFailure}`, marked: budgetUnrestored(i.home), unknown };
   }
 }
