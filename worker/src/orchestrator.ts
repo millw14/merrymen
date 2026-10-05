@@ -414,10 +414,11 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  * some of them would be a door left open at the rest, and nobody reading one
  * gate could tell which kind it had forgotten.
  *
- * Only processes. What else an out-of-scope tenant is spared (its expiry
- * retirement, the paused-source report) is the rollout's alone and is asked
- * in reconcile with rolloutHeld: the accounting hold has never stopped those,
- * and this change does not make it. Neither hold defers its owner's kill.
+ * Only processes. What else an out-of-scope tenant is spared (the leased part
+ * of its expiry retirement, the paused-source report) is the rollout's alone
+ * and is asked with rolloutHeld: the accounting hold has never stopped those,
+ * and this change does not make it. Neither hold defers its owner's kill, nor
+ * keeps an expired key's copy on the volume.
  */
 function operatorHold(tenant: string): string | null {
   if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
@@ -4214,6 +4215,13 @@ async function retireExpiredGrants(
     // Cold inactive tenants have no process or lease, but can still retain an
     // obsolete signing-key copy on the mounted volume.
     await scrubInactiveGrantForChild(lc, nowSec);
+    // OUT OF THE ROLLOUT (fleet-rollout.ts): that scrub, and nothing more. It
+    // only takes authority away, needs no lease or process, and leaves the
+    // book and everything else in the home alone; an expired key's copy
+    // should not sit on the volume, and in its backups, for as long as the
+    // tenant is held. What follows stops a process, mirrors its book under the
+    // lease and then lets the lease go: that waits for the pass that admits it.
+    if (rolloutHeld(lc)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
@@ -4747,13 +4755,13 @@ export async function reconcile(): Promise<void> {
     killChild(tenant);
     standDownHolder(tenant);
   }
-  // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: no expiry retirement
-  // (which scrubs grant.json and takes a lease for the final mirror) and no
-  // paused-source report (which takes a lease to look). Both run, unchanged,
-  // on the pass that admits it. The accounting hold has never skipped them.
-  const admitted = tenants.filter((tenant) => !rolloutHeld(tenant));
-  await retireExpiredGrants(admitted, expiresAtByTenant, nowSec);
-  await reportPausedFleetSources(admitted);
+  // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: of expiry retirement,
+  // only the scrub of an expired signing-key copy (retireExpiredGrants), and
+  // no paused-source report (which takes a lease to look). The rest runs,
+  // unchanged, on the pass that admits it. The accounting hold has never
+  // skipped either.
+  await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
+  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant)));
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
