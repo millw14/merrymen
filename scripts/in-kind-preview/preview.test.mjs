@@ -281,6 +281,29 @@ describe('the preview', () => {
     assert.equal(shogun.classification.capitalCandidate, false, '…and changed nothing');
   });
 
+  it('matches a trades row by the movement\'s OWN operation, so a sweep never borrows a bundled swap\'s row', async () => {
+    const BUNDLE = { hash: '0x' + '56'.repeat(32), block: 500,
+      input: handleOps([
+        { sender: ME, nonce: rootNonce(6n), callData: single(TSLA.address, 0n, '0xa9059cbb') },
+        { sender: ME, nonce: sessionNonce(12n), callData: single(POOL, 0n) },
+      ]),
+      logs: [before(), transfer(TSLA.address, ME, TENANT, 13n * 10n ** 18n), opEvent(ME, rootNonce(6n)),
+        transfer(USDG, ME, POOL, 25_000_000n), transfer(PEPE, POOL, ME, 400n * 10n ** 18n), opEvent(ME, sessionNonce(12n))] };
+    const swapOp = (await preview(SNAPSHOT, [BUNDLE])).p.accounts[0].movements.find(m => m.asset === PEPE).userOpHash;
+    const withSwapRow = { ...SNAPSHOT, tradeHashes: [{ account: ME, userOpHash: swapOp, txHash: BUNDLE.hash, status: 'landed' }] };
+    const { p } = await preview(withSwapRow, [BUNDLE]);
+    const [sweep, swap] = p.accounts[0].movements;
+    assert.equal(sweep.classification.kind, 'asset-out');
+    assert.equal(sweep.recordedTradeRow, false, 'the swap\'s row is not the sweep\'s');
+    assert.equal(sweep.tradeRowMatch, null);
+    assert.equal(swap.recordedTradeRow, true);
+    assert.equal(swap.tradeRowMatch, 'user-op');
+    assert.equal(p.summary.candidatesWithoutTradeRow, 1);
+    // A row that names no operation is matched by its transaction, and says so.
+    const txOnly = (await preview({ ...SNAPSHOT, tradeHashes: [{ account: ME, userOpHash: null, txHash: BUNDLE.hash, status: 'landed' }] }, [BUNDLE])).p;
+    assert.deepEqual(txOnly.accounts[0].movements.map(m => m.tradeRowMatch), ['tx-row-without-op', 'tx-row-without-op']);
+  });
+
   it('values the candidate two ways: V1 a candidate at the round in force, V2 an estimate never bookable', async () => {
     const { p } = await preview();
     const sweep = p.accounts[0].movements.find(m => m.txHash === SWEEP.hash);

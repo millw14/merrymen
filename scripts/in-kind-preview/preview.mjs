@@ -132,17 +132,29 @@ export async function buildPreview({ snapshot, accounts, rpc, deps, target, sour
   for (const s of bound) {
     const r = scanned.get(s.account);
     const marks = snapshot.marks.filter(m => m.account === s.account);
-    const tradeKeys = new Set(snapshot.tradeHashes.filter(t => t.account === s.account)
-      .flatMap(t => [t.userOpHash, t.txHash].filter(Boolean)));
+    const rows = snapshot.tradeHashes.filter(t => t.account === s.account);
+    const opKeys = new Set(rows.map(t => t.userOpHash).filter(Boolean));
+    const txKeys = new Set(rows.map(t => t.txHash).filter(Boolean));
+    // A row that names no operation can only ever be matched by its transaction.
+    const txOnlyKeys = new Set(rows.filter(t => !t.userOpHash && t.txHash).map(t => t.txHash));
     const movements = [];
     for (const m of r.movements) {
       const review = scanner.REVIEW_KINDS.includes(m.classification.kind);
+      // BY THE OPERATION WHEN THERE IS ONE. A bundle can carry an owner sweep
+      // beside an agent swap that has its row; matched by the transaction, the
+      // sweep would borrow the swap's row and drop out of the very count that
+      // exists to show the Shogun shape. The transaction is used only for a
+      // movement with no operation, or a row that names none.
+      const tradeRowMatch = m.userOpHash
+        ? (opKeys.has(m.userOpHash) ? 'user-op' : txOnlyKeys.has(m.txHash) ? 'tx-row-without-op' : null)
+        : (txKeys.has(m.txHash) ? 'tx' : null);
       movements.push({
         ...m,
         // AN OBSERVATION, NEVER AN INPUT. Shown so a reviewer can see the
         // Shogun shape — an op of ours the ledger has no row for — but the
         // classification above was decided before this was looked up.
-        recordedTradeRow: (m.userOpHash && tradeKeys.has(m.userOpHash)) || tradeKeys.has(m.txHash),
+        recordedTradeRow: tradeRowMatch !== null,
+        tradeRowMatch,
         valuation: review ? {
           v1: await value.valueAtRoundInForce({ asset: m.asset, amountRaw: m.amountRaw, at: m.at, reads }),
           v2: value.equityStepEstimate(marks, m.at),

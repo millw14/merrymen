@@ -116,7 +116,10 @@ The tool reads the following:
 
 A scope larger than these bounds is refused, never truncated. A `trades` row
 is shown next to a movement as an observation. It is never an input to the
-classification.
+classification. The row is matched by the movement's own operation hash. The
+transaction hash is used only for a movement with no operation, or for a row
+that names no operation, and `tradeRowMatch` says which key matched. Without
+this, an owner sweep bundled beside an agent swap would borrow the swap's row.
 
 The RPC transport admits `eth_chainId`, `eth_blockNumber`, `eth_getLogs`,
 `eth_getTransactionReceipt`, `eth_getTransactionByHash`,
