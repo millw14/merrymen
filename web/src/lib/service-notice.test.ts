@@ -248,6 +248,17 @@ describe("tradingPaused is wording", () => {
     assert.deepEqual(readers, [
       "web/src/app/api/service-notice/route.ts",
       "web/src/lib/service-notice.ts",
+      "web/src/terminal/App.tsx",
+      "web/src/terminal/ServiceNotice.tsx",
+    ]);
+    // App.tsx may only mount the banner and load its stylesheet — no prop,
+    // so nothing in the shell can hand the notice to anything else.
+    const app = readFileSync(path.join(root, "web/src/terminal/App.tsx"), "utf8");
+    const lines = app.split("\n").filter((l) => /service-notice|ServiceNotice/.test(l)).map((l) => l.trim());
+    assert.deepEqual(lines, [
+      'import { ServiceNotice } from "./ServiceNotice";',
+      'import "./service-notice.css";',
+      "<ServiceNotice />",
     ]);
   });
 });

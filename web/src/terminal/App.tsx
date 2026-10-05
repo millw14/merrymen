@@ -70,6 +70,8 @@ import {
 } from "./account-read";
 import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
 import { LoadFailure } from "./LoadFailure";
+import { ServiceNotice } from "./ServiceNotice";
+import "./service-notice.css";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
 import { useLiveNews, useSoundPref } from "./live-news";
@@ -506,6 +508,10 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {banner && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={clockShell.retryFailing}/>}
+        {/* THE OPERATOR'S FLEET-WIDE NOTICE, on every screen and to every
+            visitor, signed in or not. It takes no props on purpose: it reads
+            nothing of the account, and nothing here reads it. */}
+        <ServiceNotice />
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
