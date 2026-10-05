@@ -27,6 +27,7 @@ export function RecoveryNotice({ recovery, funds }: { recovery?: FleetRecoveryVi
       </p>
       <p>{funds.cash}</p>
       {funds.excludes ? <small>{funds.excludes}</small> : null}
+      {funds.paper ? <p>{funds.paper}</p> : null}
       {funds.withdraw ? <p>{funds.withdraw}</p> : null}
     </> : null}
     {typeof beat === "number" && Number.isFinite(beat) && beat > 0

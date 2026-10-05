@@ -90,6 +90,16 @@ const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
  *   - No renewal call to action and no "paused since". `since_at` on the hold
  *     row is when that row was first written, not when trading stopped, so a
  *     date from it would be a wrong fact stated precisely.
+ *
+ * PAPER IS SAID TO BE PAPER. The hold does not look at `mode`, so a paper
+ * tenant is held too, and it has a grant and a smart account like any other.
+ * Its profile then shows "Cash on chain: $0.00" in this notice and, right under
+ * it, the simulated book as "Last recorded portfolio balance". Each line is
+ * true; together, with no cue, they read as "my money is gone" — the reading
+ * this notice exists to prevent. So an explicit `mode === "paper"` adds the
+ * sentence that the recorded balance is simulated. Only that: a null or missing
+ * mode is "not said", never evidence of paper. It is the same `mode` that makes
+ * `recoveryAutonomy` say "Last recorded paper cash".
  */
 export interface RecoveryFunds {
   /** The grant's smart account, in full — the link target and the tooltip. */
@@ -104,11 +114,13 @@ export interface RecoveryFunds {
   cash: string;
   /** RECOVERY_CASH_EXCLUDES beside a figure that can exist; null on the test network, where none does. */
   excludes: string | null;
+  /** Said only when the published rail is exactly "paper": the recorded book is simulated. */
+  paper: string | null;
   /** Null until RECOVERY_WITHDRAW_VERIFIED. */
   withdraw: string | null;
 }
 
-export function recoveryFunds(status: Pick<AccountState["status"], "grant" | "balances"> | null | undefined,
+export function recoveryFunds(status: Pick<AccountState["status"], "grant" | "balances" | "mode"> | null | undefined,
   withdrawVerified: boolean = RECOVERY_WITHDRAW_VERIFIED): RecoveryFunds | null {
   const grant = status?.grant;
   const account = grant?.smartAccount;
@@ -127,6 +139,9 @@ export function recoveryFunds(status: Pick<AccountState["status"], "grant" | "ba
     cash: testnet ? "Cash on chain isn't read on the test network."
       : cash === null ? "Cash on chain: couldn't be read just now." : `Cash on chain: ${usd(cash)}.`,
     excludes: testnet ? null : RECOVERY_CASH_EXCLUDES,
+    paper: status?.mode === "paper"
+      ? "This agent is in paper mode. Its recorded balance is simulated, not real money, and is not held on chain."
+      : null,
     withdraw: withdrawVerified
       ? "Withdraw still works while trading is paused. It sends funds from this account to an address you choose."
       : null,

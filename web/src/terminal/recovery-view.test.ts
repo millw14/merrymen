@@ -164,7 +164,7 @@ describe("where the money is during recovery", () => {
     const funds = recoveryFunds(status())!;
     assert.deepEqual(funds, { account: ACCOUNT, short: "0x12aB…cDEF",
       explorer: `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`, testnet: false,
-      cash: "Cash on chain: $12.34.", excludes: RECOVERY_CASH_EXCLUDES, withdraw: null });
+      cash: "Cash on chain: $12.34.", excludes: RECOVERY_CASH_EXCLUDES, paper: null, withdraw: null });
     const page = notice(funds);
     const text = page.body.textContent!;
     assert.match(text, /Trading paused for recovery/);
@@ -301,6 +301,29 @@ describe("where the money is during recovery", () => {
       portfolio: "ok", onRefresh: noop, onSignedIn: noop }));
     assert.match(bare.body.textContent!, /Trading paused for recovery/);
     assert.doesNotMatch(bare.body.textContent!, /smart account|Cash on chain/);
+  });
+
+  it("a held paper tenant is told its recorded balance is simulated, beside a measured $0.00", () => {
+    const PAPER = /This agent is in paper mode\. Its recorded balance is simulated, not real money, and is not held on chain\./;
+    const funds = recoveryFunds(status(4663, { mode: "paper", balances: { ...balances, cashUsdg: "0" } }))!;
+    assert.equal(funds.cash, "Cash on chain: $0.00.");
+    assert.match(funds.paper!, PAPER);
+    const text = notice(funds).body.textContent!;
+    assert.match(text, /Cash on chain: \$0\.00\..*This agent is in paper mode\./);
+    assert.doesNotMatch(text, NEVER);
+    // The profile, where the simulated book sits right under the notice as the
+    // "Last recorded portfolio balance": the cue is in the same card as the $0.00.
+    const profile = doc(React.createElement(You, { mine: { ...mine, mode: "paper", equity: 1000, recovery: held, recoveryFunds: funds,
+      autonomy: recoveryAutonomy(autonomyOf({ mode: "paper", liveBlocker: null }), held) }, history: [1000, 1000],
+      stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
+    assert.match(profile.querySelector(".agent-recovery")!.textContent!, PAPER);
+    assert.match(profile.body.textContent!, /Last recorded portfolio balance/);
+    // Only an explicit paper rail says so: live, idle, null and absent never do.
+    for (const mode of ["live", "idle", null, undefined] as const) {
+      const other = recoveryFunds(status(4663, { mode, balances: { ...balances, cashUsdg: "0" } }))!;
+      assert.equal(other.paper, null, String(mode));
+      assert.doesNotMatch(notice(other).body.textContent!, /paper|simulated/i, String(mode));
+    }
   });
 
   it("the profile and the home strip say where the money is and keep Withdraw", () => {
