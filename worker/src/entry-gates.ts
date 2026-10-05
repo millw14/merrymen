@@ -159,12 +159,13 @@ export function intentEntryGate(
  * with a buy the wall is certain to refuse, and without this they are refused
  * once a tick for the life of the arm.
  *
- * ONE REJECTED ROW PER (VENUE, TOKEN, RULE) PER ARM, THEN WITHHELD. The first
- * is let through on purpose, so the wall writes its own refusal — the row, the
- * rule and the owner's notice — and the tape says why that coin is never
- * bought. Every repeat is withheld BEFORE ensureDecision: no decision row, no
- * public post, no refusal on the tape, nothing reserved. Withholding a repeat
- * cannot make anything replayable, because nothing was ever sent.
+ * ONE REJECTED ROW PER (VENUE, TOKEN, RULE) PER ARM, THEN WITHHELD. Until
+ * the wall has written it, the buy is let through on purpose, so the wall
+ * writes its own refusal — the row, the rule and the owner's notice — and the
+ * tape says why that coin is never bought. Every repeat after that is
+ * withheld BEFORE ensureDecision: no decision row, no public post, no refusal
+ * on the tape, nothing reserved. Withholding a repeat cannot make anything
+ * replayable, because nothing was ever sent.
  *
  * The venue is part of the key, not decoration: a swap refused for not being
  * watched and a curve buy of the same coin refused for not being in the grant
@@ -172,28 +173,52 @@ export function intentEntryGate(
  * spent the row and the other's remedy ("re-sign at /grant") never reached
  * the wall to be said.
  *
+ * THE ROW IS SPENT WHEN THE WALL WRITES IT, NOT WHEN THE INTENT IS LET GO.
+ * Between this check and checkPolicy sit three more doors — the Telegram
+ * group-entry claim, today's energy, ensureDecision — and any of them can
+ * stop the first gated buy with no row written. A latch that counted the row
+ * as spent on letting go would then withhold every repeat for the rest of the
+ * arm, and the refusal the comment above promises would never be on the tape.
+ * So `withhold` only READS, and `settle` — called with what the wall wrote —
+ * is the one place the row is spent: a rejected row naming THIS gate's rule.
+ * A row under another rule (the breaker, a cap) is a different sentence and
+ * leaves this one owed; the next proposal goes on to say it.
+ *
  * Cleared at every arm, with `suppressedIntents`: a re-sign is exactly what
  * lifts a gate, and the new arm must get its own first row.
  */
 export interface EntryGateLatch {
-  /** True when this intent is a gated entry whose one row this arm was already let through. */
+  /**
+   * True when this intent is a gated entry whose one row the wall has already
+   * written this arm. A read: asking never spends the row.
+   */
   withhold(intent: TradeIntent, limits: AgentLimits): boolean;
+  /**
+   * What the wall wrote for an intent `withhold` let go — the ledger facts
+   * processIntentReporting returns, null when no row was written. Spends the
+   * row only on a rejection under the gate's own rule; anything else is a no-op.
+   */
+  settle(intent: TradeIntent, limits: AgentLimits, row: { status: string; rejectRule?: string } | null | undefined): void;
   clear(): void;
 }
 
 export function entryGateLatch(): EntryGateLatch {
-  const passed = new Set<string>();
+  const rowed = new Set<string>();
+  const keyOf = (intent: TradeIntent, limits: AgentLimits) => {
+    const gate = intentEntryGate(intent, limits);
+    return gate ? { key: `${gate.venue}|${gate.token}|${gate.rule}`, rule: gate.rule } : null;
+  };
   return {
     withhold(intent, limits) {
-      const gate = intentEntryGate(intent, limits);
-      if (!gate) return false;
-      const key = `${gate.venue}|${gate.token}|${gate.rule}`;
-      if (passed.has(key)) return true;
-      passed.add(key);
-      return false;
+      const gate = keyOf(intent, limits);
+      return gate !== null && rowed.has(gate.key);
+    },
+    settle(intent, limits, row) {
+      const gate = keyOf(intent, limits);
+      if (gate && row?.status === "rejected" && row.rejectRule === gate.rule) rowed.add(gate.key);
     },
     clear() {
-      passed.clear();
+      rowed.clear();
     },
   };
 }

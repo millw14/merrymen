@@ -171,26 +171,39 @@ describe("what a gate must never touch", () => {
 });
 
 describe("the backstop: one rejected row per (venue, token, rule) per arm, then withheld", () => {
+  /**
+   * index.ts's proposal loop, as far as the latch sees it: ask `withhold`, and
+   * if the intent goes on, `settle` with the row the wall wrote — here the
+   * wall's own verdict, through checkPolicy, never a restatement of it. True
+   * when the intent was withheld.
+   */
+  const reach = (latch: ReturnType<typeof entryGateLatch>, intent: TradeIntent, l: AgentLimits): boolean => {
+    if (latch.withhold(intent, l)) return true;
+    const verdict = checkPolicy(intent, l, state);
+    latch.settle(intent, l, verdict.ok ? { status: "paper" } : { status: "rejected", rejectRule: verdict.rule });
+    return false;
+  };
+
   it("lets the FIRST gated buy through so the wall writes its own refusal, and withholds every repeat", () => {
     const latch = entryGateLatch();
     const l = limits();
-    assert.equal(latch.withhold(buySwap(WATCHED), l), false, "the one row this arm");
-    for (let tick = 0; tick < 50; tick++) assert.equal(latch.withhold(buySwap(WATCHED), l), true);
+    assert.equal(reach(latch, buySwap(WATCHED), l), false, "the one row this arm");
+    for (let tick = 0; tick < 50; tick++) assert.equal(reach(latch, buySwap(WATCHED), l), true);
   });
 
   it("keys on token AND rule, case-blind", () => {
     const latch = entryGateLatch();
     const l = limits();
-    assert.equal(latch.withhold(buySwap(WATCHED), l), false);
-    assert.equal(latch.withhold(buySwap(NEITHER), l), false, "another token gets its own row");
-    assert.equal(latch.withhold(buySwap(WATCHED.toUpperCase().replace("0X", "0x") as `0x${string}`), l), true);
+    assert.equal(reach(latch, buySwap(WATCHED), l), false);
+    assert.equal(reach(latch, buySwap(NEITHER), l), false, "another token gets its own row");
+    assert.equal(reach(latch, buySwap(WATCHED.toUpperCase().replace("0X", "0x") as `0x${string}`), l), true);
     // The same token refused under a different rule is a different fact, and
     // gets its own row: the owner is owed both sentences.
     const narrow = limits({ sellableAssets: [USDG] });
-    assert.equal(latch.withhold(buyCurve(OK), narrow), false, "asset-allowlist on the curve venue");
-    assert.equal(latch.withhold(buySwap(OK), narrow), false, "no-exit on the swap venue is a different rule");
-    assert.equal(latch.withhold(buyCurve(OK), narrow), true);
-    assert.equal(latch.withhold(buySwap(OK), narrow), true);
+    assert.equal(reach(latch, buyCurve(OK), narrow), false, "asset-allowlist on the curve venue");
+    assert.equal(reach(latch, buySwap(OK), narrow), false, "no-exit on the swap venue is a different rule");
+    assert.equal(reach(latch, buyCurve(OK), narrow), true);
+    assert.equal(reach(latch, buySwap(OK), narrow), true);
   });
 
   it("keys on the VENUE too: the same rule on a swap and on a curve is two refusals with two remedies", () => {
@@ -200,19 +213,38 @@ describe("the backstop: one rejected row per (venue, token, rule) per arm, then 
     // the grant (curve). Same token, same rule name, different sentence.
     assert.deepEqual(intentEntryGate(buySwap(NEITHER), l), { token: NEITHER, venue: "swap", rule: "asset-allowlist" });
     assert.deepEqual(intentEntryGate(buyCurve(NEITHER), l), { token: NEITHER, venue: "curve", rule: "asset-allowlist" });
-    assert.equal(latch.withhold(buySwap(NEITHER), l), false, "the swap's row");
-    assert.equal(latch.withhold(buyCurve(NEITHER), l), false, "and the curve's own row, not swallowed by the swap's");
-    assert.equal(latch.withhold(buySwap(NEITHER), l), true);
-    assert.equal(latch.withhold(buyCurve(NEITHER), l), true);
+    assert.equal(reach(latch, buySwap(NEITHER), l), false, "the swap's row");
+    assert.equal(reach(latch, buyCurve(NEITHER), l), false, "and the curve's own row, not swallowed by the swap's");
+    assert.equal(reach(latch, buySwap(NEITHER), l), true);
+    assert.equal(reach(latch, buyCurve(NEITHER), l), true);
+  });
+
+  it("THE ROW IS SPENT WHEN THE WALL WRITES IT — a gated buy stopped before the wall leaves it owed", () => {
+    const latch = entryGateLatch();
+    const l = limits();
+    // A refused group claim, a closed energy allowance or a failed decision
+    // row: `withhold` let it go and nothing ever reached the wall. Asking
+    // again, any number of times, must not spend the row.
+    for (let tick = 0; tick < 5; tick++) assert.equal(latch.withhold(buySwap(WATCHED), l), false, `stopped before the wall, tick ${tick}`);
+    // processIntentReporting returned null: no row was written.
+    latch.settle(buySwap(WATCHED), l, null);
+    assert.equal(latch.withhold(buySwap(WATCHED), l), false, "no row, nothing spent");
+    // The wall refused it under ANOTHER rule — the breaker, a cap. That is a
+    // different sentence; this one is still owed.
+    latch.settle(buySwap(WATCHED), l, { status: "rejected", rejectRule: "drawdown" });
+    assert.equal(latch.withhold(buySwap(WATCHED), l), false, "another rule's row does not say no-exit");
+    // Then it reaches the wall and the wall says `no-exit`: spent, for the arm.
+    latch.settle(buySwap(WATCHED), l, { status: "rejected", rejectRule: "no-exit" });
+    assert.equal(latch.withhold(buySwap(WATCHED), l), true);
   });
 
   it("never withholds what is not gated, and never an exit", () => {
     const latch = entryGateLatch();
     const l = limits();
     for (let tick = 0; tick < 5; tick++) {
-      assert.equal(latch.withhold(buySwap(OK), l), false);
+      assert.equal(reach(latch, buySwap(OK), l), false);
       assert.equal(
-        latch.withhold({ kind: "swap", target: ROUTER, sellToken: WATCHED, buyToken: USDG, sellAmountRaw: 1n, notionalUsdg: 1n }, l),
+        reach(latch, { kind: "swap", target: ROUTER, sellToken: WATCHED, buyToken: USDG, sellAmountRaw: 1n, notionalUsdg: 1n }, l),
         false,
       );
     }
@@ -221,9 +253,9 @@ describe("the backstop: one rejected row per (venue, token, rule) per arm, then 
   it("an arm clears it, so a re-sign starts with its own first row", () => {
     const latch = entryGateLatch();
     const l = limits();
-    latch.withhold(buySwap(WATCHED), l);
-    assert.equal(latch.withhold(buySwap(WATCHED), l), true);
+    reach(latch, buySwap(WATCHED), l);
+    assert.equal(reach(latch, buySwap(WATCHED), l), true);
     latch.clear();
-    assert.equal(latch.withhold(buySwap(WATCHED), l), false);
+    assert.equal(reach(latch, buySwap(WATCHED), l), false);
   });
 });
