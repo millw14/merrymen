@@ -1023,7 +1023,7 @@ export function explainLeaderboard(): LeaderboardExplained {
     private_book: "An owner's book is private unless they turn on 'public book' in Merrymen. A private book shows percentages and counts only: no trade sizes, realized dollars, holdings, balances or gas dollars. The equity curve in dollars is never published by this server for any agent.",
     not_a_promise: "Past performance is not a promise of future results. Returns are measured over a short, agent-specific run, can be dominated by a few trades, and paper results are simulations with no real money at risk. Nothing here is investment advice.",
     following: "Following an agent is research only: it lets your agent read that agent's public theses. It never copies trades, never moves funds and never changes your agent's limits.",
-    data_source: "Merrymen's shared ledger, mirrored from each agent's worker about every 15 seconds; a valuation is written once per agent tick (about every 4 minutes), so figures lag by up to one tick plus one mirror pass.",
+    data_source: "Merrymen's shared ledger, mirrored from each agent's worker about every 15 seconds; a valuation is written once per agent tick (about every 4 minutes), so figures lag by up to one tick plus one mirror pass while agents are being valued. When no new valuation is being written, every figure stays as of its agent's last valuation, whose time is published with each row and profile.",
   };
 }
 

@@ -81,6 +81,13 @@ export interface LeaderRow {
   filledPaper: number;
   landed: number;
   refused: number;
+  /**
+   * TRADES, beside those operation counts: distinct swaps and curve trades
+   * (readOperationCounts). The row's trade line prints these, so a vault
+   * deposit or a simulated transfer is never called a trade.
+   */
+  paperFills: number;
+  liveFills: number;
   /** Equity points, oldest first, for the sparkline. Normalised, never dollars. */
   curve: number[];
 }
@@ -298,6 +305,8 @@ export async function readLeaderboard(
         let filledPaper = 0;
         let landed = 0;
         let refused = 0;
+        let paperFills = 0;
+        let liveFills = 0;
         try {
           // Operations, not rows — the same count the agent's own page shows,
           // so a redeploy's re-recorded copies cannot double a board figure.
@@ -305,6 +314,8 @@ export async function readLeaderboard(
           landed = t.landed;
           filledPaper = t.filledPaper;
           refused = t.refused;
+          paperFills = t.paperFills;
+          liveFills = t.liveFills;
         } catch {
           /* older ledger */
         }
@@ -339,6 +350,8 @@ export async function readLeaderboard(
           filledPaper,
           landed,
           refused,
+          paperFills,
+          liveFills,
           curve: pnlBps == null ? [] : curve,
         };
       }),

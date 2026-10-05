@@ -12,7 +12,9 @@ import {
 import { strategyName } from "../strategy";
 import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
 import { unrankedShort } from "@/lib/rank-pnl";
-import { performanceOf } from "../agent-performance";
+import { performanceOf, staleSince } from "../agent-performance";
+import { useNow } from "../clock";
+import { shortDateTime } from "@/lib/format";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
 
@@ -62,6 +64,10 @@ export function Board({
 
   const mineSlug = mine?.slug;
   const folded = typeof retired === "number" && Number.isFinite(retired) ? retired : 0;
+  // A minute is fine enough for "how old is this valuation", and it is the
+  // only clock on this page.
+  const nowSec = Math.floor(useNow(60_000) / 1000);
+  const stale = staleSince(agents, nowSec);
 
   return (
     <div className={`page board-page${preview ? " board-preview" : ""}`}>
@@ -91,7 +97,14 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure, so a book that has not traded shows No trades yet rather than a flat return, and trades no valuation includes yet show Awaiting first valuation. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+      )}
+      {/* STALENESS, AND ONLY STALENESS. When no agent has been valued for a
+          while, every figure below is older than it looks, and the time a
+          tooltip used to hold is said here once and on each row. It never
+          says why nothing newer exists: nothing on this page records that. */}
+      {stale !== null && rows.length > 0 && (
+        <p className="performance-banner" role="status">No new valuations since {shortDateTime(stale * 1000)}. Each figure is as of its agent&apos;s last valuation.</p>
       )}
 
       {rows.length === 0 ? (
@@ -117,6 +130,7 @@ export function Board({
               key={r.agent.slug}
               row={r}
               you={r.agent.slug === mineSlug}
+              nowSec={nowSec}
               onProfile={onProfile}
             />
           ))}
@@ -142,15 +156,19 @@ export function Board({
 function Rank({
   row,
   you,
+  nowSec,
   onProfile,
 }: {
   row: Row;
   you: boolean;
+  nowSec: number;
   onProfile: (slug: string) => void;
 }) {
   const a = row.agent;
-  const performance = performanceOf(a);
-  const displayedReturn = performance.bps;
+  const performance = performanceOf(a, nowSec);
+  // A state stands in for the figure (performanceOf), so it is never also
+  // coloured as a gain or a loss.
+  const displayedReturn = performance.state === null ? performance.bps : null;
   const cls = ["rank", you ? "you" : ""].filter(Boolean).join(" ");
 
   return (
@@ -183,12 +201,14 @@ function Rank({
             <span className="rank-have" aria-label={`Current value ${performance.value}`}>{performance.value}</span>
             {a.performance && <small className="rank-book">{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
             {performance.lastValued !== null && <small className="rank-book">{performance.lastValued}</small>}
+            {performance.asOf !== null && <small className="rank-book performance-asof">{performance.asOf}</small>}
           </span>
           <span className="rank-return" title={performance.title}>
-            <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}`}>
-              {displayedReturn == null ? performance.gasIncomplete ? "Gas accounting unavailable" : a.performance ? "Unavailable" : a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn)}
+            <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>
+              {performance.state ?? (displayedReturn == null ? performance.gasIncomplete ? "Gas accounting unavailable" : a.performance ? "Unavailable" : a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn))}
             </span>
             {performance.pnl !== null && <small className="rank-pnl">{performance.pnl} P&L</small>}
+            {performance.note !== null && <small className="rank-book performance-note">{performance.note}</small>}
             {performance.gasIncomplete && displayedReturn != null && <small className="rank-book">Gas accounting unavailable</small>}
           </span>
         </div>
@@ -211,12 +231,21 @@ function Rank({
  * "filled 0" beside ten posts saying "filled on paper", and folding them
  * together is what re-arms that. A simulated fill is a real thing to have
  * done, and it is not a trade.
+ *
+ * AND A TRADE IS A TRADE. `landed` and `filledPaper` count operations, so a
+ * book whose only simulated activity was transfers read "11 paper trades"
+ * beside a profile that found none. Where the server counted trades
+ * (paperFills, liveFills) those are what is called trades; an operation that
+ * landed and is not one — a vault deposit — is still something the agent did,
+ * and says so. An older server sends operations only, read as before.
  */
 export function tradeLine(agent: LiveAgent): string {
-  if (agent.mode === "paper") return `${agent.filledPaper ?? 0} paper trades`;
+  const paper = agent.paperFills ?? agent.filledPaper ?? 0;
+  if (agent.mode === "paper") return `${paper} paper trades`;
+  const live = agent.liveFills ?? agent.landed ?? 0;
+  if (live > 0) return `${live} trade${live === 1 ? "" : "s"}`;
   const landed = agent.landed ?? 0;
-  if (landed > 0) return `${landed} trade${landed === 1 ? "" : "s"}`;
-  const paper = agent.filledPaper ?? 0;
+  if (landed > 0) return `${landed} operation${landed === 1 ? "" : "s"}`;
   if (paper > 0) return `${paper} on paper`;
   return "No trades yet";
 }

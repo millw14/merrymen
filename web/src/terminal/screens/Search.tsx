@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { coinPrice, lastLine, pctBps, type LiveAgent, type LiveToken } from "../live";
 import { Coin, Face, Empty, NameBlock } from "../ui";
 import { performanceOf } from "../agent-performance";
+import { useNow } from "../clock";
 
 export function Search({
   tokens,
@@ -17,6 +18,7 @@ export function Search({
   onProfile: (slug: string) => void;
 }) {
   const [q, setQ] = useState("");
+  const nowSec = Math.floor(useNow(60_000) / 1000);
   const query = q.trim().toLowerCase();
   const toks = useMemo(
     () =>
@@ -52,7 +54,9 @@ export function Search({
         />
       </div>
       {ags.map((a) => {
-        const performance = performanceOf(a);
+        const performance = performanceOf(a, nowSec);
+        // The board's words, not a bare "0.0%" for a book that never traded.
+        const figure = performance.state === null ? performance.bps : null;
         return (
         <button key={a.slug} type="button" className="tok" onClick={() => onProfile(a.slug)}>
           <Face name={a.name} slug={a.slug} />
@@ -60,7 +64,11 @@ export function Search({
             <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
             {a.last && <p className="meta">{lastLine(a.last)}</p>}
           </div>
-          <span title={performance.title} className={`px ${performance.bps == null || performance.bps === 0 ? "" : performance.bps > 0 ? "up" : "down"}`}>{pctBps(performance.bps)}</span>
+          <span className="performance-figure">
+            <span title={performance.title} className={`px ${figure == null || figure === 0 ? "" : figure > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>{performance.state ?? pctBps(performance.bps)}</span>
+            {performance.note !== null && <small className="performance-note">{performance.note}</small>}
+            {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
+          </span>
         </button>
         );
       })}

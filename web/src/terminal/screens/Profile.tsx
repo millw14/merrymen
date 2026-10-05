@@ -90,8 +90,12 @@ export function Profile({
     .filter((t) => t.slug === agent.slug || (!t.slug && t.name === agent.name))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   const g = agent.glance;
-  const performance = performanceOf(agent);
+  const performance = performanceOf(agent, Math.floor(useNow(60_000) / 1000));
   const displayPnl = performance.bps;
+  // A book's own trades, where the server counted them: a paper book whose
+  // only simulated activity was transfers has made no paper trades, however
+  // many operations `filledPaper` counts.
+  const paperTrades = performance.book === "paper" && performance.fills !== null ? performance.fills : agent.filledPaper;
   const positions =
     g.legs?.map((l) => ({
       symbol: l.symbol,
@@ -188,11 +192,13 @@ export function Profile({
             <span className="account-label">{performance.book === "paper" ? "Paper return" : performance.book === "live" || !agent.performance ? "Net return on contributed capital" : "Return"}</span>
             <strong
               title={performance.title}
-              className={`public-return ${displayPnl == null || displayPnl === 0 ? "" : displayPnl < 0 ? "down" : "up"}`}
+              className={`public-return ${performance.state !== null || displayPnl == null || displayPnl === 0 ? "" : displayPnl < 0 ? "down" : "up"}${performance.state !== null ? " performance-state" : ""}`}
             >
-              {pctBps(displayPnl)}
+              {performance.state ?? pctBps(displayPnl)}
             </strong>
             {performance.pnl !== null && <small className="profile-pnl">{performance.pnl} P&L</small>}
+            {performance.note !== null && <small className="performance-note">{performance.note}</small>}
+            {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
           </div>
           {agent.performance && <div className="profile-current-value" title={performance.title}>
             <span className="account-label">{performance.bookLabel} current value</span>
@@ -208,15 +214,18 @@ export function Profile({
           <div className="public-trade-count">
             <strong>{agent.landed}</strong>
             <span>Completed operations</span>
-            {!!agent.filledPaper && (
+            {!!paperTrades && (
               <small className="public-paper-count">
-                {agent.filledPaper} paper trades
+                {paperTrades} paper trades
               </small>
             )}
           </div>
         </div>
-        {displayPnl == null && <p className="public-empty">{performance.book === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.performance ? "Return unavailable." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
-        {performance.book === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of the paper book in this accounting period. Switching between paper and live does not reset that baseline.</p>}
+        {/* A STATE ALREADY SAYS WHAT THE MISSING FIGURE MEANS, in the
+            figure's own place (performanceOf); these sentences explain a
+            figure, or the lack of one nothing more specific accounts for. */}
+        {displayPnl == null && performance.state === null && <p className="public-empty">{performance.book === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.performance ? "Return unavailable." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
+        {performance.book === "paper" && displayPnl != null && performance.state === null && <p className="public-empty">Change in paper equity since the first recorded valuation of the paper book in this accounting period. Switching between paper and live does not reset that baseline.</p>}
         {performance.gasIncomplete && <p className="public-empty">Gas accounting is incomplete; exact P&L is unavailable.</p>}
         {/* This summary includes the whole epoch, which can extend beyond a
             held return's measured cutoff. Dollars still require publication. */}
