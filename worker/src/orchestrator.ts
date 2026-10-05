@@ -82,7 +82,8 @@ import {
   type DrainHook, type DrainLimits, type FinalPassOutcome,
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
-import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
+import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
+import { armOwnerControls } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
@@ -3161,6 +3162,51 @@ function sayTenantAlert(tenant: string, line: string): void {
   log(line);
 }
 
+/**
+ * APPLY THE OWNER'S RECORDED /pause AND /kill FOR ONE TENANT, under its lease,
+ * before its key is written (recovery-reply-arm.ts says what, from where, and
+ * why exactly once). True: nothing recorded stops this spawn. False: the
+ * tenant is held this pass — a malformed journal, a /kill still inside its
+ * /confirm window, a recorded kill not yet carried out, or one that has just
+ * removed the stored grant — and the next pass asks again.
+ *
+ * A RECORDED KILL IS CARRIED OUT THE WAY A CHILD'S IS. A kill request is left
+ * in the home and honourKill runs at once, so the stored grant is removed
+ * only if it was stored at or before the confirmed kill (honourKillRequest
+ * reads the store's own updated_at), and a grant signed after it is kept and
+ * paused (recovery-reply-arm.ts, decision 7). The request names no grant
+ * identity, only the journal row it came from, so when it is superseded it
+ * latches nothing: the owner's newer grant still arms once they say /resume.
+ *
+ * Self-hosted and any orchestrator without a shared database: nothing was
+ * recorded anywhere this could read, and the spawn goes on as before.
+ */
+async function armControlsForChild(tenant: `0x${string}`, grant: StoredGrant, lease: TenantLease): Promise<boolean> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return true;
+  const owned = () => !stopping && leases.get(tenant) === lease && lease.healthy() && !children.has(tenant);
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    const home = childHome(tenant);
+    const outcome = await armOwnerControls({
+      scope: { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId },
+      home, shared, mayWrite: owned, log,
+      forwardKill: async (killedAtSec, tag) => {
+        if (!owned()) return "failed";
+        mkdirSync(home, { recursive: true, mode: 0o700 });
+        writeKillRequest(home, { smartAccount: grant.smartAccount, serialized: `recorded-kill:${tag}` }, killedAtSec);
+        return (await honourKill(tenant, Math.floor(Date.now() / 1000))).outcome;
+      },
+    });
+    if (outcome.ok) return true;
+    sayTenantAlert(tenant, `${outcome.hold === "malformed" ? "[alert] " : ""}${tenant}: held by its owner's recorded controls (${outcome.hold}: ${outcome.why}) — not spawning`);
+    return false;
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: owner controls could not be applied (${errorKind(e)}) — retaining its home without starting a worker`);
+    return false;
+  }
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   if (operatorHeld(tenant)) return;
@@ -3230,6 +3276,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: signed grant expired — source status checked without writing a key or starting a worker`);
       return;
     }
+    // THE OWNER'S RECORDED STOPS, BEFORE THE KEY. A /pause or a confirmed
+    // /kill recorded while this tenant was held is applied here, once
+    // (recovery-reply-arm.ts): a kill is carried out against the store before
+    // grant.json could be written, and a pause is in the home before the
+    // worker's first tick reads it. A hold here is this tenant's alone.
+    if (storedGrant && !(await armControlsForChild(tenant, storedGrant, lease))) return;
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
       log(`${tenant}: no usable signed grant in the store — not spawning`);

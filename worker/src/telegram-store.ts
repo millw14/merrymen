@@ -260,6 +260,62 @@ export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
 ];
 
 /**
+ * A PAUSE THAT OUTLIVES THE HOME IT WAS WRITTEN INTO (recovery-reply-arm.ts).
+ *
+ * The pause itself is a file, `paused`, in the tenant's home: the child's tick
+ * loop honours it and the owner's /resume removes it. A file is exactly as
+ * durable as the home, and the incident showed how durable that is: the
+ * 2026-10-04 03:18 deploy rebuilt every home from the Postgres mirror, and a
+ * pause lived nowhere in the mirror. So an owner who had paused came back
+ * unpaused.
+ *
+ * `paused_at` is the half of the pause that lives in Postgres, for the pauses
+ * the orchestrator itself applies at arm: an owner's /pause or confirmed /kill
+ * recorded while trading was held, or a pause restored from the events table.
+ * Each is applied once (recovery_reply_control_receipts) and this stamp is
+ * written in the SAME transaction as its receipt. A home rebuilt after that
+ * (a new volume, a resume archive) is paused again from it before any worker
+ * arms.
+ *
+ * NEVER WRITTEN BY THE MIRROR, and so preserved by every other writer here:
+ * publishTenantTelegram, publishTelegramRuntime and publishTenantChildState
+ * all name their own columns, and none of them names this one. Cleared only
+ * by the arm that sees its own earlier pause lifted in the same home (the
+ * owner's /resume), so a later rebuild does not pause an owner who has since
+ * resumed.
+ */
+export const TELEGRAM_PAUSED_AT_DDL = "ALTER TABLE tenant_telegram ADD COLUMN paused_at INTEGER";
+
+/** When the orchestrator last applied a durable pause for this tenant, or null. Unix seconds. */
+export async function readDurablePause(db: Db, tenant: string): Promise<number | null> {
+  const row = (await db.prepare("SELECT paused_at FROM tenant_telegram WHERE tenant = ?").get(tenant.toLowerCase())) as
+    | { paused_at: unknown }
+    | undefined;
+  const at = Number(row?.paused_at);
+  return row?.paused_at === null || row?.paused_at === undefined || !Number.isSafeInteger(at) || at <= 0 ? null : at;
+}
+
+/**
+ * Record a durable pause. The earliest stamp stands: a second pause applied
+ * over a standing one changes nothing about when trading was stopped. The row
+ * may not exist yet (an owner who never linked a chat still has a pause when
+ * the events say so), so this inserts one with no code and no owner.
+ */
+export async function recordDurablePause(db: Db, tenant: string, atSec: number): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO tenant_telegram (tenant, updated_at, paused_at) VALUES (?, ?, ?)
+       ON CONFLICT (tenant) DO UPDATE SET paused_at = COALESCE(tenant_telegram.paused_at, excluded.paused_at)`,
+    )
+    .run(tenant.toLowerCase(), atSec, atSec);
+}
+
+/** Lift the durable half of a pause the owner has lifted, only if it is still the one observed. */
+export async function clearDurablePause(db: Db, tenant: string, observedAtSec: number): Promise<void> {
+  await db.prepare("UPDATE tenant_telegram SET paused_at = NULL WHERE tenant = ? AND paused_at = ?").run(tenant.toLowerCase(), observedAtSec);
+}
+
+/**
  * EVERYTHING THE ORCHESTRATOR NEEDS OF tenant_telegram, IN ONE PLACE: the
  * table, hold_notified, the liveness columns and condition cooldowns. The mirror pass runs
  * it on its own clock and sendHoldNotice runs it before a notice
@@ -276,7 +332,7 @@ export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
 export async function ensureTelegramSchema(db: Db): Promise<unknown[]> {
   await db.exec(TELEGRAM_STATE_DDL);
   const failed: unknown[] = [];
-  for (const ddl of [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL]) {
+  for (const ddl of [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL, TELEGRAM_PAUSED_AT_DDL]) {
     try {
       await db.exec(ddl);
     } catch (e) {
