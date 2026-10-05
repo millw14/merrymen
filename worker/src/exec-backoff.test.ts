@@ -15,6 +15,7 @@ import {
   BACKOFF_SCHEDULE_MIN,
   ExecBackoff,
   KEY_INSTALL_HOLD_MS,
+  STRIKE_MEMORY_MS,
   backsOff,
   heldReply,
   holdMsFor,
@@ -125,7 +126,45 @@ describe("THE SCHEDULE", () => {
     assert.equal(second.strikes, 2);
     assert.equal(second.untilMs, T0 + 21 * MIN);
     assert.equal(lines.length, 2, "one [backoff] line per change");
-    assert.match(lines[1]!, /^\[backoff\] holding swap:0x0+c0->0x0+b1 for 15m after gas-absurd \(refusal 2 this arm\)$/);
+    assert.match(lines[1]!, /^\[backoff\] holding swap:0x0+c0->0x0+b1 for 15m after gas-absurd \(refusal 2 in a row\)$/);
+  });
+
+  it("STRIKES DECAY: a refusal an hour after the last hold ended starts again at the first", () => {
+    assert.equal(STRIKE_MEMORY_MS, 60 * MIN, "the schedule's longest step");
+    // Once a day for four days, fills between: a blip each time, not a repeat.
+    const { b } = backoff();
+    for (let day = 0; day < 4; day++) {
+      const h = b.note(buy(), LIMITS, "gas-absurd", T0 + day * 24 * 60 * MIN)!;
+      assert.equal(h.strikes, 1, `day ${day + 1}`);
+      assert.equal(h.untilMs - (T0 + day * 24 * 60 * MIN), 5 * MIN, `day ${day + 1}`);
+    }
+  });
+
+  it("and the boundary is exact: one millisecond inside the memory still escalates", () => {
+    const { b } = backoff();
+    const first = b.note(buy(), LIMITS, "gas-absurd", T0)!; // until T0 + 5m
+    assert.equal(b.note(buy(), LIMITS, "gas-absurd", first.untilMs + STRIKE_MEMORY_MS - 1)!.strikes, 2);
+    const { b: c } = backoff();
+    const once = c.note(buy(), LIMITS, "gas-absurd", T0)!;
+    assert.equal(c.note(buy(), LIMITS, "gas-absurd", once.untilMs + STRIKE_MEMORY_MS)!.strikes, 1);
+  });
+
+  it("forgets what it would not read: a fresh pair every tick does not grow the map past the memory", () => {
+    const { b } = backoff();
+    // A launch a minute for a day, each refused once on its own pair.
+    for (let i = 0; i < 24 * 60; i++) {
+      const coin = `0x${(0x1000 + i).toString(16).padStart(40, "0")}` as `0x${string}`;
+      b.note(buy(coin), LIMITS, "sponsor-refused", T0 + i * MIN);
+    }
+    // Only the pairs refused in the last hold plus memory are kept: 5m + 60m.
+    assert.equal(b.clear("count"), 65);
+  });
+
+  it("forgetting never drops a hold still in force, nor its strikes", () => {
+    const { b } = backoff();
+    for (let s = 0; s < 4; s++) b.note(buy(COIN), LIMITS, "gas-absurd", T0 + s * MIN); // strike 4, 60m from T0+3m
+    b.note(buy(OTHER_COIN), LIMITS, "gas-absurd", T0 + 62 * MIN);
+    assert.equal(b.held(buy(COIN), LIMITS, T0 + 62 * MIN)?.strikes, 4);
   });
 
   it("is per token pair: one coin's refusal holds nothing else", () => {
