@@ -267,19 +267,40 @@ function noteSpawnPressure(error: unknown): void {
 }
 
 /**
+ * SPAWNS WAITING FOR A SLOT, woken at once by a drain (drainFleet). Nothing
+ * will be forked once the fleet is being called home, and the drain waits for
+ * `spawning` to empty before it signals anything — a queue of spawns two
+ * seconds apart, or one sitting out a two-minute pressure pause, would spend
+ * the whole drain budget waiting for forks that are then refused anyway.
+ */
+const spawnSlotWaiters = new Set<() => void>();
+
+/**
  * Reserve a process-creation slot before the final lease/kill check. Restarts
  * and the normal roster pass share this clock. If a different child receives
  * EAGAIN while we wait, observe its new cooldown before trying to fork.
+ * Returns early once `stopping` is set; the caller's late check then refuses.
  */
 async function waitForSpawnSlot(): Promise<void> {
   // Existing integration tests substitute fake processes and mock timers.
   // Exercise the real pacing only in its dedicated test.
   if (spawn !== nodeSpawn && !spawnPacingForTest) return;
   for (;;) {
+    if (stopping) return;
     const at = Math.max(Date.now(), nextSpawnAt, spawnPressureUntil);
     nextSpawnAt = at + spawnSpacingMs;
-    if (at > Date.now()) await new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()));
-    if (Date.now() >= spawnPressureUntil) return;
+    if (at > Date.now()) {
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          clearTimeout(timer);
+          spawnSlotWaiters.delete(wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, at - Date.now());
+        spawnSlotWaiters.add(wake);
+      });
+    }
+    if (stopping || Date.now() >= spawnPressureUntil) return;
   }
 }
 /** Give up restarting a child that keeps dying right after start. */
@@ -2580,8 +2601,21 @@ async function preparePersistentLedgerForChild(tenant: `0x${string}`, grant: Sto
   }
 }
 
-async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant), stillOwned?: () => boolean) {
+/**
+ * NO NEW COPY ONCE THE DRAIN HAS SETTLED (fleet-drain.ts, step 3), except the
+ * drain's own final pass (`drainPass`). Every copy started before then is
+ * waited for with its lease still held; one started after it — by a reconcile
+ * pass or a spawn that was already under way when the signal came — could
+ * still be between its marker and its ownership check when the leases go,
+ * which leaves the marker and blocks the tenant at the next start. Refused
+ * here, before the marker, it leaves nothing; the next owner's spawn copies
+ * the same rows (finalMirrorBeforeAnchor).
+ */
+let copiesClosed = false;
+
+async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant), stillOwned?: () => boolean, drainPass = false) {
   return mirrorSerially(tenant, async () => {
+    if (copiesClosed && !drainPass) throw new Error("The fleet is being called home; no new ledger copy starts before the next owner's.");
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror no longer owns the current worker and lease.");
     if (ledgerSourceBlocked(home)) throw new Error("Ledger source is blocked; preserve the home and recover its accounting before rearming.");
     // Check the original witnesses BEFORE mirrorTenant can advance any cursor.
@@ -3900,8 +3934,15 @@ function envTickSeconds(): number {
  * the handler returned on an entry that was not its own, it still scheduled a
  * restart here, and that restart was refused only because `releaseLease`
  * happened to win the race against the handler's 1s timer.
+ *
+ * `hardAfterMs` null is the drain's (drainFleet): SIGTERM and no SIGKILL of
+ * its own. A worker answers SIGTERM by finishing the intent in hand and
+ * closing its store, which can take longer than three seconds, and the drain
+ * gives it that time and sends SIGKILL itself to whatever is still running
+ * when it ends. The process is still tracked in `exitingChildren` until its
+ * exit is seen, which is what the drain waits on.
  */
-function killChild(tenant: string): void {
+function killChild(tenant: string, hardAfterMs: number | null = 3_000): void {
   const child = children.get(tenant);
   if (!child) return;
   trackExitingChild(tenant, child.proc);
@@ -3912,13 +3953,14 @@ function killChild(tenant: string): void {
     log(`${tenant}: child SIGTERM failed — ${error instanceof Error ? error.message : String(error)}; retrying SIGKILL`);
     try { child.proc.kill("SIGKILL"); } catch { /* retried below */ }
   }
+  if (hardAfterMs === null) return;
   setTimeout(() => {
     try {
       child.proc.kill("SIGKILL");
     } catch {
       /* already gone */
     }
-  }, 3_000);
+  }, hardAfterMs);
 }
 
 let retirementMirrorForTest: ((tenant: string) => Promise<boolean>) | null = null;
@@ -3979,55 +4021,70 @@ async function mirrorRetiredMemory(
 
 /** A stopped worker's ledger and memory must be durable before its expiry barrier can leave. */
 async function mirrorRetiredWorker(tenant: string, lease: TenantLease, mirrorLedger: boolean, held: boolean): Promise<boolean> {
-  if (retirementMirrorForTest && mirrorLedger) return retirementMirrorForTest(tenant);
+  return (await retiredWorkerPass(tenant, lease, mirrorLedger, held)) === "saved";
+}
+
+/**
+ * ONE PASS OF mirrorRetiredWorker, saying why it did not save: "more" when the
+ * ledger has another source batch to copy (the memory is saved only after the
+ * last), "retained" when its barrier stays. Retirement asks again on the next
+ * reconcile pass; the drain's final pass asks again at once, while its budget
+ * allows (drainFinalPass), and is the only caller with `drainPass`.
+ */
+async function retiredWorkerPass(
+  tenant: string, lease: TenantLease, mirrorLedger: boolean, held: boolean, drainPass = false,
+): Promise<"saved" | "more" | "retained"> {
+  if (retirementMirrorForTest && mirrorLedger) return (await retirementMirrorForTest(tenant)) ? "saved" : "retained";
   const file = path.join(childHome(tenant), "merrymen.db");
   const url = process.env.DATABASE_URL;
   // A file-only deployment keeps this home as its ledger. There is no shared
   // destination to copy to, and expiry never deletes the home.
-  if (!url && !retirementMemoryStoreForTest) return true;
+  if (!url && !retirementMemoryStoreForTest) return "saved";
   const handle = mirrorLedger && existsSync(file) ? openChildLedger(childHome(tenant)) : null;
   let shared: Db | null = null;
   const dek = retirementMemoryStoreForTest ? retirementMemoryStoreForTest.dek : tgGroupsDek();
   const dialect = retirementMemoryStoreForTest?.dialect ?? "postgres";
+  // Whose final pass the log lines name: the drain's runs for every worker.
+  const whose = drainPass ? "drained worker's" : "expired worker's";
   try {
     shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
-    if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+    if (leases.get(tenant) !== lease || !lease.healthy()) return "retained";
     if (ledgerSourceBlocked(childHome(tenant)) || (mirrorLedger && !handle)) {
       if (mirrorLedger && !existsSync(file)) blockMissingLedgerSource(tenant);
       // Missing financial SQLite can also mean missing chat_turns. Keep the
       // protected DM snapshot and honour only authenticated forget journals.
       await mirrorRetiredMemory(tenant, lease, shared, dek, dialect, true);
       log(`[alert] ${tenant}: final trading source unconfirmed — memory snapshots retained; keeping its lease and home`);
-      return false;
+      return "retained";
     }
     if (handle) {
       await applyLedgerSchema(shared);
       await shared.exec(translateSchema(MIRROR_STATE_DDL));
       try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
-      if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+      if (leases.get(tenant) !== lease || !lease.healthy()) return "retained";
       const r = await mirrorGuardedLedger(tenant, handle.db, shared, childHome(tenant),
-        () => leases.get(tenant) === lease && lease.healthy());
+        () => leases.get(tenant) === lease && lease.healthy(), drainPass);
       if (r.failed) {
-        log(`[alert] ${tenant}: expired worker's final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
-        return false;
+        log(`[alert] ${tenant}: ${whose} final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
+        return "retained";
       }
       if (r.hasMore) {
-        log(`${tenant}: expired worker's final mirror has another source batch; retaining its lease for the next pass`);
-        return false;
+        log(`${tenant}: ${whose} final mirror has another source batch; retaining its lease for the next pass`);
+        return "more";
       }
       const counts = mirrorCountsLine(tenant, r);
-      if (counts) log(`${counts} (expired worker's final pass)`);
+      if (counts) log(`${counts} (${whose} final pass)`);
     }
     const saved = await mirrorRetiredMemory(tenant, lease, shared, dek, dialect, held);
     if (!saved) log(`[alert] ${tenant}: stopped worker's final memory save incomplete; retaining its lease and home`);
-    return saved;
+    return saved ? "saved" : "retained";
   } catch (error) {
     if (shared && leases.get(tenant) === lease && lease.healthy()) {
       try { await mirrorRetiredMemory(tenant, lease, shared, dek, dialect, true); }
       catch { /* source and privacy retry barriers remain retained */ }
     }
-    log(`[alert] ${tenant}: expired worker's final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
-    return false;
+    log(`[alert] ${tenant}: ${whose} final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
+    return "retained";
   } finally {
     handle?.close();
   }
@@ -8325,7 +8382,28 @@ let liveMirrorStoreForTest: { shared: Db; dek: Buffer | null; dialect: "postgres
 export function setLiveMirrorStoreForTest(store: typeof liveMirrorStoreForTest): void { liveMirrorStoreForTest = store; }
 export function mirrorLedgersForTest(): Promise<void> { return mirrorLedgers(); }
 
+/**
+ * MIRROR PASSES STILL RUNNING, which the drain waits for (fleet-drain.ts,
+ * step 3). Once `stopping` is set no pass starts and a pass in hand stops at
+ * its next tenant — but the tenant in hand finishes: its copy, and then its
+ * memory publishes, which read the child's files while the child is alive.
+ * Left running into the drain's final pass, that older read could be written
+ * after the final pass's newer one, and the stored memory would be the
+ * stale copy.
+ */
+let mirrorPassesInFlight = 0;
+
 async function mirrorLedgers(): Promise<void> {
+  if (stopping) return;
+  mirrorPassesInFlight += 1;
+  try {
+    await mirrorLedgersPass();
+  } finally {
+    mirrorPassesInFlight -= 1;
+  }
+}
+
+async function mirrorLedgersPass(): Promise<void> {
   const url = process.env.DATABASE_URL;
   // Held tenants count: their Telegram is published below, and a fleet whose
   // only tenants are held would otherwise never show their link codes, or
@@ -8392,6 +8470,9 @@ async function mirrorLedgers(): Promise<void> {
     return;
   }
   for (const tenant of [...children.keys()]) {
+    // CALLED HOME: no further tenant. The drain settles the one in hand and
+    // gives every home its final pass once its child has exited.
+    if (stopping) break;
     const worker = children.get(tenant);
     if (!worker) continue;
     let sourceConfirmed = false;
@@ -8541,6 +8622,8 @@ async function mirrorLedgers(): Promise<void> {
   // and cost basis the shared ledger still holds. Under the same lease rule as
   // the loop above: only the replica holding the tenant speaks for it.
   for (const [tenant, held] of [...holders]) {
+    // Called home, as above: the drain's final pass handles its forgets.
+    if (stopping) break;
     const lease = leases.get(tenant.toLowerCase());
     if (!lease || !lease.healthy()) continue;
     // Stood down, and counted only until its process has gone: its grant is
