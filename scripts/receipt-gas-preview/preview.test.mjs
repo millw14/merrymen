@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildPreview, canonical, collectSnapshot, digest, intendedDelta, parseArgs, plainSummary, readQuery, targetDigest, sourceFingerprint, savePreview, validateScope } from './preview.mjs';
+import { buildPreview, canonical, collectSnapshot, digest, executionSummary, intendedDelta, parseArgs, plainSummary, readQuery, targetDigest, sourceFingerprint, savePreview, validateScope } from './preview.mjs';
 import { recoverGasProof, createReadOnlyChain, RPC_METHODS } from './runtime.ts';
 
 const account = `0x${'a'.repeat(40)}`, tx = `0x${'1'.repeat(64)}`, op = `0x${'2'.repeat(64)}`, blockHash = `0x${'3'.repeat(64)}`;
@@ -14,7 +14,7 @@ const slug = 'bm74qsj64fygkhjh';
 const scope = [{slug,account}];
 const time = 1790000000;
 const hex32 = x => BigInt(x).toString(16).padStart(64,'0');
-function fixture({ owner = false, priced = true } = {}) {
+function fixture({ owner = false, priced = true, hasTime = true } = {}) {
   const row = { id: '1', agent_id: account, epoch: 2, status: 'landed', tx_hash: tx, user_op_hash: op, user_op_nonce: '7',
     gas_wei: null, sponsored_gas_wei: null, gas_units: null, gas_usdg: null, gas_recorded_at: null };
   const receipt = { transactionHash: tx, blockHash, blockNumber: 100n, status: 'success', logs: [{
@@ -27,7 +27,7 @@ function fixture({ owner = false, priced = true } = {}) {
     block: async () => ({ hash: blockHash, timestamp: BigInt(time) }),
     latestRound: async () => priced ? ({roundId:1n,priceUsd:2500,updatedAt:time-60}) : null,
     round: async () => null };
-  const snapshot = { schema: { gasRecordedAtPresent: false, userOpNoncePresent: true },
+  const snapshot = { schema: { gasRecordedAtPresent: hasTime, userOpNoncePresent: true },
     bindings: [{ slug, account, state:'bound-current-named-account', canonicalAgent:{ account, canonicalAddress:account,epoch:2,chainId:4663 } }],
     snapshots: [{ row, protectedSnapshotDigest: digest('protected-source-row'), snapshotDigest: digest(row) }] };
   const options = { snapshot, scope, chain, recoverGasProof, target: digest('test-db'),
@@ -83,12 +83,12 @@ describe('standalone preview-only runner', () => {
       [{identities:[]},'public-slug-not-found'],
       [{identities:[{slug,accounts:[other]}]},'slug-address-mismatch'],
       [{identities:[{slug,accounts:[account]},{slug:'0'.repeat(16),accounts:[account]}]},'ambiguous-account-identity'],
-      [{identities:[{slug,accounts:[account,other]}],agents:[registration,{...registration,smart_account:other,created_at:2}]},'address-is-not-current-for-public-slug'],
+      [{identities:[{slug,accounts:[other,account]}],agents:[registration,{...registration,smart_account:other,created_at:2}]},'address-is-not-current-for-public-slug'],
       [{agents:[{...registration,epoch:0}]},'invalid-canonical-registration'],
       [{agents:[{...registration,chain_id:0}]},'invalid-canonical-registration'],
       [{agents:[registration,{...registration,smart_account:account.toUpperCase(),chain_id:46630}]},'ambiguous-current-registration'],
       [{agents:[registration,{...registration,smart_account:account.toUpperCase(),owner_address:other}]},'ambiguous-current-registration'],
-      [{identities:[{slug,accounts:[account,other]}],agents:[registration,{...registration,smart_account:other}]},'ambiguous-current-registration'],
+      [{identities:[{slug,accounts:[account,account.toUpperCase()]}]},'invalid-identity-account-list'],
     ];
     for(const [options,state] of cases) {
       const f=pgFixture(options); const snapshot=await collectSnapshot(f.client,scope);
@@ -97,6 +97,18 @@ describe('standalone preview-only runner', () => {
       assert.equal(preview.summary.accountsIneligible,1); assert.equal(preview.operations[0].state,'ineligible');
       assert.deepEqual(preview.operations[0].intendedMissingFieldDelta,{});
     }
+  });
+  it('uses the first identity account even when imports give a historical registration a newer timestamp', async () => {
+    const other = `0x${'c'.repeat(40)}`;
+    const current = { smart_account: account, epoch: 2, chain_id: 4663, beat_at: 100, created_at: 1, owner_address: account };
+    const f = pgFixture({ identities: [{ slug, accounts: [account, other] }], agents: [current, { ...current, smart_account: other, created_at: 999 }] });
+    const snapshot = await collectSnapshot(f.client, scope);
+    assert.equal(snapshot.bindings[0].state, 'bound-current-named-account');
+    assert.equal(snapshot.bindings[0].canonicalAgent.account, account);
+    const historical = await collectSnapshot(f.client, [{ slug, account: other }]);
+    assert.equal(historical.bindings[0].state, 'address-is-not-current-for-public-slug');
+    const missing = pgFixture({ identities: [{ slug, accounts: [other, account] }], agents: [current] });
+    assert.equal((await collectSnapshot(missing.client, scope)).bindings[0].state, 'account-not-found');
   });
   it('the isolated proof module contains no database writer or DDL and its exported chain is read-only', async () => {
     const runtime = await readFile(new URL('./runtime.ts',import.meta.url),'utf8');
@@ -145,6 +157,65 @@ describe('standalone preview-only runner', () => {
     assert.equal(item.proof.recoveredGas.usdg,2.5); assert.equal(item.proof.recoveredGas.price.roundId,'1');
     assert.equal(item.proofDigest,digest(item.proof)); assert.equal(item.proof.observations.latestRound.roundId,'1'); assert.equal(item.intendedMissingFieldDelta.gas_wei,'1000000000000000');
   });
+  it('keeps timestamps in proof but proposes no absent column or historical nonce fill', async () => {
+    const f = fixture({ hasTime: false }); f.row.user_op_nonce = null;
+    const p = await buildPreview(f.options);
+    assert.equal(p.operations[0].state, 'eligible');
+    assert.equal(p.operations[0].proof.recoveredGas.at, time);
+    assert.equal(p.operations[0].proof.recoveredGas.nonce, '7');
+    assert.ok(!Object.hasOwn(p.operations[0].intendedMissingFieldDelta, 'gas_recorded_at'));
+    assert.ok(!Object.hasOwn(p.operations[0].intendedMissingFieldDelta, 'user_op_nonce'));
+    assert.equal(p.summary.intendedFieldCounts.gas_recorded_at, 0);
+    assert.deepEqual(p.summary.historicalRowNonceCoverage, { recorded: 0, absent: 1 });
+    assert.ok(!Object.hasOwn(intendedDelta(f.row, p.operations[0].proof.recoveredGas), 'gas_recorded_at'));
+  });
+  it('retains repeated source rows while reporting one case-insensitive execution identity', async () => {
+    const f = fixture(); const first = f.snapshot.snapshots[0];
+    f.snapshot.snapshots.push({ ...first, row: { ...first.row, id: '2', agent_id: account.toUpperCase(), user_op_hash: op.toUpperCase() } });
+    const p = await buildPreview(f.options);
+    assert.equal(p.operations.length, 2); assert.equal(p.summary.eligible, 2);
+    assert.equal(p.summary.recordedSettledRows, 2); assert.equal(p.summary.countUnit, 'source-rows');
+    assert.deepEqual(p.summary.executions, { identity: ['lower-account', 'epoch', 'lower-user-op-hash'], distinctExecutions: 1,
+      duplicateExecutionGroups: 1, extraRowsForDuplicateExecutions: 1, conflictingEvidenceExecutionGroups: 0, rowsWithoutExecutionIdentity: 0,
+      states: { eligible: 1, 'already-complete': 0, unknown: 0, ineligible: 0, mixed: 0 } });
+    assert.match(plainSummary(p), /Settled source rows: 2; eligible rows: 2/);
+    assert.match(plainSummary(p), /Distinct executions: 1; duplicate groups: 1; extra repeated rows: 1/);
+  });
+  it('keeps mixed execution groups unresolved and excludes malformed keys from distinct counts', () => {
+    const row = fixture().row;
+    const s = executionSummary([{ row, state: 'eligible' }, { row: { ...row, id: '2' }, state: 'unknown' },
+      { row: { ...row, epoch: 3 }, state: 'eligible' },
+      { row: { ...row, user_op_hash: null }, state: 'ineligible' }, { row: { ...row, agent_id: 'bad' }, state: 'ineligible' }]);
+    assert.equal(s.distinctExecutions, 2); assert.equal(s.states.mixed, 1); assert.equal(s.states.eligible, 1);
+    assert.equal(s.rowsWithoutExecutionIdentity, 2); assert.equal(s.extraRowsForDuplicateExecutions, 1);
+  });
+  it('flags conflicting recovered receipts or competing deltas without treating observation trace differences as new executions', async () => {
+    const p = await buildPreview(fixture().options); const first = p.operations[0];
+    const copy = structuredClone(first); copy.row.id = '2';
+    copy.proof.observations.latestRound = { extraRead: true };
+    assert.equal(executionSummary([first, copy]).conflictingEvidenceExecutionGroups, 0);
+    copy.intendedMissingFieldDelta.gas_usdg = 1;
+    assert.equal(executionSummary([first, copy]).states.mixed, 1);
+    copy.intendedMissingFieldDelta.gas_usdg = 0; copy.proof.recoveredGas.gasWei = '9';
+    assert.equal(executionSummary([first, copy]).conflictingEvidenceExecutionGroups, 1);
+    copy.proof = first.proof; copy.row.tx_hash = `0x${'9'.repeat(64)}`;
+    assert.equal(executionSummary([first, copy]).states.mixed, 1);
+  });
+  it('does not claim complete exact expense when individually eligible duplicate rows have conflicting receipt costs', async () => {
+    const f = fixture(); const first = f.snapshot.snapshots[0];
+    f.snapshot.snapshots.push({ ...first, row: { ...first.row, id: '2' } });
+    let reads = 0;
+    f.chain.receipt = async () => {
+      const receipt = structuredClone(f.receipt);
+      receipt.logs[0].data = `0x${hex32(7)}${hex32(1)}${hex32(1000000000000000n + BigInt(reads++))}${hex32(200000)}`;
+      return receipt;
+    };
+    const p = await buildPreview(f.options);
+    assert.equal(p.summary.eligible, 2);
+    assert.equal(p.summary.executions.states.mixed, 1);
+    assert.equal(p.summary.executions.conflictingEvidenceExecutionGroups, 1);
+    assert.equal(p.summary.allRecordedOperationsHaveProvenExactOwnerExpense, false);
+  });
   it('unpriced owner expenses are explicit unknown cases with no intended write delta', async () => {
     const f = fixture({owner:true,priced:false}); const preview=await buildPreview(f.options); const item=preview.operations[0];
     assert.equal(item.state,'unknown'); assert.equal(item.proof.recoveredGas.usdg,null);
@@ -188,7 +259,7 @@ describe('standalone preview-only runner', () => {
   });
   it('never replaces an already recorded value in the proposed delta', () => {
     const f=fixture(); f.row.gas_usdg=99; f.row.gas_units='123';
-    const delta=intendedDelta(f.row,{payer:'owner',gasWei:'100',gasUnits:'200',usdg:2,at:time});
+    const delta=intendedDelta(f.row,{payer:'owner',gasWei:'100',gasUnits:'200',usdg:2,at:time},{gasRecordedAtPresent:true});
     assert.deepEqual(delta,{gas_wei:'100',gas_recorded_at:time});
   });
   it('scope, snapshots, protected row fingerprints, proof, and delta tampering changes review digest', async () => {

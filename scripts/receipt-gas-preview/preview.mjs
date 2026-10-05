@@ -40,11 +40,52 @@ export function parseArgs(args) {
   if (!output) throw new Error('invalid-arguments');
   return { scope: validateScope(scope), output };
 }
-export function intendedDelta(row, proof) {
+export function intendedDelta(row, proof, schema) {
   const values = { gas_wei: proof.payer === 'owner' ? proof.gasWei : null,
     sponsored_gas_wei: proof.payer === 'sponsor' ? proof.gasWei : null,
     gas_units: proof.gasUnits, gas_usdg: proof.usdg, gas_recorded_at: proof.at };
-  return Object.fromEntries(GAS_FIELDS.filter(k => row[k] === null && values[k] !== null).map(k => [k, values[k]]));
+  return Object.fromEntries(GAS_FIELDS.filter(k => row[k] === null && values[k] !== null &&
+    (k !== 'gas_recorded_at' || schema?.gasRecordedAtPresent === true)).map(k => [k, values[k]]));
+}
+
+/** Count source rows separately from executions. No source row or expense is rewritten. */
+export function executionSummary(operations) {
+  const groups = new Map(); let rowsWithoutExecutionIdentity = 0;
+  for (const operation of operations) {
+    const { row } = operation;
+    if (!ACCOUNT.test(row.agent_id ?? '') || !Number.isSafeInteger(row.epoch) || row.epoch < 1 || !HASH.test(row.user_op_hash ?? '')) {
+      rowsWithoutExecutionIdentity++; continue;
+    }
+    const key = canonical([row.agent_id.toLowerCase(), row.epoch, row.user_op_hash.toLowerCase()]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(operation);
+  }
+  const states = Object.fromEntries(['eligible', 'already-complete', 'unknown', 'ineligible', 'mixed'].map(k => [k, 0]));
+  let duplicateExecutionGroups = 0, extraRowsForDuplicateExecutions = 0, conflictingEvidenceExecutionGroups = 0;
+  for (const rows of groups.values()) {
+    if (rows.length > 1) { duplicateExecutionGroups++; extraRowsForDuplicateExecutions += rows.length - 1; }
+    const distinctStates = new Set(rows.map(o => o.state));
+    const receipts = new Set(), transactions = new Set(), proposed = new Map(); let conflict = false;
+    for (const o of rows) {
+      if (HASH.test(o.row.tx_hash ?? '')) transactions.add(o.row.tx_hash.toLowerCase());
+      if (o.proof?.recoveredGas) {
+        const p = { ...o.proof.recoveredGas };
+        for (const field of ['account', 'userOpHash', 'txHash', 'blockHash']) if (typeof p[field] === 'string') p[field] = p[field].toLowerCase();
+        if (p.price) p.price = { ...p.price, feed: p.price.feed.toLowerCase() };
+        receipts.add(canonical(p));
+      }
+      for (const [field, value] of Object.entries(o.intendedMissingFieldDelta ?? {})) {
+        const encoded = canonical(value);
+        if (proposed.has(field) && proposed.get(field) !== encoded) conflict = true;
+        proposed.set(field, encoded);
+      }
+    }
+    conflict ||= receipts.size > 1 || transactions.size > 1;
+    if (conflict) conflictingEvidenceExecutionGroups++;
+    states[distinctStates.size === 1 && !conflict ? rows[0].state : 'mixed']++;
+  }
+  return { identity: ['lower-account', 'epoch', 'lower-user-op-hash'], distinctExecutions: groups.size,
+    duplicateExecutionGroups, extraRowsForDuplicateExecutions, conflictingEvidenceExecutionGroups, rowsWithoutExecutionIdentity, states };
 }
 
 export async function buildPreview({ snapshot, scope, chain, recoverGasProof, target, source, capturedAt = new Date().toISOString() }) {
@@ -86,7 +127,7 @@ export async function buildPreview({ snapshot, scope, chain, recoverGasProof, ta
         !Number.isSafeInteger(Math.round(row.gas_usdg * 1e6)) || Math.round(row.gas_usdg * 1e6) !== Math.round(proof.usdg * 1e6))) {
         state = 'unknown'; why = 'recorded-expense-does-not-match-independent-historical-price';
       } else {
-        delta = intendedDelta(row, proof);
+        delta = intendedDelta(row, proof, snapshot.schema);
         state = Object.keys(delta).length ? 'eligible' : 'already-complete';
         why = state === 'eligible' ? 'confirmed-missing-expense-evidence' : 'confirmed-existing-expense-evidence';
       }
@@ -99,13 +140,20 @@ export async function buildPreview({ snapshot, scope, chain, recoverGasProof, ta
   const counts = Object.fromEntries(['eligible', 'already-complete', 'unknown', 'ineligible'].map(k => [k, operations.filter(o => o.state === k).length]));
   const intendedFieldCounts = Object.fromEntries(GAS_FIELDS.map(field => [field,
     operations.filter(o => Object.hasOwn(o.intendedMissingFieldDelta, field)).length]));
+  const executions = executionSummary(operations);
   const preview = { format: 'merrymen.receipt-gas-preview.v1', mode: 'preview-only', source,
     databaseTargetDigest: target, capture: { capturedAt, isolation: 'repeatable read read only',
       schema: snapshot.schema, rpcChainId: chainId, confirmationDepth: 64, head: head.toString() }, scope: scopeStates,
     operations, summary: { accountsRequested: scope.length, accountsIneligible: scopeStates.filter(s => s.state !== 'bound-current-named-account').length,
+      // v1 compatibility fields and operations[] describe source rows, not distinct expenses.
+      countUnit: 'source-rows', recordedSettledRows: operations.length,
       recordedSettledOperations: operations.length, ...counts, intendedFieldCounts,
+      executions,
+      historicalRowNonceCoverage: { recorded: operations.filter(o => o.row.user_op_nonce !== null && o.row.user_op_nonce !== '').length,
+        absent: operations.filter(o => o.row.user_op_nonce === null || o.row.user_op_nonce === '').length },
       unknownOwnerGasPrices: operations.filter(o => o.why === 'owner-gas-historical-price-unavailable-exact-expense-refused').length,
       allRecordedOperationsHaveProvenExactOwnerExpense: scopeStates.every(s => s.state === 'bound-current-named-account') && operations.length > 0 &&
+        executions.rowsWithoutExecutionIdentity === 0 && executions.states.mixed === 0 &&
         operations.every(o => ['eligible', 'already-complete'].includes(o.state)),
       recordedExpenseCoverage: snapshot.schema.complete === false ? 'unavailable-trade-schema' :
         operations.length ? 'recorded-settled-operations-only' : 'no-recorded-settled-operations',
@@ -115,11 +163,19 @@ export async function buildPreview({ snapshot, scope, chain, recoverGasProof, ta
 
 export function plainSummary(preview) {
   const s = preview.summary;
+  const executions = s.executions ?? executionSummary(preview.operations);
+  const nonceRows = s.historicalRowNonceCoverage ?? {
+    recorded: preview.operations.filter(o => o.row.user_op_nonce !== null && o.row.user_op_nonce !== '').length,
+    absent: preview.operations.filter(o => o.row.user_op_nonce === null || o.row.user_op_nonce === '').length,
+  };
   return `PREVIEW ONLY — 0 database writes; 0 schema changes.\n` +
     `Accounts: ${s.accountsRequested}; ineligible accounts: ${s.accountsIneligible}; coverage: ${s.recordedExpenseCoverage}.\n` +
-    `Settled records: ${s.recordedSettledOperations}; eligible missing evidence: ${s.eligible}; already complete: ${s['already-complete']}; unknown: ${s.unknown}; ineligible: ${s.ineligible}.\n` +
-    `Unknown historical owner gas prices refused: ${s.unknownOwnerGasPrices}.\n` +
-    `Intended NULL-field fills: ${Object.entries(s.intendedFieldCounts).map(([k,v]) => `${k}=${v}`).join(', ')}.\n` +
+    `Settled source rows: ${s.recordedSettledOperations}; eligible rows: ${s.eligible}; already complete rows: ${s['already-complete']}; unknown rows: ${s.unknown}; ineligible rows: ${s.ineligible}.\n` +
+    `Distinct executions: ${executions.distinctExecutions}; duplicate groups: ${executions.duplicateExecutionGroups}; extra repeated rows: ${executions.extraRowsForDuplicateExecutions}; rows without exact identity: ${executions.rowsWithoutExecutionIdentity}.\n` +
+    `Execution groups by row state: ${Object.entries(executions.states).map(([k,v]) => `${k}=${v}`).join(', ')}; evidence conflicts: ${executions.conflictingEvidenceExecutionGroups}. Mixed groups are unresolved; repeated row costs must not be summed.\n` +
+    `Historical nonce fields: recorded=${nonceRows.recorded}, absent=${nonceRows.absent}. Receipt nonces are observations; absent historical nonces are not independently matched or proposed for filling.\n` +
+    `Unknown historical owner gas prices refused (source rows): ${s.unknownOwnerGasPrices}.\n` +
+    `Intended NULL-field fills (source rows): ${Object.entries(s.intendedFieldCounts).map(([k,v]) => `${k}=${v}`).join(', ')}.\n` +
     `Preview SHA256: ${preview.previewDigest}\n` +
     `This preview does not establish portfolio valuation, contribution completeness, or permission to write.\n`;
 }

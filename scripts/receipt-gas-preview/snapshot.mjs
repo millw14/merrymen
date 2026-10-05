@@ -97,18 +97,20 @@ export async function collectSnapshot(client, scope, maxRows = MAX_OPERATIONS) {
       const matches = identityRows.filter(r => r.slug === request.slug);
       let state = 'bound-current-named-account'; let canonicalAgent = null;
       if (matches.length !== 1) state = matches.length ? 'ambiguous-public-slug' : 'public-slug-not-found';
-      else if (!Array.isArray(matches[0].accounts) || !matches[0].accounts.length || matches[0].accounts.some(a => typeof a !== 'string' || !ACCOUNT.test(a))) state = 'invalid-identity-account-list';
+      else if (!Array.isArray(matches[0].accounts) || !matches[0].accounts.length || matches[0].accounts.some(a => typeof a !== 'string' || !ACCOUNT.test(a)) ||
+        new Set(matches[0].accounts.map(a => a.toLowerCase())).size !== matches[0].accounts.length) state = 'invalid-identity-account-list';
       else {
         const accounts = matches[0].accounts.map(a => a.toLowerCase());
         const claimants = identityRows.filter(r => Array.isArray(r.accounts) && r.accounts.some(a => typeof a === 'string' && a.toLowerCase() === request.account));
         if (!accounts.includes(request.account)) state = 'slug-address-mismatch';
         else if (new Set(claimants.map(r => r.slug)).size !== 1) state = 'ambiguous-account-identity';
         else {
-          const known = canonicalAgents.filter(a => accounts.includes(a.account)).sort((a,b) => b.createdAt-a.createdAt || a.account.localeCompare(b.account));
-          canonicalAgent = known[0] ?? null;
+          // identity-store keeps the current account first. Imports/restarts can
+          // give historical registrations newer timestamps; they are not authority.
+          canonicalAgent = canonicalAgents.find(a => a.account === accounts[0]) ?? null;
           if (!canonicalAgent) state = 'account-not-found';
           else if (canonicalAgent.invalid) state = 'invalid-canonical-registration';
-          else if (canonicalAgent.ambiguous || known.filter(a => a.createdAt === canonicalAgent.createdAt).length > 1) state = 'ambiguous-current-registration';
+          else if (canonicalAgent.ambiguous) state = 'ambiguous-current-registration';
           else if (canonicalAgent.account !== request.account) state = 'address-is-not-current-for-public-slug';
           else if (canonicalAgent.chainId !== 4663) state = 'ineligible-chain';
         }

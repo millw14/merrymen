@@ -67,7 +67,7 @@ export function gasRecoveryChain(client: PublicClient): GasRecoveryChain {
   };
 }
 
-/** Exact event identity and finality are checked before accepting even a sponsored zero owner expense. */
+/** Exact event identity and confirmation depth are checked before accepting even a sponsored zero owner expense. */
 export async function recoverGasProof(row: GasRecoveryRow, chain: GasRecoveryChain,
   chainId: number, head: bigint): Promise<RecoveredGas | null> {
   if (!ADDRESS.test(row.agent_id) || !HASH.test(row.tx_hash) || !HASH.test(row.user_op_hash)) return null;
