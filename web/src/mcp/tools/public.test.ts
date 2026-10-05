@@ -577,6 +577,34 @@ test("a funded, evidenced live book with an unrecorded gas cost is gas-pending o
   assert.doesNotMatch(list.json + profile.json, /quality-unknown/);
 });
 
+test("a return under review is withheld from the list and the profile, in every shape, and does not rank", async () => {
+  const saved = process.env.MERRYMEN_RETURN_REVIEW;
+  try {
+    const { connect } = await setup();
+    process.env.MERRYMEN_RETURN_REVIEW = ACCOUNT_A.toUpperCase().replace("0X", "0x");
+    const b = await connect(OWNER_B);
+    const list = await call(b, "list_public_agents", {});
+    // A's 2075 bps led the board; under review it sorts with the unranked.
+    assert.deepEqual(list.sc.agents.map((a: { agent: string }) => a.agent), [SLUG_C, SLUG_A, SLUG_B]);
+    const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_A);
+    assert.deepEqual(row.unranked, { code: "review-pending", reason: "return under review" });
+    assert.equal(row.ranked, false);
+    assert.equal(row.live.return_bps, null);
+    assert.equal(row.live.max_drawdown_bps, null);
+    const profile = await call(b, "get_public_agent", { agent: SLUG_A });
+    assert.equal(profile.res.isError, undefined, profile.json);
+    assert.deepEqual(profile.sc.unranked, row.unranked);
+    assert.equal(profile.sc.live.return_bps, null);
+    assert.deepEqual(profile.sc.growth.points, [], "the growth index is the return drawn as a line");
+    assert.doesNotMatch(list.json + profile.json, /2075|20\.75/);
+    // Nobody else's figure moves.
+    assert.equal(list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C).live.return_bps, 2045);
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_RETURN_REVIEW;
+    else process.env.MERRYMEN_RETURN_REVIEW = saved;
+  }
+});
+
 test("the list and the profile name the same decider when the book changed after the last decision", async () => {
   const { d, connect } = await setup();
   // C decided (dip-hunter) while live; its newest mark is now a paper one, and
@@ -664,7 +692,7 @@ test("explain_leaderboard states the formula, the gates, both drawdowns, the pri
   assert.match(def("live.return_bps"), /recorded this run up to that valuation/);
   assert.match(def("live.max_drawdown_bps (leaderboard list)"), /including one taken while flow inference was held/);
   const codes = sc.unranked_reasons.map((r: { code: string }) => r.code);
-  for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "gas-pending", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
+  for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "gas-pending", "review-pending", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
     assert.ok(codes.includes(c), c);
   }
   assert.equal(sc.period.name, "current run");

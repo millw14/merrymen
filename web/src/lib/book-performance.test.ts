@@ -54,7 +54,7 @@ test("held current equity and measured P&L use separate timestamps with flows an
         // The key installation is an operation, never a trade, and settles
         // after the measured valuation besides; the deposit is as of it too.
         fills: 1, fillsAtMark: 1, lastFillAt: 5, funded: true, valuation: "current",
-        gasOps: { sponsored: 0, priced: 1, unpriced: 0, unrecorded: 0 } });
+        gasOps: { sponsored: 0, priced: 1, unpriced: 0, unrecorded: 0 }, underReview: false });
       assert.equal(result.liveRank.pnlBps, 980);
     }
   } finally { raw.close(); }
@@ -267,7 +267,7 @@ test("an explicitly blocked paper recovery exposes no stale equity or fabricated
       pnlBps: null, pnlAt: null, publicBook: true, gasComplete: null, held: false,
       // Nor a trade count: a book whose recovery is blocked cannot vouch for
       // its records, so it does not get to say "no trades yet" either.
-      fills: null, fillsAtMark: null, lastFillAt: null, funded: null, valuation: null, gasOps: null });
+      fills: null, fillsAtMark: null, lastFillAt: null, funded: null, valuation: null, gasOps: null, underReview: false });
   } finally { raw.close(); }
 });
 
@@ -515,6 +515,38 @@ test("with no valuation yet a trade of either book counts, and an unread mark or
     assert.deepEqual([unread.performance.fills, unread.performance.fillsAtMark, unread.performance.valuation], [null, null, null]);
     assert.equal(unread.performance.equityUsdg, 110, "and nothing else is lost with it");
   } finally { raw.close(); }
+});
+
+test("a return under review is withheld on every book, and nothing but the return is", async () => {
+  const saved = process.env.MERRYMEN_RETURN_REVIEW;
+  const { raw, db } = await ledger();
+  try {
+    await op(db, 5);
+    await mark(db, 110, 10);
+    const open = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(open.liveRank.pnlBps, 1000);
+    process.env.MERRYMEN_RETURN_REVIEW = `${FOREIGN},${CASED}`;
+    const held = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.deepEqual(held.liveRank, { pnlBps: null, unrankedWhy: "review-pending" });
+    assert.deepEqual(held.performance, { ...open.performance, pnlUsdg: null, pnlBps: null, underReview: true },
+      "the valuation, its time and the counts stay; the return in both units goes");
+    // A paper book's return is shown without being ranked, so it is withheld
+    // on the figures and in the legacy field too.
+    await mark(db, 1000, 20, "paper");
+    await mark(db, 1100, 30, "paper");
+    const paper = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(paper.performance.book, "paper");
+    assert.equal(paper.performance.pnlBps, null);
+    assert.equal(paper.performance.pnlUsdg, null);
+    assert.equal(paper.paperPnlBps, null);
+    assert.equal(paper.performance.equityUsdg, 1100);
+    process.env.MERRYMEN_RETURN_REVIEW = FOREIGN;
+    assert.equal((await readBookPerformance(db, ACCOUNT, 2, true)).paperPnlBps, 1000, "another account's review is not this one's");
+  } finally {
+    raw.close();
+    if (saved === undefined) delete process.env.MERRYMEN_RETURN_REVIEW;
+    else process.env.MERRYMEN_RETURN_REVIEW = saved;
+  }
 });
 
 test("gas operations are counted by what is on record; the unpriced and unrecorded ones are exactly the incomplete ones", async () => {

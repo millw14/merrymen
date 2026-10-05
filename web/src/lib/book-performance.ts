@@ -4,6 +4,7 @@ import { distinctTrades, fillKindSql } from "./distinct-trades";
 import { heldSql, isHeld } from "./held-marks";
 import { paperRecoveryBlocked, readPaperPerformance } from "./paper-return";
 import { rankPnl, type Rank } from "./rank-pnl";
+import { underReturnReview } from "./return-review";
 
 export interface BookPerformance {
   book: "paper" | "live" | null;
@@ -66,6 +67,14 @@ export interface BookPerformance {
    * with a measured valuation only; null otherwise.
    */
   gasOps: GasOps | null;
+  /**
+   * An operator has put this account's return under review
+   * (MERRYMEN_RETURN_REVIEW, return-review.ts), so pnlBps and pnlUsdg are
+   * withheld whatever they would have been, and the page says why. On the
+   * figures rather than only in the rank, because a paper or idle book's
+   * return is shown without being ranked.
+   */
+  underReview: boolean;
 }
 
 export interface GasOps { sponsored: number; priced: number; unpriced: number; unrecorded: number }
@@ -262,12 +271,27 @@ async function describeFills(db: Db, account: string, epoch: number, performance
  * uses a measured mark of that same recorded book and only flows/gas by then.
  * The visibility decision is an explicit owner setting supplied by the caller;
  * it never grants access to any other private financial field.
+ *
+ * A return under review (return-review.ts) is withheld HERE, the one reader
+ * every public surface shares — the board, the profile, the public feed and
+ * MCP — so no surface can publish it by computing it again. Only the return:
+ * the valuation, its time and the counts that say what it means stay.
  */
 export async function readBookPerformance(db: Db, account: string, epoch: number, publicBook: boolean): Promise<BookPerformanceRead> {
+  const read = await readBookFigures(db, account, epoch, publicBook);
+  if (!underReturnReview(account)) return read;
+  return {
+    performance: { ...read.performance, pnlUsdg: null, pnlBps: null, underReview: true },
+    liveRank: { pnlBps: null, unrankedWhy: "review-pending" },
+    paperPnlBps: null,
+  };
+}
+
+async function readBookFigures(db: Db, account: string, epoch: number, publicBook: boolean): Promise<BookPerformanceRead> {
   const performance: BookPerformance = {
     book: null, equityUsdg: null, equityAt: null, pnlUsdg: null, pnlBps: null, pnlAt: null,
     publicBook: publicBook === true, gasComplete: null, held: false,
-    fills: null, fillsAtMark: null, lastFillAt: null, funded: null, valuation: null, gasOps: null,
+    fills: null, fillsAtMark: null, lastFillAt: null, funded: null, valuation: null, gasOps: null, underReview: false,
   };
   let current: Mark | null;
   // An unread mark is not an absent one: only a read that found none may go on

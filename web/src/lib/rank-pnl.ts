@@ -67,7 +67,16 @@ export type UnrankedWhy =
    * profiles said the deposits were evidenced while the board said nobody had
    * assessed them.
    */
-  | "gas-pending";
+  | "gas-pending"
+  /**
+   * AN OPERATOR IS CHECKING THIS RETURN BEFORE IT IS PUBLISHED.
+   *
+   * Named in the web's MERRYMEN_RETURN_REVIEW (return-review.ts), and set by
+   * book-performance.ts whatever this function would have said: the review
+   * exists because a figure that passes every gate here can still be wrong —
+   * a token withdrawal nobody has booked reads as a trading loss.
+   */
+  | "review-pending";
 
 export interface RankInputs {
   /** Capital in, less capital out. Null when nothing is on record. */
@@ -127,6 +136,8 @@ export function unrankedLabel(why: UnrankedWhy): string {
       return "return unavailable";
     case "gas-pending":
       return "gas cost not yet fully recorded";
+    case "review-pending":
+      return "return under review";
     default: {
       const exhaustive: never = why;
       return exhaustive;
@@ -149,6 +160,8 @@ export function unrankedShort(why: UnrankedWhy): string {
       return "unranked";
     case "gas-pending":
       return "gas pending";
+    case "review-pending":
+      return "under review";
     default: {
       const exhaustive: never = why;
       return exhaustive;

@@ -965,6 +965,7 @@ const UNRANKED_CODES: Record<UnrankedWhy, true> = {
   "contributions-unevidenced": true,
   "quality-unknown": true,
   "gas-pending": true,
+  "review-pending": true,
 };
 
 export interface LeaderboardExplained {
@@ -1008,6 +1009,7 @@ export function explainLeaderboard(): LeaderboardExplained {
       "At least one live trade landed, and there is an equity reading to measure.",
       "The worker has assessed the contributions as evidence (chain-log receipts or a reconciling epoch carry), not inferred from a balance change.",
       "Every operation's owner gas cost up to that valuation is on record (or proved sponsored). Otherwise the return is withheld as gas-pending: it is not known exactly.",
+      "The return is not under an operator's review. A return under review is withheld everywhere as review-pending (no percentage, no P&L, no growth line) until the review clears; the current valuation stays.",
       "The newest valuation belongs to the live book (checked here in addition to the page's gates, so a paper balance is never divided by real deposits).",
     ],
     unranked_reasons: [

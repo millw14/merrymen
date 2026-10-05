@@ -700,8 +700,11 @@ export async function profileOf(
     contributionsEvidenced: contributionsKnown === true,
     flowsWithTx,
     flowsTotal,
-    growth,
-    growthComplete,
+    // A RETURN UNDER REVIEW IS WITHHELD IN EVERY SHAPE, and the growth index
+    // is one: 0.64 is "down 36%" drawn as a line. The review exists because a
+    // step like that may be a withdrawal nobody has booked (return-review.ts).
+    growth: figures.performance.underReview ? [] : growth,
+    growthComplete: figures.performance.underReview ? false : growthComplete,
     holdings,
     publicBook,
     tradesRead,
