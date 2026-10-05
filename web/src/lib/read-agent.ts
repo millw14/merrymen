@@ -701,7 +701,7 @@ export async function profileOf(
     // Measured on the growth index rather than the equity line, so a
     // withdrawal is not a loss — and on the UNDECIMATED series, because one
     // reading in nine cannot see a trough between two kept samples.
-    maxDdBps: unrankedWhy === null && !flowsWithheld ? drawdownBps(growthFull) : null,
+    maxDdBps: unrankedWhy === null ? drawdownBps(growthFull) : null,
     landed,
     filledPaper,
     paperFills,
