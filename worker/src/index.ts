@@ -107,6 +107,7 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { holdAtCaps } from "./budget-seed";
 import { resumeFrom } from "./deposit-log";
 import { scanAndBookDepositWindow } from "./deposit-scan";
 import { renderWhy } from "./strategies/reasons";
@@ -123,6 +124,8 @@ import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOu
 import { recoveryCommandRefused } from "./recovery-command-barrier";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
+import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, DrainingRefused, admissionFrom, admissionRefusal, drainIntentChain } from "./worker-admission";
+import { closeStore } from "./store";
 import { CoalescedRefresh } from "./coalesced-refresh";
 import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
@@ -200,6 +203,7 @@ import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+import { entryGateLatch, entryGatesOf } from "./entry-gates";
 // ── ENERGY: how much a low-energy agent may still do on its own today ──────
 // The contract is core energy.ts; the pure throttle is energy.ts; the owner's
 // sentence is energy-copy.ts. What is wired here is where the tick asks.
@@ -226,6 +230,7 @@ import {
   type BalanceParts,
   type EnergyLevel,
   type EnergyPlan,
+  type HeldCurveLeg,
   type LastGood,
 } from "./energy";
 import type { EnergyStatus } from "../../packages/core/src/index";
@@ -256,6 +261,7 @@ import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
+import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
@@ -547,6 +553,7 @@ import {
   landedOpsBetween,
   openNextEpoch,
   poolKeysFor,
+  budgetDayUnrestored,
   getOpsToday,
   getPaperBook,
   getSpentTodayUsdg,
@@ -702,7 +709,9 @@ const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
  * reach it; keyed by executor, so every arm starts fresh.
  */
 const keyInstallTriedAt = new WeakMap<AgentExecutor, number>();
-const KEY_INSTALL_RETRY_MS = 30 * 60_000;
+// Half an hour, and the SAME half hour an `enable-too-wide` entry is held for
+// (exec-backoff.ts): the hold lasts until the next install can be tried.
+const KEY_INSTALL_RETRY_MS = KEY_INSTALL_HOLD_MS;
 
 async function main() {
   await initStore();
@@ -3448,6 +3457,42 @@ async function main() {
    * quietly stopped proposing. Cleared at every arm.
    */
   const suppressedIntents = new Map<string, string>();
+  /**
+   * The same idea WITH AN EXPIRY, for what our own checks refuse before
+   * signing (GasRefused, SponsorRefused): a buy refused that way is not
+   * proposed again until its hold runs out. Exits are never held. Cleared at
+   * every arm, beside the map above. See exec-backoff.ts.
+   */
+  const execBackoff = new ExecBackoff();
+  /**
+   * The hold on `intent`, asked only while it would go out LIVE. A hold is
+   * about the checks before a live signature, and nothing else reaches them:
+   * on paper, or refused outright (live trading switched off, no gas), the
+   * intent meets its own rail's answer and not a gas rule left over from
+   * before the switch. The holds stay, and apply again if the rail comes back.
+   */
+  const liveHold = (intent: TradeIntent): Hold | null =>
+    active && execMode().mode === "live" ? execBackoff.held(intent, active.limits, Date.now()) : null;
+  /**
+   * THE ONLY INTENTS A HOLD MAY REFUSE: the entries the tick itself proposed.
+   *
+   * An owner's order and the Brain's are EXEMPT. They are asked for once, by
+   * somebody waiting on the answer, and a hold another intent started — of
+   * another size, perhaps on a cause the owner has just fixed — is no answer
+   * to them. So they go to the bundler and hear its own word; when that word
+   * is a refusal that starts a hold, their reply says when asking again can
+   * help (orderHeldReply). The tick's loops add an entry here just before it
+   * runs; nothing else does, so a path that forgets is merely never held,
+   * which is the behaviour before holds existed.
+   */
+  const tickEntries = new WeakSet<TradeIntent>();
+  /**
+   * Gated entries (entry-gates.ts) whose one rejected row the wall has written
+   * this arm: every repeat of the same (venue, token, rule) is withheld before
+   * ensureDecision. Spent by `settle` with the row, never by letting an intent
+   * go. Cleared at every arm, beside suppressedIntents.
+   */
+  const entryGateRows = entryGateLatch();
   /** The last arm failure reported, so the same one is not re-logged every tick. */
   let lastArmFailure: string | null = null;
   let inFlightSpentUsdg = 0n;
@@ -3457,14 +3502,54 @@ async function main() {
   /** Which book the budget is being spent from — paper and live never share one. */
   const budgetRail = (): BudgetRail => (paperActive() ? "paper" : "live");
   /**
+   * Whether the last refresh found the trailing day from before a rebuild still
+   * missing (budget-seed.ts), so the owner is told once when entries stop for
+   * it and once when they start again — not once a tick.
+   */
+  let budgetDayHeld = false;
+  /**
    * Re-read the settled halves from the ledger. Cheap (two indexed aggregates on
-   * `trades`), and the only thing that lets an op age out of the trailing-24h
-   * window without a restart. Never touches the in-flight halves.
+   * `trades`, plus one index seek per seeded operation still in its window —
+   * store.ts withBudgetSeed), and the only thing that lets an op age out of the
+   * trailing-24h window without a restart. Never touches the in-flight halves.
+   *
+   * THE LEDGER HERE INCLUDES WHAT THE ORCHESTRATOR SEEDED (budget-seed.ts): a
+   * rebuilt child's trailing day, read back from the shared ledger before it
+   * armed. It is an input to every refresh, not a starting value — so it ages
+   * out on the same clock as this child's own rows, and no refresh drops it.
+   *
+   * AND WHILE THAT DAY IS NOT BACK, THE DAY READS AS SPENT. The orchestrator
+   * leaves a marker in this home until every seeded row is in. A live book
+   * that read its caps from the ledger alone then would read a fresh allowance
+   * — the day it already spent is in a ledger it cannot see. So both settled
+   * halves are held at the grant's own caps (budget-seed.ts holdAtCaps): no
+   * headroom for a new entry, and the exits the caps already exempt — a sale
+   * into cash, the stop-loss — run exactly as they do on a spent day. On
+   * EITHER rail: the rail is re-decided after this refresh, inside the tick,
+   * so a hold on the live rail alone would let the first live entry after a
+   * paper→live flip through on the unheld paper counters. Read BEFORE the
+   * ledger: the orchestrator writes every row and only then removes the
+   * marker, so a marker that is gone here means the reads below already see
+   * the whole seed.
    */
   const refreshBudget = async (agentId: string): Promise<void> => {
     const rail = budgetRail();
-    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string));
-    settledOps = await getOpsToday(agentId, rail);
+    const held = budgetDayUnrestored();
+    const read = {
+      spentUsdg: usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string)),
+      ops: await getOpsToday(agentId, rail),
+    };
+    ({ spentUsdg: settledSpentUsdg, ops: settledOps } = holdAtCaps(read, active?.limits, held));
+    if (held !== budgetDayHeld) {
+      budgetDayHeld = held;
+      void addEvent(
+        agentId,
+        held ? "warn" : "ok",
+        held
+          ? "today's spending from before this restart can't be confirmed from the shared ledger yet — no new entries until it is; exits, stops and take-profits still run"
+          : "today's spending from before this restart is back — the daily caps read the whole trailing day again",
+      );
+    }
   };
 
   /**
@@ -7390,6 +7475,8 @@ async function main() {
     inFlightSpentUsdg = 0n;
     inFlightOps = 0;
     suppressedIntents.clear();
+    entryGateRows.clear();
+    execBackoff.clear("armed");
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
@@ -8102,12 +8189,21 @@ async function main() {
    * re-sign starts fresh. An install still in flight is not raced by a second
    * one, and a wall that cannot be installed even alone is told to the owner
    * once, not every tick.
+   *
+   * AND THE ENTRIES WAITING ON IT GO THE MOMENT IT LANDS. Every buy refused
+   * `enable-too-wide` is held for this same half hour (exec-backoff.ts), and
+   * a landed install is the end of that reason, so those holds are dropped
+   * here rather than waited out.
    */
   async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
+    // A worker on its way out installs nothing: the install is an operation of
+    // its own, with gas, and the next process tries again (worker-admission.ts
+    // DrainingRefused). Before the half-hour mark is set, so it is not owed one.
+    if (draining) return;
     const last = keyInstallTriedAt.get(executor);
     if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
     keyInstallTriedAt.set(executor, Date.now());
-    await installKeyRecorded({
+    const landed = await installKeyRecorded({
       addTrade,
       priceGas: async (wei) => {
         const eth = await ethPrice8();
@@ -8117,8 +8213,40 @@ async function main() {
       refreshBudget: () => refreshBudget(agentId),
       event: (level, message) => addEvent(agentId, level, message),
       resolveMinutes: STRANDED_INTERVAL_SEC / 60,
+      // And again at the broadcast itself, for a SIGTERM that lands while the
+      // install is being estimated and signed.
+      beforeBroadcast: () => {
+        if (draining) throw new DrainingRefused();
+      },
     }, agentId, executor);
+    if (landed) execBackoff.clearRule("enable-too-wide", "this key's permissions are installed");
   }
+
+  /**
+   * WHAT THIS PROCESS MAY START (worker-admission.ts), read once at boot: the
+   * orchestrator changes a tenant's level by respawning its child, never by
+   * editing a live one. Judged at the top of processIntentLocked, which every
+   * intent passes on its way to the chain, before a budget is reserved, a quote
+   * fetched or anything built — admission-invariant.test.ts pins both halves.
+   *
+   * `draining` is raised by the SIGTERM handler at the bottom of main(). From
+   * then on every intent that reaches the queue is refused. The one already on
+   * it is let finish only if it is already out: `draining` is asked again at
+   * the last moment before each broadcast — the broker lane's place, the live
+   * rail's reservation, the executor's onSubmitted hook and the key install —
+   * so an intent that passed the gate a moment before the signal is refused
+   * there, before it is sent (worker-admission.ts DrainingRefused). Only a paper
+   * fill, which nothing outside this process ever sees, runs to its row.
+   *
+   * `lastHeldLegs` is the tick's latest answer to which curve legs the book
+   * holds (heldLegs, beside the strategy loop), so an exits-only worker asks the
+   * same entry question the tick's own energy filter asks — of an owner's order
+   * between ticks too. Empty until a tick has read the book: the strict reading.
+   */
+  const admission = admissionFrom(process.env[ADMISSION_LEVEL_ENV], isHostedMode());
+  console.log(`[admission] level ${admission.level} — ${admission.why}`);
+  let draining = false;
+  let lastHeldLegs: ReadonlyMap<string, HeldCurveLeg> = new Map();
 
   /**
    * SERIALIZED. Every caller goes through processIntent, which holds this.
@@ -8349,6 +8477,49 @@ async function main() {
       releaseBudget();
       return wrote;
     };
+    const notional =
+      intent.kind === "swap" ||
+      intent.kind === "equity-order" ||
+      intent.kind === "curve-trade" ||
+      intent.kind === "energy-buy"
+        ? intent.notionalUsdg
+        : intent.amountUsdg;
+    // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
+    // on the broker rail. Step 5's schema work gives broker rows their own
+    // columns — until then the ticker in `target` keeps the tape readable.
+    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
+
+    // ── ADMISSION, BEFORE ANYTHING ELSE IS ASKED ────────────────────────────
+    //
+    // A tenant brought back after a hold may be at `observe` (start nothing)
+    // or `exits-only` (close what it holds), and a worker told to leave starts
+    // nothing new at all (worker-admission.ts). FIRST, because this is the one
+    // place every intent passes — the strategy, the class route, the Brain, an
+    // owner's typed or queued order, the energy buy and the selftest probe —
+    // and because nothing has happened yet: no budget reserved, no quote, no
+    // read of the risk period. So a refusal holds nothing open and leaves
+    // nothing a restart could replay. It is a `rejected` row like every other
+    // refusal here, which is budget-neutral on both rails and is what puts the
+    // answer in lastTradeOutcome for an owner's order to be told.
+    //
+    // Before checkPolicy on purpose. A tenant that is not admitted is not
+    // trading, and that is the fact the tape and the owner need — not which
+    // cap the trade would also have met.
+    const admissionRule = admissionRefusal({ level: admission.level, draining }, intent, limits, lastHeldLegs);
+    if (admissionRule) {
+      // Counted, not read — one line per refusal, as the policy's own.
+      console.log(`[admission] REFUSED ${intent.kind}: ${admissionRule} (level ${admission.level}${draining ? ", draining" : ""})`);
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: admissionRule,
+      });
+      return;
+    }
+
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
@@ -8366,17 +8537,6 @@ async function main() {
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
-    const notional =
-      intent.kind === "swap" ||
-      intent.kind === "equity-order" ||
-      intent.kind === "curve-trade" ||
-      intent.kind === "energy-buy"
-        ? intent.notionalUsdg
-        : intent.amountUsdg;
-    // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
-    // on the broker rail. Step 5's schema work gives broker rows their own
-    // columns — until then the ticker in `target` keeps the tape readable.
-    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
 
     // This check belongs inside the intent queue, beside the grant's caps.
     // A caller-side read lets two confirmed transfers both see the old spend
@@ -8422,6 +8582,31 @@ async function main() {
         amount_usdg: usdgNum(notional),
         status: "rejected",
         reject_rule: suppressed,
+      });
+      return;
+    }
+
+    // ── HELD, FOR A WHILE, AFTER OUR OWN CHECKS REFUSED IT ───────────────
+    // The expiring sibling of the block above (exec-backoff.ts), read in the
+    // same place for the same reason. Only the tick's own entries are asked
+    // (tickEntries: an owner's or the Brain's order is exempt and goes on to
+    // hear the bundler), and only a buy bound for the live rail can be held —
+    // `liveHold` answers null for every exit, whatever is recorded. What
+    // reaches here has a decision already: a strategist intent that journaled
+    // its own (a deterministic one with no decision was skipped in the tick,
+    // before it got one). So this is never a silent return: the row is a
+    // rejection carrying the rule that started the hold, with the legs the
+    // refusal's own row had.
+    const backedOff = tickEntries.has(intent) ? liveHold(intent) : null;
+    if (backedOff && verdict.ok) {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: backedOff.rule,
       });
       return;
     }
@@ -8513,6 +8698,20 @@ async function main() {
         return;
       }
 
+      // STILL NOT DRAINING? The review above was an await, and the gate at the
+      // top was asked before it. A live broker's place() is a real order, so it
+      // is the last moment to refuse one on the way out (DrainingRefused).
+      if (draining) {
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          amount_usdg: usdgNum(review.notionalUsdg),
+          status: "rejected",
+          reject_rule: "draining",
+        });
+        return;
+      }
       const placed = await orderExec.place(order, review);
       // Counters move on the REVIEWED notional — the amount the wall approved.
       // Held as a reservation until this order's row reaches the ledger below.
@@ -8764,6 +8963,30 @@ async function main() {
       return;
     }
 
+    // ── STILL NOT DRAINING? ASKED AGAIN, BEFORE ANYTHING IS RESERVED ─────
+    //
+    // The admission gate at the top was asked before the risk peak, the scout
+    // context and the transfer total were read, each an await long enough for
+    // a SIGTERM to land in. An intent that passed it a moment before the signal
+    // must not go on to reserve, quote and sign after it: before the handler
+    // existed node died on the signal and such an intent never went out, and
+    // draining must not change that. Here, before the reservation, so the row
+    // is the plain refusal the gate writes; the executor's onSubmitted hook
+    // below asks once more, for a signal that lands while this one is quoted
+    // and signed (worker-admission.ts DrainingRefused).
+    if (draining) {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: "draining",
+      });
+      return;
+    }
+
     // Reserve spend/ops BEFORE the await-heavy execution and roll back on
     // failure. Incrementing only after success opens a TOCTOU window: a chat
     // trade interleaved with a tick could both pass checkPolicy against the
@@ -8807,6 +9030,11 @@ async function main() {
        */
       const submitHooks: ExecuteHooks = {
         onSubmitted: async (userOpHash, op) => {
+          // THE LAST MOMENT BEFORE THE BROADCAST, and the last place a worker
+          // told to leave can still decline to send: signed, hashed, not yet
+          // written and not yet out. A throw here refuses it with nothing spent
+          // (the catch books it `draining`, beside NotRecorded).
+          if (draining) throw new DrainingRefused();
           const wrote = await addTrade({
             agent_id: agentId,
             kind: intent.kind,
@@ -10416,6 +10644,26 @@ async function main() {
         return;
       }
 
+      // AND ITS SIBLING ON THE WAY OUT. The worker began draining while this
+      // operation was quoted and signed, and onSubmitted declined to send it —
+      // thrown before the pre-broadcast row, so there is no `submitted` row to
+      // settle and nothing was spent. The refusal is the row, under the rule
+      // the admission gate writes (worker-admission.ts DrainingRefused).
+      if (e instanceof DrainingRefused) {
+        releaseBudget();
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          ...tokenLegs(intent),
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: e.rule,
+          ...sim,
+        });
+        return;
+      }
+
       if (e instanceof GasRefused) {
         releaseBudget();
         await addEvent(agentId, "warn", `${intent.kind} refused before signing: ${msg.slice(0, 300)}`);
@@ -10429,6 +10677,11 @@ async function main() {
           reject_rule: e.rule,
           ...sim,
         });
+        // Not proposed again until the hold runs out (exec-backoff.ts; a buy
+        // only — an exit is never held). BEFORE the install below, which
+        // drops every `enable-too-wide` hold when it lands: noted after it,
+        // this one would outlive its reason by half an hour.
+        execBackoff.note(intent, limits, e.rule, Date.now());
         // The wall fits, only not with this trade beside it: install it alone,
         // so the next trade is an ordinary operation. Still inside this
         // intent's lock, so nothing else signs with this key meanwhile.
@@ -10467,6 +10720,8 @@ async function main() {
           reject_rule: e.rule,
           ...sim,
         });
+        // Held like a gas refusal above; an unreachable sponsor is not.
+        execBackoff.note(intent, limits, e.rule, Date.now());
         return;
       }
 
@@ -12967,6 +13222,10 @@ async function main() {
       // does not pay for a window that could only buy; the rule is the hard
       // filter below. Null — not limited — whenever the gate is not enforcing.
       energy: energyNow.enforce ? { entriesLeft: energyNow.entries.left ?? 0 } : null,
+      // And what it will refuse to BUY at all (`asset-allowlist`, `no-exit`),
+      // from the very limits checkPolicy judges — so a leg the key cannot sell
+      // back is skipped, not proposed and refused every tick (entry-gates.ts).
+      entryGates: entryGatesOf(active.limits),
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and
       // nothing on the rest. Absent is a normal state — a cold cache, a pool
@@ -13227,6 +13486,9 @@ async function main() {
       classRows: await classPositions(agentId),
       classBalances: lastClassBalances,
     });
+    // And for admission, which asks the same question of an owner's order
+    // between ticks (processIntentLocked, at its top).
+    lastHeldLegs = heldLegs;
 
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
@@ -13248,6 +13510,23 @@ async function main() {
       // `continue` rather than a filtered array (`w` is paired with the intent
       // by index): no decision row, no public post, no refusal on the tape.
       const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      // ── ENTRY GATES: THE BACKSTOP (entry-gates.ts) ──────────────────────
+      //
+      // A buy the wall is certain to refuse, from a producer that did not read
+      // `snap.entryGates`. It goes on until the wall has written its one
+      // rejected row per (venue, token, rule) this arm — `settle`, below, after
+      // processIntentReporting — and every repeat after that stops here, before
+      // any claim, decision row or reservation. Entries only — never an exit.
+      if (entry && entryGateRows.withhold(intent, active.limits)) continue;
+      // ── HELD AFTER OUR OWN CHECKS REFUSED IT (exec-backoff.ts) ──────────
+      //
+      // An entry only, and only one with no decision yet: skipped before
+      // ensureDecision, so no row, no post, and no energy or group claim — the
+      // hold's `[backoff]` line already said why. An intent the strategist
+      // journaled carries its decision, and goes on to processIntentLocked,
+      // which books it `rejected` under the held rule rather than leaving
+      // that decision without an outcome.
+      if (entry && !intent.decisionId && liveHold(intent)) continue;
       // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
       //
       // An entry into a coin a group nominated must also win a group-entry
@@ -13309,12 +13588,18 @@ async function main() {
         // AN ENTRY IS COUNTED ONLY IF IT BECAME A TRADE — landed, submitted,
         // or filled on paper (the statuses the ops cap counts). Refused by the
         // wall, or never sent, the claim goes back.
+        // The tick's own entry, so a hold may refuse it (tickEntries).
+        tickEntries.add(intent);
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
         // A fill commits the reservation and opens the exploration position;
         // no fill releases it and gives the day's follow entry back.
         fomoChild.settleEntry(followGate, facts?.status, intent.decisionId);
+        // The backstop's row is spent HERE, by the row the wall wrote — not
+        // above, where a refused group claim, a closed energy allowance or a
+        // failed decision row could still stop the intent with nothing written.
+        entryGateRows.settle(intent, active.limits, facts);
       } else {
         // A sale that empties a coin bought through a group may earn one
         // "out of that one" line once its row lands (tgNoteTradeRow).
@@ -13390,6 +13675,9 @@ async function main() {
       // claimed against today's energy before its decision exists, and handed
       // back if no trade came of it. (A class exit can never reach here.)
       const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      // The same hold as the strategy loop above. A class entry never has a
+      // decision yet, and `gas-absurd` on the sealed vault holds the route.
+      if (entry && !intent.decisionId && liveHold(intent)) continue;
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);
@@ -13401,6 +13689,7 @@ async function main() {
         continue;
       }
       if (entry) {
+        tickEntries.add(intent);
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
       } else {
@@ -13737,7 +14026,32 @@ async function main() {
     // the note as "less than you asked for": a full liquidation annotated as
     // though it had been trimmed.
     const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
-    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), ...orderHeldReply(intent, outcome), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+  }
+
+  /**
+   * AN ORDER WHOSE OWN REFUSAL STARTED A HOLD, said with when asking again
+   * can help (exec-backoff.ts).
+   *
+   * An owner's or the Brain's order is never held (tickEntries): it is tried,
+   * and the bundler or the sponsor answers it. When that answer is a refusal
+   * before signing, the refusal holds the tick's entries on the same pair, and
+   * the owner (or the Brain's event line) is owed the fact the tick acts on:
+   * asking again before the hold runs out will most likely meet the same
+   * answer. So the backoff is asked for the hold THIS intent's refusal wrote,
+   * and only that one. A hold another intent started is about another size and
+   * another moment, and this order was never judged by it.
+   *
+   * Spread OVER sayTradeOutcome's reply: every other outcome keeps its own
+   * sentence, and the ledger verdict beside it is untouched.
+   */
+  function orderHeldReply(
+    intent: TradeIntent,
+    outcome: { status: TradeRow["status"]; rejectRule?: string } | null,
+  ): Partial<OrderReply> {
+    if (outcome?.status !== "rejected") return {};
+    const held = execBackoff.notedBy(intent, Date.now());
+    return held && held.rule === outcome.rejectRule ? no(heldReply(held, Date.now())) : {};
   }
 
   /**
@@ -13949,7 +14263,7 @@ async function main() {
       if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
       // sent, which is not always the amount asked for — see the clamp above.
-      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), ...orderHeldReply(intent, outcome), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
     });
   }
 
@@ -14252,7 +14566,8 @@ async function main() {
   // Telegram groups reach the research through this port only (coin-level aggregates, audience "group").
   const tgFomoPort = createTgFomoPort(() => fomoBroker);
 
-  startTelegram({
+  // Kept for the SIGTERM handler below, which stops the poll on the way out.
+  const telegramPoll = startTelegram({
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
     // and the very next message must see it — the tick-refreshed `cfg` snapshot
     // lags up to tickSeconds, which reads as "linked, then not authorized".
@@ -14586,6 +14901,108 @@ async function main() {
       console.error("[command-wake]", e);
     }
   }, COMMAND_WAKE_EVERY_MS).unref();
+
+  /**
+   * SIGTERM: STOP STARTING THINGS, LET THE TRADE ALREADY OUT FINISH, LEAVE.
+   *
+   * With no handler, node dies on the signal wherever it happens to be — in the
+   * middle of a tick that has just handed the strategy a fresh pass of intents,
+   * or between an operation's broadcast and its row settling. The orchestrator
+   * sends one from two places (orchestrator.ts): killChild, whenever it stands
+   * a child down — an accounting hold, the owner's kill switch ("grant
+   * removed"), a lost lease, an expired grant's retirement, an unconfirmed
+   * ledger, FLEET_HALT — which follows it with SIGKILL three seconds on; and
+   * its fleet drain on shutdown (fleet-drain.ts, step 4), which waits up to
+   * twenty seconds to see the exit before it sends SIGKILL. The heartbeat
+   * watchdog does NOT come here: it sends SIGKILL straight away. What all of
+   * that left behind was survivable — the pre-broadcast `submitted` row and
+   * the stranded-op resolver exist because of it — but it was never a clean
+   * stop.
+   *
+   * So, in this order:
+   *   1. `draining` — processIntentLocked refuses every intent that reaches it
+   *      from here on, with a row that says so (worker-admission.ts);
+   *   2. the clock stops — no tick starts on the way out, and no order file is
+   *      claimed only to be refused; it stays for the next process
+   *      (command-wake.ts stop). The Telegram poll stops with it: no new
+   *      getUpdates is asked, so an owner's /kill or order sent now waits
+   *      unconsumed for the next process instead of being taken by this one
+   *      and refused. A long poll already out still returns and is handled
+   *      (telegram/service.ts checks its stop between polls, not within one):
+   *      an order in it is refused `draining` and its row written, but the
+   *      reply after it is not waited for — the poll's handlers are not a tick;
+   *   3. the intent chain is waited for, at most DRAIN_INTENT_CHAIN_MS: a trade
+   *      already broadcast reads its receipt and writes its row; one not yet
+   *      sent is refused at its broadcast (`draining`, asked again there — see
+   *      the admission block above processIntentLocked), and anything queued
+   *      behind it is refused at the gate and written. The tick running when
+   *      the signal came is waited for too, within the same budget: what it
+   *      does after its trades — refunding an energy claim a refused intent
+   *      did not use, writing an owner's order result file — is work the close
+   *      and the exit must not cut off (command-wake.ts TickClock.settled);
+   *   4. the ledger is closed (store.ts closeStore);
+   *   5. exit 0, in the same turn as the close, so nothing writes after it.
+   *
+   * A trade still out when the budget runs out is left exactly as a crash
+   * leaves one: its row is already `submitted` with its hash, and the resolver
+   * settles it from the chain at the next arm. Nothing is retried, re-sent or
+   * replayed by this.
+   *
+   * WHAT THE BUDGET REALLY IS. Under killChild the SIGKILL three seconds on
+   * cuts the drain short, exactly as it always cut the process short — what
+   * changes is that nothing new is broadcast in those seconds. Under the
+   * orchestrator's fleet drain the child has up to twenty seconds before
+   * SIGKILL, which is what DRAIN_INTENT_CHAIN_MS was sized to fit inside, and
+   * the tenant leases are released last, after that wait — so a draining
+   * child has exited, or been sent SIGKILL, before its lease is given up. A
+   * drain whose own budget is cut (RAILWAY_DEPLOYMENT_DRAINING_SECONDS) cuts
+   * that wait too, and its SIGKILL then cuts this drain short as killChild's
+   * does. Until the SIGKILL, it sends nothing new (every broadcast is
+   * refused) and asks Telegram for nothing new; only a receipt read, the end
+   * of the tick it was in and its own sqlite writes go on (a hosted child has
+   * no DATABASE_URL).
+   *
+   * Registered only here, once the clock exists: a SIGTERM before this point
+   * finds nothing started and keeps node's default. A second one while draining
+   * changes nothing — the drain is already bounded, and the orchestrator's
+   * SIGKILL is the backstop when it will not wait. SIGINT keeps node's default
+   * too: Ctrl-C on a self-hosted worker in a terminal means stop now.
+   */
+  process.on("SIGTERM", () => {
+    if (draining) return;
+    draining = true;
+    console.log(`[worker] SIGTERM — draining: nothing new starts; waiting up to ${DRAIN_INTENT_CHAIN_MS / 1000}s for the trade already on the chain`);
+    tickClock.stop();
+    // Guarded: a throw here would leave the handler before the drain, and the
+    // process draining for ever with nothing left to exit it.
+    try {
+      telegramPoll.stop();
+    } catch (e) {
+      console.error("[worker] stopping the Telegram poll failed:", e);
+    }
+    void drainIntentChain({
+      tail: () => intentChain,
+      tick: () => tickClock.settled(),
+      budgetMs: DRAIN_INTENT_CHAIN_MS,
+      now: Date.now,
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    })
+      .catch(() => false)
+      .then((emptied) => {
+        console.log(
+          emptied
+            ? "[worker] drained — nothing left on the intent chain and no tick running; closing the ledger"
+            : "[worker] drain budget spent with a trade or a tick still running — a trade already out is settled by the stranded-op resolver at the next arm; closing the ledger",
+        );
+        try {
+          closeStore();
+        } catch (e) {
+          console.error("[worker] closing the ledger failed:", e);
+        }
+        process.exit(0);
+      });
+  });
 
   // ── DON'T ALL WAKE AT ONCE ──────────────────────────────────────────
   //
