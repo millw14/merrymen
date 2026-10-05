@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import path from "node:path";
+import { fleetRollout, type FleetRollout } from "./fleet-rollout";
 
 export const PERSISTENT_HOME_MANIFEST = ".merrymen-persistent-home.json";
 /** What the adopted volume's original operator halt was, kept byte for byte. */
@@ -487,13 +488,16 @@ interface RehaltReceipt {
   halt: { path: string; inode: string; text: string };
 }
 /**
- * B1's MERRYMEN_FLEET_ROLLOUT, whose grammar the orchestrator validates at
- * boot. A release needs a scope that admits someone: `none`, or no value at
- * all, keeps the halt where it is.
+ * A release needs a scope that admits someone, read with B1's own parser
+ * (fleet-rollout.ts), never a second and looser reading of the same value.
+ * The parser throws on anything malformed or mis-cased (`None`, `off`, `0`,
+ * `none,`, a bare address), and on an unset value here, because a required
+ * persistent home is the Railway fleet: a typo refuses startup and is never
+ * read as permission. `none` keeps the halt where it is. So would an unset
+ * value read as `all`, which only happens off Railway and so never here.
  */
-function rolloutAdmitsRelease(env: NodeJS.ProcessEnv): boolean {
-  const scope = env.MERRYMEN_FLEET_ROLLOUT?.trim();
-  return !!scope && scope !== "none";
+function rolloutAdmitsRelease(rollout: FleetRollout): boolean {
+  return rollout.scope === "list" || (rollout.scope === "all" && !rollout.unset);
 }
 /** Is FLEET_HALT exactly this proof's halt? Never throws over somebody else's file. */
 function ownHalt(root: Root, proof: PersistentHomeHaltProof): boolean {
@@ -523,7 +527,7 @@ function replaceDurably(root: Root, file: string, text: string, unchanged: () =>
   } finally { rmSync(temp, { force: true }); }
 }
 
-function releaseAdopted(root: Root, saved: { manifest: Manifest; evidence: Evidence }): PersistentHomeHaltControl {
+function releaseAdopted(root: Root, saved: { manifest: Manifest; evidence: Evidence }, rollout: FleetRollout): PersistentHomeHaltControl {
   const handover = saved.manifest.handover;
   if (handover.state === "complete" && !ownHalt(root, handover.halt)) {
     // Released. Whatever FLEET_HALT is here now was put there by hand, and a
@@ -533,8 +537,8 @@ function releaseAdopted(root: Root, saved: { manifest: Manifest; evidence: Evide
   // Held, or a release that crashed after its durable receipt and before it
   // removed its own unchanged halt: both finish through the reviewed path.
   if (handover.state === "held") assertHalt(root, handover.halt);
-  if (!rolloutAdmitsRelease(root.env)) {
-    return { action: "withheld", handoverState: handover.state, detail: "MERRYMEN_FLEET_ROLLOUT is none or unset, so the halt stays" };
+  if (!rolloutAdmitsRelease(rollout)) {
+    return { action: "withheld", handoverState: handover.state, detail: "MERRYMEN_FLEET_ROLLOUT is none, so the halt stays" };
   }
   markPersistentHomeHandoverComplete(root.identity, handover.halt, root.env, root.options);
   return { action: "released", handoverState: "complete", detail: "released into the configured rollout scope" };
@@ -616,7 +620,8 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
  *
  * MERRYMEN_RELEASE_HOME_HALT=<operation token> releases only a `held`
  * manifest, through markPersistentHomeHandoverComplete itself, and only while
- * MERRYMEN_FLEET_ROLLOUT admits someone. Asked again, it changes nothing:
+ * MERRYMEN_FLEET_ROLLOUT, read by B1's parser, admits someone. A malformed
+ * rollout refuses before anything is touched. Asked again, it changes nothing:
  * a FLEET_HALT made by hand after a release is never lifted by this variable.
  *
  * MERRYMEN_REHALT_HOME=<operation token> puts a canonical halt back with a
@@ -638,6 +643,9 @@ export function controlAdoptedPersistentHomeHalt(
   }
   const pinned = pinnedHalt(env);
   if (pinned === null) throw refuse("a halt release or re-halt also requires the pinned original halt hash");
+  // The scope a release would start, read before the volume is touched: a
+  // malformed value refuses here even if the boot-time check ever moves.
+  const rollout = rehalt === undefined ? fleetRollout(env) : null;
   const result = withRoot(env, options, root => {
     const saved = readManifest(root);
     if (!saved) throw refuse("a halt release or re-halt requires the adopted persistent manifest");
@@ -648,7 +656,7 @@ export function controlAdoptedPersistentHomeHalt(
     if (!readPreAdoption(root, pinned, token)) {
       throw refuse("an env halt release or re-halt applies only to a volume adopted under the pinned original halt");
     }
-    return rehalt !== undefined ? rehaltAdopted(root, saved, release !== undefined) : releaseAdopted(root, saved);
+    return rehalt !== undefined ? rehaltAdopted(root, saved, release !== undefined) : releaseAdopted(root, saved, rollout!);
   });
   if (!result) throw refuse("persistent-home opt-in is required for an env halt release or re-halt");
   return result;

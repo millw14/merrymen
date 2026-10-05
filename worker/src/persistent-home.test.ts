@@ -247,7 +247,7 @@ test("a changed hold or target proof refuses completion and the last release che
 // THE POPULATED INCIDENT VOLUME: tenant homes, an operator's hand-made halt,
 // and no manifest. Adoption, release and re-halt (docs/fleet-resume.md).
 const ORIGINAL_HALT = "operator incident halt: stand every child down, listener only\n";
-const SCOPE = `0x${"1".repeat(40)}:observe`;
+const SCOPE = `0x${"1".repeat(40)}:trade`;
 const sha = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
 const crash = () => { throw new Error("simulated crash"); };
 function tree(dir: string): unknown {
@@ -374,11 +374,19 @@ test("the env release needs the held adopted manifest, its token, the pin and a 
     { ...f.release, MERRYMEN_PERSISTENT_HOME_REQUIRED: undefined },
     { ...f.release, MERRYMEN_INITIAL_HANDOVER: "another-operation" },
   ]) assert.throws(() => controlAdoptedPersistentHomeHalt(env, f.options), /Persistent home refused/);
-  for (const MERRYMEN_FLEET_ROLLOUT of [undefined, "", "none", " none "]) {
+  for (const MERRYMEN_FLEET_ROLLOUT of ["none", " none "]) {
     const withheld = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT }, f.options)!;
     assert.deepEqual([withheld.action, withheld.handoverState], ["withheld", "held"]);
   }
+  // B1's parser reads the scope, so a typo or a missing value is a refusal
+  // and never permission: unset is refused because this is the Railway fleet.
+  for (const MERRYMEN_FLEET_ROLLOUT of [undefined, "", "None", "NONE", "off", "0", "false", "nobody", "none,", "halt", "pause", "0xabc",
+    `0x${"1".repeat(40)}`, `0x${"1".repeat(40)}:Trade`, `${SCOPE},${SCOPE}`]) {
+    assert.throws(() => controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT }, f.options), /MERRYMEN_FLEET_ROLLOUT/,
+      String(MERRYMEN_FLEET_ROLLOUT));
+  }
   assert.deepEqual(tree(f.home), before);
+  assert.equal(manifestState(f), "held");
   const released = controlAdoptedPersistentHomeHalt(f.release, f.options)!;
   assert.deepEqual([released.action, released.handoverState], ["released", "complete"]);
   assert.equal(existsSync(f.halt), false);
