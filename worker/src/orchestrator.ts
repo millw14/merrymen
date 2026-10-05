@@ -2146,6 +2146,11 @@ async function writeSettingsForChild(
  * BEFORE spawn, with the grant and the anchor, and for the same reason — the
  * child reads its book while arming, and a basis that landed a moment later
  * would be read as absent.
+ *
+ * AND THE FLOORS. `position_floors` shares the basis's lifecycle and dies with
+ * it, so each held position's graded stop is put back here too (basis-seed.ts
+ * seedPositionFloors), written under `smartAccount` exactly as the grant spells
+ * it, because that is the spelling the child reads its floors back by.
  */
 async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
   const url = process.env.DATABASE_URL;
@@ -2192,6 +2197,20 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
     // Loud, because a silent failure here is a book that sells with no cost and
     // reports no P&L — the exact defect this exists to close.
     log(`basis seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  // AND EACH HELD POSITION'S GRADED FLOOR, which the same redeploy wiped beside
+  // the cost. Its own try, NOT behind the basis: a floor goes back for every
+  // held symbol whether or not a basis row did, and a basis seed that failed is
+  // no reason to also arm the child on stops it was never entered under. See
+  // seedPositionFloors.
+  try {
+    const { seedPositionFloors, floorSeedLine } = await import("./basis-seed");
+    const plan = await seedPositionFloors({ child: handle.db, shared: await makePgDb(url), account: smartAccount });
+    log(floorSeedLine(tenant, plan));
+  } catch (e) {
+    // Loud for the same reason: the child arms anyway, on the owner's single
+    // number in place of each position's graded stop, and nothing else says so.
+    log(`floor seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     handle.close();
   }
