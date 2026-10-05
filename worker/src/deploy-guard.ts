@@ -5,9 +5,10 @@
  * can change the variables this reads. It exists for the honest mistakes that
  * have the same blast radius: a production deploy from a feature branch, the
  * orchestrator role pasted onto the wrong service, a fleet role on a container
- * with no volume behind its home, an image from before the start path ran under
- * tini, and a one-shot repair variable left set from last week that runs again,
- * fleet-wide, on the next boot — over tenants a staged rollout is still holding.
+ * with no volume behind its home, a fleet role in an image that does not carry
+ * the tini start path's marker, and a one-shot repair variable left set from
+ * last week that runs again, fleet-wide, on the next boot — over tenants a
+ * staged rollout is still holding.
  * Each of those deploys green. Each is refused here instead, loudly, by name.
  *
  * TWO PHASES, two callers:
