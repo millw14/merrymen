@@ -520,6 +520,24 @@ describe("what only the operation sweep can find", () => {
     assert.equal(m.classification.capitalCandidate, false);
     assert.equal(me.complete, false);
   });
+
+  it("calldata that is read but is not a plain execute leaves the scan incomplete too", async () => {
+    // A TRY-mode batch sending ETH home: no Transfer log, no native leg the
+    // scan will vouch for — so nothing is recorded, and the account must not
+    // read as clean.
+    const { me } = await scan([
+      {
+        hash: "0x7a7a",
+        block: 620,
+        input: handleOps([{ sender: ME, nonce: rootNonce(14n), callData: batch([{ target: TENANT, value: 10n ** 18n }], "01") }]),
+        logs: [beforeExecution(), opEvent(ME, rootNonce(14n))],
+      },
+    ]);
+    assert.equal(me.movements.length, 0);
+    assert.equal(me.operations, 1);
+    assert.equal(me.complete, false);
+    assert.ok(me.notes.some((n) => /is not a plain Kernel execute/.test(n)));
+  });
 });
 
 describe("when this account did not act", () => {

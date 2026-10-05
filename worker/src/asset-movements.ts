@@ -512,7 +512,10 @@ export async function scanAssetMovements(
           if (call && !executions) {
             // Not a plain Kernel execute — an install, a delegatecall, a TRY
             // batch. Its ETH is unknown and the classifier is told so (null).
-            entry.notes.push(`operation ${seg.op.userOpHash} is not a plain Kernel execute — native ETH it sent is unknown`);
+            // Coverage is short exactly as for calldata that could not be
+            // found: ETH such an op sent produces no movement at all here, so
+            // a clean account would be a claim nothing supports.
+            short(`operation ${seg.op.userOpHash} is not a plain Kernel execute — native ETH it sent is unknown`, entry);
           }
           nativeLegs = executions
             ? executions
