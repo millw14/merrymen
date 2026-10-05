@@ -53,7 +53,10 @@
  *     address — so it can be published as it stands. The next start reads it
  *     and says whether this stop was clean (takePreviousShutdown).
  *  8. LEASES, LAST, and exit 0. Nothing above runs without its lease, so
- *     nothing above can be cut off by losing it.
+ *     nothing above can be cut off by losing it. And a lease something may
+ *     still be writing under — a copy or a spawn the late settle could not
+ *     wait out — is not given up by hand at all (orchestrator.ts
+ *     drainReleasableLeases): it drops with the exit that ends its writer.
  *
  * ONE BUDGET OVER ALL OF IT, MERRYMEN_DRAIN_BUDGET_MS (default 50s), set
  * inside the platform's draining time so this process, not the platform,

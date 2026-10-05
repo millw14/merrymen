@@ -450,11 +450,14 @@ it("A SPAWN STUCK BEFORE THE STOP IS NOT WAITED FOR: the drain goes on at once, 
   // Claimed six minutes ago and never done: flagStuckSpawn's case, which a
   // redeploy is the remedy for. Waited for, it cost that redeploy the whole
   // settle cap (5s here) and then the rest of the budget in the late settle.
+  const releasedStuck = { n: 0 };
+  setTenantLeaseForTest(stuck, lease(stuck, releasedStuck));
   setSpawningForTest(stuck, 6 * 60_000);
   try {
     const t0 = Date.now();
     await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
     assert.ok(Date.now() - t0 < 2_000, `neither the settle cap nor the late settle was waited out (${Date.now() - t0}ms)`);
+    assert.equal(releasedStuck.n, 0, "its lease is not given up under it: the exit that ends the spawn drops it");
     const r = receipt();
     assert.equal(r.steps.find((s) => s.step === "settle")!.outcome, "done");
     assert.equal(r.steps.find((s) => s.step === "late-settle")!.outcome, "done");
@@ -466,5 +469,105 @@ it("A SPAWN STUCK BEFORE THE STOP IS NOT WAITED FOR: the drain goes on at once, 
     assert.deepEqual(exits, [0]);
   } finally {
     setSpawningForTest(stuck, null);
+    setTenantLeaseForTest(stuck, null);
+  }
+});
+
+/** The shared side, held at the first statement after `home`'s pending marker is on disk: a copy between its marker and its ownership check. */
+function heldAtMarker(home: string): { db: Db; atMarker: Promise<void>; open: () => void } {
+  let reached!: () => void, open!: () => void;
+  const atMarker = new Promise<void>((resolve) => (reached = resolve));
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  let held = false;
+  const hold = async () => {
+    if (!held && existsSync(marker(home))) { held = true; reached(); await gate; }
+  };
+  const db: Db = {
+    exec: (sql) => shared.exec(sql), tx: (fn) => shared.tx(fn),
+    prepare(sql) {
+      const statement = shared.prepare(sql);
+      return {
+        ...statement,
+        async run(...args) { await hold(); return statement.run(...args); },
+        async get(...args) { await hold(); return statement.get(...args); },
+        async all(...args) { await hold(); return statement.all(...args); },
+      };
+    },
+  };
+  return { db, atMarker, open };
+}
+
+/** Caps for a copy the drain cannot wait out: a short settle, and a budget that ends soon after it. */
+const SHORT: { budgetMs: number; limits: Partial<DrainLimits> } = { budgetMs: 1_500, limits: { ...LIMITS, settleMs: 200, reserveMs: 300 } };
+
+it("A COPY STILL RUNNING WHEN THE LEASES GO KEEPS ITS LEASE until the exit ends it — writer dead, then lock free — and every idle tenant's is released", async () => {
+  // A spawn's final mirror (finalMirrorBeforeAnchor) hung under its marker:
+  // a copy in mirrorTails, with no mirror pass in hand, so the drain knows
+  // exactly which tenant it is writing for.
+  const busy = address(0xe31), busyAccount = address(0xe32), idle = address(0xe41), idleAccount = address(0xe42);
+  const busyBook = await book(busy, busyAccount);
+  await book(idle, idleAccount);
+  const releasedBusy = { n: 0 }, releasedIdle = { n: 0 };
+  const busyLease = lease(busy, releasedBusy);
+  setTenantLeaseForTest(busy, busyLease);
+  const idleProc = new FakeProc(81_021);
+  watched = [idleProc];
+  adoptChildForTest(idle, idleAccount, idleProc, lease(idle, releasedIdle));
+  const held = heldAtMarker(busyBook.home);
+  const copy = finalMirrorBeforeAnchor(busy, held.db, busyBook.home, busyLease);
+  await held.atMarker;
+  try {
+    await drainFleetForTest("SIGTERM", { ...SHORT, exit });
+
+    assert.equal(releasedBusy.n, 0, "never released under the copy: another owner could copy the same rows above the same watermark");
+    assert.equal(hasLeaseForTest(busy), true, "kept for the exit to drop");
+    assert.equal(releasedIdle.n, 1, "the idle tenant's lease still goes at once");
+    assert.ok(said.some((l) => /\[alert\] 1 lease\(s\) left to drop with this process/.test(l)));
+    const r = receipt();
+    assert.equal(r.inFlightAtRelease, true);
+    assert.equal(r.steps.find((s) => s.step === "late-settle")!.outcome, "timeout");
+    assert.deepEqual(r.finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
+    assert.equal(r.clean, false);
+    assert.deepEqual(exits, [0]);
+  } finally {
+    held.open();
+    await copy;
+    setTenantLeaseForTest(busy, null);
+  }
+});
+
+it("A MIRROR PASS STILL IN HAND WHEN THE LEASES GO: no lease is given up by hand, and the home its copy holds gets no final pass queued behind it", async () => {
+  // The live pass hung on tenant A's copy. It does not say which tenant it
+  // holds once its copy is done, so no lease is released at all; and A's own
+  // copy is still in mirrorTails, so the drain never queues a pass behind it.
+  const a = address(0xe51), aAccount = address(0xe52), b = address(0xe61), bAccount = address(0xe62);
+  const aBook = await book(a, aAccount);
+  await book(b, bAccount);
+  const releasedA = { n: 0 }, releasedB = { n: 0 };
+  const aProc = new FakeProc(81_031), bProc = new FakeProc(81_032);
+  watched = [aProc, bProc];
+  adoptChildForTest(a, aAccount, aProc, lease(a, releasedA));
+  adoptChildForTest(b, bAccount, bProc, lease(b, releasedB));
+  const held = heldAtMarker(aBook.home);
+  setLiveMirrorStoreForTest({ shared: held.db, dek, dialect: "sqlite" });
+  const pass = mirrorLedgersForTest();
+  await held.atMarker;
+  try {
+    await drainFleetForTest("SIGTERM", { ...SHORT, exit });
+
+    assert.equal(releasedA.n + releasedB.n, 0);
+    assert.ok(said.some((l) => /\[alert\] 2 lease\(s\) left to drop with this process/.test(l)));
+    assert.ok(said.some((l) => new RegExp(`${a}: an earlier copy is still running — no final pass queued behind it`).test(l)));
+    assert.equal(await sharedTrades(aAccount), 0, "nothing of A's committed by the drain");
+    assert.equal(await sharedTrades(bAccount), 1, "B, which the hung pass never reached, had its final pass");
+    const r = receipt();
+    assert.deepEqual(r.finalPass, { homes: 2, saved: 1, retained: 0, skipped: 1, outOfTime: 0 });
+    assert.equal(r.inFlightAtRelease, true);
+    assert.deepEqual(exits, [0], "and not the backstop: no pass was left waiting behind the hung copy");
+  } finally {
+    held.open();
+    await pass;
+    setTenantLeaseForTest(a, null);
+    setTenantLeaseForTest(b, null);
   }
 });

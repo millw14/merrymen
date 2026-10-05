@@ -4397,6 +4397,8 @@ function fleetProcessesGone(): boolean {
  * for it cost exactly that redeploy its whole settle cap and late settle, and
  * the final pass that time. Left out of drainSettled with the copy it is
  * making (its tenant's mirrorTails), and counted on its own in the receipt.
+ * Its lease is not given up under it (drainReleasableLeases): it drops with
+ * the exit that ends the spawn, as after a crash.
  */
 function spawnStuck(tenant: string): boolean {
   const prep = spawning.get(tenant);
@@ -4412,6 +4414,28 @@ function spawnStuck(tenant: string): boolean {
 function drainSettled(): boolean {
   return [...mirrorTails.keys()].every(spawnStuck) && [...spawning.keys()].every(spawnStuck)
     && mirrorLoopsInHand === 0 && !ferrying;
+}
+
+/**
+ * THE LEASES THE DRAIN GIVES UP BY HAND (fleet-drain.ts, step 8): every one,
+ * unless something of this process's may still be writing under it.
+ *
+ * A copy (mirrorTails) or a spawn (spawning) still running once the late
+ * settle has run out — a hung statement, a spawn stuck before the stop —
+ * keeps its tenant's lease until the exit, which ends it in the same moment:
+ * writer dead, then lock free. Released first, another replica, or the next
+ * deployment overlapping this one, could take the tenant and mirror it while
+ * this copy still commits batches above the watermark both of them read: the
+ * double copy mirrorSerially exists to prevent, `flows` counted twice. A
+ * mirror pass with a tenant in hand, or an order ferry, does not say which
+ * tenant it holds, so while either runs no lease is given up by hand at all.
+ *
+ * What is kept costs the next owner only the moments the server takes to see
+ * this process's connections close, which drops the locks anyway.
+ */
+function drainReleasableLeases(): string[] {
+  if (mirrorLoopsInHand > 0 || ferrying) return [];
+  return [...leases.keys()].filter((tenant) => !mirrorTails.has(tenant) && !spawning.has(tenant));
 }
 
 /**
@@ -4506,9 +4530,13 @@ function drainFleet(
     finalPass: drainFinalPass,
     writeReceipt: (receipt) => writeShutdownReceipt(shutdownReceiptDir(merrymenHome()), receipt),
     // Last, and all at once: a restarting replica takes the tenants over now
-    // rather than when our dropped connections time out server-side.
+    // rather than when our dropped connections time out server-side — every
+    // lease nothing may still be writing under (drainReleasableLeases).
     releaseLeases: async () => {
-      await Promise.allSettled([...leases.keys()].map((tenant) => releaseLease(tenant)));
+      const free = drainReleasableLeases();
+      const kept = leases.size - free.length;
+      if (kept) log(`[alert] ${kept} lease(s) left to drop with this process: a copy, a spawn or a mirror pass may still be writing under them`);
+      await Promise.allSettled(free.map((tenant) => releaseLease(tenant)));
     },
     exit: opts.exit ?? ((code) => process.exit(code)),
   });
