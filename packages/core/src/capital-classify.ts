@@ -413,3 +413,411 @@ export function totalCapital(
     reservePurchases,
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MOVEMENTS IN KIND: everything that is not USDG.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * WHICH NON-USDG MOVEMENTS COULD BE THE OWNER'S CAPITAL.
+ *
+ * Everything above is about the cash token. An owner can also fund or drain a
+ * book IN KIND — send TSLA to the account, sweep a memecoin out with the owner
+ * key — and equity then steps by the asset's value with no flow row behind it,
+ * so the return reads the owner's own money as profit or loss. That is the
+ * "balance change with no trade" shape, and nothing so far could name it.
+ *
+ * WHY THE USDG RULE IS NOT ENOUGH ON ITS OWN. Transaction context still comes
+ * first — a different asset moving the other way is a swap, whoever signed it.
+ * But for an asset, the dangerous movement is the one where NOTHING pairs
+ * because the ledger lost the other half: a session-key swap whose trades row
+ * is missing (the Shogun case). "No trades row" read as "not a trade" books an
+ * agent's own purchase as an owner deposit, which is the same confident wrong
+ * number in a new coat. So whether a trades row exists is never an input here.
+ *
+ * PROVENANCE COMES FROM THE OPERATION ITSELF. Kernel v3 packs the validator
+ * that authorised a UserOperation into its nonce (executor.ts isFirstEnable),
+ * and the EntryPoint records that nonce in its own event — a contract cannot
+ * forge a log at the EntryPoint's address. That makes the signer a structural
+ * fact rather than an inference:
+ *
+ *   permission (session key)  the agent. Its wall admits trading calls only, so
+ *                             what it moved is a trade leg, or — with nothing
+ *                             visible on the other side — ambiguous. NEVER
+ *                             capital, whatever the database remembers.
+ *   root (sudo)               the owner's own key. The only signer that can
+ *                             sweep, so the only op that can be a candidate.
+ *   no op from this account   somebody else acted. An inbound movement is a
+ *                             candidate only when the owner's own wallet sent
+ *                             it or sent the transaction; anything else
+ *                             arriving unasked (airdrops, dust, poisoning) is
+ *                             ambiguous rather than a deposit.
+ *
+ * A CANDIDATE IS NOT CAPITAL. Nothing in this section books, totals or moves a
+ * peak. It answers "which movements must a reviewer look at as possible owner
+ * capital", and every arm that is not a candidate says why in words.
+ *
+ * `classifyUsdgMovement` above is deliberately untouched: the live deposit
+ * scanner and the fleet tools depend on its exact verdicts, and this section
+ * shares its helpers and its shape rather than its code path.
+ */
+
+/** The pseudo-token for native ETH, which an execution moves without any ERC-20 Transfer. */
+export const NATIVE_ASSET = "native";
+
+/** What one non-USDG movement turned out to be. */
+export type AssetMovementKind =
+  /** Owner capital arriving in kind. A CANDIDATE for review, never a booking. */
+  | "asset-in"
+  /** Owner capital leaving in kind — a sweep. A CANDIDATE for review, never a booking. */
+  | "asset-out"
+  /** One half of a swap. Not capital. */
+  | "trade-leg"
+  /**
+   * The energy reserve token, in either direction. Excluded: the reserve sits
+   * outside the trading book the way ETH gas does (energy.ts), so moving it
+   * changes no equity the return is measured against, and the USDG side of
+   * buying it is already `reserve-out` above.
+   */
+  | "reserve"
+  /**
+   * Between the account and a contract holding its own assets — its class or
+   * Trencher vault. Excluded: a sweep back from the vault moves a position, not
+   * money (custody.ts).
+   */
+  | "custody"
+  /** To or from another account this system controls. Not external. */
+  | "internal"
+  /** To or from chain infrastructure. Never capital, never a trade. */
+  | "protocol"
+  /** The classifier could not decide, and says why. Never quietly a candidate. */
+  | "ambiguous";
+
+/**
+ * WHO AUTHORISED THE OPERATION THAT MOVED THE ASSET, read off the chain.
+ *
+ * A union rather than a string so that "I could not tell" cannot be spelled
+ * the same way as an answer.
+ */
+export type OperationProvenance =
+  /**
+   * This account's own UserOperation, as the EntryPoint recorded it. `validator`
+   * is the nonce key's validator type: 0x00 root, 0x01 secondary, 0x02
+   * permission (executor.ts isFirstEnable has the layout).
+   */
+  | { source: "user-op"; validator: "root" | "permission" | "secondary"; userOpHash: string; nonce: string }
+  /**
+   * No operation from this account touched it: somebody else acted. `actors`
+   * are the transaction's sender and the sender of any other account's
+   * operation that produced the movement, so a deposit from the owner's own
+   * smart wallet is recognised as the owner's.
+   */
+  | { source: "none"; actors: readonly string[] }
+  /**
+   * It could not be established — an unreadable receipt, a nonce whose key is
+   * not one Kernel defines, a movement outside any operation's segment of a
+   * bundle. Classifies `ambiguous` before any other rule can guess.
+   */
+  | { source: "unknown"; why: string };
+
+export interface AssetClassifyInput {
+  /** The account whose book this is. */
+  account: string;
+  /** The movement being classified. `token` is NATIVE_ASSET for ETH an execution sent. */
+  leg: TransferLeg;
+  /**
+   * Every ERC-20 Transfer the SAME OPERATION produced, USDG included.
+   *
+   * Narrower than ClassifyInput.txLegs on purpose: a bundle can carry an owner
+   * sweep and an agent swap side by side, and pairing across them would turn
+   * the sweep into "half of a swap". A movement outside any operation is paired
+   * only against the other movements outside any operation.
+   */
+  opLegs: readonly TransferLeg[];
+  /**
+   * Native ETH the operation's executions sent, as legs with token NATIVE_ASSET.
+   *
+   * NULL MEANS UNREAD, not "none": the executions could not be decoded, so a
+   * curve buy paid in ETH has no visible pair. A root-key movement with nothing
+   * paired is then `executions-unread` rather than a candidate. Pass an empty
+   * list when this account did not act — there were no executions of its own.
+   */
+  nativeLegs: readonly TransferLeg[] | null;
+  provenance: OperationProvenance;
+  /** The cash token. USDG movements belong to classifyUsdgMovement, not here. */
+  usdgToken: string;
+  /**
+   * Wallets that are the owner's: the grant's owner key and the signed-in
+   * tenant wallet. Only consulted when no operation of this account acted.
+   */
+  ownerAddresses?: readonly string[];
+  /** Addresses this system controls — other hosted smart accounts. */
+  knownAccounts?: readonly string[];
+  /** Trading venues. A weak signal, exactly as in ClassifyInput. */
+  protocolAddresses?: readonly string[];
+  /** Chain infrastructure, exactly as in ClassifyInput. */
+  systemAddresses?: readonly string[];
+  /**
+   * Contracts holding THIS account's own assets. Part of "the book" here: a
+   * class buy's token lands at the vault, and a sweep from the vault to the
+   * account moves nothing across the book's edge.
+   */
+  custodyAddresses?: readonly string[];
+  /** energyReserveTokens(chainId). Any movement of one is `reserve`. */
+  reserveTokens?: readonly string[];
+}
+
+export interface AssetClassificationEvidence {
+  counterparty: string;
+  direction: "in" | "out" | "self" | "none";
+  /** How many ERC-20 Transfers the deciding operation contained. */
+  opLegCount: number;
+  /** Who authorised it, flattened so two verdicts compare without reading prose. */
+  provenance: "root" | "permission" | "secondary" | "none" | "unknown";
+  rule:
+    | "cash-leg"
+    | "zero-amount"
+    | "not-this-account"
+    | "reserve-token"
+    | "custody-transfer"
+    | "provenance-unread"
+    | "paired-movement"
+    | "known-account"
+    | "system-address"
+    | "session-key-without-pair"
+    | "secondary-validator-without-pair"
+    | "executions-unread"
+    | "venue-without-pair"
+    | "owner-operation"
+    | "owner-wallet"
+    | "unsolicited-inbound"
+    | "moved-without-account-operation";
+}
+
+export interface AssetClassification {
+  kind: AssetMovementKind;
+  /** The sentence a reviewer reads. Always populated. */
+  why: string;
+  /** The asset that moved the other way, when this was half of a swap. */
+  pairedAsset?: string;
+  /**
+   * True for `asset-in` and `asset-out` only. A reviewer's queue, not a ledger:
+   * nothing downstream may book a candidate without a separate, reviewed step.
+   */
+  capitalCandidate: boolean;
+  evidence: AssetClassificationEvidence;
+}
+
+/**
+ * Classify one non-USDG movement. PURE.
+ *
+ * The rule order is the argument, top to bottom: facts that make the question
+ * meaningless first, then exclusions that hold whoever signed, then the one
+ * test that does not depend on knowing anybody (a pair), and only then the
+ * signer. A candidate is reachable through exactly two doors — an owner root
+ * op, or the owner's own wallet sending — and every other path ends somewhere
+ * that is not capital.
+ */
+export function classifyAssetMovement(input: AssetClassifyInput): AssetClassification {
+  const { account, leg, provenance } = input;
+  const flat: AssetClassificationEvidence["provenance"] =
+    provenance.source === "user-op" ? provenance.validator : provenance.source;
+  // "The book" is the account and every contract holding for it — custody.ts's
+  // bookAddresses, passed in rather than derived so this stays pure.
+  const ours = (address: string) => eq(address, account) || has(input.custodyAddresses, address);
+  const outbound = ours(leg.from);
+  const inbound = ours(leg.to);
+  const counterparty = inbound && !outbound ? leg.from : leg.to;
+  const direction: AssetClassificationEvidence["direction"] =
+    outbound && inbound ? "self" : outbound ? "out" : inbound ? "in" : "none";
+  const evidence = (rule: AssetClassificationEvidence["rule"]): AssetClassificationEvidence => ({
+    counterparty,
+    direction,
+    opLegCount: input.opLegs.length,
+    provenance: flat,
+    rule,
+  });
+  const notCapital = (
+    kind: Exclude<AssetMovementKind, "asset-in" | "asset-out">,
+    rule: AssetClassificationEvidence["rule"],
+    why: string,
+    pairedAsset?: string,
+  ): AssetClassification => ({
+    kind,
+    why,
+    ...(pairedAsset ? { pairedAsset } : {}),
+    capitalCandidate: false,
+    evidence: evidence(rule),
+  });
+
+  // ── Questions this function is not the one to answer. ──────────────────
+  if (eq(leg.token, input.usdgToken)) {
+    return notCapital("ambiguous", "cash-leg", "this is a USDG movement — classifyUsdgMovement decides those, not the in-kind rule");
+  }
+  if (BigInt(leg.amountRaw || "0") <= 0n) {
+    // Zero-value Transfers are how address poisoning works. Nothing moved.
+    return notCapital("ambiguous", "zero-amount", "a zero-amount transfer moves nothing and says nothing about capital");
+  }
+  if (!outbound && !inbound) {
+    return notCapital("ambiguous", "not-this-account", "the movement does not touch this account or a vault holding for it");
+  }
+
+  // ── Exclusions that hold whoever signed. ──────────────────────────────
+  //
+  // Before the signer on purpose: the owner sweeping the energy reserve home,
+  // or sweeping a position back from the vault, is the owner acting and is
+  // still not a change to the book this return is measured against.
+  if (has(input.reserveTokens, leg.token)) {
+    return notCapital(
+      "reserve",
+      "reserve-token",
+      `${leg.token} is the energy reserve, which sits outside the trading book — moving it changes no equity the return is measured against`,
+    );
+  }
+  if (outbound && inbound) {
+    return eq(leg.from, leg.to)
+      ? notCapital("ambiguous", "not-this-account", "the account is both sender and recipient — a self-transfer says nothing about capital")
+      : notCapital(
+          "custody",
+          "custody-transfer",
+          `moved between ${leg.from} and ${leg.to}, both of which hold this account's own assets — a position changed place, not hands`,
+        );
+  }
+
+  // ── An unread signer stops everything after this point. ────────────────
+  //
+  // Even a pair is not trusted without it: a movement that could not be placed
+  // in one operation may be "paired" with a different operation's leg in the
+  // same bundle, and that is exactly how an owner sweep would come to read as
+  // half of somebody's swap.
+  if (provenance.source === "unknown") {
+    return notCapital("ambiguous", "provenance-unread", `who authorised this could not be read from the chain — ${provenance.why}`);
+  }
+
+  // ── PRIMARY: did a different asset cross the book's edge the other way? ──
+  //
+  // The same test as the USDG rule, widened by ETH an execution sent: a curve
+  // buy paid in native ETH has no ERC-20 leg leaving, and without the
+  // execution's value it would look like a token arriving from nowhere.
+  const paired = [...input.opLegs, ...(input.nativeLegs ?? [])].find(
+    (l) =>
+      !eq(l.token, leg.token) &&
+      (outbound ? ours(l.to) && !ours(l.from) : ours(l.from) && !ours(l.to)) &&
+      BigInt(l.amountRaw || "0") > 0n,
+  );
+  if (paired) {
+    const what = eq(paired.token, NATIVE_ASSET) ? "native ETH" : paired.token;
+    return notCapital(
+      "trade-leg",
+      "paired-movement",
+      outbound
+        ? `the same operation moved ${what} INTO the book — this ${leg.token} was spent on something, it did not leave`
+        : `the same operation moved ${what} OUT of the book — this ${leg.token} was bought, it was not deposited`,
+      paired.token,
+    );
+  }
+
+  if (has(input.knownAccounts, counterparty)) {
+    return notCapital("internal", "known-account", `the counterparty ${counterparty} is another account this system controls`);
+  }
+  if (has(input.systemAddresses, counterparty)) {
+    return notCapital(
+      "protocol",
+      "system-address",
+      `the counterparty ${counterparty} is chain infrastructure, which cannot be a source of capital`,
+    );
+  }
+
+  // ── Nothing paired. Now, and only now, the signer decides. ─────────────
+  if (provenance.source === "user-op" && provenance.validator === "permission") {
+    // The Shogun case lands here when its other half is invisible. The wall
+    // sealed into a session key admits trading calls only, so this is the
+    // agent trading even when nothing on the other side can be seen — and a
+    // missing trades row must not promote it to the owner's money.
+    return notCapital(
+      "ambiguous",
+      "session-key-without-pair",
+      `a session key moved this, and its wall admits trading calls only — it cannot be the owner's capital, but nothing ` +
+        `moved the other way in the same operation, so it cannot be confirmed as a completed trade either`,
+    );
+  }
+  if (provenance.source === "user-op" && provenance.validator === "secondary") {
+    return notCapital(
+      "ambiguous",
+      "secondary-validator-without-pair",
+      "a secondary validator — neither the owner's root key nor a session key — authorised this, and nothing paired with it",
+    );
+  }
+
+  if (provenance.source === "user-op") {
+    // The owner's root key, nothing paired. But "nothing paired" is only a
+    // finding when the executions were READ: an owner's own curve buy paid in
+    // native ETH has no ERC-20 leg leaving, and with the execution's value
+    // unknown it is indistinguishable from a deposit.
+    if (input.nativeLegs === null) {
+      return notCapital(
+        "ambiguous",
+        "executions-unread",
+        `the owner's key moved this with nothing visible the other way, but the operation's executions could not be ` +
+          `decoded — native ETH it sent may be the other half`,
+      );
+    }
+    // A venue still refuses rather than guesses, exactly as the USDG rule
+    // does: an approval-style leg to a router may be half of a trade this
+    // operation cannot show.
+    if (has(input.protocolAddresses, counterparty)) {
+      return notCapital(
+        "ambiguous",
+        "venue-without-pair",
+        `the owner's key moved this to or from ${counterparty}, a known venue, with nothing moving the other way — ` +
+          `it cannot be read as either capital or a completed trade`,
+      );
+    }
+    return {
+      kind: outbound ? "asset-out" : "asset-in",
+      why: outbound
+        ? `the owner's root key sent ${leg.token} to ${counterparty} with nothing coming back — a sweep of the book, in kind`
+        : `the owner's root key brought ${leg.token} in from ${counterparty} with nothing leaving — a deposit, in kind`,
+      capitalCandidate: true,
+      evidence: evidence("owner-operation"),
+    };
+  }
+
+  // ── No operation of this account acted. ────────────────────────────────
+  if (outbound) {
+    // A smart account's assets leave only through its own operations, or
+    // through an allowance somebody else spent. The second is not a decision
+    // the owner can be said to have made.
+    return notCapital(
+      "ambiguous",
+      "moved-without-account-operation",
+      `${leg.token} left the book in a transaction that carried no operation of this account — an allowance was spent, ` +
+        `and that is not a withdrawal anybody can be said to have chosen`,
+    );
+  }
+  // Checked before the venue list on purpose: an owner who swaps on a DEX with
+  // the account as recipient is depositing in kind, and the pool being the
+  // Transfer's sender is how that looks.
+  if (has(input.ownerAddresses, leg.from) || provenance.actors.some((a) => has(input.ownerAddresses, a))) {
+    return {
+      kind: "asset-in",
+      why: `the owner's own wallet sent ${leg.token} to the account, or sent the transaction that delivered it — a deposit, in kind`,
+      capitalCandidate: true,
+      evidence: evidence("owner-wallet"),
+    };
+  }
+  if (has(input.protocolAddresses, counterparty)) {
+    return notCapital(
+      "ambiguous",
+      "venue-without-pair",
+      `${leg.token} arrived from ${counterparty}, a known venue, in a transaction this account did not send — ` +
+        `it cannot be read as either capital or a completed trade`,
+    );
+  }
+  return notCapital(
+    "ambiguous",
+    "unsolicited-inbound",
+    `${leg.token} arrived from ${counterparty}, which is not the owner, in a transaction neither this account nor its owner ` +
+      `sent — an airdrop or a stranger's transfer is not a deposit, and nothing here can say it was one`,
+  );
+}
