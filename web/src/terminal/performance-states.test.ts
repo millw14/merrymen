@@ -276,6 +276,20 @@ test("a stale valuation says when it was taken in visible text, and the board sa
   assert.equal(staleSince(current, NOW + STALE_VALUATION_SEC + 120), NOW - 60, "and it turns stale on its own clock");
 });
 
+test("a profile whose book is not paper counts its paper history in trades too, as the board row does", async () => {
+  // Eleven simulated transfers, no simulated swap: the row says "No trades yet"
+  // and the page used to say "11 paper trades" under Completed operations.
+  const live = (over: Record<string, unknown>) => row("Mixed", { landed: 2, liveFills: 2, filledPaper: 11, ...over,
+    performance: performance({ fills: 2, fillsAtMark: 2, valuation: "current" }) });
+  const [none] = (await read([live({ paperFills: 0 })])).agents;
+  assert.doesNotMatch((await profilePage(none!)).text, /paper trades/);
+  const [some] = (await read([live({ paperFills: 2 })])).agents;
+  assert.match((await profilePage(some!)).text, /operations2 paper trades/);
+  // An older server sends no trade count; the operation count is read as before.
+  const [legacy] = (await read([live({})])).agents;
+  assert.match((await profilePage(legacy!)).text, /operations11 paper trades/);
+});
+
 test("an older server's performance reads as unread, and contradictory counts are not believed", () => {
   const legacy = performanceFromWire({ book: "paper", publicBook: true, pnlBps: 0, equityAt: 1 });
   assert.deepEqual([legacy.fills, legacy.fillsAtMark, legacy.funded, legacy.valuation, legacy.underReview], [null, null, null, null, false]);

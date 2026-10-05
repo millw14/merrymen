@@ -94,8 +94,10 @@ export function Profile({
   const displayPnl = performance.bps;
   // A book's own trades, where the server counted them: a paper book whose
   // only simulated activity was transfers has made no paper trades, however
-  // many operations `filledPaper` counts.
-  const paperTrades = performance.book === "paper" && performance.fills !== null ? performance.fills : agent.filledPaper;
+  // many operations `filledPaper` counts. A book that is not paper now still
+  // has its paper history counted the same way (`paperFills`, the board row's
+  // own count); only an older server that sends neither falls back.
+  const paperTrades = performance.book === "paper" && performance.fills !== null ? performance.fills : agent.paperFills ?? agent.filledPaper;
   const positions =
     g.legs?.map((l) => ({
       symbol: l.symbol,
