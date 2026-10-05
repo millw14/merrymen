@@ -2309,20 +2309,30 @@ async function retryEnergySeed(tenant: `0x${string}`): Promise<void> {
  *
  * `when` is "retry" for a running child: it writes beside the live agent, so
  * it waits only briefly for the child's write lock, and a failure leaves the
- * marker as it is.
+ * marker as it is — unless the day is UNKNOWN, which marks it (seedBudget).
+ *
+ * [alert] WHEN AN OPERATOR IS NEEDED, not only when the worker is kept off:
+ * an unknown day (a hashless live row, or a pending op nothing in the fleet
+ * will settle — budget-seed.ts) stays held until someone acts, and any hold
+ * that outlasts BUDGET_HOLD_ALERT_SEC has stopped looking like a blip. Each
+ * once per failure, not once per fifteen-second pass.
  */
-const budgetSeedFailing = new Map<string, string>();
+const budgetSeedFailing = new Map<string, { why: string; sinceSec: number; alerted: boolean }>();
+/** When each running child's seed should be looked at again for the pending ops only it charges (BudgetSeedResult `recheckAt`). */
+const budgetSeedRecheckAt = new Map<string, number>();
+const BUDGET_HOLD_ALERT_SEC = 10 * 60;
 async function seedBudgetForChild(tenant: `0x${string}`, smartAccount: string, when: "spawn" | "retry" = "spawn"): Promise<boolean> {
   const url = process.env.DATABASE_URL;
   if (!url) return true; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
   const home = childHome(tenant);
   const opened: DatabaseSync[] = [];
+  const nowSec = Math.floor(Date.now() / 1000);
   try {
     const r = await seedBudget({
       home,
       agent: smartAccount,
       cashToken: String(CASH.USDG),
-      nowSec: Math.floor(Date.now() / 1000),
+      nowSec,
       when,
       local: () => {
         const raw = new DatabaseSync(path.join(home, "merrymen.db"));
@@ -2334,23 +2344,37 @@ async function seedBudgetForChild(tenant: `0x${string}`, smartAccount: string, w
     });
     if (r.ok) {
       const was = budgetSeedFailing.delete(tenant);
+      if (r.recheckAt === null) budgetSeedRecheckAt.delete(tenant);
+      else budgetSeedRecheckAt.set(tenant, r.recheckAt);
       if (r.restored || was) {
-        log(`budget seed: ${tenant} — ${r.restored} operation(s) of the trailing day restored${was ? " on retry; new entries have headroom again" : ""}`);
+        log(
+          `budget seed: ${tenant} — ${r.restored} operation(s) of the trailing day restored${was ? " on retry; new entries have headroom again" : ""}` +
+            (r.recheckAt === null ? "" : `; pending op(s) only the seed charges, looked at again ${new Date(r.recheckAt * 1000).toISOString()}`),
+        );
       }
       return true;
     }
-    // Once per distinct failure, not once per fifteen-second pass.
-    if (when === "spawn" || budgetSeedFailing.get(tenant) !== r.why) {
+    const prev = budgetSeedFailing.get(tenant);
+    const sinceSec = prev?.sinceSec ?? nowSec;
+    const longHold = r.marked && nowSec - sinceSec >= BUDGET_HOLD_ALERT_SEC;
+    const alert = r.unknown || (!r.marked && when === "spawn") || longHold;
+    // Once per distinct failure, not once per fifteen-second pass — and once
+    // more the first time the same failure becomes an operator's problem.
+    if (when === "spawn" || prev?.why !== r.why || (alert && !prev?.alerted)) {
       log(
-        `${r.marked ? "" : "[alert] "}budget seed: ${tenant} FAILED — ${r.why} ` +
-          (r.marked
-            ? when === "retry"
-              ? "(still unrestored; tried again next pass)"
-              : "(the child arms with its trailing day UNRESTORED: no headroom for a new entry until a later pass restores it; exits, stops and the owner's sales run)"
-            : "(and NO marker: not starting a worker that would read an empty day)"),
+        `${alert ? "[alert] " : ""}budget seed: ${tenant} FAILED — ${r.why} ` +
+          (!r.marked && when === "spawn"
+            ? "(and NO marker: not starting a worker that would read an empty day)"
+            : r.unknown
+              ? "(its trailing day is UNKNOWN and no pass will clear it alone — an operator's call, budget-seed.ts says what lifts it: no headroom for a new entry meanwhile; exits, stops and the owner's sales run; looked at again every pass)"
+              : r.marked
+                ? when === "retry"
+                  ? `(still unrestored${longHold ? ` after ${Math.round((nowSec - sinceSec) / 60)} min` : ""}; tried again next pass)`
+                  : "(the child arms with its trailing day UNRESTORED: no headroom for a new entry until a later pass restores it; exits, stops and the owner's sales run)"
+                : "(its last seed stands, still charging what it charged; tried again next pass)"),
       );
     }
-    budgetSeedFailing.set(tenant, r.why);
+    budgetSeedFailing.set(tenant, { why: r.why, sinceSec, alerted: (prev?.alerted ?? false) || alert });
     return r.marked;
   } finally {
     for (const raw of opened) {
@@ -2369,10 +2393,19 @@ async function seedBudgetForChild(tenant: `0x${string}`, smartAccount: string, w
  * Only while its home holds the marker (budget-seed.ts), so a healthy fleet
  * pays one missing-file read per child per pass. On success the child's next
  * refresh reads the seeded day and its entries have headroom again.
+ *
+ * AND A CHILD WHOSE SEED CHARGES A PENDING OP ONLY THE SEED KNOWS OF, once that
+ * op reaches the age past which nothing in the fleet will settle it
+ * (`recheckAt`). Looked at again, it has either settled — the mirror carried a
+ * landing the reconciler re-recorded, or this child now holds it — or it has
+ * not, and the day is unknown: held, with an [alert], instead of a charge
+ * that would otherwise sit there silently until the next spawn and beyond.
  */
 async function retryBudgetSeed(tenant: `0x${string}`): Promise<void> {
   const child = children.get(tenant);
-  if (!child || !process.env.DATABASE_URL || !budgetUnrestored(childHome(tenant))) return;
+  if (!child || !process.env.DATABASE_URL) return;
+  const due = (budgetSeedRecheckAt.get(tenant) ?? Number.POSITIVE_INFINITY) <= Date.now() / 1000;
+  if (!due && !budgetUnrestored(childHome(tenant))) return;
   await seedBudgetForChild(tenant, child.smartAccount, "retry");
 }
 

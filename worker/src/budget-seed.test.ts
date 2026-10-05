@@ -501,6 +501,22 @@ describe("until a seed exists, entries get no headroom — and exits stay open",
     assert.ok(budget < spawn.indexOf("const late = lateSpawnRefusal(tenant, lease);"), "before the worker starts");
     assert.match(src, /await retryEnergySeed\(tenant as `0x\$\{string\}`\);\s*(\/\/[^\n]*\n\s*)*await retryBudgetSeed\(tenant as `0x\$\{string\}`\);/);
   });
+
+  it("the orchestrator looks again when a seed's pending op comes due, and puts an unknown day in front of an operator", () => {
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    const body = (name: string) => {
+      const from = src.indexOf(`async function ${name}(`);
+      assert.ok(from > 0, `sanity: found ${name}`);
+      return src.slice(from, src.indexOf("\n}\n", from));
+    };
+    const seedFor = body("seedBudgetForChild");
+    assert.match(seedFor, /else budgetSeedRecheckAt\.set\(tenant, r\.recheckAt\);/, "a good seed records when to look again");
+    assert.match(seedFor, /const alert = r\.unknown \|\| \(!r\.marked && when === "spawn"\) \|\| longHold;/);
+    assert.match(seedFor, /`\$\{alert \? "\[alert\] " : ""\}budget seed: /);
+    const retry = body("retryBudgetSeed");
+    assert.match(retry, /const due = \(budgetSeedRecheckAt\.get\(tenant\) \?\? Number\.POSITIVE_INFINITY\) <= Date\.now\(\) \/ 1000;/);
+    assert.match(retry, /if \(!due && !budgetUnrestored\(childHome\(tenant\)\)\) return;/);
+  });
 });
 
 describe("the seed costs one seek per operation, never a scan of the agent's history", () => {
