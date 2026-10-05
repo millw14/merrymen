@@ -3,8 +3,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
-import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
+import { wrapSqlite } from "./db";
+import { publicationNarrowing, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type ThesisRow } from "./thesis-policy";
 
 /**
  * NOTHING SIGNS, FILLS OR SENDS EXCEPT PAST THE ADMISSION GATE.
@@ -320,4 +322,71 @@ describe("an owner refused at admission is told in words", () => {
       assert.equal(rejectRuleRemedy(rule), null, "there is nothing for the owner to change");
     });
   }
+});
+
+describe("BUT THE PUBLIC FEED DOES NOT CARRY IT — the service's hold is not a view about the coin", () => {
+  // A fleet coming back from a hold starts at observe, so every tick of every
+  // tenant writes a rollout-hold refusal, from every producer — a Brain that
+  // re-reviews every thirty seconds included. drawdown-halt.test.ts is the
+  // same flood for the breaker; these are its rule list's newer members.
+  const refused = (over: Partial<ThesisRow>): ThesisRow => ({
+    agent_id: "0xabcabcabcabcabcabcabcabcabcabcabcabcabca",
+    name: "Shogun",
+    source: "brain",
+    action: "buy",
+    symbol: "T3139F043B88",
+    display_name: "JUGGERNAUT",
+    size_usdg: 5,
+    reason: "Five-minute flow flipped to net buying on rising volume; small entry, invalidated if sellers return.",
+    status: "rejected",
+    reject_rule: "rollout-hold",
+    said: 1,
+    last_at: 1_800_000_000,
+    first_at: 1_800_000_000,
+    mode: "live",
+    ...over,
+  });
+
+  for (const rule of ["rollout-hold", "draining"]) {
+    it(`${rule}: dropped for every source, the model's included`, () => {
+      for (const source of ["brain", "strategy:trencher", "strategy:steady-basket"]) {
+        assert.equal(publishableThesis(refused({ source, reject_rule: rule })), null, `${source} refused on ${rule}`);
+      }
+    });
+  }
+
+  it("a model's refused view on any other account rule still publishes — that boundary is unchanged", () => {
+    const post = publishableThesis(refused({ reject_rule: "ops-cap" }));
+    assert.ok(post);
+    assert.equal(post!.outcome, "refused");
+  });
+
+  it("and the SQL half drops them too, so a recovery's worth cannot fill a bounded scan", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    try {
+      await db.exec(`CREATE TABLE decisions(id TEXT, source TEXT, action TEXT);
+        CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, status TEXT, reject_rule TEXT);`);
+      const rows: [string, string, string, string | null][] = [
+        ["held", "brain", "rejected", "rollout-hold"],
+        ["held-strategy", "strategy:trencher", "rejected", "rollout-hold"],
+        ["draining", "brain", "rejected", "draining"],
+        ["capped", "brain", "rejected", "ops-cap"],
+        ["landed", "brain", "landed", null],
+      ];
+      for (const [id, source, status, rule] of rows) {
+        await db.prepare("INSERT INTO decisions VALUES (?, ?, 'buy')").run(id, source);
+        await db.prepare("INSERT INTO trades (decision_id, status, reject_rule) VALUES (?, ?, ?)").run(id, status, rule);
+      }
+      const narrow = publicationNarrowing("d", "t");
+      const kept = new Set(
+        ((await db
+          .prepare(`SELECT d.id AS id FROM decisions d LEFT JOIN trades t ON t.decision_id = d.id WHERE ${narrow.sql}`)
+          .all(...narrow.args)) as { id: string }[]).map((r) => r.id),
+      );
+      assert.deepEqual([...kept].sort(), ["capped", "landed"]);
+    } finally {
+      raw.close();
+    }
+  });
 });
