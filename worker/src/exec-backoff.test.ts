@@ -511,7 +511,9 @@ describe("WHERE THE WORKER ASKS", () => {
   });
 
   it("CLEAR ON ARM, in the same breath as suppressedIntents", () => {
-    assert.match(CODE, /suppressedIntents\.clear\(\);\n\s*execBackoff\.clear\("armed"\);/);
+    // The entry-gate latch (entry-gates.ts) is cleared in that same breath, and
+    // may sit between the two; nothing else may.
+    assert.match(CODE, /suppressedIntents\.clear\(\);\n(?:\s*entryGateRows\.clear\(\);\n)?\s*execBackoff\.clear\("armed"\);/);
   });
 
   it("ONLY THE TICK'S OWN ENTRIES are marked holdable, each just before it runs", () => {
