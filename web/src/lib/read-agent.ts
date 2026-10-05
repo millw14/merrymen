@@ -1,4 +1,5 @@
-import { capitalFlowsSql, readBookPerformance, type BookPerformance } from "./book-performance";
+import { readBookPerformance, type BookPerformance } from "./book-performance";
+import { readDistinctFlows } from "./distinct-flows";
 /**
  * One agent, in public.
  *
@@ -124,6 +125,13 @@ export interface AgentProfile {
    * then divide a pretend balance by a real deposit.
    */
   filledPaper: number;
+  /**
+   * TRADES among those paper operations: distinct swaps and curve trades only
+   * (readOperationCounts), as the board's row counts them. The profile calls
+   * this "paper trades"; `filledPaper` also counts a simulated transfer or an
+   * energy purchase, which the page never calls a trade.
+   */
+  paperFills: number;
   refused: number;
   /** Distinct tokens bought, in this agent's own evidence class only. */
   tokensTouched: number;
@@ -402,20 +410,13 @@ export async function profileOf(
   let flowsTotal = 0;
   let flowsRead = false;
   try {
-    const rows = (await db
-      .prepare(
-        `SELECT direction, amount_usdg, at, source FROM ${await capitalFlowsSql(db)} ORDER BY at ASC`,
-      )
-      .all(account.toLowerCase(), epoch)) as {
-      direction: string;
-      amount_usdg: number;
-      at: number;
-      source: string | null;
-    }[];
+    // ONE ROW PER MOVEMENT: a carry, a log or a mirror copy on record twice
+    // is one deposit, and it is divided out of the growth index once.
+    const rows = await readDistinctFlows(db, account, epoch);
     flowsRead = true;
     flows = rows.map((r) => ({
-      at: Number(r.at),
-      signed: (r.direction === "in" ? 1 : -1) * Number(r.amount_usdg),
+      at: r.at,
+      signed: (r.direction === "in" ? 1 : -1) * r.amountUsdg,
     }));
     onRecord = rows.length === 0 ? null : flows.reduce((n, x) => n + x.signed, 0);
     flowsTotal = rows.length;
@@ -433,9 +434,12 @@ export async function profileOf(
     // is checkable against the prior epoch's own closing mark, which is a
     // different and sufficient kind of support. The page publishes the SHAPE of
     // the evidence, never amounts.
-    flowsWithTx = rows.filter((r) => isEvidencedFlow(String(r.source ?? ""))).length;
+    flowsWithTx = rows.filter((r) => isEvidencedFlow(r.source)).length;
   } catch {
-    /* flows arrives with a worker migration */
+    // Unread, whatever stopped it: no flows table yet, a failed read (of the
+    // rows, or of the registration that places an unstamped one), or rows
+    // that contradict each other and are withheld (distinct-flows.ts). Not
+    // read as none — see the growth index below.
   }
 
   // ── equity, divided by what the owner put in ─────────────────────────────
@@ -469,12 +473,19 @@ export async function profileOf(
     // Every flow is attributed to the hour it fell in: growthIndex takes the
     // flows at or before each close, so a deposit between two closes is
     // divided out of exactly the period that contains it.
-    growthFull = growthIndex(clean, flows);
+    //
+    // AND ONLY OVER FLOWS THAT WERE READ. Over flows that were not, the index
+    // divides nothing out: every deposit on record is drawn as a gain and
+    // every withdrawal as a loss. So no line, and no drawdown taken from one,
+    // whatever stopped the read.
+    if (flowsRead) {
+      growthFull = growthIndex(clean, flows);
 
-    // EVERY CLOSE, UNTHINNED. The page slices the windows, so the server no
-    // longer decimates — and with no decimation there is no modulo left that
-    // could drop the newest reading, which is the value the headline divides.
-    growth = clean.map((p, i) => ({ at: p.at, g: growthFull[i]! }));
+      // EVERY CLOSE, UNTHINNED. The page slices the windows, so the server no
+      // longer decimates — and with no decimation there is no modulo left that
+      // could drop the newest reading, which is the value the headline divides.
+      growth = clean.map((p, i) => ({ at: p.at, g: growthFull[i]! }));
+    }
   } catch {
     /* no history */
   }
@@ -485,6 +496,7 @@ export async function profileOf(
   const activity = await readProfileTrades(db, account, epoch, publicBook);
   let landed = 0;
   let filledPaper = 0;
+  let paperFills = 0;
   let refused = 0;
   let tokensTouched = 0;
   let tradesRead = false;
@@ -504,6 +516,7 @@ export async function profileOf(
     unpricedTrades = t.unpricedTrades;
     landed = t.landed;
     filledPaper = t.filledPaper;
+    paperFills = t.paperFills;
     refused = t.refused;
     tokensTouched = t.tokensTouched;
   } catch {
@@ -693,6 +706,7 @@ export async function profileOf(
     maxDdBps: unrankedWhy === null ? drawdownBps(growthFull) : null,
     landed,
     filledPaper,
+    paperFills,
     refused,
     tokensTouched,
     gas: { usdg: publicBook ? gasUsdg : null, unpricedTrades },
@@ -700,8 +714,12 @@ export async function profileOf(
     contributionsEvidenced: contributionsKnown === true,
     flowsWithTx,
     flowsTotal,
-    growth,
-    growthComplete,
+    // A RETURN UNDER REVIEW IS WITHHELD IN EVERY SHAPE, and the growth index
+    // is one: 0.64 is "down 36%" drawn as a line. The review exists because a
+    // step like that may be a withdrawal nobody has booked (return-review.ts).
+    // An index over flows that were not read is not drawn at all (above).
+    growth: figures.performance.underReview ? [] : growth,
+    growthComplete: figures.performance.underReview || !flowsRead ? false : growthComplete,
     holdings,
     publicBook,
     tradesRead,

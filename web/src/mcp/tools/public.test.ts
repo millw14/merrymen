@@ -558,6 +558,125 @@ test("the list and the profile give the same reason for the same agent", async (
   assert.equal(profile.sc.valuation.book, "unknown");
 });
 
+test("a funded, evidenced live book with an unrecorded gas cost is gas-pending on both surfaces, never quality-unknown", async () => {
+  const { d, connect } = await setup();
+  // C's deposits are evidenced (contributions_known = 1) and its one fill
+  // landed; only that fill's owner gas has no price. The return is withheld,
+  // and the reason says which input is missing — not that nobody assessed it.
+  d.raw.prepare("UPDATE trades SET gas_usdg = NULL WHERE agent_id = ?").run(ACCOUNT_C);
+  const b = await connect(OWNER_B);
+  const list = await call(b, "list_public_agents", {});
+  const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.deepEqual(row.unranked, { code: "gas-pending", reason: "gas cost not yet fully recorded" });
+  assert.equal(row.live.return_bps, null);
+  assert.equal(row.ranked, false);
+  const profile = await call(b, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.res.isError, undefined, profile.json);
+  assert.deepEqual(profile.sc.unranked, row.unranked);
+  assert.equal(profile.sc.live.return_bps, null);
+  assert.doesNotMatch(list.json + profile.json, /quality-unknown/);
+});
+
+test("a return under review is withheld from the list and the profile, in every shape, and does not rank", async () => {
+  const saved = process.env.MERRYMEN_RETURN_REVIEW;
+  try {
+    const { connect } = await setup();
+    process.env.MERRYMEN_RETURN_REVIEW = ACCOUNT_A.toUpperCase().replace("0X", "0x");
+    const b = await connect(OWNER_B);
+    const list = await call(b, "list_public_agents", {});
+    // A's 2075 bps led the board; under review it sorts with the unranked.
+    assert.deepEqual(list.sc.agents.map((a: { agent: string }) => a.agent), [SLUG_C, SLUG_A, SLUG_B]);
+    const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_A);
+    assert.deepEqual(row.unranked, { code: "review-pending", reason: "return under review" });
+    assert.equal(row.ranked, false);
+    assert.equal(row.live.return_bps, null);
+    assert.equal(row.live.max_drawdown_bps, null);
+    const profile = await call(b, "get_public_agent", { agent: SLUG_A });
+    assert.equal(profile.res.isError, undefined, profile.json);
+    assert.deepEqual(profile.sc.unranked, row.unranked);
+    assert.equal(profile.sc.live.return_bps, null);
+    assert.deepEqual(profile.sc.growth.points, [], "the growth index is the return drawn as a line");
+    assert.doesNotMatch(list.json + profile.json, /2075|20\.75/);
+    // Nobody else's figure moves.
+    assert.equal(list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C).live.return_bps, 2045);
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_RETURN_REVIEW;
+    else process.env.MERRYMEN_RETURN_REVIEW = saved;
+  }
+});
+
+test("a transfer recorded as both the agent's own and its chain log puts the return under review on both surfaces", async () => {
+  const { d, connect } = await setup();
+  // C's 2045 bps rests on 100 of capital. The executor books a transfer home
+  // with its tx, and a later scan books the same transfer from its log: which
+  // one is right is a question, and summing them is the one wrong answer.
+  const flow = d.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, epoch, at)
+    VALUES (?, 'out', 10, '0xhomec', ?, 4663, ?, 1, ?)`);
+  flow.run(ACCOUNT_C, null, "transfer-intent", T - 2 * H);
+  flow.run(ACCOUNT_C, 0, "chain-log", T - 2 * H + 60);
+  const b = await connect(OWNER_B);
+  const list = await call(b, "list_public_agents", {});
+  const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.deepEqual(row.unranked, { code: "review-pending", reason: "return under review" });
+  assert.equal(row.ranked, false);
+  assert.equal(row.live.return_bps, null);
+  const profile = await call(b, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.res.isError, undefined, profile.json);
+  assert.deepEqual(profile.sc.unranked, row.unranked);
+  assert.equal(profile.sc.live.return_bps, null);
+  assert.deepEqual(profile.sc.growth.points, [], "no line is drawn over flows that were not summed");
+  assert.doesNotMatch(list.json + profile.json, /2045|20\.45/);
+});
+
+test("two different opening balances in one run make the return unavailable, and both surfaces say the records are unread", async () => {
+  const { d, connect } = await setup();
+  const carry = d.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, at) VALUES (?, 'in', ?, 'epoch-carry', 1, ?)`);
+  carry.run(ACCOUNT_C, 50, T - 4 * H);
+  // The mirror's exact copy is one carry, and C still ranks on it.
+  carry.run(ACCOUNT_C, 50, T - 4 * H);
+  const b = await connect(OWNER_B);
+  const once = (await call(b, "list_public_agents", {})).sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.equal(once.ranked, true);
+  assert.equal(once.live.return_bps, Math.round(((120.5 - 150 - 0.05) / 150) * 10_000));
+  carry.run(ACCOUNT_C, 40, T - 4 * H);
+  const list = await call(b, "list_public_agents", {});
+  const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_C);
+  assert.equal(row.ranked, false);
+  assert.equal(row.live.return_bps, null);
+  assert.equal(row.unranked.code, "records-unreadable");
+  const profile = await call(b, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.res.isError, undefined, profile.json);
+  assert.deepEqual(profile.sc.unranked, row.unranked);
+  assert.equal(profile.sc.funding.funded, null, "withheld funding is not unfunded");
+});
+
+test("a paper agent's return under review says review-pending, not 'paper' beside a null return", async () => {
+  // B's paper book is up 23.45%. Under review its paper return is withheld,
+  // and "paper" beside a null return would read like a paper read that did
+  // not answer; the web terminal says "Return under review" for it.
+  const saved = process.env.MERRYMEN_RETURN_REVIEW;
+  try {
+    const { connect } = await setup();
+    process.env.MERRYMEN_RETURN_REVIEW = ACCOUNT_B;
+    const b = await connect(OWNER_B);
+    const list = await call(b, "list_public_agents", {});
+    const row = list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_B);
+    assert.equal(row.mode, "paper", "the mode is still said");
+    assert.deepEqual(row.unranked, { code: "review-pending", reason: "return under review" });
+    assert.equal(row.paper.return_bps, null);
+    const profile = await call(b, "get_public_agent", { agent: SLUG_B });
+    assert.equal(profile.res.isError, undefined, profile.json);
+    assert.deepEqual(profile.sc.unranked, row.unranked);
+    assert.equal(profile.sc.paper.return_bps, null);
+    assert.doesNotMatch(list.json + profile.json, /2345|23\.45/);
+    // Only the listed account changes: an unlisted agent keeps its figure.
+    assert.equal(list.sc.agents.find((x: { agent: string }) => x.agent === SLUG_A).live.return_bps, 2075);
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_RETURN_REVIEW;
+    else process.env.MERRYMEN_RETURN_REVIEW = saved;
+  }
+});
+
 test("the list and the profile name the same decider when the book changed after the last decision", async () => {
   const { d, connect } = await setup();
   // C decided (dip-hunter) while live; its newest mark is now a paper one, and
@@ -645,7 +764,7 @@ test("explain_leaderboard states the formula, the gates, both drawdowns, the pri
   assert.match(def("live.return_bps"), /recorded this run up to that valuation/);
   assert.match(def("live.max_drawdown_bps (leaderboard list)"), /including one taken while flow inference was held/);
   const codes = sc.unranked_reasons.map((r: { code: string }) => r.code);
-  for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
+  for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "gas-pending", "review-pending", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
     assert.ok(codes.includes(c), c);
   }
   assert.equal(sc.period.name, "current run");

@@ -28,10 +28,11 @@ function handler(readLeaderboard: () => Promise<LeaderboardRead>) {
 function row(publicBook: boolean, equityUsdg: number | null = 1000.25, pnlUsdg: number | null = 12.5): LeaderRow {
   return {
     slug: "desk", name: "Desk", handle: null, handleVerified: false, unrankedWhy: null,
-    pnlBps: 125, mode: "live", filledPaper: 0, landed: 3, refused: 0, maxDdBps: 0, curve: [1, 1.0125],
+    pnlBps: 125, mode: "live", filledPaper: 0, landed: 3, refused: 0, paperFills: 0, liveFills: 3, maxDdBps: 0, curve: [1, 1.0125],
     performance: { book: "live", equityUsdg: publicBook ? equityUsdg : null,
       equityAt: 100, pnlUsdg: publicBook ? pnlUsdg : null, pnlBps: 125, pnlAt: 100,
-      publicBook, gasComplete: true, held: false },
+      publicBook, gasComplete: true, held: false, fills: 3, fillsAtMark: 3, lastFillAt: 90, funded: true,
+      valuation: "current", gasOps: { sponsored: 3, priced: 0, unpriced: 0, unrecorded: 0 }, underReview: false },
   };
 }
 const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, agents });
