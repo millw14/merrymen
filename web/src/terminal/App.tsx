@@ -23,6 +23,7 @@ import {
 } from "react";
 import { autonomyOf } from "@merrymen/core";
 import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
 import { chatTape } from "./chat-thread";
@@ -415,6 +416,25 @@ export function App() {
    * figure that must not be trusted to say whether money exists.
    */
   const recovery = pausedRecovery(account?.status.recovery);
+  /**
+   * IS THE BLOCKER OLDER THAN THE SIGNATURE?
+   *
+   * Both halves come from this one response: `grantedAt` from the grant store
+   * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
+   * row that also carries `liveBlocker` — so the comparison is between two
+   * facts that arrived together, not a race between sources.
+   *
+   * Both must be present. A missing timestamp is not a fresh signature, and
+   * defaulting either way would turn "we don't know" into a claim.
+   *
+   * NAMED, because the desk needs the fact itself and not the verdict's word
+   * for it. It used to be handed `autonomy.state === "checking"`, which stopped
+   * meaning this once a silent worker could answer NOT RUNNING instead.
+   */
+  const blockerPredatesGrant =
+    account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
+      ? account.status.grant.grantedAt > account.status.workerAliveAt
+      : false;
   const autonomy = recoveryAutonomy(autonomyOf({
     mode: account?.status.mode ?? null,
     liveBlocker: account?.status.liveBlocker ?? null,
@@ -426,21 +446,19 @@ export function App() {
     // the one value `autonomyOf` answers with "Add funds" — to a funded owner,
     // whenever the node was slow. See realCashOf.
     realCashUsd: realCashOf(account),
+    blockerPredatesGrant,
     /**
-     * IS THE BLOCKER OLDER THAN THE SIGNATURE?
-     *
-     * Both halves come from this one response: `grantedAt` from the grant store
-     * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
-     * row that also carries `liveBlocker` — so the comparison is between two
-     * facts that arrived together, not a race between sources.
-     *
-     * Both must be present. A missing timestamp is not a fresh signature, and
-     * defaulting either way would turn "we don't know" into a claim.
+     * HAS THE WORKER STOPPED? The SERVER's answer (`workerStale` on the same
+     * response), read back as the beat it went quiet at — never this browser's
+     * clock against a server timestamp. An older server sends no answer, and
+     * the agent is described as it describes itself. See worker-stale.ts.
      */
-    blockerPredatesGrant:
-      account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
-        ? account.status.grant.grantedAt > account.status.workerAliveAt
-        : false,
+    workerSilentSince: workerSilentSince(account?.status),
+    // Whole days left on the key, counted up; `autonomyOf` keeps the window.
+    expiresSoonDays:
+      account?.status.grant?.expiresAt !== undefined
+        ? Math.ceil((account.status.grant.expiresAt * 1000 - Date.now()) / 86_400_000)
+        : null,
   }), recovery);
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
     ...(recovery ? { chg24: null } : {})} : null;
@@ -580,7 +598,7 @@ export function App() {
             onResign={() => {window.location.href=resignHref;}}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
-            staleBlocker={autonomy.state === "checking"}
+            staleBlocker={blockerPredatesGrant}
             energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
@@ -814,7 +832,7 @@ export function App() {
             }}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
-            staleBlocker={autonomy.state === "checking"}
+            staleBlocker={blockerPredatesGrant}
             energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
