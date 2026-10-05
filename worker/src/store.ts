@@ -19,6 +19,7 @@ import {
 } from "./energy-days";
 import type { EnergyCounters, LastGood } from "./energy";
 import { energyDayUnrestored } from "./energy-seed";
+import { BUDGET_SEED_SCHEMA, budgetUnrestored } from "./budget-seed";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
@@ -67,6 +68,7 @@ export const getRiskPeriodPeak = (account: string, equity: number | null = null)
 const SQLITE_SCHEMA = `
     ${RISK_PERIOD_SCHEMA};
     ${ENERGY_DAYS_SCHEMA};
+    ${BUDGET_SEED_SCHEMA};
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
        decisions, positions, cost_basis, equity, fee_accruals. On the EVM rail
        it is the ERC-4337 smart-account address; on the broker rail it is the
@@ -3530,20 +3532,101 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
 }
 
 /**
+ * A CAP READER'S SUM, WITH THE TRAILING DAY A REBUILT CHILD WAS GIVEN BACK
+ * (budget-seed.ts) — in ONE statement, so the child's rows and the seed are
+ * read from one snapshot, and an operation written between two reads can be
+ * neither counted twice nor missed.
+ *
+ *   figure      what one ledger row adds to this cap: `amount_usdg`, or 1 for an op
+ *   where       the reader's own predicate on a ledger row, its window included
+ *   seedFigure  the same figure on a seed row
+ *
+ * Per seed row, keyed by operation hash however either side spelt it:
+ *   - the child's ledger holds no row for it → the seed's figure, on the
+ *     seed's own window;
+ *   - it holds one that has stopped counting — reverted, dropped, settled more
+ *     than 24h ago → nothing: the child's row is the later word;
+ *   - it holds one that still counts → what the seed says ABOVE the child's
+ *     own figure for it, never below zero. The reconciler's bare copy of a
+ *     transfer is a swap, so for the transfer allowance this is the whole
+ *     transfer; for spend and ops it is nothing when the two agree.
+ *
+ * The seed is the LIVE rail's (a paper fill has no hash to count it once by),
+ * so only a live reader adds it. `local + seeded` is the cap's settled half.
+ */
+function withBudgetSeed(q: {
+  agentId: string;
+  rail: BudgetRail;
+  figure: string;
+  where: string;
+  params: readonly unknown[];
+  seedFigure: string;
+  seedParams?: readonly unknown[];
+}): { sql: string; params: unknown[] } {
+  const local = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
+  if (q.rail !== "live") return { sql: `SELECT (${local}) AS local, 0 AS seeded`, params: [q.agentId, ...q.params] };
+  const live = railFilter("live");
+  const sameOp = "agent_id = ? AND user_op_hash IS NOT NULL AND lower(user_op_hash) = s.op_hash";
+  return {
+    sql: `SELECT (${local}) AS local,
+      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN (CASE WHEN k.current = 1 THEN k.x ELSE 0 END)
+                                WHEN k.counting = 0 THEN 0
+                                WHEN k.x > k.local_x THEN k.x - k.local_x
+                                ELSE 0 END), 0)
+         FROM (SELECT ${q.seedFigure} AS x,
+                      CASE WHEN s.pending = 1 OR s.settled_at > unixepoch() - 86400 THEN 1 ELSE 0 END AS current,
+                      (SELECT COUNT(*) FROM trades WHERE ${sameOp}) AS known,
+                      (SELECT COUNT(*) FROM trades WHERE ${sameOp} AND status IN (${live.sql})
+                         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)) AS counting,
+                      (SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE ${sameOp} AND ${q.where}) AS local_x
+                 FROM budget_seed s
+                WHERE lower(s.agent_id) = lower(?)) k) AS seeded`,
+    params: [
+      q.agentId, ...q.params,
+      ...(q.seedParams ?? []),
+      q.agentId,
+      q.agentId, ...live.params,
+      q.agentId, ...q.params,
+      q.agentId,
+    ],
+  };
+}
+
+/** Run a withBudgetSeed reader: the two halves, as numbers whatever the backend returned them as. */
+async function seededSum(q: { sql: string; params: unknown[] }): Promise<number> {
+  const row = (await getDb().prepare(q.sql).get(...q.params)) as { local?: unknown; seeded?: unknown } | undefined;
+  return Number(row?.local ?? 0) + Number(row?.seeded ?? 0);
+}
+
+/**
+ * Is the trailing day from before this ledger was rebuilt still missing
+ * (budget-seed.ts)? The orchestrator's seed has not put it back, so no cap
+ * here can be read as complete: refreshBudget reads the live rail as a spent
+ * day, and getTransferredTodayUsdg refuses to answer.
+ */
+export function budgetDayUnrestored(): boolean {
+  return budgetUnrestored(merrymenHome());
+}
+
+/**
  * Settled-op count in the trailing 24h, plus every unresolved live operation.
  * A pending operation never releases its slot merely because it is old; when
  * it lands, its 24h window starts at observed settlement, not submission.
+ * Plus, on the live rail, the seeded operations this ledger does not already
+ * count (withBudgetSeed).
  */
 export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): Promise<number> {
   const { sql, params } = railFilter(rail);
-  const row = await getDb()
-    .prepare(
-      `SELECT COUNT(*) AS n FROM trades
-       WHERE agent_id = ? AND status IN (${sql})
-         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId, ...params) as { n: number } | undefined;
-  return row?.n ?? 0;
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail,
+      figure: "1",
+      where: `status IN (${sql}) AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
+      params,
+      seedFigure: "1",
+    }),
+  );
 }
 
 /** Rename the agent — the user-given merryman name (shown on the dashboard). */
@@ -3580,16 +3663,29 @@ export async function setAgentName(agentId: string, name: string): Promise<void>
   }
 }
 
-/** Pending transfers reserve allowance until resolved; settled spend rolls for 24h. */
+/**
+ * Pending transfers reserve allowance until resolved; settled spend rolls for 24h.
+ *
+ * THROWS while the trailing day from before a rebuild is not back
+ * (budgetDayUnrestored): the transfers it holds are somewhere this ledger
+ * cannot see, and an allowance nobody can read never authorizes a send — the
+ * caller reads the throw as unreadable (transfer-budget.ts).
+ */
 export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
-  const row = await getDb()
-    .prepare(
-      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN ('landed', 'submitted') AND kind = 'transfer'
+  if (budgetDayUnrestored()) {
+    throw new Error("the trailing day's transfers from before this ledger was rebuilt are not restored yet");
+  }
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail: "live",
+      figure: "amount_usdg",
+      where: `status IN ('landed', 'submitted') AND kind = 'transfer'
          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId) as { spent: number } | undefined;
-  return row?.spent ?? 0;
+      params: [],
+      seedFigure: "s.transfer_usdg",
+    }),
+  );
 }
 
 /**
@@ -3611,14 +3707,21 @@ export async function getSpentTodayUsdg(
   const sells = cashToken
     ? ` AND NOT (kind IN ('swap', 'curve-trade') AND LOWER(COALESCE(buy_token, '')) = ?)`
     : "";
-  const row = await getDb()
-    .prepare(
-      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'${sells}
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail,
+      figure: "amount_usdg",
+      where: `status IN (${sql}) AND kind != 'vault-withdraw'${sells}
          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId, ...params, ...(cashToken ? [cashToken.toLowerCase()] : [])) as { spent: number } | undefined;
-  return row?.spent ?? 0;
+      params: [...params, ...(cashToken ? [cashToken.toLowerCase()] : [])],
+      // THE SAME EXEMPTION ON THE SEED: its net spend where it was read for
+      // this cash token, its gross otherwise — never less than this reader
+      // would have counted had the rows been its own.
+      seedFigure: "CASE WHEN s.cash_token = ? THEN s.spend_usdg ELSE s.gross_usdg END",
+      seedParams: [cashToken ? cashToken.toLowerCase() : null],
+    }),
+  );
 }
 
 /**
