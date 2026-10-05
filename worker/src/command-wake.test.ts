@@ -572,6 +572,71 @@ describe("the tick clock", () => {
     await landSecond!();
     assert.deepEqual(k.log, ["regular", "hold", "hold", "regular"]);
   });
+
+  // ── A WORKER THAT IS LEAVING (SIGTERM, index.ts) ────────────────────────
+  //
+  // stop() is the first thing a draining worker does: from then on it may
+  // finish the trade already on the chain, and nothing else. A tick started on
+  // the way out would read the book and hand the strategy a fresh pass of
+  // intents for the drain to refuse.
+
+  it("STOPPED, IT STARTS NOTHING — the armed tick comes off the clock, and no command or research tick can start", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    assert.equal(k.f.pending().length, 1);
+    k.c.stop();
+    assert.deepEqual(k.f.pending(), [], "the regular tick is off the clock");
+    assert.equal(k.c.state().regularDueInMs, null, "so commandTickReady says no as well");
+    assert.equal(k.c.wakeCommand(), false);
+    assert.equal(k.c.wakeNomination(), false);
+    k.c.start(0);
+    assert.deepEqual(k.f.pending(), [], "and nothing puts it back: there is no restart");
+    assert.deepEqual(k.log, ["regular"]);
+  });
+
+  it("A TICK RUNNING WHEN THE CLOCK STOPS FINISHES, AND ARMS NOTHING — not even the research it was owed", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    k.f.fire();
+    assert.equal(k.c.wakeNomination(), true, "evidence during a running tick is owed one research tick after it");
+    k.c.stop();
+    await k.finishRegular();
+    assert.deepEqual(k.log, ["regular", "regular"], "and a stopped clock does not pay it");
+    assert.deepEqual(k.f.pending(), []);
+    assert.equal(k.c.state().tickRunning, false);
+  });
+
+  it("A COMMAND TICK RUNNING WHEN THE CLOCK STOPS DOES NOT HAND THE REGULAR TICK BACK", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    assert.equal(k.c.wakeCommand(), true);
+    k.c.stop();
+    await k.finishCommand();
+    assert.deepEqual(k.f.pending(), [], "the tick it took off the clock stays off");
+    assert.deepEqual(k.log, ["regular", "command"]);
+  });
+
+  it("A REGULAR TICK HELD BEHIND A TRADE WHEN THE CLOCK STOPS NEVER STARTS — not even once the trade lands", async () => {
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    const land = k.startOrder();
+    k.f.fire();
+    await settle();
+    assert.deepEqual(k.log, ["regular", "hold"]);
+    k.c.stop();
+    await land();
+    assert.deepEqual(k.log, ["regular", "hold"], "no read of the book on the way out");
+    assert.deepEqual(k.f.pending(), []);
+    assert.equal(k.c.state().tickRunning, false, "and the clock is idle once the trade it waited on has landed");
+  });
 });
 
 /**
@@ -1162,6 +1227,27 @@ describe("a trade typed in Telegram holds the clock the same way", () => {
     await w.run(400_000);
     const silence = longestSilence(w.beats, sentAt, w.now());
     assert.ok(silence < staleThresholdSec(15) * 1000, `the file went ${silence / 1000}s unwritten`);
+  });
+});
+
+describe("a worker that is leaving", () => {
+  it("A STOPPED CLOCK WAKES NOTHING FOR AN ORDER THAT ARRIVES, AND WRITES NO BEAT — the order stays on disk for the next process", async () => {
+    const w = worker();
+    w.clock.start(0);
+    await w.fire();
+    // A trade out when the worker is told to leave: an unstopped clock would
+    // beat for it on its first poll (see "a child is alive while a trade it
+    // sent is out").
+    w.chat("tg1");
+    w.clock.stop();
+    const beats = w.beats.length;
+    w.order("late");
+    await w.run(60_000);
+    assert.ok(!w.log.includes("command reads the book"), w.log.join("\n"));
+    assert.deepEqual(queuedCommandIds(w.home), ["late"], "not claimed, so not refused: the next process drains it");
+    assert.equal(w.beats.length, beats, "no beat from the clock on the way out");
+    assert.deepEqual(w.pending(), [], "and no regular tick on the clock");
+    assert.equal(w.clock.poll(), false);
   });
 });
 
