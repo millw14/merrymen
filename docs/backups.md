@@ -48,8 +48,9 @@ resume), and after any change to backup settings.
    `REPEATABLE READ READ ONLY` transaction that ends in `ROLLBACK`: one for
    the catalog, then one per table. It never writes to either.
 4. **Record the JSON** with the runbook evidence. It contains the restore point,
-   row counts and verdicts. It contains no row values, stamps, host names or
-   URLs, and errors are reported by code.
+   row counts, each table's kind and verdict, and the fixed reasons in
+   `contentUnverified`. It contains no row values, stamps, host names or URLs,
+   and errors are reported by code.
 5. **Delete the fork** service, and any proxy you added.
 
 The exit code is `0` when the drill passes, `1` when it fails or cannot
@@ -67,21 +68,45 @@ but never prints.
 
 The margin is also a blind spot. Rows stamped within it of the restore point
 are compared by neither side, so a fork restored up to that many seconds
-before or after the restore point still reads `match`. Keep the default. The
+before or after the restore point still passes. Keep the default. The
 verifier refuses more than 3600. If you run it with any other value, record
 the value and the reason with the evidence. A wider margin is never the fix
 for `fork-behind`.
 
-- **`ok: true, exact: true`**: every allowlisted table that exists matched.
-  Expect this while trading is held.
+Counts and a newest stamp prove that the fork holds the rows. Whether it holds
+their contents as they were at the restore point depends on how the table is
+written, so each table in the report has a `kind`:
+
+| Kind | Written how | What an equal comparison proves |
+|---|---|---|
+| `append` | Inserted, never changed, at most deleted | The rows and their contents: `match` |
+| `last-write` | Every writer sets the stamp to the time of its write | The rows and their contents: `match` |
+| `presence-only` | Some writer changes a row without moving its stamp, copies the stamp from a child ledger, or writes back an older one | The rows only: `present-content-unverified` |
+
+A presence-only table never reads `match`. A fork that kept an older version
+of one of its rows (an `agents` row whose caps or high-water mark changed,
+say) reads exactly like a fork with the current version, and the verifier
+cannot tell them apart.
+
+- **`ok: true, exact: true`**: every allowlisted table that exists held the
+  same rows as the source by the cutoff, by count and newest stamp: `match`,
+  or `present-content-unverified` for a presence-only table. Expect this
+  while trading is held. It is not a statement about the contents of the
+  tables in `contentUnverified`.
 - **`ok: true, exact: false`**: some tables read `source-changed`. After the
   restore point the source deleted rows stamped before the cutoff, or rewrote
   them with newer stamps. Either way the fork holds more than the source,
   which is consistent with a good restore. Check that it fits known activity,
   such as a re-signed grant or an accounting repair.
+- **`present-content-unverified`**: a presence-only table held the same rows
+  on both sides. This passes. Its contents were not checked.
+- **`contentUnverified`**: every presence-only table the verifier compared,
+  each with a fixed `why` naming the write that keeps its contents out of
+  reach. It does not fail the drill. Record it with the evidence as it is,
+  and never summarise the drill as having verified those tables' contents.
 - **`absent`**: neither database has the table yet. This passes.
 
-These verdicts fail the drill:
+These verdicts fail the drill, whatever the table's kind:
 
 | Verdict | Meaning | What to do |
 |---|---|---|
@@ -110,12 +135,24 @@ The verifier reads only the allowlist `DRILL_TABLES` in
 cursors, wallet authority and owner configuration, the apps owners connected
 over MCP with their tokens and order proposals, recovery state, and send and
 reply receipts. Every entry names an integer write stamp. It is in epoch
-seconds or milliseconds, written with the row, and it never moves backwards.
-Each value is normalised to seconds on its own, because both units are in use.
+seconds or milliseconds, written with the row. Each value is normalised to
+seconds on its own, because both units are in use.
 
-To add a table, give it a stamp of that kind. A table without one, such as
-`energy_days`, which keys on a text day, can only be compared whole, which
-fails every drill taken while the source is still being written.
+Every entry also names its kind, decided by reading every writer of the table
+(each `INSERT`, `UPDATE`, `DELETE` and upsert that reaches the shared
+database), with the evidence beside the entry. One writer is enough to make a
+table presence-only.
+
+To add a table, give it an integer stamp and a kind, and cite its writers. A
+table without such a stamp, such as `energy_days`, which keys on a text day,
+can only be compared whole, which fails every drill taken while the source is
+still being written. A new writer of an allowlisted table means reading its
+kind again.
+
+A presence-only table can become last-write only once it has a stamp that
+every writer sets to the time of its write: an `updated_at` added by a
+migration and maintained by each writer, with the entry switched to it. That
+is a schema change and a change to every writer, and is reviewed as such.
 
 On the source, the cost is one counting scan per allowlisted table, each in
 its own read-only transaction. A scan holds an ordinary read lock on its one
@@ -125,7 +162,14 @@ not run it during a deploy or a schema change.
 
 ## What it does not prove
 
-- It does not compare row contents. It compares counts and newest stamps.
+- It does not read row contents. It compares counts and newest stamps. For
+  append and last-write tables that is also evidence about contents, because
+  a row there either never changes or moves its stamp when it does. For
+  presence-only tables it is not, and the report lists them in
+  `contentUnverified`.
+- It does not check rows the source deleted, or re-stamped past the cutoff,
+  after the restore point. The fork may hold more than the source, never
+  less.
 - It does not check tables outside the allowlist.
 - It does not check orchestrator volume snapshots. Restore one into a new
   volume, mounted by no live service, and inspect it separately.

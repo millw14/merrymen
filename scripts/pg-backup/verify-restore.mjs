@@ -19,13 +19,13 @@
  * is the live database, so the fork is read first: a fork that cannot be
  * opened never costs production a query.
  *
- * NO VALUES LEAVE THIS PROCESS. The output is JSON holding table names (the
- * constants below), row counts and verdicts. The newest stamp of each table
- * and each server's identity are compared in memory and never printed. The
- * connection strings come from the environment, never argv (argv is in `ps`
- * and shell history), and an error is reported by its code alone, because a
- * driver's message can carry a host name. The JSON can go into the runbook
- * evidence as it is.
+ * NO VALUES LEAVE THIS PROCESS. The output is JSON holding table names, their
+ * kinds and fixed reasons (the constants below), row counts and verdicts. The
+ * newest stamp of each table and each server's identity are compared in
+ * memory and never printed. The connection strings come from the environment,
+ * never argv (argv is in `ps` and shell history), and an error is reported by
+ * its code alone, because a driver's message can carry a host name. The JSON
+ * can go into the runbook evidence as it is.
  *
  * THE COMPARISON, AND WHY IT IS ONE-SIDED. The fork stopped at the restore
  * point; the source kept going. So only rows the source had ALREADY written by
@@ -39,6 +39,17 @@
  * in the fork is `source-changed`: reported, not a failure. Fewer, or an older
  * newest stamp, is `fork-behind`, and the drill fails.
  *
+ * PRESENCE IS NOT CONTENT. Counts and a newest stamp show the fork holds the
+ * rows. Whether it holds them as they stood at the restore point depends on
+ * how each table is written, so every allowlisted table carries a KIND (see
+ * DRILL_KINDS), read from its writers. Where some writer changes a row
+ * without moving its stamp, a fork holding an older version of that row
+ * counts exactly like one holding the current version: `match` there would be
+ * a claim the drill cannot make. Such a table reads `present-content-unverified`
+ * instead and is named, with its reason, in the report's `contentUnverified`.
+ * That is stated, not failed — the fork may well be right — but no pass ever
+ * claims those contents were checked.
+ *
  * A FORK THAT IS NOT THE FORK. Comparing the source with itself matches
  * perfectly, and that is the most dangerous false pass there is. It is refused
  * three ways: the two URLs name the same database; the fork URL is this
@@ -48,8 +59,10 @@
  * not a copy of that moment.
  *
  * EVERY DOUBT FAILS THE SAME WAY. A margin too small, or a mirror catching up
- * a backlog with old stamps after the restore point, reads as `fork-behind`,
- * never as a pass. Investigate it; never widen the comparison to make it go.
+ * a backlog of inserts with old stamps after the restore point, reads as
+ * `fork-behind`, never as a pass. Investigate it; never widen the comparison
+ * to make it go. (A backlog of in-place changes is invisible to any count;
+ * that is exactly what a presence-only table's reason says.)
  */
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -58,85 +71,307 @@ import { fileURLToPath } from "node:url";
 export const DRILL_FORMAT = "merrymen-restore-drill/v1";
 
 /**
- * THE ALLOWLIST: every table the drill reads, and the stamp it reads it by.
+ * THE KINDS: WHAT A VERDICT MAY SAY ABOUT A TABLE'S CONTENTS.
+ *
+ * The comparison proves PRESENCE: the fork holds at least the rows the source
+ * had stamped by the cutoff. Whether it holds their CONTENTS as they stood at
+ * the restore point depends on how the table is written, and that is read from
+ * its writers — every INSERT, UPDATE, DELETE and upsert in worker/src, web/src
+ * and scripts that reaches the shared database — never from its name or from
+ * what its stamp column is called. One writer is enough to lower a kind:
+ *
+ *   append         Rows are inserted and never changed after; at most they
+ *                  are deleted. The stamp is the insert's. A row the fork holds
+ *                  is the row the source holds, so presence IS content, and a
+ *                  late insert carrying an old stamp (a mirror backlog, a
+ *                  repair) leaves the fork a row short: `fork-behind`.
+ *   last-write     Every writer that changes a row also sets the stamp to the
+ *                  time of that write, on its own clock (Date.now(),
+ *                  unixepoch()). A fork is one moment of the source, so a
+ *                  fork whose newest stamp is not behind the source's holds
+ *                  every write stamped before it too: every row as the source
+ *                  last wrote it by the cutoff. A fork taken earlier lacks the
+ *                  newest write and reads `fork-behind`. The residue is the
+ *                  margin's blind spot again, smaller: whole seconds cannot
+ *                  order two writes in one second, nor a commit that trailed
+ *                  its own stamp.
+ *   presence-only  Some writer changes a row without moving its stamp, or
+ *                  sets the stamp from another clock, or puts an older value
+ *                  back. A fork holding an older version of such a row counts
+ *                  exactly like one holding the current version, so the
+ *                  comparison can prove the rows are there and nothing about
+ *                  what they say. Such a table never reads `match`: it reads
+ *                  `present-content-unverified`, and the report names it in
+ *                  `contentUnverified` with its `why`, a fixed sentence
+ *                  printed as written. It does not fail the drill for that —
+ *                  every presence verdict (`fork-behind` and the rest) still
+ *                  applies to it and still fails.
+ *
+ * A STAMP COPIED FROM ANOTHER DATABASE IS NOT A LAST-WRITE STAMP HERE. The
+ * mirror writes each child row with the child's own stamp, which is the
+ * child's clock: a pass that lands after the restore point can change a row
+ * here under a stamp from before it. An INSERT carrying such a stamp is still
+ * caught by the count, which is why the append tables the mirror fills stay
+ * append; an in-place change is not, which is why the snapshot tables it
+ * rewrites (positions, cost_basis, position_floors, class_positions) do not.
+ *
+ * AN OLDER STAMP WRITTEN BACK (an undo restoring the claim it replaced) can
+ * only make a good fork read `fork-behind`; it never lets a bad one through
+ * the presence check. So it lowers a table's kind and nothing else.
+ *
+ * TO MOVE A TABLE UP. A presence-only table becomes last-write once it has a
+ * stamp that EVERY writer sets to the time of its write — an `updated_at`
+ * added by a migration and maintained by each writer — and its entry here is
+ * switched to that column. That is deliberately not done in this file: it is
+ * a schema change and a change to every writer, each of which is reviewed on
+ * its own. A few presence-only tables appear to carry such a column already
+ * (agent_identity.updated_at, fleet_recovery_health.checked_at,
+ * recovery_reply_offsets.updated_at_ms); switching to one needs the same
+ * writer-by-writer reading first, because a single writer that skips it
+ * turns a last-write claim back into the false `match` this exists to stop.
+ */
+export const DRILL_KINDS = Object.freeze(["append", "last-write", "presence-only"]);
+
+// Names are spliced into SQL (quoted), so they are checked when this loads,
+// not trusted because a reviewer read the list.
+const IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
+/** A presence-only table's reason is printed: one plain line, bounded. */
+const REASON = /^[\x20-\x7e]{1,160}$/;
+const ENTRY_FIELDS = new Set(["table", "stamp", "kind", "why"]);
+
+/**
+ * THE ALLOWLIST'S SHAPE, CHECKED WHEN THIS LOADS — and exported so the test
+ * can show each malformed entry is refused rather than read. An entry names a
+ * plain table, a plain stamp column and a kind; a presence-only entry also
+ * says why, and no other entry may, so a reason can never sit beside a kind
+ * that claims content. Returns the list frozen, entry by entry.
+ */
+export function validateDrillTables(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) throw new Error("restore drill: the allowlist is empty");
+  const seen = new Set();
+  return Object.freeze(entries.map((entry) => {
+    if (entry === null || typeof entry !== "object" || Object.keys(entry).some((k) => !ENTRY_FIELDS.has(k))) {
+      throw new Error("restore drill: an allowlisted entry has a field it should not");
+    }
+    const { table, stamp, kind, why } = entry;
+    if (typeof table !== "string" || typeof stamp !== "string" || !IDENTIFIER.test(table) || !IDENTIFIER.test(stamp)) {
+      throw new Error("restore drill: an allowlisted name is not a plain identifier");
+    }
+    if (seen.has(table)) throw new Error("restore drill: a table is listed twice");
+    seen.add(table);
+    if (!DRILL_KINDS.includes(kind)) throw new Error("restore drill: an allowlisted table has no kind");
+    if (kind === "presence-only" ? typeof why !== "string" || !REASON.test(why) : why !== undefined) {
+      throw new Error("restore drill: a presence-only table needs its reason, and only it may have one");
+    }
+    return Object.freeze({ ...entry });
+  }));
+}
+
+/**
+ * THE ALLOWLIST: every table the drill reads, the stamp it reads it by, and
+ * the kind its writers make it (above).
  *
  * A table is here because a restore that lost it would lose money, authority
  * or a guard against doing something twice. Nothing outside this list is
  * read, and neither a table nor a column name can come from input.
  *
- * THE STAMP is an integer epoch written with the row that never moves
- * backwards: an insert time, or the time of the row's last write. Seconds and
- * milliseconds are both in use here, sometimes under the same name
- * (agent_commands.created_at is Date.now()), so each value is normalised to
- * seconds on its own — see MS_FLOOR. A table with no such stamp (energy_days
- * keys on a text day) is not here: it could only be compared whole, which
- * fails every drill taken while the source is still being written.
+ * THE STAMP is an integer epoch written with the row: an insert time, or the
+ * time of a write. Seconds and milliseconds are both in use here, sometimes
+ * under the same name (agent_commands.created_at is Date.now()), so each value
+ * is normalised to seconds on its own — see MS_FLOOR. A table with no such
+ * stamp (energy_days keys on a text day) is not here: it could only be
+ * compared whole, which fails every drill taken while the source is still
+ * being written.
+ *
+ * EACH KIND IS CITED FROM ITS WRITERS, beside the entry. Presence-only cites
+ * one writer that changes a row without moving the stamp (there are often
+ * more); append and last-write cite every writer found, because one missed
+ * writer is the whole question. A new writer of any table here, or a new
+ * table, needs its entry read again.
  *
  * An allowlisted table that the source has not created yet reads `absent` on
  * both sides and passes; it is checked from the first drill after it exists.
  */
-export const DRILL_TABLES = Object.freeze([
-  // The ledger, mirrored out of every child (ledger-mirror.ts). Insert stamps.
-  { table: "trades", stamp: "created_at" },
-  { table: "flows", stamp: "at" },
-  { table: "flows_quarantine", stamp: "quarantined_at" },
-  { table: "equity", stamp: "at" },
-  { table: "decisions", stamp: "at" },
-  { table: "fee_accruals", stamp: "at" },
-  { table: "journal", stamp: "at" },
-  { table: "events", stamp: "created_at" },
-  { table: "risk_periods", stamp: "started_at" },
-  { table: "agent_commands", stamp: "created_at" },
-  // Book state, upserted in place: the stamp is the last write.
-  { table: "agents", stamp: "created_at" },
-  { table: "positions", stamp: "updated_at" },
-  { table: "cost_basis", stamp: "updated_at" },
-  { table: "position_floors", stamp: "at" },
-  { table: "class_positions", stamp: "first_seen" },
-  { table: "paper_book", stamp: "updated_at" },
-  { table: "paper_checkpoints", stamp: "updated_at" },
-  // The mirror's cursors and the original-book imports. A fork without the
-  // cursors would copy every child's rows again (CURSOR REWOUND).
-  { table: "mirror_state", stamp: "updated_at" },
-  { table: "tenant_ledger_import", stamp: "created_at_ms" },
-  // Wallet authority and the owner's configuration.
-  { table: "grants", stamp: "updated_at" },
-  { table: "tenant_settings", stamp: "updated_at" },
-  { table: "tenant_telegram", stamp: "updated_at" },
-  { table: "telegram_bot_claims", stamp: "claimed_at" },
-  { table: "holder_claims", stamp: "claimed_at" },
-  { table: "agent_identity", stamp: "created_at" },
-  // One account, one identity, ever (account-claim.ts). Insert-only.
-  { table: "agent_account", stamp: "claimed_at" },
-  // The apps an owner connected over MCP, and the tokens that act for them.
-  // A connection is re-stamped when re-approved or revoked; a token is
-  // insert-only, and pruning one reads as `source-changed`.
-  { table: "mcp_connections", stamp: "updated_at" },
-  { table: "mcp_tokens", stamp: "created_at" },
-  // Recovery state, and the receipts that stop a send or a reply repeating.
-  { table: "fleet_recovery_health", stamp: "since_at" },
-  { table: "paper_recovery_health", stamp: "updated_at" },
-  { table: "recovery_reply_offsets", stamp: "armed_at" },
-  { table: "tenant_recovery_reply_state", stamp: "updated_at_ms" },
-  { table: "announcements", stamp: "sent_at" },
-  { table: "announcement_attempts", stamp: "claimed_at" },
-  { table: "tg_group_notices", stamp: "claimed_at" },
-  { table: "notify_deliveries", stamp: "created_at" },
-  // An app's order proposals: one per (tenant, idempotency key), carrying the
-  // order it became. Re-stamped on every change of status.
-  { table: "mcp_proposals", stamp: "updated_at" },
-  // Sealed owner memory and group state that the ferries restore into a home.
-  { table: "tenant_personal_memory", stamp: "updated_at_ms" },
-  { table: "tenant_tg_groups", stamp: "updated_at_ms" },
-].map((entry) => Object.freeze(entry)));
+export const DRILL_TABLES = validateDrillTables([
+  // ── The ledger, mirrored out of every child (ledger-mirror.ts) ────────────
+  //
+  // Resolved in place: the mirror's resolution pass (`UPDATE trades SET
+  // tx_hash = COALESCE(…), status = ?, … WHERE … status = 'submitted'`),
+  // store.ts addTrade's resolution of an in-flight row, orchestrator.ts's
+  // realised-P&L booking against the shared trades, history-fill-repair.ts.
+  // None of them touches created_at.
+  { table: "trades", stamp: "created_at", kind: "presence-only",
+    why: "A submitted trade is resolved in place (status, tx hash, fill, gas) without moving created_at." },
+  // Inserted by store.ts insertFlowWithJournal, accounting-repair.ts and the
+  // mirror, and deleted only by accounting-repair.ts's quarantine — but
+  // store.ts's SQLITE_ALTERS, which applyLedgerSchema runs against the shared
+  // database on every orchestrator boot, rewrite tx_hash to lowercase and
+  // fill a NULL chain_id in place. `at` stays.
+  { table: "flows", stamp: "at", kind: "presence-only",
+    why: "Boot-time normalisation lowercases tx_hash and fills chain_id in place without moving at." },
+  // accounting-repair.ts's quarantine step only: INSERT … SELECT, stamped
+  // with the repair's own now. Never updated or deleted.
+  { table: "flows_quarantine", stamp: "quarantined_at", kind: "append" },
+  // store.ts (each mark, and writePaperOpening) and the mirror's
+  // `INSERT … ON CONFLICT DO NOTHING`. Never updated or deleted.
+  { table: "equity", stamp: "at", kind: "append" },
+  // store.ts addDecision, and the mirror's `ON CONFLICT (id) DO NOTHING` — a
+  // decision reaches here exactly as first written (see the note there).
+  { table: "decisions", stamp: "at", kind: "append" },
+  // store.ts addFeeAccrual and the mirror. Never updated or deleted.
+  { table: "fee_accruals", stamp: "at", kind: "append" },
+  // store.ts appendJournalRow only: a hash chain, insert-only by design.
+  { table: "journal", stamp: "at", kind: "append" },
+  // store.ts, orchestrator.ts, held-reset.ts, risk-period.ts and the mirror,
+  // all INSERT. Never updated or deleted.
+  { table: "events", stamp: "created_at", kind: "append" },
+  // risk-period.ts: mergeRiskPeriod's upsert (which the mirror runs against
+  // the shared database), markRiskPeriod and adjustRiskCapital all raise
+  // hwm_usdg / withdrawn_usdg in place. started_at is the period's identity.
+  { table: "risk_periods", stamp: "started_at", kind: "presence-only",
+    why: "The period's high-water mark and withdrawals are raised in place without moving started_at." },
+  // orchestrator.ts claims and completes commands in the shared database
+  // (claimed_at, done_at, result, receipt), as do store.ts, held-reset.ts and
+  // web/src/lib/services/proposals.ts.
+  { table: "agent_commands", stamp: "created_at", kind: "presence-only",
+    why: "Claim, completion, result and receipt are written in place without moving created_at." },
 
-// Names are spliced into SQL (quoted), so they are checked when this loads,
-// not trusted because a reviewer read the list.
-const IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
-for (const { table, stamp } of DRILL_TABLES) {
-  if (!IDENTIFIER.test(table) || !IDENTIFIER.test(stamp)) throw new Error("restore drill: an allowlisted name is not a plain identifier");
-}
-if (new Set(DRILL_TABLES.map((t) => t.table)).size !== DRILL_TABLES.length) throw new Error("restore drill: a table is listed twice");
+  // ── Book state ────────────────────────────────────────────────────────────
+  //
+  // The mirror's agents upsert sets caps, expiry, status, heartbeat, mode,
+  // epoch, HWM, fees and accounting quality and never created_at; so do
+  // store.ts's epoch / HWM / fee / quality updates, paper-checkpoint.ts's
+  // epoch move and accounting-repair.ts. The case the review named.
+  { table: "agents", stamp: "created_at", kind: "presence-only",
+    why: "Caps, expiry, heartbeat, epoch, HWM, fees and accounting quality are upserted without moving created_at." },
+  // Every writer sets updated_at — store.ts's upsert to unixepoch() — but
+  // here the mirror deletes each agent's rows and re-inserts them carrying
+  // the CHILD's updated_at (see A STAMP COPIED, above).
+  { table: "positions", stamp: "updated_at", kind: "presence-only",
+    why: "The mirror rewrites each row with the child's own stamp, which can predate the write here." },
+  // paper-checkpoint.ts restorePaperCheckpoint renormalises a child's qty_raw
+  // without updated_at, and the mirror's upsert carries that unchanged child
+  // stamp here with the new quantity.
+  { table: "cost_basis", stamp: "updated_at", kind: "presence-only",
+    why: "A child's basis is renormalised without moving updated_at, and the mirror copies the child's stamp." },
+  // The mirror upserts with the child's own `at`, and basis-seed.ts re-seeds
+  // a rebuilt child's floors carrying the `at` it read from here.
+  { table: "position_floors", stamp: "at", kind: "presence-only",
+    why: "The mirror upserts with the child's own at, and a re-seeded floor carries a historical at." },
+  // The mirror's upsert sets state, quantities and proceeds and never
+  // first_seen; store.ts moves first_seen BACK to an earlier sighting.
+  { table: "class_positions", stamp: "first_seen", kind: "presence-only",
+    why: "State, quantities and proceeds are upserted without moving first_seen, which can also move back." },
+  // store.ts only, and every statement stamps the write: INSERT OR IGNORE
+  // (DEFAULT unixepoch()), resetPaperLedger's upsert and setPaperBook (both
+  // `updated_at = unixepoch()`). paper-checkpoint.ts's restore writes the
+  // CHILD's book, never this one.
+  { table: "paper_book", stamp: "updated_at", kind: "last-write" },
+  // paper-checkpoint.ts mirrorPaperCheckpoints: on a newer epoch the upsert
+  // takes the child's row whatever its updated_at (older included), and on an
+  // equal updated_at (`>=`) it overwrites the contents.
+  { table: "paper_checkpoints", stamp: "updated_at", kind: "presence-only",
+    why: "A new epoch replaces the row whatever its stamp, and an equal stamp overwrites the contents." },
+
+  // ── The mirror's cursors and the original-book imports ────────────────────
+  //
+  // A fork without the cursors would copy every child's rows again (CURSOR
+  // REWOUND). The mirror's first witness of a cursor sets last_stamp alone
+  // (`DO UPDATE SET last_stamp = excluded.last_stamp`).
+  { table: "mirror_state", stamp: "updated_at", kind: "presence-only",
+    why: "A cursor's first witness sets last_stamp without moving updated_at." },
+  // ledger-import.ts consumes or deletes an import, and grant-store.ts
+  // deletes them with a grant: state changes and the sealed body is cleared.
+  { table: "tenant_ledger_import", stamp: "created_at_ms", kind: "presence-only",
+    why: "Consuming or deleting an import rewrites its state and clears its sealed body without moving created_at_ms." },
+
+  // ── Wallet authority and the owner's configuration ────────────────────────
+  //
+  // grant-store.ts stopForReplacement rewrites grant_json and erases the
+  // sealed session key, and leaves updated_at as it was.
+  { table: "grants", stamp: "updated_at", kind: "presence-only",
+    why: "Stopping a grant for replacement erases its session key without moving updated_at." },
+  // settings-store.ts put is the one writer (`updated_at = EXCLUDED.updated_at`,
+  // Date.now() at the write); remove deletes.
+  { table: "tenant_settings", stamp: "updated_at", kind: "last-write" },
+  // telegram-store.ts writes condition alerts, hold notices and poll liveness,
+  // and recovery-replies.ts the listener's state, none of them updated_at.
+  { table: "tenant_telegram", stamp: "updated_at", kind: "presence-only",
+    why: "Alerts, hold notices and poll liveness are written in place without moving updated_at." },
+  // telegram-claims.ts undoBotClaim puts the replaced holder back WITH its
+  // older claimed_at.
+  { table: "telegram_bot_claims", stamp: "claimed_at", kind: "presence-only",
+    why: "Undoing a move puts the replaced holder back with its older claimed_at." },
+  // settings-store.ts undoTakeHolder, the same way.
+  { table: "holder_claims", stamp: "claimed_at", kind: "presence-only",
+    why: "Undoing a move puts the replaced holder back with its older claimed_at." },
+  // identity-store.ts adds accounts and links a social identity in place,
+  // moving updated_at and never created_at (the stamp read here).
+  { table: "agent_identity", stamp: "created_at", kind: "presence-only",
+    why: "Accounts and the linked social identity are updated in place without moving created_at." },
+  // One account, one identity, ever (account-claim.ts): identity-store.ts's
+  // three `INSERT … ON CONFLICT (smart_account) DO NOTHING`, and nothing else.
+  { table: "agent_account", stamp: "claimed_at", kind: "append" },
+
+  // ── The apps an owner connected over MCP, and the tokens that act for them ─
+  //
+  // web/src/mcp/oauth/server.ts re-stamps a connection when it is re-approved
+  // or revoked, but records each use in last_used_at alone.
+  { table: "mcp_connections", stamp: "updated_at", kind: "presence-only",
+    why: "Each use is recorded in last_used_at without moving updated_at." },
+  // server.ts marks a refresh token used and revokes tokens and families in
+  // place. Pruning one (worker/src/mcp/maintenance.ts) reads `source-changed`.
+  { table: "mcp_tokens", stamp: "created_at", kind: "presence-only",
+    why: "Use and revocation are written in place without moving created_at." },
+
+  // ── Recovery state, and the receipts that stop a send or a reply repeating ─
+  //
+  // fleet-recovery.ts clears a hold (held = 0) and changes its cause while
+  // keeping since_at, the moment it began.
+  { table: "fleet_recovery_health", stamp: "since_at", kind: "presence-only",
+    why: "Clearing a hold, or changing its cause, keeps since_at." },
+  // paper-checkpoint.ts recordPaperRecoveryHealth is the one writer: an
+  // upsert setting updated_at to Date.now() at the write.
+  { table: "paper_recovery_health", stamp: "updated_at", kind: "last-write" },
+  // recovery-reply-store.ts advanceReplyOffset moves offset_id and
+  // updated_at_ms; armed_at moves only on a rebind.
+  { table: "recovery_reply_offsets", stamp: "armed_at", kind: "presence-only",
+    why: "Advancing the reply offset moves updated_at_ms, not armed_at." },
+  // recovery-reply-store.ts advanceReplyOffset's upsert is the one writer,
+  // stamped with the caller's now() — Date.now(), recovery-replies.ts.
+  { table: "tenant_recovery_reply_state", stamp: "updated_at_ms", kind: "last-write" },
+  // announce.ts: `INSERT … ON CONFLICT DO NOTHING` once a send succeeded,
+  // stamped then. Never updated or deleted.
+  { table: "announcements", stamp: "sent_at", kind: "append" },
+  // announce.ts moves an attempt's state to sent, aborted or uncertain.
+  { table: "announcement_attempts", stamp: "claimed_at", kind: "presence-only",
+    why: "An attempt's state (sent, aborted, uncertain) changes in place without moving claimed_at." },
+  // tg-group-recovery-notice.ts records the send's status and sent_at.
+  { table: "tg_group_notices", stamp: "claimed_at", kind: "presence-only",
+    why: "A notice's status and sent_at are written in place without moving claimed_at." },
+  // worker/src/mcp/notify.ts (and web/src/mcp/tools/notifications.ts) move a
+  // delivery through sending, retry, sent, dead and skipped.
+  { table: "notify_deliveries", stamp: "created_at", kind: "presence-only",
+    why: "Status, attempts and retry times change in place without moving created_at." },
+
+  // ── An app's order proposals ──────────────────────────────────────────────
+  //
+  // One per (tenant, idempotency key), carrying the order it became.
+  // web/src/lib/services/proposals.ts: the insert, setStatus and
+  // cancelAwaitingForConnection each set updated_at to the caller's now.
+  { table: "mcp_proposals", stamp: "updated_at", kind: "last-write" },
+
+  // ── Sealed owner memory and group state that the ferries restore into a home
+  //
+  // personal-memory-ferry.ts's upsert and patch, memory-safeguard.ts's seed
+  // (insert only) and recovery-reply-store.ts's erase, each Date.now() at the
+  // write. memory-safeguard.ts's backup-stamped insert is into its own
+  // in-memory check, not here.
+  { table: "tenant_personal_memory", stamp: "updated_at_ms", kind: "last-write" },
+  // tg-groups-ferry.ts's upsert and patch and recovery-reply-store.ts's
+  // erase, the same way.
+  { table: "tenant_tg_groups", stamp: "updated_at_ms", kind: "last-write" },
+]);
 
 const INTEGER_TYPES = new Set(["smallint", "integer", "bigint"]);
 /** At or above this an epoch is milliseconds: 10^11 seconds is the year 5138, 10^11 ms is 1973. */
@@ -144,7 +379,7 @@ const MS_FLOOR = 100_000_000_000;
 /**
  * THE SETTLE MARGIN IS ALSO A BLIND SPOT. Rows stamped within it of the restore
  * point are compared by neither side, so a fork restored up to that far before
- * or after the point still reads `match`. Widening it hides the very error the
+ * or after the point still passes. Widening it hides the very error the
  * drill is for, so it is capped low: a `fork-behind` that needs more than an
  * hour is answered with a restore point outside the backlog, not a wider
  * margin.
@@ -157,6 +392,14 @@ const USAGE = "Usage: node scripts/pg-backup/verify-restore.mjs --restore-point 
 
 /** Verdicts that fail the drill. Everything else is reported and passes. */
 export const FAILING_VERDICTS = Object.freeze(["missing-in-fork", "missing-in-source", "bad-stamp", "fork-after-restore-point", "fork-behind"]);
+/**
+ * A PRESENCE-ONLY TABLE'S `match`. The fork holds the same rows by count and
+ * newest stamp, and nothing more is known (THE KINDS). It passes — stated, not
+ * failed — but it is never spelt `match`, so no reading of the report, by a
+ * person or a script looking for that word, can take it for a check of what
+ * the rows say.
+ */
+const CONTENT_UNVERIFIED = "present-content-unverified";
 /** Refused before anything was compared: exit 64, as for bad usage. */
 const REFUSALS = new Set(["usage", "fork-is-source", "fork-is-live"]);
 
@@ -398,8 +641,14 @@ async function readSide(client, bounds, side, admit) {
 
 const compareStamp = (a, b) => (a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1);
 
-/** One table's verdict. See the header for why the comparison is one-sided. */
-export function verdictOf(fork, source) {
+/**
+ * One table's verdict. See the header for why the comparison is one-sided,
+ * and THE KINDS for why `kind` decides what an equal comparison may be called.
+ * The kind is required: a caller that does not know it cannot be handed a
+ * `match`, so a missing one is a mistake to stop on, not a default to guess.
+ */
+export function verdictOf(fork, source, kind) {
+  if (!DRILL_KINDS.includes(kind)) throw new Error("restore drill: a verdict needs the table's kind");
   if (!fork.present && !source.present) return "absent";
   if (!fork.present) return "missing-in-fork";
   if (!source.present) return "missing-in-source";
@@ -407,15 +656,28 @@ export function verdictOf(fork, source) {
   if (fork.after > 0) return "fork-after-restore-point";
   const newest = compareStamp(fork.newest, source.newest);
   if (fork.rows < source.rows || newest < 0) return "fork-behind";
-  if (fork.rows === source.rows && newest === 0) return "match";
+  // Equal on both sides: for append and last-write tables that is the rows
+  // and what they say; for a presence-only table it is the rows alone.
+  if (fork.rows === source.rows && newest === 0) return kind === "presence-only" ? CONTENT_UNVERIFIED : "match";
+  // More in the fork. Never a content claim on any kind, so it keeps its name;
+  // a presence-only table that reads it is still listed in contentUnverified.
   return "source-changed";
 }
 
 /**
  * THE REPORT. Counts and verdicts only: `newest` becomes equal / fork-newer /
- * fork-older and the stamps themselves are dropped here. `ok` is the drill's
- * result; `exact` says every table present matched outright, which is what a
- * drill taken while the source is quiet (the trading hold) should show.
+ * fork-older and the stamps themselves are dropped here. Each table carries
+ * its kind, so a reader can see what its verdict covers.
+ *
+ * `ok` is the drill's result. `exact` says every table present held exactly
+ * the rows the source held by the cutoff — `match`, or a presence-only
+ * table's `present-content-unverified` — which is what a drill taken while the
+ * source is quiet (the trading hold) should show. Neither speaks for the
+ * contents of a presence-only table: `contentUnverified` names every one the
+ * drill compared, with the fixed reason it cannot see their contents, so the
+ * gap is written into the evidence beside the pass instead of behind it. It
+ * does not fail the drill; a presence-only table that fails on presence is in
+ * `failed` like any other.
  *
  * A drill that compared nothing — every table absent, or every source row
  * stamped after the cutoff — is not a pass, whatever the verdicts say.
@@ -424,20 +686,22 @@ export function compareSides(fork, source) {
   const tables = {};
   const summary = {};
   const failed = [];
+  const contentUnverified = [];
   let compared = 0;
-  for (const { table } of DRILL_TABLES) {
+  for (const { table, kind, why } of DRILL_TABLES) {
     const f = fork.tables[table] ?? { present: false };
     const s = source.tables[table] ?? { present: false };
-    const verdict = verdictOf(f, s);
+    const verdict = verdictOf(f, s, kind);
     summary[verdict] = (summary[verdict] ?? 0) + 1;
     if (FAILING_VERDICTS.includes(verdict)) failed.push(table);
-    const entry = { verdict };
+    const entry = { verdict, kind };
     if (f.present && s.present && f.stamped && s.stamped) {
       const newest = compareStamp(f.newest, s.newest);
       entry.fork = { rows: f.rows, total: f.total, after: f.after };
       entry.source = { rows: s.rows, total: s.total };
       entry.newest = newest === 0 ? (f.newest === null ? "none" : "equal") : newest > 0 ? "fork-newer" : "fork-older";
       compared += s.rows;
+      if (kind === "presence-only") contentUnverified.push({ table, why });
     }
     tables[table] = entry;
   }
@@ -445,9 +709,10 @@ export function compareSides(fork, source) {
   const ok = failed.length === 0 && !empty;
   return {
     ok,
-    exact: ok && Object.values(tables).every((t) => t.verdict === "match" || t.verdict === "absent"),
+    exact: ok && Object.values(tables).every((t) => t.verdict === "match" || t.verdict === CONTENT_UNVERIFIED || t.verdict === "absent"),
     failed,
     summary,
+    contentUnverified,
     tables,
     ...(empty ? { error: { code: "nothing-to-compare", detail: "No source row was stamped at or before the cutoff; nothing was compared." } } : {}),
   };

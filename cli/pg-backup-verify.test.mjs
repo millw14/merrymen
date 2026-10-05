@@ -22,6 +22,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_SETTLE_SEC,
+  DRILL_KINDS,
   DRILL_TABLES,
   DrillRefusal,
   FAILING_VERDICTS,
@@ -30,6 +31,7 @@ import {
   databaseOf,
   parseDrillArgs,
   runRestoreDrill,
+  validateDrillTables,
   verdictOf,
 } from "../scripts/pg-backup/verify-restore.mjs";
 
@@ -185,6 +187,69 @@ test("the allowlist names plain identifiers once each, and covers the ledger, au
   assert.ok(Object.isFrozen(DRILL_TABLES));
 });
 
+/**
+ * THE CLASSIFICATION, PINNED. Each kind was read from the table's writers (the
+ * citations sit beside each entry in verify-restore.mjs). Only append and
+ * last-write tables may ever read `match`, so those two lists are written out
+ * here in full: moving a table into either — a claim that the drill checks its
+ * contents — has to change this test too, and so has to be argued for in
+ * review rather than slipped in with an edit to the allowlist.
+ */
+const CONTENT_VERIFIED = {
+  append: ["flows_quarantine", "equity", "decisions", "fee_accruals", "journal", "events", "agent_account", "announcements"],
+  "last-write": ["paper_book", "tenant_settings", "paper_recovery_health", "tenant_recovery_reply_state", "mcp_proposals", "tenant_personal_memory", "tenant_tg_groups"],
+};
+const PRESENCE_ONLY = DRILL_TABLES.filter((t) => t.kind === "presence-only").map((t) => t.table);
+
+test("every allowlisted table has a kind read from its writers, and only a presence-only one says why", () => {
+  assert.deepEqual([...DRILL_KINDS], ["append", "last-write", "presence-only"]);
+  for (const [kind, tables] of Object.entries(CONTENT_VERIFIED)) {
+    assert.deepEqual(DRILL_TABLES.filter((t) => t.kind === kind).map((t) => t.table).sort(), [...tables].sort(), `the ${kind} tables`);
+  }
+  for (const entry of DRILL_TABLES) {
+    assert.ok(DRILL_KINDS.includes(entry.kind), `${entry.table} has a kind`);
+    if (entry.kind === "presence-only") {
+      assert.match(entry.why, /^[\x20-\x7e]{1,160}$/, `${entry.table} says why, in one printable line`);
+      assert.doesNotMatch(entry.why, /\d{6,}|0x[0-9a-f]/i, `${entry.table}'s reason carries no value`);
+    } else {
+      assert.equal(entry.why, undefined, `${entry.table} claims its contents, so it has no reason not to`);
+    }
+  }
+  // The rows the review named: agents is upserted in place under a creation
+  // stamp, and so are the ledger rows and authority beside it.
+  for (const must of ["agents", "trades", "flows", "risk_periods", "agent_commands", "grants", "mcp_tokens", "holder_claims", "telegram_bot_claims"]) {
+    assert.ok(PRESENCE_ONLY.includes(must), `${must} is presence-only`);
+  }
+  assert.equal(PRESENCE_ONLY.length + CONTENT_VERIFIED.append.length + CONTENT_VERIFIED["last-write"].length, DRILL_TABLES.length);
+});
+
+test("the allowlist's shape is checked: an entry with no kind, a stray reason or an unknown field is refused", () => {
+  const ok = { table: "trades", stamp: "created_at", kind: "presence-only", why: "A reason." };
+  const frozen = validateDrillTables([ok, { table: "equity", stamp: "at", kind: "append" }]);
+  assert.ok(Object.isFrozen(frozen) && frozen.every((e) => Object.isFrozen(e)));
+  assert.notEqual(frozen[0], ok, "the caller's object is copied, not frozen in place");
+  const refused = [
+    [],
+    [{ table: "trades", stamp: "created_at" }], // no kind: the old shape
+    [{ ...ok, kind: "insert-only" }],
+    [{ ...ok, kind: undefined }],
+    [{ table: "trades", stamp: "created_at", kind: "presence-only" }], // no reason
+    [{ ...ok, why: "" }],
+    [{ ...ok, why: "two\nlines" }],
+    [{ ...ok, why: "x".repeat(161) }],
+    [{ ...ok, why: 7 }],
+    [{ table: "equity", stamp: "at", kind: "append", why: "A reason beside a content claim." }],
+    [{ table: "paper_book", stamp: "updated_at", kind: "last-write", why: "Likewise." }],
+    [{ ...ok, note: "an unknown field" }],
+    [{ ...ok, table: "trades; DROP TABLE trades" }],
+    [{ ...ok, stamp: "Created_At" }],
+    [{ ...ok, table: undefined }], // String(undefined) is a plain identifier; the type is checked first
+    [ok, { ...ok }], // twice
+    [null],
+  ];
+  for (const entries of refused) assert.throws(() => validateDrillTables(entries), /restore drill:/, JSON.stringify(entries));
+});
+
 // ── arguments and URLs ───────────────────────────────────────────────────────
 
 test("arguments: a zoned restore point, a default settle margin, and the window derived from both", () => {
@@ -267,19 +332,44 @@ test("verdicts: the fork may hold more than the source wrote by the cutoff, neve
     [{ present: true, stamped: false }, side(1, 100), "bad-stamp"],
     [side(1, 100), { present: true, stamped: false }, "bad-stamp"],
   ];
-  for (const [fork, source, verdict] of cases) assert.equal(verdictOf(fork, source), verdict, JSON.stringify({ fork, source }));
+  for (const [fork, source, verdict] of cases) {
+    for (const kind of ["append", "last-write"]) assert.equal(verdictOf(fork, source, kind), verdict, JSON.stringify({ kind, fork, source }));
+    // A presence-only table is judged the same on presence, every failure
+    // included; only an outright match is renamed, because for it the rows
+    // being there is all that is known.
+    const presence = verdict === "match" ? "present-content-unverified" : verdict;
+    assert.equal(verdictOf(fork, source, "presence-only"), presence, JSON.stringify({ kind: "presence-only", fork, source }));
+  }
   assert.deepEqual([...FAILING_VERDICTS].sort(), ["bad-stamp", "fork-after-restore-point", "fork-behind", "missing-in-fork", "missing-in-source"]);
+  assert.ok(!FAILING_VERDICTS.includes("present-content-unverified"), "stated, not failed");
+  // No kind, no verdict: a caller that cannot say what a table is cannot be told it matched.
+  for (const kind of [undefined, "", "match"]) assert.throws(() => verdictOf(side(5, 100), side(5, 100), kind), /needs the table's kind/);
 });
 
-test("the report prints counts and verdicts, never a stamp", () => {
+test("a presence-only table never reads match, whatever the two sides hold", () => {
+  const side = (rows, newest, after = 0) => ({ present: true, stamped: true, rows, total: rows + 2, after, newest });
+  const shapes = [];
+  for (const rows of [0, 1, 5]) for (const newest of [null, 99, 100, 101]) shapes.push(side(rows, rows === 0 ? null : newest));
+  shapes.push({ present: false }, { present: true, stamped: false }, side(5, 100, 1));
+  for (const fork of shapes) {
+    for (const source of shapes) assert.notEqual(verdictOf(fork, source, "presence-only"), "match", JSON.stringify({ fork, source }));
+  }
+});
+
+test("the report prints counts, kinds and verdicts, never a stamp", () => {
   const tables = (newest) => Object.fromEntries(DRILL_TABLES.map(({ table }) => [table, { present: true, stamped: true, rows: 3, total: 4, after: 0, newest }]));
   const stamp = 1_789_999_123;
   const report = compareSides({ tables: tables(stamp) }, { tables: tables(stamp) });
   assert.equal(report.ok, true);
   assert.equal(report.exact, true);
   assert.deepEqual(report.failed, []);
-  assert.deepEqual(report.summary, { match: DRILL_TABLES.length });
-  assert.deepEqual(report.tables.trades, { verdict: "match", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  assert.deepEqual(report.summary, { match: DRILL_TABLES.length - PRESENCE_ONLY.length, "present-content-unverified": PRESENCE_ONLY.length });
+  assert.deepEqual(report.tables.equity, { verdict: "match", kind: "append", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  assert.deepEqual(report.tables.tenant_settings, { verdict: "match", kind: "last-write", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  assert.deepEqual(report.tables.trades, { verdict: "present-content-unverified", kind: "presence-only", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 4 }, newest: "equal" });
+  // Every presence-only table compared is named, in allowlist order, with the
+  // reason written beside its entry — the gap travels with the pass.
+  assert.deepEqual(report.contentUnverified, DRILL_TABLES.filter((t) => t.kind === "presence-only").map(({ table, why }) => ({ table, why })));
   assert.doesNotMatch(JSON.stringify(report), new RegExp(String(stamp)));
 
   const older = compareSides({ tables: { ...tables(stamp), flows: { present: true, stamped: true, rows: 3, total: 3, after: 0, newest: stamp - 1 } } }, { tables: tables(stamp) });
@@ -314,9 +404,12 @@ test("a faithful fork of a source that kept writing: exact, read-only on both si
   assert.equal(out.report.ok, true);
   assert.equal(out.report.exact, true);
   assert.equal(out.report.restorePoint, RESTORE_POINT);
-  assert.deepEqual(out.report.tables.trades, { verdict: "match", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 6 }, newest: "equal" });
-  assert.equal(out.report.tables.agent_commands.verdict, "match");
+  // trades is resolved in place, so equal counts prove the rows, not their contents.
+  assert.deepEqual(out.report.tables.trades, { verdict: "present-content-unverified", kind: "presence-only", fork: { rows: 3, total: 4, after: 0 }, source: { rows: 3, total: 6 }, newest: "equal" });
+  assert.equal(out.report.tables.agent_commands.verdict, "present-content-unverified");
   assert.equal(out.report.tables.agent_commands.source.rows, 3);
+  assert.equal(out.report.tables.equity.verdict, "match");
+  assert.ok(out.report.contentUnverified.some((t) => t.table === "trades"));
 
   // The fork first, so a broken fork never costs production a query.
   assert.deepEqual(out.order, ["fork", "source"]);
@@ -346,7 +439,54 @@ test("rows the source deleted after the restore point read as source-changed, an
   assert.equal(out.report.ok, true);
   assert.equal(out.report.exact, false);
   assert.equal(out.report.tables.grants.verdict, "source-changed");
-  assert.deepEqual(out.report.summary, { match: DRILL_TABLES.length - 1, "source-changed": 1 });
+  assert.deepEqual(out.report.summary, {
+    match: DRILL_TABLES.length - PRESENCE_ONLY.length,
+    "present-content-unverified": PRESENCE_ONLY.length - 1,
+    "source-changed": 1,
+  });
+  // grants is presence-only: reading `source-changed` does not take it off the list.
+  assert.ok(out.report.contentUnverified.some((t) => t.table === "grants"));
+});
+
+/**
+ * THE CASE THE REVIEW NAMED. An agents row was updated before the restore
+ * point — caps narrowed, expiry moved, HWM raised — and the fork kept the
+ * older version. created_at never moves, so both sides count the same rows
+ * under the same newest stamp. The drill cannot tell these forks apart, and
+ * now it says so instead of calling it a match: the pass stands (the fork may
+ * be right), the table is not `match`, and the JSON names it with its reason.
+ */
+test("an agents row updated in place reads present-content-unverified, is listed, and does not fail the drill", async () => {
+  const stamps = [BEFORE - 86_400, BEFORE - 3600];
+  const fork = database({ ...FORK_SERVER, tables: { agents: { stamps } } });
+  const source = database({ tables: { agents: { stamps: [...stamps, LATER] } } });
+  const out = await drill(fork, source);
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.report.ok, true);
+  assert.deepEqual(out.report.tables.agents, {
+    verdict: "present-content-unverified", kind: "presence-only",
+    fork: { rows: 2, total: 2, after: 0 }, source: { rows: 2, total: 3 }, newest: "equal",
+  });
+  assert.ok(!Object.values(out.report.tables).some((t) => t.kind === "presence-only" && t.verdict === "match"));
+  // What a script recording the evidence reads: the JSON the command line prints.
+  const printed = JSON.parse(JSON.stringify(out.report));
+  const agents = printed.contentUnverified.find((t) => t.table === "agents");
+  assert.equal(agents.why, DRILL_TABLES.find((t) => t.table === "agents").why);
+  assert.match(agents.why, /without moving created_at/);
+  assert.deepEqual(printed.contentUnverified.map((t) => t.table), PRESENCE_ONLY);
+  assert.ok(!printed.contentUnverified.some((t) => t.table === "equity" || t.table === "tenant_settings"), "content-verified kinds are not listed");
+
+  // A presence-only table the fork is behind on still fails, as before.
+  const behind = await drill(database({ ...FORK_SERVER, tables: { agents: { stamps: [stamps[0]] } } }), source);
+  assert.equal(behind.exitCode, 1);
+  assert.deepEqual(behind.report.failed, ["agents"]);
+  assert.equal(behind.report.tables.agents.verdict, "fork-behind");
+
+  // A presence-only table neither side has is absent, and not listed: there
+  // was nothing whose contents went unchecked.
+  const none = await drill(database({ ...FORK_SERVER, tables: { agents: null } }), database({ tables: { agents: null } }));
+  assert.equal(none.report.tables.agents.verdict, "absent");
+  assert.ok(!none.report.contentUnverified.some((t) => t.table === "agents"));
 });
 
 test("a fork missing a row, or restored to an earlier moment, fails", async () => {
@@ -492,8 +632,17 @@ test("a millisecond stamp is read as milliseconds, row by row", async () => {
   const fork = database({ ...FORK_SERVER, tables: { holder_claims: { stamps: [BEFORE * 1000, BEFORE] } } });
   const source = database({ tables: { holder_claims: { stamps: [BEFORE * 1000, BEFORE, justAfter] } } });
   const out = await drill(fork, source);
-  assert.equal(out.report.tables.holder_claims.verdict, "match");
+  // holder_claims is presence-only (an undone move puts an older stamp back).
+  assert.equal(out.report.tables.holder_claims.verdict, "present-content-unverified");
   assert.deepEqual(out.report.tables.holder_claims.source, { rows: 2, total: 3 });
+
+  // The same reading on a last-write table whose stamp is milliseconds.
+  const memory = await drill(
+    database({ ...FORK_SERVER, tables: { tenant_personal_memory: { stamps: [BEFORE * 1000 + 999, BEFORE] } } }),
+    database({ tables: { tenant_personal_memory: { stamps: [BEFORE * 1000 + 999, BEFORE, justAfter] } } }),
+  );
+  assert.equal(memory.report.tables.tenant_personal_memory.verdict, "match");
+  assert.deepEqual(memory.report.tables.tenant_personal_memory.source, { rows: 2, total: 3 });
 });
 
 test("the command line prints the same JSON and exit code, and refuses a URL in argv without repeating it", () => {
@@ -572,14 +721,17 @@ test("Postgres: the drill's SQL over two real databases", { skip: !url, timeout:
 
   const first = await run();
   assert.equal(first.exitCode, 0, JSON.stringify(first.report));
-  assert.equal(first.report.tables.trades.verdict, "match");
+  // trades and holder_claims are presence-only: equal, and their contents unchecked.
+  assert.equal(first.report.tables.trades.verdict, "present-content-unverified");
   assert.deepEqual(first.report.tables.trades.source, { rows: 3, total: 5 }); // the unstamped row counts as old
-  assert.equal(first.report.tables.holder_claims.verdict, "match");
-  assert.equal(first.report.tables.tenant_settings.verdict, "match"); // an int4 stamp
+  assert.equal(first.report.tables.holder_claims.verdict, "present-content-unverified");
+  assert.equal(first.report.tables.tenant_settings.verdict, "match"); // last-write, and an int4 stamp
   // The re-signed grant left the source's old rows: the fork holds more, and that passes.
   assert.equal(first.report.tables.grants.verdict, "source-changed");
   assert.equal(first.report.exact, false);
   assert.equal(first.report.tables.journal.verdict, "absent");
+  // Only the presence-only tables this database has are listed, in allowlist order.
+  assert.deepEqual(first.report.contentUnverified.map((t) => t.table), ["trades", "flows", "grants", "holder_claims"]);
   const printed = JSON.stringify(first.report);
   for (const value of ["sealed", "0xw", names.fork, names.source, String(BEFORE), String(BEFORE - 10)]) assert.ok(!printed.includes(value), value);
 
