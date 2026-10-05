@@ -123,6 +123,8 @@ import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOu
 import { recoveryCommandRefused } from "./recovery-command-barrier";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
+import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, admissionFrom, admissionRefusal, drainIntentChain } from "./worker-admission";
+import { closeStore } from "./store";
 import { CoalescedRefresh } from "./coalesced-refresh";
 import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
@@ -206,6 +208,7 @@ import {
   type BalanceParts,
   type EnergyLevel,
   type EnergyPlan,
+  type HeldCurveLeg,
   type LastGood,
 } from "./energy";
 import type { EnergyStatus } from "../../packages/core/src/index";
@@ -7783,6 +7786,27 @@ async function main() {
   }
 
   /**
+   * WHAT THIS PROCESS MAY START (worker-admission.ts), read once at boot: the
+   * orchestrator changes a tenant's level by respawning its child, never by
+   * editing a live one. Judged at the top of processIntentLocked, which every
+   * intent passes on its way to the chain, before a budget is reserved, a quote
+   * fetched or anything built — admission-invariant.test.ts pins both halves.
+   *
+   * `draining` is raised by the SIGTERM handler at the bottom of main(). From
+   * then on every intent that reaches the queue is refused; the one already on
+   * it is let finish.
+   *
+   * `lastHeldLegs` is the tick's latest answer to which curve legs the book
+   * holds (heldLegs, beside the strategy loop), so an exits-only worker asks the
+   * same entry question the tick's own energy filter asks — of an owner's order
+   * between ticks too. Empty until a tick has read the book: the strict reading.
+   */
+  const admission = admissionFrom(process.env[ADMISSION_LEVEL_ENV], isHostedMode());
+  console.log(`[admission] level ${admission.level} — ${admission.why}`);
+  let draining = false;
+  let lastHeldLegs: ReadonlyMap<string, HeldCurveLeg> = new Map();
+
+  /**
    * SERIALIZED. Every caller goes through processIntent, which holds this.
    *
    * The hazard is named in this file already, at the budget reservation: "a
@@ -8006,6 +8030,49 @@ async function main() {
       releaseBudget();
       return wrote;
     };
+    const notional =
+      intent.kind === "swap" ||
+      intent.kind === "equity-order" ||
+      intent.kind === "curve-trade" ||
+      intent.kind === "energy-buy"
+        ? intent.notionalUsdg
+        : intent.amountUsdg;
+    // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
+    // on the broker rail. Step 5's schema work gives broker rows their own
+    // columns — until then the ticker in `target` keeps the tape readable.
+    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
+
+    // ── ADMISSION, BEFORE ANYTHING ELSE IS ASKED ────────────────────────────
+    //
+    // A tenant brought back after a hold may be at `observe` (start nothing)
+    // or `exits-only` (close what it holds), and a worker told to leave starts
+    // nothing new at all (worker-admission.ts). FIRST, because this is the one
+    // place every intent passes — the strategy, the class route, the Brain, an
+    // owner's typed or queued order, the energy buy and the selftest probe —
+    // and because nothing has happened yet: no budget reserved, no quote, no
+    // read of the risk period. So a refusal holds nothing open and leaves
+    // nothing a restart could replay. It is a `rejected` row like every other
+    // refusal here, which is budget-neutral on both rails and is what puts the
+    // answer in lastTradeOutcome for an owner's order to be told.
+    //
+    // Before checkPolicy on purpose. A tenant that is not admitted is not
+    // trading, and that is the fact the tape and the owner need — not which
+    // cap the trade would also have met.
+    const admissionRule = admissionRefusal({ level: admission.level, draining }, intent, limits, lastHeldLegs);
+    if (admissionRule) {
+      // Counted, not read — one line per refusal, as the policy's own.
+      console.log(`[admission] REFUSED ${intent.kind}: ${admissionRule} (level ${admission.level}${draining ? ", draining" : ""})`);
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: admissionRule,
+      });
+      return;
+    }
+
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
@@ -8023,17 +8090,6 @@ async function main() {
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
-    const notional =
-      intent.kind === "swap" ||
-      intent.kind === "equity-order" ||
-      intent.kind === "curve-trade" ||
-      intent.kind === "energy-buy"
-        ? intent.notionalUsdg
-        : intent.amountUsdg;
-    // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
-    // on the broker rail. Step 5's schema work gives broker rows their own
-    // columns — until then the ticker in `target` keeps the tape readable.
-    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
 
     // This check belongs inside the intent queue, beside the grant's caps.
     // A caller-side read lets two confirmed transfers both see the old spend
@@ -12823,6 +12879,9 @@ async function main() {
       classRows: await classPositions(agentId),
       classBalances: lastClassBalances,
     });
+    // And for admission, which asks the same question of an owner's order
+    // between ticks (processIntentLocked, at its top).
+    lastHeldLegs = heldLegs;
 
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
@@ -14115,6 +14174,68 @@ async function main() {
       console.error("[command-wake]", e);
     }
   }, COMMAND_WAKE_EVERY_MS).unref();
+
+  /**
+   * SIGTERM: STOP STARTING THINGS, LET THE TRADE ALREADY OUT FINISH, LEAVE.
+   *
+   * With no handler, node dies on the signal wherever it happens to be — in the
+   * middle of a tick that has just handed the strategy a fresh pass of intents,
+   * or between an operation's broadcast and its row settling. The orchestrator
+   * sends one whenever it stops a child: a stand-down, a watchdog kill, its own
+   * shutdown. What that left behind was survivable — the pre-broadcast
+   * `submitted` row and the stranded-op resolver exist because of it — but it
+   * was never a clean stop.
+   *
+   * So, in this order:
+   *   1. `draining` — processIntentLocked refuses every intent that reaches it
+   *      from here on, with a row that says so (worker-admission.ts);
+   *   2. the clock stops — no tick starts on the way out, and no order file is
+   *      claimed only to be refused; it stays for the next process
+   *      (command-wake.ts stop);
+   *   3. the intent chain is waited for, at most DRAIN_INTENT_CHAIN_MS: the
+   *      trade on it finishes and writes its row, and anything queued behind it
+   *      is refused and written;
+   *   4. the ledger is closed (store.ts closeStore);
+   *   5. exit 0, in the same turn as the close, so nothing writes after it.
+   *
+   * A trade still out when the budget runs out is left exactly as a crash
+   * leaves one: its row is already `submitted` with its hash, and the resolver
+   * settles it from the chain at the next arm. Nothing is retried, re-sent or
+   * replayed by this.
+   *
+   * Registered only here, once the clock exists: a SIGTERM before this point
+   * finds nothing started and keeps node's default. A second one while draining
+   * changes nothing — the drain is already bounded, and the orchestrator's
+   * SIGKILL is the backstop when it will not wait. SIGINT keeps node's default
+   * too: Ctrl-C on a self-hosted worker in a terminal means stop now.
+   */
+  process.on("SIGTERM", () => {
+    if (draining) return;
+    draining = true;
+    console.log(`[worker] SIGTERM — draining: nothing new starts; waiting up to ${DRAIN_INTENT_CHAIN_MS / 1000}s for the trade already on the chain`);
+    tickClock.stop();
+    void drainIntentChain({
+      tail: () => intentChain,
+      budgetMs: DRAIN_INTENT_CHAIN_MS,
+      now: Date.now,
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    })
+      .catch(() => false)
+      .then((emptied) => {
+        console.log(
+          emptied
+            ? "[worker] drained — nothing left on the intent chain; closing the ledger"
+            : "[worker] drain budget spent with a trade still out — the stranded-op resolver settles it at the next arm; closing the ledger",
+        );
+        try {
+          closeStore();
+        } catch (e) {
+          console.error("[worker] closing the ledger failed:", e);
+        }
+        process.exit(0);
+      });
+  });
 
   // ── DON'T ALL WAKE AT ONCE ──────────────────────────────────────────
   //
