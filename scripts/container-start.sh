@@ -6,16 +6,16 @@
 #
 # WHY THIS FILE EXISTS INSTEAD OF `sh -c "npm run …"`.
 #
-# The image used to start with CMD ["sh", "-c", "npm run ${MERRYMEN_START…}"].
-# That made `sh` PID 1, npm its child, npm's own `sh -c` the next one down, and
-# node a great-grandchild of the process Railway signals. Railway stops a
-# deployment by sending SIGTERM to PID 1 — and PID 1 is the one process the
-# kernel gives no default signal action: a signal it installed no handler for
-# is simply dropped. sh installs none. So the orchestrator's SIGTERM handler,
-# the one that calls the fleet home, carries a pending Telegram kill to the
-# store and releases the tenant leases for the replica taking over, never ran.
-# Every deploy ended in the SIGKILL at the end of the grace period instead, and
-# nothing in the logs said so.
+# The image used to start with CMD ["sh", "-c", "npm run ${MERRYMEN_START…}"],
+# which put a shell, npm and npm's own `sh -c` between PID 1 and node. Railway
+# stops a deployment by sending SIGTERM to PID 1 — and PID 1 is the one process
+# the kernel gives no default signal action: a signal it has no handler for is
+# simply dropped. So whether the stop ever reached the orchestrator's handler
+# (the one that calls the fleet home, carries a pending Telegram kill to the
+# store and releases the tenant leases for the replica taking over) rested on
+# details nobody here owns: whether each shell happened to exec its one
+# command, and whether npm, as PID 1, passed the signal on. npm as PID 1 also
+# reaps nothing, and is a second node process idling for the container's life.
 #
 # Now tini is PID 1 (the Dockerfile's ENTRYPOINT): it forwards SIGTERM to its
 # one child and reaps the orphans PID 1 inherits. Its child is THIS script, and
