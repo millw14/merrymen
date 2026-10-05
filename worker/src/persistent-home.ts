@@ -1,20 +1,33 @@
 /**
  * Production-only prerequisite for the one-shot handover. A directory on the
  * container overlay must never be mistaken for the durable book's home.
- * Verification is read-only; only explicit preparation/completion writes here.
+ * Verification is read-only; only explicit preparation, adoption, completion
+ * and re-halt write here (docs/fleet-resume.md).
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync,
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync,
   readSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeSync,
 } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import path from "node:path";
+import { fleetRollout, type FleetRollout } from "./fleet-rollout";
 
 export const PERSISTENT_HOME_MANIFEST = ".merrymen-persistent-home.json";
+/** What the adopted volume's original operator halt was, kept byte for byte. */
+export const PERSISTENT_HOME_PREADOPTION = ".fleet-halt-preadoption.json";
+/** Which canonical halt the latest env re-halt created, before its manifest said so. */
+export const PERSISTENT_HOME_REHALT_RECEIPT = ".fleet-halt-rehalt.json";
+// Private second names for a canonical halt before it is published as
+// FLEET_HALT. Only this file writes them, and only inside the 0700 root.
+const ADOPTION_HALT = ".fleet-halt-adoption.tmp";
+const REHALT_HALT = ".fleet-halt-rehalt.tmp";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SHA256 = /^[0-9a-f]{64}$/i;
 const MAX_EVIDENCE_BYTES = 8 * 1024;
+/** The original halt's bytes travel inside a record that must itself fit MAX_EVIDENCE_BYTES. */
+const MAX_ORIGINAL_HALT_BYTES = 4 * 1024;
 const EPHEMERAL_FS = new Set([
   "overlay", "overlayfs", "tmpfs", "ramfs", "rootfs", "devtmpfs", "proc", "sysfs",
   "cgroup", "cgroup2", "mqueue", "hugetlbfs", "debugfs", "tracefs", "securityfs",
@@ -38,6 +51,10 @@ export interface PreparedPersistentHome extends PersistentHomeIdentity {
   handoverState: "held" | "complete";
   halt: PersistentHomeHaltProof | null;
 }
+export interface AdoptedPersistentHome extends PreparedPersistentHome {
+  /** True only on the start that wrote the adopted manifest; every later start with the pin set reports the volume as it stands. */
+  adoptedNow: boolean;
+}
 export interface PersistentHomeOptions {
   /** Trusted test seam. Production reads the kernel's mount table directly. */
   readMountInfo?: () => string;
@@ -45,6 +62,15 @@ export interface PersistentHomeOptions {
   afterHaltSynced?: () => void;
   afterCompletionSynced?: () => void;
   beforeHaltRemoval?: () => void;
+  /** Adoption: the record is durable; the canonical halt is durable beside the original; it replaced it. */
+  afterPreAdoptionSynced?: () => void;
+  afterAdoptionHaltSynced?: () => void;
+  afterAdoptionRenamed?: () => void;
+  /** Re-halt: the private halt, its receipt, the FLEET_HALT link, then the single-link halt are durable. */
+  afterRehaltHaltSynced?: () => void;
+  afterRehaltReceiptSynced?: () => void;
+  afterRehaltLinked?: () => void;
+  afterRehaltPublished?: () => void;
 }
 interface Manifest {
   version: 1;
@@ -53,9 +79,15 @@ interface Manifest {
   homeRoot: string;
   device: string;
   inode: string;
-  handover: { state: "held" | "complete"; operationToken: string; halt: PersistentHomeHaltProof };
+  /**
+   * haltGeneration is absent (0) for the halt that initialization or adoption
+   * created, and n for the halt the nth env re-halt put back. An env release
+   * names the generation it lifts, so a release that a re-halt has since
+   * consumed never lifts the halt again.
+   */
+  handover: { state: "held" | "complete"; operationToken: string; halt: PersistentHomeHaltProof; haltGeneration?: number };
 }
-interface Evidence { text: string; device: string; inode: string }
+interface Evidence { text: string; bytes: Buffer; device: string; inode: string }
 interface Root { identity: PersistentHomeIdentity; fd: number; env: NodeJS.ProcessEnv; options: PersistentHomeOptions }
 const refuse = (reason: string) => new Error(`Persistent home refused: ${reason}.`);
 const missing = (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT";
@@ -174,7 +206,8 @@ function evidence(file: string, root: Root): Evidence | null {
     const final = fstatSync(fd, { bigint: true });
     if (n > MAX_EVIDENCE_BYTES || BigInt(n) !== st.size || final.size !== st.size
         || final.mtimeNs !== st.mtimeNs || final.ctimeNs !== st.ctimeNs) throw refuse("required evidence changed while reading");
-    return { text: buffer.subarray(0, n).toString("utf8"), device: String(st.dev), inode: String(st.ino) };
+    const bytes = buffer.subarray(0, n);
+    return { text: bytes.toString("utf8"), bytes, device: String(st.dev), inode: String(st.ino) };
   } finally { closeSync(fd); }
 }
 function haltText(id: string, token: string): string {
@@ -189,6 +222,7 @@ function readManifest(root: Root): { manifest: Manifest; evidence: Evidence } | 
   if (m?.version !== 1 || m.volumeId !== i.id || m.mountPath !== i.mountPath || m.homeRoot !== i.homeRoot
       || typeof m.device !== "string" || !/^\d+$/.test(m.device) || m.inode !== i.inode || !h || !["held", "complete"].includes(h.state)
       || typeof h.operationToken !== "string" || !TOKEN.test(h.operationToken) || !halt
+      || (h.haltGeneration !== undefined && (!Number.isSafeInteger(h.haltGeneration) || h.haltGeneration < 1))
       || halt.operationToken !== h.operationToken || halt.path !== path.join(i.homeRoot, "FLEET_HALT")
       || halt.device !== m.device || typeof halt.inode !== "string" || !/^[1-9]\d*$/.test(halt.inode)
       || halt.text !== haltText(i.id, h.operationToken)
@@ -275,10 +309,167 @@ export function preparePersistentHomeForHandover(
   }, true);
 }
 
+const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+interface PreAdoption {
+  version: 1; volumeId: string; homeRoot: string; inode: string; operationToken: string;
+  halt: { path: string; inode: string; size: number; sha256: string; bytes: string };
+}
+/** The operator's pin on the one original halt an adoption may replace, or null when none was asked for. */
+function pinnedHalt(env: NodeJS.ProcessEnv): string | null {
+  const pinned = env.MERRYMEN_ADOPT_HOME_HALT_SHA256;
+  if (pinned === undefined) return null;
+  if (!SHA256.test(pinned)) throw refuse("MERRYMEN_ADOPT_HOME_HALT_SHA256 must be the 64-hex SHA-256 of the original halt");
+  return pinned.toLowerCase();
+}
+function presentStat(file: string): BigIntStats | null {
+  try { return lstatSync(file, { bigint: true }); }
+  catch (e) { if (missing(e)) return null; throw refuse("a halt name on the volume could not be inspected"); }
+}
+/**
+ * The adoption's record and manifest are FIRST WRITES whose real name only
+ * ever appears whole, and never over an existing file: written and synced
+ * under a private name, link()ed into place (exclusive at the real name),
+ * then the private name dropped. A crash leaves at most the private name,
+ * torn or whole, alone or beside the complete file it links. settleFirstWrite
+ * drops it on the next start before anything reads the real name, which is
+ * then absent or complete and single-link, so a torn write can never wedge
+ * adoption or the listener's proof behind an incomplete file.
+ */
+const firstWriteTemp = (file: string) => `${file}.tmp`;
+function settleFirstWrite(root: Root, file: string): void {
+  if (presentStat(firstWriteTemp(file))) { unlinkSync(firstWriteTemp(file)); fsyncSync(root.fd); }
+}
+function publishFirstWrite(root: Root, file: string, text: string): void {
+  const temp = firstWriteTemp(file);
+  settleFirstWrite(root, file);
+  writeExclusive(root, temp, text);
+  try { linkSync(temp, file); }
+  catch (e) { throw (e as NodeJS.ErrnoException).code === "EEXIST" ? refuse("a file appeared under an adoption record's name") : e; }
+  finally { unlinkSync(temp); fsyncSync(root.fd); }
+}
+function readPreAdoption(root: Root, pinned: string, token: string): PreAdoption | null {
+  const e = evidence(path.join(root.identity.homeRoot, PERSISTENT_HOME_PREADOPTION), root);
+  if (!e) return null;
+  let r: PreAdoption;
+  try { r = JSON.parse(e.text) as PreAdoption; } catch { throw refuse("the pre-adoption halt record is incomplete"); }
+  const i = root.identity, h = r?.halt;
+  const bytes = typeof h?.bytes === "string" ? Buffer.from(h.bytes, "base64") : null;
+  if (r?.version !== 1 || r.volumeId !== i.id || r.homeRoot !== i.homeRoot || r.inode !== i.inode
+      || r.operationToken !== token || !h || h.path !== path.join(i.homeRoot, "FLEET_HALT")
+      || typeof h.inode !== "string" || !/^[1-9]\d*$/.test(h.inode) || h.sha256 !== pinned
+      || !bytes || bytes.toString("base64") !== h.bytes || bytes.length !== h.size || sha256(bytes) !== pinned) {
+    throw refuse("the pre-adoption record does not match the pinned original halt, volume or handover");
+  }
+  return r;
+}
+
+/**
+ * ADOPTING THE POPULATED INCIDENT VOLUME UNDER THE HALT IT ALREADY HAS.
+ *
+ * The fleet's volume was written before this file existed: tenant homes, an
+ * operator's hand-made FLEET_HALT, and no manifest. Ordinary preparation
+ * refuses that root, rightly, because it cannot tell an old book from a stray
+ * directory. Adoption is the one reviewed way in (docs/fleet-resume.md), and
+ * it asks for two explicit things: MERRYMEN_ADOPT_HOME_HALT_SHA256, the hash
+ * the operator recorded of that hand-made halt, and the initial handover token.
+ *
+ * THE HALT IS NEVER ABSENT. The original is recorded first (hash, inode and
+ * its exact bytes, durable), a canonical halt is written beside it under a
+ * private name, and one rename puts it in FLEET_HALT's place. Only then is the
+ * manifest written, `held`, naming that canonical halt as its own, so the
+ * existing release and verification paths work on this volume unchanged.
+ *
+ * A CRASH AT ANY SEAM CONVERGES on the next start with the same variables.
+ * The record and the manifest appear whole or not at all (publishFirstWrite).
+ * A record whose original is still in place carries on to the rename, and a
+ * record whose FLEET_HALT is already this adoption's canonical text carries on
+ * to the manifest. A restart after the manifest changes nothing. Any other
+ * shape (a wrong hash, a loose or hard-linked halt, an empty root, a manifest
+ * this adoption did not make) refuses before writing. No book, grant, lease or
+ * ledger is opened.
+ */
+export function adoptPopulatedPersistentHome(
+  env: NodeJS.ProcessEnv = process.env, options: PersistentHomeOptions = {},
+): AdoptedPersistentHome | null {
+  const pinned = pinnedHalt(env);
+  if (pinned === null) return null;
+  const result = withRoot(env, options, root => {
+    // Adopting needs the explicit token. Once adopted, the pin may stay set
+    // for release and re-halt after the token is retired: the record must
+    // then match the manifest's own operation instead.
+    const i = root.identity;
+    for (const name of [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST]) settleFirstWrite(root, path.join(i.homeRoot, name));
+    const saved = readManifest(root);
+    const token = env.MERRYMEN_INITIAL_HANDOVER ?? saved?.manifest.handover.operationToken;
+    if (!token) throw refuse("adoption requires the explicit initial handover operation token");
+    const haltPath = path.join(i.homeRoot, "FLEET_HALT"), canonical = haltText(i.id, token);
+    let record = readPreAdoption(root, pinned, token);
+    if (saved) {
+      if (!record) throw refuse("an existing persistent manifest was not created by this adoption");
+      const m = verifiedManifest(root);
+      return { ...i, handoverState: m.handover.state, halt: m.handover.state === "held" ? m.handover.halt : null, adoptedNow: false };
+    }
+    const names = readdirSync(i.homeRoot);
+    if (!names.some(name => !["FLEET_HALT", PERSISTENT_HOME_PREADOPTION, ADOPTION_HALT].includes(name))) {
+      throw refuse("only a populated root is adopted; an empty root uses explicit initialization");
+    }
+    const found = evidence(haltPath, root);
+    if (!found) throw refuse("adoption requires the original halt to be present");
+    if (!record) {
+      if (names.includes(ADOPTION_HALT)) throw refuse("an adoption halt exists without its pre-adoption record");
+      if (found.bytes.length > MAX_ORIGINAL_HALT_BYTES || sha256(found.bytes) !== pinned) {
+        throw refuse("the existing halt does not match the pinned original halt hash");
+      }
+      const pre: PreAdoption = { version: 1, volumeId: i.id, homeRoot: i.homeRoot, inode: i.inode, operationToken: token,
+        halt: { path: haltPath, inode: found.inode, size: found.bytes.length, sha256: pinned, bytes: found.bytes.toString("base64") } };
+      publishFirstWrite(root, path.join(i.homeRoot, PERSISTENT_HOME_PREADOPTION), JSON.stringify(pre) + "\n");
+      options.afterPreAdoptionSynced?.();
+      record = readPreAdoption(root, pinned, token);
+      if (!record) throw refuse("the pre-adoption record disappeared");
+    }
+    const original = (e: Evidence | null) => !!e && e.inode === record!.halt.inode && sha256(e.bytes) === pinned;
+    if (original(found)) {
+      // A leftover private halt from a crash before the rename is this
+      // adoption's own, possibly torn: replace it rather than trust it.
+      const temp = path.join(i.homeRoot, ADOPTION_HALT);
+      if (presentStat(temp)) { unlinkSync(temp); fsyncSync(root.fd); }
+      writeExclusive(root, temp, canonical);
+      options.afterAdoptionHaltSynced?.();
+      if (!original(evidence(haltPath, root))) throw refuse("the original halt changed during adoption");
+      sameRoot(root);
+      renameSync(temp, haltPath);
+      fsyncSync(root.fd);
+      options.afterAdoptionRenamed?.();
+    } else if (found.text !== canonical || names.includes(ADOPTION_HALT)) {
+      throw refuse("FLEET_HALT is neither the recorded original nor this adoption's canonical halt");
+    }
+    // The explicit resume branch joins here: the record holds the pinned hash
+    // and FLEET_HALT already is haltText(id, token) on a new inode.
+    const created = evidence(haltPath, root);
+    if (!created || created.text !== canonical || created.inode === record.halt.inode) {
+      throw refuse("the adopted canonical halt is missing or changed");
+    }
+    const halt: PersistentHomeHaltProof = { path: haltPath, device: created.device, inode: created.inode, text: created.text, operationToken: token };
+    const manifest: Manifest = { version: 1, volumeId: i.id, mountPath: i.mountPath, homeRoot: i.homeRoot,
+      device: i.device, inode: i.inode, handover: { state: "held", operationToken: token, halt } };
+    publishFirstWrite(root, path.join(i.homeRoot, PERSISTENT_HOME_MANIFEST), JSON.stringify(manifest) + "\n");
+    verifiedManifest(root);
+    return { ...i, handoverState: "held" as const, halt, adoptedNow: true };
+  });
+  if (!result) throw refuse("persistent-home opt-in is required to adopt a populated volume");
+  return result;
+}
+
 /**
  * Explicit reviewed release only: the caller must first verify the source,
- * imported original books, tenant identities and memory. Startup never calls
- * this. A completed receipt is durable before our own unchanged halt is removed.
+ * imported original books, tenant identities and memory. Ordinary startup
+ * never calls this. The one startup exception (decision 5 of the resume plan,
+ * for Milla's review) is controlAdoptedPersistentHomeHalt below, which calls
+ * it only for an ADOPTED volume whose manifest is `held`, only when
+ * MERRYMEN_RELEASE_HOME_HALT names this manifest's operation and its standing
+ * halt generation, the pinned original-halt hash still matches the
+ * pre-adoption record, and B1's parser reads a rollout scope other than
+ * `none`. A completed receipt is durable before our own unchanged halt is removed.
  */
 export function markPersistentHomeHandoverComplete(
   proof: PersistentHomeIdentity, expectedHalt: PersistentHomeHaltProof,
@@ -320,5 +511,243 @@ export function markPersistentHomeHandoverComplete(
     return root.identity;
   });
   if (!result) throw refuse("persistent-home opt-in is required for an explicit handover release");
+  return result;
+}
+
+export interface PersistentHomeHaltControl {
+  action: "released" | "rehalted" | "already-released" | "already-held" | "withheld";
+  handoverState: "held" | "complete";
+  /** Log-safe: never the operation token, a hash or a tenant. */
+  detail: string;
+}
+interface RehaltReceipt {
+  version: 1; volumeId: string; homeRoot: string; inode: string; operationToken: string;
+  halt: { path: string; inode: string; text: string };
+}
+/**
+ * MERRYMEN_RELEASE_HOME_HALT names the halt generation it lifts:
+ * `<operation token>` for the adoption's own halt (generation 0), and
+ * `<operation token>@<n>` for the halt the nth env re-halt put back. `@` is
+ * outside TOKEN's alphabet, so neither spelling can be read as the other.
+ */
+const RELEASE = /^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})(?:@([1-9]\d{0,8}))?$/;
+function releaseAsked(value: string): { token: string; generation: number } | null {
+  const m = RELEASE.exec(value);
+  return m ? { token: m[1]!, generation: m[2] === undefined ? 0 : Number(m[2]) } : null;
+}
+/** How an operator spells a release of this generation, with the token itself left out of every log. */
+const releaseSpelling = (generation: number) => `MERRYMEN_RELEASE_HOME_HALT=<operation token>${generation ? `@${generation}` : ""}`;
+/**
+ * A release needs a scope that admits someone, read with B1's own parser
+ * (fleet-rollout.ts), never a second and looser reading of the same value.
+ * The parser throws on anything malformed or mis-cased (`None`, `off`, `0`,
+ * `none,`, a bare address), and on an unset value here, because a required
+ * persistent home is the Railway fleet: a typo refuses startup and is never
+ * read as permission. `none` keeps the halt where it is. So would an unset
+ * value read as `all`, which only happens off Railway and so never here.
+ */
+function rolloutAdmitsRelease(rollout: FleetRollout): boolean {
+  return rollout.scope === "list" || (rollout.scope === "all" && !rollout.unset);
+}
+/** Is FLEET_HALT exactly this proof's halt? Never throws over somebody else's file. */
+function ownHalt(root: Root, proof: PersistentHomeHaltProof): boolean {
+  const st = presentStat(proof.path);
+  if (!st || String(st.ino) !== proof.inode) return false;
+  try { assertHalt(root, proof); return true; } catch { return false; }
+}
+function readRehaltReceipt(root: Root, token: string): RehaltReceipt | null {
+  const e = evidence(path.join(root.identity.homeRoot, PERSISTENT_HOME_REHALT_RECEIPT), root);
+  if (!e) return null;
+  let r: RehaltReceipt;
+  try { r = JSON.parse(e.text) as RehaltReceipt; } catch { throw refuse("the re-halt receipt is incomplete"); }
+  const i = root.identity, h = r?.halt;
+  if (r?.version !== 1 || r.volumeId !== i.id || r.homeRoot !== i.homeRoot || r.inode !== i.inode || r.operationToken !== token
+      || !h || h.path !== path.join(i.homeRoot, "FLEET_HALT") || typeof h.inode !== "string" || !/^[1-9]\d*$/.test(h.inode)
+      || h.text !== haltText(i.id, token)) throw refuse("the re-halt receipt does not match the configured volume or handover");
+  return r;
+}
+/** Write-new-then-rename, like the completion receipt: a torn file never takes the real name. */
+function replaceDurably(root: Root, file: string, text: string, unchanged: () => void): void {
+  const temp = `${file}.${randomUUID()}`;
+  try {
+    writeExclusive(root, temp, text);
+    unchanged();
+    renameSync(temp, file);
+    fsyncSync(root.fd);
+  } finally { rmSync(temp, { force: true }); }
+}
+
+function releaseAdopted(
+  root: Root, saved: { manifest: Manifest; evidence: Evidence }, generation: number, rollout: FleetRollout,
+): PersistentHomeHaltControl {
+  const handover = saved.manifest.handover, standing = handover.haltGeneration ?? 0;
+  if (handover.state === "complete") {
+    // RELEASED, AND THIS VARIABLE NEVER REMOVES ANYTHING AGAIN. Whatever
+    // FLEET_HALT is here now stands every child down and stays. That holds
+    // even for one that looks exactly like the manifest's own halt. A release
+    // that stopped after its completed manifest and before its unlink leaves
+    // that, but so does a hand-made copy of the canonical text on a reused
+    // inode, and once the original has gone no inode, text or mode can tell
+    // the two apart. Either way the fleet stays halted. The re-halt holds the
+    // manifest on that halt again, and a release of the next generation lifts it.
+    if (!ownHalt(root, handover.halt)) {
+      return { action: "already-released", handoverState: "complete", detail: "already released; any FLEET_HALT present is an operator halt and stays" };
+    }
+    return { action: "withheld", handoverState: "complete",
+      detail: "FLEET_HALT matches the released manifest's own halt (a release stopped before removing it, or a copy made by hand); an env release never removes a halt once the manifest is complete, so it stays; MERRYMEN_REHALT_HOME holds the manifest on it again at the next generation" };
+  }
+  assertHalt(root, handover.halt);
+  // ONE RELEASE PER HALT GENERATION. A re-halt is a rollback, and it consumes
+  // the release before it: that variable, left set when the re-halt variable
+  // is removed, names the older generation and lifts nothing. Releasing again
+  // takes a new value naming the generation the re-halt put back.
+  if (generation !== standing) {
+    return { action: "withheld", handoverState: handover.state,
+      detail: `MERRYMEN_RELEASE_HOME_HALT names halt generation ${generation}, but the standing halt is generation ${standing}, so it stays; only ${releaseSpelling(standing)} lifts it` };
+  }
+  if (!rolloutAdmitsRelease(rollout)) {
+    return { action: "withheld", handoverState: handover.state, detail: "MERRYMEN_FLEET_ROLLOUT is none, so the halt stays" };
+  }
+  markPersistentHomeHandoverComplete(root.identity, handover.halt, root.env, root.options);
+  return { action: "released", handoverState: "complete", detail: "released into the configured rollout scope" };
+}
+
+function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Evidence }, releaseIgnored: boolean): PersistentHomeHaltControl {
+  const i = root.identity, m = saved.manifest, token = m.handover.operationToken, options = root.options;
+  const ignored = releaseIgnored ? "; MERRYMEN_RELEASE_HOME_HALT is ignored while a re-halt is asked for" : "";
+  // The manifest changes only at the very end, so a re-halt resumed after a
+  // crash computes the same next generation as the attempt it finishes.
+  const standing = m.handover.haltGeneration ?? 0, next = standing + 1;
+  if (m.handover.state === "held") {
+    assertHalt(root, m.handover.halt);
+    return { action: "already-held", handoverState: "held", detail: `already held at halt generation ${standing}${ignored}` };
+  }
+  const haltPath = path.join(i.homeRoot, "FLEET_HALT"), temp = path.join(i.homeRoot, REHALT_HALT), canonical = haltText(i.id, token);
+  const withheld: PersistentHomeHaltControl = { action: "withheld", handoverState: "complete",
+    detail: `an operator FLEET_HALT is already standing the fleet down; it and the released manifest stay as they are${ignored}` };
+  const isCanonical = (file: string) => { try { return evidence(file, root)?.text === canonical; } catch { return false; } };
+  const present = presentStat(haltPath), pending = presentStat(temp);
+  if (present && ownHalt(root, m.handover.halt)) {
+    // A release that stopped after its completed manifest and before removing
+    // its own unchanged halt (the env release never finishes it). That file is
+    // already the canonical, private, single-link halt every verifier of a held
+    // manifest asks for, so the manifest is held on it as it stands: nothing
+    // is written in FLEET_HALT's place, and it is not mistaken for an operator's.
+    if (pending) { unlinkSync(temp); fsyncSync(root.fd); } // Never this file: it is single-link.
+    return holdManifest(root, saved, m.handover.halt, next, ignored);
+  }
+  if (present) {
+    // Ours only by proof: our private name still links it (a crash after the
+    // link), or the receipt written before the link names it (a crash after
+    // the private name went). Identical text alone proves nothing.
+    const ours = pending ? pending.ino === present.ino
+      : readRehaltReceipt(root, token)?.halt.inode === String(present.ino) && isCanonical(haltPath);
+    if (!ours) {
+      if (pending) { unlinkSync(temp); fsyncSync(root.fd); }
+      return withheld;
+    }
+  } else {
+    if (pending) { unlinkSync(temp); fsyncSync(root.fd); } // A crash before the link; possibly torn.
+    writeExclusive(root, temp, canonical);
+    options.afterRehaltHaltSynced?.();
+    const created = evidence(temp, root);
+    if (!created || created.text !== canonical) throw refuse("the re-halt's canonical halt changed");
+    const receipt: RehaltReceipt = { version: 1, volumeId: i.id, homeRoot: i.homeRoot, inode: i.inode, operationToken: token,
+      halt: { path: haltPath, inode: created.inode, text: canonical } };
+    replaceDurably(root, path.join(i.homeRoot, PERSISTENT_HOME_REHALT_RECEIPT), JSON.stringify(receipt) + "\n", () => {});
+    options.afterRehaltReceiptSynced?.();
+    sameRoot(root);
+    // O_EXCL at the real name: link() never replaces a halt that appeared meanwhile.
+    try { linkSync(temp, haltPath); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      unlinkSync(temp); fsyncSync(root.fd);
+      return withheld;
+    }
+    fsyncSync(root.fd);
+    options.afterRehaltLinked?.();
+  }
+  // FLEET_HALT is ours. Drop the private name so it is a single-link plain
+  // file again, which every verifier of a held manifest requires.
+  const linked = presentStat(temp);
+  if (linked) {
+    if (linked.ino !== presentStat(haltPath)?.ino) throw refuse("the re-halt's private halt no longer names FLEET_HALT");
+    unlinkSync(temp);
+    fsyncSync(root.fd);
+  }
+  options.afterRehaltPublished?.();
+  const published = evidence(haltPath, root);
+  if (!published || published.text !== canonical || readRehaltReceipt(root, token)?.halt.inode !== published.inode) {
+    throw refuse("the re-halt's own canonical halt is missing or changed");
+  }
+  const halt: PersistentHomeHaltProof = { path: haltPath, device: published.device, inode: published.inode, text: published.text, operationToken: token };
+  return holdManifest(root, saved, halt, next, ignored);
+}
+/** The re-halt's last step: the manifest, unchanged since it was read, is replaced by one holding on `halt` at `generation`. */
+function holdManifest(
+  root: Root, saved: { manifest: Manifest; evidence: Evidence }, halt: PersistentHomeHaltProof, generation: number, ignored: string,
+): PersistentHomeHaltControl {
+  const m = saved.manifest, file = path.join(root.identity.homeRoot, PERSISTENT_HOME_MANIFEST);
+  replaceDurably(root, file, JSON.stringify({ ...m, handover: { ...m.handover, state: "held", halt, haltGeneration: generation } }) + "\n", () => {
+    const now = evidence(file, root);
+    if (!now || now.device !== saved.evidence.device || now.inode !== saved.evidence.inode || now.text !== saved.evidence.text) {
+      throw refuse("the persistent manifest changed before the re-halt");
+    }
+    assertHalt(root, halt);
+  });
+  verifiedManifest(root);
+  return { action: "rehalted", handoverState: "held",
+    detail: `re-halted under this volume's canonical halt at generation ${generation}; only ${releaseSpelling(generation)} releases it${ignored}` };
+}
+
+/**
+ * THE REVIEWED ENV RELEASE AND RE-HALT OF AN ADOPTED VOLUME, so neither the
+ * pilot's first release nor a rollback to listener-only mode needs a shell on
+ * the container (docs/fleet-resume.md).
+ *
+ * MERRYMEN_RELEASE_HOME_HALT=<operation token>[@<generation>] releases only
+ * a `held` manifest whose standing halt is that generation, through
+ * markPersistentHomeHandoverComplete itself, and only while
+ * MERRYMEN_FLEET_ROLLOUT, read by B1's parser, admits someone. A malformed
+ * rollout refuses before anything is touched. Once the manifest is `complete`
+ * it removes nothing, ever: not a FLEET_HALT made by hand after a release, and
+ * not the halt of a release that stopped before its unlink (re-halt instead).
+ *
+ * MERRYMEN_REHALT_HOME=<operation token> puts a canonical halt back with a
+ * no-replace link, records which inode it is in a receipt BEFORE publishing
+ * it, and returns the manifest to `held` at the next halt generation, which
+ * the earlier release value does not name. When both are set the re-halt
+ * wins: a rollback must never fail because a release variable was left behind.
+ *
+ * Both need the pinned original-halt hash and a pre-adoption record that
+ * matches it, so neither applies to a volume this code initialized fresh.
+ * Neither opens a book, a grant, a lease or the ledger.
+ */
+export function controlAdoptedPersistentHomeHalt(
+  env: NodeJS.ProcessEnv = process.env, options: PersistentHomeOptions = {},
+): PersistentHomeHaltControl | null {
+  const release = env.MERRYMEN_RELEASE_HOME_HALT, rehalt = env.MERRYMEN_REHALT_HOME;
+  if (release === undefined && rehalt === undefined) return null;
+  // While a re-halt is asked for, only its own value is read: a release
+  // variable left behind, stale or mistyped, must never stop a rollback.
+  const asked = rehalt !== undefined ? (TOKEN.test(rehalt) ? { token: rehalt, generation: null } : null) : releaseAsked(release!);
+  if (!asked) throw refuse("the halt release or re-halt operation token is invalid");
+  const pinned = pinnedHalt(env);
+  if (pinned === null) throw refuse("a halt release or re-halt also requires the pinned original halt hash");
+  // The scope a release would start, read before the volume is touched: a
+  // malformed value refuses here even if the boot-time check ever moves.
+  const rollout = rehalt === undefined ? fleetRollout(env) : null;
+  const result = withRoot(env, options, root => {
+    const saved = readManifest(root);
+    if (!saved) throw refuse("a halt release or re-halt requires the adopted persistent manifest");
+    const token = saved.manifest.handover.operationToken;
+    if (asked.token !== token) throw refuse("the halt release or re-halt operation token does not match the persistent manifest");
+    if (!readPreAdoption(root, pinned, token)) {
+      throw refuse("an env halt release or re-halt applies only to a volume adopted under the pinned original halt");
+    }
+    return asked.generation === null ? rehaltAdopted(root, saved, release !== undefined)
+      : releaseAdopted(root, saved, asked.generation, rollout!);
+  });
+  if (!result) throw refuse("persistent-home opt-in is required for an env halt release or re-halt");
   return result;
 }

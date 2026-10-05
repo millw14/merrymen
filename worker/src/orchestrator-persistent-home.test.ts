@@ -1,5 +1,6 @@
 /** Real SQLite books through the persistent cold-start and stopped-writer cleanup gates. */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -16,7 +17,10 @@ import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { captureLedgerImport, LEDGER_IMPORT_PENDING_FILE, registerLedgerSource, restoreLedgerImport, stageLedgerImport } from "./ledger-import";
 import { ensurePersonalMemorySchema, publishPersonalMemory } from "./personal-memory-ferry";
-import type { PersistentHomeIdentity } from "./persistent-home";
+import {
+  adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST, PERSISTENT_HOME_PREADOPTION,
+  type PersistentHomeIdentity,
+} from "./persistent-home";
 import type { TenantLease } from "./tenant-lease";
 
 const fleet = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-persistent-reconcile-")));
@@ -24,7 +28,7 @@ process.env.MERRYMEN_HOME = fleet;
 process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
 const {
-  childHome, hasLeaseForTest, reconcile, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
+  childHome, fleetHaltFile, hasLeaseForTest, honourFleetHalt, reconcile, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
   setPersonalMemoryStoreForTest, setRetirementMemoryStoreForTest, setSpawnForTest, setTenantLeaseForTest,
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
@@ -259,6 +263,51 @@ it("a failed persistent root proof writes no cached key, child book or partial r
   } finally {
     setPersistentHomeVerifierForTest(() => volume); setPaperRestoreForTest(async () => ({ ok: true, line: null })); await remove(f);
   }
+});
+
+it("an adopted fleet root spawns nothing until its reviewed release, and a hand-made FLEET_HALT afterwards still stands every child down", async () => {
+  const f = await fixture(); setTenantLeaseForTest(f.tenant, f.lease);
+  // The incident's shape on this fleet root: tenant homes from the tests
+  // above, an operator's hand-made halt, and no manifest.
+  const original = "operator incident halt\n", halt = fleetHaltFile(), token = "reviewed-adoption";
+  writeFileSync(halt, original, { mode: 0o600 });
+  const major = ((rootStat.dev >> 8n) & 0xfffn) | ((rootStat.dev >> 32n) & 0xfffff000n), minor = (rootStat.dev & 0xffn) | ((rootStat.dev >> 12n) & 0xffffff00n);
+  const options = { readMountInfo: () => `40 20 ${major}:${minor} / ${fleet} rw,relatime - ext4 /dev/volume rw\n` };
+  const adopt = { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_HOME: fleet, RAILWAY_VOLUME_MOUNT_PATH: fleet, MERRYMEN_HOME_VOLUME_ID: volume.id,
+    MERRYMEN_INITIAL_HANDOVER: token, MERRYMEN_ADOPT_HOME_HALT_SHA256: createHash("sha256").update(original).digest("hex") };
+  const release = { ...adopt, MERRYMEN_RELEASE_HOME_HALT: token, MERRYMEN_FLEET_ROLLOUT: `${f.tenant}:trade` };
+  const before = spawned.length;
+  try {
+    assert.equal(adoptPopulatedPersistentHome(adopt, options)!.handoverState, "held");
+    await reconcile(); assert.equal(spawned.length, before, "the canonical halt holds like the original");
+    assert.equal(controlAdoptedPersistentHomeHalt({ ...release, MERRYMEN_FLEET_ROLLOUT: "none" }, options)!.action, "withheld");
+    await reconcile(); assert.equal(spawned.length, before);
+    assert.equal(controlAdoptedPersistentHomeHalt(release, options)!.action, "released");
+    await reconcile(); assert.equal(spawned.length, before + 1);
+    const proc = spawned.at(-1)!;
+    writeFileSync(halt, "hand-made stop\n", { mode: 0o600 });
+    // The next start, with the release variable still set, leaves it alone.
+    assert.equal(controlAdoptedPersistentHomeHalt(release, options)!.action, "already-released");
+    await honourFleetHalt();
+    assert.deepEqual(proc.signals, ["SIGTERM"]); assert.equal(hasLeaseForTest(f.tenant), false); assert.equal(f.releases.n, 1);
+    assert.equal(readFileSync(halt, "utf8"), "hand-made stop\n");
+    proc.exit();
+  } finally {
+    for (const name of ["FLEET_HALT", PERSISTENT_HOME_MANIFEST, PERSISTENT_HOME_PREADOPTION]) rmSync(path.join(fleet, name), { force: true });
+    await remove(f);
+  }
+});
+
+it("startup adopts, then applies the env release or re-halt, then re-proves the home, all before any lease, child or writer", () => {
+  const source = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  const run = source.slice(source.indexOf("export async function runOrchestrator("));
+  // B1's boot-time refusal of a malformed rollout comes first of all.
+  const order = ["fleetRollout(process.env)", "await runRecoveryReportOnly(); return;", "adoptPopulatedPersistentHome()", "controlAdoptedPersistentHomeHalt()",
+    "preparePersistentHomeForHandover()", "setTenantLeaseLossHandler(", "await runAccountingDiagnosisIfAsked()", "void orderFerryLoop()", "await reconcile()"];
+  const at = order.map(step => run.indexOf(step));
+  order.forEach((step, k) => assert.ok(at[k]! > 0 && (k === 0 || at[k - 1]! < at[k]!), `${step} out of order`));
+  assert.equal(run.split("adoptPopulatedPersistentHome(").length, 2, "called once");
+  assert.equal(run.split("controlAdoptedPersistentHomeHalt(").length, 2, "called once");
 });
 
 /**
