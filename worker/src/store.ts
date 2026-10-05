@@ -50,7 +50,8 @@ import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./pers
 
 let driver: Db | null = null;
 /** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
- *  the file; a running worker never closes its ledger. */
+ *  the file, and closeStore() on a drained worker's way out; a running worker never
+ *  closes its ledger. */
 let ledgerFile: DatabaseSync | null = null;
 
 /**
@@ -1130,6 +1131,30 @@ function getDb(): Db {
  * call it without knowing whether the store was ever touched.
  */
 export function closeStoreForTest(): void {
+  const open = ledgerFile;
+  ledgerFile = null;
+  driver = null;
+  open?.close();
+}
+
+/**
+ * Close the ledger ON THE WAY OUT: a worker that drained on SIGTERM (index.ts),
+ * after its intent chain emptied or its drain budget ran out.
+ *
+ * The sqlite file is closed, which checkpoints the write-ahead log into it, so
+ * whoever opens it next — the orchestrator's mirror, the next process — finds
+ * the database file whole by itself. WAL is crash-safe either way; this is a
+ * clean exit being clean, not the thing that makes an unclean one safe.
+ *
+ * The Postgres pool is left to the process exit: nothing is buffered in it, and
+ * a statement the exit cuts off is rolled back by the server, as for any
+ * dropped connection.
+ *
+ * NOTHING MAY BE WRITTEN AFTER THIS. Its one caller exits on the next line, in
+ * the same turn of the event loop, so no queued statement ever runs against the
+ * closed handle.
+ */
+export function closeStore(): void {
   const open = ledgerFile;
   ledgerFile = null;
   driver = null;
