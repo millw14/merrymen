@@ -409,7 +409,9 @@ describe("SIGTERM reaches the orchestrator's stop handler", { skip: !posix }, ()
         exited,
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no exit 15s after SIGTERM:\n${stdout}${stderr}`)), 15_000)),
       ]);
-      assert.match(stdout, /\[orchestrator\] stopping — calling the whole fleet home/, `${stdout}${stderr}`);
+      // The drain's own first line (fleet-drain.ts), naming the signal it got:
+      // the handler that ran is the drain, not the old release-and-exit stop.
+      assert.match(stdout, /\[orchestrator\] stopping on SIGTERM — calling the whole fleet home/, `${stdout}${stderr}`);
       assert.equal(signal, null, "the process was killed by SIGTERM instead of handling it — the script did not exec node");
       assert.equal(code, 0, `${stdout}${stderr}`);
       assert.ok(stdout.indexOf(`[start] role=start:orchestrator commit=${SHA}`) === 0, `the [start] line must come first:\n${stdout}`);
