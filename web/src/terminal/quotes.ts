@@ -105,7 +105,34 @@ export function applyTokenQuotes(
 }
 
 let changesCache: { expires: number; values: Map<string, number> } | undefined;
-/** Session return from the same underlying-equity source as the candles. */
+/**
+ * HOW LONG A PASS IS KEPT. One that read something, five minutes, as before. One
+ * that read nothing, a minute: it was not kept at all, so while the chart venue
+ * was down every caller — the market's clock, and the fresh clocks each sign-in
+ * or sign-out starts (live-clocks.ts) — sent one request per stock straight back
+ * at the endpoint failing.
+ */
+const CHANGES_READ_MS = 300_000;
+const CHANGES_UNREAD_MS = 60_000;
+/**
+ * WHEN A PASS STOPS ASKING: nothing has answered yet and the last two failed.
+ * That is the venue down, not a symbol it refused, and every stock left would
+ * fail the same way. Once anything has answered, a failure is that symbol's own
+ * and the pass carries on past it.
+ */
+const CHANGES_DOWN_AFTER = 2;
+
+/**
+ * Session return from the same underlying-equity source as the candles.
+ *
+ * A VENUE THAT IS DOWN COSTS FOUR REQUESTS, NOT ONE PER STOCK. The stocks are
+ * asked for four at a time. Until one answers, a failure holds every worker
+ * until the requests still out have said whether the venue is up, so nothing
+ * more is sent past a failure into a venue that may be down. One answer among
+ * them and all four carry on — a refused symbol is only that symbol. None, and
+ * two failures end the pass; a single failure with nothing else out is tried
+ * past once more, on its own.
+ */
 export async function loadSessionChanges(
   tokens: LiveToken[],
 ): Promise<Map<string, number>> {
@@ -113,9 +140,23 @@ export async function loadSessionChanges(
     return changesCache.values;
   const values = new Map<string, number>();
   const queue = tokens.filter((t) => t.kind !== "memecoin");
+  const asked = queue.length > 0;
+  let answered = 0;
+  let failedInARow = 0;
+  let out = 0;
+  let settled: (() => void)[] = [];
+  const down = () => answered === 0 && failedInARow >= CHANGES_DOWN_AFTER;
+  /** The next stock to ask for, counted as out the moment it is handed over. */
+  const next = async (): Promise<LiveToken | undefined> => {
+    while (answered === 0 && failedInARow > 0 && out > 0)
+      await new Promise<void>((resolve) => settled.push(resolve));
+    const token = down() ? undefined : queue.shift();
+    if (token) out++;
+    return token;
+  };
   await Promise.all(
     Array.from({ length: 4 }, async () => {
-      for (let token = queue.shift(); token; token = queue.shift()) {
+      for (let token = await next(); token; token = await next()) {
         try {
           const data = await json<{
             chart?: {
@@ -124,16 +165,27 @@ export async function loadSessionChanges(
           }>(
             `/api/venue?desk=chart&symbol=${encodeURIComponent(token.symbol)}&window=5D`,
           );
+          answered++;
+          failedInARow = 0;
           const change =
             data.chart?.result?.[0]?.meta?.regularMarketChangePercent;
           if (typeof change === "number" && Number.isFinite(change))
             values.set(token.id, change);
         } catch {
           /* An unavailable reference return stays unknown. */
+          failedInARow++;
+        } finally {
+          out--;
+          const waiting = settled;
+          settled = [];
+          for (const wake of waiting) wake();
         }
       }
     }),
   );
-  if (values.size) changesCache = { expires: Date.now() + 300_000, values };
+  if (values.size)
+    changesCache = { expires: Date.now() + CHANGES_READ_MS, values };
+  else if (asked)
+    changesCache = { expires: Date.now() + CHANGES_UNREAD_MS, values };
   return values;
 }
