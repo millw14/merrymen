@@ -15,6 +15,7 @@
  *     tenant-bound context.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, it } from "node:test";
 
 import { brokerFailureEnvelope } from "../fomo/broker";
@@ -291,4 +292,22 @@ describe("C12: somebody else's trades are never read off the owner's ledger", ()
       if (someoneElse) assert.equal(await answerTradeQuestion(q, ctx()), null);
     });
   }
+  it("with Fomo off in this process there is no third party: the owner's question keeps the ledger answer, as before", async () => {
+    for (const q of ["show their trades", "what did you buy today? are they still up?", "show @alice's trades"]) {
+      assert.notEqual(await answerTradeQuestion(q, ctx({ fomoOff: true })), null, q);
+    }
+  });
+});
+
+describe("telegram/service.ts carries Fomo off to every lane", () => {
+  const SRC = readFileSync(new URL("./service.ts", import.meta.url), "utf8");
+  it("the answer loop's tool context says so (answer.ts then offers no fomo_* lookup)", () => {
+    assert.match(SRC, /fomo: fomoBroker\(\),\s*fomoOff: deps\.fomoOff === true,/);
+  });
+  it("groups get no research port", () => {
+    assert.match(SRC, /fomo: \(\) => \(deps\.fomoOff === true \? null : deps\.fomoGroupPort\?\.\(\) \?\? null\),/);
+  });
+  it("a DM is never asked of the research", () => {
+    assert.match(SRC, /const fomoDm = async \([^)]*\): Promise<string \| null> => \{\s*\/\/[^\n]*\n\s*if \(deps\.fomoOff === true\) return null;/);
+  });
 });

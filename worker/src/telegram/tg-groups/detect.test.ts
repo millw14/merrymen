@@ -931,8 +931,12 @@ describe("isPrivateAsk: who it follows, copies or watches is the owner's configu
     "what are you holding?", "who's watching the game", "anyone watching pepe", "i'm following the chart", "what are fomo traders buying?",
     "who is buying pons on fomo?", "what's trending on fomo", "copy that", "follow the money",
   ];
-  for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t), true));
-  for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t), false));
+  for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t, { research: true }), true));
+  for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t, { research: true }), false));
+  // Without research in this process there is no such configuration: these lines go on as before Fomo.
+  for (const t of ["who do you copy trade?", "what are you watching?", "what's on your watchlist", "who's in your cohort?"]) {
+    it(`no research, not private: ${t}`, () => assert.equal(isPrivateAsk(t), false));
+  }
 });
 
 describe("fomoAskOf: an addressed social-trading research ask, conservatively", () => {

@@ -497,8 +497,10 @@ export function asksAboutSomeoneElsesTrades(question: string, agentName?: string
 /** Obvious trade questions are rendered directly from the ledger; no model can invent their answer. */
 export async function answerTradeQuestion(question:string,ctx:ToolContext):Promise<string|null> {
   if(/\bwhy\b.*(?:didn[’']t|did not|haven[’']t|have not|no trades|not trad|nothing)/i.test(question))return null;
-  // Somebody else's trades are never read off the owner's ledger.
-  if(asksAboutSomeoneElsesTrades(question,ctx.status?.name))return null;
+  // Somebody else's trades are never read off the owner's ledger. Only where
+  // Fomo research is on in this process: off, there is no third party to ask
+  // about, and the owner's own questions keep the ledger answer as before.
+  if(ctx.fomoOff!==true&&asksAboutSomeoneElsesTrades(question,ctx.status?.name))return null;
   const why=/\bwhy\s+(?:did|have|do)\s+(?:you|we|i)\b.*\b(?:buy|bought|sell|sold|trade|traded)\b|\bwhy\b.*(?:trade\s*#?|#)-?\d+/i.test(question);
   const history=/\b(?:what|which)\s+(?:did|have)\s+(?:you|we|i)\b.*\b(?:trad(?:e|es|ed)|buy|bought|sell|sold)\b|\b(?:list|show)\b.*\b(?:trades?|buys|sells)\b|\b(?:trades|buys|sells)\s+today\b/i.test(question);
   if(!why&&!history)return null;

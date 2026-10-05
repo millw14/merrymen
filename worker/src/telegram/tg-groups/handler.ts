@@ -1843,7 +1843,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       insult: insultLevel(text, names),
       distress: isDistress(text),
       botQuestion: isBotQuestion(text),
-      privateAsk: isPrivateAsk(text),
+      // Who it follows or watches is private only where research is wired.
+      privateAsk: isPrivateAsk(text, { research: fomoNow() !== null }),
       injection: isInjection(text),
       tradeTalk: isTradeTalk(text),
       questionToRoom: isQuestionToRoom(text),

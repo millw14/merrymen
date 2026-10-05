@@ -37,26 +37,34 @@ export function isAnalysisOnlyMessage(text: string): boolean {
 
 const MARKET_TERMS = /\b(?:entry|exit|scalp(?:ing)?|support|resistance|breakout|breakdown|retest|candle|trend|chart|momentum|volume|liquidity|vwap|rsi|ema|atr|bullish|bearish|upside|downside|market|stop|target|invalidation|risk|reward|pullback|bounce|chase)\b|\b(?:should|would|could|can)\b.*\b(?:buy|sell|hold|long|short)\b|\b(?:is|are)\b.*\b(?:buying|selling|holding)\b/i;
 const TRADE_DISCUSSION = /\b(?:what\s+if|suppose|assuming|if)\b[^.!?\n]*\b(?:buy|sell|hold|long|short)\b|\b(?:can|could|would|will)\s+you\s+(?:please\s+)?explain\b[^.!?\n]*\b(?:buying|selling|holding)\b|^(?:please\s+)?explain\b[^.!?\n]*\b(?:buying|selling|holding)\b/i;
+const NOT_COINS = new Set(["I", "USD", "USDG", "USDC", "USDT", "EMA", "RSI", "ATR", "VWAP", "TA", "TP", "SL", "ATH", "API", "AI", "PC", "UTC", "P", "L"]);
 /**
- * Upper-case words that are not coins. FOMO and its platform words are here
- * because "what are the top FOMO traders buying?" names a research platform
- * (docs/fomo.md), not a ticker: read as one, it seeded a market read for a
- * coin called FOMO and asked "which coin do you mean?".
+ * FOMO AND ITS PLATFORM WORDS, read as words rather than tickers WHERE FOMO
+ * RESEARCH IS ON (`fomoWords`): "what are the top FOMO traders buying?" names
+ * a research platform (docs/fomo.md), not a coin, and read as one it seeded a
+ * market read for a coin called FOMO and asked "which coin do you mean?".
+ * Only a bare upper-case word: a $cashtag, an address or a known symbol is
+ * always the coin. Where Fomo is off, nothing here changes.
  */
-const NOT_COINS = new Set([
-  "I", "USD", "USDG", "USDC", "USDT", "EMA", "RSI", "ATR", "VWAP", "TA", "TP", "SL", "ATH", "API", "AI", "PC", "UTC", "P", "L",
-  "FOMO", "FOMOAPI", "FOMO.FAMILY", "THESIS", "THESES", "TRADERS", "TRADER", "COHORT", "KOL", "KOLS",
-]);
+const FOMO_PLATFORM_WORDS = new Set(["FOMO", "FOMOAPI", "FOMO.FAMILY", "THESIS", "THESES", "TRADERS", "TRADER", "COHORT", "KOL", "KOLS"]);
 
-function references(text: string, knownSymbols: readonly string[]): string[] {
+/** How a question is read: `fomoWords` where Fomo research is on in this process (answer.ts). */
+export interface QuestionReading {
+  fomoWords?: boolean;
+}
+
+function references(text: string, knownSymbols: readonly string[], reading: QuestionReading = {}): string[] {
   const refs = new Map<string, string>();
-  const add = (s: string) => {
-    if (!NOT_COINS.has(s.toUpperCase()) && !/^(?:EMA|SMA|RSI|ATR)\d+$/i.test(s)) refs.set(s.toLowerCase(), s);
+  const add = (s: string, explicit = false) => {
+    const up = s.toUpperCase();
+    if (NOT_COINS.has(up) || /^(?:EMA|SMA|RSI|ATR)\d+$/i.test(s)) return;
+    if (!explicit && reading.fomoWords === true && FOMO_PLATFORM_WORDS.has(up)) return;
+    refs.set(s.toLowerCase(), s);
   };
-  for (const m of text.matchAll(/\b0x[0-9a-fA-F]{40}\b/g)) add(m[0]);
+  for (const m of text.matchAll(/\b0x[0-9a-fA-F]{40}\b/g)) add(m[0], true);
   // An address identifies a coin more precisely than its non-unique ticker.
   if (refs.size) return [...refs.values()];
-  for (const m of text.matchAll(/\$([A-Za-z][A-Za-z0-9._-]{0,31})\b/g)) add(m[1]!);
+  for (const m of text.matchAll(/\$([A-Za-z][A-Za-z0-9._-]{0,31})\b/g)) add(m[1]!, true);
   for (const m of text.matchAll(/\b[A-Z][A-Z0-9._-]{1,15}\b/g)) add(m[0]);
   for (const symbol of knownSymbols) {
     if (!/^[A-Za-z][A-Za-z0-9._-]{0,31}$/.test(symbol)) continue;
@@ -64,17 +72,17 @@ function references(text: string, knownSymbols: readonly string[]): string[] {
     const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     // Short tickers such as BE/ON/IT are also ordinary words. Lowercase names
     // require a subject position; a sentence's "will be" must never become BE.
-    if (new RegExp(`(?:^|\\b(?:for|on|about|of|coin|token)\\s+\\$?)${escaped}(?![\\w])`, "i").test(text)) add(symbol.toUpperCase());
+    if (new RegExp(`(?:^|\\b(?:for|on|about|of|coin|token)\\s+\\$?)${escaped}(?![\\w])`, "i").test(text)) add(symbol.toUpperCase(), true);
   }
   return [...refs.values()];
 }
 
-function explicitAssetReferences(text: string, knownSymbols: readonly string[]): string[] {
+function explicitAssetReferences(text: string, knownSymbols: readonly string[], reading: QuestionReading = {}): string[] {
   const known = new Set(knownSymbols.map((s) => s.toLowerCase()));
   const marked = new Set<string>();
   for (const m of text.matchAll(/\$([A-Za-z][A-Za-z0-9._-]{0,31})\b/g)) marked.add(m[1]!.toLowerCase());
   for (const m of text.matchAll(/\b([A-Za-z][A-Za-z0-9._-]{0,31})\s*\/\s*(?:USDG|USDC|USDT|USD|ETH|WETH|BTC)\b/gi)) marked.add(m[1]!.toLowerCase());
-  return references(text, knownSymbols).filter((s) => /^0x[0-9a-fA-F]{40}$/.test(s) || known.has(s.toLowerCase()) || marked.has(s.toLowerCase()));
+  return references(text, knownSymbols, reading).filter((s) => /^0x[0-9a-fA-F]{40}$/.test(s) || known.has(s.toLowerCase()) || marked.has(s.toLowerCase()));
 }
 
 export interface MarketQuestionPlan {
@@ -84,9 +92,9 @@ export interface MarketQuestionPlan {
   needsClarification: boolean;
 }
 
-export function marketQuestionPlan(question: string, history: readonly ConversationTurn[], reply: string | undefined, knownSymbols: readonly string[]): MarketQuestionPlan | null {
+export function marketQuestionPlan(question: string, history: readonly ConversationTurn[], reply: string | undefined, knownSymbols: readonly string[], reading: QuestionReading = {}): MarketQuestionPlan | null {
   const comparison = /\b(?:compare|comparison|versus|vs|between|both|better|stronger|weaker|which)\b/i.test(question);
-  let coins = references(question, knownSymbols);
+  let coins = references(question, knownSymbols, reading);
   if (!MARKET_TERMS.test(question) && !TRADE_DISCUSSION.test(question)) {
     // Comparisons are market questions only when there are actual coin
     // references. "Compare my settings" must not become a market-board read.
@@ -94,37 +102,37 @@ export function marketQuestionPlan(question: string, history: readonly Conversat
       ? reply.slice(0, 2_400)
       : [...history].reverse().find((h) => h.role === "assistant")?.content.slice(0, 2_400) ?? "";
     const comparisonRefs = /\b(?:coins?|tokens?|crypto|assets?)\b/i.test(question)
-      ? references(source, knownSymbols) : explicitAssetReferences(source, knownSymbols);
+      ? references(source, knownSymbols, reading) : explicitAssetReferences(source, knownSymbols, reading);
     if (!comparison || comparisonRefs.length < 2) return null;
     coins = comparisonRefs;
   }
   // Definitions and configured controls use their own private read tools.
   // "What is my stop loss?" is not asking for a coin's chart.
   if (/\b(?:settings?|configured|stop loss (?:setting|on))\b|\bwhat (?:does|is|are)\b.*\b(?:mean|vwap|rsi|ema|atr|slippage|market cap|stop loss|take profit)\b/i.test(question)
-    && !references(question, knownSymbols).length
+    && !references(question, knownSymbols, reading).length
     && !/\b(?:entry|scalp|support|resistance|chart|trend)\b/i.test(question)) return null;
   const market = /\b(?:whole|overall|broader)\s+market\b|\b(?:market|markets)\b(?!.*\b(?:this|that|it|coin|token|cap)\b)/i.test(question);
   // A new question about the whole board supersedes the old coin topic.
   if (!coins.length && market) return { coins: [], market: true, needsClarification: false };
-  if (!coins.length && reply?.trim()) coins = references(reply.slice(0, 2_400), knownSymbols);
+  if (!coins.length && reply?.trim()) coins = references(reply.slice(0, 2_400), knownSymbols, reading);
   if (!coins.length && !reply?.trim()) {
     // The latest assistant turn only: never jump over a topic change to a stale coin.
     const last = [...history].reverse().find((h) => h.role === "assistant");
-    if (last) coins = references(last.content.slice(0, 2_400), knownSymbols);
+    if (last) coins = references(last.content.slice(0, 2_400), knownSymbols, reading);
   }
   if (coins.length) return { coins: coins.slice(0, 2), market: false, needsClarification: coins.length > 2 || (coins.length > 1 && !comparison) };
   return { coins: [], market, needsClarification: !market };
 }
 
 /** An exact referenced trade must be verified against this owner's ledger. */
-export function referencedTradeId(question: string, history: readonly ConversationTurn[], reply: string | undefined, knownSymbols: readonly string[] = []): number | null {
+export function referencedTradeId(question: string, history: readonly ConversationTurn[], reply: string | undefined, knownSymbols: readonly string[] = [], reading: QuestionReading = {}): number | null {
   if (!isReferencedTradeDetailQuestion(question)) return null;
   // A direct reply supplies the referent. History alone still needs a deictic
   // question, so a fresh generic fees/proceeds question can't borrow an old ID.
   if (!reply?.trim() && !/^\s*(?:and\s+)?why\s*\??\s*$/i.test(question) && !/\b(?:that|this|it|those)\b/i.test(question)) return null;
   const source = reply?.trim() || [...history].reverse().find((h) => h.role === "assistant")?.content || "";
-  const currentAssets = references(question, knownSymbols).map((asset) => asset.toLowerCase());
-  const sourceAssets = new Set(references(source, knownSymbols).map((asset) => asset.toLowerCase()));
+  const currentAssets = references(question, knownSymbols, reading).map((asset) => asset.toLowerCase());
+  const sourceAssets = new Set(references(source, knownSymbols, reading).map((asset) => asset.toLowerCase()));
   if (currentAssets.some((asset) => !sourceAssets.has(asset))) return null;
   const markers = [...source.matchAll(/\btrade\s*#/gi)];
   const matches = [...source.matchAll(/\btrade\s*#\s*(-?\d+)(?=$|[\s,;:)\]}]|[.!?](?![\w\d]))/gi)];
@@ -142,7 +150,7 @@ function isReferencedTradeDetailQuestion(question: string): boolean {
 }
 
 /** An explicit trade reply with ambiguous/malformed IDs needs another referent. */
-export function replyTradeNeedsClarification(question: string, reply: string | undefined, knownSymbols: readonly string[] = []): boolean {
+export function replyTradeNeedsClarification(question: string, reply: string | undefined, knownSymbols: readonly string[] = [], reading: QuestionReading = {}): boolean {
   return !!reply?.trim() && isReferencedTradeDetailQuestion(question)
-    && /\btrade\s*#/i.test(reply) && referencedTradeId(question, [], reply, knownSymbols) === null;
+    && /\btrade\s*#/i.test(reply) && referencedTradeId(question, [], reply, knownSymbols, reading) === null;
 }

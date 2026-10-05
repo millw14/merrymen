@@ -1485,9 +1485,16 @@ const PRIVATE_RES: readonly RegExp[] = [
   /\bwhat (?:model|llm|ai model|language model|ai) (?:are|r|do|is) (?:you|u|ya)\b/u,
   /\bwhich (?:model|llm|ai model|language model)\b/u,
   /\b(?:your|ur) (?:model|llm|settings|config|telegram id|chat id|user id)\b/u,
-  // who and what it follows, copies or watches: the owner's research
-  // configuration, as private as its settings ("who do you copy trade?",
-  // "who are you following on fomo?", "what are you watching?")
+];
+
+/**
+ * WHO AND WHAT IT FOLLOWS, COPIES OR WATCHES: the owner's research
+ * configuration, as private as its settings ("who do you copy trade?", "who
+ * are you following on fomo?", "what are you watching?"). Only where Fomo
+ * research is on in this process (handler.ts passes `research`): without it
+ * there is no such configuration, and these lines go on as before.
+ */
+const RESEARCH_PRIVATE_RES: readonly RegExp[] = [
   /\bwho (?:do|did|are|r|will|would|should) (?:you|u|ya) (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b/u,
   /\b(?:which|what) (?:traders?|wallets?|accounts?|people|whales|degens) (?:do|are|r|did|will) (?:you|u|ya) (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b/u,
   /\bwhat (?:coins? |tokens? |traders? )?(?:are|r) (?:you|u|ya) (?:watching|tracking|monitoring|following|researching|copying|copy[- ]?trading)\b/u,
@@ -1506,9 +1513,10 @@ const ASKING = /\?|\b(?:what|whats|what's|how|hows|how's|show|tell|share|post|dr
  * nice try"), never answered. The names of coins it holds are NOT private
  * (the persona knows them), so "what are you holding" is not caught here.
  */
-export function isPrivateAsk(text: string): boolean {
+export function isPrivateAsk(text: string, opts: { research?: boolean } = {}): boolean {
   const t = norm(text);
   if (!t) return false;
+  if (opts.research === true && RESEARCH_PRIVATE_RES.some((re) => re.test(t))) return true;
   return PRIVATE_RES.some((re) => re.test(t)) || (MONEY_NOUN.test(t) && ASKING.test(t));
 }
 

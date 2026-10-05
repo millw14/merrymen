@@ -148,18 +148,30 @@ describe("discussion is distinct from an explicit action request", () => {
   }
 });
 
-describe("FOMO is a research platform, never a ticker", () => {
+describe("FOMO is a research platform, never a ticker — where Fomo research is on", () => {
+  const ON = { fomoWords: true };
   it("'top FOMO traders' does not seed a market read of a coin called FOMO", () => {
-    const plan = marketQuestionPlan("what are the top FOMO traders buying in this market?", [], undefined, symbols);
+    const plan = marketQuestionPlan("what are the top FOMO traders buying in this market?", [], undefined, symbols, ON);
     assert.ok(!plan?.coins.some((c) => c.toUpperCase() === "FOMO"), JSON.stringify(plan));
   });
   it("'is FOMO showing volume on OFY?' asks about OFY alone, with no clarification", () => {
-    assert.deepEqual(marketQuestionPlan("is FOMO showing volume on OFY?", [], undefined, symbols), { coins: ["OFY"], market: false, needsClarification: false });
+    assert.deepEqual(marketQuestionPlan("is FOMO showing volume on OFY?", [], undefined, symbols, ON), { coins: ["OFY"], market: false, needsClarification: false });
   });
   it("the platform's words are not coins either", () => {
     for (const q of ["any THESES on the chart?", "is FOMOAPI down? check the chart", "what are TRADERS doing on the chart"]) {
-      const plan = marketQuestionPlan(q, [], undefined, symbols);
+      const plan = marketQuestionPlan(q, [], undefined, symbols, ON);
       assert.ok(!plan?.coins.some((c) => ["THESES", "FOMOAPI", "TRADERS"].includes(c.toUpperCase())), `${q}: ${JSON.stringify(plan)}`);
     }
+  });
+  it("a $cashtag or a known symbol is always the coin, even one spelled like the platform", () => {
+    assert.deepEqual(marketQuestionPlan("chart for $FOMO?", [], undefined, symbols, ON)?.coins, ["FOMO"]);
+    assert.deepEqual(marketQuestionPlan("is the chart on FOMO bullish?", [], undefined, [...symbols, "FOMO"], ON)?.coins, ["FOMO"]);
+  });
+  it("where Fomo is off, the words read exactly as they did before it", () => {
+    for (const q of ["is FOMO showing volume on OFY?", "any THESES on the chart?"]) {
+      assert.deepEqual(marketQuestionPlan(q, [], undefined, symbols), marketQuestionPlan(q, [], undefined, symbols, { fomoWords: false }));
+    }
+    const plan = marketQuestionPlan("is FOMO showing volume on OFY?", [], undefined, symbols);
+    assert.ok(plan?.coins.some((c) => c.toUpperCase() === "FOMO"), "an upper-case word is a ticker, as before");
   });
 });

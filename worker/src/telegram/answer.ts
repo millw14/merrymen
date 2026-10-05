@@ -141,10 +141,12 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
     const literalMath=parseChatMath(i.question);
     if(literalMath) { const result=calculateChatMath(literalMath); return {text:result.ok?result.text:result.error,used:["calculate"],needsSignature:false,signReason:null}; }
     const knownSymbols = [...STOCK_TOKENS.map((t) => t.symbol), ...(i.tools.cfg.customTokens ?? []).map((t) => t.symbol)];
-    if (replyTradeNeedsClarification(i.question, i.replyContext, knownSymbols)) {
+    // Fomo's platform words are words, not tickers, only where Fomo is on (question-context.ts).
+    const reading = { fomoWords: fomoOn };
+    if (replyTradeNeedsClarification(i.question, i.replyContext, knownSymbols, reading)) {
       return { text: "Which trade do you mean? Reply to one trade or send its canonical trade ID so I can verify its records.", used, needsSignature, signReason };
     }
-    const priorTrade = referencedTradeId(i.question, i.history, i.replyContext, knownSymbols);
+    const priorTrade = referencedTradeId(i.question, i.history, i.replyContext, knownSymbols, reading);
     const tradeAnswer=priorTrade === null ? await answerTradeQuestion(i.question,i.tools) : null;
     if(tradeAnswer!==null)return {text:tradeAnswer,used:["list_trades"],needsSignature:false,signReason:null};
     // A model may choose to answer without calling anything. Seed concrete
@@ -165,7 +167,7 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
       used.push(name);
     };
     if (priorTrade !== null) await seed("trade_details", { trade_id: priorTrade });
-    const market = marketQuestionPlan(i.question, i.history, i.replyContext, knownSymbols);
+    const market = marketQuestionPlan(i.question, i.history, i.replyContext, knownSymbols, reading);
     if (market?.needsClarification) {
       return { text: market.coins.length ? "Which coin or pair do you mean? Send the names or contract addresses." : "Which coin do you mean? Send its name or contract address so I can check the current market.", used, needsSignature, signReason };
     } else if (market) {
