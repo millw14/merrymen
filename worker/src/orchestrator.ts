@@ -43,7 +43,7 @@ import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
 import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
-import { FLEET_HEARTBEAT_EVERY_MS, commitOf, heartbeatCounts, readLastShutdown, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
+import { commitOf, heartbeatClock, heartbeatCounts, readLastShutdown, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
@@ -5446,64 +5446,57 @@ async function fleetHealth(): Promise<void> {
 
 /** This process: when it started, and how the one before it ended (read at boot). */
 let heartbeatBoot: { startedAt: number; lastShutdown: LastShutdown | null } | null = null;
-let fleetHeartbeatInFlight = false;
-let fleetHeartbeatLastMs = 0;
-let fleetHeartbeatSchemaReady = false;
-let fleetHeartbeatLastFailure: string | null = null;
-
-function startFleetHeartbeat(): void {
-  if (fleetHeartbeatInFlight || stopping || !process.env.DATABASE_URL) return;
-  if (Date.now() - fleetHeartbeatLastMs < FLEET_HEARTBEAT_EVERY_MS) return;
-  fleetHeartbeatLastMs = Date.now();
-  fleetHeartbeatInFlight = true;
-  void writeOrchestratorHeartbeat().finally(() => {
-    fleetHeartbeatInFlight = false;
-  });
+let fleetHeartbeatDbForTest: Db | null = null;
+export function setFleetHeartbeatDbForTest(db: Db | null): void {
+  fleetHeartbeatDbForTest = db;
 }
 
-async function writeOrchestratorHeartbeat(): Promise<void> {
+/**
+ * The minute's clock and the in-flight latch (heartbeatClock, where a test
+ * drives them). The orchestrator is the one writer that creates the table.
+ */
+const fleetHeartbeat = heartbeatClock({ beat: writeOrchestratorHeartbeat, mayCreate: true, log: (line) => log(line) });
+
+function startFleetHeartbeat(): void {
+  if (stopping || (!process.env.DATABASE_URL && !fleetHeartbeatDbForTest)) return;
+  void fleetHeartbeat.tick();
+}
+
+/** One beat. Throws to the clock, which says so once; a fleet it cannot read is still a beat. */
+async function writeOrchestratorHeartbeat(create: boolean): Promise<boolean> {
   const boot = (heartbeatBoot ??= { startedAt: Math.floor(Date.now() / 1000), lastShutdown: null });
+  const shared = fleetHeartbeatDbForTest ?? await makePgDb(process.env.DATABASE_URL!);
+  const nowSec = Math.floor(Date.now() / 1000);
+  let counts: HeartbeatCounts | null = null;
   try {
-    const shared = await makePgDb(process.env.DATABASE_URL!);
-    const nowSec = Math.floor(Date.now() / 1000);
-    let counts: HeartbeatCounts | null = null;
-    try {
-      const snapshot = await collectFleetSnapshot(shared, { nowSec, spawnedAt: spawnedAtByAgent(), longWindow: true });
-      counts = heartbeatCounts(snapshot, { children: children.size, holders: holders.size });
-    } catch {
-      // A beat with no counts is still a beat: the process is alive, and
-      // whether it can read the fleet is a separate question the null answers.
-    }
-    await writeFleetHeartbeat(
-      shared,
-      {
-        role: "orchestrator",
-        commit: commitOf(process.env),
-        startedAt: boot.startedAt,
-        beatAt: nowSec,
-        halted: haltRequested(),
-        // No rollout scope in this build: every tenant the gates admit is
-        // admitted. The rollout (MERRYMEN_FLEET_ROLLOUT) reports its level
-        // counts here once it lands.
-        rollout: null,
-        counts,
-        lastShutdown: boot.lastShutdown,
-      },
-      { create: !fleetHeartbeatSchemaReady },
-    );
-    fleetHeartbeatSchemaReady = true;
-    if (fleetHeartbeatLastFailure !== null) {
-      fleetHeartbeatLastFailure = null;
-      log("fleet heartbeat: writing again");
-    }
-  } catch (e) {
-    // Said once per distinct failure, not once a minute.
-    const text = (e instanceof Error ? e.message : String(e)).slice(0, 200);
-    if (text !== fleetHeartbeatLastFailure) {
-      fleetHeartbeatLastFailure = text;
-      log(`fleet heartbeat: write failed — ${text}`);
-    }
+    const snapshot = await collectFleetSnapshot(shared, { nowSec, spawnedAt: spawnedAtByAgent(), longWindow: true });
+    counts = heartbeatCounts(snapshot, { children: children.size, holders: holders.size });
+  } catch {
+    // A beat with no counts is still a beat: the process is alive, and
+    // whether it can read the fleet is a separate question the null answers.
   }
+  return writeFleetHeartbeat(
+    shared,
+    {
+      role: "orchestrator",
+      commit: commitOf(process.env),
+      startedAt: boot.startedAt,
+      beatAt: nowSec,
+      halted: haltRequested(),
+      // No rollout scope in this build: every tenant the gates admit is
+      // admitted. The rollout (MERRYMEN_FLEET_ROLLOUT) reports its level
+      // counts here once it lands.
+      rollout: null,
+      counts,
+      lastShutdown: boot.lastShutdown,
+    },
+    { create },
+  );
+}
+
+/** One beat as the clock would write it, without waiting out the minute. */
+export function writeOrchestratorHeartbeatForTest(create = true): Promise<boolean> {
+  return writeOrchestratorHeartbeat(create);
 }
 
 /**
