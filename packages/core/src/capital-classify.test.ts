@@ -728,6 +728,26 @@ describe("in-kind movements", () => {
       assert.equal(v.kind, "asset-in");
     });
 
+    it("a Transfer log NAMING the owner, in a transaction the owner did not send, is not a deposit", () => {
+      // Address poisoning: a worthless contract logs Transfer(owner → account)
+      // in a stranger's transaction. The log's `from` is the contract's word;
+      // only the transaction's sender and the operation's sender are the chain's.
+      const FAKE = "0x0000000000000000000000000000000000000fa6";
+      for (const owner of [OWNER_KEY, TENANT_WALLET]) {
+        const v = classify(leg(FAKE, owner, ME, "1000000000000000000"), nobody(STRANGER));
+        assert.equal(v.kind, "ambiguous");
+        assert.equal(v.evidence.rule, "owner-named-only-by-log");
+        assert.equal(v.capitalCandidate, false);
+        assert.match(v.why, /did not send the transaction/);
+      }
+    });
+
+    it("the owner's wallet named by the log AND sending the transaction is still asset-in", () => {
+      const v = classify(leg(TSLA, OWNER_KEY, ME, "13000000000000000000"), nobody(OWNER_KEY));
+      assert.equal(v.kind, "asset-in");
+      assert.equal(v.evidence.rule, "owner-wallet");
+    });
+
     it("a stranger's token arriving unasked is ambiguous, not a deposit", () => {
       const v = classify(leg(PEPE, STRANGER, ME, "400000000000000000000"), nobody(BUNDLER));
       assert.equal(v.kind, "ambiguous");

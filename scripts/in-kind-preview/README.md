@@ -53,9 +53,9 @@ Shogun case) is still a swap.
 
 | Kind | Meaning |
 | --- | --- |
-| `asset-out`, `asset-in` | **Capital candidates.** An `asset-out` is the owner's root key sweeping with nothing coming back. An `asset-in` is the root key bringing an asset in, or the owner's own wallet (the owner key or the signed-in tenant wallet) sending it in or sending the transaction that delivered it. |
+| `asset-out`, `asset-in` | **Capital candidates.** An `asset-out` is the owner's root key sweeping with nothing coming back. An `asset-in` is the root key bringing an asset in, or the owner's own wallet (the owner key or the signed-in tenant wallet) sending the transaction, or the operation, that delivered it. A Transfer log that only names the owner as sender is not enough, because any token contract can write that log. |
 | `trade-leg` | A different asset crossed the book's edge the other way in the same operation. Native ETH sent by the execution counts as that other asset. |
-| `ambiguous` | The movement could not be decided, and the reason is given in words. Examples: a session key's movement with nothing paired, an unsolicited inbound transfer, an allowance spent without an operation, an unread signer, or root-key executions that were not decoded. A session key's movement is never a candidate. |
+| `ambiguous` | The movement could not be decided, and the reason is given in words. Examples: a session key's movement with nothing paired, an unsolicited inbound transfer, a Transfer log naming the owner in a transaction the owner did not send, an allowance spent without an operation, an unread signer, or root-key executions that were not decoded. A session key's movement is never a candidate. |
 | `reserve` | The energy reserve token. Excluded, because it sits outside the trading book. |
 | `custody` | Between the account and its own class or Trencher vault. Excluded. |
 | `internal`, `protocol` | Another scanned account, or chain infrastructure (an EntryPoint, Permit2, the operation's own paymaster). |

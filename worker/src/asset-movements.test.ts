@@ -520,6 +520,22 @@ describe("when this account did not act", () => {
     assert.equal(calls.filter((c) => c.method === "eth_getTransactionByHash").length, 0, "no op of ours, no calldata needed");
   });
 
+  it("a stranger's token logging Transfer(owner → account) is NOT a deposit — the log's sender is the contract's word", async () => {
+    // Address poisoning with an amount: the fake token's own code writes the
+    // owner's key as `from`, in a transaction the stranger sent.
+    const FAKE = "0x0000000000000000000000000000000000000fa6";
+    const { me } = await scan([
+      { hash: "0x9015", block: 705, from: STRANGER, to: FAKE, logs: [transfer(FAKE, OWNER_KEY, ME, 10n ** 18n)] },
+    ]);
+    assert.equal(me.movements.length, 1);
+    const m = me.movements[0]!;
+    assert.deepEqual(m.provenance, { source: "none", actors: [STRANGER] });
+    assert.equal(m.classification.kind, "ambiguous");
+    assert.equal(m.classification.evidence.rule, "owner-named-only-by-log");
+    assert.equal(m.classification.capitalCandidate, false);
+    assert.equal(me.counts["asset-in"], 0);
+  });
+
   it("another hosted account's op sending us a token is internal", async () => {
     const { me } = await scan(
       [

@@ -449,9 +449,11 @@ export function totalCapital(
  *                             sweep, so the only op that can be a candidate.
  *   no op from this account   somebody else acted. An inbound movement is a
  *                             candidate only when the owner's own wallet sent
- *                             it or sent the transaction; anything else
- *                             arriving unasked (airdrops, dust, poisoning) is
- *                             ambiguous rather than a deposit.
+ *                             the transaction or the operation that delivered
+ *                             it — never because a Transfer log names the
+ *                             owner, which any token contract can write.
+ *                             Anything else arriving unasked (airdrops, dust,
+ *                             poisoning) is ambiguous rather than a deposit.
  *
  * A CANDIDATE IS NOT CAPITAL. Nothing in this section books, totals or moves a
  * peak. It answers "which movements must a reviewer look at as possible owner
@@ -548,7 +550,8 @@ export interface AssetClassifyInput {
   usdgToken: string;
   /**
    * Wallets that are the owner's: the grant's owner key and the signed-in
-   * tenant wallet. Only consulted when no operation of this account acted.
+   * tenant wallet. Only consulted when no operation of this account acted, and
+   * matched against the provenance's actors — never against a log's `from`.
    */
   ownerAddresses?: readonly string[];
   /** Addresses this system controls — other hosted smart accounts. */
@@ -590,6 +593,7 @@ export interface AssetClassificationEvidence {
     | "venue-without-pair"
     | "owner-operation"
     | "owner-wallet"
+    | "owner-named-only-by-log"
     | "unsolicited-inbound"
     | "moved-without-account-operation";
 }
@@ -798,13 +802,28 @@ export function classifyAssetMovement(input: AssetClassifyInput): AssetClassific
   // Checked before the venue list on purpose: an owner who swaps on a DEX with
   // the account as recipient is depositing in kind, and the pool being the
   // Transfer's sender is how that looks.
-  if (has(input.ownerAddresses, leg.from) || provenance.actors.some((a) => has(input.ownerAddresses, a))) {
+  //
+  // THE ACTORS, NEVER THE LOG. `leg.from` is a field of a Transfer log, and the
+  // token contract that emitted the log chose it: a worthless contract can log
+  // Transfer(owner → account) in a transaction a stranger sent, and address
+  // poisoning does exactly that with wallets that are public on chain. Who
+  // sent the transaction, and whose operation produced the log, the chain
+  // authenticates — so only those open this door.
+  if (provenance.actors.some((a) => has(input.ownerAddresses, a))) {
     return {
       kind: "asset-in",
-      why: `the owner's own wallet sent ${leg.token} to the account, or sent the transaction that delivered it — a deposit, in kind`,
+      why: `the owner's own wallet sent the transaction, or the operation, that delivered ${leg.token} to the account — a deposit, in kind`,
       capitalCandidate: true,
       evidence: evidence("owner-wallet"),
     };
+  }
+  if (has(input.ownerAddresses, leg.from)) {
+    return notCapital(
+      "ambiguous",
+      "owner-named-only-by-log",
+      `the Transfer log names the owner's wallet ${leg.from} as sender, but the owner did not send the transaction or ` +
+        `the operation that produced it — a token contract writes its own logs, so this is not evidence the owner sent anything`,
+    );
   }
   if (has(input.protocolAddresses, counterparty)) {
     return notCapital(
