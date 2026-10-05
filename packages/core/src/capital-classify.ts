@@ -646,8 +646,9 @@ export interface AssetClassification {
  * meaningless first, then exclusions that hold whoever signed, then the one
  * test that does not depend on knowing anybody (a pair), and only then the
  * signer. A candidate is reachable through exactly two doors — an owner root
- * op, or the owner's own wallet sending — and every other path ends somewhere
- * that is not capital.
+ * op, or the owner's own wallet sending the transaction or operation (never a
+ * log that merely names it) — and every other path ends somewhere that is not
+ * capital.
  */
 export function classifyAssetMovement(input: AssetClassifyInput): AssetClassification {
   const { account, leg, provenance } = input;

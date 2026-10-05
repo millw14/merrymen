@@ -172,6 +172,10 @@ node --import tsx --test scripts/in-kind-preview/*.test.*
 node --import tsx --test packages/core/src/capital-classify.test.ts worker/src/asset-movements.test.ts
 ```
 
+CI runs the first command, and a strict typecheck of `value.ts`, through
+`cli/in-kind-preview.test.mjs`. The second command is already inside the
+`npm test` globs.
+
 The synthetic tests use no production connection. A fake Postgres client
 records every statement, and a fake node honours log filters and answers
 Chainlink reads.
