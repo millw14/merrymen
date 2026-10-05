@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { XPosting } from "../XPosting";
+import { TelegramCreateBot } from "../TelegramCreateBot";
+import { requestJson } from "../request-json";
 import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
@@ -103,6 +105,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [symbols, setSymbols] = useState<string[] | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const saveInFlight = useRef(false);
+  const telegramCreateActive = useRef(false);
+  const [telegramCreating, setTelegramCreating] = useState(false);
+  const settingsOwner = useRef(view?.owner);
+  settingsOwner.current = view?.owner;
   const [trencherPrepared, setTrencherPrepared] = useState(false);
   const [settingsVerified, setSettingsVerified] = useState(false);
   // The "saved" note clears itself after a few seconds; the timer is dropped
@@ -162,6 +168,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
+  const [telegramLaunch, setTelegramLaunch] = useState<{ owner: string; botUsername: string } | null>(null);
+  const [telegramLaunchNote, setTelegramLaunchNote] = useState<{ owner: string; text: string } | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
   const [pcEnabled, setPcEnabled] = useState<boolean | null>(null);
   const [caps, setCaps] = useState<string[] | null>(null);
@@ -234,6 +242,38 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       .then((r) => (r.ok ? (r.json() as Promise<TelegramStatus>) : null))
       .then((s) => s && setTg(s))
       .catch(() => {});
+
+  useEffect(() => {
+    if (!telegramLaunch) return;
+    const { owner, botUsername } = telegramLaunch;
+    const scopeMatches = () => settingsOwner.current?.toLowerCase() === owner;
+    if (!scopeMatches()) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    const ready = (status: TelegramStatus) => !status.botElsewhere && status.botUsername === botUsername && /^[A-Za-z0-9_-]{1,64}$/.test(status.linkCode ?? "");
+    if (tg && ready(tg)) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    if (tg?.botElsewhere) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    const ctl = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (text: string | null) => {
+      if (!scopeMatches() || ctl.signal.aborted) return;
+      ctl.abort(); clearTimeout(timer);
+      setTelegramLaunch(null);
+      setTelegramLaunchNote(text ? { owner, text } : null);
+    };
+    setTelegramLaunchNote({ owner, text: "Your bot is connected. Waiting for its Telegram launch link…" });
+    const expiry = setTimeout(() => stop("Your bot is connected. Its Telegram launch link isn't ready yet. Refresh Settings to check again."), 60_000);
+    const poll = async () => {
+      try {
+        const status = await requestJson<TelegramStatus>(`/api/telegram?owner=${encodeURIComponent(owner)}`, { signal: ctl.signal });
+        if (ctl.signal.aborted || !scopeMatches()) return;
+        if (status.botUsername && status.botUsername !== botUsername) { stop("Your Telegram connection changed. Reload Settings before opening the bot."); return; }
+        setTg(status.botUsername === botUsername && !status.botElsewhere ? status : { ...status, linkCode: null });
+        if (status.botElsewhere || ready(status)) { stop(null); return; }
+        timer = setTimeout(poll, 3000);
+      } catch { stop("Couldn't check the Telegram launch link. Refresh Settings to check again."); }
+    };
+    timer = setTimeout(poll, 3000);
+    return () => { ctl.abort(); clearTimeout(timer); clearTimeout(expiry); };
+  }, [telegramLaunch, view?.owner]);
 
   useEffect(() => {
     try {
@@ -448,7 +488,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
   /** `moveBot`: the owner answered "Move it here" to a bot another agent holds. */
   async function save(opts: { moveBot?: boolean } = {}) {
-    if (saveInFlight.current) return;
+    if (saveInFlight.current || telegramCreateActive.current) return;
     if (statusTimer.current) clearTimeout(statusTimer.current);
     setSettingsVerified(false);
     setStatus("saving…");
@@ -895,7 +935,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
               You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
             </p>}
-            <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>Save settings</button>
+            <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…" || telegramCreating}>Save settings</button>
+            {telegramCreating ? <p className="mm-hint" role="status">Finish or cancel Telegram setup before saving other settings.</p> : null}
             <p className="mm-hint">Saves all changes on this page. Preparing settings does not turn on real-money trading or change your signed limits.</p>
             {status === "saving…" && <p role="status">Saving settings…</p>}
             {settingsVerified && !hasUnsavedChanges && <p role="status">Settings saved. <Link href="/grant#resign">Review trading permission</Link> to check Autonomous Trencher access.</p>}
@@ -1545,6 +1586,38 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
           </details>
           <details className="settings-group" id="telegram"><summary>Telegram</summary>
+          {hosted === true ? <TelegramCreateBot
+            owner={view.owner}
+            hasBot={view.telegramBotToken.set}
+            disabled={status === "saving…"}
+            onActiveChange={active => { telegramCreateActive.current = active; setTelegramCreating(active); }}
+            onConnected={async (owner, signal, botUsername) => {
+              const sameOwner = () => settingsOwner.current?.toLowerCase() === owner;
+              if (!sameOwner() || signal.aborted) throw new Error("Settings owner changed");
+              const [settingsResponse, telegramResponse] = await Promise.all([
+                fetch("/api/settings", { cache: "no-store", signal }),
+                fetch(`/api/telegram?owner=${encodeURIComponent(owner)}`, { cache: "no-store", signal }),
+              ]);
+              if (!settingsResponse.ok || !telegramResponse.ok) throw new Error("Settings refresh unavailable");
+              const [freshSettings, freshTelegram] = await Promise.all([
+                settingsResponse.json() as Promise<SettingsView>,
+                telegramResponse.json() as Promise<TelegramStatus>,
+              ]);
+              if (signal.aborted || !sameOwner() || freshSettings.owner?.toLowerCase() !== owner) throw new Error("Settings owner changed");
+              if (!freshSettings.telegramBotToken.set || freshSettings.values.telegramEnabled !== true) throw new Error("Telegram settings not confirmed");
+              if (freshTelegram.botUsername && freshTelegram.botUsername !== botUsername) throw new Error("Telegram bot changed");
+              setView(freshSettings);
+              setTg(freshTelegram.botUsername === botUsername && !freshTelegram.botElsewhere ? freshTelegram : { ...freshTelegram, linkCode: null });
+              setTelegramLaunch({ owner, botUsername });
+              // The managed connection is already saved. Keep unrelated edits,
+              // but never let an earlier manual bot draft overwrite it later.
+              setDraft(({ telegramBotToken: _oldToken, ...rest }) => rest);
+              setTgEnabled(null); setTgTest(null);
+              setBotClaimed(null); setBotMoved(false);
+              onSaved?.();
+            }}
+          /> : null}
+          {telegramLaunchNote && telegramLaunchNote.owner === view.owner?.toLowerCase() ? <p className="mm-hint" role="status">{telegramLaunchNote.text}</p> : null}
           {/* THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT.
 
               These were in two different collapsed drawers: this sentence
@@ -1557,14 +1630,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               A missing code is a WAIT, not an absence: the agent mints one on
               its next pass after a token is saved, so the copy says that
               rather than claiming there is no code. */}
-          <p className="mm-hint" style={{ marginTop: 0 }}>
-            Create a bot with @BotFather and add its token below.
-          </p>
           <TelegramListeningNote row={telegramRow(tg)} />
           {tg?.linkCode ? (
             <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
-              {tg.botUsername ? (
-                <a href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noreferrer">Open Telegram →</a>
+              {tg.botUsername && /^[A-Za-z0-9_]{2,29}bot$/i.test(tg.botUsername) && /^[A-Za-z0-9_-]{1,64}$/.test(tg.linkCode) ? (
+                <a className="mm-btn primary" href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noopener noreferrer">Open my bot →</a>
               ) : null}
               <br />
               {/* A BEARER CREDENTIAL. `/link <code>` is accepted from ANY chat,
@@ -1584,9 +1654,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 ? t("settings.tg.pickingUp")
                 : view.telegramBotToken.set
                   ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
-                  : "Your link code appears here once a token is saved."}
+                  : "Your link code appears here once a bot is connected."}
             </p>
           )}
+          <details className="settings-group" open={view.telegramBotToken.set}>
+          <summary>Connect an existing bot</summary>
+          <p className="mm-hint">Already have a bot? Get its token from <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> and add it here.</p>
           <div className="mm-grid">
             <Field
               label={t("settings.label.botToken")}
@@ -1594,18 +1667,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             >
               <input
                 type="password"
+                disabled={telegramCreating}
                 placeholder={secretPlaceholder(view.telegramBotToken)}
                 value={draft.telegramBotToken ?? ""}
                 onChange={set("telegramBotToken")}
               />
               {view.telegramBotToken.set && (
-                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
+                <button type="button" className="mm-btn danger sm" disabled={telegramCreating} onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
                   clear
                 </button>
               )}
             </Field>
             <Field label={t("settings.label.connection")}>
-              <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
+              <button type="button" className="mm-tag" disabled={telegramCreating} style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
                 test connection
               </button>
               {/* AN UNREAD BRIDGE IS NOT A MISSING TOKEN.
@@ -1619,6 +1693,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   it and the home strip shares the same words. */}
               <span className="mm-unit">{tgTest ?? telegramLabel(telegramRow(tg))}</span>
             </Field>
+          </div>
+          </details>
+          <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">{t("settings.label.enableTelegram")}</span>
               <span className="mm-input">
@@ -2204,14 +2281,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
           </details>
 
-          <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
+          <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…" || telegramCreating}>
             {hasUnsavedChanges && status === "Changes saved" ? "Save changes" : status ?? "Save changes"}
           </button>
           {botClaimed && (
             <div className="mm-note" role="alert">
               <p style={{ marginTop: 0 }}>{botClaimed}</p>
               <p className="mm-hint">Nothing has been saved yet.</p>
-              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
+              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…" || telegramCreating}>
                 Move it here
               </button>{" "}
               {/* KEEPING IT THERE TAKES THE TOKEN OUT OF THE FORM. Left in the
