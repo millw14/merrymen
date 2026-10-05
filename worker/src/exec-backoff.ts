@@ -55,12 +55,26 @@ import { suppressionKey, suppressionLegs } from "./revert";
 import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 
 /**
- * Minutes held after the 1st, 2nd, 3rd… refusal of one key in an arm; the last
- * step repeats. Short first, because the first refusal may be a bad moment and
+ * Minutes held after the 1st, 2nd, 3rd… refusal of one key in a row
+ * (STRIKE_MEMORY_MS); the last step repeats. Short first, because the first refusal may be a bad moment and
  * not a bad trade; capped at an hour, because a hold is a guess about the
  * future and a long guess is the suppression this is not.
  */
 export const BACKOFF_SCHEDULE_MIN: readonly number[] = Object.freeze([5, 15, 30, 60]);
+
+/**
+ * HOW LONG A KEY'S STRIKES OUTLIVE ITS HOLD: the schedule's longest step.
+ *
+ * Escalation is for a refusal that REPEATS — one that comes back as soon as
+ * its hold lets the key be tried again. Hosted arms run for days, and four
+ * unrelated blips on one pair a day apart, with fills between them, are not a
+ * repeat; counting them all since the arm would hold a healthy pair for an
+ * hour after its fourth. So a refusal arriving this long after the previous
+ * hold ended starts again at the first strike — and an entry that old carries
+ * nothing a later refusal would read, so it is dropped (ExecBackoff.note),
+ * which also bounds the map on a route proposing a fresh pair every tick.
+ */
+export const STRIKE_MEMORY_MS = Math.max(...BACKOFF_SCHEDULE_MIN) * 60_000;
 
 /**
  * THE `enable-too-wide` HOLD, AND THE KEY INSTALL'S RETRY, ARE ONE NUMBER.
@@ -199,7 +213,11 @@ export interface Hold {
   /** The refusal that started it — the rule a held intent's row carries. */
   rule: string;
   untilMs: number;
-  /** Refusals of this key this arm, counting this one — all but those that may be transient (NOT_ESCALATED). */
+  /**
+   * Refusals of this key in a row, counting this one: each within
+   * STRIKE_MEMORY_MS of the previous hold's end, and none that may be
+   * transient (NOT_ESCALATED).
+   */
   strikes: number;
 }
 
@@ -223,11 +241,13 @@ export class ExecBackoff {
    * hold and returns it, or null when nothing is held (an exit, a kind that is
    * never held, or a rule NOT_BACKED_OFF).
    *
-   * A REFUSAL AFTER A HOLD RAN OUT COUNTS AS THE NEXT STRIKE: the entry is kept
-   * past its expiry for exactly that, until the arm clears it.
+   * A REFUSAL SOON AFTER A HOLD RAN OUT COUNTS AS THE NEXT STRIKE: the entry
+   * is kept past its expiry for exactly that — for STRIKE_MEMORY_MS, and no
+   * longer. A refusal after that is a new story and starts at the first.
    */
   note(intent: TradeIntent, limits: BackoffLimits, rule: string, nowMs: number): Hold | null {
     if (!backsOff(intent, limits)) return null;
+    this.forget(nowMs);
     const { pair, route } = keysOf(intent, limits);
     const key = rule === "gas-absurd" && route !== null ? route : pair;
     const escalates = !NOT_ESCALATED.has(rule);
@@ -239,9 +259,20 @@ export class ExecBackoff {
     this.noted.set(intent, hold);
     this.log(
       `[backoff] holding ${key} for ${Math.round(ms / 60_000)}m after ${rule} ` +
-        `(${escalates ? `refusal ${strikes} this arm` : "may be transient, not escalated"})`,
+        `(${escalates ? `refusal ${strikes} in a row` : "may be transient, not escalated"})`,
     );
     return hold;
+  }
+
+  /**
+   * Drop every entry whose hold ended at least STRIKE_MEMORY_MS ago: it holds
+   * nothing, and its strikes would not be read. Silent — nothing that was
+   * holding anything changed.
+   */
+  private forget(nowMs: number): void {
+    for (const [key, h] of this.holds) {
+      if (nowMs - h.untilMs >= STRIKE_MEMORY_MS) this.holds.delete(key);
+    }
   }
 
   /**
