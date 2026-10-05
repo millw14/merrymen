@@ -863,6 +863,16 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // gas-limits.ts `checkPrefund`: the fee the network holds up front.
   "prefund-short": "the account did not hold enough to cover the network fee up front",
   "prefund-unverified": "the up-front network fee could not be checked against the account's balance",
+  // ── THE WORKER'S OWN ADMISSION, NOT THE WALL ────────────────────────────
+  //
+  // worker-admission.ts, at the top of the intent queue: a tenant being
+  // brought back after a hold one level at a time, or a worker on its way out
+  // for a restart. Neither is the owner's signature or the market — it is the
+  // service holding the agent back, and the sentence says so, so nobody goes
+  // looking through their permissions for it. No remedy: there is nothing for
+  // the owner to change.
+  "rollout-hold": "trading is on hold for this agent while the service brings agents back",
+  draining: "the agent was restarting and took no new trades",
 });
 
 /**
