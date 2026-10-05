@@ -17,6 +17,10 @@
  *     the very PID the script was started as.
  *   - Unset MERRYMEN_START runs web, as it always did. SET BUT EMPTY, or any
  *     other value, is refused with 64 and runs nothing at all.
+ *   - Every allowlisted role passes the deploy guard after its [start] line
+ *     and before its exec, and a guard refusal ends the script with the
+ *     guard's own status, having exec'd nothing (worker/src/deploy-guard.ts;
+ *     deploy-guard.test.ts drives the real guard through the real script).
  *   - A real orchestrator, started through the real script, prints
  *     "[orchestrator] stopping" on SIGTERM and exits 0 — not killed by it.
  *   - The script is LF, and .gitattributes keeps it that way.
@@ -167,10 +171,18 @@ describe("the script's bytes", () => {
   });
 });
 
+/** The deploy guard's argv, as the script must run it for a role. */
+const GUARD_ARGS = (role: string) => `--import tsx worker/src/deploy-guard.ts --phase=start --role=${role}`;
+
 /**
  * A copy of the script in a scratch "app root" whose `node` and `next` are
  * stubs on PATH. The stubs print their PID, cwd and argv, so a run says which
  * program the script became, from where, with what — without starting either.
+ *
+ * The `node` stub answers the deploy guard's invocation on its own `guard`
+ * line, and exits with STUB_GUARD_EXIT (default 0): the guard runs and RETURNS
+ * before the exec, so it is a call the script makes, not the program it
+ * becomes, and it stays out of the ran/arg lines compared against npm below.
  */
 function sandbox() {
   const app = tempDir("merrymen-container-start-");
@@ -180,7 +192,10 @@ function sandbox() {
   copyFileSync(join(ROOT, SCRIPT), join(app, SCRIPT));
   for (const name of ["node", "next"]) {
     const stub = join(app, "stub-bin", name);
-    writeFileSync(stub, `#!/bin/sh\necho "pid=$$"\necho "ran=${name} cwd=$(pwd -P)"\nfor a in "$@"; do echo "arg=$a"; done\n`);
+    const guard = name === "node"
+      ? `if [ "$3" = worker/src/deploy-guard.ts ]; then echo "guard cwd=$(pwd -P) args=$*"; exit "\${STUB_GUARD_EXIT:-0}"; fi\n`
+      : "";
+    writeFileSync(stub, `#!/bin/sh\n${guard}echo "pid=$$"\necho "ran=${name} cwd=$(pwd -P)"\nfor a in "$@"; do echo "arg=$a"; done\n`);
     chmodSync(stub, 0o755);
   }
   // Deliberately NOT process.env: nothing from the developer's shell (a
@@ -260,6 +275,19 @@ describe("the script runs package.json's start scripts, and only those", { skip:
     assert.equal(execs(code), allowed.length, `${SCRIPT} execs a program outside its allowlisted roles`);
   });
 
+  it("every allowlisted branch passes the deploy guard before it execs, and the refusal never runs it", () => {
+    // Read from the code as well as run below: a branch added later without
+    // the guard would otherwise only show up as a missing line in one case.
+    const branches = roleBranches(scriptCode());
+    for (const b of branches.slice(0, -1)) {
+      const lines = b.body.split("\n").map((l) => l.trim());
+      const guard = lines.indexOf("guard"), exec = lines.findIndex((l) => /^exec\s/.test(l));
+      assert.ok(guard >= 0 && guard < exec, `${b.labels[0]} must run \`guard\` before its exec`);
+      assert.equal(lines.filter((l) => l === "guard").length, 1, `${b.labels[0]} runs the guard more than once`);
+    }
+    assert.doesNotMatch(branches.at(-1)!.body, /^\s*guard\s*$/m, "the refusal must not run the guard: nothing runs for a refused role");
+  });
+
   for (const shell of SHELLS) {
     for (const role of startRoles) {
       for (const port of [undefined, "4321"]) {
@@ -277,6 +305,28 @@ describe("the script runs package.json's start scripts, and only those", { skip:
           assert.match(r.stdout, new RegExp(`^\\[start\\] role=${role} commit=unknown$`, "m"));
         });
       }
+    }
+
+    for (const role of startRoles) {
+      it(`${shell}: ${role} passes the deploy guard from the app root, after its [start] line and before its exec`, () => {
+        const box = sandbox();
+        const r = box.run(shell, { MERRYMEN_START: role });
+        assert.equal(r.status, 0, r.stderr);
+        const lines = r.stdout.split("\n");
+        const started = lines.indexOf(`[start] role=${role} commit=unknown`);
+        const guards = lines.filter((l) => l.startsWith("guard "));
+        const ran = lines.findIndex((l) => l.startsWith("ran="));
+        assert.deepEqual(guards, [`guard cwd=${box.app} args=${GUARD_ARGS(role)}`]);
+        const guard = lines.indexOf(guards[0]!);
+        assert.ok(started >= 0 && started < guard && guard < ran, `[start], guard, exec out of order:\n${r.stdout}`);
+      });
+
+      it(`${shell}: ${role} stops with the guard's status when the guard refuses, having exec'd nothing`, () => {
+        const r = sandbox().run(shell, { MERRYMEN_START: role, STUB_GUARD_EXIT: "78" });
+        assert.equal(r.status, 78, `${r.stdout}${r.stderr}`);
+        assert.doesNotMatch(r.stdout, /^ran=/m, `${role} started after a guard refusal:\n${r.stdout}`);
+        assert.match(r.stdout, /^guard /m);
+      });
     }
 
     it(`${shell}: MERRYMEN_START unset runs the web role`, () => {

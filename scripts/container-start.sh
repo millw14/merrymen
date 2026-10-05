@@ -67,18 +67,35 @@ started() {
   echo "[start] role=$role commit=$commit"
 }
 
+# THE DEPLOY GUARD, in every allowlisted branch, after the [start] line and
+# before the exec (worker/src/deploy-guard.ts). On Railway it holds the fleet
+# roles to their own service, a persistent home and this image, and refuses
+# the orchestrator while a one-shot repair variable is still set mid-rollout;
+# the web role gets the allowlist check only; off Railway it says it skipped.
+#
+# It is NOT exec'd: it runs, answers and exits, and only then does the role
+# exec in this shell's place — so the role is still tini's one child.
+# A refusal ends the script with the guard's own status (78, EX_CONFIG) before
+# anything has started; `|| exit` says so here rather than leaving it to set -e.
+guard() {
+  node --import tsx worker/src/deploy-guard.ts --phase=start "--role=$role" || exit $?
+}
+
 case $role in
   start:web)
     started
+    guard
     cd web
     exec next start -H 0.0.0.0 -p "${PORT:-3100}"
     ;;
   start:orchestrator)
     started
+    guard
     exec node --import tsx worker/src/orchestrator.ts
     ;;
   start:recovery-replies)
     started
+    guard
     exec node --import tsx worker/src/recovery-replies.ts
     ;;
   *)

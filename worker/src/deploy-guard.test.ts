@@ -371,4 +371,24 @@ describe("the real guard, as the container runs it", { skip: !posix }, () => {
     const usage = cli([], base(dir));
     assert.equal(usage.status, EX_USAGE);
   });
+
+  it("a refused orchestrator never starts: the script stops with 78 after its [start] line, and the home stays untouched", () => {
+    const dir = tempDir("merrymen-deploy-guard-start-");
+    const home = join(dir, "home");
+    mkdirSync(home, { mode: 0o700 });
+    const secret = `apply-${"7".repeat(40)}`;
+    const r = spawnSync("/bin/sh", [join(ROOT, "scripts/container-start.sh")], {
+      cwd: dir,
+      env: { ...base(dir), ...FLEET, RAILWAY_SERVICE_ID: OTHER_SERVICE, MERRYMEN_START: "start:orchestrator", MERRYMEN_HOSTED: "1",
+        MERRYMEN_HOME: home, RAILWAY_GIT_COMMIT_SHA: SHA, MERRYMEN_REPAIR_HWM: secret },
+      encoding: "utf8", timeout: 60_000,
+    });
+    assert.equal(r.status, EX_CONFIG, `${r.stdout}${r.stderr}`);
+    assert.equal(r.stdout, `[start] role=start:orchestrator commit=${SHA}\n[deploy-guard] census one-shot: MERRYMEN_REPAIR_HWM\n`);
+    assert.match(r.stderr, /^\[deploy-guard\] refused: this is not the fleet's service/m);
+    assert.match(r.stderr, /^\[deploy-guard\] refused: one-shot operator variables are set/m);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /\[orchestrator\]/, "the orchestrator ran after a refusal");
+    assert.ok(!`${r.stdout}${r.stderr}`.includes(secret), "a one-shot value reached the log");
+    assert.deepEqual(readdirSync(home), []);
+  });
 });
