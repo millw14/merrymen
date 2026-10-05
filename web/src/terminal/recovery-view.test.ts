@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -17,6 +18,7 @@ import { Agent } from "./screens/Agent";
 import { You } from "./screens/You";
 import { AccountEntry, FundingPanel } from "./HostedControls";
 import { SwapsTable } from "./SwapsTable";
+import { AgentStrip } from "./AgentStrip";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 const noop = () => {};
@@ -281,6 +283,39 @@ describe("where the money is during recovery", () => {
       portfolio: "ok", onRefresh: noop, onSignedIn: noop }));
     assert.match(bare.body.textContent!, /Trading paused for recovery/);
     assert.doesNotMatch(bare.body.textContent!, /smart account|Cash on chain/);
+  });
+
+  it("the profile and the home strip say where the money is and keep Withdraw", () => {
+    const funds = recoveryFunds(status());
+    const profile = doc(React.createElement(You, { mine: { ...mine, recovery: held, recoveryFunds: funds }, history: [40, 42],
+      stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
+    const card = profile.querySelector(".agent-recovery")!;
+    assert.match(card.textContent!, /Your funds are in your smart account 0x12aB…cDEF and the vaults it controls\..*Cash on chain: \$12\.34\./);
+    assert.equal(card.querySelector("a")!.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
+    assert.doesNotMatch(card.textContent!, NEVER);
+    assert.ok([...profile.querySelectorAll("button")].some(b => b.textContent === "Withdraw"), "the Withdraw button stays");
+    const strip = doc(React.createElement(AgentStrip, { hasAgent: true, recovery: held, funds }));
+    assert.match(strip.querySelector(".agent-recovery")!.textContent!, /Your funds are in your smart account 0x12aB…cDEF.*Cash on chain: \$12\.34\./);
+    assert.match(strip.body.textContent!, /Trading paused/);
+    assert.doesNotMatch(strip.querySelector(".agent-recovery")!.textContent!, NEVER);
+    // No funds handed down: the strip's notice is the plain one, and no hold means no notice at all.
+    const plain = doc(React.createElement(AgentStrip, { hasAgent: true, recovery: held }));
+    assert.doesNotMatch(plain.body.textContent!, /smart account|Cash on chain/);
+    const none = doc(React.createElement(AgentStrip, { hasAgent: true, recovery: null, funds }));
+    assert.equal(none.querySelector(".agent-recovery"), null);
+  });
+
+  it("App derives the funds from the account that carried the hold, and only while it holds", () => {
+    // App renders under next/navigation and cannot be mounted here (see
+    // account-read.ts), so the one line that pairs the two is pinned in source.
+    const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    assert.match(app, /const recovery = pausedRecovery\(account\?\.status\.recovery\);/);
+    assert.match(app, /\.\.\.\(recovery \? \{ chg24: null, recoveryFunds: recoveryFunds\(account\.status\) \} : \{\}\)/);
+    assert.equal(app.match(/recoveryFunds\(/g)?.length, 1, "computed once, never re-derived");
+    assert.match(readFileSync(new URL("./screens/Home.tsx", import.meta.url), "utf8"),
+      /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\}\/>/);
+    assert.match(readFileSync(new URL("./Desktop.tsx", import.meta.url), "utf8"),
+      /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\}\/>/);
   });
 
   it("reads the hold without changing it, and keeps the hold's own words", () => {
