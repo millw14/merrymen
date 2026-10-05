@@ -603,3 +603,11 @@ it("UNDER FLEET_HALT THE DRAIN COPIES NOTHING: no ledger batch, no memory row, a
     await getGrantStore().remove(tenant);
   }
 });
+
+it("A MAIN-LOOP PASS UNDER WAY WHEN THE SIGNAL COMES STARTS NOTHING AFTER ITS MIRROR: no history repair, no owner message, no background job", () => {
+  // Read from the source: runOrchestrator's loop is not drivable from a test
+  // without a database. The mirror returns at once once `stopping` is set, so
+  // without this every step after it would start during the drain.
+  const source = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  assert.match(source, /\n {6}await mirrorLedgers\(\);\n(?: {6}\/\/.*\n)* {6}if \(stopping\) return;\n {6}startHistoryRepair\(\);\n/);
+});
