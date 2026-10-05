@@ -12,6 +12,7 @@ let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
 const originalCreate = URL.createObjectURL;
 const originalRevoke = URL.revokeObjectURL;
+const originalClipboardItem = Object.getOwnPropertyDescriptor(globalThis, "ClipboardItem");
 let calls: { url: string; init?: RequestInit }[];
 let created: Blob[];
 let revoked: string[];
@@ -45,6 +46,8 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
   URL.createObjectURL = originalCreate;
   URL.revokeObjectURL = originalRevoke;
+  if (originalClipboardItem) Object.defineProperty(globalThis, "ClipboardItem", originalClipboardItem);
+  else Reflect.deleteProperty(globalThis, "ClipboardItem");
 });
 
 const png = () => new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } });
@@ -74,6 +77,19 @@ async function showOwnerCard() {
 async function loadImage() {
   assert.ok(image(), "an image preview is available");
   await act(async () => { image()!.dispatchEvent(new ui.dom.window.Event("load")); });
+}
+const notice = () => dialog()?.querySelector('.pnl-card-note[role="status"]')?.textContent ?? "";
+/** jsdom has neither a share sheet nor an image clipboard, so each test grants
+ *  only the browser capabilities it is about, on that test's own navigator. */
+function grant(name: "share" | "canShare" | "clipboard", value: unknown) {
+  Object.defineProperty(ui.dom.window.navigator, name, { configurable: true, value });
+}
+/** Records what the dialog asked the clipboard to hold. */
+class FakeClipboardItem {
+  constructor(readonly items: Record<string, Blob>) {}
+}
+function grantClipboardItem(item: unknown = FakeClipboardItem) {
+  Object.defineProperty(globalThis, "ClipboardItem", { configurable: true, writable: true, value: item });
 }
 
 it("public tables never offer export, even when their owner published the dollars", async () => {
@@ -135,6 +151,102 @@ it("fetches the canonical ledger ID, then enables a private PNG download and pri
   await press(buttons("Print")[0]);
   assert.equal(printed, 1);
   assert.equal(ui.dom.window.localStorage.length, 0, "images are not persisted beside wallet data");
+});
+
+it("a browser without a file share sheet or image clipboard keeps exactly Download and Print", async () => {
+  const asked: ShareData[] = [];
+  grant("share", async () => {});
+  grant("canShare", (data: ShareData) => { asked.push(data); return false; });
+  await showOwnerCard();
+  await loadImage();
+  assert.equal(asked.at(-1)?.files?.[0]?.type, "image/png", "support is checked for this PNG, not for a link");
+  assert.equal(buttons("Share").length, 0, "a browser that shares only links gets no dead button");
+  assert.equal(buttons("Copy image").length, 0, "no ClipboardItem, no copy action");
+  assert.deepEqual([...dialog()!.querySelectorAll(".pnl-card-actions > *")].map((node) => node.textContent),
+    ["Download PNG", "Print"]);
+  assert.equal(download()?.getAttribute("href"), "blob:private-pnl-1");
+  assert.equal(download()?.download, "CASHCAT-731-pnl.png");
+  await press(buttons("Close")[0]);
+  grant("canShare", () => { throw new TypeError("files are not supported"); });
+  await showOwnerCard();
+  await loadImage();
+  assert.equal(buttons("Share").length, 0, "a feature check that throws is treated as unsupported");
+});
+
+it("Share hands the loaded PNG to the system share sheet, and dismissing the sheet is not an error", async () => {
+  const shared: ShareData[] = [];
+  let outcome = async () => {};
+  grant("canShare", (data: ShareData) => data.files?.length === 1 && data.files[0]!.type === "image/png");
+  grant("share", (data: ShareData) => { shared.push(data); return outcome(); });
+  await showOwnerCard();
+  assert.equal(buttons("Share")[0]?.disabled, true, "nothing is shared before the preview has loaded");
+  await press(buttons("Share")[0]);
+  assert.equal(shared.length, 0);
+  await loadImage();
+  await press(buttons("Share")[0]);
+  assert.equal(shared.length, 1);
+  const file = shared[0]!.files![0]!;
+  assert.equal(file.name, "CASHCAT-731-pnl.png");
+  assert.equal(file.type, "image/png");
+  assert.deepEqual([...new Uint8Array(await file.arrayBuffer())], [137, 80, 78, 71], "the bytes the preview shows");
+  assert.equal(calls.length, 1, "sharing does not generate a second image");
+  assert.equal(notice(), "");
+  outcome = async () => { throw new DOMException("Share canceled", "AbortError"); };
+  await press(buttons("Share")[0]);
+  assert.equal(notice(), "", "closing the share sheet is the owner's choice, not a failure");
+  outcome = async () => { throw new DOMException("Permission denied by the platform", "NotAllowedError"); };
+  await press(buttons("Share")[0]);
+  assert.equal(notice(), "Could not share this image. Use Download PNG instead.");
+  assert.doesNotMatch(dialog()?.textContent ?? "", /Permission denied by the platform/);
+  assert.equal(download()?.getAttribute("href"), "blob:private-pnl-1", "Download stays available");
+  assert.equal(ui.dom.window.localStorage.length, 0, "sharing does not persist the image");
+});
+
+it("Copy image puts the loaded PNG on the clipboard, and a failed copy says how to save it instead", async () => {
+  const written: FakeClipboardItem[][] = [];
+  let outcome = async () => {};
+  grantClipboardItem();
+  grant("clipboard", { write: (items: FakeClipboardItem[]) => { written.push(items); return outcome(); } });
+  await showOwnerCard();
+  assert.equal(buttons("Copy image")[0]?.disabled, true, "nothing is copied before the preview has loaded");
+  await loadImage();
+  assert.deepEqual([...dialog()!.querySelectorAll(".pnl-card-actions > *")].map((node) => node.textContent),
+    ["Download PNG", "Copy image", "Print"]);
+  await press(buttons("Copy image")[0]);
+  assert.equal(written.length, 1);
+  assert.deepEqual(Object.keys(written[0]![0]!.items), ["image/png"]);
+  assert.equal(written[0]![0]!.items["image/png"], created[0], "the same in-memory PNG, not a refetch");
+  assert.equal(calls.length, 1);
+  assert.equal(notice(), "Image copied.");
+  outcome = async () => { throw new DOMException("Write permission denied.", "NotAllowedError"); };
+  await press(buttons("Copy image")[0]);
+  assert.equal(notice(), "Could not copy this image. Use Download PNG instead.");
+  assert.doesNotMatch(dialog()?.textContent ?? "", /Write permission denied/);
+  outcome = async () => {};
+  await press(buttons("Copy image")[0]);
+  assert.equal(notice(), "Image copied.", "a later press reports its own outcome");
+  grantClipboardItem(class { constructor() { throw new TypeError("image/png is not supported"); } });
+  await press(buttons("Copy image")[0]);
+  assert.equal(written.length, 3, "an item the browser cannot build never reaches the clipboard");
+  assert.equal(notice(), "Could not copy this image. Use Download PNG instead.", "a synchronous refusal is reported too");
+  assert.equal(download()?.getAttribute("href"), "blob:private-pnl-1", "Download is unchanged");
+  assert.equal(download()?.download, "CASHCAT-731-pnl.png");
+  assert.equal(ui.dom.window.localStorage.length, 0, "copying does not persist the image");
+});
+
+it("a copy that settles after the trade changed never reports on the new trade's preview", async () => {
+  const pending = deferred<void>();
+  grantClipboardItem();
+  grant("clipboard", { write: () => pending.promise });
+  const render = (tradeId: number, symbol: string) => ui.render(createElement(PnlCardDialog, { tradeId, symbol, onClose() {} }));
+  await render(731, "OLD");
+  await loadImage();
+  await press(buttons("Copy image")[0]);
+  await render(732, "NEW");
+  await loadImage();
+  await act(async () => { pending.resolve(); });
+  assert.equal(image()?.getAttribute("src"), "blob:private-pnl-2");
+  assert.equal(notice(), "", "the old image's copy result is not shown against the new one");
 });
 
 it("closing restores the triggering button and releases the private image", async () => {
