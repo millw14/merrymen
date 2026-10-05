@@ -14,17 +14,19 @@
  *   - The census prints names and never a value, counts every orchestrator
  *     `run…IfAsked` gate, and leaves standing configuration alone.
  *   - No refusal echoes what it refused.
+ *   - The command line runs the checks however it is named — a symlinked
+ *     path, no extension — and nothing imports it.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import {
   DEPLOY_GUARD_IMAGE, EX_CONFIG, EX_USAGE, hostedPersistentHomeRefusal, isOneShotVariable, oneShotCensus,
   onRailway, runDeployGuard, START_ROLES, type GuardResult,
-} from "./deploy-guard";
+} from "./deploy-guard-checks";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
@@ -340,6 +342,17 @@ describe("the guard agrees with the image and the start script", () => {
     const scripts = (JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts;
     assert.deepEqual([...START_ROLES].sort(), Object.keys(scripts).filter((k) => k.startsWith("start:")).sort());
   });
+
+  it("nothing imports the command line, which runs the guard on load; the checks are imported instead", () => {
+    const importsOf = (target: string) => new RegExp(`(?:from\\s+|import\\s*\\(\\s*|require\\s*\\(\\s*)["'][^"']*/${target}(?:\\.[cm]?[jt]sx?)?["']`);
+    const sources = ["worker", "web/src", "packages", "scripts", "sdk", "browser", "cli", "services"].flatMap((dir) =>
+      (readdirSync(join(ROOT, dir), { recursive: true }) as string[])
+        .filter((f) => /\.[cm]?[jt]sx?$/.test(f) && !f.split(/[\\/]/).includes("node_modules"))
+        .map((f) => join(dir, f)));
+    assert.deepEqual(sources.filter((f) => importsOf("deploy-guard").test(read(f))), []);
+    assert.ok(sources.some((f) => f === join("worker", "src", "orchestrator.ts") && importsOf("deploy-guard-checks").test(read(f))),
+      "the scan should at least find orchestrator.ts importing the checks");
+  });
 });
 
 describe("the real guard, as the container runs it", { skip: !posix }, () => {
@@ -370,6 +383,21 @@ describe("the real guard, as the container runs it", { skip: !posix }, () => {
     assert.equal(predeploy.stdout, `[deploy-guard] ok branch=main commit=${SHA}\n`);
     const usage = cli([], base(dir));
     assert.equal(usage.status, EX_USAGE);
+  });
+
+  it("runs however it is named: through a symlinked app root, and without its extension", () => {
+    // The command line used to ask whether it was the entry module, and the
+    // answer was "no" — no output, exit 0 — whenever the path it was given
+    // was not the path Node resolved. Each of these must still refuse.
+    const dir = tempDir("merrymen-deploy-guard-link-");
+    const link = join(dir, "app");
+    symlinkSync(ROOT, link);
+    const env = { ...base(dir), RAILWAY_SERVICE_ID: OTHER_SERVICE, MERRYMEN_REPAIR_HWM: "apply" };
+    for (const entry of [join(link, "worker/src/deploy-guard.ts"), "worker/src/deploy-guard"]) {
+      const r = spawnSync(process.execPath, ["--import", "tsx", entry, "--phase=start", "--role=start:orchestrator"], { cwd: ROOT, env, encoding: "utf8", timeout: 60_000 });
+      assert.equal(r.status, EX_CONFIG, `${entry}: ${r.stdout}${r.stderr}`);
+      assert.equal(r.stdout, "[deploy-guard] census one-shot: MERRYMEN_REPAIR_HWM\n", entry);
+    }
   });
 
   it("a refused orchestrator never starts: the script stops with 78 after its [start] line, and the home stays untouched", () => {

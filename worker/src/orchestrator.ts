@@ -121,7 +121,7 @@ import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } fro
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
 import { PERSISTENT_HOME_MANIFEST, preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
-import { EX_CONFIG, hostedPersistentHomeRefusal } from "./deploy-guard";
+import { EX_CONFIG, hostedPersistentHomeRefusal } from "./deploy-guard-checks";
 import { scrubHostedGrantCache } from "./hosted-grant-cache";
 import {
   clearHoldNotified,
