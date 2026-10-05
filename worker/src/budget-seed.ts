@@ -58,18 +58,19 @@
  * UNTIL A SEED EXISTS, NEW ENTRIES GET NO HEADROOM. The orchestrator writes an
  * UNRESTORED marker in the child's home BEFORE it reads anything and removes it
  * only after every seed row is in; refreshBudget reads a standing marker as a
- * spent day on the live rail (index.ts), and the transfer allowance as
- * unreadable (store.ts getTransferredTodayUsdg). The caps exempt a sale into
+ * spent day (holdAtCaps, below), and the transfer allowance as unreadable
+ * (store.ts getTransferredTodayUsdg). The caps exempt a sale into
  * cash, so the exits a spent day leaves open stay open — a stop-loss is never
  * the thing a missing seed holds shut. The orchestrator tries again on every
  * reconcile pass while the marker stands (retryBudgetSeed) and at the next
  * spawn. A file, not a row, for the reasons energy-seed.ts gives: the failure
  * being reported may be the child's own sqlite.
  *
- * THE LIVE RAIL ONLY. A paper fill carries no operation hash, so there is
- * nothing to count it once BY, and it moves no money: a rebuilt paper child's
- * practice allowance restarts from its own ledger, as it always has, and its
- * entries are never held for a seed it does not have.
+ * THE LIVE RAIL ONLY IS SEEDED. A paper fill carries no operation hash, so
+ * there is nothing to count it once BY, and it moves no money: a rebuilt paper
+ * child's practice allowance restarts from its own ledger, as it always has.
+ * The HOLD is on both rails all the same (holdAtCaps says why), and a paper
+ * book's marker clears on the first seed that runs, with nothing in it.
  *
  * Caps only ever tighten here. Nothing is executed, signed or replayed: a seed
  * row is a number the wall is judged against, never an operation.
@@ -136,6 +137,37 @@ export function markBudgetUnrestored(home: string, atSec: number): void {
 /** The trailing day is back: the caps read what the ledger and the seed say. */
 export function clearBudgetUnrestored(home: string): void {
   rmSync(markerIn(home), { force: true });
+}
+
+/**
+ * THE HOLD, as refreshBudget applies it to the settled halves it just read:
+ * while the trailing day is not known to be back (`held`), both read at the
+ * grant's own caps — no headroom for a new entry, and the exits the caps
+ * already exempt (a sale into cash: the stop-loss, the take-profit) run exactly
+ * as they do on a spent day.
+ *
+ * WHATEVER THE RAIL. The rail is re-decided from measured gas and cash during
+ * the tick, AFTER the refresh, so a book read on paper can be judged live
+ * moments later; a hold keyed to the rail at refresh time would let that first
+ * live entry through on a fresh day. Paper loses only the practice entries of
+ * an outage, and paper has nothing to seed — its marker clears on the first
+ * seed that runs.
+ *
+ * Raised, never lowered: a half already at or over its cap stays where it is.
+ * A grant with no finite op count has no ops cap to hold at — the spend half
+ * already leaves a new entry nothing to spend. No grant, nothing to hold at,
+ * and nothing trades. Pure, so the hold itself is what the tests run.
+ */
+export function holdAtCaps(
+  settled: { spentUsdg: bigint; ops: number },
+  limits: { dailyUsdg: bigint; maxOpsPerDay: number } | null | undefined,
+  held: boolean,
+): { spentUsdg: bigint; ops: number } {
+  if (!held || !limits) return settled;
+  return {
+    spentUsdg: settled.spentUsdg < limits.dailyUsdg ? limits.dailyUsdg : settled.spentUsdg,
+    ops: Number.isFinite(limits.maxOpsPerDay) && settled.ops < limits.maxOpsPerDay ? limits.maxOpsPerDay : settled.ops,
+  };
 }
 
 /** One operation of the trailing day, as the shared ledger describes it. */

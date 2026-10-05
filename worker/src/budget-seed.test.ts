@@ -32,6 +32,7 @@ import {
   BUDGET_UNRESTORED_FILE,
   budgetUnrestored,
   clearBudgetUnrestored,
+  holdAtCaps,
   readBudgetSeed,
   seedBudget,
 } from "./budget-seed";
@@ -352,19 +353,33 @@ describe("until a seed exists, entries get no headroom — and exits stay open",
     assert.match(!unguarded.ok ? unguarded.why : "", /marker could not be written/);
   });
 
+  const limits: AgentLimits = {
+    perTradeUsdg: 50_000_000n,
+    dailyUsdg: 500_000_000n,
+    allowedTargets: [TOKEN as `0x${string}`],
+    allowedAssets: [USDG as `0x${string}`, TOKEN as `0x${string}`],
+    maxDrawdownBps: 1_000,
+    expiresAt: nowSec() + 86_400,
+    maxOpsPerDay: 48,
+    cashToken: USDG,
+  };
+
+  it("THE HOLD RAISES BOTH SETTLED HALVES TO THE GRANT'S OWN CAPS — and only while held", () => {
+    const empty = { spentUsdg: 0n, ops: 0 };
+    assert.deepEqual(holdAtCaps(empty, limits, true), { spentUsdg: 500_000_000n, ops: 48 }, "an empty rebuilt day reads as spent");
+    assert.deepEqual(holdAtCaps({ spentUsdg: 499_999_999n, ops: 47 }, limits, true), { spentUsdg: 500_000_000n, ops: 48 }, "one short of either cap is still raised");
+    // RAISED, NEVER LOWERED: a day already over its caps keeps what it read.
+    assert.deepEqual(holdAtCaps({ spentUsdg: 700_000_000n, ops: 60 }, limits, true), { spentUsdg: 700_000_000n, ops: 60 });
+    assert.deepEqual(holdAtCaps({ spentUsdg: 10n, ops: 3 }, limits, false), { spentUsdg: 10n, ops: 3 }, "no marker, no hold");
+    // A grant with no finite op count: nothing to hold the count at, and the spend half still holds.
+    assert.deepEqual(holdAtCaps(empty, { ...limits, maxOpsPerDay: Number.POSITIVE_INFINITY }, true), { spentUsdg: 500_000_000n, ops: 0 });
+    assert.deepEqual(holdAtCaps({ spentUsdg: 5n, ops: 1 }, null, true), { spentUsdg: 5n, ops: 1 }, "no grant, nothing to hold at");
+  });
+
   it("HELD AT THE CAPS, a buy is refused and a sale into cash still passes — the wall's own exemptions", () => {
-    const limits: AgentLimits = {
-      perTradeUsdg: 50_000_000n,
-      dailyUsdg: 500_000_000n,
-      allowedTargets: [TOKEN as `0x${string}`],
-      allowedAssets: [USDG as `0x${string}`, TOKEN as `0x${string}`],
-      maxDrawdownBps: 1_000,
-      expiresAt: nowSec() + 86_400,
-      maxOpsPerDay: 48,
-      cashToken: USDG,
-    };
-    // What refreshBudget holds the settled halves at while the marker stands.
-    const held = { spentTodayUsdg: limits.dailyUsdg, opsToday: limits.maxOpsPerDay, highWaterMarkUsdg: 0n, equityUsdg: 0n, nowSec: nowSec() };
+    // What refreshBudget hands checkPolicy while the marker stands, from an empty rebuilt day.
+    const settled = holdAtCaps({ spentUsdg: 0n, ops: 0 }, limits, true);
+    const held = { spentTodayUsdg: settled.spentUsdg, opsToday: settled.ops, highWaterMarkUsdg: 0n, equityUsdg: 0n, nowSec: nowSec() };
     const swap = (sellToken: string, buyToken: string): TradeIntent => ({
       kind: "swap",
       target: TOKEN as `0x${string}`,
@@ -377,18 +392,23 @@ describe("until a seed exists, entries get no headroom — and exits stay open",
     assert.equal(buy.ok, false);
     assert.match(!buy.ok ? buy.rule : "", /^(ops-cap|daily-cap)$/);
     assert.deepEqual(checkPolicy(swap(TOKEN, USDG), limits, held), { ok: true }, "the stop-loss and the take-profit run");
+    // And with the ops half alone unheld (an unbounded count), the spend half still refuses the buy.
+    const spendOnly = holdAtCaps({ spentUsdg: 0n, ops: 0 }, { ...limits, maxOpsPerDay: Number.POSITIVE_INFINITY }, true);
+    const refused = checkPolicy(swap(USDG, TOKEN), { ...limits, maxOpsPerDay: Number.POSITIVE_INFINITY }, { ...held, spentTodayUsdg: spendOnly.spentUsdg, opsToday: spendOnly.ops });
+    assert.equal(!refused.ok && refused.rule, "daily-cap");
   });
 
-  it("refreshBudget reads the marker BEFORE the ledger, and holds only the live rail, at the grant's own caps", () => {
+  it("refreshBudget reads the marker BEFORE the ledger, and hands the hold every rail's read", () => {
     const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const start = src.indexOf("const refreshBudget = async (agentId: string): Promise<void> => {");
     assert.ok(start > 0, "sanity: found refreshBudget");
     const body = src.slice(start, src.indexOf("\n  };", start));
     const marker = body.indexOf("budgetDayUnrestored()");
     assert.ok(marker > 0 && marker < body.indexOf("getSpentTodayUsdg(") && marker < body.indexOf("getOpsToday("), "marker first");
-    assert.match(body, /const held = rail === "live" && budgetDayUnrestored\(\);/);
-    assert.match(body, /settledSpentUsdg = active\.limits\.dailyUsdg;/);
-    assert.match(body, /settledOps = active\.limits\.maxOpsPerDay;/);
+    // NOT keyed to the rail: the rail can flip paper→live after this refresh, inside the tick.
+    assert.match(body, /const held = budgetDayUnrestored\(\);/);
+    assert.match(body, /\(\{ spentUsdg: settledSpentUsdg, ops: settledOps \} = holdAtCaps\(read, active\?\.limits, held\)\);/);
+    assert.ok(body.indexOf("holdAtCaps(") > body.indexOf("getOpsToday("), "held after both reads");
   });
 
   it("the orchestrator seeds beside the energy seed before spawn, and retries beside it every pass", () => {
