@@ -107,6 +107,7 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { holdAtCaps } from "./budget-seed";
 import { resumeFrom } from "./deposit-log";
 import { scanAndBookDepositWindow } from "./deposit-scan";
 import { renderWhy } from "./strategies/reasons";
@@ -530,6 +531,7 @@ import {
   landedOpsBetween,
   openNextEpoch,
   poolKeysFor,
+  budgetDayUnrestored,
   getOpsToday,
   getPaperBook,
   getSpentTodayUsdg,
@@ -3214,14 +3216,54 @@ async function main() {
   /** Which book the budget is being spent from — paper and live never share one. */
   const budgetRail = (): BudgetRail => (paperActive() ? "paper" : "live");
   /**
+   * Whether the last refresh found the trailing day from before a rebuild still
+   * missing (budget-seed.ts), so the owner is told once when entries stop for
+   * it and once when they start again — not once a tick.
+   */
+  let budgetDayHeld = false;
+  /**
    * Re-read the settled halves from the ledger. Cheap (two indexed aggregates on
-   * `trades`), and the only thing that lets an op age out of the trailing-24h
-   * window without a restart. Never touches the in-flight halves.
+   * `trades`, plus one index seek per seeded operation still in its window —
+   * store.ts withBudgetSeed), and the only thing that lets an op age out of the
+   * trailing-24h window without a restart. Never touches the in-flight halves.
+   *
+   * THE LEDGER HERE INCLUDES WHAT THE ORCHESTRATOR SEEDED (budget-seed.ts): a
+   * rebuilt child's trailing day, read back from the shared ledger before it
+   * armed. It is an input to every refresh, not a starting value — so it ages
+   * out on the same clock as this child's own rows, and no refresh drops it.
+   *
+   * AND WHILE THAT DAY IS NOT BACK, THE DAY READS AS SPENT. The orchestrator
+   * leaves a marker in this home until every seeded row is in. A live book
+   * that read its caps from the ledger alone then would read a fresh allowance
+   * — the day it already spent is in a ledger it cannot see. So both settled
+   * halves are held at the grant's own caps (budget-seed.ts holdAtCaps): no
+   * headroom for a new entry, and the exits the caps already exempt — a sale
+   * into cash, the stop-loss — run exactly as they do on a spent day. On
+   * EITHER rail: the rail is re-decided after this refresh, inside the tick,
+   * so a hold on the live rail alone would let the first live entry after a
+   * paper→live flip through on the unheld paper counters. Read BEFORE the
+   * ledger: the orchestrator writes every row and only then removes the
+   * marker, so a marker that is gone here means the reads below already see
+   * the whole seed.
    */
   const refreshBudget = async (agentId: string): Promise<void> => {
     const rail = budgetRail();
-    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string));
-    settledOps = await getOpsToday(agentId, rail);
+    const held = budgetDayUnrestored();
+    const read = {
+      spentUsdg: usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string)),
+      ops: await getOpsToday(agentId, rail),
+    };
+    ({ spentUsdg: settledSpentUsdg, ops: settledOps } = holdAtCaps(read, active?.limits, held));
+    if (held !== budgetDayHeld) {
+      budgetDayHeld = held;
+      void addEvent(
+        agentId,
+        held ? "warn" : "ok",
+        held
+          ? "today's spending from before this restart can't be confirmed from the shared ledger yet — no new entries until it is; exits, stops and take-profits still run"
+          : "today's spending from before this restart is back — the daily caps read the whole trailing day again",
+      );
+    }
   };
 
   /**
