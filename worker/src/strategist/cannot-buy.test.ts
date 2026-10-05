@@ -102,6 +102,18 @@ describe("the model is told", () => {
     assert.deepEqual(b.signals()?.cannotBuy, ["PEPE"]);
   });
 
+  it("and NOT the swap gate: a curve leg in the grant but not watched is buyable, as the wall says", async () => {
+    // The case above gates PEPE on both venues, so it cannot tell which one
+    // was asked. Here only the swap gate would refuse PEPE (`asset-allowlist`,
+    // not watched); the curve branch never reads the watch list, and the
+    // wall accepts the curve buy. Asking the swap gate would withhold a buy
+    // the wall lets through — this mirror going stricter than the chain.
+    const signedNotWatched = entryGatesOf({ allowedAssets: [USDG, TSLA, MEME], sellableAssets: [USDG, TSLA, MEME, PEPE] });
+    const b = build([], { curve: true });
+    await tickOf(b.s, snap({ entryGates: signedNotWatched }));
+    assert.equal(b.signals()?.cannotBuy, undefined);
+  });
+
   it("omitted when nothing is gated, and when the hint was never read", async () => {
     const clear = build([]);
     await tickOf(clear.s, snap({ entryGates: entryGatesOf({ allowedAssets: [USDG, TSLA, MEME], sellableAssets: [USDG, TSLA, MEME] }) }));
