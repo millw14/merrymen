@@ -4,7 +4,7 @@
  * Two things, both read on the server for the caller's own tenant and nobody
  * else's: the owner's research status through the same registered tool every
  * surface uses (fomo_get_research_status: watches, research jobs, the latest
- * assessment and decision funnel, the followed cohort), and the service's
+ * assessment and decision funnel, the watched-trader cohort), and the service's
  * health in plain words (not configured, provider unavailable, rationed,
  * receiving fresh data). Hosted, the tenant is the verified session cookie;
  * self-hosted, it is this install's fixed tenant. Nothing in the request can

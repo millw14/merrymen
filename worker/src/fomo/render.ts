@@ -328,7 +328,14 @@ function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audie
   } else {
     out.push(`${name}: the holdings snapshot could not be read.`);
   }
-  if (d.cohort) out.push(`In Merrymen's followed cohort: ${d.cohort.member ? `yes${d.cohort.followable === false ? " (narrative discovery only, not followable)" : ""}` : "no"}.`);
+  // "Watched", never "followed": the cohort is what Merrymen monitors; following is a separate, opt-in setting.
+  if (d.cohort) {
+    out.push(
+      d.cohort.size === null || d.cohort.size === 0
+        ? "Merrymen's watched-trader cohort has not been built yet, so whether this trader is in it is unknown."
+        : `In Merrymen's watched-trader cohort: ${d.cohort.member ? `yes${d.cohort.followable === false ? " (useful for spotting narratives, not for following)" : ""}` : "no"}.`,
+    );
+  }
   if (d.profile) {
     const p = d.profile.pnlUsd;
     const parts = (["24h", "7d", "30d", "all"] as const).filter((w) => w in p).map((w) => `${w} ${signedUsd(p[w])}`);
@@ -383,7 +390,7 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
 function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d) return [];
-  const subject = d.token ? coin(d.token, d.label, audience) : d.cohortOnly ? "Followed traders" : "The Fomo feed";
+  const subject = d.token ? coin(d.token, d.label, audience) : d.cohortOnly ? "Watched traders" : "The Fomo feed";
   const scope = d.window === "all" ? "on record" : `in the last ${d.window}`;
   const out: string[] = [];
   if (d.events.length === 0) {
@@ -401,9 +408,15 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
       const parts: string[] = [];
       if (d.cohort.buyers.length) parts.push(`latest action buy — ${fmt(d.cohort.buyers)}`);
       if (d.cohort.sellers.length) parts.push(`latest action sell — ${fmt(d.cohort.sellers)}`);
-      out.push(parts.length ? `Followed traders: ${parts.join("; ")}.` : "No followed trader appears in this scope.");
+      out.push(
+        parts.length
+          ? `Watched traders: ${parts.join("; ")}.`
+          : d.cohort.size === null || d.cohort.size === 0
+            ? "Merrymen's watched-trader cohort has not been built yet, so this cannot say which watched traders took part."
+            : "No watched trader appears in this scope.",
+      );
     } else {
-      out.push(`Followed traders: ${d.cohort.buyers.length} with a latest buy, ${d.cohort.sellers.length} with a latest sell.`);
+      out.push(`Watched traders: ${d.cohort.buyers.length} with a latest buy, ${d.cohort.sellers.length} with a latest sell.`);
     }
   }
   if (d.breadth) out.push(`Breadth (Merrymen's reading): ${d.breadth.reading}, ${plural(d.breadth.distinctBuyers, "buyer", "buyers")} across ${plural(d.breadth.buyEvents, "buy", "buys")}${d.breadth.repeatAdds ? `, ${d.breadth.repeatAdds} repeat adds` : ""}.`);
@@ -438,7 +451,7 @@ function bodyOpportunities(env: FomoEnvelope<OpportunitiesData>, audience: Audie
   const out = ["Coins getting fresh attention, ranked by early-signal evidence (not size or popularity):"];
   d.rows.slice(0, 8).forEach((r, i) => {
     const sig: string[] = [];
-    if (r.signals.cohortBuyers) sig.push(`${plural(r.signals.cohortBuyers, "followed trader", "followed traders")} bought`);
+    if (r.signals.cohortBuyers) sig.push(`${plural(r.signals.cohortBuyers, "watched trader", "watched traders")} bought`);
     if (r.signals.firstSeenInWindow === true) sig.push("first seen in this window");
     if (r.signals.newThesis) sig.push("new thesis");
     if (r.signals.boards.length) sig.push(`on ${r.signals.boards.join(" and ")} board`);
@@ -482,7 +495,7 @@ function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, n
   if (d.flow) {
     const f = d.flow;
     out.push(
-      `Flow, ${f.window} (observed, provider-reported feed): ${count(f.distinctBuyers, "buyer", "buyers")} / ${count(f.distinctSellers, "seller", "sellers")}${f.cohortBuyers !== null ? `; followed traders ${f.cohortBuyers} buying / ${f.cohortSellers ?? "unknown"} selling` : ""}.`,
+      `Flow, ${f.window} (observed, provider-reported feed): ${count(f.distinctBuyers, "buyer", "buyers")} / ${count(f.distinctSellers, "seller", "sellers")}${f.cohortBuyers !== null ? `; watched traders ${f.cohortBuyers} buying / ${f.cohortSellers ?? "unknown"} selling` : ""}.`,
     );
   }
   if (d.unknowns.length) out.push(`Unknowns: ${d.unknowns.slice(0, 2).join(" ")}`);

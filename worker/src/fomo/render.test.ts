@@ -346,3 +346,18 @@ describe("review fixes", () => {
     assert.match(renderEnvelope(t, O), /received by transfer, not bought/);
   });
 });
+
+describe("the watched-trader cohort, in words", () => {
+  it("says the cohort is not built yet rather than that no watched trader took part", () => {
+    const act: TokenActivityData = {
+      token: T, label: { symbol: "PONS", name: null }, window: "24h", side: "buy", cohortOnly: true, events: [], distinctBuyers: 0, distinctSellers: 0,
+      cohort: { buyers: [], sellers: [], version: null, size: null }, breadth: null, stats: null, localEvents: 0, restEvents: 0,
+    };
+    const text = renderEnvelope(env("fomo_get_token_activity", "empty", act), O);
+    assert.match(text, /watched-trader cohort has not been built yet/);
+    assert.ok(!/No watched trader appears/.test(text), "an empty cohort is not evidence that no watched trader took part");
+    const built = renderEnvelope(env("fomo_get_token_activity", "empty", { ...act, cohort: { buyers: [], sellers: [], version: 3, size: 120 } }), O);
+    assert.match(built, /No watched trader appears in this scope/);
+    assert.ok(!/followed/i.test(text + built), "the cohort is watched, not followed: following is a separate setting");
+  });
+});

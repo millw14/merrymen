@@ -954,7 +954,7 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
   }
 
   // ── Claims from observed action ──
-  const cohortClause = (n: number | null, side: string): string => (n === null ? "" : `, ${n} of the ${side} from the followed cohort`);
+  const cohortClause = (n: number | null, side: string): string => (n === null ? "" : `, ${n} of the ${side} from the watched-trader cohort`);
   const actionClaims: DossierClaimDetail[] = [];
   const actionClaim = (
     key: string,

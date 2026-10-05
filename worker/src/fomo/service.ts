@@ -2150,7 +2150,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
 
   function cohortReadFailed(a: Answer): void {
     a.partial = true;
-    a.note("The followed traders' record could not be read in full; some of their activity is missing here.");
+    a.note("The watched traders' record could not be read in full; some of their activity is missing here.");
   }
 
   async function gapNote(a: Answer, since: number, now: number): Promise<void> {
@@ -2230,7 +2230,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           essential.push(a.add(localSection("stream-record", local, local.length ? Math.max(...local.map((e) => e.observedAt)) : null)));
           if (ce.failed) cohortReadFailed(a);
         }
-        if (cohort.size === null) a.note("No followed cohort has been built yet.");
+        if (cohort.size === null) a.note("No watched-trader cohort has been built yet.");
       } else {
         const chain = args.chain ?? undefined;
         const feed = a.add(await read(ic.cc, specs.feed({ chain }), args.freshness));
@@ -2337,7 +2337,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         inCohort: cohort.size === null ? null : cohort.ids.has(r.trader.userId),
       }));
       a.note("P&L is the provider-reported realised P&L for the window, not a measure of skill; follower counts are not used.");
-      if (args.cohortOnly) a.note("Limited to Merrymen's followed traders who appear on this board.");
+      if (args.cohortOnly) a.note("Limited to Merrymen's watched traders who appear on this board.");
       a.achieved = { rows: traders.length, boardRows: lb.data?.rows.length ?? null };
       return finish(ic, a, {
         cls: "rankings",
@@ -2401,7 +2401,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       else cohortReadFailed(a);
     }
     const baselineKnown = !ce.failed && ce.reachedFloor && lookback >= retainedFrom;
-    if (cohort.ids.size && !baselineKnown) a.note("Whether a coin is new to the followed traders could not be judged: the record before this window was not read in full.");
+    if (cohort.ids.size && !baselineKnown) a.note("Whether a coin is new to the watched traders could not be judged: the record before this window was not read in full.");
     const before = events.filter((e) => eventTime(e) < since);
     const inWin = events.filter((e) => eventTime(e) >= since);
     const firstSeen = new Map<string, number>();
@@ -2489,7 +2489,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const shown = rows.slice(0, args.limit);
     for (const r of shown) for (const id of r.evidence) a.addRef({ id, kind: "event", sourceUrl: null });
     if (filteredByCap) a.note(`${filteredByCap} coin(s) above the market-cap limit were left out; coins with an unknown market cap were kept and are labelled.`);
-    if (cohort.size === null) a.note("No followed cohort has been built yet, so only the boards were used.");
+    if (cohort.size === null) a.note("No watched-trader cohort has been built yet, so only the boards were used.");
     a.note("Ranked by early-signal evidence (distinct followed buyers, recency, new theses, first appearance), not by size or popularity.");
     a.note("Research leads only: no route has been verified and nothing here is a reason to buy.");
     a.achieved = { candidates: rows.length, shown: shown.length, cohortEvents: inWin.length };

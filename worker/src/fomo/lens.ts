@@ -120,7 +120,7 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
   const flowShown = f !== null && (f.distinctBuyers ?? 0) + (f.distinctSellers ?? 0) > 0;
   if (f && flowShown) {
     const cohort =
-      f.cohortBuyers !== null && f.cohortSellers !== null ? ` (${f.cohortBuyers} and ${f.cohortSellers} of them from the followed cohort)` : "";
+      f.cohortBuyers !== null && f.cohortSellers !== null ? ` (${f.cohortBuyers} and ${f.cohortSellers} of them from the watched-trader cohort)` : "";
     const repeats = f.repeatAddsBySameTrader ? `; ${plural(f.repeatAddsBySameTrader, "repeat add", "repeat adds")} by traders already buying` : "";
     const buyers = f.distinctBuyers === null ? "an unknown number of distinct buyers" : plural(f.distinctBuyers, "distinct buyer", "distinct buyers");
     const sellers = f.distinctSellers === null ? "an unknown number of distinct sellers" : plural(f.distinctSellers, "distinct seller", "distinct sellers");

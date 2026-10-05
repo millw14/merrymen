@@ -89,7 +89,7 @@ const SIDE = z.enum(["buy", "sell"]);
 const FRESHNESS = z.enum(FRESHNESS_MODES as unknown as [string, ...string[]])
   .describe("cached-ok accepts a fresh-enough stored copy; prefer-fresh (the default) refreshes when the copy is older than its data class allows; force-refresh attempts an upstream read now.");
 const DEPTH = z.enum(DEPTHS).describe("How much to read: quick is one page; standard and deep read further and cost more credits.");
-const COHORT_ONLY = z.boolean().describe("Only Merrymen's followed traders.");
+const COHORT_ONLY = z.boolean().describe("Only Merrymen's watched traders.");
 const LIMIT = (max: number) => z.number().int().min(1).max(max);
 
 const INPUTS = {

@@ -710,7 +710,7 @@ const S = {
     description: "force-refresh only when the user asks for the latest / right now.",
   },
   depth: { type: "string", enum: [...DEPTHS] },
-  cohortOnly: { type: "boolean", description: "Only Merrymen's followed traders." },
+  cohortOnly: { type: "boolean", description: "Only Merrymen's watched traders." },
   limit: (max: number) => ({ type: "integer", minimum: 1, maximum: max }),
 } as const;
 
@@ -769,7 +769,7 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
   fomo_get_trader_context: {
     description:
       "A Fomo trader's current holdings snapshot (provider-reported, valued at current prices; a truncated list is a floor, not a total) " +
-      "and whether they are in Merrymen's followed cohort. A snapshot is not transaction history.",
+      "and whether they are in Merrymen's watched-trader cohort. A snapshot is not transaction history.",
     schema: schema(
       {
         trader: S.trader,
@@ -871,7 +871,7 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
   fomo_get_token_activity: {
     description:
       "Who has been buying or selling on Fomo in a window, for one coin or the whole feed. The feed only carries positions above roughly $3,000, " +
-      "so counts are a floor. cohort_only limits it to Merrymen's followed traders.",
+      "so counts are a floor. cohort_only limits it to Merrymen's watched traders.",
     schema: schema({
       token: S.token,
       chain: S.chain,
@@ -932,7 +932,7 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
 
   fomo_find_opportunities: {
     description:
-      "Smaller coins getting fresh attention: followed traders' first purchases, new theses and new graduations, ranked by early-signal evidence, " +
+      "Smaller coins getting fresh attention: watched traders' first purchases, new theses and new graduations, ranked by early-signal evidence, " +
       "not by size or popularity. Research leads only; nothing here is a reason to buy.",
     schema: schema({
       chain: S.chain,
@@ -1004,7 +1004,7 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
 
   fomo_get_research_status: {
     description:
-      "The owner's own Fomo research state: latest assessment and decision funnel for a coin, active watches, research jobs, the followed cohort " +
+      "The owner's own Fomo research state: latest assessment and decision funnel for a coin, active watches, research jobs, the watched-trader cohort " +
       "and whether Fomo data is healthy. Owner only.",
     schema: schema({
       token: S.token,

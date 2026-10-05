@@ -98,7 +98,7 @@ export interface EarlyDiscovery {
 }
 
 /**
- * Coins entering the followed cohort's PURCHASES for the first time: a token
+ * Coins entering the watched-trader cohort's PURCHASES for the first time: a token
  * key absent from `firstSeen` that a cohort member bought. Only buy events
  * count. The caller persists `firstCohortBuyAt` into its first-seen map.
  */
@@ -122,7 +122,7 @@ export function earlyDiscovery(
       cohortBuyEvents: list.length,
       evidence: list.slice(0, MAX_REFS).map((e) => eventRef(e.eventKey)),
       note:
-        `${plural(buyers, "followed trader", "followed traders")} bought this coin for the first time in the cohort's record. ` +
+        `${plural(buyers, "watched trader", "watched traders")} bought this coin for the first time in the cohort's record. ` +
         "A purchase is a reason to investigate, not an instruction to buy" +
         (buyers === 1 ? ", and one buyer is not breadth." : "."),
     });
