@@ -280,6 +280,8 @@ describe("SIGTERM: stop starting things, let the chain finish, leave", () => {
     assert.equal(sites(/process\.(on|once)\("SIGTERM"/).length, 1);
     const clock = CODE.indexOf("const tickClock = createCommandClock(");
     assert.ok(clock > 0 && at > clock, "registered after tickClock, which it stops");
+    const poll = CODE.indexOf("const telegramPoll = startTelegram({");
+    assert.ok(poll > 0 && at > poll, "and after the Telegram poll, which it stops too");
   });
 
   it("IN THIS ORDER: raise draining, stop the clock, wait for the chain within its budget, close the ledger, exit 0", () => {
@@ -287,6 +289,9 @@ describe("SIGTERM: stop starting things, let the chain finish, leave", () => {
       "if (draining) return;",
       "draining = true;",
       "tickClock.stop();",
+      // And the Telegram poll: an owner's message that arrives now is left
+      // unconsumed for the next process, not taken by one that is leaving.
+      "telegramPoll.stop();",
       "drainIntentChain({",
       "tail: () => intentChain,",
       // And the tick that put the trade there: its work after the chain empties.
