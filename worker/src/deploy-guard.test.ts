@@ -373,6 +373,7 @@ describe("the one-shot census", () => {
       "runAccountingReconstructionAtStartup", // runs runReconstructionDryRunIfAsked, which is held here
       "runHolderClaimsBackfill", "startHistoryRepair", // every boot or pass, on no variable
       "runBuilderPass", "runNewsPass", "startGroupChatPass", "startXPostPass", // every pass, standing features
+      "startFleetHeartbeat", // every pass, halted or not, on no variable: the fleet_heartbeat row (fleet-heartbeat.ts)
     ]);
 
     it("finds them where they are", () => {
