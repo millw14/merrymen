@@ -232,16 +232,24 @@ export function parseDrillArgs(argv, env, nowMs) {
  * installs it and package.json deliberately does not name it — so it is loaded
  * here, on use, from wherever this file sits: /app/node_modules in the image.
  * Nothing but the application name is sent as a startup option, so a pooler
- * in front of either database has nothing to reject.
+ * in front of either database has nothing to reject. `load` is the test seam.
+ *
+ * AN 'error' EVENT IS HEARD, AND DOES NOTHING ELSE. pg emits one on the client
+ * when the server drops the session mid-read (a restart, a failover,
+ * pg_terminate_backend, a network blip). Unheard, it kills the process before
+ * a line of JSON is written, with a stack trace in its place. Heard, the read
+ * in flight rejects with its own code and the drill reports `query-failed`
+ * like any other failed read (the same listener identity-store.ts keeps).
  */
-export async function connectPg(url) {
+export async function connectPg(url, load = () => createRequire(import.meta.url)("pg")) {
   let pg;
   try {
-    pg = createRequire(import.meta.url)("pg");
+    pg = load();
   } catch {
     throw new DrillRefusal("no-driver", "The pg driver is not installed here. Run from the hosted image, where the Dockerfile installs it.");
   }
   const client = new pg.Client({ connectionString: url, application_name: "merrymen-restore-drill", connectionTimeoutMillis: 15_000 });
+  client.on("error", () => {});
   try {
     await client.connect();
   } catch (e) {

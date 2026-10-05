@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -25,6 +26,7 @@ import {
   DrillRefusal,
   FAILING_VERDICTS,
   compareSides,
+  connectPg,
   databaseOf,
   parseDrillArgs,
   runRestoreDrill,
@@ -379,6 +381,64 @@ test("a failed read names the side, the table and the driver code, and still rol
   assert.equal(out.clients.source.sent.at(-1), "ROLLBACK");
   assert.equal(out.clients.source.ended, true);
   assert.doesNotMatch(JSON.stringify(out.report), /secret|railway\.internal/);
+});
+
+/**
+ * A stand-in for the `pg` module itself, so connectPg runs as it does hosted.
+ * Its Client is an EventEmitter, as pg's is, and `dropAt` names a table whose
+ * count meets what pg does when the server ends the session mid-read: 'error'
+ * is emitted on the client from a socket event, outside any promise, and the
+ * read in flight then rejects with the server's code. Every later query is
+ * refused, as pg refuses a client that is no longer queryable.
+ */
+function fakePg(byUrl, { dropAt } = {}) {
+  const made = [];
+  class Client extends EventEmitter {
+    constructor(config) {
+      super();
+      this.config = config;
+      this.inner = fakeClient(byUrl[config.connectionString]);
+      this.dead = false;
+      made.push(this);
+    }
+
+    async connect() {}
+
+    query(text, params) {
+      if (this.dead) return Promise.reject(new Error("Client has encountered a connection error and is not queryable"));
+      if (dropAt && text.includes(`FROM "${dropAt}") AS stamped`)) {
+        this.dead = true;
+        return new Promise((_, reject) => setImmediate(() => {
+          this.emit("error", new Error("Connection terminated unexpectedly"));
+          reject(Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" }));
+        }));
+      }
+      return this.inner.query(text, params);
+    }
+
+    async end() {
+      this.ended = true;
+    }
+  }
+  return { Client, made };
+}
+
+test("a connection the server drops mid-read is reported by code, not by a crash", async () => {
+  const pg = fakePg({ [FORK_URL]: database(FORK_SERVER), [SOURCE_URL]: database() }, { dropAt: "positions" });
+  const client = await connectPg(FORK_URL, () => pg);
+  assert.equal(client.listenerCount("error"), 1, "connectPg hears the client's 'error' event");
+  assert.doesNotThrow(() => client.emit("error", new Error("Connection terminated unexpectedly")));
+
+  const out = await runRestoreDrill({ argv: ARGV, env: ENV, now: () => NOW_MS, connect: (url) => connectPg(url, () => pg) });
+  assert.equal(out.exitCode, 1);
+  assert.deepEqual(out.report.error, { code: "query-failed", detail: "A read failed and the drill stopped.", side: "fork", table: "positions", cause: "57P01" });
+  assert.ok(pg.made.slice(1).every((c) => c.ended), "every client the drill opened was ended");
+  assert.equal(pg.made.length, 2, "the source was never opened after the fork failed");
+  assert.doesNotMatch(JSON.stringify(out.report), /secret|railway\.internal|terminat/);
+});
+
+test("a missing driver is refused by code", async () => {
+  await assert.rejects(connectPg(FORK_URL, () => { throw new Error("Cannot find module 'pg'"); }), (e) => e instanceof DrillRefusal && e.code === "no-driver");
 });
 
 test("a millisecond stamp is read as milliseconds, row by row", async () => {
