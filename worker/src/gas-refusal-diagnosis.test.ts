@@ -149,6 +149,17 @@ describe("a request dump that happens to spell an AA code is not the wall", () =
     const duplicate = classifyRevert(withReason("AA23 reverted duplicate permissionHash"));
     assert.equal(duplicate.rule, "wall-refused");
     assert.match(duplicate.detail, /installed twice/);
+    // And with nothing but the CODE to go on. Both reasons above also carry
+    // words a case-insensitive entry catches, so on their own they would pass
+    // with the AA-code entry gone. These are the shapes that have only the
+    // code: the account's revert data after it (measured on 4663, see
+    // session-account.ts), and the EntryPoint's out-of-gas form.
+    for (const reason of ["AA23 reverted 0xc48cf8ee", "AA23 reverted (or OOG)"]) {
+      const v = classifyRevert(withReason(reason));
+      assert.equal(v.rule, "wall-refused", reason);
+      assert.equal(v.retryable, false, reason);
+      assert.match(v.detail, /sealed policy does not permit/, reason);
+    }
   });
 });
 
