@@ -52,6 +52,7 @@
  * quietly resume every tenant: it refuses to boot instead. Anywhere else (a
  * local supervisor, the test suites) unset keeps today's behaviour.
  */
+import { RAILWAY_ONLY_IDENTITY } from "./deploy-guard-checks";
 
 export const FLEET_ROLLOUT_ENV = "MERRYMEN_FLEET_ROLLOUT";
 /** What the child reads its own level from. The rollout itself never reaches a child. */
@@ -100,17 +101,15 @@ type Env = Record<string, string | undefined>;
  * hosted orchestrator that resumes the whole fleet by default. Deliberately
  * not RAILWAY_TOKEN or anything else a developer's shell or a CI job may carry:
  * those say who is deploying, not where this process runs.
+ *
+ * THE DEPLOY GUARD'S OWN LIST, AND WIDER, NEVER NARROWER. The identity names
+ * are deploy-guard-checks.ts's (onRailway), so the two can never disagree in
+ * the direction that admits: whatever the guard treats as Railway, this treats
+ * as Railway too. This one also counts the volume's mount path, and a marker
+ * that is present but empty, which the guard does not. Here wider only means
+ * an unset rollout refuses in more places, so it stays fail-closed.
  */
-const RAILWAY_MARKERS = [
-  "RAILWAY_ENVIRONMENT",
-  "RAILWAY_ENVIRONMENT_ID",
-  "RAILWAY_ENVIRONMENT_NAME",
-  "RAILWAY_PROJECT_ID",
-  "RAILWAY_SERVICE_ID",
-  "RAILWAY_DEPLOYMENT_ID",
-  "RAILWAY_REPLICA_ID",
-  "RAILWAY_VOLUME_MOUNT_PATH",
-] as const;
+const RAILWAY_MARKERS = [...RAILWAY_ONLY_IDENTITY, "RAILWAY_VOLUME_MOUNT_PATH"] as const;
 
 /**
  * Is this the Railway-hosted orchestrator? Also true for a required persistent

@@ -96,9 +96,11 @@ const isFleetRole = (role: string): role is FleetRole => FLEET_ROLES.has(role);
 /**
  * What Railway sets in every deployment, pre-deploy containers included. ANY
  * of them present means "on Railway": fail closed, so one renamed variable
- * cannot turn the whole guard into a skip.
+ * cannot turn the whole guard into a skip. fleet-rollout.ts reads the same
+ * list (and more) for its own "unset refuses on Railway", so a name added
+ * here is a refusal there too.
  */
-const RAILWAY_ONLY_IDENTITY = [
+export const RAILWAY_ONLY_IDENTITY = [
   "RAILWAY_PROJECT_ID", "RAILWAY_ENVIRONMENT_ID", "RAILWAY_ENVIRONMENT_NAME", "RAILWAY_ENVIRONMENT",
   "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID", "RAILWAY_REPLICA_ID",
 ] as const;

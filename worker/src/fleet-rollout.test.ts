@@ -25,6 +25,7 @@ import {
   rolloutStartupLine,
   WORKER_ENFORCED_LEVELS,
 } from "./fleet-rollout";
+import { onRailway, RAILWAY_ONLY_IDENTITY } from "./deploy-guard-checks";
 
 const address = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
 const A = address(0xa1), B = address(0xb2), C = address(0xc3), D = address(0xd4);
@@ -150,6 +151,18 @@ describe("unset", () => {
 
   it("a deployer's token is not a deployment: RAILWAY_TOKEN alone does not make this Railway-hosted", () => {
     assert.equal(railwayHosted({ RAILWAY_TOKEN: "x", RAILWAY_API_TOKEN: "y" }), false);
+  });
+
+  it("is Railway wherever the deploy guard is, and never the other way round", () => {
+    // The guard (deploy-guard-checks.ts) skips off Railway; this refuses an
+    // unset value on Railway. Were the guard's list ever wider than this one,
+    // a process the guard checked as the fleet could still read unset as all.
+    for (const key of [...RAILWAY_ONLY_IDENTITY, "RAILWAY_VOLUME_MOUNT_PATH", "RAILWAY_TOKEN", "RAILWAY_GIT_BRANCH"]) {
+      for (const value of ["x", ""]) {
+        if (onRailway({ [key]: value })) assert.equal(railwayHosted({ [key]: value }), true, `${key}=${JSON.stringify(value)}`);
+      }
+    }
+    for (const key of RAILWAY_ONLY_IDENTITY) assert.equal(railwayHosted({ [key]: "" }), true, `${key}, present but empty`);
   });
 
   it("set on Railway, the value decides as anywhere else", () => {
