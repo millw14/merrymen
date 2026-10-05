@@ -20,8 +20,8 @@ import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, type LedgerImportVolume } from "./ledger-import";
 import type { TenantLease } from "./tenant-lease";
 import {
-  applyResumeApprovals, archiveTenantHome, chainGapCheck, homeIdentity, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview,
-  parseResumeRevokes, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
+  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, parseResumeApprovals,
+  parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
   type GapChain, type PreviewEntry,
 } from "./ledger-resume";
 
@@ -75,8 +75,11 @@ describe("the operator variables", () => {
     assert.throws(() => parseResumeApprovals(`${addr(1)}:${d},${addr(1)}:${"c".repeat(64)}`), /repeats/);
     assert.throws(() => parseResumeApprovals(`${addr(1)}`), /entry 1/);
     assert.throws(() => parseResumeApprovals("run:abc"), /entry 1/);
-    assert.deepEqual(parseResumeRevokes(addr(3)), [addr(3)]);
+    assert.deepEqual(parseResumeRevokes(`${addr(3)}:${d},run:${"b".repeat(64)}`), [{ kind: "tenant", tenant: addr(3), digest: d }, { kind: "run", run: "b".repeat(64) }]);
     assert.throws(() => parseResumeRevokes("0x12"), /entry 1/);
+    // A bare tenant is refused: left set across boots it withdrew the re-approval too.
+    assert.throws(() => parseResumeRevokes(addr(3)), /entry 1 is not 0x<tenant>:<evidence digest>/);
+    assert.throws(() => parseResumeRevokes(`${addr(3)}:${d},${addr(3)}:${d}`), /repeats/);
   });
 });
 
@@ -135,6 +138,43 @@ describe("the preconditions", () => {
     raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '10', '20', ?)").run(account, OLD);
     assert.deepEqual((await check()).refusals.map((r) => /no accounting anchor, yet 1/.test(r)), [true]);
   });
+  it("a paper book with a flow on record, or whose owner asked for live trading, is read on chain and starts exits-only", async () => {
+    const funded = await fixture();
+    funded.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, at, epoch, chain_id)
+      VALUES (?, 'in', 25, '0xdep9', 10, 1, 'deposit', ?, 2, 4663)`).run(funded.account, OLD);
+    const f = await funded.pre();
+    assert.deepEqual({ paper: f.paper, chain: f.chainRequired, level: f.suggestedLevel }, { paper: false, chain: true, level: "exits-only" });
+    const intent = await fixture();
+    const i = await resumePreconditions(intent.shared, { tenant: intent.tenant, account: intent.account, grantAccount: intent.account, nowSec: NOW, controls: CONTROLS,
+      homePendingImport: false, liveIntent: true });
+    assert.deepEqual({ paper: i.paper, chain: i.chainRequired, level: i.suggestedLevel }, { paper: false, chain: true, level: "exits-only" });
+    assert.equal((await intent.pre()).chainRequired, false, "without the intent it is the paper book it was");
+  });
+  it("reads the chain from the OLDEST financial cursor, so an operation after a stalled trades cursor is never skipped", async () => {
+    const f = await fixture({ live: true });
+    f.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ? AND table_name = 'trades'").run(NOW - 100 * 3600, f.tenant);
+    f.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ? AND table_name = 'events'").run(NOW - 30 * 3600, f.tenant);
+    const p = await f.pre();
+    assert.equal(p.lastMirrorAt, NOW - 30 * 3600, "the gap began at the last pass that copied anything");
+    assert.equal(p.gapFromSec, NOW - 100 * 3600 - 600, "but the read starts where the trades cursor stopped");
+    f.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ?").run(NOW - 3600, f.tenant);
+    assert.equal((await f.pre()).gapFromSec, NOW - 26 * 3600 - 600, "and always at least 26 hours back");
+  });
+  it("refuses a tenant already admitted only while its attested book is on the volume, present and unblocked", async () => {
+    const f = await fixture();
+    await ensureLedgerResumeSchema(f.shared);
+    const generation = "00000000-0000-4000-8000-0000000000c1";
+    f.raw.prepare(`INSERT INTO tenant_ledger_import (tenant, generation, target_volume_id, state, bytes, sha256, source_digest, bindings_json, created_at_ms,
+      grant_updated_at, grant_row_version) VALUES (?, ?, 'v', 'consumed', 0, '', '', '{}', 1, '1', '1')`).run(f.tenant, generation);
+    f.raw.prepare(`INSERT INTO ledger_resume_attestations (generation, approval_id, tenant, smart_account, chain_id, owner, evidence_digest, receipt_digest,
+      mirror_state_digest, snapshot_digest, created_at_ms) VALUES (?, 'a1', ?, ?, 4663, ?, 'e', 'r', 'm', 's', 1)`).run(generation, f.tenant, f.account, f.owner);
+    const check = (homeBook: "absent" | "blocked" | "present", account = f.account) =>
+      resumePreconditions(f.shared, { tenant: f.tenant, account, grantAccount: account, nowSec: NOW, controls: CONTROLS, homePendingImport: false, homeBook });
+    assert.deepEqual((await check("present")).refusals.map((r) => /already admitted/.test(r)), [true]);
+    assert.deepEqual((await check("blocked")).refusals, [], "its book was lost or blocked again: this path is what it needs");
+    assert.deepEqual((await check("absent")).refusals, []);
+    assert.ok(!(await check("present", addr(0xacc999))).refusals.some((r) => /already admitted/.test(r)), "a new account is not the admitted one");
+  });
   it("carries a valid risk period only under the grant's own spelling", async () => {
     const f = await fixture({ live: true });
     f.raw.prepare("INSERT INTO risk_periods VALUES ('r1', ?, ?, 100, 110, 0, 'owner reviewed')").run(f.account, OLD);
@@ -163,6 +203,15 @@ describe("the evidence", () => {
     assert.equal((await read()).digest, first.digest);
     f.raw.prepare("UPDATE trades SET status = 'reverted' WHERE agent_id = ?").run(f.account);
     assert.notEqual((await read()).digest, first.digest, "a status settled in place changes it");
+  });
+  it("never binds a device number, which a volume reattached on another host changes", () => {
+    const home = path.join(root, "dev-free"); mkdirSync(home, { recursive: true });
+    const book = new DatabaseSync(path.join(home, "merrymen.db")); book.exec("CREATE TABLE t (x)"); book.close();
+    const id = homeIdentity(home);
+    assert.equal("dev" in id, false);
+    assert.equal("dev" in (id.db ?? {}), false);
+    assert.equal(id.ino, String(lstatSync(home, { bigint: true }).ino));
+    assert.deepEqual(Object.keys(id.db!).sort(), ["ino", "size"]);
   });
   it("homeIdentity reads an absent home as absent and refuses a home that is not a directory", () => {
     assert.deepEqual(homeIdentity(path.join(root, "nope")), { exists: false });
@@ -241,14 +290,16 @@ describe("approvals", () => {
     const home = path.join(root, `approve-${f.id}`);
     const { evidence, digest } = await readResumeEvidence(f.shared, { tenant: f.tenant, grant: { smartAccount: f.account, chainId: 4663, owner: f.owner }, home, nowSec: NOW, controls: CONTROLS });
     const entry: PreviewEntry = { tenant: f.tenant, account: f.account, chainId: 4663, owner: f.owner, digest, pass: true, refusals: [], chain: "not-required",
-      suggestedLevel: "trade", anchor: "established:epoch-2", riskPeriod: "none", home: "absent", lastMirrorAt: null, evidence };
+      suggestedLevel: "trade", anchor: "established:epoch-2", riskPeriod: "none", home: "absent", lastMirrorAt: null,
+      holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86_400, book: "absent", evidence };
     const entries = [entry, ...extra];
     return { run: await recordPreviewRun(f.shared, entries, 1), digest, entries };
   }
   it("a batch approval binds to exactly the tenants that passed in that run", async () => {
     const f = await fixture();
     const failing: PreviewEntry = { tenant: addr(0x1234), account: addr(0x1235), chainId: 4663, owner: addr(0x1236), digest: "d".repeat(64), pass: false,
-      refusals: ["x"], chain: null, suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null, evidence: null };
+      refusals: ["x"], chain: null, suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null,
+      holdsPositions: null, startsPaused: null, grantExpiresAt: null, book: null, evidence: null };
     const { run, digest } = await runOf(f, [failing]);
     const lines: string[] = [];
     assert.equal(await applyResumeApprovals(f.shared, [{ kind: "run", run }], 2, (l) => lines.push(l)), 1);
@@ -274,10 +325,53 @@ describe("approvals", () => {
     assert.notEqual(second.digest, digest);
     assert.equal(await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: second.digest }], 3, (l) => lines.push(l)), 0);
     assert.match(lines.at(-1)!, /already has an open approval/);
-    await revokeResumeApprovals(f.shared, [f.tenant], 4, () => {});
+    await revokeResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest }], 4, () => {});
     assert.equal(await readOpenApproval(f.shared, f.tenant), null);
     assert.equal(await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: second.digest }], 5, () => {}), 1);
     assert.equal(await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest }], 6, () => {}), 0, "a revoked approval is never reopened");
+  });
+  it("a revoke left set across a restart never withdraws the re-approval that replaced it", async () => {
+    const f = await fixture();
+    const first = await runOf(f);
+    await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: first.digest }], 2, () => {});
+    f.raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(f.account, OLD + 2);
+    const second = await runOf(f);
+    // One deploy: revoke the old evidence, approve the new (the runbook's order, as boot runs them).
+    const boot = async (at: number) => {
+      await revokeResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: first.digest }], at, () => {});
+      await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: second.digest }], at, () => {});
+    };
+    await boot(3);
+    const open = (await readOpenApproval(f.shared, f.tenant))!;
+    assert.equal(open.evidenceDigest, second.digest);
+    // Its Phase A moves it on; then the container restarts with the same variables.
+    assert.ok(await moveApproval(f.shared, open.approvalId, "approved", "archiving", { generation: "00000000-0000-4000-8000-0000000000d1" }));
+    assert.ok(await moveApproval(f.shared, open.approvalId, "archiving", "archived"));
+    await boot(4);
+    assert.equal((await readOpenApproval(f.shared, f.tenant))?.state, "archived", "the re-approval stands");
+    // A run revoke withdraws what that run approved, and only that.
+    const g = await fixture();
+    const r = await runOf(g);
+    await applyResumeApprovals(g.shared, [{ kind: "run", run: r.run }], 2, () => {});
+    await revokeResumeApprovals(g.shared, [{ kind: "run", run: "9".repeat(64) }], 3, () => {});
+    assert.equal((await readOpenApproval(g.shared, g.tenant))?.state, "approved");
+    await revokeResumeApprovals(g.shared, [{ kind: "run", run: r.run }], 4, () => {});
+    assert.equal(await readOpenApproval(g.shared, g.tenant), null);
+  });
+  it("a preview taken before the tenant was admitted approves nothing for it afterwards", async () => {
+    const f = await fixture();
+    const old = await runOf(f);
+    await applyResumeApprovals(f.shared, [{ kind: "run", run: old.run }], 2, () => {});
+    const a = (await readOpenApproval(f.shared, f.tenant))!;
+    for (const [from, to] of [["approved", "archiving"], ["archiving", "archived"], ["archived", "registered"], ["registered", "applied"]] as const) {
+      assert.ok(await moveApproval(f.shared, a.approvalId, from, to, to === "archiving" ? { generation: "00000000-0000-4000-8000-0000000000d2" } : {}, 10));
+    }
+    // An older run in which the tenant passed with other evidence (recorded before the admission).
+    f.raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(f.account, OLD + 3);
+    const stale = await runOf(f);
+    const lines: string[] = [];
+    assert.equal(await applyResumeApprovals(f.shared, [{ kind: "run", run: stale.run }], 11, (l) => lines.push(l)), 0);
+    assert.match(lines.join("\n"), /admitted after preview run/);
   });
   it("a registered approval is past what a revoke undoes", async () => {
     const f = await fixture();
@@ -288,7 +382,7 @@ describe("approvals", () => {
     assert.ok(await moveApproval(f.shared, open.approvalId, "archiving", "archived"));
     assert.ok(await moveApproval(f.shared, open.approvalId, "archived", "registered"));
     const lines: string[] = [];
-    await revokeResumeApprovals(f.shared, [f.tenant], 3, (l) => lines.push(l));
+    await revokeResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest }], 3, (l) => lines.push(l));
     assert.equal((await readOpenApproval(f.shared, f.tenant))?.state, "registered");
     assert.match(lines[0]!, /past the point a revoke undoes/);
   });
@@ -370,6 +464,54 @@ describe("the home archive", () => {
   it("with no home there is nothing to archive", () => {
     assert.deepEqual(archiveTenantHome({ home: path.join(root, "vol", "children", "none"), archiveRoot: path.join(root, "vol", "archive", "none"),
       generation: "00000000-0000-4000-8000-000000000014", mayWrite: () => true }), { archivePath: null, carried: [] });
+  });
+});
+
+describe("the attested seed", () => {
+  async function book() {
+    const raw = new DatabaseSync(":memory:"); handles.push(raw);
+    const db = wrapSqlite(raw); await applyLedgerSchema(db);
+    return { raw, db };
+  }
+  it("plans exactly what the ordinary seeds restore into an empty book: held live basis, and the floor beside it", async () => {
+    const f = await fixture({ live: true });
+    f.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'SOLD', '5', '9', ?)").run(f.account, OLD); // no position: never restored
+    f.raw.prepare("INSERT INTO cost_basis VALUES (?, 'paper', 'COIN', '10', '20', ?)").run(f.account, OLD); // paper: never restored
+    f.raw.prepare("INSERT INTO position_floors VALUES (?, 'live', 'SOLD', 900, 'r1', 'entry', ?)").run(f.account, OLD);
+    const plan = await planAttestedSeed(f.shared, f.account);
+    assert.deepEqual(plan.basis, [{ mode: "live", symbol: "COIN", qtyRaw: "10", costUsdg: "20" }]);
+    assert.deepEqual(plan.floors.map((x) => [x.symbol, x.stopBps]), [["COIN", 1500]]);
+  });
+  it("completes a seed that failed, and proves it, in one transaction on the book", async () => {
+    const f = await fixture({ live: true });
+    const plan = await planAttestedSeed(f.shared, f.account);
+    const b = await book();
+    const done = await completeAttestedSeed({ book: b.db, account: f.account, plan, mayWrite: () => null });
+    assert.deepEqual(done, { ok: true, basis: 1, floors: 1 });
+    assert.deepEqual(b.raw.prepare("SELECT agent_id, mode, symbol, qty_raw, cost_usdg FROM cost_basis").all().map((r) => ({ ...r })),
+      [{ agent_id: f.account, mode: "live", symbol: "COIN", qty_raw: "10", cost_usdg: "20" }]);
+    assert.deepEqual(b.raw.prepare("SELECT symbol, stop_bps, rung FROM position_floors").all().map((r) => ({ ...r })), [{ symbol: "COIN", stop_bps: 1500, rung: "r1" }]);
+    // Again: the rows the ordinary seed (or the last call) wrote are kept and proved.
+    assert.deepEqual(await completeAttestedSeed({ book: b.db, account: f.account, plan, mayWrite: () => null }), { ok: true, basis: 1, floors: 1 });
+    assert.equal((b.raw.prepare("SELECT count(*) AS n FROM cost_basis").get() as { n: number }).n, 1);
+  });
+  it("refuses a book whose row disagrees, and a lost writer before or at the commit, writing nothing", async () => {
+    const f = await fixture({ live: true });
+    const plan = await planAttestedSeed(f.shared, f.account);
+    const wrong = await book();
+    wrong.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '10', '99', 1)").run(f.account);
+    const r = await completeAttestedSeed({ book: wrong.db, account: f.account, plan, mayWrite: () => null });
+    assert.equal(r.ok, false);
+    assert.match(!r.ok ? r.why : "", /disagrees/);
+    assert.equal((wrong.raw.prepare("SELECT count(*) AS n FROM position_floors").get() as { n: number }).n, 0, "rolled back");
+    const early = await book();
+    assert.deepEqual(await completeAttestedSeed({ book: early.db, account: f.account, plan, mayWrite: () => "it holds no lease" }),
+      { ok: false, why: "nothing written — it holds no lease" });
+    const late = await book();
+    let asked = 0;
+    const l = await completeAttestedSeed({ book: late.db, account: f.account, plan, mayWrite: () => (++asked > 1 ? "lease lost" : null) });
+    assert.equal(l.ok, false);
+    assert.equal((late.raw.prepare("SELECT count(*) AS n FROM cost_basis").get() as { n: number }).n, 0, "the late refusal takes the rows back");
   });
 });
 

@@ -127,7 +127,8 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
     assert.deepEqual(check.refusals, []);
     const entry: PreviewEntry = { tenant, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
-      anchor: check.anchor, riskPeriod: check.riskPeriod, home: "absent", lastMirrorAt: check.lastMirrorAt, evidence };
+      anchor: check.anchor, riskPeriod: check.riskPeriod, home: "absent", lastMirrorAt: check.lastMirrorAt,
+      holdsPositions: check.holdsPositions, startsPaused: false, grantExpiresAt: NOW + 86400, book: "absent", evidence };
     const run = await recordPreviewRun(shared, [entry], Date.now());
     assert.equal(await applyResumeApprovals(shared, [{ kind: "run", run }], Date.now(), () => {}), 1);
     await assert.rejects(main.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run,
