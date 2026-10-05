@@ -266,6 +266,12 @@ test("a ledger older than the identity columns collapses only exact copies", asy
       // No epoch column either: a pre-epoch ledger's every row is its one run.
       assert.deepEqual(netFlows(await readDistinctFlows(reader, CASED, null)), { n: 2, net: 200 });
     }
+    // A reader's fixture with no id, tx or source at all is still a run read.
+    raw.exec(`DROP TABLE flows; CREATE TABLE flows (agent_id TEXT, epoch INTEGER, direction TEXT, amount_usdg REAL, at INTEGER);
+      INSERT INTO flows VALUES ('${ACCOUNT}', 2, 'in', 100, 1), ('${ACCOUNT}', 2, 'out', 10, 2), ('${ACCOUNT}', 2, 'out', 10, 2)`);
+    for (const reader of [wrapSqlite(raw), pgTranslated(raw)]) {
+      assert.deepEqual(netFlows(await readDistinctFlows(reader, ACCOUNT, 2)), { n: 2, net: 90 }, "an exact copy is still one");
+    }
   } finally { raw.close(); }
 });
 

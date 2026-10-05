@@ -138,9 +138,14 @@ function optionalInt(v: unknown): number | null {
   return n;
 }
 
-/** A row that does not read as a flow is not a flow of zero: the run is unread. */
-function recordOf(r: Record<string, unknown>): FlowRecord {
-  const id = Number(r.id);
+/**
+ * A row that does not read as a flow is not a flow of zero: the run is unread.
+ * A COLUMN that is not there is a row without that fact — an older ledger has
+ * no identity columns — so it reads as null, never as unread. `position`
+ * stands in for an id only where the table has none.
+ */
+function recordOf(r: Record<string, unknown>, position: number): FlowRecord {
+  const id = r.id === undefined ? position : Number(r.id);
   const amountUsdg = Number(r.amount_usdg);
   const at = Number(r.at);
   const direction = r.direction;
@@ -232,43 +237,21 @@ export function collapseFlows(rows: readonly FlowRecord[], agentChain: number | 
   return { flows, duplicates, verdict };
 }
 
-function missingColumns(error: unknown): boolean {
-  const e = error as { code?: unknown; message?: unknown };
-  return e.code === "42703" || (typeof e.message === "string" && /^no such column: /i.test(e.message));
-}
-
-const identityColumns = new WeakSet<object>();
 /**
- * Whether `flows` has the identity columns yet. A ledger an older worker wrote
- * has neither, and then no row is a chain log: every row collapses only as an
- * exact copy. Remembered once found, like the other column probes.
- */
-async function hasIdentity(db: Db): Promise<boolean> {
-  if (identityColumns.has(db)) return true;
-  try {
-    await db.prepare("SELECT log_index, chain_id FROM flows WHERE 1 = 0").all();
-    identityColumns.add(db);
-    return true;
-  } catch (error) {
-    if (!missingColumns(error)) throw error;
-    return false;
-  }
-}
-
-/**
- * Every row of one account's run, oldest first. Case-insensitive on the
- * account, like every financial reader: an account has been written under more
- * than one spelling. `epoch` null only for a ledger older than epochs, where
- * every row is the one run there is.
+ * Every row of one account's run. Case-insensitive on the account, like every
+ * financial reader: an account has been written under more than one spelling.
+ * `epoch` null only for a ledger older than epochs, where every row is the one
+ * run there is.
+ *
+ * `SELECT *`, NOT A COLUMN LIST: a ledger an older worker wrote has no
+ * `log_index` or `chain_id`, and then no row is a chain log — every row
+ * collapses only as an exact copy. Naming a column it lacks would throw, and
+ * a run with no identity columns is a run read, not an unread one. The scope
+ * is the normalized account/run index either way.
  */
 async function readFlowRows(db: Db, account: string, epoch: number | null): Promise<FlowRecord[]> {
-  const identity = await hasIdentity(db) ? "log_index, chain_id" : "NULL AS log_index, NULL AS chain_id";
   const rows = (await db
-    .prepare(
-      `SELECT id, agent_id, direction, amount_usdg, tx_hash, block_number, ${identity}, source, at
-         FROM flows WHERE LOWER(agent_id) = ?${epoch === null ? "" : " AND epoch = ?"}
-        ORDER BY at ASC, id ASC`,
-    )
+    .prepare(`SELECT * FROM flows WHERE LOWER(agent_id) = ?${epoch === null ? "" : " AND epoch = ?"} ORDER BY at ASC`)
     .all(account.toLowerCase(), ...(epoch === null ? [] : [epoch]))) as Record<string, unknown>[];
   return rows.map(recordOf);
 }
