@@ -26,7 +26,9 @@
  *     03:18 deploy destroyed; the event survived in the mirror. It is
  *     restored by the same rule the dashboard's inactivity reader uses
  *     (web/src/lib/services/inactivity.ts): the newest pause/resume event is a
- *     pause, and the agent did nothing past the pause gate after it.
+ *     pause, and the agent did nothing past the pause gate after it. Only into
+ *     a home never armed here: in a home a worker has run in, its own `paused`
+ *     file is the truth, and Postgres may not have its /resume yet.
  *  3. Kill-request files already in the home. Those are not read here: the
  *     orchestrator honours them on every pass (honourPendingKills, reconcile)
  *     and spawnChild refuses while one is pending (killRequested).
@@ -133,7 +135,7 @@ interface ControlRow {
   chatId: number | null;
 }
 
-/** What the journal says the owner asked for, across every bot, token and claim of one tenant/account/chain. */
+/** What the journal says the owner asked for, across every bot, token, claim, account and chain of one tenant. */
 export interface ControlFold {
   /** /pause requests. Every one is restrictive; none is ever lifted here. */
   pauses: Array<{ botId: string; updateId: number; atSec: number; chatId: number | null }>;
@@ -174,10 +176,10 @@ function parseRow(raw: unknown): ControlRow | string {
 }
 
 /**
- * THE FOLD: what every recorded control for one tenant/account/chain comes
- * to, now. Pure. Spans every bot, token tag, claim stamp and grant tag the
- * rows carry: a token rotation or a re-sign does not lift a pause, and a
- * second bot cannot hide a kill.
+ * THE FOLD: what every recorded control for one tenant comes to, now. Pure.
+ * Spans every bot, token tag, claim stamp, grant tag, account and chain the
+ * rows carry: a token rotation, a re-sign or a new account does not lift a
+ * pause, and a second bot cannot hide a kill.
  *
  * A /kill is confirmed only by a /confirm that links to it, in the same bot
  * stream, later in that stream, and dated inside the request's own window
@@ -242,20 +244,32 @@ const missingTable = (e: unknown): boolean => {
 const MAX_CONTROL_ROWS = 10_000;
 
 /**
- * THE ADAPTER FOR #259: every journal row for one tenant/account/chain, or
- * `absent` when the table does not exist (the listener that writes it is not
- * deployed). Any other error throws: an unreadable journal is not an empty one.
- * Run outside any transaction, so a missing table cannot abort one (Postgres).
+ * THE ADAPTER FOR #259: every journal row for one tenant, or `absent` when the
+ * table does not exist (the listener that writes it is not deployed). Any
+ * other error throws: an unreadable journal is not an empty one. Run outside
+ * any transaction, so a missing table cannot abort one (Postgres).
+ *
+ * EVERY ACCOUNT AND CHAIN THE TENANT'S JOURNAL NAMES, not only the current
+ * grant's. The tenant is the owner, and a stop belongs to the owner's home,
+ * not to one account: the legacy reader below already spans every account the
+ * owner has had (ownerAccounts), as the dashboard's inactivity reader does.
+ * Read under the current account alone, a /pause the listener journalled
+ * while the owner's grant named account A was silently dropped once the owner
+ * re-signed on account B before admission. A confirmed /kill journalled under
+ * A reaches B's arm the same way, and honourKillRequest decides it against
+ * the grant the store holds now (a grant signed after the kill is kept and
+ * paused, decision 7). Receipts are keyed by the request's own (bot, update),
+ * so exactly-once is unchanged.
  */
 export async function readRecoveryControls(db: Db, scope: ControlScope): Promise<{ rows: unknown[] } | { absent: true }> {
   try {
     const rows = await db
       .prepare(
         `SELECT bot_id, update_id, kind, request_update_id, message_at_sec, expires_at_ms, chat_id
-           FROM recovery_reply_controls WHERE tenant = ? AND smart_account = ? AND chain_id = ?
+           FROM recovery_reply_controls WHERE tenant = ?
           ORDER BY bot_id, update_id LIMIT ${MAX_CONTROL_ROWS + 1}`,
       )
-      .all(scope.tenant.toLowerCase(), scope.smartAccount.toLowerCase(), scope.chainId);
+      .all(scope.tenant.toLowerCase());
     if (rows.length > MAX_CONTROL_ROWS) throw new Error("recovery control journal is too large to fold");
     return { rows };
   } catch (e) {
@@ -457,6 +471,9 @@ export async function armOwnerControls(o: ArmControlsOptions): Promise<ArmContro
     await ensureTelegramSchema(o.shared);
     schemaReady.add(o.shared);
   }
+  // Read before anything below writes the arm record: whether THIS home has
+  // ever been armed decides whether a pre-incident pause event may be restored.
+  const neverArmed = readArmedAtMs(o.home) === null;
   const journal = await readRecoveryControls(o.shared, s);
   const fold = foldRecoveryControls("absent" in journal ? [] : journal.rows, nowMs);
   if (fold.malformed) return { ok: false, hold: "malformed", why: fold.malformed };
@@ -509,7 +526,14 @@ export async function armOwnerControls(o: ArmControlsOptions): Promise<ArmContro
     }
   }
 
-  const legacy = await readLegacyPause(o.shared, s);
+  // A PRE-INCIDENT PAUSE, ONLY INTO A HOME NEVER ARMED HERE: a rebuilt home,
+  // or the fresh one a resume archive leaves, which is exactly the home whose
+  // `paused` file the events outlived. A home armed before is a home a worker
+  // ran in, and its own `paused` file is the truth: on every crash-restart
+  // this runs again, BEFORE finalMirrorBeforeAnchor carries the book's tail
+  // up, so Postgres can still show the owner's /pause and not yet the /resume
+  // that followed it — and restoring from that would undo the resume.
+  const legacy = neverArmed ? await readLegacyPause(o.shared, s) : null;
   if (legacy && !receipts.has(`${LEGACY_EVENTS_BOT}:${legacy.eventId}`)) {
     const when = new Date(legacy.atSec * 1000).toISOString();
     if (await applyPause(o, LEGACY_EVENTS_BOT, legacy.eventId, "legacy-restore",

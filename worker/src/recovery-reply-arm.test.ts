@@ -185,6 +185,37 @@ describe("armOwnerControls", () => {
       { ok: true, paused: false, applied: [] });
   });
 
+  it("never restores a legacy pause into a home already armed: a /resume Postgres has not seen yet stands", async () => {
+    const f = await fixture(false);
+    // First arm: nothing on record, so the home is armed unpaused.
+    assert.deepEqual(await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW }),
+      { ok: true, paused: false, applied: [] });
+    // The worker then ran: the owner said /pause (mirrored), then /resume —
+    // the child removed its file and wrote the resume event into its own
+    // book, and crashed before the next mirror pass carried it up.
+    f.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 42', ?)").run(f.account, NOW_SEC + 60);
+    assert.ok(await readLegacyPause(f.shared, f.scope), "Postgres, alone, still reads a standing pause");
+    const respawn = await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 120_000 });
+    assert.deepEqual(respawn, { ok: true, paused: false, applied: [] }, "the crash-restart does not undo the owner's /resume");
+    assert.equal((f.raw.prepare("SELECT count(*) AS n FROM recovery_reply_control_receipts").get() as { n: number }).n, 0);
+    // The same events into a home never armed (rebuilt, or left by an archive): restored.
+    const rebuilt = path.join(root, `rebuilt-${f.tenant}`);
+    const armed = await armOwnerControls({ scope: f.scope, home: rebuilt, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW + 180_000 });
+    assert.equal(armed.ok && armed.paused, true);
+  });
+
+  it("a /pause journalled under the owner's previous account still applies after a re-sign on a new account", async () => {
+    const f = await fixture();
+    control(f.raw, { tenant: f.tenant, account: addr(0xb0dd) }, { update: 9, kind: "pause", at: NOW_SEC - 60 });
+    const armed = await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW });
+    assert.deepEqual(armed, { ok: true, paused: true, applied: ["pause 111:9"] });
+    // And another tenant's journal never reaches this one.
+    const g = await fixture();
+    control(g.raw, { tenant: addr(0xcafe), account: g.account }, { update: 3, kind: "pause", at: NOW_SEC - 60 });
+    assert.deepEqual(await armOwnerControls({ scope: g.scope, home: g.home, shared: g.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW }),
+      { ok: true, paused: false, applied: [] });
+  });
+
   it("does not restore a legacy pause the agent acted past, or one a resume followed", async () => {
     const f = await fixture(false);
     f.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 42', ?)").run(f.account, NOW_SEC - 7200);
