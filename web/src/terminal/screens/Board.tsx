@@ -173,12 +173,16 @@ function Rank({
             <span className="rank-trades">{tradeLine(a)}</span>
             {a.mode && a.mode !== "live" && (!a.performance || a.mode !== performance.book)
               && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
+            {/* KEPT THROUGH THE RECOVERY HOLD, and said neutrally: never
+                "expired", never "re-sign" — see read-leaderboard.ts. */}
+            {performance.notRunning && <Stamp>Not running</Stamp>}
           </div>
         </div>
         <div className="rank-nums">
           <span className="rank-value" title={performance.title}>
             <span className="rank-have" aria-label={`Current value ${performance.value}`}>{performance.value}</span>
             {a.performance && <small className="rank-book">{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
+            {performance.lastValued !== null && <small className="rank-book">{performance.lastValued}</small>}
           </span>
           <span className="rank-return" title={performance.title}>
             <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}`}>

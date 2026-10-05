@@ -1,4 +1,4 @@
-import { fullDateTime, subCentUsd, usd } from "@/lib/format";
+import { fullDateTime, shortDateTime, subCentUsd, usd } from "@/lib/format";
 import type { LiveAgent } from "./live";
 
 /** A current valuation and a separately measured return, from the ledger. */
@@ -52,7 +52,13 @@ export function performanceOf(agent: LiveAgent) {
   const pnl = published ? number(p.pnlUsdg) : null;
   const equityAt = timestamp(p?.equityAt);
   const pnlAt = timestamp(p?.pnlAt);
+  // NOT RUNNING, AND NOTHING MORE. The board kept this row through the
+  // recovery hold (read-leaderboard.ts); it says so neutrally, beside the
+  // newest fact the row has — when its book was last valued — and never why
+  // or what an owner should do about it.
+  const notRunning = agent.notRunning === true;
   const title = [
+    notRunning ? "Not running" : "",
     `${bookLabel} portfolio`,
     equityAt !== null ? `Valued ${fullDateTime(equityAt * 1000)}` : "Valuation time unavailable",
     pnlAt !== null ? `P&L measured ${fullDateTime(pnlAt * 1000)}` : "Measured P&L unavailable",
@@ -65,5 +71,8 @@ export function performanceOf(agent: LiveAgent) {
     pnl: pnl === null ? null : `${pnl > 0 ? "+" : pnl < 0 ? "−" : ""}${dollars(Math.abs(pnl))}`,
     held: p?.held === true,
     gasIncomplete: p?.gasComplete === false,
+    notRunning,
+    /** Visible as-of text for a row nothing is running; null when unvalued. */
+    lastValued: notRunning && equityAt !== null ? `Last valued ${shortDateTime(equityAt * 1000)}` : null,
   };
 }

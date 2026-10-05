@@ -146,6 +146,11 @@ export interface LiveAgent {
   contributionsEvidenced?: boolean;
   profileAvailable?: boolean;
   mode?: string;
+  /**
+   * The board kept this row through the recovery hold, and nothing is running
+   * it. Said as "Not running" and nothing more — see read-leaderboard.ts.
+   */
+  notRunning?: boolean;
   recentTrades?: import("@/lib/profile-trades").ProfileTrade[];
   activityRead?: boolean;
   publicBook?: boolean;
@@ -896,6 +901,9 @@ export function liveOf(s: LiveSources): LiveState {
       profileAvailable: !!a.slug,
       name: a.name,
       mode: a.mode,
+      // Only a true is said; an older server sends nothing, and absent is
+      // not "not running".
+      notRunning: a.notRunning === true,
       filledPaper: a.filledPaper,
       handle: a.handle,
       pnlBps: a.pnlBps,
@@ -1400,6 +1408,8 @@ const finiteOrNull = (n: unknown): number | null => (typeof n === "number" && Nu
 interface BoardRow {
   performance?: AgentPerformance;
   mode?: string;
+  /** Optional: an older server does not send it. */
+  notRunning?: boolean;
   filledPaper?: number;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
   slug: string | null;
