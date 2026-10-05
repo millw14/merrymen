@@ -54,6 +54,10 @@ import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/co
 
 let historyRepairStarted = false;
 function startHistoryRepair(): void {
+  // Every tenant's shared rows at once, held ones included: only once the
+  // rollout admits the whole fleet (fleet-rollout.ts). Not latched meanwhile,
+  // so the deploy that makes it `all` runs it.
+  if (!rolloutAdmitsWholeFleet()) return;
   if (historyRepairStarted || !process.env.DATABASE_URL) return;
   historyRepairStarted = true;
   void (async () => {
@@ -77,7 +81,7 @@ import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease as acquireStoreLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings, type StoredGrant } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -114,8 +118,12 @@ import {
   FLEET_ROLLOUT_ENV,
   childAdmissionLevel,
   fleetRollout,
+  rolloutAdmitsWholeFleet,
+  rolloutCounts,
   rolloutHeld,
+  rolloutLine,
   rolloutStartupLine,
+  type RolloutCounts,
 } from "./fleet-rollout";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
@@ -757,6 +765,19 @@ export function setSpawnForTest(fn: typeof spawn): void {
   spawn = fn;
 }
 
+/**
+ * What takes a tenant's advisory lease: tenant-lease.ts's, unless a test has
+ * swapped in one that records who was asked for. The no-op lease a test runs
+ * on is taken and released without trace, so "a tenant the rollout does not
+ * admit is never leased" could not be shown without this.
+ */
+let acquireTenantLease: (tenant: `0x${string}`) => Promise<TenantLease | null> = acquireStoreLease;
+
+/** Test seam: take leases through `fn`; null puts tenant-lease.ts's back. */
+export function setLeaseAcquireForTest(fn: typeof acquireTenantLease | null): void {
+  acquireTenantLease = fn ?? acquireStoreLease;
+}
+
 /** Test seam: run the production spawn gate with short, real waits. */
 export function setSpawnPacingForTest(spacingMs: number, pressureMs: number): void {
   spawnPacingForTest = true;
@@ -947,6 +968,12 @@ export function isRetiringExpiredForTest(tenant: string): boolean {
 }
 let lastRosterLog: { active: number; expired: number; at: number } | null = null;
 let lastCapacityLog: { deferred: number; at: number } | null = null;
+/** The last reconcile's count of the roster per rollout level, for the heartbeat (fleetHealth). */
+let lastRolloutCounts: RolloutCounts | null = null;
+/** Test seam: what the heartbeat's rollout line would count, as the last reconcile left it. */
+export function rolloutCountsForTest(): RolloutCounts | null {
+  return lastRolloutCounts;
+}
 /** Includes children already removed by the watchdog or another stand-down. */
 const exitingChildren = new Map<string, Set<ChildProcess>>();
 
@@ -4263,9 +4290,16 @@ function childHomeTenants(): `0x${string}`[] {
  * Every child home holding a pending request, whether or not its child is
  * running. Read from the disk rather than the children map, so a kill left
  * by a child that has since crashed is not missed.
+ *
+ * EXCEPT A TENANT THE ROLLOUT DOES NOT ADMIT. Its request stays in its home,
+ * pending, and is carried out by the reconcile that first admits it, before
+ * that pass can spawn anything (and spawnChild refuses over it regardless).
+ * Nothing runs for it meanwhile, so nothing can arm the killed grant; carrying
+ * it out now would delete the grant and send the removed-agent sweep through
+ * a home the rollout has promised to leave as the incident left it.
  */
 function pendingKillTenants(): `0x${string}`[] {
-  return childHomeTenants().filter((n) => killRequested(childHome(n)));
+  return childHomeTenants().filter((n) => !rolloutHeld(n) && killRequested(childHome(n)));
 }
 
 /**
@@ -4318,26 +4352,42 @@ export async function reconcile(): Promise<void> {
   // order ferry usually got there first (honourPendingKills). Then this
   // finds the grant already absent, which is also `revoked`.
   // See kill-request.ts.
+  //
+  // Not for a tenant the rollout does not admit: its kill waits, pending, for
+  // the pass that admits it, which carries it out here before anything can
+  // spawn (see pendingKillTenants).
   const nowSec = Math.floor(Date.now() / 1000);
   const kept: `0x${string}`[] = [];
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if ((await honourKill(lc, nowSec)).outcome === "revoked") continue;
+    if (!rolloutHeld(lc) && (await honourKill(lc, nowSec)).outcome === "revoked") continue;
     kept.push(tenant);
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  // The heartbeat's count per rollout level, of the whole roster (fleetHealth).
+  lastRolloutCounts = rolloutCounts(tenants);
   // Remain wanted: a maintenance hold must not revoke the grant or wipe its
   // home. A fresh held deployment starts no process for these tenants. Also
   // stand down a local incarnation if a hold is introduced during a test or
   // by an in-process operator; its retained state will refuse repair commit.
-  for (const tenant of accountingHolds) {
+  //
+  // The same for every operator hold (operatorHold), so a tenant out of the
+  // rollout is stood down as an accounting-held one is: asked of every tenant
+  // with something local to stand down, not only the named ones.
+  for (const tenant of new Set([...accountingHolds, ...children.keys(), ...holders.keys(), ...restartPending.keys()])) {
+    if (!operatorHeld(tenant)) continue;
     cancelRestart(tenant);
     killChild(tenant);
     standDownHolder(tenant);
   }
-  await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
-  await reportPausedFleetSources(tenants);
+  // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: no expiry retirement
+  // (which scrubs grant.json and takes a lease for the final mirror) and no
+  // paused-source report (which takes a lease to look). Both run, unchanged,
+  // on the pass that admits it. The accounting hold has never skipped them.
+  const admitted = tenants.filter((tenant) => !rolloutHeld(tenant));
+  await retireExpiredGrants(admitted, expiresAtByTenant, nowSec);
+  await reportPausedFleetSources(admitted);
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
@@ -4376,7 +4426,9 @@ export async function reconcile(): Promise<void> {
   let capacityDeferred = 0;
   for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (accountingHolds.has(lc)) continue;
+    // First, before a lease is so much as asked for: nothing below this line
+    // is for a tenant the operator holds, the lease attempt included.
+    if (operatorHeld(lc)) continue;
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
@@ -4459,7 +4511,7 @@ export async function reconcile(): Promise<void> {
   // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
-    if (accountingHolds.has(held.tenant)) { pressLeaving(held); continue; }
+    if (operatorHeld(held.tenant)) { pressLeaving(held); continue; }
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
     // tenant, stood down or not, until its exit is seen.
@@ -5288,6 +5340,11 @@ export const AUTONOMY_TRADE_FUNNEL_SQL = `SELECT status, COALESCE(reject_rule, '
   FROM trades WHERE created_at >= ? GROUP BY status, rule`;
 
 async function fleetHealth(): Promise<void> {
+  // WHO THE ROLLOUT ADMITS, AT WHAT LEVEL, every pass and before anything that
+  // can fail: a deploy whose scope is not the one its operator meant (a typo
+  // that leaves a named tenant held, a cohort still at `none`) is exactly what
+  // this line exists to make visible, and it reads no table.
+  if (lastRolloutCounts) log(rolloutLine(lastRolloutCounts));
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -7318,6 +7375,11 @@ const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;
 
 async function runHolderClaimsBackfill(): Promise<void> {
   if (holderClaimsBackfilled || Date.now() < holderBackfillRetryAt) return;
+  // It claims wallets for every tenant at once, held ones included: only once
+  // the rollout admits the whole fleet (fleet-rollout.ts). An admitted child
+  // meanwhile reads its login wallet, which can only cost it a perk it owns,
+  // never grant it one it does not (see MERRYMEN_HOLDER_ADDRESS).
+  if (!rolloutAdmitsWholeFleet()) return;
   let lease: TenantLease | null;
   try {
     lease = await acquireTenantLease(HOLDER_BACKFILL_LEASE);
@@ -9424,8 +9486,11 @@ export async function runOrchestrator(): Promise<void> {
       startXPostPass();
       // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
       // Started, never awaited, like the room: nothing here is on the trading
-      // path, and each pass has its own budget and in-flight guard.
-      (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
+      // path, and each pass has its own budget and in-flight guard. Its jobs,
+      // alerts and retention run for every owner at once, held ones included,
+      // and send through their bots: only once the rollout admits the whole
+      // fleet (fleet-rollout.ts).
+      if (rolloutAdmitsWholeFleet()) (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
       // The mirror REPLACES positions per agent, so between a child restarting
