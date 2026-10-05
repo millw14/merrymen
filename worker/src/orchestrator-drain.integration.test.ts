@@ -604,6 +604,41 @@ it("UNDER FLEET_HALT THE DRAIN COPIES NOTHING: no ledger batch, no memory row, a
   }
 });
 
+it("THE SHARED LEDGER SCHEMA IS APPLIED ONCE PER DRAIN, not once per home: a few dozen round trips each, over a whole fleet", async () => {
+  const fleetOf = [[0xe81, 0xe82], [0xe91, 0xe92], [0xea1, 0xea2]].map(([t, a]) => ({ tenant: address(t!), account: address(a!) }));
+  const procs: FakeProc[] = [];
+  for (const [i, { tenant, account }] of fleetOf.entries()) {
+    await book(tenant, account);
+    procs.push(new FakeProc(81_051 + i));
+    adoptChildForTest(tenant, account, procs[i]!, lease(tenant, { n: 0 }));
+  }
+  watched = procs;
+  let schemaRuns = 0;
+  const counting: Db = {
+    exec(sql) {
+      if (/ALTER TABLE mirror_state ADD COLUMN last_stamp/.test(sql)) schemaRuns += 1;
+      return shared.exec(sql);
+    },
+    tx: (fn) => shared.tx(fn),
+    prepare: (sql) => shared.prepare(sql),
+  };
+  setRetirementMemoryStoreForTest({ shared: counting, dek, dialect: "sqlite" });
+
+  await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+
+  assert.equal(schemaRuns, 1);
+  for (const { account } of fleetOf) assert.equal(await sharedTrades(account), 1, "and every home was still copied");
+  assert.deepEqual(receipt().finalPass, { homes: 3, saved: 3, retained: 0, skipped: 0, outOfTime: 0 });
+  // The next drain (a later process) applies it again.
+  resetDrainForTest();
+  const again = address(0xeb1), againAccount = address(0xeb2), againProc = new FakeProc(81_061);
+  await book(again, againAccount);
+  watched = [againProc];
+  adoptChildForTest(again, againAccount, againProc, lease(again, { n: 0 }));
+  await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+  assert.equal(schemaRuns, 2);
+});
+
 it("A MAIN-LOOP PASS UNDER WAY WHEN THE SIGNAL COMES STARTS NOTHING AFTER ITS MIRROR: no history repair, no owner message, no background job", () => {
   // Read from the source: runOrchestrator's loop is not drivable from a test
   // without a database. The mirror returns at once once `stopping` is set, so
