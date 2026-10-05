@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { getAddress } from "viem";
 
@@ -400,5 +400,57 @@ describe("until a seed exists, entries get no headroom — and exits stay open",
     assert.ok(energy > 0 && budget > energy, "beside the energy seed");
     assert.ok(budget < spawn.indexOf("const late = lateSpawnRefusal(tenant, lease);"), "before the worker starts");
     assert.match(src, /await retryEnergySeed\(tenant as `0x\$\{string\}`\);\s*(\/\/[^\n]*\n\s*)*await retryBudgetSeed\(tenant as `0x\$\{string\}`\);/);
+  });
+});
+
+describe("the seed costs one seek per operation, never a scan of the agent's history", () => {
+  // refreshBudget runs every tick and after every recordTrade, on a
+  // synchronous sqlite. Matched on lower(user_op_hash), each seed row
+  // range-scanned every hashed row the agent ever wrote, three times over.
+  it("EVERY CORRELATED LOOKUP IS AN EQUALITY SEEK on (agent_id, user_op_hash) — the query plan says so", () => {
+    const q = store.withBudgetSeed({
+      agentId: AGENT,
+      rail: "live",
+      figure: "amount_usdg",
+      where: "status IN ('landed', 'submitted') AND kind = 'transfer'",
+      params: [],
+      seedFigure: "s.transfer_usdg",
+    });
+    const raw = new DatabaseSync(path.join(HOME, "merrymen.db"));
+    try {
+      const plan = (raw.prepare(`EXPLAIN QUERY PLAN ${q.sql}`).all(...(q.params as SQLInputValue[])) as { detail: string }[]).map((r) => r.detail);
+      const lookups = plan.flatMap((d, i) => (d.startsWith("CORRELATED SCALAR SUBQUERY") ? [plan[i + 1] ?? ""] : []));
+      assert.ok(lookups.length >= 3, `sanity: the per-operation lookups are in the plan\n${plan.join("\n")}`);
+      for (const step of lookups) {
+        assert.match(step, /^SEARCH trades USING (COVERING )?INDEX trades_agent_userop \(agent_id=\? AND user_op_hash=\?\)$/);
+      }
+      assert.ok(!plan.some((d) => /^SCAN trades\b/.test(d)), `no full scan of trades\n${plan.join("\n")}`);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("and at a long history the answer is the same: thousands of hashed rows, the seed counted once, aged-out seed rows not at all", async () => {
+    const Y = getAddress("0x9999999999999999999999999999999999990f0f");
+    const raw = new DatabaseSync(path.join(HOME, "merrymen.db"));
+    try {
+      raw.exec("BEGIN");
+      const ins = raw.prepare(
+        "INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at) VALUES (?, 'swap', ?, 1, ?, 'landed', unixepoch() - ?)",
+      );
+      // 5,000 ops, one every ten minutes: the newest 144 inside the day.
+      for (let i = 0; i < 5_000; i++) ins.run(Y, TOKEN, h(0xf_0000 + i), (i + 1) * 600 - 300);
+      const seedRow = raw.prepare(
+        `INSERT INTO budget_seed (agent_id, op_hash, spend_usdg, gross_usdg, transfer_usdg, cash_token, pending, settled_at, seeded_at)
+         VALUES (?, ?, 2, 2, 0, ?, 0, unixepoch() - ?, unixepoch())`,
+      );
+      // 48 seeded ops the child does not hold: half inside the day, half aged out.
+      for (let i = 0; i < 48; i++) seedRow.run(Y, h(0xf_8000 + i), USDG.toLowerCase(), i % 2 ? 3_600 : 3 * 86_400);
+      raw.exec("COMMIT");
+    } finally {
+      raw.close();
+    }
+    assert.equal(await store.getOpsToday(Y, "live"), 144 + 24);
+    assert.equal(await store.getSpentTodayUsdg(Y, "live", USDG), 144 + 2 * 24);
   });
 });

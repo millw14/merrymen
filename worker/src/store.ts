@@ -3541,20 +3541,39 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
  *   where       the reader's own predicate on a ledger row, its window included
  *   seedFigure  the same figure on a seed row
  *
- * Per seed row, keyed by operation hash however either side spelt it:
- *   - the child's ledger holds no row for it → the seed's figure, on the
- *     seed's own window;
+ * Per seed row STILL INSIDE THE SEED'S OWN WINDOW (pending, or settled within
+ * 24h), keyed by operation hash:
+ *   - the child's ledger holds no row for it → the seed's figure;
  *   - it holds one that has stopped counting — reverted, dropped, settled more
  *     than 24h ago → nothing: the child's row is the later word;
  *   - it holds one that still counts → what the seed says ABOVE the child's
  *     own figure for it, never below zero. The reconciler's bare copy of a
  *     transfer is a swap, so for the transfer allowance this is the whole
  *     transfer; for spend and ops it is nothing when the two agree.
+ * A seed row past its window adds nothing in any case: that is where the cap
+ * before the rebuild let it go, and the child's own copy, while it still
+ * counts, keeps counting through `own`.
+ *
+ * WHAT THIS COSTS, because it is paid on every refreshBudget — every tick,
+ * after every recordTrade — and node:sqlite is synchronous, so it is paid by
+ * the child's whole event loop: a stop-loss, Telegram, the heartbeat. Three
+ * subqueries per seed row, each an equality SEEK on trades_agent_userop
+ * (agent_id, user_op_hash). Not lower(user_op_hash): an expression no index
+ * serves range-scanned every hashed row the agent ever wrote, per subquery per
+ * seed row — measured at 0.4-0.9 s a refresh at 20k rows and 48 seeds, a year
+ * of trading. Both hashes are written lowercase — viem hands the executor and
+ * the reconciler lowercase hex, and readBudgetSeed lowers the shared side — so
+ * the plain match finds every copy the child wrote. One spelt otherwise is not
+ * found, and the seed then counts in full beside it: over, never under. And
+ * only seed rows still in their window are visited — the ones that have aged
+ * out stay in the table until the next seed replaces it, and must not cost.
  *
  * The seed is the LIVE rail's (a paper fill has no hash to count it once by),
  * so only a live reader adds it. `own + seeded` is the cap's settled half.
+ *
+ * Exported for its query-plan test (budget-seed.test.ts), not for use.
  */
-function withBudgetSeed(q: {
+export function withBudgetSeed(q: {
   agentId: string;
   rail: BudgetRail;
   figure: string;
@@ -3566,21 +3585,21 @@ function withBudgetSeed(q: {
   const own = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
   if (q.rail !== "live") return { sql: `SELECT (${own}) AS own, 0 AS seeded`, params: [q.agentId, ...q.params] };
   const live = railFilter("live");
-  const sameOp = "agent_id = ? AND user_op_hash IS NOT NULL AND lower(user_op_hash) = s.op_hash";
+  const sameOp = "agent_id = ? AND user_op_hash = s.op_hash";
   return {
     sql: `SELECT (${own}) AS own,
-      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN (CASE WHEN k.in_window = 1 THEN k.x ELSE 0 END)
+      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN k.x
                                 WHEN k.counting = 0 THEN 0
                                 WHEN k.x > k.own_x THEN k.x - k.own_x
                                 ELSE 0 END), 0)
          FROM (SELECT ${q.seedFigure} AS x,
-                      CASE WHEN s.pending = 1 OR s.settled_at > unixepoch() - 86400 THEN 1 ELSE 0 END AS in_window,
                       (SELECT COUNT(*) FROM trades WHERE ${sameOp}) AS known,
                       (SELECT COUNT(*) FROM trades WHERE ${sameOp} AND status IN (${live.sql})
                          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)) AS counting,
                       (SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE ${sameOp} AND ${q.where}) AS own_x
                  FROM budget_seed s
-                WHERE lower(s.agent_id) = lower(?)) k) AS seeded`,
+                WHERE lower(s.agent_id) = lower(?)
+                  AND (s.pending = 1 OR s.settled_at > unixepoch() - 86400)) k) AS seeded`,
     params: [
       q.agentId, ...q.params,
       ...(q.seedParams ?? []),

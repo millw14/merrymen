@@ -3262,8 +3262,9 @@ async function main() {
   let budgetDayHeld = false;
   /**
    * Re-read the settled halves from the ledger. Cheap (two indexed aggregates on
-   * `trades`), and the only thing that lets an op age out of the trailing-24h
-   * window without a restart. Never touches the in-flight halves.
+   * `trades`, plus one index seek per seeded operation still in its window —
+   * store.ts withBudgetSeed), and the only thing that lets an op age out of the
+   * trailing-24h window without a restart. Never touches the in-flight halves.
    *
    * THE LEDGER HERE INCLUDES WHAT THE ORCHESTRATOR SEEDED (budget-seed.ts): a
    * rebuilt child's trailing day, read back from the shared ledger before it
