@@ -419,3 +419,25 @@ test("a retained paper headline stays paper across live/idle heartbeats and agre
     }
   } finally { raw.close(); }
 });
+
+test("a live agent's page counts its paper TRADES as the board row does, not every paper operation", async () => {
+  // Its paper history is one simulated swap and two simulated transfers. The
+  // board row says "1 on paper"; the page said "3 paper trades".
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE agents SET expires_at = ?, beat_at = ?").run(T0 + 100 * H, T0 + H);
+    await mark(db, T0, 100);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 10, status: "paper" });
+    for (const hash of ["0xpt1", "0xpt2"]) {
+      await db.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch) VALUES (?, 'transfer', 'x', 5, ?, 'paper', ?, 2)`)
+        .run(ACCOUNT, hash, T0 + 20);
+    }
+    const ids = async () => [{ ...identity, tenant: "0x1" as const, accounts: [ACCOUNT] as `0x${string}`[], updatedAt: T0 }];
+    const profile = (await profileOf(db, identity, false))!;
+    const [board] = (await readLeaderboard((fn) => fn(db), ids, () => T0 + H, async () => null)).agents;
+    assert.equal(profile.mode, "live");
+    assert.equal(profile.filledPaper, 3, "operations, as before");
+    assert.equal(profile.paperFills, 1, "and the trades among them");
+    assert.equal(profile.paperFills, board.paperFills);
+  } finally { raw.close(); }
+});

@@ -124,6 +124,13 @@ export interface AgentProfile {
    * then divide a pretend balance by a real deposit.
    */
   filledPaper: number;
+  /**
+   * TRADES among those paper operations: distinct swaps and curve trades only
+   * (readOperationCounts), as the board's row counts them. The profile calls
+   * this "paper trades"; `filledPaper` also counts a simulated transfer or an
+   * energy purchase, which the page never calls a trade.
+   */
+  paperFills: number;
   refused: number;
   /** Distinct tokens bought, in this agent's own evidence class only. */
   tokensTouched: number;
@@ -485,6 +492,7 @@ export async function profileOf(
   const activity = await readProfileTrades(db, account, epoch, publicBook);
   let landed = 0;
   let filledPaper = 0;
+  let paperFills = 0;
   let refused = 0;
   let tokensTouched = 0;
   let tradesRead = false;
@@ -504,6 +512,7 @@ export async function profileOf(
     unpricedTrades = t.unpricedTrades;
     landed = t.landed;
     filledPaper = t.filledPaper;
+    paperFills = t.paperFills;
     refused = t.refused;
     tokensTouched = t.tokensTouched;
   } catch {
@@ -693,6 +702,7 @@ export async function profileOf(
     maxDdBps: unrankedWhy === null ? drawdownBps(growthFull) : null,
     landed,
     filledPaper,
+    paperFills,
     refused,
     tokensTouched,
     gas: { usdg: publicBook ? gasUsdg : null, unpricedTrades },
@@ -700,8 +710,11 @@ export async function profileOf(
     contributionsEvidenced: contributionsKnown === true,
     flowsWithTx,
     flowsTotal,
-    growth,
-    growthComplete,
+    // A RETURN UNDER REVIEW IS WITHHELD IN EVERY SHAPE, and the growth index
+    // is one: 0.64 is "down 36%" drawn as a line. The review exists because a
+    // step like that may be a withdrawal nobody has booked (return-review.ts).
+    growth: figures.performance.underReview ? [] : growth,
+    growthComplete: figures.performance.underReview ? false : growthComplete,
     holdings,
     publicBook,
     tradesRead,

@@ -34,6 +34,7 @@ import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
 import { performanceOf } from "./agent-performance";
+import { useNow } from "./clock";
 import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
@@ -145,6 +146,8 @@ export function DesktopSidebar({
   const [filter, setFilter] = useState("all");
   const watchlist = useWatchlist();
   const [sort, setSort] = useState<"name" | "change">("name");
+  // For "as of" on a stale valuation (performanceOf); a minute is fine enough.
+  const nowSec = Math.floor(useNow(60_000) / 1000);
   const held = new Set(positionsOf(mine).map((p) => p.symbol));
   const list = tokens.filter((t) => filter === "held" ? held.has(t.symbol) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
   list.sort((a, b) =>
@@ -304,7 +307,11 @@ export function DesktopSidebar({
           {agents
             .filter((a) => a.slug !== mine.slug)
             .map((a) => {
-              const performance = performanceOf(a);
+              const performance = performanceOf(a, nowSec);
+              // The board's words in the figure's place (performanceOf), and
+              // never coloured as a gain or a loss.
+              const figure = performance.state === null ? performance.bps : null;
+              const said = performance.state ?? pctBps(performance.bps);
               return (
               <button
                 className="sidebar-agent"
@@ -322,24 +329,26 @@ export function DesktopSidebar({
                   */}
                   <small>{tradeLine(a)}</small>
                 </span>
-                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${pctBps(performance.bps)}, ${tradeLine(a)}`}>
+                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${said}, ${tradeLine(a)}`}>
                   <strong>{performance.value}</strong>
                   {a.performance && <small>{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
                   <strong
                     className={
-                      performance.bps == null
-                        ? ""
-                        : performance.bps < 0
+                      figure == null
+                        ? performance.state !== null ? "performance-state" : ""
+                        : figure < 0
                           ? "down"
-                          : performance.bps > 0
+                          : figure > 0
                             ? "up"
                             : ""
                     }
                   >
-                    {pctBps(performance.bps)}
+                    {said}
                   </strong>
                   {performance.pnl !== null && <small>{performance.pnl} P&L</small>}
-                  {performance.gasIncomplete && <small>Gas accounting unavailable</small>}
+                  {performance.note !== null && <small className="performance-note">{performance.note}</small>}
+                  {performance.gasIncomplete && performance.state === null && <small>Gas accounting unavailable</small>}
+                  {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
                 </span>
               </button>
               );

@@ -146,6 +146,11 @@ export interface LiveAgent {
   contributionsEvidenced?: boolean;
   profileAvailable?: boolean;
   mode?: string;
+  /**
+   * The board kept this row through the recovery hold, and nothing is running
+   * it. Said as "Not running" and nothing more — see read-leaderboard.ts.
+   */
+  notRunning?: boolean;
   recentTrades?: import("@/lib/profile-trades").ProfileTrade[];
   activityRead?: boolean;
   publicBook?: boolean;
@@ -161,6 +166,13 @@ export interface LiveAgent {
    * simulated fills published "0 Completed trades".
    */
   filledPaper?: number;
+  /**
+   * TRADES, where `landed` and `filledPaper` count operations: distinct swaps
+   * and curve trades only (distinct-trades.ts readOperationCounts). Absent
+   * from an older server, and then the operation counts are read as before.
+   */
+  paperFills?: number;
+  liveFills?: number;
   last: Thesis | null;
   glance: StrategyGlance;
   thesis: string;
@@ -896,7 +908,12 @@ export function liveOf(s: LiveSources): LiveState {
       profileAvailable: !!a.slug,
       name: a.name,
       mode: a.mode,
+      // Only a true is said; an older server sends nothing, and absent is
+      // not "not running".
+      notRunning: a.notRunning === true,
       filledPaper: a.filledPaper,
+      paperFills: countOrAbsent(a.paperFills),
+      liveFills: countOrAbsent(a.liveFills),
       handle: a.handle,
       pnlBps: a.pnlBps,
       paperPnlBps: a.paperPnlBps,
@@ -1396,11 +1413,19 @@ interface MarketTok {
 }
 
 const finiteOrNull = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
+/** A count the server sent; anything else is absent, so a reader falls back rather than print it. */
+const countOrAbsent = (n: unknown): number | undefined =>
+  (typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : undefined);
 
 interface BoardRow {
   performance?: AgentPerformance;
   mode?: string;
+  /** Optional: an older server does not send it. */
+  notRunning?: boolean;
   filledPaper?: number;
+  /** Optional: an older server does not send them. */
+  paperFills?: unknown;
+  liveFills?: unknown;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
   slug: string | null;
   name: string;

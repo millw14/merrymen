@@ -125,3 +125,31 @@ test("a malformed performance field stays unavailable rather than coercing empty
   assert.match(doc.querySelector(".rank-value")!.getAttribute("title")!, /Valuation time unavailable.*Measured P&L unavailable/);
   assert.doesNotMatch(doc.body.textContent!, /99\.0%|0\.0%|\$0\.00/);
 });
+
+test("a row the recovery hold kept says Not running and when it was last valued, and nothing about expiry", async () => {
+  const { agents } = await read([
+    row("Held", { mode: "idle", notRunning: true, performance: performance({ publicBook: false, equityAt: 1_791_083_000 }) }),
+    row("Unvalued", { mode: "idle", notRunning: true, performance: undefined, pnlBps: null }),
+    row("Running"),
+    // An older server sends no flag, and absent is not "not running".
+    row("Older"),
+  ]);
+  for (const preview of [false, true]) {
+    const doc = board(agents, preview);
+    const rows = [...doc.querySelectorAll(".rank")];
+    const held = rows.find(r => r.textContent!.includes("Held"))!;
+    assert.ok([...held.querySelectorAll(".tag")].some(t => t.textContent === "Not running"));
+    const valued = [...held.querySelectorAll(".rank-book")].map(b => b.textContent!);
+    assert.ok(valued.some(t => /^Last valued \S/.test(t)), `visible as-of time: ${valued.join(" | ")}`);
+    assert.match(held.querySelector(".rank-value")!.getAttribute("title")!, /^Not running\. /);
+    assert.equal(held.querySelector(".rank-have")!.textContent, "Private", "a private book stays private");
+    const unvalued = rows.find(r => r.textContent!.includes("Unvalued"))!;
+    assert.ok([...unvalued.querySelectorAll(".tag")].some(t => t.textContent === "Not running"));
+    assert.doesNotMatch(unvalued.textContent!, /Last valued/, "no time is invented for an unvalued book");
+    for (const name of ["Running", "Older"]) {
+      const other = rows.find(r => r.textContent!.includes(name))!;
+      assert.doesNotMatch(other.textContent!, /Not running|Last valued/, name);
+    }
+    assert.doesNotMatch(doc.body.textContent!, /expire|re-?sign|renew/i);
+  }
+});
