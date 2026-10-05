@@ -13,7 +13,8 @@
  *     or not), admits an actor for each tenant whose stored public scope is
  *     available (tenant lease + bot stream lease + a fresh snapshot), stops
  *     the actor of a tenant that left or changed, and re-admits it when it is
- *     still eligible. A malformed row is skipped with a redacted [alert].
+ *     still eligible. A malformed row is skipped with a redacted [alert]:
+ *     its tenant stays fenced, and its bot stream lease is released.
  *   - EACH ACTOR re-proves only its own scope: its own grant row against its
  *     own roster receipt, then the rest of its snapshot (assertReplySnapshot),
  *     its own tenant lease, its own bot lease, plus the fleet-wide root proof.
@@ -163,6 +164,13 @@ interface ReplySeat {
     quarantined: string | null;
     /** The stored scope is explicitly unavailable (no enabled token, link, claim or held status). Fenced, not served. */
     unavailable: boolean;
+    /**
+     * The last pass found this tenant's row malformed or ambiguous: fenced
+     * (in the roster) but not admissible. Fenced, not served, and its bot
+     * stream is not ours to hold (pass step 3, and launch() for an actor
+     * that pass stopped).
+     */
+    skipped: boolean;
     /** Not before this Date.now(): the admission back-off. */
     retryAt: number;
     /** Consecutive admission failures, for the back-off. */
@@ -497,6 +505,17 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         wakePending = true;
     };
     let wake = idleWake;
+    // Brings the supervisor's sleep forward to a seat's new admission
+    // back-off (admitWait), never later than the sleep already armed. A
+    // back-off can start AFTER the pass that caused it has armed its sleep:
+    // a lease loss wakes a pass, the pass stops an actor still finishing a
+    // database statement and sleeps the whole period (the seat still had an
+    // actor), and only then does the actor end and record its 5s retry.
+    // Without this, that retry waited for the period (30s). Between sleeps
+    // it does nothing: the next sleep is timed from every seat after the pass.
+    const idleRetime = () => {
+    };
+    let retime = idleRetime;
     if (options.stopSignal?.aborted)
         stop();
     options.stopSignal?.addEventListener("abort", stop, { once: true });
@@ -1068,6 +1087,10 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
             const ms = replyBackoffMs(kind, seat.streak);
             seat.retryAt = Date.now() + ms;
             alert(`${line} tenant=${tenantTag(seat.tenant)} reason=${reason} retry=${Math.round(ms / 1000)}s`);
+            // The retry keeps its own schedule even when the supervisor is
+            // already asleep for the period (an actor that ended after the
+            // pass that stopped it).
+            retime();
         };
         const STOP_BACKOFF: Partial<Record<ReplyStopReason, ReplyBackoffKind>> = { "lease-lost": "admission", "db-transient": "db-transient", "actor-error": "actor-error" };
         const ROUTINE_STOP: ReadonlySet<ReplyStopReason> = new Set<ReplyStopReason>(["roster-changed", "roster-removed", "snapshot-invalid", "stopped"]);
@@ -1106,6 +1129,13 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     // that replacement are admitted by the pass this wakes.
                     await dropBot(seat);
                     wake();
+                }
+                else if (seat.bot && seat.skipped) {
+                    // Stopped because its row went malformed or ambiguous
+                    // (pass step 3): the fence stays, the bot stream goes now,
+                    // not a whole period later at the next pass.
+                    say(`release tenant=${tenantTag(seat.tenant)} scope=bot reason=roster-changed`);
+                    await dropBot(seat);
                 }
             }).catch(() => {
             });
@@ -1313,7 +1343,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 fleetGuard();
                 let seat = seats.get(tenant);
                 if (!seat)
-                    seats.set(tenant, seat = { tenant, lease: null, bot: null, actor: null, quarantined: null, unavailable: false, retryAt: 0, streak: 0, progress: 0, retiring: false });
+                    seats.set(tenant, seat = { tenant, lease: null, bot: null, actor: null, quarantined: null, unavailable: false, skipped: false, retryAt: 0, streak: 0, progress: 0, retiring: false });
                 if (seat.retiring)
                     continue;
                 const leaseLost = !!seat.lease && (seat.lease.backend !== "postgres" || !seat.lease.healthy());
@@ -1334,10 +1364,26 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     await fenceSeat(seat);
             }
             // 3. An actor whose own row changed, went bad or became ambiguous.
-            for (const seat of seats.values()) {
+            //    A tenant whose row is malformed or ambiguous (in the fence,
+            //    not admissible) keeps its tenant lease, the fence, but not
+            //    its bot stream lease: step 4 never visits it, so a bot lease
+            //    left on its seat would stay held until the tenant left the
+            //    roster, and that bot could be served by nobody, not even a
+            //    tenant its claim moved to. Released here once the seat is
+            //    idle (by launch() when this step stopped its actor); a later
+            //    valid row takes it again in admit() like any other.
+            for (const seat of [...seats.values()]) {
+                if (seat.retiring)
+                    continue;
                 const grant = admissible.get(seat.tenant);
-                if (seat.actor && !seat.retiring && (!grant || grant.receipt !== seat.actor.receipt))
+                seat.skipped = !grant;
+                if (seat.actor && (!grant || grant.receipt !== seat.actor.receipt))
                     stopActor(seat, "roster-changed");
+                else if (!seat.actor && !grant && seat.bot) {
+                    fleetGuard();
+                    say(`release tenant=${tenantTag(seat.tenant)} scope=bot reason=roster-changed`);
+                    await dropBot(seat);
+                }
             }
             // 4. Admission, unless the multi-bot 409 alarm paused the fleet:
             //    the fence above is still held throughout a pause.
@@ -1360,33 +1406,47 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         else {
             const every = Math.max(1, options.supervisorEveryMs ?? REPLY_SUPERVISOR_EVERY_MS);
             /**
-             * HOW LONG TO SLEEP: the period, or less when something is due
-             * sooner — a pause ending, or a waiting seat's admission back-off
+             * WHEN TO WAKE: the end of the period, or sooner when something is
+             * due — a pause ending, or a waiting seat's admission back-off
              * (5s after a lost lease, 2s after database weather). Without this
              * every back-off shorter than the period was really the period: a
              * tenant whose lease dropped waited up to thirty seconds, not five.
              * Each early pass is one roster read; the soonest it can come is
-             * the shortest back-off, two seconds.
+             * the shortest back-off, two seconds. `periodDue` is fixed when
+             * the sleep starts, so a sleep re-timed by a later back-off
+             * (retime) only ever ends sooner; it never pushes the periodic
+             * pass back.
              */
-            const sleepMs = () => {
+            const dueAt = (periodDue: number) => {
                 const at = Date.now();
-                let due = at + every;
+                let due = periodDue;
                 if (pausedUntil > at)
                     due = Math.min(due, pausedUntil + 1);
                 else
                     for (const seat of seats.values())
                         if (!seat.actor && !seat.retiring && seat.retryAt > at)
                             due = Math.min(due, seat.retryAt + 1);
-                return Math.max(1, due - at);
+                return due;
             };
             while (!fleet.signal.aborted) {
                 await new Promise<void>(resolve => {
-                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const periodDue = Date.now() + every;
+                    let timer: ReturnType<typeof setTimeout> | undefined, armedFor = Infinity;
                     const done = () => {
                         clearTimeout(timer);
                         wake = idleWake;
+                        retime = idleRetime;
                         fleet.signal.removeEventListener("abort", done);
                         resolve();
+                    };
+                    /** Times the sleep to the soonest thing due; a later call only ever brings it forward. */
+                    const arm = () => {
+                        const due = dueAt(periodDue);
+                        if (due >= armedFor)
+                            return;
+                        clearTimeout(timer);
+                        armedFor = due;
+                        timer = setTimeout(done, Math.max(1, due - Date.now()));
                     };
                     wake = done;
                     fleet.signal.addEventListener("abort", done, { once: true });
@@ -1395,7 +1455,8 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                         done();
                         return;
                     }
-                    timer = setTimeout(done, sleepMs());
+                    retime = arm;
+                    arm();
                 });
                 if (fleet.signal.aborted)
                     break;

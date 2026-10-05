@@ -45,7 +45,10 @@ error in one actor did the same. The entry is now a supervisor with one actor
 per serving tenant:
 
 - **The supervisor** re-reads the roster every 30 seconds, row by row, and
-  sooner when a waiting tenant's back-off ends or a lease is lost. It holds
+  sooner when a waiting tenant's back-off ends or a lease is lost, including
+  a back-off that starts while it sleeps (an actor that ends only after the
+  pass that stopped it: its 5-second retry is not rounded up to the next
+  30-second pass). It holds
   the tenant lease of every roster tenant whose tenant column is an address
   in any letter case (under its lowercase form), malformed grant or not (the
   fence), and admits an actor for each tenant whose stored public scope is
@@ -54,7 +57,11 @@ per serving tenant:
   or whose own row changed, and re-admits it on a later pass when it is
   still eligible. A malformed row, a mixed-case tenant column, or two rows
   claiming one smart account, is skipped with a redacted `[alert]`; that
-  tenant stays fenced and is never served on a guess.
+  tenant stays fenced and is never served on a guess. Its bot stream lease
+  is released (once its actor, if any, has ended), so the bot is not held
+  by a tenant nobody serves, and another tenant its claim moves to can take
+  it; when the row is valid again, admission takes the lease again like any
+  other.
 - **Each actor** re-proves only its own scope before every step: the fleet
   root proof, its own tenant lease and bot lease, its own grant row against
   the receipt it was admitted with (and that no other row claims its smart
@@ -149,6 +156,7 @@ owner or chat id, address, message or provider text. The codes:
 | `actor-stop` | `roster-changed`, `roster-removed`, `snapshot-invalid`, `lease-lost`, `telegram-refused`, `db-transient`, `actor-error` |
 | `admit-wait` | `lease-busy` (another process holds it), `lease-settling` (this process's own acquisition or release is still in flight), `bot-busy`, `bot-session-renewing` (no back-off), `lease-lost`, `snapshot-invalid`, `db-transient` |
 | `backoff` | `telegram-409`, `telegram-network`, `db-transient`, `deadline` (also `scope=roster` and `scope=pool`) |
+| `release` | `roster-removed` (left the roster: both leases), `roster-changed` with `scope=bot` (row malformed or ambiguous: the bot stream lease only; the tenant stays fenced) |
 | `fleet-pause` | `telegram-409-fleet` (no exit; leases kept) |
 | `refused reason=` (last line, exit 1) | `root-proof`, `dek-invalid`, `roster-unreadable`, `roster-cap`, `supervisor-error`, `startup` |
 
@@ -284,13 +292,17 @@ actual opted-in results separately from ordinary CI; inspecting a test is
 not evidence that it ran. Its isolation block runs the entry continuously
 (mostly with a 50ms supervisor period): another tenant's grant write, a new
 roster tenant, a 409 or a transport exception on one bot, a 57014 on one
-tenant, a lost tenant lease, a changed root proof, three conflicted bots
+tenant, a lost tenant lease (also one lost while its actor finishes a
+statement, at the production period: re-admitted after its 5-second
+back-off, not the next pass), a changed root proof, three conflicted bots
 (the pause, leases kept, no exit), webhook 409s on three of five bots, a
 backend terminated under an open transaction (injected and entry-owned
 pools), a lost bot stream session while another bot waits out a 409 (at the
 production 30-second period), a drain that fails every time, database
 weather at startup, an unsettled release of our own, another row claiming a
-tenant's smart account, a checksummed tenant column and SIGTERM.
+tenant's smart account, a checksummed tenant column, rows that go
+malformed (a running and a quarantined tenant: fence kept, bot stream lease
+released, both taken again once the rows are valid) and SIGTERM.
 `worker/src/recovery-reply-isolation.test.ts` covers the reason codes,
 back-off schedules, the 409 alarm, the exit line and the row-by-row roster
 without a database, and runs in ordinary CI.

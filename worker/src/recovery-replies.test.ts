@@ -906,6 +906,51 @@ test("actual reply entry isolation: one tenant's or one bot's problem stops only
     assert.deepEqual(f.logs.filter(l => /actor-stop/.test(l)), [`[recovery-replies] [alert] actor-stop tenant=${tagA} reason=lease-lost retry=5s`]);
   });
 
+  await t.test("a tenant lease lost while its actor finishes a statement is re-admitted after its 5s back-off, not the next 30s pass", async s => {
+    const f = await fixture(s), a = f.actors[0]!, probe = await f.connect(), tagA = a.tenant.slice(0, 8);
+    // A bigint advisory lock shows its high half as classid and its low half as objid.
+    const key = BigInt.asUintN(64, leaseKey(a.tenant));
+    const holders = async () => (await probe.query("SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objsubid=1 AND classid=$1::oid AND objid=$2::oid",
+      [(key >> 32n).toString(), (key & 0xffffffffn).toString()])).rows.map(r => Number(r.pid));
+    f.transport.getUpdates = async (_opts, offset) => updates([f.msg(offset, "$A chart")], offset + 1);
+    let armed = false, lostAt = 0;
+    // THE RACE: A's drain is still finishing a statement (its liveness mark)
+    // when its tenant lease session drops. The loss wakes a pass, which stops
+    // A while it is still here and then goes back to sleep; only after that
+    // does A end and record its 5s retry. That retry used to wait for the
+    // sleep the pass had already armed: the whole 30-second period.
+    f.hook(async (sql, values) => {
+      if (!armed || !/^UPDATE tenant_telegram SET poll_ok_at=\$1/.test(sql) || values?.[1] !== a.tenant) return;
+      armed = false;
+      const pids = await holders();
+      assert.equal(pids.length, 1, "one entry-owned session holds A's tenant lease");
+      const reads = f.audit.length;
+      await probe.query("SELECT pg_terminate_backend($1)", [pids[0]]);
+      lostAt = Date.now();
+      await until("the pass the loss woke", () => f.audit.slice(reads).some(q => /FROM grants ORDER BY tenant LIMIT/.test(q)), 2_000);
+      await delay(300);
+    });
+    // The entry's own tenant lease sessions (whose loss wakes the supervisor),
+    // at the production supervisor period.
+    const { stop, done } = live(f, { acquireTenant: undefined, supervisorEveryMs: REPLY_SUPERVISOR_EVERY_MS });
+    let readmittedMs = 0, atLoss = 0;
+    try {
+      await until("A replying", () => sent(f, a.botId) >= 1);
+      armed = true;
+      await until("A stopped", () => f.logs.includes(`[recovery-replies] [alert] actor-stop tenant=${tagA} reason=lease-lost retry=5s`));
+      atLoss = sent(f, a.botId);
+      await until("A re-admitted", () => f.logs.filter(l => l === `[recovery-replies] actor-start tenant=${tagA}`).length === 2, 20_000);
+      readmittedMs = Date.now() - lostAt;
+      await until("A replying again", () => sent(f, a.botId) > atLoss);
+      assert.equal(await lockFree(probe, a.tenant), false, "fenced again under a fresh lease");
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(readmittedMs >= 5_000 && readmittedMs < 15_000, `A re-admitted ${readmittedMs}ms after its lease was lost`);
+    assert.deepEqual(f.logs.filter(l => /actor-stop/.test(l)), [`[recovery-replies] [alert] actor-stop tenant=${tagA} reason=lease-lost retry=5s`]);
+    assert.equal(await lockFree(probe, a.tenant), true, "released on stop");
+  });
+
   await t.test("a changed root proof still refuses the whole fleet and releases every lease", async s => {
     const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect();
     f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, "$X chart", opts.token === a.token ? 0 : 1)], offset + 1);
@@ -1125,6 +1170,56 @@ test("actual reply entry isolation: one tenant's or one bot's problem stops only
     assert.equal(sent(f, b.botId), 0); assert.ok(!f.polls.some(p => p.botId === b.botId));
     assert.ok(f.logs.includes(`[recovery-replies] [alert] roster-row-skipped tenant=${b.tenant.slice(0, 8)}`), f.logs.join("\n"));
     assert.equal(await lockFree(probe, b.tenant), true, "released on stop");
+  });
+
+  await t.test("a row that goes malformed keeps its tenant fenced but releases its bot stream lease; a later valid row takes it again", async s => {
+    const f = await fixture(s, 3), [a, b, c] = [f.actors[0]!, f.actors[1]!, f.actors[2]!], probe = await f.connect();
+    const [tagA, tagB] = [a.tenant.slice(0, 8), b.tenant.slice(0, 8)];
+    const competing = new RecoveryReplyBotLeases(probe, () => {});
+    /** Whether another process could take this bot's stream lease right now (taken and handed straight back). */
+    const botFree = async (botId: string) => { const held = await competing.acquire(botId); if (held) await held.release(); return !!held; };
+    const malformed = (granted: number, ...tenants: string[]) => f.pool.query("UPDATE grants SET grant_json=jsonb_set(grant_json,'{grantedAt}',to_jsonb($1::int)) WHERE tenant=ANY($2::text[])", [granted, tenants]);
+    // A serves until it is held inside a poll; B's token is refused, so B is
+    // quarantined and sits IDLE holding its bot stream lease; C never changes.
+    let holdA = false, aHeld = false, bRefused = true;
+    const baseMe = f.transport.getMe;
+    f.transport.getMe = async opts => opts.token === b.token && bRefused ? { bot: null, reason: "synthetic invalid credentials", errorCode: 401 } : baseMe(opts);
+    f.transport.getUpdates = async (opts, offset) => {
+      if (opts.token === a.token && holdA) { aHeld = true; return new Promise<never>(() => {}); }
+      return updates([f.msg(offset, "$X chart", [a, b, c].findIndex(x => x.token === opts.token))], offset + 1);
+    };
+    const { stop, done } = live(f);
+    try {
+      await until("A and C replying, B quarantined", () => sent(f, a.botId) >= 1 && sent(f, c.botId) >= 1
+        && f.logs.includes(`[recovery-replies] [alert] actor-stop tenant=${tagB} reason=telegram-refused`));
+      assert.equal(await botFree(a.botId), false); assert.equal(await botFree(b.botId), false, "a quarantined bot keeps its stream lease");
+      // A sits in a poll, so only the supervisor can see its row change: it
+      // stops A, and A's seat drops its bot lease as A ends (launch()). B has
+      // no actor: the pass drops its bot lease itself (step 3).
+      holdA = true;
+      await until("A held in a poll", () => aHeld);
+      await malformed(0, a.tenant, b.tenant);
+      await until("both bot streams released", async () => await botFree(a.botId) && await botFree(b.botId));
+      assert.ok(f.logs.includes(`[recovery-replies] actor-stop tenant=${tagA} reason=roster-changed`), f.logs.join("\n"));
+      for (const tag of [tagA, tagB])
+        assert.ok(f.logs.includes(`[recovery-replies] release tenant=${tag} scope=bot reason=roster-changed`), f.logs.join("\n"));
+      assert.equal(await lockFree(probe, a.tenant), false, "A stays fenced"); assert.equal(await lockFree(probe, b.tenant), false, "B stays fenced");
+      const cAt = sent(f, c.botId), aAt = sent(f, a.botId);
+      await until("C keeps replying", () => sent(f, c.botId) >= cAt + 3);
+      assert.equal(sent(f, a.botId), aAt);
+      // Valid again: both re-acquire their bot stream lease through ordinary admission.
+      holdA = false; bRefused = false;
+      await malformed(1, a.tenant, b.tenant);
+      await until("A and B admitted again", () => f.logs.filter(l => l === `[recovery-replies] actor-start tenant=${tagA}`).length === 2
+        && f.logs.filter(l => l === `[recovery-replies] actor-start tenant=${tagB}`).length === 2);
+      await until("A and B replying", () => sent(f, a.botId) > aAt && sent(f, b.botId) >= 1);
+      assert.equal(await botFree(a.botId), false); assert.equal(await botFree(b.botId), false);
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(!f.logs.some(l => /admit-wait|lease-lost|bot-busy|lease-settling/.test(l)), f.logs.join("\n"));
+    assert.equal(f.logs.filter(l => /release tenant=.* scope=bot/.test(l)).length, 2, "each bot stream released once");
+    for (const x of [a, b, c]) { assert.equal(await lockFree(probe, x.tenant), true); assert.equal(await botFree(x.botId), true); }
   });
 
   await t.test("SIGTERM is a clean stop: the entry resolves \"stopped\" and releases every lease", async s => {
