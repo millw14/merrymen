@@ -8986,15 +8986,16 @@ const fomoBrokers = new Map<ChildProcess, () => void>();
 
 /**
  * Whether this replica still speaks for the tenant's running child: a child
- * here, its lease held healthily, not held for recovery, its ledger source not
- * blocked. The same rule the mirror and the roster use, asked at the moment of
- * acting rather than at the start of a pass.
+ * here, its lease held healthily, its ledger source not blocked. The same rule
+ * the mirror and the roster use, asked at the moment of acting rather than at
+ * the start of a pass. A tenant held for recovery has no entry in `children`
+ * (its child is stopped before a hold process stands in), and like every pass
+ * this one never reads the hold map (restore-hold.test.ts).
  */
 function fomoStillOurs(tenant: string): boolean {
   const key = tenant.toLowerCase();
   const running = [...children.keys()].find((t) => t.toLowerCase() === key);
   if (!running) return false;
-  if ([...holders.keys()].some((t) => t.toLowerCase() === key)) return false;
   const lease = leases.get(key);
   if (!lease || !lease.healthy()) return false;
   return !ledgerSourceBlocked(childHome(running));

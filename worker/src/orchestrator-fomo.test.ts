@@ -1622,7 +1622,8 @@ describe("the orchestrator's wiring", () => {
     assert.doesNotMatch(holder.slice(0, holder.indexOf("\nasync function ") > 0 ? holder.indexOf("\nasync function ") : undefined), /attachFomoBroker|"ipc"/);
     // And the pass asks, right before each file, whether the tenant is still a running child here and not held.
     const still = code.slice(code.indexOf("function fomoStillOurs("), code.indexOf("function fomoStillOurs(") + 800);
-    assert.match(still, /holders\.keys\(\)/);
+    assert.match(still, /children\.keys\(\)/, "a running child here");
+    assert.doesNotMatch(still, /\bholders\b/, "held tenants are not in children; passes never read the hold map");
     assert.match(still, /lease\.healthy\(\)/);
     assert.match(code, /stillOurs: fomoStillOurs,/);
   });
@@ -1653,13 +1654,20 @@ describe("the orchestrator's wiring", () => {
     }
     process.env.MERRYMEN_FOMO_API_KEY = KEY;
     process.env.FOMO_API_KEY = KEY;
+    const savedSwitch = process.env.MERRYMEN_FOMO_ENABLED;
+    process.env.MERRYMEN_FOMO_ENABLED = "1";
     try {
       const env = childEnv(T1);
       assert.equal(env.MERRYMEN_FOMO_API_KEY, undefined);
       assert.equal(env.FOMO_API_KEY, undefined);
+      // The switch is not a secret and must reach the child: a hosted child is
+      // Fomo-on only with the channel AND this value (fomo-child.ts childFomoOff).
+      assert.equal(env.MERRYMEN_FOMO_ENABLED, "1");
     } finally {
       delete process.env.MERRYMEN_FOMO_API_KEY;
       delete process.env.FOMO_API_KEY;
+      if (savedSwitch === undefined) delete process.env.MERRYMEN_FOMO_ENABLED;
+      else process.env.MERRYMEN_FOMO_ENABLED = savedSwitch;
     }
   });
 
