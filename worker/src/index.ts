@@ -14273,7 +14273,11 @@ async function main() {
    *      already broadcast reads its receipt and writes its row; one not yet
    *      sent is refused at its broadcast (`draining`, asked again there — see
    *      the admission block above processIntentLocked), and anything queued
-   *      behind it is refused at the gate and written;
+   *      behind it is refused at the gate and written. The tick running when
+   *      the signal came is waited for too, within the same budget: what it
+   *      does after its trades — refunding an energy claim a refused intent
+   *      did not use, writing an owner's order result file — is work the close
+   *      and the exit must not cut off (command-wake.ts TickClock.settled);
    *   4. the ledger is closed (store.ts closeStore);
    *   5. exit 0, in the same turn as the close, so nothing writes after it.
    *
@@ -14295,6 +14299,7 @@ async function main() {
     tickClock.stop();
     void drainIntentChain({
       tail: () => intentChain,
+      tick: () => tickClock.settled(),
       budgetMs: DRAIN_INTENT_CHAIN_MS,
       now: Date.now,
       setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -14304,8 +14309,8 @@ async function main() {
       .then((emptied) => {
         console.log(
           emptied
-            ? "[worker] drained — nothing left on the intent chain; closing the ledger"
-            : "[worker] drain budget spent with a trade still out — the stranded-op resolver settles it at the next arm; closing the ledger",
+            ? "[worker] drained — nothing left on the intent chain and no tick running; closing the ledger"
+            : "[worker] drain budget spent with a trade or a tick still running — a trade already out is settled by the stranded-op resolver at the next arm; closing the ledger",
         );
         try {
           closeStore();

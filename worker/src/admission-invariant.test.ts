@@ -289,6 +289,8 @@ describe("SIGTERM: stop starting things, let the chain finish, leave", () => {
       "tickClock.stop();",
       "drainIntentChain({",
       "tail: () => intentChain,",
+      // And the tick that put the trade there: its work after the chain empties.
+      "tick: () => tickClock.settled(),",
       "budgetMs: DRAIN_INTENT_CHAIN_MS,",
       "closeStore();",
       "process.exit(0);",
