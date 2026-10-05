@@ -51,17 +51,30 @@
  * into every deployment (RAILWAY_ONLY_IDENTITY below) — never from
  * RAILWAY_TOKEN, which sits in plenty of developers' shells for the CLI.
  *
- * NO ACK AND NO BREAK-GLASS. There is no variable that waves a refusal
- * through. Every refusal names the configuration to fix, and fixing it is the
- * only way past — a deliberate, visible change on the service, which is the
- * whole point. A rollback to a deployment from another branch, or to an image
- * older than this file, fails the pre-deploy step for the same reason: clear
- * the service's pre-deploy command first, on purpose.
+ * NO ACK AND NO BREAK-GLASS. There is no variable whose only job is to wave a
+ * refusal through. Every refusal names the configuration to fix, and fixing it
+ * is the only way past — a deliberate, visible change on the service, which is
+ * the whole point. A rollback to a deployment from another branch, or to an
+ * image older than this file, fails the pre-deploy step for the same reason:
+ * clear the service's pre-deploy command first, on purpose.
+ *
+ * WHAT `MERRYMEN_FLEET_ROLLOUT=all` DOES AND DOES NOT MEAN HERE. It is the one
+ * value that lets the orchestrator start with a one-shot set, because it is
+ * the rollout's declared end state: the whole fleet admitted, nothing held for
+ * review by the rollout. It is not proof of that. Until the staged rollout
+ * itself ships, that variable does nothing else, so setting it purely to quiet
+ * this guard is possible — the operator runbook keeps start:orchestrator off
+ * until the rollout exists, which is a procedure, not a check. And `all` says
+ * nothing about MERRYMEN_ACCOUNTING_HOLD_TENANTS: this guard never reads the
+ * hold list, and never checks a rollout's tenants against it. Confirming that
+ * no admitted tenant is still held is the operator's step (or the rollout's
+ * own parser's), not this file's.
  *
  * Exit codes: 0 ok or skipped; 78 (EX_CONFIG) a refusal; 64 (EX_USAGE) the
  * guard itself was called wrongly. Refusals go to stderr, everything else to
  * stdout, one `[deploy-guard]` line each. No environment value is ever echoed
- * except the commit, and only once it has matched 40 hex digits.
+ * except the commit, once it has matched 40 hex digits, and the role, once it
+ * has matched the allowlist.
  *
  * THIS FILE IS THE CHECKS, AND HAS NO SIDE EFFECTS: orchestrator.ts imports
  * it. The command line both callers run is worker/src/deploy-guard.ts, which
