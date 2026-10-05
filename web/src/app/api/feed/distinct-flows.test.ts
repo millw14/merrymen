@@ -6,12 +6,13 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
 /**
- * THE OWNER'S DESK COUNTS EACH CAPITAL FLOW ONCE.
+ * THE OWNER'S DESK COUNTS EACH CAPITAL FLOW AND EACH OPERATION'S GAS ONCE.
  *
- * /api/feed summed raw flow rows, so the /you page's return divided by an
- * opening carry the mirror copied twice. Rows that contradict each other now
- * leave the contributions null — no return — instead of one of them. Driven
- * through the real GET, self-hosted, against the worker's schema.
+ * /api/feed summed raw flow rows and raw landed trade rows, so the /you
+ * page's return divided by an opening carry the mirror copied twice, charged a
+ * re-recorded paid op twice, and never charged a revert. Rows that contradict
+ * each other now leave the contributions null — no return — instead of one of
+ * them. Driven through the real GET, self-hosted, against the worker's schema.
  */
 const ACCOUNT = "0xa6e17a1b2c3d4e5f60718293a4b5c6d7e8f90123";
 const CASED = "0xA6E17A1B2C3D4E5F60718293A4B5C6D7E8F90123";
@@ -76,6 +77,13 @@ it("contributions are counted once per movement", async () => {
   assert.equal(f.netContributionsUsdg, 150, "the carry and the top-up, each once");
   assert.equal(f.measured?.netContributionsUsdg, 150, "the late unstamped copy is the top-up already in the mark");
   assert.equal(f.measured?.equityUsdg, 160);
+});
+
+it("gas is charged once per operation, reverts included — a deliberate correction", async () => {
+  const f = await feed();
+  // Summed raw, this was the landed row alone: 0.2, and no unpriced count.
+  assert.ok(Math.abs(f.gasUsdg - 0.3) < 1e-12, `the copy is not charged twice and the revert is charged: ${f.gasUsdg}`);
+  assert.equal(f.gasUnpricedTrades, 1, "the unpriced revert is counted, once");
 });
 
 it("a transfer booked as both our intent and its chain log leaves the contributions null, never summed", async () => {

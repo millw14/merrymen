@@ -6,13 +6,14 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
 /**
- * THE SCOREBOARD COUNTS EACH CAPITAL FLOW ONCE.
+ * THE SCOREBOARD COUNTS EACH CAPITAL FLOW AND EACH OPERATION'S GAS ONCE.
  *
- * Its P&L summed raw flow rows. So an opening carry the mirror copied twice,
- * or a deposit on record with and without its chain stamp, was capital twice.
- * Rows that contradict each other now leave the P&L null instead of one of
- * them. Driven through the real GET, self-hosted, against a ledger built by the
- * worker's own schema.
+ * Its P&L summed raw flow rows and raw landed trade rows. So an opening carry
+ * the mirror copied twice, or a deposit on record with and without its chain
+ * stamp, was capital twice; a re-recorded copy of a paid op was gas twice; and
+ * a reverted op, which burns gas too, was never charged. Rows that contradict
+ * each other now leave the P&L null instead of one of them. Driven through the
+ * real GET, self-hosted, against a ledger built by the worker's own schema.
  */
 const ACCOUNT = "0xa6e17a1b2c3d4e5f60718293a4b5c6d7e8f90123";
 const CASED = "0xA6E17A1B2C3D4E5F60718293A4B5C6D7E8F90123";
@@ -74,8 +75,16 @@ const board = async () => (await (await GET(new Request("http://localhost/api/sc
 it("capital is counted once per movement", async () => {
   const [a] = (await board()).agents;
   assert.ok(a);
-  // 160 − 150 of capital − 0.2 of gas. Summed raw, the capital was 300.
-  assert.ok(Math.abs(a.pnl_usdg! - 9.8) < 1e-9, `pnl ${a.pnl_usdg}`);
+  // 160 − 150 of capital − 0.3 of gas. Summed raw, the capital was 300.
+  assert.ok(Math.abs(a.pnl_usdg! - 9.7) < 1e-9, `pnl ${a.pnl_usdg}`);
+});
+
+it("gas is charged once per operation, reverts included — a deliberate correction", async () => {
+  const [a] = (await board()).agents;
+  assert.ok(a);
+  // Summed raw, this was the landed row alone: 0.2, and no unpriced count.
+  assert.ok(Math.abs(a.gas_usdg - 0.3) < 1e-12, `the copy is not charged twice and the revert is charged: ${a.gas_usdg}`);
+  assert.equal(a.gas_unpriced_trades, 1, "the unpriced revert is counted, once");
 });
 
 it("a transfer booked as both our intent and its chain log leaves the P&L unpublished, never summed", async () => {

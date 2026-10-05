@@ -17,6 +17,7 @@ import { hostedAgentFor } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
 import { readMeasuredMark } from "@/lib/held-marks";
 import { netFlows, readDistinctFlows, type FlowRecord } from "@/lib/distinct-flows";
+import { distinctTrades } from "@/lib/distinct-trades";
 import type { FeedMeasured } from "@/lib/feed-pnl";
 
 /**
@@ -160,9 +161,9 @@ export interface FeedResponse {
    */
   measured: FeedMeasured | null;
   /**
-   * Gas paid in USDG, and how many landed trades' gas could NOT be priced.
-   * P&L is equity − contributions − gas; the count is what says whether that is
-   * the full gas cost or only the priceable part.
+   * Gas paid in USDG, and how many settled operations' (landed or reverted)
+   * gas could NOT be priced. P&L is equity − contributions − gas; the count is
+   * what says whether that is the full gas cost or only the priceable part.
    */
   gasUsdg: number;
   gasUnpricedTrades: number;
@@ -408,11 +409,18 @@ export async function GET(req: Request) {
       /* no equity or flows table yet, or withheld flows: nothing measured, and the page says so */
     }
     try {
+      // A DELIBERATE CORRECTION: one row per OPERATION (distinctTrades), and
+      // reverted operations as well as landed ones. This summed raw landed
+      // rows, so a redeploy's re-recorded copy of a paid op charged its gas
+      // twice, and a revert, which burns gas too, was never charged at all. It
+      // now counts what the profile and the board charge (readOperationCounts,
+      // gasAt), over the whole run as before.
       const row = (await db
         .prepare(
-          `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
-                  SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-             FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
+          `SELECT COALESCE(SUM(t.gas_usdg), 0) AS usdg,
+                  COUNT(CASE WHEN t.gas_wei IS NOT NULL AND t.gas_usdg IS NULL THEN 1 END) AS unpriced
+             FROM ${distinctTrades(`LOWER(t.agent_id) = LOWER(?)${epochWhere}`)}
+            WHERE t.status IN ('landed', 'reverted')`,
         )
         .get(scope, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
       gasUsdg = row?.usdg ?? 0;
