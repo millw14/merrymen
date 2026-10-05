@@ -34,7 +34,7 @@ import { sameBookAsLatest } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import type { UnrankedWhy } from "@/lib/rank-pnl";
-import { isRetired, notRunning as heldNotRunning, type AgentLifecycle } from "@/lib/retired-agent";
+import { inIncidentWindow, isRetired, notRunning as heldNotRunning, type AgentLifecycle } from "@/lib/retired-agent";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export interface LeaderRow {
@@ -219,18 +219,21 @@ export async function readLeaderboard(
       // Read on its own and defensively: a self-hosted or older ledger has no
       // such table, and a read that fails for any reason is no hold rather
       // than no board — the beat window below still speaks for each account.
+      // And only a hold recorded inside the incident window: a later one is
+      // the owner's report, not the board's — see inIncidentWindow.
+      const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
       const held = new Set<string>();
       try {
         for (const h of (await db
-          .prepare(`SELECT tenant, smart_account FROM fleet_recovery_health WHERE held = 1`)
-          .all()) as { tenant: unknown; smart_account: unknown }[]) {
+          .prepare(`SELECT tenant, smart_account, since_at FROM fleet_recovery_health WHERE held = 1`)
+          .all()) as { tenant: unknown; smart_account: unknown; since_at: unknown }[]) {
+          if (!inIncidentWindow(num(h.since_at))) continue;
           held.add(`${String(h.tenant).toLowerCase()} ${String(h.smart_account).toLowerCase()}`);
         }
       } catch {
         /* no recovery table: nothing is held */
       }
       const now = nowSec();
-      const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
       const before = rows.length;
       rows = rows.filter((r) => {
         const l = life.get(r.smart_account);

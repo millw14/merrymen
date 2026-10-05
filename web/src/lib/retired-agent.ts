@@ -30,9 +30,10 @@ export interface AgentLifecycle {
   /** When the signed key stops working, unix seconds. */
   expiresAt: number | null;
   /**
-   * Whether THIS account's own `fleet_recovery_health` row reads held=1: the
-   * supervisor recorded the recovery hold against it, and nothing may run it
-   * until that clears. Optional, and absent is not held — a self-hosted or
+   * Whether THIS account's own `fleet_recovery_health` row reads held=1 and
+   * was recorded inside the incident window (see inIncidentWindow): the
+   * supervisor recorded this incident's hold against it, and nothing may run
+   * it until that clears. Optional, and absent is not held — a self-hosted or
    * older ledger has no such table, and a failed read proves nothing.
    */
   held?: boolean;
@@ -91,6 +92,28 @@ function seconds(t: number): number {
   return t > 1_000_000_000_000 ? Math.floor(t / 1000) : t;
 }
 
+/**
+ * Whether a stamp, in either unit, falls inside the incident window. One test
+ * for both kinds of evidence an account carries: its own last beat, and when
+ * its own hold row was recorded.
+ *
+ * WHY A HOLD ROW COUNTS ONLY FROM INSIDE IT. `fleet_recovery_health` is an
+ * owner-scoped report (docs/fleet-history-recovery.md), and on the public
+ * board a held row is the difference between a fold and a "Not running" row
+ * — so honouring every held row would publish, to anyone comparing the board
+ * over time, which agents have a recovery hold on their accounting source. A
+ * fleet-wide halt is no secret; one tenant's source-continuity or
+ * source-barrier hold recorded later is. This incident's rows were recorded
+ * inside the window (18:36Z on 10-04), so the incident case is unchanged; a
+ * row recorded after it stays the owner's, and the account's own beat still
+ * speaks for it.
+ */
+export function inIncidentWindow(t: number | null): boolean {
+  if (t === null || !Number.isFinite(t)) return false;
+  const s = seconds(t);
+  return s >= INCIDENT_WINDOW.fromSec && s <= INCIDENT_WINDOW.untilSec;
+}
+
 function beating(a: AgentLifecycle, nowSec: number): boolean {
   return a.beatAt !== null && Number.isFinite(a.beatAt) && nowSec - seconds(a.beatAt) <= RECENT_BEAT_SEC;
 }
@@ -128,9 +151,7 @@ export function silencedByHold(a: AgentLifecycle): boolean {
   if (a.slug === null || a.status === "killed") return false;
   if (overBeforeHold(a)) return false;
   if (a.held === true) return true;
-  if (a.beatAt === null || !Number.isFinite(a.beatAt)) return false;
-  const beat = seconds(a.beatAt);
-  return beat >= INCIDENT_WINDOW.fromSec && beat <= INCIDENT_WINDOW.untilSec;
+  return inIncidentWindow(a.beatAt);
 }
 
 /**

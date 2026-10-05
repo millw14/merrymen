@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { wrapSqlite } from "../../../worker/src/db";
 import { FLEET_RECOVERY_SCHEMA } from "../../../worker/src/fleet-recovery";
 import { readLeaderboard } from "./read-leaderboard";
-import { INCIDENT_WINDOW, RECENT_BEAT_SEC, isRetired, notRunning, type AgentLifecycle } from "./retired-agent";
+import { INCIDENT_WINDOW, RECENT_BEAT_SEC, inIncidentWindow, isRetired, notRunning, type AgentLifecycle } from "./retired-agent";
 
 const NOW = 2_000_000_000;
 const HOUR = 3600;
@@ -147,6 +147,19 @@ describe("the recovery hold is not retirement", () => {
     assert.equal(isRetired(held({ mode: "idle", beatAt: (INCIDENT_WINDOW.fromSec - 1) * 1000 }), HELD_NOW), true);
   });
 
+  it("the window is inclusive at both ends, in either unit, and nothing is inside it", () => {
+    for (const t of [INCIDENT_WINDOW.fromSec, LAST_BEAT, INCIDENT_WINDOW.untilSec]) {
+      assert.equal(inIncidentWindow(t), true, String(t));
+      assert.equal(inIncidentWindow(t * 1000), true, `${t} ms`);
+    }
+    for (const t of [INCIDENT_WINDOW.fromSec - 1, INCIDENT_WINDOW.untilSec + 1]) {
+      assert.equal(inIncidentWindow(t), false, String(t));
+      assert.equal(inIncidentWindow(t * 1000), false, `${t} ms`);
+    }
+    assert.equal(inIncidentWindow(null), false);
+    assert.equal(inIncidentWindow(Number.NaN), false);
+  });
+
   it("only the account's own evidence speaks, and the ordinary rules hold outside it", () => {
     // Silent since before the incident, with no hold row: not the hold's doing.
     assert.equal(isRetired(held({ mode: "idle", beatAt: INCIDENT_WINDOW.fromSec - DAY }), HELD_NOW), true);
@@ -255,7 +268,8 @@ describe("the board folds retired agents into a count", () => {
     // Quiet in the day before the window opened: not yet folded when the hold began.
     const QUIET = INCIDENT_WINDOW.fromSec - 6 * HOUR;
     const BEFORE = INCIDENT_WINDOW.fromSec - 10 * DAY;
-    const fleet = (beat: (sec: number) => number, holds = true) => `
+    // `since`: when the hold rows were recorded — this incident's, by default.
+    const fleet = (beat: (sec: number) => number, holds = true, since = LAST_BEAT) => `
       INSERT INTO agents VALUES
         ('0xa1','SirSendIt',NULL,0,1,'idle',9,1,'armed',${beat(LAST_BEAT)},${HELD_NOW + 30 * DAY}),
         ('0xb1','Lapsed',NULL,0,1,'live',8,1,'armed',${beat(LAST_BEAT)},${LAPSED_AT}),
@@ -266,12 +280,12 @@ describe("the board folds retired agents into a count", () => {
         ('0xr1','Robin',NULL,0,1,'idle',4,1,'armed',${beat(LAST_BEAT)},${HELD_NOW + 30 * DAY});
       ${holds ? `${FLEET_RECOVERY_SCHEMA}
       INSERT INTO fleet_recovery_health VALUES
-        ('0x3','0xc1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
-        ('0x4','0xd1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
-        ('0x9','0xe1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
-        ('0x5','0xe1',4663,0,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
-        ('0x6','0xf1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT}),
-        ('0x0','0xr1',4663,1,'persistent-source',${LAST_BEAT},${LAST_BEAT});` : ""}`;
+        ('0x3','0xc1',4663,1,'persistent-source',${since},${since}),
+        ('0x4','0xd1',4663,1,'persistent-source',${since},${since}),
+        ('0x9','0xe1',4663,1,'persistent-source',${since},${since}),
+        ('0x5','0xe1',4663,0,'persistent-source',${since},${since}),
+        ('0x6','0xf1',4663,1,'persistent-source',${since},${since}),
+        ('0x0','0xr1',4663,1,'persistent-source',${since},${since});` : ""}`;
     const seconds = (sec: number) => sec;
 
     it("an idle named agent and one whose key lapsed stay listed as not running; killed is folded", async () => {
@@ -307,6 +321,18 @@ describe("the board folds retired agents into a count", () => {
       const r = await board(fleet(seconds, false), { now: HELD_NOW });
       assert.deepEqual(r.agents.map((a) => a.name).sort(), ["Lapsed", "SirSendIt"]);
       assert.equal(r.retired, 5, "Killed, Reported, Gone, Over and Robin");
+    });
+
+    it("a hold row recorded after the incident window stays the owner's, and keeps no row on the board", async () => {
+      // Reported has only its hold row to speak for it. Recorded later, that
+      // row is one tenant's own source hold, not this incident's — and keeping
+      // the row would publish it. It folds as it did before.
+      const later = await board(fleet(seconds, true, INCIDENT_WINDOW.untilSec + DAY), { now: HELD_NOW });
+      assert.deepEqual(later.agents.map((a) => a.name).sort(), ["Lapsed", "SirSendIt"]);
+      assert.equal(later.retired, 5, "Killed, Reported, Gone, Over and Robin");
+      // This incident's rows, written in milliseconds, still count.
+      const ms = await board(fleet(seconds, true, LAST_BEAT * 1000), { now: HELD_NOW });
+      assert.deepEqual(ms.agents.map((a) => a.name).sort(), ["Lapsed", "Reported", "SirSendIt"]);
     });
 
     it("outside the hold nothing changes: rows still beating carry no label", async () => {
