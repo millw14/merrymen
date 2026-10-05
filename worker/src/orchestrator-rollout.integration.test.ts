@@ -326,6 +326,29 @@ describe("the removed-agent sweep is the fleet's, not the rollout's", () => {
     assert.equal(existsSync(path.join(childHome(held), "settings.json")), true, "a held tenant is wanted, not removed");
     assert.deepEqual(leaseAsks, []);
   });
+
+  it("a removed tenant still running goes to the kill switch, not the rollout's stand-down", async () => {
+    const child = tenantAt(0x1fd), held = tenantAt(0x1ff), heldAccount = address(0x200);
+    await store.put(child, grant(address(0x1fe)));
+    process.env.MERRYMEN_FLEET_ROLLOUT = `${child}:trade`;
+    await reconcile();
+    assert.equal(spawnedFor(child).length, 1);
+    await store.put(held, grant(heldAccount));
+    const hold = new FakeProc({}, true);
+    await adoptHolderForTest(held, heldAccount, hold as unknown as ChildProcess);
+    // Both grants deleted, and a scope that names neither: removed, which the
+    // rollout would otherwise also read as held.
+    await store.remove(child);
+    await store.remove(held);
+    process.env.MERRYMEN_FLEET_ROLLOUT = "none";
+    said.length = 0;
+    await reconcile();
+    await settle();
+    assert.equal(spawnedFor(child)[0]!.gone, true);
+    assert.deepEqual(hold.signals.slice(0, 1), ["SIGTERM"]);
+    assert.ok(said.some((l) => l.includes(`${child} grant removed — standing it down`)), said.join("\n"));
+    assert.ok(said.some((l) => l.includes(`${held} grant removed — standing its hold down`)), said.join("\n"));
+  });
 });
 
 describe("one hold predicate, at every path that starts a process", () => {

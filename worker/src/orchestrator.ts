@@ -4748,8 +4748,15 @@ export async function reconcile(): Promise<void> {
   // The same for every operator hold (operatorHold), so a tenant out of the
   // rollout is stood down as an accounting-held one is: asked of every tenant
   // with something local to stand down, not only the named ones.
+  //
+  // Except a tenant no longer wanted, which the rollout always "holds" (it
+  // names nobody removed): that is the kill switch's, below, as it is with no
+  // rollout at all. Stood down here first, the kill switch would skip it, and
+  // with it its "grant removed" line, its groups and its hold alerts. The
+  // accounting hold's own names are stood down here as they always were.
   const standing = new Set([...accountingHolds, ...children.keys(), ...holders.keys(), ...restartPending.keys()]);
   for (const tenant of standing) {
+    if (!wanted.has(tenant) && !accountingHolds.has(tenant)) continue;
     if (!operatorHeld(tenant)) continue;
     cancelRestart(tenant);
     killChild(tenant);
