@@ -14305,10 +14305,11 @@ async function main() {
    * outside a container whose teardown takes every process with it, a child
    * can outlive its orchestrator and the tenant lease it released by up to
    * the whole budget. In that window it sends nothing new (every broadcast is
-   * refused) and polls nothing; only a receipt read and its own sqlite writes
-   * go on. The fleet drain planned for the orchestrator (C3: twenty seconds
-   * per child, its leases released last) is what DRAIN_INTENT_CHAIN_MS was
-   * sized for, and closes that window.
+   * refused) and asks Telegram for nothing new; only a receipt read, the end
+   * of the tick it was in and its own sqlite writes go on (a hosted child has
+   * no DATABASE_URL). The fleet drain planned for the orchestrator (C3: twenty
+   * seconds per child, its leases released last) is what DRAIN_INTENT_CHAIN_MS
+   * was sized for, and closes that window.
    *
    * Registered only here, once the clock exists: a SIGTERM before this point
    * finds nothing started and keeps node's default. A second one while draining
