@@ -15,7 +15,7 @@ import { RecoveryNotice } from "./RecoveryNotice";
 import { DesktopHeader, DesktopPortfolio, DesktopSidebar } from "./Desktop";
 import { Agent } from "./screens/Agent";
 import { You } from "./screens/You";
-import { AccountEntry } from "./HostedControls";
+import { AccountEntry, FundingPanel } from "./HostedControls";
 import { SwapsTable } from "./SwapsTable";
 
 (globalThis as unknown as { React: typeof React }).React = React;
@@ -258,6 +258,29 @@ describe("where the money is during recovery", () => {
           ? `https://explorer.testnet.chain.robinhood.com/address/${ACCOUNT}`
           : `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`, what);
       }
+  });
+
+  it("the account entry and the funding panel say where the money is from the same grants answer", () => {
+    const account = { session: { hosted: true, address: "0x" + "a".repeat(40) },
+      status: { exists: true, recovery: held, ...status() } };
+    const entry = doc(React.createElement(AccountEntry, { account, portfolio: "ok", onRefresh: noop, onSignedIn: noop }));
+    assert.match(entry.body.textContent!, /Trading paused for recovery.*Your funds are in your smart account 0x12aB…cDEF.*Cash on chain: \$12\.34\./);
+    assert.equal(entry.querySelector(".agent-recovery a")!.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
+    assert.doesNotMatch(entry.body.textContent!, NEVER);
+    const deposit = doc(React.createElement(FundingPanel, { mode: "deposit", account, onClose: noop }));
+    assert.match(deposit.body.textContent!, /Trading paused for recovery.*Your funds are in your smart account 0x12aB…cDEF.*Cash on chain: \$12\.34\./);
+    assert.match(deposit.body.textContent!, /Copy deposit address/);
+    // The panel's own wrong-network warning mentions a re-sign; the notice never does.
+    assert.doesNotMatch(deposit.querySelector(".agent-recovery")!.textContent!, NEVER);
+    // Without a hold the funding panel is exactly what it was: no funds sentences.
+    const ordinary = doc(React.createElement(FundingPanel, { mode: "deposit", onClose: noop,
+      account: { ...account, status: { ...account.status, recovery: null } } }));
+    assert.doesNotMatch(ordinary.body.textContent!, /Trading paused for recovery|Your funds are in|Cash on chain/);
+    // An entry whose grants answer named no account keeps the plain notice.
+    const bare = doc(React.createElement(AccountEntry, { account: { ...account, status: { exists: true, recovery: held } },
+      portfolio: "ok", onRefresh: noop, onSignedIn: noop }));
+    assert.match(bare.body.textContent!, /Trading paused for recovery/);
+    assert.doesNotMatch(bare.body.textContent!, /smart account|Cash on chain/);
   });
 
   it("reads the hold without changing it, and keeps the hold's own words", () => {
