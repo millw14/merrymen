@@ -35,6 +35,7 @@ import {
   holdAtCaps,
   readBudgetSeed,
   seedBudget,
+  UNSETTLEABLE_AFTER_SEC,
 } from "./budget-seed";
 import { checkPolicy, type AgentLimits, type TradeIntent } from "./policy";
 import { transferBudgetRefusal } from "./transfer-budget";
@@ -160,9 +161,11 @@ describe("the cap after a rebuild equals the cap before it", () => {
     await trade({ agent_id: AGENT, kind: "transfer", target: OWNER, amount_usdg: 20, status: "landed", user_op_hash: h(3) });
     await trade({ agent_id: AGENT, kind: "curve-trade", target: TOKEN, sell_token: TOKEN, buy_token: QUOTE, amount_usdg: 4, status: "landed", user_op_hash: h(4) });
     await trade({ agent_id: AGENT, kind: "vault-withdraw", target: VAULT, amount_usdg: 30, status: "landed", user_op_hash: h(5) });
-    // Sent three days ago and never heard back about: it holds its charge whatever its age.
+    // Sent three hours ago and never heard back about: it holds its charge until
+    // it settles. (One nothing in the fleet will ever settle has its own
+    // describe below: past 26h it makes a rebuilt day unknown.)
     await trade({ agent_id: AGENT, kind: "swap", target: TOKEN, sell_token: USDG, buy_token: TOKEN, amount_usdg: 7, status: "submitted", user_op_hash: h(6) });
-    age(h(6), 3 * 86_400, null);
+    age(h(6), 3 * 3_600, null);
     // CREATED 27h AGO, SETTLED AN HOUR AGO: the window runs from settlement.
     await trade({ agent_id: AGENT, kind: "swap", target: TOKEN, sell_token: USDG, buy_token: TOKEN, amount_usdg: 9, status: "landed", user_op_hash: h(7) });
     age(h(7), 27 * 3_600, 3_600);
@@ -188,7 +191,11 @@ describe("the cap after a rebuild equals the cap before it", () => {
 
   it("SEEDED, EVERY CAP READS WHAT IT READ BEFORE — with no reconciler copy at all (an RPC failure at arm)", async () => {
     const r = await seed("spawn");
-    assert.deepEqual(r, { ok: true, restored: 8 });
+    assert.equal(r.ok && r.restored, 8);
+    // The two ops still pending that only the seed charges: looked at again
+    // when the older of them is 26h old, whether or not the child restarts.
+    const sentH6 = nowSec() - 3 * 3_600;
+    assert.ok(r.ok && r.recheckAt !== null && Math.abs(r.recheckAt - (sentH6 + UNSETTLEABLE_AFTER_SEC)) <= 5, `recheckAt ${r.ok && r.recheckAt}`);
     assert.equal(budgetUnrestored(HOME), false, "the marker comes out once every row is in");
     assert.deepEqual(await caps(), before);
     assert.equal(await store.getSpentTodayUsdg(AGENT, "live"), grossBefore, "and without the cash token, the same gross sum");
@@ -277,7 +284,7 @@ describe("a row created more than 26h ago but settled within 24h is counted", ()
     );
     ins.run(E, TOKEN, 9, h(0xe1), "landed", t - 27 * 3_600, t - 3_600); // created 27h ago, settled 1h ago
     ins.run(E, TOKEN, 11, h(0xe2), "landed", t - 30 * 3_600, t - 25 * 3_600); // settled 25h ago
-    ins.run(E, TOKEN, 7, h(0xe3), "submitted", t - 72 * 3_600, null); // pending, three days old
+    ins.run(E, TOKEN, 7, h(0xe3), "submitted", t - 3 * 3_600, null); // pending, three hours old
     ins.run(E, TOKEN, 5, h(0xe4), "landed", t - 23 * 3_600, null); // no settlement stamp: created 23h ago
     const entries = await readBudgetSeed(shared, E, USDG, t);
     assert.deepEqual(entries.map((e) => e.opHash).sort(), [h(0xe1), h(0xe3), h(0xe4)].sort());
@@ -306,6 +313,7 @@ describe("a live row with no hash makes the seed unknown — and unknown fails c
     const r = await seed("spawn", async () => shared, C);
     assert.equal(r.ok, false);
     assert.equal(!r.ok && r.marked, true, "the child arms held, not on an empty day");
+    assert.equal(!r.ok && r.unknown, true, "told apart from an outage: no later pass clears it alone");
     assert.equal(budgetUnrestored(HOME), true);
     assert.equal(store.budgetDayUnrestored(), true, "the child's own store sees the marker the orchestrator left");
     await assert.rejects(store.getTransferredTodayUsdg(C), /not restored/);
@@ -320,9 +328,80 @@ describe("a live row with no hash makes the seed unknown — and unknown fails c
     assert.equal(budgetUnrestored(HOME), true);
     sharedRaw.prepare("DELETE FROM trades WHERE agent_id = ? AND user_op_hash IS NULL").run(C);
     const r = await seed("retry", async () => shared, C);
-    assert.deepEqual(r, { ok: true, restored: 0 });
+    assert.deepEqual(r, { ok: true, restored: 0, recheckAt: null });
     assert.equal(budgetUnrestored(HOME), false);
     assert.equal(await store.getTransferredTodayUsdg(C), 0);
+  });
+});
+
+describe("a pending op nothing in the fleet will settle makes the day unknown — never a silent charge", () => {
+  // The finding: a shared row left 'submitted' by an incarnation that died
+  // mid-op, for an op that then reverted, was dropped, or landed before the
+  // reconciler's lookback. The rebuilt child never holds a row for it, so
+  // neither its resolver nor the mirror ever settles it, and the seed charged
+  // it — 1 op and its notional — on every spawn, for ever, with no event.
+  const P = getAddress("0x9999999999999999999999999999999999991a1a");
+  const Q = getAddress("0x9999999999999999999999999999999999991b1b");
+  const R = getAddress("0x9999999999999999999999999999999999991c1c");
+  const pendingIn = (agent: string, kind: string, amount: number, hash: string, sentAgoSec: number) =>
+    sharedRaw
+      .prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at) VALUES (?, ?, ?, ?, ?, 'submitted', unixepoch() - ?)`)
+      .run(agent, kind, TOKEN, amount, hash, sentAgoSec);
+
+  it("SENT FIVE DAYS AGO, NOT IN THE CHILD'S LEDGER: unknown at every spawn — marked, held, and told apart from an outage", async () => {
+    pendingIn(P, "swap", 40, h(0x1a1), 5 * 86_400);
+    // The predicate still finds it, whatever its age, and says when it was sent.
+    const [entry] = await readBudgetSeed(shared, P, USDG, nowSec());
+    assert.equal(entry?.pending, true);
+    assert.ok(entry?.pendingSince !== null && Math.abs(entry!.pendingSince! - (nowSec() - 5 * 86_400)) <= 5);
+    for (let spawn = 1; spawn <= 3; spawn++) {
+      const r = await seed("spawn", async () => shared, P);
+      assert.equal(r.ok, false, `spawn ${spawn}`);
+      assert.equal(!r.ok && r.unknown, true, `spawn ${spawn}: no later pass clears it alone`);
+      assert.equal(!r.ok && r.marked, true, `spawn ${spawn}: the child arms held`);
+      assert.match(!r.ok ? r.why : "", /1 op\(s\) the shared ledger still calls 'submitted' .*0x00000000…/);
+      assert.equal(budgetUnrestored(HOME), true);
+    }
+    // And held is held: what refreshBudget hands checkPolicy is a spent day.
+    assert.deepEqual(holdAtCaps({ spentUsdg: 0n, ops: 0 }, { dailyUsdg: 25_000_000n, maxOpsPerDay: 24 }, store.budgetDayUnrestored()), {
+      spentUsdg: 25_000_000n,
+      ops: 24,
+    });
+    clearBudgetUnrestored(HOME);
+  });
+
+  it("A CHILD THAT HOLDS THE OP KEEPS ITS OWN RESOLVER'S WORD: its own 'submitted' row is charged once, as it always was", async () => {
+    // A persistent home: the child's own row, which its stranded-op resolver asks the chain about.
+    await trade({ agent_id: Q, kind: "swap", target: TOKEN, sell_token: USDG, buy_token: TOKEN, amount_usdg: 40, status: "submitted", user_op_hash: h(0x1b1) });
+    age(h(0x1b1), 5 * 86_400, null);
+    pendingIn(Q, "swap", 40, h(0x1b1), 5 * 86_400);
+    const r = await seed("spawn", async () => shared, Q);
+    assert.deepEqual(r, { ok: true, restored: 1, recheckAt: null });
+    assert.equal(budgetUnrestored(HOME), false);
+    assert.deepEqual(await caps(Q), { ops: 1, spent: 40, transferred: 0 });
+  });
+
+  it("YOUNG, IT STAYS CHARGED AND IS LOOKED AT AGAIN AT 26h — and still unsettled then, the RUNNING child is held, not only its next spawn", async () => {
+    pendingIn(R, "transfer", 20, h(0x1c1), 2 * 3_600);
+    const sent = nowSec() - 2 * 3_600;
+    const r = await seed("spawn", async () => shared, R);
+    assert.equal(r.ok, true);
+    const recheckAt = r.ok ? r.recheckAt : null;
+    assert.ok(recheckAt !== null && Math.abs(recheckAt - (sent + UNSETTLEABLE_AFTER_SEC)) <= 5, `recheckAt ${recheckAt}`);
+    assert.deepEqual(await caps(R), { ops: 1, spent: 20, transferred: 20 }, "charged meanwhile, on every cap it would have been");
+    // The orchestrator's re-check when it is due: a RETRY, on a child with no marker.
+    const due = await seedBudget({ home: HOME, agent: R, cashToken: USDG, nowSec: recheckAt!, when: "retry", local: orchestratorHandle, shared: async () => shared });
+    assert.equal(!due.ok && due.unknown, true);
+    assert.equal(budgetUnrestored(HOME), true, "a retry that learns the day is unknown marks it: entries stop now");
+    assert.deepEqual(await caps(R).catch((e: Error) => e.message), "the trailing day's transfers from before this ledger was rebuilt are not restored yet");
+  });
+
+  it("and once the shared row stops reading 'submitted' — the mirror carried a settlement — the next pass lifts the hold", async () => {
+    sharedRaw.prepare("UPDATE trades SET status = 'reverted' WHERE user_op_hash = ?").run(h(0x1c1));
+    const r = await seed("retry", async () => shared, R);
+    assert.deepEqual(r, { ok: true, restored: 0, recheckAt: null });
+    assert.equal(budgetUnrestored(HOME), false);
+    assert.deepEqual(await caps(R), { ops: 0, spent: 0, transferred: 0 });
   });
 });
 
@@ -343,6 +422,7 @@ describe("until a seed exists, entries get no headroom — and exits stay open",
   it("an outage at spawn marks; nothing at all — no marker and no seed — is the one state that is reported unmarked", async (t) => {
     const r = await seed("spawn", outage);
     assert.equal(!r.ok && r.marked, true);
+    assert.equal(!r.ok && r.unknown, false, "an outage is a blip a later pass can clear");
     clearBudgetUnrestored(HOME);
     if (process.getuid?.() === 0) return t.skip("root ignores directory permissions");
     mkdirSync(READONLY_HOME);
