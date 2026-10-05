@@ -156,8 +156,8 @@ export interface FloorSeedPlan {
  *   carries no mode — it is whichever rail last ticked — so a held symbol puts
  *   back that symbol's floor in each mode. Every floor read is scoped to the
  *   rail that is running (store.ts positionFloors), so the other rail's row is
- *   inert until that rail runs, and is then the row it had before the
- *   redeploy. An omitted list seeds nothing.
+ *   inert until that rail runs — and today only a live buy stamps one at all
+ *   (index.ts stampFloorFor). An omitted list seeds nothing.
  * - A ROW THAT CANNOT BE READ IS DROPPED, NOT GUESSED. A stop of zero or less
  *   is already "no floor" to the strategist (strategy.ts falls back to the
  *   owner's number), so leaving it out changes no level. Two spellings of one
