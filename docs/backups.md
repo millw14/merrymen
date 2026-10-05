@@ -65,6 +65,13 @@ or before the **cutoff**: the restore point minus a settle margin
 moment after its stamp. It also reads the newest such stamp, which it compares
 but never prints.
 
+The margin is also a blind spot. Rows stamped within it of the restore point
+are compared by neither side, so a fork restored up to that many seconds
+before or after the restore point still reads `match`. Keep the default. The
+verifier refuses more than 3600. If you run it with any other value, record
+the value and the reason with the evidence. A wider margin is never the fix
+for `fork-behind`.
+
 - **`ok: true, exact: true`**: every allowlisted table that exists matched.
   Expect this while trading is held.
 - **`ok: true, exact: false`**: some tables read `source-changed`. After the
@@ -78,7 +85,7 @@ These verdicts fail the drill:
 
 | Verdict | Meaning | What to do |
 |---|---|---|
-| `fork-behind` | The fork has fewer rows stamped before the cutoff than the source, or an older newest stamp | Suspect the restore first: a wrong point, or an incomplete restore. A mirror catching up a backlog after a restart also writes rows with old stamps after the restore point. Check the orchestrator's mirror log lines around that time, then repeat with a quieter restore point or a larger `--settle-sec`. Never record it as a pass without the explanation. |
+| `fork-behind` | The fork has fewer rows stamped before the cutoff than the source, or an older newest stamp | Suspect the restore first: a wrong point, or an incomplete restore. A mirror catching up a backlog after a restart also writes rows with old stamps after the restore point. Check the orchestrator's mirror log lines around that time. Only once they show such a backlog, repeat with a new fork at a restore point outside it. Do not widen `--settle-sec` to make it pass. Never record it as a pass without the explanation. |
 | `fork-after-restore-point` | The fork holds rows stamped after the restore point plus the margin | The restore point given is wrong, the fork URL is not the fork, or something wrote to the fork |
 | `missing-in-fork` / `missing-in-source` | Only one database has the table | Investigate the restore, or the URLs |
 | `bad-stamp` | The table's allowlisted stamp column is missing or not an integer | Fix the allowlist |

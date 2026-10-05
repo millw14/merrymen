@@ -129,8 +129,16 @@ if (new Set(DRILL_TABLES.map((t) => t.table)).size !== DRILL_TABLES.length) thro
 const INTEGER_TYPES = new Set(["smallint", "integer", "bigint"]);
 /** At or above this an epoch is milliseconds: 10^11 seconds is the year 5138, 10^11 ms is 1973. */
 const MS_FLOOR = 100_000_000_000;
+/**
+ * THE SETTLE MARGIN IS ALSO A BLIND SPOT. Rows stamped within it of the restore
+ * point are compared by neither side, so a fork restored up to that far before
+ * or after the point still reads `match`. Widening it hides the very error the
+ * drill is for, so it is capped low: a `fork-behind` that needs more than an
+ * hour is answered with a restore point outside the backlog, not a wider
+ * margin.
+ */
 export const DEFAULT_SETTLE_SEC = 900;
-const MAX_SETTLE_SEC = 86_400;
+const MAX_SETTLE_SEC = 3_600;
 const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const USAGE = "Usage: node scripts/pg-backup/verify-restore.mjs --restore-point <ISO-8601 time with zone> [--settle-sec N]. "
   + "The URLs are read from MERRYMEN_RESTORE_FORK_URL and MERRYMEN_RESTORE_SOURCE_URL only. See docs/backups.md.";
@@ -206,7 +214,7 @@ export function parseDrillArgs(argv, env, nowMs) {
   if (restoreMs > nowMs) throw new DrillRefusal("usage", "The restore point is in the future.");
   if (settle !== undefined && (typeof settle !== "string" || !/^\d{1,6}$/.test(settle))) throw new DrillRefusal("usage", USAGE);
   const settleSec = settle === undefined ? DEFAULT_SETTLE_SEC : Number(settle);
-  if (settleSec > MAX_SETTLE_SEC) throw new DrillRefusal("usage", "--settle-sec is at most 86400.");
+  if (settleSec > MAX_SETTLE_SEC) throw new DrillRefusal("usage", "--settle-sec is at most 3600.");
 
   const forkUrl = env.MERRYMEN_RESTORE_FORK_URL;
   const sourceUrl = env.MERRYMEN_RESTORE_SOURCE_URL;

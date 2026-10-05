@@ -193,6 +193,7 @@ test("arguments: a zoned restore point, a default settle margin, and the window 
     { restorePointSec: R, settleSec: 900, cutoffSec: R - 900, afterSec: R + 900 },
   );
   assert.equal(parseDrillArgs([`--restore-point=${RESTORE_POINT}`, "--settle-sec=0"], ENV, NOW_MS).cutoffSec, R);
+  assert.equal(parseDrillArgs([...ARGV, "--settle-sec", "3600"], ENV, NOW_MS).cutoffSec, R - 3600);
   // R's wall clock two hours east, written with its offset, is the same instant.
   const offset = new Date((R + 2 * 3600) * 1000).toISOString().replace("Z", "+02:00");
   assert.equal(parseDrillArgs(["--restore-point", offset], ENV, NOW_MS).restorePointSec, R);
@@ -209,7 +210,7 @@ test("arguments: refused, by a fixed message that never repeats what it was give
     [...ARGV, "--restore-point", RESTORE_POINT],
     [...ARGV, "--settle-sec", "-5"],
     [...ARGV, "--settle-sec", "15m"],
-    [...ARGV, "--settle-sec", "86401"],
+    [...ARGV, "--settle-sec", "3601"], // a margin that wide hides a fork restored an hour off
     [...ARGV, FORK_URL], // a connection string pasted into argv
     [...ARGV, "--fork", FORK_URL],
   ];
