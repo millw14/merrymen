@@ -4375,7 +4375,8 @@ export async function reconcile(): Promise<void> {
   // The same for every operator hold (operatorHold), so a tenant out of the
   // rollout is stood down as an accounting-held one is: asked of every tenant
   // with something local to stand down, not only the named ones.
-  for (const tenant of new Set([...accountingHolds, ...children.keys(), ...holders.keys(), ...restartPending.keys()])) {
+  const standing = new Set([...accountingHolds, ...children.keys(), ...holders.keys(), ...restartPending.keys()]);
+  for (const tenant of standing) {
     if (!operatorHeld(tenant)) continue;
     cancelRestart(tenant);
     killChild(tenant);

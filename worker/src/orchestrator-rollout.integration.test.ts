@@ -350,7 +350,7 @@ describe("one hold predicate, at every path that starts a process", () => {
     await store.put(a, grant(account));
     await getSettingsStore().put(a, { paperTradingEnabled: false, telegramEnabled: false } as never);
     const hold = new FakeProc({}, true);
-    await adoptHolderForTest(a, account, hold);
+    await adoptHolderForTest(a, account, hold as unknown as ChildProcess);
     process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade`;
     // The scope narrows while the pass reads the held tenant's settings, after
     // its stand-down was decided and before its handover is: only holdMayLeave
@@ -396,8 +396,8 @@ describe("one hold predicate, at every path that starts a process", () => {
     await getSettingsStore().put(a, { paperTradingEnabled: false, telegramEnabled: false } as never);
     await getSettingsStore().put(b, { paperTradingEnabled: false, telegramEnabled: false } as never);
     const aHold = new FakeProc({}, true), bHold = new FakeProc({}, true);
-    await adoptHolderForTest(a, aAccount, aHold);
-    await adoptHolderForTest(b, bAccount, bHold);
+    await adoptHolderForTest(a, aAccount, aHold as unknown as ChildProcess);
+    await adoptHolderForTest(b, bAccount, bHold as unknown as ChildProcess);
     let restores = 0;
     setPaperRestoreForTest(async () => { restores++; return { ok: true, line: null }; });
     process.env.MERRYMEN_FLEET_ROLLOUT = `${b}:trade`;
