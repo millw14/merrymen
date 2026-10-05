@@ -8,6 +8,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { runRecoveryReplies, type RecoveryReplyOptions, type ReplyPool } from "./recovery-replies";
+import { RecoveryReplyFleetRefusal } from "./recovery-reply-isolation";
 import { RecoveryReplyBotLeases } from "./recovery-reply-lease";
 import { openRecoveryReplyState, readRecoveryReplyOffset, readReplyPrivacy, RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import { PgTenantLeaseManager, leaseKey } from "./tenant-lease";
@@ -29,6 +30,20 @@ function fileFacts(home: string): unknown {
   return readdirSync(home).sort().map(name => { const file = path.join(home, name), s = lstatSync(file); return [name, s.mode, s.ino, s.nlink, s.size, s.isDirectory() ? fileFacts(file) : readFileSync(file).toString("base64")]; });
 }
 
+const LOG_LINE = /^\[recovery-replies\] (?:\[alert\] )?(?:actor-start|actor-stop|admit-wait|backoff|release|roster-row-skipped|roster-unreadable|stats)(?: [a-z]+=(?:0x[0-9a-f]{6}|\?|[0-9]+s?|[a-z0-9-]+))*$/;
+function assertRedacted(lines: readonly string[], actors: ReadonlyArray<Record<string, string | number>>): void {
+  for (const line of lines) {
+    assert.match(line, LOG_LINE, `log line outside the redacted grammar: ${line}`);
+    assert.doesNotMatch(line, /0x[0-9a-f]{7,}/i, `more than an eight-character address prefix: ${line}`);
+    for (const a of actors) for (const value of Object.values(a)) {
+      const text = String(value);
+      if (/^-?\d+$/.test(text)) assert.doesNotMatch(line, new RegExp(`(?<![0-9])${text.replace("-", "\\-")}(?![0-9])`), `log line carries a fixture id: ${line}`);
+      else assert.ok(!line.includes(text), `log line carries a fixture secret or address: ${line}`);
+    }
+    assert.doesNotMatch(line, /private_fixture_token|replacement_fixture_token|FROG|chart|forget|Hiii|synthetic/i, `log line carries message or provider text: ${line}`);
+  }
+}
+
 async function fixture(t: TestContext, count = 1) {
   const pg = createRequire(import.meta.url)("pg") as { Client: new (o: { connectionString: string }) => Client; Pool: new (o: { connectionString: string; max: number }) => RawPool };
   const schema = `mm_reply_entry_${randomBytes(8).toString("hex")}`;
@@ -48,7 +63,9 @@ async function fixture(t: TestContext, count = 1) {
     CREATE TABLE original_financial(id BIGINT,nonce TEXT,amount TEXT,risk TEXT,fee TEXT);
     CREATE TABLE tenant_ledger_import(tenant TEXT,payload TEXT);`);
   let clock = Math.floor(Date.now() / 1000) * 1000;
-  const actors = Array.from({ length: count }, (_, i) => ({ tenant: address(101 + i), account: address(201 + i), owner: address(301 + i), session: address(401 + i), ownerId: 701 + i, botId: String(801 + i), token: `${801 + i}:private_fixture_token`, room: -901 - i }));
+  // Tenant addresses differ in their first hex digits: a log line carries only
+  // an eight-character prefix, and each fixture tenant must still be told apart.
+  const actors = Array.from({ length: count }, (_, i) => ({ tenant: `0x${(0xa1 + i).toString(16)}${"0".repeat(38)}` as `0x${string}`, account: address(201 + i), owner: address(301 + i), session: address(401 + i), ownerId: 701 + i, botId: String(801 + i), token: `${801 + i}:private_fixture_token`, room: -901 - i }));
   for (const a of actors) {
     const grant = { smartAccount: a.account, owner: a.owner, sessionKeyAddress: a.session, chainId: 4663, grantedAt: 1, expiresAt: 2, serialized: "never-read-private-session-payload" };
     await pool.query("INSERT INTO grants VALUES($1,4663,$2,'intentionally-invalid-sealed-key',100)", [a.tenant, JSON.stringify(grant)]);
@@ -77,7 +94,7 @@ async function fixture(t: TestContext, count = 1) {
   const env: NodeJS.ProcessEnv = { MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home, MERRYMEN_HOME_VOLUME_ID: "d6481580-14af-430c-af4a-f3540dfb833d", MERRYMEN_HOSTED: "1", MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1", MERRYMEN_FLEET_RECOVERY_REPLIES: "1", DATABASE_URL: localUrl };
   const tables = (await pool.query("SELECT tablename FROM pg_tables WHERE schemaname=$1 ORDER BY tablename", [schema])).rows.map(r => String(r.tablename));
   const original = async (except: string[] = ["tenant_telegram"]) => { const rows: unknown[] = []; for (const table of tables.filter(name => !except.includes(name))) rows.push([table, (await pool.query(`SELECT * FROM ${table} ORDER BY ctid`)).rows]); return rows; };
-  const health = { tenant: true, bot: true }, audit: string[] = [], sends: Array<{ botId: string; chatId: number; text: string; deadline: number | undefined }> = [], polls: Array<{ botId: string; offset: number; deadline: number | undefined }> = [], replies: string[] = [];
+  const health = { tenant: true, bot: true, lostTenants: new Set<string>(), lostBots: new Set<string>() }, logs: string[] = [], audit: string[] = [], sends: Array<{ botId: string; chatId: number; text: string; deadline: number | undefined }> = [], polls: Array<{ botId: string; offset: number; deadline: number | undefined }> = [], replies: string[] = [];
   let hook: ((sql: string, values: unknown[] | undefined, client: Pick<Client, "query"> | null) => Promise<void>) | undefined;
   const audited = async (sql: string, values: unknown[] | undefined, client: Pick<Client, "query"> | null) => {
     audit.push(sql); assert.doesNotMatch(sql, /sealed_session_key|serialized|(?:INSERT INTO|UPDATE|DELETE FROM|ALTER TABLE)\s+(?:agents|trades|cost_basis|risk_periods|fee_accruals|agent_commands|mirror_state|grants|tenant_settings|telegram_bot_claims|fleet_recovery_health)\b/i);
@@ -94,14 +111,18 @@ async function fixture(t: TestContext, count = 1) {
     sendPhotoBytes: async () => ({ ok: false, noDelivery: true, reason: "fixture image refused" }),
     answerCallbackQuery: async () => ({ ok: true }),
   };
-  const run = (extra: Partial<RecoveryReplyOptions> = {}) => runRecoveryReplies({ env, pool: entryPool, dek: DEK, readMountInfo: () => mount, onePass: true, now: () => clock,
-    acquireTenant: async tenant => { const held = await tenants.acquire(tenant); return held && { ...held, healthy: () => health.tenant && held.healthy() }; },
-    acquireBot: async id => { const held = await bots.acquire(id); return held && { ...held, healthy: () => health.bot && held.healthy() }; },
+  const run = (extra: Partial<RecoveryReplyOptions> = {}) => runRecoveryReplies({ env, pool: entryPool, dek: DEK, readMountInfo: () => mount, onePass: true, now: () => clock, log: (_stream, line) => { logs.push(line); },
+    acquireTenant: async tenant => { const held = await tenants.acquire(tenant); return held && { ...held, healthy: () => health.tenant && !health.lostTenants.has(tenant) && held.healthy() }; },
+    acquireBot: async id => { const held = await bots.acquire(id); return held && { ...held, healthy: () => health.bot && !health.lostBots.has(id) && held.healthy() }; },
     transport, reply: async req => { replies.push(req.text); return { kind: "public", text: "fresh public code read; trading remains held" }; }, ...extra });
   const msg = (id: number, text = "$FROG chart", i = 0, fields: Partial<TgMessage> = {}): TgMessage => ({ updateId: id, messageId: id + 100, chatId: actors[i]!.ownerId, fromId: actors[i]!.ownerId, text, date: Math.floor(clock / 1000), ...fields });
   const offset = async (botId = actors[0]!.botId) => (await pool.query("SELECT * FROM recovery_reply_offsets WHERE bot_id=$1", [botId])).rows[0];
   const prime = async (offsetId = 0, armedAgo = 0) => { await pool.query(RECOVERY_REPLY_SCHEMA); for (const a of actors) await pool.query("INSERT INTO recovery_reply_offsets VALUES($1,$2,$3,4663,$4,200,$5,$6,$7)", [a.botId, a.tenant, a.account, createHash("sha256").update(a.token).digest("hex").slice(0, 16), offsetId, Math.floor(clock / 1000) - armedAgo, clock]); };
-  return { actors, pool, connect, env, home, halt, mount, health, transport, sends, polls, replies, audit, run, msg, offset, prime, original, botClient, tenantClients, clock: () => clock, advance: (ms: number) => { clock += ms; }, hook: (fn: typeof hook) => { hook = fn; } };
+  // EVERY LINE THE ENTRY PRINTED IN THIS FIXTURE, held to the redaction rule:
+  // a fixed grammar of reason codes, counts and eight-character tenant
+  // prefixes, and none of the fixture's tokens, ids, addresses or texts.
+  t.after(() => assertRedacted(logs, actors));
+  return { actors, pool, connect, env, home, halt, mount, health, logs, transport, sends, polls, replies, audit, run, msg, offset, prime, original, botClient, tenantClients, clock: () => clock, advance: (ms: number) => { clock += ms; }, hook: (fn: typeof hook) => { hook = fn; } };
 }
 
 test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff and atomic privacy", { skip: !URL, timeout: 120_000 }, async t => {
@@ -265,16 +286,30 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
   });
 
-  await t.test("missing hold/link/claim stays unavailable and malformed grants/tokens refuse without initialization", async s => {
+  await t.test("missing hold/link/claim stays unavailable and malformed grants/tokens skip only that tenant without initialization", async s => {
     for (const sql of ["DELETE FROM fleet_recovery_health", "UPDATE tenant_telegram SET owner_id=NULL", "DELETE FROM telegram_bot_claims"]) {
       const f = await fixture(s); await f.pool.query(sql); const before = await f.original(); await f.run(); assert.equal(f.sends.length, 0); assert.deepEqual(await f.original(), before); assert.equal(existsSync(path.join(f.home, "persistent-home.json")), false);
       assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS table")).rows[0]!.table, null);
     }
+    // A malformed row or sealed scope used to refuse the whole listener. Now it
+    // is that tenant's alone: skipped with a redacted [alert], still fenced, and
+    // nothing is initialized on its behalf.
     for (const broken of ["grant", "token"]) {
-      const f = await fixture(s);
+      const f = await fixture(s), probe = await f.connect(), tag = f.actors[0]!.tenant.slice(0, 8);
       if (broken === "grant") await f.pool.query("UPDATE grants SET grant_json='{}'");
       else await f.pool.query("UPDATE tenant_settings SET sealed=$1", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: "not-a-token", telegramAllowlist: [701] }), DEK)]);
-      await assert.rejects(f.run()); assert.equal(f.sends.length, 0); assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS table")).rows[0]!.table, null);
+      let fenced = false;
+      // The probe runs inside the entry's own awaited queries, never beside a lease acquisition; a lock it wins is handed straight back.
+      f.hook(async () => {
+        if (fenced) return;
+        const key = leaseKey(f.actors[0]!.tenant).toString();
+        if ((await probe.query("SELECT pg_try_advisory_lock($1::bigint) AS held", [key])).rows[0]!.held === true) await probe.query("SELECT pg_advisory_unlock($1::bigint)", [key]);
+        else fenced = true;
+      });
+      assert.equal(await f.run(), "one-pass"); assert.equal(f.sends.length, 0); assert.equal(f.polls.length, 0);
+      assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS table")).rows[0]!.table, null);
+      assert.ok(f.logs.includes(broken === "grant" ? `[recovery-replies] [alert] roster-row-skipped tenant=${tag}` : `[recovery-replies] [alert] admit-wait tenant=${tag} reason=snapshot-invalid retry=60s`), f.logs.join("\n"));
+      if (broken === "token") assert.equal(fenced, true, "a tenant whose scope cannot be read stays fenced while the listener runs");
     }
   });
 
@@ -308,29 +343,39 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     }
   });
 
-  await t.test("present null, scalar, object and malformed allowlists refuse before provider calls or offset initialization", async s => {
+  await t.test("present null, scalar, object and malformed allowlists refuse that tenant before provider calls or offset initialization; another bot replies", async s => {
     for (const allowlist of [null, 701, "701", { owner: 701 }, ["701"], [0]]) {
-      const f = await fixture(s, 2), bad = f.actors[0]!;
+      const f = await fixture(s, 2), bad = f.actors[0]!, good = f.actors[1]!;
       await f.pool.query("UPDATE tenant_settings SET sealed=$1 WHERE tenant=$2", [sealSecret(JSON.stringify({ telegramEnabled: true, telegramBotToken: bad.token, telegramAllowlist: allowlist }), DEK), bad.tenant]);
-      const rows = await f.original([]), files = fileFacts(f.home);
+      const rows = await f.original(), files = fileFacts(f.home), badLink = (await f.pool.query("SELECT * FROM tenant_telegram WHERE tenant=$1", [bad.tenant])).rows;
       let providerCalls = 0;
-      f.transport.getMe = async () => { providerCalls++; throw new Error("malformed scope must not call getMe"); };
-      f.transport.getUpdates = async () => { providerCalls++; throw new Error("malformed scope must not poll"); };
-      await assert.rejects(f.run());
-      assert.equal(providerCalls, 0); assert.equal(f.sends.length, 0); assert.equal(f.replies.length, 0);
-      assert.equal((await f.pool.query("SELECT to_regclass('recovery_reply_offsets') AS table")).rows[0]!.table, null);
-      assert.deepEqual(await f.original([]), rows); assert.deepEqual(fileFacts(f.home), files);
+      const baseMe = f.transport.getMe;
+      f.transport.getMe = async opts => { if (opts.token === bad.token) { providerCalls++; throw new Error("malformed scope must not call getMe"); } return baseMe(opts); };
+      f.transport.getUpdates = async opts => { if (opts.token === bad.token) { providerCalls++; throw new Error("malformed scope must not poll"); } return updates([f.msg(1, "$GOOD chart", 1)]); };
+      await f.run();
+      assert.equal(providerCalls, 0); assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.botId, good.botId); assert.deepEqual(f.replies, ["$GOOD chart"]);
+      assert.equal(await f.offset(bad.botId), undefined); assert.equal(Number((await f.offset(good.botId))!.offset_id), 2);
+      assert.ok(f.logs.includes(`[recovery-replies] [alert] admit-wait tenant=${bad.tenant.slice(0, 8)} reason=snapshot-invalid retry=60s`), f.logs.join("\n"));
+      assert.deepEqual((await f.pool.query("SELECT * FROM tenant_telegram WHERE tenant=$1", [bad.tenant])).rows, badLink);
+      assert.deepEqual(await f.original(), rows); assert.deepEqual(fileFacts(f.home), files);
     }
   });
 
-  await t.test("real tenant/bot contention refuses and releases every successfully acquired lease", async s => {
-    const f = await fixture(s), foreign = await f.connect();
-    await foreign.query("SELECT pg_advisory_lock($1::bigint)", [leaseKey(f.actors[0]!.tenant).toString()]);
-    await assert.rejects(f.run()); assert.equal(f.sends.length, 0);
-    await foreign.query("SELECT pg_advisory_unlock($1::bigint)", [leaseKey(f.actors[0]!.tenant).toString()]);
-    const other = new RecoveryReplyBotLeases(foreign, () => {}), held = await other.acquire(f.actors[0]!.botId); assert.ok(held);
-    await assert.rejects(f.run()); await held.release();
-    await f.run(); assert.equal(Number((await f.offset())!.offset_id), 0);
+  await t.test("real tenant/bot contention skips only that tenant and releases every successfully acquired lease", async s => {
+    const f = await fixture(s, 2), foreign = await f.connect(), [a, b] = [f.actors[0]!, f.actors[1]!], tag = a.tenant.slice(0, 8);
+    await foreign.query("SELECT pg_advisory_lock($1::bigint)", [leaseKey(a.tenant).toString()]);
+    await f.run(); assert.equal(f.sends.length, 0); assert.deepEqual(f.polls.map(p => p.botId), [b.botId]);
+    assert.ok(f.logs.includes(`[recovery-replies] [alert] admit-wait tenant=${tag} reason=lease-busy retry=5s`), f.logs.join("\n"));
+    assert.equal(await f.offset(a.botId), undefined);
+    await foreign.query("SELECT pg_advisory_unlock($1::bigint)", [leaseKey(a.tenant).toString()]);
+    const other = new RecoveryReplyBotLeases(foreign, () => {}), held = await other.acquire(a.botId); assert.ok(held);
+    await f.run(); assert.deepEqual(f.polls.map(p => p.botId), [b.botId, b.botId]);
+    assert.ok(f.logs.includes(`[recovery-replies] [alert] admit-wait tenant=${tag} reason=bot-busy retry=5s`), f.logs.join("\n"));
+    // Every lease this listener took is released when it returns.
+    assert.equal((await foreign.query("SELECT pg_try_advisory_lock($1::bigint) AS held", [leaseKey(a.tenant).toString()])).rows[0]!.held, true);
+    await foreign.query("SELECT pg_advisory_unlock($1::bigint)", [leaseKey(a.tenant).toString()]);
+    await held.release();
+    await f.run(); assert.equal(Number((await f.offset())!.offset_id), 0); assert.equal(f.polls.filter(p => p.botId === a.botId).length, 1);
   });
 
   await t.test("approved group request grammar answers actual phrasing and rejects ordinary, mixed, anonymous and unapproved lines", async s => {
@@ -442,7 +487,7 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     assert.ok(reads >= 1); assert.equal(f.sends.length, 0); assert.equal(Number((await f.offset())!.offset_id), 3);
   });
 
-  await t.test("provider-quarantined actors retain leases while other proven bots reply; poll conflicts refuse globally", async s => {
+  await t.test("provider-quarantined actors retain leases while other proven bots reply; one bot's conflict backs off only that bot", async s => {
     for (const failure of ["getMe-401", "getMe-404", "wrong-bot", "poll-401", "poll-404"] as const) {
       const f = await fixture(s, 2), bad = f.actors[0]!, good = f.actors[1]!, other = await f.connect();
       await f.pool.query("UPDATE tenant_telegram SET poll_ok_at=$1 WHERE tenant=$2", [Math.floor(f.clock() / 1000), bad.tenant]);
@@ -472,12 +517,23 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
       const releasedBot = await new RecoveryReplyBotLeases(other, () => {}).acquire(bad.botId); assert.ok(releasedBot); await releasedBot.release();
       assert.deepEqual(await f.original(), original); assert.deepEqual(fileFacts(f.home), files);
     }
+    // A 409 used to refuse the whole listener. One bot's conflict is that
+    // bot's: marked on its existing liveness columns in the dashboard's format,
+    // backed off, and the other bot keeps answering.
     for (const phase of ["getMe", "poll"] as const) {
-      const f = await fixture(s, 2), baseMe = f.transport.getMe;
-      let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
-      f.transport.getMe = async opts => opts.token.startsWith("801:") && phase === "getMe" ? { bot: null, reason: "conflicting poller", errorCode: 409 } : baseMe(opts);
-      f.transport.getUpdates = async opts => { if (opts.token.startsWith("801:")) return { ...updates(), reason: "conflicting poller", errorCode: 409 }; await held; return updates([f.msg(1, "$GOOD chart", 1)]); };
-      try { await assert.rejects(f.run()); assert.equal(f.sends.length, 0); } finally { release(); }
+      const f = await fixture(s, 2), baseMe = f.transport.getMe, bad = f.actors[0]!, good = f.actors[1]!;
+      await f.pool.query("UPDATE tenant_telegram SET poll_ok_at=$1 WHERE tenant=$2", [Math.floor(f.clock() / 1000), bad.tenant]);
+      const original = await f.original(), files = fileFacts(f.home);
+      f.transport.getMe = async opts => opts.token.startsWith("801:") && phase === "getMe" ? { bot: null, reason: "Conflict: terminated by other getUpdates request", errorCode: 409 } : baseMe(opts);
+      f.transport.getUpdates = async opts => { if (opts.token.startsWith("801:")) return { ...updates(), reason: "Conflict: terminated by other getUpdates request", errorCode: 409 }; return updates([f.msg(1, "$GOOD chart", 1)]); };
+      assert.equal(await f.run(), "one-pass");
+      assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.botId, good.botId); assert.equal(Number((await f.offset(good.botId))!.offset_id), 2);
+      const marked = (await f.pool.query("SELECT poll_ok_at,poll_err,poll_err_at,child_state FROM tenant_telegram WHERE tenant=$1", [bad.tenant])).rows[0]!;
+      assert.equal(marked.poll_ok_at, null); assert.equal(marked.poll_err, "conflict: another program is reading this bot's updates (409)");
+      assert.equal(Number(marked.poll_err_at), Math.floor(f.clock() / 1000)); assert.equal(marked.child_state, "held:recovery-replies");
+      assert.ok(f.logs.includes(`[recovery-replies] [alert] backoff tenant=${bad.tenant.slice(0, 8)} reason=telegram-409 wait=60s`), f.logs.join("\n"));
+      const badOffset = await f.offset(bad.botId); assert.equal(badOffset ? Number(badOffset.offset_id) : 0, 0);
+      assert.deepEqual(await f.original(), original); assert.deepEqual(fileFacts(f.home), files);
     }
   });
 
@@ -493,7 +549,8 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
       stop.abort(); return updates([], 10000);
     };
     const watchdog = setTimeout(() => stop.abort(), 8000);
-    try { await assert.rejects(f.run({ onePass: undefined, stopSignal: stop.signal })); } finally { clearTimeout(watchdog); stop.abort(); }
+    // The trusted stop signal is a clean stop: the entry resolves, it does not refuse.
+    try { assert.equal(await f.run({ onePass: undefined, stopSignal: stop.signal }), "stopped"); } finally { clearTimeout(watchdog); stop.abort(); }
     assert.equal(identityCalls, 2); assert.deepEqual(offsets, [37, 37, 38]); assert.ok(pollDeadlines.every(deadline => deadline === at + 8000));
     assert.equal(f.sends.length, 1); assert.equal(f.sends[0]!.deadline, at + 30000); assert.equal(Number((await f.offset())!.offset_id), 38); assert.deepEqual(await f.original(), original);
     f.transport.getMe = baseMe; f.transport.getUpdates = async (_opts, offset) => { assert.equal(offset, 38); return updates([f.msg(38)], 39); };
@@ -516,7 +573,7 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     };
     f.transport.sendMessage = async (opts, chat, text, extra) => { sentWall = Date.now(); assert.equal(opts.deadlineAtMs, at + 30000); return baseSend(opts, chat, text, extra); };
     const watchdog = setTimeout(() => stop.abort(), 30000);
-    try { await assert.rejects(f.run({ onePass: undefined, stopSignal: stop.signal, reply: async req => { reads++; assert.equal(req.text, "$FRESH chart"); assert.equal(req.deadlineMs, at + 30000); return { kind: "public", text: "fresh public read" }; } })); }
+    try { assert.equal(await f.run({ onePass: undefined, stopSignal: stop.signal, reply: async req => { reads++; assert.equal(req.text, "$FRESH chart"); assert.equal(req.deadlineMs, at + 30000); return { kind: "public", text: "fresh public read" }; } }), "stopped"); }
     finally { clearTimeout(watchdog); stop.abort(); }
     assert.deepEqual(offsets, [0, 101, 201, 301, 401, 402]); assert.equal(reads, 1); assert.equal(f.sends.length, 1); assert.ok(sentWall - firstPollWall < 30000);
     assert.equal(Number((await f.offset())!.offset_id), 402); assert.deepEqual(await f.original(), original);
@@ -570,7 +627,11 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     for (const a of late.actors) assert.equal(Number((await late.offset(a.botId))!.offset_id), 5);
   });
 
-  await t.test("link/token/allowlist/grant/lease/halt changes during a transaction refuse and roll back its cursor", async s => {
+  await t.test("link/token/allowlist/grant/lease changes during a transaction stop that actor and roll back its cursor; a halt change refuses the fleet", async s => {
+    // Each scope change is this tenant's: its actor stops under the change's own
+    // reason and its uncommitted cursor rolls back. Only the root proof (the
+    // halt) is fleet-wide.
+    const reasons: Record<string, string> = { link: "snapshot-invalid", token: "snapshot-invalid", allowlist: "snapshot-invalid", grant: "roster-changed", "tenant-lease": "lease-lost retry=5s", "bot-lease": "lease-lost retry=5s" };
     for (const change of ["link", "token", "allowlist", "grant", "tenant-lease", "bot-lease", "halt"]) {
       const f = await fixture(s); await f.prime(); let once = false;
       f.transport.getUpdates = async () => updates([f.msg(1)]);
@@ -583,7 +644,13 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
         if (change === "bot-lease") f.health.bot = false;
         if (change === "halt") writeFileSync(f.halt, "operator halt changed\n");
       });
-      await assert.rejects(f.run()); assert.equal(f.sends.length, 0, change); assert.equal(Number((await f.offset())!.offset_id), 0, change);
+      if (change === "halt") await assert.rejects(f.run(), (e: unknown) => e instanceof RecoveryReplyFleetRefusal && e.reason === "root-proof");
+      else {
+        assert.equal(await f.run(), "one-pass", change);
+        const stop = f.logs.filter(line => /actor-stop/.test(line));
+        assert.equal(stop.length, 1, `${change}: ${f.logs.join("\n")}`); assert.ok(stop[0]!.endsWith(`actor-stop tenant=${f.actors[0]!.tenant.slice(0, 8)} reason=${reasons[change]}`), `${change}: ${stop[0]}`);
+      }
+      assert.equal(f.sends.length, 0, change); assert.equal(Number((await f.offset())!.offset_id), 0, change);
     }
   });
 
@@ -601,7 +668,8 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
 
   await t.test("a corrupt legacy memory refuses forget and rolls back both durable cursor and privacy receipt", async s => {
     const f = await fixture(s); await f.prime(); await f.pool.query("UPDATE tenant_personal_memory SET sealed='corrupt-retained-memory'");
-    f.transport.getUpdates = async () => updates([f.msg(1, "/forget")]); const before = await f.original(); await assert.rejects(f.run());
+    f.transport.getUpdates = async () => updates([f.msg(1, "/forget")]); const before = await f.original(); await f.run();
+    assert.ok(f.logs.includes(`[recovery-replies] [alert] actor-stop tenant=${f.actors[0]!.tenant.slice(0, 8)} reason=actor-error retry=60s`), f.logs.join("\n"));
     assert.equal(Number((await f.offset())!.offset_id), 0); assert.equal(f.sends.length, 0); assert.equal((await f.pool.query("SELECT count(*) FROM tenant_recovery_reply_state")).rows[0]!.count, "0"); assert.deepEqual(await f.original(), before);
   });
 
@@ -613,7 +681,8 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
       await f.pool.query("UPDATE tenant_tg_groups SET sealed=$1 WHERE tenant=$2", [sealSecret(`tg-groups/v1 ${a.tenant}\n${JSON.stringify(group)}`, DEK), a.tenant]);
       const original = await f.original(), files = fileFacts(f.home);
       f.transport.getUpdates = async () => updates([f.msg(1, "/forgetme", 0, { chatId: a.room })], 2);
-      await assert.rejects(f.run()); assert.equal(f.sends.length, 0); assert.equal(Number((await f.offset())!.offset_id), 0); assert.equal((await f.pool.query("SELECT count(*) FROM tenant_recovery_reply_state")).rows[0]!.count, "0");
+      await f.run(); assert.ok(f.logs.some(line => line.endsWith(`actor-stop tenant=${a.tenant.slice(0, 8)} reason=actor-error retry=60s`)), f.logs.join("\n"));
+      assert.equal(f.sends.length, 0); assert.equal(Number((await f.offset())!.offset_id), 0); assert.equal((await f.pool.query("SELECT count(*) FROM tenant_recovery_reply_state")).rows[0]!.count, "0");
       assert.deepEqual(await f.original(), original); assert.deepEqual(fileFacts(f.home), files);
     }
   });
@@ -626,7 +695,8 @@ test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff 
     plain.forgets = [{ id: first, atMs: 80, kind: "chat", chatId: a.ownerId, completed: true }, { id: newer, atMs: 90, kind: "chat", chatId: a.ownerId, completed: true }];
     plain.applied = { [`chat:${a.ownerId}`]: newer };
     await f.pool.query("UPDATE tenant_personal_memory SET sealed=$1 WHERE tenant=$2", [sealSecret(`personal-memory/v1 ${a.tenant}\n${JSON.stringify(plain)}`, DEK), a.tenant]);
-    const before = await f.original(); f.transport.getUpdates = async () => updates([f.msg(1, "/forget")]); await assert.rejects(f.run());
+    const before = await f.original(); f.transport.getUpdates = async () => updates([f.msg(1, "/forget")]); await f.run();
+    assert.ok(f.logs.some(line => line.endsWith(`actor-stop tenant=${a.tenant.slice(0, 8)} reason=actor-error retry=60s`)), f.logs.join("\n"));
     assert.equal(f.sends.length, 0); assert.equal(Number((await f.offset())!.offset_id), 0); assert.equal((await f.pool.query("SELECT count(*) FROM tenant_recovery_reply_state")).rows[0]!.count, "0"); assert.deepEqual(await f.original(), before);
   });
 
