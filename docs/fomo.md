@@ -19,9 +19,10 @@ client's GET-only path allowlist.
 **Hosted Fomo is opt-in.** Nothing here runs on a hosted deployment until
 `MERRYMEN_FOMO_ENABLED=1` is set on the orchestrator and the web (see Operations). Off,
 there is no Fomo pool, DDL, IPC channel, child file, Telegram research lane, chat
-interception, Settings section, MCP tool or scout-budget charge. Self-hosted Fomo is on
-unless the install sets `MERRYMEN_FOMO_ENABLED=0`; without a key it answers Fomo
-questions "not configured" and spends nothing.
+interception, Settings section, MCP tool or scout-budget charge. Self-hosted Fomo runs
+only with the install's own key and unless it sets `MERRYMEN_FOMO_ENABLED=0`. Without a
+key it behaves as before Fomo: no runtime, no `fomo.sqlite`, no interception. Adding a
+key takes a worker restart.
 
 **What still changes with hosted Fomo off.** These are deliberate, and all apply from the
 next deploy of each service:
@@ -32,7 +33,9 @@ next deploy of each service:
     security fix);
   - each decision also carries `proposed_action` and `proposed_delta_usdg`, record only,
     which older workers ignore;
-  - `/health` lists `lens_keys`.
+  - `/health` lists `lens_keys`;
+  - the request schema accepts `trader-flow` material for every instrument class (it was
+    a 422). Only the memecoin desk reads it, and only when it is sent.
 - **Workers:**
   - Paused stock tokens are excluded from the Brain's focus and from the fast-Trencher
     candidate filter. Both looked the address set up by symbol, so a paused token was
@@ -50,9 +53,14 @@ next deploy of each service:
   - The regular Trencher candidate list is built by `regularEntryPools`. It is identical
     while no early or verify-only pool exists, which is always the case with Fomo off.
 - **Orchestrator:**
-  - children receive `MERRYMEN_TENANT`;
+  - children and hold processes receive `MERRYMEN_TENANT` (read only by Fomo code);
   - both Fomo key names are stripped from children;
-  - one boot line says Fomo is off.
+  - the `fomo/*` modules are loaded at boot (imports only; nothing runs);
+  - one boot line, printed at boot even under `FLEET_HALT`, says Fomo is off. An
+    unexpected switch value is described by its length, never echoed.
+- **Telegram:** the Sign now button follows only the two permission readers
+  (`agent_status`, `permission_status`) at the start of a line. On main, any lookup's
+  text could raise it, a coin's own description included; this is a fix.
 - **Web:**
   - The chat route reads the recovery hold before anything else, which was already
     main's order.
@@ -61,7 +69,10 @@ next deploy of each service:
   - Settings PUT does not save the three Fomo booleans while Fomo is off; they are
     reported in `ignored`. Telegram `/set` and the Settings proposal box leave them out
     too, so no consent can be stored for a switch nobody can see.
-  - The page shows no Fomo section while Fomo is off.
+  - A hosted PUT carrying `fomoApiKey` drops it, like every other house secret, and
+    does not list it in `ignored`.
+  - The page shows no Fomo section while Fomo is off. A chat change-settings card, and
+    an agent's `?propose=` link, offer no Fomo switch either.
   - `/api/auth/session` adds a `fomo` flag.
   - The new `/api/fomo/status` route answers 401 when signed out and 404 "not enabled"
     otherwise.
