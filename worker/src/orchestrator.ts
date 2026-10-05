@@ -4466,8 +4466,8 @@ function drainFleet(
     },
     beforeChildren: drainBeforeChildren,
     // A copy started, a spawn preparing (its own final mirror among its
-    // awaits), a mirror pass in hand, or an order ferry crossing a home.
-    settled: () => mirrorTails.size === 0 && spawning.size === 0 && mirrorPassesInFlight === 0 && !ferrying,
+    // awaits), the mirror's tenant in hand, or an order ferry crossing a home.
+    settled: () => mirrorTails.size === 0 && spawning.size === 0 && mirrorLoopsInHand === 0 && !ferrying,
     closeCopies: () => {
       copiesClosed = true;
     },
@@ -8597,27 +8597,21 @@ export function setLiveMirrorStoreForTest(store: typeof liveMirrorStoreForTest):
 export function mirrorLedgersForTest(): Promise<void> { return mirrorLedgers(); }
 
 /**
- * MIRROR PASSES STILL RUNNING, which the drain waits for (fleet-drain.ts,
- * step 3). Once `stopping` is set no pass starts and a pass in hand stops at
- * its next tenant — but the tenant in hand finishes: its copy, and then its
- * memory publishes, which read the child's files while the child is alive.
- * Left running into the drain's final pass, that older read could be written
- * after the final pass's newer one, and the stored memory would be the
- * stale copy.
+ * THE MIRROR'S TENANT LOOPS STILL RUNNING, which the drain waits for
+ * (fleet-drain.ts, step 3). Once `stopping` is set they stop at the next
+ * tenant — but the tenant in hand finishes: its copy, and then its memory
+ * publishes, which read the child's files while the child is alive. Left
+ * running into the drain's final pass, that older read could be written after
+ * the final pass's newer one: stale memory stored, and a forget made in the
+ * child's last seconds undone until the next publish.
+ *
+ * Counted around the loops alone, which hold no `return`. Not in a finally:
+ * nothing in them throws by design, and a throw there would end
+ * runOrchestrator's loop, and this process, with it.
  */
-let mirrorPassesInFlight = 0;
+let mirrorLoopsInHand = 0;
 
 async function mirrorLedgers(): Promise<void> {
-  if (stopping) return;
-  mirrorPassesInFlight += 1;
-  try {
-    await mirrorLedgersPass();
-  } finally {
-    mirrorPassesInFlight -= 1;
-  }
-}
-
-async function mirrorLedgersPass(): Promise<void> {
   const url = process.env.DATABASE_URL;
   // Held tenants count: their Telegram is published below, and a fleet whose
   // only tenants are held would otherwise never show their link codes, or
@@ -8683,6 +8677,7 @@ async function mirrorLedgersPass(): Promise<void> {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
+  mirrorLoopsInHand += 1;
   for (const tenant of [...children.keys()]) {
     // CALLED HOME: no further tenant. The drain settles the one in hand and
     // gives every home its final pass once its child has exited.
@@ -8865,6 +8860,7 @@ async function mirrorLedgersPass(): Promise<void> {
       await forgetStoredPersonalMemory({ tenant, home: childHome(tenant), shared, dek: personalMemoryDekThisPass, log });
     }
   }
+  mirrorLoopsInHand -= 1;
 
   // What the fleet has been thinking about, for the news desk to prioritise.
   // Read here because the shared handle is already open and because this table
