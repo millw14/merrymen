@@ -26,8 +26,10 @@
  *     they have an allowance, and an overrun is waited for no longer.
  *  3. SETTLE. Every copy already started finishes WITH ITS LEASE STILL HELD —
  *     the whole point — and every spawn still preparing reaches its last check
- *     and refuses. Capped; once this step ends, no new copy may start except
- *     the drain's own final pass.
+ *     and refuses. Not a spawn already stuck before the signal: no wait ends
+ *     one, so it is said, counted, and left to the exit (`stuckSpawns`).
+ *     Capped; once this step ends, no new copy may start except the drain's
+ *     own final pass.
  *  4. CHILDREN AND HOLD PROCESSES: SIGTERM, then wait; SIGKILL only to what
  *     is still running when the wait ends, sent by the drain rather than by
  *     killChild's three-second timer. NOT A GRACEFUL STOP OF THE WORKER: no
