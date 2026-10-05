@@ -146,6 +146,32 @@ describe("what a gate must never touch", () => {
     }
   });
 
+  it("AND NOT BY LUCK: an exit into a cash leg the gate WOULD refuse to buy is still never gated", () => {
+    // The fixture above lists USDG as allowed and sellable, so a sell into it
+    // was never gated whatever intentEntryGate asked first — the isExitIntent
+    // guard could be deleted and that test would still pass. Here the cash leg
+    // itself is on neither list, so only the guard stands between an exit and
+    // a gate.
+    const l = limits({ allowedAssets: [OK, WATCHED], sellableAssets: [OK, SIGNED] });
+    const gates = entryGatesOf(l);
+    assert.equal(entryGateFor(gates, USDG), "asset-allowlist", "buying the cash leg WOULD be gated");
+    assert.equal(entryGateFor(gates, USDG, "curve"), "asset-allowlist");
+    const latch = entryGateLatch();
+    for (const token of TOKENS) {
+      const sell: TradeIntent = { kind: "swap", target: ROUTER, sellToken: token, buyToken: USDG, sellAmountRaw: 1n, notionalUsdg: 1n };
+      const curveSell: TradeIntent = { ...(buyCurve(USDG) as Extract<TradeIntent, { kind: "curve-trade" }>), assetIn: token, assetOut: USDG };
+      for (const exit of [sell, curveSell]) {
+        assert.equal(intentEntryGate(exit, l), null, `${exit.kind} exit out of ${token}`);
+        // Nor can the backstop ever hold one back — not even after a row
+        // naming the rule the cash leg would be refused under.
+        for (let tick = 0; tick < 3; tick++) {
+          assert.equal(latch.withhold(exit, l), false, `${exit.kind} exit out of ${token}, tick ${tick}`);
+          latch.settle(exit, l, { status: "rejected", rejectRule: "asset-allowlist" });
+        }
+      }
+    }
+  });
+
   it("the autonomous trencher rail is judged by its vault's assets, not these lists", () => {
     const intent: TradeIntent = { ...(buySwap(NEITHER) as Extract<TradeIntent, { kind: "swap" }>), target: TRENCH_VAULT, custody: "trencher" };
     assert.equal(intentEntryGate(intent, limits()), null);
