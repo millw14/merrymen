@@ -423,15 +423,51 @@ test("a freshly initialized volume is not released or re-halted by the env varia
   assert.equal(manifestState(f), "held");
 });
 
-test("a release that crashed after its durable receipt finishes on the next start, and only into a scope", t => {
+test("a release that stopped before removing its halt is never finished by the env; the re-halt holds that same halt at the next generation", t => {
   const f = populated(t), prepared = adoptPopulatedPersistentHome(f.adopt, f.options)!;
   assert.throws(() => controlAdoptedPersistentHomeHalt(f.release, { ...f.options, afterCompletionSynced: crash }), /simulated crash/);
   assert.equal(manifestState(f), "complete");
   assert.equal(readFileSync(f.halt, "utf8"), prepared.halt!.text);
-  assert.equal(controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT: "none" }, f.options)!.action, "withheld");
-  assert.equal(existsSync(f.halt), true);
-  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
+  const stopped = tree(f.home);
+  for (const MERRYMEN_FLEET_ROLLOUT of [SCOPE, "none"]) {
+    const kept = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT }, f.options)!;
+    assert.deepEqual([kept.action, kept.handoverState], ["withheld", "complete"]);
+    assert.match(kept.detail, /never removes a halt once the manifest is complete/);
+  }
+  assert.deepEqual(tree(f.home), stopped, "the env release removed nothing");
+  // The rollback recognises the manifest's own halt rather than calling it an operator's.
+  const rehalted = controlAdoptedPersistentHomeHalt({ ...f.rehalt, MERRYMEN_RELEASE_HOME_HALT: OP }, f.options)!;
+  assert.deepEqual([rehalted.action, rehalted.handoverState], ["rehalted", "held"]);
+  const manifest = JSON.parse(readFileSync(f.manifest, "utf8"));
+  assert.equal(manifest.handover.halt.inode, prepared.halt!.inode, "held on the same file, nothing written in its place");
+  assert.equal(String(lstatSync(f.halt).ino), prepared.halt!.inode);
+  assert.equal(manifest.handover.haltGeneration, 1);
+  assert.equal(existsSync(f.receipt), false, "nothing was published, so nothing needed a receipt");
+  assert.equal(preparePersistentHomeForHandover(f.env, f.options)!.handoverState, "held");
+  assert.equal(controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!.action, "already-held");
+  // The release that stopped is consumed too; the next generation's release finishes the job.
+  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "withheld");
+  assert.equal(controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_RELEASE_HOME_HALT: `${OP}@1` }, f.options)!.action, "released");
   assert.equal(existsSync(f.halt), false);
+});
+
+test("after a release, a hand-made halt that copies the canonical text onto a reused inode is still never lifted", t => {
+  const f = populated(t), prepared = adoptPopulatedPersistentHome(f.adopt, f.options)!;
+  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
+  // The operator stops the fleet with a copy of the manifest's halt text, and
+  // the filesystem hands it the freed inode number (simulated: APFS never
+  // reuses one, so the manifest is pointed at the copy instead).
+  writeFileSync(f.halt, prepared.halt!.text, { mode: 0o600 });
+  const saved = JSON.parse(readFileSync(f.manifest, "utf8"));
+  saved.handover.halt.inode = String(lstatSync(f.halt).ino);
+  writeFileSync(f.manifest, JSON.stringify(saved) + "\n");
+  const stopped = tree(f.home);
+  for (const MERRYMEN_RELEASE_HOME_HALT of [OP, `${OP}@1`]) {
+    const kept = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_RELEASE_HOME_HALT }, f.options)!;
+    assert.deepEqual([kept.action, kept.handoverState], ["withheld", "complete"], MERRYMEN_RELEASE_HOME_HALT);
+  }
+  assert.deepEqual(tree(f.home), stopped);
+  assert.equal(readFileSync(f.halt, "utf8"), prepared.halt!.text);
 });
 
 test("the env re-halt publishes a canonical halt without replacing one, records it first, and returns the manifest to held", t => {

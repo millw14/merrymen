@@ -551,14 +551,22 @@ function releaseAdopted(
   root: Root, saved: { manifest: Manifest; evidence: Evidence }, generation: number, rollout: FleetRollout,
 ): PersistentHomeHaltControl {
   const handover = saved.manifest.handover, standing = handover.haltGeneration ?? 0;
-  if (handover.state === "complete" && !ownHalt(root, handover.halt)) {
-    // Released. Whatever FLEET_HALT is here now was put there by hand, and a
-    // hand-made halt still stands every child down: it is never ours to lift.
-    return { action: "already-released", handoverState: "complete", detail: "already released; any FLEET_HALT present is an operator halt and stays" };
+  if (handover.state === "complete") {
+    // RELEASED, AND THIS VARIABLE NEVER REMOVES ANYTHING AGAIN. Whatever
+    // FLEET_HALT is here now stands every child down and stays. That holds
+    // even for one that looks exactly like the manifest's own halt. A release
+    // that stopped after its completed manifest and before its unlink leaves
+    // that, but so does a hand-made copy of the canonical text on a reused
+    // inode, and once the original has gone no inode, text or mode can tell
+    // the two apart. Either way the fleet stays halted. The re-halt holds the
+    // manifest on that halt again, and a release of the next generation lifts it.
+    if (!ownHalt(root, handover.halt)) {
+      return { action: "already-released", handoverState: "complete", detail: "already released; any FLEET_HALT present is an operator halt and stays" };
+    }
+    return { action: "withheld", handoverState: "complete",
+      detail: "FLEET_HALT matches the released manifest's own halt (a release stopped before removing it, or a copy made by hand); an env release never removes a halt once the manifest is complete, so it stays; MERRYMEN_REHALT_HOME holds the manifest on it again at the next generation" };
   }
-  // Held, or a release that crashed after its durable receipt and before it
-  // removed its own unchanged halt: both finish through the reviewed path.
-  if (handover.state === "held") assertHalt(root, handover.halt);
+  assertHalt(root, handover.halt);
   // ONE RELEASE PER HALT GENERATION. A re-halt is a rollback, and it consumes
   // the release before it: that variable, left set when the re-halt variable
   // is removed, names the older generation and lifts nothing. Releasing again
@@ -589,6 +597,15 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
     detail: `an operator FLEET_HALT is already standing the fleet down; it and the released manifest stay as they are${ignored}` };
   const isCanonical = (file: string) => { try { return evidence(file, root)?.text === canonical; } catch { return false; } };
   const present = presentStat(haltPath), pending = presentStat(temp);
+  if (present && ownHalt(root, m.handover.halt)) {
+    // A release that stopped after its completed manifest and before removing
+    // its own unchanged halt (the env release never finishes it). That file is
+    // already the canonical, private, single-link halt every verifier of a held
+    // manifest asks for, so the manifest is held on it as it stands: nothing
+    // is written in FLEET_HALT's place, and it is not mistaken for an operator's.
+    if (pending) { unlinkSync(temp); fsyncSync(root.fd); } // Never this file: it is single-link.
+    return holdManifest(root, saved, m.handover.halt, next, ignored);
+  }
   if (present) {
     // Ours only by proof: our private name still links it (a crash after the
     // link), or the receipt written before the link names it (a crash after
@@ -634,8 +651,14 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
     throw refuse("the re-halt's own canonical halt is missing or changed");
   }
   const halt: PersistentHomeHaltProof = { path: haltPath, device: published.device, inode: published.inode, text: published.text, operationToken: token };
-  const file = path.join(i.homeRoot, PERSISTENT_HOME_MANIFEST);
-  replaceDurably(root, file, JSON.stringify({ ...m, handover: { ...m.handover, state: "held", halt, haltGeneration: next } }) + "\n", () => {
+  return holdManifest(root, saved, halt, next, ignored);
+}
+/** The re-halt's last step: the manifest, unchanged since it was read, is replaced by one holding on `halt` at `generation`. */
+function holdManifest(
+  root: Root, saved: { manifest: Manifest; evidence: Evidence }, halt: PersistentHomeHaltProof, generation: number, ignored: string,
+): PersistentHomeHaltControl {
+  const m = saved.manifest, file = path.join(root.identity.homeRoot, PERSISTENT_HOME_MANIFEST);
+  replaceDurably(root, file, JSON.stringify({ ...m, handover: { ...m.handover, state: "held", halt, haltGeneration: generation } }) + "\n", () => {
     const now = evidence(file, root);
     if (!now || now.device !== saved.evidence.device || now.inode !== saved.evidence.inode || now.text !== saved.evidence.text) {
       throw refuse("the persistent manifest changed before the re-halt");
@@ -644,7 +667,7 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
   });
   verifiedManifest(root);
   return { action: "rehalted", handoverState: "held",
-    detail: `re-halted under this volume's canonical halt at generation ${next}; only ${releaseSpelling(next)} releases it${ignored}` };
+    detail: `re-halted under this volume's canonical halt at generation ${generation}; only ${releaseSpelling(generation)} releases it${ignored}` };
 }
 
 /**
@@ -656,8 +679,9 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
  * a `held` manifest whose standing halt is that generation, through
  * markPersistentHomeHandoverComplete itself, and only while
  * MERRYMEN_FLEET_ROLLOUT, read by B1's parser, admits someone. A malformed
- * rollout refuses before anything is touched. Asked again, it changes nothing:
- * a FLEET_HALT made by hand after a release is never lifted by this variable.
+ * rollout refuses before anything is touched. Once the manifest is `complete`
+ * it removes nothing, ever: not a FLEET_HALT made by hand after a release, and
+ * not the halt of a release that stopped before its unlink (re-halt instead).
  *
  * MERRYMEN_REHALT_HOME=<operation token> puts a canonical halt back with a
  * no-replace link, records which inode it is in a receipt BEFORE publishing
