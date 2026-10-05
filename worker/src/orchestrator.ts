@@ -2791,8 +2791,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // Checking `children` is not enough: this function awaits a dozen times
   // before the child exists, and a second caller arriving in that window saw
   // nothing running. See `spawning`. The finally releases it whichever way
-  // this function leaves — every refusal below returns, and a throw is as
-  // final as a return.
+  // this function leaves — every refusal below returns, and a throw is caught
+  // and said at the bottom, as final as a return.
   if (spawning.has(tenant)) {
     log(`${tenant}: already being spawned — not starting a second`);
     return;
@@ -3079,6 +3079,16 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     pipe(proc.stderr, process.stderr);
 
     log(`${tenant} spawn requested (pid ${proc.pid ?? "pending"}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+  } catch {
+    // AND ANY OTHER THROW IN PREPARATION, the same way as the recovery gates
+    // above: this tenant is held, not the fleet. reconcile() awaits this, and
+    // so does handHoldBack; the restart timer starts it with `void`, where a
+    // rejection is unhandled outright. Either way it exited the supervisor.
+    // What can throw here runs before spawn(), whose own throw is caught
+    // there, so no worker started: the lease and home are kept, and the next
+    // pass prepares it again. Said without the error's text, which can carry
+    // a private value.
+    log(`[alert] ${tenant}: worker preparation failed — retaining its home without starting a worker; the next pass tries again`);
   } finally {
     spawning.delete(tenant);
   }

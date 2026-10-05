@@ -240,6 +240,26 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     assert.equal(spawned.length, 0);
   });
 
+  it("ANY OTHER THROW IN PREPARATION: an anchor that can be neither replaced nor removed", async () => {
+    useLedger(true);
+    setPaperRestoreForTest(PAPER_OK);
+    const t = await wanted(null);
+    live.push(t.tenant);
+    // writeBootstrapForChild refuses to start the child by throwing when the
+    // last spawn's anchor cannot be removed (bootstrap.json). Nothing named
+    // above: the catch at the bottom of spawnChild is what holds it.
+    mkdirSync(path.join(t.home, "bootstrap.json"), { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(t.home, "bootstrap.json", "stuck"), "", { mode: 0o600 });
+
+    await assert.doesNotReject(reconcile(), "the throw does not reject through reconcile");
+    assert.equal(spawned.length, 0, "no worker starts over an anchor it cannot trust");
+    assert.ok(alerts(t.tenant).some((l) => /worker preparation failed/.test(l)), said.join("\n"));
+    assert.ok(!alerts(t.tenant).some((l) => /unsafe bootstrap anchor|EISDIR|directory/.test(l)), "said without the error's text");
+    assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
+    await assert.doesNotReject(reconcile(), "and the next pass holds it again");
+    assert.equal(spawned.length, 0);
+  });
+
   // Last: the removed agent stays pending for the rest of this process.
   it("A POSTGRES FAILURE AT THE REMOVED AGENT'S RETRY: its lease and original book stay", async () => {
     useLedger(false);
