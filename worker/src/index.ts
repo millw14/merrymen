@@ -3221,6 +3221,19 @@ async function main() {
    */
   const liveHold = (intent: TradeIntent): Hold | null =>
     active && execMode().mode === "live" ? execBackoff.held(intent, active.limits, Date.now()) : null;
+  /**
+   * THE ONLY INTENTS A HOLD MAY REFUSE: the entries the tick itself proposed.
+   *
+   * An owner's order and the Brain's are EXEMPT. They are asked for once, by
+   * somebody waiting on the answer, and a hold another intent started — of
+   * another size, perhaps on a cause the owner has just fixed — is no answer
+   * to them. So they go to the bundler and hear its own word; when that word
+   * is a refusal that starts a hold, their reply says when asking again can
+   * help (orderHeldReply). The tick's loops add an entry here just before it
+   * runs; nothing else does, so a path that forgets is merely never held,
+   * which is the behaviour before holds existed.
+   */
+  const tickEntries = new WeakSet<TradeIntent>();
   /** The last arm failure reported, so the same one is not re-logged every tick. */
   let lastArmFailure: string | null = null;
   let inFlightSpentUsdg = 0n;
@@ -8111,15 +8124,16 @@ async function main() {
 
     // ── HELD, FOR A WHILE, AFTER OUR OWN CHECKS REFUSED IT ───────────────
     // The expiring sibling of the block above (exec-backoff.ts), read in the
-    // same place for the same reason. Only a buy bound for the live rail can
-    // be held — `liveHold` answers null for every exit, whatever is recorded —
-    // and what reaches here has a decision already: an owner's or the Brain's order, or a strategist
-    // intent that journaled its own (a deterministic one with no decision was
-    // skipped in the tick, before it got one). So this is never a silent
-    // return: the row is a rejection carrying the rule that started the hold,
-    // with the legs the refusal's own row had, and an order's reply says when
-    // asking again can help (orderHeldReply).
-    const backedOff = liveHold(intent);
+    // same place for the same reason. Only the tick's own entries are asked
+    // (tickEntries: an owner's or the Brain's order is exempt and goes on to
+    // hear the bundler), and only a buy bound for the live rail can be held —
+    // `liveHold` answers null for every exit, whatever is recorded. What
+    // reaches here has a decision already: a strategist intent that journaled
+    // its own (a deterministic one with no decision was skipped in the tick,
+    // before it got one). So this is never a silent return: the row is a
+    // rejection carrying the rule that started the hold, with the legs the
+    // refusal's own row had.
+    const backedOff = tickEntries.has(intent) ? liveHold(intent) : null;
     if (backedOff && verdict.ok) {
       await recordTrade({
         agent_id: agentId,
@@ -12944,6 +12958,8 @@ async function main() {
         // AN ENTRY IS COUNTED ONLY IF IT BECAME A TRADE — landed, submitted,
         // or filled on paper (the statuses the ops cap counts). Refused by the
         // wall, or never sent, the claim goes back.
+        // The tick's own entry, so a hold may refuse it (tickEntries).
+        tickEntries.add(intent);
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
@@ -13036,6 +13052,7 @@ async function main() {
         continue;
       }
       if (entry) {
+        tickEntries.add(intent);
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
       } else {
@@ -13376,16 +13393,17 @@ async function main() {
   }
 
   /**
-   * AN ORDER THE EXEC BACKOFF HELD, said as what it was (exec-backoff.ts).
+   * AN ORDER WHOSE OWN REFUSAL STARTED A HOLD, said with when asking again
+   * can help (exec-backoff.ts).
    *
-   * processIntentLocked books a held order `rejected` under the rule that
-   * started the hold, so its row reads exactly like that refusal — and
-   * sayTradeOutcome would explain the rule as though the order had just been
-   * tried. It was not; the owner (or the Brain's event line) is owed WHEN
-   * asking again can help. So the backoff is asked, with the same intent:
-   * a rejection under the rule holding this order right now. That is also
-   * the truth just after a fresh refusal started the hold — it was not sent,
-   * and asking sooner gets the same answer.
+   * An owner's or the Brain's order is never held (tickEntries): it is tried,
+   * and the bundler or the sponsor answers it. When that answer is a refusal
+   * before signing, the refusal holds the tick's entries on the same pair, and
+   * the owner (or the Brain's event line) is owed the fact the tick acts on:
+   * asking again before the hold runs out will most likely meet the same
+   * answer. So the backoff is asked for the hold THIS intent's refusal wrote,
+   * and only that one. A hold another intent started is about another size and
+   * another moment, and this order was never judged by it.
    *
    * Spread OVER sayTradeOutcome's reply: every other outcome keeps its own
    * sentence, and the ledger verdict beside it is untouched.
@@ -13395,7 +13413,7 @@ async function main() {
     outcome: { status: TradeRow["status"]; rejectRule?: string } | null,
   ): Partial<OrderReply> {
     if (outcome?.status !== "rejected") return {};
-    const held = liveHold(intent);
+    const held = execBackoff.notedBy(intent, Date.now());
     return held && held.rule === outcome.rejectRule ? no(heldReply(held, Date.now())) : {};
   }
 
