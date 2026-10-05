@@ -17,9 +17,18 @@ FROM node:22-slim
 
 # tini, to be PID 1 (the ENTRYPOINT at the bottom). First, so this layer is
 # cached across every source change. Debian's package puts it at /usr/bin/tini.
+#
+# AND THE BUILD RUNS IT, at the exact path the ENTRYPOINT names. Nothing else
+# would notice a tini that is missing or elsewhere (a base-image change, a
+# renamed package) until the container started: the build would pass, the new
+# deployment would replace the live one — railway.json has no healthcheck to
+# stop it — and every role would then crash-loop on `exec /usr/bin/tini: no
+# such file or directory`. Failing HERE leaves the previous deployment serving.
+# `--version` prints and exits 0 before tini looks at PID 1 or a child.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && /usr/bin/tini --version
 
 WORKDIR /app
 
@@ -48,6 +57,12 @@ RUN npm install --no-save --ignore-scripts pg@8
 
 # Full source. .dockerignore keeps node_modules / .next / local state out.
 COPY . .
+
+# The start script is the CMD, so the build parses it with the image's own sh
+# (dash) — for the same reason as the tini check above: a script that cannot
+# parse, or is not where the CMD says, fails the build and not the deploy.
+# `-n` reads without running anything; no role starts here.
+RUN /bin/sh -n /app/scripts/container-start.sh
 
 # NEXT_PUBLIC_* IS INLINED AT BUILD TIME, NOT READ AT RUNTIME.
 #

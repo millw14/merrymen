@@ -128,6 +128,24 @@ describe("the Dockerfile starts node under tini, through the script", () => {
     assert.match(docker, /^ENV MERRYMEN_IMAGE=dockerfile-v1$/m);
   });
 
+  it("the build runs tini and parses the script, at the very paths the start uses", () => {
+    // Nothing in CI builds this image and railway.json has no healthcheck, so
+    // a tini or a script that is missing or broken at START would still build
+    // green, replace the live deployment, and crash-loop every role. These two
+    // RUNs move that failure into the BUILD, where the previous deployment
+    // keeps serving — but only if they name the paths the ENTRYPOINT and CMD
+    // actually start, which is what this holds.
+    const steps = instructions(docker);
+    const [tini] = soleExecForm(docker, "ENTRYPOINT") as string[];
+    const [shell, script] = soleExecForm(docker, "CMD") as string[];
+    const install = steps.find((i) => i.keyword === "RUN" && /\bapt-get install -y --no-install-recommends tini\b/.test(i.args));
+    assert.ok(install, "no RUN installs tini");
+    assert.ok(install.args.replace(/\s+/g, " ").endsWith(`&& ${tini} --version`), `the tini install does not end by running ${tini}: ${install.args}`);
+    const copy = steps.findIndex((i) => i.keyword === "COPY" && i.args === ". .");
+    const parse = steps.findIndex((i) => i.keyword === "RUN" && i.args === `${shell} -n ${script}`);
+    assert.ok(copy >= 0 && parse > copy, `the build must run \`${shell} -n ${script}\` after \`COPY . .\` put it there`);
+  });
+
   it("the CMD's path is where COPY puts the script, and .dockerignore keeps it", () => {
     // WORKDIR /app + `COPY . .` puts the repo's scripts/ at /app/scripts/.
     assert.match(docker, /^WORKDIR \/app$/m);
