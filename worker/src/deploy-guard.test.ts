@@ -374,6 +374,7 @@ describe("the one-shot census", () => {
       "runHolderClaimsBackfill", "startHistoryRepair", // every boot or pass, on no variable
       "runBuilderPass", "runNewsPass", "startGroupChatPass", "startXPostPass", // every pass, standing features
       "startFleetHeartbeat", // every pass, halted or not, on no variable: the fleet_heartbeat row (fleet-heartbeat.ts)
+      "startFomoPass", // every pass, a standing feature behind its own opt-in (MERRYMEN_FOMO_ENABLED, docs/fomo.md): research only, it places no order
     ]);
 
     it("finds them where they are", () => {
