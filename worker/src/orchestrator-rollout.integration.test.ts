@@ -309,13 +309,22 @@ describe("one hold predicate, at every path that starts a process", () => {
     await settle();
     assert.ok(said.some((l) => l.includes(`${a} rallying again`)), "the restart was scheduled while admitted");
     process.env.MERRYMEN_FLEET_ROLLOUT = "none";
-    context.mock.timers.tick(60_000);
-    await settle();
+    // Past spawnChild's first gate, its first await is the stored grant's read,
+    // reached synchronously from the timer's callback: a read here means the
+    // spawn went on to prepare a key and settings it was never going to use.
+    const reads: string[] = [];
+    store.get = async function (this: typeof store, tenant: `0x${string}`) {
+      reads.push(tenant.toLowerCase());
+      return Object.getPrototypeOf(this).get.call(this, tenant);
+    };
+    try {
+      context.mock.timers.tick(60_000);
+      await settle();
+    } finally {
+      delete (store as { get?: unknown }).get;
+    }
     assert.equal(spawned.length, 1, "the timer reaches spawnChild and starts nothing");
-    assert.ok(
-      !said.some((l) => l.includes(`${a}: MERRYMEN_FLEET_ROLLOUT does not admit this tenant — not spawning`)),
-      "it stopped at the first gate, before writing a key or settings, not at the last one",
-    );
+    assert.ok(!reads.includes(a), "it stopped at the first gate, before reading the grant to write it into the home");
     await reconcile();
     assert.equal(spawned.length, 1);
   });
