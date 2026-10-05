@@ -29,6 +29,25 @@ test("one entry that is not an address holds EVERY return rather than silently p
   }
 });
 
+test("a malformed list is logged once, with a count and never the entries", () => {
+  // Names in place of addresses: the likeliest mistake, and from the page
+  // alone it looks like the review working.
+  const raw = `${A} johnny sirsendit`;
+  const real = console.warn;
+  const said: string[] = [];
+  console.warn = (...args: unknown[]) => { said.push(args.map(String).join(" ")); };
+  try {
+    for (const account of [A, B, "0xcccccccccccccccccccccccccccccccccccccccc"]) assert.equal(underReturnReview(account, raw), true);
+    // A well-formed list says nothing.
+    assert.equal(underReturnReview(B, A), false);
+  } finally {
+    console.warn = real;
+  }
+  assert.equal(said.length, 1, said.join("\n"));
+  assert.match(said[0]!, /MERRYMEN_RETURN_REVIEW has 2 of 3 entries that are not 0x smart-account addresses; every return is withheld/);
+  assert.doesNotMatch(said[0]!, /johnny|sirsendit|0xaaaa/i);
+});
+
 test("read from the environment on every call, not at import", () => {
   const saved = process.env.MERRYMEN_RETURN_REVIEW;
   try {
