@@ -14,8 +14,10 @@ import { describe, it } from "node:test";
 import { wrapSqlite } from "./db";
 import { RAIL_CONTRADICTORY, RAIL_NO_WORKER, RAIL_RESPAWNING, foldFunnel } from "./autonomy-funnel";
 import {
+  FLEET_HEARTBEAT_EVERY_MS,
   LAST_SHUTDOWN_FILE,
   commitOf,
+  heartbeatClock,
   heartbeatCounts,
   numbersOnly,
   publicHeartbeat,
@@ -138,6 +140,100 @@ describe("the heartbeat row", () => {
   it("refuses a role it does not know", async () => {
     const db = wrapSqlite(new DatabaseSync(":memory:"));
     await assert.rejects(writeFleetHeartbeat(db, beat({ role: "web" as never }), { create: true }));
+  });
+});
+
+describe("the clock: once a minute, never two at once", () => {
+  /** A beat that settles when the test says so, recording what it was asked. */
+  function harness(mayCreate = true) {
+    let nowMs = 1_800_000_000_000;
+    const asked: boolean[] = [];
+    const logged: string[] = [];
+    let settle: ((r: boolean | Error) => void) | null = null;
+    const clock = heartbeatClock({
+      mayCreate,
+      nowMs: () => nowMs,
+      log: (line) => logged.push(line),
+      beat: (create) => {
+        asked.push(create);
+        return new Promise<boolean>((resolve, reject) => {
+          settle = (r) => (r instanceof Error ? reject(r) : resolve(r));
+        });
+      },
+    });
+    return {
+      clock,
+      asked,
+      logged,
+      advance: (ms: number) => void (nowMs += ms),
+      /** Settle the beat in flight, and wait for the clock to see it. */
+      async finish(beat: Promise<void> | null, r: boolean | Error = true) {
+        assert.ok(beat, "a beat was started");
+        settle!(r);
+        await beat;
+      },
+    };
+  }
+
+  it("two ticks inside the minute write one beat; the next minute writes the next", async () => {
+    const h = harness();
+    await h.finish(h.clock.tick());
+    h.advance(FLEET_HEARTBEAT_EVERY_MS - 1);
+    assert.equal(h.clock.tick(), null, "inside the minute");
+    h.advance(1);
+    await h.finish(h.clock.tick());
+    assert.equal(h.asked.length, 2);
+  });
+
+  it("a beat that hangs is never joined by a second, however long it hangs", async () => {
+    const h = harness();
+    const first = h.clock.tick();
+    h.advance(10 * FLEET_HEARTBEAT_EVERY_MS);
+    assert.equal(h.clock.tick(), null, "still in flight: no second write behind it");
+    assert.equal(h.clock.tick(), null);
+    await h.finish(first);
+    assert.equal(h.asked.length, 1);
+    // Settled, and a minute has long passed: the next tick beats at once.
+    await h.finish(h.clock.tick());
+    assert.equal(h.asked.length, 2);
+  });
+
+  it("the table is created until the first beat lands, and then only upserted", async () => {
+    const h = harness();
+    await h.finish(h.clock.tick(), new Error("connection refused"));
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), true);
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), true);
+    assert.deepEqual(h.asked, [true, true, false]);
+  });
+
+  it("a writer that may not create the table is never asked to, and a skipped beat is not an error", async () => {
+    const h = harness(false);
+    await h.finish(h.clock.tick(), false);
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), true);
+    assert.deepEqual(h.asked, [false, false]);
+    assert.deepEqual(h.logged, []);
+  });
+
+  it("a failure is said once per distinct message, retried a minute later — not every pass — and its end is said once", async () => {
+    const h = harness();
+    await h.finish(h.clock.tick(), new Error("connection refused"));
+    assert.equal(h.clock.tick(), null, "a failed beat still started the minute");
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), new Error("connection refused"));
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), new Error("too many clients"));
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), true);
+    h.advance(FLEET_HEARTBEAT_EVERY_MS);
+    await h.finish(h.clock.tick(), true);
+    assert.deepEqual(h.logged, [
+      "fleet heartbeat: write failed — connection refused",
+      "fleet heartbeat: write failed — too many clients",
+      "fleet heartbeat: writing again",
+    ]);
   });
 });
 

@@ -5,7 +5,8 @@
  * running workers wrote counted as their rail.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -13,7 +14,15 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { AUTONOMY_TRADE_FUNNEL_SQL } from "./autonomy-funnel";
 import { wrapSqlite } from "./db";
-import { childEnv, collectFleetSnapshot, fleetHealthLines } from "./orchestrator";
+import { readFleetHeartbeats } from "./fleet-heartbeat";
+import {
+  childEnv,
+  collectFleetSnapshot,
+  fleetHaltFile,
+  fleetHealthLines,
+  setFleetHeartbeatDbForTest,
+  writeOrchestratorHeartbeatForTest,
+} from "./orchestrator";
 
 it("counts recent trades by agent, status and rejection rule", () => {
   const db = new DatabaseSync(":memory:");
@@ -169,6 +178,25 @@ describe("the heartbeat's place in orchestrator.ts", () => {
     assert.ok(body.statements.indexOf(stmt) < body.statements.indexOf(halt!), "before it, so neither branch can skip a beat");
   });
 
+  it("ticks the clock that holds the minute and the latch, around the one writer that creates the table", () => {
+    // heartbeatClock's own tests drive the minute, the latch, create-until-
+    // first-success and the failure line; this pins that the orchestrator's
+    // beat goes through that clock and nowhere else.
+    const start = AST.statements.find(
+      (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === "startFleetHeartbeat",
+    );
+    assert.match(start!.body!.getText(), /\bvoid fleetHeartbeat\.tick\(\)/);
+    assert.doesNotMatch(start!.body!.getText(), /writeOrchestratorHeartbeat/, "never written past the clock");
+    const decl = AST.statements
+      .filter(ts.isVariableStatement)
+      .flatMap((s) => [...s.declarationList.declarations])
+      .find((d) => ts.isIdentifier(d.name) && d.name.text === "fleetHeartbeat");
+    const init = decl?.initializer?.getText() ?? "";
+    assert.match(init, /^heartbeatClock\(/);
+    assert.match(init, /\bbeat: writeOrchestratorHeartbeat\b/);
+    assert.match(init, /\bmayCreate: true\b/);
+  });
+
   it("childEnv strips the ops token: it opens the heartbeat, and a child has no use for it", () => {
     const saved = process.env.MERRYMEN_OPS_TOKEN;
     process.env.MERRYMEN_OPS_TOKEN = "ops-token-never-to-a-child-0123456789abcdef";
@@ -177,6 +205,95 @@ describe("the heartbeat's place in orchestrator.ts", () => {
     } finally {
       if (saved === undefined) delete process.env.MERRYMEN_OPS_TOKEN;
       else process.env.MERRYMEN_OPS_TOKEN = saved;
+    }
+  });
+});
+
+describe("one orchestrator beat: what the row says about this process", () => {
+  const NOW = Math.floor(Date.now() / 1000);
+  const A = "0x00000000000000000000000000000000000000a1";
+
+  /** A home of its own, so FLEET_HALT here is nobody else's, and a database the beat is pointed at. */
+  async function withBeat(fleet: (raw: DatabaseSync) => void, run: (raw: DatabaseSync) => Promise<void>) {
+    const saved = { home: process.env.MERRYMEN_HOME, sha: process.env.RAILWAY_GIT_COMMIT_SHA };
+    const home = mkdtempSync(path.join(tmpdir(), "mm-orch-beat-"));
+    const raw = new DatabaseSync(":memory:");
+    process.env.MERRYMEN_HOME = home;
+    process.env.RAILWAY_GIT_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
+    try {
+      fleet(raw);
+      setFleetHeartbeatDbForTest(wrapSqlite(raw));
+      await run(raw);
+    } finally {
+      setFleetHeartbeatDbForTest(null);
+      raw.close();
+      rmSync(home, { recursive: true, force: true });
+      if (saved.home === undefined) delete process.env.MERRYMEN_HOME;
+      else process.env.MERRYMEN_HOME = saved.home;
+      if (saved.sha === undefined) delete process.env.RAILWAY_GIT_COMMIT_SHA;
+      else process.env.RAILWAY_GIT_COMMIT_SHA = saved.sha;
+    }
+  }
+
+  const fleet = (raw: DatabaseSync) => {
+    raw.exec(`CREATE TABLE agents (smart_account TEXT PRIMARY KEY, status TEXT NOT NULL, mode TEXT, beat_at INTEGER, live_blocker TEXT)`);
+    raw.exec(`CREATE TABLE trades (agent_id TEXT NOT NULL, status TEXT NOT NULL, reject_rule TEXT, created_at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE decisions (source TEXT NOT NULL, action TEXT, hold_kind TEXT, at INTEGER NOT NULL)`);
+    raw.prepare("INSERT INTO agents (smart_account, status, mode, beat_at) VALUES (?, ?, ?, ?)").run(A, "armed", "live", NOW - 30);
+    raw.prepare("INSERT INTO trades (agent_id, status, reject_rule, created_at) VALUES (?, ?, ?, ?)").run(A, "rejected", "no-gas", NOW - 60);
+  };
+
+  it("halted is the FLEET_HALT file as it is at the beat: present, then gone", async () => {
+    await withBeat(fleet, async (raw) => {
+      writeFileSync(fleetHaltFile(), "halt\n", { mode: 0o600 });
+      assert.equal(await writeOrchestratorHeartbeatForTest(true), true);
+      let [h] = await readFleetHeartbeats(wrapSqlite(raw), NOW + 1);
+      assert.equal(h!.role, "orchestrator");
+      assert.equal(h!.halted, true);
+      assert.equal(h!.commit, "0123456789abcdef0123456789abcdef01234567");
+      assert.equal(h!.rollout, null, "no rollout in this build");
+      const c = h!.counts as Record<string, any>;
+      assert.equal(c.agents, 1);
+      assert.deepEqual([c.children, c.holders], [0, 0], "this replica runs nothing for anyone here");
+      assert.equal(c.funnel1h.live.execRefused, 1, "it publishes the funnel the log prints");
+
+      rmSync(fleetHaltFile());
+      assert.equal(await writeOrchestratorHeartbeatForTest(false), true, "the table is there: a bare upsert");
+      [h] = await readFleetHeartbeats(wrapSqlite(raw), NOW + 1);
+      assert.equal(h!.halted, false);
+    });
+  });
+
+  it("a fleet it cannot read is still a beat: counts null, the row written", async () => {
+    // No agents table at all: the snapshot's first read throws.
+    await withBeat(() => {}, async (raw) => {
+      assert.equal(await writeOrchestratorHeartbeatForTest(true), true);
+      const [h] = await readFleetHeartbeats(wrapSqlite(raw), NOW + 1);
+      assert.equal(h!.role, "orchestrator");
+      assert.equal(h!.counts, null, "unread, never zeros");
+      assert.equal(h!.halted, false);
+      assert.ok(h!.beatAt >= NOW, "and it beat now");
+    });
+  });
+
+  it("a write that fails reaches the clock, which says so — it is never taken here for a beat", async () => {
+    await withBeat(fleet, async () => {
+      // Not allowed to create the table, and it is not there: skipped, not written.
+      assert.equal(await writeOrchestratorHeartbeatForTest(false), false);
+    });
+    const failing = {
+      prepare() {
+        throw new Error("disk I/O error");
+      },
+      async exec() {
+        throw new Error("disk I/O error");
+      },
+    };
+    setFleetHeartbeatDbForTest(failing as never);
+    try {
+      await assert.rejects(writeOrchestratorHeartbeatForTest(true), /disk I\/O error/);
+    } finally {
+      setFleetHeartbeatDbForTest(null);
     }
   });
 });

@@ -248,6 +248,71 @@ export async function writeFleetHeartbeat(db: Db, hb: FleetHeartbeat, opts: { cr
   }
 }
 
+// ── THE CLOCK ───────────────────────────────────────────────────────────────
+
+/**
+ * ONE ROLE'S BEAT, ON A MINUTE'S CLOCK, NEVER TWO AT ONCE.
+ *
+ * The writer's own loop calls tick() as often as it runs; a beat starts only
+ * when the last one STARTED a minute ago and has finished. Both halves matter:
+ *
+ *  - The clock is stamped when a beat starts, not when one succeeds, so a
+ *    database that refuses every write is asked once a minute — not on every
+ *    pass of a loop that turns every few seconds.
+ *  - The latch means a write that hangs is never joined by a second one. A
+ *    wedged database then shows from outside as what it is, a beat that
+ *    stopped, instead of writes piling up behind the first.
+ *
+ * `create` is asked of the writer only until its first beat lands, and only
+ * of a writer that may create the table at all (the orchestrator): every
+ * later beat is a bare upsert. A failure is said once per distinct message,
+ * and its end once.
+ *
+ * tick() never throws and is not for awaiting in the loop; it returns the
+ * beat it started (null when none was due) so a test can wait for exactly it.
+ */
+export function heartbeatClock(opts: {
+  /** Write one beat: true when written, false when skipped (no table, and may not create one). */
+  beat: (create: boolean) => Promise<boolean>;
+  mayCreate: boolean;
+  log: (line: string) => void;
+  nowMs?: () => number;
+  everyMs?: number;
+}): { tick(): Promise<void> | null } {
+  const now = opts.nowMs ?? Date.now;
+  const every = opts.everyMs ?? FLEET_HEARTBEAT_EVERY_MS;
+  let inFlight = false;
+  let lastStartMs: number | null = null;
+  let schemaReady = !opts.mayCreate;
+  let lastFailure: string | null = null;
+  return {
+    tick() {
+      if (inFlight) return null;
+      const at = now();
+      if (lastStartMs !== null && at - lastStartMs < every) return null;
+      lastStartMs = at;
+      inFlight = true;
+      return (async () => {
+        try {
+          if (await opts.beat(!schemaReady)) schemaReady = true;
+          if (lastFailure !== null) {
+            lastFailure = null;
+            opts.log("fleet heartbeat: writing again");
+          }
+        } catch (e) {
+          const text = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+          if (text !== lastFailure) {
+            lastFailure = text;
+            opts.log(`fleet heartbeat: write failed — ${text}`);
+          }
+        } finally {
+          inFlight = false;
+        }
+      })();
+    },
+  };
+}
+
 // ── READ SIDE (the web's ops route) ─────────────────────────────────────────
 
 /** What an operator's check is served: the row, rebuilt from known fields only. */
