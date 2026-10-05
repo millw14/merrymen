@@ -203,6 +203,72 @@ describe("THE GATE IS THE FIRST THING THE FUNNEL ASKS", () => {
   });
 });
 
+describe("AND DRAINING IS ASKED AGAIN AT EACH BROADCAST — a signal can land mid-intent", () => {
+  // The gate above judges an intent where it enters. Between there and the
+  // send are the risk peak, the scout context, the transfer total, a quote, a
+  // simulation and a signature — every one an await. An intent that passed
+  // the gate a moment before SIGTERM must still be stopped before it goes out:
+  // node used to die on the signal, so such an intent never did.
+
+  it("the broker lane: asked after the review, immediately before place() — nothing but the refusal between", () => {
+    const place = BODY.indexOf("const placed = await orderExec.place(");
+    assert.ok(place > 0, "place() must still be in processIntentLocked for this pin to mean anything");
+    const guard = BODY.lastIndexOf("if (draining) {", place);
+    assert.ok(guard > BODY.indexOf("review = await orderExec.review("), "asked after the review's await");
+    assert.match(
+      BODY.slice(guard, place),
+      /^if \(draining\) \{\s*await recordTrade\(\{[^}]*status: "rejected",[^}]*reject_rule: "draining",[^}]*\}\);\s*return;\s*\}\s*$/,
+    );
+  });
+
+  it("the live rail: asked after every read the gate came before, and before the reservation", () => {
+    const reserve = BODY.indexOf("reserveBudget(countsSpend ? notional : 0n);");
+    assert.ok(reserve > 0);
+    const guard = BODY.lastIndexOf("if (draining) {", reserve);
+    for (const read of ["getRiskPeriodPeak(", "scoutContextFor(", "getTransferredTodayUsdg("]) {
+      assert.ok(BODY.indexOf(read) < guard, `${read} comes after the live rail's draining check`);
+    }
+    const branch = BODY.slice(guard, BODY.indexOf("\n    }\n", guard));
+    assert.match(branch, /await recordTrade\(\{[\s\S]*status: "rejected",[\s\S]*reject_rule: "draining",[\s\S]*\}\);\s*return;$/);
+    assert.doesNotMatch(BODY.slice(guard, reserve), /reserveBudget\(|executor/);
+  });
+
+  it("THE EXECUTOR'S onSubmitted: the last moment, signed and not yet sent — it throws before the pre-broadcast row", () => {
+    const hook = BODY.indexOf("onSubmitted: async (userOpHash, op) => {");
+    assert.ok(hook > 0);
+    const check = BODY.indexOf("if (draining) throw new DrainingRefused();", hook);
+    const row = BODY.indexOf("const wrote = await addTrade({", hook);
+    assert.ok(check > hook && row > check, "the draining check is the hook's first statement, before the submitted row");
+    assert.doesNotMatch(BODY.slice(hook, check), /\bawait\b/);
+    // Every send carries these hooks — the plain send and the vault deploy.
+    const sends = [...BODY.matchAll(/\.execute\(([^)]*)\)/g)].map((m) => m[1] ?? "");
+    assert.ok(sends.length >= 2);
+    for (const args of sends) assert.match(args, /\bsubmitHooks\b/, `a send without the hook that refuses it: execute(${args})`);
+  });
+
+  it("and the refusal it throws is booked as one: rejected, `draining`, the reservation released, no submitted row", () => {
+    const at = BODY.indexOf("if (e instanceof DrainingRefused) {");
+    assert.ok(at > 0, "the live rail's catch must handle DrainingRefused");
+    const branch = BODY.slice(at, BODY.indexOf("\n      }\n", at));
+    assert.match(branch, /releaseBudget\(\);[\s\S]*await recordTrade\(\{[\s\S]*status: "rejected",[\s\S]*reject_rule: e\.rule,[\s\S]*\}\);\s*return;$/);
+    // Before the branches that treat a thrown send as possibly out.
+    assert.ok(at < BODY.indexOf("if (e instanceof UserOpUnresolved) {"));
+  });
+
+  it("THE KEY INSTALL: refused before it starts, and again at its own broadcast", () => {
+    const [from, to] = span("  async function installKeyAlone(");
+    const fn = CODE.slice(from, to);
+    const first = fn.indexOf("{") + 1;
+    assert.match(fn.slice(first), /^\s*if \(draining\) return;/, "installKeyAlone's first statement");
+    assert.match(fn, /beforeBroadcast: \(\) => \{\s*if \(draining\) throw new DrainingRefused\(\);\s*\}/);
+    const booking = codeOf(readFileSync(path.join(HERE, "key-install-accounting.ts"), "utf8"));
+    const hook = booking.indexOf("executor.installKey({ onSubmitted: async (hash, op) => {");
+    assert.ok(hook > 0);
+    const asked = booking.indexOf("deps.beforeBroadcast?.();", hook);
+    assert.ok(asked > hook && asked < booking.indexOf("recorded = await deps.addTrade(", hook), "asked before the install's pre-broadcast row");
+  });
+});
+
 describe("SIGTERM: stop starting things, let the chain finish, leave", () => {
   const at = CODE.indexOf('process.on("SIGTERM", () => {');
   const handler = CODE.slice(at, CODE.indexOf("\n  });\n", at));

@@ -22,6 +22,7 @@ import type { AgentLimits, TradeIntent } from "./policy";
 import {
   ADMISSION_LEVEL_ENV,
   DRAIN_INTENT_CHAIN_MS,
+  DrainingRefused,
   admissionFrom,
   admissionRefusal,
   drainIntentChain,
@@ -150,6 +151,15 @@ describe("which intents a level refuses", () => {
     const sale = curve(MEME, EXTRA);
     assert.equal(judge("exits-only", sale, false, new Map()), "rollout-hold");
     assert.equal(judge("exits-only", sale), null, "and admitted once the tick has seen the leg");
+  });
+
+  it("THE LATE REFUSAL AT A BROADCAST SAYS WHAT THE GATE SAYS: `draining`, and that nothing was sent", () => {
+    const e = new DrainingRefused();
+    assert.ok(e instanceof Error);
+    assert.equal(e.name, "DrainingRefused");
+    assert.equal(e.rule, "draining");
+    assert.equal(e.rule, judge("trade", EXITS_ONLY[0]![1], true), "the same rule however late it came");
+    assert.match(e.message, /Nothing was sent/);
   });
 
   it("a held-leg map cannot turn a buy into a sale: only paying WITH the held token, on its curve, into its quote", () => {

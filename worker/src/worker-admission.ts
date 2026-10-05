@@ -107,6 +107,8 @@ export type AdmissionRule = "rollout-hold" | "draining";
  * DRAINING WINS. A worker on its way out refuses everything new whatever its
  * level, and says so: "the service is restarting" is the more useful fact to
  * the owner whose order it was, because retrying in a minute may just work.
+ * And it is asked again later, at each broadcast (DrainingRefused below): this
+ * function judges the intent once, where it enters; the signal can come after.
  *
  * THE ENTRY TEST IS THE TICK'S OWN (index.ts, the strategy loop and the class
  * entries): energy.ts countsAsEntry over the breaker's isExitIntent and a
@@ -130,6 +132,33 @@ export function admissionRefusal(
     return "rollout-hold";
   }
   return null;
+}
+
+/**
+ * REFUSING TO BROADCAST ON THE WAY OUT.
+ *
+ * admissionRefusal is asked once, at the top of processIntentLocked, and an
+ * intent that passed it a moment before SIGTERM still has a long way to go
+ * before anything leaves the process: the risk peak, the scout context and the
+ * transfer total are read, a route is quoted, the operation is simulated,
+ * bounded and signed. Each of those is an await, and each is long enough for
+ * the signal to land in. Before this, node died on the signal and such an
+ * intent never went out; a worker that drains must not be the reason one
+ * does. So index.ts asks `draining` again at the last moment before each
+ * broadcast — and the very last of those is the executor's onSubmitted hook,
+ * which runs after signing and before the send, where a throw is already the
+ * way to refuse (executor.ts ExecuteHooks). This is that throw.
+ *
+ * A sibling of NotRecorded and GasRefused, never of a revert: nothing was sent,
+ * nothing spent, no `submitted` row written. Its `rule` is the one the gate
+ * writes, so the tape says the same thing however late the refusal came.
+ */
+export class DrainingRefused extends Error {
+  readonly rule: AdmissionRule = "draining";
+  constructor() {
+    super("refusing to broadcast: this worker is draining (SIGTERM) and starts nothing new. Nothing was sent.");
+    this.name = "DrainingRefused";
+  }
 }
 
 /**
