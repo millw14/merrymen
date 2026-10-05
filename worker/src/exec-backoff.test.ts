@@ -303,7 +303,7 @@ const codeOf = (src: string) =>
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .join("\n");
 const CODE = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
-const SKIP = "if (entry && !intent.decisionId && execBackoff.held(intent, active.limits, Date.now())) continue;";
+const SKIP = "if (entry && !intent.decisionId && liveHold(intent)) continue;";
 
 /** A function declared in main() — two-space indent — up to its closing brace. */
 function body(name: string): string {
@@ -313,6 +313,15 @@ function body(name: string): string {
 }
 
 describe("WHERE THE WORKER ASKS", () => {
+  it("ONLY ON THE LIVE RAIL: paper and a refused rail meet their own answer, not a stale gas rule", () => {
+    assert.match(
+      CODE,
+      /const liveHold = \(intent: TradeIntent\): Hold \| null =>\s*active && execMode\(\)\.mode === "live" \? execBackoff\.held\(intent, active\.limits, Date\.now\(\)\) : null;/,
+    );
+    // And nobody asks the backoff any other way.
+    assert.equal((CODE.match(/execBackoff\.held\(/g) ?? []).length, 1);
+  });
+
   it("THE STRATEGY LOOP skips a held entry with no decision before anything is claimed or decided", () => {
     const at = CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {");
     const loop = CODE.slice(at, CODE.indexOf("\n    }\n", at));
@@ -337,7 +346,7 @@ describe("WHERE THE WORKER ASKS", () => {
   it("processIntentLocked books a held intent `rejected` under the held rule — never a silent return", () => {
     const fn = body("processIntentLocked");
     const suppressed = fn.indexOf("if (suppressed && verdict.ok) {");
-    const asked = fn.indexOf("const backedOff = execBackoff.held(intent, limits, Date.now());");
+    const asked = fn.indexOf("const backedOff = liveHold(intent);");
     assert.ok(suppressed > 0 && asked > suppressed, "read beside suppressedIntents, after checkPolicy");
     const branch = fn.slice(asked, fn.indexOf("return;", asked));
     assert.match(branch, /if \(backedOff && verdict\.ok\) \{\s*await recordTrade\(\{/);
@@ -373,6 +382,7 @@ describe("WHERE THE WORKER ASKS", () => {
     assert.match(curveOrder, /\.\.\.sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\), \.\.\.orderHeldReply\(intent, outcome\),/);
     const reply = body("orderHeldReply");
     assert.match(reply, /outcome\?\.status !== "rejected"\) return \{\};/);
-    assert.match(reply, /held && held\.rule === outcome\.rejectRule \? no\(heldReply\(held, now\)\) : \{\}/);
+    assert.match(reply, /const held = liveHold\(intent\);/);
+    assert.match(reply, /held && held\.rule === outcome\.rejectRule \? no\(heldReply\(held, Date\.now\(\)\)\) : \{\}/);
   });
 });
