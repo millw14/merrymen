@@ -364,6 +364,18 @@ test("every adoption crash seam converges under the same variables while ordinar
   }
 });
 
+test("a FLEET_HALT replaced while adoption runs is never renamed over, and the next start refuses", t => {
+  const f = populated(t), stop = path.join(f.dir, "operator-stop");
+  // An operator replaces the halt after the canonical one is written beside it.
+  const swap = () => { writeFileSync(stop, "operator stop\n", { mode: 0o600 }); renameSync(stop, f.halt); };
+  assert.throws(() => adoptPopulatedPersistentHome(f.adopt, { ...f.options, afterAdoptionHaltSynced: swap }), /original halt changed during adoption/);
+  assert.equal(readFileSync(f.halt, "utf8"), "operator stop\n");
+  assert.equal(existsSync(f.manifest), false);
+  assert.throws(() => adoptPopulatedPersistentHome(f.adopt, f.options), /neither the recorded original nor this adoption's canonical halt/);
+  assert.equal(readFileSync(f.halt, "utf8"), "operator stop\n");
+  assert.equal(existsSync(f.manifest), false);
+});
+
 test("a first write torn or left linked by a crash never wedges adoption or the listener's proof", t => {
   for (const name of [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST]) {
     const manifest = name === PERSISTENT_HOME_MANIFEST;
