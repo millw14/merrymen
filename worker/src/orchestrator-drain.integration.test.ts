@@ -240,6 +240,57 @@ it("SIGTERM BETWEEN THE MARKER WRITE AND THE OWNERSHIP CHECK LEAVES NO ledger-so
   assert.equal(takePreviousShutdown(shutdownReceiptDir(fleet)).clean, true, "the next start reads this stop as clean");
 });
 
+it("A MIRROR PASS WITH ITS TENANT IN HAND IS WAITED FOR: its older memory read is never written over the final pass's", async () => {
+  const tenant = address(0xd81), account = address(0xd82), released = { n: 0 };
+  const { home } = await book(tenant, account);
+  const owner = path.join(home, "soul", "OWNER.md");
+  mkdirSync(path.dirname(owner), { recursive: true });
+  writeFileSync(owner, "read by the pass in hand");
+  await getGrantStore().put(tenant, grant(account));
+  // The worker's last act on SIGTERM: a newer note, which only the final pass can carry.
+  const proc = new FakeProc(81_007, { onTerm: () => writeFileSync(owner, "written on the way out") });
+  watched = [proc];
+  adoptChildForTest(tenant, account, proc, lease(tenant, released));
+  // The live pass held at its personal-memory write: its copy is done (no
+  // tail in mirrorTails), its read of the home already taken.
+  let reached!: () => void, open!: () => void;
+  const atWrite = new Promise<void>((resolve) => (reached = resolve));
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  let held = false;
+  const gated: Db = {
+    exec: (sql) => shared.exec(sql), tx: (fn) => shared.tx(fn),
+    prepare(sql) {
+      const statement = shared.prepare(sql);
+      if (!/^INSERT INTO tenant_personal_memory/.test(sql)) return statement;
+      return {
+        ...statement,
+        async run(...args) {
+          if (!held) { held = true; reached(); await gate; }
+          return statement.run(...args);
+        },
+      };
+    },
+  };
+  setLiveMirrorStoreForTest({ shared: gated, dek, dialect: "sqlite" });
+  const pass = mirrorLedgersForTest();
+  await atWrite;
+
+  const drained = drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+  await sleep(100);
+  assert.deepEqual(proc.signals, [], "no child is signalled while the mirror's tenant is in hand");
+  open();
+  await pass;
+  await drained;
+
+  assert.deepEqual(proc.signals, ["SIGTERM"]);
+  const restored = mkdtempSync(path.join(fleet, "restored-personal-"));
+  assert.equal(await restorePersonalMemory({ tenant, home: restored, shared, dek, log: () => {} }), "restored");
+  assert.equal(readFileSync(path.join(restored, "soul", "OWNER.md"), "utf8"), "written on the way out", "the final pass's read is the one stored last");
+  assert.deepEqual(receipt().finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
+  assert.equal(receipt().clean, true);
+  await getGrantStore().remove(tenant);
+});
+
 it("A HOLDER HOME GETS FORGET-ONLY MEMORY HANDLING, and its book is never copied", async () => {
   const tenant = address(0xd21), account = address(0xd22), home = childHome(tenant);
   mkdirSync(home, { recursive: true });
