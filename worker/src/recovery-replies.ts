@@ -20,9 +20,17 @@
  *     Another tenant's write never reaches it; its own write stops only it.
  *   - FLEET-WIDE REFUSAL is kept for fleet-wide conditions only: the root
  *     proof (FLEET_HALT, the mount, the frozen environment), an invalid DEK,
- *     a roster unreadable at startup or over its cap, and several distinct
- *     bots answering 409 at once (recovery-reply-isolation.ts). SIGTERM is a
- *     clean stop, not a refusal.
+ *     a roster over its cap or unreadable at startup for a reason that is not
+ *     database weather (weather is retried in place), and a supervisor fault.
+ *     SIGTERM is a clean stop, not a refusal.
+ *   - THE MULTI-BOT 409 ALARM PAUSES; IT DOES NOT EXIT. Most serving bots
+ *     meeting a new non-webhook 409 at once (recovery-reply-isolation.ts)
+ *     stops every actor for a while but keeps every lease, so the fence is
+ *     never handed to whatever else is polling, and no restart is spent.
+ *   - A DROPPED DATABASE CONNECTION IS ONE ACTOR'S WEATHER. Every pool client
+ *     has an 'error' listener, checked out or idle, so a terminated backend
+ *     fails that actor's next statement (db-transient back-off) instead of
+ *     being an uncaught exception that ends the process.
  *
  * WHAT DOES NOT CHANGE. The listener never trades, never holds a financial
  * port and never writes a financial table; it never runs beside the ordinary
@@ -43,16 +51,26 @@ import { pathToFileURL } from "node:url";
 import { requireDek } from "./store-crypto";
 import { PgTenantLeaseFleet, type TenantLease } from "./tenant-lease";
 import { proveRecoveryReplyRoot, recoveryReplyRefused, type RecoveryReplyRootProof } from "./recovery-reply-proof";
-import { isTransientReplyDbError, recoveryReplyExitLine, replyBackoffMs, ReplyActorStop, ReplyConflictAlarm, RecoveryReplyFleetRefusal, tenantTag, type ReplyBackoffKind, type ReplyFleetReason, type ReplyStopReason } from "./recovery-reply-isolation";
+import { CONFLICT_PAUSE_MS, isTransientReplyDbError, isWebhookConflict, recoveryReplyExitLine, replyBackoffMs, ReplyActorStop, ReplyConflictAlarm, RecoveryReplyFleetRefusal, tenantTag, type ReplyBackoffKind, type ReplyFleetReason, type ReplyStopReason } from "./recovery-reply-isolation";
 import { pollFailure } from "./telegram/poll-rules";
 import { RECOVERY_REPLY_SCHEMA, type ReplyPrivacyOp } from "./recovery-reply-state";
 import { assertReplySnapshot, advanceReplyOffset, bindReplyOffset, readReplyRoster, readReplySnapshot, scanReplyRoster, ReplyGrantChanged, ReplyRosterCapExceeded, type ReplyQuery, type ReplySnapshot, type ReplyGrant, type ReplyRosterScan } from "./recovery-reply-store";
-import { RecoveryReplyBotLeases, type ReplyLease } from "./recovery-reply-lease";
+import { RecoveryReplyBotLeases, type ReplyLease, type ReplyLeaseClient } from "./recovery-reply-lease";
 import { getMe, getUpdates, sendMessage, sendPhotoBytes, esc, answerCallbackQuery, type TgMessage, type TgCallback, type TelegramOpts } from "./telegram/api";
 import { createRecoveryPublicReply, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_UNAVAILABLE, RECOVERY_PUBLIC_BUSY, RECOVERY_PUBLIC_BUTTON_HELD, isRecoveryPublicRequest, parseRecoveryPublicAsk } from "./telegram/recovery-public-reply";
 import { createRecoveryPublicLook } from "./telegram/recovery-public-transport";
 interface ReplyConnection extends ReplyQuery {
     release(error?: Error): void;
+    /**
+     * A pg client is an EventEmitter. pg-pool takes its own idle 'error'
+     * listener off a client it hands out, so while a transaction holds it, a
+     * terminated backend or a reset socket emits 'error' with nobody
+     * listening: an uncaught exception that ends the whole process. The
+     * transaction attaches its own listener for exactly as long as it holds
+     * the client. Optional so a test pool that is not an emitter still fits.
+     */
+    on?(event: "error", fn: (error: Error) => void): unknown;
+    removeListener?(event: "error", fn: (error: Error) => void): unknown;
 }
 export interface ReplyPool extends ReplyQuery {
     connect(): Promise<ReplyConnection>;
@@ -84,6 +102,8 @@ export interface RecoveryReplyOptions {
     stopSignal?: AbortSignal;
     /** Trusted test seam: the supervisor's period. Production uses REPLY_SUPERVISOR_EVERY_MS. */
     supervisorEveryMs?: number;
+    /** Trusted test seam: how long the multi-bot 409 alarm pauses polling. Production uses CONFLICT_PAUSE_MS. */
+    conflictPauseMs?: number;
     /**
      * Trusted test seam: where each line goes. Production writes stdout, and
      * stderr for an [alert]. Every line is built from fixed reason codes,
@@ -112,10 +132,17 @@ export const REPLY_STATS_EVERY_MS = 300_000;
  *
  * These bound ONE statement. Every transaction keeps its own overall deadline
  * (8s, and less when the reply deadline is nearer), every reply keeps its
- * original thirty seconds, and lock waits keep their 500ms lock_timeout, so a
- * slower database delays one actor's reply; it cannot stretch a deadline or
- * hold a row lock longer. A timeout that still fires is now one actor's
- * back-off (db-transient), never a fleet stop.
+ * original thirty seconds, and lock waits keep their 500ms lock_timeout. The
+ * deadline is checked between statements, and the client stops waiting for a
+ * statement at the deadline, but PostgreSQL does not notice a client that
+ * stopped waiting: a statement that STARTED just before the deadline can run
+ * on the server up to STATEMENT_TIMEOUT_MS past it, keeping the share locks
+ * its transaction took (FOR SHARE NOWAIT on this tenant's grant, settings,
+ * claim and link rows) until it ends. The worst case is therefore about 1.5s
+ * longer than with the old 1s limit, and it can delay the web's write to that
+ * one tenant's row by as much; it never touches another tenant's rows. A
+ * timeout that still fires is one actor's back-off (db-transient), never a
+ * fleet stop.
  */
 const STATEMENT_TIMEOUT_MS = 2_500;
 const QUERY_WAIT_MS = 3_000;
@@ -140,7 +167,11 @@ interface ReplySeat {
     retryAt: number;
     /** Consecutive admission failures, for the back-off. */
     streak: number;
-    /** Committed polls; lets an in-place back-off tell a new failure from a repeated one. */
+    /**
+     * Polls whose drain COMMITTED. Bumped only after the cursor moved, never
+     * on a clean getUpdates alone, so a drain that fails every time is one
+     * repeated failure whose in-place back-off keeps doubling.
+     */
     progress: number;
     /** Leaving the roster: release everything once the actor has ended. */
     retiring: boolean;
@@ -217,6 +248,12 @@ class ReplyDeadline extends Error {
         super("Reply deadline expired.");
     }
 }
+/** The bot stream session was lost and cannot be replaced yet: an actor on it is still stopping. Not a failure. */
+class ReplyBotSessionRenewing extends Error {
+    constructor() {
+        super(recoveryReplyRefused().message);
+    }
+}
 async function bounded<T>(work: () => Promise<T>, ms: number, signal?: AbortSignal, onLate?: (value: T) => void): Promise<T> {
     if (ms <= 0)
         throw new ReplyDeadline();
@@ -258,6 +295,15 @@ async function transaction<T>(pool: ReplyPool, guard: () => void, fn: (db: Reply
     check();
     const client = await bounded(() => pool.connect(), Math.min(CONNECT_WAIT_MS, deadline - now()), undefined, c => c.release(new ReplyDeadline()));
     let began = false, broken = false;
+    // THE CONNECTION DIED WHILE WE HELD IT (a terminated backend, a failover,
+    // a reset socket, often while the transaction waits on a Telegram send).
+    // Mark it broken so it is discarded on release, and let the next
+    // statement fail as itself ("Client has encountered a connection error",
+    // 57P01, "Connection terminated"): db-transient weather for this actor.
+    const lost = () => {
+        broken = true;
+    };
+    client.on?.("error", lost);
     const db: ReplyQuery = { query: async (sql, values) => {
             check();
             try {
@@ -290,7 +336,11 @@ async function transaction<T>(pool: ReplyPool, guard: () => void, fn: (db: Reply
         throw e;
     }
     finally {
+        // Hand the client back first (pg-pool re-attaches its own idle
+        // listener inside release, and destroys a broken client), and only
+        // then stop listening: there is no moment with no listener at all.
         client.release(broken ? recoveryReplyRefused() : undefined);
+        client.removeListener?.("error", lost);
     }
 }
 /** Metadata-only coverage; caller must already hold a pinned read-only RR snapshot. */
@@ -383,10 +433,12 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         return result;
     };
     const checked = checker(fleetGuard, fleet.signal);
-    let pool = options.pool, botLeases: { set: RecoveryReplyBotLeases; live: boolean } | null = null;
-    const ownedClients = new Set<import("./recovery-reply-lease").ReplyLeaseClient & {
+    type OwnedClient = ReplyLeaseClient & {
         connect(): Promise<void>;
-    }>();
+    };
+    let pool = options.pool, botLeases: { set: RecoveryReplyBotLeases; live: boolean; client: OwnedClient } | null = null;
+    /** Sessions this entry opened itself, ended at shutdown. A session is removed once it has been discarded. */
+    const ownedClients = new Set<OwnedClient>();
     const seats = new Map<`0x${string}`, ReplySeat>(), releasing = new Set<Promise<unknown>>();
     const alarm = new ReplyConflictAlarm();
     const track = (p: Promise<unknown>) => {
@@ -394,18 +446,40 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         void p.finally(() => releasing.delete(p)).catch(() => {
         });
     };
+    /**
+     * OUR OWN LEASE WORK STILL IN FLIGHT, by key (`tenant:0x…`, `bot:801`): an
+     * acquisition whose answer arrived after we stopped waiting, or a release
+     * whose unlock has not settled. While one is pending the lease managers
+     * refuse a new acquisition of the same lease (a PostgreSQL session lock is
+     * reentrant, so they must), and that refusal is OURS: it is reported as
+     * `lease-settling`, never as `lease-busy`, which sends an operator looking
+     * for another process holding the tenant.
+     */
+    const inFlight = new Map<string, number>();
+    const own = <T>(key: string, work: Promise<T>): Promise<T> => {
+        inFlight.set(key, (inFlight.get(key) ?? 0) + 1);
+        void work.finally(() => {
+            const left = (inFlight.get(key) ?? 1) - 1;
+            if (left > 0)
+                inFlight.set(key, left);
+            else
+                inFlight.delete(key);
+        }).catch(() => {
+        });
+        return work;
+    };
     const dropBot = async (seat: ReplySeat) => {
         const bot = seat.bot;
         seat.bot = null;
         if (bot)
-            await bounded(() => bot.lease.release(), 1500).catch(() => {
+            await bounded(() => own(`bot:${bot.id}`, bot.lease.release()), 1500).catch(() => {
             });
     };
     const dropLease = async (seat: ReplySeat) => {
         const lease = seat.lease;
         seat.lease = null;
         if (lease)
-            await bounded(() => lease.release(), 1500).catch(() => {
+            await bounded(() => own(`tenant:${seat.tenant}`, lease.release()), 1500).catch(() => {
             });
     };
     /** Bot stream first, then the fence: the reverse of acquisition. Only once the seat has no running actor. */
@@ -415,7 +489,14 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         await dropBot(seat);
         await dropLease(seat);
     };
-    let wake = () => {};
+    // Ends the supervisor's sleep. Between sleeps (during a pass) it is only
+    // remembered, so a lease loss or an actor's end that lands mid-pass still
+    // gets its own pass straight after, not up to a whole period later.
+    let wakePending = false;
+    const idleWake = () => {
+        wakePending = true;
+    };
+    let wake = idleWake;
     if (options.stopSignal?.aborted)
         stop();
     options.stopSignal?.addEventListener("abort", stop, { once: true });
@@ -432,7 +513,19 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
             // restart, an idle-connection reaper) and drops it; with no listener
             // that event is an uncaught exception that ends the whole process.
             // The next query simply takes a fresh connection.
-            (owned as unknown as { on(event: "error", fn: () => void): void }).on("error", () => say("backoff scope=pool reason=db-transient"));
+            const emitter = owned as unknown as {
+                on(event: "error", fn: () => void): void;
+                on(event: "connect", fn: (client: { on(event: "error", fn: () => void): void }) => void): void;
+            };
+            emitter.on("error", () => say("backoff scope=pool reason=db-transient"));
+            // AND ONE THAT DIES WHILE CHECKED OUT. pg-pool takes its idle
+            // listener off a client it hands out, so every client gets a
+            // permanent one of its own the moment the pool creates it. It only
+            // absorbs the event: the transaction holding the client marks it
+            // broken, its next statement fails as db-transient, and the pool
+            // discards it on release. (transaction() attaches its own listener
+            // too, which also covers an injected pool.)
+            emitter.on("connect", client => client.on("error", () => {}));
             pool = owned;
         }
         const shared: ReplyPool = { connect: () => pool!.connect(), end: () => pool!.end(), query: (sql, values) => checked(() => pool!.query(sql, values), now() + QUERY_WAIT_MS) };
@@ -440,16 +533,33 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         // fence yet, so a roster that cannot be read leaves nothing to stand on.
         // Later reads that fail only skip that pass; every actor keeps proving
         // its own row meanwhile.
-        let startRoster: ReplyRosterScan;
-        try {
-            startRoster = await checked(() => scanReplyRoster(shared));
-        }
-        catch (e) {
-            if (e instanceof ReplyRosterCapExceeded)
-                refuse("roster-cap");
-            if (e instanceof RecoveryReplyFleetRefusal || fleet.signal.aborted)
-                throw e;
-            return refuse("roster-unreadable");
+        //
+        // DATABASE WEATHER AT STARTUP IS WAITED OUT, NOT A REFUSAL. A database
+        // that is restarting or briefly overloaded (ECONNREFUSED, a pool
+        // connect timeout, 57014) would otherwise fail every container start
+        // at once and spend Railway's restart attempts until the deploy shows
+        // crashed. Nothing is fenced, polled or served until the read
+        // succeeds, so waiting here carries no risk, and SIGTERM still ends
+        // the wait at once. A roster over its cap, or one that fails for any
+        // other reason (a missing table), still refuses. A bounded one-pass
+        // run never waits.
+        let startRoster: ReplyRosterScan | null = null;
+        for (let attempt = 1; !startRoster; attempt++) {
+            try {
+                startRoster = await checked(() => scanReplyRoster(shared));
+            }
+            catch (e) {
+                if (e instanceof ReplyRosterCapExceeded)
+                    refuse("roster-cap");
+                if (e instanceof RecoveryReplyFleetRefusal || fleet.signal.aborted)
+                    throw e;
+                if (options.onePass || !(e instanceof ReplyDeadline || isTransientReplyDbError(e)))
+                    return refuse("roster-unreadable");
+                const waitMs = replyBackoffMs("db-transient", attempt);
+                say(`backoff scope=roster reason=db-transient wait=${Math.round(waitMs / 1000)}s`);
+                await wait(waitMs, fleet.signal);
+                fleetGuard();
+            }
         }
         // Legacy pollers have no bot-id mutex. Holding the complete current roster's
         // tenant leases prevents coexistence with its ordinary workers/holders.
@@ -472,40 +582,72 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
             const leaseFleet = new PgTenantLeaseFleet(async () => {
                 const client = new Client({ connectionString: env.DATABASE_URL, connectionTimeoutMillis: CONNECT_WAIT_MS, query_timeout: QUERY_WAIT_MS, statement_timeout: STATEMENT_TIMEOUT_MS });
                 ownedClients.add(client);
+                // The lease manager ends a session it discards (its own 'error'
+                // and 'end' handlers); forget it then, so a long-lived listener
+                // on a database that drops connections now and then does not
+                // keep every replaced session until it exits.
+                client.on("end", () => ownedClients.delete(client));
                 return client;
             }, () => wake());
             acquireTenant = tenant => leaseFleet.acquire(tenant);
         }
         // THE BOT STREAM MUTEX SESSION is one connection. When it is lost every
-        // bot lease on it goes unhealthy at once (Postgres released them all),
-        // so every actor stops at its next guard — but the process does not:
-        // once no actor still holds a lease from the lost session, the next
-        // admission closes it and opens a fresh one.
+        // bot lease on it goes unhealthy at once, and the process does not stop:
+        //
+        //   1. the loss wakes the supervisor, whose pass stops every actor
+        //      holding a lease from that session AT ONCE (pass step 2). The
+        //      abort also ends an actor sitting in a long in-place wait (a 409
+        //      back-off of up to ten minutes, Telegram's retry_after), which
+        //      otherwise kept its dead lease and so held up step 3 for every
+        //      other bot until its wait ran out;
+        //   2. each stopped actor's seat drops its dead lease as it ends, and
+        //      wakes the supervisor again (launch);
+        //   3. the next admission finds no RUNNING actor on the old session,
+        //      drops the dead leases of idle seats (quarantined ones), ends the
+        //      old session (which also frees any lock it may still hold when a
+        //      failed query, not a dropped socket, marked it lost) and opens a
+        //      fresh one.
+        //
+        // Until step 3 can run, admission waits under its own reason
+        // (`bot-session-renewing`) with no back-off, never as db-transient.
         let acquireBot = options.acquireBot;
         if (!acquireBot) {
             const botSession = async (): Promise<RecoveryReplyBotLeases> => {
                 if (botLeases?.live)
                     return botLeases.set;
                 if (botLeases) {
-                    if ([...seats.values()].some(seat => seat.bot))
-                        throw new ReplyDeadline();
-                    const old = botLeases.set;
+                    // An actor whose stop is still in flight may be finishing a
+                    // Telegram call under a lease of the old session: a new
+                    // lease on that bot must not overlap it.
+                    if ([...seats.values()].some(seat => seat.actor && seat.bot))
+                        throw new ReplyBotSessionRenewing();
+                    for (const seat of seats.values())
+                        if (seat.bot)
+                            await dropBot(seat);
+                    const old = botLeases;
                     botLeases = null;
-                    await bounded(() => old.close(), 1500).catch(() => {
+                    await bounded(() => old.set.close(), 1500).catch(() => {
                     });
+                    ownedClients.delete(old.client);
                 }
                 const driver = "pg", module = await import(driver), Client = (module.default as unknown as {
-                    Client: new (o: unknown) => {
-                        connect(): Promise<void>;
-                    } & import("./recovery-reply-lease").ReplyLeaseClient;
+                    Client: new (o: unknown) => OwnedClient;
                 }).Client;
                 const client = new Client({ connectionString: env.DATABASE_URL, connectionTimeoutMillis: CONNECT_WAIT_MS, query_timeout: QUERY_WAIT_MS, statement_timeout: STATEMENT_TIMEOUT_MS });
                 ownedClients.add(client);
                 // Before connect, so a socket error while connecting cannot be an
                 // uncaught 'error' event; the lease set attaches its own loss handler.
                 client.on("error", () => {});
-                await checked(() => client.connect());
-                const session = { set: null as unknown as RecoveryReplyBotLeases, live: true };
+                try {
+                    await checked(() => client.connect());
+                }
+                catch (e) {
+                    ownedClients.delete(client);
+                    void bounded(() => client.end(), 1500).catch(() => {
+                    });
+                    throw e;
+                }
+                const session = { set: null as unknown as RecoveryReplyBotLeases, live: true, client };
                 session.set = new RecoveryReplyBotLeases(client, () => {
                     session.live = false;
                     wake();
@@ -586,20 +728,32 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
              * 409 CONFLICT: something else is reading THIS bot. Mark it on the
              * tenant's existing liveness columns in the poll-rules format the
              * dashboard already reads (`conflict: …`, fixed text, never
-             * Telegram's prose), back off this bot alone, and feed the fleet's
-             * multi-bot alarm — the one 409 pattern that does refuse fleet-wide.
+             * Telegram's prose: a webhook and another poller each get their
+             * own wording), back off this bot alone, and feed the fleet's
+             * multi-bot alarm. A webhook 409 is the owner's own setting on
+             * their own bot, never a second poller fleet, so it is never fed
+             * to the alarm. When the alarm trips, the fleet PAUSES (pauseFleet
+             * below): every actor stops, every lease is kept, no exit.
              */
             const conflicted = async (s: ReplySnapshot, reason: string | undefined) => {
                 conflicts++;
                 const waitMs = replyBackoffMs("telegram-409", conflicts);
                 alert(`backoff tenant=${tenantTag(s.grant.tenant)} reason=telegram-409 wait=${Math.round(waitMs / 1000)}s`);
-                if (alarm.conflict(s.botId, Date.now()))
-                    refuse("telegram-409-fleet");
-                await transaction(shared, guard, async (db) => {
-                    await authority(db, s, true);
-                    await db.query("UPDATE tenant_telegram SET poll_ok_at=NULL,poll_err=$1,poll_err_at=$2,child_state='held:recovery-replies' WHERE tenant=$3 AND bot_id=$4 AND owner_id=$5", [pollFailure({ reason, errorCode: 409 }, conflicts).err, Math.floor(now() / 1000), s.grant.tenant, s.botId, s.ownerId]);
-                    await authority(db, s, true);
-                }, now);
+                const serving = [...seats.values()].filter(seat => seat.actor).length;
+                const tripped = !isWebhookConflict(reason) && alarm.conflict(s.botId, Date.now(), serving);
+                try {
+                    await transaction(shared, guard, async (db) => {
+                        await authority(db, s, true);
+                        await db.query("UPDATE tenant_telegram SET poll_ok_at=NULL,poll_err=$1,poll_err_at=$2,child_state='held:recovery-replies' WHERE tenant=$3 AND bot_id=$4 AND owner_id=$5", [pollFailure({ reason, errorCode: 409 }, conflicts).err, Math.floor(now() / 1000), s.grant.tenant, s.botId, s.ownerId]);
+                        await authority(db, s, true);
+                    }, now);
+                }
+                finally {
+                    // After this bot's own mark (or its failure): the pause
+                    // stops this actor too, and its mark should land first.
+                    if (tripped)
+                        pauseFleet(serving);
+                }
                 if (!options.onePass)
                     await wait(waitMs, controller.signal);
             };
@@ -611,12 +765,14 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 if (!options.onePass)
                     await wait(waitMs, controller.signal);
             };
-            /** A clean poll ends both streaks and this bot's standing 409. */
+            /**
+             * A clean poll ends both Telegram streaks and this bot's standing
+             * 409. It is NOT yet progress: that waits for the drain to commit
+             * (below), so a drain that keeps failing backs off longer each time.
+             */
             const cleanPoll = (s: ReplySnapshot) => {
                 conflicts = failures = 0;
                 alarm.clear(s.botId);
-                seat.progress++;
-                seat.streak = 0;
             };
             let me: Awaited<ReturnType<typeof getMe>>;
             do {
@@ -738,6 +894,11 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     await authority(db, s, true);
                 }, now, Math.min(askedAt + 15000, now() + 8000));
                 state = { ...state, offset: polled.nextOffset };
+                // COMMITTED: the cursor moved. Only now does this count as
+                // progress, ending serve()'s in-place streak and the seat's
+                // admission streak.
+                seat.progress++;
+                seat.streak = 0;
                 const jobs = units.map(unit => ({ unit, deadline: unit.msg && Number.isSafeInteger(unit.msg.date) && unit.msg.date > 0 ? Math.min(askedAt + 30000, unit.msg.date * 1000 + 30000) : askedAt + 30000 }))
                     .filter(({ unit, deadline }) => deadline > now() && (!unit.msg || unit.msg.date >= state.armedAt));
                 const respond = async ({ unit, deadline }: typeof jobs[number], overload = false) => {
@@ -878,6 +1039,29 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 seat.actor.controller.abort();
             }
         };
+        /**
+         * THE MULTI-BOT 409 ALARM TRIPPED: most bots this listener serves met a
+         * new conflict at once, the signature of a lease-less poller fleet
+         * beside it. Stop polling EVERY bot for a while, loudly, in ONE line —
+         * but keep every tenant lease (the fence) and every bot lease, and do
+         * not exit: an exit would hand each fenced tenant to that other fleet
+         * and spend a restart, and it would not stop the other poller anyway.
+         * The supervisor admits nobody until the pause ends, then re-admits
+         * everyone; the conflicts that tripped it are spent and cannot trip
+         * it again while they stand, so after one pause each conflicted bot
+         * is back to its own 409 back-off and alert lines.
+         */
+        let pausedUntil = 0;
+        const pauseFleet = (serving: number) => {
+            if (Date.now() < pausedUntil)
+                return;
+            const ms = Math.max(1, options.conflictPauseMs ?? CONFLICT_PAUSE_MS);
+            pausedUntil = Date.now() + ms;
+            alert(`fleet-pause reason=telegram-409-fleet bots=${alarm.size} serving=${serving} wait=${Math.round(ms / 1000)}s`);
+            for (const seat of seats.values())
+                stopActor(seat, "fleet-paused");
+            wake();
+        };
         /** Re-admission back-off, per seat. A change is re-admitted on the next pass; a failure waits. */
         const admitWait = (seat: ReplySeat, kind: ReplyBackoffKind, reason: ReplyStopReason, line = "admit-wait") => {
             seat.streak++;
@@ -905,7 +1089,8 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     : outcome.error instanceof ReplyActorStop ? outcome.error.reason
                         : outcome.error instanceof ReplyDeadline || isTransientReplyDbError(outcome.error) ? "db-transient" : "actor-error");
                 // null: a bounded one-pass iteration that simply finished.
-                if (reason !== null) {
+                // fleet-paused: the pause printed the one fleet line already.
+                if (reason !== null && reason !== "fleet-paused") {
                     const kind = STOP_BACKOFF[reason];
                     if (kind)
                         admitWait(seat, kind, reason, "actor-stop");
@@ -914,6 +1099,14 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 }
                 if (seat.retiring)
                     await releaseSeat(seat);
+                else if (seat.bot && !seat.bot.lease.healthy()) {
+                    // A lease from a lost bot stream session goes with its
+                    // actor, at once: the session is replaced only when no
+                    // running actor still holds one, and the seats waiting on
+                    // that replacement are admitted by the pass this wakes.
+                    await dropBot(seat);
+                    wake();
+                }
             }).catch(() => {
             });
         };
@@ -923,11 +1116,13 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
          * would otherwise sit on our session, untracked, fencing that tenant
          * against ourselves until the process ends.
          */
-        const acquired = async <T extends { release(): Promise<void> }>(fn: () => Promise<T | null>): Promise<T | null> => {
+        const acquired = async <T extends { release(): Promise<void> }>(key: string, fn: () => Promise<T | null>): Promise<T | null> => {
             fleetGuard();
-            const held = await bounded(fn, CONNECT_WAIT_MS + QUERY_WAIT_MS, fleet.signal, late => {
+            // The acquisition and any release of a late or unwanted answer are
+            // OUR lease work on `key` until they settle (inFlight above).
+            const held = await bounded(() => own(key, fn()), CONNECT_WAIT_MS + QUERY_WAIT_MS, fleet.signal, late => {
                 if (late)
-                    track(bounded(() => late.release(), 1500).catch(() => {
+                    track(bounded(() => own(key, late.release()), 1500).catch(() => {
                     }));
             });
             try {
@@ -935,7 +1130,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
             }
             catch (e) {
                 if (held)
-                    track(bounded(() => held.release(), 1500).catch(() => {
+                    track(bounded(() => own(key, held.release()), 1500).catch(() => {
                     }));
                 throw e;
             }
@@ -943,9 +1138,14 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         };
         const passFailure = (e: unknown) => e instanceof RecoveryReplyFleetRefusal || fleet.signal.aborted;
         const fenceSeat = async (seat: ReplySeat) => {
+            const key = `tenant:${seat.tenant}`;
+            // Our own late acquisition or unsettled release of this very lease:
+            // asking now would only meet ourselves.
+            if (inFlight.has(key))
+                return admitWait(seat, "admission", "lease-settling");
             let lease: TenantLease | null;
             try {
-                lease = await acquired(() => acquireTenant!(seat.tenant));
+                lease = await acquired(key, () => acquireTenant!(seat.tenant));
             }
             catch (e) {
                 if (passFailure(e))
@@ -955,7 +1155,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
             if (!lease)
                 return admitWait(seat, "admission", "lease-busy");
             if (lease.tenant !== seat.tenant || lease.backend !== "postgres" || !lease.healthy()) {
-                await bounded(() => lease!.release(), 1500).catch(() => {
+                await bounded(() => own(key, lease!.release()), 1500).catch(() => {
                 });
                 return admitWait(seat, "admission", "lease-lost");
             }
@@ -992,35 +1192,47 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 return;
             }
             seat.unavailable = false;
-            if (seat.quarantined === s.receipt)
-                return;
-            seat.quarantined = null;
+            if (seat.quarantined !== s.receipt)
+                seat.quarantined = null;
             if (seat.bot && (seat.bot.id !== s.botId || !seat.bot.lease.healthy()))
                 await dropBot(seat);
+            // The bot stream lease comes BEFORE the quarantine check: a
+            // quarantined bot stays fenced, and after a lost bot stream session
+            // its lease is taken again here like everyone else's.
             if (!seat.bot) {
-                const botId = s.botId;
+                const botId = s.botId, key = `bot:${botId}`;
                 // Never two of our own seats on one bot stream (a claim that moved
                 // between tenants while the old actor still runs): one actor per bot.
                 if ([...seats.values()].some(other => other !== seat && other.bot?.id === botId))
                     return admitWait(seat, "admission", "bot-busy");
+                if (inFlight.has(key))
+                    return admitWait(seat, "admission", "lease-settling");
                 let hold: ReplyLease | null;
                 try {
-                    hold = await acquired(() => acquireBot!(botId));
+                    hold = await acquired(key, () => acquireBot!(botId));
                 }
                 catch (e) {
                     if (passFailure(e))
                         throw e;
+                    // Not a failure: the lost session's last actors are still
+                    // stopping. No back-off; the pass their end wakes retries.
+                    if (e instanceof ReplyBotSessionRenewing) {
+                        say(`admit-wait tenant=${tenantTag(seat.tenant)} reason=bot-session-renewing`);
+                        return;
+                    }
                     return admitWait(seat, "admission", "db-transient");
                 }
                 if (!hold)
                     return admitWait(seat, "admission", "bot-busy");
                 if (!hold.healthy()) {
-                    await bounded(() => hold!.release(), 1500).catch(() => {
+                    await bounded(() => own(key, hold!.release()), 1500).catch(() => {
                     });
                     return admitWait(seat, "admission", "lease-lost");
                 }
                 seat.bot = { id: botId, lease: hold };
             }
+            if (seat.quarantined === s.receipt)
+                return;
             try {
                 await ensureSchema();
             }
@@ -1042,7 +1254,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 return;
             statsAt = Date.now();
             const all = [...seats.values()], count = (f: (seat: ReplySeat) => unknown) => all.filter(f).length;
-            say(`stats roster=${scan.tenants.length} fenced=${count(x => x.lease?.healthy())} actors=${count(x => x.actor)} unavailable=${count(x => x.unavailable)} quarantined=${count(x => x.quarantined !== null)} waiting=${count(x => !x.actor && x.retryAt > Date.now())} skipped=${scan.skipped.length + scan.unnamed} conflicts=${alarm.size}`);
+            say(`stats roster=${scan.tenants.length} fenced=${count(x => x.lease?.healthy())} actors=${count(x => x.actor)} unavailable=${count(x => x.unavailable)} quarantined=${count(x => x.quarantined !== null)} waiting=${count(x => !x.actor && x.retryAt > Date.now())} skipped=${scan.skipped.length + scan.unnamed} conflicts=${alarm.size} paused=${Date.now() < pausedUntil ? 1 : 0}`);
         };
         /**
          * ONE SUPERVISOR PASS: read the roster row by row, release tenants that
@@ -1104,14 +1316,19 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     seats.set(tenant, seat = { tenant, lease: null, bot: null, actor: null, quarantined: null, unavailable: false, retryAt: 0, streak: 0, progress: 0, retiring: false });
                 if (seat.retiring)
                     continue;
-                if (seat.lease && (seat.lease.backend !== "postgres" || !seat.lease.healthy())) {
-                    if (seat.actor) {
-                        stopActor(seat, "lease-lost");
-                        continue;
-                    }
-                    await dropLease(seat);
+                const leaseLost = !!seat.lease && (seat.lease.backend !== "postgres" || !seat.lease.healthy());
+                const botLost = !!seat.bot && !seat.bot.lease.healthy();
+                // Either of an actor's two leases gone: stop it NOW. Its guard
+                // would refuse its next step anyway, but an actor waiting out a
+                // long back-off takes no step, and while it holds a lease of a
+                // lost bot stream session no other bot can be re-admitted.
+                if (seat.actor && (leaseLost || botLost)) {
+                    stopActor(seat, "lease-lost");
+                    continue;
                 }
-                if (seat.bot && !seat.bot.lease.healthy() && !seat.actor)
+                if (leaseLost)
+                    await dropLease(seat);
+                if (botLost)
                     await dropBot(seat);
                 if (!seat.lease && !seat.actor && Date.now() >= seat.retryAt)
                     await fenceSeat(seat);
@@ -1122,8 +1339,9 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 if (seat.actor && !seat.retiring && (!grant || grant.receipt !== seat.actor.receipt))
                     stopActor(seat, "roster-changed");
             }
-            // 4. Admission.
-            for (const grant of scan.grants) {
+            // 4. Admission, unless the multi-bot 409 alarm paused the fleet:
+            //    the fence above is still held throughout a pause.
+            for (const grant of Date.now() < pausedUntil ? [] : scan.grants) {
                 fleetGuard();
                 const seat = seats.get(grant.tenant);
                 if (!seat || seat.retiring || seat.actor || !seat.lease?.healthy() || Date.now() < seat.retryAt)
@@ -1141,18 +1359,43 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
         }
         else {
             const every = Math.max(1, options.supervisorEveryMs ?? REPLY_SUPERVISOR_EVERY_MS);
+            /**
+             * HOW LONG TO SLEEP: the period, or less when something is due
+             * sooner — a pause ending, or a waiting seat's admission back-off
+             * (5s after a lost lease, 2s after database weather). Without this
+             * every back-off shorter than the period was really the period: a
+             * tenant whose lease dropped waited up to thirty seconds, not five.
+             * Each early pass is one roster read; the soonest it can come is
+             * the shortest back-off, two seconds.
+             */
+            const sleepMs = () => {
+                const at = Date.now();
+                let due = at + every;
+                if (pausedUntil > at)
+                    due = Math.min(due, pausedUntil + 1);
+                else
+                    for (const seat of seats.values())
+                        if (!seat.actor && !seat.retiring && seat.retryAt > at)
+                            due = Math.min(due, seat.retryAt + 1);
+                return Math.max(1, due - at);
+            };
             while (!fleet.signal.aborted) {
                 await new Promise<void>(resolve => {
                     let timer: ReturnType<typeof setTimeout> | undefined;
                     const done = () => {
                         clearTimeout(timer);
-                        wake = () => {};
+                        wake = idleWake;
                         fleet.signal.removeEventListener("abort", done);
                         resolve();
                     };
-                    timer = setTimeout(done, every);
                     wake = done;
                     fleet.signal.addEventListener("abort", done, { once: true });
+                    if (wakePending) {
+                        wakePending = false;
+                        done();
+                        return;
+                    }
+                    timer = setTimeout(done, sleepMs());
                 });
                 if (fleet.signal.aborted)
                     break;

@@ -71,14 +71,19 @@ export class ReplyRosterCapExceeded extends Error {
  * listener used to inherit that: one tenant's half-written grant stopped every
  * bot. Here a row that does not validate costs only its own tenant:
  *
- *   - `tenants` is every row whose tenant column is itself a well-formed
- *     lowercase address — the FENCE. The listener holds the tenant lease of
+ *   - `tenants` is every row whose tenant column is itself an address, in
+ *     its lowercase form — the FENCE. The listener holds the tenant lease of
  *     each, malformed grant or not, so an ordinary worker can never arm a
- *     tenant beside it just because that tenant's row was unreadable.
+ *     tenant beside it just because that tenant's row was unreadable. A
+ *     checksummed (mixed-case) tenant column is fenced too: the lease key is
+ *     computed from the lowercase address (PgTenantLeaseManager.acquire), so
+ *     it is the same lease an ordinary worker would take.
  *   - `grants` are the rows that validate AND are unambiguous: the only
  *     tenants an actor may be admitted for.
- *   - `skipped` are fenced tenants with a malformed row, or two rows that
- *     claim one smart account (both are skipped: neither may answer for it).
+ *   - `skipped` are fenced tenants with a malformed row (a mixed-case tenant
+ *     column included: the strict read refuses it, so it is never served),
+ *     two rows for one tenant, or two rows that claim one smart account
+ *     (both are skipped: neither may answer for it).
  *   - `unnamed` counts rows whose tenant column is not an address at all;
  *     there is nothing to fence or to name in a log for those.
  *
@@ -97,12 +102,12 @@ export async function scanReplyRoster(db: ReplyQuery): Promise<ReplyRosterScan> 
     const tenants = new Set<`0x${string}`>(), bad = new Set<string>(), byAccount = new Map<string, string[]>(), valid: ReplyGrant[] = [];
     let unnamed = 0;
     for (const r of rows) {
-        if (typeof r.tenant !== "string" || !ADDRESS.test(r.tenant) || r.tenant !== r.tenant.toLowerCase()) {
+        if (typeof r.tenant !== "string" || !ADDRESS.test(r.tenant)) {
             unnamed++;
             continue;
         }
-        const tenant = r.tenant as `0x${string}`;
-        if (tenants.has(tenant))
+        const tenant = r.tenant.toLowerCase() as `0x${string}`;
+        if (tenants.has(tenant) || r.tenant !== tenant)
             bad.add(tenant);
         tenants.add(tenant);
         let grant: ReplyGrant;
@@ -129,8 +134,9 @@ export async function scanReplyRoster(db: ReplyQuery): Promise<ReplyRosterScan> 
 }
 /**
  * THE TENANT'S OWN GRANT ROW CHANGED (or went away) since its receipt was
- * taken. The same message as every refusal — the type only lets the listener
- * log `roster-changed` for this tenant instead of guessing.
+ * taken, or another row now claims its smart account. The same message as
+ * every refusal — the type only lets the listener log `roster-changed` for
+ * this tenant instead of guessing.
  */
 export class ReplyGrantChanged extends Error {
     constructor() {
@@ -154,8 +160,14 @@ export interface ReplySnapshot {
 /** Returns null for explicitly unavailable scope. Corrupt/unknown reads refuse. */
 export async function readReplySnapshot(db: ReplyQuery, grant: ReplyGrant, dek: Buffer, lock = false): Promise<ReplySnapshot | null> {
     const suffix = lock ? " FOR SHARE NOWAIT" : "";
-    // Only THIS tenant's grant row: another tenant's write never reaches here.
-    const current = await db.query(`${GRANTS} WHERE tenant=$1${suffix}`, [grant.tenant]);
+    // THIS tenant's grant row, plus any OTHER row that claims the same smart
+    // account. An unrelated tenant's write never matches, so it never reaches
+    // here (the 2026-10-05 trigger); a second row claiming this account is
+    // exactly the ambiguity the roster refuses, and finding it here, before
+    // every operation, stops this actor at once instead of at the
+    // supervisor's next pass. The account test reads at most the roster's 256
+    // rows, far less than the whole-roster receipt it replaces.
+    const current = await db.query(`${GRANTS} WHERE tenant=$1 OR lower(grant_json->>'smartAccount')=$2${suffix}`, [grant.tenant, grant.account]);
     if (current.rows.length !== 1 || JSON.stringify(current.rows[0]) !== grant.receipt)
         throw new ReplyGrantChanged();
     const settings = await db.query(`SELECT sealed,xmin::text||':'||ctid::text AS incarnation FROM tenant_settings WHERE tenant=$1${suffix}`, [grant.tenant]);

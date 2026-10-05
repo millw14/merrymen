@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { runRecoveryReplies, type RecoveryReplyOptions, type ReplyPool } from "./recovery-replies";
+import { REPLY_SUPERVISOR_EVERY_MS, runRecoveryReplies, type RecoveryReplyOptions, type ReplyPool } from "./recovery-replies";
 import { RecoveryReplyFleetRefusal } from "./recovery-reply-isolation";
 import { RecoveryReplyBotLeases } from "./recovery-reply-lease";
 import { openRecoveryReplyState, readRecoveryReplyOffset, readReplyPrivacy, RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
@@ -30,7 +30,7 @@ function fileFacts(home: string): unknown {
   return readdirSync(home).sort().map(name => { const file = path.join(home, name), s = lstatSync(file); return [name, s.mode, s.ino, s.nlink, s.size, s.isDirectory() ? fileFacts(file) : readFileSync(file).toString("base64")]; });
 }
 
-const LOG_LINE = /^\[recovery-replies\] (?:\[alert\] )?(?:actor-start|actor-stop|admit-wait|backoff|release|roster-row-skipped|roster-unreadable|stats)(?: [a-z]+=(?:0x[0-9a-f]{6}|\?|[0-9]+s?|[a-z0-9-]+))*$/;
+const LOG_LINE = /^\[recovery-replies\] (?:\[alert\] )?(?:actor-start|actor-stop|admit-wait|backoff|fleet-pause|release|roster-row-skipped|roster-unreadable|stats)(?: [a-z]+=(?:0x[0-9a-f]{6}|\?|[0-9]+s?|[a-z0-9-]+))*$/;
 function assertRedacted(lines: readonly string[], actors: ReadonlyArray<Record<string, string | number>>): void {
   for (const line of lines) {
     assert.match(line, LOG_LINE, `log line outside the redacted grammar: ${line}`);
@@ -50,6 +50,11 @@ async function fixture(t: TestContext, count = 1) {
   const admin = new pg.Client({ connectionString: URL! }); await admin.connect(); await admin.query(`CREATE SCHEMA ${schema}`);
   const scoped = new globalThis.URL(URL!); scoped.searchParams.set("options", `-c search_path=${schema}`); const localUrl = scoped.toString();
   const pool = new pg.Pool({ connectionString: localUrl, max: 16 });
+  // The fixture's own pool absorbs an IDLE client's error, as the entry's
+  // owned pool does. A CHECKED-OUT client has no pool listener at all (pg-pool
+  // removes it): that one is the entry's to handle, and a test that kills one
+  // fails loudly if it does not.
+  (pool as unknown as { on(event: "error", fn: () => void): void }).on("error", () => {});
   const clients: Client[] = [];
   const parent = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-reply-entry-"))), home = path.join(parent, "volume"); mkdirSync(home, { mode: 0o700 });
   t.after(async () => { await pool.end(); await Promise.allSettled(clients.map(c => c.end())); await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end(); rmSync(parent, { recursive: true, force: true }); });
@@ -103,7 +108,9 @@ async function fixture(t: TestContext, count = 1) {
     audit.push(sql); assert.doesNotMatch(sql, /sealed_session_key|serialized|(?:INSERT INTO|UPDATE|DELETE FROM|ALTER TABLE)\s+(?:agents|trades|cost_basis|risk_periods|fee_accruals|agent_commands|mirror_state|grants|tenant_settings|telegram_bot_claims|fleet_recovery_health)\b/i);
     const result = await (client ?? pool).query(sql, values); await hook?.(sql, values, client); return result;
   };
-  const entryPool: ReplyPool = { query: (sql, values) => audited(sql, values, null), end: () => pool.end(), connect: async () => { const c = await pool.connect(); return { query: (sql, values) => audited(sql, values, c), release: error => c.release(error) }; } };
+  // The checked-out client is an EventEmitter in production; the wrapper
+  // passes its 'error' subscription through so the entry can listen to it.
+  const entryPool: ReplyPool = { query: (sql, values) => audited(sql, values, null), end: () => pool.end(), connect: async () => { const c = await pool.connect(); return { query: (sql, values) => audited(sql, values, c), release: error => c.release(error), on: (event, fn) => c.on?.(event, fn), removeListener: (event, fn) => c.removeListener?.(event, fn) }; } };
   const tenantClients: Client[] = [];
   const tenants = new PgTenantLeaseManager(async () => { const c = new pg.Client({ connectionString: localUrl }); clients.push(c); tenantClients.push(c); return c; });
   const botClient = await connect(), bots = new RecoveryReplyBotLeases(botClient, () => {});
@@ -114,8 +121,9 @@ async function fixture(t: TestContext, count = 1) {
     sendPhotoBytes: async () => ({ ok: false, noDelivery: true, reason: "fixture image refused" }),
     answerCallbackQuery: async () => ({ ok: true }),
   };
+  const acquireTenant = async (tenant: `0x${string}`) => { const held = await tenants.acquire(tenant); if (!held) return held; const lease = { ...held, healthy: () => health.tenant && !health.lost.has(lease) && held.healthy() }; health.current.set(tenant, lease); health.acquired.push(tenant); return lease; };
   const run = (extra: Partial<RecoveryReplyOptions> = {}) => runRecoveryReplies({ env, pool: entryPool, dek: DEK, readMountInfo: () => mount, onePass: true, now: () => clock, log: (_stream, line) => { logs.push(line); },
-    acquireTenant: async tenant => { const held = await tenants.acquire(tenant); if (!held) return held; const lease = { ...held, healthy: () => health.tenant && !health.lost.has(lease) && held.healthy() }; health.current.set(tenant, lease); health.acquired.push(tenant); return lease; },
+    acquireTenant,
     acquireBot: async id => { const held = await bots.acquire(id); if (!held) return held; const lease = { ...held, healthy: () => health.bot && !health.lost.has(lease) && held.healthy() }; health.current.set(id, lease); return lease; },
     transport, reply: async req => { replies.push(req.text); return { kind: "public", text: "fresh public code read; trading remains held" }; }, ...extra });
   const msg = (id: number, text = "$FROG chart", i = 0, fields: Partial<TgMessage> = {}): TgMessage => ({ updateId: id, messageId: id + 100, chatId: actors[i]!.ownerId, fromId: actors[i]!.ownerId, text, date: Math.floor(clock / 1000), ...fields });
@@ -125,7 +133,7 @@ async function fixture(t: TestContext, count = 1) {
   // a fixed grammar of reason codes, counts and eight-character tenant
   // prefixes, and none of the fixture's tokens, ids, addresses or texts.
   t.after(() => assertRedacted(logs, actors));
-  return { actors, pool, connect, env, home, halt, mount, health, logs, transport, sends, polls, replies, audit, run, msg, offset, prime, original, botClient, tenantClients, clock: () => clock, advance: (ms: number) => { clock += ms; }, hook: (fn: typeof hook) => { hook = fn; } };
+  return { actors, pool, connect, env, home, halt, mount, health, logs, transport, sends, polls, replies, audit, run, msg, offset, prime, original, botClient, tenantClients, acquireTenant, clock: () => clock, advance: (ms: number) => { clock += ms; }, hook: (fn: typeof hook) => { hook = fn; } };
 }
 
 test("actual reply entry: local PostgreSQL authority, deadlines, cursor handoff and atomic privacy", { skip: !URL, timeout: 120_000 }, async t => {
@@ -913,17 +921,210 @@ test("actual reply entry isolation: one tenant's or one bot's problem stops only
     assert.equal(await lockFree(probe, a.tenant), true); assert.equal(await lockFree(probe, b.tenant), true);
   });
 
-  await t.test("409s on fewer than three bots stay per bot; three distinct bots in conflict refuse the fleet", async s => {
+  await t.test("409s on fewer than three bots stay per bot; three of three pause every actor, keep every lease and do not exit", async s => {
     const conflict = { ...updates(), reason: "Conflict: terminated by other getUpdates request", errorCode: 409 };
     const two = await fixture(s, 3);
     two.transport.getUpdates = async opts => opts.token === two.actors[2]!.token ? updates([two.msg(1, "$C chart", 2)], 2) : conflict;
     assert.equal(await two.run(), "one-pass");
     assert.equal(two.sends.length, 1); assert.equal(two.sends[0]!.botId, two.actors[2]!.botId);
     assert.equal(two.logs.filter(l => /telegram-409/.test(l)).length, 2);
-    const three = await fixture(s, 3);
-    three.transport.getUpdates = async () => conflict;
-    await assert.rejects(three.run(), (e: unknown) => e instanceof RecoveryReplyFleetRefusal && e.reason === "telegram-409-fleet");
+    assert.ok(!two.logs.some(l => /fleet-pause/.test(l)), two.logs.join("\n"));
+    // Three of three, live. This used to EXIT (telegram-409-fleet), handing
+    // every fenced tenant to whatever else was polling and spending a restart.
+    const three = await fixture(s, 3), probe = await three.connect();
+    const polled = () => three.polls.length;
+    three.transport.getUpdates = async (opts, offset) => { three.polls.push({ botId: opts.token.split(":")[0]!, offset, deadline: opts.deadlineAtMs }); return conflict; };
+    const { stop, done } = live(three, { conflictPauseMs: 2_000 });
+    try {
+      await until("the fleet pause", () => three.logs.some(l => /fleet-pause/.test(l)));
+      assert.deepEqual(three.logs.filter(l => /fleet-pause/.test(l)), ["[recovery-replies] [alert] fleet-pause reason=telegram-409-fleet bots=3 serving=3 wait=2s"]);
+      // Every tenant stays fenced through the pause, and nothing polls.
+      for (const a of three.actors) assert.equal(await lockFree(probe, a.tenant), false, "fenced while paused");
+      const atPause = polled(); await delay(500); assert.equal(polled(), atPause, "no bot is polled during the pause");
+      await until("re-admitted after the pause", () => three.logs.filter(l => /actor-start/.test(l)).length >= 6);
+      await until("each bot met its conflict again", () => polled() >= atPause + 3);
+      await delay(300);
+      assert.equal(three.logs.filter(l => /fleet-pause/.test(l)).length, 1, "the same standing conflicts cannot pause the fleet twice");
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
     assert.equal(three.sends.length, 0);
+    assert.ok(!three.logs.some(l => /actor-stop/.test(l)), "a pause is one fleet line, not one per actor");
+  });
+
+  await t.test("webhook 409s on three of five bots stay per bot: the healthy bots keep replying and nothing pauses", async s => {
+    const f = await fixture(s, 5);
+    const webhook = { ...updates(), reason: "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first", errorCode: 409 };
+    f.transport.getUpdates = async (opts, offset) => { const i = Number(opts.token.split(":")[0]) - 801; return i < 3 ? webhook : updates([f.msg(offset, "$OK chart", i)], offset + 1); };
+    const { stop, done } = live(f);
+    try { await until("the healthy bots reply", () => sent(f, f.actors[3]!.botId) >= 3 && sent(f, f.actors[4]!.botId) >= 3); }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(!f.logs.some(l => /fleet-pause/.test(l)), f.logs.join("\n"));
+    assert.equal(f.logs.filter(l => /reason=telegram-409/.test(l)).length, 3);
+    for (const a of f.actors.slice(0, 3)) assert.equal((await f.pool.query("SELECT poll_err FROM tenant_telegram WHERE tenant=$1", [a.tenant])).rows[0]!.poll_err, "conflict: this bot has a webhook set (409)");
+  });
+
+  await t.test("a connection killed under one actor's open transaction is that actor's db-transient back-off, never an uncaught exception", async s => {
+    for (const owned of [false, true]) {
+      const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect(), tagA = a.tenant.slice(0, 8);
+      let lastA = 0, killed = 0;
+      // The injected pool: A's last authority read inside a transaction names its backend.
+      f.hook(async (sql, values, client) => { if (client && values?.[0] === a.tenant && /FROM tenant_settings WHERE tenant=\$1 FOR SHARE NOWAIT/.test(sql)) lastA = (client as unknown as { processID: number }).processID; });
+      f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, opts.token === a.token ? "$A chart" : "$B chart", opts.token === a.token ? 0 : 1)], offset + 1);
+      const baseSend = f.transport.sendMessage;
+      f.transport.sendMessage = async (opts, chat, text, extra) => {
+        if (opts.token === a.token && !killed++) {
+          // A's respond transaction sits idle in transaction around this send:
+          // a failover, a reaper or an operator ends exactly that backend.
+          const pids = owned
+            ? (await probe.query("SELECT pid FROM pg_stat_activity WHERE state='idle in transaction' AND datname=current_database() AND pid<>pg_backend_pid()")).rows.map(r => Number(r.pid))
+            : [lastA];
+          assert.ok(pids.length >= 1 && pids.every(pid => pid > 0));
+          for (const pid of pids) await probe.query("SELECT pg_terminate_backend($1)", [pid]);
+          await until("the backend gone", async () => Number((await probe.query("SELECT count(*) FROM pg_stat_activity WHERE pid=ANY($1::int[])", [pids])).rows[0]!.count) === 0);
+          await delay(100);
+        }
+        return baseSend(opts, chat, text, extra);
+      };
+      const { stop, done } = live(f, owned ? { pool: undefined } : {});
+      try {
+        await until("A's connection killed", () => killed > 0);
+        const aAt = sent(f, a.botId), bAt = sent(f, b.botId);
+        await until("A replying again", () => sent(f, a.botId) > aAt);
+        await until("B still replying", () => sent(f, b.botId) >= bAt + 2);
+      }
+      finally { stop.abort(); }
+      assert.deepEqual(await done, { ok: true, value: "stopped" }, owned ? "entry-owned pool" : "injected pool");
+      assert.ok(f.logs.includes(`[recovery-replies] backoff tenant=${tagA} reason=db-transient wait=2s`), f.logs.join("\n"));
+      assert.ok(!f.logs.some(l => /actor-stop/.test(l)), f.logs.join("\n"));
+      if (!owned) assert.ok(!f.logs.some(l => l.includes(`tenant=${b.tenant.slice(0, 8)}`) && /backoff/.test(l)), f.logs.join("\n"));
+    }
+  });
+
+  await t.test("a lost bot stream session stops a bot in a long 409 back-off at once, so the healthy bot resumes within seconds", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect(), tagA = a.tenant.slice(0, 8);
+    f.transport.getUpdates = async (opts, offset) => opts.token === a.token
+      ? { ...updates([], offset), reason: "Conflict: terminated by other getUpdates request", errorCode: 409 }
+      : updates([f.msg(offset, "$B chart", 1)], offset + 1);
+    // The entry's own lease sessions (one bot stream session for both bots),
+    // at the production supervisor period: the 5s re-admission back-off must
+    // be honoured as 5s, not rounded up to the next 30s pass.
+    const { stop, done } = live(f, { acquireTenant: undefined, acquireBot: undefined, supervisorEveryMs: REPLY_SUPERVISOR_EVERY_MS });
+    let resumedMs = 0;
+    try {
+      await until("B replies and A sits in its 60s back-off", () => sent(f, b.botId) >= 2 && f.logs.some(l => /telegram-409/.test(l)));
+      const pids = (await probe.query("SELECT DISTINCT pid FROM pg_locks WHERE locktype='advisory' AND classid=$1::oid", [0x4d525042])).rows.map(r => Number(r.pid));
+      assert.equal(pids.length, 1, "one bot stream session");
+      await probe.query("SELECT pg_terminate_backend($1)", [pids[0]]);
+      const lostAt = Date.now(), atLoss = sent(f, b.botId);
+      // It used to wait for A's 60s (up to 10 min, or Telegram's retry_after up
+      // to an hour): A kept its dead lease and no new session could open.
+      await until("B resumes", () => sent(f, b.botId) > atLoss + 1, 30_000);
+      resumedMs = Date.now() - lostAt;
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(resumedMs < 15_000, `B resumed after ${resumedMs}ms`);
+    assert.ok(f.logs.includes(`[recovery-replies] [alert] actor-stop tenant=${tagA} reason=lease-lost retry=5s`), f.logs.join("\n"));
+    assert.ok(!f.logs.some(l => /admit-wait .*reason=db-transient/.test(l)), "a session renewal is never reported as database weather");
+  });
+
+  await t.test("a drain that fails every time backs off longer each time; the other bot never notices", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], tagA = a.tenant.slice(0, 8);
+    f.hook(async (sql, values) => {
+      if (/^UPDATE tenant_telegram SET poll_ok_at=\$1/.test(sql) && values?.[1] === a.tenant) throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+    });
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, opts.token === a.token ? "$A chart" : "$B chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    const { stop, done } = live(f);
+    try {
+      await until("A backed off twice", () => f.logs.filter(l => l.startsWith(`[recovery-replies] backoff tenant=${tagA} `)).length >= 2, 15_000);
+      await until("B replying", () => sent(f, b.botId) >= 3);
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    // A clean getUpdates is not progress: only a committed drain is.
+    assert.deepEqual(f.logs.filter(l => l.startsWith(`[recovery-replies] backoff tenant=${tagA} `)).slice(0, 2),
+      [`[recovery-replies] backoff tenant=${tagA} reason=db-transient wait=2s`, `[recovery-replies] backoff tenant=${tagA} reason=db-transient wait=4s`]);
+    assert.equal(sent(f, a.botId), 0); assert.equal(Number((await f.offset(a.botId))!.offset_id), 0, "A's cursor never moved");
+  });
+
+  await t.test("database weather on the startup roster read is waited out; anything else, or a one-pass run, still refuses", async s => {
+    const f = await fixture(s);
+    let failed = 0;
+    f.hook(async sql => { if (!failed && /FROM grants ORDER BY tenant LIMIT/.test(sql)) { failed++; throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" }); } });
+    f.transport.getUpdates = async (_opts, offset) => updates([f.msg(offset)], offset + 1);
+    const { stop, done } = live(f);
+    try { await until("replying after the wait", () => f.sends.length >= 1, 15_000); }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.equal(f.logs[0], "[recovery-replies] backoff scope=roster reason=db-transient wait=2s");
+    for (const error of [Object.assign(new Error("relation \"grants\" does not exist"), { code: "42P01" }), Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" })]) {
+      const g = await fixture(s);
+      g.hook(async sql => { if (/FROM grants ORDER BY tenant LIMIT/.test(sql)) throw error; });
+      // A missing table refuses in live mode; weather refuses only a bounded one-pass run.
+      const live42 = error.code === "42P01";
+      const result = live42 ? await live(g).done : await g.run().then(value => ({ ok: true as const, value }), (e: unknown) => ({ ok: false as const, error: e }));
+      assert.ok(!result.ok && result.error instanceof RecoveryReplyFleetRefusal && result.error.reason === "roster-unreadable", error.code);
+    }
+  });
+
+  await t.test("our own unsettled release is reported as lease-settling, never as another process's lease-busy", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], tagA = a.tenant.slice(0, 8);
+    let slowed = 0;
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, opts.token === a.token ? "$A chart" : "$B chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    // A's first lease takes 6.5s to unlock: longer than the release bound
+    // (1.5s) and than the 5s re-admission back-off. Until it settles, the
+    // lease manager refuses a new acquisition of the same lease — ours.
+    const { stop, done } = live(f, { acquireTenant: async tenant => {
+      const held = await f.acquireTenant(tenant);
+      if (!held || tenant !== a.tenant || slowed++) return held;
+      return { ...held, release: async () => { await delay(6_500); await held.release(); } };
+    } });
+    try {
+      await until("both replying", () => sent(f, a.botId) >= 1 && sent(f, b.botId) >= 1);
+      f.health.lost.add(f.health.current.get(a.tenant)!);
+      await until("A waits on its own release", () => f.logs.some(l => l.includes(`tenant=${tagA} reason=lease-settling`)), 15_000);
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.ok(f.logs.includes(`[recovery-replies] [alert] admit-wait tenant=${tagA} reason=lease-settling retry=10s`), f.logs.join("\n"));
+    assert.ok(!f.logs.some(l => /lease-busy/.test(l)), f.logs.join("\n"));
+    // Let the slow unlock finish before the fixture ends its sessions.
+    await delay(2_500);
+  });
+
+  await t.test("another tenant's row claiming this tenant's smart account stops both actors at their next step, not at the next pass", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], tagA = a.tenant.slice(0, 8), tagB = b.tenant.slice(0, 8);
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, opts.token === a.token ? "$A chart" : "$B chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    // No supervisor pass after startup in this test: only the per-operation check can see it.
+    const { stop, done } = live(f, { supervisorEveryMs: 600_000 });
+    try {
+      await until("both replying", () => sent(f, a.botId) >= 1 && sent(f, b.botId) >= 1);
+      await f.pool.query("UPDATE grants SET grant_json=jsonb_set(grant_json,'{smartAccount}',to_jsonb($1::text)) WHERE tenant=$2", [a.account.toUpperCase().replace(/^0X/, "0x"), b.tenant]);
+      await until("both stopped", () => f.logs.includes(`[recovery-replies] actor-stop tenant=${tagA} reason=roster-changed`) && f.logs.includes(`[recovery-replies] actor-stop tenant=${tagB} reason=roster-changed`), 10_000);
+      const aAt = sent(f, a.botId), bAt = sent(f, b.botId);
+      await delay(300);
+      assert.equal(sent(f, a.botId), aAt); assert.equal(sent(f, b.botId), bAt);
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+  });
+
+  await t.test("a checksummed tenant column is fenced under its lowercase address and never served", async s => {
+    const f = await fixture(s, 2), [a, b] = [f.actors[0]!, f.actors[1]!], probe = await f.connect();
+    await f.pool.query("UPDATE grants SET tenant='0x'||upper(substr(tenant,3)) WHERE tenant=$1", [b.tenant]);
+    f.transport.getUpdates = async (opts, offset) => updates([f.msg(offset, "$X chart", opts.token === a.token ? 0 : 1)], offset + 1);
+    const { stop, done } = live(f);
+    try {
+      await until("A replying", () => sent(f, a.botId) >= 2);
+      assert.equal(await lockFree(probe, b.tenant), false, "fenced under its lowercase address");
+    }
+    finally { stop.abort(); }
+    assert.deepEqual(await done, { ok: true, value: "stopped" });
+    assert.equal(sent(f, b.botId), 0); assert.ok(!f.polls.some(p => p.botId === b.botId));
+    assert.ok(f.logs.includes(`[recovery-replies] [alert] roster-row-skipped tenant=${b.tenant.slice(0, 8)}`), f.logs.join("\n"));
+    assert.equal(await lockFree(probe, b.tenant), true, "released on stop");
   });
 
   await t.test("SIGTERM is a clean stop: the entry resolves \"stopped\" and releases every lease", async s => {
