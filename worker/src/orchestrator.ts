@@ -3223,6 +3223,9 @@ async function resumeChainGate(tenant: string, approval: ApprovalRow, check: Res
       log(`${tenant}: resume chain check ${result.status}${result.status === "clean" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${result.fromBlock}, all in Postgres`
         : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) on chain that Postgres lacks` : ` — ${result.why}; tried again`}`);
     })
+    // Never a rejection loose in the supervisor: an answer nobody could record
+    // is no answer, and the next pass asks again.
+    .catch(() => { resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result: { status: "unavailable", why: "the chain read could not be recorded" } }); })
     .finally(() => { resumeCheckPromises.delete(p); });
   resumeCheckPromises.add(p);
   return "held";
@@ -10775,27 +10778,6 @@ async function runRecoveryReportOnly(): Promise<void> {
 }
 
 /**
- * ON RAILWAY, THE FLEET STARTS ONLY WHERE AND AS THE DEPLOY GUARD SAYS IT MAY.
- *
- * preparePersistentHomeForHandover() below proves the mount, the provider
- * volume and the manifest — but only when MERRYMEN_PERSISTENT_HOME_REQUIRED=1
- * asks it to. Unset or 0 it returns null, and the orchestrator would carry on
- * in whatever MERRYMEN_HOME names: on Railway, possibly the container's own
- * disk, which the next deploy throws away with every child book, cached grant
- * and pending kill in it. Beside that opt-in, the deploy guard's other start
- * checks for this role: the one service MERRYMEN_FLEET_SERVICE_ID names (a
- * second fleet would race the first for every tenant), this image, and no
- * one-shot repair variable left set before the rollout reads `all`.
- *
- * container-start.sh runs the same checks before it execs this file, but a
- * Start Command set on the service, or a hand-run `node … orchestrator.ts`,
- * never passes through the script. So a Railway-hosted orchestrator that
- * fails any of them exits 78 (EX_CONFIG), naming each reason, before either
- * entry path, the report-only one included, has read or written anything.
- * Off Railway it stands aside: there is no Railway service or volume to be
- * wrong about, and local runs and the test suite start the supervisor there.
- */
-/**
  * THE RESUME PREVIEW (MERRYMEN_RESUME_PREVIEW): one line per tenant, and one
  * run digest over them all, printed at boot whatever the halt and the rollout
  * say, so an operator reads it from the deploy log before approving anything.
@@ -10875,6 +10857,27 @@ export function runResumeAdmissionControlsForTest(env: NodeJS.ProcessEnv): Promi
   return runResumeAdmissionControls({ preview: parseResumePreview(env[RESUME_PREVIEW_ENV]), approvals: parseResumeApprovals(env[RESUME_APPROVE_ENV]), revokes: parseResumeRevokes(env[RESUME_REVOKE_ENV]) });
 }
 
+/**
+ * ON RAILWAY, THE FLEET STARTS ONLY WHERE AND AS THE DEPLOY GUARD SAYS IT MAY.
+ *
+ * preparePersistentHomeForHandover() below proves the mount, the provider
+ * volume and the manifest — but only when MERRYMEN_PERSISTENT_HOME_REQUIRED=1
+ * asks it to. Unset or 0 it returns null, and the orchestrator would carry on
+ * in whatever MERRYMEN_HOME names: on Railway, possibly the container's own
+ * disk, which the next deploy throws away with every child book, cached grant
+ * and pending kill in it. Beside that opt-in, the deploy guard's other start
+ * checks for this role: the one service MERRYMEN_FLEET_SERVICE_ID names (a
+ * second fleet would race the first for every tenant), this image, and no
+ * one-shot repair variable left set before the rollout reads `all`.
+ *
+ * container-start.sh runs the same checks before it execs this file, but a
+ * Start Command set on the service, or a hand-run `node … orchestrator.ts`,
+ * never passes through the script. So a Railway-hosted orchestrator that
+ * fails any of them exits 78 (EX_CONFIG), naming each reason, before either
+ * entry path, the report-only one included, has read or written anything.
+ * Off Railway it stands aside: there is no Railway service or volume to be
+ * wrong about, and local runs and the test suite start the supervisor there.
+ */
 function assertHostedFleetStart(): void {
   const refusals = hostedOrchestratorRefusals(process.env);
   if (refusals.length === 0) return;
