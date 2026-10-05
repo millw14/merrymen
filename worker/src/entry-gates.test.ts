@@ -9,7 +9,7 @@
  * through checkPolicy itself rather than restating its rules.
  *
  * And the other half of the contract: an exit is never gated, and the per-arm
- * backstop lets exactly one gated buy per (token, rule) reach the wall.
+ * backstop lets exactly one gated buy per (venue, token, rule) reach the wall.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -103,7 +103,7 @@ describe("one-direction parity: a gate implies checkPolicy refuses with the same
           }
           // The intent-level gate is the same answer, for the same token.
           const whole = intentEntryGate(intent, l);
-          assert.deepEqual(whole, rule === null ? null : { token: token.toLowerCase(), rule });
+          assert.deepEqual(whole, rule === null ? null : { token: token.toLowerCase(), venue, rule });
         }
         // The sweep must actually exercise the rule, or it proves nothing. The
         // one shape with nothing to gate is a curve with no sellable list: the
@@ -170,7 +170,7 @@ describe("what a gate must never touch", () => {
   });
 });
 
-describe("the backstop: one rejected row per (token, rule) per arm, then withheld", () => {
+describe("the backstop: one rejected row per (venue, token, rule) per arm, then withheld", () => {
   it("lets the FIRST gated buy through so the wall writes its own refusal, and withholds every repeat", () => {
     const latch = entryGateLatch();
     const l = limits();
@@ -191,6 +191,19 @@ describe("the backstop: one rejected row per (token, rule) per arm, then withhel
     assert.equal(latch.withhold(buySwap(OK), narrow), false, "no-exit on the swap venue is a different rule");
     assert.equal(latch.withhold(buyCurve(OK), narrow), true);
     assert.equal(latch.withhold(buySwap(OK), narrow), true);
+  });
+
+  it("keys on the VENUE too: the same rule on a swap and on a curve is two refusals with two remedies", () => {
+    const latch = entryGateLatch();
+    const l = limits();
+    // NEITHER is `asset-allowlist` on both venues — not watched (swap), not in
+    // the grant (curve). Same token, same rule name, different sentence.
+    assert.deepEqual(intentEntryGate(buySwap(NEITHER), l), { token: NEITHER, venue: "swap", rule: "asset-allowlist" });
+    assert.deepEqual(intentEntryGate(buyCurve(NEITHER), l), { token: NEITHER, venue: "curve", rule: "asset-allowlist" });
+    assert.equal(latch.withhold(buySwap(NEITHER), l), false, "the swap's row");
+    assert.equal(latch.withhold(buyCurve(NEITHER), l), false, "and the curve's own row, not swallowed by the swap's");
+    assert.equal(latch.withhold(buySwap(NEITHER), l), true);
+    assert.equal(latch.withhold(buyCurve(NEITHER), l), true);
   });
 
   it("never withholds what is not gated, and never an exit", () => {

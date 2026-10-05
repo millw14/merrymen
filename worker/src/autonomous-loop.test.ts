@@ -134,8 +134,8 @@ describe("the desk is asked about what the agent actually trades", () => {
  *   the HINT  — every strategy is handed the gates, from the limits the wall
  *               judges, so the builtins never propose a buy it refuses;
  *   the BACKSTOP — anything that proposes one anyway gets ONE rejected row per
- *               (token, rule) per arm, and every repeat is withheld before a
- *               decision row, a claim or a reservation exists.
+ *               (venue, token, rule) per arm, and every repeat is withheld
+ *               before a decision row, a claim or a reservation exists.
  */
 describe("and it never buys what it can never sell", () => {
   const loop = INDEX.slice(INDEX.indexOf("for (const [proposedAt, intent] of proposed.entries())"));
