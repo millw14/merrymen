@@ -27,7 +27,7 @@
 import { decodeFunctionResult, encodeFunctionData, type Hex } from "viem";
 import { CASH, CASH_FEEDS, CHAINLINK_ABI, NATIVE_ASSET, STOCK_ABI, STOCK_TOKENS } from "../../packages/core/src/index.ts";
 import { findRoundAt, MAX_ROUND_LAG_SEC, type FeedRound } from "../../worker/src/gas-backfill.ts";
-import type { RpcCall } from "../../worker/src/chain-capital.ts";
+import { classifyRpcError, type RpcCall } from "../../worker/src/chain-capital.ts";
 
 /** Every method this preview may ask a node. Nothing that writes is on it. */
 export const RPC_METHODS = Object.freeze([
@@ -46,7 +46,13 @@ export const RPC_METHODS = Object.freeze([
  * own error can echo the URL, and a URL can carry a key.
  *
  * The node's refusal words are kept only as the coarse class the scanner's
- * backoff needs ("429", "exceeds limit"); nothing else of them survives.
+ * backoff needs ("429", "exceeds limit"); nothing else of them survives. WHICH
+ * words make which class is chain-capital's classifyRpcError, read on the raw
+ * message before it is replaced, so the two readers share one definition. A
+ * private list here once dropped the Robinhood node's block-span refusal
+ * ("query spans N blocks … only 10000000 are allowed for this request"): the
+ * scanner then waited out a refusal that waiting cannot fix, never split the
+ * range, and the default run from block 0 came back with every sweep UNREAD.
  */
 export function createReadOnlyRpc(url: string, fetchImpl: typeof fetch = fetch): RpcCall {
   const parsed = new URL(url);
@@ -65,11 +71,11 @@ export function createReadOnlyRpc(url: string, fetchImpl: typeof fetch = fetch):
     if (!response.ok) throw new Error("rpc-unavailable");
     const body = (await response.json()) as { jsonrpc?: string; id?: number; result?: unknown; error?: { message?: unknown } };
     if (body.error) {
-      const m = String(body.error.message ?? "").toLowerCase();
-      if (m.includes("exceeds limit") || m.includes("too many results") || m.includes("query returned more than")) {
+      const refusal = classifyRpcError(String(body.error.message ?? ""));
+      if (refusal === "too-many-results") {
         throw new Error("rpc refused: query returned more than the node allows (exceeds limit)");
       }
-      if (m.includes("429") || m.includes("too many requests") || m.includes("rate limit")) throw new Error("rpc rate limit (429)");
+      if (refusal === "rate-limited") throw new Error("rpc rate limit (429)");
       throw new Error("rpc-read-failed");
     }
     if (body.jsonrpc !== "2.0" || body.id !== requestId || !Object.hasOwn(body, "result")) throw new Error("rpc-read-failed");

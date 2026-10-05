@@ -7,6 +7,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CASH, CASH_FEEDS, NATIVE_ASSET, STOCK_TOKENS } from "../../packages/core/src/index.ts";
+import { scanAssetMovements } from "../../worker/src/asset-movements.ts";
+import { TRANSFER_TOPIC } from "../../worker/src/chain-capital.ts";
 import {
   createReadOnlyRpc,
   equityStepEstimate,
@@ -209,5 +211,75 @@ describe("the read-only transport", () => {
 
   it("refuses a non-http URL", () => {
     assert.throws(() => createReadOnlyRpc("file:///etc/passwd"), /unsupported-rpc-url/);
+  });
+
+  it("keeps Robinhood's block-span refusal as one the scanner SPLITS, so a run from block 0 reads the whole history", async () => {
+    // The default run asks for 0..head (about 77M) and the public node caps a
+    // getLogs span at 10M blocks. Read as "rpc-read-failed", that refusal was
+    // waited out six times per sweep and never split: every sweep UNREAD, and
+    // every account incomplete with nothing in it. This drives the scanner
+    // through the real transport with the node's exact words.
+    const ME = "0x00000000000000000000000000000000000000a1";
+    const TENANT = "0x00000000000000000000000000000000000000a3";
+    const BLOCK = 70_000_000n;
+    const HEAD = 77_000_000n;
+    const pad32 = (a: string) => "0x" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+    const hex = (n: bigint) => "0x" + n.toString(16);
+    const blockHash = pad32(hex(BLOCK));
+    const log = {
+      address: TSLA.address.toLowerCase(),
+      topics: [TRANSFER_TOPIC, pad32(TENANT), pad32(ME)],
+      data: pad32(hex(13n * 10n ** 18n)),
+      blockNumber: hex(BLOCK),
+      transactionHash: "0x" + "77".repeat(32),
+      logIndex: "0x0",
+    };
+    const spans: bigint[] = [];
+    const fetchImpl = (async (_url: string, init: { body: string }) => {
+      const req = JSON.parse(init.body) as { id: number; method: string; params: unknown[] };
+      const reply = (body: Record<string, unknown>) => new Response(JSON.stringify({ jsonrpc: "2.0", id: req.id, ...body }));
+      if (req.method === "eth_getLogs") {
+        const f = req.params[0] as { address?: string; fromBlock: string; toBlock: string; topics: (string | string[] | null)[] };
+        const from = BigInt(f.fromBlock);
+        const to = BigInt(f.toBlock);
+        spans.push(to - from + 1n);
+        if (to - from + 1n > 10_000_000n) {
+          return reply({
+            error: {
+              code: -32000,
+              message: `query spans ${to - from + 1n} blocks (${from} to ${to}), but only 10000000 are allowed for this request; narrow the block range`,
+            },
+          });
+        }
+        const hit = BLOCK >= from && BLOCK <= to && (!f.address || f.address.toLowerCase() === log.address) &&
+          f.topics.every((want, i) => want === null || (Array.isArray(want) ? want : [want]).some((w) => w.toLowerCase() === log.topics[i]));
+        return reply({ result: hit ? [log] : [] });
+      }
+      if (req.method === "eth_getTransactionReceipt") {
+        return reply({ result: { status: "0x1", blockNumber: hex(BLOCK), blockHash, from: TENANT, to: log.address, logs: [log] } });
+      }
+      if (req.method === "eth_getBlockByNumber") {
+        return reply({ result: { number: hex(BLOCK), hash: blockHash, timestamp: hex(BigInt(AT)) } });
+      }
+      return reply({ error: { message: `unexpected ${req.method}` } });
+    }) as unknown as typeof fetch;
+
+    let waited = 0;
+    const out = await scanAssetMovements(createReadOnlyRpc("https://rpc.example", fetchImpl), {
+      accounts: [{ account: ME, owners: [TENANT] }],
+      usdgToken: CASH.USDG,
+      fromBlock: 0n,
+      toBlock: HEAD,
+      includeReviewTimestamps: true,
+      sleep: async () => {
+        waited++;
+      },
+    });
+    const me = out.get(ME)!;
+    assert.equal(me.complete, true, `every split range was read: ${me.notes.join("; ")}`);
+    assert.equal(waited, 0, "a span refusal is split at once, never waited out");
+    assert.ok(spans.length > 3 && spans.every((s, i) => i === 0 || s <= spans[0]!), "the oversized range was halved");
+    assert.ok(spans.some((s) => s <= 10_000_000n), "down to spans the node answers");
+    assert.deepEqual(me.movements.map((m) => [m.asset, m.classification.kind]), [[TSLA.address.toLowerCase(), "asset-in"]]);
   });
 });
