@@ -107,6 +107,7 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { holdAtCaps } from "./budget-seed";
 import { resumeFrom } from "./deposit-log";
 import { scanAndBookDepositWindow } from "./deposit-scan";
 import { renderWhy } from "./strategies/reasons";
@@ -3271,37 +3272,35 @@ async function main() {
    * armed. It is an input to every refresh, not a starting value — so it ages
    * out on the same clock as this child's own rows, and no refresh drops it.
    *
-   * AND WHILE THAT DAY IS NOT BACK, THE LIVE DAY READS AS SPENT. The
-   * orchestrator leaves a marker in this home until every seeded row is in. A
-   * live book that read its caps from the ledger alone then would read a fresh
-   * allowance — the day it already spent is in a ledger it cannot see. So both
-   * settled halves are held at the grant's own caps: no headroom for a new
-   * entry, and the exits the caps already exempt — a sale into cash, the
-   * stop-loss — run exactly as they do on a spent day. Read BEFORE the ledger:
-   * the orchestrator writes every row and only then removes the marker, so a
-   * marker that is gone here means the reads below already see the whole seed.
-   * The paper book is never seeded (no paper fill has a hash) and never held.
+   * AND WHILE THAT DAY IS NOT BACK, THE DAY READS AS SPENT. The orchestrator
+   * leaves a marker in this home until every seeded row is in. A live book
+   * that read its caps from the ledger alone then would read a fresh allowance
+   * — the day it already spent is in a ledger it cannot see. So both settled
+   * halves are held at the grant's own caps (budget-seed.ts holdAtCaps): no
+   * headroom for a new entry, and the exits the caps already exempt — a sale
+   * into cash, the stop-loss — run exactly as they do on a spent day. On
+   * EITHER rail: the rail is re-decided after this refresh, inside the tick,
+   * so a hold on the live rail alone would let the first live entry after a
+   * paper→live flip through on the unheld paper counters. Read BEFORE the
+   * ledger: the orchestrator writes every row and only then removes the
+   * marker, so a marker that is gone here means the reads below already see
+   * the whole seed.
    */
   const refreshBudget = async (agentId: string): Promise<void> => {
     const rail = budgetRail();
-    const held = rail === "live" && budgetDayUnrestored();
-    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string));
-    settledOps = await getOpsToday(agentId, rail);
-    if (held && active) {
-      if (settledSpentUsdg < active.limits.dailyUsdg) settledSpentUsdg = active.limits.dailyUsdg;
-      // A grant with no finite count has no ops cap to hold at; the spend half
-      // above already leaves a new entry nothing to spend.
-      if (Number.isFinite(active.limits.maxOpsPerDay) && settledOps < active.limits.maxOpsPerDay) {
-        settledOps = active.limits.maxOpsPerDay;
-      }
-    }
+    const held = budgetDayUnrestored();
+    const read = {
+      spentUsdg: usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string)),
+      ops: await getOpsToday(agentId, rail),
+    };
+    ({ spentUsdg: settledSpentUsdg, ops: settledOps } = holdAtCaps(read, active?.limits, held));
     if (held !== budgetDayHeld) {
       budgetDayHeld = held;
       void addEvent(
         agentId,
         held ? "warn" : "ok",
         held
-          ? "today's spending from before this restart is not back from the shared ledger yet — no new entries until it is; exits, stops and take-profits still run"
+          ? "today's spending from before this restart can't be confirmed from the shared ledger yet — no new entries until it is; exits, stops and take-profits still run"
           : "today's spending from before this restart is back — the daily caps read the whole trailing day again",
       );
     }

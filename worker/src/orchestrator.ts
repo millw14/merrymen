@@ -2422,8 +2422,8 @@ async function retryEnergySeed(tenant: `0x${string}`): Promise<void> {
  *
  * FAIL CLOSED, AND STILL ARMED. The marker goes into the child's home before
  * anything is read, and comes out only after every row is in, so a seed that
- * fails — or dies half way — leaves a live child that arms with no headroom
- * for a new entry while its exits and stops run. retryBudgetSeed tries again
+ * fails — or dies half way — leaves a child that arms with no headroom for a
+ * new entry while its exits and stops run. retryBudgetSeed tries again
  * every reconcile pass. False only when there is no marker AND no seed: the
  * one state in which this child would arm on an empty day, so spawnChild does
  * not start it and the next pass tries the whole spawn again.
@@ -2467,7 +2467,7 @@ async function seedBudgetForChild(tenant: `0x${string}`, smartAccount: string, w
           (r.marked
             ? when === "retry"
               ? "(still unrestored; tried again next pass)"
-              : "(the child arms with its trailing day UNRESTORED: no headroom for a new live entry until a later pass restores it; exits, stops and the owner's sales run)"
+              : "(the child arms with its trailing day UNRESTORED: no headroom for a new entry until a later pass restores it; exits, stops and the owner's sales run)"
             : "(and NO marker: not starting a worker that would read an empty day)"),
       );
     }
@@ -5128,7 +5128,7 @@ export async function reconcile(): Promise<void> {
     // AND ITS ENERGY HISTORY, if the seed before it armed could not put it
     // back: until then its store reads those days as unreadable.
     await retryEnergySeed(tenant as `0x${string}`);
-    // AND ITS TRAILING DAY OF SPENDING, on the same terms: until then its live
+    // AND ITS TRAILING DAY OF SPENDING, on the same terms: until then its new
     // entries have no headroom.
     await retryBudgetSeed(tenant as `0x${string}`);
   }

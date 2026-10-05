@@ -3629,8 +3629,8 @@ async function seededSum(q: { sql: string; params: unknown[] }): Promise<number>
 /**
  * Is the trailing day from before this ledger was rebuilt still missing
  * (budget-seed.ts)? The orchestrator's seed has not put it back, so no cap
- * here can be read as complete: refreshBudget reads the live rail as a spent
- * day, and getTransferredTodayUsdg refuses to answer.
+ * here can be read as complete: refreshBudget reads the day as spent, and
+ * getTransferredTodayUsdg refuses to answer.
  */
 export function budgetDayUnrestored(): boolean {
   return budgetUnrestored(merrymenHome());
