@@ -168,17 +168,19 @@ describe("where the money is during recovery", () => {
     const page = notice(funds);
     const text = page.body.textContent!;
     assert.match(text, /Trading paused for recovery/);
-    assert.match(text, /Your funds are in your smart account 0x12aB…cDEF and the vaults it controls\./);
+    assert.match(text, /Your funds are in your smart account 0x12aB…cDEF and in any vaults it owns\./);
     const link = page.querySelector(".agent-recovery a")!;
     assert.equal(link.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
     assert.equal(link.getAttribute("target"), "_blank");
     assert.equal(link.getAttribute("rel"), "noreferrer");
     assert.equal(link.getAttribute("title"), ACCOUNT);
     assert.match(text, /Cash on chain: \$12\.34\./);
-    assert.match(text, /Only USDG held in the account itself\. Not included: USDG in the Morpho vault, and any tokens the account holds\./);
+    assert.match(text, /Only USDG held in the account itself\. Not included: USDG in the Morpho vault, anything held in vaults the account owns, and any tokens the account holds\./);
     // The vault balance is shares: neither its raw count nor a dollar reading of it appears.
     assert.doesNotMatch(text, /5000000000000000000|\$5\b|\$5\.00|\$17\.34/);
     assert.doesNotMatch(text, NEVER);
+    // It owns its class and Trencher vaults; it controls nothing about the Morpho vault.
+    assert.doesNotMatch(text, /control/i);
   });
 
   it("links a testnet account on the testnet explorer and says it is the test network", () => {
@@ -187,7 +189,7 @@ describe("where the money is during recovery", () => {
     assert.equal(funds.testnet, true);
     const page = notice(funds);
     assert.equal(page.querySelector(".agent-recovery a")!.getAttribute("href"), funds.explorer);
-    assert.match(page.body.textContent!, /smart account 0x12aB…cDEF on the test network and the vaults it controls/);
+    assert.match(page.body.textContent!, /smart account 0x12aB…cDEF on the test network and in any vaults it owns/);
   });
 
   it("on the test network says the cash isn't read there, never a figure and never a passing failure", () => {
@@ -213,7 +215,7 @@ describe("where the money is during recovery", () => {
       assert.equal(funds.testnet, false);
       const page = notice(funds);
       assert.equal(page.querySelector(".agent-recovery a"), null);
-      assert.match(page.body.textContent!, /Your funds are in your smart account 0x12aB…cDEF and the vaults it controls/);
+      assert.match(page.body.textContent!, /Your funds are in your smart account 0x12aB…cDEF and in any vaults it owns/);
     }
   });
 
@@ -267,7 +269,7 @@ describe("where the money is during recovery", () => {
         assert.doesNotMatch(text, /\$0\.00/, what);
         assert.equal(/smart account/.test(text), hasAccount, what);
         const mainnet = hasAccount && chainId === 4663;
-        assert.equal(/Not included: USDG in the Morpho vault, and any tokens the account holds/.test(text), mainnet, what);
+        assert.equal(/Not included: USDG in the Morpho vault, anything held in vaults the account owns, and any tokens the account holds/.test(text), mainnet, what);
         assert.equal(/on the test network/.test(text), hasAccount && chainId === 46630, what);
         assert.equal(/Cash on chain isn't read on the test network\./.test(text), hasAccount && chainId === 46630, what);
         assert.equal(/Cash on chain: \$12\.34\./.test(text), mainnet && cash !== null, what);
@@ -331,7 +333,7 @@ describe("where the money is during recovery", () => {
     const profile = doc(React.createElement(You, { mine: { ...mine, recovery: held, recoveryFunds: funds }, history: [40, 42],
       stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
     const card = profile.querySelector(".agent-recovery")!;
-    assert.match(card.textContent!, /Your funds are in your smart account 0x12aB…cDEF and the vaults it controls\..*Cash on chain: \$12\.34\./);
+    assert.match(card.textContent!, /Your funds are in your smart account 0x12aB…cDEF and in any vaults it owns\..*Cash on chain: \$12\.34\./);
     assert.equal(card.querySelector("a")!.getAttribute("href"), `https://robinhoodchain.blockscout.com/address/${ACCOUNT}`);
     assert.doesNotMatch(card.textContent!, NEVER);
     assert.ok([...profile.querySelectorAll("button")].some(b => b.textContent === "Withdraw"), "the Withdraw button stays");

@@ -46,10 +46,12 @@ export const RECOVERY_WITHDRAW_VERIFIED = false;
  * it as `balanceOf` on the Morpho vault, which is a count of vault SHARES, not
  * of USDG. Printing it as dollars would need `convertToAssets`, which that route
  * does not call — and this notice only uses what the route already returns.
- * Tokens are left out for the same reason: no price for them is read here. So
- * the figure is named for what it is, and both are named as not in it.
+ * Tokens are left out for the same reason: no price for them is read here. And
+ * what sits in the account's own vaults (class, Trencher) is not read by that
+ * route at all. So the figure is named for what it is, and each of them is
+ * named as not in it — the notice has just said the funds are in those vaults.
  */
-export const RECOVERY_CASH_EXCLUDES = "Only USDG held in the account itself. Not included: USDG in the Morpho vault, and any tokens the account holds.";
+export const RECOVERY_CASH_EXCLUDES = "Only USDG held in the account itself. Not included: USDG in the Morpho vault, anything held in vaults the account owns, and any tokens the account holds.";
 
 /** The two chains this product runs on — anything else gets no explorer link. */
 const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
