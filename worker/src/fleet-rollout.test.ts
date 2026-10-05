@@ -6,8 +6,11 @@
  * spawned, killed or retired) is orchestrator-rollout.integration.test.ts.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
+  ADMISSION_LEVELS,
   ADMISSION_LEVEL_ENV,
   FLEET_ROLLOUT_ENV,
   MAX_ROLLOUT_TENANTS,
@@ -20,6 +23,7 @@ import {
   rolloutLevel,
   rolloutLine,
   rolloutStartupLine,
+  WORKER_ENFORCED_LEVELS,
 } from "./fleet-rollout";
 
 const address = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
@@ -35,11 +39,11 @@ describe("the grammar", () => {
     assert.equal(rolloutLevel(A, env("all")), "trade");
   });
 
-  it("a list admits exactly the tenants it names, each at its own level, and holds the rest", () => {
-    const e = env(`${A}:observe,${B}:exits-only,${C}:trade`);
-    assert.equal(rolloutLevel(A, e), "observe");
-    assert.equal(rolloutLevel(B, e), "exits-only");
+  it("a list admits exactly the tenants it names, and holds the rest", () => {
+    const e = env(`${A}:trade,${C}:trade`);
+    assert.equal(rolloutLevel(A, e), "trade");
     assert.equal(rolloutLevel(C, e), "trade");
+    assert.equal(rolloutLevel(B, e), "held");
     assert.equal(rolloutLevel(D, e), "held");
     assert.equal(rolloutHeld(D, e), true);
     assert.equal(rolloutHeld(A, e), false);
@@ -47,14 +51,15 @@ describe("the grammar", () => {
 
   it("addresses match whatever their case, and whitespace around entries is ignored", () => {
     const mixed = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
-    const e = env(` ${mixed}:trade , ${A}:observe `);
+    const e = env(` ${mixed}:trade , ${A}:trade `);
     assert.equal(rolloutLevel(mixed.toLowerCase(), e), "trade");
     assert.equal(rolloutLevel(mixed, e), "trade");
-    assert.equal(rolloutLevel(A.toUpperCase().replace("0X", "0x"), e), "observe");
+    assert.equal(rolloutLevel(A.toUpperCase().replace("0X", "0x"), e), "trade");
+    assert.equal(rolloutLevel(B, e), "held");
   });
 
   it(`takes up to ${MAX_ROLLOUT_TENANTS} named tenants and refuses one more`, () => {
-    const names = (n: number) => Array.from({ length: n }, (_, i) => `${address(0x1000 + i)}:observe`).join(",");
+    const names = (n: number) => Array.from({ length: n }, (_, i) => `${address(0x1000 + i)}:trade`).join(",");
     const most = fleetRollout(env(names(MAX_ROLLOUT_TENANTS)));
     assert.equal(most.scope === "list" && most.levels.size, MAX_ROLLOUT_TENANTS);
     assert.throws(() => fleetRollout(env(names(MAX_ROLLOUT_TENANTS + 1))), /more than 512 tenants/);
@@ -73,11 +78,13 @@ describe("the grammar", () => {
     ["a short address", "0x123:trade"],
     ["a 0X prefix", `0X${A.slice(2)}:trade`],
     ["a trailing comma", `${A}:trade,`],
-    ["an empty entry", `${A}:trade,,${B}:observe`],
-    ["a semicolon", `${A}:trade;${B}:observe`],
+    ["an empty entry", `${A}:trade,,${B}:trade`],
+    ["a semicolon", `${A}:trade;${B}:trade`],
     ["space inside an entry", `${A} : trade`],
-    ["a tenant named twice at one level", `${A}:trade,${B}:observe,${A}:trade`],
+    ["a tenant named twice at one level", `${A}:trade,${B}:trade,${A}:trade`],
     ["a tenant named twice at two", `${A}:trade,${A.toUpperCase().replace("0X", "0x")}:observe`],
+    ["a level no worker in this build enforces: observe", `${A}:observe`],
+    ["a level no worker in this build enforces: exits-only", `${B}:trade,${A}:exits-only`],
   ];
   for (const [why, value] of malformed) {
     it(`refuses rather than guesses: ${why}`, () => {
@@ -89,6 +96,20 @@ describe("the grammar", () => {
       assert.equal(childAdmissionLevel(A, env(value)), "observe");
     });
   }
+
+  it("observe and exits-only are read, and refused by name until a worker obeys them", () => {
+    for (const level of ["observe", "exits-only"]) {
+      assert.throws(
+        () => fleetRollout(env(`${B}:trade,${A}:${level}`)),
+        new RegExp(`entry 2 asks for ${level}, which no worker in this build enforces yet \\(nothing reads ${ADMISSION_LEVEL_ENV}\\)`),
+      );
+      // The whole value, not just that entry: the tenant named at trade beside
+      // it is held as well, as for any other value that refuses.
+      assert.equal(rolloutLevel(B, env(`${B}:trade,${A}:${level}`)), "held");
+    }
+    // Named twice is still named twice, whichever level the second one asks for.
+    assert.throws(() => fleetRollout(env(`${A}:trade,${A}:observe`)), /entry 2 names a tenant an earlier entry already named/);
+  });
 
   it("a refusal names the entry's position, never its text", () => {
     const secretish = "0xnot-an-address-but-somebody-pasted-it-here:trade";
@@ -132,17 +153,17 @@ describe("unset", () => {
   });
 
   it("set on Railway, the value decides as anywhere else", () => {
-    const e = env(`${A}:observe`, { RAILWAY_PROJECT_ID: "p" });
-    assert.equal(rolloutLevel(A, e), "observe");
+    const e = env(`${A}:trade`, { RAILWAY_PROJECT_ID: "p" });
+    assert.equal(rolloutLevel(A, e), "trade");
     assert.equal(rolloutLevel(B, e), "held");
   });
 });
 
 describe("what the readers make of it", () => {
   it("only the level reaches a child, and held never does", () => {
-    const e = env(`${A}:exits-only`);
-    assert.equal(childAdmissionLevel(A, e), "exits-only");
-    assert.equal(childAdmissionLevel(B, e), "observe", "the most restrictive level a worker understands");
+    const e = env(`${A}:trade`);
+    assert.equal(childAdmissionLevel(A, e), "trade");
+    assert.equal(childAdmissionLevel(B, e), "observe", "the grammar's most restrictive level");
     assert.equal(childAdmissionLevel(A, env("all")), "trade");
     assert.equal(ADMISSION_LEVEL_ENV, "MERRYMEN_ADMISSION_LEVEL", "the name the worker's admission gate reads");
   });
@@ -155,19 +176,33 @@ describe("what the readers make of it", () => {
   });
 
   it("the heartbeat counts the roster by level, and names tenants the roster lacks", () => {
-    const e = env(`${A}:observe,${B}:trade,${D}:exits-only`);
+    const e = env(`${A}:trade,${B}:trade,${D}:trade`);
     const counts = rolloutCounts([A, B, C, C.toUpperCase().replace("0X", "0x")], e);
-    assert.deepEqual(counts, { trade: 1, "exits-only": 0, observe: 1, held: 1, absent: 1 });
+    assert.deepEqual(counts, { trade: 2, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 1 });
     assert.equal(
       rolloutLine(counts, e),
-      "fleet| rollout 3 named — trade 1 · exits-only 0 · observe 1 · held 1 · named but not in the roster 1",
+      "fleet| rollout 3 named — admitted: trade 2 · exits-only 0 · observe 0; not run: held 1 · expired 0; named but not in the roster 1",
     );
     const all = rolloutCounts([A, B], env("all"));
-    assert.deepEqual(all, { trade: 2, "exits-only": 0, observe: 0, held: 0, absent: 0 });
-    assert.equal(rolloutLine(all, env("all")), "fleet| rollout all — trade 2 · exits-only 0 · observe 0 · held 0");
+    assert.deepEqual(all, { trade: 2, "exits-only": 0, observe: 0, held: 0, expired: 0, absent: 0 });
+    assert.equal(rolloutLine(all, env("all")), "fleet| rollout all — admitted: trade 2 · exits-only 0 · observe 0; not run: held 0 · expired 0");
     assert.match(rolloutLine(all, env(undefined)), /^fleet\| rollout all \(unset off Railway\) /);
-    assert.deepEqual(rolloutCounts([A, B], env("none")), { trade: 0, "exits-only": 0, observe: 0, held: 2, absent: 0 });
-    assert.match(rolloutLine(rolloutCounts([A], env("halt")), env("halt")), /^fleet\| rollout REFUSED — .* held 1$/);
+    assert.deepEqual(rolloutCounts([A, B], env("none")), { trade: 0, "exits-only": 0, observe: 0, held: 2, expired: 0, absent: 0 });
+    assert.match(rolloutLine(rolloutCounts([A], env("halt")), env("halt")), /^fleet\| rollout REFUSED — .* held 1 · expired 0$/);
+  });
+
+  it("a tenant nothing runs for is never counted at a level: the accounting hold is held, an expired key is expired", () => {
+    // A, B, C and D all admitted at trade. A is named by the accounting hold,
+    // B's key has expired, and A's has too: held wins, as nothing runs either way.
+    const counts = rolloutCounts([A, B, C, D], env("all"), { accountingHeld: new Set([A]), unexpired: new Set([C, D]) });
+    assert.deepEqual(counts, { trade: 2, "exits-only": 0, observe: 0, held: 1, expired: 1, absent: 0 });
+    // Held by the rollout and expired: held.
+    assert.deepEqual(rolloutCounts([A, B], env(`${A}:trade`), { unexpired: new Set([A]) }),
+      { trade: 1, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 0 });
+  });
+
+  it("a pass that could not read the roster says so, and repeats no older figure", () => {
+    assert.equal(rolloutLine(null, env("none")), "fleet| rollout none — the last pass could not read the roster");
   });
 
   it("the startup line says the scope that took", () => {
@@ -175,16 +210,39 @@ describe("what the readers make of it", () => {
     assert.match(rolloutStartupLine(fleetRollout(env("all"))), /^fleet rollout: all — every tenant is admitted at trade$/);
     assert.match(rolloutStartupLine(fleetRollout(env(undefined))), /unset off Railway/);
     assert.match(
-      rolloutStartupLine(fleetRollout(env(`${A}:observe,${B}:observe,${C}:trade`))),
-      /^fleet rollout: 3 named tenant\(s\) — trade 1 · exits-only 0 · observe 2; every other tenant is held/,
+      rolloutStartupLine(fleetRollout(env(`${A}:trade,${B}:trade,${C}:trade`))),
+      /^fleet rollout: 3 named tenant\(s\) — trade 3 · exits-only 0 · observe 0; every other tenant is held/,
     );
   });
 
   it("a changed value is read afresh, not served from the last parse", () => {
     assert.equal(rolloutLevel(A, env(`${A}:trade`)), "trade");
-    assert.equal(rolloutLevel(A, env(`${A}:observe`)), "observe");
+    assert.equal(rolloutLevel(A, env(`${B}:trade`)), "held");
+    assert.equal(rolloutLevel(A, env(`${A}:trade`)), "trade");
     assert.equal(rolloutLevel(A, env("none")), "held");
     assert.equal(rolloutLevel(A, env(undefined)), "trade");
     assert.equal(rolloutLevel(A, env(undefined, { RAILWAY_SERVICE_ID: "s" })), "held");
+  });
+});
+
+describe("the levels a worker in this tree obeys", () => {
+  /**
+   * A TRIPWIRE ON THE ORDER TWO CHANGES MERGE IN. The worker's admission gate
+   * is worker-admission.ts, by the name the rollout plan gives it. Without it
+   * in this tree, `trade` is the only level anything obeys, and the rollout
+   * must accept no other (fleet-rollout.ts WORKER_ENFORCED_LEVELS). With it,
+   * the set is widened in the same change, and this fails until it is: a
+   * refusal left in place is safe but would keep the staged rollout from ever
+   * using the levels it exists for.
+   */
+  it("are exactly the ones the rollout accepts: trade, until the worker's admission gate is here", () => {
+    const gate = existsSync(fileURLToPath(new URL("./worker-admission.ts", import.meta.url)));
+    assert.deepEqual(
+      [...WORKER_ENFORCED_LEVELS].sort(),
+      gate ? [...ADMISSION_LEVELS].sort() : ["trade"],
+      gate
+        ? "worker-admission.ts is in this tree: widen WORKER_ENFORCED_LEVELS to the levels it obeys, in the same change"
+        : "no worker in this tree reads MERRYMEN_ADMISSION_LEVEL, so no level but trade may be accepted",
+    );
   });
 });

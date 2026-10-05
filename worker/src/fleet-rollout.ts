@@ -10,17 +10,27 @@
  *   all                                    every tenant is admitted, at trade
  *   0x<40 hex>:<level>,0x<40 hex>:<level>  only these, each at its own level
  *
- * where <level> is `observe`, `exits-only` or `trade`. The level reaches the
- * child as MERRYMEN_ADMISSION_LEVEL (childEnv) and nothing else of the value
- * does: the list names other tenants, and a child has no business knowing who
- * else is running, the same reason MERRYMEN_HOLDER_ADDRESS is stripped.
+ * where <level> is `observe`, `exits-only` or `trade`, and is accepted only
+ * once a worker in this tree obeys it (WORKER_ENFORCED_LEVELS: today, `trade`
+ * alone). The level reaches the child as MERRYMEN_ADMISSION_LEVEL (childEnv)
+ * and nothing else of the value does: the list names other tenants, and a
+ * child has no business knowing who else is running, the same reason
+ * MERRYMEN_HOLDER_ADDRESS is stripped.
  *
  * A TENANT THE VALUE DOES NOT ADMIT IS `held`. The supervisor starts nothing
- * for it, leases nothing, carries out none of its pending kills and retires
- * none of its expired keys, so its home on the volume stays exactly as the
- * incident left it until it is admitted. It stays in the roster (`wanted`):
- * being out of the rollout is not being removed, and the removed-agent sweep
- * must still be able to tell the two apart.
+ * for it and leases nothing, so its home on the volume stays exactly as the
+ * incident left it until it is admitted, but for one file: once its key has
+ * expired, the copy of that key (grant.json) is removed, as for any tenant,
+ * because that only takes authority away and needs no lease. It stays in the
+ * roster (`wanted`): being out of the rollout is not being removed, and the
+ * removed-agent sweep must still be able to tell the two apart.
+ *
+ * BUT ITS OWNER CAN STILL REVOKE IT. A pending Telegram /kill is carried out
+ * for a held tenant as for any other, within seconds, exactly as a dashboard
+ * DELETE /api/grants is and as FLEET_HALT has always allowed: a kill only
+ * takes authority away, and its request lives in a home a redeploy may
+ * discard (kill-request.ts). The tenant is then removed, not held, and the
+ * removed-agent sweep keeps its original book as it does for any revoke.
  *
  * ONLY EVER NARROWS. Every gate that already stops a tenant (FLEET_HALT, the
  * accounting hold, a lost lease, a pending kill, the source fences) still
@@ -54,6 +64,27 @@ export const ADMISSION_LEVELS = ["observe", "exits-only", "trade"] as const;
 export type AdmissionLevel = (typeof ADMISSION_LEVELS)[number];
 /** An admitted level, or `held`: the supervisor starts nothing for the tenant. */
 export type RolloutLevel = AdmissionLevel | "held";
+
+/**
+ * THE LEVELS A WORKER IN THIS TREE OBEYS, and so the only ones the rollout
+ * accepts. Today that is `trade` alone.
+ *
+ * `observe` and `exits-only` are the grammar's, and childEnv already hands a
+ * child its level, but nothing in the worker reads MERRYMEN_ADMISSION_LEVEL
+ * yet: that is the worker's admission gate (worker-admission.ts), a change of
+ * its own. Until it is here, a tenant named at `observe` would be spawned with
+ * the word in its environment and trade with full authority, while the
+ * startup line and the heartbeat reported it as only being watched. A risk
+ * control that depends on the order two changes are deployed in fails open
+ * the one time they are deployed out of order. This one fails closed: such a
+ * value refuses boot like any other the orchestrator cannot honour, and every
+ * runtime reader reads it as `held`.
+ *
+ * The change that brings the worker's gate widens this set in the same
+ * commit. fleet-rollout.test.ts fails until it does, and fails if the set is
+ * widened without the gate.
+ */
+export const WORKER_ENFORCED_LEVELS: ReadonlySet<AdmissionLevel> = new Set<AdmissionLevel>(["trade"]);
 
 export type FleetRollout =
   | { scope: "none" }
@@ -110,7 +141,13 @@ function parseRollout(raw: string): FleetRollout {
     // Twice is ambiguous even at the same level: one of the two was meant to
     // be something else, and nobody can say which.
     if (levels.has(tenant)) throw refuse(`entry ${i + 1} names a tenant an earlier entry already named`);
-    levels.set(tenant, m[2] as AdmissionLevel);
+    // Well-formed, and still not a promise this build can keep. The level is
+    // one of the grammar's three words, so naming it repeats nothing else.
+    const level = m[2] as AdmissionLevel;
+    if (!WORKER_ENFORCED_LEVELS.has(level)) {
+      throw refuse(`entry ${i + 1} asks for ${level}, which no worker in this build enforces yet (nothing reads ${ADMISSION_LEVEL_ENV}); name it at trade or leave it out`);
+    }
+    levels.set(tenant, level);
   });
   return { scope: "list", levels };
 }
@@ -152,7 +189,7 @@ export function rolloutLevel(tenant: string, env: Env = process.env): RolloutLev
   return rollout.levels.get(tenant.toLowerCase()) ?? "held";
 }
 
-/** Out of the rollout: nothing is started, leased, killed or retired for it. */
+/** Out of the rollout: nothing is started or leased for it. Its owner's kill, and an expired key's scrub, still are carried out. */
 export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
   return rolloutLevel(tenant, env) === "held";
 }
@@ -160,8 +197,10 @@ export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
 /**
  * The level a child's environment carries. A held tenant is never spawned
  * (every spawn path asks rolloutHeld first), so `held` cannot reach here in
- * practice; were it to, the child gets the most restrictive level a worker
- * understands rather than an unset variable or a word it does not know.
+ * practice; were it to, the child gets the grammar's most restrictive level
+ * rather than an unset variable or a word no worker knows. (No worker in this
+ * tree obeys `observe` yet, which is why WORKER_ENFORCED_LEVELS keeps anyone
+ * who is spawned at `trade`.)
  */
 export function childAdmissionLevel(tenant: string, env: Env = process.env): AdmissionLevel {
   const level = rolloutLevel(tenant, env);
@@ -183,11 +222,22 @@ export function rolloutAdmitsWholeFleet(env: Env = process.env): boolean {
   }
 }
 
+/**
+ * THE ROSTER, AS THE HEARTBEAT SAYS IT. The three levels count tenants the
+ * rollout admits that have a key which has not expired and no accounting hold:
+ * admitted, which is not the same as running (a lease another replica holds,
+ * the process cap, a book whose restore failed). Everybody else is one of the
+ * two buckets nothing runs for, so a figure under `trade` is never a tenant
+ * that cannot trade whatever the rollout says.
+ */
 export interface RolloutCounts {
   trade: number;
   "exits-only": number;
   observe: number;
+  /** Not admitted by the rollout, or named by the accounting hold: the operator holds it. */
   held: number;
+  /** Admitted and not held, but its key has expired: it cannot sign, so nothing runs. */
+  expired: number;
   /**
    * Tenants the value names that the roster does not hold: a typo, or a grant
    * removed since the value was written. Either way the operator meant to admit
@@ -196,11 +246,25 @@ export interface RolloutCounts {
   absent: number;
 }
 
-/** How many of the roster sit at each level, and how many named tenants it lacks. */
-export function rolloutCounts(roster: readonly string[], env: Env = process.env): RolloutCounts {
-  const counts: RolloutCounts = { trade: 0, "exits-only": 0, observe: 0, held: 0, absent: 0 };
+/**
+ * How many of the roster sit at each level, and how many named tenants it
+ * lacks. `accountingHeld` and `unexpired` are reconcile's own answers for the
+ * same pass (lowercase); left out, nobody is accounting-held and no key has
+ * expired.
+ */
+export function rolloutCounts(
+  roster: readonly string[],
+  env: Env = process.env,
+  pass: { accountingHeld?: ReadonlySet<string>; unexpired?: ReadonlySet<string> } = {},
+): RolloutCounts {
+  const counts: RolloutCounts = { trade: 0, "exits-only": 0, observe: 0, held: 0, expired: 0, absent: 0 };
   const present = new Set(roster.map((tenant) => tenant.toLowerCase()));
-  for (const tenant of present) counts[rolloutLevel(tenant, env)] += 1;
+  for (const tenant of present) {
+    const level = rolloutLevel(tenant, env);
+    if (level === "held" || pass.accountingHeld?.has(tenant)) counts.held += 1;
+    else if (pass.unexpired && !pass.unexpired.has(tenant)) counts.expired += 1;
+    else counts[level] += 1;
+  }
   try {
     const rollout = fleetRollout(env);
     if (rollout.scope === "list") for (const tenant of rollout.levels.keys()) if (!present.has(tenant)) counts.absent += 1;
@@ -221,19 +285,24 @@ function scopeName(env: Env): string {
   }
 }
 
-/** The heartbeat's rollout line, every pass, beside the fleet's own. */
-export function rolloutLine(counts: RolloutCounts, env: Env = process.env): string {
+/**
+ * The heartbeat's rollout line, every pass, beside the fleet's own. Null
+ * counts are a pass that could not read the roster: the scope is still said,
+ * and no figure from an older pass is passed off as this one's.
+ */
+export function rolloutLine(counts: RolloutCounts | null, env: Env = process.env): string {
+  if (!counts) return `fleet| rollout ${scopeName(env)} — the last pass could not read the roster`;
   return (
-    `fleet| rollout ${scopeName(env)} — trade ${counts.trade} · exits-only ${counts["exits-only"]} · ` +
-    `observe ${counts.observe} · held ${counts.held}` +
-    (counts.absent > 0 ? ` · named but not in the roster ${counts.absent}` : "")
+    `fleet| rollout ${scopeName(env)} — admitted: trade ${counts.trade} · exits-only ${counts["exits-only"]} · ` +
+    `observe ${counts.observe}; not run: held ${counts.held} · expired ${counts.expired}` +
+    (counts.absent > 0 ? `; named but not in the roster ${counts.absent}` : "")
   );
 }
 
 /** Said once at boot, so the operator who redeployed sees the scope took. */
 export function rolloutStartupLine(rollout: FleetRollout): string {
   if (rollout.scope === "none") {
-    return `fleet rollout: none — no tenant is admitted; grants, homes and pending kills stay as they are, and removed agents are still cleaned up`;
+    return `fleet rollout: none — no tenant is admitted; grants and homes stay as they are, and owners' kills and removed agents are still carried out`;
   }
   if (rollout.scope === "all") {
     return rollout.unset
