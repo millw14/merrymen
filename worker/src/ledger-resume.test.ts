@@ -447,6 +447,49 @@ describe("registerAttestedGapSource", () => {
     assert.equal((p.f.raw.prepare("SELECT source_identity FROM tenant_ledger_import WHERE tenant = ?").get(p.f.tenant) as { source_identity: string }).source_identity, r.generation);
     assert.equal((p.f.raw.prepare("SELECT state FROM ledger_resume_approvals").get() as { state: string }).state, "registered");
   });
+  it("a crash between the book's O_EXCL create and its identity converges: a 0-byte book, and a schema-only book, are finished on the same generation", async () => {
+    for (const leftover of ["empty", "schema-only"] as const) {
+      const p = await prepared();
+      mkdirSync(p.home, { recursive: true, mode: 0o700 });
+      const file = path.join(p.home, "merrymen.db");
+      writeFileSync(file, "", { mode: 0o600 });
+      if (leftover === "schema-only") {
+        const half = new DatabaseSync(file);
+        try { await applyLedgerSchema(wrapSqlite(half)); } finally { half.close(); }
+      }
+      const r = await registerAttestedGapSource(p.args);
+      assert.equal(r.generation, p.args.generation, leftover);
+      assert.equal((p.f.raw.prepare("SELECT state FROM ledger_resume_approvals").get() as { state: string }).state, "registered", leftover);
+      assert.equal((p.f.raw.prepare("SELECT source_identity FROM tenant_ledger_import WHERE tenant = ?").get(p.f.tenant) as { source_identity: string }).source_identity,
+        p.args.generation, leftover);
+      const book = new DatabaseSync(file, { readOnly: true });
+      try {
+        assert.equal((book.prepare("SELECT book_id FROM ledger_source_identity").get() as { book_id: string }).book_id, p.args.generation);
+        assert.equal((book.prepare("SELECT count(*) AS n FROM trades").get() as { n: number }).n, 0);
+      } finally { book.close(); }
+    }
+  });
+  it("a book at the path that holds a row, or another generation's identity, refuses and moves nothing", async () => {
+    for (const foreign of ["a-row", "other-identity"] as const) {
+      const p = await prepared();
+      mkdirSync(p.home, { recursive: true, mode: 0o700 });
+      const file = path.join(p.home, "merrymen.db");
+      const other = new DatabaseSync(file);
+      try {
+        await applyLedgerSchema(wrapSqlite(other));
+        if (foreign === "a-row") other.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'info', 'x', 1)").run(p.f.account);
+        else {
+          other.exec("CREATE TABLE ledger_source_identity (id INTEGER PRIMARY KEY CHECK (id = 1), book_id TEXT NOT NULL, tenant TEXT NOT NULL, smart_account TEXT NOT NULL, chain_id INTEGER NOT NULL)");
+          other.prepare("INSERT INTO ledger_source_identity VALUES (1, '00000000-0000-4000-8000-0000000000ff', ?, ?, 4663)").run(p.f.tenant, p.f.account);
+        }
+      } finally { other.close(); }
+      chmodSync(file, 0o600);
+      await assert.rejects(registerAttestedGapSource(p.args), /refused/, foreign);
+      assert.deepEqual(p.f.raw.prepare("SELECT table_name, last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? ORDER BY table_name").all(p.f.tenant).map((x) => ({ ...x })),
+        p.before.marks, foreign);
+      assert.equal((p.f.raw.prepare("SELECT state FROM ledger_resume_approvals").get() as { state: string }).state, "archived", foreign);
+    }
+  });
   it("refuses a staged original import, an approval in another state, a different owner, and a lost lease — each moving nothing", async () => {
     for (const make of [
       async () => { const p = await prepared(); p.f.raw.prepare(`INSERT INTO tenant_ledger_import (tenant, generation, target_volume_id, state, bytes, sha256, source_digest, bindings_json,
@@ -463,4 +506,3 @@ describe("registerAttestedGapSource", () => {
   });
 });
 
-void chmodSync;

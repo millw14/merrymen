@@ -581,6 +581,44 @@ export const ATTESTED_SNAPSHOT_TABLES = ["positions", "cost_basis", "position_fl
 export interface AttestedGapReceipt { generation: string; receiptDigest: string; mirrorStateDigest: string; snapshotDigest: string }
 
 /**
+ * BRING THE ATTESTED BOOK AT `file` TO "EMPTY, WITH THIS GENERATION AS ITS
+ * IDENTITY", from wherever an earlier call stopped: just created (0 bytes),
+ * schema half or wholly applied, or finished. Idempotent.
+ *
+ * An identity already present must be this generation's (anything else is
+ * another book: refuse). With none, the file must hold no row in ANY table,
+ * named or not, and no non-zero sequence, before anything is written into it:
+ * the proof that it is the empty book this generation created and nobody
+ * else's. Then the schema (idempotent) and the identity, in one SQLite
+ * transaction, synchronous and journalled so a crash inside it rolls back to
+ * the identity-less state this function starts from.
+ */
+async function finishAttestedBook(file: string, tenant: string, account: string, chainId: number, generation: string): Promise<void> {
+  const raw = new DatabaseSync(file);
+  try {
+    raw.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL");
+    if (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ledger_source_identity'").get()) {
+      if (readSourceIdentity(raw, tenant, account, chainId) !== generation) throw refuse();
+      return;
+    }
+    const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: unknown }>)
+      .map(t => String(t.name));
+    for (const table of tables) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(table)) throw refuse();
+      if ((raw.prepare(`SELECT count(*) AS n FROM "${table}"`).get() as { n: number }).n !== 0) throw refuse();
+    }
+    if (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'").get()) {
+      const stmt = raw.prepare("SELECT seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
+      if (stmt.all().some(row => row.seq !== 0n)) throw refuse();
+    }
+    await applyLedgerSchema(wrapSqlite(raw));
+    raw.exec("BEGIN IMMEDIATE");
+    try { createSourceIdentity(raw, tenant, account, chainId, generation); raw.exec("COMMIT"); }
+    catch (e) { raw.exec("ROLLBACK"); throw e; }
+  } finally { raw.close(); }
+}
+
+/**
  * A NEW EMPTY BOOK FOR A TENANT WITH HISTORY, UNDER AN OPERATOR'S APPROVAL.
  *
  * The narrow variant of registerLedgerSource's new-book branch, and the only
@@ -617,7 +655,15 @@ export interface AttestedGapReceipt { generation: string; receiptDigest: string;
  *
  * RE-ENTRY IS KEYED BY GENERATION. A crash after the book was created and
  * before the commit leaves an empty book whose identity IS this generation;
- * the next call proves that and continues. Any other file at the path refuses.
+ * the next call proves that and continues. A crash between the O_EXCL create
+ * and the identity's commit — Railway's SIGKILL at the end of the drain, an
+ * OOM kill, ENOSPC inside the schema — leaves a 0-byte or schema-only book
+ * with NO identity, and that is this call's own too: it is proved to hold no
+ * row in any table before its schema and this generation are written into
+ * it (finishAttestedBook), exactly as registerLedgerSource finishes its own
+ * interrupted empty book. Without that, every retry refused and the approval
+ * sat `archived` for good. Any other file at the path — a row anywhere, or
+ * another generation's identity — refuses.
  */
 export async function registerAttestedGapSource(o: {
   tenant: string; smartAccount: string; chainId: number; owner: string; home: string; volume: LedgerImportVolume;
@@ -666,22 +712,20 @@ export async function registerAttestedGapSource(o: {
       }
     }
     const snapshotDigest = hash(canonical(snapshot));
-    // The new empty book, or this generation's own from a call that did not commit.
+    // The new empty book, or this generation's own from a call that did not
+    // finish. Created O_EXCL; a file already at the path is this call's own
+    // only if it is a private plain file on the volume AND either carries this
+    // generation as its identity, or carries no identity yet and holds
+    // nothing at all (finishAttestedBook proves which).
     if (present(file)) {
       privateBook(file);
       if (String(lstatSync(file, { bigint: true }).dev) !== o.volume.device) throw refuse();
-      verifySourceIdentity(file, tenant, account, o.chainId, o.generation);
     } else {
       const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); fchmodSync(fd, 0o600); closeSync(fd);
-      const created = new DatabaseSync(file);
-      try {
-        await applyLedgerSchema(wrapSqlite(created));
-        created.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; BEGIN IMMEDIATE");
-        try { createSourceIdentity(created, tenant, account, o.chainId, o.generation); created.exec("COMMIT"); }
-        catch (e) { created.exec("ROLLBACK"); throw e; }
-      } finally { created.close(); }
-      chmodSync(file, 0o600); syncFile(file); fsyncDirSync(o.home);
+      fsyncDirSync(o.home);
     }
+    await finishAttestedBook(file, tenant, account, o.chainId, o.generation);
+    chmodSync(file, 0o600); syncFile(file); fsyncDirSync(o.home);
     const raw = new DatabaseSync(file, { readOnly: true });
     try {
       for (const table of names) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
