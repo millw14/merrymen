@@ -1,15 +1,16 @@
-# Hosted merrymen — ONE image, TWO services.
+# Hosted merrymen — ONE image, TWO services, THREE roles.
 #
-# The same image runs either the Next.js dashboard (the web service) or the
-# process-per-tenant supervisor (the orchestrator service); the role is picked by
-# the MERRYMEN_START env var per service (see the CMD at the bottom + docs/
-# hosted-deploy.md). railway.json deliberately sets NO startCommand and NO
-# healthcheck, so this one image + a single per-service variable is the only
-# difference between the two — and the orchestrator, which serves no HTTP, is
-# never failed by a path healthcheck it can't answer. Both need the whole monorepo
-# present: the web build resolves packages/core + worker from source via tsconfig
-# paths (next.config externalDir), and the orchestrator runs worker/src directly
-# with tsx at runtime.
+# The same image runs the Next.js dashboard (the web service), or — on the
+# orchestrator service — the process-per-tenant supervisor or the recovery reply
+# listener. The role is picked by the MERRYMEN_START env var per service, and it
+# is scripts/container-start.sh that reads it, holds it to an allowlist and execs
+# the role, under tini (the ENTRYPOINT/CMD at the bottom; docs/hosted-deploy.md).
+# railway.json deliberately sets NO startCommand and NO healthcheck, so this one
+# image + a single per-service variable is the only difference between them — and
+# the orchestrator, which serves no HTTP, is never failed by a path healthcheck it
+# can't answer. All need the whole monorepo present: the web build resolves
+# packages/core + worker from source via tsconfig paths (next.config
+# externalDir), and the other two run worker/src directly with tsx at runtime.
 #
 # node:22 (not alpine) for glibc + a node new enough for the built-in node:sqlite
 # the worker uses (>= 22.12).
