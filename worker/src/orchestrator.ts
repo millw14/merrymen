@@ -4462,9 +4462,21 @@ function drainReleasableLeases(): string[] {
  * SIGKILL, or a copy of its own still in flight that the drain could only
  * queue behind. The next owner's spawn copies what is left
  * (finalMirrorBeforeAnchor), as after any crash.
+ *
+ * Nor under FLEET_HALT. An operator who creates it has frozen the shared
+ * ledger — for accounting work by hand, say — and every other halt path
+ * honours that: honourFleetHalt stands the fleet down and lets its leases go
+ * with no final mirror, and the main loop mirrors nothing while the file is
+ * there. A redeploy that lands before the halt's first pass has stood a child
+ * down is no reason to write ledger batches and memory rows under it. Asked
+ * per home, so a halt made during the drain stops the rest.
  */
 async function drainFinalPass(home: DrainHome): Promise<FinalPassOutcome> {
   const { tenant, lease } = home;
+  if (haltRequested()) {
+    log(`${tenant}: FLEET_HALT is present — no final pass; its home is left for the next owner's spawn once the halt is lifted`);
+    return "skipped";
+  }
   if (!lease || leases.get(tenant) !== lease || !lease.healthy()) {
     log(`${tenant}: lease gone before the drain's final pass — its home is left for the next owner's spawn to copy`);
     return "skipped";
