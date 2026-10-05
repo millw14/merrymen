@@ -51,7 +51,7 @@ export const RECENT_BEAT_SEC = 24 * 3600;
 
 /**
  * THE INCIDENT WINDOW, unix seconds, both ends inclusive:
- * 2026-10-03T00:00:00Z to 2026-10-06T00:00:00Z.
+ * 2026-10-04T00:00:00Z to 2026-10-06T00:00:00Z.
  *
  * Trading was halted fleet-wide, and every hosted worker stopped beating with
  * it. From about 03:18 UTC on 10-05 — a day after those last beats — the rule
@@ -60,15 +60,21 @@ export const RECENT_BEAT_SEC = 24 * 3600;
  * stopped them, and nothing they or their owners could do would restart them.
  *
  * A last beat inside this window is the account's OWN evidence that it was
- * running when the incident began. It opens a day before those last beats, so
- * an agent that stopped while the incident developed on 10-03 is not judged
- * by a guess at the exact minute: opened too early, a row that would have
- * folded says "Not running", which is true; opened too late, a held agent
- * leaves the board without a word. It closes at a fixed moment because
- * nothing beats while the fleet is halted — a worker the resume restarts
- * beats after it and is judged by the ordinary rules again. An account the
- * resume never restarts keeps its "Not running" row until this window is
- * retired, which is a deliberate one-line change once the holds have cleared.
+ * running when the incident began. It opens at the start of 10-04, a few
+ * hours before the fleet's last beats at about 03:18Z — no earlier, so that an
+ * agent whose key lapsed or whose owner stopped it on 10-03, before the halt,
+ * is not credited to the hold. NOTHING IN THE CODE RECORDS THE HALT'S MINUTE:
+ * FLEET_HALT carries no time, and a hold row's `since_at` is when the row was
+ * written (18:36Z on 10-04 for this incident's rows), not when trading
+ * stopped. These bounds are therefore an operator's reading of the incident,
+ * and Milla confirms them before this ships.
+ *
+ * It closes at a fixed moment because nothing beats while the fleet is halted
+ * — a worker the resume restarts beats after it and is judged by the ordinary
+ * rules again. An account the resume never restarts keeps its "Not running"
+ * row until this window is retired. RETIRE IT once the holds have cleared:
+ * delete this constant and every use of it, and the board is main's again.
+ * That is a tracked follow-up, not something this module does on a date.
  *
  * FIXED, NOT READ OFF THE FLEET. "The fleet's newest heartbeat" is a MAX over
  * other tenants' rows, written in two units, and one millisecond stamp among
@@ -76,7 +82,7 @@ export const RECENT_BEAT_SEC = 24 * 3600;
  * beat, normalised on its own row, and by nothing else.
  */
 export const INCIDENT_WINDOW = {
-  fromSec: 1_790_985_600,
+  fromSec: 1_791_072_000,
   untilSec: 1_791_244_800,
 } as const;
 
@@ -90,11 +96,29 @@ function beating(a: AgentLifecycle, nowSec: number): boolean {
 }
 
 /**
+ * OVER BEFORE THE HOLD BEGAN, on the account's own evidence: the ordinary
+ * rules in isRetired had already folded it by the time the window opened.
+ * Its key had lapsed — by its own expiry, or by its worker's word when the
+ * row carries no expiry to date that by — or it was idle and had already been
+ * silent for a day. The hold did not stop an agent that was over before it,
+ * so neither a beat nor a hold row recorded for it since brings it back: the
+ * reporter writes rows for stopped and expired tenants alike, and a key that
+ * lapsed last year is not "Not running" because of this incident.
+ */
+function overBeforeHold(a: AgentLifecycle): boolean {
+  const from = INCIDENT_WINDOW.fromSec;
+  const lapsed =
+    a.expiresAt !== null && Number.isFinite(a.expiresAt) ? seconds(a.expiresAt) < from : a.status === "expired";
+  return lapsed || (a.mode === "idle" && !beating(a, from));
+}
+
+/**
  * WHETHER THE RECOVERY HOLD EXPLAINS THIS ACCOUNT'S SILENCE.
  *
  * Only ever on the account's own evidence: its own hold row, or its own last
  * beat inside the incident window. Never another tenant's row, and never a
- * fleet-wide figure.
+ * fleet-wide figure. And never for an account that was over before the hold
+ * began — see overBeforeHold.
  *
  * A NAMED account only. An account with no public id has nothing to show but
  * the clone row this module exists to fold, held or not. And never a killed
@@ -102,6 +126,7 @@ function beating(a: AgentLifecycle, nowSec: number): boolean {
  */
 export function silencedByHold(a: AgentLifecycle): boolean {
   if (a.slug === null || a.status === "killed") return false;
+  if (overBeforeHold(a)) return false;
   if (a.held === true) return true;
   if (a.beatAt === null || !Number.isFinite(a.beatAt)) return false;
   const beat = seconds(a.beatAt);
