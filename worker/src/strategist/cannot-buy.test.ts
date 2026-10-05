@@ -49,6 +49,7 @@ function build(actions: unknown[], over: { curve?: boolean } = {}) {
   let seen: Signals | null = null;
   const decisions: StrategistDecision[] = [];
   const notes: string[] = [];
+  const levels: string[] = [];
   const driver: ProposalDriver = {
     name: "spy",
     propose: async (signals) => {
@@ -77,9 +78,12 @@ function build(actions: unknown[], over: { curve?: boolean } = {}) {
       : {}),
     decisionIntervalMs: 0,
     onDecision: (d) => void decisions.push(d),
-    onNote: (_level, m) => void notes.push(m),
+    onNote: (level, m) => {
+      notes.push(m);
+      levels.push(level);
+    },
   });
-  return { s, decisions, notes, signals: () => seen as Signals | null };
+  return { s, decisions, notes, levels, signals: () => seen as Signals | null };
 }
 
 const tickOf = async (s: Strategy, sn: Snapshot): Promise<Tick> => {
@@ -139,6 +143,19 @@ describe("and held to it", () => {
     assert.ok(!b.decisions.some((d) => d.symbol === "MEME"), "never journaled — a published buy that could not happen");
     assert.ok(!b.decisions.some((d) => d.dropped_rule?.includes("MEME")), "and not as a published drop either");
     assert.ok(b.notes.some((n) => /1 buy proposal\(s\) withheld — the signed key can't sell MEME back/.test(n)));
+  });
+
+  it("THE OWNER IS WARNED ONCE PER CHANGE — at warn, where a refusal used to be, and not every window", async () => {
+    const b = build([BUY_MEME]);
+    const lockedLevels = () => b.levels.filter((_, i) => /can't sell MEME back/.test(b.notes[i] ?? ""));
+    for (let window = 0; window < 3; window++) await tickOf(b.s, snap());
+    // The first window replaces the `no-exit` refusal the owner used to see at
+    // warn; the repeats still log, at ok, which no owner surface renders.
+    assert.deepEqual(lockedLevels(), ["warn", "ok", "ok"]);
+    // A re-sign covers MEME, then a later one drops it again: a new fact.
+    await tickOf(b.s, snap({ entryGates: entryGatesOf({ allowedAssets: [USDG, TSLA, MEME], sellableAssets: [USDG, TSLA, MEME] }) }));
+    await tickOf(b.s, snap());
+    assert.deepEqual(lockedLevels(), ["warn", "ok", "ok", "warn"]);
   });
 
   it("A SELL OF THE SAME COIN IS UNTOUCHED — the gate is never asked about an exit", async () => {
