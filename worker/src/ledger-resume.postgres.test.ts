@@ -119,6 +119,16 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const again = await armOwnerControls({ scope, home: armHome, shared, mayWrite: () => true, forwardKill: async () => "none" });
     assert.deepEqual(again.ok && again.applied, []);
     assert.equal(Number((await main.query("SELECT count(*) AS n FROM recovery_reply_control_receipts")).rows[0]!.n), 1);
+    // The owner's /resume, mirrored (events' BIGINT id and created_at come back
+    // as strings here), then the home lost with no arm in between: the rebuilt
+    // home is not paused again, and the stamp is lifted.
+    const stamp = (await readDurablePause(shared, tenant))!;
+    rmSync(path.join(armHome, "paused"));
+    await main.query("INSERT INTO events (agent_id, level, message, created_at) VALUES ($1, 'warn', 'Telegram: resumed by chat 5', $2)", [account, stamp + 1]);
+    rmSync(armHome, { recursive: true, force: true });
+    const rebuilt = await armOwnerControls({ scope, home: armHome, shared, mayWrite: () => true, forwardKill: async () => "none" });
+    assert.deepEqual(rebuilt, { ok: true, paused: false, applied: [] });
+    assert.equal(await readDurablePause(shared, tenant), null);
   });
 
   await t.test("approvals: one open per tenant, enforced by the index as well as the code", async () => {
