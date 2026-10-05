@@ -44,8 +44,19 @@ export interface SettingsProposalProps {
   /** Tickers a basket may name. */
   symbols: readonly string[];
   hosted: boolean;
+  /**
+   * Whether this deployment runs Fomo research (/api/auth/session `fomo`).
+   * False: the Fomo switches are left out of any proposal, as the save would
+   * ignore them. Null or absent (not known yet): nothing is left out.
+   */
+  fomo?: boolean | null;
   /** After a successful approval, so the page can re-read what is saved. */
   onApplied: () => void;
+}
+
+/** A proposal's changes without the Fomo switches, where the deployment does not run Fomo. */
+function withoutFomoWhereOff<T extends { key: string }>(changes: readonly T[], fomo: boolean | null | undefined): T[] {
+  return fomo === false ? changes.filter((c) => !/^fomo/.test(c.key)) : [...changes];
 }
 
 const EXAMPLES = ["each buy $20, stop loss 8%", "be more careful", "only trade stocks", "message me once an hour", "hunt memecoins"];
@@ -94,7 +105,7 @@ export function SettingsProposal(props: SettingsProposalProps) {
       return;
     }
     if (!param) return;
-    const changes = decodeProposalLink(param);
+    const changes = withoutFomoWhereOff(decodeProposalLink(param), props.fomo);
     setFromLink(true);
     setProposal(buildProposal(changes, current, { symbols: props.symbols, hosted: props.hosted }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -105,7 +116,7 @@ export function SettingsProposal(props: SettingsProposalProps) {
     setStatus("idle");
     setApplied([]);
     setFromLink(false);
-    setProposal(buildProposal(understandSettingsText(text), current, { symbols: props.symbols, hosted: props.hosted }));
+    setProposal(buildProposal(withoutFomoWhereOff(understandSettingsText(text), props.fomo), current, { symbols: props.symbols, hosted: props.hosted }));
   };
 
   const clearLink = () => {

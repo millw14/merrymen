@@ -639,8 +639,21 @@ export class FunnelRecorder {
     this.blocks.clear();
   }
 
-  /** File one observation. False when the token is not an address (nothing is filed). */
+  /**
+   * File one observation. False when the token is not an address (nothing is
+   * filed). NEVER THROWS, nor do note() and block(): they are called on the
+   * trading path, one of them right before a fill's ledger row is written, and
+   * a reading aid must never be what costs a trade its record.
+   */
   record(r: FunnelRecord): boolean {
+    try {
+      return this.recordUnguarded(r);
+    } catch {
+      return false;
+    }
+  }
+
+  private recordUnguarded(r: FunnelRecord): boolean {
     const token = typeof r.token === "string" ? r.token.toLowerCase() : "";
     if (!ADDRESS.test(token) || !STEPS_ORDER.includes(r.stage)) return false;
     const at = typeof r.at === "number" && Number.isFinite(r.at) ? r.at : this.now();
@@ -672,14 +685,26 @@ export class FunnelRecorder {
     return true;
   }
 
-  /** `record` from a classification; a null classification files nothing. */
+  /** `record` from a classification; a null classification files nothing. Never throws. */
   note(token: string, symbol: string | null | undefined, c: Classified | null, at?: number): boolean {
-    if (!c) return false;
-    return this.record({ token, symbol, stage: c.stage, detail: c.detail, decisionId: c.decisionId, candidateAction: c.candidateAction, enforcedAction: c.enforcedAction, paper: c.paper, at });
+    try {
+      if (!c) return false;
+      return this.record({ token, symbol, stage: c.stage, detail: c.detail, decisionId: c.decisionId, candidateAction: c.candidateAction, enforcedAction: c.enforcedAction, paper: c.paper, at });
+    } catch {
+      return false;
+    }
   }
 
-  /** A whole tick that reviewed or entered nothing, and why. Not per coin. */
+  /** A whole tick that reviewed or entered nothing, and why. Not per coin. Never throws. */
   block(block: TickBlock | null, at?: number): void {
+    try {
+      this.blockUnguarded(block, at);
+    } catch {
+      // a reading aid; the tick goes on
+    }
+  }
+
+  private blockUnguarded(block: TickBlock | null, at?: number): void {
     if (!block) return;
     const c = classifyStage({ kind: "tick-block", block });
     const t = typeof at === "number" && Number.isFinite(at) ? at : this.now();

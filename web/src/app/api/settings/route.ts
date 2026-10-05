@@ -30,6 +30,7 @@ import {
   type SecretSettingKey,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
@@ -806,8 +807,15 @@ async function saveSettings(
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────
+  // THE FOMO SWITCHES ONLY WHERE THIS DEPLOYMENT RUNS FOMO (fomo-switch.ts).
+  // Elsewhere they would be stored and do nothing — until an operator turned
+  // Fomo on, when a consent given to a switch nobody could see (the real-money
+  // "act on Fomo research" among them) would quietly take effect. Not saved,
+  // and reported back in `ignored` like any key this deployment does not take.
+  const fomoHere = fomoEnabledFor(isHostedMode());
   for (const key of BOOL_FIELDS) {
     if (!(key in body)) continue;
+    if (!fomoHere && /^fomo/.test(key)) continue;
     const v = body[key];
     if (v === null || v === undefined) setOrClear(key, undefined);
     else if (typeof v === "boolean") setOrClear(key, v as never);

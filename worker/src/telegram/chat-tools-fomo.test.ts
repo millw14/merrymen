@@ -284,6 +284,9 @@ describe("C12: somebody else's trades are never read off the owner's ledger", ()
     ["show the agent's trades", false],
     ["show Shogun's trades", false],
     ["what did you trade today?", false],
+    // The owner's own book, with a pronoun for its coins: still the ledger's answer.
+    ["what did you buy today? are they still up?", false],
+    ["show my trades, are they green?", false],
   ];
   for (const [q, someoneElse] of ROWS) {
     it(`${JSON.stringify(q)} is ${someoneElse ? "somebody else's" : "the owner's"}`, async () => {
@@ -309,5 +312,10 @@ describe("telegram/service.ts carries Fomo off to every lane", () => {
   });
   it("a DM is never asked of the research", () => {
     assert.match(SRC, /const fomoDm = async \([^)]*\): Promise<string \| null> => \{\s*\/\/[^\n]*\n\s*if \(deps\.fomoOff === true\) return null;/);
+  });
+  it("the classifier is told, and /set names no Fomo switch", () => {
+    assert.match(SRC, /replyContext: msg\.replyTo\?\.text, fomoOff: deps\.fomoOff === true \}/);
+    assert.match(SRC, /const fomoGone = \(k: string\): boolean => deps\.fomoOff === true && \/\^fomo\/i\.test\(k\.trim\(\)\);\s*if \(fomoGone\(setting\)\) setting = "unknown";/);
+    assert.match(SRC, /const requested = requestedChanges\(setting, value, changes\)\.filter\(\(r\) => !fomoGone\(r\.key\)\);/);
   });
 });

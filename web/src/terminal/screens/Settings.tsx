@@ -766,6 +766,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           owner={view.owner}
           symbols={[...view.knownSymbols, ...(view.values.customTokens ?? []).map((tk) => tk.symbol.toUpperCase())]}
           hosted={view.owner !== null}
+          fomo={fomoOn}
           onApplied={() => setLoadAttempt((x) => x + 1)}
         />
       </div>

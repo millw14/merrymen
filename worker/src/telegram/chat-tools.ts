@@ -484,7 +484,14 @@ const OWN_BOOK_POSSESSORS = new Set(["today","yesterday","tonight","day","week",
  */
 export function asksAboutSomeoneElsesTrades(question: string, agentName?: string | null): boolean {
   const q = question.replace(/[‘’ʼ]/g, "'");
-  if (/\b(?:their|theirs|they|them|his|her|hers|he|she)\b/i.test(q)) return true;
+  // A PRONOUN IS A THIRD PARTY ONLY WHERE NOBODY ELSE IS NAMED: "show their
+  // trades" after a trader answer is someone else's; "what did you buy today?
+  // are they still up?" is the owner's own book, and "they" are its coins.
+  const ownBook =
+    /\b(?:my|mine|our|ours|your|yours)\b/i.test(q) ||
+    /\b(?:did|do|does|have|has|are|were|will|would|can|could)\s+(?:you|we|i)\b/i.test(q) ||
+    /\b(?:you|we|i)\s+(?:just\s+)?(?:buy|bought|sell|sold|trade|traded|hold|held|own|got|get|ape|aped|enter|entered|exit|exited)\b/i.test(q);
+  if (!ownBook && /\b(?:their|theirs|they|them|his|her|hers|he|she)\b/i.test(q)) return true;
   if (/(?:^|[^\w@])@[A-Za-z0-9_]{1,32}\b/.test(q)) return true;
   const self = new Set(String(agentName ?? "").toLowerCase().split(/\s+/).filter(Boolean));
   for (const m of q.matchAll(/\b([a-z0-9_]{2,30})'s\s+(?:\S+\s+)?(?:trades?|buys|sells|fills|history|bags|holdings|positions)\b/gi)) {

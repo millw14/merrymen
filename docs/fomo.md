@@ -37,13 +37,16 @@ next deploy of each service:
   - Paused stock tokens are excluded from the Brain's focus and from the fast-Trencher
     candidate filter. Both looked the address set up by symbol, so a paused token was
     never excluded.
-  - Instrumentation:
+  - Instrumentation (it never throws; every call is guarded):
     - a per-coin decision funnel, with one aggregated log line per 10 minutes for
       fast-Trencher agents;
     - a superseded unused BUY or SELL is logged;
-    - Brain gate fields and a `refusal_reason` are added at the end of decision rows'
-      `signals_json`.
-  - A portfolio-quality refusal is logged as itself rather than as "Brain unavailable".
+    - Brain gate fields are appended at the end of decision rows' `signals_json`;
+    - refusal rows gain a `refusal_reason`;
+    - the `[brain] gate` log line gains `proposed=`.
+  - Log wording only: Brain non-decision log lines name their actual outcome (a
+    portfolio-quality refusal, an unusable answer, an exhausted budget, an unreachable
+    Brain) instead of all reading "Brain unavailable".
   - The regular Trencher candidate list is built by `regularEntryPools`. It is identical
     while no early or verify-only pool exists, which is always the case with Fomo off.
 - **Orchestrator:**
@@ -53,10 +56,15 @@ next deploy of each service:
 - **Web:**
   - The chat route reads the recovery hold before anything else, which was already
     main's order.
-  - Settings GET masks a stored `fomoApiKey` like every other secret, and PUT accepts the
-    three Fomo booleans. The page shows no Fomo section while Fomo is off.
+  - Settings GET always includes a masked `fomoApiKey` field (`{set:false}` when nothing
+    is stored) and the three Fomo defaults.
+  - Settings PUT does not save the three Fomo booleans while Fomo is off; they are
+    reported in `ignored`. Telegram `/set` and the Settings proposal box leave them out
+    too, so no consent can be stored for a switch nobody can see.
+  - The page shows no Fomo section while Fomo is off.
   - `/api/auth/session` adds a `fomo` flag.
-  - The new `/api/fomo/status` route answers 404 "not enabled".
+  - The new `/api/fomo/status` route answers 401 when signed out and 404 "not enabled"
+    otherwise.
 
 | Area | Status |
 |---|---|
@@ -521,6 +529,14 @@ MERRYMEN_FOMO_API_KEY=… npx tsx scripts/fomo-probe.mts [--theses] [--trader] [
    close any follow or early positions first. Follow is paper-only until Stage E.
 2. Or, to keep the switch on but spend nothing: unset `MERRYMEN_FOMO_API_KEY` on the web
    and orchestrator. Lookups answer "not configured".
+
+**Turning it on, the first time.** With Fomo on, every hosted agent's scout gate counts
+what Fomo exploration holds, and while that ledger cannot be read over IPC it charges
+every open Trencher position's cost instead, which errs toward refusing. So:
+
+- confirm the orchestrator logs `fomo: on` and that its runtime builds on the first pass;
+- then watch scout-gate refusals for a few ticks;
+- unsetting the switch makes that term exactly 0 again.
 3. Owners' `fomoFollowEnabled` defaults to off. Turning it off stops nominations at the
    next tick. Open positions keep their normal exits.
 4. The schema is additive (`fomo_*` tables only). Leaving it in place is harmless; dropping

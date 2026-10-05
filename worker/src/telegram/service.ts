@@ -1041,10 +1041,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           signedPerTradeUsdg: deps.grantPerTradeUsdg(),
           agentName: getName(),
         };
+        // NO FOMO SWITCH WHERE FOMO IS OFF in this process (fomo-child.ts
+        // childFomoOff): "/set fomo on" and a Fomo key among several changes
+        // are read as they were before Fomo existed — not a setting.
+        const fomoGone = (k: string): boolean => deps.fomoOff === true && /^fomo/i.test(k.trim());
+        if (fomoGone(setting)) setting = "unknown";
         // SEVERAL AT ONCE, OR A SETTING ONLY THE DASHBOARD CHANGES: one
         // proposal, one approval — here if every change is the chat's to make,
         // otherwise one button that opens Settings with all of them filled in.
-        const requested = requestedChanges(setting, value, changes);
+        const requested = requestedChanges(setting, value, changes).filter((r) => !fomoGone(r.key));
         if (wantsManyPath(requested)) {
           const m = proposeManyChanges(requested, ctx);
           if (m.kind === "ask-many") {
