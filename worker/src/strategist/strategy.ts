@@ -292,6 +292,23 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
    * like from here.
    */
   const floorFired = new Set<string>();
+  /**
+   * The locked symbols the owner has already been warned about, for the gate
+   * set they were warned under (`cannotBuy`, sorted and joined) — so a withheld
+   * buy is a `warn` once per symbol per change, not once per window.
+   *
+   * A WARN, BECAUSE IT REPLACES ONE. Before the gate, the same buy reached
+   * checkPolicy and the owner's refusal notice said `no-exit` at warn; the
+   * withheld note is now where the "re-sign at /grant" remedy lives, and an
+   * `ok` line is one no owner surface renders (idle-notice.ts). Once, because
+   * a model that keeps proposing the coin must not post a warn every window —
+   * the repeats still log, at `ok`.
+   *
+   * Forgotten when the gate set changes: a re-sign or a settings change that
+   * covers a coin, or drops one, is a new fact and earns its own warning.
+   */
+  let lockedGates = "";
+  const lockedWarned = new Set<string>();
 
   return {
     name,
@@ -634,10 +651,17 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       }
       // The symbols are the universe's own — `cannotBuy` is drawn from it —
       // so naming them carries nothing the model wrote.
+      const gatesNow = [...cannotBuy].sort().join(",");
+      if (gatesNow !== lockedGates) {
+        lockedGates = gatesNow;
+        lockedWarned.clear();
+      }
       if (locked.length > 0) {
         const names = [...new Set(locked.map((a) => a.symbol))];
+        const fresh = names.some((n) => !lockedWarned.has(n));
+        for (const n of names) lockedWarned.add(n);
         note(
-          "ok",
+          fresh ? "warn" : "ok",
           `strategist: ${locked.length} buy proposal(s) withheld — the signed key can't sell ` +
             `${names.join(", ")} back, so the wall would refuse the buy; ` +
             `re-sign at /grant to cover ${names.length === 1 ? "it" : "them"}`,
