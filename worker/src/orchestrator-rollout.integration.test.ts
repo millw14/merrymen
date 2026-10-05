@@ -2,10 +2,11 @@
  * THE ROLLOUT, THROUGH THE REAL reconcile() (fleet-rollout.ts).
  *
  * A tenant MERRYMEN_FLEET_ROLLOUT does not admit is held: the supervisor
- * leases nothing for it, starts nothing for it, carries out none of its
- * pending kills and retires none of its expired keys, so its home stays as the
- * incident left it. It stays in the roster, so the removed-agent sweep still
- * tells "not admitted" from "removed". And the hold is one predicate
+ * leases nothing for it, starts nothing for it and retires none of its expired
+ * keys, so its home stays as the incident left it. It stays in the roster, so
+ * the removed-agent sweep still tells "not admitted" from "removed". Its
+ * owner's kill is still carried out, as under FLEET_HALT: a kill only takes
+ * authority away. And the hold is one predicate
  * (operatorHold), so it is obeyed by every path that starts a process: the
  * spawn loop, a restart timer already in flight, the holder path, the last
  * check before the fork, and the stand-down of anything already running.
@@ -51,7 +52,7 @@ const {
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore, useSettingsStoreForTest } = await import("./settings-store");
-const { killRequested, writeKillRequest } = await import("./kill-request");
+const { writeKillRequest } = await import("./kill-request");
 const { acquireTenantLease } = await import("./tenant-lease");
 
 const address = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as `0x${string}`;
@@ -148,16 +149,15 @@ function snapshot(dir: string): unknown {
 }
 
 describe("a tenant the rollout does not admit", () => {
-  it("is never leased, spawned, killed, retired or reported, and its home is byte-identical over three passes", async () => {
+  it("is never leased, spawned, retired or reported, and its home is byte-identical over three passes", async () => {
     const admitted = tenantAt(0x101), out = tenantAt(0x201), expired = tenantAt(0x301);
     const outAccount = address(0x202), expiredAccount = address(0x302);
     await store.put(admitted, grant(address(0x102)));
     await store.put(out, grant(outAccount));
     await store.put(expired, grant(expiredAccount, nowSec() - 60));
     // What the incident left in the two held homes: a book nobody may open,
-    // the bot's files, a signing-key copy, and for one of them a /kill its
-    // owner sent that has not been carried out.
-    for (const [tenant, account] of [[out, outAccount], [expired, expiredAccount]] as const) {
+    // the bot's files and a signing-key copy.
+    for (const tenant of [out, expired]) {
       const home = childHome(tenant);
       mkdirSync(home, { recursive: true });
       writeFileSync(path.join(home, "merrymen.db"), "original-book-not-opened", { mode: 0o600 });
@@ -165,9 +165,7 @@ describe("a tenant the rollout does not admit", () => {
       writeFileSync(path.join(home, "telegram.json"), "{}", { mode: 0o600 });
       writeFileSync(path.join(home, "heartbeat.json"), JSON.stringify({ at: nowSec() - 86_400 }), { mode: 0o600 });
       writeFileSync(path.join(home, "grant.json"), JSON.stringify(await store.get(tenant)), { mode: 0o600 });
-      if (tenant === out) writeKillRequest(home, grant(account), nowSec());
     }
-    assert.equal(killRequested(childHome(out)), true);
     // A shared store, so the paused-source report runs at all: it would take
     // a lease for every cold tenant it looks at.
     const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw);
@@ -189,9 +187,6 @@ describe("a tenant the rollout does not admit", () => {
       assert.equal(hasLeaseForTest(out), false);
       assert.equal(hasLeaseForTest(expired), false);
       assert.deepEqual(spawned.map((p) => p.env.MERRYMEN_HOME), [childHome(admitted)], "only the admitted tenant runs");
-      assert.ok(await store.get(out), "its pending kill was not carried out");
-      assert.equal(killRequested(childHome(out)), true, "and is still pending for the pass that admits it");
-      assert.deepEqual(confirmed, []);
       assert.equal(isRetiringExpiredForTest(expired), false, "its expiry is not retired");
       assert.deepEqual(rolloutCountsForTest(), { trade: 0, "exits-only": 0, observe: 1, held: 2, absent: 0 });
 
@@ -200,16 +195,14 @@ describe("a tenant the rollout does not admit", () => {
       assert.equal(env.MERRYMEN_ADMISSION_LEVEL, "observe");
       assert.equal(env.MERRYMEN_FLEET_ROLLOUT, undefined, "the rollout names other tenants; a child never sees it");
 
-      // ADMISSION CARRIES OUT WHAT WAS WAITING, which also shows the homes
-      // above were ones these passes would have changed had they been admitted.
+      // ADMISSION DOES WHAT WAS WAITING, which also shows the homes above were
+      // ones these passes would have changed had they been admitted.
       process.env.MERRYMEN_FLEET_ROLLOUT = `${admitted}:observe,${out}:trade,${expired}:trade`;
       await reconcile();
       await settle();
-      assert.equal(await store.get(out), null, "the kill is carried out before anything could spawn");
-      assert.deepEqual(confirmed, [out]);
-      assert.equal(spawnedFor(out).length, 0, "and nothing was spawned for the killed grant");
-      assert.equal(existsSync(path.join(childHome(out), "settings.json")), false, "its removal clears the cached access");
-      assert.equal(existsSync(path.join(childHome(out), "merrymen.db")), true, "and keeps the original book");
+      assert.ok(leaseAsks.includes(out), "the newly admitted tenant is leased");
+      assert.equal(spawnedFor(out).length, 1, "and started");
+      assert.equal(spawnedFor(out)[0]!.env.MERRYMEN_ADMISSION_LEVEL, "trade");
       assert.equal(existsSync(path.join(childHome(expired), "grant.json")), false, "the expired key's copy is scrubbed once admitted");
       assert.equal(spawnedFor(expired).length, 0, "an expired key still runs nothing");
     } finally {
@@ -231,6 +224,40 @@ describe("a tenant the rollout does not admit", () => {
     assert.equal(existsSync(childHome(b)), false);
     assert.ok(await store.get(a) && await store.get(b), "both grants stay stored: held is not removed");
     assert.deepEqual(rolloutCountsForTest(), { trade: 0, "exits-only": 0, observe: 0, held: 2, absent: 0 });
+  });
+
+  it("still has its owner's kill carried out, by the order ferry and by reconcile, as under FLEET_HALT", async () => {
+    const ferried = tenantAt(0x1f7), reconciled = tenantAt(0x1f9);
+    const ferriedAccount = address(0x1f8), reconciledAccount = address(0x1fa);
+    for (const [tenant, account] of [[ferried, ferriedAccount], [reconciled, reconciledAccount]] as const) {
+      await store.put(tenant, grant(account));
+      const home = childHome(tenant);
+      mkdirSync(home, { recursive: true });
+      writeFileSync(path.join(home, "merrymen.db"), "original-book-not-opened", { mode: 0o600 });
+      writeFileSync(path.join(home, "settings.json"), "{}", { mode: 0o600 });
+    }
+    process.env.MERRYMEN_FLEET_ROLLOUT = "none";
+    // The order ferry's three-second clock (honourPendingKills)...
+    writeKillRequest(childHome(ferried), grant(ferriedAccount), nowSec());
+    await honourPendingKills();
+    assert.equal(await store.get(ferried), null, "the ferry removes a held tenant's revoked grant within seconds");
+    assert.deepEqual(confirmed, [ferried], "and the owner is told");
+    // ...and reconcile's own pass, which must not leave it to the ferry.
+    writeKillRequest(childHome(reconciled), grant(reconciledAccount), nowSec());
+    await reconcile();
+    await settle();
+    assert.equal(await store.get(reconciled), null, "reconcile carries it out too");
+    assert.deepEqual(confirmed, [ferried, reconciled]);
+    for (const tenant of [ferried, reconciled]) {
+      assert.equal(existsSync(path.join(childHome(tenant), "settings.json")), false, "a revoked tenant is removed, and its cached access cleared");
+      assert.equal(existsSync(path.join(childHome(tenant), "merrymen.db")), true, "with its original book kept");
+    }
+    assert.deepEqual(leaseAsks, [], "a kill takes no lease");
+    assert.deepEqual(spawned, []);
+    // Admitting them later arms nothing: the grants are gone.
+    process.env.MERRYMEN_FLEET_ROLLOUT = `${ferried}:trade,${reconciled}:trade`;
+    await reconcile();
+    assert.deepEqual(spawned, []);
   });
 
   it("a named tenant missing from the roster is counted, so a typo is visible", async () => {

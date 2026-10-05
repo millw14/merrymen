@@ -16,11 +16,18 @@
  * else is running, the same reason MERRYMEN_HOLDER_ADDRESS is stripped.
  *
  * A TENANT THE VALUE DOES NOT ADMIT IS `held`. The supervisor starts nothing
- * for it, leases nothing, carries out none of its pending kills and retires
- * none of its expired keys, so its home on the volume stays exactly as the
- * incident left it until it is admitted. It stays in the roster (`wanted`):
- * being out of the rollout is not being removed, and the removed-agent sweep
- * must still be able to tell the two apart.
+ * for it, leases nothing and retires none of its expired keys, so its home on
+ * the volume stays exactly as the incident left it until it is admitted. It
+ * stays in the roster (`wanted`): being out of the rollout is not being
+ * removed, and the removed-agent sweep must still be able to tell the two
+ * apart.
+ *
+ * BUT ITS OWNER CAN STILL REVOKE IT. A pending Telegram /kill is carried out
+ * for a held tenant as for any other, within seconds, exactly as a dashboard
+ * DELETE /api/grants is and as FLEET_HALT has always allowed: a kill only
+ * takes authority away, and its request lives in a home a redeploy may
+ * discard (kill-request.ts). The tenant is then removed, not held, and the
+ * removed-agent sweep keeps its original book as it does for any revoke.
  *
  * ONLY EVER NARROWS. Every gate that already stops a tenant (FLEET_HALT, the
  * accounting hold, a lost lease, a pending kill, the source fences) still
@@ -152,7 +159,7 @@ export function rolloutLevel(tenant: string, env: Env = process.env): RolloutLev
   return rollout.levels.get(tenant.toLowerCase()) ?? "held";
 }
 
-/** Out of the rollout: nothing is started, leased, killed or retired for it. */
+/** Out of the rollout: nothing is started, leased or retired for it. Its owner's kill still is carried out. */
 export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
   return rolloutLevel(tenant, env) === "held";
 }
@@ -233,7 +240,7 @@ export function rolloutLine(counts: RolloutCounts, env: Env = process.env): stri
 /** Said once at boot, so the operator who redeployed sees the scope took. */
 export function rolloutStartupLine(rollout: FleetRollout): string {
   if (rollout.scope === "none") {
-    return `fleet rollout: none — no tenant is admitted; grants, homes and pending kills stay as they are, and removed agents are still cleaned up`;
+    return `fleet rollout: none — no tenant is admitted; grants and homes stay as they are, and owners' kills and removed agents are still carried out`;
   }
   if (rollout.scope === "all") {
     return rollout.unset
