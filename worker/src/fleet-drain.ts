@@ -41,7 +41,9 @@
  *     the next arm (inflight-reconcile.ts). The wait is for each exit to be
  *     SEEN — the final pass never reads a home its process may still write —
  *     and for a process that is stuck or ignores the signal. It is also the
- *     room a graceful worker-side handler would need; that is its own change.
+ *     room a graceful worker-side handler would need — a separate change,
+ *     whose own wait is sized to fit inside this one; until it lands, the
+ *     paragraph above is the whole of what SIGTERM does to a worker.
  *  5. TELEGRAM KILLS still pending in a home, AFTER the children: a child's
  *     last act may be writing one. Capped, as the old stop's was.
  *  6. THE FINAL PASS: each home that had a child or a hold process, copied one
