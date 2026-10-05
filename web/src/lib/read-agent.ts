@@ -478,12 +478,14 @@ export async function profileOf(
     // divides nothing out: every deposit on record is drawn as a gain and
     // every withdrawal as a loss. So no line, and no drawdown taken from one,
     // whatever stopped the read.
-    growthFull = flowsRead ? growthIndex(clean, flows) : [];
+    if (flowsRead) {
+      growthFull = growthIndex(clean, flows);
 
-    // EVERY CLOSE, UNTHINNED. The page slices the windows, so the server no
-    // longer decimates — and with no decimation there is no modulo left that
-    // could drop the newest reading, which is the value the headline divides.
-    growth = flowsRead ? clean.map((p, i) => ({ at: p.at, g: growthFull[i]! })) : [];
+      // EVERY CLOSE, UNTHINNED. The page slices the windows, so the server no
+      // longer decimates — and with no decimation there is no modulo left that
+      // could drop the newest reading, which is the value the headline divides.
+      growth = clean.map((p, i) => ({ at: p.at, g: growthFull[i]! }));
+    }
   } catch {
     /* no history */
   }
