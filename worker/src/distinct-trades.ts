@@ -92,6 +92,26 @@ export function distinctTrades(where: string, alias = "t"): string {
  */
 export const OP_COPY_REACH_SEC = 7 * 86_400;
 
+/**
+ * WHICH OPERATIONS ARE A TRADE, as SQL over `alias`: a fill of a market
+ * position, and nothing else.
+ *
+ * `landed` and `filledPaper` count every operation of their status, and a
+ * vault deposit, an energy purchase or a simulated transfer is one. Printed as
+ * "11 paper trades" beside a profile whose own trade reader (profile-trades.ts,
+ * which keeps only these kinds) found none, that was a count of something the
+ * page never called a trade. So the trades a page names are counted here, on
+ * the same pair.
+ *
+ * RESTATED, NOT IMPORTED: web/src/lib/services/decisions.ts FILL_KINDS is the
+ * definition, and worker/src/mcp/notify.ts restates it for the same reason this
+ * does — the worker may not import web code. A change to one is a change to all
+ * three.
+ */
+export function fillKindSql(alias: string): string {
+  return `${alias}.kind IN ('swap', 'curve-trade')`;
+}
+
 export interface OperationCounts {
   gasUsdg: number;
   unpricedTrades: number;
@@ -99,6 +119,15 @@ export interface OperationCounts {
   filledPaper: number;
   refused: number;
   tokensTouched: number;
+  /**
+   * TRADES, not operations: distinct paper and live fills (fillKindSql).
+   * Beside `filledPaper` and `landed` rather than instead of them, because
+   * those two feed refusals, re-reads and the ranking gate, which count every
+   * operation on purpose — a vault deposit that landed is still evidence the
+   * account executed.
+   */
+  paperFills: number;
+  liveFills: number;
 }
 
 /**
@@ -133,7 +162,9 @@ export async function readOperationCounts(
               COUNT(DISTINCT CASE WHEN t.status = 'paper' THEN ${op} END) AS paper_filled,
               COUNT(DISTINCT CASE WHEN t.status IN ('rejected','reverted') THEN ${op} END) AS refused,
               COUNT(DISTINCT CASE WHEN t.fill_side = 'buy' AND t.status = ?
-                                  THEN LOWER(t.buy_token) END) AS tokens
+                                  THEN LOWER(t.buy_token) END) AS tokens,
+              COUNT(DISTINCT CASE WHEN t.status = 'paper' AND ${fillKindSql("t")} THEN ${op} END) AS paper_fills,
+              COUNT(DISTINCT CASE WHEN t.status = 'landed' AND ${fillKindSql("t")} THEN ${op} END) AS live_fills
          FROM ${distinctTrades("LOWER(t.agent_id) = LOWER(?) AND t.epoch = ?")}`,
     )
     .get(tokensFrom, account, epoch)) as Record<string, number | null> | undefined;
@@ -144,5 +175,7 @@ export async function readOperationCounts(
     filledPaper: Number(t?.paper_filled ?? 0),
     refused: Number(t?.refused ?? 0),
     tokensTouched: Number(t?.tokens ?? 0),
+    paperFills: Number(t?.paper_fills ?? 0),
+    liveFills: Number(t?.live_fills ?? 0),
   };
 }
