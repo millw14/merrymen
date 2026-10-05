@@ -18,9 +18,9 @@ client's GET-only path allowlist.
 
 | Area | Status |
 |---|---|
-| Provider adapter, identity, normalisation | IMPLEMENTED, FIXTURE_TESTED. No route is AUTHENTICATED_TESTED: no key was available. |
-| On-demand tools: app chat, Telegram DM and groups, MCP | IMPLEMENTED, FIXTURE_TESTED |
-| Shared ingestion, 150-trader cohort, research queue, child files | IMPLEMENTED, FIXTURE_TESTED. Stream behaviour NOT_YET_VERIFIED against the live provider. |
+| Provider adapter, identity, normalisation | IMPLEMENTED, FIXTURE_TESTED. AUTHENTICATED_TESTED on 6 routes (see "Live verification"); normalisers reconciled with live response shapes. |
+| On-demand tools: app chat, Telegram DM and groups, MCP | IMPLEMENTED, FIXTURE_TESTED. The shared chat pipeline was run end to end against the live API; the surfaces themselves were exercised with fixtures. |
+| Shared ingestion, 150-trader cohort, research queue, child files | IMPLEMENTED, FIXTURE_TESTED. The alerts stream connects and runs realtime on the live key; the fleet pass itself has not run against the live API. |
 | Early-opportunity discovery path | IMPLEMENTED, FIXTURE_TESTED |
 | Selective-following assessments into the Trencher review | IMPLEMENTED, FIXTURE_TESTED. PAPER_TESTED only at module level (no live paper agent was run). |
 | Publication drafts | IMPLEMENTED, FIXTURE_TESTED. Delivery to X is disabled pending policy review. |
@@ -506,11 +506,74 @@ MERRYMEN_FOMO_API_KEY=… npx tsx scripts/fomo-probe.mts [--theses] [--trader] [
    (1 USDG) are reasoned defaults, not fitted ones. Revisit them once real data has been
    read.
 
+## Live verification (2026-10-04/05, Starter plan key)
+
+Read-only, from a developer machine; the key was read from a private file and never
+printed or committed. Captured response bodies stayed in a scratch area; the repository's
+test fixtures copy only their field structure, with fabricated values.
+
+- **Account (`/v2/me`):** plan Starter, 2,500,000 credits a month, a **100,000-credit daily
+  ceiling**, the app-feed stream included and the on-chain stream (`/ws/trades`) not.
+- **AUTHENTICATED_TESTED:**
+  - account
+  - leaderboard
+  - trending board
+  - alerts feed
+  - theses by token
+  - the alerts stream, realtime
+- **PARTIAL:** holdings, because the provider truncates large books (the total is reported as a floor).
+- **ENTITLEMENT_BLOCKED:** `/ws/trades` on this plan.
+- **Upstream transient:** token stats answered 503 "upstream did not answer in time" on
+  every attempt in both sessions, billed nothing, and is reported as missing, not empty.
+  Positions (502) and trade comments (503) behaved the same once.
+- **Measured costs** matched the documentation exactly:
+
+  | Read | Credits |
+  |---|---|
+  | Leaderboard | 250 |
+  | Board | 250 |
+  | Alerts page | 125 |
+  | Thesis page | 1,250 |
+  | Holdings | 250 |
+  | Search | 250 |
+  | `/v2/me` | 0 |
+  | 5xx failures | 0 |
+
+- **Measured latency:**
+
+  | Read | Time |
+  |---|---|
+  | Boards and leaderboard | about 0.6 s |
+  | Alerts | about 1 s |
+  | Fills | about 5 s |
+  | Holdings and theses | about 7 s |
+  | Failing stats | 11 s per attempt |
+
+  This led to the 20 s per-attempt and 45 s overall limits, and the 40 s invoke deadline.
+- **Live shape differences fixed:**
+  - Token search returns `results`.
+  - Stream entitlements are objects.
+  - Thesis and fill times are ISO strings.
+  - Feed rows use `type`.
+  - Undocumented EVM network ids 1, 56 and 8453 are Ethereum, BNB and Base.
+  - Unpriced holdings are unknown, not zero.
+  - Thesis "equity 0" is not a stake.
+  - Per-token P&L on the leaderboard is not window P&L.
+- **End-to-end chat** (planner → broker → service → renderer, in-memory store) ran against the live API:
+  - theses
+  - "what about the sellers?" (kept the coin and chain)
+  - "which of our 150 traders bought this?"
+  - weekly leaderboard
+  - a trader's holdings
+  - smaller coins getting attention
+  - an owner-ledger question correctly left alone
+- **Credits used** by all verification: about 8,500.
+
 ## Status labels
 
 **IMPLEMENTED:** code exists and is wired. **FIXTURE_TESTED:** tests pass against fixtures
 constructed from the provider's documentation (not captured responses).
-**AUTHENTICATED_TESTED:** verified with a real key; none yet. **PAPER_TESTED:** exercised
+**AUTHENTICATED_TESTED:** verified with a real key (see "Live verification"). **PAPER_TESTED:** exercised
 by a real paper agent end to end; none yet. **LIVE_AUTHORIZED:** owner-approved live use;
 none. **NOT_YET_VERIFIED:** behaviour assumed from documentation (stream heartbeats, ring
 retention, thesis-by-token Robinhood filtering, holders coverage, paid-plan daily ceiling).
