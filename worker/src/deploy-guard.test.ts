@@ -24,7 +24,7 @@ import os from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import {
-  DEPLOY_GUARD_IMAGE, EX_CONFIG, EX_USAGE, hostedPersistentHomeRefusal, isOneShotVariable, oneShotCensus,
+  DEPLOY_GUARD_IMAGE, EX_CONFIG, EX_USAGE, hostedOrchestratorRefusals, isOneShotVariable, oneShotCensus,
   onRailway, runDeployGuard, START_ROLES, type GuardResult,
 } from "./deploy-guard-checks";
 
@@ -117,6 +117,15 @@ describe("--phase=start", () => {
       }
     });
   }
+
+  it("runOrchestrator's own copy refuses exactly what this phase refuses for the orchestrator, case for case", async () => {
+    const orchestrator = cases.filter((c) => c.role === "start:orchestrator");
+    assert.ok(orchestrator.length > 10);
+    for (const c of orchestrator) {
+      const r = await start(c.role, c.env);
+      assert.deepEqual(hostedOrchestratorRefusals(c.env).map((reason) => `[deploy-guard] refused: ${reason}`), r.err, c.name);
+    }
+  });
 
   it("a refused fleet role still prints the census first, naming what to delete", async () => {
     const r = await start("start:orchestrator", { ...FLEET, MERRYMEN_REPAIR_HWM: "apply", MERRYMEN_ANNOUNCE_ID: "x" });
@@ -321,14 +330,19 @@ describe("the one-shot census", () => {
   });
 });
 
-describe("a Railway-hosted orchestrator's persistent home", () => {
-  it("is required on Railway, exactly as 1, and not this check's business elsewhere", () => {
-    assert.equal(hostedPersistentHomeRefusal({}), null);
-    assert.equal(hostedPersistentHomeRefusal({ MERRYMEN_PERSISTENT_HOME_REQUIRED: "0" }), null);
-    assert.equal(hostedPersistentHomeRefusal({ ...RAILWAY, MERRYMEN_PERSISTENT_HOME_REQUIRED: "1" }), null);
+describe("runOrchestrator's own copy of the start checks", () => {
+  it("is not this check's business off Railway, whatever is set", () => {
+    assert.deepEqual(hostedOrchestratorRefusals({}), []);
+    assert.deepEqual(hostedOrchestratorRefusals({ MERRYMEN_PERSISTENT_HOME_REQUIRED: "0", MERRYMEN_REPAIR_HWM: "apply", MERRYMEN_IMAGE: "nixpacks" }), []);
+  });
+
+  it("on Railway, needs the persistent home exactly as 1", () => {
+    assert.deepEqual(hostedOrchestratorRefusals(FLEET), []);
     for (const value of [undefined, "", "0", "true", "yes", " 1"]) {
-      const env = value === undefined ? { ...RAILWAY } : { ...RAILWAY, MERRYMEN_PERSISTENT_HOME_REQUIRED: value };
-      assert.match(hostedPersistentHomeRefusal(env) ?? "", /needs MERRYMEN_PERSISTENT_HOME_REQUIRED=1/, JSON.stringify(value));
+      const env = value === undefined ? without(FLEET, "MERRYMEN_PERSISTENT_HOME_REQUIRED") : { ...FLEET, MERRYMEN_PERSISTENT_HOME_REQUIRED: value };
+      const refusals = hostedOrchestratorRefusals(env);
+      assert.equal(refusals.length, 1, JSON.stringify(value));
+      assert.match(refusals[0]!, /^MERRYMEN_PERSISTENT_HOME_REQUIRED is not 1/, JSON.stringify(value));
     }
   });
 });

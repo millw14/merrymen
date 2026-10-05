@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { wrapSqlite, type Db } from "./db";
+import { DEPLOY_GUARD_IMAGE } from "./deploy-guard-checks";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
@@ -265,14 +266,20 @@ it("a failed persistent root proof writes no cached key, child book or partial r
  * container runs, and process.exit is what is being tested. Deliberately NOT
  * process.env — this file pointed MERRYMEN_HOME at its in-process fleet, and
  * no DATABASE_URL from a developer's shell may reach a supervisor started here.
+ * Started directly, NOT through container-start.sh: what is under test is the
+ * check that holds however the process was started. Correctly configured
+ * apart from what each test changes.
  */
+const FLEET_SERVICE = "227ff49a-1111-4222-8333-444455556666";
 function hostedOrchestrator(home: string, extra: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, ["--import", "tsx", "worker/src/orchestrator.ts"], {
     cwd: path.join(import.meta.dirname, "..", ".."), encoding: "utf8", timeout: 60_000,
     env: { PATH: process.env.PATH, HOME: path.dirname(home), MERRYMEN_HOSTED: "1", MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home,
-      RAILWAY_ENVIRONMENT_ID: "e1e1e1e1-1111-4222-8333-444455556666", RAILWAY_SERVICE_ID: "227ff49a-1111-4222-8333-444455556666", ...extra },
+      RAILWAY_ENVIRONMENT_ID: "e1e1e1e1-1111-4222-8333-444455556666", RAILWAY_SERVICE_ID: FLEET_SERVICE,
+      MERRYMEN_FLEET_SERVICE_ID: FLEET_SERVICE, MERRYMEN_IMAGE: DEPLOY_GUARD_IMAGE, ...extra },
   });
 }
+const refusals = (stdout: string) => stdout.split("\n").filter((l) => l.startsWith("[orchestrator] refusing to start — "));
 
 it("a Railway-hosted orchestrator without the persistent-home opt-in exits 78 before it touches its home", () => {
   for (const required of [undefined, "0", ""]) {
@@ -283,11 +290,32 @@ it("a Railway-hosted orchestrator without the persistent-home opt-in exits 78 be
       const r = hostedOrchestrator(home, { MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1",
         ...(required === undefined ? {} : { MERRYMEN_PERSISTENT_HOME_REQUIRED: required }) });
       assert.equal(r.status, 78, `${JSON.stringify(required)}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stdout, /^\[orchestrator\] refusing to start — a Railway-hosted fleet needs MERRYMEN_PERSISTENT_HOME_REQUIRED=1/m);
+      assert.equal(refusals(r.stdout).length, 1, r.stdout);
+      assert.match(r.stdout, /^\[orchestrator\] refusing to start — MERRYMEN_PERSISTENT_HOME_REQUIRED is not 1 — a fleet role runs only on a home proven to be the mounted volume/m);
       assert.doesNotMatch(r.stdout, /\[orchestrator\] starting/);
       assert.deepEqual(readdirSync(home), []);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+it("without the start script, a hosted orchestrator on the wrong service, or with a one-shot set mid-rollout, still exits 78", () => {
+  // A Start Command on the service, or node run by hand, never passes through
+  // container-start.sh and its guard; runOrchestrator() holds the same line.
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-hosted-unguarded-"))), home = path.join(dir, "home");
+  mkdirSync(home, { mode: 0o700 });
+  const secret = `apply-${"7".repeat(40)}`;
+  try {
+    const r = hostedOrchestrator(home, { MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_FLEET_SERVICE_ID: "b72f7ad9-1111-4222-8333-444455556666",
+      MERRYMEN_REPAIR_HWM: secret, MERRYMEN_FLEET_ROLLOUT: "none" });
+    assert.equal(r.status, 78, `${r.stdout}${r.stderr}`);
+    const lines = refusals(r.stdout);
+    assert.equal(lines.length, 2, r.stdout);
+    assert.match(lines[0]!, /refusing to start — this is not the fleet's service/);
+    assert.match(lines[1]!, /refusing to start — one-shot operator variables are set \(MERRYMEN_REPAIR_HWM\) while MERRYMEN_FLEET_ROLLOUT is not all/);
+    assert.ok(!`${r.stdout}${r.stderr}`.includes(secret), "a one-shot value reached the log");
+    assert.doesNotMatch(r.stdout, /\[orchestrator\] starting/);
+    assert.deepEqual(readdirSync(home), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 it("with the opt-in, a hosted orchestrator goes on to the real volume proof, which still decides", () => {

@@ -121,7 +121,7 @@ import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } fro
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
 import { PERSISTENT_HOME_MANIFEST, preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
-import { EX_CONFIG, hostedPersistentHomeRefusal } from "./deploy-guard-checks";
+import { EX_CONFIG, hostedOrchestratorRefusals } from "./deploy-guard-checks";
 import { scrubHostedGrantCache } from "./hosted-grant-cache";
 import {
   clearHoldNotified,
@@ -9240,26 +9240,30 @@ async function runRecoveryReportOnly(): Promise<void> {
 }
 
 /**
- * ON RAILWAY, THE FLEET'S HOME IS THE PROVEN VOLUME, OR THERE IS NO FLEET.
+ * ON RAILWAY, THE FLEET STARTS ONLY WHERE AND AS THE DEPLOY GUARD SAYS IT MAY.
  *
  * preparePersistentHomeForHandover() below proves the mount, the provider
  * volume and the manifest — but only when MERRYMEN_PERSISTENT_HOME_REQUIRED=1
  * asks it to. Unset or 0 it returns null, and the orchestrator would carry on
  * in whatever MERRYMEN_HOME names: on Railway, possibly the container's own
  * disk, which the next deploy throws away with every child book, cached grant
- * and pending kill in it.
+ * and pending kill in it. Beside that opt-in, the deploy guard's other start
+ * checks for this role: the one service MERRYMEN_FLEET_SERVICE_ID names (a
+ * second fleet would race the first for every tenant), this image, and no
+ * one-shot repair variable left set before the rollout reads `all`.
  *
- * So a Railway-hosted orchestrator without the opt-in exits 78 (EX_CONFIG)
- * before either entry path, the report-only one included, has read or written
- * anything. Off Railway it stands aside: there is no Railway volume to prove,
- * and local runs and the test suite start the supervisor there. The start
- * script's deploy guard refuses the same configuration earlier; this is the
- * check that holds however the process was started.
+ * container-start.sh runs the same checks before it execs this file, but a
+ * Start Command set on the service, or a hand-run `node … orchestrator.ts`,
+ * never passes through the script. So a Railway-hosted orchestrator that
+ * fails any of them exits 78 (EX_CONFIG), naming each reason, before either
+ * entry path, the report-only one included, has read or written anything.
+ * Off Railway it stands aside: there is no Railway service or volume to be
+ * wrong about, and local runs and the test suite start the supervisor there.
  */
-function assertHostedPersistentHome(): void {
-  const refusal = hostedPersistentHomeRefusal(process.env);
-  if (refusal === null) return;
-  log(`refusing to start — ${refusal}`);
+function assertHostedFleetStart(): void {
+  const refusals = hostedOrchestratorRefusals(process.env);
+  if (refusals.length === 0) return;
+  for (const refusal of refusals) log(`refusing to start — ${refusal}`);
   process.exit(EX_CONFIG);
 }
 
@@ -9268,7 +9272,7 @@ export async function runOrchestrator(): Promise<void> {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
-  assertHostedPersistentHome();
+  assertHostedFleetStart();
   // Validate operator intent before either entry path can initialize anything.
   const accountingHolds = accountingHoldTenants(process.env);
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;

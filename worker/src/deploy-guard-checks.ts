@@ -37,6 +37,9 @@
  *                       the values) of the one-shot operator variables that are
  *                       set, and the orchestrator role is refused while any is
  *                       set and MERRYMEN_FLEET_ROLLOUT is not exactly `all`.
+ *                       runOrchestrator() runs the orchestrator's checks again
+ *                       itself (hostedOrchestratorRefusals), because the script
+ *                       is not the only way to start it.
  *
  * Off Railway, both phases print that they skipped and exit 0: a self-hosted
  * install, a laptop and the test suite have no Railway service to be wrong
@@ -69,7 +72,9 @@ export const DEPLOY_GUARD_IMAGE = "dockerfile-v1";
 /** scripts/container-start.sh's allowlist, which is package.json's start:* scripts. */
 export const START_ROLES = ["start:web", "start:orchestrator", "start:recovery-replies"] as const;
 export type StartRole = (typeof START_ROLES)[number];
-const FLEET_ROLES: ReadonlySet<string> = new Set<StartRole>(["start:orchestrator", "start:recovery-replies"]);
+export type FleetRole = Extract<StartRole, "start:orchestrator" | "start:recovery-replies">;
+const FLEET_ROLES: ReadonlySet<string> = new Set<FleetRole>(["start:orchestrator", "start:recovery-replies"]);
+const isFleetRole = (role: string): role is FleetRole => FLEET_ROLES.has(role);
 
 /**
  * What Railway sets in every deployment, pre-deploy containers included. ANY
@@ -126,15 +131,51 @@ export function oneShotCensus(env: NodeJS.ProcessEnv): string[] {
 }
 
 /**
+ * A FLEET ROLE'S START CHECKS: the one-shot census, and every reason to refuse
+ * — without printing, and without asking whether this is Railway (each caller
+ * does). Three callers hold the same list: the start phase, the pre-deploy
+ * phase when MERRYMEN_START names a fleet role, and runOrchestrator() itself.
+ *
  * A FLEET HOME ON RAILWAY IS A PROVEN VOLUME. persistent-home.ts proves the
  * mount, the volume UUID and the manifest — but only when
- * MERRYMEN_PERSISTENT_HOME_REQUIRED=1 asks it to; unset or 0, it steps aside.
- * runOrchestrator() asks this before anything else and exits 78 on a refusal.
- * Off Railway this is null: there is no Railway volume to prove.
+ * MERRYMEN_PERSISTENT_HOME_REQUIRED=1 asks it to; unset or 0, it steps aside,
+ * and the fleet would run in whatever MERRYMEN_HOME names.
  */
-export function hostedPersistentHomeRefusal(env: NodeJS.ProcessEnv): string | null {
-  if (!onRailway(env) || env.MERRYMEN_PERSISTENT_HOME_REQUIRED === "1") return null;
-  return "a Railway-hosted fleet needs MERRYMEN_PERSISTENT_HOME_REQUIRED=1, so its home is proven to be the mounted volume and not the container's own disk, which the next deploy discards";
+export function fleetStartChecks(env: NodeJS.ProcessEnv, role: FleetRole): { census: string[]; reasons: string[] } {
+  const reasons: string[] = [];
+  const fleet = env.MERRYMEN_FLEET_SERVICE_ID ?? "", service = env.RAILWAY_SERVICE_ID ?? "";
+  if (!fleet) {
+    reasons.push("MERRYMEN_FLEET_SERVICE_ID is not set — a fleet role runs only on the one Railway service that variable names");
+  } else if (service !== fleet) {
+    reasons.push("this is not the fleet's service: RAILWAY_SERVICE_ID differs from MERRYMEN_FLEET_SERVICE_ID — a second fleet would race the first for every tenant");
+  }
+  if (env.MERRYMEN_PERSISTENT_HOME_REQUIRED !== "1") {
+    reasons.push("MERRYMEN_PERSISTENT_HOME_REQUIRED is not 1 — a fleet role runs only on a home proven to be the mounted volume, never on the container's own disk, which the next deploy discards");
+  }
+  if (env.MERRYMEN_IMAGE !== DEPLOY_GUARD_IMAGE) {
+    reasons.push(`MERRYMEN_IMAGE is not ${DEPLOY_GUARD_IMAGE} — this is not the image whose start path delivers SIGTERM to node`);
+  }
+  const census = oneShotCensus(env);
+  // Exactly `all`, as written: a value the rollout parser might also read as
+  // all ("ALL", " all") is not one this guard has to guess about.
+  if (role === "start:orchestrator" && census.length && env.MERRYMEN_FLEET_ROLLOUT !== "all") {
+    reasons.push(`one-shot operator variables are set (${census.join(" ")}) while MERRYMEN_FLEET_ROLLOUT is not all — delete them before the orchestrator starts over a partly held fleet`);
+  }
+  return { census, reasons };
+}
+
+/**
+ * THE ORCHESTRATOR'S OWN COPY OF ITS START CHECKS. container-start.sh runs the
+ * guard before it execs the orchestrator, but the script is only one way in:
+ * a Start Command set on the Railway service replaces the image's CMD
+ * (docs/hosted-deploy.md says to leave it empty, which is advice, not a
+ * check), and so does `node --import tsx worker/src/orchestrator.ts` by hand.
+ * runOrchestrator() asks this before anything else and exits 78 on any reason,
+ * so the fleet's service, its proven home, this image and the one-shot
+ * refusal hold however the process was started. Off Railway it is empty.
+ */
+export function hostedOrchestratorRefusals(env: NodeJS.ProcessEnv): string[] {
+  return onRailway(env) ? fleetStartChecks(env, "start:orchestrator").reasons : [];
 }
 
 export interface GuardResult {
@@ -214,29 +255,13 @@ async function predeploy(env: NodeJS.ProcessEnv, deps: GuardDeps): Promise<Guard
   return { code: 0, out: [line(`ok branch=main commit=${sha}${repo !== undefined ? " ancestry=proven" : ""}`)], err: [] };
 }
 
+const censusLine = (census: readonly string[]) => line(`census one-shot: ${census.length ? census.join(" ") : "none"}`);
+
 function start(env: NodeJS.ProcessEnv, role: StartRole): GuardResult {
   if (!onRailway(env)) return skipped("not running on Railway");
-  if (!FLEET_ROLES.has(role)) return { code: 0, out: [line(`ok role=${role}`)], err: [] };
-  const reasons: string[] = [];
-  const fleet = env.MERRYMEN_FLEET_SERVICE_ID ?? "", service = env.RAILWAY_SERVICE_ID ?? "";
-  if (!fleet) {
-    reasons.push("MERRYMEN_FLEET_SERVICE_ID is not set — a fleet role runs only on the one Railway service that variable names");
-  } else if (service !== fleet) {
-    reasons.push("this is not the fleet's service: RAILWAY_SERVICE_ID differs from MERRYMEN_FLEET_SERVICE_ID — a second fleet would race the first for every tenant");
-  }
-  if (env.MERRYMEN_PERSISTENT_HOME_REQUIRED !== "1") {
-    reasons.push("MERRYMEN_PERSISTENT_HOME_REQUIRED is not 1 — a fleet role never runs on a home that is not the proven volume");
-  }
-  if (env.MERRYMEN_IMAGE !== DEPLOY_GUARD_IMAGE) {
-    reasons.push(`MERRYMEN_IMAGE is not ${DEPLOY_GUARD_IMAGE} — this is not the image whose start path delivers SIGTERM to node`);
-  }
-  const census = oneShotCensus(env);
-  const out = [line(`census one-shot: ${census.length ? census.join(" ") : "none"}`)];
-  // Exactly `all`, as written: a value the rollout parser might also read as
-  // all ("ALL", " all") is not one this guard has to guess about.
-  if (role === "start:orchestrator" && census.length && env.MERRYMEN_FLEET_ROLLOUT !== "all") {
-    reasons.push("one-shot operator variables are set (named in the census above) while MERRYMEN_FLEET_ROLLOUT is not all — delete them before the orchestrator starts over a partly held fleet");
-  }
+  if (!isFleetRole(role)) return { code: 0, out: [line(`ok role=${role}`)], err: [] };
+  const { census, reasons } = fleetStartChecks(env, role);
+  const out = [censusLine(census)];
   if (reasons.length) return refused(out, reasons);
   out.push(line(`ok role=${role}`));
   return { code: 0, out, err: [] };
