@@ -2864,6 +2864,45 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
   return null;
 }
 
+/**
+ * WHAT KIND OF ERROR IT WAS, WITHOUT WHAT IT SAID: its class, and its code (a
+ * Node errno or a SQLSTATE) when it has the shape of one.
+ *
+ * The spawn path's catches below keep an error's text out of the log, because
+ * it can carry a connection string or a private value. Keeping out everything
+ * left an [alert] with nothing in it to diagnose: a bug that threw a TypeError
+ * in a seed for every tenant read exactly as a missing driver or a full disk
+ * did. A class name and a code are neither, and each is let through only when
+ * it looks like one — a word, or capitals, digits and underscores — so a
+ * library that puts something else there says nothing more than "Error".
+ */
+function errorKind(e: unknown): string {
+  const name = e instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(e.name) ? e.name : typeof e;
+  const code = (e as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? `${name} ${code}` : name;
+}
+
+/**
+ * ONCE PER CAUSE, NOT ONCE PER PASS. What each tenant's last held-not-crashed
+ * alert said, and when.
+ *
+ * A refusal the spawn path now holds a tenant on can stand for days — an
+ * offset row naming another account does not clear itself — and each fifteen-
+ * second pass meets it again: 5,760 identical [alert] lines a day a tenant,
+ * which buries the one line that is new. So the same line is said once, and
+ * again each hour it still stands, so it is never only in a log that has
+ * rotated away; a different line is said at once. Forgotten when the tenant's
+ * worker or hold process starts, so the same refusal coming back is new again.
+ */
+const TENANT_ALERT_RESAY_MS = 60 * 60_000;
+const tenantAlertSaid = new Map<string, { line: string; at: number }>();
+function sayTenantAlert(tenant: string, line: string): void {
+  const said = tenantAlertSaid.get(tenant), now = Date.now();
+  if (said?.line === line && now - said.at < TENANT_ALERT_RESAY_MS) return;
+  tenantAlertSaid.set(tenant, { line, at: now });
+  log(line);
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   if (operatorHeld(tenant)) return;
@@ -2873,8 +2912,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // Checking `children` is not enough: this function awaits a dozen times
   // before the child exists, and a second caller arriving in that window saw
   // nothing running. See `spawning`. The finally releases it whichever way
-  // this function leaves — every refusal below returns, and a throw is as
-  // final as a return.
+  // this function leaves — every refusal below returns, and a throw is caught
+  // and said at the bottom, as final as a return.
   if (spawning.has(tenant)) {
     log(`${tenant}: already being spawned — not starting a second`);
     return;
@@ -3018,22 +3057,47 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
     // child is already polling would be read from a file the child has by then
     // replaced with a fresh, unlinked default.
+    //
+    // A REFUSAL HERE HOLDS THIS TENANT, NOT THE FLEET. The privacy proof and the
+    // offset handoff refuse by throwing, and so do their reads when Postgres
+    // will not answer — the pool itself (makePgDb) opens lazily and rejects
+    // only when it cannot be built at all, such as a driver that will not
+    // load. Uncaught, that rejected through reconcile() and out of the main
+    // loop, and nothing handles an unhandled rejection: one tenant's refusal
+    // exited the whole supervisor, every other tenant's worker, hold and reply
+    // with it, and again on every restart while its state stood. Caught, it is
+    // what any other refusal here is: no worker, the lease and home kept, and
+    // the next pass asks again. Said by its kind and not its text, which can
+    // carry a connection string or a private value (errorKind), and once per
+    // cause rather than every pass (sayTenantAlert).
     if (process.env.DATABASE_URL) {
-      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-      const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
-      if (!dek || !await recoveryReplyPrivacyAllowsFork({
-        tenant, home: childHome(tenant), shared, dek,
-        mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-      })) return;
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
+        if (!dek || !await recoveryReplyPrivacyAllowsFork({
+          tenant, home: childHome(tenant), shared, dek,
+          mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+        })) return;
+      } catch (e) {
+        sayTenantAlert(tenant, `[alert] ${tenant}: recovery privacy proof unavailable or refused (${errorKind(e)}) — retaining its home without starting a worker`);
+        return;
+      }
     }
     await writeTelegramForChild(tenant);
     if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
-      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-      await handoffRecoveryReplyOffset({
-        tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
-        home: childHome(tenant), shared,
-        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-      });
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        await handoffRecoveryReplyOffset({
+          tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
+          home: childHome(tenant), shared,
+          mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+        });
+      } catch (e) {
+        // The handoff is what puts the child's poll at or past what the
+        // recovery listener already answered. Without it, nothing polls the bot.
+        sayTenantAlert(tenant, `[alert] ${tenant}: recovery reply offset not handed over (${errorKind(e)}) — retaining its home without starting a worker`);
+        return;
+      }
     }
     // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
     // restoreTgGroupsForChild.
@@ -3139,6 +3203,18 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     pipe(proc.stderr, process.stderr);
 
     log(`${tenant} spawn requested (pid ${proc.pid ?? "pending"}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+    tenantAlertSaid.delete(tenant);
+  } catch (e) {
+    // AND ANY OTHER THROW IN PREPARATION, the same way as the recovery gates
+    // above: this tenant is held, not the fleet. reconcile() awaits this, and
+    // so does handHoldBack; the restart timer starts it with `void`, where a
+    // rejection is unhandled outright. Either way it exited the supervisor.
+    // What can throw here runs before spawn(), whose own throw is caught
+    // there, so no worker started: the lease and home are kept, and the next
+    // pass prepares it again. Said by its kind (errorKind) and not its text,
+    // which can carry a private value: a bug that throws for every tenant is
+    // still told from a disk or a driver that does.
+    sayTenantAlert(tenant, `[alert] ${tenant}: worker preparation failed (${errorKind(e)}) — retaining its home without starting a worker; the next pass tries again`);
   } finally {
     spawning.delete(tenant);
   }
@@ -3369,14 +3445,24 @@ async function spawnHolder(
   // a file it has already replaced with an unlinked default.
   await writeTelegramForChild(tenant);
   if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
-    const grant = await getGrantStore().get(tenant);
-    if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
-    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-    await handoffRecoveryReplyOffset({
-      tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
-      home: childHome(tenant), shared,
-      mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-    });
+    // Refused as spawnChild's handoff is (see there), and for the same reason:
+    // a throw here rejected through reconcile() and took the supervisor down.
+    // Returned before `holders`, as the refusals beside it are: recorded as held
+    // with no process, a later refresh would start one with no handoff at all.
+    // So no hold process and no worker; the next pass prepares the hold again.
+    try {
+      const grant = await getGrantStore().get(tenant);
+      if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
+      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+      await handoffRecoveryReplyOffset({
+        tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
+        home: childHome(tenant), shared,
+        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+      });
+    } catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: recovery reply offset not handed over (${errorKind(e)}) — trading stays held, with no hold process to answer its bot`);
+      return;
+    }
   }
   // THE LAST AWAIT IS ABOVE THIS LINE: asked again for the same reasons as
   // spawnChild's, and one more. A tenant already held is not held twice.
@@ -3404,6 +3490,7 @@ async function spawnHolder(
   // reset that could not be decided is asked about again soon.
   scheduleHoldRetry(held, honour?.transient ? UNCLASSIFIED_BLOCK : restoreBlockClass(reason));
   holders.set(tenant, held);
+  tenantAlertSaid.delete(tenant);
   noteHold(tenant, reason, cls, resettable);
   if (!holderBotReady(settings)) {
     log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${Math.round((held.nextRetryAt - Date.now()) / 1000)}s`);
@@ -4413,7 +4500,21 @@ export async function reconcile(): Promise<void> {
     if (localMemoryWriterPresent(tenant) || leases.get(tenant) !== lease || !lease.healthy()) continue;
     const url = process.env.DATABASE_URL;
     if (!url && !retirementMemoryStoreForTest) continue;
-    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    // A pool that cannot be built — makePgDb opens lazily, so this is a driver
+    // that will not load, not a Postgres that will not answer — rejected
+    // straight out of reconcile() and took the supervisor with it (see
+    // spawnChild's recovery gates). A Postgres that will not answer is met by
+    // the copy's own reads, and the copy never throws
+    // (finalMirrorBeforeAnchor): it answers false and stays pending. Either
+    // way it stays pending under the same lease, which is what holds it, and
+    // is tried again next pass.
+    let shared: Db;
+    try {
+      shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    } catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: removed agent's final copy deferred — shared database pool cannot be built (${errorKind(e)}); retaining its lease and original book`);
+      continue;
+    }
     if (await finalMirrorBeforeAnchor(tenant, shared, childHome(tenant), lease)) removedLedgerPending.delete(tenant);
   }
   // A stored but expired key is still wanted for revocation, home and Telegram
