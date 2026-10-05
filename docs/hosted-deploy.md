@@ -488,12 +488,21 @@ script itself: no npm and no `sh -c` on the start path.
   quickest check of what a deploy is actually running.
 - **Stopping:** Railway's SIGTERM goes to tini, which forwards it to node and to
   nothing else (the orchestrator stops its own tenant workers). The orchestrator
-  logs `[orchestrator] stopping — calling the whole fleet home`. How long it has
-  before SIGKILL is the service's draining time, not anything the image sets.
-  Today that handler releases the tenant leases at once and exits after about
-  1s (4s with a Telegram kill pending) without waiting for its workers, and when
-  it exits tini does too, taking the workers with it — so a longer draining time
-  does not yet give the workers longer to stop.
+  logs `[orchestrator] stopping on SIGTERM — calling the whole fleet home` and
+  drains: it starts nothing new, lets each mirror copy already running finish
+  under its lease, sends its workers SIGTERM and waits to see each one exit
+  (SIGKILL only for one still running when that wait ends), carries out pending
+  Telegram kills, gives each tenant home a final mirror pass, writes
+  `ops/last-shutdown.json` under `MERRYMEN_HOME`, releases the leases last and
+  exits 0. Workers have no SIGTERM handler yet, so each still ends at once, as
+  in a crash. The whole drain must fit in `MERRYMEN_DRAIN_BUDGET_MS` (default
+  50s); past it the orchestrator exits 1 and the receipt names the step it
+  stalled in. How long it has before SIGKILL is the service's draining time, not
+  anything the image sets: make it longer than the budget (75s for the default).
+  Set as the variable `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, it also cuts the
+  budget to end 5s before Railway's SIGKILL; a time set only in the service
+  settings is not visible to the orchestrator. The next start logs whether the
+  last stop was clean.
 
 1. **web** — new service from this repo. Leave `MERRYMEN_START` unset → runs the Next dashboard. Set the web env above, then add the custom domain (`app.merrymen.dev`) and follow its DNS record.
 2. **orchestrator** — a second service from the same repo. Set `MERRYMEN_START=start:orchestrator`. Set the orchestrator env above. It needs **no public domain**.
