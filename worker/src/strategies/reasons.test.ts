@@ -32,6 +32,9 @@ const ALL: Why[] = [
   { code: "trench-exit", symbol: "WIF", cause: "unpriceable" },
   { code: "ops-spent" },
   { code: "breaker-tripped", limitBps: 1_000 },
+  { code: "legs-locked", legs: 3, locked: 3 },
+  { code: "legs-locked", legs: 5, locked: 2 },
+  { code: "legs-locked", legs: 1, locked: 1 },
 ];
 
 describe("every reason is publishable prose", () => {
@@ -153,6 +156,36 @@ describe("a stale feed says WHICH kind of stale it is", () => {
     for (const marketShut of [true, false]) {
       const text = renderWhy({ code: "all-legs-stale", legs: 3, paused: 2, marketShut });
       assert.match(text, /2 of them are paused/);
+    }
+  });
+});
+
+/**
+ * THE SIGNATURE'S SILENCE. A leg the signed key cannot sell back is skipped
+ * rather than refused every tick (entry-gates.ts), and when nothing else could
+ * have bought, `legs-locked` is the sentence. It has to say WHICH legs by
+ * count, give the remedy only to the one person who can act on it, and must not
+ * borrow its siblings' "selling is never blocked" — the key is what is missing.
+ */
+describe("legs the signed key does not cover", () => {
+  it("counts the legs, and says all of them when it is all of them", () => {
+    assert.match(renderWhy({ code: "legs-locked", legs: 3, locked: 3 }), /can't sell back any of the 3 legs/);
+    assert.match(renderWhy({ code: "legs-locked", legs: 5, locked: 2 }), /can't sell back 2 of the 5 legs/);
+    assert.match(
+      renderWhy({ code: "legs-locked", legs: 1, locked: 1 }),
+      /can't sell back the only leg, so the wall would refuse a buy of it/,
+    );
+  });
+
+  it("the remedy is the owner's, and the public row carries none", () => {
+    const w: Why = { code: "legs-locked", legs: 3, locked: 2 };
+    assert.match(renderWhy(w, "owner"), /Re-sign at \/grant to cover them$/);
+    assert.doesNotMatch(renderWhy(w, "public"), /\/grant|re-sign/i);
+  });
+
+  it("never claims selling is unaffected — the key is exactly what cannot sell it", () => {
+    for (const audience of ["owner", "public"] as const) {
+      assert.doesNotMatch(renderWhy({ code: "legs-locked", legs: 3, locked: 3 }, audience), /never blocked/);
     }
   });
 });
