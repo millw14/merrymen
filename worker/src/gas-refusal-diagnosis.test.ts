@@ -21,10 +21,20 @@
  * ── WHAT THESE TESTS PIN, AND WHAT THEY DELIBERATELY DO NOT ──────────────
  *
  * They pin the NAME and the SENTENCE on a refusal. They do not pin whether the
- * operation is refused — it is refused either way, before signing, and no test
- * here should be read as evidence about money moving.
+ * operation is refused — it is refused either way, before signing, and nothing
+ * here is evidence about the refused trade's money.
+ *
+ * BUT ONE NAME IS NOT ONLY A NAME. `enable-too-wide` is the refusal index.ts
+ * answers by SENDING something: installKeyAlone broadcasts the key's install
+ * on its own (executor.ts keyInstallCalls, `approve(USDG, Router02, 0)`), and
+ * that spends gas — once per executor per half hour, persisted before
+ * broadcast, nonce-bound, and refused once the key is installed. So a rename
+ * AWAY from `enable-too-wide` decides whether that operation goes out. The
+ * 2026-10-03 misreading below did exactly that, and fixing it gives the
+ * install back; the last describe pins it against the executor's own lines.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { classifyRevert } from "./revert";
 
@@ -191,6 +201,49 @@ describe("what may and may not rename a gas refusal", () => {
     // `enable-too-wide`, because the request dump spelled Aa24. The gas verdict
     // was the true one and must keep its name.
     assert.equal(mayRename(SIMULATION_REVERT_MESSAGE), false);
+  });
+
+  /**
+   * The rule the executor throws, computed by ITS OWN lines rather than by the
+   * copy above — the technique reject-reason.test.ts uses on index.ts. Lifted
+   * by their text, so a rewrite of them fails here loudly instead of leaving
+   * `mayRename` to vouch for code it no longer resembles.
+   */
+  const executorRule = (estimateError: string, boundedRule: string): string => {
+    const lines = readFileSync(new URL("./executor.ts", import.meta.url), "utf8")
+      .split(/\r?\n/)
+      .map((l) => l.trim());
+    const diagnosed = lines.findIndex((l) => l.startsWith("const diagnosed = estimateError ? classifyRevert(estimateError)"));
+    const renamed = lines.findIndex((l) => l.startsWith("const renamed = diagnosed"));
+    const thrown = lines.indexOf("throw new GasRefused(", renamed);
+    assert.ok(diagnosed > 0 && renamed > diagnosed && thrown > renamed, "the executor's rename is where we think it is");
+    const rule = lines[thrown + 1]!.replace(/,$/, "");
+    assert.match(rule, /^renamed \? renamed\.rule : bounded\.rule$/, "the refusal is named by the rename or by boundGas");
+    return new Function(
+      "classifyRevert",
+      "estimateError",
+      "bounded",
+      `${lines[diagnosed]}\n${lines[renamed]}\nreturn ${rule};`,
+    )(classifyRevert, estimateError, { rule: boundedRule }) as string;
+  };
+
+  it("the copy above answers what the executor's own lines answer", () => {
+    for (const m of [LIVE_MESSAGE, SIMULATION_REVERT_MESSAGE, "connection reset by peer", "Too little received", "AA21 didn't pay prefund"]) {
+      assert.equal(executorRule(m, "gas-unreadable") !== "gas-unreadable", mayRename(m), m);
+    }
+  });
+
+  it("the 13:07:48Z refusal stays `enable-too-wide`, which index.ts answers by installing the key alone", () => {
+    // The shape that day: estimate 1 came back and boundGas refused the first
+    // enable as too wide; estimate 2 threw the simulation revert, and its text
+    // is what `estimateError` held. Under /AA23|AA24/i it renamed the refusal
+    // `wall-refused`, so index.ts never reached installKeyAlone and the owner
+    // was told to re-sign. Now the gas verdict keeps its name — and with it,
+    // the install. That is a broadcast this fix gives back, on purpose.
+    assert.equal(executorRule(SIMULATION_REVERT_MESSAGE, "enable-too-wide"), "enable-too-wide");
+    // A real validation revert in the same position still renames it, as it
+    // did before this fix.
+    assert.equal(executorRule(LIVE_MESSAGE, "enable-too-wide"), "wall-refused");
   });
 
   it("leaves a RETRYABLE class alone even though it is recognised", () => {
