@@ -57,7 +57,8 @@
  *
  * ONE BUDGET OVER ALL OF IT, MERRYMEN_DRAIN_BUDGET_MS (default 50s), set
  * inside the platform's draining time so this process, not the platform,
- * decides how the stop ends. Every step's cap is cut to what is left of it,
+ * decides how the stop ends — and cut to that time when the platform's
+ * variable says it (drainBudgetMs). Every step's cap is cut to what is left of it,
  * less a reserve for the receipt and the leases. And a BACKSTOP: when the
  * budget is spent with the drain still running, the receipt says where, and
  * the process exits 1. What was interrupted then is interrupted as a crash
@@ -201,22 +202,52 @@ export interface FleetDrainPlan<T> {
 }
 
 /**
- * THE BUDGET MERRYMEN_DRAIN_BUDGET_MS ASKS FOR, or the default and a reason.
- * The value itself is never echoed: an operator reads the variable's name and
- * the rule, and the default is safe to drain with.
+ * KEPT BETWEEN THE DRAIN'S END AND THE PLATFORM'S SIGKILL: the exit itself,
+ * a signal delivered late, an event loop that was busy. See drainBudgetMs.
  */
-export function drainBudgetMs(env: NodeJS.ProcessEnv = process.env): { ms: number; refused: string | null } {
+export const PLATFORM_DRAIN_MARGIN_MS = 5_000;
+
+/**
+ * THE BUDGET TO DRAIN WITHIN, and each [alert] to say about it.
+ *
+ * What MERRYMEN_DRAIN_BUDGET_MS asks for, or the default and a reason. That
+ * value itself is never echoed: an operator reads the variable's name and the
+ * rule, and the default is safe to drain with.
+ *
+ * THEN CUT TO THE PLATFORM'S OWN DEADLINE, when it says one. Railway sends
+ * SIGKILL RAILWAY_DEPLOYMENT_DRAINING_SECONDS after SIGTERM, and a budget that
+ * runs past that is no budget: the platform, not the backstop, ends the drain
+ * — perhaps between a final-pass copy's marker and its ownership check, a copy
+ * the old stop never started, and that marker blocks its tenant at the next
+ * start. So the drain ends PLATFORM_DRAIN_MARGIN_MS before it, however small
+ * that leaves it: a budget too short for a final pass gives none (step 6) and
+ * still releases the leases. Only when the variable is set — a draining time
+ * set in the service settings is not visible from here, and the runbook's
+ * (drainingSeconds 75 against the default 50s) is what covers that.
+ */
+export function drainBudgetMs(env: NodeJS.ProcessEnv = process.env): { ms: number; alerts: string[] } {
+  const alerts: string[] = [];
+  let ms = DRAIN_BUDGET_DEFAULT_MS;
   const raw = env.MERRYMEN_DRAIN_BUDGET_MS;
-  if (raw === undefined || raw.trim() === "") return { ms: DRAIN_BUDGET_DEFAULT_MS, refused: null };
-  const value = raw.trim();
-  if (/^[1-9][0-9]{0,9}$/.test(value)) {
-    const ms = Number(value);
-    if (ms >= DRAIN_BUDGET_MIN_MS && ms <= DRAIN_BUDGET_MAX_MS) return { ms, refused: null };
+  if (raw !== undefined && raw.trim() !== "") {
+    const value = raw.trim();
+    const asked = /^[1-9][0-9]{0,9}$/.test(value) ? Number(value) : NaN;
+    if (asked >= DRAIN_BUDGET_MIN_MS && asked <= DRAIN_BUDGET_MAX_MS) ms = asked;
+    else alerts.push(`MERRYMEN_DRAIN_BUDGET_MS is not a whole number of milliseconds from ${DRAIN_BUDGET_MIN_MS} to ${DRAIN_BUDGET_MAX_MS} — draining within the default ${DRAIN_BUDGET_DEFAULT_MS}ms`);
   }
-  return {
-    ms: DRAIN_BUDGET_DEFAULT_MS,
-    refused: `MERRYMEN_DRAIN_BUDGET_MS is not a whole number of milliseconds from ${DRAIN_BUDGET_MIN_MS} to ${DRAIN_BUDGET_MAX_MS} — draining within the default ${DRAIN_BUDGET_DEFAULT_MS}ms`,
-  };
+  const platform = env.RAILWAY_DEPLOYMENT_DRAINING_SECONDS?.trim();
+  if (!platform) return { ms, alerts };
+  if (!/^(0|[1-9][0-9]{0,5})$/.test(platform)) {
+    alerts.push("RAILWAY_DEPLOYMENT_DRAINING_SECONDS is not a whole number of seconds — the drain budget is not cut to the platform's deadline");
+    return { ms, alerts };
+  }
+  const deadline = Math.max(DRAIN_BUDGET_MIN_MS, Number(platform) * 1000 - PLATFORM_DRAIN_MARGIN_MS);
+  if (ms <= deadline) return { ms, alerts };
+  alerts.push(
+    `drain budget cut to ${deadline}ms, to end ${PLATFORM_DRAIN_MARGIN_MS}ms before RAILWAY_DEPLOYMENT_DRAINING_SECONDS sends SIGKILL — ` +
+      `raise the platform's draining time, not the budget, to give the final pass its time`,
+  );
+  return { ms: deadline, alerts };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
