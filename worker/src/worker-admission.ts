@@ -174,15 +174,14 @@ export class DrainingRefused extends Error {
 /**
  * How long a draining worker waits for the trade already on its intent chain.
  *
- * Sized to fit inside the twenty seconds the PLANNED fleet drain (C3, not yet
- * in orchestrator.ts) gives a child between SIGTERM and SIGKILL, so the child
- * leaves by itself rather than being killed mid-write, and far inside the
- * heartbeat watchdog's floor. TODAY no orchestrator path waits that long:
- * killChild sends SIGKILL three seconds on, and the child is killed exactly as
- * it always was — only now with nothing new broadcast in those three seconds;
- * and the orchestrator's own stop() sends SIGTERM alone, so a child can run
- * out its drain after the orchestrator has gone (index.ts, on SIGTERM, says
- * what it still does then). Long enough for a send and one receipt read on a
+ * Sized to fit inside the twenty seconds the orchestrator's fleet drain
+ * (fleet-drain.ts DRAIN_LIMITS.exitWaitMs) gives a child between SIGTERM and
+ * SIGKILL, so the child leaves by itself rather than being killed mid-write,
+ * and far inside the heartbeat watchdog's floor. Only that drain waits so
+ * long: killChild, standing one child down, sends SIGKILL three seconds on,
+ * and the child is killed exactly as it always was — only now with nothing
+ * new broadcast in those three seconds (index.ts, on SIGTERM, says what it
+ * does in each case). Long enough for a send and one receipt read on a
  * healthy chain; a trade still out after it is left exactly as a crash would
  * leave it — its row was written `submitted` before the broadcast, and the
  * stranded-op resolver settles it from the chain on the next arm. Waiting

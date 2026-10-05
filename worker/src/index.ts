@@ -14263,11 +14263,12 @@ async function main() {
    * a child down — an accounting hold, the owner's kill switch ("grant
    * removed"), a lost lease, an expired grant's retirement, an unconfirmed
    * ledger, FLEET_HALT — which follows it with SIGKILL three seconds on; and
-   * its own stop() on shutdown, which sends SIGTERM alone and exits about a
-   * second later. The heartbeat watchdog does NOT come here: it sends SIGKILL
-   * straight away. What all of that left behind was survivable — the
-   * pre-broadcast `submitted` row and the stranded-op resolver exist because
-   * of it — but it was never a clean stop.
+   * its fleet drain on shutdown (fleet-drain.ts, step 4), which waits up to
+   * twenty seconds to see the exit before it sends SIGKILL. The heartbeat
+   * watchdog does NOT come here: it sends SIGKILL straight away. What all of
+   * that left behind was survivable — the pre-broadcast `submitted` row and
+   * the stranded-op resolver exist because of it — but it was never a clean
+   * stop.
    *
    * So, in this order:
    *   1. `draining` — processIntentLocked refuses every intent that reaches it
@@ -14298,18 +14299,19 @@ async function main() {
    * settles it from the chain at the next arm. Nothing is retried, re-sent or
    * replayed by this.
    *
-   * WHAT THE BUDGET REALLY IS, TODAY. Under killChild the SIGKILL three
-   * seconds on cuts the drain short, exactly as it always cut the process
-   * short — what changes is that nothing new is broadcast in those seconds.
-   * Under the orchestrator's own stop() nothing kills a draining child, so,
-   * outside a container whose teardown takes every process with it, a child
-   * can outlive its orchestrator and the tenant lease it released by up to
-   * the whole budget. In that window it sends nothing new (every broadcast is
+   * WHAT THE BUDGET REALLY IS. Under killChild the SIGKILL three seconds on
+   * cuts the drain short, exactly as it always cut the process short — what
+   * changes is that nothing new is broadcast in those seconds. Under the
+   * orchestrator's fleet drain the child has up to twenty seconds before
+   * SIGKILL, which is what DRAIN_INTENT_CHAIN_MS was sized to fit inside, and
+   * the tenant leases are released last, after that wait — so a draining
+   * child has exited, or been sent SIGKILL, before its lease is given up. A
+   * drain whose own budget is cut (RAILWAY_DEPLOYMENT_DRAINING_SECONDS) cuts
+   * that wait too, and its SIGKILL then cuts this drain short as killChild's
+   * does. Until the SIGKILL, it sends nothing new (every broadcast is
    * refused) and asks Telegram for nothing new; only a receipt read, the end
    * of the tick it was in and its own sqlite writes go on (a hosted child has
-   * no DATABASE_URL). The fleet drain planned for the orchestrator (C3: twenty
-   * seconds per child, its leases released last) is what DRAIN_INTENT_CHAIN_MS
-   * was sized for, and closes that window.
+   * no DATABASE_URL).
    *
    * Registered only here, once the clock exists: a SIGTERM before this point
    * finds nothing started and keeps node's default. A second one while draining

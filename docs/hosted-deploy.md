@@ -494,9 +494,11 @@ script itself: no npm and no `sh -c` on the start path.
   (SIGKILL only for one still running when that wait ends), carries out pending
   Telegram kills, gives each tenant home a final mirror pass, writes
   `ops/last-shutdown.json` under `MERRYMEN_HOME`, releases the leases last and
-  exits 0. Workers have no SIGTERM handler yet, so each still ends at once, as
-  in a crash. The whole drain must fit in `MERRYMEN_DRAIN_BUDGET_MS` (default
-  50s); past it the orchestrator exits 1 and the receipt names the step it
+  exits 0. Each worker drains itself on that SIGTERM: it starts nothing new,
+  gives a trade already on its chain up to 18s, closes its ledger and exits; a
+  trade still out is settled at the next start, as after a crash. The whole
+  drain must fit in `MERRYMEN_DRAIN_BUDGET_MS` (default 50s); past it the
+  orchestrator exits 1 and the receipt names the step it
   stalled in. How long it has before SIGKILL is the service's draining time, not
   anything the image sets: make it longer than the budget (75s for the default).
   Set as the variable `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, it also cuts the

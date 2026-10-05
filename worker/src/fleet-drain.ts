@@ -32,18 +32,19 @@
  *     own final pass.
  *  4. CHILDREN AND HOLD PROCESSES: SIGTERM, then wait; SIGKILL only to what
  *     is still running when the wait ends, sent by the drain rather than by
- *     killChild's three-second timer. NOT A GRACEFUL STOP OF THE WORKER: no
- *     worker or hold process has a SIGTERM handler today (index.ts,
- *     telegram-hold.ts — and `node --import tsx` installs none), so each ends
- *     at once, as abruptly as on SIGKILL. An intent in hand is cut off as a
- *     crash cuts it, and stays accounted the way it does after a crash: by the
- *     'submitted' row written before broadcast and the in-flight reconcile at
- *     the next arm (inflight-reconcile.ts). The wait is for each exit to be
- *     SEEN — the final pass never reads a home its process may still write —
- *     and for a process that is stuck or ignores the signal. It is also the
- *     room a graceful worker-side handler would need — a separate change,
- *     whose own wait is sized to fit inside this one; until it lands, the
- *     paragraph above is the whole of what SIGTERM does to a worker.
+ *     killChild's three-second timer. A WORKER DRAINS ITSELF on the signal
+ *     (index.ts): it starts nothing new, refuses any broadcast not yet sent,
+ *     waits at most DRAIN_INTENT_CHAIN_MS (worker-admission.ts, sized to fit
+ *     inside this wait at its full length) for the trade already on its chain
+ *     and the tick it was in, closes its ledger and exits 0. A hold process
+ *     has no handler (telegram-hold.ts — and `node --import tsx` installs
+ *     none), so it ends at once, as abruptly as on SIGKILL. Whatever is cut
+ *     off — a trade still out when the worker's budget or this wait runs out —
+ *     stays accounted the way it does after a crash: by the 'submitted' row
+ *     written before broadcast and the in-flight reconcile at the next arm
+ *     (inflight-reconcile.ts). The wait is for each exit to be SEEN — the
+ *     final pass never reads a home its process may still write — and for a
+ *     process that is stuck or ignores the signal.
  *  5. TELEGRAM KILLS still pending in a home, AFTER the children: a child's
  *     last act may be writing one. Capped, as the old stop's was.
  *  6. THE FINAL PASS: each home that had a child or a hold process, copied one

@@ -8,10 +8,11 @@
  * drain's waits are the real waits on the real maps. The caps are shrunk; the
  * order is not.
  *
- * A real worker has no SIGTERM handler and ends at once on the signal. A
- * fake's `lastWrite` is NOT a graceful stop: it places a write in the home
- * after the live pass last read it and before the process is gone — the last
- * of the worker's tick — which only a final pass after the exit can carry.
+ * A real worker drains itself on the signal (index.ts) and then exits; a
+ * fake just exits, which is all the drain waits for. A fake's `lastWrite` is
+ * NOT that drain: it places a write in the home after the live pass last read
+ * it and before the process is gone — the last of the worker's tick — which
+ * only a final pass after the exit can carry.
  *
  * MERRYMEN_HOME is per process (node --test runs each file in its own), so
  * this never leaks into another test file. A drain is once per process, so

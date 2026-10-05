@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { HeldCurveLeg } from "./energy";
+import { DRAIN_LIMITS } from "./fleet-drain";
 import type { AgentLimits, TradeIntent } from "./policy";
 import {
   ADMISSION_LEVEL_ENV,
@@ -190,8 +191,12 @@ describe("draining the intent chain", () => {
     };
   }
 
-  it("the budget is eighteen seconds — inside the planned fleet drain's twenty (C3), far inside the watchdog", () => {
+  it("the budget is eighteen seconds — inside the fleet drain's twenty for a child's exit, far inside the watchdog", () => {
     assert.equal(DRAIN_INTENT_CHAIN_MS, 18_000);
+    // The orchestrator's drain (fleet-drain.ts, step 4) sends SIGKILL to a
+    // child still running when this wait ends: the worker's own drain must
+    // be over first, with room left for closing the ledger and exiting.
+    assert.ok(DRAIN_INTENT_CHAIN_MS < DRAIN_LIMITS.exitWaitMs, `${DRAIN_INTENT_CHAIN_MS}ms must end inside ${DRAIN_LIMITS.exitWaitMs}ms`);
   });
 
   it("AN EMPTY CHAIN DRAINS AT ONCE", async () => {
