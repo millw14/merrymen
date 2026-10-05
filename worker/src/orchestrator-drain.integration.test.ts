@@ -649,18 +649,22 @@ it("THE SHARED LEDGER SCHEMA IS APPLIED ONCE PER DRAIN, not once per home: a few
 it("ONCE STOPPING IS SET THE LIVE PASS TAKES NO FURTHER TENANT: the one in hand finishes, the next is left to its final pass", async () => {
   // Spec step 1. B's child is still alive while the pass would read it, and
   // its copy and memory publish from then could land after the final pass's.
-  const a = address(0xec1), aAccount = address(0xec2), b = address(0xed1), bAccount = address(0xed2);
+  // Held tenant C has the second loop's turn after every child's.
+  const a = address(0xec1), aAccount = address(0xec2), b = address(0xed1), bAccount = address(0xed2), c = address(0xe01), cAccount = address(0xe02);
   const aBook = await book(a, aAccount);
   await book(b, bAccount);
-  const aProc = new FakeProc(81_071), bProc = new FakeProc(81_072);
-  watched = [aProc, bProc];
+  mkdirSync(childHome(c), { recursive: true });
+  const aProc = new FakeProc(81_071), bProc = new FakeProc(81_072), cProc = new FakeProc(81_073);
+  watched = [aProc, bProc, cProc];
   adoptChildForTest(a, aAccount, aProc, lease(a, { n: 0 }));
   adoptChildForTest(b, bAccount, bProc, lease(b, { n: 0 }));
+  await adoptHolderForTest(c, cAccount, cProc as unknown as ChildProcess);
   const held = heldAtMarker(aBook.home);
   setLiveMirrorStoreForTest({ shared: held.db, dek, dialect: "sqlite" });
   const pass = mirrorLedgersForTest();
   await held.atMarker;
-  assert.ok(!held.seen.includes(b) && !held.seen.includes(bAccount), "the pass is on A, and has not reached B");
+  const untouched = (...ids: string[]) => ids.every((id) => !held.seen.includes(id));
+  assert.ok(untouched(b, bAccount, c, cAccount), "the pass is on A, and has reached neither B nor C");
 
   const drained = drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
   // Called home with A in hand: A's copy may finish, nothing after it starts.
@@ -668,12 +672,13 @@ it("ONCE STOPPING IS SET THE LIVE PASS TAKES NO FURTHER TENANT: the one in hand 
   await pass;
   await drained;
 
-  assert.ok(!held.seen.includes(b) && !held.seen.includes(bAccount), "the live pass never touched B once stopping was set");
+  assert.ok(untouched(b, bAccount), "the live pass never touched B once stopping was set");
+  assert.ok(untouched(c, cAccount), "nor the held tenant in the second loop");
   assert.equal(await sharedTrades(aAccount), 1, "A's copy in hand finished");
   assert.equal(await sharedTrades(bAccount), 1, "and B's book went up through its final pass alone");
   assert.equal(existsSync(marker(aBook.home)), false);
   const r = receipt();
-  assert.deepEqual(r.finalPass, { homes: 2, saved: 2, retained: 0, skipped: 0, outOfTime: 0 });
+  assert.deepEqual(r.finalPass, { homes: 3, saved: 3, retained: 0, skipped: 0, outOfTime: 0 });
   assert.equal(r.clean, true, JSON.stringify(r));
 });
 
