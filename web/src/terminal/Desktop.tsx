@@ -410,7 +410,8 @@ export function DesktopPortfolio({
       <section>
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
-          <span className={`desktop-running ${stopped || recovery ? "paused" : ""}`}>
+          {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+          <span className={`desktop-running ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
             {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
           </span>
         </div>
@@ -477,6 +478,15 @@ export function DesktopPortfolio({
               {mine.autonomy.action.label}
             </button>
           </div>
+        )}
+        {/* A KEY ABOUT TO EXPIRE: a line and a link, never the banner above —
+            nothing is wrong yet. Never beside that banner either (the verdict
+            drops the chip wherever a renewal is already offered), and never
+            during a hold, which the chip itself does not know about. */}
+        {!recovery && displayedAutonomy.expiresSoon && (
+          <p className="meta">
+            <a href="/grant#resign">{displayedAutonomy.expiresSoon.label}</a>
+          </p>
         )}
         {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
 

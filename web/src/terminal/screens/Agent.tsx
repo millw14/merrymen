@@ -36,7 +36,7 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
-import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
+import { ENERGY_NOTICE_PREFIX, isOwnerActionRule, type EnergyStatus } from "@merrymen/core";
 import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
 import { EnergyNote } from "../EnergyNote";
 import { RecoveryNotice } from "../RecoveryNotice";
@@ -519,8 +519,30 @@ export function Agent({
    * Deliberately wrapping the RENDER rather than folding it into `blocked`
    * above, which `live-blocker.test.ts` pins literally as the child's verdict
    * arriving unmodified.
+   *
+   * ONLY A VERDICT ABOUT THE KEY. `staleBlocker` is now the bare fact — signed
+   * since the worker last spoke — and a signature says nothing about ETH or
+   * USDG, so "your agent has no ETH" stays up through a re-sign exactly as the
+   * verdict's own CHECKING arm keeps it (`isOwnerActionRule`). This used to
+   * come for free from `state === "checking"`, and stopped doing so the day a
+   * silent worker could answer NOT RUNNING instead.
    */
-  const blockerIsStale = staleBlocker === true;
+  const blockerIsStale = staleBlocker === true && isOwnerActionRule(liveBlocker);
+  /**
+   * AN EXPIRED KEY, SAID ON THE SCREEN ITS OWNER OPENS.
+   *
+   * The desktop has rendered this banner from the verdict for a long time; the
+   * desk reads the worker's raw rule, and an expired agent has none — it is
+   * retired before the rail is assessed — so the phone said nothing at all, or
+   * worse, kept showing whatever blocker it had before it expired.
+   *
+   * FROM THE VERDICT, NOT A RULE OF OUR OWN. There is no `expired` advice and
+   * no invented `liveBlocker`: that field carries the worker's word, and mixing
+   * ours into it is how two surfaces end up disagreeing. And from
+   * `displayedAutonomy`, so a recovery hold — which clears the rule — offers no
+   * renewal while trading is paused.
+   */
+  const renewal = displayedAutonomy.rule === "expired" && displayedAutonomy.action ? displayedAutonomy : null;
   return (
     <div className="desk-page">
       <RecoveryNotice recovery={recovery}/>
@@ -533,7 +555,18 @@ export function Agent({
           to trade. Their owners are the ones reporting "it doesn't trade".
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
-      {blocked && !blockerIsStale && !recovery && (
+      {renewal && renewal.action && (
+        <section className="desk-blocked" role="status">
+          <p>{renewal.headline}</p>
+          <button type="button" onClick={onResign}>
+            {renewal.action.label} →
+          </button>
+        </section>
+      )}
+      {/* IN PLACE OF the worker's last blocker, not beside it: an expired
+          agent was retired before the rail was assessed, so whatever blocker
+          is on record predates the expiry and is no longer the story. */}
+      {blocked && !blockerIsStale && !recovery && !renewal && (
         /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
            rendered for every blocker there is — including the one that means
            "your agent is practising, exactly as you asked". An owner who had
@@ -558,6 +591,19 @@ export function Agent({
               Start live trading →
             </button>
           )}
+        </section>
+      )}
+      {/* A KEY ABOUT TO EXPIRE, while it still works. The neutral panel, never
+          the red one: nothing is wrong yet, and a key with two days left trades
+          exactly like one with ninety. Gated on the hold here because the
+          verdict's chip survives `recoveryAutonomy` — no renewal is offered
+          while trading is paused. The words are the verdict's. */}
+      {!recovery && displayedAutonomy.expiresSoon && (
+        <section className="desk-note" role="status">
+          <p>Renewal happens on the wallet page, where revoking the old permission requires network fees.</p>
+          <button type="button" onClick={onResign}>
+            {displayedAutonomy.expiresSoon.label} →
+          </button>
         </section>
       )}
       {/* THE WARNINGS NOBODY HAS EVER SEEN, finally somewhere somebody looks.
@@ -587,7 +633,8 @@ export function Agent({
               finds out, and names it in one tap. Renders nothing otherwise. */}
           <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
-        <span className={`desk-status ${stopped || recovery ? "paused" : ""}`}>
+        {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+        <span className={`desk-status ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
           <i />
           {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
         </span>
