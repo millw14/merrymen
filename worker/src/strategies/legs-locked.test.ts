@@ -189,8 +189,41 @@ describe("even-keel", () => {
   it("a HELD locked leg stays in the book: its trim is proposed, its top-up is not", () => {
     const over = evenKeelTick(cfg, snap({ holdings: hold({ QQQ: 10_000_000n, NVDA: 10_000_000n, MEME: 40_000_000n }) }));
     assert.ok(over.intents.some((i) => i.kind === "swap" && i.sellToken === MEME), "the exit is never gated");
+    // Above the target it is weighed like any leg, so the cash its trim frees
+    // goes to the legs the key can still buy.
+    assert.deepEqual(bought(over), [QQQ, NVDA], "and the legs it can own are topped up toward the same target");
     const under = evenKeelTick(cfg, snap({ holdings: hold({ QQQ: 20_000_000n, NVDA: 20_000_000n, MEME: 2_000_000n }) }));
     assert.ok(!under.intents.some((i) => i.kind === "swap" && i.buyToken === MEME), "its top-up is the refused buy");
+  });
+
+  it("NO CHURN FROM DUST: a held locked leg BELOW target is not weighed, so the legs it can own are not trimmed", () => {
+    // The reviewer's case: two 50 USDG legs beside 1 USDG of a leg the key
+    // cannot buy. Weighed, it made the target 33.67 and trimmed both legs
+    // toward it, every tick, down to 2.9 each in eight ticks.
+    const dust = evenKeelTick(cfg, snap({ holdings: hold({ QQQ: 50_000_000n, NVDA: 50_000_000n, MEME: 1_000_000n }) }));
+    assert.deepEqual(dust.intents, [], "a balanced book of the legs it can own is left alone");
+    assert.equal(dust.idle, undefined, "and that is a healthy quiet tick, not an idle one");
+    const under = evenKeelTick(cfg, snap({ holdings: hold({ QQQ: 20_000_000n, NVDA: 20_000_000n, MEME: 2_000_000n }) }));
+    assert.deepEqual(under.intents, [], "the same at any size below the target");
+  });
+
+  it("dropping one locked leg can drop the next: the target settles on what can still move", () => {
+    // NVDA is locked too here. 60 + 35 + 5: the first target (33.33) drops
+    // MEME, the second (47.5) drops NVDA, and QQQ alone sits at its own target.
+    const twoLocked = gates([USDG, QQQ, PEPE]);
+    const t = evenKeelTick(cfg, snap({ entryGates: twoLocked, holdings: hold({ QQQ: 60_000_000n, NVDA: 35_000_000n, MEME: 5_000_000n }) }));
+    assert.deepEqual(t.intents, [], "nothing is trimmed toward legs that can never be bought back up");
+  });
+
+  it("EVERY TRADABLE LEG LOCKED BUT SOME HELD — nothing trimmed toward the smaller, and legs-locked says why", () => {
+    const t = evenKeelTick(cfg, snap({ entryGates: NONE_SELLABLE, holdings: hold({ QQQ: 50_000_000n, NVDA: 10_000_000n }) }));
+    assert.deepEqual(t.intents, []);
+    assert.deepEqual(t.idle, { code: "legs-locked", legs: 3, locked: 3 });
+    const braked = evenKeelTick(
+      cfg,
+      snap({ entryGates: NONE_SELLABLE, holdings: hold({ QQQ: 50_000_000n, NVDA: 10_000_000n }), drawdown: { bps: 2_000, limitBps: 1_000 } }),
+    );
+    assert.equal(braked.idle?.code, "breaker-tripped", "behind the breaker");
   });
 
   it("EVERY TRADABLE LEG LOCKED AND NONE HELD — legs-locked, once, and nothing proposed", () => {

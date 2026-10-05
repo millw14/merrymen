@@ -109,12 +109,13 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
    * trim again: the book walks itself down to the leg it can never own. Before
    * the gate the same churn ran with a refused buy beside it every tick.
    *
-   * A locked leg that IS held stays in, so its trim is proposed exactly as
-   * before — the gate is never asked about a sell — and only its top-up is
-   * skipped below.
+   * A locked leg that IS held stays in, so its trim is still proposed — the
+   * gate is never asked about a sell — and only its top-up is skipped below.
+   * How much it weighs in the TARGET is the next question, answered there.
    */
   const locked = (l: EvenKeelLeg) => entryGateFor(snap.entryGates, l.token) !== null;
   const book = tradable.filter((l) => !locked(l) || valueOf(l.symbol) > 0n);
+  const buyable = book.filter((l) => !locked(l));
   const invested = book.reduce((sum, l) => sum + valueOf(l.symbol), 0n);
 
   // THE DAY'S TRADE COUNT BINDS THE BUYS, and only the buys. With it used up
@@ -128,6 +129,11 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   // into cash — the one move the breaker exists never to block.
   const brake = breakerIdle(snap);
   const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
+  const locksAll: Tick = {
+    intents: [],
+    why: [],
+    idle: { code: "legs-locked", legs: cfg.legs.length, locked: lockedLegs(snap.entryGates, cfg.legs) },
+  };
 
   // Cold start: nothing invested yet → lay down an equal-weight entry from cash.
   if (invested === 0n) {
@@ -137,13 +143,7 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
     // none is held: there is nothing this strategy may ever open. Behind the
     // breaker and the count, as in steady-basket, where the buy loop that
     // finds a locked leg never runs while either binds.
-    if (book.length === 0) {
-      return {
-        intents: [],
-        why: [],
-        idle: { code: "legs-locked", legs: cfg.legs.length, locked: lockedLegs(snap.entryGates, cfg.legs) },
-      };
-    }
+    if (book.length === 0) return locksAll;
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
     const per = budget / BigInt(book.length);
     const want = clamp(per, cfg.maxTradeUsdg);
@@ -221,7 +221,39 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
     };
   }
 
-  const target = invested / BigInt(book.length);
+  /**
+   * THE SAME TRAP, ONE STEP ON: A HELD LOCKED LEG BELOW TARGET.
+   *
+   * Leaving an unheld locked leg out of the book closes the trap only while
+   * that leg is worth exactly zero. Held — dust from an older grant, an
+   * airdrop — it sits below the target and can never be topped up to it, so
+   * a target that still counts it reads every other leg as overweight and
+   * trims them toward it, tick after tick: two 50 USDG legs beside a 1 USDG
+   * locked one walked down to 2.9 each in eight ticks. The dust liquidated the
+   * basket.
+   *
+   * So a locked leg BELOW the target is not weighed: it is held at what it is
+   * worth, and the target is the rest of the book spread over the rest of the
+   * legs. Dropping it raises the target, which can put another locked leg
+   * below it, so this repeats until nothing more drops — and it always stops
+   * with a leg left, because the largest leg is never below the average of a
+   * set it is in.
+   *
+   * A locked leg ABOVE the target stays weighed, and is trimmed toward it as
+   * any other leg would be: the gate is never asked about a sell, and the cash
+   * the trim frees tops up the legs this key can still buy. With no buyable
+   * leg at all, what stays weighed is the largest of the locked legs, at the
+   * target to within rounding — nothing is trimmed toward a leg that can
+   * never be bought.
+   */
+  let weighed = book;
+  let target = invested / BigInt(weighed.length);
+  for (;;) {
+    const next = weighed.filter((l) => !(locked(l) && valueOf(l.symbol) < target));
+    if (next.length === weighed.length) break;
+    weighed = next;
+    target = weighed.reduce((sum, l) => sum + valueOf(l.symbol), 0n) / BigInt(weighed.length);
+  }
   const band = (target * BigInt(cfg.bandBps)) / 10_000n;
   const intents: TradeIntent[] = [];
   const why: (Why | null)[] = [];
@@ -291,5 +323,12 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
     }
   }
 
-  return intents.length === 0 && withheld ? (braked ?? counted) : { intents, why };
+  if (intents.length === 0 && withheld) return braked ?? counted;
+  // NOTHING LEFT THAT THIS KEY MAY BUY, though the book still holds some of
+  // it: the cold start's sentence, for a book that is not cold. Behind the
+  // breaker and the count, as there.
+  if (intents.length === 0 && buyable.length === 0) {
+    return braked ?? (countSpent ? counted : locksAll);
+  }
+  return { intents, why };
 }
