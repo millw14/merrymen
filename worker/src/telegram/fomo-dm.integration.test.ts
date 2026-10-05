@@ -154,7 +154,7 @@ const settle = async () => {
 };
 
 async function withDm(
-  opts: { llm?: boolean; broker?: "fixture" | "absent" | "null"; composeReply?: string | null },
+  opts: { llm?: boolean; broker?: "fixture" | "absent" | "null"; composeReply?: string | null; fomoOff?: boolean },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
   const calls: Call[] = [];
@@ -250,6 +250,7 @@ async function withDm(
     submitTransfer: async () => "no transfers in this test",
     kill: () => ({ ok: true }),
     ...(opts.broker === "absent" ? {} : { fomo: () => (opts.broker === "null" ? null : fx.broker) }),
+    ...(opts.fomoOff ? { fomoOff: true } : {}),
     fomoComposeText: async (_creds, o) => {
       composed.push({ system: o.system, prompt: o.prompt });
       return opts.composeReply === undefined ? "On the evidence read, the support is thin and mostly one trader." : (opts.composeReply ?? "");
@@ -354,6 +355,16 @@ describe("social-trading research in a DM", () => {
         assert.match(await ask(h, "hello there"), /pick an AI provider/);
       });
     }
+  });
+
+  it("FOMO OFF IN THIS PROCESS: a research question goes on exactly as before Fomo existed, and nothing is asked of the broker", async () => {
+    await withDm({ fomoOff: true }, async (h) => {
+      // No brain in this harness: the classifier's own answer for any free text.
+      assert.match(await ask(h, "what are fomo traders buying?"), /pick an AI provider/);
+      assert.match(await ask(h, "theses on $PONS?"), /pick an AI provider/);
+      assert.match(await ask(h, "hello there"), /pick an AI provider/);
+      assert.deepEqual(h.fx.provider, [], "no provider request");
+    });
   });
 
   it("a watch comes only from the owner's own DM, through the planner", async () => {

@@ -19,7 +19,7 @@
  */
 
 import { llmAgentTurn, llmText, type AgentMsg, type AgentToolUse, type LlmCreds } from "../llm";
-import { CHAT_TOOLS, answerTradeQuestion, localResearchLines, openToolSession, toolByName, type ToolContext } from "./chat-tools";
+import { CHAT_TOOLS, FOMO_CHAT_TOOLS, answerTradeQuestion, localResearchLines, openToolSession, toolByName, type ToolContext } from "./chat-tools";
 import { brokerFailureEnvelope } from "../fomo/broker";
 import { answerFomoQuestion, type AnswerFomoResult, type FomoComposeInput } from "../fomo/chat";
 import type { FomoBroker } from "../fomo/contract";
@@ -70,7 +70,11 @@ export interface Answer {
   signReason: SignReason | null;
 }
 
-export function answerSystem(name: string, identity: string): string {
+/** The system prompt's line about the fomo_* lookups: left out where they are not offered (Fomo off in this process). */
+const FOMO_LOOKUPS_LINE = `
+- fomo_* lookups are read-only research on Fomo, a public social-trading feed (traders' theses, buys and sells, trending coins, and your own Fomo research status). Use them for questions about Fomo, its traders or theses. They never place an order, a post or a watch, and a trader's public activity is not what you or the owner traded: never present it as your trades.`;
+
+export function answerSystem(name: string, identity: string, opts: { fomo?: boolean } = {}): string {
   return `You are ${name}, the owner's own trading agent — a "merryman" of the merrymen, a Sherwood band working Robinhood Chain — talking with your owner on Telegram.
 
 HOW YOU ANSWER
@@ -78,8 +82,7 @@ HOW YOU ANSWER
 - For "today", use list_trades with period today; default day is since 00:00 UTC. Use a different timezone only when the owner explicitly supplies it. Never call a rolling 24 hours "today".
 - Use canonical trade IDs from list_trades and trade_details for a specific trade's why/result; a separate recent decision about the same ticker is not that trade's reason. Orders pending, refused or reverted did not fill. An intended size or quote is not the executed cash. Practice is separate from real money.
 - Use calculate for arithmetic. Only verified ledger results are actual trade P&L; user-supplied arithmetic is hypothetical. Never fill in missing cost, proceeds, fees or prices.
-- Asked how the market is, what's moving, for a chart / TA / analysis of a coin, or whether something is a good entry: call market_read (with the coin, or with none for the whole market) and THINK like a trader over what it returns — trend and structure, momentum, volume and buyer/seller flow, liquidity versus FDV, where price sits against support and resistance. Say which signal dominates, give your view, the level to watch and what would flip it. Cite only figures it returned; never invent a target. Your own history with a coin is token_report.
-- fomo_* lookups are read-only research on Fomo, a public social-trading feed (traders' theses, buys and sells, trending coins, and your own Fomo research status). Use them for questions about Fomo, its traders or theses. They never place an order, a post or a watch, and a trader's public activity is not what you or the owner traded: never present it as your trades.
+- Asked how the market is, what's moving, for a chart / TA / analysis of a coin, or whether something is a good entry: call market_read (with the coin, or with none for the whole market) and THINK like a trader over what it returns — trend and structure, momentum, volume and buyer/seller flow, liquidity versus FDV, where price sits against support and resistance. Say which signal dominates, give your view, the level to watch and what would flip it. Cite only figures it returned; never invent a target. Your own history with a coin is token_report.${opts.fomo === false ? "" : FOMO_LOOKUPS_LINE}
 - Follow-ups such as "best entry?", "where would the stop go?", "what if support breaks?", "take profit where?", "scalp or swing?", "wait or chase?", "is volume confirming?", "what would change your mind?" and comparisons are analysis requests. Resolve the coin/trade from the replied-to message first, otherwise the most recent relevant conversation. If the subject is ambiguous, ask one short clarification. Refresh market_read; earlier prices and an old chart are context, not current evidence.
 - Give a conditional plan when asked: entry trigger or a wait/no-entry conclusion, invalidation, the next measured level, and whether fees, slippage or shallow liquidity could erase the move. Distinguish a candle close/retest from a wick. If measurements cannot support an entry, stop, target, timeframe or probability, say what is missing; do not invent it or promise wins. A hypothetical stop is not an installed order. Hourly candles cannot establish a minute-level scalp entry.
 - For "why that buy/loss?", use the exact canonical trade ID from the reference with trade_details, then token_report/decisions only if further context is needed. For comparisons, read each coin independently and compare the same timeframe; never imply access to another owner's private holdings, settings or trade reasons. Public market facts do not prove what someone else traded.
@@ -118,8 +121,12 @@ function userBlock(i: AnswerInput): string {
 /** Run the loop. Null = the caller should fall back. */
 export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
   const turn = i.turn ?? llmAgentTurn;
-  const system = answerSystem(i.name, i.identity);
-  const tools = CHAT_TOOLS.map((t) => t.spec);
+  // FOMO OFF IN THIS PROCESS: the fomo_* lookups are neither offered nor
+  // runnable, and the prompt says nothing of them — the bot as before Fomo.
+  const fomoOn = i.tools.fomoOff !== true;
+  const offered = fomoOn ? CHAT_TOOLS : CHAT_TOOLS.filter((t) => !FOMO_CHAT_TOOLS.includes(t));
+  const system = answerSystem(i.name, i.identity, { fomo: fomoOn });
+  const tools = offered.map((t) => t.spec);
   const messages: AgentMsg[] = [];
   const used: string[] = [];
   let needsSignature = false;
@@ -129,7 +136,7 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
   try {
     const lookup = i.lookup ?? (async (name: string, input: Record<string, unknown>, ctx: ToolContext) => {
       const tool = toolByName(name);
-      return tool ? tool.run(input, ctx) : `There is no lookup called ${name}.`;
+      return tool && offered.includes(tool) ? tool.run(input, ctx) : `There is no lookup called ${name}.`;
     });
     const literalMath=parseChatMath(i.question);
     if(literalMath) { const result=calculateChatMath(literalMath); return {text:result.ok?result.text:result.error,used:["calculate"],needsSignature:false,signReason:null}; }

@@ -345,12 +345,15 @@ Design and stages: [`docs/fomo.md`](fomo.md).
 |---|---|---|
 | `MERRYMEN_FOMO_API_KEY` *(alias `FOMO_API_KEY`)* | **web + orchestrator** | the provider key. The house name wins when both are set; a blank value is no key. **Stripped from every worker child under both names** |
 | `MERRYMEN_FOMO_PLAN_CREDITS` *(optional)* | **web + orchestrator, the same value on both** | credits per month on the provider plan; the shared daily budget is derived from it. Default: the Free plan's `250000`. Both services draw on the same durable counters, so both must size them the same |
-| `MERRYMEN_FOMO_ENABLED` *(optional)* | orchestrator | `0` switches the orchestrator's Fomo pass off: no stream, no cohort, no research files, and worker children are spawned without the IPC channel, so their Fomo tools answer *unavailable* at once. The web's own lookups are unaffected |
+| `MERRYMEN_FOMO_ENABLED` | **web + orchestrator, the same value on both** | **Opt-in: Fomo is off unless this is exactly `1`.** Off, the orchestrator opens no Fomo database pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without the IPC channel; those children behave as they did before Fomo (no research lane in Telegram, nothing charged to the scout budget). The web builds no runtime and its chat answers as before; the MCP Fomo tools answer `unsupported`. Self-hosted installs are unaffected |
 
 > **The key lives on the two services that broker reads, and nowhere else.**
 > `CHILD_SECRET_STRIP` removes both names at fork, because a tenant's worker
 > could otherwise put it in a prompt, a decision row or a log line. A hosted
 > child still answers Fomo questions on Telegram: it asks the orchestrator.
+>
+> **Opt-in.** Nothing below happens until `MERRYMEN_FOMO_ENABLED=1` is set on
+> both services. Deploying this code without it changes nothing in production.
 >
 > **The IPC channel.** While the pass is on, worker children are spawned with
 > `stdio: ["ignore", "pipe", "pipe", "ipc"]`; stdin stays closed and the log
@@ -373,8 +376,8 @@ Design and stages: [`docs/fomo.md`](fomo.md).
 >
 > **Without a key** nothing is spent and nothing pretends: the pass still writes
 > each child's file with `not-configured` health, and lookups over the channel
-> answer *not configured*. Without `DATABASE_URL` the pass is off and says so
-> once.
+> answer *not configured*. Without `DATABASE_URL`, or without the opt-in, the
+> pass is off and says so once.
 >
 > **Nothing is posted.** Research and watching notes are drafted into the
 > `fomo_publications` outbox only for owners with a connected X account, and

@@ -79,6 +79,12 @@ export interface ToolContext {
    * lookup here can name one.
    */
   fomo?: FomoBroker | null;
+  /**
+   * True when this process has no Fomo at all (telegram/service.ts fomoOff):
+   * the fomo_* lookups are not offered to the model and its prompt does not
+   * mention them (answer.ts answerQuestion).
+   */
+  fomoOff?: boolean;
   /** "tg-dm:<chatId>": the conversation the research's subject memory is kept under. */
   fomoConversationKey?: string | null;
   /**

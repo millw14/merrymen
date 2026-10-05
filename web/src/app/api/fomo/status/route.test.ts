@@ -9,16 +9,23 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { after, afterEach, before, beforeEach, it } from "node:test";
 import { mintSession, SESSION_COOKIE } from "@/lib/auth";
-import { createWebFomoRuntime, FOMO_NEEDS_AGENT, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
+import { createWebFomoRuntime, FOMO_NEEDS_AGENT, FOMO_NOT_ENABLED, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
 import { projectSettings, setSettingsReaderForTest } from "@/lib/services/settings-view";
 import { wrapSqlite } from "../../../../../../worker/src/db";
 import { FOMO_ATTRIBUTION } from "../../../../../../worker/src/fomo/render";
 import { GET } from "./route";
 
+/** A runtime that must never be asked for: asked, it fails the answer (a Fomo question then reads "can't reach"), never the process. */
+function untouchable(): Promise<never> {
+  const p = Promise.reject(new Error("the runtime must not be asked for"));
+  p.catch(() => {});
+  return p;
+}
+
 const A = `0x${"a".repeat(40)}` as `0x${string}`;
 const B = `0x${"b".repeat(40)}` as `0x${string}`;
 const PONS = "0x39dbed3a00000000000000000000000000000c0d";
-const ENV_KEYS = ["MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET"] as const;
+const ENV_KEYS = ["MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "MERRYMEN_FOMO_ENABLED"] as const;
 const saved = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
 const C = `0x${"c".repeat(40)}` as `0x${string}`;
 const settings: Record<string, Record<string, unknown> | null> = {};
@@ -29,6 +36,8 @@ let raw: DatabaseSync;
 
 before(() => {
   process.env.MERRYMEN_HOSTED = "1";
+  // Hosted Fomo is opt-in (fomo-runtime.ts hostedFomoEnabled); these tests run an opted-in deployment.
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
   process.env.MERRYMEN_SESSION_SECRET = "test-fomo-status-secret-at-least-32-characters";
   setSettingsReaderForTest({ async settingsFor(t) { return projectSettings(settings[t.toLowerCase()] ?? null); } });
   setFomoOwnerReaderForTest({ async hasAgent(t) { return agents.has(t); } });
@@ -46,6 +55,17 @@ afterEach(() => {
   setFomoRuntimeForTest(null);
   setFomoOwnerReaderForTest({ async hasAgent(t) { return agents.has(t); } });
   process.env.MERRYMEN_HOSTED = "1";
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
+});
+
+it("hosted, not opted in: 404 'not enabled', and nothing is read, asked or logged", async () => {
+  delete process.env.MERRYMEN_FOMO_ENABLED;
+  setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked while Fomo is not enabled"); } });
+  setFomoRuntimeForTest(untouchable());
+  const res = await get(A);
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: FOMO_NOT_ENABLED });
+  assert.equal(Number((raw.prepare("SELECT COUNT(*) AS n FROM fomo_requests").get() as { n: number }).n), 0);
 });
 
 after(() => {

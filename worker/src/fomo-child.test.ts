@@ -43,6 +43,8 @@ import {
   type HeldCoin,
   type OwnPrice,
   type SelfHostedJobs,
+  childFomoOff,
+  withExplorationQuarantine,
 } from "./fomo-child";
 import { brokerFailureEnvelope, createIpcBroker, serveBrokerRequests, validateBrokerReport, type BrokerPort } from "./fomo/broker";
 import { writeChildFomoFile } from "./fomo/child-file";
@@ -251,6 +253,8 @@ interface HarnessOpts {
   durable?: DurableStatePort;
   /** Start at this clock (a "redeploy" later on). */
   now?: number;
+  /** Fomo off in this process (childFomoOff). */
+  off?: () => boolean;
 }
 
 /** The tenant's durable store as the broker memory API holds it, with failure switches. */
@@ -338,6 +342,7 @@ function harness(o: HarnessOpts = {}) {
   });
   const child = new FomoChild({
     broker: () => broker,
+    off: o.off,
     ownTenant: () => (o.tenant === undefined ? TENANT : o.tenant),
     home: () => home,
     live,
@@ -1212,6 +1217,69 @@ describe("an entry is recorded before it is sent", () => {
   });
 });
 
+describe("FOMO OFF IN THIS PROCESS (a hosted child spawned without the channel)", () => {
+  it("is decided from the process alone: hosted and no IPC channel; self-hosted never", () => {
+    const port = fakePort();
+    assert.equal(childFomoOff(true, null), true);
+    assert.equal(childFomoOff(true, port), false);
+    assert.equal(childFomoOff(false, null), false, "self-hosted builds its own runtime");
+    assert.equal(childFomoOff(false, port), false);
+  });
+
+  it("charges the scout gate exactly nothing, even with the durable ledger unreadable, and never reads the fallback", async () => {
+    const d = memoryDurable();
+    d.readable = false;
+    const h = harness({ durable: d.port, broker: null, off: () => true });
+    h.tick();
+    await h.child.settled();
+    assert.equal(h.child.explorationScoutUse6(), 0n, "off is zero, never unknown");
+    let fallbackReads = 0;
+    const charge = async () => {
+      fallbackReads++;
+      return U(20);
+    };
+    assert.equal(await withExplorationQuarantine(U(7), h.child.explorationScoutUse6(), charge), U(7), "quarantinedUsdg === lastQuarantinedUsdg");
+    assert.equal(await withExplorationQuarantine(0n, h.child.explorationScoutUse6(), charge), 0n);
+    assert.equal(fallbackReads, 0, "the Trencher book / whole budget is never charged");
+    // The same unreadable ledger with Fomo ON still errs toward refusing.
+    const on = harness({ durable: d.port, broker: null });
+    on.tick();
+    await on.child.settled();
+    assert.equal(on.child.explorationScoutUse6(), null);
+    assert.equal(await withExplorationQuarantine(U(7), on.child.explorationScoutUse6(), charge), U(27));
+    assert.equal(fallbackReads, 1);
+  });
+
+  it("does nothing at all: no file read, no durable read or write, no nomination, verification, gate, lens or report", async () => {
+    const d = memoryDurable();
+    const h = harness({ durable: d.port, off: () => true });
+    h.tick([{ token: coin(1), symbol: h.symbol(coin(1)), decimals: 18, valueUsdg6: U(5), price8: P(1), priceStale: false }]);
+    await h.child.settled();
+    h.t.now += 60_000;
+    h.tick();
+    await h.child.settled();
+    assert.equal(d.reads + d.writes, 0, "the tenant's store is never asked");
+    assert.equal(h.book.active().length, 0, "nothing offered to the early book");
+    assert.deepEqual(h.child.verifyRequests(), []);
+    assert.equal(h.child.heldReviewDue(coin(1)), false);
+    assert.deepEqual(h.child.gateEntry(h.entry(coin(1), 5)), { kind: "none" });
+    const signals: Record<string, string> = {};
+    assert.equal(h.child.attachLens(signals, coin(1), "http://brain.test"), false);
+    assert.deepEqual(signals, {}, "no lens rides on a Brain request");
+    assert.deepEqual(h.reports(), [], "nothing reported");
+    assert.equal(h.child.explorationScoutUse6(), 0n);
+  });
+
+  it("a probe that throws is not 'off': the conservative charge stands", async () => {
+    const d = memoryDurable();
+    d.readable = false;
+    const h = harness({ durable: d.port, broker: null, off: () => { throw new Error("probe"); } });
+    h.tick();
+    await h.child.settled();
+    assert.equal(h.child.explorationScoutUse6(), null);
+  });
+});
+
 describe("one scout pool", () => {
   it("what the existing scout gate holds is spent from the same budget: a full pool sizes follow at zero", () => {
     const h = harness();
@@ -1669,7 +1737,7 @@ describe("index.ts wires the follow path's money rules", () => {
     assert.match(CODE, /scoutHeldCost6: lastQuarantinedKnown \? lastQuarantinedUsdg : null,/);
     assert.match(CODE, /lastQuarantinedKnown = true;/);
     const fn = CODE.slice(CODE.indexOf("async function scoutContextFor("));
-    assert.match(fn.slice(0, 9000), /quarantinedUsdg: lastQuarantinedUsdg \+ \(fomoChild\.explorationScoutUse6\(\) \?\? await trenchHeldCostOrBudget\(\)\),/);
+    assert.match(fn.slice(0, 9000), /quarantinedUsdg: await withExplorationQuarantine\(lastQuarantinedUsdg, fomoChild\.explorationScoutUse6\(\), trenchHeldCostOrBudget\),/);
     // An unknown ledger is charged the Trencher book (the bound on what follow
     // can hold), never silently zero, and the whole budget only if the book
     // itself is unreadable — so the Fomo channel being down is not a scout kill switch.
@@ -1687,6 +1755,15 @@ describe("index.ts wires the follow path's money rules", () => {
     assert.match(CODE, /const verifyOnly = new Set\(fomoChild\.verifyRequests\(\)\.filter\(\(a\) => !earlyBook\.addresses\(\)\.has\(a\)\)\);/);
     assert.match(CODE, /: highVolumePools\(freshTape\)\.filter\(\(p\) => !verifyOnly\.has\(p\.tokenAddress\.toLowerCase\(\)\)\);/);
     assert.doesNotMatch(CODE, /: highVolumePools\(freshTape\);/);
+  });
+
+  it("FOMO OFF is decided once from the process and reaches the child, the broker choice and Telegram", () => {
+    assert.match(CODE, /const fomoPort = processBrokerPort\(\);\s*const fomoOff = childFomoOff\(isHostedMode\(\), fomoPort\);/);
+    assert.match(CODE, /new FomoChild\(\{\s*broker: \(\) => fomoBroker,\s*off: \(\) => fomoOff,/);
+    assert.match(CODE, /void chooseChildFomoBroker\(\{\s*hosted: isHostedMode\(\),\s*port: fomoPort,/);
+    assert.match(CODE, /fomoGroupPort: \(\) => tgFomoPort,\s*fomoOff,/);
+    assert.equal((CODE.match(/processBrokerPort\(\)/g) ?? []).length, 1, "one channel, read once");
+    assert.equal((CODE.match(/explorationScoutUse6\(\)/g) ?? []).length, 1, "the scout gate is the only reader");
   });
 
   it("self-hosted runs its own deep-research queue; hosted never builds a local runtime", () => {

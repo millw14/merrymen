@@ -219,6 +219,15 @@ export interface TelegramServiceDeps {
   fomo?: () => FomoBroker | null;
   /** The groups' research port (worker/src/tg-fomo-port.ts createTgFomoPort). Absent or null: no research lane in groups. */
   fomoGroupPort?: () => TgFomoPort | null;
+  /**
+   * THIS PROCESS HAS NO FOMO AT ALL (fomo-child.ts childFomoOff: a hosted
+   * child whose orchestrator has not opted in). Unlike an absent or null
+   * broker, which is research that is unavailable right now, this is the bot
+   * as it was before Fomo existed: a DM goes straight to the classifier, the
+   * chat model is offered no fomo_* lookup and its prompt does not mention
+   * them, and groups have no research lane.
+   */
+  fomoOff?: boolean;
   /** Injectable for tests: the one-shot model call a DM research analysis is worded with (llm.ts llmText). */
   fomoComposeText?: FomoDmInput["compose"];
   /** Injectable for tests. */
@@ -617,7 +626,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         port: () => deps.tgCoins ?? null,
         facts: () => deps.tgFacts ?? null,
         desk: () => deps.tgDesk?.() ?? null,
-        fomo: () => deps.fomoGroupPort?.() ?? null,
+        fomo: () => (deps.fomoOff === true ? null : deps.fomoGroupPort?.() ?? null),
         self: () => {
           const bot = selfFor(groupCfg());
           // The bot's display name (getMe's first_name) is what members see on
@@ -730,6 +739,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       client: mainnetClient(),
       now: now(),
       fomo: fomoBroker(),
+      fomoOff: deps.fomoOff === true,
       fomoConversationKey: msg ? fomoDmKey(msg.chatId) : null,
       fomoAudience: msg && fomoOwnerDm(msg) ? "owner" : "group",
     };
@@ -897,6 +907,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * it and the classifier should.
    */
   const fomoDm = async (msg: TgMessage, cfg: ResolvedConfig, token: string): Promise<string | null> => {
+    // No Fomo in this process: the classifier takes every DM, as before Fomo.
+    if (deps.fomoOff === true) return null;
     const owner = fomoOwnerDm(msg);
     const nowMs = Date.now();
     const st = stateRef.get();

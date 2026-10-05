@@ -1573,21 +1573,56 @@ describe("the orchestrator's wiring", () => {
     assert.ok(/stopFomoPass\(\);/.test(SRC.slice(SRC.indexOf("export async function honourFleetHalt("), SRC.indexOf("export async function runOrchestrator("))), "FLEET_HALT stops the stream");
   });
 
-  it("reads the switches once: off by switch or without a database, the key by either name, never logged", async () => {
+  it("WITH THE PASS OFF, NOTHING FOMO RUNS: no pool, no DDL, no IPC channel, no fomo.json, no held-coin read", () => {
+    const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const count = (re: RegExp) => (code.match(re) ?? []).length;
+    // The pool and the schema: built only by fomoRuntimeNow, which only runFomoPass calls,
+    // which only startFomoPass starts, after `if (boot.off) return`.
+    const runtimeNow = code.slice(code.indexOf("async function fomoRuntimeNow("), code.indexOf("function attachFomoBroker("));
+    assert.ok(/makePgDb\(/.test(runtimeNow) && /createFomoRuntime\(/.test(runtimeNow), "fomoRuntimeNow holds the pool and the runtime (whose build ensures the schema)");
+    assert.equal(count(/fomoRuntimeNow\(/g), 2, "declared once, called once");
+    assert.equal(count(/createFomoRuntime\(/g), 1, "the runtime is built nowhere else");
+    const run = code.slice(code.indexOf("async function runFomoPass("));
+    assert.ok(/const rt = await fomoRuntimeNow\(boot\);/.test(run.slice(0, 400)), "runFomoPass is the caller");
+    assert.equal(count(/runFomoPass\(/g), 2, "declared once, started once");
+    const start = code.slice(code.indexOf("function startFomoPass("), code.indexOf("async function runFomoPass("));
+    assert.ok(/const boot = fomoBootNow\(\);\s*if \(boot\.off\) return;[\s\S]*runFomoPass\(boot\)/.test(start), "started only after the off check");
+    // fomo.json: written only by the pass the runtime feeds.
+    assert.equal(count(/writeChildFomoFile\b/g), 2, "imported once, handed to makeFomoPass once");
+    assert.ok(/writeChildFile: writeChildFomoFile/.test(run), "and only inside runFomoPass");
+    // The broker: attached only once the runtime exists, which it never does while off.
+    const attach = code.slice(code.indexOf("function attachFomoBroker("), code.indexOf("function noteFomoFailure("));
+    assert.ok(/const rt = fomoRuntime;\s*if \(!rt \|\|/.test(attach), "no runtime, no broker");
+    assert.equal(count(/fomoRuntime = \{/g), 1, "the runtime is assigned in one place");
+    // The held-coin read on the mirror: gated by the same switch.
+    assert.equal(count(/heldCoinAddressesFor\(handle\.db\)/g), 1);
+    assert.ok(/if \(!fomoBootNow\(\)\.off\) tenantHeldCoins\.set\(tenant\.toLowerCase\(\), await heldCoinAddressesFor\(handle\.db\)\)/.test(code), "read only while the pass is on");
+  });
+
+  it("reads the switches once: off unless opted in, off without a database, the key by either name, never logged", async () => {
     process.env.MERRYMEN_HOME ??= path.join(tmpdir(), "mm-orchestrator-fomo-test-home");
     process.env.MERRYMEN_HOSTED = "1";
     const { childEnv, fomoSetup } = await import("./orchestrator");
+    const ON = { MERRYMEN_FOMO_ENABLED: "1", DATABASE_URL: "postgres://x" };
     assert.equal(fomoSetup({ MERRYMEN_FOMO_ENABLED: "0", DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: KEY }).off, true);
-    assert.equal(fomoSetup({ MERRYMEN_FOMO_API_KEY: KEY }).off, true, "no shared database, no pass");
-    const on = fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: ` ${KEY} `, MERRYMEN_FOMO_PLAN_CREDITS: "1000000" });
+    assert.equal(fomoSetup({ MERRYMEN_FOMO_ENABLED: "1", MERRYMEN_FOMO_API_KEY: KEY }).off, true, "no shared database, no pass");
+    const on = fomoSetup({ ...ON, MERRYMEN_FOMO_API_KEY: ` ${KEY} `, MERRYMEN_FOMO_PLAN_CREDITS: "1000000" });
     assert.deepEqual([on.off, on.apiKey, on.planCredits], [false, KEY, 1_000_000]);
-    assert.equal(fomoSetup({ DATABASE_URL: "postgres://x", FOMO_API_KEY: KEY }).apiKey, KEY, "the provider's own name works too");
-    assert.equal(fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: " ", FOMO_API_KEY: KEY }).apiKey, KEY, "a blank house name falls through");
-    const keyless = fomoSetup({ DATABASE_URL: "postgres://x" });
-    assert.deepEqual([keyless.off, keyless.apiKey], [false, null], "no key still runs: files and the broker answer honestly");
+    assert.equal(fomoSetup({ ...ON, FOMO_API_KEY: KEY }).apiKey, KEY, "the provider's own name works too");
+    assert.equal(fomoSetup({ ...ON, MERRYMEN_FOMO_API_KEY: " ", FOMO_API_KEY: KEY }).apiKey, KEY, "a blank house name falls through");
+    const keyless = fomoSetup(ON);
+    assert.deepEqual([keyless.off, keyless.apiKey], [false, null], "opted in without a key still runs: files and the broker answer honestly");
     assert.match(keyless.lines.join(" "), /without a provider key/);
-    assert.equal(fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_PLAN_CREDITS: "lots" }).planCredits, undefined);
+    assert.equal(fomoSetup({ ...ON, MERRYMEN_FOMO_PLAN_CREDITS: "lots" }).planCredits, undefined);
     assert.ok(!JSON.stringify([on.lines, keyless.lines]).includes(KEY), "a boot line carries the key");
+    // OPT-IN. A deployment that never set the switch — even one holding the
+    // shared database AND a provider key — runs no pass.
+    for (const value of [undefined, "", " ", "true", "yes", "on", "01", "1 "]) {
+      const boot = fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: KEY, MERRYMEN_FOMO_ENABLED: value });
+      assert.deepEqual([boot.off, boot.apiKey], [true, null], `MERRYMEN_FOMO_ENABLED=${JSON.stringify(value)} is off`);
+      assert.match(boot.lines.join(" "), /fomo: off/);
+      assert.ok(!boot.lines.join(" ").includes(KEY));
+    }
     process.env.MERRYMEN_FOMO_API_KEY = KEY;
     process.env.FOMO_API_KEY = KEY;
     try {

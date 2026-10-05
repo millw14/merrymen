@@ -47,6 +47,40 @@ const base = (turn: AnswerInput["turn"]): AnswerInput => ({
   turn,
 });
 
+describe("answerQuestion with Fomo off in this process (a deployment that has not opted in)", () => {
+  function recording(first: AgentTurn) {
+    const seen: { system: string; tools: string[]; messages: AgentMsg[] }[] = [];
+    const turn = (async (_c: LlmCreds, o: { system: string; tools: { name: string }[]; messages: AgentMsg[] }) => {
+      seen.push({ system: o.system, tools: o.tools.map((t) => t.name), messages: [...o.messages] });
+      return seen.length === 1 ? first : { text: "done", toolUses: [] };
+    }) as never;
+    return { seen, turn };
+  }
+
+  it("offers no fomo_* lookup, says nothing of them, and refuses one the model names anyway", async () => {
+    const r = recording({ text: "", toolUses: [{ id: "f1", name: "fomo_get_rankings", input: {} }] });
+    await answerQuestion({ ...base(r.turn), tools: { ...tools, fomoOff: true } as ToolContext });
+    assert.ok(r.seen[0]!.tools.length > 0);
+    assert.deepEqual(r.seen[0]!.tools.filter((n) => n.startsWith("fomo_")), [], "not offered");
+    assert.doesNotMatch(r.seen[0]!.system, /fomo_\*|Fomo/, "not in the prompt");
+    const results = r.seen[1]!.messages.find((m) => m.role === "tools") as Extract<AgentMsg, { role: "tools" }>;
+    assert.match(results.results[0]!.output, /no lookup called fomo_get_rankings/, "not runnable");
+  });
+
+  it("with Fomo on (the default), the lookups and their rules are there", async () => {
+    const r = recording({ text: "fine", toolUses: [] });
+    await answerQuestion(base(r.turn));
+    assert.ok(r.seen[0]!.tools.some((n) => n.startsWith("fomo_")));
+    assert.match(r.seen[0]!.system, /fomo_\* lookups are read-only research/);
+    assert.equal(answerSystem("Shogun", "YOUR IDENTITY: Shogun.", { fomo: false }).includes("fomo_"), false);
+    assert.equal(
+      answerSystem("Shogun", "YOUR IDENTITY: Shogun.", { fomo: false }),
+      answerSystem("Shogun", "YOUR IDENTITY: Shogun.").replace(/\n- fomo_\* lookups[^\n]*/, ""),
+      "the one line, and nothing else, is left out",
+    );
+  });
+});
+
 describe("answerQuestion — look it up, then answer", () => {
   it("runs the lookup the model asks for and answers from it", async () => {
     const s = scripted([

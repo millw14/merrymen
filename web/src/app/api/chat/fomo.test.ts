@@ -18,6 +18,13 @@ import { wrapSqlite } from "../../../../../worker/src/db";
 import { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } from "../../../../../worker/src/fomo/render";
 import { POST } from "./route";
 
+/** A runtime that must never be asked for: asked, it fails the answer (a Fomo question then reads "can't reach"), never the process. */
+function untouchable(): Promise<never> {
+  const p = Promise.reject(new Error("the runtime must not be asked for"));
+  p.catch(() => {});
+  return p;
+}
+
 type Rec = Record<string, unknown>;
 
 const A = `0x${"a".repeat(40)}` as `0x${string}`;
@@ -25,7 +32,7 @@ const B = `0x${"b".repeat(40)}` as `0x${string}`;
 const ALERTS_NEWEST = 1788378000000;
 const ENV_KEYS = [
   "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "MERRYMEN_HOME", "DATABASE_URL", "GROQ_API_KEY", "ANTHROPIC_API_KEY",
-  "MERRYMEN_LLM_PROVIDER", "MERRYMEN_SETTINGS_FILE", "MERRYMEN_FOMO_API_KEY", "FOMO_API_KEY",
+  "MERRYMEN_LLM_PROVIDER", "MERRYMEN_SETTINGS_FILE", "MERRYMEN_FOMO_API_KEY", "FOMO_API_KEY", "MERRYMEN_FOMO_ENABLED",
 ] as const;
 const saved = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
 const home = mkdtempSync(path.join(os.tmpdir(), "merrymen-chat-fomo-"));
@@ -69,6 +76,8 @@ let raw: DatabaseSync;
 before(() => {
   for (const k of ENV_KEYS) delete process.env[k];
   process.env.MERRYMEN_HOSTED = "1";
+  // Hosted Fomo is opt-in (fomo-runtime.ts hostedFomoEnabled); these tests run an opted-in deployment.
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
   process.env.MERRYMEN_SESSION_SECRET = "test-chat-fomo-secret-at-least-32-characters";
   process.env.MERRYMEN_HOME = home;
   // The house brain: an OpenAI-compatible endpoint, reached only through the stub below.
@@ -100,7 +109,10 @@ beforeEach(async () => {
   setFomoRuntimeForTest(rt);
 });
 
-afterEach(() => setFomoRuntimeForTest(null));
+afterEach(() => {
+  setFomoRuntimeForTest(null);
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
+});
 
 after(() => {
   mock.restoreAll();
@@ -130,6 +142,23 @@ async function chat(tenant: `0x${string}`, message: string, o: { stream?: boolea
 }
 
 const requests = () => raw.prepare("SELECT tenant, surface, tool FROM fomo_requests ORDER BY created_at_ms, rowid").all() as Rec[];
+
+describe("a hosted deployment that has not opted in (MERRYMEN_FOMO_ENABLED unset)", () => {
+  it("answers a Fomo question exactly as before Fomo existed: no lookup, no research store touched, no research turn for the model", async () => {
+    for (const value of [undefined, "0", "true"]) {
+      if (value === undefined) delete process.env.MERRYMEN_FOMO_ENABLED;
+      else process.env.MERRYMEN_FOMO_ENABLED = value;
+      llm = [];
+      setFomoRuntimeForTest(untouchable());
+      const r = await chat(A, "who are the top traders on fomo this week?");
+      assert.equal(r.reply, "On the evidence read, support is thin.", "the ordinary model reply");
+      assert.equal(provider.length, 0, "no provider call");
+      assert.equal(requests().length, 0, "nothing logged in the research store");
+      assert.equal(llm.length, 1);
+      assert.ok(!/FOMO RESEARCH|FOMO EVIDENCE/.test(llm[0]!.system + llm[0]!.prompt), `MERRYMEN_FOMO_ENABLED=${String(value)}: no research turn`);
+    }
+  });
+});
 
 describe("POST /api/chat with a Fomo question", () => {
   it("a factual question invokes a registered tool for the cookie's tenant and replies from code, attributed, with no model", async () => {

@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { wrapSqlite } from "../../../worker/src/db";
 import { FOMO_ATTRIBUTION, FOMO_CHAT_RULES, NOT_PERMISSION_LINE } from "../../../worker/src/fomo/render";
 import { deserialize } from "../../../worker/src/fomo/subject-memory";
@@ -110,6 +110,16 @@ const factual = (t: FomoChatTurn): string => {
   return t.factualReply;
 };
 
+const savedEnabled = process.env.MERRYMEN_FOMO_ENABLED;
+before(() => {
+  // Hosted Fomo is opt-in (fomo-runtime.ts hostedFomoEnabled); these tests run an opted-in deployment.
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
+});
+after(() => {
+  if (savedEnabled === undefined) delete process.env.MERRYMEN_FOMO_ENABLED;
+  else process.env.MERRYMEN_FOMO_ENABLED = savedEnabled;
+});
+
 beforeEach(() => {
   for (const k of Object.keys(settings)) delete settings[k];
   setSettingsReaderForTest({ async settingsFor(t) { return projectSettings(settings[t.toLowerCase()] ?? null); } });
@@ -120,6 +130,27 @@ beforeEach(() => {
 afterEach(() => {
   setSettingsReaderForTest(null);
   setFomoOwnerReaderForTest(null);
+});
+
+describe("a hosted deployment that has not opted in", () => {
+  it("is not a Fomo turn at all: null for every message, with no owner question and no runtime", async () => {
+    setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked while Fomo is not enabled"); } });
+    const runtime = async () => { throw new Error("the runtime must not be asked for"); };
+    for (const message of ["who are the top traders on fomo this week?", "what are fomo traders saying about PONS?", "hello"]) {
+      assert.equal(await fomoChatTurn({ message }, { tenant: A, now: Date.now(), hosted: true }, { runtime, enabled: () => false }), null, message);
+    }
+    // The switch itself: only "1" is on.
+    const saved = process.env.MERRYMEN_FOMO_ENABLED;
+    try {
+      for (const value of [undefined, "", "0", "true", "yes"]) {
+        if (value === undefined) delete process.env.MERRYMEN_FOMO_ENABLED;
+        else process.env.MERRYMEN_FOMO_ENABLED = value;
+        assert.equal(await fomoChatTurn({ message: "who are the top traders on fomo this week?" }, { tenant: A, now: Date.now(), hosted: true }, { runtime }), null, `MERRYMEN_FOMO_ENABLED=${String(value)}`);
+      }
+    } finally {
+      process.env.MERRYMEN_FOMO_ENABLED = saved;
+    }
+  });
 });
 
 describe("a factual Fomo question", () => {

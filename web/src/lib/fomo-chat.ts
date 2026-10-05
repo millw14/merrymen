@@ -45,7 +45,7 @@ import { evidenceForModel, FOMO_ATTRIBUTION, FOMO_CHAT_RULES, NOT_PERMISSION_LIN
 import type { FomoEnvelope, ResultStatus } from "../../../worker/src/fomo/types";
 import { resolveConfig } from "../../../worker/src/settings";
 import { settingsReader } from "./services/settings-view";
-import { FOMO_NEEDS_AGENT, fomoRuntime, fomoTenantFor, hostedFomoOwner, type FomoRuntime } from "./fomo-runtime";
+import { FOMO_NEEDS_AGENT, fomoRuntime, fomoTenantFor, hostedFomoEnabled, hostedFomoOwner, type FomoRuntime } from "./fomo-runtime";
 
 /** The model-bound Fomo context: fenced evidence, the rules, and what to say without a model. */
 export interface FomoChatEvidence {
@@ -99,6 +99,8 @@ const ANSWERED: ReadonlySet<ResultStatus> = new Set(["ok", "empty", "partial", "
 
 export interface FomoChatDeps {
   runtime?: typeof fomoRuntime;
+  /** Tests only: whether hosted Fomo is enabled (default: the MERRYMEN_FOMO_ENABLED switch). */
+  enabled?: () => boolean;
 }
 
 /**
@@ -120,6 +122,10 @@ export interface FomoChatCaller {
 export async function fomoChatTurn(body: AgentChatBody, ctx: FomoChatCaller, deps: FomoChatDeps = {}): Promise<FomoChatTurn> {
   const text = typeof body?.message === "string" ? body.message.slice(0, 2000).trim() : "";
   if (!text) return null;
+  // HOSTED FOMO IS OPT-IN (fomo-runtime.ts hostedFomoEnabled). Not enabled,
+  // this turn is not a Fomo turn at all: nothing is read, nothing is built,
+  // and the chat answers exactly as it did before Fomo existed.
+  if (ctx.hosted === true && !(deps.enabled ?? hostedFomoEnabled)()) return null;
   const tenant = fomoTenantFor(ctx.tenant, ctx.hosted === true);
   if (!tenant) return null;
   const now = Number.isFinite(ctx.now) ? ctx.now : Date.now();

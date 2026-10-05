@@ -15,10 +15,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, test } from "node:test";
+import { after, afterEach, before, test } from "node:test";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { createWebFomoRuntime, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
+import { createWebFomoRuntime, FOMO_NOT_ENABLED, setFomoOwnerReaderForTest, setFomoRuntimeForTest, type FomoRuntime } from "@/lib/fomo-runtime";
 import { wrapSqlite } from "../../../../worker/src/db";
 import { FOMO_ATTRIBUTION } from "../../../../worker/src/fomo/render";
 import { FOMO_TOOL_DEFS, MUTATION_TOOL_NAMES, READ_TOOL_NAMES } from "../../../../worker/src/fomo/tools";
@@ -31,6 +31,13 @@ import { OWNER_A, OWNER_B, connectAs, errorOf, installFixtures, makeDeps, makeTe
 import { ALL_TOOLS } from "./index";
 import { FOMO_MCP_TOOLS } from "./fomo";
 import { UNTRUSTED_NOTE } from "./shared";
+
+/** A runtime that must never be asked for: asked, it fails the answer (a Fomo question then reads "can't reach"), never the process. */
+function untouchable(): Promise<never> {
+  const p = Promise.reject(new Error("the runtime must not be asked for"));
+  p.catch(() => {});
+  return p;
+}
 
 type Rec = Record<string, unknown>;
 
@@ -45,12 +52,23 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "x-credits-cost": "250" } });
 
 let restore: (() => void) | null = null;
+const savedEnabled = process.env.MERRYMEN_FOMO_ENABLED;
+before(() => {
+  // Hosted Fomo is opt-in (fomo-runtime.ts hostedFomoEnabled); these tests run an opted-in deployment.
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
+});
+after(() => {
+  if (savedEnabled === undefined) delete process.env.MERRYMEN_FOMO_ENABLED;
+  else process.env.MERRYMEN_FOMO_ENABLED = savedEnabled;
+});
+
 afterEach(() => {
   restore?.();
   restore = null;
   setFomoRuntimeForTest(null);
   setFomoOwnerReaderForTest(null);
   resetMetricsForTest();
+  process.env.MERRYMEN_FOMO_ENABLED = "1";
 });
 
 async function setup(o: { scopes?: string[]; settings?: Record<string, Record<string, unknown>>; withAgent?: string[] } = {}) {
@@ -105,6 +123,24 @@ const errCode = async (p: Principal, name: string, args: unknown): Promise<strin
   assert.equal(r.isError, true, `expected an error from ${name}`);
   return errorOf(r).code;
 };
+
+test("a deployment that has not opted in answers 'unsupported' for every Fomo tool, with no owner question, runtime or provider call", async () => {
+  const { a, provider } = await setup();
+  delete process.env.MERRYMEN_FOMO_ENABLED;
+  setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked while Fomo is not enabled"); } });
+  setFomoRuntimeForTest(untouchable());
+  for (const t of FOMO_MCP_TOOLS) {
+    const r = await call(a, t.name, t.name === "fomo_get_research_status" || t.name === "fomo_get_rankings" ? {} : { token: "PONS", trader: "@alice", subject: "PONS" });
+    assert.equal(r.isError, true, t.name);
+    const e = errorOf(r);
+    // An argument the tool does not take is refused first, and that is fine: nothing was read either way.
+    assert.ok(e.code === "unsupported" || e.code === "invalid_input", `${t.name}: ${e.code}`);
+    if (e.code === "unsupported") assert.match(e.message, new RegExp(FOMO_NOT_ENABLED.replace(/\./g, "\\.")));
+  }
+  const status = errorOf(await call(a, "fomo_get_research_status", {}));
+  assert.equal(status.code, "unsupported");
+  assert.equal(provider.length, 0);
+});
 
 // ── the catalogue ───────────────────────────────────────────────────────────
 

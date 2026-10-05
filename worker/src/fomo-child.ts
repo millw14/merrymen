@@ -175,11 +175,38 @@ export type ChildBrokerKind = "ipc" | "unavailable" | "direct" | "failed";
  *
  *   hosted + IPC channel   the orchestrator's service over IPC; it stamps the
  *                          tenant from which child asked.
- *   hosted, no channel     none: every surface answers "unavailable" at once
- *                          (the orchestrator spawned us without the pass).
+ *   hosted, no channel     none, and FOMO IS OFF in this process (childFomoOff):
+ *                          the orchestrator has not opted in, so it spawned us
+ *                          without the pass.
  *   self-hosted            a local runtime over fomo.sqlite, wrapped in a
  *                          direct broker for the fixed tenant "self".
  */
+/**
+ * WHETHER THIS PROCESS HAS NO FOMO AT ALL: a hosted child the orchestrator
+ * spawned without the IPC channel, which it does exactly when its pass is off
+ * (orchestrator.ts fomoSetup: opt-in, MERRYMEN_FOMO_ENABLED=1). Decided once,
+ * from the process alone. Then FomoChild does nothing (deps.off), the scout
+ * gate is charged nothing for Fomo (explorationScoutUse6 is exactly 0), and
+ * Telegram offers no research lane — the child behaves as it did before Fomo
+ * existed. Self-hosted always has its local runtime, so it is never off here.
+ */
+export function childFomoOff(hosted: boolean, port: BrokerPort | null): boolean {
+  return hosted && port === null;
+}
+
+/**
+ * THE SCOUT GATE'S QUARANTINED COST WITH FOMO EXPLORATION IN IT (index.ts
+ * scoutContextFor). `use` is FomoChild.explorationScoutUse6(): a known figure
+ * is added as it is; an UNKNOWN one (null: the durable ledger unread while
+ * Fomo is on) is charged `unknownCharge()` — every open Trencher position's
+ * cost, or the whole budget if that cannot be read either. With Fomo off `use`
+ * is exactly 0n, so the result is exactly `last` and `unknownCharge` is never
+ * read: an agent on a deployment that has not opted in sizes as it did before.
+ */
+export async function withExplorationQuarantine(last: bigint, use: bigint | null, unknownCharge: () => Promise<bigint>): Promise<bigint> {
+  return last + (use ?? (await unknownCharge()));
+}
+
 export async function chooseChildFomoBroker(c: {
   hosted: boolean;
   port: BrokerPort | null;
@@ -1656,6 +1683,13 @@ export interface FomoTickInput {
 
 export interface FomoChildDeps {
   broker(): FomoBroker | null;
+  /**
+   * True when this process has no Fomo at all (childFomoOff). Then nothing in
+   * this class runs: tick returns at once (no file, no durable read, no
+   * report), nothing is nominated, gated, verified or attached, and
+   * explorationScoutUse6 is exactly 0n. Absent: on.
+   */
+  off?: () => boolean;
   /** Trusted: childFomoTenant(). Never the file's, never a message's. */
   ownTenant(): string | null;
   home(): string;
@@ -1889,6 +1923,7 @@ export class FomoChild {
    * background and serve the NEXT pass. Never throws.
    */
   tick(input: FomoTickInput): void {
+    if (this.isOff()) return;
     const now = input.now ?? this.now();
     try {
       this.lastTickAt = now;
@@ -1934,6 +1969,15 @@ export class FomoChild {
       this.kickRefresh(input, live, now);
     } catch (e) {
       this.once(`tick:${e instanceof Error ? e.name : "error"}`, `[fomo] child tick skipped (${e instanceof Error ? e.name : "error"})`);
+    }
+  }
+
+  /** Fomo is off in this process (deps.off). A throwing probe is not "off": the conservative charge then stands. */
+  private isOff(): boolean {
+    try {
+      return this.deps.off?.() === true;
+    } catch {
+      return false;
     }
   }
 
@@ -2268,6 +2312,7 @@ export class FomoChild {
 
   /** Addresses whose held review should come sooner (the existing held-review rotation reads this). */
   heldReviewDue(token: string): boolean {
+    if (this.isOff()) return false;
     try {
       const a = lower(token);
       return this.followBook.heldReviewRequests().some((r) => r.address === a);
@@ -2278,6 +2323,7 @@ export class FomoChild {
 
   /** Coins asked of discovery for on-chain verification only (bounded; see assessAll). */
   verifyRequests(): string[] {
+    if (this.isOff()) return [];
     return [...this.verify];
   }
 
@@ -2381,6 +2427,7 @@ export class FomoChild {
    * must not lose what the entry cost).
    */
   gateEntry(intent: { kind: string; sellToken?: string; buyToken?: string; notionalUsdg?: bigint; decisionId?: string }): FollowGate {
+    if (this.isOff()) return { kind: "none" };
     let token = "";
     try {
       token = entryTokenOf(intent) ?? "";
@@ -2559,6 +2606,11 @@ export class FomoChild {
    * (tick reads the ledger even with research off, so that read happens).
    */
   explorationScoutUse6(): bigint | null {
+    // FOMO OFF: exactly nothing, never "unknown". No follow or early entry can
+    // be made without the pass (no file, no broker), and an unknown here would
+    // charge every agent's open Trencher cost to its scout budget for a
+    // feature its deployment never turned on (withExplorationQuarantine).
+    if (this.isOff()) return 0n;
     try {
       const live = this.deps.live();
       const used = this.ledger.scoutUse6(this.mode(live), scoutKey(live.settings));
@@ -2681,6 +2733,7 @@ export class FomoChild {
 
   /** A trade row this worker wrote (recordTrade): sales of an exploration coin feed its realised loss. */
   noteTradeRow(row: { status: string; fill_side?: string; sell_token?: string; fill_cash_usdg?: number }): void {
+    if (this.isOff()) return;
     try {
       if ((row.status !== "landed" && row.status !== "paper") || row.fill_side !== "sell") return;
       const token = lower(row.sell_token);
@@ -2700,6 +2753,7 @@ export class FomoChild {
    * anything address-shaped or vendor-named in it. Returns whether it was set.
    */
   attachLens(signals: Record<string, string>, token: string, brainUrl: string | null | undefined): boolean {
+    if (this.isOff()) return false;
     try {
       if (!this.file || !this.access.dataAccess || !(this.access.monitoring || this.access.follow)) return false;
       const a = lower(token);
@@ -2726,6 +2780,7 @@ export class FomoChild {
    * sent: one Brain was never sent is recorded as UNVERIFIED, never evidence.
    */
   onReviewed(r: { token: string; held: boolean; outcome: ShadowOutcome }): void {
+    if (this.isOff()) return;
     try {
       const a = lower(r.token);
       const ok = r.outcome.ran && r.outcome.result.ok ? r.outcome.result.decision : null;

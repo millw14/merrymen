@@ -37,7 +37,7 @@
  */
 import { randomUUID } from "node:crypto";
 import * as z from "zod";
-import { fomoRuntime, fomoTenantFor, hostedFomoOwner } from "@/lib/fomo-runtime";
+import { FOMO_NOT_ENABLED, fomoRuntime, fomoTenantFor, hostedFomoEnabled, hostedFomoOwner } from "@/lib/fomo-runtime";
 import { FOMO_ATTRIBUTION, renderEnvelope } from "../../../../worker/src/fomo/render";
 import { BOARDS, DEPTHS, FOMO_TOOL_DEFS, FRESHNESS_MODES, RANKING_WINDOWS, TOOL_LIMITS, TOOL_WINDOWS } from "../../../../worker/src/fomo/tools";
 import type { EvidenceKind, FomoEnvelope, FomoReadToolName, FreshnessClass, Freshness, ResultStatus } from "../../../../worker/src/fomo/types";
@@ -310,6 +310,8 @@ async function invokeFor(name: FomoReadToolName, args: Record<string, unknown>, 
   // The registry's own validator is the final word on arguments, after zod.
   const checked = FOMO_TOOL_DEFS[name].validate(args);
   if (!checked.ok) throw new McpError("invalid_input", `That request could not be read as a Fomo lookup (${checked.reason}).`);
+  // Opt-in (fomo-runtime.ts hostedFomoEnabled): not enabled, nothing is read or built.
+  if (!hostedFomoEnabled()) throw new McpError("unsupported", FOMO_NOT_ENABLED);
   // MCP runs on hosted Merrymen only (mcp/config.ts refuses to enable it otherwise), so the mode is hosted.
   const tenant = fomoTenantFor(ctx.principal.tenant, true);
   if (!tenant) throw new McpError("forbidden", "This connection has no owner Merrymen can vouch for.");

@@ -19,12 +19,15 @@ import { setMcpDbForTest } from "../mcp/db";
 import {
   createWebFomoRuntime,
   FOMO_MODEL_BUDGET,
+  FOMO_NOT_ENABLED,
+  FomoNotEnabledError,
   fomoPlanCredits,
   fomoRuntime,
   fomoTenantFor,
   grantStoreOwnerReader,
   hostedFomoAccess,
   hostedFomoApiKey,
+  hostedFomoEnabled,
   hostedFomoOwner,
   selfHostedFomoAccess,
   setFomoOwnerReaderForTest,
@@ -53,6 +56,7 @@ afterEach(() => {
   setFomoOwnerReaderForTest(null);
   resetGrantStoreForTest();
   delete process.env.MERRYMEN_FOMO_DATA_ACCESS;
+  delete process.env.MERRYMEN_FOMO_ENABLED;
 });
 
 /** Owners with an agent, for the hosted permission tests: A and B unless a test says otherwise. */
@@ -70,14 +74,31 @@ after(() => {
 
 describe("the key, the plan and the switch", () => {
   it("reads the house's key name first, then the provider docs' name; a blank value is no key", () => {
-    assert.equal(hostedFomoApiKey({ MERRYMEN_FOMO_API_KEY: " house-test ", FOMO_API_KEY: "docs-test" }), "house-test");
-    assert.equal(hostedFomoApiKey({ MERRYMEN_FOMO_API_KEY: "   ", FOMO_API_KEY: "docs-test" }), "docs-test");
-    assert.equal(hostedFomoApiKey({ FOMO_API_KEY: "  " }), null);
-    assert.equal(hostedFomoApiKey({}), null);
+    const on = { MERRYMEN_FOMO_ENABLED: "1" };
+    assert.equal(hostedFomoApiKey({ ...on, MERRYMEN_FOMO_API_KEY: " house-test ", FOMO_API_KEY: "docs-test" }), "house-test");
+    assert.equal(hostedFomoApiKey({ ...on, MERRYMEN_FOMO_API_KEY: "   ", FOMO_API_KEY: "docs-test" }), "docs-test");
+    assert.equal(hostedFomoApiKey({ ...on, FOMO_API_KEY: "  " }), null);
+    assert.equal(hostedFomoApiKey(on), null);
   });
 
-  it("MERRYMEN_FOMO_ENABLED=0 turns the web's lookups off too: no key, so every answer is 'not configured'", () => {
-    assert.equal(hostedFomoApiKey({ MERRYMEN_FOMO_ENABLED: "0", MERRYMEN_FOMO_API_KEY: "house-test" }), null);
+  it("HOSTED FOMO IS OPT-IN: only MERRYMEN_FOMO_ENABLED=1 is on, the orchestrator's own switch, and off there is no key", async () => {
+    const orchestrator = "../../../worker/src/orchestrator";
+    const { fomoSetup } = (await import(orchestrator)) as { fomoSetup(env: Record<string, string | undefined>): { off: boolean } };
+    for (const value of [undefined, "", "0", "1", " 1", "true", "yes", "on"]) {
+      const env = { MERRYMEN_FOMO_ENABLED: value, DATABASE_URL: "postgres://x", MERRYMEN_FOMO_API_KEY: "house-test" };
+      assert.equal(hostedFomoEnabled(env), value === "1", `MERRYMEN_FOMO_ENABLED=${String(value)}`);
+      assert.equal(hostedFomoEnabled(env), !fomoSetup(env).off, "the web and the orchestrator agree");
+      assert.equal(hostedFomoApiKey(env), value === "1" ? "house-test" : null);
+    }
+  });
+
+  it("not opted in, a hosted runtime is never built: no database opened, no fomo_* schema", async () => {
+    delete process.env.MERRYMEN_FOMO_ENABLED;
+    const raw = new DatabaseSync(":memory:");
+    setMcpDbForTest({ db: wrapSqlite(raw), dialect: "sqlite" });
+    await assert.rejects(fomoRuntime(true), (e: unknown) => e instanceof FomoNotEnabledError && e.message === FOMO_NOT_ENABLED);
+    const tables = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'fomo_%'").all();
+    assert.deepEqual(tables, [], "no DDL ran");
   });
 
   it("reads the plan exactly as the orchestrator does (they share the allowance counters)", async () => {
@@ -86,7 +107,7 @@ describe("the key, the plan and the switch", () => {
     const { fomoSetup } = (await import(orchestrator)) as { fomoSetup(env: Record<string, string | undefined>): { planCredits: number | undefined } };
     for (const raw of [undefined, "", "lots", "-5", "0", "1000000", " 250000 ", "1e6", "NaN", "Infinity"]) {
       const env = raw === undefined ? {} : { MERRYMEN_FOMO_PLAN_CREDITS: raw };
-      assert.equal(fomoPlanCredits(env), fomoSetup({ DATABASE_URL: "postgres://x", ...env }).planCredits, `plan ${JSON.stringify(raw)}`);
+      assert.equal(fomoPlanCredits(env), fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_ENABLED: "1", ...env }).planCredits, `plan ${JSON.stringify(raw)}`);
     }
     assert.equal(fomoPlanCredits({ MERRYMEN_FOMO_PLAN_CREDITS: "1000000" }), 1_000_000);
   });
@@ -188,6 +209,7 @@ describe("one runtime per process", () => {
   });
 
   it("hosted: a failed build is forgotten, and the next caller builds again", async () => {
+    process.env.MERRYMEN_FOMO_ENABLED = "1";
     const failed = fomoRuntime(true);
     await assert.rejects(failed, /DATABASE_URL/);
     // The shared database becomes reachable (here: the MCP test seam).

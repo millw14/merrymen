@@ -114,13 +114,35 @@ export function setFomoOwnerReaderForTest(r: FomoOwnerReader | null): void {
 
 type Env = Record<string, string | undefined>;
 
+/** Said where a hosted deployment has not opted in to Fomo research (MERRYMEN_FOMO_ENABLED=1). */
+export const FOMO_NOT_ENABLED = "Fomo research is not enabled on this deployment.";
+
+/**
+ * HOSTED FOMO IS OPT-IN: on only when MERRYMEN_FOMO_ENABLED is exactly "1",
+ * the orchestrator's own switch (worker/src/orchestrator.ts fomoSetup). Off,
+ * the web builds no runtime — no fomo_* DDL, no Fomo reads or writes on the
+ * shared database — and the chat leaves every message to its existing
+ * handlers, so landing this code changes nothing until an operator turns it
+ * on. Self-hosted installs are unaffected (their key is their own setting).
+ */
+export function hostedFomoEnabled(env: Env = process.env): boolean {
+  return env.MERRYMEN_FOMO_ENABLED === "1";
+}
+
+/** Thrown by fomoRuntime(true) while hosted Fomo is not enabled: nothing was built. */
+export class FomoNotEnabledError extends Error {
+  constructor() {
+    super(FOMO_NOT_ENABLED);
+    this.name = "FomoNotEnabledError";
+  }
+}
+
 /**
  * The hosted key. The house's name first, then the provider docs' name; a
- * blank value is no key. MERRYMEN_FOMO_ENABLED=0 (the orchestrator's switch)
- * turns the web's lookups off too: they answer "not configured".
+ * blank value is no key. None at all unless hosted Fomo is enabled.
  */
 export function hostedFomoApiKey(env: Env = process.env): string | null {
-  if (env.MERRYMEN_FOMO_ENABLED === "0") return null;
+  if (!hostedFomoEnabled(env)) return null;
   return env.MERRYMEN_FOMO_API_KEY?.trim() || env.FOMO_API_KEY?.trim() || null;
 }
 
@@ -221,6 +243,8 @@ export async function createWebFomoRuntime(o: WebFomoRuntimeOptions): Promise<Fo
 
 async function build(hosted: boolean): Promise<FomoRuntime> {
   if (hosted) {
+    // Before the database is opened: a deployment that has not opted in gets no schema and no Fomo rows.
+    if (!hostedFomoEnabled()) throw new FomoNotEnabledError();
     const { db, dialect } = await mcpDb();
     return createWebFomoRuntime({ hosted: true, db, dialect, apiKey: hostedFomoApiKey(), planCreditsPerMonth: fomoPlanCredits() });
   }

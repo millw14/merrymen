@@ -161,11 +161,13 @@ import {
   brokerDurableState,
   childDurableFollowCounters,
   childExplorationStore,
+  childFomoOff,
   childFomoTenant,
   chooseChildFomoBroker,
   fomoFollowLiveEnabledFor,
   installFomoChild,
   selfHostedFomoBroker,
+  withExplorationQuarantine,
   type FomoLiveFacts,
 } from "./fomo-child";
 import { processBrokerPort } from "./fomo/broker";
@@ -836,8 +838,19 @@ async function main() {
    * refuses: an unread ledger is never an empty one.
    */
   const fomoDurable = brokerDurableState(() => fomoBroker);
+  /**
+   * The IPC channel the orchestrator spawned us with, or null — and with it
+   * whether this process has any Fomo at all. Hosted Fomo is opt-in: without
+   * the channel the orchestrator's pass is off, and this child behaves as it
+   * did before Fomo existed (fomo-child.ts childFomoOff): FomoChild does
+   * nothing, the scout gate is charged nothing for it, Telegram has no
+   * research lane.
+   */
+  const fomoPort = processBrokerPort();
+  const fomoOff = childFomoOff(isHostedMode(), fomoPort);
   const fomoChild = new FomoChild({
     broker: () => fomoBroker,
+    off: () => fomoOff,
     // Trusted process context only: MERRYMEN_TENANT hosted, "self" self-hosted.
     ownTenant: () => childFomoTenant(process.env, isHostedMode()),
     home: () => merrymenHome(),
@@ -8041,7 +8054,11 @@ async function main() {
       // buy for owners who never followed anything whenever the Fomo channel
       // is down — the Fomo kill switch would become a scout kill switch. Only
       // if even the Trencher book cannot be read is the whole budget charged.
-      quarantinedUsdg: lastQuarantinedUsdg + (fomoChild.explorationScoutUse6() ?? await trenchHeldCostOrBudget()),
+      //
+      // FOMO OFF IS EXACTLY ZERO (withExplorationQuarantine): a deployment
+      // that has not opted in charges its agents nothing here, and the
+      // fallback above is never read.
+      quarantinedUsdg: await withExplorationQuarantine(lastQuarantinedUsdg, fomoChild.explorationScoutUse6(), trenchHeldCostOrBudget),
     };
   }
 
@@ -14201,7 +14218,7 @@ async function main() {
   // Built in the background; until it is, research answers "unavailable".
   void chooseChildFomoBroker({
     hosted: isHostedMode(),
-    port: processBrokerPort(),
+    port: fomoPort,
     selfHosted: () =>
       selfHostedFomoBroker({
         apiKey: cfg.fomoApiKey ?? null,
@@ -14260,9 +14277,11 @@ async function main() {
     // held (telegram/held-groups.ts), in this home: applied at the first poll.
     heldGroupUpdates: () => takeHeldGroupUpdates(merrymenHome()),
     // Social-trading research (docs/fomo.md): the broker above for DMs, and the
-    // groups' port over the same broker. Neither carries a tenant.
+    // groups' port over the same broker. Neither carries a tenant. With Fomo
+    // off in this process (childFomoOff) there is no research lane at all.
     fomo: () => fomoBroker,
     fomoGroupPort: () => tgFomoPort,
+    fomoOff,
     kill: () => {
       try {
         const grant = loadGrantFile();

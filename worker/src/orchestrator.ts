@@ -8519,7 +8519,8 @@ async function mirrorLedgers(): Promise<void> {
         tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
         // HELD ONLY, for the Fomo pass: a coin a tenant owns is a reason to watch
         // its traders at position-protection priority, and a candidate is not.
-        tenantHeldCoins.set(tenant.toLowerCase(), await heldCoinAddressesFor(handle.db));
+        // Not read at all while the pass is off (fomoSetup).
+        if (!fomoBootNow().off) tenantHeldCoins.set(tenant.toLowerCase(), await heldCoinAddressesFor(handle.db));
         // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
         //
         // This used to print only when n > 0, which made a stalled table and an
@@ -8983,9 +8984,22 @@ const fomoBrokers = new Map<ChildProcess, () => void>();
  * own docs' name, a blank value being no key. It is handed to the runtime and
  * the stream URL builder as an argument and is stripped from every child
  * (CHILD_SECRET_STRIP).
+ *
+ * OPT-IN: OFF UNLESS MERRYMEN_FOMO_ENABLED IS EXACTLY "1". Off, this process
+ * does nothing Fomo at all: no Postgres pool and no fomo_* DDL (fomoRuntimeNow
+ * is reached only through startFomoPass), no IPC channel on any child
+ * (spawnChild), no fomo.json written, no held-coin read on the mirror. So
+ * landing this code changes nothing in a deployment until its operator turns
+ * it on, and a child without the channel charges nothing to the scout budget
+ * for Fomo (fomo-child.ts explorationScoutUse6).
  */
 export function fomoSetup(env: Record<string, string | undefined> = process.env): FomoBoot {
-  if (env.MERRYMEN_FOMO_ENABLED === "0") return { off: true, lines: ["fomo: off — MERRYMEN_FOMO_ENABLED=0"], apiKey: null, planCredits: undefined };
+  if (env.MERRYMEN_FOMO_ENABLED !== "1") {
+    const why = env.MERRYMEN_FOMO_ENABLED === undefined || env.MERRYMEN_FOMO_ENABLED.trim() === ""
+      ? "opt-in; set MERRYMEN_FOMO_ENABLED=1 to run the research pass"
+      : `MERRYMEN_FOMO_ENABLED is ${JSON.stringify(env.MERRYMEN_FOMO_ENABLED.slice(0, 16))}, and only "1" turns it on`;
+    return { off: true, lines: [`fomo: off — ${why}`], apiKey: null, planCredits: undefined };
+  }
   if (!env.DATABASE_URL) {
     return { off: true, lines: ["fomo: off — no DATABASE_URL; the shared research store lives there"], apiKey: null, planCredits: undefined };
   }

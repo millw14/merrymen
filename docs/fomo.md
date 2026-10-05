@@ -16,6 +16,11 @@ client's GET-only path allowlist.
 
 **Status of this change** (labels defined at the end):
 
+**Hosted Fomo is opt-in.** Nothing here runs on a hosted deployment until
+`MERRYMEN_FOMO_ENABLED=1` is set on the orchestrator and the web (see Operations). Off,
+there is no Fomo pool, DDL, IPC channel, child file, Telegram research lane, chat
+interception or scout-budget charge. Landing the code changes nothing in production.
+
 | Area | Status |
 |---|---|
 | Provider adapter, identity, normalisation | IMPLEMENTED, FIXTURE_TESTED. AUTHENTICATED_TESTED on 6 routes (see "Live verification"); normalisers reconciled with live response shapes. |
@@ -438,7 +443,7 @@ answers use one call on the existing house model.
 |---|---|---|
 | `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) | web, orchestrator; self-hosted worker or settings `fomoApiKey` | provider key, stripped from hosted children |
 | `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget |
-| `MERRYMEN_FOMO_ENABLED=0` | orchestrator | turns the fleet pass off; children spawn without IPC and answer "unavailable" |
+| `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; those children run no Fomo code (no Telegram research lane, nothing charged to the scout budget), the web chat answers as before and MCP Fomo tools answer `unsupported`. Self-hosted is unaffected |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
 | `MERRYMEN_TENANT` | set by the orchestrator in each child | not a secret; the child checks `fomo.json` belongs to it. IPC never trusts it: the orchestrator stamps the tenant itself. |
@@ -472,9 +477,13 @@ MERRYMEN_FOMO_API_KEY=… npx tsx scripts/fomo-probe.mts [--theses] [--trader] [
 
 ## Rollback
 
-1. Set `MERRYMEN_FOMO_ENABLED=0` on the orchestrator. The stream, cohort, research and
-   child files stop, and children spawn without IPC.
-2. Unset `MERRYMEN_FOMO_API_KEY` on the web. Lookups answer "not configured".
+1. Unset `MERRYMEN_FOMO_ENABLED` (or set anything but `1`) on the orchestrator and the
+   web. The stream, cohort, research and child files stop, children respawn without IPC
+   and run no Fomo code, and the web chat answers as it did before Fomo.
+   Turning the pass off also stops charging Fomo exploration to the scout budget, so
+   close any follow or early positions first. Follow is paper-only until Stage E.
+2. Or, to keep the switch on but spend nothing: unset `MERRYMEN_FOMO_API_KEY` on the web
+   and orchestrator. Lookups answer "not configured".
 3. Owners' `fomoFollowEnabled` defaults to off. Turning it off stops nominations at the
    next tick. Open positions keep their normal exits.
 4. The schema is additive (`fomo_*` tables only). Leaving it in place is harmless; dropping
