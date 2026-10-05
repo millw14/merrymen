@@ -18,11 +18,12 @@
  * MERRYMEN_HOLDER_ADDRESS is stripped.
  *
  * A TENANT THE VALUE DOES NOT ADMIT IS `held`. The supervisor starts nothing
- * for it, leases nothing and retires none of its expired keys, so its home on
- * the volume stays exactly as the incident left it until it is admitted. It
- * stays in the roster (`wanted`): being out of the rollout is not being
- * removed, and the removed-agent sweep must still be able to tell the two
- * apart.
+ * for it and leases nothing, so its home on the volume stays exactly as the
+ * incident left it until it is admitted, but for one file: once its key has
+ * expired, the copy of that key (grant.json) is removed, as for any tenant,
+ * because that only takes authority away and needs no lease. It stays in the
+ * roster (`wanted`): being out of the rollout is not being removed, and the
+ * removed-agent sweep must still be able to tell the two apart.
  *
  * BUT ITS OWNER CAN STILL REVOKE IT. A pending Telegram /kill is carried out
  * for a held tenant as for any other, within seconds, exactly as a dashboard
@@ -188,7 +189,7 @@ export function rolloutLevel(tenant: string, env: Env = process.env): RolloutLev
   return rollout.levels.get(tenant.toLowerCase()) ?? "held";
 }
 
-/** Out of the rollout: nothing is started, leased or retired for it. Its owner's kill still is carried out. */
+/** Out of the rollout: nothing is started or leased for it. Its owner's kill, and an expired key's scrub, still are carried out. */
 export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
   return rolloutLevel(tenant, env) === "held";
 }
