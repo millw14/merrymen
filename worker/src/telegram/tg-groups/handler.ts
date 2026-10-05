@@ -73,6 +73,8 @@ import {
   extractCaHits,
   extractCas,
   extractCashtags,
+  fomoAskOf,
+  fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
   hasOtherChainLink,
@@ -122,6 +124,7 @@ import type {
   TgDeskAsk,
   TgDeskPort,
   TgDeskThought,
+  TgFomoPort,
   TgGroupFactsPort,
   TgLine,
   TgPerson,
@@ -298,6 +301,13 @@ export interface TgGroupsDeps {
    * coin question gets the public snapshot as before.
    */
   desk?: () => TgDeskPort | null;
+  /**
+   * Social-trading research (docs/fomo.md): coin-level public aggregates for
+   * an addressed research question, implemented outside this directory
+   * (worker/src/tg-fomo-port.ts). Absent or null: no research lane, and the
+   * line goes on to the desk and the persona as before.
+   */
+  fomo?: () => TgFomoPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
   /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
@@ -550,6 +560,12 @@ interface LineJob {
   threadId?: number;
   /** The question-to-the-room second look (see QUESTION_WAIT_MS). */
   deferred?: boolean;
+  /**
+   * An addressed social-trading research ask (fomoAskOf, or a follow-up to
+   * this chat's last research answer), decided when the line arrived. Such a
+   * line runs off the chat queue, so act() may wait on the research inline.
+   */
+  fomo?: boolean;
 }
 
 /** One outgoing group line, composed and waiting to be sent. */
@@ -867,6 +883,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const portNow = (): TgCoinsPort | null => {
     try {
       return d.port() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** The research port, unless the operator switched the lane off (MERRYMEN_TG_GROUPS_FOMO=0). */
+  const fomoNow = (): TgFomoPort | null => {
+    try {
+      if ((env().MERRYMEN_TG_GROUPS_FOMO ?? "").trim() === "0") return null;
+      return d.fomo?.() ?? null;
     } catch {
       return null;
     }
@@ -1717,6 +1742,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     coinMissed.deleteWhere((k) => k.startsWith(prefix));
     askedIn.deleteWhere((k) => k.startsWith(prefix));
     for (const key of lastDesk.keys()) if (key.startsWith(prefix)) lastDesk.delete(key);
+    for (const key of lastFomo.keys()) if (key.startsWith(prefix)) lastFomo.delete(key);
+    // The research side's subject memory for this room too ("it" no longer
+    // points at the coin the room was discussing). Detached; never throws.
+    const fomo = fomoNow();
+    if (fomo?.forget) void Promise.resolve().then(() => fomo.forget?.(chatId)).catch((e) => fail("fomo forget", e));
   };
 
   // ─── The memory pass ─────────────────────────────────────────────────────
@@ -1813,7 +1843,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       insult: insultLevel(text, names),
       distress: isDistress(text),
       botQuestion: isBotQuestion(text),
-      privateAsk: isPrivateAsk(text),
+      // Who it follows or watches is private only where research is wired.
+      privateAsk: isPrivateAsk(text, { research: fomoNow() !== null }),
       injection: isInjection(text),
       tradeTalk: isTradeTalk(text),
       questionToRoom: isQuestionToRoom(text),
@@ -2011,6 +2042,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
       const context = coinContext(j);
       const coinQuestion = asksAboutCoin(j.line.text, selfNamesOf(selfNow())) || /\b(?:why|how come)\b/iu.test(j.line.text);
+      // SOCIAL-TRADING RESEARCH FIRST for an addressed research question
+      // (docs/fomo.md): coin-level public aggregates, every line gated. It
+      // waits inline because the line's whole job already runs off the chat
+      // queue (onMessage: `fomo` lines are research), and a question the
+      // research does not take must still reach the desk below.
+      if (j.fomo === true && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
+        const r = await fomoAnswer(chatId, j, replyOpts);
+        if (r === "sent") return null;
+        if (r !== "not-research") {
+          releaseReply(chatId, messageId);
+          return r;
+        }
+      }
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
       const deskAsk = !request && dec.mood !== "private-ask" && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
@@ -2207,6 +2251,172 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (order === undefined || (lastDesk.get(key)?.ingressOrder ?? -1) >= order) return;
     if (lastDesk.size > 256 && !lastDesk.has(key)) lastDesk.delete(lastDesk.keys().next().value!);
     lastDesk.set(key, { ask, atMs, ingressOrder: order, ...(migrated ? { migrated: true } : {}) });
+  };
+
+  // ── social-trading research (docs/fomo.md "Telegram groups") ──────────────
+
+  /**
+   * HOW OFTEN THE RESEARCH MAY BE ASKED, like the desk's looks: each ask can
+   * spend the owner's research credits, so a chat gets at most FOMO_PER_CHAT
+   * and the agent FOMO_PER_AGENT in any ten minutes. An ask the research does
+   * not take (not a research question) gives its slot back.
+   */
+  const FOMO_WINDOW_MS = 10 * MIN;
+  const FOMO_PER_CHAT = 6;
+  const FOMO_PER_AGENT = 30;
+  const fomoAsks: Array<{ chatId: number; atMs: number }> = [];
+  const fomoRoom = (chatId: number): { atMs: number; chatId: number } | null => {
+    const now = clock();
+    while (fomoAsks.length && now - fomoAsks[0]!.atMs > FOMO_WINDOW_MS) fomoAsks.shift();
+    if (fomoAsks.length >= FOMO_PER_AGENT || fomoAsks.filter((l) => l.chatId === chatId).length >= FOMO_PER_CHAT) return null;
+    const slot = { chatId, atMs: now };
+    fomoAsks.push(slot);
+    return slot;
+  };
+  const fomoRefund = (slot: { atMs: number; chatId: number }): void => {
+    const i = fomoAsks.indexOf(slot);
+    if (i >= 0) fomoAsks.splice(i, 1);
+  };
+  /** When each chat topic last got a research answer: a short follow-up there ("what about the sellers?") goes to the research too. */
+  const lastFomo = new Map<string, number>();
+  const FOMO_FOLLOW_MS = 15 * MIN;
+  const fomoRecent = (chatId: number, threadId?: number): boolean => {
+    const at = lastFomo.get(deskKey(chatId, threadId));
+    return at !== undefined && clock() - at <= FOMO_FOLLOW_MS;
+  };
+  const rememberFomo = (chatId: number, threadId?: number): void => {
+    const key = deskKey(chatId, threadId);
+    if (lastFomo.size > 256 && !lastFomo.has(key)) lastFomo.delete(lastFomo.keys().next().value!);
+    lastFomo.set(key, clock());
+  };
+  /** The most lines and characters one research answer may run to in a room. */
+  const FOMO_MAX_LINES = 6;
+  const FOMO_MAX_CHARS = 700;
+  const FOMO_LATE = "the research didn't come back in time; ask again in a bit.";
+  const FOMO_BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
+  const FOMO_UNSAYABLE = "i can't put that research into words for a group; ask me in a direct message.";
+
+  /**
+   * WHAT OF A RESEARCH ANSWER A ROOM MAY HEAR: each line through the group
+   * line gate on its own (the strictest gate a code-built line takes: no
+   * handles, addresses, links, cashtags, money figures, advice, claims,
+   * private state or plumbing), refused lines DROPPED, never repaired. The
+   * port's source line ("Source: …") is the attribution: when it is refused
+   * nothing is sent, because unattributed research is not said in a room.
+   * Null when nothing sayable is left.
+   */
+  const fomoSayable = (text: string): string | null => {
+    const agentName = selfNow()?.name ?? "";
+    const lines = text.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    const sourceAt = lines.findIndex((l) => /^source:/iu.test(l));
+    let source: string | null = null;
+    const kept: string[] = [];
+    let refused = 0;
+    for (const [i, l] of lines.entries()) {
+      const v = admitTgLine(l, { agentName, kind: "answer", recentOwn: [] });
+      if (!v.ok) {
+        refused += 1;
+        continue;
+      }
+      if (i === sourceAt) source = v.text;
+      else kept.push(v.text);
+    }
+    if (refused) log(`[tg-groups] research lines dropped by the gate (${refused})`);
+    if (sourceAt >= 0 && source === null) return null;
+    const out: string[] = [];
+    let used = source ? source.length + 1 : 0;
+    for (const l of kept) {
+      if (out.length >= FOMO_MAX_LINES - (source ? 1 : 0) || used + l.length + 1 > FOMO_MAX_CHARS) break;
+      out.push(l);
+      used += l.length + 1;
+    }
+    if (!out.length) return null;
+    return [...out, ...(source ? [source] : [])].join("\n");
+  };
+
+  /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
+  const readFomo = async (port: TgFomoPort, q: { text: string; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+    if (ms <= 0) return "timeout";
+    const ask = { ...q, timeoutMs: ms };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = d.timer ? d.timer(ms).then(() => "timeout" as const) : new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), ms);
+        timer.unref?.();
+      });
+      return await Promise.race([Promise.resolve().then(() => port.ask(ask)), expired]);
+    } catch (e) {
+      fail("research", e);
+      return "failed";
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  /**
+   * ONE ADDRESSED RESEARCH QUESTION, ANSWERED IN THE ROOM: rate-bounded,
+   * inside the reply deadline from receipt, delivered through deliver() so
+   * the feature switch, the room's approval, the deadline, a shush and
+   * whether it is still wanted are all checked again right before the send.
+   * "not-research": the research did not take it, and the caller goes on.
+   */
+  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts): Promise<"sent" | "not-research" | Quiet> => {
+    const port = fomoNow();
+    if (!port) return "not-research";
+    const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
+    let lost: Quiet = "send-failed";
+    const send = async (text: string): Promise<"sent" | Quiet> => {
+      const sent = await deliver({
+        chatId,
+        intent: { kind: "answer", mood: "normal" },
+        text,
+        ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+        ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+        ...(o.mention ? { mention: o.mention } : {}),
+        bornAtMs: j.bornAtMs,
+        replyByMs,
+        followUp: false,
+        ownerAddressed: o.ownerAddressed === true,
+        // Still wanted only while the research lane stays wired and the asker still wants it.
+        stillWanted: () => (!o.stillWanted || o.stillWanted()) && fomoNow() !== null,
+        miss: (why) => {
+          lost = why;
+          o.miss?.(why);
+        },
+        accountAnswer: accountResearchAnswer(j.line, j.seenAtMs),
+      });
+      if (!sent) return lost;
+      recordOwn(sent.chatId, sent.messageId, text.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined, undefined, sent.chatId === chatId ? o.threadId : undefined);
+      log("[tg-groups] said research");
+      return "sent";
+    };
+    const slot = fomoRoom(chatId);
+    if (!slot) return send(FOMO_BUSY);
+    stageOf(chatId, "research: ask");
+    // The bot's own names go with the line: an addressed line almost always
+    // carries "@thisbot", which the research must not read as a trader.
+    const selfNames = selfNamesOf(selfNow());
+    const r = await readFomo(port, { text: j.line.text, chatId, ...(j.threadId !== undefined ? { threadId: j.threadId } : {}), ...(selfNames.length ? { selfNames } : {}) }, replyByMs - RESEARCH_SEND_MS - clock());
+    if (r === null) {
+      fomoRefund(slot);
+      return "not-research";
+    }
+    if (r === "failed") {
+      fomoRefund(slot);
+      return "not-research";
+    }
+    if (r === "timeout") {
+      log("[tg-groups] research ask timed out");
+      return send(FOMO_LATE);
+    }
+    if (typeof r !== "object" || typeof r.text !== "string") {
+      fomoRefund(slot);
+      return "not-research";
+    }
+    // A deflection is still an answer about research: a follow-up here goes back to it.
+    rememberFomo(chatId, j.threadId);
+    const text = fomoSayable(r.text) ?? FOMO_UNSAYABLE;
+    return send(text);
   };
 
   /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
@@ -2681,7 +2891,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const deskResearch = j.addressed !== null && deskNow() !== null && coinFactsOn() && !foreignMint && otherChain.length === 0 && !isInjection(text)
         && (deskQuestionIntent(text) === "comparison" || (cas.length === 1 && researchIntent?.kind === "coin"
           && (deskQuestionIntent(text) !== "overview" || isReadOnlyTradeQuestion(text) || /\b(?:chart|analy[sz]e|analysis|read[- ]only|research)\b/iu.test(text))));
-      if (!rememberedAsk && !deskTicker && !deskResearch && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
+      // AN ADDRESSED RESEARCH QUESTION IS NOT A COIN POST: "what are the theses
+      // on $PONS?" is answered by the research lane (act), never asked for a CA,
+      // and a CA inside such a question is a subject to research, never a
+      // nomination into trading (an information request never starts a trade).
+      const fomoQuestion = j.fomo === true && !isInjection(text);
+      if (!rememberedAsk && !deskTicker && !deskResearch && !fomoQuestion && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,
@@ -3069,15 +3284,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         maybeMemoryPass(chatId);
 
-        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order, ...(threadId !== undefined ? { threadId } : {}) };
+        // An addressed research question, or a short follow-up to this
+        // topic's last research answer (fomoRecent), while a port is wired.
+        const fomoAsk = addressed !== null && fomoNow() !== null
+          && (fomoAskOf(text, selfNamesOf(me)) !== null || (fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
+        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order, ...(threadId !== undefined ? { threadId } : {}), ...(fomoAsk ? { fomo: true } : {}) };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.
         const coin = extractCas(text).length > 0;
         // Public research starts beside a busy chatter queue. Bookkeeping and
         // reply admission still happen synchronously. Nomination admission
         // belongs to the port; financial execution stays on the trading side.
-        const research = !!d.desk && (coin || (addressed !== null && (deskAskOf(text, selfNamesOf(me)) !== null
-          || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text))));
+        const research = fomoAsk || (!!d.desk && (coin || (addressed !== null && (deskAskOf(text, selfNamesOf(me)) !== null
+          || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text)))));
         if (research) track(processLine(job));
         else enqueue(chatId, () => processLine(job), { force: addressed !== null });
       } catch (e) {

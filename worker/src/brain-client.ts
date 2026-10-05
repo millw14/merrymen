@@ -116,6 +116,20 @@ export interface BrainDecision {
    * not say which kind any of them were.
    */
   hold_kind?: "MODEL_HOLD" | "GATE_FORCED_HOLD" | null;
+  /**
+   * WHAT THE MODEL ASKED FOR, before the gate overwrote it.
+   *
+   * `hold_kind` says a hold was forced; it cannot say what was forced OUT —
+   * and "the model wanted to buy and was not allowed to size it" is the one
+   * fact the decision funnel most needs and could not see. Carried, never
+   * acted on: `action` and `suggested_delta_usdg` remain the decision, and
+   * nothing sizes from these. Optional and nullable because a Brain build
+   * that predates them sends neither; absent stays absent and is never read
+   * as "the model agreed".
+   */
+  proposed_action?: "buy" | "sell" | "hold" | null;
+  /** Micro-USDG the model proposed before the gate, signed like `suggested_delta_usdg`. */
+  proposed_delta_usdg?: number | null;
   cost: BrainCost;
   models: { node: string; provider: string; model: string }[];
 }

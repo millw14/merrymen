@@ -1,0 +1,44 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "handle": "CryptoKaleo",
+  "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+  "count": 2,
+  "truncated": false,
+  "complete": true,
+  "cap": 300,
+  "profileFollowing": 2,
+  "following": [
+    {
+      "handle": "frankdegods",
+      "displayName": "frank",
+      "userId": "6dcf7c78-2537-522a-8307-3f9970c081be",
+      "followers": 249483,
+      "following": 10,
+      "trades": 41,
+      "swapCount": 90,
+      "volumeUsd": 88000,
+      "pnl24h": -4210.5,
+      "verified": false,
+      "private": false,
+      "twitter": null,
+      "createdAt": "2025-01-01T00:00:00Z",
+      "accountAgeDays": 641
+    },
+    {
+      "handle": "starcatcher444",
+      "displayName": "star",
+      "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+      "followers": 120,
+      "following": 30,
+      "trades": 983,
+      "swapCount": 2000,
+      "volumeUsd": 1500000,
+      "pnl24h": 3100,
+      "verified": false,
+      "private": false,
+      "twitter": null,
+      "createdAt": "2025-06-01T00:00:00Z",
+      "accountAgeDays": 490
+    }
+  ]
+}

@@ -27,6 +27,10 @@ export interface SettingsView {
   takeProfitBps: number | null;
   buyPerTickUsdg: number | null;
   discoveryEnabled: boolean | null;
+  /** Fomo research permissions (docs/fomo.md). Null when never stored: the worker default applies. */
+  fomoDataAccess: boolean | null;
+  fomoMonitoringEnabled: boolean | null;
+  fomoFollowEnabled: boolean | null;
   scoutEnabled: boolean | null;
   scoutBudgetUsdg: number | null;
   launchBuying: { enabled: boolean; perEntryUsdg: number | null; maxPositions: number | null; maxHoldSec: number | null; minDepthUsdg: number | null };
@@ -99,6 +103,9 @@ export function projectSettings(raw: Record<string, unknown> | null | undefined)
     takeProfitBps: n(s.takeProfitBps),
     buyPerTickUsdg: n(s.buyPerTickUsdg),
     discoveryEnabled: b(s.discoveryEnabled),
+    fomoDataAccess: b(s.fomoDataAccess),
+    fomoMonitoringEnabled: b(s.fomoMonitoringEnabled),
+    fomoFollowEnabled: b(s.fomoFollowEnabled),
     scoutEnabled: b(s.scoutEnabled),
     scoutBudgetUsdg: n(s.scoutBudgetUsdg),
     launchBuying: {

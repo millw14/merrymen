@@ -1,0 +1,33 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "board": "graduated",
+  "source": "captured",
+  "capturedAt": "2026-10-04T15:59:00.000+00:00",
+  "stale": false,
+  "ageHours": 0.1,
+  "count": 2,
+  "tokens": [
+    {
+      "rank": 1,
+      "image": "https://example.invalid/b/1.png",
+      "token": { "name": "Fake Board Coin", "symbol": "FBC", "address": "FakeBoardMint44444444444444444444444444pump" },
+      "holders": 512,
+      "network": 1399811149,
+      "priceUsd": 0.00001234,
+      "change24h": -12.5,
+      "marketCapUsd": 12345,
+      "volume24hUsd": 6789
+    },
+    {
+      "rank": 2,
+      "image": "https://example.invalid/b/2.png",
+      "token": { "name": "Fake Hood Coin", "symbol": "FHC", "address": "0xFA0E00000000000000000000000000000000F00D" },
+      "holders": 40,
+      "network": 4663,
+      "priceUsd": 0.5,
+      "change24h": 3,
+      "marketCapUsd": 500000,
+      "volume24hUsd": 2500
+    }
+  ]
+}

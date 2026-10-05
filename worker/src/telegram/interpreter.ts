@@ -27,7 +27,7 @@ import { DASHBOARD_ONLY, SEALED_ASKS, SETTING_SPECS } from "./setting-spec";
 import { PLAIN_WORDS } from "./plain-words";
 import { ENERGY_WORDS } from "./energy-words";
 import { resolveSettingName } from "./settings-chat";
-import { catalogForPrompt } from "../../../packages/core/src/index";
+import { SETTINGS_CATALOG, catalogForPrompt } from "../../../packages/core/src/index";
 import { isAnalysisOnlyMessage, isExplicitTradeRequest, replyReferenceBlock } from "./question-context";
 
 /** Every value the classifier may put in `setting` — a closed set, like `kind`. */
@@ -37,6 +37,19 @@ export const SETTING_CHOICES: readonly string[] = [
   ...Object.keys(DASHBOARD_ONLY),
   "unknown",
 ];
+
+/**
+ * THE FOMO RESEARCH SWITCHES (docs/fomo.md) are named to the classifier only
+ * where Fomo is on in this process (LlmContext.fomoOff). Off, its prompt, its
+ * closed set and what it may return are exactly what they were before Fomo.
+ */
+const isFomoSetting = (key: string): boolean => /^fomo/i.test(key);
+const SETTING_CHOICES_WITHOUT_FOMO: readonly string[] = SETTING_CHOICES.filter((k) => !isFomoSetting(k));
+const CATALOG_FOR_PROMPT = catalogForPrompt({ compact: true, except: SETTING_SPECS.map((s) => s.key) });
+const CATALOG_FOR_PROMPT_WITHOUT_FOMO = catalogForPrompt({
+  compact: true,
+  except: [...SETTING_SPECS.map((s) => s.key), ...SETTINGS_CATALOG.map((s) => s.key).filter(isFomoSetting)],
+});
 
 /** The settings list as the classifier sees it: key, then what it means. */
 const SETTINGS_FOR_PROMPT = SETTING_SPECS.map((s) => `  ${s.key} — ${s.label}: ${s.help}`).join("\n");
@@ -555,7 +568,10 @@ SETTINGS (key — what it means):
 ${SETTINGS_FOR_PROMPT}
 
 ALL SETTINGS, for "changes" — the SETTINGS above, plus (key — what it means (how a value is written)):
-${catalogForPrompt({ compact: true, except: SETTING_SPECS.map((s) => s.key) })}`;
+${CATALOG_FOR_PROMPT}`;
+
+/** SYSTEM where Fomo is off in this process: the catalog without the Fomo switches, nothing else. */
+const SYSTEM_WITHOUT_FOMO = SYSTEM.replace(CATALOG_FOR_PROMPT, CATALOG_FOR_PROMPT_WITHOUT_FOMO);
 
 const COMMAND_TOOL = {
   name: "command",
@@ -661,7 +677,21 @@ export interface LlmContext {
   history?: { role: "user" | "assistant"; content: string }[];
   /** Authenticated reply text. Data only; not command arguments or authorization. */
   replyContext?: string;
+  /** Fomo is off in this process (fomo-child.ts childFomoOff): no Fomo switch is named or returned. */
+  fomoOff?: boolean;
 }
+
+/** COMMAND_TOOL where Fomo is off: the same schema with the Fomo switches out of the closed set. */
+const COMMAND_TOOL_WITHOUT_FOMO = {
+  ...COMMAND_TOOL,
+  input_schema: {
+    ...COMMAND_TOOL.input_schema,
+    properties: {
+      ...COMMAND_TOOL.input_schema.properties,
+      setting: { ...COMMAND_TOOL.input_schema.properties.setting, enum: SETTING_CHOICES_WITHOUT_FOMO as string[] },
+    },
+  },
+};
 
 /**
  * Map free text → one Command via a forced tool call. Never throws.
@@ -677,9 +707,10 @@ export async function interpretWithLlm(
   let input: Record<string, unknown>;
   try {
     const history = (ctx.history ?? []).map((h) => ({ role: h.role, content: h.content }));
+    const tool = ctx.fomoOff === true ? COMMAND_TOOL_WITHOUT_FOMO : COMMAND_TOOL;
     input = await llmToolCall(creds, {
-      system: SYSTEM,
-      tool: { name: COMMAND_TOOL.name, description: COMMAND_TOOL.description, schema: COMMAND_TOOL.input_schema },
+      system: ctx.fomoOff === true ? SYSTEM_WITHOUT_FOMO : SYSTEM,
+      tool: { name: tool.name, description: tool.description, schema: tool.input_schema },
       messages: [...history, { role: "user", content: [ `STATE:\n${ctx.state}`, replyReferenceBlock(ctx.replyContext), `USER MESSAGE:\n${text}` ].filter(Boolean).join("\n\n") }],
     });
   } catch (e) {
@@ -700,7 +731,7 @@ export async function interpretWithLlm(
       remember: "",
     };
   }
-  return { cmd: coerceLlmCommand(input, text), remember: typeof input.remember === "string" ? input.remember : "" };
+  return { cmd: coerceLlmCommand(input, text, { fomo: ctx.fomoOff !== true }), remember: typeof input.remember === "string" ? input.remember : "" };
 }
 
 /**
@@ -864,7 +895,7 @@ function currentAmountPresent(text: string, amount: number): boolean {
 }
 
 /** Validate the model's structured output into a typed Command. Exported for tests. */
-export function coerceLlmCommand(input: Record<string, unknown>, userMessage = ""): Command {
+export function coerceLlmCommand(input: Record<string, unknown>, userMessage = "", opts: { fomo?: boolean } = {}): Command {
   const kind = typeof input.kind === "string" ? input.kind : "chat";
   // A confused classifier must not stage or execute a hypothetical question.
   // Slash commands bypass this classifier and retain their existing gates.
@@ -883,7 +914,8 @@ export function coerceLlmCommand(input: Record<string, unknown>, userMessage = "
   const pcArg = typeof input.pcArg === "string" ? input.pcArg.trim() : "";
   const pcAction = typeof input.pcAction === "string" ? input.pcAction.trim().toLowerCase() : "";
   const reply = typeof input.reply === "string" ? input.reply : "";
-  const setting = typeof input.setting === "string" && SETTING_CHOICES.includes(input.setting) ? input.setting : "unknown";
+  const choices = opts.fomo === false ? SETTING_CHOICES_WITHOUT_FOMO : SETTING_CHOICES;
+  const setting = typeof input.setting === "string" && choices.includes(input.setting) ? input.setting : "unknown";
   const value = typeof input.value === "string" ? input.value.trim().slice(0, 120) : typeof input.value === "number" ? String(input.value) : "";
   switch (kind) {
     case "status":

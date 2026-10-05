@@ -22,7 +22,7 @@
  * the same PUT /api/settings the Save button does, with only these keys, bound
  * to this owner, so every bound the route enforces still applies.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PROPOSAL_PARAM,
   buildProposal,
@@ -44,8 +44,19 @@ export interface SettingsProposalProps {
   /** Tickers a basket may name. */
   symbols: readonly string[];
   hosted: boolean;
+  /**
+   * Whether this deployment runs Fomo research (/api/auth/session `fomo`).
+   * False: the Fomo switches are left out of any proposal, as the save would
+   * ignore them. Null or absent (not known yet): nothing is left out.
+   */
+  fomo?: boolean | null;
   /** After a successful approval, so the page can re-read what is saved. */
   onApplied: () => void;
+}
+
+/** A proposal's changes without the Fomo switches, where the deployment does not run Fomo. */
+function withoutFomoWhereOff<T extends { key: string }>(changes: readonly T[], fomo: boolean | null | undefined): T[] {
+  return fomo === false ? changes.filter((c) => !/^fomo/.test(c.key)) : [...changes];
 }
 
 const EXAMPLES = ["each buy $20, stop loss 8%", "be more careful", "only trade stocks", "message me once an hour", "hunt memecoins"];
@@ -85,8 +96,14 @@ export function SettingsProposal(props: SettingsProposalProps) {
   const [applied, setApplied] = useState<string[]>([]);
 
   // THE AGENT'S LINK, ONCE, after the saved values are in hand: a diff against
-  // defaults would show changes that are not changes.
+  // defaults would show changes that are not changes. And once the page knows
+  // whether this deployment runs Fomo (`fomo` null is not yet known): read
+  // before that, a link's Fomo switches would be shown for approval where
+  // they do nothing.
+  const linkRead = useRef(false);
   useEffect(() => {
+    if (linkRead.current || props.fomo === null) return;
+    linkRead.current = true;
     let param: string | null = null;
     try {
       param = new URLSearchParams(window.location.search).get(PROPOSAL_PARAM);
@@ -94,18 +111,18 @@ export function SettingsProposal(props: SettingsProposalProps) {
       return;
     }
     if (!param) return;
-    const changes = decodeProposalLink(param);
+    const changes = withoutFomoWhereOff(decodeProposalLink(param), props.fomo);
     setFromLink(true);
     setProposal(buildProposal(changes, current, { symbols: props.symbols, hosted: props.hosted }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [props.fomo]);
 
   const understand = () => {
     setError(null);
     setStatus("idle");
     setApplied([]);
     setFromLink(false);
-    setProposal(buildProposal(understandSettingsText(text), current, { symbols: props.symbols, hosted: props.hosted }));
+    setProposal(buildProposal(withoutFomoWhereOff(understandSettingsText(text), props.fomo), current, { symbols: props.symbols, hosted: props.hosted }));
   };
 
   const clearLink = () => {

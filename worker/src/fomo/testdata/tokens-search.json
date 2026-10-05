@@ -1,0 +1,20 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "tokens": [
+    {
+      "symbol": "PONS",
+      "address": "0x39DBED3A00000000000000000000000000000C0D",
+      "name": "Pons",
+      "image": null,
+      "marketCapUsd": 2080000,
+      "networkId": 4663
+    },
+    {
+      "symbol": "ANSEM",
+      "address": "AnsemAnsemAnsemAnsemAnsemAnsemAnsemAnsempump",
+      "name": "Ansem",
+      "image": null,
+      "networkId": 1399811149
+    }
+  ]
+}

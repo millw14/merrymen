@@ -843,3 +843,32 @@ describe("several settings at once", () => {
     assert.match(await executeCommand({ kind: "confirm" }, off), /control was turned off/);
   });
 });
+
+describe("the classifier where Fomo is off in this process", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  async function classify(fomoOff: boolean | undefined, returns: Record<string, unknown>) {
+    let sent: { system: string; enum: string[] } | null = null;
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { messages: { role: string; content: string }[]; tools: { function: { parameters: { properties: { setting: { enum: string[] } } } } }[] };
+      sent = { system: body.messages[0]!.content, enum: body.tools[0]!.function.parameters.properties.setting.enum };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "", tool_calls: [{ id: "c", type: "function", function: { name: "command", arguments: JSON.stringify(returns) } }] } }] }) };
+    }) as never;
+    const creds = { provider: "test", transport: "openai", baseUrl: "http://x", apiKey: "k", model: "m", vision: false } as LlmCreds;
+    const r = await interpretWithLlm("turn on fomo research", { state: "cash 20", ...(fomoOff === undefined ? {} : { fomoOff }) }, creds);
+    return { r, sent: sent! };
+  }
+
+  it("names no Fomo switch in its prompt or its closed set, and returns none", async () => {
+    const off = await classify(true, { kind: "set", setting: "fomo", value: "on" });
+    assert.doesNotMatch(off.sent.system, /\bfomo\w*\b — /i, "no Fomo switch in the catalog it reads");
+    assert.ok(!off.sent.enum.some((k) => /^fomo/i.test(k)));
+    assert.deepEqual(off.r.cmd, { kind: "set", setting: "unknown", value: "on" });
+    const on = await classify(undefined, { kind: "set", setting: "fomo", value: "on" });
+    assert.match(on.sent.system, /fomoDataAccess — answer Fomo questions/);
+    assert.ok(on.sent.enum.includes("fomo"));
+    assert.deepEqual(on.r.cmd, { kind: "set", setting: "fomo", value: "on" });
+  });
+});

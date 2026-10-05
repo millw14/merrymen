@@ -2,6 +2,7 @@ import { erc20Abi, parseAbi, type Address, type PublicClient } from "viem";
 import { CASH, TRENCHER_VAULT_ABI, isEnergyReserveToken, type StockToken, type StoredGrant } from "../../packages/core/src/index";
 import { highVolumePools } from "./trencher-brain";
 import { NOMINATE } from "./trencher-nominate";
+import { EARLY_VENUE, earlyVerifyPools } from "./early-candidates";
 import { verifyTrencherCustody } from "./venues/trencher-vault";
 import type { GeckoPool } from "./venues/geckoterminal";
 
@@ -11,6 +12,45 @@ const FACTORY = parseAbi(["function getPool(address a,address b,uint24 fee) view
 export const DISCOVERY_SLICE = 20;
 /** Nominated pools verified beyond that slice, at most — the nomination book's own queue bound. */
 export const NOMINATED_VERIFY_MAX = NOMINATE.queueMax;
+/** Early-candidate pools verified per pass, at most (early-candidates.ts). Its own bound, beside the two above. */
+export const EARLY_VERIFY_MAX = 5;
+
+/** A verified pool. `early` marks one admitted through the early path (see DiscoveryOptions.early). */
+export type QualifiedPool = GeckoPool & { early?: true };
+
+/**
+ * THE REGULAR AUTONOMOUS ENTRY LIST (index.ts trenchCandidates): the fresh
+ * tape's pools that discovery verified through the REGULAR reads — the top
+ * slice and the nominations — screened by `highVolumePools`.
+ *
+ * WHY `early` POOLS ARE LEFT OUT. A pool verified only because something
+ * asked the early path to read it (an early-book offer, or the Fomo follow
+ * path's verification-only ask) and ranked beyond the slice comes back
+ * `early`. Letting it into this list would make an ASK into a regular
+ * candidate — reviewed in the ordinary rotation, bought at the ordinary
+ * autonomous size, with no follow gate, no follow-entry cap and no
+ * exploration budget, on an agent the operator never allow-listed for follow.
+ * Early pools reach the candidate list only through `earlyEntryPools`, which
+ * requires an early-book offer.
+ *
+ * WHY `verifyOnly` TOO. The `early` flag alone does not cover an ask: the
+ * asked coin's own page joins the tape discovery ranks, so a busy coin that
+ * sits on no feed page can rank INSIDE the slice on that page alone and come
+ * back as a regular read. `verifyOnly` (lowercased token addresses asked of
+ * discovery with no early-book offer behind them — index.ts passes the Fomo
+ * verification asks less the book's coins) is left out whatever the slice
+ * said, as the paper rail's list leaves it out.
+ */
+export function regularEntryPools(
+  tape: readonly GeckoPool[],
+  qualified: readonly Pick<QualifiedPool, "poolAddress" | "tokenAddress" | "early">[],
+  verifyOnly: ReadonlySet<string> = new Set(),
+): GeckoPool[] {
+  const asked = new Set([...verifyOnly].map(a => String(a).toLowerCase()));
+  return highVolumePools(tape.filter(p =>
+    !asked.has(p.tokenAddress.toLowerCase())
+    && qualified.some(q => q.early !== true && q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)));
+}
 
 export interface DiscoveryOptions {
   /**
@@ -33,6 +73,26 @@ export interface DiscoveryOptions {
    * the chat picks what to look at, never what counts as verified.
    */
   nominated?: ReadonlySet<string>;
+  /**
+   * Token addresses the early-candidate book holds (early-candidates.ts), in
+   * the book's order — decided coins first, then by priority.
+   *
+   * THE SMALLER-COIN PATH, AND STILL NOTHING BUT A LOOKUP KEY. Unlike a
+   * nomination, an early coin does NOT have to clear `highVolumePools` or sit
+   * in the top slice: its pool is chosen by the route-specific early screen
+   * (`earlyScreenReason`: the v3 route, two-sided 24h flow, fresh activity,
+   * a known reserve) and up to EARLY_VERIFY_MAX of them are read per pass,
+   * after the slice and the nominations, never instead of them. Then it runs
+   * EXACTLY the loop every other pool runs — Uniswap v3 on this chain, a USDG
+   * or WETH quote, the pool the canonical factory's `getPool` returns for its
+   * own token0/token1/fee, the decimals bound, never the energy reserve — so
+   * nothing becomes a known Trencher asset without that verification. A coin
+   * already read through the slice or a nomination is not read twice and is
+   * not marked early.
+   *
+   * Verified early pools come back in `qualified` with `early: true`.
+   */
+  early?: Iterable<string>;
   /**
    * What earlier passes in this process already proved about pools. Absent,
    * every pool is read from scratch — which is what every pass did before it
@@ -147,7 +207,7 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   });
   // Failure to read existing holdings aborts the entire pass; it never becomes an empty book.
   const held = custody.deployed ? await client.readContract({address:custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"tokens"}) : [];
-  const qualified: GeckoPool[] = [];
+  const qualified: QualifiedPool[] = [];
   // Filter supported venues before token deduplication: a larger V2/V4 pool
   // must not erase an otherwise eligible V3 route for the same token.
   const ranked = highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood"));
@@ -155,7 +215,15 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   const beyond = nominated.size
     ? ranked.slice(DISCOVERY_SLICE).filter(p => nominated.has(p.tokenAddress.toLowerCase())).slice(0, NOMINATED_VERIFY_MAX)
     : [];
-  for (const p of [...ranked.slice(0,DISCOVERY_SLICE), ...beyond]) {
+  const regularReads = [...ranked.slice(0,DISCOVERY_SLICE), ...beyond];
+  // The early path: chosen by the early screen, not the volume ranking, and
+  // bounded on its own. Coins the regular reads already cover are skipped.
+  const earlyAll = opts.early
+    ? earlyVerifyPools(pools.filter(p => p.dex === EARLY_VENUE), opts.early, new Set(regularReads.map(p => p.tokenAddress.toLowerCase())))
+    : [];
+  const earlyReads = earlyAll.slice(0, EARLY_VERIFY_MAX);
+  const earlyRead = new Set<GeckoPool>(earlyReads);
+  for (const p of [...regularReads, ...earlyReads]) {
     if (p.dex !== "uniswap-v3-robinhood" || !p.poolAddress || !/^0x[0-9a-fA-F]{40}$/.test(p.poolAddress)) continue;
     // The energy reserve is never a trencher candidate: it is held as energy,
     // never watched, bought or sold as a coin. Excluded here, where a NEW token
@@ -191,7 +259,7 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
         if (canonical.toLowerCase()!==address.toLowerCase()) { cache?.rememberRefused(factory, address, p.tokenAddress); continue; }
         cache?.rememberVerified(factory, address, facts);
       }
-      qualified.push(p);
+      qualified.push(earlyRead.has(p) ? { ...p, early: true } : p);
     } catch { /* A failed new-candidate read excludes it; it does not authorize a guess. */ }
   }
   const addresses = [...new Set([...held,...qualified.map(p=>p.tokenAddress as Address)].map(a=>a.toLowerCase() as Address))];
@@ -232,5 +300,14 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
       if (held.some(t=>t.toLowerCase()===address)) throw error;
     }
   }
-  return {custody,tokens,held,qualified:qualified.filter(p=>tokens.some(t=>t.address.toLowerCase()===p.tokenAddress.toLowerCase()))};
+  const verified = qualified.filter(p=>tokens.some(t=>t.address.toLowerCase()===p.tokenAddress.toLowerCase()));
+  // What the early path did this pass, by token, for the decision funnel:
+  // verified, read but refused (or failed), or left for a later pass by the bound.
+  const earlyVerified = new Set(verified.filter(p => p.early).map(p => p.tokenAddress.toLowerCase()));
+  const early = {
+    verified: [...earlyVerified],
+    unverified: earlyReads.map(p => p.tokenAddress.toLowerCase()).filter(t => !earlyVerified.has(t)),
+    deferred: earlyAll.slice(EARLY_VERIFY_MAX).map(p => p.tokenAddress.toLowerCase()),
+  };
+  return {custody,tokens,held,qualified:verified,early};
 }

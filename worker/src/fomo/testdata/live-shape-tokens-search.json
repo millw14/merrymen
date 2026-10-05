@@ -1,0 +1,35 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "query": "FAKE",
+  "type": "tokens",
+  "count": 3,
+  "results": [
+    {
+      "type": "token",
+      "symbol": "FAKE",
+      "address": "0xFA0E00000000000000000000000000000000F00D",
+      "name": "Fake Token",
+      "image": "https://example.invalid/media/4663_fake.png",
+      "marketCapUsd": null,
+      "networkId": 4663
+    },
+    {
+      "type": "token",
+      "symbol": "FAKE",
+      "address": "0xFA0E00000000000000000000000000000000F00D",
+      "name": "Fake Token on BNB",
+      "image": "https://example.invalid/media/56_fake.png",
+      "marketCapUsd": 1234567.5,
+      "networkId": 56
+    },
+    {
+      "type": "token",
+      "symbol": "FAKE",
+      "address": "0xFA0E00000000000000000000000000000000F00D",
+      "name": "Fake Token on Ethereum",
+      "image": "https://example.invalid/media/1_fake.png",
+      "marketCapUsd": 98765,
+      "networkId": 1
+    }
+  ]
+}

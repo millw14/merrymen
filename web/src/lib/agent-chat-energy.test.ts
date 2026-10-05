@@ -200,12 +200,22 @@ describe("/api/chat injects it on the server", () => {
     assert.match(ROUTE, /getGrantStore\(\)\.get\(tenant\)/, "the grant is resolved from the authenticated tenant");
     assert.match(ROUTE, /const account = hosted \? grant\?\.smartAccount \?\? null : await diskAgent\(\)/, "the caller cannot name the agent");
     assert.match(ROUTE, /ceilingFor\(req, hosted\)/);
-    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply, recovery \}\)/);
+    // Beside it, the server's own Fomo research context (lib/fomo-chat.ts), never the body's.
+    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply, fomo, recovery, fomoSettings \}\)/);
+    assert.match(ROUTE, /const fomoSettings = fomoEnabledFor\(hosted\);/, "the Fomo switches only where the deployment runs Fomo");
   });
 
   it("AND ONLY WHILE ITS DAY LASTS — a stale report is no ENERGY block", () => {
     assert.match(ROUTE, /const report = currentEnergy\(!recovery && account \? await readAgentEnergy\(account\) : null, Math\.floor\(Date\.now\(\) \/ 1000\)\);/);
     assert.match(ROUTE, /const energy = report\s*\?/, "the ceiling is only added to a current report");
+  });
+
+  it("THE RECOVERY HOLD IS READ BEFORE ANY FOMO LOOKUP, and a research answer is sent qualified by it", () => {
+    const hold = ROUTE.indexOf("readFleetRecoveryView(db, scope, null)");
+    const refused = ROUTE.indexOf('why: "recovery-unavailable"');
+    const fomo = ROUTE.indexOf("await fomoChatTurn(");
+    assert.ok(hold > 0 && refused > hold && fomo > refused, "an unreadable hold refuses the turn before research is asked");
+    assert.match(ROUTE, /\{ factualReply: fomoTurn\.factualReply, factualSource: "research", recovery \}/);
   });
 
   it("AND NEVER FROM THE BODY", () => {

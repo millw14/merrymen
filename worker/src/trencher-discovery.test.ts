@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { keccak256, type PublicClient } from "viem";
 import { CASH, UNISWAP, GRANT_TRENCHER, MERRYMEN_TOKEN, type StoredGrant } from "../../packages/core/src/index";
-import { NOMINATED_VERIFY_MAX, discoverTrencherUniverse } from "./trencher-discovery";
+import { EARLY_VERIFY_MAX, NOMINATED_VERIFY_MAX, discoverTrencherUniverse, regularEntryPools } from "./trencher-discovery";
+import { earlyEntryPools } from "./early-candidates";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
 const token="0x1111111111111111111111111111111111111111";
@@ -212,4 +213,145 @@ test("verification beyond the slice is bounded by the nomination queue", async (
   const result = await discoverTrencherUniverse(c.client, grant, tape, { nominated: new Set(tape.slice(20).map(p => p.tokenAddress)) });
   assert.equal(result.qualified.length, 20 + NOMINATED_VERIFY_MAX);
   assert.equal(new Set(reads).size, 20 + NOMINATED_VERIFY_MAX);
+});
+
+// ─── Early candidates (early-candidates.ts) ────────────────────────────────
+//
+// The smaller-coin path: no volume screen and no top slice, but exactly the
+// same on-chain verification, bounded on its own.
+
+test("an early coin below the volume screen and beyond the slice is verified by the same on-chain checks, marked early", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(25);
+  const small = { ...pool, tokenAddress: `0x${"d".repeat(38)}01`, poolAddress: `0x${"e".repeat(38)}01`, poolId: `0x${"e".repeat(38)}01`,
+    volume24hUsd: 20_000, buyers24h: 12, reserveUsd: 30_000, fdvUsd: 60_000 } as GeckoPool;
+  const far = tape[23]!; // passes highVolumePools, outside the slice, not nominated
+  const all = [...tape, small];
+  const reads: string[] = [];
+  const c = chain(new Set(all.map(p => p.tokenAddress.toLowerCase())), reads);
+  all.forEach(p => c.register(p));
+
+  const plain = await discoverTrencherUniverse(c.client, grant, all);
+  const emptyEarly = await discoverTrencherUniverse(c.client, grant, all, { early: [] });
+  assert.deepEqual(emptyEarly.qualified, plain.qualified, "no early coins: identical result");
+  assert.deepEqual(plain.early, { verified: [], unverified: [], deferred: [] });
+  assert.ok(!plain.qualified.some(p => p.tokenAddress === small.tokenAddress || p.tokenAddress === far.tokenAddress));
+
+  reads.length = 0;
+  const result = await discoverTrencherUniverse(c.client, grant, all, { early: [small.tokenAddress.toUpperCase().replace("0X", "0x"), far.tokenAddress] });
+  assert.ok(reads.includes(small.poolAddress!.toLowerCase()) && reads.includes(far.poolAddress!.toLowerCase()));
+  for (const p of [small, far]) {
+    const q = result.qualified.find(x => x.tokenAddress === p.tokenAddress);
+    assert.equal(q?.early, true, p.name);
+    assert.ok(result.tokens.some(tok => tok.address === p.tokenAddress && tok.symbol === `T${p.tokenAddress.slice(-11).toUpperCase()}`));
+  }
+  assert.deepEqual(result.qualified.filter(p => !p.early).map(p => p.tokenAddress), plain.qualified.map(p => p.tokenAddress), "the slice is untouched");
+  assert.deepEqual(result.early.verified.sort(), [small.tokenAddress, far.tokenAddress].sort());
+
+  // A coin the slice already reads is not read twice and is not marked early.
+  const top = tape[0]!;
+  reads.length = 0;
+  const covered = await discoverTrencherUniverse(c.client, grant, all, { early: [top.tokenAddress] });
+  assert.equal(covered.qualified.find(p => p.tokenAddress === top.tokenAddress)?.early, undefined);
+  assert.equal(reads.filter(r => r === top.poolAddress!.toLowerCase()).length, 3, "token0, token1, fee once");
+});
+
+test("an early coin still needs the canonical factory, the v3 route, two-sided flow and never the energy reserve", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const mk = (i: number, over: Partial<GeckoPool> = {}) => ({ ...pool, tokenAddress: `0x${"d".repeat(38)}${i.toString(16).padStart(2, "0")}`,
+    poolAddress: `0x${"e".repeat(38)}${i.toString(16).padStart(2, "0")}`, poolId: `p${i}`, volume24hUsd: 20_000, buyers24h: 12, ...over } as GeckoPool);
+  const lookalike = mk(1);
+  const v4 = mk(2, { dex: "uniswap-v4-robinhood" });
+  const oneSided = mk(3, { sells24h: 0 });
+  const reserve = mk(4, { tokenAddress: MERRYMEN_TOKEN.address });
+  const all = [lookalike, v4, oneSided, reserve];
+  const reads: string[] = [];
+  const c = chain(new Set([v4, oneSided, reserve].map(p => p.tokenAddress.toLowerCase())), reads); // the factory does not know `lookalike`
+  all.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, all, { early: all.map(p => p.tokenAddress) });
+  assert.equal(result.qualified.length, 0);
+  assert.equal(result.tokens.length, 0, "nothing becomes a known Trencher asset without verification");
+  assert.ok(reads.includes(lookalike.poolAddress!.toLowerCase()), "read, and refused: an offer is not provenance");
+  for (const p of [v4, oneSided, reserve]) assert.ok(!reads.includes(p.poolAddress!.toLowerCase()), `${p.poolId} never read on chain`);
+  assert.deepEqual(result.early.unverified, [lookalike.tokenAddress]);
+});
+
+test("early verification is bounded by EARLY_VERIFY_MAX, beside the slice and the nominations", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(40);
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, {
+    nominated: new Set(tape.slice(20, 30).map(p => p.tokenAddress)),
+    early: tape.slice(30).map(p => p.tokenAddress),
+  });
+  assert.equal(result.qualified.length, 20 + NOMINATED_VERIFY_MAX + EARLY_VERIFY_MAX);
+  assert.equal(new Set(reads).size, 20 + NOMINATED_VERIFY_MAX + EARLY_VERIFY_MAX);
+  assert.equal(result.early.deferred.length, 10 - EARLY_VERIFY_MAX);
+});
+
+// ─── What an early read may NOT become ─────────────────────────────────────
+//
+// A Fomo follow verification ask (fomo-child.ts verifyRequests) rides the
+// early path. Discovery verifies the coin beyond the slice and marks it
+// `early`; that must never make it a REGULAR autonomous candidate — reviewed in
+// the ordinary rotation and bought at the ordinary size, with no follow gate,
+// on an agent the operator never allow-listed for follow.
+
+test("a beyond-slice coin verified only because Fomo asked never reaches the regular candidate list", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(25);
+  const asked = tape[20]!; // the 21st busiest: passes the $100k screen, one past the slice
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, { early: [asked.tokenAddress] });
+  assert.equal(result.qualified.find(p => p.tokenAddress === asked.tokenAddress)?.early, true, "verified, and marked early");
+
+  const regular = regularEntryPools(tape, result.qualified);
+  assert.ok(!regular.some(p => p.tokenAddress === asked.tokenAddress), "not a regular candidate");
+  assert.deepEqual(regular.map(p => p.tokenAddress), tape.slice(0, 20).map(p => p.tokenAddress), "the regular list is the slice, exactly");
+  // With no early-book offer (no follow nomination), the early list does not add it either.
+  assert.deepEqual(earlyEntryPools(tape, new Set(), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified }), []);
+  // Only an early-book offer brings it in, through the early path.
+  const viaBook = earlyEntryPools(tape, new Set([asked.tokenAddress]), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified });
+  assert.deepEqual(viaBook.map(p => p.tokenAddress), [asked.tokenAddress]);
+});
+
+test("a verify-only coin whose own tape page ranks it INSIDE the slice is still never a regular candidate", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  // The feeds carry 12 pools; the asked coin is on NO feed page. Its own page,
+  // read only because Fomo asked to verify it, puts it on the tape — busy
+  // enough to rank inside the slice, so discovery reads it as a REGULAR pool.
+  const feeds = ranked(12);
+  const asked = { ...ranked(13)[12]!, volume24hUsd: 9_950_000 };
+  const tape = [...feeds, asked];
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, { early: [asked.tokenAddress] });
+  const q = result.qualified.find(p => p.tokenAddress === asked.tokenAddress);
+  assert.ok(q, "verified on chain");
+  assert.equal(q.early, undefined, "inside the slice: not marked early, so the flag alone cannot keep it out");
+
+  // index.ts passes the Fomo asks that hold no early-book offer as `verifyOnly`.
+  const verifyOnly = new Set([asked.tokenAddress.toUpperCase().replace("0X", "0x")]);
+  const regular = regularEntryPools(tape, result.qualified, verifyOnly);
+  assert.ok(!regular.some(p => p.tokenAddress === asked.tokenAddress), "not a regular autonomous candidate");
+  assert.deepEqual(regular.map(p => p.tokenAddress), feeds.map(p => p.tokenAddress), "the feed coins are untouched");
+  // Only an early-book offer (a follow nomination) brings it in, through the early path.
+  assert.deepEqual(earlyEntryPools(tape, new Set(), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified }), []);
+  const viaBook = earlyEntryPools(tape, new Set([asked.tokenAddress]), { regular: new Set(regular.map(p => p.tokenAddress)), qualified: result.qualified });
+  assert.deepEqual(viaBook.map(p => p.tokenAddress), [asked.tokenAddress]);
 });

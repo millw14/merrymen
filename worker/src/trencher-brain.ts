@@ -1,9 +1,10 @@
-import type { BrainDecision } from "./brain-client";
+import type { BrainDecision, BrainResult } from "./brain-client";
 import { orderFromDecision } from "./brain-live";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import type { GeckoFetch, GeckoPool } from "./venues/geckoterminal";
 import { fetchGeckoPoolsResult, readTokenPoolsResult } from "./venues/geckoterminal";
 import { NOMINATE } from "./trencher-nominate";
+import { EARLY_PAGES_MAX, EARLY_VENUE, earlyScreenReason, type EarlyScreen } from "./early-candidates";
 import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 
 export const TRENCH_VOLUME_MIN = 100_000;
@@ -11,6 +12,7 @@ export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
 /** Tape pages kept for nominated coins, at most — the nomination book's own queue bound. */
 export const NOMINATED_PAGES_MAX = NOMINATE.queueMax;
 const NOMINATED_PREFIX = "nominated:";
+const EARLY_PREFIX = "early:";
 
 /** Safe diagnostic codes only; never provider bodies or credential-bearing URLs. */
 const pageFailure = (failure: string | undefined) =>
@@ -40,6 +42,8 @@ export class TrenchTapeReader {
   private pages = new Map<string, { pools: GeckoPool[]; at: number }>();
   /** Lowercased addresses whose own token page rides on the tape. See setNominated. */
   private nominated = new Set<string>();
+  /** Lowercased early-candidate addresses (early-candidates.ts). See setEarly. */
+  private early = new Set<string>();
   constructor(
     private fetchPage = fetchGeckoPoolsResult,
     private now = Date.now,
@@ -103,7 +107,67 @@ export class TrenchTapeReader {
     } catch { failures.push("nominated=unavailable"); }
   }
 
-  snapshot() {
+  /**
+   * EARLY CANDIDATES GET A PAGE OF THEIR OWN TOO — separate from nominations,
+   * bounded by the early book's own size (EARLY_PAGES_MAX), and screened
+   * DIFFERENTLY: `snapshot()` adds an early coin's pools that pass
+   * `earlyScreenReason` (early-candidates.ts) even when `highVolumePools` would
+   * drop them. That screen is for these coins only. The regular tape, every
+   * non-early coin on it, and `highVolumePools` itself are unchanged.
+   *
+   * Same page discipline as setNominated: REPLACES THE SET, a coin that left
+   * the book loses its page now, and an address beyond the bound is not read.
+   * A coin that is also nominated is not read twice: its nominated page
+   * carries the same pools.
+   */
+  setEarly(addresses: Iterable<string>): void {
+    const next = new Set<string>();
+    for (const a of addresses) {
+      const key = typeof a === "string" ? a.toLowerCase() : "";
+      if (!/^0x[0-9a-f]{40}$/.test(key) || next.has(key)) continue;
+      if (next.size >= EARLY_PAGES_MAX) break;
+      next.add(key);
+    }
+    for (const key of [...this.pages.keys()]) {
+      if (key.startsWith(EARLY_PREFIX) && !next.has(key.slice(EARLY_PREFIX.length))) this.pages.delete(key);
+    }
+    this.early = next;
+  }
+
+  /**
+   * The coins whose own early page is ON THE TAPE NOW: what setEarly last
+   * kept, whatever the book or the verification asks say this instant. A
+   * caller that keeps those pages off the regular list asks this, so a coin
+   * that left the asks a moment ago cannot slip on while its page remains.
+   */
+  earlyPageAddresses(): Set<string> {
+    return new Set([...this.pages.keys()].filter((k) => k.startsWith(EARLY_PREFIX)).map((k) => k.slice(EARLY_PREFIX.length)));
+  }
+
+  /** Read only the early pages — what a fresh offer asks for. One request per coin, none for the feeds. */
+  async refreshEarly(): Promise<string[]> {
+    const failures: string[] = [];
+    await Promise.all(this.earlyToRead().map(address => this.readEarly(address, failures)));
+    return failures;
+  }
+
+  private earlyToRead(): string[] {
+    return [...this.early].filter(a => !this.nominated.has(a));
+  }
+
+  private async readEarly(address: string, failures: string[]): Promise<void> {
+    const key = `${EARLY_PREFIX}${address}`;
+    // The kind of page, never the address: these lines are logged.
+    try {
+      const r = await this.fetchToken(address);
+      if (r.failed) { failures.push(`early=${pageFailure(r.failure)}`); return; }
+      // Left the book while the read was in flight: the page must not come back.
+      if (!this.early.has(address)) return;
+      this.pages.set(key, { pools: r.pools.filter(p => p.tokenAddress.toLowerCase() === address), at: r.observedAt ?? this.now() });
+    } catch { failures.push("early=unavailable"); }
+  }
+
+  private fresh() {
     const pages = [...this.pages.values()].filter(p => this.now() - p.at <= TRENCH_TAPE_MAX_AGE_MS);
     // Prefer the newest observation of a pool across overlapping feeds.
     const unique = new Map<string, GeckoPool>();
@@ -113,8 +177,82 @@ export class TrenchTapeReader {
         if (!unique.has(key)) unique.set(key, p);
       }
     }
-    return { pools: highVolumePools([...unique.values()], true),
+    return { pools: [...unique.values()], pages };
+  }
+
+  /**
+   * `pools` is `highVolumePools(fresh, true)` — exactly what it always was —
+   * followed by `early`: an early candidate's pools that pass the early
+   * screen and are not already in that list. With no early candidates the two
+   * are identical to the old snapshot.
+   */
+  snapshot() {
+    const { pools, pages } = this.fresh();
+    const regular = highVolumePools(pools, true);
+    const early = this.earlyPasses(pools, regular);
+    return { pools: early.length ? [...regular, ...early] : regular, early,
       observedAt: pages.length ? Math.min(...pages.map(p => p.at)) : 0 };
+  }
+
+  private earlyPasses(pools: readonly GeckoPool[], regular: readonly GeckoPool[]): GeckoPool[] {
+    if (this.early.size === 0) return [];
+    const key = (p: GeckoPool) => `${p.tokenAddress.toLowerCase()}:${p.dex}:${p.poolAddress?.toLowerCase() ?? p.poolId}`;
+    const have = new Set(regular.map(key));
+    const volume = (p: GeckoPool) => (typeof p.volume24hUsd === "number" && Number.isFinite(p.volume24hUsd) ? p.volume24hUsd : -1);
+    return pools
+      .filter(p => this.early.has(p.tokenAddress.toLowerCase()) && !have.has(key(p)) && earlyScreenReason(p) === null)
+      .sort((a, b) => volume(b) - volume(a));
+  }
+
+  /**
+   * THE COINS THE SCREEN DROPPED, and the first rule each failed — read only
+   * by the decision funnel (decision-funnel.ts), so "why was that coin never
+   * looked at?" has an answer that is not "it was not in the log".
+   *
+   * Per TOKEN, not per pool: a coin with one passing pool was not screened
+   * out, whatever its other pools look like. The reason given is the busiest
+   * failing pool's. Same fresh pages and same rules as `snapshot()`, so this
+   * can never disagree with what was actually offered.
+   */
+  screenedOut(): { tokenAddress: string; reason: TrenchScreen }[] {
+    const passed = new Set<string>();
+    const failed = new Map<string, { reason: TrenchScreen; volume: number }>();
+    for (const p of this.fresh().pools) {
+      const token = p.tokenAddress.toLowerCase();
+      // An early candidate is answered by its own screen: earlyScreenedOut.
+      if (this.early.has(token)) continue;
+      const reason = trenchScreenReason(p);
+      if (reason === null) { passed.add(token); continue; }
+      const volume = typeof p.volume24hUsd === "number" && Number.isFinite(p.volume24hUsd) ? p.volume24hUsd : -1;
+      const prior = failed.get(token);
+      if (!prior || volume > prior.volume) failed.set(token, { reason, volume });
+    }
+    return [...failed].filter(([token]) => !passed.has(token)).map(([tokenAddress, f]) => ({ tokenAddress, reason: f.reason }));
+  }
+
+  /**
+   * THE EARLY CANDIDATES THE EARLY SCREEN DROPPED, and the first rule each
+   * failed — for the decision funnel's `early-screen:<reason>`. A coin with
+   * ANY pool passing either screen is not listed (it is on the snapshot). The
+   * reason is the busiest failing pool's on the supported venue, or, with no
+   * pool there at all, `venue-not-supported`. A coin with no pools on the
+   * fresh tape is not listed: nothing was observed to screen.
+   */
+  earlyScreenedOut(): { tokenAddress: string; reason: EarlyScreen }[] {
+    if (this.early.size === 0) return [];
+    const passed = new Set<string>();
+    const failed = new Map<string, { reason: EarlyScreen; onVenue: boolean; volume: number }>();
+    for (const p of this.fresh().pools) {
+      const token = p.tokenAddress.toLowerCase();
+      if (!this.early.has(token)) continue;
+      const reason = earlyScreenReason(p);
+      if (reason === null || trenchScreenReason(p) === null) { passed.add(token); continue; }
+      const onVenue = p.dex === EARLY_VENUE;
+      const volume = typeof p.volume24hUsd === "number" && Number.isFinite(p.volume24hUsd) ? p.volume24hUsd : -1;
+      const prior = failed.get(token);
+      if (!prior || (onVenue && !prior.onVenue) || (onVenue === prior.onVenue && volume > prior.volume)) failed.set(token, { reason, onVenue, volume });
+    }
+    return [...failed].filter(([token]) => !passed.has(token)).map(([tokenAddress, f]) => ({ tokenAddress, reason: f.reason }));
   }
 
   async refresh() {
@@ -132,6 +270,8 @@ export class TrenchTapeReader {
       // Refreshed WITH the tape, on the tape's clock: a nominated page is
       // never older than the feed pages it is read beside.
       ...[...this.nominated].map(address => this.readNominated(address, failures)),
+      // Early pages ride the same clock, for the same reason.
+      ...this.earlyToRead().map(address => this.readEarly(address, failures)),
     ]);
     return { ...this.snapshot(), failures };
   }
@@ -160,17 +300,37 @@ export async function fetchTrenchTape(fetchPage = fetchGeckoPoolsResult): Promis
   return highVolumePools(healthy.flatMap(r => r.pools), true);
 }
 
+/** The first rule of the tape screen a pool failed. See `trenchScreenReason`. */
+export type TrenchScreen =
+  | "quote-asset" | "not-memecoin" | "volume-unknown" | "volume-below-min"
+  | "buyers-below-min" | "no-buys-24h" | "no-sells-24h" | "no-m5-volume";
+
+/**
+ * THE TAPE SCREEN, NAMED. `highVolumePools` asks this and nothing else, so the
+ * reason the decision funnel reports is the rule that actually applied rather
+ * than a second reading of it that could drift. Same order, same comparisons:
+ * a missing count still fails as it always did (`?? 0`), and is only NAMED
+ * here — it is not a new rule and it does not move a threshold.
+ */
+export function trenchScreenReason(p: GeckoPool): TrenchScreen | null {
+  // Quote assets are portfolio cash/bridge assets, never speculative entries.
+  // instrumentClassOf deliberately classifies unknown addresses as memecoins.
+  if ([CASH.USDG, CASH.WETH].some(a => a.toLowerCase() === p.tokenAddress.toLowerCase())) return "quote-asset";
+  if (instrumentClassOf(p.tokenAddress) !== "memecoin") return "not-memecoin";
+  if (!Number.isFinite(p.volume24hUsd)) return "volume-unknown";
+  if ((p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN) return "volume-below-min";
+  if ((p.buyers24h ?? 0) < 20) return "buyers-below-min";
+  if ((p.buys24h ?? 0) <= 0) return "no-buys-24h";
+  if ((p.sells24h ?? 0) <= 0) return "no-sells-24h";
+  if ((p.buckets.m5?.volumeUsd ?? 0) <= 0) return "no-m5-volume";
+  return null;
+}
+
 /** Volume ranks opportunities; on-chain depth and wallet policy still gate trades. */
 export function highVolumePools(pools: readonly GeckoPool[], perPool = false): GeckoPool[] {
   const byToken = new Map<string, GeckoPool>();
   for (const p of pools) {
-    // Quote assets are portfolio cash/bridge assets, never speculative entries.
-    // instrumentClassOf deliberately classifies unknown addresses as memecoins.
-    if ([CASH.USDG, CASH.WETH].some(a => a.toLowerCase() === p.tokenAddress.toLowerCase())) continue;
-    if (instrumentClassOf(p.tokenAddress) !== "memecoin") continue;
-    if (!Number.isFinite(p.volume24hUsd) || (p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN ||
-        (p.buyers24h ?? 0) < 20 || (p.buys24h ?? 0) <= 0 || (p.sells24h ?? 0) <= 0 ||
-        (p.buckets.m5?.volumeUsd ?? 0) <= 0) continue;
+    if (trenchScreenReason(p) !== null) continue;
     const key = perPool
       ? `${p.tokenAddress.toLowerCase()}:${p.dex}:${p.poolAddress?.toLowerCase() ?? p.poolId}`
       : p.tokenAddress.toLowerCase();
@@ -200,6 +360,48 @@ export function trenchBrainPersona(symbol: string, held: boolean): string {
       : `You hold zero ${symbol}. This is an entry review: choose BUY or HOLD. A bearish view means HOLD, not SELL; short selling is not supported.`);
 }
 type Ready = { decision: BrainDecision; input: ShadowInputs; token: string; context: string; started: number };
+
+/**
+ * THE EARLY LANE the review rotation is told about (early-candidates.ts).
+ * index.ts builds it from the early book on every `candidate` call.
+ */
+export interface EarlyLane {
+  /** Every coin the early book holds now (waiting or decided), lowercased. None of them takes a regular rotation slot. */
+  held: ReadonlySet<string>;
+  /** The ones still waiting for their review, in the order the reserved slot takes them. */
+  waiting: Iterable<string>;
+  /** This slot is reserved for an early candidate: EarlyCandidateBook.reservedSlot(recentLaunches()). */
+  reserved: boolean;
+}
+
+/** Reviews remembered for `recentLaunches`; more than the reserved-capacity window ever reads. */
+const LAUNCH_MEMORY = 16;
+
+/** What a dropped order was about, for a caller that files it by coin (the decision funnel). */
+export type TrenchDropInfo = { symbol: string; token: string; action: string; reason: string; decisionId?: string };
+
+/**
+ * WHY A REVIEW PRODUCED NO DECISION, in words that are true.
+ *
+ * Every non-decision used to print as "Brain unavailable: <kind>" — including
+ * the commonest one, a refusal by the portfolio gate on book quality, where
+ * the Brain was up, answered within milliseconds, and refused on purpose
+ * before any model call. An owner reading "unavailable" goes looking for an
+ * outage; the remedy is in the accounting (graph.py `assess`, refusing before
+ * it bills). The refusal reason is service text, so only a short code-shaped
+ * one is repeated.
+ */
+export function brainNoDecisionNote(symbol: string, result: BrainResult): string {
+  if (result.ok) return `Brain reviewed ${symbol}: ${result.decision.action}`;
+  if (result.kind === "unreachable") return "Brain unavailable: unreachable; no order approved";
+  if (result.kind === "malformed") return `Brain answered ${symbol} with an unusable decision (malformed); no order approved`;
+  const reason = /^[a-z0-9-]{1,48}$/.test(result.reason) ? result.reason : "unrecognised-reason";
+  if (reason === "portfolio-quality-insufficient") {
+    return `Brain did not review ${symbol}: the portfolio gate refused on book quality (${reason}); no new entry approved`;
+  }
+  if (reason === "budget-exhausted") return `Brain stopped reviewing ${symbol}: the run's model budget ran out (${reason}); no order approved`;
+  return `Brain refused to decide on ${symbol} (${reason}); no order approved`;
+}
 
 /** Model calls cannot hold up a stop-loss tick. Results are one-use, short-lived data. */
 export class TrenchBrainReview {
@@ -234,7 +436,21 @@ export class TrenchBrainReview {
    */
   private priorityLaunchedAtMs: number | undefined;
   private reviewSequence = 0;
+  /** Tokens (lowercased) of the reviews actually launched, oldest first, bounded. */
+  private launches: string[] = [];
   constructor(private now = Date.now) {}
+
+  /**
+   * Where the early lane comes from (index.ts sets it once). Asked on every
+   * `candidate` call with the recent launches. Absent, or answering null, the
+   * rotation is exactly what it was before the early path existed.
+   */
+  earlyLane?: (recentLaunches: readonly string[]) => EarlyLane | null;
+
+  /** The tokens of the last reviews launched, oldest first — what EarlyCandidateBook.reservedSlot reads. */
+  recentLaunches(): string[] {
+    return [...this.launches];
+  }
 
   /**
    * True when the context actually changed — the moment every review in
@@ -253,6 +469,7 @@ export class TrenchBrainReview {
     this.priorityKeys = new Set();
     this.priorityLaunchedAtMs = undefined;
     this.reviewSequence = 0;
+    this.launches = [];
     return true;
   }
 
@@ -305,6 +522,22 @@ export class TrenchBrainReview {
    * launched for any coin in the hint, and a coin is not preferred again
    * until that long after its own last launch — together, at most every other
    * review slot — and in between the rotation runs exactly as before.
+   *
+   * ── EARLY CANDIDATES HAVE A LANE OF THEIR OWN ────────────────────────
+   *
+   * RESERVED CAPACITY, NEVER CAPITAL. A coin the early book holds
+   * (early-candidates.ts) is usually far too quiet to win a busiest-first
+   * rotation, so without a reservation it would be verified and then never
+   * looked at. With `earlyLane`, such a coin is reviewed ONLY in a slot the
+   * book reserves — one in every EARLY.reserveEvery — taking the waiting
+   * coins in the book's priority order, each spaced by PRIORITY_RETRY_MS so
+   * a review that produced no decision does not re-ask every 30s. It never
+   * takes a regular slot unless nothing else is eligible at all. Like the
+   * nomination hint, the lane chooses among ELIGIBLE coins only — everything
+   * the caller filters on (verification, shouldEnter, paused, held) has
+   * already run — and a decided coin (Brain said BUY, entry pending) is not
+   * picked again: a second review would supersede the order it is waiting
+   * on. What a review then decides, and what may be bought, is unchanged.
    */
   candidate<T extends { token: string; volume24hUsd?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
@@ -312,6 +545,19 @@ export class TrenchBrainReview {
     const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
     this.priorityKeys = wanted;
     if (eligible.length === 0) return undefined;
+    const lane = this.laneNow();
+    if (lane) {
+      const early = eligible.filter(c => lane.held.has(c.token.toLowerCase()));
+      if (early.length > 0) {
+        const regular = eligible.filter(c => !lane.held.has(c.token.toLowerCase()));
+        if (lane.reserved || regular.length === 0) {
+          const pick = this.earlyPick(early, lane.waiting);
+          if (pick) return pick;
+        }
+        if (regular.length === 0) return undefined;
+        eligible = regular;
+      }
+    }
     if (wanted.size > 0) {
       const now = this.now();
       const spaced = (last: number | undefined) => last === undefined || now - last >= PRIORITY_RETRY_MS;
@@ -350,11 +596,41 @@ export class TrenchBrainReview {
     }, undefined);
   }
 
+  /** The lane for this call, or null. An observer that throws is no lane, not a broken rotation. */
+  private laneNow(): EarlyLane | null {
+    if (!this.earlyLane) return null;
+    try {
+      const lane = this.earlyLane(this.recentLaunches());
+      return lane && typeof lane.held?.has === "function" && lane.held.size > 0 ? lane : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The first WAITING early coin, in the book's order, not launched within PRIORITY_RETRY_MS. */
+  private earlyPick<T extends { token: string }>(early: readonly T[], waiting: Iterable<string>): T | undefined {
+    const now = this.now();
+    const byToken = new Map<string, T>();
+    for (const c of early) {
+      const key = c.token.toLowerCase();
+      if (!byToken.has(key)) byToken.set(key, c);
+    }
+    for (const raw of waiting) {
+      const key = typeof raw === "string" ? raw.toLowerCase() : "";
+      const c = byToken.get(key);
+      const last = this.launchedAtMs.get(key);
+      if (c && (last === undefined || now - last >= PRIORITY_RETRY_MS)) return c;
+    }
+    return undefined;
+  }
+
   launch(context: string, input: ShadowInputs, token: string, run: () => Promise<ShadowOutcome>, note: (s: string) => void) {
     this.reset(context);
     if (this.pending || this.now() < this.nextAt) return;
     this.pending = true;
     this.reviewed.set(token.toLowerCase(), ++this.reviewSequence);
+    this.launches.push(token.toLowerCase());
+    if (this.launches.length > LAUNCH_MEMORY) this.launches.shift();
     const started = this.now();
     // STAMPED WHERE THE REVIEW ACTUALLY HAPPENS, past the pending/interval
     // guard above — a stamp written from the caller would claim a review on
@@ -373,7 +649,18 @@ export class TrenchBrainReview {
     this.nextAt = started + TRENCH_REVIEW_INTERVAL_MS;
     void run().then(outcome => {
       if (this.context !== context || this.generation !== generation) return;
+      const held = Boolean(input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0));
+      try {
+        this.onReviewed?.({ token, symbol: input.market.symbol, held, priceStale: input.market.priceStale === true, outcome });
+      } catch { /* An observer cannot break the review it observes. */ }
       if (outcome.ran && outcome.result.ok) {
+        // A NEWER DECISION REPLACES AN UNUSED ORDER, AND THAT IS SAID TOO.
+        // Every branch here overwrites `ready`; an untaken BUY or SELL sitting
+        // there used to vanish without a word whenever its coin left the
+        // strategy's candidate list before the next review landed. Only this
+        // branch: a review that produced no decision leaves `ready` alone, as
+        // it always has.
+        this.supersede();
         if (outcome.result.decision.action === "sell" &&
             !input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0)) {
           this.ready = null;
@@ -398,8 +685,30 @@ export class TrenchBrainReview {
         }
         this.ready = { decision: outcome.result.decision, input, token, context, started };
         note(`Brain reviewed ${input.market.symbol}: ${outcome.result.decision.action}`);
-      } else note(outcome.ran ? `Brain unavailable: ${outcome.result.ok ? "" : outcome.result.kind}` : outcome.why);
+      } else note(outcome.ran ? brainNoDecisionNote(input.market.symbol, outcome.result) : outcome.why);
     }).catch(() => note("Brain review failed; no new entry approved")).finally(() => { this.pending = false; });
+  }
+
+  /**
+   * Told about every review that completed in the current context, before
+   * any of the guards in `launch` decide what becomes of it — the decision
+   * funnel's view of what the Brain said (index.ts). Read-only: it cannot
+   * change the outcome, and a throw from it is swallowed.
+   */
+  onReviewed?: (r: { token: string; symbol: string; held: boolean; priceStale: boolean; outcome: ShadowOutcome }) => void;
+
+  private supersede(): void {
+    const r = this.ready;
+    this.ready = null;
+    if (!r || r.decision.action.toLowerCase() === "hold") return;
+    const id = typeof r.decision.decision_id === "string" && r.decision.decision_id.trim() ? r.decision.decision_id : undefined;
+    const reason = "superseded by a newer review before it was taken";
+    // The decision id rides only in `info`, not in the second argument the
+    // nomination book answers from: the review that replaced this one may be
+    // answering that same nomination right now, and telling the group
+    // `skipped` underneath it would race the answer that is still coming.
+    this.onDrop?.(`Brain ${r.decision.action.toUpperCase()} ${r.input.market.symbol} not used: ${reason}`, undefined,
+      { symbol: r.input.market.symbol, token: r.token, action: r.decision.action, reason, decisionId: id });
   }
 
   /** When this symbol was last actually reviewed, ms epoch. Absent = never. */
@@ -412,7 +721,7 @@ export class TrenchBrainReview {
    * Brain decision it was, so a caller waiting on that decision's fill (a
    * nominated coin) hears that none is coming instead of waiting out a TTL.
    */
-  onDrop?: (why: string, decisionId?: string) => void;
+  onDrop?: (why: string, decisionId?: string, info?: TrenchDropInfo) => void;
 
   take(symbol: string, token: string, price8: bigint, maxUsdg: number, held = false): TrenchBrainOrder | null {
     const r = this.ready;
@@ -427,7 +736,7 @@ export class TrenchBrainReview {
     const act = r.decision.action.toUpperCase();
     const id = typeof r.decision.decision_id === "string" && r.decision.decision_id.trim() ? r.decision.decision_id : undefined;
     const drop = (reason: string): null => {
-      this.onDrop?.(`Brain ${act} ${symbol} not used: ${reason}`, id);
+      this.onDrop?.(`Brain ${act} ${symbol} not used: ${reason}`, id, { symbol, token: r.token, action: r.decision.action, reason, decisionId: id });
       return null;
     };
     if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return drop("whether it is held changed since the review");

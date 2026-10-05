@@ -1487,6 +1487,21 @@ const PRIVATE_RES: readonly RegExp[] = [
   /\b(?:your|ur) (?:model|llm|settings|config|telegram id|chat id|user id)\b/u,
 ];
 
+/**
+ * WHO AND WHAT IT FOLLOWS, COPIES OR WATCHES: the owner's research
+ * configuration, as private as its settings ("who do you copy trade?", "who
+ * are you following on fomo?", "what are you watching?"). Only where Fomo
+ * research is on in this process (handler.ts passes `research`): without it
+ * there is no such configuration, and these lines go on as before.
+ */
+const RESEARCH_PRIVATE_RES: readonly RegExp[] = [
+  /\bwho (?:do|did|are|r|will|would|should) (?:you|u|ya) (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b/u,
+  /\b(?:which|what) (?:traders?|wallets?|accounts?|people|whales|degens) (?:do|are|r|did|will) (?:you|u|ya) (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b/u,
+  /\bwhat (?:coins? |tokens? |traders? )?(?:are|r) (?:you|u|ya) (?:watching|tracking|monitoring|following|researching|copying|copy[- ]?trading)\b/u,
+  /\bwhat(?:'s| is|s) on (?:your|ur) (?:watch ?list|radar|list)\b/u,
+  /\b(?:your|ur) (?:watch ?list|follow(?:ing)? list|copy(?:[- ]?trad(?:e|ing))? list|copy[- ]?trades|cohort|tracked traders|followed traders|traders list)\b/u,
+];
+
 /** Its balance, P&L, portfolio, positions: private when ASKED for ("what's your pnl", "your p&l?"), not when judged ("your trades are trash"). */
 const MONEY_NOUN = new RegExp(String.raw`\b${YOUR} (?:balance|bal|pnl|p&l|p/l|p n l|profits?|losses|gains|returns?|roi|win ?rate|net ?worth|portfolio|holdings|stack|bag size|bags? size|position sizes?|positions?|trade history|trades|performance|bankroll|funds|money)\b`, "u");
 const ASKING = /\?|\b(?:what|whats|what's|how|hows|how's|show|tell|share|post|drop|send|give|reveal|screenshot|ss|let'?s see|lets see|flex)\b/u;
@@ -1498,9 +1513,10 @@ const ASKING = /\?|\b(?:what|whats|what's|how|hows|how's|show|tell|share|post|dr
  * nice try"), never answered. The names of coins it holds are NOT private
  * (the persona knows them), so "what are you holding" is not caught here.
  */
-export function isPrivateAsk(text: string): boolean {
+export function isPrivateAsk(text: string, opts: { research?: boolean } = {}): boolean {
   const t = norm(text);
   if (!t) return false;
+  if (opts.research === true && RESEARCH_PRIVATE_RES.some((re) => re.test(t))) return true;
   return PRIVATE_RES.some((re) => re.test(t)) || (MONEY_NOUN.test(t) && ASKING.test(t));
 }
 
@@ -1814,4 +1830,67 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
   if (DESK_SETUP.test(t) && DESK_REQUEST.test(t)) return { kind: "discussion", topic: "setup" };
   return null;
+}
+
+// ─── Social-trading research asks (docs/fomo.md "Telegram groups") ─────────
+
+/**
+ * "fomo" where it names the platform, never the feeling: "on fomo", "fomo
+ * traders", "fomo's leaderboard", "trending on fomo". "i have fomo", "fomo'd
+ * in", "pure fomo lol" and "fomo into it" are how people feel, and stay chat.
+ */
+const FOMO_PLATFORM =
+  /\b(?:on|from|via|through|using|inside|in the) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b/u;
+/** Written cases for and against a coin: the research's own word, singular or plural. */
+const FOMO_THESES = /\btheses\b|\bthesis (?:on|for|about|behind|of)\b/u;
+/** Traders, as a group, buying or selling: "what are the top traders buying", "are traders selling pepe". */
+const FOMO_TRADER_FLOW =
+  /\b(?:top |best |smart |fomo |the |any |which |what )?(?:traders|whales|smart money|degens) (?:are |r |is |been |have been |were )?(?:buying|selling|aping|accumulating|dumping|exiting|loading|into|rotating)\b/u;
+/** Asking for something, without a question mark: "show me…", "check…", "pull up…". */
+const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|u))\s+)*(?:show|tell|check|give|list|pull|find|research|look|dig|get|fetch|what|whats|what's|who|whos|who's|which|how|is|are|any)\b/u;
+
+export type FomoAsk = { kind: "platform" } | { kind: "theses" } | { kind: "trader-flow" };
+
+/**
+ * IS THIS ADDRESSED LINE A SOCIAL-TRADING RESEARCH ASK? Deliberately
+ * conservative, because the answer costs a lookup: the platform named in a
+ * platform position, the word "theses" (or "thesis on/for/about"), or traders
+ * as a group buying or selling — and in every case a question or a request.
+ * Read on the line without its names and handles. Null: not one, and the line
+ * goes on to the desk and the persona as before.
+ *
+ * This only routes. The research side plans the question itself from the
+ * words (and may still say it is not one), and nothing here names a coin, a
+ * trader or anything a lookup is made with.
+ */
+export function fomoAskOf(text: string, selfNames: readonly string[] = []): FomoAsk | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  // Names out, and whatever punctuation they leave in front ("@", ",").
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
+  if (!t || COIN_STOP.test(t)) return null;
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames);
+  if (!asked) return null;
+  if (FOMO_PLATFORM.test(t)) return { kind: "platform" };
+  if (FOMO_THESES.test(t)) return { kind: "theses" };
+  if (FOMO_TRADER_FLOW.test(t)) return { kind: "trader-flow" };
+  return null;
+}
+
+/**
+ * A SHORT FOLLOW-UP TO A RESEARCH ANSWER that names no subject of its own:
+ * "what about the sellers?", "and the buyers?", "any theses?", "refresh it",
+ * "this week?". Read only while this chat's last answer was research
+ * (handler.ts), so on its own it routes nothing.
+ */
+const FOMO_FOLLOW_UP =
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying)\b/u;
+const FOLLOW_UP_MAX_WORDS = 10;
+
+export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
+  if (!t || COIN_STOP.test(t)) return false;
+  if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames);
+  return asked && FOMO_FOLLOW_UP.test(t);
 }

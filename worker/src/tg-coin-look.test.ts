@@ -1291,7 +1291,15 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     // (trencher-discovery.ts) and changes what is re-read, never what qualifies.
     const refresh = CODE.slice(CODE.indexOf("const autoTrenchRefresh = new CoalescedRefresh("), CODE.indexOf("function refreshAutoTrench("));
     assert.match(refresh, /const poolCache = trenchPoolCache;/);
-    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache\s*\}\)/);
+    // The early-candidate set (early-candidates.ts) rides beside both; it
+    // too changes what is read, never the verification (trencher-discovery.ts).
+    // The follow path's verification-only asks (fomo-child.ts verifyRequests)
+    // ride beside the book's coins through the same verification. A coin they
+    // get verified is marked early, so it reaches candidates only through the
+    // early path (a follow nomination): the regular autonomous list is built
+    // by regularEntryPools, which drops early pools, and the paper list drops
+    // verify-only coins. They earn no review slot or ceiling by themselves.
+    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*(?:earlyBook\.addresses\(\)|earlyDiscoverySet\(\)))?\s*\}\)/);
     assert.match(refresh, /autoTrenchContext === context && trenchPoolCache === poolCache && active/,
       "a result from an old grant or connection cannot replace the current discovery");
   });

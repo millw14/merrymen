@@ -69,8 +69,11 @@ import { BUILTIN_STRATEGIES } from "../strategies/registry";
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import type { TradeViewOpts } from "./trade-rows";
-import { answerQuestion } from "./answer";
-import type { ToolContext } from "./chat-tools";
+import { answerFomoDm, answerQuestion, type FomoDmInput, type FomoDmJob } from "./answer";
+import { FOMO_TOOL_TIMEOUT_MS, type ToolContext } from "./chat-tools";
+import type { BrokerCallOptions, FomoBroker } from "../fomo/contract";
+import { FOMO_ATTRIBUTION, renderEnvelope } from "../fomo/render";
+import type { ResearchStatusData } from "../fomo/tools";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
@@ -132,7 +135,7 @@ import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from 
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 import type { TgGroupsStore } from "./tg-groups/store";
-import type { TgCoinsPort, TgDeskPort, TgGroupFactsPort } from "./tg-groups/types";
+import type { TgCoinsPort, TgDeskPort, TgFomoPort, TgGroupFactsPort } from "./tg-groups/types";
 import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 import type { HeldGroupEntry } from "./held-groups";
 
@@ -146,6 +149,12 @@ const ANSWER_KINDS: ReadonlySet<string> = new Set(["chat", "status", "positions"
 /** Buttons a command asked to have under its reply. */
 interface ReplyExtras {
   keyboard?: InlineKeyboard;
+  /**
+   * No link preview card under the reply. Set for research answers: they
+   * quote third-party text, and a link that slipped past the excerpt
+   * redaction must not arrive as a tappable card in my own message.
+   */
+  disablePreview?: boolean;
 }
 
 export interface TelegramServiceDeps {
@@ -200,6 +209,27 @@ export interface TelegramServiceDeps {
    * it there is nothing to take.
    */
   heldGroupUpdates?: () => HeldGroupEntry[];
+  /**
+   * SOCIAL-TRADING RESEARCH (docs/fomo.md): this child's research broker
+   * (fomo/broker.ts). Its tenant is stamped by whoever serves it — the
+   * orchestrator, from which child asked; self-hosted, the install's own —
+   * and never by anything said in a chat. Absent or null: a research
+   * question is answered that research is not available here.
+   */
+  fomo?: () => FomoBroker | null;
+  /** The groups' research port (worker/src/tg-fomo-port.ts createTgFomoPort). Absent or null: no research lane in groups. */
+  fomoGroupPort?: () => TgFomoPort | null;
+  /**
+   * THIS PROCESS HAS NO FOMO AT ALL (fomo-child.ts childFomoOff: a hosted
+   * child whose orchestrator has not opted in). Unlike an absent or null
+   * broker, which is research that is unavailable right now, this is the bot
+   * as it was before Fomo existed: a DM goes straight to the classifier, the
+   * chat model is offered no fomo_* lookup and its prompt does not mention
+   * them, and groups have no research lane.
+   */
+  fomoOff?: boolean;
+  /** Injectable for tests: the one-shot model call a DM research analysis is worded with (llm.ts llmText). */
+  fomoComposeText?: FomoDmInput["compose"];
   /** Injectable for tests. */
   now?: () => number;
   /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
@@ -596,6 +626,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         port: () => deps.tgCoins ?? null,
         facts: () => deps.tgFacts ?? null,
         desk: () => deps.tgDesk?.() ?? null,
+        fomo: () => (deps.fomoOff === true ? null : deps.fomoGroupPort?.() ?? null),
         self: () => {
           const bot = selfFor(groupCfg());
           // The bot's display name (getMe's first_name) is what members see on
@@ -688,8 +719,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     };
   };
 
-  /** What the answer loop's lookups read: this owner's agent, settings, permission and chain. */
-  const toolContext = (cfg: ResolvedConfig): ToolContext => {
+  /**
+   * What the answer loop's lookups read: this owner's agent, settings,
+   * permission and chain, and the research broker with this chat's
+   * conversation and audience. The audience is "owner" only for the linked
+   * owner in their own DM (state.ownerId, a trusted link); anyone else
+   * allowlisted gets the group's: public research, no private state.
+   */
+  const toolContext = (cfg: ResolvedConfig, msg?: Pick<TgMessage, "chatId" | "fromId">): ToolContext => {
     const grant = loadGrantFile();
     const status = deps.buildStatusContext();
     const agentId = status.agentId ?? grant?.smartAccount ?? null;
@@ -701,7 +738,203 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       book: agentId ? bookAddresses(grant, agentId) : [],
       client: mainnetClient(),
       now: now(),
+      fomo: fomoBroker(),
+      fomoOff: deps.fomoOff === true,
+      fomoConversationKey: msg ? fomoDmKey(msg.chatId) : null,
+      fomoAudience: msg && fomoOwnerDm(msg) ? "owner" : "group",
     };
+  };
+
+  // ─── Social-trading research in DMs (docs/fomo.md) ──────────────────────
+
+  /** The broker, or null; a getter that throws is no broker. */
+  const fomoBroker = (): FomoBroker | null => {
+    try {
+      return deps.fomo?.() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** The DM conversation the research keeps its subject memory under. */
+  const fomoDmKey = (chatId: number): string => `tg-dm:${chatId}`;
+  /** The linked owner, in their own private chat. Never decided by what was said. */
+  const fomoOwnerDm = (m: Pick<TgMessage, "chatId" | "fromId">): boolean => {
+    const ownerId = stateRef.get().ownerId;
+    return ownerId !== null && m.chatId === m.fromId && m.fromId === ownerId;
+  };
+  /**
+   * When each DM last got a research answer. A subject-less follow-up ("what
+   * about the sellers?") asks the research again only inside this window, so
+   * an ordinary DM never costs a round trip to the broker. In memory: after a
+   * restart a follow-up needs its subject again.
+   */
+  const fomoActive = new Map<number, number>();
+  const FOMO_ACTIVE_MS = 30 * 60_000;
+  /**
+   * The message ids of my research answers, per DM ("chatId:messageId"),
+   * bounded. A reply to one of them continues the research; a reply to any
+   * other message of mine (a trade receipt, a market read) is about THAT
+   * message, so it must not inherit the research's "it" (answer.ts
+   * repliesToOther). In memory, like fomoActive.
+   */
+  const fomoAnswerIds = new Set<string>();
+  const FOMO_ANSWER_IDS_MAX = 512;
+  const rememberFomoAnswer = (chatId: number, messageId: number | undefined): void => {
+    if (typeof messageId !== "number") return;
+    if (fomoAnswerIds.size >= FOMO_ANSWER_IDS_MAX) fomoAnswerIds.delete(fomoAnswerIds.values().next().value!);
+    fomoAnswerIds.add(`${chatId}:${messageId}`);
+  };
+  /** A reply to a message of mine that is not a research answer. */
+  const repliesToOther = (msg: TgMessage): boolean => {
+    const r = msg.replyTo;
+    if (!r || r.fromIsBot !== true) return false;
+    if (fomoAnswerIds.has(`${msg.chatId}:${r.messageId}`)) return false;
+    // After a restart the ids are gone; a quoted research answer still ends
+    // with its attribution. (Not any mention of "fomo": a trade receipt may
+    // name a fomo-follow source and is still not research.)
+    return !(r.text ?? "").includes(FOMO_ATTRIBUTION);
+  };
+  /** The agent's own names and the bot's @username: never researched as a trader (fomo/intent.ts). */
+  const fomoSelfNames = (cfg: ResolvedConfig): string[] => {
+    const out: string[] = [];
+    try {
+      out.push(getName());
+    } catch {
+      /* the default name is still covered by the bot's own handle below */
+    }
+    const bot = selfFor(cfg);
+    if (bot?.username) out.push(`@${bot.username.replace(/^@/, "")}`);
+    if (bot?.firstName) out.push(bot.firstName);
+    return out.filter((n) => typeof n === "string" && n.trim() !== "");
+  };
+
+  /**
+   * DEEP RESEARCH, DELIVERED ONCE (docs/fomo.md): a research answer that
+   * registered a bounded deep job gets one follow-up in the same DM when the
+   * job ends. Polled at most every FOMO_JOB_POLL_MS until its deadline, at
+   * most FOMO_JOBS_MAX at a time, every timer cleared on stop. Before it is
+   * sent the recipient is checked again: still the linked owner, Telegram
+   * still on with the same bot, the chat still allowlisted, and the research
+   * status still answering for this owner (data access can be switched off
+   * meanwhile, and then nothing is sent). Only ever to the chat that asked.
+   */
+  const FOMO_JOB_POLL_MS = 60_000;
+  const FOMO_JOB_GRACE_MS = 60_000;
+  const FOMO_JOBS_MAX = 3;
+  interface FomoJobWatch {
+    chatId: number;
+    token: string;
+    job: FomoDmJob;
+    timer: ReturnType<typeof setTimeout> | null;
+  }
+  const fomoJobs = new Map<string, FomoJobWatch>();
+  const fomoRecipientCurrent = (w: FomoJobWatch): boolean => {
+    if (stopped) return false;
+    let cfg: ResolvedConfig;
+    try {
+      cfg = deps.getCfg();
+    } catch {
+      return false;
+    }
+    return cfg.telegramEnabled === true && cfg.telegramBotToken === w.token && stateRef.get().ownerId === w.chatId
+      && Array.isArray(cfg.telegramAllowlist) && cfg.telegramAllowlist.includes(w.chatId);
+  };
+  const fomoJobLabel = (job: FomoDmJob): string => {
+    const sym = job.label.symbol ? job.label.symbol.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 20) : "";
+    return sym ? `$${sym}` : "that coin";
+  };
+  /** One look at a job. True: look again later. */
+  const pollFomoJob = async (w: FomoJobWatch): Promise<boolean> => {
+    if (!fomoRecipientCurrent(w)) return false;
+    const broker = fomoBroker();
+    if (!broker) return false;
+    const past = Date.now() > w.job.deadlineMs + FOMO_JOB_GRACE_MS;
+    const opts: BrokerCallOptions = { surface: "telegram-dm", audience: "owner", conversationKey: fomoDmKey(w.chatId), priority: "interactive", timeoutMs: FOMO_TOOL_TIMEOUT_MS };
+    const status = await broker.call("fomo_get_research_status", {}, opts);
+    // Access switched off (or any refusal for this owner): nothing more is sent.
+    if (status.status === "not-authorized") return false;
+    if (status.status !== "ok" && status.status !== "partial" && status.status !== "stale") return !past;
+    const seen = (status.data as ResearchStatusData | null)?.jobs?.find((x) => x.id === w.job.id) ?? null;
+    if (seen?.delivered) return false;
+    let text: string;
+    if (seen?.status === "done") {
+      const args: Record<string, unknown> = { token: w.job.token.address, freshness: "cached-ok", depth: "quick" };
+      if (w.job.token.chain.slug) args.chain = w.job.token.chain.slug;
+      if (w.job.revision !== null && w.job.revision >= 1) args.since_revision = w.job.revision;
+      const env = await broker.call("fomo_research_coin", args, opts);
+      if (env.status === "not-authorized") return false;
+      text = `The deeper Fomo research on ${fomoJobLabel(w.job)} is done.\n${renderEnvelope(env, { audience: "owner", maxChars: 3_000, now: Date.now() })}`;
+    } else if (seen?.status === "failed" || seen?.status === "cancelled") {
+      text = `The deeper Fomo research on ${fomoJobLabel(w.job)} didn't complete, so what I sent earlier is still the latest I have.`;
+    } else if (past) {
+      text = seen
+        ? `The deeper Fomo research on ${fomoJobLabel(w.job)} didn't finish before its deadline, so what I sent earlier is still the latest I have.`
+        : `I couldn't confirm whether the deeper Fomo research on ${fomoJobLabel(w.job)} finished, so what I sent earlier is still the latest I have.`;
+    } else {
+      return true;
+    }
+    // Checked again after the reads, right before the one send.
+    if (!fomoRecipientCurrent(w) || fomoJobs.get(w.job.id) !== w) return false;
+    fomoJobs.delete(w.job.id);
+    const sent = await sendMessage({ token: w.token }, w.chatId, esc(text), { disablePreview: true });
+    rememberFomoAnswer(w.chatId, sent.messageId);
+    await pushHistory(w.chatId, "assistant", text);
+    return false;
+  };
+  const scheduleFomoJob = (chatId: number, token: string, job: FomoDmJob): void => {
+    if (stopped || fomoJobs.has(job.id) || fomoJobs.size >= FOMO_JOBS_MAX || !Number.isFinite(job.deadlineMs)) return;
+    const w: FomoJobWatch = { chatId, token, job, timer: null };
+    fomoJobs.set(job.id, w);
+    const next = (): void => {
+      if (stopped || fomoJobs.get(job.id) !== w) return;
+      w.timer = setTimeout(() => {
+        w.timer = null;
+        void pollFomoJob(w)
+          .catch(() => !(Date.now() > job.deadlineMs + FOMO_JOB_GRACE_MS))
+          .then((again) => {
+            if (again && !stopped && fomoJobs.get(job.id) === w) next();
+            else if (fomoJobs.get(job.id) === w) fomoJobs.delete(job.id);
+          });
+      }, FOMO_JOB_POLL_MS);
+      (w.timer as { unref?: () => void }).unref?.();
+    };
+    next();
+  };
+
+  /**
+   * A DM in words, asked of the research first (answer.ts answerFomoDm).
+   * The reply as Telegram HTML, escaped; null when the research did not take
+   * it and the classifier should.
+   */
+  const fomoDm = async (msg: TgMessage, cfg: ResolvedConfig, token: string): Promise<string | null> => {
+    // No Fomo in this process: the classifier takes every DM, as before Fomo.
+    if (deps.fomoOff === true) return null;
+    const owner = fomoOwnerDm(msg);
+    const nowMs = Date.now();
+    const st = stateRef.get();
+    const r = await answerFomoDm({
+      text: msg.text,
+      broker: fomoBroker(),
+      audience: owner ? "owner" : "group",
+      conversationKey: fomoDmKey(msg.chatId),
+      active: (fomoActive.get(msg.chatId) ?? Number.NEGATIVE_INFINITY) > nowMs - FOMO_ACTIVE_MS,
+      repliesToOther: repliesToOther(msg),
+      selfNames: fomoSelfNames(cfg),
+      nowMs,
+      creds: resolveLlm(cfg),
+      persona: async () => ({
+        name: getName(),
+        identity: narratorIdentityBlock(st.linkedAt, st.messageCount, now()),
+        history: await historyFor(msg.chatId),
+      }),
+      ...(deps.fomoComposeText ? { compose: deps.fomoComposeText } : {}),
+    });
+    if (!r.handled) return null;
+    if (fomoActive.size > 512 && !fomoActive.has(msg.chatId)) fomoActive.delete(fomoActive.keys().next().value!);
+    fomoActive.set(msg.chatId, nowMs);
+    if (owner) for (const job of r.jobs) scheduleFomoJob(msg.chatId, token, job);
+    console.log(`[telegram] answered from Fomo research: ${r.toolsCalled.join(", ") || "no lookup"}${r.composed ? " (worded by the model)" : ""}${r.timedOut ? " (timed out)" : ""}`);
+    return r.composed ? escModel(r.text) : esc(r.text);
   };
 
   /**
@@ -808,10 +1041,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           signedPerTradeUsdg: deps.grantPerTradeUsdg(),
           agentName: getName(),
         };
+        // NO FOMO SWITCH WHERE FOMO IS OFF in this process (fomo-child.ts
+        // childFomoOff): "/set fomo on" and a Fomo key among several changes
+        // are read as they were before Fomo existed — not a setting.
+        const fomoGone = (k: string): boolean => deps.fomoOff === true && /^fomo/i.test(k.trim());
+        if (fomoGone(setting)) setting = "unknown";
         // SEVERAL AT ONCE, OR A SETTING ONLY THE DASHBOARD CHANGES: one
         // proposal, one approval — here if every change is the chat's to make,
         // otherwise one button that opens Settings with all of them filled in.
-        const requested = requestedChanges(setting, value, changes);
+        const requested = requestedChanges(setting, value, changes).filter((r) => !fomoGone(r.key));
         if (wantsManyPath(requested)) {
           const m = proposeManyChanges(requested, ctx);
           if (m.kind === "ask-many") {
@@ -1000,6 +1238,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         await clearChatTurns(msg.chatId);
         history.delete(msg.chatId);
         stickyIds.delete(msg.chatId);
+        // And what the research remembers this conversation was about.
+        fomoActive.delete(msg.chatId);
+        const fomo = fomoBroker();
+        if (fomo) void Promise.resolve().then(() => fomo.memory.clear(fomoDmKey(msg.chatId))).catch(() => {});
       },
       // ── PC control ─────────────────────────────────────────────────────
       pcControlEnabled: cfg.telegramPcControlEnabled,
@@ -1264,6 +1506,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Filled by a command that wants buttons under its reply (a "Sign now" link,
     // a Settings link). Confirm buttons for a parked action are added below.
     const extras: ReplyExtras = {};
+    /** This reply is a research answer (recorded so a reply to it continues the research). */
+    let fomoReplied = false;
     const cmdDeps = makeCmdDeps(msg, cfg, token, extras);
 
     // Only the OWNER shapes the soul — both relationship growth AND persistent
@@ -1327,6 +1571,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         else if (/^(no|n|nope|cancel|never ?mind|don'?t|leave it)[.!\s]*$/i.test(t)) cmd = { kind: "cancel" };
       }
     }
+    if (!cmd && msg.chatId === msg.fromId && !msg.text.trim().startsWith("/")) {
+      // SOCIAL-TRADING RESEARCH BEFORE THE CLASSIFIER (answer.ts answerFomoDm):
+      // its deterministic planner takes research questions the closed enum
+      // would misroute ("watch this coin" is not a settings change), and
+      // returns nothing for orders and the owner's own ledger, which go on
+      // below exactly as before. A private chat only: a group's lines never
+      // reach this function, and a forwarded group command is a slash.
+      const reply = await fomoDm(msg, cfg, token);
+      if (reply !== null) {
+        cmd = { kind: "chat", reply };
+        fomoReplied = true;
+        extras.disablePreview = true;
+        await pushHistory(msg.chatId, "user", msg.text);
+      }
+    }
     if (!cmd) {
       const llm = resolveLlm(cfg);
       if (llm) {
@@ -1336,7 +1595,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = await readLlmState(statusCtx());
-        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId), replyContext: msg.replyTo?.text };
+        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId), replyContext: msg.replyTo?.text, fomoOff: deps.fomoOff === true };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
         // Strip any thinking dump that slipped through llmText (defense in depth)
@@ -1381,7 +1640,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
             memory: recalledNow.block,
             gap: gap ? `TIME SINCE THEIR LAST MESSAGE: ${gap}` : "",
             history: await historyFor(msg.chatId),
-            tools: toolContext(cfg),
+            tools: toolContext(cfg, msg),
             creds: llm,
           });
           if (ans) {
@@ -1522,9 +1781,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const sent = await say(
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
-      keyboard ? { keyboard } : {},
+      { ...(keyboard ? { keyboard } : {}), ...(extras.disablePreview ? { disablePreview: true } : {}) },
     );
     if (meta && sent.messageId !== undefined) meta.messageId = sent.messageId;
+    if (fomoReplied && sent.ok) rememberFomoAnswer(msg.chatId, sent.messageId);
     // A typed "yes" may answer the NEXT message only if this reply was the
     // settings question itself.
     if (meta?.action.kind === "setting" || meta?.action.kind === "settings") typedAnswerable.add(pendingKey);
@@ -2475,6 +2735,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     stop: () => {
       stopped = true;
       tgGroups?.stop();
+      for (const w of fomoJobs.values()) if (w.timer) clearTimeout(w.timer);
+      fomoJobs.clear();
     },
   };
 }

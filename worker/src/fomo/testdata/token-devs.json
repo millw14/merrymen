@@ -1,0 +1,27 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "token": "0x39DBED3A00000000000000000000000000000C0D",
+  "networkId": 4663,
+  "chain": "robinhood",
+  "count": 1,
+  "note": "an empty list means FOMO knows of no dev holding, not that the token is safe",
+  "devs": [
+    {
+      "handle": "ponsdev",
+      "wallet": {
+        "solana": null,
+        "evm": "0x2222222222222222222222222222222222222222"
+      },
+      "isDev": true,
+      "amount": 1000000,
+      "valueUsd": 2080000,
+      "costBasisUsd": 0,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": 2080000,
+      "averageEntryPrice": 0,
+      "averageHoldTimeSeconds": 864000,
+      "tradeId": "d0000000-0000-4000-8000-000000000001",
+      "thesis": "Building PONS for the long run"
+    }
+  ]
+}

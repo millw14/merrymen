@@ -53,6 +53,18 @@ LENS_KEYS = frozenset(
         # provenance of the TEAM, and an analyst handed them together cannot
         # weigh one against the other because they answer different questions.
         "builder",
+        # WHAT TRACKED TRADERS DID AND SAID ABOUT THIS COIN, as reported by a
+        # third party. Its own lens rather than a paragraph inside `social`,
+        # because `social` is what the tape shows anonymous wallets doing and
+        # this is what a followed cohort did and claimed: identity and stated
+        # reasoning the tape cannot carry, and a crowd that can be wrong
+        # together. Handed to one analyst alongside the tape, the two would be
+        # read as corroborating each other when they are partly one signal.
+        #
+        # The name is neutral on purpose. Brain weighs the KIND of source, and
+        # a brand in a prompt invites the model to recall whatever it believes
+        # about that brand instead.
+        "trader-flow",
         "peg",
         "reserve",
     }
@@ -293,6 +305,23 @@ class BrainDecision(BaseModel):
     gate_caveat_count: int | None = None
     #: THE ONE FIELD THIS EXISTS FOR. Null when the action is not a hold.
     hold_kind: Literal["MODEL_HOLD", "GATE_FORCED_HOLD"] | None = None
+    #: WHAT THE MODEL PROPOSED, before the gate had its say.
+    #:
+    #: `hold_kind` says a hold was forced; it cannot say what it was forced
+    #: FROM. A GATE_FORCED_HOLD over a model that wanted to buy and one over a
+    #: model that would have held anyway are different findings — the first is
+    #: a trade the book's state prevented, the second is a gate that cost
+    #: nothing — and following decisions are measured on exactly that
+    #: difference. So the model's own action is kept beside the gated one.
+    #:
+    #: The delta has been through the same cash and holding clamps as the real
+    #: one, so it is what trusted code WOULD have sized with the gate open, not
+    #: a raw model number. It is a record, never an instruction: nothing reads
+    #: it to size, and the worker must not execute it. Null when the model
+    #: produced no recognisable action. Equal to `action` and
+    #: `suggested_delta_usdg` whenever the gate was open.
+    proposed_action: Action | None = None
+    proposed_delta_usdg: int | None = None
     cost: Cost
     models: list[ModelUse] = Field(default_factory=list)
 
@@ -326,6 +355,16 @@ class BrainDecision(BaseModel):
             raise ValueError("action 'sell' must carry a negative delta")
         if not self.thesis.strip():
             raise ValueError("a decision without a thesis is not publishable")
+        # The record of what the model proposed has to agree with itself too,
+        # or a "buy" with a negative size lands in the following measurements.
+        if (self.proposed_action is None) != (self.proposed_delta_usdg is None):
+            raise ValueError("proposed_action and proposed_delta_usdg are recorded together or not at all")
+        if self.proposed_action == "hold" and self.proposed_delta_usdg != 0:
+            raise ValueError("a proposed 'hold' must carry a zero delta")
+        if self.proposed_action == "buy" and (self.proposed_delta_usdg or 0) <= 0:
+            raise ValueError("a proposed 'buy' must carry a positive delta")
+        if self.proposed_action == "sell" and (self.proposed_delta_usdg or 0) >= 0:
+            raise ValueError("a proposed 'sell' must carry a negative delta")
         return self
 
 
