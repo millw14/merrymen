@@ -3208,7 +3208,7 @@ async function main() {
   const suppressedIntents = new Map<string, string>();
   /**
    * Gated entries (entry-gates.ts) whose one rejected row this arm has been let
-   * through: every repeat of the same (token, rule) is withheld before
+   * through: every repeat of the same (venue, token, rule) is withheld before
    * ensureDecision. Cleared at every arm, beside suppressedIntents.
    */
   const entryGateRows = entryGateLatch();
@@ -12995,9 +12995,10 @@ async function main() {
       // ── ENTRY GATES: THE BACKSTOP (entry-gates.ts) ──────────────────────
       //
       // A buy the wall is certain to refuse, from a producer that did not read
-      // `snap.entryGates`. The first per (token, rule) this arm goes on, so the
-      // wall writes its one rejected row; every repeat stops here, before any
-      // claim, decision row or reservation. Entries only — never an exit.
+      // `snap.entryGates`. The first per (venue, token, rule) this arm goes on,
+      // so the wall writes its one rejected row; every repeat stops here,
+      // before any claim, decision row or reservation. Entries only — never an
+      // exit.
       if (entry && entryGateRows.withhold(intent, active.limits)) continue;
       // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
       //

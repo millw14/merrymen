@@ -117,8 +117,13 @@ export function lockedLegs(gates: EntryGates | null | undefined, legs: readonly 
 }
 
 /**
- * The gate for a whole intent: which token it is ENTERING, and the rule the
- * wall would refuse it with. Null for everything a gate must not touch:
+ * The gate for a whole intent: which token it is ENTERING, on which venue, and
+ * the rule the wall would refuse it with. The venue travels with the answer
+ * because the same rule on the two venues is two different refusals: a swap's
+ * `asset-allowlist` says the coin is not watched, a curve's says it is not in
+ * the signed grant, and each has its own remedy.
+ *
+ * Null for everything a gate must not touch:
  *
  *   an exit         — isExitIntent, the breaker's own test. Never gated.
  *   trencher custody — the autonomous rail is judged against the vault's
@@ -131,17 +136,17 @@ export function lockedLegs(gates: EntryGates | null | undefined, legs: readonly 
 export function intentEntryGate(
   intent: TradeIntent,
   limits: AgentLimits,
-): { token: string; rule: EntryGateRule } | null {
+): { token: string; venue: EntryVenue; rule: EntryGateRule } | null {
   if (isExitIntent(intent, limits)) return null;
   if (intent.kind === "swap") {
     if (intent.custody === "trencher") return null;
     const rule = entryGateFor(entryGatesOf(limits), intent.buyToken, "swap");
-    return rule ? { token: lc(intent.buyToken), rule } : null;
+    return rule ? { token: lc(intent.buyToken), venue: "swap", rule } : null;
   }
   if (intent.kind === "curve-trade") {
     if (limits.ponsClassVault !== undefined && lc(intent.target) === lc(limits.ponsClassVault)) return null;
     const rule = entryGateFor(entryGatesOf(limits), intent.assetOut, "curve");
-    return rule ? { token: lc(intent.assetOut), rule } : null;
+    return rule ? { token: lc(intent.assetOut), venue: "curve", rule } : null;
   }
   return null;
 }
@@ -154,12 +159,18 @@ export function intentEntryGate(
  * with a buy the wall is certain to refuse, and without this they are refused
  * once a tick for the life of the arm.
  *
- * ONE REJECTED ROW PER (TOKEN, RULE) PER ARM, THEN WITHHELD. The first is let
- * through on purpose, so the wall writes its own refusal — the row, the rule
- * and the owner's notice — and the tape says why that coin is never bought.
- * Every repeat is withheld BEFORE ensureDecision: no decision row, no public
- * post, no refusal on the tape, nothing reserved. Withholding a repeat cannot
- * make anything replayable, because nothing was ever sent.
+ * ONE REJECTED ROW PER (VENUE, TOKEN, RULE) PER ARM, THEN WITHHELD. The first
+ * is let through on purpose, so the wall writes its own refusal — the row, the
+ * rule and the owner's notice — and the tape says why that coin is never
+ * bought. Every repeat is withheld BEFORE ensureDecision: no decision row, no
+ * public post, no refusal on the tape, nothing reserved. Withholding a repeat
+ * cannot make anything replayable, because nothing was ever sent.
+ *
+ * The venue is part of the key, not decoration: a swap refused for not being
+ * watched and a curve buy of the same coin refused for not being in the grant
+ * share a rule name and nothing else. Keyed without it, whichever came first
+ * spent the row and the other's remedy ("re-sign at /grant") never reached
+ * the wall to be said.
  *
  * Cleared at every arm, with `suppressedIntents`: a re-sign is exactly what
  * lifts a gate, and the new arm must get its own first row.
@@ -176,7 +187,7 @@ export function entryGateLatch(): EntryGateLatch {
     withhold(intent, limits) {
       const gate = intentEntryGate(intent, limits);
       if (!gate) return false;
-      const key = `${gate.token}|${gate.rule}`;
+      const key = `${gate.venue}|${gate.token}|${gate.rule}`;
       if (passed.has(key)) return true;
       passed.add(key);
       return false;
