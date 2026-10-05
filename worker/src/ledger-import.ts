@@ -11,8 +11,8 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import type { MemorySource } from "./memory-safeguard";
 import type { TenantLease } from "./tenant-lease";
-import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA } from "./ledger-import-schema";
-export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA } from "./ledger-import-schema";
+import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
+export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 
 export const LEDGER_IMPORT_PENDING_FILE = "ledger-import.pending.json";
 export const LEDGER_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
@@ -274,6 +274,12 @@ export async function ensureLedgerImportSchema(shared: Db, dialect: Dialect = "p
   void dialect;
   await shared.exec(LEDGER_IMPORT_SCHEMA);
   await shared.exec(LEDGER_IMPORT_GENERATIONS_SCHEMA);
+}
+
+/** The attested-gap tables (ledger-import-schema.ts). Additive; nothing else reads them. */
+export async function ensureLedgerResumeSchema(shared: Db): Promise<void> {
+  await ensureLedgerImportSchema(shared);
+  for (const ddl of LEDGER_RESUME_SCHEMA) await shared.exec(ddl);
 }
 
 /** Called only by a reviewed operator after the final checkpoint, under stopped-writer/source proof. */
@@ -560,6 +566,152 @@ export async function registerLedgerSource(o: {
       .run(tenant, generation, o.volume.id, String(lstatSync(file, { bigint: true }).ino), identity, canonical(bound), Date.now(), Date.now(), current.updatedAt, current.rowVersion);
     await db.prepare("INSERT INTO tenant_ledger_import_generations(generation,tenant,state) VALUES(?,?,'consumed')").run(generation, tenant);
     leaseOkay(o.lease, tenant);
+  });
+}
+
+/**
+ * THE SNAPSHOT TABLES THE FIRST MIRROR PASS OF A NEW BOOK REPLACES per agent
+ * (ledger-mirror.ts: delete-then-insert for positions, and for basis, floors
+ * and the class book whenever no cursor rewound). Their rows as they stand at
+ * admission are archived, row by row, before that can happen.
+ */
+export const ATTESTED_SNAPSHOT_TABLES = ["positions", "cost_basis", "position_floors", "class_positions"] as const;
+
+/** What an attested-gap registration archived and bound. Digests only. */
+export interface AttestedGapReceipt { generation: string; receiptDigest: string; mirrorStateDigest: string; snapshotDigest: string }
+
+/**
+ * A NEW EMPTY BOOK FOR A TENANT WITH HISTORY, UNDER AN OPERATOR'S APPROVAL.
+ *
+ * The narrow variant of registerLedgerSource's new-book branch, and the only
+ * one. That branch refuses whenever Postgres holds a cursor or a financial row
+ * for the account, and rightly: an empty book beside history would be read by
+ * the next mirror pass as a ledger that went backwards. Every tenant from
+ * before 2026-10-04 03:18 has history and no surviving book (homes were
+ * always rebuilt from the mirror; that deploy rebuilt them over nothing), so
+ * that branch refuses all of them, forever.
+ *
+ * This replaces the "no shared financial rows" refusal with an attestation,
+ * and nothing else. In ONE transaction, under the same lease and grant lock:
+ *
+ *  - the approval must be the one ledger-resume.ts archived the home under
+ *    (state `archived`, this generation, this evidence digest), and the
+ *    caller's re-check of the gap preconditions must pass inside it;
+ *  - every mirror_state row for the tenant is copied to mirror_state_archive
+ *    and deleted, so no cursor of the lost book can be read against the new
+ *    one (assertLedgerSourceContinuity has nothing to compare, by design);
+ *  - the four snapshot tables' rows are copied to ledger_snapshot_archive.
+ *    They are NOT changed here; the first mirror pass replaces them with the
+ *    seeded set, as every redeploy did before the incident;
+ *  - the empty book is created O_EXCL, with this generation as its identity,
+ *    and its consumed receipt in tenant_ledger_import is bound to
+ *    hash('attested-gap:' + approval + ':' + evidence). A receipt from an
+ *    earlier generation is superseded (its generation row marked deleted),
+ *    never reused. A staged original import (`available`) refuses: an operator
+ *    put a book there, and this does not override it;
+ *  - the attestation row and the approval's move to `registered`.
+ *
+ * NO FINANCIAL ROW IS WRITTEN OR CHANGED, and nothing is imported, so nothing
+ * becomes replayable. The accounting epoch, peaks and fees continue from
+ * Postgres through the ordinary anchor (writeBootstrapForChild), as before.
+ *
+ * RE-ENTRY IS KEYED BY GENERATION. A crash after the book was created and
+ * before the commit leaves an empty book whose identity IS this generation;
+ * the next call proves that and continues. Any other file at the path refuses.
+ */
+export async function registerAttestedGapSource(o: {
+  tenant: string; smartAccount: string; chainId: number; owner: string; home: string; volume: LedgerImportVolume;
+  shared: Db; lease: TenantLease; dialect?: Dialect;
+  approvalId: string; evidenceDigest: string; generation: string; archivePath: string | null; gapFromSec: number | null;
+  /** The gap preconditions, re-read inside the transaction. Throws to refuse. */
+  recheck: (db: Db) => Promise<void>;
+}): Promise<AttestedGapReceipt> {
+  const tenant = address(o.tenant), account = address(o.smartAccount), owner = address(o.owner), dialect = o.dialect ?? "postgres";
+  if (!UUID.test(o.generation) || !UUID.test(o.approvalId) || !/^[0-9a-f]{64}$/.test(o.evidenceDigest)) throw refuse();
+  leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
+  if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
+  const file = path.join(o.home, "merrymen.db");
+  await ensureLedgerResumeSchema(o.shared);
+  const forUpdate = dialect === "postgres" ? " FOR UPDATE" : "";
+  return o.shared.tx(async db => {
+    leaseOkay(o.lease, tenant);
+    const current = await grantBinding(db, tenant, dialect, true);
+    if (current.smartAccount !== account || current.chainId !== o.chainId || current.owner !== owner) throw refuse();
+    const approval = await db.prepare(`SELECT state, generation, evidence_digest, smart_account, chain_id, owner FROM ledger_resume_approvals WHERE approval_id = ?${forUpdate}`)
+      .get(o.approvalId) as Record<string, unknown> | undefined;
+    if (!approval || approval.state !== "archived" || approval.generation !== o.generation || approval.evidence_digest !== o.evidenceDigest
+        || approval.smart_account !== account || Number(approval.chain_id) !== o.chainId || approval.owner !== owner) throw refuse();
+    await o.recheck(db);
+    const prior = await db.prepare(`SELECT state, generation FROM tenant_ledger_import WHERE tenant = ?${forUpdate}`).get(tenant) as Record<string, unknown> | undefined;
+    if (prior && prior.state === "available") throw refuse();
+    const now = Date.now();
+    // The lost book's cursors: archived exactly, then removed.
+    const marks = await db.prepare("SELECT table_name, last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? ORDER BY table_name").all(tenant) as Array<Record<string, unknown>>;
+    for (const m of marks) {
+      await db.prepare(`INSERT INTO mirror_state_archive (generation, tenant, table_name, last_id, last_stamp, updated_at, archived_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(o.generation, tenant, m.table_name, m.last_id, m.last_stamp ?? null, m.updated_at ?? 0, now);
+    }
+    await db.prepare("DELETE FROM mirror_state WHERE tenant = ?").run(tenant);
+    const mirrorStateDigest = hash(canonical(marks.map(m => [String(m.table_name), String(m.last_id), m.last_stamp === null || m.last_stamp === undefined ? null : String(m.last_stamp), String(m.updated_at ?? 0)])));
+    // The snapshot pre-images, row by row, in a stable order.
+    const snapshot: Record<string, string[]> = {};
+    for (const table of ATTESTED_SNAPSHOT_TABLES) {
+      const rows = (await db.prepare(`SELECT * FROM ${table} WHERE LOWER(agent_id) = ?`).all(account) as Array<Record<string, unknown>>)
+        .map(r => canonical(Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "bigint" ? String(v) : v])))).sort();
+      snapshot[table] = rows;
+      let seq = 0;
+      for (const row of rows) {
+        await db.prepare(`INSERT INTO ledger_snapshot_archive (generation, tenant, table_name, seq, row_digest, row_json, archived_at_ms)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(o.generation, tenant, table, seq++, hash(row), row, now);
+      }
+    }
+    const snapshotDigest = hash(canonical(snapshot));
+    // The new empty book, or this generation's own from a call that did not commit.
+    if (present(file)) {
+      privateBook(file);
+      if (String(lstatSync(file, { bigint: true }).dev) !== o.volume.device) throw refuse();
+      verifySourceIdentity(file, tenant, account, o.chainId, o.generation);
+    } else {
+      const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); fchmodSync(fd, 0o600); closeSync(fd);
+      const created = new DatabaseSync(file);
+      try {
+        await applyLedgerSchema(wrapSqlite(created));
+        created.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; BEGIN IMMEDIATE");
+        try { createSourceIdentity(created, tenant, account, o.chainId, o.generation); created.exec("COMMIT"); }
+        catch (e) { created.exec("ROLLBACK"); throw e; }
+      } finally { created.close(); }
+      chmodSync(file, 0o600); syncFile(file); fsyncDirSync(o.home);
+    }
+    const raw = new DatabaseSync(file, { readOnly: true });
+    try {
+      for (const table of names) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
+      const stmt = raw.prepare("SELECT name,seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
+      if (stmt.all().some(row => typeof row.name === "string" && autoincrement.includes(row.name) && row.seq !== 0n)) throw refuse();
+    } finally { raw.close(); }
+    leaseOkay(o.lease, tenant);
+    const receiptDigest = hash(`attested-gap:${o.approvalId}:${o.evidenceDigest}`);
+    const bound = { grant: current, marks: [], mutableDigest: receiptDigest };
+    const inode = String(lstatSync(file, { bigint: true }).ino);
+    if (prior) {
+      const changed = await db.prepare(`UPDATE tenant_ledger_import SET generation=?,target_volume_id=?,state='consumed',sealed=NULL,bytes=0,sha256='',source_digest='',
+        source_inode=?,source_identity=?,bindings_json=?,created_at_ms=?,consumed_at_ms=?,grant_updated_at=?,grant_row_version=? WHERE tenant=? AND generation=?`)
+        .run(o.generation, o.volume.id, inode, o.generation, canonical(bound), now, now, current.updatedAt, current.rowVersion, tenant, prior.generation);
+      if (changed.changes !== 1) throw refuse();
+      await db.prepare("UPDATE tenant_ledger_import_generations SET state = 'deleted' WHERE generation = ? AND tenant = ?").run(prior.generation, tenant);
+    } else {
+      await db.prepare(`INSERT INTO tenant_ledger_import(tenant,generation,target_volume_id,state,sealed,bytes,sha256,source_digest,source_inode,source_identity,bindings_json,created_at_ms,consumed_at_ms,grant_updated_at,grant_row_version)
+        VALUES(?,?,?,'consumed',NULL,0,'','',?,?,?,?,?,?,?)`)
+        .run(tenant, o.generation, o.volume.id, inode, o.generation, canonical(bound), now, now, current.updatedAt, current.rowVersion);
+    }
+    await db.prepare("INSERT INTO tenant_ledger_import_generations(generation,tenant,state) VALUES(?,?,'consumed')").run(o.generation, tenant);
+    await db.prepare(`INSERT INTO ledger_resume_attestations (generation, approval_id, tenant, smart_account, chain_id, owner, evidence_digest, receipt_digest,
+      mirror_state_digest, snapshot_digest, archive_path, gap_from_sec, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(o.generation, o.approvalId, tenant, account, o.chainId, owner, o.evidenceDigest, receiptDigest, mirrorStateDigest, snapshotDigest, o.archivePath, o.gapFromSec, now);
+    const moved = await db.prepare("UPDATE ledger_resume_approvals SET state = 'registered', updated_at_ms = ? WHERE approval_id = ? AND state = 'archived' AND generation = ?")
+      .run(now, o.approvalId, o.generation);
+    if (moved.changes !== 1) throw refuse();
+    leaseOkay(o.lease, tenant);
+    return { generation: o.generation, receiptDigest, mirrorStateDigest, snapshotDigest };
   });
 }
 
