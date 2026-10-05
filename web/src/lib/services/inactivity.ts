@@ -892,8 +892,8 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   // what_owner_can_do nor in the check's own list. Otherwise every other check's
   // remedy is promoted as the owner's only actions: a re-signed permission (which
   // revokes the old one on-chain and costs network fees), a deposit, a /resume
-  // (answered with the recovery reply while it is held) or a Settings switch,
-  // each asked of the owner for nothing. No renew call to action reaches a held
+  // (which recovery-replies mode answers with its held reply) or a Settings
+  // switch, each asked of the owner for nothing. No renew call to action reaches a held
   // tenant; the terminal does the same (recoveryAutonomy carries no action, and
   // its blocker and renew prompts give way to the recovery notice). Each check
   // still says what it found, and asked again once the hold lifts, the diagnosis
