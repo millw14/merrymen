@@ -108,6 +108,36 @@ describe("a chart venue that is down", () => {
     assert.deepEqual(asked, ["S00", "S01", "S02", "S03"]);
   });
 
+  it("A PASS THAT READ NOTHING DOES NOT BLANK A NEWER ONE THAT READ THE BOARD — when the two overlap", async () => {
+    // An old clock's pass is still out at a hanging venue when a sign-in starts
+    // fresh clocks, whose own pass reads the venue once it is back. The old
+    // pass ends last, on its four failures — refusals here, held until
+    // released, as a request timing out would be.
+    let release!: () => void;
+    const hung = new Promise<void>((resolve) => (release = resolve));
+    let hanging = true;
+    const asked = venue(() => (hanging ? refused() : chart(3)));
+    const answer = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const sentWhileHanging = hanging;
+      const response = await answer(input);
+      if (sentWhileHanging) await hung;
+      return response;
+    }) as typeof fetch;
+
+    const old = loadSessionChanges(BOARD);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(asked.length, 4, "the old pass has its four requests out");
+    hanging = false;
+    assert.equal((await loadSessionChanges(BOARD)).size, 25, "the fresh pass reads the board");
+
+    release();
+    assert.equal((await old).size, 0, "the old pass read nothing");
+    const before = asked.length;
+    assert.equal((await loadSessionChanges(BOARD)).size, 25, "what the fresh pass read is still kept");
+    assert.equal(asked.length, before, "and answered without asking again");
+  });
+
   it("a pass with no stock in it asks nothing and keeps nothing", async () => {
     const asked = venue((symbol) => chart(symbol.length));
     assert.equal((await loadSessionChanges(BOARD.filter((t) => t.kind === "memecoin"))).size, 0);

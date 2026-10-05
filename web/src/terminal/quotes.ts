@@ -182,9 +182,16 @@ export async function loadSessionChanges(
       }
     }),
   );
+  // A PASS THAT READ NOTHING NEVER REPLACES ONE THAT IS STILL KEPT. One kept
+  // now was not there when this pass began (it would have been answered from
+  // it), so another pass wrote it while this one was out: an old clock's pass
+  // still waiting on a hanging venue when a sign-in starts fresh clocks
+  // (live-clocks.ts), whose own pass read the venue once it came back. The
+  // old pass ending last, on its failures, would otherwise blank what was
+  // just read for a minute.
   if (values.size)
     changesCache = { expires: Date.now() + CHANGES_READ_MS, values };
-  else if (asked)
+  else if (asked && !(changesCache && changesCache.expires > Date.now()))
     changesCache = { expires: Date.now() + CHANGES_UNREAD_MS, values };
   return values;
 }
