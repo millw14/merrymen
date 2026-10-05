@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  markPersistentHomeHandoverComplete, PERSISTENT_HOME_MANIFEST,
-  preparePersistentHomeForHandover, verifyPersistentHome,
+  adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt,
+  markPersistentHomeHandoverComplete, PERSISTENT_HOME_MANIFEST, PERSISTENT_HOME_PREADOPTION,
+  PERSISTENT_HOME_REHALT_RECEIPT, preparePersistentHomeForHandover, verifyPersistentHome,
   type PersistentHomeOptions,
 } from "./persistent-home";
+import { proveRecoveryReplyRoot } from "./recovery-reply-proof";
 
 const VOLUME = "d6481580-14af-430c-af4a-f3540dfb833d";
 const OP = "reviewed-handover-2026-10-04";
@@ -239,4 +242,261 @@ test("a changed hold or target proof refuses completion and the last release che
   assert.equal(readFileSync(f.halt, "utf8"), "new independent operator halt");
   assert.equal(JSON.parse(readFileSync(f.manifest, "utf8")).handover.state, "complete");
   assert.equal(existsSync(f.halt), true);
+});
+
+// THE POPULATED INCIDENT VOLUME: tenant homes, an operator's hand-made halt,
+// and no manifest. Adoption, release and re-halt (docs/fleet-resume.md).
+const ORIGINAL_HALT = "operator incident halt: stand every child down, listener only\n";
+const SCOPE = `0x${"1".repeat(40)}:observe`;
+const sha = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
+const crash = () => { throw new Error("simulated crash"); };
+function tree(dir: string): unknown {
+  return readdirSync(dir).sort().map(name => {
+    const file = path.join(dir, name), st = lstatSync(file);
+    return [name, st.mode, st.ino, st.nlink, st.isDirectory() ? tree(file) : readFileSync(file).toString("base64")];
+  });
+}
+function populated(t: test.TestContext) {
+  const f = fixture(t), book = path.join(f.home, "children", "0xabc", "merrymen.db");
+  mkdirSync(path.dirname(book), { recursive: true, mode: 0o700 });
+  writeFileSync(book, "original populated book", { mode: 0o600 });
+  writeFileSync(f.halt, ORIGINAL_HALT, { mode: 0o600 });
+  const adopt = { ...f.initial, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(ORIGINAL_HALT) };
+  return {
+    ...f, book, adopt, originalInode: String(lstatSync(f.halt, { bigint: true }).ino),
+    record: path.join(f.home, PERSISTENT_HOME_PREADOPTION), receipt: path.join(f.home, PERSISTENT_HOME_REHALT_RECEIPT),
+    release: { ...adopt, MERRYMEN_RELEASE_HOME_HALT: OP, MERRYMEN_FLEET_ROLLOUT: SCOPE },
+    rehalt: { ...adopt, MERRYMEN_REHALT_HOME: OP },
+    // The recovery-reply listener's own mode, as the runbook keeps it during the hold.
+    listener: { ...f.initial, MERRYMEN_HOSTED: "1", MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1", MERRYMEN_FLEET_RECOVERY_REPLIES: "1",
+      DATABASE_URL: "postgresql://synthetic@127.0.0.1:1/synthetic" } as NodeJS.ProcessEnv,
+  };
+}
+const manifestState = (f: { manifest: string }) => JSON.parse(readFileSync(f.manifest, "utf8")).handover.state;
+
+test("adoption refuses a wrong pin, a loose or linked halt, an empty root and a manifest it did not make, before any write", t => {
+  const f = populated(t), before = tree(f.home);
+  assert.equal(adoptPopulatedPersistentHome(f.initial, f.options), null, "not asked for, not attempted");
+  for (const env of [
+    { ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("a different halt\n") },
+    { ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(ORIGINAL_HALT).slice(1) },
+    { ...f.adopt, MERRYMEN_INITIAL_HANDOVER: undefined },
+    { ...f.adopt, MERRYMEN_INITIAL_HANDOVER: "not a token" },
+    { ...f.adopt, MERRYMEN_PERSISTENT_HOME_REQUIRED: undefined },
+  ]) assert.throws(() => adoptPopulatedPersistentHome(env, f.options), /Persistent home refused/);
+  assert.deepEqual(tree(f.home), before);
+  chmodSync(f.halt, 0o644);
+  assert.throws(() => adoptPopulatedPersistentHome(f.adopt, f.options), /private owned plain file/);
+  chmodSync(f.halt, 0o600);
+  const second = path.join(f.dir, "second-name");
+  linkSync(f.halt, second);
+  assert.throws(() => adoptPopulatedPersistentHome(f.adopt, f.options), /private owned plain file/);
+  rmSync(second);
+  renameSync(f.halt, path.join(f.dir, "away"));
+  assert.throws(() => adoptPopulatedPersistentHome(f.adopt, f.options), /original halt to be present/);
+  renameSync(path.join(f.dir, "away"), f.halt);
+  assert.deepEqual(tree(f.home), before);
+  // A halt too large to keep byte for byte inside its record is refused even when pinned.
+  const large = "x".repeat(4097);
+  writeFileSync(f.halt, large);
+  assert.throws(() => adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(large) }, f.options), /pinned original halt hash/);
+  assert.equal(existsSync(f.record), false);
+
+  const empty = fixture(t);
+  assert.throws(() => adoptPopulatedPersistentHome({ ...empty.initial, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(ORIGINAL_HALT) }, empty.options), /populated root/);
+  writeFileSync(empty.halt, ORIGINAL_HALT, { mode: 0o600 });
+  assert.throws(() => adoptPopulatedPersistentHome({ ...empty.initial, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(ORIGINAL_HALT) }, empty.options), /populated root/);
+  assert.deepEqual(readdirSync(empty.home), ["FLEET_HALT"]);
+
+  const fresh = fixture(t), prepared = preparePersistentHomeForHandover(fresh.initial, fresh.options)!;
+  writeFileSync(path.join(fresh.home, "merrymen.db"), "a book written after initialization", { mode: 0o600 });
+  const initialized = tree(fresh.home);
+  assert.throws(() => adoptPopulatedPersistentHome({ ...fresh.initial, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(prepared.halt!.text) }, fresh.options), /not created by this adoption/);
+  assert.deepEqual(tree(fresh.home), initialized);
+});
+
+test("adoption puts a canonical halt in the original's place in one rename, keeps the original's bytes, and holds", t => {
+  const f = populated(t), present: boolean[] = [];
+  const watch = () => { present.push(existsSync(f.halt)); };
+  const prepared = adoptPopulatedPersistentHome(f.adopt, { ...f.options,
+    afterPreAdoptionSynced: watch, afterAdoptionHaltSynced: watch, afterAdoptionRenamed: watch })!;
+  assert.deepEqual(present, [true, true, true], "FLEET_HALT is never absent");
+  assert.equal(prepared.handoverState, "held");
+  assert.equal(prepared.halt!.text, readFileSync(f.halt, "utf8"));
+  assert.match(prepared.halt!.text, new RegExp(`operation=${OP}\nvolume=${VOLUME}\n$`));
+  assert.notEqual(prepared.halt!.inode, f.originalInode);
+  assert.equal(lstatSync(f.halt).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(readFileSync(f.record, "utf8")).halt, { path: f.halt, inode: f.originalInode,
+    size: Buffer.byteLength(ORIGINAL_HALT), sha256: sha(ORIGINAL_HALT), bytes: Buffer.from(ORIGINAL_HALT).toString("base64") });
+  assert.equal(lstatSync(f.record).mode & 0o777, 0o600);
+  assert.equal(manifestState(f), "held");
+  assert.deepEqual(readdirSync(f.home).sort(), [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST, "FLEET_HALT", "children"].sort());
+  assert.equal(readFileSync(f.book, "utf8"), "original populated book");
+  // Ordinary startup now verifies it, and a restart with the variable still set changes nothing.
+  assert.deepEqual(preparePersistentHomeForHandover(f.env, f.options), prepared);
+  const after = tree(f.home);
+  assert.deepEqual(adoptPopulatedPersistentHome(f.adopt, f.options), prepared);
+  assert.deepEqual(tree(f.home), after);
+  assert.throws(() => adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("another halt") }, f.options), /pinned original halt/);
+});
+
+test("every adoption crash seam converges under the same variables while ordinary startup refuses", t => {
+  for (const seam of ["afterPreAdoptionSynced", "afterAdoptionHaltSynced", "afterAdoptionRenamed"] as const) {
+    const f = populated(t);
+    assert.throws(() => adoptPopulatedPersistentHome(f.adopt, { ...f.options, [seam]: crash }), /simulated crash/);
+    assert.equal(existsSync(f.halt), true, seam);
+    assert.equal(existsSync(f.manifest), false, seam);
+    assert.throws(() => preparePersistentHomeForHandover(f.initial, f.options), /only an empty mounted root/, seam);
+    assert.throws(() => adoptPopulatedPersistentHome({ ...f.adopt, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("another halt") }, f.options), /pinned original halt/, seam);
+    // The listener keeps standing behind whichever halt is there.
+    proveRecoveryReplyRoot(f.listener, f.options.readMountInfo).assert();
+    const prepared = adoptPopulatedPersistentHome(f.adopt, f.options)!;
+    assert.equal(prepared.handoverState, "held", seam);
+    assert.equal(readFileSync(f.halt, "utf8"), prepared.halt!.text, seam);
+    assert.equal(JSON.parse(readFileSync(f.record, "utf8")).halt.inode, f.originalInode, seam);
+    assert.deepEqual(readdirSync(f.home).sort(), [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST, "FLEET_HALT", "children"].sort(), seam);
+    assert.ok(verifyPersistentHome(f.env, f.options));
+  }
+});
+
+test("the env release needs the held adopted manifest, its token, the pin and a rollout scope; asked again it changes nothing", t => {
+  const f = populated(t);
+  adoptPopulatedPersistentHome(f.adopt, f.options);
+  assert.equal(controlAdoptedPersistentHomeHalt(f.adopt, f.options), null, "not asked for, not attempted");
+  const before = tree(f.home);
+  for (const env of [
+    { ...f.release, MERRYMEN_RELEASE_HOME_HALT: "another-operation" },
+    { ...f.release, MERRYMEN_RELEASE_HOME_HALT: "not a token" },
+    { ...f.release, MERRYMEN_ADOPT_HOME_HALT_SHA256: undefined },
+    { ...f.release, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("another halt") },
+    { ...f.release, MERRYMEN_PERSISTENT_HOME_REQUIRED: undefined },
+    { ...f.release, MERRYMEN_INITIAL_HANDOVER: "another-operation" },
+  ]) assert.throws(() => controlAdoptedPersistentHomeHalt(env, f.options), /Persistent home refused/);
+  for (const MERRYMEN_FLEET_ROLLOUT of [undefined, "", "none", " none "]) {
+    const withheld = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT }, f.options)!;
+    assert.deepEqual([withheld.action, withheld.handoverState], ["withheld", "held"]);
+  }
+  assert.deepEqual(tree(f.home), before);
+  const released = controlAdoptedPersistentHomeHalt(f.release, f.options)!;
+  assert.deepEqual([released.action, released.handoverState], ["released", "complete"]);
+  assert.equal(existsSync(f.halt), false);
+  assert.equal(manifestState(f), "complete");
+  assert.ok(verifyPersistentHome(f.adopt, f.options));
+  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "already-released");
+  // A halt made by hand after the release is honoured, and the variable never lifts it, private or not.
+  writeFileSync(f.halt, "operator stop\n", { mode: 0o644 });
+  assert.ok(verifyPersistentHome(f.adopt, f.options));
+  for (const MERRYMEN_FLEET_ROLLOUT of [SCOPE, "none"]) {
+    const kept = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT }, f.options)!;
+    assert.equal(kept.action, "already-released");
+    assert.doesNotMatch(JSON.stringify(kept), new RegExp(`${OP}|${sha(ORIGINAL_HALT)}`), "log-safe detail");
+  }
+  assert.equal(readFileSync(f.halt, "utf8"), "operator stop\n");
+  assert.equal(readFileSync(f.book, "utf8"), "original populated book");
+  assert.equal(JSON.parse(readFileSync(f.record, "utf8")).halt.bytes, Buffer.from(ORIGINAL_HALT).toString("base64"));
+});
+
+test("a freshly initialized volume is not released or re-halted by the env variables, whatever hash is pinned", t => {
+  const f = fixture(t), prepared = preparePersistentHomeForHandover(f.initial, f.options)!;
+  writeFileSync(path.join(f.home, "merrymen.db"), "a book", { mode: 0o600 });
+  const env = { ...f.initial, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha(prepared.halt!.text), MERRYMEN_FLEET_ROLLOUT: "all" };
+  for (const control of [{ MERRYMEN_RELEASE_HOME_HALT: OP }, { MERRYMEN_REHALT_HOME: OP }]) {
+    assert.throws(() => controlAdoptedPersistentHomeHalt({ ...env, ...control }, f.options), /adopted under the pinned original halt/);
+  }
+  assert.equal(readFileSync(f.halt, "utf8"), prepared.halt!.text);
+  assert.equal(manifestState(f), "held");
+});
+
+test("a release that crashed after its durable receipt finishes on the next start, and only into a scope", t => {
+  const f = populated(t), prepared = adoptPopulatedPersistentHome(f.adopt, f.options)!;
+  assert.throws(() => controlAdoptedPersistentHomeHalt(f.release, { ...f.options, afterCompletionSynced: crash }), /simulated crash/);
+  assert.equal(manifestState(f), "complete");
+  assert.equal(readFileSync(f.halt, "utf8"), prepared.halt!.text);
+  assert.equal(controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT: "none" }, f.options)!.action, "withheld");
+  assert.equal(existsSync(f.halt), true);
+  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
+  assert.equal(existsSync(f.halt), false);
+});
+
+test("the env re-halt publishes a canonical halt without replacing one, records it first, and returns the manifest to held", t => {
+  const f = populated(t);
+  adoptPopulatedPersistentHome(f.adopt, f.options);
+  controlAdoptedPersistentHomeHalt(f.release, f.options);
+  for (const env of [{ ...f.rehalt, MERRYMEN_REHALT_HOME: "another-operation" }, { ...f.rehalt, MERRYMEN_ADOPT_HOME_HALT_SHA256: undefined }]) {
+    assert.throws(() => controlAdoptedPersistentHomeHalt(env, f.options), /Persistent home refused/);
+  }
+  assert.equal(existsSync(f.halt), false);
+  const rehalted = controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!;
+  assert.deepEqual([rehalted.action, rehalted.handoverState], ["rehalted", "held"]);
+  const manifest = JSON.parse(readFileSync(f.manifest, "utf8")), st = lstatSync(f.halt, { bigint: true });
+  assert.equal(manifest.handover.state, "held");
+  assert.equal(manifest.handover.halt.inode, String(st.ino));
+  assert.equal(st.nlink, 1n);
+  assert.equal(st.mode & 0o777n, 0o600n);
+  assert.equal(readFileSync(f.halt, "utf8"), manifest.handover.halt.text);
+  assert.equal(JSON.parse(readFileSync(f.receipt, "utf8")).halt.inode, String(st.ino));
+  assert.equal(lstatSync(f.receipt).mode & 0o777, 0o600);
+  assert.equal(preparePersistentHomeForHandover(f.env, f.options)!.handoverState, "held");
+  assert.equal(controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!.action, "already-held");
+  // A release variable left behind never defeats the rollback.
+  const both = controlAdoptedPersistentHomeHalt({ ...f.rehalt, MERRYMEN_RELEASE_HOME_HALT: OP, MERRYMEN_FLEET_ROLLOUT: SCOPE }, f.options)!;
+  assert.deepEqual([both.action, both.handoverState], ["already-held", "held"]);
+  assert.match(both.detail, /MERRYMEN_RELEASE_HOME_HALT is ignored/);
+  assert.equal(existsSync(f.halt), true);
+  // Once the re-halt variable goes, the same reviewed release applies again.
+  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
+  assert.equal(existsSync(f.halt), false);
+  // An operator's halt is never replaced, and the released manifest is left alone with it.
+  writeFileSync(f.halt, "operator stop\n", { mode: 0o600 });
+  const withheld = controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!;
+  assert.deepEqual([withheld.action, withheld.handoverState], ["withheld", "complete"]);
+  assert.equal(readFileSync(f.halt, "utf8"), "operator stop\n");
+  assert.equal(manifestState(f), "complete");
+  assert.equal(readFileSync(f.book, "utf8"), "original populated book");
+});
+
+test("every re-halt crash seam converges, and a halt made by hand meanwhile is kept", t => {
+  for (const seam of ["afterRehaltHaltSynced", "afterRehaltReceiptSynced", "afterRehaltLinked", "afterRehaltPublished"] as const) {
+    const f = populated(t);
+    adoptPopulatedPersistentHome(f.adopt, f.options);
+    controlAdoptedPersistentHomeHalt(f.release, f.options);
+    assert.throws(() => controlAdoptedPersistentHomeHalt(f.rehalt, { ...f.options, [seam]: crash }), /simulated crash/);
+    assert.equal(manifestState(f), "complete", seam);
+    const rehalted = controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!;
+    assert.equal(rehalted.action, "rehalted", seam);
+    const st = lstatSync(f.halt, { bigint: true });
+    assert.equal(st.nlink, 1n, seam);
+    assert.equal(JSON.parse(readFileSync(f.manifest, "utf8")).handover.halt.inode, String(st.ino), seam);
+    assert.deepEqual(readdirSync(f.home).sort(),
+      [PERSISTENT_HOME_PREADOPTION, PERSISTENT_HOME_MANIFEST, PERSISTENT_HOME_REHALT_RECEIPT, "FLEET_HALT", "children"].sort(), seam);
+    assert.equal(preparePersistentHomeForHandover(f.env, f.options)!.handoverState, "held", seam);
+  }
+  for (const seam of ["afterRehaltReceiptSynced", "afterRehaltLinked"] as const) {
+    const f = populated(t);
+    adoptPopulatedPersistentHome(f.adopt, f.options);
+    controlAdoptedPersistentHomeHalt(f.release, f.options);
+    assert.throws(() => controlAdoptedPersistentHomeHalt(f.rehalt, { ...f.options, [seam]: crash }), /simulated crash/);
+    // The operator stops the fleet by hand before the next start: a new
+    // file in FLEET_HALT's place, which the re-halt must not take as its own.
+    rmSync(f.halt, { force: true });
+    writeFileSync(f.halt, "operator stop\n", { mode: 0o600 });
+    assert.equal(controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!.action, "withheld", seam);
+    assert.equal(readFileSync(f.halt, "utf8"), "operator stop\n", seam);
+    assert.equal(existsSync(path.join(f.home, ".fleet-halt-rehalt.tmp")), false, seam);
+    assert.equal(manifestState(f), "complete", seam);
+  }
+});
+
+test("the recovery-reply listener's current proof accepts the adopted and the re-halted manifests", t => {
+  for (const token of [OP, undefined]) {
+    const f = populated(t), env = { ...f.listener, MERRYMEN_INITIAL_HANDOVER: token }, mount = f.options.readMountInfo!;
+    proveRecoveryReplyRoot(env, mount).assert(); // The incident's shape: the original halt and no manifest.
+    adoptPopulatedPersistentHome(f.adopt, f.options);
+    proveRecoveryReplyRoot(env, mount).assert();
+    controlAdoptedPersistentHomeHalt(f.release, f.options);
+    // Released, there is no halt for the listener to stand behind until the re-halt.
+    assert.throws(() => proveRecoveryReplyRoot(env, mount), /Reply-only prerequisites/);
+    controlAdoptedPersistentHomeHalt(f.rehalt, f.options);
+    proveRecoveryReplyRoot(env, mount).assert();
+  }
 });
