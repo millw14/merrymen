@@ -344,11 +344,17 @@ export function autonomyHolds(rows: readonly { kind: string; n: number | string 
 
 /** Not yet beaten since this replica started its worker: the row is its predecessor's. */
 export const RAIL_RESPAWNING = "unknown (respawning)";
+/**
+ * Beaten since the spawn, and says `live` beside a blocker: a row that
+ * contradicts itself (see railOf). Named for what it is, so nobody waits for a
+ * respawn that is not coming.
+ */
+export const RAIL_CONTRADICTORY = "unknown (live with blocker)";
 /** No worker in this replica: nothing here is trading for it, whatever its row last said. */
 export const RAIL_NO_WORKER = "no worker here";
 
 /** The order the rails line names them; any other mode follows under its own name. */
-const RAIL_ORDER = ["live", "paper", "idle", RAIL_RESPAWNING, RAIL_NO_WORKER] as const;
+const RAIL_ORDER = ["live", "paper", "idle", RAIL_RESPAWNING, RAIL_CONTRADICTORY, RAIL_NO_WORKER] as const;
 
 export interface AgentRailRow {
   smart_account: string;
@@ -398,8 +404,12 @@ export function railOf(row: AgentRailRow, spawnedAtMs: number | undefined): stri
   if (mode === null) return RAIL_RESPAWNING;
   if (mode === "live") {
     // `live` with a blocker is two facts that cannot both be true of one
-    // verdict (exec-mode.ts writes them together). Not counted as either.
-    return row.live_blocker === null || row.live_blocker === undefined ? "live" : RAIL_RESPAWNING;
+    // verdict (exec-mode.ts writes them together) — but the mirror can put
+    // them side by side, since it COALESCEs the mode and copies the blocker
+    // straight over. Not counted as either, and not called a respawn: this
+    // worker has beaten, and waiting for it to restart would be waiting for
+    // nothing.
+    return row.live_blocker === null || row.live_blocker === undefined ? "live" : RAIL_CONTRADICTORY;
   }
   return mode;
 }
