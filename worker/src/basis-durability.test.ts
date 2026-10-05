@@ -18,6 +18,7 @@
  * restored floor then goes with its basis is floor-seed-sweep.integration.test.ts.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 
@@ -583,5 +584,43 @@ describe("a restored position's graded floor survives the redeploy too", () => {
       shared: [{ mode: "paper", symbol: "PEPE", stopBps: 1800, rung: "graded", why: "w", at: 1 }],
     });
     assert.equal(plan.rows.length, 0);
+  });
+});
+
+/**
+ * WHERE THE FLOOR SEED SITS IN seedBasisForChild, which has no test seam of its
+ * own (it needs DATABASE_URL and makePgDb). Pinned the way the basis and energy
+ * seeds' places in spawnChild are (orchestrator.test.ts, energy-durability.test.ts).
+ */
+describe("seedBasisForChild runs the floor seed behind the basis", () => {
+  const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  const at = src.indexOf("async function seedBasisForChild(");
+  const fn = src.slice(at, src.indexOf("\n}\n", at));
+
+  it("only what an insert actually wrote counts as restored", () => {
+    assert.ok(at > 0);
+    assert.match(fn, /if \(wrote\.changes > 0\) restored\.push\(\{ mode: r\.mode, symbol: r\.symbol \}\);/);
+  });
+
+  it("in its own try AFTER the basis seed's catch, handed `restored` and the write refusal", () => {
+    const basisFailed = fn.indexOf("log(`basis seed: ${tenant} FAILED");
+    const floor = fn.indexOf("seedPositionFloors({");
+    assert.ok(basisFailed > 0 && floor > basisFailed, "after the basis seed's catch, so a failed basis cannot skip it");
+    assert.ok(fn.slice(basisFailed, floor).includes("try {"), "in a try of its own");
+    assert.match(fn.slice(floor), /^seedPositionFloors\(\{\s*child: handle\.db, shared: await makePgDb\(url\), account: smartAccount, restored, mayWrite: writeRefusal,\s*\}\)/);
+  });
+
+  it("the handle closes after it, in the finally", () => {
+    const floor = fn.indexOf("seedPositionFloors({");
+    const close = fn.indexOf("handle.close();");
+    assert.ok(close > floor, "the floor seed must not run on a closed handle");
+    assert.ok(fn.lastIndexOf("} finally {", close) > floor);
+  });
+
+  it("the basis writes ask the same question before the first row", () => {
+    const asked = fn.indexOf("writeRefusal() : null;");
+    const insert = fn.indexOf("INSERT INTO cost_basis");
+    assert.ok(asked > 0 && insert > asked);
+    assert.match(fn, /lateSpawnRefusal\(tenant, lease\) \?\? \(originalSourceRefused\(tenant\)/);
   });
 });
