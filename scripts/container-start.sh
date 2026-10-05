@@ -27,8 +27,12 @@
 #
 # THE COMMANDS ARE package.json's start scripts, spelled out. npm is gone from
 # the start path because it forks, not because the commands changed; the test
-# runs both against the same stubs and requires identical argv and cwd, and it
-# requires this allowlist to name exactly the `start:*` scripts there.
+# runs both against the same stubs and requires identical argv and cwd. It
+# also reads the role `case` below as sh does and requires its patterns — all
+# of them, whatever they look like — to be exactly the `start:*` scripts
+# there, one per branch, each exec'ing once, with the `*)` refusal last; and
+# nothing outside those branches may exec at all. A new role is a package.json
+# start script first, and a branch here second.
 #
 # Plain POSIX sh: the image's /bin/sh is Debian's dash, not bash. LF endings
 # only (.gitattributes) — a CR would ride into every word on every line.

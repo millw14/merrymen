@@ -197,6 +197,36 @@ function sandbox() {
     spawnSync("/bin/sh", ["-c", line], { cwd: app, env: env(extra), encoding: "utf8", timeout: 10_000 }).stdout;
   return { app, run, runNpmScript };
 }
+/** The script without its comment lines, which talk about `exec` and roles freely. */
+const scriptCode = () => read(SCRIPT).split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+/** How many `exec <program>` commands — not `exec 2>&1`-style redirections. */
+const execs = (code: string) => [...code.matchAll(/^\s*exec\s+[A-Za-z/]/gm)].length;
+
+/**
+ * The branches of the script's role `case`, read the way sh reads them: every
+ * item between `case $role in` and its `esac`, split on `;;`, each with ALL of
+ * its `|`-separated patterns. Anything this cannot read — a second role case,
+ * a nested one, an item with no pattern — fails the test rather than being
+ * skipped, so the allowlist cannot grow a branch this file does not see.
+ */
+function roleBranches(code: string): { labels: string[]; body: string }[] {
+  const heads = [...code.matchAll(/^\s*case\s+"?\$\{?role\}?"?\s+in\s*$/gm)];
+  assert.equal(heads.length, 1, `${SCRIPT} must pick the role in exactly one \`case $role in\``);
+  const start = heads[0]!.index! + heads[0]![0].length;
+  const end = code.slice(start).search(/^\s*esac\s*$/m);
+  assert.ok(end >= 0, `the role case in ${SCRIPT} has no esac`);
+  const body = code.slice(start, start + end);
+  assert.doesNotMatch(body, /^\s*case\s/m, "the role case must not nest another case");
+  return body.split(";;").map((item) => item.trim()).filter(Boolean).map((item) => {
+    const close = item.indexOf(")");
+    assert.ok(close > 0, `a role case item without a pattern: ${item}`);
+    return {
+      labels: item.slice(0, close).replace(/^\(/, "").split("|").map((l) => l.trim()),
+      body: item.slice(close + 1).trim(),
+    };
+  });
+}
+
 /** The stub's report without its PID, which no two processes share. */
 const invocation = (stdout: string) => stdout.split("\n").filter((l) => /^(ran|arg)=/.test(l)).join("\n");
 const stubPid = (stdout: string) => Number(/^pid=(\d+)$/m.exec(stdout)?.[1]);
@@ -205,9 +235,29 @@ describe("the script runs package.json's start scripts, and only those", { skip:
   const scripts = (JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts;
   const startRoles = Object.keys(scripts).filter((k) => k.startsWith("start:")).sort();
 
-  it("its allowlist is exactly the package.json start:* scripts", () => {
-    const allowed = [...read(SCRIPT).matchAll(/^ {2}(start:[a-z-]+)\)$/gm)].map((m) => m[1]!).sort();
-    assert.deepEqual(allowed, startRoles, "a start:* script and the container's allowlist have drifted apart");
+  it("its allowlist is exactly the package.json start:* scripts, and everything else is refused", () => {
+    const code = scriptCode();
+    const branches = roleBranches(code);
+    // The refusal is the LAST branch, alone, and starts nothing. sh takes the
+    // first pattern that matches, so a `*` any earlier would swallow every
+    // role after it.
+    const refusal = branches.at(-1);
+    assert.deepEqual(refusal?.labels, ["*"], "the role case must end in a lone `*)` refusal");
+    assert.match(refusal!.body, /\bexit 64$/, "the `*)` branch must end in exit 64");
+    assert.equal(execs(refusal!.body), 0, "the `*)` branch must not start anything");
+    // EVERY pattern of every other branch, whatever it looks like. Collecting
+    // only the labels that start with `start:` is how a `dev:worker)` branch —
+    // a bare tenant worker carrying the orchestrator service's DATABASE_URL
+    // and DEK, with no lease — could sit beside them and pass this test.
+    const allowed = branches.slice(0, -1);
+    assert.deepEqual(allowed.flatMap((b) => b.labels).sort(), startRoles, "a start:* script and the container's allowlist have drifted apart");
+    for (const b of allowed) {
+      assert.equal(b.labels.length, 1, `one role per branch, not ${b.labels.join("|")}`);
+      assert.equal(execs(b.body), 1, `${b.labels[0]} must exec exactly one program`);
+    }
+    // And nothing is exec'd OUTSIDE those branches: a role started by an `if`
+    // ahead of the case would never reach the allowlist at all.
+    assert.equal(execs(code), allowed.length, `${SCRIPT} execs a program outside its allowlisted roles`);
   });
 
   for (const shell of SHELLS) {
@@ -246,7 +296,7 @@ describe("the script runs package.json's start scripts, and only those", { skip:
     });
 
     it(`${shell}: any other value is refused with 64, and is not echoed`, () => {
-      for (const value of ["start", "build", "dev:web", "start:web ", " start:web", "START:WEB", "start:web;id", "start:orchestrator\n", "$(id)", "start:*"]) {
+      for (const value of ["start", "build", "dev:web", "dev:worker", "start:orchestrator|dev:web", "start:web ", " start:web", "START:WEB", "start:web;id", "start:orchestrator\n", "$(id)", "start:*"]) {
         const r = sandbox().run(shell, { MERRYMEN_START: value });
         assert.equal(r.status, 64, `${JSON.stringify(value)} was not refused: ${r.stdout}${r.stderr}`);
         assert.equal(r.stdout, "", `${JSON.stringify(value)} ran something`);
