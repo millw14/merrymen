@@ -2,13 +2,13 @@
 
 The hosted stack is **three Railway pieces from one repo**:
 
-| Piece | What it is | Start command |
+| Piece | What it is | Role (`MERRYMEN_START`) |
 |---|---|---|
-| **web** | the Next.js dashboard + API (SIWE auth, grant/settings intake) | `npm run start:web` (the image default) |
-| **orchestrator** | the process-per-tenant supervisor (spawns one worker child per tenant) | `npm run start:orchestrator` |
+| **web** | the Next.js dashboard + API (SIWE auth, grant/settings intake) | `start:web` (the image default: leave it unset) |
+| **orchestrator** | the process-per-tenant supervisor (spawns one worker child per tenant) | `start:orchestrator` |
 | **Postgres** | the shared grant + settings store | Railway's managed Postgres plugin |
 
-Both services build from the **same `Dockerfile`** (one image, two start commands). Every secret is injected at **runtime** by Railway — nothing is baked into the image.
+Both services build from the **same `Dockerfile`** (one image, a role per service). Every secret is injected at **runtime** by Railway — nothing is baked into the image.
 
 ---
 
@@ -471,11 +471,30 @@ dashboard, the iOS Telegram screen and the site docs repeat:
 > enabled (BotFather's default) or the bot cannot be added to a group at all.
 
 ## 5. Create the two services
-Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
-`CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no
-startCommand and no healthcheck — so the only difference between the services is
-the `MERRYMEN_START` variable, and the HTTP-less orchestrator is never failed by a
-healthcheck it can't answer.
+Both build from the same repo + `Dockerfile`. The image is role-by-variable, and
+`railway.json` sets no startCommand and no healthcheck — so the only difference
+between the services is the `MERRYMEN_START` variable, and the HTTP-less
+orchestrator is never failed by a healthcheck it can't answer. tini is PID 1 and
+runs `scripts/container-start.sh`, which `exec`s the role's package.json start
+script itself: no npm and no `sh -c` on the start path.
+
+- **The roles:** `start:web` (or the variable unset), `start:orchestrator`,
+  `start:recovery-replies`. Anything else — **including the variable set but
+  empty** — is refused with exit 64 and nothing starts. To get the web role,
+  delete the variable; do not clear it.
+- **Leave each service's Start Command empty.** One set in Railway would replace
+  the image's start step, and with it the role allowlist and the `exec`.
+- **The first line of every start is** `[start] role=<role> commit=<sha>` — the
+  quickest check of what a deploy is actually running.
+- **Stopping:** Railway's SIGTERM goes to tini, which forwards it to node and to
+  nothing else (the orchestrator stops its own tenant workers). The orchestrator
+  logs `[orchestrator] stopping — calling the whole fleet home`. How long it has
+  before SIGKILL is the service's draining time, not anything the image sets.
+  Today that handler releases the tenant leases at once and exits after about
+  1s (4s with a Telegram kill pending) without waiting for its workers, and when
+  it exits tini does too, taking the workers with it — so a longer draining time
+  does not yet give the workers longer to stop.
+
 1. **web** — new service from this repo. Leave `MERRYMEN_START` unset → runs the Next dashboard. Set the web env above, then add the custom domain (`app.merrymen.dev`) and follow its DNS record.
 2. **orchestrator** — a second service from the same repo. Set `MERRYMEN_START=start:orchestrator`. Set the orchestrator env above. It needs **no public domain**.
 

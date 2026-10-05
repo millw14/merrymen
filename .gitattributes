@@ -1,0 +1,5 @@
+# Shell scripts run inside the Linux image (scripts/container-start.sh is the
+# container's start step) and on Unix hosts. A CRLF checkout on Windows would
+# ride a carriage return into every word dash reads — `exec node\r` is not a
+# command — so they are LF in every working tree, whatever core.autocrlf says.
+*.sh text eol=lf
