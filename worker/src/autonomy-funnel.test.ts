@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
   AUTONOMY_HOLDS_SQL,
+  RAIL_CONTRADICTORY,
   RAIL_NO_WORKER,
   RAIL_RESPAWNING,
   autonomyHolds,
@@ -341,8 +342,13 @@ describe("rails: live only if the row says so AND was written by the worker runn
     assert.equal(railOf(row("live", null), SPAWN_MS), RAIL_RESPAWNING);
   });
 
-  it("live with a blocker is never live", () => {
-    assert.equal(railOf(row("live", at + 30, "no-cash"), SPAWN_MS), RAIL_RESPAWNING);
+  it("live with a blocker is never live, and is not called a respawn when the worker has beaten", () => {
+    assert.equal(railOf(row("live", at + 30, "no-cash"), SPAWN_MS), RAIL_CONTRADICTORY);
+    // Not yet beaten: the respawn is the first thing that is unknown about it.
+    assert.equal(railOf(row("live", at - 60, "no-cash"), SPAWN_MS), RAIL_RESPAWNING);
+    const rails = fleetRails([row("live", at + 30, "no-cash")], new Map([[row(null, null).smart_account, SPAWN_MS]]));
+    assert.equal(rails.live, 0);
+    assert.equal(railsLine(rails), "fleet| rails — unknown (live with blocker) 1");
   });
 
   it("freshness applies to every mode: a stale paper row is no more current than a stale live one", () => {

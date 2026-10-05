@@ -12,7 +12,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { wrapSqlite } from "./db";
-import { foldFunnel } from "./autonomy-funnel";
+import { RAIL_CONTRADICTORY, RAIL_NO_WORKER, RAIL_RESPAWNING, foldFunnel } from "./autonomy-funnel";
 import {
   LAST_SHUTDOWN_FILE,
   commitOf,
@@ -157,6 +157,11 @@ describe("what may be served", () => {
       none: null,
     });
     assert.deepEqual(kept, { armed: 3, nested: { live: 2, deeper: { x: 1 } }, none: null });
+  });
+
+  it("every rail the rails line can name is a key that survives being served", () => {
+    const rails = { live: 1, paper: 1, idle: 1, [RAIL_RESPAWNING]: 1, [RAIL_CONTRADICTORY]: 1, [RAIL_NO_WORKER]: 1 };
+    assert.deepEqual(numbersOnly(rails), rails);
   });
 
   it("a row is rebuilt from known fields: a bad commit, scope or role is dropped, not passed on", () => {
