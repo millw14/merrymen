@@ -2616,6 +2616,8 @@ async function preparePersistentLedgerForChild(tenant: `0x${string}`, grant: Sto
  * the same rows (finalMirrorBeforeAnchor).
  */
 let copiesClosed = false;
+/** The drain's final pass has applied the shared ledger schema once (retiredWorkerPass). */
+let drainLedgerSchemaReady = false;
 
 async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant), stillOwned?: () => boolean, drainPass = false) {
   return mirrorSerially(tenant, async () => {
@@ -4065,9 +4067,16 @@ async function retiredWorkerPass(
       return "retained";
     }
     if (handle) {
-      await applyLedgerSchema(shared);
-      await shared.exec(translateSchema(MIRROR_STATE_DDL));
-      try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+      // ONCE PER DRAIN, not once per home: the shared schema is the same for
+      // every tenant, and applying it is a few dozen statements, each a round
+      // trip to Postgres — over a fleet of homes, seconds of a budget the
+      // final pass is short of. Retirement still applies it every time.
+      if (!drainPass || !drainLedgerSchemaReady) {
+        await applyLedgerSchema(shared);
+        await shared.exec(translateSchema(MIRROR_STATE_DDL));
+        try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+        if (drainPass) drainLedgerSchemaReady = true;
+      }
       if (leases.get(tenant) !== lease || !lease.healthy()) return "retained";
       const r = await mirrorGuardedLedger(tenant, handle.db, shared, childHome(tenant),
         () => leases.get(tenant) === lease && lease.healthy(), drainPass);
@@ -4570,6 +4579,7 @@ export function drainFleetForTest(
 export function resetDrainForTest(): void {
   stopping = false;
   copiesClosed = false;
+  drainLedgerSchemaReady = false;
   draining = null;
 }
 
