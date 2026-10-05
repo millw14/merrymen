@@ -113,6 +113,14 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import {
+  ADMISSION_LEVEL_ENV,
+  FLEET_ROLLOUT_ENV,
+  childAdmissionLevel,
+  fleetRollout,
+  rolloutHeld,
+  rolloutStartupLine,
+} from "./fleet-rollout";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -387,6 +395,33 @@ function nextRung(child: Child, aliveUntilMs: number): number {
 }
 
 /**
+ * WHY THE OPERATOR HOLDS THIS TENANT, or null: the accounting hold, or a
+ * rollout that does not admit it (fleet-rollout.ts).
+ *
+ * ONE PREDICATE, asked at every gate that starts or keeps a process for a
+ * tenant: the restart timer, spawnChild on the way in and again after its
+ * last await (lateSpawnRefusal), spawnHolder and the hold process it starts,
+ * holdMayLeave, and reconcile's spawn loop and stand-down. The accounting hold
+ * was asked at each of those, by name; a second kind of hold asked at only
+ * some of them would be a door left open at the rest, and nobody reading one
+ * gate could tell which kind it had forgotten.
+ *
+ * Only processes. What else an out-of-scope tenant is spared (its pending
+ * kills, its expiry retirement, the paused-source report) is the rollout's
+ * alone and is asked in reconcile with rolloutHeld: the accounting hold has
+ * never stopped those, and this change does not make it.
+ */
+function operatorHold(tenant: string): string | null {
+  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
+  if (rolloutHeld(tenant)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
+  return null;
+}
+
+function operatorHeld(tenant: string): boolean {
+  return operatorHold(tenant) !== null;
+}
+
+/**
  * ONE RESTART POLICY, because there were two and only one of them had a brake.
  *
  * The exit handler backed off and capped. The watchdog — the path a
@@ -398,7 +433,7 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  */
 function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
   if (stopping) return;
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   if (restarts > MAX_RESTARTS) {
     gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
     log(
@@ -570,6 +605,20 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  /**
+   * THE ROLLOUT, REDUCED TO THIS TENANT'S OWN LEVEL (fleet-rollout.ts).
+   *
+   * The level is what the worker's admission gate obeys: observe refuses
+   * every order, exits-only refuses entries, trade is unchanged. Always set,
+   * and always set here, overwriting anything the orchestrator's own env
+   * carried under that name: a child must never take its level from an
+   * operator's fleet-wide variable. The rollout itself is stripped, for the
+   * reason MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an
+   * answer to a question about somebody else, and a child that read it might
+   * one day mistake another tenant's level for its own.
+   */
+  delete env[FLEET_ROLLOUT_ENV];
+  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant);
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
@@ -2812,7 +2861,8 @@ export async function writeBootstrapForChild(
  */
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
-  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
+  const held = operatorHold(tenant);
+  if (held) return held;
   if (haltRequested()) return "FLEET_HALT is present";
   if (retiringExpired.has(tenant)) return "the expired grant's previous process is still retiring";
   if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
@@ -2825,7 +2875,7 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   if (retiringExpired.has(tenant)) return;
   if (removedLedgerPending.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
@@ -3322,7 +3372,7 @@ async function spawnHolder(
   lease: TenantLease,
   honour: HeldHonour | null,
 ): Promise<void> {
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
@@ -3586,7 +3636,7 @@ function scheduleHoldRetry(held: Holder, cls: string): void {
  * refuse, which would leave the bot unanswered until the next pass.
  */
 function holdMayLeave(tenant: `0x${string}`): boolean {
-  if (accountingTenantHeld(tenant)) return false;
+  if (operatorHeld(tenant)) return false;
   const lease = leases.get(tenant);
   return !stopping && !haltRequested() && !retiringExpired.has(tenant) && !!lease && lease.healthy() && !killRequested(childHome(tenant));
 }
@@ -9658,8 +9708,19 @@ export async function runOrchestrator(): Promise<void> {
   assertHostedFleetStart();
   // Validate operator intent before either entry path can initialize anything.
   const accountingHolds = accountingHoldTenants(process.env);
+  // THE ROLLOUT TOO, and for both paths: a malformed value, or an unset one on
+  // Railway, refuses here, before the halt, the volume or a lease is touched.
+  const rollout = fleetRollout(process.env);
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
   if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
+  // NAMED TENANTS AND THE FAILURE-ONLY REPORTER ARE TWO ANSWERS TO ONE
+  // QUESTION. A list says "start these"; the reporter starts nothing and leases
+  // every tenant in turn, so the deploy would do the opposite of what half its
+  // variables say. Refused rather than resolved either way: whichever one the
+  // operator meant, the other is a mistake they should see before it runs.
+  if (reportMode === "1" && rollout.scope === "list") {
+    throw new Error(`${FLEET_ROLLOUT_ENV} names tenants to start, and MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 starts none; refusing both`);
+  }
   if (reportMode === "1") { await runRecoveryReportOnly(); return; }
   // A new mounted home first writes its own durable halt. No child, holder,
   // accounting repair or ordinary writer may precede this preparation.
@@ -9668,6 +9729,7 @@ export async function runOrchestrator(): Promise<void> {
   // Validate the complete operator list before any diagnosis, mutation or
   // child starts. A malformed entry must never silently drop from a hold.
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
+  log(rolloutStartupLine(rollout));
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote

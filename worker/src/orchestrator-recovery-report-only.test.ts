@@ -41,6 +41,9 @@ function fixture(t: TestContext) {
   const line = `40 20 ${major}:${minor} / ${home} rw - ext4 /dev/volume rw\n`;
   Object.assign(process.env, { MERRYMEN_HOSTED: "1", MERRYMEN_HOME: home, RAILWAY_VOLUME_MOUNT_PATH: home,
     MERRYMEN_HOME_VOLUME_ID: volume, MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_FLEET_RECOVERY_REPORT_ONLY: "1",
+    // A Railway-shaped deployment must name its rollout scope (fleet-rollout.ts);
+    // the reporter starts nobody, so it runs beside `none`.
+    MERRYMEN_FLEET_ROLLOUT: "none",
     DATABASE_URL: "postgres://fixture.invalid/not-a-real-connection" });
   for (const key of ["MERRYMEN_STORE_DEK", "MERRYMEN_INITIAL_HANDOVER", "MERRYMEN_ACCOUNTING_HOLD_TENANTS"]) delete process.env[key];
   const halt = path.join(home, "FLEET_HALT"); writeFileSync(halt, "", { mode: 0o600 });
