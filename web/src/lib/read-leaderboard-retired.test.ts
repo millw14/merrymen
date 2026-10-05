@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { wrapSqlite } from "../../../worker/src/db";
 import { readLeaderboard } from "./read-leaderboard";
-import { RECENT_BEAT_SEC, isRetired, type AgentLifecycle } from "./retired-agent";
+import { INCIDENT_WINDOW, RECENT_BEAT_SEC, isRetired, notRunning, type AgentLifecycle } from "./retired-agent";
 
 const NOW = 2_000_000_000;
 const HOUR = 3600;
@@ -65,6 +65,82 @@ describe("which agents are retired from the board", () => {
     // Read as seconds, a milliseconds stamp is centuries ahead and would keep a
     // month-dead account "beating" for ever.
     assert.equal(isRetired(agent({ slug: null, beatAt: (NOW - 40 * DAY) * 1000 }), NOW), true);
+  });
+});
+
+describe("the recovery hold is not retirement", () => {
+  // Days into the hold: every beat below is far more than a day old.
+  const HELD_NOW = INCIDENT_WINDOW.untilSec + 3 * DAY;
+  // The fleet's last beats, early on 2026-10-04.
+  const LAST_BEAT = INCIDENT_WINDOW.fromSec + DAY + 3 * HOUR;
+  const held = (over: Partial<AgentLifecycle>): AgentLifecycle =>
+    agent({ beatAt: LAST_BEAT, expiresAt: HELD_NOW + 30 * DAY, ...over });
+
+  it("an idle named agent silent for more than a day during the hold stays listed, as not running", () => {
+    // SirSendIt: idle, named, a good key, and stopped by the hold rather than
+    // by its owner. The day-long rule folded it; its own last beat says why.
+    const sirSendIt = held({ mode: "idle" });
+    assert.ok(HELD_NOW - LAST_BEAT > RECENT_BEAT_SEC);
+    assert.equal(isRetired(sirSendIt, HELD_NOW), false);
+    assert.equal(notRunning(sirSendIt, HELD_NOW), true);
+    // Its own hold row is evidence on its own, whenever it last beat.
+    const reported = held({ mode: "idle", beatAt: INCIDENT_WINDOW.fromSec - 30 * DAY, held: true });
+    assert.equal(isRetired(reported, HELD_NOW), false);
+    assert.equal(notRunning(reported, HELD_NOW), true);
+  });
+
+  it("an account whose key expired during the hold stays listed, as not running", () => {
+    const lapsed = held({ expiresAt: INCIDENT_WINDOW.untilSec + DAY });
+    assert.equal(isRetired(lapsed, HELD_NOW), false);
+    assert.equal(notRunning(lapsed, HELD_NOW), true);
+    // Whether or not anything wrote the status, and whichever evidence speaks.
+    assert.equal(isRetired(held({ status: "expired", expiresAt: INCIDENT_WINDOW.untilSec }), HELD_NOW), false);
+    assert.equal(isRetired(held({ status: "expired", beatAt: null, held: true }), HELD_NOW), false);
+  });
+
+  it("a killed account is folded, hold or not", () => {
+    for (const over of [{}, { held: true }, { mode: "idle" }, { beatAt: null, held: true }]) {
+      const killed = held({ status: "killed", ...over });
+      assert.equal(isRetired(killed, HELD_NOW), true);
+      assert.equal(notRunning(killed, HELD_NOW), false);
+    }
+  });
+
+  it("a heartbeat in milliseconds reads the same as one in seconds", () => {
+    for (const beat of [LAST_BEAT, INCIDENT_WINDOW.fromSec, INCIDENT_WINDOW.untilSec, INCIDENT_WINDOW.fromSec - 1, INCIDENT_WINDOW.untilSec + 1]) {
+      for (const over of [{ mode: "idle" }, { expiresAt: INCIDENT_WINDOW.untilSec }]) {
+        const s = held({ beatAt: beat, ...over });
+        const ms = held({ beatAt: beat * 1000, ...over });
+        assert.equal(isRetired(ms, HELD_NOW), isRetired(s, HELD_NOW), `beat ${beat}`);
+        assert.equal(notRunning(ms, HELD_NOW), notRunning(s, HELD_NOW), `beat ${beat}`);
+      }
+    }
+    // And the window really does decide it — in both units.
+    assert.equal(isRetired(held({ mode: "idle", beatAt: LAST_BEAT * 1000 }), HELD_NOW), false);
+    assert.equal(isRetired(held({ mode: "idle", beatAt: (INCIDENT_WINDOW.fromSec - 1) * 1000 }), HELD_NOW), true);
+  });
+
+  it("only the account's own evidence speaks, and the ordinary rules hold outside it", () => {
+    // Silent since before the incident, with no hold row: not the hold's doing.
+    assert.equal(isRetired(held({ mode: "idle", beatAt: INCIDENT_WINDOW.fromSec - DAY }), HELD_NOW), true);
+    assert.equal(isRetired(held({ expiresAt: INCIDENT_WINDOW.fromSec - DAY, beatAt: INCIDENT_WINDOW.fromSec - DAY }), HELD_NOW), true);
+    // A worker the resume restarted beats after the window, and is judged as
+    // before when it stops again.
+    assert.equal(isRetired(held({ mode: "idle", beatAt: INCIDENT_WINDOW.untilSec + 1 }), HELD_NOW + 30 * DAY), true);
+    // An account with no public id is the clone row, held or not.
+    assert.equal(isRetired(held({ slug: null, held: true }), HELD_NOW), true);
+    assert.equal(isRetired(held({ slug: null }), HELD_NOW), true);
+    assert.equal(notRunning(held({ slug: null, held: true }), HELD_NOW), false);
+  });
+
+  it("not running is said only of a silent row: a held account still beating is listed as before", () => {
+    const fresh = held({ held: true, beatAt: HELD_NOW - HOUR });
+    assert.equal(isRetired(fresh, HELD_NOW), false);
+    assert.equal(notRunning(fresh, HELD_NOW), false);
+    // And a quiet worker with no hold evidence keeps its row, unlabelled.
+    const quiet = agent({ mode: "live", beatAt: NOW - 3 * DAY });
+    assert.equal(isRetired(quiet, NOW), false);
+    assert.equal(notRunning(quiet, NOW), false);
   });
 });
 
