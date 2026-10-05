@@ -490,6 +490,10 @@ script itself: no npm and no `sh -c` on the start path.
   nothing else (the orchestrator stops its own tenant workers). The orchestrator
   logs `[orchestrator] stopping — calling the whole fleet home`. How long it has
   before SIGKILL is the service's draining time, not anything the image sets.
+  Today that handler releases the tenant leases at once and exits after about
+  1s (4s with a Telegram kill pending) without waiting for its workers, and when
+  it exits tini does too, taking the workers with it — so a longer draining time
+  does not yet give the workers longer to stop.
 
 1. **web** — new service from this repo. Leave `MERRYMEN_START` unset → runs the Next dashboard. Set the web env above, then add the custom domain (`app.merrymen.dev`) and follow its DNS record.
 2. **orchestrator** — a second service from the same repo. Set `MERRYMEN_START=start:orchestrator`. Set the orchestrator env above. It needs **no public domain**.
