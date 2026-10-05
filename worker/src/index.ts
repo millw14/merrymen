@@ -241,6 +241,7 @@ import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
+import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
@@ -688,7 +689,9 @@ const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
  * reach it; keyed by executor, so every arm starts fresh.
  */
 const keyInstallTriedAt = new WeakMap<AgentExecutor, number>();
-const KEY_INSTALL_RETRY_MS = 30 * 60_000;
+// Half an hour, and the SAME half hour an `enable-too-wide` entry is held for
+// (exec-backoff.ts): the hold lasts until the next install can be tried.
+const KEY_INSTALL_RETRY_MS = KEY_INSTALL_HOLD_MS;
 
 async function main() {
   await initStore();
@@ -3208,6 +3211,35 @@ async function main() {
    * quietly stopped proposing. Cleared at every arm.
    */
   const suppressedIntents = new Map<string, string>();
+  /**
+   * The same idea WITH AN EXPIRY, for what our own checks refuse before
+   * signing (GasRefused, SponsorRefused): a buy refused that way is not
+   * proposed again until its hold runs out. Exits are never held. Cleared at
+   * every arm, beside the map above. See exec-backoff.ts.
+   */
+  const execBackoff = new ExecBackoff();
+  /**
+   * The hold on `intent`, asked only while it would go out LIVE. A hold is
+   * about the checks before a live signature, and nothing else reaches them:
+   * on paper, or refused outright (live trading switched off, no gas), the
+   * intent meets its own rail's answer and not a gas rule left over from
+   * before the switch. The holds stay, and apply again if the rail comes back.
+   */
+  const liveHold = (intent: TradeIntent): Hold | null =>
+    active && execMode().mode === "live" ? execBackoff.held(intent, active.limits, Date.now()) : null;
+  /**
+   * THE ONLY INTENTS A HOLD MAY REFUSE: the entries the tick itself proposed.
+   *
+   * An owner's order and the Brain's are EXEMPT. They are asked for once, by
+   * somebody waiting on the answer, and a hold another intent started — of
+   * another size, perhaps on a cause the owner has just fixed — is no answer
+   * to them. So they go to the bundler and hear its own word; when that word
+   * is a refusal that starts a hold, their reply says when asking again can
+   * help (orderHeldReply). The tick's loops add an entry here just before it
+   * runs; nothing else does, so a path that forgets is merely never held,
+   * which is the behaviour before holds existed.
+   */
+  const tickEntries = new WeakSet<TradeIntent>();
   /**
    * Gated entries (entry-gates.ts) whose one rejected row the wall has written
    * this arm: every repeat of the same (venue, token, rule) is withheld before
@@ -7124,6 +7156,7 @@ async function main() {
     inFlightOps = 0;
     suppressedIntents.clear();
     entryGateRows.clear();
+    execBackoff.clear("armed");
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
@@ -7818,6 +7851,11 @@ async function main() {
    * re-sign starts fresh. An install still in flight is not raced by a second
    * one, and a wall that cannot be installed even alone is told to the owner
    * once, not every tick.
+   *
+   * AND THE ENTRIES WAITING ON IT GO THE MOMENT IT LANDS. Every buy refused
+   * `enable-too-wide` is held for this same half hour (exec-backoff.ts), and
+   * a landed install is the end of that reason, so those holds are dropped
+   * here rather than waited out.
    */
   async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
     // A worker on its way out installs nothing: the install is an operation of
@@ -7827,7 +7865,7 @@ async function main() {
     const last = keyInstallTriedAt.get(executor);
     if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
     keyInstallTriedAt.set(executor, Date.now());
-    await installKeyRecorded({
+    const landed = await installKeyRecorded({
       addTrade,
       priceGas: async (wei) => {
         const eth = await ethPrice8();
@@ -7843,6 +7881,7 @@ async function main() {
         if (draining) throw new DrainingRefused();
       },
     }, agentId, executor);
+    if (landed) execBackoff.clearRule("enable-too-wide", "this key's permissions are installed");
   }
 
   /**
@@ -8200,6 +8239,31 @@ async function main() {
         amount_usdg: usdgNum(notional),
         status: "rejected",
         reject_rule: suppressed,
+      });
+      return;
+    }
+
+    // ── HELD, FOR A WHILE, AFTER OUR OWN CHECKS REFUSED IT ───────────────
+    // The expiring sibling of the block above (exec-backoff.ts), read in the
+    // same place for the same reason. Only the tick's own entries are asked
+    // (tickEntries: an owner's or the Brain's order is exempt and goes on to
+    // hear the bundler), and only a buy bound for the live rail can be held —
+    // `liveHold` answers null for every exit, whatever is recorded. What
+    // reaches here has a decision already: a strategist intent that journaled
+    // its own (a deterministic one with no decision was skipped in the tick,
+    // before it got one). So this is never a silent return: the row is a
+    // rejection carrying the rule that started the hold, with the legs the
+    // refusal's own row had.
+    const backedOff = tickEntries.has(intent) ? liveHold(intent) : null;
+    if (backedOff && verdict.ok) {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: backedOff.rule,
       });
       return;
     }
@@ -10270,6 +10334,11 @@ async function main() {
           reject_rule: e.rule,
           ...sim,
         });
+        // Not proposed again until the hold runs out (exec-backoff.ts; a buy
+        // only — an exit is never held). BEFORE the install below, which
+        // drops every `enable-too-wide` hold when it lands: noted after it,
+        // this one would outlive its reason by half an hour.
+        execBackoff.note(intent, limits, e.rule, Date.now());
         // The wall fits, only not with this trade beside it: install it alone,
         // so the next trade is an ordinary operation. Still inside this
         // intent's lock, so nothing else signs with this key meanwhile.
@@ -10308,6 +10377,8 @@ async function main() {
           reject_rule: e.rule,
           ...sim,
         });
+        // Held like a gas refusal above; an unreachable sponsor is not.
+        execBackoff.note(intent, limits, e.rule, Date.now());
         return;
       }
 
@@ -13043,6 +13114,15 @@ async function main() {
       // processIntentReporting — and every repeat after that stops here, before
       // any claim, decision row or reservation. Entries only — never an exit.
       if (entry && entryGateRows.withhold(intent, active.limits)) continue;
+      // ── HELD AFTER OUR OWN CHECKS REFUSED IT (exec-backoff.ts) ──────────
+      //
+      // An entry only, and only one with no decision yet: skipped before
+      // ensureDecision, so no row, no post, and no energy or group claim — the
+      // hold's `[backoff]` line already said why. An intent the strategist
+      // journaled carries its decision, and goes on to processIntentLocked,
+      // which books it `rejected` under the held rule rather than leaving
+      // that decision without an outcome.
+      if (entry && !intent.decisionId && liveHold(intent)) continue;
       // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
       //
       // An entry into a coin a group nominated must also win a group-entry
@@ -13077,6 +13157,8 @@ async function main() {
         // AN ENTRY IS COUNTED ONLY IF IT BECAME A TRADE — landed, submitted,
         // or filled on paper (the statuses the ops cap counts). Refused by the
         // wall, or never sent, the claim goes back.
+        // The tick's own entry, so a hold may refuse it (tickEntries).
+        tickEntries.add(intent);
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
         tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
@@ -13159,6 +13241,9 @@ async function main() {
       // claimed against today's energy before its decision exists, and handed
       // back if no trade came of it. (A class exit can never reach here.)
       const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      // The same hold as the strategy loop above. A class entry never has a
+      // decision yet, and `gas-absurd` on the sealed vault holds the route.
+      if (entry && !intent.decisionId && liveHold(intent)) continue;
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);
@@ -13170,6 +13255,7 @@ async function main() {
         continue;
       }
       if (entry) {
+        tickEntries.add(intent);
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
       } else {
@@ -13506,7 +13592,32 @@ async function main() {
     // the note as "less than you asked for": a full liquidation annotated as
     // though it had been trimmed.
     const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
-    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), ...orderHeldReply(intent, outcome), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+  }
+
+  /**
+   * AN ORDER WHOSE OWN REFUSAL STARTED A HOLD, said with when asking again
+   * can help (exec-backoff.ts).
+   *
+   * An owner's or the Brain's order is never held (tickEntries): it is tried,
+   * and the bundler or the sponsor answers it. When that answer is a refusal
+   * before signing, the refusal holds the tick's entries on the same pair, and
+   * the owner (or the Brain's event line) is owed the fact the tick acts on:
+   * asking again before the hold runs out will most likely meet the same
+   * answer. So the backoff is asked for the hold THIS intent's refusal wrote,
+   * and only that one. A hold another intent started is about another size and
+   * another moment, and this order was never judged by it.
+   *
+   * Spread OVER sayTradeOutcome's reply: every other outcome keeps its own
+   * sentence, and the ledger verdict beside it is untouched.
+   */
+  function orderHeldReply(
+    intent: TradeIntent,
+    outcome: { status: TradeRow["status"]; rejectRule?: string } | null,
+  ): Partial<OrderReply> {
+    if (outcome?.status !== "rejected") return {};
+    const held = execBackoff.notedBy(intent, Date.now());
+    return held && held.rule === outcome.rejectRule ? no(heldReply(held, Date.now())) : {};
   }
 
   /**
@@ -13718,7 +13829,7 @@ async function main() {
       if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
       // sent, which is not always the amount asked for — see the clamp above.
-      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), ...orderHeldReply(intent, outcome), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
     });
   }
 
