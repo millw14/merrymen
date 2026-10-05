@@ -178,17 +178,31 @@ describe("what the readers make of it", () => {
   it("the heartbeat counts the roster by level, and names tenants the roster lacks", () => {
     const e = env(`${A}:trade,${B}:trade,${D}:trade`);
     const counts = rolloutCounts([A, B, C, C.toUpperCase().replace("0X", "0x")], e);
-    assert.deepEqual(counts, { trade: 2, "exits-only": 0, observe: 0, held: 1, absent: 1 });
+    assert.deepEqual(counts, { trade: 2, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 1 });
     assert.equal(
       rolloutLine(counts, e),
-      "fleet| rollout 3 named — trade 2 · exits-only 0 · observe 0 · held 1 · named but not in the roster 1",
+      "fleet| rollout 3 named — admitted: trade 2 · exits-only 0 · observe 0; not run: held 1 · expired 0; named but not in the roster 1",
     );
     const all = rolloutCounts([A, B], env("all"));
-    assert.deepEqual(all, { trade: 2, "exits-only": 0, observe: 0, held: 0, absent: 0 });
-    assert.equal(rolloutLine(all, env("all")), "fleet| rollout all — trade 2 · exits-only 0 · observe 0 · held 0");
+    assert.deepEqual(all, { trade: 2, "exits-only": 0, observe: 0, held: 0, expired: 0, absent: 0 });
+    assert.equal(rolloutLine(all, env("all")), "fleet| rollout all — admitted: trade 2 · exits-only 0 · observe 0; not run: held 0 · expired 0");
     assert.match(rolloutLine(all, env(undefined)), /^fleet\| rollout all \(unset off Railway\) /);
-    assert.deepEqual(rolloutCounts([A, B], env("none")), { trade: 0, "exits-only": 0, observe: 0, held: 2, absent: 0 });
-    assert.match(rolloutLine(rolloutCounts([A], env("halt")), env("halt")), /^fleet\| rollout REFUSED — .* held 1$/);
+    assert.deepEqual(rolloutCounts([A, B], env("none")), { trade: 0, "exits-only": 0, observe: 0, held: 2, expired: 0, absent: 0 });
+    assert.match(rolloutLine(rolloutCounts([A], env("halt")), env("halt")), /^fleet\| rollout REFUSED — .* held 1 · expired 0$/);
+  });
+
+  it("a tenant nothing runs for is never counted at a level: the accounting hold is held, an expired key is expired", () => {
+    // A, B, C and D all admitted at trade. A is named by the accounting hold,
+    // B's key has expired, and A's has too: held wins, as nothing runs either way.
+    const counts = rolloutCounts([A, B, C, D], env("all"), { accountingHeld: new Set([A]), unexpired: new Set([C, D]) });
+    assert.deepEqual(counts, { trade: 2, "exits-only": 0, observe: 0, held: 1, expired: 1, absent: 0 });
+    // Held by the rollout and expired: held.
+    assert.deepEqual(rolloutCounts([A, B], env(`${A}:trade`), { unexpired: new Set([A]) }),
+      { trade: 1, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 0 });
+  });
+
+  it("a pass that could not read the roster says so, and repeats no older figure", () => {
+    assert.equal(rolloutLine(null, env("none")), "fleet| rollout none — the last pass could not read the roster");
   });
 
   it("the startup line says the scope that took", () => {

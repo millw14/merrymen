@@ -197,7 +197,7 @@ describe("a tenant the rollout does not admit", () => {
       assert.equal(hasLeaseForTest(expired), false);
       assert.deepEqual(spawned.map((p) => p.env.MERRYMEN_HOME), [childHome(admitted)], "only the admitted tenant runs");
       assert.equal(isRetiringExpiredForTest(expired), false, "its expiry is not retired");
-      assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 2, absent: 0 });
+      assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 2, expired: 0, absent: 0 });
 
       // THE LEVEL, AND ONLY THE LEVEL, REACHES THE CHILD.
       const env = spawned[0]!.env;
@@ -213,6 +213,8 @@ describe("a tenant the rollout does not admit", () => {
       assert.equal(spawnedFor(out).length, 1, "and started");
       assert.equal(spawnedFor(out)[0]!.env.MERRYMEN_ADMISSION_LEVEL, "trade");
       assert.equal(spawnedFor(expired).length, 0, "an expired key still runs nothing");
+      assert.deepEqual(rolloutCountsForTest(), { trade: 2, "exits-only": 0, observe: 0, held: 0, expired: 1, absent: 0 },
+        "and the heartbeat counts it as expired, not as trading");
     } finally {
       setRetirementMemoryStoreForTest(null);
       raw.close();
@@ -261,7 +263,7 @@ describe("a tenant the rollout does not admit", () => {
     assert.equal(existsSync(childHome(a)), false, "no settings, anchor, ledger or holder files were written");
     assert.equal(existsSync(childHome(b)), false);
     assert.ok(await store.get(a) && await store.get(b), "both grants stay stored: held is not removed");
-    assert.deepEqual(rolloutCountsForTest(), { trade: 0, "exits-only": 0, observe: 0, held: 2, absent: 0 });
+    assert.deepEqual(rolloutCountsForTest(), { trade: 0, "exits-only": 0, observe: 0, held: 2, expired: 0, absent: 0 });
   });
 
   it("still has its owner's kill carried out, by the order ferry and by reconcile, as under FLEET_HALT", async () => {
@@ -299,12 +301,20 @@ describe("a tenant the rollout does not admit", () => {
   });
 
   it("a named tenant missing from the roster is counted, so a typo is visible", async () => {
-    const a = tenantAt(0x131);
+    const a = tenantAt(0x131), b = tenantAt(0x133);
     await store.put(a, grant(address(0x132)));
-    process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade,${address(0x999)}:trade`;
-    await reconcile();
-    assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 0, absent: 1 });
+    await store.put(b, grant(address(0x134)));
+    process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade,${b}:trade,${address(0x999)}:trade`;
+    // And one the rollout admits but the accounting hold names: held, not trading.
+    process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = b;
+    try {
+      await reconcile();
+    } finally {
+      delete process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS;
+    }
+    assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 1, expired: 0, absent: 1 });
     assert.equal(spawnedFor(a)[0]?.env.MERRYMEN_ADMISSION_LEVEL, "trade");
+    assert.equal(spawnedFor(b).length, 0);
   });
 });
 
