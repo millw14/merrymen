@@ -118,6 +118,18 @@ describe("--phase=start", () => {
     });
   }
 
+  it("pre-deploy refuses exactly what this phase refuses for a fleet role, case for case, before the live deployment is replaced", async () => {
+    const fleet = cases.filter((c) => c.role !== "start:web" && onRailway(c.env));
+    assert.ok(fleet.length > 20);
+    for (const c of fleet) {
+      const [atStart, before] = [await start(c.role, c.env),
+        await runDeployGuard(["--phase=predeploy"], { ...c.env, RAILWAY_GIT_BRANCH: "main", RAILWAY_GIT_COMMIT_SHA: SHA, MERRYMEN_START: c.role })];
+      assert.equal(before.code, atStart.code, c.name);
+      assert.deepEqual(before.err, atStart.err, c.name);
+      assert.equal(before.out[0], atStart.out[0], `${c.name}: the same census line`);
+    }
+  });
+
   it("runOrchestrator's own copy refuses exactly what this phase refuses for the orchestrator, case for case", async () => {
     const orchestrator = cases.filter((c) => c.role === "start:orchestrator");
     assert.ok(orchestrator.length > 10);
@@ -155,25 +167,23 @@ describe("--phase=predeploy", () => {
     assert.deepEqual(r, { code: 0, out: ["[deploy-guard] skipped: not running on Railway"], err: [] });
   });
 
-  it("outside production it is skipped; an unnamed environment is production", async () => {
-    for (const name of ["staging", "pr-261"]) {
-      const r = await predeploy({ ...RAILWAY, RAILWAY_ENVIRONMENT_NAME: name, RAILWAY_GIT_BRANCH: "feature" }, noFetch);
-      assert.deepEqual(r, { code: 0, out: ["[deploy-guard] skipped: the pre-deploy checks apply to the production environment only"], err: [] }, name);
+  it("holds every Railway environment it runs in to main, whatever that environment is named", async () => {
+    // Where the command is configured is where it applies; a name is not
+    // evidence of a sandbox — "prod", "live" or a renamed production included.
+    for (const name of ["production", "Production", "staging", "pr-261", "prod", "merrymen", "main", "live", "", " "]) {
+      const r = await predeploy({ ...RAILWAY, RAILWAY_ENVIRONMENT_NAME: name, RAILWAY_GIT_BRANCH: "feature", RAILWAY_GIT_COMMIT_SHA: SHA }, noFetch);
+      assert.equal(r.code, EX_CONFIG, name);
+      assert.doesNotMatch(all(r), /skipped/, name);
     }
-    for (const name of ["production", "Production", " production ", "", " "]) {
-      assert.equal((await predeploy({ ...RAILWAY, RAILWAY_ENVIRONMENT_NAME: name, RAILWAY_GIT_BRANCH: "feature", RAILWAY_GIT_COMMIT_SHA: SHA }, noFetch)).code, EX_CONFIG, name);
-    }
-    // Neither name variable: still on Railway (by its ids), so production.
-    const r = await predeploy({ RAILWAY_SERVICE_ID: SERVICE, RAILWAY_GIT_BRANCH: "feature", RAILWAY_GIT_COMMIT_SHA: SHA }, noFetch);
-    assert.equal(r.code, EX_CONFIG);
-    // The legacy name alone decides when it is the only one.
-    assert.equal((await predeploy({ RAILWAY_SERVICE_ID: SERVICE, RAILWAY_ENVIRONMENT: "staging" }, noFetch)).code, 0);
+    // Neither name variable, or only the legacy one: on Railway by its ids, so held.
+    assert.equal((await predeploy({ RAILWAY_SERVICE_ID: SERVICE, RAILWAY_GIT_BRANCH: "feature", RAILWAY_GIT_COMMIT_SHA: SHA }, noFetch)).code, EX_CONFIG);
+    assert.equal((await predeploy({ RAILWAY_SERVICE_ID: SERVICE, RAILWAY_ENVIRONMENT: "staging" }, noFetch)).code, EX_CONFIG);
   });
 
-  it("main at a 40-hex commit passes, and says which", async () => {
-    assert.deepEqual(await predeploy(PROD, noFetch), { code: 0, out: [`[deploy-guard] ok branch=main commit=${SHA}`], err: [] });
+  it("main at a 40-hex commit passes, and says which commit and which role", async () => {
+    assert.deepEqual(await predeploy(PROD, noFetch), { code: 0, out: [`[deploy-guard] ok branch=main commit=${SHA} role=start:web`], err: [] });
     // Railway reports lower case; upper case is the same commit, logged lower.
-    assert.deepEqual((await predeploy({ ...PROD, RAILWAY_GIT_COMMIT_SHA: SHA.toUpperCase() }, noFetch)).out, [`[deploy-guard] ok branch=main commit=${SHA}`]);
+    assert.deepEqual((await predeploy({ ...PROD, RAILWAY_GIT_COMMIT_SHA: SHA.toUpperCase() }, noFetch)).out, [`[deploy-guard] ok branch=main commit=${SHA} role=start:web`]);
   });
 
   it("any other branch is refused, and not echoed", async () => {
@@ -182,8 +192,48 @@ describe("--phase=predeploy", () => {
       const r = await predeploy(env, noFetch);
       assert.equal(r.code, EX_CONFIG, JSON.stringify(branch));
       assert.deepEqual(r.out, []);
-      assert.deepEqual(r.err, ["[deploy-guard] refused: production deploys only from main, and RAILWAY_GIT_BRANCH is not main — deploy main, or merge first"]);
+      assert.deepEqual(r.err, ["[deploy-guard] refused: this service deploys only from main, and RAILWAY_GIT_BRANCH is not main — deploy main, or merge first (an environment that deploys other branches must not carry this pre-deploy command)"]);
     }
+  });
+
+  describe("the role this deployment will start", () => {
+    it("a fleet role's start checks run here too, so a refusal leaves the live deployment serving", async () => {
+      const ok = await predeploy({ ...PROD, ...FLEET, MERRYMEN_START: "start:orchestrator" }, noFetch);
+      assert.deepEqual(ok, { code: 0, out: ["[deploy-guard] census one-shot: none", `[deploy-guard] ok branch=main commit=${SHA} role=start:orchestrator`], err: [] });
+      const listener = await predeploy({ ...PROD, ...without(FLEET, "MERRYMEN_FLEET_SERVICE_ID"), MERRYMEN_START: "start:recovery-replies" }, noFetch);
+      assert.equal(listener.code, EX_CONFIG);
+      assert.deepEqual(listener.out, ["[deploy-guard] census one-shot: none"]);
+      assert.deepEqual(listener.err, ["[deploy-guard] refused: MERRYMEN_FLEET_SERVICE_ID is not set — a fleet role runs only on the one Railway service that variable names"]);
+    });
+
+    it("refuses with every reason at once — the branch and the role's — and never echoes a value", async () => {
+      const secret = `apply-${"7".repeat(40)}`;
+      const r = await predeploy({ ...PROD, ...FLEET, RAILWAY_GIT_BRANCH: "feature", MERRYMEN_START: "start:orchestrator", MERRYMEN_REPAIR_HWM: secret }, noFetch);
+      assert.equal(r.code, EX_CONFIG);
+      assert.deepEqual(r.out, ["[deploy-guard] census one-shot: MERRYMEN_REPAIR_HWM"]);
+      assert.equal(r.err.length, 2, r.err.join("\n"));
+      assert.match(r.err[0]!, /RAILWAY_GIT_BRANCH is not main/);
+      assert.match(r.err[1]!, /one-shot operator variables are set \(MERRYMEN_REPAIR_HWM\) while MERRYMEN_FLEET_ROLLOUT is not all/);
+      assert.ok(!all(r).includes(secret));
+    });
+
+    it("unset is web, which has no start checks to run here; empty or unknown is refused, and not echoed", async () => {
+      // Web on the fleet's own service, with none of its variables: the start
+      // phase lets web through on the allowlist alone, and so does this.
+      assert.equal((await predeploy({ ...PROD, MERRYMEN_REPAIR_HWM: "apply" }, noFetch)).code, 0);
+      assert.deepEqual((await predeploy({ ...PROD, MERRYMEN_START: "start:web" }, noFetch)).out, [`[deploy-guard] ok branch=main commit=${SHA} role=start:web`]);
+      for (const role of ["", "start:evil", "start:web ", "$(id)"]) {
+        const r = await predeploy({ ...PROD, ...FLEET, MERRYMEN_START: role }, noFetch);
+        assert.equal(r.code, EX_CONFIG, JSON.stringify(role));
+        assert.deepEqual(r.out, []);
+        assert.deepEqual(r.err, ["[deploy-guard] refused: MERRYMEN_START is not one of: start:web start:orchestrator start:recovery-replies (unset means start:web) — the start script would refuse it once this deploy had replaced the live one"]);
+      }
+    });
+
+    it("a refused role never reaches GitHub", async () => {
+      const r = await predeploy({ ...PROD, MERRYMEN_START: "start:orchestrator", MERRYMEN_DEPLOY_ANCESTRY_REPO: "millw14/merrymen" }, noFetch);
+      assert.equal(r.code, EX_CONFIG);
+    });
   });
 
   it("a deploy without a full hex commit is refused, and not echoed", async () => {
@@ -215,7 +265,7 @@ describe("--phase=predeploy", () => {
       for (const status of ["identical", "behind"]) {
         asked.length = 0;
         const r = await predeploy({ ...PROD, MERRYMEN_DEPLOY_ANCESTRY_REPO: REPO }, answer(200, proof(status)));
-        assert.deepEqual(r, { code: 0, out: [`[deploy-guard] ok branch=main commit=${SHA} ancestry=proven`], err: [] }, status);
+        assert.deepEqual(r, { code: 0, out: [`[deploy-guard] ok branch=main commit=${SHA} ancestry=proven role=start:web`], err: [] }, status);
         assert.deepEqual(asked, [`https://api.github.com/repos/${REPO}/compare/main...${SHA}?per_page=1`]);
       }
     });
@@ -394,7 +444,7 @@ describe("the real guard, as the container runs it", { skip: !posix }, () => {
     assert.equal(refused.stderr.trim().split("\n").length, 2, refused.stderr);
     const predeploy = cli(["--phase=predeploy"], { ...base(dir), ...RAILWAY, RAILWAY_GIT_BRANCH: "main", RAILWAY_GIT_COMMIT_SHA: SHA });
     assert.equal(predeploy.status, 0, predeploy.stderr);
-    assert.equal(predeploy.stdout, `[deploy-guard] ok branch=main commit=${SHA}\n`);
+    assert.equal(predeploy.stdout, `[deploy-guard] ok branch=main commit=${SHA} role=start:web\n`);
     const usage = cli([], base(dir));
     assert.equal(usage.status, EX_USAGE);
   });

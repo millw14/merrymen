@@ -18,13 +18,17 @@
  *                         node --import tsx worker/src/deploy-guard.ts --phase=predeploy
  *                       It runs in its own container BEFORE the new deployment
  *                       replaces the live one, so a refusal here leaves the
- *                       previous deployment serving. Production only: the
- *                       deploy must come from `main`, at a full 40-hex commit,
- *                       and — only when MERRYMEN_DEPLOY_ANCESTRY_REPO names the
- *                       repository — GitHub's public compare API must show that
- *                       commit inside main's history. That check FAILS CLOSED:
+ *                       previous deployment serving. The deploy must come
+ *                       from `main`, at a full 40-hex commit, and — only when
+ *                       MERRYMEN_DEPLOY_ANCESTRY_REPO names the repository —
+ *                       GitHub's public compare API must show that commit
+ *                       inside main's history. That check FAILS CLOSED:
  *                       unreachable, rate-limited, private or ambiguous all
- *                       refuse; unset the variable to stop asking.
+ *                       refuse; unset the variable to stop asking. When
+ *                       MERRYMEN_START names a fleet role, that role's start
+ *                       checks (below) run here as well, for the same reason.
+ *                       Production is wherever this command is configured —
+ *                       the guard does not read the environment's name.
  *
  *   --phase=start --role=<role>
  *                       scripts/container-start.sh, inside each allowlisted
@@ -230,32 +234,52 @@ async function ancestryRefusal(repo: string, sha: string, fetchImpl: typeof fetc
   return `the commit is not inside main's history (compare status ${status})`;
 }
 
+const censusLine = (census: readonly string[]) => line(`census one-shot: ${census.length ? census.join(" ") : "none"}`);
+const isStartRole = (role: string): role is StartRole => (START_ROLES as readonly string[]).includes(role);
+
 async function predeploy(env: NodeJS.ProcessEnv, deps: GuardDeps): Promise<GuardResult> {
   if (!onRailway(env)) return skipped("not running on Railway");
-  // Missing or blank reads as production: on Railway, an environment we cannot
-  // name is not one we may assume is a sandbox.
-  const name = (env.RAILWAY_ENVIRONMENT_NAME || env.RAILWAY_ENVIRONMENT || "").trim().toLowerCase();
-  if (name && name !== "production") {
-    return skipped("the pre-deploy checks apply to the production environment only");
-  }
+  // EVERY ENVIRONMENT THIS RUNS IN, WHATEVER IT IS CALLED. The pre-deploy
+  // command is a per-environment service setting: configuring it is the
+  // choice of where these checks apply, and an environment that deploys other
+  // branches simply does not carry it. This once skipped every environment
+  // not NAMED "production" — so a renamed production, or the command copied
+  // into an environment serving real tenants under another name, would have
+  // taken a feature branch through green. A name is not evidence of a sandbox.
   const reasons: string[] = [];
   if (env.RAILWAY_GIT_BRANCH !== "main") {
-    reasons.push("production deploys only from main, and RAILWAY_GIT_BRANCH is not main — deploy main, or merge first");
+    reasons.push("this service deploys only from main, and RAILWAY_GIT_BRANCH is not main — deploy main, or merge first (an environment that deploys other branches must not carry this pre-deploy command)");
   }
   const sha = (env.RAILWAY_GIT_COMMIT_SHA ?? "").toLowerCase();
   if (!SHA40.test(sha)) {
     reasons.push("RAILWAY_GIT_COMMIT_SHA is not a 40-hex commit, so this deploy cannot be tied to main (a CLI upload or an image deploy names none)");
   }
-  if (reasons.length) return refused([], reasons);
+  // THE ROLE THIS DEPLOYMENT WILL START, read as container-start.sh reads it:
+  // `-`, not `:-` — unset is web, empty is refused. A fleet role's start checks
+  // need nothing but the environment, which this container shares with the
+  // deployment it guards (this image's MERRYMEN_IMAGE included), so they run
+  // here too. Here, a refusal leaves the previous deployment serving. The same
+  // refusal at start comes after Railway has already replaced it — with no
+  // healthcheck, an outage of the fleet or the reply listener until somebody
+  // fixes the variables. The start phase still runs them: it is the backstop.
+  const role = env.MERRYMEN_START ?? "start:web";
+  const out: string[] = [];
+  if (!isStartRole(role)) {
+    reasons.push(`MERRYMEN_START is not one of: ${START_ROLES.join(" ")} (unset means start:web) — the start script would refuse it once this deploy had replaced the live one`);
+  } else if (isFleetRole(role)) {
+    const fleet = fleetStartChecks(env, role);
+    out.push(censusLine(fleet.census));
+    reasons.push(...fleet.reasons);
+  }
+  if (reasons.length) return refused(out, reasons);
   const repo = env.MERRYMEN_DEPLOY_ANCESTRY_REPO;
   if (repo !== undefined) {
     const why = await ancestryRefusal(repo, sha, deps.fetch ?? fetch);
-    if (why) return refused([], [why]);
+    if (why) return refused(out, [why]);
   }
-  return { code: 0, out: [line(`ok branch=main commit=${sha}${repo !== undefined ? " ancestry=proven" : ""}`)], err: [] };
+  out.push(line(`ok branch=main commit=${sha}${repo !== undefined ? " ancestry=proven" : ""} role=${role}`));
+  return { code: 0, out, err: [] };
 }
-
-const censusLine = (census: readonly string[]) => line(`census one-shot: ${census.length ? census.join(" ") : "none"}`);
 
 function start(env: NodeJS.ProcessEnv, role: StartRole): GuardResult {
   if (!onRailway(env)) return skipped("not running on Railway");
@@ -277,7 +301,7 @@ export async function runDeployGuard(argv: readonly string[], env: NodeJS.Proces
   if (argv.length === 1 && argv[0] === "--phase=predeploy") return predeploy(env, deps);
   if (argv.length === 2 && argv[0] === "--phase=start" && argv[1]?.startsWith("--role=")) {
     const role = argv[1].slice("--role=".length);
-    if ((START_ROLES as readonly string[]).includes(role)) return start(env, role as StartRole);
+    if (isStartRole(role)) return start(env, role);
     return { code: EX_USAGE, out: [], err: [line(`refused: --role is not one of: ${START_ROLES.join(" ")}`)] };
   }
   return { code: EX_USAGE, out: [], err: [line("refused: usage is --phase=predeploy, or --phase=start --role=<start:* role>")] };
