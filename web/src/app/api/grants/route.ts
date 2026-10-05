@@ -59,7 +59,8 @@ export interface AgentStatus {
   workerAliveAt?: number | null;
   /**
    * HAS THE WORKER STOPPED REPORTING? `workerAliveAt` older than the watchdog's
-   * window for this owner's tick, plus a margin for the mirror.
+   * window for this owner's tick — never shorter than one order's run, which
+   * the mirrored row can lag the file by — plus a margin for the mirror.
    *
    * DECIDED HERE, by this server's clock — never by the browser's, which would
    * judge a server timestamp by however wrong that laptop's clock is — and by

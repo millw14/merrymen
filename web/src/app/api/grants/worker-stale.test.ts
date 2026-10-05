@@ -16,12 +16,15 @@ import { DatabaseSync } from "node:sqlite";
 import { after, before, beforeEach, mock, test } from "node:test";
 import type { MerrymenSettings, StoredGrant } from "@merrymen/core";
 import { freshWithin } from "@/lib/services/agent-status";
+import { ORDER_IN_FLIGHT_MS } from "@/lib/order-state";
 import { WORKER_STALE_MARGIN_SEC } from "@/terminal/worker-stale";
 import type { AgentStatus } from "./route";
 
 const A = `0x${"a".repeat(40)}` as `0x${string}`;
 const ACCOUNT = `0x${"c".repeat(40)}` as `0x${string}`;
 const NOW = Date.parse("2026-10-05T12:00:00Z") / 1000;
+/** The rule terminal/stale-autonomy.test.ts pins: the watchdog's window, floored at one order's run, plus the margin. */
+const edgeFor = (tick: number | null) => Math.max(freshWithin(tick), ORDER_IN_FLIGHT_MS / 1000) + WORKER_STALE_MARGIN_SEC;
 const ORIGIN = "https://app.merrymen.dev";
 const saved = new Map(["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_STORE_DEK",
   "MERRYMEN_SETTINGS_FILE", "MERRYMEN_TICK_SECONDS"].map(key => [key, process.env[key]]));
@@ -101,7 +104,7 @@ async function status(beatAt: number | null): Promise<AgentStatus> {
 
 test("a worker that beat recently is not stopped, and one that went quiet is", async () => {
   settings = { tickSeconds: 60 };
-  const edge = freshWithin(60) + WORKER_STALE_MARGIN_SEC;
+  const edge = edgeFor(60);
   const fresh = await status(NOW - 10);
   assert.equal(fresh.workerStale, false);
   assert.equal(fresh.mode, "live", "the last word is still reported as it was said");
@@ -121,7 +124,7 @@ test("the window is THIS owner's tick, not a fixed number", async () => {
 });
 
 test("a failed or empty settings read is the default window, never a guess", async () => {
-  const edge = freshWithin(null) + WORKER_STALE_MARGIN_SEC;
+  const edge = edgeFor(null);
   for (const answer of [new Error("store unreadable"), null, {}]) {
     settings = answer;
     assert.equal((await status(NOW - edge)).workerStale, false, String(answer));

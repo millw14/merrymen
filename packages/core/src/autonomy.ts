@@ -267,10 +267,11 @@ export interface AutonomyInput {
    *
    * DECIDED ON THE SERVER, never here and never in a browser. `/api/grants`
    * compares the heartbeat with its own clock using the watchdog's rule
-   * (`freshWithin(tickSeconds)` in agent-status.ts, plus a margin for the
-   * mirror) and says so as `workerStale`. A browser's clock against a server's
-   * timestamp would be a second staleness rule, and the MCP tools and this
-   * screen would disagree about the same agent.
+   * (`freshWithin(tickSeconds)` in agent-status.ts, widened — never narrowed —
+   * for the mirror's lag; web/src/terminal/worker-stale.ts) and says so as
+   * `workerStale`. A browser's clock against a server's timestamp would be a
+   * second staleness rule, and the MCP tools and this screen would disagree
+   * about the same agent.
    */
   workerSilentSince?: number | null;
   /**

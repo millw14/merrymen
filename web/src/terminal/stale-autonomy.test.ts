@@ -20,6 +20,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { autonomyOf, type AutonomyInput } from "@merrymen/core";
 import { freshWithin } from "@/lib/services/agent-status";
+import { ORDER_IN_FLIGHT_MS } from "@/lib/order-state";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import type { ChatController } from "./chat-controller";
 import { DesktopPortfolio } from "./Desktop";
@@ -67,12 +68,27 @@ const portfolio = (mine: LiveMine) =>
     onScreen: noop, onTab: noop }));
 
 describe("the server decides when a worker has stopped, by one rule", () => {
-  it("IS THE WATCHDOG'S WINDOW PLUS A MARGIN FOR THE MIRROR — not a number of its own", () => {
+  it("IS THE WATCHDOG'S WINDOW, NEVER SHORTER THAN ONE ORDER'S RUN, PLUS A MARGIN FOR THE MIRROR", () => {
     for (const tick of [null, 15, 60, 240, 300, 3_600]) {
-      const edge = freshWithin(tick) + WORKER_STALE_MARGIN_SEC;
+      const edge = Math.max(freshWithin(tick), ORDER_IN_FLIGHT_MS / 1000) + WORKER_STALE_MARGIN_SEC;
       assert.equal(workerStale(NOW - edge, NOW, tick), false, `exactly at the edge is still fresh (tick ${tick})`);
       assert.equal(workerStale(NOW - edge - 1, NOW, tick), true, `one second past it is stopped (tick ${tick})`);
     }
+  });
+
+  it("AN AGENT WAITING ON A SLOW RECEIPT IS NOT CALLED STOPPED, however short its tick", () => {
+    // Hosted, the row is written only when a tick starts, and an order in
+    // flight holds the next tick back for up to ORDER_IN_FLIGHT_MS while the
+    // clock beats only the FILE. The watchdog sees a live child; this must not
+    // say NOT RUNNING over the trade. Six minutes is the reviewer's case: past
+    // the one-minute tick's own window, inside one order's run.
+    for (const tick of [15, 60]) {
+      assert.ok(freshWithin(tick) + WORKER_STALE_MARGIN_SEC < 6 * 60, `the bare window is shorter than the stall (tick ${tick})`);
+      assert.equal(workerStale(NOW - 6 * 60, NOW, tick), false, `six minutes on a receipt (tick ${tick})`);
+      assert.equal(workerStale(NOW - ORDER_IN_FLIGHT_MS / 1000, NOW, tick), false, `a whole order's run (tick ${tick})`);
+    }
+    // The floor only ever widens: a long tick keeps the watchdog's own window.
+    assert.equal(workerStale(NOW - freshWithin(300) - WORKER_STALE_MARGIN_SEC - 1, NOW, 300), true);
   });
 
   it("a longer tick earns a longer window, as the watchdog grants it", () => {
