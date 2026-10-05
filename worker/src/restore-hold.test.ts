@@ -145,6 +145,13 @@ describe("held tenants reach only the loops they belong in", () => {
       .sort();
     assert.deepEqual(readers, [
       "adoptHolderForTest",
+      // The SIGTERM drain (fleet-drain.ts): it writes a hold's home down as
+      // held, so its final pass never copies the book and handles its memory
+      // forget-only; it signals the hold process and waits for it to go; and
+      // a home whose process is still running gets no final pass at all.
+      "drainFinalPass",
+      "drainHomes",
+      "fleetProcessesGone",
       "handHoldBack",
       "honourFleetHalt",
       "isHeldForTest",
@@ -159,8 +166,8 @@ describe("held tenants reach only the loops they belong in", () => {
       "reportIdle",
       "retireExpiredGrants",
       "retryHold",
-      "runOrchestrator",
       "scheduleRestart",
+      "signalFleetForDrain",
       "spawnChild",
       "spawnHolder",
       "standDownHolder",
@@ -256,12 +263,19 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.ok(removedFiles);
     assert.deepEqual(removedFiles.elements.map((e) => ts.isStringLiteral(e) ? e.text : e.getText()), ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"]);
     assert.doesNotMatch(retainedBook.thenStatement.getText(), /recursive:\s*true|rmSync\(home\b|ledger-source-blocked|ledger-import/, "retaining accounting also retains its recovery barriers");
-    // FLEET_HALT, one loop of which the main loop runs in place of a pass, and stop().
+    // FLEET_HALT, one loop of which the main loop runs in place of a pass, and
+    // stop(), which is the drain: every hold process is signalled with the
+    // children, and one a handover or stand-down still waits on is finished.
     const halt = fn("honourFleetHalt").body!.getText();
     assert.match(halt, /for \(const t of \[\.\.\.holders\.keys\(\)\]\) standDownHolder\(t\);/);
     const run = fn("runOrchestrator").body!.getText();
     assert.match(run, /if \(haltRequested\(\)\) \{\s*await honourFleetHalt\(\);\s*\} else \{/);
-    assert.match(run, /for \(const held of holders\.values\(\)\) held\.proc\?\.kill\("SIGTERM"\);/);
+    assert.match(run, /const stop = \(signal: NodeJS\.Signals\) => \{\s*void drainFleet\(signal\);\s*\};/);
+    assert.match(fn("drainFleet").body!.getText(), /signalFleet: signalFleetForDrain,/);
+    const holdLoop = loopsOver(fn("signalFleetForDrain"), "holders").map((l) => l.statement.getText());
+    assert.equal(holdLoop.length, 1, "one loop over hold processes");
+    assert.match(holdLoop[0]!, /held\.proc\.kill\(signal\);/);
+    assert.match(holdLoop[0]!, /killLeaving\(held\);/);
   });
 
   it("THE HANDOVER STOPS THE HOLD PROCESS AND WAITS FOR IT BEFORE A WORKER STARTS", () => {
