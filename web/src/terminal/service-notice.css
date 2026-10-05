@@ -1,0 +1,98 @@
+/*
+ * THE OPERATOR'S SERVICE NOTICE (ServiceNotice.tsx).
+ *
+ * The geometry of .agent-recovery, so a fleet-wide notice and an agent's own
+ * hold read as the same kind of thing. NO RED: red in this product means a
+ * fault the reader must fix, and a notice is the operator telling them what is
+ * happening. And no second palette for `tradingPaused` — that flag changes the
+ * label's words, not how loudly they are drawn.
+ */
+.terminal-host .service-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: none;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--tx) 5%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.terminal-host .service-notice-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 12px;
+}
+
+.terminal-host .service-notice-label {
+  color: var(--warn, #fbbf24);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.terminal-host .service-notice-head time {
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+.terminal-host .service-notice strong {
+  color: var(--tx);
+  font-weight: 600;
+}
+
+/* Line breaks the operator wrote are kept; nothing else about the text is
+   interpreted. `anywhere` so a long URL written into the body cannot widen a
+   phone's page. */
+.terminal-host .service-notice p {
+  margin: 0;
+  color: var(--tx);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.terminal-host .service-notice-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.terminal-host .service-notice-links a {
+  color: var(--lime);
+}
+
+.terminal-host .service-notice button {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--tx);
+  font: inherit;
+  cursor: pointer;
+}
+
+/*
+ * ABOVE THE CHAT, THE CHAT GIVES WAY.
+ *
+ * On a phone the desk page is a fixed-height column inside a `.body` that is
+ * `overflow: hidden`, sized to fill the screen exactly. Anything mounted above
+ * it pushes its bottom — the composer — under the tab bar. While the notice is
+ * up, the desk takes the height that is left instead of a fixed one; the
+ * conversation is its flexible child, so that is what shrinks.
+ */
+.terminal-host .body:has(> .service-notice) > .desk-page {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+.terminal-host .body:has(> .desk-page) > .service-notice {
+  margin-bottom: 12px;
+}
