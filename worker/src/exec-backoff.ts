@@ -18,7 +18,8 @@
  * its mind, an account gets funded; suppressing until the next arm would turn
  * a refusal we would sign tomorrow into a strategy that quietly stopped
  * working. So each hold has a time on it (BACKOFF_SCHEDULE_MIN), and a refusal
- * that repeats when it runs out waits longer the next time.
+ * that repeats when it runs out waits longer the next time — unless it may be
+ * a moment rather than a fact (NOT_ESCALATED), which never waits longer.
  *
  * WHAT IS NEVER HELD, and each of these is load-bearing:
  *
@@ -89,12 +90,42 @@ const NOT_BACKED_OFF: ReadonlySet<string> = new Set([
   "prefund-unverified",
   // paymaster.ts: the sponsor did not answer, which is not the sponsor saying no.
   "sponsor-unreachable",
+  // executor.ts: the SDK's plugin-enable read failed open — "one flaky
+  // eth_call" shapes an enable nothing needs. A read that failed, not a fact.
+  "enable-redundant",
+  // executor.ts: "That enable has already landed" — our own landing, the same
+  // race as nonce-changed.
+  "enable-replayed",
 ]);
+
+/**
+ * Refusals that MAY BE A MOMENT rather than a fact: held for the schedule's
+ * first step and never longer, however often they come, and they add no
+ * strike to their key — a later refusal that IS a fact starts where it would
+ * have without them.
+ *
+ * Held at all, rather than NOT_BACKED_OFF, because during a bundler outage
+ * every entry the tick proposes meets one, and a hold is what keeps that to
+ * one attempt per pair per five minutes instead of one per tick. Not
+ * escalated, because nothing about them says the next attempt will fail too:
+ *
+ *   - `gas-unreadable` reaches the ledger unrenamed only when the bundler's
+ *     error was unclassified or retryable (executor.ts: "a transient bundler
+ *     hiccup worth retrying"). A non-retryable cause is renamed to its class
+ *     before it gets here, and that class does escalate.
+ *   - `gas-unstable`: two estimates of the same calldata disagreed. The
+ *     estimator disagreeing with itself is about the estimator.
+ *
+ * A DECISION FOR MILLA, recorded here: both reviewers of this module asked
+ * whether these two should be held at all. This is the middle answer.
+ */
+const NOT_ESCALATED: ReadonlySet<string> = new Set(["gas-unreadable", "gas-unstable"]);
 
 /** How long a refusal of `rule` holds its key, at this strike; null when it is not held at all. */
 export function holdMsFor(rule: string, strikes: number): number | null {
   if (NOT_BACKED_OFF.has(rule)) return null;
   if (rule === "enable-too-wide") return KEY_INSTALL_HOLD_MS;
+  if (NOT_ESCALATED.has(rule)) return BACKOFF_SCHEDULE_MIN[0]! * 60_000;
   const at = Math.min(Math.max(strikes, 1), BACKOFF_SCHEDULE_MIN.length) - 1;
   return BACKOFF_SCHEDULE_MIN[at]! * 60_000;
 }
@@ -168,7 +199,7 @@ export interface Hold {
   /** The refusal that started it — the rule a held intent's row carries. */
   rule: string;
   untilMs: number;
-  /** Refusals of this key this arm, counting this one. */
+  /** Refusals of this key this arm, counting this one — all but those that may be transient (NOT_ESCALATED). */
   strikes: number;
 }
 
@@ -199,13 +230,17 @@ export class ExecBackoff {
     if (!backsOff(intent, limits)) return null;
     const { pair, route } = keysOf(intent, limits);
     const key = rule === "gas-absurd" && route !== null ? route : pair;
-    const strikes = (this.holds.get(key)?.strikes ?? 0) + 1;
+    const escalates = !NOT_ESCALATED.has(rule);
+    const strikes = (this.holds.get(key)?.strikes ?? 0) + (escalates ? 1 : 0);
     const ms = holdMsFor(rule, strikes);
     if (ms === null) return null;
     const hold: Hold = { key, rule, untilMs: nowMs + ms, strikes };
     this.holds.set(key, hold);
     this.noted.set(intent, hold);
-    this.log(`[backoff] holding ${key} for ${Math.round(ms / 60_000)}m after ${rule} (refusal ${strikes} this arm)`);
+    this.log(
+      `[backoff] holding ${key} for ${Math.round(ms / 60_000)}m after ${rule} ` +
+        `(${escalates ? `refusal ${strikes} this arm` : "may be transient, not escalated"})`,
+    );
     return hold;
   }
 

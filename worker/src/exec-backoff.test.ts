@@ -70,13 +70,49 @@ describe("THE SCHEDULE", () => {
   });
 
   it("does NOT hold a refusal that says we could not read something, or raced our own landing", () => {
-    for (const rule of ["nonce-changed", "enable-unverified", "prefund-unverified", "sponsor-unreachable"]) {
+    for (const rule of [
+      "nonce-changed",
+      "enable-unverified",
+      "prefund-unverified",
+      "sponsor-unreachable",
+      // The SDK's enable read failing open, and our own enable having landed.
+      "enable-redundant",
+      "enable-replayed",
+    ]) {
       assert.equal(holdMsFor(rule, 1), null, rule);
+      const { b, lines } = backoff();
+      assert.equal(b.note(buy(), LIMITS, rule, T0), null, rule);
+      assert.equal(b.held(buy(), LIMITS, T0 + 1), null, rule);
+      assert.deepEqual(lines, [], `${rule}: nothing held, nothing said`);
     }
     // The sponsor saying no is not the sponsor being unreachable.
     for (const rule of ["sponsor-refused", "sponsor-absurd", "gas-unreadable", "prefund-short"]) {
       assert.equal(holdMsFor(rule, 1), 5 * MIN, rule);
     }
+  });
+
+  it("a refusal that MAY BE A MOMENT is held five minutes, never longer, and adds no strike", () => {
+    for (const rule of ["gas-unreadable", "gas-unstable"]) {
+      for (const s of [1, 2, 4, 9]) assert.equal(holdMsFor(rule, s), 5 * MIN, `${rule} at strike ${s}`);
+      // Four in a row on one pair, each after the last ran out: five minutes each.
+      const { b, lines } = backoff();
+      for (let i = 0; i < 4; i++) {
+        const h = b.note(buy(), LIMITS, rule, T0 + i * 10 * MIN)!;
+        assert.equal(h.untilMs, T0 + i * 10 * MIN + 5 * MIN, `${rule} #${i + 1}`);
+      }
+      assert.match(lines[3]!, new RegExp(`for 5m after ${rule} \\(may be transient, not escalated\\)$`));
+      // And a refusal that IS a fact, after them, is the first strike.
+      const fact = b.note(buy(), LIMITS, "gas-absurd", T0 + 50 * MIN)!;
+      assert.equal(fact.strikes, 1, rule);
+      assert.equal(fact.untilMs, T0 + 55 * MIN, rule);
+    }
+  });
+
+  it("a transient refusal neither resets nor raises a fact's strikes", () => {
+    const { b } = backoff();
+    b.note(buy(), LIMITS, "gas-absurd", T0); // strike 1, 5m
+    b.note(buy(), LIMITS, "gas-unreadable", T0 + 6 * MIN); // still 1
+    assert.equal(b.note(buy(), LIMITS, "gas-absurd", T0 + 12 * MIN)!.strikes, 2);
   });
 
   it("a hold ends when its time does, and a refusal after it counts as the next strike", () => {
