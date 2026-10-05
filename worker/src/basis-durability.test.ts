@@ -11,6 +11,10 @@
  * up → child rebuilt → seed back down → sell → realised written → basis
  * consumed → and the result survives a further restart. Nothing is hand-seeded
  * after the restart; the seed plan is the thing under test.
+ *
+ * And the graded FLOOR beside it, which dies with the same sqlite: the floor
+ * seed is driven through its real reads and writes (seedPositionFloors) over
+ * sqlite standing in for both sides.
  */
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -18,7 +22,14 @@ import { describe, it } from "node:test";
 
 import { applyFill } from "./basis";
 import { realisedForFill } from "./basis-order";
-import { basisSeedLine, planBasisSeed, type BasisSeedRow } from "./basis-seed";
+import {
+  basisSeedLine,
+  floorSeedLine,
+  planBasisSeed,
+  planFloorSeed,
+  seedPositionFloors,
+  type BasisSeedRow,
+} from "./basis-seed";
 import { wrapSqlite } from "./db";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 
@@ -261,5 +272,175 @@ describe("and it never restores the cost of something already sold", () => {
       heldSymbols: ["HELD"],
     });
     assert.deepEqual(plan.rows.map((r) => r.symbol), ["HELD"]);
+  });
+});
+
+// ── THE FLOOR ───────────────────────────────────────────────────────────────
+
+/** The same account as AGENT, as a grant spells it. The child reads by THIS. */
+const CHECKSUMMED = "0xA96bF429888E1aAB4255762d17d29c53F6A0370D";
+
+const holds = (raw: DatabaseSync, agent: string, symbol: string, rawBalance: string) =>
+  raw
+    .prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, value_usdg) VALUES (?, ?, '0xt', ?, 1.0)`)
+    .run(agent, symbol, rawBalance);
+
+const floorIn = (raw: DatabaseSync, agent: string, mode: string, symbol: string, stopBps: number | string, at = 1000) =>
+  raw
+    .prepare(`INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at) VALUES (?, ?, ?, ?, 'graded', ?, ?)`)
+    .run(agent, mode, symbol, stopBps, `graded at ${symbol}'s entry`, at);
+
+const floorsOf = (raw: DatabaseSync) =>
+  raw.prepare(`SELECT agent_id, mode, symbol, stop_bps, rung, why, at FROM position_floors ORDER BY mode, symbol`).all() as {
+    agent_id: string; mode: string; symbol: string; stop_bps: number; rung: string; why: string; at: number;
+  }[];
+
+/** The child's own read (store.ts positionFloors): the exact spelling, one rail. */
+const childReads = (raw: DatabaseSync, agentId: string, mode: string) =>
+  (raw.prepare(`SELECT symbol, stop_bps FROM position_floors WHERE agent_id = ? AND mode = ?`).all(agentId, mode) as {
+    symbol: string; stop_bps: number;
+  }[]).map((r) => `${r.symbol}=${Number(r.stop_bps)}`).sort();
+
+describe("a held position's graded floor survives the redeploy too", () => {
+  it("BUY → floor stamped → mirror → child rebuilt → floor back, with NO basis row on either side", async () => {
+    const shared = sharedDb();
+    shared.raw.prepare(`INSERT INTO agents (smart_account, epoch) VALUES (?, 1)`).run(AGENT);
+
+    // ── the entry, in the child's own ledger: a position and its graded floor,
+    // and deliberately no cost — the floor must not wait on the basis.
+    const first = fresh();
+    first.raw.prepare(`INSERT INTO agents (smart_account, epoch) VALUES (?, 1)`).run(AGENT);
+    holds(first.raw, AGENT, "PEPE", (4n * 10n ** 18n).toString());
+    floorIn(first.raw, AGENT, "live", "PEPE", 2500, 1234);
+
+    // ── up, through the REAL mirror ───────────────────────────────────────
+    await mirrorTenant({ tenant: "t1", child: first.db, shared: shared.db, nowSec: 1000 });
+    assert.equal(floorsOf(shared.raw).length, 1, "the shared ledger must hold the floor");
+
+    // ── the redeploy, and the seeds ──────────────────────────────────────
+    const rebuilt = fresh();
+    const basis = seed(rebuilt.raw, shared.raw);
+    assert.match(basis.skipped ?? "", /shared ledger holds no basis/, "no basis comes back — and that must not matter");
+
+    const plan = await seedPositionFloors({ child: rebuilt.db, shared: shared.db, account: AGENT });
+    assert.equal(plan.skipped, null);
+    assert.match(floorSeedLine("t1", plan), /restored 1 position floor\(s\).*live:PEPE=2500bps/);
+
+    assert.deepEqual(childReads(rebuilt.raw, AGENT, "live"), ["PEPE=2500"], "THE FLOOR MUST BE BACK, where the child looks");
+    const [back] = floorsOf(rebuilt.raw);
+    assert.equal(back!.rung, "graded");
+    assert.equal(back!.why, "graded at PEPE's entry", "the sentence the owner reads comes back with the number");
+    assert.equal(Number(back!.at), 1234, "stamped once and never moved — the restore keeps the original stamp");
+  });
+
+  it("a symbol the book no longer holds gets NO floor back", async () => {
+    const shared = sharedDb();
+    holds(shared.raw, AGENT, "HELD", "5");
+    holds(shared.raw, AGENT, "SOLD", "0"); // a zero balance is not a holding
+    floorIn(shared.raw, AGENT, "live", "HELD", 2000);
+    floorIn(shared.raw, AGENT, "live", "SOLD", 2000); // stale: the mirror skipped its delete
+    floorIn(shared.raw, AGENT, "live", "GONE", 2000); // no position row at all
+
+    const child = fresh();
+    const plan = await seedPositionFloors({ child: child.db, shared: shared.db, account: AGENT });
+    assert.deepEqual(plan.rows.map((r) => r.symbol), ["HELD"]);
+    assert.deepEqual(childReads(child.raw, AGENT, "live"), ["HELD=2000"]);
+  });
+
+  it("and with nothing held, nothing is restored", async () => {
+    const shared = sharedDb();
+    floorIn(shared.raw, AGENT, "live", "PEPE", 2000);
+    const child = fresh();
+    const plan = await seedPositionFloors({ child: child.db, shared: shared.db, account: AGENT });
+    assert.match(plan.skipped ?? "", /no held position on record/);
+    assert.equal(floorsOf(child.raw).length, 0);
+  });
+
+  it("a child that already has floors keeps its own — none is overwritten, none is added", async () => {
+    const shared = sharedDb();
+    holds(shared.raw, AGENT, "HELD", "5");
+    holds(shared.raw, AGENT, "OTHER", "5");
+    floorIn(shared.raw, AGENT, "live", "HELD", 3000);
+    floorIn(shared.raw, AGENT, "live", "OTHER", 2000);
+
+    const child = fresh();
+    floorIn(child.raw, AGENT, "live", "HELD", 1200);
+
+    const plan = await seedPositionFloors({ child: child.db, shared: shared.db, account: AGENT });
+    assert.match(plan.skipped ?? "", /child already holds 1 floor row/);
+    // Its own level stands, and a shared row it does not carry is not copied in
+    // beside it: shared is never newer than a child that kept its table, only
+    // possibly stale.
+    assert.deepEqual(childReads(child.raw, AGENT, "live"), ["HELD=1200"]);
+  });
+
+  it("written in the GRANT'S spelling, whatever spelling shared holds — or the child would never read it", async () => {
+    const shared = sharedDb();
+    holds(shared.raw, AGENT, "PEPE", "5"); // shared holds the lower-cased spelling
+    floorIn(shared.raw, AGENT, "live", "PEPE", 2500);
+
+    const child = fresh();
+    const plan = await seedPositionFloors({ child: child.db, shared: shared.db, account: CHECKSUMMED });
+    assert.equal(plan.rows.length, 1, "the read is case-blind");
+    assert.deepEqual(floorsOf(child.raw).map((r) => r.agent_id), [CHECKSUMMED]);
+    assert.deepEqual(childReads(child.raw, CHECKSUMMED, "live"), ["PEPE=2500"], "the child's exact-match read finds it");
+    assert.deepEqual(childReads(child.raw, AGENT, "live"), [], "and no row is left under a spelling the child never asks for");
+  });
+
+  it("each mode's floor for a held symbol comes back; an unreadable or non-positive stop does not", async () => {
+    const shared = sharedDb();
+    for (const s of ["PEPE", "ZERO", "ODD"]) holds(shared.raw, AGENT, s, "5");
+    floorIn(shared.raw, AGENT, "live", "PEPE", 2500);
+    floorIn(shared.raw, AGENT, "paper", "PEPE", 1800);
+    floorIn(shared.raw, AGENT, "live", "ZERO", 0); // already "no floor" to the strategist
+    floorIn(shared.raw, AGENT, "live", "ODD", "not-a-number");
+
+    const child = fresh();
+    await seedPositionFloors({ child: child.db, shared: shared.db, account: AGENT });
+    assert.deepEqual(childReads(child.raw, AGENT, "live"), ["PEPE=2500"]);
+    assert.deepEqual(childReads(child.raw, AGENT, "paper"), ["PEPE=1800"], "each rail reads only its own");
+  });
+
+  it("two spellings of one account in shared resolve to the EARLIER stamp — the first write wins", async () => {
+    const shared = sharedDb();
+    holds(shared.raw, AGENT, "PEPE", "5");
+    floorIn(shared.raw, AGENT, "live", "PEPE", 3000, 2000);
+    floorIn(shared.raw, CHECKSUMMED, "live", "PEPE", 1500, 1000);
+
+    const child = fresh();
+    const plan = await seedPositionFloors({ child: child.db, shared: shared.db, account: CHECKSUMMED });
+    assert.equal(plan.rows.length, 1);
+    assert.deepEqual(childReads(child.raw, CHECKSUMMED, "live"), ["PEPE=1500"]);
+  });
+
+  it("a seed cut short leaves NO floor, so the next spawn still restores them all", async () => {
+    const shared = sharedDb();
+    holds(shared.raw, AGENT, "HELD", "5");
+    holds(shared.raw, AGENT, "BOOM", "5");
+    floorIn(shared.raw, AGENT, "live", "HELD", 2000);
+    floorIn(shared.raw, AGENT, "live", "BOOM", 2000);
+
+    const child = fresh();
+    child.raw.exec(
+      `CREATE TRIGGER boom BEFORE INSERT ON position_floors WHEN NEW.symbol = 'BOOM'
+       BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;`,
+    );
+    await assert.rejects(seedPositionFloors({ child: child.db, shared: shared.db, account: AGENT }), /disk I\/O error/);
+    // A partial table would read as "the child's own" next time and the rest
+    // would never come back.
+    assert.equal(floorsOf(child.raw).length, 0, "all or nothing");
+
+    child.raw.exec(`DROP TRIGGER boom`);
+    const again = await seedPositionFloors({ child: child.db, shared: shared.db, account: AGENT });
+    assert.equal(again.rows.length, 2);
+    assert.deepEqual(childReads(child.raw, AGENT, "live"), ["BOOM=2000", "HELD=2000"]);
+  });
+
+  it("an UNKNOWN holding set restores nothing — it is not a licence", () => {
+    const plan = planFloorSeed({
+      childRowCount: 0,
+      shared: [{ mode: "live", symbol: "PEPE", stopBps: 2000, rung: "graded", why: "w", at: 1 }],
+    });
+    assert.equal(plan.rows.length, 0);
   });
 });
