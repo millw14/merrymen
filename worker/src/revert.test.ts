@@ -174,6 +174,16 @@ test("REGRESSION: AA codes are word-bounded and case-sensitive, like the three-l
     "signature: 0xAA23ff00",
     "aa21",
     "aa24 reverted",
+    // Upper-case, and at one END of a hex run, so only the boundary on the
+    // OTHER side refuses it. Each half of \b…\b is pinned on its own here:
+    // without these, /AA21\b/ or /\bAA21/ alone passed this whole file, and the
+    // seeded blobs below almost never put an exact upper-case code at an edge.
+    "reverted on-chain: 0x71c4efed (0x9f3cdeadbeefAA21)",
+    "reverted on-chain: 0x71c4efed (0x9f3cdeadbeefAA23)",
+    "signature: 0xBFBA14D4FF10D1484c05AA24\n\nDetails: x",
+    "reverted on-chain: 0x71c4efed (AA21e07b5d14)",
+    "signature: AA23e6d1AEBF7B5B",
+    "signature: AA24e6d1AEBF7B5B",
   ]) {
     assert.equal(
       classifyRevert(innocent).rule,
