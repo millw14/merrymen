@@ -69,7 +69,9 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
   // The calls that sign, send or fill. Each must exist, so the scan is not
   // vacuous, and each must sit inside the funnel's body.
   const MOVES: [string, RegExp][] = [
-    ["the executor's send", /\bexecutor\.execute\(/],
+    // Any `.execute(` at all, not only `executor.execute(`: a send through a
+    // renamed handle is still a send. index.ts has no other method by that name.
+    ["the executor's send", /\.execute\(/],
     ["the key install on its own", /(?<!function )\binstallKeyAlone\(/],
     ["the broker lane's place", /\borderExec\.place\(/],
     ["the paper fill", /\bapplyPaperIntent\(/],
@@ -87,6 +89,12 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
       }
     });
   }
+
+  it("nothing in index.ts installs a key straight off the executor — only through the booking below", () => {
+    for (const i of sites(/\.installKey\(/)) {
+      assert.ok(inside(LOCKED, i), `worker/src/index.ts:${lineOf(i)} installs a key outside processIntentLocked`);
+    }
+  });
 
   it("the key install itself is reached only from installKeyAlone", () => {
     const owner = span("  async function installKeyAlone(");
