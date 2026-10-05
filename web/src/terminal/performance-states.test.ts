@@ -240,6 +240,14 @@ test("a stale valuation says when it was taken in visible text, and the board sa
   assert.ok(sidebar(agents).querySelector(".performance-asof"), "the sidebar says it too");
   assert.match((await searchRows(agents, "old"))[0]!, /as of \S/);
   assert.match((await profilePage(agents[0]!)).text, /as of \S/);
+  // A row the recovery hold kept already says "Last valued" on the board, so
+  // it is not said twice there — and the other surfaces, which do not print
+  // that, still say when.
+  const { agents: kept } = await read([row("Kept", { mode: "idle", notRunning: true, performance: performance({ equityAt: stale, pnlAt: stale }) })]);
+  const keptRow = board(kept).querySelector(".rank")!;
+  assert.match(keptRow.textContent!, /Last valued \S/);
+  assert.equal(keptRow.querySelector(".performance-asof"), null);
+  assert.ok(sidebar(kept).querySelector(".performance-asof"));
   // Fresh: nothing about time is added.
   const { agents: current } = await read([row("Now")]);
   assert.equal(staleSince(current, NOW), null);

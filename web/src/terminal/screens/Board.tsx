@@ -201,7 +201,7 @@ function Rank({
             <span className="rank-have" aria-label={`Current value ${performance.value}`}>{performance.value}</span>
             {a.performance && <small className="rank-book">{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
             {performance.lastValued !== null && <small className="rank-book">{performance.lastValued}</small>}
-            {performance.asOf !== null && <small className="rank-book performance-asof">{performance.asOf}</small>}
+            {performance.lastValued === null && performance.asOf !== null && <small className="rank-book performance-asof">{performance.asOf}</small>}
           </span>
           <span className="rank-return" title={performance.title}>
             <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>

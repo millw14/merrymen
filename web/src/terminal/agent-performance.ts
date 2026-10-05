@@ -178,10 +178,10 @@ export function performanceOf(agent: LiveAgent, nowSec?: number) {
     note,
     /**
      * WHEN, AS VISIBLE TEXT, once the valuation is stale — a tooltip is
-     * something nobody reads on a phone. Left to `lastValued` on a row that
-     * already says it; null without a clock (`nowSec`) to judge by.
+     * something nobody reads on a phone. Null without a clock (`nowSec`) to
+     * judge by. A row that prints `lastValued` already says it.
      */
-    asOf: nowSec !== undefined && !notRunning && equityAt !== null && nowSec - equityAt > STALE_VALUATION_SEC
+    asOf: nowSec !== undefined && equityAt !== null && nowSec - equityAt > STALE_VALUATION_SEC
       ? `as of ${shortDateTime(equityAt * 1000)}` : null,
     /** This book's trades (BookPerformance.fills); null when unread or from an older server. */
     fills: p?.fills ?? null,
