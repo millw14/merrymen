@@ -10,6 +10,7 @@ import { RecoveryReplyBotLeases, type ReplyLease } from "./recovery-reply-lease"
 import { getMe, getUpdates, sendMessage, sendPhotoBytes, esc, answerCallbackQuery, type TgMessage, type TgCallback, type TelegramOpts } from "./telegram/api";
 import { createRecoveryPublicReply, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_UNAVAILABLE, RECOVERY_PUBLIC_BUSY, RECOVERY_PUBLIC_BUTTON_HELD, isRecoveryPublicRequest, parseRecoveryPublicAsk } from "./telegram/recovery-public-reply";
 import { createRecoveryPublicLook } from "./telegram/recovery-public-transport";
+import { RECOVERY_REPLY_CONTROLS_SCHEMA, recoveryControlOf, recoveryControlsEnabled, recordRecoveryControl, type RecoveryControl } from "./recovery-reply-controls";
 interface ReplyConnection extends ReplyQuery {
     release(error?: Error): void;
 }
@@ -300,6 +301,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
             return;
         await transaction(shared, guard, async (db) => {
             await db.query(RECOVERY_REPLY_SCHEMA);
+            await db.query(RECOVERY_REPLY_CONTROLS_SCHEMA);
         });
         const transport = options.transport ?? { getMe, getUpdates, sendMessage, sendPhotoBytes, answerCallbackQuery };
         const reply = options.reply ?? createRecoveryPublicReply({ look: createRecoveryPublicLook(), now });
@@ -396,22 +398,31 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                     msg?: TgMessage;
                     cb?: TgCallback;
                     privacy?: ReplyPrivacyOp;
+                    control?: RecoveryControl;
+                    controlReply?: string;
                 }[] = [...polled.messages.map(msg => ({ id: msg.updateId, msg })), ...polled.callbacks.map(cb => ({ id: cb.updateId, cb })),
                     ...polled.members.map(u => ({ id: u.updateId })), ...polled.service.map(u => ({ id: u.updateId }))].sort((a, b) => a.id - b.id).filter(u => u.id >= state.offset);
                 if (units.length > 100 || units.some((u, i) => !Number.isSafeInteger(u.id) || u.id < 0 || u.id >= Number.MAX_SAFE_INTEGER || (i > 0 && units[i - 1]!.id === u.id))
                     || !Number.isSafeInteger(polled.nextOffset) || polled.nextOffset < state.offset || units.some(u => u.id >= polled.nextOffset))
                     throw recoveryReplyRefused();
                 for (const unit of units)
-                    if (unit.msg)
+                    if (unit.msg) {
                         unit.privacy = privacyOf(unit.msg, s, username, now());
-                // Coalesce the drain into one bounded transaction. Privacy is durable before
+                        unit.control = recoveryControlOf(unit.msg, s, username, {
+                            armedAt: state.armedAt, nowSec: Math.floor(now() / 1000), groupsEnabled: groupsOn(),
+                        }) ?? undefined;
+                    }
+                // Coalesce the drain into one bounded transaction. Privacy and restrictive owner controls are durable before
                 // any acknowledgement; ignored/raw updates advance the same stream cutoff.
                 const previousOffset = state.offset;
                 await transaction(shared, guard, async (db) => {
                     await authority(db, s, true);
                     let cutoff = state.offset;
                     for (const unit of units)
-                        if (unit.privacy) {
+                        if (unit.privacy || unit.control) {
+                            if (unit.control && unit.msg)
+                                unit.controlReply = await recordRecoveryControl(db, s, unit.msg, unit.control, now(),
+                                    recoveryControlsEnabled(s, env.MERRYMEN_TELEGRAM_CONTROL));
                             await advanceReplyOffset(db, s, dek, unit.id + 1, now(), [], unit.privacy);
                             cutoff = unit.id + 1;
                         }
@@ -429,7 +440,10 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                         text: string;
                         photo?: Uint8Array;
                     } | undefined;
-                    if (unit.privacy) {
+                    if (unit.controlReply) {
+                        text = unit.controlReply;
+                    }
+                    else if (unit.privacy) {
                         text = "Your forget request was applied to retained shared memory. Historical local memory stays held until its privacy proof is reconciled.";
                     }
                     else if (unit.cb) {
@@ -498,7 +512,7 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
                 };
                 // No queue grows beyond a Telegram batch. Public jobs have eight slots;
                 // one stalled lookup/send cannot consume the other bots' actors or clocks.
-                const actionable = jobs.filter(({ unit }) => unit.privacy || unit.cb || (unit.msg && (unit.msg.chatId > 0 || groupsOn()) && publicText(unit.msg, s, username, firstName) !== null)).slice(0, 16);
+                const actionable = jobs.filter(({ unit }) => unit.controlReply || unit.privacy || unit.cb || (unit.msg && (unit.msg.chatId > 0 || groupsOn()) && publicText(unit.msg, s, username, firstName) !== null)).slice(0, 16);
                 const results = await Promise.allSettled(actionable.map(async (job, i) => {
                     // No fleet-wide lookup/render/send queue. Privacy is already durable even
                     // when overload cannot admit another nonfinancial acknowledgement.

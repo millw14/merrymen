@@ -61,6 +61,8 @@ export interface ReplySnapshot {
     botUsername?: string;
     rooms: number[];
     groupCoinsEnabled: boolean;
+    /** Preserve file > operator environment > shared default control semantics. */
+    telegramControlEnabled?: boolean;
     receipt: string;
 }
 /** Returns null for explicitly unavailable scope. Corrupt/unknown reads refuse. */
@@ -93,7 +95,7 @@ export async function readReplySnapshot(db: ReplyQuery, grant: ReplyGrant, dek: 
         throw recoveryReplyRefused();
     if (!Array.isArray(cfg.telegramAllowlist) || cfg.telegramAllowlist.length > 100 || cfg.telegramAllowlist.some(v => typeof v !== "number" || !Number.isSafeInteger(v) || v === 0))
         throw recoveryReplyRefused();
-    for (const name of ["telegramGroupsEnabled", "telegramGroupCoinsEnabled"]) {
+    for (const name of ["telegramGroupsEnabled", "telegramGroupCoinsEnabled", "telegramControlEnabled"]) {
         if (cfg[name] !== undefined && typeof cfg[name] !== "boolean")
             throw recoveryReplyRefused();
     }
@@ -162,7 +164,8 @@ export async function readReplySnapshot(db: ReplyQuery, grant: ReplyGrant, dek: 
         }
     }
     const receipt = JSON.stringify([grant.receipt, settings.rows[0]!.incarnation, hash(settings.rows[0]!.sealed), claim, link, held, rooms]);
-    return { grant, botId, token, tokenTag, ownerId, allowlist, claimStamp, rooms, groupCoinsEnabled, receipt };
+    return { grant, botId, token, tokenTag, ownerId, allowlist, claimStamp, rooms, groupCoinsEnabled, receipt,
+        ...(typeof cfg.telegramControlEnabled === "boolean" ? { telegramControlEnabled: cfg.telegramControlEnabled } : {}) };
 }
 export async function assertReplySnapshot(db: ReplyQuery, snapshot: ReplySnapshot, dek: Buffer, lock = false): Promise<void> {
     const current = await readReplySnapshot(db, snapshot.grant, dek, lock);
