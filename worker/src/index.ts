@@ -123,7 +123,7 @@ import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOu
 import { recoveryCommandRefused } from "./recovery-command-barrier";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
-import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, admissionFrom, admissionRefusal, drainIntentChain } from "./worker-admission";
+import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, DrainingRefused, admissionFrom, admissionRefusal, drainIntentChain } from "./worker-admission";
 import { closeStore } from "./store";
 import { CoalescedRefresh } from "./coalesced-refresh";
 import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
@@ -7769,6 +7769,10 @@ async function main() {
    * once, not every tick.
    */
   async function installKeyAlone(agentId: string, executor: AgentExecutor): Promise<void> {
+    // A worker on its way out installs nothing: the install is an operation of
+    // its own, with gas, and the next process tries again (worker-admission.ts
+    // DrainingRefused). Before the half-hour mark is set, so it is not owed one.
+    if (draining) return;
     const last = keyInstallTriedAt.get(executor);
     if (last !== undefined && Date.now() - last < KEY_INSTALL_RETRY_MS) return;
     keyInstallTriedAt.set(executor, Date.now());
@@ -7782,6 +7786,11 @@ async function main() {
       refreshBudget: () => refreshBudget(agentId),
       event: (level, message) => addEvent(agentId, level, message),
       resolveMinutes: STRANDED_INTERVAL_SEC / 60,
+      // And again at the broadcast itself, for a SIGTERM that lands while the
+      // install is being estimated and signed.
+      beforeBroadcast: () => {
+        if (draining) throw new DrainingRefused();
+      },
     }, agentId, executor);
   }
 
@@ -7793,8 +7802,13 @@ async function main() {
    * fetched or anything built — admission-invariant.test.ts pins both halves.
    *
    * `draining` is raised by the SIGTERM handler at the bottom of main(). From
-   * then on every intent that reaches the queue is refused; the one already on
-   * it is let finish.
+   * then on every intent that reaches the queue is refused. The one already on
+   * it is let finish only if it is already out: `draining` is asked again at
+   * the last moment before each broadcast — the broker lane's place, the live
+   * rail's reservation, the executor's onSubmitted hook and the key install —
+   * so an intent that passed the gate a moment before the signal is refused
+   * there, before it is sent (worker-admission.ts DrainingRefused). Only a paper
+   * fill, which nothing outside this process ever sees, runs to its row.
    *
    * `lastHeldLegs` is the tick's latest answer to which curve legs the book
    * holds (heldLegs, beside the strategy loop), so an exits-only worker asks the
@@ -8226,6 +8240,20 @@ async function main() {
         return;
       }
 
+      // STILL NOT DRAINING? The review above was an await, and the gate at the
+      // top was asked before it. A live broker's place() is a real order, so it
+      // is the last moment to refuse one on the way out (DrainingRefused).
+      if (draining) {
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          amount_usdg: usdgNum(review.notionalUsdg),
+          status: "rejected",
+          reject_rule: "draining",
+        });
+        return;
+      }
       const placed = await orderExec.place(order, review);
       // Counters move on the REVIEWED notional — the amount the wall approved.
       // Held as a reservation until this order's row reaches the ledger below.
@@ -8477,6 +8505,30 @@ async function main() {
       return;
     }
 
+    // ── STILL NOT DRAINING? ASKED AGAIN, BEFORE ANYTHING IS RESERVED ─────
+    //
+    // The admission gate at the top was asked before the risk peak, the scout
+    // context and the transfer total were read, each an await long enough for
+    // a SIGTERM to land in. An intent that passed it a moment before the signal
+    // must not go on to reserve, quote and sign after it: before the handler
+    // existed node died on the signal and such an intent never went out, and
+    // draining must not change that. Here, before the reservation, so the row
+    // is the plain refusal the gate writes; the executor's onSubmitted hook
+    // below asks once more, for a signal that lands while this one is quoted
+    // and signed (worker-admission.ts DrainingRefused).
+    if (draining) {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: "draining",
+      });
+      return;
+    }
+
     // Reserve spend/ops BEFORE the await-heavy execution and roll back on
     // failure. Incrementing only after success opens a TOCTOU window: a chat
     // trade interleaved with a tick could both pass checkPolicy against the
@@ -8520,6 +8572,11 @@ async function main() {
        */
       const submitHooks: ExecuteHooks = {
         onSubmitted: async (userOpHash, op) => {
+          // THE LAST MOMENT BEFORE THE BROADCAST, and the last place a worker
+          // told to leave can still decline to send: signed, hashed, not yet
+          // written and not yet out. A throw here refuses it with nothing spent
+          // (the catch books it `draining`, beside NotRecorded).
+          if (draining) throw new DrainingRefused();
           const wrote = await addTrade({
             agent_id: agentId,
             kind: intent.kind,
@@ -10124,6 +10181,26 @@ async function main() {
           amount_usdg: usdgNum(notional),
           status: "rejected",
           reject_rule: "not-recorded",
+          ...sim,
+        });
+        return;
+      }
+
+      // AND ITS SIBLING ON THE WAY OUT. The worker began draining while this
+      // operation was quoted and signed, and onSubmitted declined to send it —
+      // thrown before the pre-broadcast row, so there is no `submitted` row to
+      // settle and nothing was spent. The refusal is the row, under the rule
+      // the admission gate writes (worker-admission.ts DrainingRefused).
+      if (e instanceof DrainingRefused) {
+        releaseBudget();
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          ...tokenLegs(intent),
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: e.rule,
           ...sim,
         });
         return;
@@ -14192,9 +14269,11 @@ async function main() {
    *   2. the clock stops — no tick starts on the way out, and no order file is
    *      claimed only to be refused; it stays for the next process
    *      (command-wake.ts stop);
-   *   3. the intent chain is waited for, at most DRAIN_INTENT_CHAIN_MS: the
-   *      trade on it finishes and writes its row, and anything queued behind it
-   *      is refused and written;
+   *   3. the intent chain is waited for, at most DRAIN_INTENT_CHAIN_MS: a trade
+   *      already broadcast reads its receipt and writes its row; one not yet
+   *      sent is refused at its broadcast (`draining`, asked again there — see
+   *      the admission block above processIntentLocked), and anything queued
+   *      behind it is refused at the gate and written;
    *   4. the ledger is closed (store.ts closeStore);
    *   5. exit 0, in the same turn as the close, so nothing writes after it.
    *
