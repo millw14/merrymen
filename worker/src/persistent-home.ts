@@ -638,9 +638,10 @@ export function controlAdoptedPersistentHomeHalt(
 ): PersistentHomeHaltControl | null {
   const release = env.MERRYMEN_RELEASE_HOME_HALT, rehalt = env.MERRYMEN_REHALT_HOME;
   if (release === undefined && rehalt === undefined) return null;
-  if ([release, rehalt].some(token => token !== undefined && !TOKEN.test(token))) {
-    throw refuse("the halt release or re-halt operation token is invalid");
-  }
+  // While a re-halt is asked for, only its own value is read: a release
+  // variable left behind, stale or mistyped, must never stop a rollback.
+  const asked = rehalt ?? release!;
+  if (!TOKEN.test(asked)) throw refuse("the halt release or re-halt operation token is invalid");
   const pinned = pinnedHalt(env);
   if (pinned === null) throw refuse("a halt release or re-halt also requires the pinned original halt hash");
   // The scope a release would start, read before the volume is touched: a
@@ -650,9 +651,7 @@ export function controlAdoptedPersistentHomeHalt(
     const saved = readManifest(root);
     if (!saved) throw refuse("a halt release or re-halt requires the adopted persistent manifest");
     const token = saved.manifest.handover.operationToken;
-    if ([release, rehalt].some(value => value !== undefined && value !== token)) {
-      throw refuse("the halt release or re-halt operation token does not match the persistent manifest");
-    }
+    if (asked !== token) throw refuse("the halt release or re-halt operation token does not match the persistent manifest");
     if (!readPreAdoption(root, pinned, token)) {
       throw refuse("an env halt release or re-halt applies only to a volume adopted under the pinned original halt");
     }

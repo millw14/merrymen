@@ -436,8 +436,10 @@ test("the env re-halt publishes a canonical halt without replacing one, records 
     assert.throws(() => controlAdoptedPersistentHomeHalt(env, f.options), /Persistent home refused/);
   }
   assert.equal(existsSync(f.halt), false);
-  const rehalted = controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!;
+  // A release variable left behind, naming another operation, does not stop the rollback.
+  const rehalted = controlAdoptedPersistentHomeHalt({ ...f.rehalt, MERRYMEN_RELEASE_HOME_HALT: "an-earlier-operation" }, f.options)!;
   assert.deepEqual([rehalted.action, rehalted.handoverState], ["rehalted", "held"]);
+  assert.match(rehalted.detail, /MERRYMEN_RELEASE_HOME_HALT is ignored/);
   const manifest = JSON.parse(readFileSync(f.manifest, "utf8")), st = lstatSync(f.halt, { bigint: true });
   assert.equal(manifest.handover.state, "held");
   assert.equal(manifest.handover.halt.inode, String(st.ino));
@@ -448,10 +450,12 @@ test("the env re-halt publishes a canonical halt without replacing one, records 
   assert.equal(lstatSync(f.receipt).mode & 0o777, 0o600);
   assert.equal(preparePersistentHomeForHandover(f.env, f.options)!.handoverState, "held");
   assert.equal(controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!.action, "already-held");
-  // A release variable left behind never defeats the rollback.
-  const both = controlAdoptedPersistentHomeHalt({ ...f.rehalt, MERRYMEN_RELEASE_HOME_HALT: OP, MERRYMEN_FLEET_ROLLOUT: SCOPE }, f.options)!;
-  assert.deepEqual([both.action, both.handoverState], ["already-held", "held"]);
-  assert.match(both.detail, /MERRYMEN_RELEASE_HOME_HALT is ignored/);
+  // A release variable left behind never defeats the rollback, whatever it says.
+  for (const MERRYMEN_RELEASE_HOME_HALT of [OP, "not a token", "another-operation"]) {
+    const both = controlAdoptedPersistentHomeHalt({ ...f.rehalt, MERRYMEN_RELEASE_HOME_HALT, MERRYMEN_FLEET_ROLLOUT: SCOPE }, f.options)!;
+    assert.deepEqual([both.action, both.handoverState], ["already-held", "held"]);
+    assert.match(both.detail, /MERRYMEN_RELEASE_HOME_HALT is ignored/);
+  }
   assert.equal(existsSync(f.halt), true);
   // Once the re-halt variable goes, the same reviewed release applies again.
   assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
