@@ -12,9 +12,9 @@ ordinary startup refuses the volume too.
 This page is the operator runbook for getting from there to trading agents,
 every step from the Railway dashboard, followed by what each mechanism does:
 
-- [The runbook](#the-runbook-from-todays-production-to-trading-agents): steps 0 to 7, each with what to check and how to roll back.
+- [The runbook](#the-runbook-from-todays-production-to-trading-agents): steps 0 to 8, each with what to check and how to roll back.
 - [Owner stop requests](#owner-stop-requests-applied-before-any-worker-arms) (`worker/src/recovery-reply-arm.ts`): every recorded `/pause` and `/kill` is applied once before a worker arms.
-- [Attested-gap admission](#attested-gap-admission) (`worker/src/ledger-resume.ts`): preview, approve, archive the home, register an empty book under the approval, spawn through the ordinary path.
+- [Attested-gap admission](#attested-gap-admission) (`worker/src/ledger-resume.ts`): preview, approve, archive the home, register an empty book under the approval, prove its seed, spawn through the ordinary path.
 - [The volume steps](#the-volume-steps-adopt-release-re-halt) (`worker/src/persistent-home.ts`): adopt the volume under its halt, release the halt into a rollout scope, re-halt it for a rollback.
 
 This is an application change requiring Milla's review under `AGENTS.md`.
@@ -47,11 +47,25 @@ Nothing on this page has been run against production by its author.
   budget seed, deploy guard, drain) and this branch (owner controls and
   attested-gap admission), each merged after review with CI green.
 - Change one thing per step, and review each staged variable change before you
-  deploy it. Never leave staged changes behind.
-- From step 2 until each agent is admitted, that agent's bot does not answer:
-  the listener stops when the orchestrator role starts (the sidecar that would
-  keep it answering, B8, is not built). Steps 2 to 4 take three deploys; keep
-  the gap between them short.
+  deploy it. Never leave staged changes behind: deploy them or discard them
+  before you use Rollback or Redeploy on any deployment.
+- **Bots go silent from step 2, and some stay silent.** The listener stops
+  when the orchestrator role starts (the sidecar that would keep it answering,
+  B8, is not built). An admitted agent's own worker answers its bot again. A
+  tenant that is never admitted — it does not pass the preview, its grant
+  expired, or it is still waiting for a slot under the process cap — gets no
+  replies at all until it is admitted or B8 ships. Today the listener answers
+  about 9 bots; before step 4, check the step 2 preview for which of those do
+  not pass, and decide with that list in hand. Steps 2 to 4 take three
+  deploys; keep the gap between them short.
+- **At most 48 worker and hold processes run at once** on one orchestrator
+  (`MAX_LOCAL_CHILD_PROCESSES`; it protects the container's PID and thread
+  limit and must not be raised to fit). A rollout naming more tenants than fit
+  starts them in roster order and defers the rest, each pass logging
+  `[alert] 0x…: worker deferred; local process cap 48 reached`, until a slot
+  frees. With 74 unexpired grants this matters: admit live holders first, then
+  paper tenants in batches (steps 5 and 6), and expect that not every tenant
+  can run at once on this one service.
 
 ### Step 0: back up Postgres
 
@@ -71,14 +85,15 @@ Railway → orchestrator service → **Variables**. In one staged change:
 | `MERRYMEN_FLEET_SERVICE_ID` | the service's own ID | orchestrator service → **Settings** → Service ID (begins `227ff49a`) |
 | `MERRYMEN_PERSISTENT_HOME_REQUIRED` | `1` | keep as it is |
 | `MERRYMEN_HOME`, `MERRYMEN_HOME_VOLUME_ID` | unchanged | keep as they are |
-| `MERRYMEN_INITIAL_HANDOVER` | unchanged | keep; it is the operation token steps 4 and the rollback use |
+| `MERRYMEN_INITIAL_HANDOVER` | unchanged | keep; it is the operation token step 4 and the rollback use |
 | `MERRYMEN_FLEET_ROLLOUT` | `none` | fixed: nobody is admitted yet |
 | `MERRYMEN_ADOPT_HOME_HALT_SHA256` | `6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa` | see below |
 | `MERRYMEN_RESUME_PREVIEW` | `all` | fixed (or a comma list of tenant addresses) |
 | `MERRYMEN_FLEET_RECOVERY_REPORT_ONLY` | **delete** | report-only mode starts nothing, and a tenant list beside it refuses boot |
 | `MERRYMEN_FLEET_RECOVERY_REPLIES` | keep | only the listener reads it; the rollback needs it |
 | `MERRYMEN_ACCOUNTING_HOLD_TENANTS` | keep | tenants named there stay held; the preview says so for each |
-| `MERRYMEN_RPC_MAINNET`, `DATABASE_URL`, `MERRYMEN_STORE_DEK` | keep | the chain read at admission needs the RPC |
+| `DATABASE_URL`, `MERRYMEN_STORE_DEK` | keep | |
+| `MERRYMEN_RPC_MAINNET` | keep if set | the chain read at admission uses it, or the chain's public endpoint (`https://rpc.mainnet.chain.robinhood.com`) when it is unset, as every other orchestrator read does. Check in **Variables** whether it is set; a private RPC is kinder to a long read |
 
 **Delete every one-shot variable.** The deploy guard refuses the orchestrator
 while any is set and the rollout is not `all`. As of the 10-04 audit these are
@@ -128,18 +143,35 @@ Read the deploy log, in order:
 - `[deploy-guard] … census one-shot: none`
 - `persistent home adopted under its original halt; handover held`
 - `fleet rollout: none — no tenant is admitted; …`
-- one `[resume-preview] {…}` line per tenant, then
+- the preview: first its summary —
   `[resume-preview] run <64 hex>: N of M tenant(s) pass every Postgres precondition`,
-  `… approve every passing tenant of this run with MERRYMEN_RESUME_APPROVE=run:<64 hex>`
-  and `… rollout for them at the plan's starting levels: 0x…:trade,0x…:exits-only,…`
+  `… approve every passing tenant of this run with MERRYMEN_RESUME_APPROVE=run:<64 hex>`,
+  `… rollout for them at the plan's starting levels: 0x…:trade,0x…:exits-only,…`
+  and, when more pass than fit, `… admit them in batches of at most 40 …` —
+  then one `[resume-preview] {…}` line per tenant, then the same summary again.
 - no `spawn requested` line anywhere.
 
-Rollback (any time before step 4): **Deployments** → `4b4220e3` → **Redeploy**,
-with `MERRYMEN_START=start:recovery-replies` and
-`MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1` put back. The listener accepts the
-adopted manifest and its canonical halt, and nothing else changed: adoption
-keeps the original halt's bytes in `.fleet-halt-preadoption.json`, and the
-preview wrote only its own run row.
+**If the log store dropped the summary** (it has dropped the tail of a long
+boot burst before), the run is also recorded in Postgres: Railway → Postgres
+→ **Data** → table `ledger_resume_preview_runs`, the row with the newest
+`created_at_ms`; its `run` column is the run digest, and `entries_json` holds
+every line.
+
+What this halted boot does write: the preview's run row, and the resume and
+receipt tables it creates on first use (empty, additive DDL). And, as every
+orchestrator boot does even under `FLEET_HALT`, it carries out any owner
+`/kill` request already waiting in a home (`honourPendingKills`), which
+removes that owner's grant and tells them; that is the owner's own request.
+No trade, lease, child or financial row.
+
+Rollback (any time before step 4): **Deployments** → `4b4220e3` → **Rollback**.
+Railway's Rollback restores that deployment's image *and its variables*, so
+the listener comes back exactly as it was (`start:recovery-replies`, report-only
+and replies set, the one-shots back). Clear the pre-deploy command first if
+you set one. The listener accepts the adopted manifest and its canonical halt:
+adoption keeps the original halt's bytes in `.fleet-halt-preadoption.json`.
+To go forward again later, repeat step 1 in full (Rollback put back every
+variable you changed there).
 
 ### Step 3: read the preview
 
@@ -150,18 +182,26 @@ Each `[resume-preview]` line is one tenant:
 | `pass` | every precondition Postgres can answer holds (see [the preconditions](#the-preconditions)) |
 | `refusals` | each reason it does not, one sentence each |
 | `digest` | the evidence digest: what `0x<tenant>:<digest>` approves |
-| `chain` | `required`: the account was ever live, so admission reads the chain first; `not-required`: a paper book with no live operation on record |
+| `chain` | `required`: the account could arm live (a live operation, any flow, or the owner's settings ask for live), so admission reads the chain first; `not-required`: a paper book that could not |
 | `suggestedLevel` | decision 6 of the plan: paper → `trade` once the canary has traded; live → `exits-only` |
+| `holdsPositions` | Postgres shows open positions or class positions; a live holder must start `exits-only` so its stops run and nothing new opens |
+| `startsPaused` | a pause is on record that the worker will start under (the home's own file, a journalled `/pause` or `/kill`, a restored pre-incident pause, or a durable pause); the owner's `/resume` lifts it |
+| `grantExpiresAt` | when the owner's grant expires (unix seconds); an expired one refuses |
+| `book` | the home's book as the ordinary path would meet it: `absent`, `blocked` (behind a source barrier — the usual pre-incident case), or `present` |
 | `anchor`, `riskPeriod` | the accounting anchor the worker will get (`established:epoch-N` or `no-prior-accounting`), and the risk period it carries (`valid:<id>`, or `none`: the lifetime-peak drawdown breaker every agent ran on before the incident) |
 | `home` | whether the volume has a home for it (it is archived at admission) |
 
 Pick the canary: a `pass:true`, `chain:"not-required"` paper tenant (the plan
-names `0x3289ed018dd5ae59b42aba8ec4d49f489645abcb`). Note the run digest.
+names `0x3289ed018dd5ae59b42aba8ec4d49f489645abcb`). Note the run digest. Make
+three lists from the lines: the live tenants (`chain:"required"`), the paper
+tenants (`chain:"not-required"`), and the tenants that do not pass.
 
 A tenant that does not pass stays held whatever else you do; its refusals say
 why. `submitted/sent/pending trade(s)` waits for #258's receipt proof (Codex);
 `duplicate or conflicting` flows wait for the reviewed repair; an expired grant
-waits for its owner to re-sign.
+waits for its owner to re-sign (then [steady state](#steady-state-re-signers-and-late-tenants));
+`already admitted` means its book is registered and the ordinary path runs it:
+it needs no approval, only a rollout entry.
 
 ### Step 4: the canary, at observe, then trade
 
@@ -181,6 +221,7 @@ Deploy, then read the log:
 - `0x<canary>: resume admission — home archived to archive/0x…/<generation> (keys scrubbed); carried …`
   (or `no home on the volume: nothing to archive`)
 - `0x<canary>: resume admission — new book registered as generation <generation> …`
+- `0x<canary>: attested book seeded — N live cost basis row(s) and M floor(s) proved in the book before its first worker`
 - `0x<canary> spawn requested …`, then `0x<canary>: resume admission applied — its first worker has started`
 - in the canary's own lines: refusals are `rollout-hold` only; no `CURSOR REWOUND`, no `STALLED`.
 
@@ -194,49 +235,117 @@ Rollback, in order of reach:
   the child cleanly).
 - Back to listener-only: `MERRYMEN_REHALT_HOME=<the operation token>`, deploy
   once with `start:orchestrator` (log: `re-halted … at generation 1`), then
-  redeploy the listener as in step 2's rollback. Releasing again later takes
-  `MERRYMEN_RELEASE_HOME_HALT=<token>@1`.
+  **Rollback** to `4b4220e3` as in step 2. **Admitted tenants' bots stay
+  silent under the listener:** it answers only tenants whose recovery status is
+  held, and admission recorded the canary's as verified. Every tenant not yet
+  admitted is answered as before. Releasing again later takes
+  `MERRYMEN_RELEASE_HOME_HALT=<token>@1` (the re-halt's log line gives the
+  number), after step 1 is repeated.
 - Nothing is lost either way: the old home is in `archive/<tenant>/<generation>`
   on the volume, and the lost book's cursors and snapshot rows are in
   `mirror_state_archive` and `ledger_snapshot_archive`.
 
-### Step 5: every passing paper tenant
+### Step 5: live tenants, exits-only, before the paper batches
 
-Set `MERRYMEN_FLEET_ROLLOUT` to the canary plus every paper tenant from the
-preview's rollout line, each at `:trade` (copy the line; keep the entries that
-read `:trade`). The run approval from step 4 already covers them: deploy.
+Live tenants may hold real positions whose stops only a running worker
+manages, so they take their process slots first. Add the preview's
+`:exits-only` entries (the `chain:"required"` tenants, about 11) to
+`MERRYMEN_FLEET_ROLLOUT` beside the canary, and deploy. If step 4 approved the
+canary only, also set `MERRYMEN_RESUME_APPROVE=run:<step 2 run digest>` (it
+leaves the canary's approval as it is).
 
-Each is archived, registered and spawned in turn, a few seconds apart. A tenant
-whose books changed since the preview is refused (`evidence changed since the
-preview`): leave `MERRYMEN_RESUME_PREVIEW` set, redeploy, and approve the new
-run's digest (`MERRYMEN_RESUME_APPROVE=run:<new digest>`; the old approvals are
-not reopened).
+Each is first read on chain, from the oldest financial cursor of its last
+mirror pass (at least 26 hours back) to now: the log says
+`resume admission — reading the chain for 0x… since …`, and the tenant waits,
+held, until `resume chain check clean — …`. An RPC failure is retried a
+minute later.
+
+At `exits-only` a live agent can sell and stop out of what it holds and opens
+nothing.
+
+**If the chain shows something Postgres lacks** (`resume approval REFUSED — the
+chain holds operations or USDG transfers for the account that Postgres
+lacks`), most likely an owner's deposit or withdrawal during the hold, that
+tenant stays held. **No code path in this tree books that movement**, and this
+runbook does not invent one. Do this:
+
+1. List the refused tenants: those `[alert]` lines, or Railway → Postgres →
+   **Data** → `ledger_resume_approvals`, rows with `state` `refused` and that
+   reason.
+2. Tell each owner (with Milla's wording) that their agent is not managing
+   their positions yet and that they can manage them from their own wallet
+   meanwhile.
+3. Escalate the list to Milla and Codex for a reviewed booking of the missing
+   movement. Once it is booked, preview that tenant again and approve it
+   per tenant.
+
+### Step 6: paper tenants, in batches
+
+Add paper tenants (the preview's `:trade` entries) to `MERRYMEN_FLEET_ROLLOUT`,
+each at `:trade`, keeping every entry already there, and deploy. Keep the total
+of named tenants at or under **40** (48 processes, less room for restarts and
+holds); add the next batch once the last one is running. If step 4 approved the
+canary only, set `MERRYMEN_RESUME_APPROVE=run:<step 2 run digest>` now.
+
+Each is archived, registered, seeded and spawned in turn, a few seconds
+apart. A tenant whose books changed since the preview is refused (`evidence
+changed since the preview`): leave `MERRYMEN_RESUME_PREVIEW` set (as `all`, or
+just those tenants), deploy, and approve the new run's digest. Either form
+works: an already-admitted tenant never passes a preview, so `run:<new digest>`
+approves only tenants still waiting; `0x<tenant>:<digest>` per tenant is the
+more exact. The old approvals are not reopened.
+
+A tenant past the cap logs `worker deferred; local process cap 48 reached`
+and waits; its approval stays `registered` and it starts as soon as a slot
+frees. To swap which tenants run, remove some from the rollout and deploy.
 
 Rollback: remove entries from `MERRYMEN_FLEET_ROLLOUT` and deploy.
 
-### Step 6: live tenants, exits-only first
+### Step 7: live tenants to trade
 
-Add the preview's `:exits-only` entries (the `chain:"required"` tenants) to
-`MERRYMEN_FLEET_ROLLOUT` and deploy. Each is first read on chain, from the last
-mirror pass to now: the log says
-`resume admission — reading the chain for 0x… since …`, and the tenant waits,
-held, until `resume chain check clean — …`. An RPC failure is retried a
-minute later. If the chain shows an operation or a USDG transfer Postgres
-lacks (an owner's deposit or withdrawal during the hold, most likely), the
-approval is refused and the tenant stays held until that movement is booked
-through Codex's reviewed path.
+Once a live agent's book looks right at `exits-only` (its positions, cost
+basis and floors are on the dashboard, and its stops behave), change its entry
+to `:trade` and deploy. One at a time, or a few, never the whole list blind.
 
-At `exits-only` a live agent can sell and stop out of what it holds and
-opens nothing. Once its book looks right, move it to `:trade`.
+### Step 8: the whole fleet
 
-### Step 7: the whole fleet
+`MERRYMEN_FLEET_ROLLOUT=all` admits **every** tenant at `trade` — including a
+live tenant whose admission had not finished (for example a chain read still
+retrying), which would then skip `exits-only`, and up to 48 processes in roster
+order. So, first:
 
-`MERRYMEN_FLEET_ROLLOUT=all`, deploy. Every tenant with a registered book
-trades; a tenant that was never approved is still refused by the continuity
-gate, and stays held, as it is today. Then remove `MERRYMEN_RESUME_PREVIEW`,
-`MERRYMEN_RESUME_APPROVE` and `MERRYMEN_RESUME_REVOKE` (left set they change
-nothing, and the preview costs a boot a few seconds). Keep
-`MERRYMEN_ADOPT_HOME_HALT_SHA256` and the operation token: re-halt needs both.
+1. Railway → Postgres → **Data** → `ledger_resume_approvals`: no row may be in
+   state `approved`, `archiving` or `archived`. For each that is, either wait
+   for it to reach `applied`, or withdraw it with
+   `MERRYMEN_RESUME_REVOKE=0x<tenant>:<its evidence_digest>` (or
+   `run:<its preview_run>` for a whole run), deploy, and admit it later from an
+   explicit list.
+2. Count the tenants that will run: more than 48 and some wait for a slot,
+   indefinitely, in roster order.
+
+Then set `MERRYMEN_FLEET_ROLLOUT=all` and deploy. Every tenant with a
+registered book trades; a tenant that was never approved is still refused by
+the continuity gate, and stays held, as it is today. Then remove
+`MERRYMEN_RESUME_PREVIEW`, `MERRYMEN_RESUME_APPROVE` and
+`MERRYMEN_RESUME_REVOKE` (left set they change nothing, and the preview costs a
+boot a few seconds). Keep `MERRYMEN_ADOPT_HOME_HALT_SHA256` and the operation
+token: re-halt needs both.
+
+### Steady state: re-signers and late tenants
+
+An owner whose grant had expired re-signs; a tenant whose refusal was fixed
+is ready; a new owner signs up with history under an old account. Each is
+refused by the continuity gate until admitted:
+
+1. `MERRYMEN_RESUME_PREVIEW=0x<tenant>,0x<tenant>…`, deploy, read their lines.
+2. `MERRYMEN_RESUME_APPROVE=0x<tenant>:<digest>` per tenant, deploy.
+3. Under `all`, an approved tenant is admitted at `trade` on that deploy. For
+   a live tenant that holds positions, prefer to admit it while the rollout is
+   an explicit list with it at `:exits-only`, or approve it only when you can
+   watch its first ticks.
+
+A tenant with no history at all (a brand-new account) needs none of this: the
+ordinary empty-book path admits it.
 
 ### What cannot be honoured
 
@@ -253,9 +362,21 @@ and that `/pause` works again.
 
 | From | To stop trading | To return to listener-only |
 | --- | --- | --- |
-| step 2–3 (halted, nobody admitted) | nothing trades | redeploy `4b4220e3` with the listener variables |
-| step 4 onwards | `MERRYMEN_FLEET_ROLLOUT=none`, deploy | `MERRYMEN_REHALT_HOME=<token>`, deploy; then redeploy the listener |
+| step 2–3 (halted, nobody admitted) | nothing trades | **Rollback** to `4b4220e3` (restores its variables); repeat step 1 before going forward again |
+| step 4 onwards | `MERRYMEN_FLEET_ROLLOUT=none`, deploy | `MERRYMEN_REHALT_HOME=<token>`, deploy; then **Rollback** to `4b4220e3`. Admitted tenants' bots stay silent under the listener; the rest are answered |
 | one tenant misbehaving | remove it from `MERRYMEN_FLEET_ROLLOUT`, deploy; its owner's `/pause` also works | — |
+
+Railway has two actions on an old deployment. **Rollback** restores that
+deployment's Docker image and its custom variables (Railway docs, "Deployment
+Actions"); it is the one this page means. Redeploy reuses its code and build
+settings with the variables as they stand now, which here would boot the
+listener's code with the orchestrator's variables. Deploy or discard any
+staged variable change before using either. Rollback is offered only within
+the plan's image retention window; if it is missing on `4b4220e3`, point
+**Source → Branch** back at `codex/recovery-casual-replies`, deploy `a7303f47`,
+and put back the variables you recorded before step 1 by hand. The service's
+source branch is not part of a Rollback: it stays `main`, which is harmless
+with automatic deploys off.
 
 ## Owner stop requests, applied before any worker arms
 
@@ -267,14 +388,17 @@ archive, and before `grant.json` is written. It reads three sources:
   (`readRecoveryControls`). #259 is not merged and the table does not exist in
   production: a missing table (Postgres `42P01`) is no controls. When #259
   lands, its rows are folded with no change here. The fold spans every bot,
-  token and claim of the tenant, account and chain: a token rotation keeps a
-  pause. A `/kill` counts once confirmed in its window; `/cancel` lifts
-  nothing else; an unanswered `/kill` holds the tenant until its window
-  closes. A malformed journal holds the tenant with an `[alert]`.
+  token, claim, account and chain the tenant's journal holds: a token rotation
+  or a re-sign on a new account keeps a pause. A `/kill` counts once confirmed
+  in its window; `/cancel` lifts nothing else; an unanswered `/kill` holds the
+  tenant until its window closes. A malformed journal holds the tenant with an
+  `[alert]`.
 - **The events table**, for pauses a worker recorded before the incident: the
   newest `Telegram: paused by chat` / `resumed by chat` event across every
   account the owner has had, restored only if the agent did nothing past the
-  pause gate afterwards (the dashboard's own rule, `inactivity.ts`).
+  pause gate afterwards (the dashboard's own rule, `inactivity.ts`), and only
+  into a home never armed here — a rebuilt home, or the fresh one an archive
+  leaves. In a home a worker has run in, its own `paused` file is the truth.
 - **Kill-request files already in the home**: honoured every pass, as before.
 
 Each control applied writes a receipt (`recovery_reply_control_receipts`,
@@ -302,58 +426,73 @@ grant's key is never written into a home.
 | Variable | Grammar | Effect |
 | --- | --- | --- |
 | `MERRYMEN_RESUME_PREVIEW` | `all`, or `0x…,0x…` | at boot, halted or not: one line per tenant and a run digest; writes only its run row (`ledger_resume_preview_runs`) |
-| `MERRYMEN_RESUME_APPROVE` | `0x<tenant>:<digest>` and/or `run:<run digest>`, comma separated | records approvals. A per-tenant digest must be one a recorded run showed passing; a run approves exactly the tenants that passed in it |
-| `MERRYMEN_RESUME_REVOKE` | `0x…,0x…` | withdraws an approval not yet registered |
+| `MERRYMEN_RESUME_APPROVE` | `0x<tenant>:<digest>` and/or `run:<run digest>`, comma separated | records approvals. A per-tenant digest must be one a recorded run showed passing; a run approves exactly the tenants that passed in it, less any admitted since that run was taken |
+| `MERRYMEN_RESUME_REVOKE` | `0x<tenant>:<digest>` and/or `run:<run digest>`, comma separated | withdraws approvals not yet archiving or registered: that tenant's approval of that evidence, or every approval recorded from that run |
 
 A malformed value refuses boot. Each approval is unique per tenant and
 evidence digest, so a variable left set approves nothing twice and never
 reopens one that was applied, refused or revoked; a tenant has at most one
-open approval. None of these is a one-shot: they are the rollout's own
-controls, read every boot.
+open approval. A revoke names the evidence it withdraws, never a bare tenant,
+so left set across a restart it never withdraws the re-approval that replaced
+it. None of these is a one-shot: they are the rollout's own controls, read
+every boot.
 
 The evidence digest covers the tenant, account, chain and owner; a Postgres
 summary of the books (counts, maxima, statuses, the snapshot tables' rows, the
-agent's ratchets); the lost book's cursors; the home's identity (device,
-inode, the main book's size and which barrier and control files exist — never
+agent's ratchets); the lost book's cursors; the home's identity (inode, the
+main book's inode and size, and which barrier and control files exist — never
+the device number, which a volume reattached on another host changes, nor
 `-wal`, `-shm` or any mtime); the anchor kind, the risk period, the controls
-fold and the unresolved count. It never covers the grant's incarnation, so an
-owner who re-signs on the same account keeps the approval; a new account is
-refused.
+fold, the unresolved count and whether the chain must be read. It never
+covers the grant's incarnation, so an owner who re-signs on the same account
+keeps the approval; a new account is refused.
 
 ### The phases
 
 In `spawnChild`, under the lease, for a tenant in the rollout scope with an
 open approval:
 
-1. **Re-derive the evidence.** Any change refuses the approval; the tenant
+1. **Drain** a continuous old book's tail through the existing guarded mirror
+   (at most 100 passes), if there is one — first, so the comparison and the
+   chain read below see it in Postgres.
+2. **Re-derive the evidence.** Any change refuses the approval; the tenant
    stays held and is previewed again.
-2. **Check every precondition**, and read the chain where the account was
-   ever live (in the background; the tenant waits held).
-3. **Drain** a continuous old book's tail through the existing guarded mirror
-   (at most 100 passes), if there is one.
-4. **Archive the home**: carry the owner's pause, arm record, kill-request
+3. **Check every precondition**, and read the chain where the account could
+   arm live (in the background; the tenant waits held).
+4. **Archive the home**: copy the owner's pause, arm record, kill-request
    files and Telegram state into a staging directory; remove `grant.json`,
    `grants/` and `settings.json` (rewritten from their stores at the next
    spawn, so no key enters the archive); rename the home to
-   `archive/<tenant>/<generation>` (0700) with a 0600 manifest of file stats;
-   move the carry into a fresh home. Every step survives a crash.
+   `archive/<tenant>/<generation>` (0700); then remove the moved Telegram
+   files from the archive, write a 0600 manifest of file stats, and move the
+   carry into a fresh home. Every step survives a crash or a lost lease.
 5. **Register**, in one transaction: archive and delete the tenant's
    `mirror_state` rows; archive the positions, cost basis, floors and class
-   rows; create the empty book with this generation as its identity; bind its
-   consumed receipt to `hash('attested-gap:' + approval + ':' + evidence)`;
-   write the attestation; move the approval to `registered`. No financial row
-   is written or changed.
+   rows; create the empty book with this generation as its identity (an
+   interrupted creation is finished, never refused); bind its consumed receipt
+   to `hash('attested-gap:' + approval + ':' + evidence)`; write the
+   attestation; move the approval to `registered`. No financial row is written
+   or changed.
 6. **The ordinary path, unchanged**: the original-book gates accept the
    attested book, the anchor carries the same accounting epoch (lifetime PnL
    continues from Postgres), the seeds restore basis, floors, energy and the
    trailing day, the owner's controls are applied, then the privacy gate, the
-   offset handoff and the source barrier. The worker starts at its rollout
-   level and the approval becomes `applied`. `recovery-generation.json` in
-   the home says when the gap began, for the Telegram and Fomo answers.
+   offset handoff and the source barrier.
+7. **The seed, proved**: before the first worker, every live cost basis row
+   the seed restores (a held symbol) and the floor beside it must be in the
+   book. One the ordinary seed missed is written then; if that cannot be done
+   the spawn is held and asked again. `attested-seed.json` records it. Then
+   the worker starts at its rollout level and the approval becomes `applied`.
+   `recovery-generation.json` in the home says when the gap began, for the
+   Telegram and Fomo answers.
 
-The first mirror pass replaces the snapshot tables with what the new book
-holds — the seeded set — as every redeploy did before the incident. Their
-pre-images are in `ledger_snapshot_archive`.
+Why step 7 is not best-effort: registration removes the lost book's cursors,
+and with them the mirror's rebuilt-book guard, so the first mirror pass
+replaces the tenant's basis, floors and class rows in Postgres with what the
+new book holds. With the seed proved, that is the seeded set; their pre-images
+are in `ledger_snapshot_archive` either way. Class positions are re-derived
+from the vault's own events when the worker arms; positions from the chain on
+its first tick.
 
 ### The preconditions
 
@@ -361,10 +500,12 @@ Each refuses on its own; none fails open.
 
 1. No `submitted`, `sent` or `pending` trade (#258's receipt helper is not in
    this tree, so any such row refuses).
-2. Nothing on chain Postgres lacks, from the last mirror pass (and at least
-   26 hours back) to head: every EntryPoint `UserOperationEvent` the account
-   sent and every USDG `Transfer` to or from it. An RPC failure retries. A
-   paper tenant with no live operation on record needs no chain read.
+2. Nothing on chain Postgres lacks, from the oldest financial cursor of the
+   last mirror (trades, flows, equity; at least 26 hours back) to head: every
+   EntryPoint `UserOperationEvent` the account sent and every USDG `Transfer`
+   to or from it. An RPC failure retries. Only a paper tenant that could not
+   arm live — no live operation, no flow, no live intent in its settings —
+   skips the read.
 3. Nothing settled in the last 26 hours.
 4. The flows hold no duplicate or conflicting copies (`distinct-flows.ts`).
 5. One `agent_id` spelling across the financial tables.
@@ -372,16 +513,21 @@ Each refuses on its own; none fails open.
    rows at all.
 7. The risk period, if Postgres holds one, valid and carried under the
    grant's own spelling. None is the lifetime-peak breaker; the preview says
-   which, and the approval binds it.
+   which, and the approval binds it. (Decision 9 recommended holding tenants
+   with no risk period; that would hold every paper tenant, since a period
+   can only be started on live evidenced accounting. Milla to confirm.)
 8. The owner controls readable and well formed.
 9. The grant unexpired, and its tenant, account, chain and owner the ones
    approved.
+10. Not already admitted: its book on the volume is not the attested
+    generation registered for this account.
 
 ### Approval states
 
 `approved` → `archiving` → `archived` → `registered` → `applied`; `refused`
-(the evidence changed, or a precondition failed: preview again) and `revoked`
-are terminal. Every row stays: `ledger_resume_approvals`,
+(the evidence changed, a precondition failed, or a registered book's grant
+moved to another account before its first worker: preview again) and
+`revoked` are terminal. Every row stays: `ledger_resume_approvals`,
 `ledger_resume_attestations`, `mirror_state_archive`,
 `ledger_snapshot_archive`, and the archived homes on the volume.
 
