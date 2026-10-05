@@ -173,7 +173,7 @@ describe("a tenant the rollout does not admit", () => {
     await shared.exec(MIRROR_STATE_DDL);
     setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
     try {
-      process.env.MERRYMEN_FLEET_ROLLOUT = `${admitted}:observe`;
+      process.env.MERRYMEN_FLEET_ROLLOUT = `${admitted}:trade`;
       const before = { out: snapshot(childHome(out)), expired: snapshot(childHome(expired)) };
       for (let pass = 0; pass < 3; pass++) {
         await reconcile();
@@ -188,16 +188,16 @@ describe("a tenant the rollout does not admit", () => {
       assert.equal(hasLeaseForTest(expired), false);
       assert.deepEqual(spawned.map((p) => p.env.MERRYMEN_HOME), [childHome(admitted)], "only the admitted tenant runs");
       assert.equal(isRetiringExpiredForTest(expired), false, "its expiry is not retired");
-      assert.deepEqual(rolloutCountsForTest(), { trade: 0, "exits-only": 0, observe: 1, held: 2, absent: 0 });
+      assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 2, absent: 0 });
 
       // THE LEVEL, AND ONLY THE LEVEL, REACHES THE CHILD.
       const env = spawned[0]!.env;
-      assert.equal(env.MERRYMEN_ADMISSION_LEVEL, "observe");
+      assert.equal(env.MERRYMEN_ADMISSION_LEVEL, "trade");
       assert.equal(env.MERRYMEN_FLEET_ROLLOUT, undefined, "the rollout names other tenants; a child never sees it");
 
       // ADMISSION DOES WHAT WAS WAITING, which also shows the homes above were
       // ones these passes would have changed had they been admitted.
-      process.env.MERRYMEN_FLEET_ROLLOUT = `${admitted}:observe,${out}:trade,${expired}:trade`;
+      process.env.MERRYMEN_FLEET_ROLLOUT = `${admitted}:trade,${out}:trade,${expired}:trade`;
       await reconcile();
       await settle();
       assert.ok(leaseAsks.includes(out), "the newly admitted tenant is leased");
@@ -263,10 +263,10 @@ describe("a tenant the rollout does not admit", () => {
   it("a named tenant missing from the roster is counted, so a typo is visible", async () => {
     const a = tenantAt(0x131);
     await store.put(a, grant(address(0x132)));
-    process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:exits-only,${address(0x999)}:trade`;
+    process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade,${address(0x999)}:trade`;
     await reconcile();
-    assert.deepEqual(rolloutCountsForTest(), { trade: 0, "exits-only": 1, observe: 0, held: 0, absent: 1 });
-    assert.equal(spawnedFor(a)[0]?.env.MERRYMEN_ADMISSION_LEVEL, "exits-only");
+    assert.deepEqual(rolloutCountsForTest(), { trade: 1, "exits-only": 0, observe: 0, held: 0, absent: 1 });
+    assert.equal(spawnedFor(a)[0]?.env.MERRYMEN_ADMISSION_LEVEL, "trade");
   });
 });
 
@@ -447,10 +447,10 @@ describe("one hold predicate, at every path that starts a process", () => {
 describe("childEnv", () => {
   it("always sets the tenant's own level, over anything the orchestrator's env carried, and strips the rollout", () => {
     const a = address(0x1f1), b = address(0x1f2);
-    process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:exits-only`;
-    process.env.MERRYMEN_ADMISSION_LEVEL = "trade";
+    process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade`;
+    process.env.MERRYMEN_ADMISSION_LEVEL = "exits-only";
     try {
-      assert.equal(childEnv(a).MERRYMEN_ADMISSION_LEVEL, "exits-only", "never inherited from the operator");
+      assert.equal(childEnv(a).MERRYMEN_ADMISSION_LEVEL, "trade", "never inherited from the operator");
       assert.equal(childEnv(a).MERRYMEN_FLEET_ROLLOUT, undefined);
       assert.equal(childEnv(b).MERRYMEN_ADMISSION_LEVEL, "observe", "held never reaches a child; observe is the floor");
       process.env.MERRYMEN_FLEET_ROLLOUT = "all";
@@ -490,6 +490,12 @@ describe("startup", () => {
     }
   });
 
+  it("refuses a level no worker in this build obeys, rather than start a tenant that would trade", async () => {
+    for (const level of ["observe", "exits-only"]) {
+      assert.match((await boot(`${address(1)}:${level}`))!, new RegExp(`asks for ${level}, which no worker in this build enforces yet`), level);
+    }
+  });
+
   it("refuses an unset value on Railway, and a required persistent home counts as Railway", async () => {
     assert.match((await boot(undefined, { RAILWAY_ENVIRONMENT: "production" }))!, /must name its scope/);
     assert.match((await boot(undefined, { RAILWAY_SERVICE_ID: "svc" }))!, /must name its scope/);
@@ -497,7 +503,7 @@ describe("startup", () => {
   });
 
   it("refuses named tenants beside the failure-only reporter", async () => {
-    assert.match((await boot(`${address(1)}:observe`))!, /names tenants to start, and MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 starts none/);
+    assert.match((await boot(`${address(1)}:trade`))!, /names tenants to start, and MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 starts none/);
   });
 
   it("lets `none` and `all` reach the reporter, whose own prerequisites then decide", async () => {
