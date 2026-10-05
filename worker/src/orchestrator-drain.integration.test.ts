@@ -36,6 +36,7 @@ import {
   ensurePersonalMemorySchema, publishPersonalMemory, recordPersonalMemoryForget, restorePersonalMemory,
 } from "./personal-memory-ferry";
 import { SHUTDOWN_RECEIPT_FILE, shutdownReceiptDir, takePreviousShutdown, type DrainLimits, type ShutdownReceipt } from "./fleet-drain";
+import { writeRestoreBlocked } from "./restore-block";
 
 const fleet = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-drain-")));
 process.env.MERRYMEN_HOME = fleet;
@@ -473,13 +474,19 @@ it("A SPAWN STUCK BEFORE THE STOP IS NOT WAITED FOR: the drain goes on at once, 
   }
 });
 
-/** The shared side, held at the first statement after `home`'s pending marker is on disk: a copy between its marker and its ownership check. */
-function heldAtMarker(home: string): { db: Db; atMarker: Promise<void>; open: () => void } {
+/**
+ * The shared side, held at the first statement after `home`'s pending marker
+ * is on disk: a copy between its marker and its ownership check. `seen` is
+ * every argument a statement through it was given, lowercased.
+ */
+function heldAtMarker(home: string): { db: Db; atMarker: Promise<void>; open: () => void; seen: string[] } {
   let reached!: () => void, open!: () => void;
   const atMarker = new Promise<void>((resolve) => (reached = resolve));
   const gate = new Promise<void>((resolve) => (open = resolve));
+  const seen: string[] = [];
   let held = false;
-  const hold = async () => {
+  const hold = async (args: unknown[]) => {
+    seen.push(...args.map((a) => String(a).toLowerCase()));
     if (!held && existsSync(marker(home))) { held = true; reached(); await gate; }
   };
   const db: Db = {
@@ -488,13 +495,13 @@ function heldAtMarker(home: string): { db: Db; atMarker: Promise<void>; open: ()
       const statement = shared.prepare(sql);
       return {
         ...statement,
-        async run(...args) { await hold(); return statement.run(...args); },
-        async get(...args) { await hold(); return statement.get(...args); },
-        async all(...args) { await hold(); return statement.all(...args); },
+        async run(...args) { await hold(args); return statement.run(...args); },
+        async get(...args) { await hold(args); return statement.get(...args); },
+        async all(...args) { await hold(args); return statement.all(...args); },
       };
     },
   };
-  return { db, atMarker, open };
+  return { db, atMarker, open, seen };
 }
 
 /** Caps for a copy the drain cannot wait out: a short settle, and a budget that ends soon after it. */
@@ -637,6 +644,81 @@ it("THE SHARED LEDGER SCHEMA IS APPLIED ONCE PER DRAIN, not once per home: a few
   adoptChildForTest(again, againAccount, againProc, lease(again, { n: 0 }));
   await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
   assert.equal(schemaRuns, 2);
+});
+
+it("ONCE STOPPING IS SET THE LIVE PASS TAKES NO FURTHER TENANT: the one in hand finishes, the next is left to its final pass", async () => {
+  // Spec step 1. B's child is still alive while the pass would read it, and
+  // its copy and memory publish from then could land after the final pass's.
+  const a = address(0xec1), aAccount = address(0xec2), b = address(0xed1), bAccount = address(0xed2);
+  const aBook = await book(a, aAccount);
+  await book(b, bAccount);
+  const aProc = new FakeProc(81_071), bProc = new FakeProc(81_072);
+  watched = [aProc, bProc];
+  adoptChildForTest(a, aAccount, aProc, lease(a, { n: 0 }));
+  adoptChildForTest(b, bAccount, bProc, lease(b, { n: 0 }));
+  const held = heldAtMarker(aBook.home);
+  setLiveMirrorStoreForTest({ shared: held.db, dek, dialect: "sqlite" });
+  const pass = mirrorLedgersForTest();
+  await held.atMarker;
+  assert.ok(!held.seen.includes(b) && !held.seen.includes(bAccount), "the pass is on A, and has not reached B");
+
+  const drained = drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+  // Called home with A in hand: A's copy may finish, nothing after it starts.
+  held.open();
+  await pass;
+  await drained;
+
+  assert.ok(!held.seen.includes(b) && !held.seen.includes(bAccount), "the live pass never touched B once stopping was set");
+  assert.equal(await sharedTrades(aAccount), 1, "A's copy in hand finished");
+  assert.equal(await sharedTrades(bAccount), 1, "and B's book went up through its final pass alone");
+  assert.equal(existsSync(marker(aBook.home)), false);
+  const r = receipt();
+  assert.deepEqual(r.finalPass, { homes: 2, saved: 2, retained: 0, skipped: 0, outOfTime: 0 });
+  assert.equal(r.clean, true, JSON.stringify(r));
+});
+
+it("A WORKER HOME STILL MARKED restore-blocked IS NEVER MIRRORED by the final pass, and its memory is handled forget-only", async () => {
+  // A worker that followed a hold before the restore was proved: its book is
+  // unrestored, and copied, it would overwrite the checkpoint, positions and
+  // cost basis the shared ledger still holds.
+  const tenant = address(0xee1), account = address(0xee2), released = { n: 0 };
+  const { home, trade } = await book(tenant, account);
+  trade(2);
+  writeFileSync(path.join(home, "tg-groups.json"), groups("durable group summary, stored"));
+  await publishTgGroups({ tenant, home, shared, dek, seen: new Map(), log: () => {} });
+  writeFileSync(path.join(home, "tg-groups.json"), groups("unrestored worker memory must not win"));
+  writeRestoreBlocked(home, { reason: "paper fills are newer than the checkpoint", class: "trades newer than the last valuation", since: nowSec() - 60 });
+  await getGrantStore().put(tenant, grant(account));
+  const proc = new FakeProc(81_081);
+  watched = [proc];
+  adoptChildForTest(tenant, account, proc, lease(tenant, released));
+  try {
+    await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: LIMITS, exit });
+
+    assert.equal(await sharedTrades(account), 0, "the unrestored book was not copied over the shared ledger");
+    assert.equal(existsSync(marker(home)), false, "and no copy begun, so no barrier");
+    const stored = await storedGroups(tenant);
+    assert.ok(stored.includes("durable group summary, stored") && !stored.includes("unrestored worker memory must not win"), "forget-only: nothing sealed over the stored row");
+    assert.deepEqual(receipt().finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
+    assert.equal(released.n, 1);
+  } finally {
+    await getGrantStore().remove(tenant);
+  }
+});
+
+it("THE DRAIN ARMS NO THREE-SECOND SIGKILL: a process that ignores SIGTERM is killed when the drain's own wait ends, not killChild's timer", async () => {
+  const tenant = address(0xef1), account = address(0xef2);
+  await book(tenant, account);
+  const proc = new FakeProc(81_091, { ignoreTerm: true });
+  watched = [proc];
+  adoptChildForTest(tenant, account, proc, lease(tenant, { n: 0 }));
+
+  await drainFleetForTest("SIGTERM", { budgetMs: 15_000, limits: { ...LIMITS, exitWaitMs: 3_500 }, exit });
+
+  assert.deepEqual(proc.signals, ["SIGTERM", "SIGKILL"]);
+  const gap = proc.signalledAt.SIGKILL! - proc.signalledAt.SIGTERM!;
+  assert.ok(gap >= 3_400, `SIGKILL came at the end of the drain's 3.5s wait, not killChild's 3s (${gap}ms)`);
+  assert.equal(receipt().stragglers, 1);
 });
 
 it("A MAIN-LOOP PASS UNDER WAY WHEN THE SIGNAL COMES STARTS NOTHING AFTER ITS MIRROR: no history repair, no owner message, no background job", () => {
