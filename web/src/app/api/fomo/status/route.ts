@@ -22,7 +22,7 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { FOMO_NEEDS_AGENT, FOMO_NOT_ENABLED, fomoRuntime, fomoTenantFor, hostedFomoEnabled, hostedFomoOwner } from "@/lib/fomo-runtime";
+import { FOMO_NEEDS_AGENT, FOMO_NOT_ENABLED, fomoEnabledFor, fomoRuntime, fomoTenantFor, hostedFomoOwner } from "@/lib/fomo-runtime";
 import { FOMO_ATTRIBUTION, renderEnvelope } from "../../../../../../worker/src/fomo/render";
 
 export const dynamic = "force-dynamic";
@@ -40,8 +40,8 @@ export async function GET(req: Request) {
   const hosted = isHostedMode();
   const session = hosted ? tenantOf(req) : null;
   if (hosted && !session) return NextResponse.json({ error: "not signed in" }, { status: 401, headers: NO_STORE });
-  // Opt-in (fomo-runtime.ts hostedFomoEnabled): not enabled, nothing is read or built.
-  if (hosted && !hostedFomoEnabled()) return NextResponse.json({ error: FOMO_NOT_ENABLED }, { status: 404, headers: NO_STORE });
+  // Opt-in hosted, switchable off self-hosted (fomo-switch.ts fomoEnabledFor): not enabled, nothing is read or built.
+  if (!fomoEnabledFor(hosted)) return NextResponse.json({ error: FOMO_NOT_ENABLED }, { status: 404, headers: NO_STORE });
   const tenant = fomoTenantFor(session, hosted);
   if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401, headers: NO_STORE });
   if (hosted) {

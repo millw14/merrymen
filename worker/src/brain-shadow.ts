@@ -690,8 +690,6 @@ export async function persistBrainDecision(
       expected_edge_usdg: d.expected_edge_usdg ?? null,
       economics: d.economics ?? "unknown",
       expected_trade_gas_usdg: d.expected_trade_gas_usdg ?? null,
-      // THE GATE'S VERDICT AND WHAT IT OVERRODE. See gateSignals.
-      ...gate,
       cost: d.cost,
       models: d.models,
       latency_seconds: result.seconds,
@@ -700,6 +698,10 @@ export async function persistBrainDecision(
       // This is the pre-trade source, not evidence that anything executed.
       // Actual attempts and fills are recorded by trades.decision_id.
       execution_connected: source === "brain",
+      // THE GATE'S VERDICT AND WHAT IT OVERRODE (see gateSignals). LAST: the
+      // owner's signals view keeps the first 24 scalars (decisions.ts), and
+      // these must not push the fields above out of it.
+      ...gate,
     }),
   }).catch((e) => log(`[brain] decision write failed: ${e instanceof Error ? e.message : String(e)}`));
 }

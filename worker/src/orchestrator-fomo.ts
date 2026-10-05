@@ -378,6 +378,13 @@ export interface FomoPassDeps {
    */
   holdingsKnown?(tenant: string): boolean;
   childHome(tenant: string): string;
+  /**
+   * Whether this replica still speaks for the tenant's running child, asked
+   * right before its file is written: the roster was read when the pass
+   * started, and the tenant may since have moved, stood down or been held.
+   * Absent (tests): yes.
+   */
+  stillOurs?(tenant: string): boolean;
   writeChildFile(home: string, file: ChildFomoFile): void;
   /** The tenant's connected X account with posting consent, or null. Drafts are made only for tenants with one. */
   xConsent?(tenant: string): Promise<{ accountId: string } | null>;
@@ -1952,6 +1959,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
           health: healthFor(access, c),
           signals: monitored ? await signalsFor(tenant, c) : [],
         };
+        if (deps.stillOurs && !deps.stillOurs(tenant)) continue;
         deps.writeChildFile(deps.childHome(tenant), file);
         fileWritten.set(tenant, { at: now, key });
         counters.childFiles++;

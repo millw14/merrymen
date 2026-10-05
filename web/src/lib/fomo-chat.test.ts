@@ -132,6 +132,19 @@ afterEach(() => {
   setFomoOwnerReaderForTest(null);
 });
 
+describe("a self-hosted install that switched Fomo off (MERRYMEN_FOMO_ENABLED=0)", () => {
+  it("is not a Fomo turn at all, and nothing is built", async () => {
+    const saved = process.env.MERRYMEN_FOMO_ENABLED;
+    process.env.MERRYMEN_FOMO_ENABLED = "0";
+    try {
+      const runtime = async () => { throw new Error("the runtime must not be asked for"); };
+      assert.equal(await fomoChatTurn({ message: "who are the top traders on fomo this week?" }, { tenant: null, now: Date.now(), hosted: false }, { runtime }), null);
+    } finally {
+      process.env.MERRYMEN_FOMO_ENABLED = saved;
+    }
+  });
+});
+
 describe("a hosted deployment that has not opted in", () => {
   it("is not a Fomo turn at all: null for every message, with no owner question and no runtime", async () => {
     setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked while Fomo is not enabled"); } });

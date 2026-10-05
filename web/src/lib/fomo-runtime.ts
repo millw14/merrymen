@@ -53,7 +53,7 @@ import type { FomoDialect } from "../../../worker/src/fomo/store";
 import { resolveConfig } from "../../../worker/src/settings";
 import { mcpDb } from "../mcp/db";
 import { settingsReader } from "./services/settings-view";
-import { FOMO_NOT_ENABLED, hostedFomoEnabled } from "./fomo-switch";
+import { FOMO_NOT_ENABLED, fomoEnabledFor, hostedFomoEnabled } from "./fomo-switch";
 
 /** The worker runtime plus the web's per-tenant analysis-model budget. */
 export type FomoRuntime = BaseFomoRuntime & { modelBudget: ModelBudget };
@@ -116,7 +116,7 @@ export function setFomoOwnerReaderForTest(r: FomoOwnerReader | null): void {
 type Env = Record<string, string | undefined>;
 
 // The opt-in switch (fomo-switch.ts), re-exported for the surfaces that already import this module.
-export { FOMO_NOT_ENABLED, hostedFomoEnabled };
+export { FOMO_NOT_ENABLED, fomoEnabledFor, hostedFomoEnabled };
 
 /** Thrown by fomoRuntime(true) while hosted Fomo is not enabled: nothing was built. */
 export class FomoNotEnabledError extends Error {

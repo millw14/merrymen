@@ -9,7 +9,7 @@ import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
 import { ledgerChatReply } from "@/lib/chat-ledger-facts";
 import { fomoChatTurn } from "@/lib/fomo-chat";
-import { hostedFomoEnabled } from "@/lib/fomo-switch";
+import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { withReadDb } from "@/lib/ledger";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 
@@ -101,6 +101,6 @@ export async function POST(req: Request) {
     ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
     : null;
   // The Fomo switches are settings change-settings may name only where this deployment runs Fomo.
-  const fomoSettings = !hosted || hostedFomoEnabled();
+  const fomoSettings = fomoEnabledFor(hosted);
   return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo, recovery, fomoSettings });
 }

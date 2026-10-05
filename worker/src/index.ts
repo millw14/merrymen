@@ -796,9 +796,15 @@ async function main() {
     watchTokens.find((t) => t.address.toLowerCase() === token.toLowerCase())?.symbol ?? trencherSymbol(token);
   /** An ENTRY intent's fate, filed under its coin. Trencher agents only: exits and other rails are not this funnel. */
   function noteEntryFunnel(intent: TradeIntent, c: Classified): void {
-    if (cfg.strategy !== "trencher") return;
-    const token = entryTokenOf(intent as { kind: string; sellToken?: string; buyToken?: string });
-    if (token) funnel.note(token, funnelSymbol(token), { ...c, decisionId: c.decisionId ?? intent.decisionId ?? null });
+    // INSTRUMENTATION NEVER STANDS BETWEEN A FILL AND ITS ROW: one call sits
+    // right before addTrade, so nothing it does may throw.
+    try {
+      if (cfg.strategy !== "trencher") return;
+      const token = entryTokenOf(intent as { kind: string; sellToken?: string; buyToken?: string });
+      if (token) funnel.note(token, funnelSymbol(token), { ...c, decisionId: c.decisionId ?? intent.decisionId ?? null });
+    } catch {
+      // the funnel is a reading aid; the ledger row is the record
+    }
   }
   /**
    * THE EARLY-CANDIDATE BOOK (early-candidates.ts): the smaller-coin path into
@@ -851,6 +857,8 @@ async function main() {
   const fomoChild = new FomoChild({
     broker: () => fomoBroker,
     off: () => fomoOff,
+    // Only the hosted orchestrator's fomo.json nominates follow or early entries.
+    explores: () => isHostedMode(),
     // Trusted process context only: MERRYMEN_TENANT hosted, "self" self-hosted.
     ownTenant: () => childFomoTenant(process.env, isHostedMode()),
     home: () => merrymenHome(),
@@ -14216,7 +14224,8 @@ async function main() {
   // hosted: a local runtime over fomo.sqlite in this home with the install's
   // own key, for the fixed tenant "self", permissions read live from settings.
   // Built in the background; until it is, research answers "unavailable".
-  void chooseChildFomoBroker({
+  // Not at all where Fomo is off (childFomoOff): no channel served, no local runtime, no fomo.sqlite.
+  if (!fomoOff) void chooseChildFomoBroker({
     hosted: isHostedMode(),
     port: fomoPort,
     selfHosted: () =>

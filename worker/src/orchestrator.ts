@@ -8176,24 +8176,26 @@ async function coinAddressesFor(db: Db): Promise<string[]> {
 
 /**
  * The coin contracts this tenant holds: the first two of coinAddressesFor's
- * three sources, without the discovery candidates. Same filters, same
- * never-throws contract.
+ * three sources, without the discovery candidates. Same filters. Never throws,
+ * and NULL WHEN EITHER READ FAILED: an unread book is not an empty one, and the
+ * pass says "I hold no position in it" only on a book it actually read.
  */
-async function heldCoinAddressesFor(db: Db): Promise<string[]> {
+async function heldCoinAddressesFor(db: Db): Promise<string[] | null> {
   const notCoins = new Set<string>([
     ...STOCK_TOKENS.map((t) => t.address.toLowerCase()),
     ...Object.values(CASH).map((a) => String(a).toLowerCase()),
   ]);
-  const pull = async (sql: string): Promise<string[]> => {
+  const pull = async (sql: string): Promise<string[] | null> => {
     try {
       const rows = (await db.prepare(sql).all()) as Record<string, unknown>[];
       return rows.map((r) => String(r.token ?? ""));
     } catch {
-      return [];
+      return null;
     }
   };
   const held = await pull("SELECT token FROM positions WHERE value_usdg > 0 ORDER BY value_usdg DESC");
   const classHeld = await pull("SELECT token FROM class_positions ORDER BY first_seen DESC LIMIT 50");
+  if (held === null || classHeld === null) return null;
   return addressesOf([...held, ...classHeld]).filter((a) => !notCoins.has(a));
 }
 
@@ -8520,7 +8522,11 @@ async function mirrorLedgers(): Promise<void> {
         // HELD ONLY, for the Fomo pass: a coin a tenant owns is a reason to watch
         // its traders at position-protection priority, and a candidate is not.
         // Not read at all while the pass is off (fomoSetup).
-        if (!fomoBootNow().off) tenantHeldCoins.set(tenant.toLowerCase(), await heldCoinAddressesFor(handle.db));
+        if (!fomoBootNow().off) {
+          const heldCoins = await heldCoinAddressesFor(handle.db);
+          if (heldCoins) tenantHeldCoins.set(tenant.toLowerCase(), heldCoins);
+          else tenantHeldCoins.delete(tenant.toLowerCase());
+        }
         // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
         //
         // This used to print only when n > 0, which made a stalled table and an
@@ -8979,6 +8985,22 @@ let fomoLastFailure: { text: string; at: number } | null = null;
 const fomoBrokers = new Map<ChildProcess, () => void>();
 
 /**
+ * Whether this replica still speaks for the tenant's running child: a child
+ * here, its lease held healthily, not held for recovery, its ledger source not
+ * blocked. The same rule the mirror and the roster use, asked at the moment of
+ * acting rather than at the start of a pass.
+ */
+function fomoStillOurs(tenant: string): boolean {
+  const key = tenant.toLowerCase();
+  const running = [...children.keys()].find((t) => t.toLowerCase() === key);
+  if (!running) return false;
+  if ([...holders.keys()].some((t) => t.toLowerCase() === key)) return false;
+  const lease = leases.get(key);
+  if (!lease || !lease.healthy()) return false;
+  return !ledgerSourceBlocked(childHome(running));
+}
+
+/**
  * The Fomo switches, read once. THE KEY IS READ HERE AND NOWHERE ELSE in the
  * worker (fomo/boundary.test.ts): the house's name first, then the provider's
  * own docs' name, a blank value being no key. It is handed to the runtime and
@@ -9159,7 +9181,12 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
         const mirrored = new Map([...tenantHeldCoins].filter(([t]) => here.has(t)));
         return mergeHeldTokens(heldTokensFrom(mirrored), rt.service.heldTokensSnapshot?.());
       },
-      holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()),
+      // Read, and read from a child still running here: a reading left behind
+      // by a child that moved or stood down is not this tenant's book now.
+      holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()) && fomoStillOurs(tenant),
+      // Checked right before each fomo.json is written: the roster was read
+      // when the pass started, and a tenant may since have moved or been held.
+      stillOurs: fomoStillOurs,
       childHome,
       writeChildFile: writeChildFomoFile,
       xConsent: xpostConsentLookup(rt.db),

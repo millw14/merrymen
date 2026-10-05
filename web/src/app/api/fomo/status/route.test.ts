@@ -58,6 +58,15 @@ afterEach(() => {
   process.env.MERRYMEN_FOMO_ENABLED = "1";
 });
 
+it("self-hosted, switched off: 404 'not enabled', and nothing is read", async () => {
+  delete process.env.MERRYMEN_HOSTED;
+  process.env.MERRYMEN_FOMO_ENABLED = "0";
+  setFomoRuntimeForTest(untouchable());
+  const res = await get(null);
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: FOMO_NOT_ENABLED });
+});
+
 it("hosted, not opted in: 404 'not enabled', and nothing is read, asked or logged", async () => {
   delete process.env.MERRYMEN_FOMO_ENABLED;
   setFomoOwnerReaderForTest({ async hasAgent() { throw new Error("must not be asked while Fomo is not enabled"); } });

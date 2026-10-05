@@ -171,27 +171,22 @@ export const FOMO_STATE_KEYS = Object.freeze({
 export type ChildBrokerKind = "ipc" | "unavailable" | "direct" | "failed";
 
 /**
- * WHICH BROKER, decided from the process and nothing else.
+ * WHETHER THIS PROCESS HAS NO FOMO AT ALL, decided once from the process.
  *
- *   hosted + IPC channel   the orchestrator's service over IPC; it stamps the
- *                          tenant from which child asked.
- *   hosted, no channel     none, and FOMO IS OFF in this process (childFomoOff):
- *                          the orchestrator has not opted in, so it spawned us
- *                          without the pass.
- *   self-hosted            a local runtime over fomo.sqlite, wrapped in a
- *                          direct broker for the fixed tenant "self".
+ *   hosted        on only with BOTH the IPC channel and the opt-in the
+ *                 orchestrator spawned it under (MERRYMEN_FOMO_ENABLED=1,
+ *                 inherited through childEnv): the orchestrator adds the
+ *                 channel exactly when its pass is on, and a channel some
+ *                 other launcher happened to give is not a pass.
+ *   self-hosted   on unless the install switched it off (=0), like its web.
+ *
+ * Off, FomoChild does nothing (deps.off), the scout gate is charged nothing
+ * for Fomo (explorationScoutUse6 is exactly 0), no broker or local runtime is
+ * built, and Telegram offers no research lane: the process behaves as it did
+ * before Fomo existed.
  */
-/**
- * WHETHER THIS PROCESS HAS NO FOMO AT ALL: a hosted child the orchestrator
- * spawned without the IPC channel, which it does exactly when its pass is off
- * (orchestrator.ts fomoSetup: opt-in, MERRYMEN_FOMO_ENABLED=1). Decided once,
- * from the process alone. Then FomoChild does nothing (deps.off), the scout
- * gate is charged nothing for Fomo (explorationScoutUse6 is exactly 0), and
- * Telegram offers no research lane — the child behaves as it did before Fomo
- * existed. Self-hosted always has its local runtime, so it is never off here.
- */
-export function childFomoOff(hosted: boolean, port: BrokerPort | null): boolean {
-  return hosted && port === null;
+export function childFomoOff(hosted: boolean, port: BrokerPort | null, env: Record<string, string | undefined> = process.env): boolean {
+  return hosted ? port === null || env.MERRYMEN_FOMO_ENABLED !== "1" : env.MERRYMEN_FOMO_ENABLED === "0";
 }
 
 /**
@@ -207,6 +202,16 @@ export async function withExplorationQuarantine(last: bigint, use: bigint | null
   return last + (use ?? (await unknownCharge()));
 }
 
+/**
+ * WHICH BROKER, decided from the process and nothing else. Never asked where
+ * Fomo is off in this process (childFomoOff).
+ *
+ *   hosted + IPC channel   the orchestrator's service over IPC; it stamps the
+ *                          tenant from which child asked.
+ *   hosted, no channel     none: every surface answers "unavailable" at once.
+ *   self-hosted            a local runtime over fomo.sqlite, wrapped in a
+ *                          direct broker for the fixed tenant "self".
+ */
 export async function chooseChildFomoBroker(c: {
   hosted: boolean;
   port: BrokerPort | null;
@@ -1690,6 +1695,15 @@ export interface FomoChildDeps {
    * explorationScoutUse6 is exactly 0n. Absent: on.
    */
   off?: () => boolean;
+  /**
+   * Whether follow or early exploration can happen in this process at all:
+   * only a hosted child, because only the hosted orchestrator writes the
+   * fomo.json that nominates anything. False (self-hosted): there is nothing
+   * the scout gate could owe, so explorationScoutUse6 is exactly 0n rather
+   * than unknown while the local ledger is read, or for good if the local
+   * runtime never starts. Absent: possible.
+   */
+  explores?: () => boolean;
   /** Trusted: childFomoTenant(). Never the file's, never a message's. */
   ownTenant(): string | null;
   home(): string;
@@ -2611,6 +2625,12 @@ export class FomoChild {
     // charge every agent's open Trencher cost to its scout budget for a
     // feature its deployment never turned on (withExplorationQuarantine).
     if (this.isOff()) return 0n;
+    // NOTHING TO OWE: no fomo.json can nominate in this process (deps.explores).
+    try {
+      if (this.deps.explores?.() === false) return 0n;
+    } catch {
+      // a probe that throws is not proof: the ledger below decides
+    }
     try {
       const live = this.deps.live();
       const used = this.ledger.scoutUse6(this.mode(live), scoutKey(live.settings));

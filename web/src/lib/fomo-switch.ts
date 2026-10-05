@@ -19,3 +19,12 @@ export const FOMO_NOT_ENABLED = "Fomo research is not enabled on this deployment
 export function hostedFomoEnabled(env: Env = process.env): boolean {
   return env.MERRYMEN_FOMO_ENABLED === "1";
 }
+
+/**
+ * Whether this deployment runs Fomo research at all: hosted, only when opted
+ * in; self-hosted, unless the install switched it off with "0" (its worker
+ * reads the same rule, worker/src/fomo-child.ts childFomoOff).
+ */
+export function fomoEnabledFor(hosted: boolean, env: Env = process.env): boolean {
+  return hosted ? hostedFomoEnabled(env) : env.MERRYMEN_FOMO_ENABLED !== "0";
+}

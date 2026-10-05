@@ -312,6 +312,7 @@ async function rig(o: {
   access?: Record<string, FomoAccess>;
   held?: Map<string, string[]>;
   holdingsKnown?: (tenant: string) => boolean;
+  stillOurs?: (tenant: string) => boolean;
   xConsent?: Record<string, string>;
   knobs?: Partial<FomoPassKnobs>;
   ingestConfig?: Partial<IngestConfig>;
@@ -351,6 +352,7 @@ async function rig(o: {
     },
     heldTokens: () => held,
     holdingsKnown: o.holdingsKnown ?? (() => true),
+    ...(o.stillOurs ? { stillOurs: o.stillOurs } : {}),
     childHome: (t) => `/homes/${t}`,
     writeChildFile: (home, file) => {
       // The child's own reader must accept every file the pass writes.
@@ -658,6 +660,19 @@ describe("child files", () => {
     assert.equal(r.files.get(`/homes/${T1}`)?.length, 2);
     assert.deepEqual(r.last(T1).signals, []);
     assert.equal(r.last(T1).health.state, "research-only");
+    r.pass.stop();
+  });
+
+  it("is never written for a tenant this replica stopped speaking for after the roster was read", async () => {
+    const ours = new Set([T1, T2]);
+    const r = await rig({ serve: {}, access: { [T1]: ACCESS.monitoring, [T2]: ACCESS.monitoring }, stillOurs: (t) => ours.has(t) });
+    ours.delete(T2); // moved, stood down or held between the roster and the write
+    await r.run([T1, T2]);
+    assert.equal(r.files.get(`/homes/${T1}`)?.length, 1);
+    assert.equal(r.files.get(`/homes/${T2}`), undefined, "no file into a home this replica no longer owns");
+    ours.add(T2);
+    await r.run([T1, T2], T0 + 61_000);
+    assert.equal(r.files.get(`/homes/${T2}`)?.length, 1, "and written once it is ours again");
     r.pass.stop();
   });
 });
@@ -1594,9 +1609,22 @@ describe("the orchestrator's wiring", () => {
     const attach = code.slice(code.indexOf("function attachFomoBroker("), code.indexOf("function noteFomoFailure("));
     assert.ok(/const rt = fomoRuntime;\s*if \(!rt \|\|/.test(attach), "no runtime, no broker");
     assert.equal(count(/fomoRuntime = \{/g), 1, "the runtime is assigned in one place");
-    // The held-coin read on the mirror: gated by the same switch.
+    // The held-coin read on the mirror: gated by the same switch, and a failed read is not an empty book.
     assert.equal(count(/heldCoinAddressesFor\(handle\.db\)/g), 1);
-    assert.ok(/if \(!fomoBootNow\(\)\.off\) tenantHeldCoins\.set\(tenant\.toLowerCase\(\), await heldCoinAddressesFor\(handle\.db\)\)/.test(code), "read only while the pass is on");
+    assert.ok(/if \(!fomoBootNow\(\)\.off\) \{\s*const heldCoins = await heldCoinAddressesFor\(handle\.db\);\s*if \(heldCoins\) tenantHeldCoins\.set\(tenant\.toLowerCase\(\), heldCoins\);\s*else tenantHeldCoins\.delete\(tenant\.toLowerCase\(\)\);/.test(code), "read only while the pass is on");
+    assert.ok(/if \(held === null \|\| classHeld === null\) return null;/.test(code), "either read failing is no reading");
+  });
+
+  it("a held tenant's process never gets the channel, and never a broker", () => {
+    const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const holder = code.slice(code.indexOf("async function startHolderProcess("), code.indexOf("async function startHolderProcess(") + 6000);
+    assert.match(holder, /spawn\([\s\S]*?\{ cwd: ROOT, env: childEnv\(tenant\), stdio: \["ignore", "pipe", "pipe"\] \}/, "stdio is exactly the three pipes");
+    assert.doesNotMatch(holder.slice(0, holder.indexOf("\nasync function ") > 0 ? holder.indexOf("\nasync function ") : undefined), /attachFomoBroker|"ipc"/);
+    // And the pass asks, right before each file, whether the tenant is still a running child here and not held.
+    const still = code.slice(code.indexOf("function fomoStillOurs("), code.indexOf("function fomoStillOurs(") + 800);
+    assert.match(still, /holders\.keys\(\)/);
+    assert.match(still, /lease\.healthy\(\)/);
+    assert.match(code, /stillOurs: fomoStillOurs,/);
   });
 
   it("reads the switches once: off unless opted in, off without a database, the key by either name, never logged", async () => {

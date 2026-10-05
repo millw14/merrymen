@@ -1218,12 +1218,29 @@ describe("an entry is recorded before it is sent", () => {
 });
 
 describe("FOMO OFF IN THIS PROCESS (a hosted child spawned without the channel)", () => {
-  it("is decided from the process alone: hosted and no IPC channel; self-hosted never", () => {
+  it("is decided from the process alone: hosted needs the channel AND the opt-in; self-hosted only its own off switch", () => {
     const port = fakePort();
-    assert.equal(childFomoOff(true, null), true);
-    assert.equal(childFomoOff(true, port), false);
-    assert.equal(childFomoOff(false, null), false, "self-hosted builds its own runtime");
-    assert.equal(childFomoOff(false, port), false);
+    const ON = { MERRYMEN_FOMO_ENABLED: "1" };
+    assert.equal(childFomoOff(true, null, ON), true, "no channel: the orchestrator's pass is off");
+    assert.equal(childFomoOff(true, port, ON), false);
+    assert.equal(childFomoOff(true, port, {}), true, "a channel some other launcher gave is not a pass");
+    assert.equal(childFomoOff(true, port, { MERRYMEN_FOMO_ENABLED: "true" }), true);
+    assert.equal(childFomoOff(false, null, {}), false, "self-hosted builds its own runtime");
+    assert.equal(childFomoOff(false, port, {}), false);
+    assert.equal(childFomoOff(false, null, { MERRYMEN_FOMO_ENABLED: "0" }), true, "an install that switched it off");
+  });
+
+  it("self-hosted: nothing can be owed to the scout gate, read or not (deps.explores)", async () => {
+    const d = memoryDurable();
+    d.readable = false;
+    const h = harness({ durable: d.port, broker: null });
+    const self = new FomoChild({ ...(h.child as unknown as { deps: ConstructorParameters<typeof FomoChild>[0] }).deps, explores: () => false });
+    self.tick({ context: "agent:paper:1:brain", equity6: U(1000), held: [], basis: async () => ({ qtyRaw: 0n, costUsdg: 0n }), entrySec: async () => null });
+    await self.settled();
+    assert.equal(self.explorationScoutUse6(), 0n, "the local ledger is unread, and still nothing is owed");
+    h.tick();
+    await h.child.settled();
+    assert.equal(h.child.explorationScoutUse6(), null, "hosted (explores absent): unread is unknown, as before");
   });
 
   it("charges the scout gate exactly nothing, even with the durable ledger unreadable, and never reads the fallback", async () => {
