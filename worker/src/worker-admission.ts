@@ -6,10 +6,12 @@
  * (`observe`), then it may close what it holds (`exits-only`), and only then
  * may it trade (`trade`). The orchestrator decides which, per tenant, and
  * hands the answer to the child it spawns as MERRYMEN_ADMISSION_LEVEL
- * (orchestrator.ts childEnv). This file is the child's half: it reads that
- * answer, and judges every intent against it at the one place every intent
- * passes — the top of processIntentLocked (index.ts), before a budget is
- * reserved, a quote is fetched or anything is signed.
+ * (orchestrator.ts childEnv — the rollout scope's half, which this file does
+ * not ship with: until childEnv sets it, every hosted child reads as
+ * `observe`, below). This file is the child's half: it reads that answer, and
+ * judges every intent against it at the one place every intent passes — the
+ * top of processIntentLocked (index.ts), before a budget is reserved, a quote
+ * is fetched or anything is signed.
  *
  * WHY THERE AND NOWHERE ELSE. An owner's typed order, a Brain order, the
  * strategy loop, the class route, a dashboard command, the energy buy and the
@@ -164,12 +166,15 @@ export class DrainingRefused extends Error {
 /**
  * How long a draining worker waits for the trade already on its intent chain.
  *
- * Sized to fit inside the twenty seconds a fleet drain gives a child between
- * SIGTERM and SIGKILL, so the child leaves by itself rather than being killed
- * mid-write, and far inside the heartbeat watchdog's floor. Where the
- * orchestrator kills sooner (killChild's SIGKILL three seconds on), the child
- * is killed exactly as it always was — only now with nothing new started in
- * those three seconds. Long enough for a send and one receipt read on a
+ * Sized to fit inside the twenty seconds the PLANNED fleet drain (C3, not yet
+ * in orchestrator.ts) gives a child between SIGTERM and SIGKILL, so the child
+ * leaves by itself rather than being killed mid-write, and far inside the
+ * heartbeat watchdog's floor. TODAY no orchestrator path waits that long:
+ * killChild sends SIGKILL three seconds on, and the child is killed exactly as
+ * it always was — only now with nothing new broadcast in those three seconds;
+ * and the orchestrator's own stop() sends SIGTERM alone, so a child can run
+ * out its drain after the orchestrator has gone (index.ts, on SIGTERM, says
+ * what it still does then). Long enough for a send and one receipt read on a
  * healthy chain; a trade still out after it is left exactly as a crash would
  * leave it — its row was written `submitted` before the broadcast, and the
  * stranded-op resolver settles it from the chain on the next arm. Waiting

@@ -14259,10 +14259,15 @@ async function main() {
    * With no handler, node dies on the signal wherever it happens to be — in the
    * middle of a tick that has just handed the strategy a fresh pass of intents,
    * or between an operation's broadcast and its row settling. The orchestrator
-   * sends one whenever it stops a child: a stand-down, a watchdog kill, its own
-   * shutdown. What that left behind was survivable — the pre-broadcast
-   * `submitted` row and the stranded-op resolver exist because of it — but it
-   * was never a clean stop.
+   * sends one from two places (orchestrator.ts): killChild, whenever it stands
+   * a child down — an accounting hold, the owner's kill switch ("grant
+   * removed"), a lost lease, an expired grant's retirement, an unconfirmed
+   * ledger, FLEET_HALT — which follows it with SIGKILL three seconds on; and
+   * its own stop() on shutdown, which sends SIGTERM alone and exits about a
+   * second later. The heartbeat watchdog does NOT come here: it sends SIGKILL
+   * straight away. What all of that left behind was survivable — the
+   * pre-broadcast `submitted` row and the stranded-op resolver exist because
+   * of it — but it was never a clean stop.
    *
    * So, in this order:
    *   1. `draining` — processIntentLocked refuses every intent that reaches it
@@ -14292,6 +14297,18 @@ async function main() {
    * leaves one: its row is already `submitted` with its hash, and the resolver
    * settles it from the chain at the next arm. Nothing is retried, re-sent or
    * replayed by this.
+   *
+   * WHAT THE BUDGET REALLY IS, TODAY. Under killChild the SIGKILL three
+   * seconds on cuts the drain short, exactly as it always cut the process
+   * short — what changes is that nothing new is broadcast in those seconds.
+   * Under the orchestrator's own stop() nothing kills a draining child, so,
+   * outside a container whose teardown takes every process with it, a child
+   * can outlive its orchestrator and the tenant lease it released by up to
+   * the whole budget. In that window it sends nothing new (every broadcast is
+   * refused) and polls nothing; only a receipt read and its own sqlite writes
+   * go on. The fleet drain planned for the orchestrator (C3: twenty seconds
+   * per child, its leases released last) is what DRAIN_INTENT_CHAIN_MS was
+   * sized for, and closes that window.
    *
    * Registered only here, once the clock exists: a SIGTERM before this point
    * finds nothing started and keeps node's default. A second one while draining
