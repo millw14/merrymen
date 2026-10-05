@@ -10571,6 +10571,10 @@ export async function runOrchestrator(): Promise<void> {
   log(rolloutStartupLine(rollout));
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing
+  // spawns and no pass runs, and the operator should still read whether it
+  // is on (docs/fomo.md). Reads the environment and logs; nothing else.
+  fomoBootNow();
   // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
   // (fleet-drain.ts): said once, and moved aside so that a crash of this run
   // is never read as the clean stop of the last.
@@ -10585,10 +10589,6 @@ export async function runOrchestrator(): Promise<void> {
     startedAt: Math.floor(Date.now() / 1000),
     lastShutdown: lastShutdownOf({ clean: previousShutdown.clean, finishedAt: previousShutdown.at }),
   };
-  // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing
-  // spawns and no pass runs, and the operator should still read whether it
-  // is on (docs/fomo.md). Reads the environment and logs; nothing else.
-  fomoBootNow();
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror
