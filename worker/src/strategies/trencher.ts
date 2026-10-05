@@ -20,6 +20,7 @@
  */
 
 import type { PriceQuote } from "../../../packages/core/src/index";
+import { ENTRY_GATE_WHY, entryGateFor } from "../entry-gates";
 import type { TradeIntent } from "../policy";
 import { breakerIdle, type Snapshot, type Strategy, type Tick } from "./types";
 import type { Why } from "./reasons";
@@ -442,6 +443,13 @@ export interface TrencherDeps {
  * always more urgent than getting in.
  */
 export function makeTrencher(deps: TrencherDeps): Strategy {
+  /**
+   * Candidates skipped for an entry gate, keyed token|rule — said once each,
+   * for as long as this strategy is built (a settings change or an arm builds
+   * a new one, and a re-sign is exactly what lifts a gate). The refusal used
+   * to be where an owner learned to re-sign; the skip must not take that away.
+   */
+  const gateNoted = new Set<string>();
   return {
     name: "trencher",
     async tick(snap: Snapshot): Promise<Tick> {
@@ -537,6 +545,28 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;
+        // ── A BUY THE WALL IS CERTAIN TO REFUSE IS NOT A CANDIDATE ────────
+        //
+        // BEFORE shouldEnter and BEFORE the Brain: a coin the key cannot sell
+        // back passed every entry bound, took this tick's one entry, and with
+        // the Brain required was a paid review first — then `no-exit`, every
+        // tick. Skipping it lets the next candidate have the slot.
+        //
+        // WATCHED TOKENS ONLY. An unwatched candidate already fails shouldEnter
+        // with its own sentence ("no watched token matches"), which names the
+        // remedy that applies to it; gating it here would swap that for one
+        // that does not. And never a custody candidate: the autonomous rail is
+        // judged against its vault's chain-verified assets, not these lists.
+        const gate =
+          !c.custodyVault && c.unpriceable !== "not-watched" ? entryGateFor(snap.entryGates, c.token) : null;
+        if (gate) {
+          const key = `${c.token.toLowerCase()}|${gate}`;
+          if (!gateNoted.has(key)) {
+            gateNoted.add(key);
+            deps.onNote?.("warn", `trencher: skipping ${c.symbol} — ${ENTRY_GATE_WHY[gate]}`);
+          }
+          continue;
+        }
         let size = deps.cfg.perEntryUsdg;
         // Respect the daily headroom as a sizing hint, exactly as other
         // strategies do — the wall still refuses anything over, this just stops
