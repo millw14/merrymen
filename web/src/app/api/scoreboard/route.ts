@@ -11,7 +11,7 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { readMeasuredMark } from "@/lib/held-marks";
-import { netFlows, readDistinctFlows } from "@/lib/distinct-flows";
+import { CapitalFlowsWithheld, netFlows, readDistinctFlows } from "@/lib/distinct-flows";
 import { distinctTrades } from "@/lib/distinct-trades";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +34,12 @@ export interface ScoreboardAgent {
   equity: ScoreboardEquityPoint[];
   /** Equity − contributions − gas. Null when contributions are unknown. */
   pnl_usdg: number | null;
+  /**
+   * Why that P&L is null when flows are on record but cannot be summed
+   * (distinct-flows.ts): "review" for one transfer booked two ways, "unread"
+   * for records that contradict each other. Null otherwise.
+   */
+  contributions_withheld: "review" | "unread" | null;
   /** Gas charged against that figure, and settled operations (landed or reverted) whose gas could not be priced. */
   gas_usdg: number;
   gas_unpriced_trades: number;
@@ -167,14 +173,17 @@ export async function GET(req: Request) {
       //
       // EACH MOVEMENT ONCE (distinct-flows.ts), collapsed before the cutoff:
       // a carry or a log on record twice is one deposit. Rows that contradict
-      // each other throw, and the P&L is null rather than one of them.
+      // each other throw, and the P&L is null rather than one of them, with
+      // the reason said.
       let contributed: number | null = null;
+      let contributionsWithheld: ScoreboardAgent["contributions_withheld"] = null;
       try {
         const flows = await readDistinctFlows(db, account, epochArg.length ? epochArg[0]! : null);
         const { n, net } = netFlows(flows, latestAt ?? undefined);
         contributed = n === 0 ? null : net;
-      } catch {
-        /* flows arrives with a worker migration, or its rows are withheld */
+      } catch (error) {
+        // Flows arrives with a worker migration, or its rows are withheld.
+        if (error instanceof CapitalFlowsWithheld) contributionsWithheld = error.verdict;
       }
       // Gas priced in USDG when it was burned, and how much could not be
       // priced — the count is what stops "net of gas" being a claim we can't
@@ -300,6 +309,7 @@ export async function GET(req: Request) {
         // overstates performance by the whole trading cost.
         pnl_usdg:
           latestEquity === null || contributed === null ? null : latestEquity - contributed - gasUsdg,
+        contributions_withheld: contributionsWithheld,
         gas_usdg: gasUsdg,
         gas_unpriced_trades: gasUnpriced,
         max_drawdown_bps: maxDdBps,

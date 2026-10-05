@@ -12,8 +12,9 @@ import { DatabaseSync } from "node:sqlite";
  * the mirror copied twice, or a deposit on record with and without its chain
  * stamp, was capital twice; a re-recorded copy of a paid op was gas twice; and
  * a reverted op, which burns gas too, was never charged. Rows that contradict
- * each other now leave the P&L null instead of one of them. Driven through the
- * real GET, self-hosted, against a ledger built by the worker's own schema.
+ * each other now leave the P&L null instead of one of them, and say why.
+ * Driven through the real GET, self-hosted, against a ledger built by the
+ * worker's own schema.
  */
 const ACCOUNT = "0xa6e17a1b2c3d4e5f60718293a4b5c6d7e8f90123";
 const CASED = "0xA6E17A1B2C3D4E5F60718293A4B5C6D7E8F90123";
@@ -69,7 +70,7 @@ after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-type Board = { agents: { pnl_usdg: number | null; gas_usdg: number; gas_unpriced_trades: number }[] };
+type Board = { agents: { pnl_usdg: number | null; contributions_withheld: string | null; gas_usdg: number; gas_unpriced_trades: number }[] };
 const board = async () => (await (await GET(new Request("http://localhost/api/scoreboard"))).json()) as Board;
 
 it("capital is counted once per movement", async () => {
@@ -77,6 +78,7 @@ it("capital is counted once per movement", async () => {
   assert.ok(a);
   // 160 − 150 of capital − 0.3 of gas. Summed raw, the capital was 300.
   assert.ok(Math.abs(a.pnl_usdg! - 9.7) < 1e-9, `pnl ${a.pnl_usdg}`);
+  assert.equal(a.contributions_withheld, null);
 });
 
 it("gas is charged once per operation, reverts included — a deliberate correction", async () => {
@@ -99,4 +101,18 @@ it("a transfer booked as both our intent and its chain log leaves the P&L unpubl
   }
   const [a] = (await board()).agents;
   assert.equal(a!.pnl_usdg, null);
+  assert.equal(a!.contributions_withheld, "review");
+});
+
+it("records that contradict each other are withheld as unread", async () => {
+  const raw = new DatabaseSync(path.join(dir, "merrymen.db"));
+  try {
+    raw.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', 90, 'epoch-carry', 1000)`)
+      .run(ACCOUNT);
+  } finally {
+    raw.close();
+  }
+  const [a] = (await board()).agents;
+  assert.equal(a!.pnl_usdg, null);
+  assert.equal(a!.contributions_withheld, "unread");
 });

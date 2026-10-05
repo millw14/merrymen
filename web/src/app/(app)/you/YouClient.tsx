@@ -8,8 +8,8 @@ import { Sparkline } from "@/components/Sparkline";
 import { ThesisCard } from "@/components/ThesisCard";
 import { KillSwitch } from "@/components/KillSwitch";
 import { railNotices } from "@/lib/rail-notices";
-import { rankPnl, unrankedLabel } from "@/lib/rank-pnl";
-import { pnlBasisOf, type FeedMeasured } from "@/lib/feed-pnl";
+import { rankPnl, unrankedLabel, type Rank } from "@/lib/rank-pnl";
+import { pnlBasisOf, withheldWhy, type FeedMeasured } from "@/lib/feed-pnl";
 import { statusLine, type AgentSnapshot } from "@/lib/status-line";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { timeAgo } from "@/lib/time";
@@ -57,6 +57,8 @@ interface FeedResponse {
   netContributionsUsdg?: number | null;
   /** The mark a return is measured at, and what was booked by it — see lib/feed-pnl.ts. */
   measured?: FeedMeasured | null;
+  /** Why the contributions are null though flows are on record — see lib/feed-pnl.ts. */
+  contributionsWithheld?: "review" | "unread" | null;
   gasUsdg?: number;
   /** Landed fills whose gas could not be priced. Non-zero means GROSS of gas. */
   gasUnpricedTrades?: number;
@@ -203,7 +205,12 @@ export function YouClient() {
   // page whose reader owns the money. It also had no quality term, so a
   // contribution total assembled from inference published a confident
   // percentage over an unevidenced denominator.
-  const rank = rankPnl({
+  //
+  // Contributions WITHHELD (one transfer booked two ways, or records that
+  // contradict each other) are not contributions of nothing: the reason is the
+  // one the public page gives, never "no deposit on record".
+  const withheld = withheldWhy(feed);
+  const rank: Rank = withheld ? { pnlBps: null, unrankedWhy: withheld } : rankPnl({
     contributed,
     latest: basis.latest,
     gasUsdg: gas,

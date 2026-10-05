@@ -16,7 +16,7 @@ import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
 import { readMeasuredMark } from "@/lib/held-marks";
-import { netFlows, readDistinctFlows, type FlowRecord } from "@/lib/distinct-flows";
+import { CapitalFlowsWithheld, netFlows, readDistinctFlows, type FlowRecord } from "@/lib/distinct-flows";
 import { distinctTrades } from "@/lib/distinct-trades";
 import type { FeedMeasured } from "@/lib/feed-pnl";
 
@@ -161,6 +161,14 @@ export interface FeedResponse {
    */
   measured: FeedMeasured | null;
   /**
+   * WHY `netContributionsUsdg` IS NULL when the flows are on record but cannot
+   * be summed (distinct-flows.ts): "review" for one transfer booked two ways,
+   * "unread" for records that contradict each other. Null otherwise. Without
+   * it a withheld figure reaches the owner's desk as null contributions, and
+   * the desk calls a funded account "no deposit on record".
+   */
+  contributionsWithheld: "review" | "unread" | null;
+  /**
    * Gas paid in USDG, and how many settled operations' (landed or reverted)
    * gas could NOT be priced. P&L is equity − contributions − gas; the count is
    * what says whether that is the full gas cost or only the priceable part.
@@ -194,6 +202,7 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     agent: await identityOf(null, tenant),
     netContributionsUsdg: null,
     measured: null,
+    contributionsWithheld: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
     landed: 0,
@@ -239,6 +248,7 @@ export async function GET(req: Request) {
     let name: string | null = null;
     let netContributionsUsdg: number | null = null;
     let measured: FeedMeasured | null = null;
+    let contributionsWithheld: FeedResponse["contributionsWithheld"] = null;
     let gasUsdg = 0;
     let gasUnpricedTrades = 0;
     // WHOSE numbers these are. Re-granting mints a new smart account and leaves
@@ -386,14 +396,16 @@ export async function GET(req: Request) {
     }
     // EACH MOVEMENT ONCE (distinct-flows.ts): a carry or a log on record twice
     // is one deposit. Rows that contradict each other throw, and both figures
-    // stay null — no return — rather than sum them or pick one.
+    // stay null — no return — rather than sum them or pick one, and the
+    // response says why, so the desk does not read null as "no deposit".
     let flows: FlowRecord[] | null = null;
     try {
       flows = await readDistinctFlows(db, scope, epoch);
       const { n, net } = netFlows(flows);
       netContributionsUsdg = n === 0 ? null : net;
-    } catch {
-      /* flows arrives with a worker migration, or its rows are withheld — null, never zero */
+    } catch (error) {
+      // Flows arrives with a worker migration (null, never zero), or its rows are withheld.
+      if (error instanceof CapitalFlowsWithheld) contributionsWithheld = error.verdict;
     }
     try {
       // The return's pair: the newest measured mark and what was booked by it.
@@ -459,6 +471,7 @@ export async function GET(req: Request) {
       agent: await identityOf(name, tenant),
       netContributionsUsdg,
       measured,
+      contributionsWithheld,
       gasUsdg,
       gasUnpricedTrades,
       landed,

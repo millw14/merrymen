@@ -12,7 +12,8 @@ import { DatabaseSync } from "node:sqlite";
  * page's return divided by an opening carry the mirror copied twice, charged a
  * re-recorded paid op twice, and never charged a revert. Rows that contradict
  * each other now leave the contributions null — no return — instead of one of
- * them. Driven through the real GET, self-hosted, against the worker's schema.
+ * them, and say why. Driven through the real GET, self-hosted, against the
+ * worker's schema.
  */
 const ACCOUNT = "0xa6e17a1b2c3d4e5f60718293a4b5c6d7e8f90123";
 const CASED = "0xA6E17A1B2C3D4E5F60718293A4B5C6D7E8F90123";
@@ -77,6 +78,7 @@ it("contributions are counted once per movement", async () => {
   assert.equal(f.netContributionsUsdg, 150, "the carry and the top-up, each once");
   assert.equal(f.measured?.netContributionsUsdg, 150, "the late unstamped copy is the top-up already in the mark");
   assert.equal(f.measured?.equityUsdg, 160);
+  assert.equal(f.contributionsWithheld, null);
 });
 
 it("gas is charged once per operation, reverts included — a deliberate correction", async () => {
@@ -99,5 +101,19 @@ it("a transfer booked as both our intent and its chain log leaves the contributi
   const f = await feed();
   assert.equal(f.netContributionsUsdg, null);
   assert.equal(f.measured, null, "no return is measured over withheld contributions");
+  assert.equal(f.contributionsWithheld, "review", "and the desk is told why, not left to read null as no deposit");
   assert.deepEqual(f.equity.map((p: { equity_usdg: number }) => p.equity_usdg), [160], "the book's value is still shown");
+});
+
+it("records that contradict each other are withheld as unread", async () => {
+  const raw = new DatabaseSync(path.join(dir, "merrymen.db"));
+  try {
+    raw.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', 90, 'epoch-carry', ?)`)
+      .run(ACCOUNT, now - 4_000);
+  } finally {
+    raw.close();
+  }
+  const f = await feed();
+  assert.equal(f.netContributionsUsdg, null);
+  assert.equal(f.contributionsWithheld, "unread");
 });
