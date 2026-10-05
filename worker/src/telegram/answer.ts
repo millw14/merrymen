@@ -329,7 +329,13 @@ export type FomoDmAnswer =
       timedOut: boolean;
     };
 
-/** Resolve `p`, or `fallback` after `ms`. The timer never outlives the race. */
+/**
+ * Resolve `p`, or `fallback` after `ms`. The timer never outlives the race,
+ * and it is NOT unref'd: it is cleared the moment the race settles, so it
+ * holds nothing open past the deadline, while an unref'd one let a process
+ * with nothing else pending exit with the race still open (a lookup that
+ * never answers would then never be cut off at all).
+ */
 function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
   if (!(ms > 0)) {
     p.catch(() => {});
@@ -338,7 +344,6 @@ function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<F>((resolve) => {
     timer = setTimeout(() => resolve(fallback), ms);
-    (timer as { unref?: () => void }).unref?.();
   });
   return Promise.race([p, expired]).finally(() => {
     if (timer) clearTimeout(timer);
