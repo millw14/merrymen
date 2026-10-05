@@ -29,6 +29,7 @@ import { after, afterEach, describe, it } from "node:test";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { wrapSqlite } from "./db";
+import { DEPLOY_GUARD_IMAGE, hostedOrchestratorRefusals, onRailway } from "./deploy-guard-checks";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
 
@@ -537,6 +538,17 @@ describe("startup", () => {
    * Each case also sets the failure-only reporter and leaves DATABASE_URL
    * unset, so a refusal that did not happen falls through to the reporter's
    * own refusal (a different message) instead of into the main loop.
+   *
+   * ON RAILWAY THE DEPLOY GUARD SPEAKS FIRST (assertHostedFleetStart,
+   * deploy-guard-checks.ts): an orchestrator that is not the fleet's one
+   * service, on a required persistent home, in the guarded image, exits 78
+   * before the rollout is read — and process.exit would end this whole file.
+   * So a case that puts this process on Railway also configures it as the
+   * fleet service, correctly. The guard is not loosened, and it is asked
+   * first, so a guard that changes fails here by name rather than by exit.
+   * What such a case proves is the order the deploy runs in: a fleet the
+   * guard lets through still refuses an unset rollout. Each marker on its own
+   * is fleet-rollout.test.ts's.
    */
   const boot = async (rollout: string | undefined, extra: Record<string, string> = {}) => {
     const saved = { ...process.env };
@@ -544,7 +556,16 @@ describe("startup", () => {
     else process.env.MERRYMEN_FLEET_ROLLOUT = rollout;
     process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY = "1";
     Object.assign(process.env, extra);
+    if (onRailway(process.env)) {
+      const service = process.env.RAILWAY_SERVICE_ID || "227ff49a-1111-4222-8333-444455556666";
+      Object.assign(process.env, {
+        RAILWAY_SERVICE_ID: service, MERRYMEN_FLEET_SERVICE_ID: service,
+        MERRYMEN_PERSISTENT_HOME_REQUIRED: "1", MERRYMEN_IMAGE: DEPLOY_GUARD_IMAGE,
+      });
+    }
     try {
+      const refusals = hostedOrchestratorRefusals(process.env);
+      assert.deepEqual(refusals, [], `the deploy guard would exit this process before the rollout is read: ${refusals.join("; ")}`);
       await runOrchestrator();
       return null;
     } catch (e) {
