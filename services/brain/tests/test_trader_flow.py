@@ -286,6 +286,21 @@ class TestThePulseConsultsIt:
         assert m.nodes == ["analyst:technical", "analyst:social", "analyst:liquidity", "portfolio-manager"]
         assert _pulse_lenses(_lenses_for("memecoin"), MARKET) == ["technical", "social", "liquidity"]
 
+    @pytest.mark.parametrize("tier,stages", [("research", "adaptive"), ("research", "full"), ("deep", "adaptive")])
+    def test_no_tier_asks_an_unfed_trader_flow_analyst(self, tier, stages):
+        # The desk lists the lens, but a run without its material makes exactly
+        # the analyst calls it made before the lens existed: every memecoin
+        # lens but trader-flow, in the desk's order, unfed ones included.
+        m = _Recorder()
+        req = _request(dict(MARKET), tier=tier).model_copy(update={"stages": stages})
+        _run(m, req)
+        analysts = [n for n in m.nodes if n.startswith("analyst:")]
+        assert analysts == ["analyst:technical", "analyst:onchain", "analyst:social", "analyst:liquidity", "analyst:builder"]
+        assert "[analyst:trader-flow]" not in m.manager_call()["user"]
+        fed = _Recorder()
+        _run(fed, _request({**MARKET, "trader-flow": FLOW}, tier=tier).model_copy(update={"stages": stages}))
+        assert "analyst:trader-flow" in fed.nodes, "fed, it runs on this tier too"
+
 
 # ── the instruction ────────────────────────────────────────────────────────
 
@@ -422,6 +437,21 @@ class TestTheFence:
             (REF_A, "six distinct buyers"),
             ("pool reserves", "100000 USD of reserves"),
         ]
+
+    def test_a_run_without_trader_material_keeps_its_evidence_as_before(self):
+        # The filter governs citations only where refs were issued: a run
+        # without trader material keeps every item, as it did before the lens.
+        items = [
+            {"source": "liquidity", "ref": "pool reserves", "claim": "100000 USD of reserves"},
+            {"source": "social", "ref": "[ref:dffffffr9c9]", "claim": "a model-made bracket"},
+        ]
+        m = _Recorder(manager={
+            "action": "hold", "confidence": .5, "suggested_delta_usdg": 0,
+            "thesis": "Depth is thin.", "evidence": items,
+        })
+        result = _run(m, _request(dict(MARKET)))
+        assert isinstance(result, BrainDecision), result
+        assert [(e.ref, e.claim) for e in result.evidence] == [(i["ref"], i["claim"]) for i in items]
 
 
 # ── the record ─────────────────────────────────────────────────────────────

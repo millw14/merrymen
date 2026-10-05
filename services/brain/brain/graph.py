@@ -427,6 +427,14 @@ class BrainGraph:
         # budget is a running total and a fan-out would race it past the
         # ceiling before any of them checked.
         lenses = _lenses_for(req.market.instrument_class)
+        # TRADER-FLOW ONLY WHEN FED, on every tier. Every other unfed lens is
+        # still asked on a non-pulse run ("NO DATA AVAILABLE" is a reading),
+        # but this one exists only for the following path: unfed, it would be
+        # a paid analyst call and an extra report in the manager's prompt on
+        # every research and deep memecoin review, from workers that never
+        # send it. Without its material, a run makes exactly the calls it made
+        # before the lens existed.
+        lenses = [l for l in lenses if l != TRADER_FLOW or req.market.signals.get(TRADER_FLOW)]
         if req.tier == "pulse":
             # Reserve one of the four calls for the decision. Previously four
             # analysts consumed the entire pulse budget before it could decide.
@@ -566,7 +574,7 @@ class BrainGraph:
                 return self._assemble(
                     req, budget, gate, candidate, bull="", bear="",
                     depth_used="analysts", escalation=escalation, candidate_action=candidate_action,
-                    views=views,
+                    views=views, following=following,
                 )
             stages = "full"
 
@@ -588,6 +596,7 @@ class BrainGraph:
             req, budget, gate, data, bull=bull, bear=bear,
             depth_used="full" if stages == "full" else "analysts+debate",
             escalation=escalation, candidate_action=candidate_action, views=views,
+            following=following,
         )
 
     def _assemble(
@@ -603,6 +612,7 @@ class BrainGraph:
         escalation: EscalationVerdict,
         candidate_action: str | None,
         views: list[AnalystView],
+        following: bool = False,
     ) -> BrainDecision:
         # ── THE GATE WINS, whatever the model said ──────────────────────────
         #
@@ -661,10 +671,12 @@ class BrainGraph:
                 # beside an invented citation is exactly the claim it was
                 # invented to prop up. Checked on the bounded values, because
                 # those are what is stored: a cut through a token is a
-                # malformed citation too.
+                # malformed citation too. Only on a following run: refs are
+                # issued only with trader material, and a run without it
+                # keeps its evidence exactly as before the lens existed.
                 ref = str(e.get("ref", ""))[:200]
                 claim = str(e.get("claim", ""))[:400]
-                if not _cites_only_supplied(f"{ref}\n{claim}", supplied):
+                if following and not _cites_only_supplied(f"{ref}\n{claim}", supplied):
                     continue
                 evidence.append(
                     Evidence(
@@ -880,8 +892,9 @@ _DESK: dict[str, list[str]] = {
     # reading is the one dropped. It is evidence about the team, which moves on
     # a scale of days; the tape moves inside the pulse.
     #
-    # `trader-flow` holds a pulse slot whenever it is fed (see
-    # PULSE_RESERVED_LENSES), so its place here sets only the order the
+    # `trader-flow` runs only when it is fed, on every tier (_think drops it
+    # otherwise), and holds a pulse slot whenever it is (see
+    # PULSE_RESERVED_LENSES). So its place here sets only the order the
     # reports are read in: the tape first, then who traded it, then who builds
     # it. Only on the memecoin desk, because that is the only class the
     # following path nominates; another desk asking for it would pay for an
