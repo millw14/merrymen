@@ -373,11 +373,17 @@ test("the env release needs the held adopted manifest, its token, the pin and a 
     { ...f.release, MERRYMEN_ADOPT_HOME_HALT_SHA256: sha("another halt") },
     { ...f.release, MERRYMEN_PERSISTENT_HOME_REQUIRED: undefined },
     { ...f.release, MERRYMEN_INITIAL_HANDOVER: "another-operation" },
+    // The generation is a positive integer after one `@`, or absent for the adoption's own halt.
+    ...[`${OP}@0`, `${OP}@01`, `${OP}@`, `${OP}@1@1`, `${OP}@-1`, "@1"].map(MERRYMEN_RELEASE_HOME_HALT => ({ ...f.release, MERRYMEN_RELEASE_HOME_HALT })),
   ]) assert.throws(() => controlAdoptedPersistentHomeHalt(env, f.options), /Persistent home refused/);
   for (const MERRYMEN_FLEET_ROLLOUT of ["none", " none "]) {
     const withheld = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_FLEET_ROLLOUT }, f.options)!;
     assert.deepEqual([withheld.action, withheld.handoverState], ["withheld", "held"]);
   }
+  // A generation no re-halt has put back yet lifts nothing either.
+  const ahead = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_RELEASE_HOME_HALT: `${OP}@1` }, f.options)!;
+  assert.deepEqual([ahead.action, ahead.handoverState], ["withheld", "held"]);
+  assert.match(ahead.detail, /generation 1, but the standing halt is generation 0/);
   // B1's parser reads the scope, so a typo or a missing value is a refusal
   // and never permission: unset is refused because this is the Railway fleet.
   for (const MERRYMEN_FLEET_ROLLOUT of [undefined, "", "None", "NONE", "off", "0", "false", "nobody", "none,", "halt", "pause", "0xabc",
@@ -457,8 +463,8 @@ test("the env re-halt publishes a canonical halt without replacing one, records 
     assert.match(both.detail, /MERRYMEN_RELEASE_HOME_HALT is ignored/);
   }
   assert.equal(existsSync(f.halt), true);
-  // Once the re-halt variable goes, the same reviewed release applies again.
-  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
+  // The re-halt consumed the release before it; releasing again names the new generation.
+  assert.equal(controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_RELEASE_HOME_HALT: `${OP}@1` }, f.options)!.action, "released");
   assert.equal(existsSync(f.halt), false);
   // An operator's halt is never replaced, and the released manifest is left alone with it.
   writeFileSync(f.halt, "operator stop\n", { mode: 0o600 });
@@ -467,6 +473,39 @@ test("the env re-halt publishes a canonical halt without replacing one, records 
   assert.equal(readFileSync(f.halt, "utf8"), "operator stop\n");
   assert.equal(manifestState(f), "complete");
   assert.equal(readFileSync(f.book, "utf8"), "original populated book");
+});
+
+test("a re-halt consumes the release before it: the release variable left set after a rollback lifts nothing", t => {
+  const f = populated(t), rollback = () => controlAdoptedPersistentHomeHalt(f.rehalt, f.options)!;
+  adoptPopulatedPersistentHome(f.adopt, f.options);
+  assert.equal(controlAdoptedPersistentHomeHalt(f.release, f.options)!.action, "released");
+  for (const generation of [1, 2]) {
+    const rehalted = rollback();
+    assert.deepEqual([rehalted.action, rehalted.handoverState], ["rehalted", "held"]);
+    assert.match(rehalted.detail, new RegExp(`generation ${generation}; only MERRYMEN_RELEASE_HOME_HALT=<operation token>@${generation} releases it`));
+    assert.equal(JSON.parse(readFileSync(f.manifest, "utf8")).handover.haltGeneration, generation);
+    const held = tree(f.home);
+    // The operator removes the re-halt variable and leaves every earlier
+    // release value set: each names a generation a re-halt has consumed.
+    for (const MERRYMEN_RELEASE_HOME_HALT of [OP, ...Array.from({ length: generation - 1 }, (_, k) => `${OP}@${k + 1}`)]) {
+      const stale = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_RELEASE_HOME_HALT }, f.options)!;
+      assert.deepEqual([stale.action, stale.handoverState], ["withheld", "held"], MERRYMEN_RELEASE_HOME_HALT);
+      assert.match(stale.detail, new RegExp(`standing halt is generation ${generation}, so it stays`));
+      assert.doesNotMatch(stale.detail, new RegExp(OP), "log-safe detail");
+    }
+    assert.deepEqual(tree(f.home), held, "a stale release writes nothing");
+    assert.ok(verifyPersistentHome(f.env, f.options));
+    const again = controlAdoptedPersistentHomeHalt({ ...f.release, MERRYMEN_RELEASE_HOME_HALT: `${OP}@${generation}` }, f.options)!;
+    assert.deepEqual([again.action, again.handoverState], ["released", "complete"]);
+    assert.equal(existsSync(f.halt), false);
+    assert.equal(JSON.parse(readFileSync(f.manifest, "utf8")).handover.haltGeneration, generation, "completion keeps the generation");
+  }
+  // A manifest whose generation is not a positive integer is refused, not read as 0.
+  const saved = JSON.parse(readFileSync(f.manifest, "utf8"));
+  for (const haltGeneration of [0, -1, 1.5, "2", null]) {
+    writeFileSync(f.manifest, JSON.stringify({ ...saved, handover: { ...saved.handover, haltGeneration } }) + "\n", { mode: 0o600 });
+    assert.throws(() => verifyPersistentHome(f.env, f.options), /does not match the configured volume/, String(haltGeneration));
+  }
 });
 
 test("every re-halt crash seam converges, and a halt made by hand meanwhile is kept", t => {
