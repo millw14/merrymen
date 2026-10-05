@@ -384,6 +384,21 @@ describe("entry gates: skipped before shouldEnter and the Brain", () => {
     assert.match(notes[0]!, /^trencher: skipping LOCK — this key can't approve it for a sell.*no-exit/);
   });
 
+  it("AN ARM DOES NOT REBUILD THIS: a coin seen covered, then gated again, earns a fresh note", async () => {
+    // A re-sign reuses the strategy (only a settings change builds a new one),
+    // so the once-per-coin set is forgotten for a coin the moment it is seen
+    // ungated — not by an arm that never reaches it.
+    const covered = entryGatesOf({ allowedAssets: [USDG, LOCKED, OPEN], sellableAssets: [USDG, LOCKED, OPEN] });
+    const { s, notes } = build([candidate({ symbol: "LOCK", token: LOCKED })]);
+    const skips = () => notes.filter((n) => /^trencher: skipping LOCK/.test(n)).length;
+    await run(s, snap());
+    await run(s, snap());
+    assert.equal(skips(), 1, "once while the gate stands");
+    assert.equal((await run(s, snap({ entryGates: covered }))).length, 1, "a re-sign covers it: bought");
+    await run(s, snap());
+    assert.equal(skips(), 2, "a later re-sign drops it again: a new fact, said again");
+  });
+
   it("WATCHED TOKENS ONLY: an unwatched candidate keeps shouldEnter's own sentence", async () => {
     const stranger = "0x00000000000000000000000000000000000000d9" as const;
     const { s, notes } = build([candidate({ symbol: "ANON", token: stranger, priceable: false, unpriceable: "not-watched" })]);

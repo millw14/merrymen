@@ -444,10 +444,16 @@ export interface TrencherDeps {
  */
 export function makeTrencher(deps: TrencherDeps): Strategy {
   /**
-   * Candidates skipped for an entry gate, keyed token|rule — said once each,
-   * for as long as this strategy is built (a settings change or an arm builds
-   * a new one, and a re-sign is exactly what lifts a gate). The refusal used
-   * to be where an owner learned to re-sign; the skip must not take that away.
+   * Candidates skipped for an entry gate, keyed token|rule — said once each.
+   * The refusal used to be where an owner learned to re-sign; the skip must
+   * not take that away.
+   *
+   * NOT CLEARED BY AN ARM. Only a strategy-settings change builds a new
+   * strategy (index.ts makeStrategy); an arm — a re-sign included — reuses
+   * this one, so on its own the set would outlive every grant in the
+   * process, as index.ts's noExitAnnounced does. So a coin's notes are
+   * forgotten the first time it is seen UNGATED below: a re-sign that covers
+   * it, and a later one that drops it again, is a new fact with its own note.
    */
   const gateNoted = new Set<string>();
   return {
@@ -557,8 +563,8 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         // remedy that applies to it; gating it here would swap that for one
         // that does not. And never a custody candidate: the autonomous rail is
         // judged against its vault's chain-verified assets, not these lists.
-        const gate =
-          !c.custodyVault && c.unpriceable !== "not-watched" ? entryGateFor(snap.entryGates, c.token) : null;
+        const asked = !c.custodyVault && c.unpriceable !== "not-watched";
+        const gate = asked ? entryGateFor(snap.entryGates, c.token) : null;
         if (gate) {
           const key = `${c.token.toLowerCase()}|${gate}`;
           if (!gateNoted.has(key)) {
@@ -566,6 +572,11 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
             deps.onNote?.("warn", `trencher: skipping ${c.symbol} — ${ENTRY_GATE_WHY[gate]}`);
           }
           continue;
+        }
+        // Asked, with the hint read, and nothing gates it: whatever was said
+        // about this coin no longer holds, so the next gate on it is news.
+        if (asked && snap.entryGates) {
+          for (const rule of Object.keys(ENTRY_GATE_WHY)) gateNoted.delete(`${c.token.toLowerCase()}|${rule}`);
         }
         let size = deps.cfg.perEntryUsdg;
         // Respect the daily headroom as a sizing hint, exactly as other
