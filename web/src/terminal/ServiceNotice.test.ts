@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import * as React from "react";
 import { act, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -113,6 +113,51 @@ describe("the banner in the shell", () => {
     answer = async () => { throw new TypeError("fetch failed"); };
     await mount();
     assert.equal(ui.container.innerHTML, "");
+  });
+
+  it("an open tab asks again every five minutes: a failed read keeps the notice, null clears it", async () => {
+    // The two properties the component says are deliberate, during the
+    // outage they exist for. jsdom's window.setInterval runs on Node's
+    // setTimeout, which mock.timers holds, so five minutes can be stepped;
+    // the reads land on microtasks alone, so no real timer is needed.
+    const FIVE_MINUTES = 5 * 60_000;
+    const drain = () => act(async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); });
+    const after = async (ms: number) => { mock.timers.tick(ms); await drain(); };
+    mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    try {
+      await ui.remount(createElement(ServiceNotice));
+      await drain();
+      assert.ok(shown(), "the first read shows the notice");
+      assert.equal(requests.length, 1);
+
+      answer = async () => { throw new TypeError("fetch failed"); };
+      await after(FIVE_MINUTES - 1);
+      assert.equal(requests.length, 1, "no second read before five minutes");
+      await after(1);
+      assert.equal(requests.length, 2, "a second read at five minutes");
+      assert.ok(shown(), "a read that failed keeps the notice on screen");
+
+      // A proxy's error page is not an answer either.
+      answer = async () => new Response("<html>Bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+      await after(FIVE_MINUTES);
+      assert.equal(requests.length, 3);
+      assert.ok(shown(), "a 502 keeps the notice on screen");
+
+      answer = async () => json({ notice: { ...NOTICE, title: "Trading has resumed" } });
+      await after(FIVE_MINUTES);
+      assert.equal(ui.container.querySelector("strong")?.textContent, "Trading has resumed", "an edit reaches a tab left open");
+
+      answer = async () => json({ notice: null });
+      await after(FIVE_MINUTES);
+      assert.equal(requests.length, 5);
+      assert.equal(shown(), null, "the route answering null is an answer, and clears the banner");
+
+      await ui.remount(createElement("div"));
+      await after(FIVE_MINUTES * 3);
+      assert.equal(requests.length, 5, "an unmounted banner stops asking");
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   it("stays dismissed for the same notice, and comes back after ANY edit", async () => {
