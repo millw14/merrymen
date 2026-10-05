@@ -23,6 +23,7 @@ import { registerPrompts } from "./prompts";
 import { DIRECTORY_INSTRUCTIONS, SERVER_INSTRUCTIONS, SERVER_VERSION } from "./instructions";
 import { capabilityAllowedIn, scopeAllowedIn, type Capability, type McpProfile } from "./scopes";
 import { ALL_TOOLS } from "./tools";
+import { hostedFomoEnabled } from "@/lib/fomo-switch";
 import { ALL_RESOURCES } from "./resources-catalog";
 import { traceId as newTraceId } from "./observe";
 
@@ -84,8 +85,12 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
   if (!principal) return server;
   const p: Principal = principal;
   const trace = opts.trace ?? newTraceId();
+  // Fomo research is opt-in per deployment (fomo-runtime.ts hostedFomoEnabled):
+  // off, its tools are not listed at all rather than listed and refusing.
+  const fomoOn = hostedFomoEnabled();
   for (const def of opts.tools ?? ALL_TOOLS) {
     if (!toolInProfile(def, profile)) continue;
+    if (!fomoOn && def.name.startsWith("fomo_")) continue;
     const usable = def.anyOf?.length ? def.anyOf.some((c) => hasCapability(p, c)) : hasCapability(p, def.capability);
     if (!usable) continue;
     server.registerTool(def.name, {

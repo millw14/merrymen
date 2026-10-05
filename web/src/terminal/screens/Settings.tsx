@@ -130,11 +130,20 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
    * they are yours to set.
    */
   const [hosted, setHosted] = useState<boolean | null>(null);
+  // Whether this deployment runs Fomo research at all (hosted Fomo is opt-in):
+  // the Fomo section is shown only once the answer is yes.
+  const [fomoOn, setFomoOn] = useState<boolean | null>(null);
   useEffect(() => {
     fetch("/api/auth/session")
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setHosted(!!d?.hosted))
-      .catch(() => setHosted(false));
+      .then((d) => {
+        setHosted(!!d?.hosted);
+        setFomoOn(d?.fomo === true);
+      })
+      .catch(() => {
+        setHosted(false);
+        setFomoOn(false);
+      });
   }, []);
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
@@ -1488,6 +1497,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               entries. The last sits beside scout mode because the scout budget
               above is the allocation it spends inside — there is no second,
               hidden allowance. */}
+          {fomoOn === true && (<>
           <div className="mm-subtle mono">fomo research · traders, coins and theses</div>
           <p className="mm-hint" style={{ marginTop: 0 }}>
             Data comes from FOMO API (fomoapi.io), an independent service that is not affiliated with fomo.family. Lookups only read; nothing here buys or posts on its own.
@@ -1548,6 +1558,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             </label>
           </div>
           {fomoFleetOnly && <p className="mm-hint">{t("settings.hint.fomoHostedOnly")}</p>}
+          </>)}
 
           {/* ── THE CLASS ROUTE ────────────────────────────────────────────
               Four settings that had a type, a PUT-allowlist entry and a worker

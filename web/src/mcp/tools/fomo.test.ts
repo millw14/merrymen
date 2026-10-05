@@ -282,6 +282,17 @@ test("research status needs agents:read and shows only the connection owner's ow
 
 // ── through the real MCP handler ────────────────────────────────────────────
 
+test("through the SDK, on a deployment that has not opted in: no fomo_* tool is listed at all", async () => {
+  const { tokenA } = await setup({ scopes: ["market:read", "agents:read", "offline_access"] });
+  delete process.env.MERRYMEN_FOMO_ENABLED;
+  const handler = createMcpHandler(({ authInfo }) => buildServer(principalOf(authInfo), { tools: ALL_TOOLS as ToolDef[], deps: { now: () => NOW } }), { legacy: "stateless", responseMode: "auto" });
+  const send = (req: Request) => handleMcpRequest(req, { cfg: testConfig(), now: () => NOW, fetch: (r, authInfo) => handler.fetch(r, { authInfo }) });
+  const list = await rpcResult(await send(mcpRequest(tokenA, "tools/list")));
+  const tools = (list.result?.tools ?? []) as Array<{ name: string }>;
+  assert.ok(tools.length > 0, "the rest of the catalogue is listed");
+  assert.deepEqual(tools.filter((t) => t.name.startsWith("fomo_")), []);
+});
+
 test("through the SDK: the family is listed read-only with output schemas, and a call returns the envelope", async () => {
   const { tokenA, provider } = await setup({ scopes: ["market:read", "offline_access"] });
   const handler = createMcpHandler(({ authInfo }) => buildServer(principalOf(authInfo), { tools: ALL_TOOLS as ToolDef[], deps: { now: () => NOW } }), { legacy: "stateless", responseMode: "auto" });

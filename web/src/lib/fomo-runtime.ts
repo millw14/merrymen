@@ -53,6 +53,7 @@ import type { FomoDialect } from "../../../worker/src/fomo/store";
 import { resolveConfig } from "../../../worker/src/settings";
 import { mcpDb } from "../mcp/db";
 import { settingsReader } from "./services/settings-view";
+import { FOMO_NOT_ENABLED, hostedFomoEnabled } from "./fomo-switch";
 
 /** The worker runtime plus the web's per-tenant analysis-model budget. */
 export type FomoRuntime = BaseFomoRuntime & { modelBudget: ModelBudget };
@@ -114,20 +115,8 @@ export function setFomoOwnerReaderForTest(r: FomoOwnerReader | null): void {
 
 type Env = Record<string, string | undefined>;
 
-/** Said where a hosted deployment has not opted in to Fomo research (MERRYMEN_FOMO_ENABLED=1). */
-export const FOMO_NOT_ENABLED = "Fomo research is not enabled on this deployment.";
-
-/**
- * HOSTED FOMO IS OPT-IN: on only when MERRYMEN_FOMO_ENABLED is exactly "1",
- * the orchestrator's own switch (worker/src/orchestrator.ts fomoSetup). Off,
- * the web builds no runtime — no fomo_* DDL, no Fomo reads or writes on the
- * shared database — and the chat leaves every message to its existing
- * handlers, so landing this code changes nothing until an operator turns it
- * on. Self-hosted installs are unaffected (their key is their own setting).
- */
-export function hostedFomoEnabled(env: Env = process.env): boolean {
-  return env.MERRYMEN_FOMO_ENABLED === "1";
-}
+// The opt-in switch (fomo-switch.ts), re-exported for the surfaces that already import this module.
+export { FOMO_NOT_ENABLED, hostedFomoEnabled };
 
 /** Thrown by fomoRuntime(true) while hosted Fomo is not enabled: nothing was built. */
 export class FomoNotEnabledError extends Error {

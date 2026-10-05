@@ -24,6 +24,7 @@ import { hasCapability, requireCapability } from "./policy";
 import type { Principal } from "./oauth/server";
 import type { ResourceDef } from "./resources";
 import { defineTool, runTool } from "./tool";
+import { hostedFomoEnabled } from "@/lib/fomo-switch";
 
 let restore: (() => void) | null = null;
 afterEach(() => { restore?.(); restore = null; resetMetricsForTest(); });
@@ -558,7 +559,8 @@ test("tools/list on the directory endpoint names no other tool and instructs not
     return others.length ? `names ${others.join(", ")}` : OTHER_TOOLS.test(text) ? "points at other tools" : MODEL_INSTRUCTION.test(text) ? "instructs the model" : null;
   };
   type Listed = { name: string; title?: string; description?: string; inputSchema?: unknown; outputSchema?: unknown };
-  const expected = ALL_TOOLS.filter((t) => toolInProfile(t, "directory")).map((t) => t.name).sort();
+  // Fomo tools are listed only where the deployment opted in (server.ts, fomo-switch.ts).
+  const expected = ALL_TOOLS.filter((t) => toolInProfile(t, "directory") && (hostedFomoEnabled() || !t.name.startsWith("fomo_"))).map((t) => t.name).sort();
   for (const era of ["legacy", "modern"] as const) {
     const tools = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "tools/list", {}, { era })))).result?.tools as Listed[];
     assert.deepEqual(tools.map((t) => t.name).sort(), expected, era);
@@ -579,7 +581,7 @@ test("tools/list on the directory endpoint names no other tool and instructs not
   }
   // The full server serves the full descriptions, pointers included.
   const fullTools = (await rpcResult(await call(mcpRequest(full.tokens.access_token, "tools/list")))).result?.tools as Listed[];
-  for (const def of ALL_TOOLS.filter((t) => t.directoryDescription !== undefined)) {
+  for (const def of ALL_TOOLS.filter((t) => t.directoryDescription !== undefined && (hostedFomoEnabled() || !t.name.startsWith("fomo_")))) {
     const served = fullTools.find((t) => t.name === def.name);
     assert.equal(served?.description, def.description, def.name);
   }
