@@ -190,7 +190,7 @@ describe("draining the intent chain", () => {
     };
   }
 
-  it("the budget is eighteen seconds — inside a fleet drain's twenty, far inside the watchdog", () => {
+  it("the budget is eighteen seconds — inside the planned fleet drain's twenty (C3), far inside the watchdog", () => {
     assert.equal(DRAIN_INTENT_CHAIN_MS, 18_000);
   });
 
