@@ -1031,7 +1031,7 @@ export function explainLeaderboard(): LeaderboardExplained {
       "The worker has assessed the contributions as evidence (chain-log receipts or a reconciling epoch carry), not inferred from a balance change.",
       "Every operation's owner gas cost up to that valuation is on record (or proved sponsored). Otherwise the return is withheld as gas-pending: it is not known exactly.",
       "The return is not under an operator's review. A return under review is withheld everywhere as review-pending (no percentage, no P&L, no growth line) until the review clears; the current valuation stays.",
-      "Each deposit and withdrawal is counted once, however many copies of it are on record, and the records agree with each other. A transfer recorded both as the agent's own transfer and as its chain log is never summed: the return is withheld as review-pending. Records that contradict each other (two different opening balances in one run) withhold it as unavailable.",
+      "Each deposit and withdrawal is counted once, however many copies of it are on record, and the records agree with each other. A transfer recorded two ways (as the agent's own transfer and again from its chain log) is never summed: the return is withheld as review-pending. Records that contradict each other (two different opening balances in one run) withhold it as unavailable.",
       "The newest valuation belongs to the live book (checked here in addition to the page's gates, so a paper balance is never divided by real deposits).",
     ],
     unranked_reasons: [

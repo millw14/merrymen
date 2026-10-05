@@ -87,7 +87,7 @@ test("an exact duplicate carry collapses; a different carry in the same epoch ma
       assert.deepEqual(netFlows(flows), { n: 2, net: 300 });
       const report = await flowDuplicateReport(reader, ACCOUNT);
       assert.equal(report.epoch, 2);
-      assert.deepEqual(report.copies, { log: 0, nullChain: 0, carry: 2, identical: 0 });
+      assert.deepEqual(report.copies, { log: 0, nullChain: 0, carry: 2, intent: 0, identical: 0 });
       assert.equal(report.verdict, "ok");
       assert.equal(report.clean, false, "a collapsed copy is still a copy the worker's own sums would add");
     }
@@ -118,7 +118,7 @@ test("a transfer intent and a chain log on the same tx and direction are never s
       assert.equal(await withheld(readDistinctFlows(reader, ACCOUNT, 2)), "review");
       await assert.rejects(readDistinctFlows(reader, ACCOUNT, 2), /Contributions under review/);
       const report = await flowDuplicateReport(reader, ACCOUNT, 2);
-      assert.equal(report.conflicts.intentTwins, 1);
+      assert.equal(report.conflicts.txTwins, 1);
       assert.equal(report.verdict, "review");
       assert.equal(report.clean, false);
     }
@@ -136,8 +136,108 @@ test("an intent booked from its receipt is the same log as its chain-log copy, n
     for (const reader of readers) {
       assert.deepEqual(netFlows(await readDistinctFlows(reader, ACCOUNT, 2)), { n: 2, net: 90 });
       const report = await flowDuplicateReport(reader, ACCOUNT);
-      assert.deepEqual(report.copies, { log: 1, nullChain: 0, carry: 0, identical: 0 });
-      assert.equal(report.conflicts.intentTwins, 0);
+      assert.deepEqual(report.copies, { log: 1, nullChain: 0, carry: 0, intent: 0, identical: 0 });
+      assert.equal(report.conflicts.txTwins, 0);
+    }
+  } finally { raw.close(); }
+});
+
+test("the executor's intent beside the resolver's booking of the same transfer is under review, whichever booker wrote first", async () => {
+  // The executor books a transfer home with its tx and no log index. The
+  // resolver, which asks only its own spelling whether the tx is booked,
+  // books it again from its receipt WITH the log index; a scan books the log.
+  // Summed, the withdrawal counted twice and the return was published 10 USDG
+  // high, or not, depending on which copy of the log was written first.
+  const RPC = TX(9).toUpperCase().replace("0X", "0x");
+  for (const [executor, resolver, scan] of [[100, 200, 300], [100, 300, 200], [300, 100, 200], [200, 300, 100]] as const) {
+    const { raw, db, readers } = await ledger();
+    try {
+      await flow(db, { tx: TX(1), log: 0, chain: 4663, amount: 100, at: 1 });
+      await flow(db, { tx: TX(9), source: "transfer-intent", direction: "out", amount: 10, chain: 4663, at: executor });
+      await flow(db, { tx: TX(9), log: 3, source: "transfer-intent", direction: "out", amount: 10, chain: 4663, at: resolver });
+      for (const reader of readers) {
+        assert.equal(await withheld(readDistinctFlows(reader, ACCOUNT, 2)), "review", `executor @${executor}, resolver @${resolver}`);
+        const report = await flowDuplicateReport(reader, ACCOUNT);
+        assert.equal(report.conflicts.txTwins, 1);
+        assert.equal(report.verdict, "review");
+        assert.equal(report.clean, false);
+      }
+      // And the scan's copy of the resolver's log, under another spelling, in the RPC's case.
+      await flow(db, { account: CASED, tx: RPC, log: 3, chain: 4663, direction: "out", amount: 10, at: scan });
+      for (const reader of readers) {
+        assert.equal(await withheld(readDistinctFlows(reader, ACCOUNT, 2)), "review", `and the scan @${scan}`);
+        const report = await flowDuplicateReport(reader, ACCOUNT);
+        assert.equal(report.copies.log, 1, "the resolver's booking and the scan's are one log");
+        assert.equal(report.conflicts.txTwins, 1, "and the executor's intent is that log, booked another way");
+        assert.equal(report.clean, false);
+      }
+    } finally { raw.close(); }
+  }
+});
+
+test("copies of one executor intent collapse whatever spelling or chain stamp they carry; copies that disagree are unread", async () => {
+  const { raw, db, readers } = await ledger();
+  try {
+    await flow(db, { tx: TX(1), log: 0, chain: 4663, amount: 100, at: 1 });
+    // The executor's intent from before the chain was stamped, its stamped
+    // copy, and a re-copied child row under the checksummed spelling.
+    await flow(db, { tx: TX(9), source: "transfer-intent", direction: "out", amount: 10, chain: null, at: 100 });
+    await flow(db, { tx: TX(9), source: "transfer-intent", direction: "out", amount: 10, chain: 4663, at: 100 });
+    await flow(db, { account: CASED, tx: TX(9).toUpperCase().replace("0X", "0x"), source: "transfer-intent", direction: "out",
+      amount: 10, chain: 4663, at: 150 });
+    for (const reader of readers) {
+      assert.deepEqual(netFlows(await readDistinctFlows(reader, ACCOUNT, 2)), { n: 2, net: 90 }, "one withdrawal, not three");
+      const report = await flowDuplicateReport(reader, ACCOUNT);
+      assert.deepEqual(report.copies, { log: 0, nullChain: 0, carry: 0, intent: 2, identical: 0 });
+      assert.equal(report.verdict, "ok");
+      assert.equal(report.clean, false, "the worker's own sums would still add all three");
+    }
+    // One transfer was signed, for one amount.
+    await flow(db, { account: CASED, tx: TX(9), source: "transfer-intent", direction: "out", amount: 12, chain: 4663, at: 160 });
+    for (const reader of readers) {
+      assert.equal(await withheld(readDistinctFlows(reader, ACCOUNT, 2)), "unread");
+      const report = await flowDuplicateReport(reader, ACCOUNT);
+      assert.equal(report.conflicts.intents, 1);
+      assert.equal(report.verdict, "unread");
+    }
+  } finally { raw.close(); }
+});
+
+test("an unstamped intent on an account whose chain cannot be named is never guessed into a stamped copy", async () => {
+  const { raw, db, readers } = await ledger();
+  try {
+    await db.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps,
+      granted_at, expires_at, mode, epoch) VALUES (?, 'Desk', '0x1', '0x2', 46630, '{}', 0, 0, 'live', 2)`).run(CASED);
+    await flow(db, { tx: TX(1), log: 0, chain: 4663, amount: 100, at: 1 });
+    await flow(db, { tx: TX(9), source: "transfer-intent", direction: "out", amount: 10, chain: null, at: 100 });
+    for (const reader of readers) {
+      assert.deepEqual(netFlows(await readDistinctFlows(reader, ACCOUNT, 2)), { n: 2, net: 90 }, "alone, it is the withdrawal");
+    }
+    await flow(db, { tx: TX(9), source: "transfer-intent", direction: "out", amount: 10, chain: 46630, at: 120 });
+    for (const reader of readers) {
+      assert.equal(await withheld(readDistinctFlows(reader, ACCOUNT, 2)), "review");
+      assert.equal((await flowDuplicateReport(reader, ACCOUNT)).conflicts.txTwins, 1);
+    }
+  } finally { raw.close(); }
+});
+
+test("a legacy row with no log index beside the logs of its tx is under review; two logs of one tx are two legs", async () => {
+  const { raw, db, readers } = await ledger();
+  try {
+    await flow(db, { tx: TX(5), log: 1, chain: 4663, amount: 60, at: 1 });
+    await flow(db, { tx: TX(5), log: 2, chain: 4663, amount: 40, at: 1 });
+    for (const reader of readers) {
+      assert.deepEqual(netFlows(await readDistinctFlows(reader, ACCOUNT, 2)), { n: 2, net: 100 });
+      assert.equal((await flowDuplicateReport(reader, ACCOUNT)).clean, true);
+    }
+    // Booked from the same tx before log indexes were recorded: one of those
+    // legs, or both, and nothing on the row says which.
+    await flow(db, { tx: TX(5), amount: 60, at: 2 });
+    for (const reader of readers) {
+      assert.equal(await withheld(readDistinctFlows(reader, ACCOUNT, 2)), "review");
+      const report = await flowDuplicateReport(reader, ACCOUNT);
+      assert.equal(report.conflicts.txTwins, 2);
+      assert.equal(report.clean, false);
     }
   } finally { raw.close(); }
 });
@@ -154,7 +254,7 @@ test("a NULL-chain twin merges with its chain-stamped copy, read as the account'
       assert.deepEqual(netFlows(flows, 10), { n: 1, net: 100 });
       assert.deepEqual(netFlows(flows, 0), { n: 0, net: 0 });
       const report = await flowDuplicateReport(reader, ACCOUNT);
-      assert.deepEqual(report.copies, { log: 0, nullChain: 1, carry: 0, identical: 0 });
+      assert.deepEqual(report.copies, { log: 0, nullChain: 1, carry: 0, intent: 0, identical: 0 });
     }
     // Copies of one log that disagree cannot both be the log.
     await flow(db, { account: CASED, tx: TX(7), log: 7, chain: 4663, amount: 90, at: 40 });
@@ -198,7 +298,7 @@ test("same-amount deposits in different transactions both count; only byte-ident
     for (const reader of readers) {
       assert.deepEqual(netFlows(await readDistinctFlows(reader, ACCOUNT, 2)), { n: 6, net: 116 });
       const report = await flowDuplicateReport(reader, ACCOUNT);
-      assert.deepEqual(report.copies, { log: 0, nullChain: 0, carry: 0, identical: 1 });
+      assert.deepEqual(report.copies, { log: 0, nullChain: 0, carry: 0, intent: 0, identical: 1 });
       assert.equal(report.rows, 7);
       assert.equal(report.distinct, 6);
     }
@@ -286,4 +386,28 @@ test("collapse is a pure function of the rows, taken earliest first whatever ord
   assert.equal(collapseFlows([late, early], null).verdict, "unread");
   // An empty hash is no hash: a row keyed by nothing is not a log.
   assert.equal(collapseFlows([row({ id: 3, txHash: "" }), row({ id: 4, txHash: "", at: 11 })], null).flows.length, 2);
+});
+
+test("a verdict is a fact about every copy of a movement, never about which booker wrote first", () => {
+  const row = (over: Partial<FlowRecord>): FlowRecord => ({ id: 1, agentId: ACCOUNT, direction: "out", amountUsdg: 10, txHash: TX(9),
+    blockNumber: 5, logIndex: 3, source: "chain-log", chainId: 4663, at: 10, ...over });
+  const orders = [[10, 20, 30], [10, 30, 20], [20, 10, 30], [20, 30, 10], [30, 10, 20], [30, 20, 10]];
+  const verdicts = (make: (at: readonly number[]) => FlowRecord[]) => new Set(orders.map((at) => collapseFlows(make(at), 4663).verdict));
+  // The executor's intent, the resolver's, and the scan's log.
+  assert.deepEqual(verdicts((at) => [
+    row({ id: 1, source: "transfer-intent", logIndex: null, at: at[0] }),
+    row({ id: 2, source: "transfer-intent", at: at[1] }),
+    row({ id: 3, at: at[2] }),
+  ]), new Set(["review"]));
+  // The resolver's booking and the scan's are one log, alone on the tx: summed once.
+  assert.deepEqual(verdicts((at) => [row({ id: 2, source: "transfer-intent", at: at[0] }), row({ id: 3, at: at[1] })]), new Set(["ok"]));
+  // That log beside another log of the same tx: one of them is an intent, so
+  // the pair is not two legs on its own say-so, in either order.
+  assert.deepEqual(verdicts((at) => [
+    row({ id: 2, source: "transfer-intent", at: at[0] }),
+    row({ id: 3, at: at[1] }),
+    row({ id: 4, logIndex: 5, at: at[2] }),
+  ]), new Set(["review"]));
+  // Two logs of one tx and nothing else: two legs.
+  assert.deepEqual(verdicts((at) => [row({ id: 3, at: at[0] }), row({ id: 4, logIndex: 5, at: at[1] })]), new Set(["ok"]));
 });

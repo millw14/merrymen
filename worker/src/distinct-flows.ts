@@ -7,10 +7,13 @@
  * before the chain was stamped sits beside its stamped copy. Rows with no tx
  * have no identity at all: the mirror rewound its cursor onto a rebuilt child
  * and copied them up again (the canary's 10 USDG opening balance sat in
- * Postgres three times). And one transfer home can be booked twice by two
- * bookers that cannot see each other: the executor writes 'transfer-intent'
- * with its tx and no log index, and a deposit scan that no longer has the
- * trade row to skip books the same transfer again as 'chain-log', from its log.
+ * Postgres three times). And one transfer home can be booked more than once
+ * by bookers that cannot see each other: the executor writes 'transfer-intent'
+ * with its tx and no log index; the resolver, which asks only its own child
+ * ledger under one spelling whether the tx is booked (hasFlowForTx), books it
+ * again from its receipt as 'transfer-intent' WITH the log index; and a
+ * deposit scan that no longer has the trade row to skip books it as
+ * 'chain-log', from its log.
  *
  * Summing those rows publishes the owner's own money as a loss or a gain. So
  * every web reader that turns rows into a contribution figure collapses them
@@ -27,21 +30,33 @@
  *   EPOCH CARRIES are one per (epoch, direction, amount). An epoch opens once
  *   and carries one balance, so two carries that DIFFER cannot both be true.
  *
- *   EVERYTHING ELSE — inferred rows, legacy rows, an intent with no log index
- *   — has nothing that names it. Two such rows collapse only when they are
- *   byte-identical copies (every column but the row id): the mirror carries
- *   every column, so its copies are exact, and two deposits of the same amount
- *   in different transactions are two deposits.
+ *   THE EXECUTOR'S INTENTS — 'transfer-intent' with a tx and no log index —
+ *   are one movement per (chain, tx, direction): the executor books one per
+ *   transfer it signed, so two are copies, whatever account spelling or chain
+ *   stamp each was filed under. The chain is placed as a log's is, and copies
+ *   of one intent must agree on amount.
+ *
+ *   EVERYTHING ELSE — inferred rows, legacy rows — has nothing that names it.
+ *   Two such rows collapse only when they are byte-identical copies (every
+ *   column but the row id): the mirror carries every column, so its copies are
+ *   exact, and two deposits of the same amount in different transactions are
+ *   two deposits.
  *
  * AND THEN IT REFUSES, rather than picking one. Rows that cannot all be true
  * make the figure UNAVAILABLE:
  *
- *   - two different carries in one epoch, copies of one log that disagree, or a
- *     chain log whose chain cannot be named: "Unread capital accounting";
- *   - a 'transfer-intent' and a 'chain-log' on the same tx and direction that
- *     are not copies of one log: the intent is what was ASKED for and the log
- *     is what moved, and nothing here can say which is right — so they are
- *     never summed and never collapsed. "Contributions under review".
+ *   - two different carries in one epoch, copies of one log or of one intent
+ *     that disagree, or a chain log whose chain cannot be named: "Unread
+ *     capital accounting";
+ *   - two movements on one tx and direction, either of them a transfer intent
+ *     or a row with no log index of its own. Only distinct logs of one tx —
+ *     two legs, each named by its own log index — are two movements on their
+ *     own say-so. Anything else is one transfer booked two ways: the intent is
+ *     what was ASKED for and the log is what moved, or a legacy row with no
+ *     log index sits beside the log it was. Nothing here can say which is
+ *     right, so they are never summed and never collapsed: "Contributions under
+ *     review". Judged over EVERY copy of each movement, not only the one that
+ *     speaks for it, so the verdict cannot turn on which booker wrote first.
  *
  * Every contradiction is judged over the whole run, before any valuation
  * cutoff, because a copy can be booked later than its original and a cutoff
@@ -88,7 +103,12 @@ export interface FlowDuplicates {
     nullChain: number;
     /** The same carry: same direction and amount in the epoch. */
     carry: number;
-    /** A byte-identical copy of a row with no log identity (inferred, legacy, an intent with no log index). */
+    /**
+     * The same executor intent (one tx and direction, no log index), filed
+     * under another spelling of the account or another chain stamp.
+     */
+    intent: number;
+    /** A byte-identical copy of a row with no log identity (inferred, legacy). */
     identical: number;
   };
   /** Rows that cannot all be true. Any of these withholds the figure. */
@@ -99,8 +119,14 @@ export interface FlowDuplicates {
     logs: number;
     /** Chain logs with no chain stamp, on an account whose chain cannot be read. */
     unresolvedChain: number;
-    /** Transfer intents with a chain log on the same tx and direction. */
-    intentTwins: number;
+    /** Copies of one executor intent that disagree with it on amount. */
+    intents: number;
+    /**
+     * Movements beyond the first on one tx and direction, where any copy of
+     * any of them is a transfer intent or has no log index of its own: one
+     * transfer booked two ways. Two distinct logs of one tx are not counted.
+     */
+    txTwins: number;
   };
 }
 
@@ -172,23 +198,35 @@ const txOf = (f: FlowRecord) => (f.txHash ? f.txHash.toLowerCase() : null);
 const isLog = (f: FlowRecord) => f.source !== "epoch-carry" && txOf(f) !== null && f.logIndex !== null;
 
 /**
+ * The executor's own booking of a transfer it signed: its tx, no log index
+ * (index.ts). One per transfer, so the tx names it. The resolver's booking of
+ * the same transfer carries the log index and is a chain log (isLog).
+ */
+const isBareIntent = (f: FlowRecord) => f.source === "transfer-intent" && txOf(f) !== null && f.logIndex === null;
+
+/**
  * Collapse one run's rows into movements, and say whether they may be summed.
  *
  * PURE: `agentChain` is the account's registered chain, read by the caller —
  * null when it has none or more than one, and then a chain log with no stamp of
- * its own cannot be placed. Rows are taken earliest first (at, then id), so the
+ * its own cannot be placed (nor can an intent, which then stands apart from a
+ * stamped copy). Rows are taken earliest first (at, then id), so the
  * copy that speaks for a movement is the one booked first, which is the time a
- * valuation cutoff places it by.
+ * valuation cutoff places it by. Nothing ELSE turns on that order: every
+ * verdict is a fact about all the copies of a movement, so the same rows read
+ * the same way whichever booker wrote first.
  */
 export function collapseFlows(rows: readonly FlowRecord[], agentChain: number | null): CollapsedFlows {
   const ordered = [...rows].sort((a, b) => a.at - b.at || a.id - b.id);
   const duplicates: FlowDuplicates = {
     rows: ordered.length,
     distinct: 0,
-    copies: { log: 0, nullChain: 0, carry: 0, identical: 0 },
-    conflicts: { carries: 0, logs: 0, unresolvedChain: 0, intentTwins: 0 },
+    copies: { log: 0, nullChain: 0, carry: 0, intent: 0, identical: 0 },
+    conflicts: { carries: 0, logs: 0, unresolvedChain: 0, intents: 0, txTwins: 0 },
   };
   const firstOf = new Map<string, FlowRecord>();
+  /** Movements any copy of which is a transfer intent, by key. */
+  const intended = new Set<string>();
   const flows: FlowRecord[] = [];
   let carries = 0;
   for (const f of ordered) {
@@ -205,11 +243,17 @@ export function collapseFlows(rows: readonly FlowRecord[], agentChain: number | 
       } else {
         key = `log|${chain}|${txOf(f)}|${f.logIndex}`;
       }
+    } else if (isBareIntent(f)) {
+      // Placed on a chain as a log is. One the account cannot name stays
+      // apart from a stamped copy rather than be guessed into it — and then
+      // it is a second movement on the same tx, which is refused below.
+      key = `intent|${f.chainId ?? agentChain ?? "?"}|${txOf(f)}|${f.direction}`;
     } else {
       // Every column but the row id, as written. A case or a NULL that differs
       // is a different row: only the mirror's exact copies are copies here.
       key = `same|${JSON.stringify([f.agentId, f.direction, f.amountUsdg, f.txHash, f.blockNumber, f.logIndex, f.source, f.chainId, f.at])}`;
     }
+    if (f.source === "transfer-intent") intended.add(key);
     const first = firstOf.get(key);
     if (!first) {
       firstOf.set(key, f);
@@ -219,21 +263,40 @@ export function collapseFlows(rows: readonly FlowRecord[], agentChain: number | 
     }
     if (key.startsWith("carry|")) duplicates.copies.carry += 1;
     else if (key.startsWith("same|")) duplicates.copies.identical += 1;
-    else if (first.direction !== f.direction || first.amountUsdg !== f.amountUsdg) duplicates.conflicts.logs += 1;
+    else if (first.direction !== f.direction || first.amountUsdg !== f.amountUsdg) {
+      // Copies of one log, or of one intent, that cannot both be it.
+      if (key.startsWith("intent|")) duplicates.conflicts.intents += 1;
+      else duplicates.conflicts.logs += 1;
+    } else if (key.startsWith("intent|")) duplicates.copies.intent += 1;
     else if ((first.chainId === null) !== (f.chainId === null)) duplicates.copies.nullChain += 1;
     else duplicates.copies.log += 1;
   }
   if (carries > 1) duplicates.conflicts.carries = carries - 1;
-  // Judged on movements, after copies of one log have collapsed: an intent and
-  // a log that ARE one log (the resolver books the intent with its log index)
-  // are a copy, not a twin.
-  const logged = new Set(flows.filter((f) => f.source === "chain-log" && txOf(f) !== null).map((f) => `${txOf(f)}|${f.direction}`));
-  duplicates.conflicts.intentTwins = flows
-    .filter((f) => f.source === "transfer-intent" && txOf(f) !== null && logged.has(`${txOf(f)}|${f.direction}`)).length;
+  // ONE TX, ONE DIRECTION, MORE THAN ONE MOVEMENT — judged after copies have
+  // collapsed, so an intent and a log that ARE one log (the resolver books the
+  // intent with its log index) are a copy, not a twin. What is left is two
+  // legs only when every movement in the group is a log named by its own log
+  // index and no copy of any of them is an intent. A movement with no log
+  // index (the executor's intent, a legacy row) cannot say it is not the log
+  // beside it; an intent among the copies is what was asked for, not what
+  // moved. Either way the group is one transfer booked two ways. Over every
+  // copy (`intended`), not the copy that speaks for the movement, so the
+  // verdict does not depend on which booker wrote first. Carries are judged
+  // on their own above.
+  const onTx = new Map<string, { n: number; ambiguous: boolean }>();
+  for (const [key, f] of firstOf) {
+    const tx = txOf(f);
+    if (key.startsWith("carry|") || tx === null) continue;
+    const group = onTx.get(`${tx}|${f.direction}`) ?? { n: 0, ambiguous: false };
+    group.n += 1;
+    group.ambiguous ||= f.logIndex === null || intended.has(key);
+    onTx.set(`${tx}|${f.direction}`, group);
+  }
+  for (const group of onTx.values()) if (group.n > 1 && group.ambiguous) duplicates.conflicts.txTwins += group.n - 1;
   duplicates.distinct = flows.length;
   const c = duplicates.conflicts;
-  const verdict: FlowVerdict = c.carries > 0 || c.logs > 0 || c.unresolvedChain > 0 ? "unread"
-    : c.intentTwins > 0 ? "review" : "ok";
+  const verdict: FlowVerdict = c.carries > 0 || c.logs > 0 || c.unresolvedChain > 0 || c.intents > 0 ? "unread"
+    : c.txTwins > 0 ? "review" : "ok";
   return { flows, duplicates, verdict };
 }
 
@@ -272,7 +335,7 @@ async function agentChainOf(db: Db, account: string): Promise<number | null> {
 async function readRun(db: Db, account: string, epoch: number | null): Promise<CollapsedFlows> {
   const rows = await readFlowRows(db, account, epoch);
   // The registration is asked only when a row needs it: most runs have none.
-  const unstamped = rows.some((f) => f.chainId === null && isLog(f));
+  const unstamped = rows.some((f) => f.chainId === null && (isLog(f) || isBareIntent(f)));
   return collapseFlows(rows, unstamped ? await agentChainOf(db, account) : null);
 }
 

@@ -409,6 +409,30 @@ test("a transfer booked as both our intent and its chain log puts the return und
   } finally { raw.close(); }
 });
 
+test("the resolver's booking of a transfer the executor already booked puts the return under review, whichever came first", async () => {
+  for (const [executor, resolver] of [[5, 9], [9, 5]] as const) {
+    const { raw, db } = await ledger();
+    try {
+      await db.prepare("UPDATE flows SET chain_id = 4663, tx_hash = '0xdeposit', log_index = 0").run();
+      const flow = db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at, chain_id, tx_hash, log_index)
+        VALUES (?, 2, 'out', 10, 'transfer-intent', ?, 4663, '0xhome', ?)`);
+      // The executor's intent (no log index), and the resolver's, from the
+      // receipt, under the spelling it asked about: summed, the withdrawal
+      // counted twice and published 100 over 80 as a 25% gain.
+      await flow.run(ACCOUNT, executor, null);
+      await flow.run(CASED, resolver, 3);
+      await op(db, 5);
+      await mark(db, 100, 10);
+      for (const reader of [db, translated(raw)]) {
+        const result = await readBookPerformance(reader, ACCOUNT, 2, true);
+        assert.deepEqual(result.liveRank, { pnlBps: null, unrankedWhy: "review-pending" }, `executor @${executor}`);
+        assert.equal(result.performance.underReview, true);
+        assert.equal(result.performance.pnlUsdg, null);
+      }
+    } finally { raw.close(); }
+  }
+});
+
 test("funding quality uses the same epoch, heartbeat and spelling tie-break as the current account", async () => {
   const { raw, db } = await ledger();
   try {

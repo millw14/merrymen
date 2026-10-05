@@ -70,9 +70,9 @@ export interface BookPerformance {
   gasOps: GasOps | null;
   /**
    * An operator has put this account's return under review
-   * (MERRYMEN_RETURN_REVIEW, return-review.ts), or its contributions are (a
-   * transfer booked both as an intent and as its chain log, distinct-flows.ts),
-   * so pnlBps and pnlUsdg are withheld whatever they would have been, and the
+   * (MERRYMEN_RETURN_REVIEW, return-review.ts), or its contributions are (one
+   * transfer booked two ways — as our intent and again from its log, say —
+   * distinct-flows.ts), so pnlBps and pnlUsdg are withheld whatever they would have been, and the
    * page says why. On the figures rather than only in the rank, because a
    * paper or idle book's return is shown without being ranked.
    */
@@ -130,7 +130,7 @@ async function flowCapital(db: Db, account: string, epoch: number, at?: number):
   return net;
 }
 
-/** A transfer booked both as our intent and as its chain log: never summed, and said so. */
+/** One transfer booked two ways (our intent, and again from its log): never summed, and said so. */
 const contributionsUnderReview = (error: unknown) => error instanceof CapitalFlowsWithheld && error.verdict === "review";
 
 async function contributionQuality(db: Db, account: string, epoch: number): Promise<Record<string, unknown> | undefined> {
@@ -260,8 +260,9 @@ async function describeFills(db: Db, account: string, epoch: number, performance
  * the valuation, its time and the counts that say what it means stay.
  *
  * So are CONTRIBUTIONS under review (distinct-flows.ts): one transfer booked
- * both as our intent and as its chain log is two rows that cannot both be
- * summed, and nothing here can say which is right. The return is withheld the
+ * two ways — as our intent and again from its log, or by a row with no log
+ * index beside the log it was — is two rows that cannot both be summed, and
+ * nothing here can say which is right. The return is withheld the
  * same way, in the same words, until somebody does.
  */
 export async function readBookPerformance(db: Db, account: string, epoch: number, publicBook: boolean): Promise<BookPerformanceRead> {
