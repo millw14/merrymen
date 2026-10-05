@@ -75,7 +75,13 @@ interface Manifest {
   homeRoot: string;
   device: string;
   inode: string;
-  handover: { state: "held" | "complete"; operationToken: string; halt: PersistentHomeHaltProof };
+  /**
+   * haltGeneration is absent (0) for the halt that initialization or adoption
+   * created, and n for the halt the nth env re-halt put back. An env release
+   * names the generation it lifts, so a release that a re-halt has since
+   * consumed never lifts the halt again.
+   */
+  handover: { state: "held" | "complete"; operationToken: string; halt: PersistentHomeHaltProof; haltGeneration?: number };
 }
 interface Evidence { text: string; bytes: Buffer; device: string; inode: string }
 interface Root { identity: PersistentHomeIdentity; fd: number; env: NodeJS.ProcessEnv; options: PersistentHomeOptions }
@@ -212,6 +218,7 @@ function readManifest(root: Root): { manifest: Manifest; evidence: Evidence } | 
   if (m?.version !== 1 || m.volumeId !== i.id || m.mountPath !== i.mountPath || m.homeRoot !== i.homeRoot
       || typeof m.device !== "string" || !/^\d+$/.test(m.device) || m.inode !== i.inode || !h || !["held", "complete"].includes(h.state)
       || typeof h.operationToken !== "string" || !TOKEN.test(h.operationToken) || !halt
+      || (h.haltGeneration !== undefined && (!Number.isSafeInteger(h.haltGeneration) || h.haltGeneration < 1))
       || halt.operationToken !== h.operationToken || halt.path !== path.join(i.homeRoot, "FLEET_HALT")
       || halt.device !== m.device || typeof halt.inode !== "string" || !/^[1-9]\d*$/.test(halt.inode)
       || halt.text !== haltText(i.id, h.operationToken)
@@ -488,6 +495,19 @@ interface RehaltReceipt {
   halt: { path: string; inode: string; text: string };
 }
 /**
+ * MERRYMEN_RELEASE_HOME_HALT names the halt generation it lifts:
+ * `<operation token>` for the adoption's own halt (generation 0), and
+ * `<operation token>@<n>` for the halt the nth env re-halt put back. `@` is
+ * outside TOKEN's alphabet, so neither spelling can be read as the other.
+ */
+const RELEASE = /^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})(?:@([1-9]\d{0,8}))?$/;
+function releaseAsked(value: string): { token: string; generation: number } | null {
+  const m = RELEASE.exec(value);
+  return m ? { token: m[1]!, generation: m[2] === undefined ? 0 : Number(m[2]) } : null;
+}
+/** How an operator spells a release of this generation, with the token itself left out of every log. */
+const releaseSpelling = (generation: number) => `MERRYMEN_RELEASE_HOME_HALT=<operation token>${generation ? `@${generation}` : ""}`;
+/**
  * A release needs a scope that admits someone, read with B1's own parser
  * (fleet-rollout.ts), never a second and looser reading of the same value.
  * The parser throws on anything malformed or mis-cased (`None`, `off`, `0`,
@@ -527,8 +547,10 @@ function replaceDurably(root: Root, file: string, text: string, unchanged: () =>
   } finally { rmSync(temp, { force: true }); }
 }
 
-function releaseAdopted(root: Root, saved: { manifest: Manifest; evidence: Evidence }, rollout: FleetRollout): PersistentHomeHaltControl {
-  const handover = saved.manifest.handover;
+function releaseAdopted(
+  root: Root, saved: { manifest: Manifest; evidence: Evidence }, generation: number, rollout: FleetRollout,
+): PersistentHomeHaltControl {
+  const handover = saved.manifest.handover, standing = handover.haltGeneration ?? 0;
   if (handover.state === "complete" && !ownHalt(root, handover.halt)) {
     // Released. Whatever FLEET_HALT is here now was put there by hand, and a
     // hand-made halt still stands every child down: it is never ours to lift.
@@ -537,6 +559,14 @@ function releaseAdopted(root: Root, saved: { manifest: Manifest; evidence: Evide
   // Held, or a release that crashed after its durable receipt and before it
   // removed its own unchanged halt: both finish through the reviewed path.
   if (handover.state === "held") assertHalt(root, handover.halt);
+  // ONE RELEASE PER HALT GENERATION. A re-halt is a rollback, and it consumes
+  // the release before it: that variable, left set when the re-halt variable
+  // is removed, names the older generation and lifts nothing. Releasing again
+  // takes a new value naming the generation the re-halt put back.
+  if (generation !== standing) {
+    return { action: "withheld", handoverState: handover.state,
+      detail: `MERRYMEN_RELEASE_HOME_HALT names halt generation ${generation}, but the standing halt is generation ${standing}, so it stays; only ${releaseSpelling(standing)} lifts it` };
+  }
   if (!rolloutAdmitsRelease(rollout)) {
     return { action: "withheld", handoverState: handover.state, detail: "MERRYMEN_FLEET_ROLLOUT is none, so the halt stays" };
   }
@@ -547,9 +577,12 @@ function releaseAdopted(root: Root, saved: { manifest: Manifest; evidence: Evide
 function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Evidence }, releaseIgnored: boolean): PersistentHomeHaltControl {
   const i = root.identity, m = saved.manifest, token = m.handover.operationToken, options = root.options;
   const ignored = releaseIgnored ? "; MERRYMEN_RELEASE_HOME_HALT is ignored while a re-halt is asked for" : "";
+  // The manifest changes only at the very end, so a re-halt resumed after a
+  // crash computes the same next generation as the attempt it finishes.
+  const standing = m.handover.haltGeneration ?? 0, next = standing + 1;
   if (m.handover.state === "held") {
     assertHalt(root, m.handover.halt);
-    return { action: "already-held", handoverState: "held", detail: `already held${ignored}` };
+    return { action: "already-held", handoverState: "held", detail: `already held at halt generation ${standing}${ignored}` };
   }
   const haltPath = path.join(i.homeRoot, "FLEET_HALT"), temp = path.join(i.homeRoot, REHALT_HALT), canonical = haltText(i.id, token);
   const withheld: PersistentHomeHaltControl = { action: "withheld", handoverState: "complete",
@@ -602,7 +635,7 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
   }
   const halt: PersistentHomeHaltProof = { path: haltPath, device: published.device, inode: published.inode, text: published.text, operationToken: token };
   const file = path.join(i.homeRoot, PERSISTENT_HOME_MANIFEST);
-  replaceDurably(root, file, JSON.stringify({ ...m, handover: { ...m.handover, state: "held", halt } }) + "\n", () => {
+  replaceDurably(root, file, JSON.stringify({ ...m, handover: { ...m.handover, state: "held", halt, haltGeneration: next } }) + "\n", () => {
     const now = evidence(file, root);
     if (!now || now.device !== saved.evidence.device || now.inode !== saved.evidence.inode || now.text !== saved.evidence.text) {
       throw refuse("the persistent manifest changed before the re-halt");
@@ -610,7 +643,8 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
     assertHalt(root, halt);
   });
   verifiedManifest(root);
-  return { action: "rehalted", handoverState: "held", detail: `re-halted under this volume's canonical halt${ignored}` };
+  return { action: "rehalted", handoverState: "held",
+    detail: `re-halted under this volume's canonical halt at generation ${next}; only ${releaseSpelling(next)} releases it${ignored}` };
 }
 
 /**
@@ -618,16 +652,18 @@ function rehaltAdopted(root: Root, saved: { manifest: Manifest; evidence: Eviden
  * pilot's first release nor a rollback to listener-only mode needs a shell on
  * the container (docs/fleet-resume.md).
  *
- * MERRYMEN_RELEASE_HOME_HALT=<operation token> releases only a `held`
- * manifest, through markPersistentHomeHandoverComplete itself, and only while
+ * MERRYMEN_RELEASE_HOME_HALT=<operation token>[@<generation>] releases only
+ * a `held` manifest whose standing halt is that generation, through
+ * markPersistentHomeHandoverComplete itself, and only while
  * MERRYMEN_FLEET_ROLLOUT, read by B1's parser, admits someone. A malformed
  * rollout refuses before anything is touched. Asked again, it changes nothing:
  * a FLEET_HALT made by hand after a release is never lifted by this variable.
  *
  * MERRYMEN_REHALT_HOME=<operation token> puts a canonical halt back with a
  * no-replace link, records which inode it is in a receipt BEFORE publishing
- * it, and returns the manifest to `held`. When both are set the re-halt wins:
- * a rollback must never fail because the release variable was left behind.
+ * it, and returns the manifest to `held` at the next halt generation, which
+ * the earlier release value does not name. When both are set the re-halt
+ * wins: a rollback must never fail because a release variable was left behind.
  *
  * Both need the pinned original-halt hash and a pre-adoption record that
  * matches it, so neither applies to a volume this code initialized fresh.
@@ -640,8 +676,8 @@ export function controlAdoptedPersistentHomeHalt(
   if (release === undefined && rehalt === undefined) return null;
   // While a re-halt is asked for, only its own value is read: a release
   // variable left behind, stale or mistyped, must never stop a rollback.
-  const asked = rehalt ?? release!;
-  if (!TOKEN.test(asked)) throw refuse("the halt release or re-halt operation token is invalid");
+  const asked = rehalt !== undefined ? (TOKEN.test(rehalt) ? { token: rehalt, generation: null } : null) : releaseAsked(release!);
+  if (!asked) throw refuse("the halt release or re-halt operation token is invalid");
   const pinned = pinnedHalt(env);
   if (pinned === null) throw refuse("a halt release or re-halt also requires the pinned original halt hash");
   // The scope a release would start, read before the volume is touched: a
@@ -651,11 +687,12 @@ export function controlAdoptedPersistentHomeHalt(
     const saved = readManifest(root);
     if (!saved) throw refuse("a halt release or re-halt requires the adopted persistent manifest");
     const token = saved.manifest.handover.operationToken;
-    if (asked !== token) throw refuse("the halt release or re-halt operation token does not match the persistent manifest");
+    if (asked.token !== token) throw refuse("the halt release or re-halt operation token does not match the persistent manifest");
     if (!readPreAdoption(root, pinned, token)) {
       throw refuse("an env halt release or re-halt applies only to a volume adopted under the pinned original halt");
     }
-    return rehalt !== undefined ? rehaltAdopted(root, saved, release !== undefined) : releaseAdopted(root, saved, rollout!);
+    return asked.generation === null ? rehaltAdopted(root, saved, release !== undefined)
+      : releaseAdopted(root, saved, asked.generation, rollout!);
   });
   if (!result) throw refuse("persistent-home opt-in is required for an env halt release or re-halt");
   return result;
