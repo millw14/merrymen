@@ -11,7 +11,8 @@
  * worker handles an unhandled rejection — so one tenant's refusal exited the
  * whole orchestrator: every other tenant's worker, hold and reply with it,
  * then again on every restart, for as long as that tenant's state stayed the
- * same.
+ * same. The removed agent's retry at the top of reconcile() opened its pool
+ * the same way.
  *
  * Each refusal must instead hold its own tenant: an [alert] naming it, no
  * worker and no hold process, its lease and home retained, and the pass
@@ -50,6 +51,7 @@ const {
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
+const { applyLedgerSchema } = await import("./store");
 const { MIRROR_STATE_DDL } = await import("./ledger-mirror");
 const { RECOVERY_REPLY_SCHEMA, sealRecoveryReplyState } = await import("./recovery-reply-state");
 
@@ -158,7 +160,7 @@ const alerts = (tenant: string) => said.filter((l) => l.startsWith(`[orchestrato
 const PAPER_OK = async () => ({ ok: true as const, line: null });
 const BOT = { telegramEnabled: true, telegramBotToken: "8801:spawn_guard_fixture" };
 
-describe("a refusal at the end of preparation holds its tenant, not the fleet", () => {
+describe("one tenant's refusal holds that tenant, not the fleet", () => {
   it("A PRIVACY REFUSAL: a durable erasure the retained group file cannot be proved against", async () => {
     const { raw } = useLedger(true);
     setPaperRestoreForTest(PAPER_OK);
@@ -235,6 +237,31 @@ describe("a refusal at the end of preparation holds its tenant, not the fleet", 
     assert.ok(!alerts(t.tenant).some((l) => /spawn-guard\.invalid|not-a-real-connection|pg/.test(l)), "and no connection detail is logged");
     assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");
+    assert.equal(spawned.length, 0);
+  });
+
+  // Last: the removed agent stays pending for the rest of this process.
+  it("A POSTGRES FAILURE AT THE REMOVED AGENT'S RETRY: its lease and original book stay", async () => {
+    useLedger(false);
+    const n = ++next;
+    const tenant = addr(0x5a00 + n);
+    const home = childHome(tenant);
+    // Its grant is gone and its home still holds the original book. The first
+    // pass cannot copy it up (no database), so it is kept pending under its
+    // lease, and every later pass retries that copy before anything else.
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    const book = new DatabaseSync(path.join(home, "merrymen.db"));
+    await applyLedgerSchema(wrapSqlite(book));
+    book.close();
+    setTenantLeaseForTest(tenant, { tenant, backend: "postgres", healthy: () => true, async release() {} });
+
+    await assert.doesNotReject(reconcile(), "the first pass keeps it pending");
+    await assert.doesNotReject(reconcile(), "the retry's failure does not reject through reconcile");
+    await assert.doesNotReject(reconcile());
+    assert.ok(alerts(tenant).some((l) => /final copy deferred/.test(l)), said.join("\n"));
+    assert.ok(!alerts(tenant).some((l) => /spawn-guard\.invalid|not-a-real-connection|pg/.test(l)), "and no connection detail is logged");
+    assert.equal(hasLeaseForTest(tenant), true, "the lease that protects its final copy is kept");
+    assert.ok(existsSync(path.join(home, "merrymen.db")), "and the original book stays");
     assert.equal(spawned.length, 0);
   });
 });

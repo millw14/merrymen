@@ -4326,7 +4326,17 @@ export async function reconcile(): Promise<void> {
     if (localMemoryWriterPresent(tenant) || leases.get(tenant) !== lease || !lease.healthy()) continue;
     const url = process.env.DATABASE_URL;
     if (!url && !retirementMemoryStoreForTest) continue;
-    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    // A pool that will not open rejected straight out of reconcile() and took
+    // the supervisor with it (see spawnChild's recovery gates). It stays
+    // pending under the same lease, which is what holds it, and is tried again
+    // next pass. The copy itself never throws (finalMirrorBeforeAnchor).
+    let shared: Db;
+    try {
+      shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    } catch {
+      log(`[alert] ${tenant}: removed agent's final copy deferred — shared database unavailable; retaining its lease and original book`);
+      continue;
+    }
     if (await finalMirrorBeforeAnchor(tenant, shared, childHome(tenant), lease)) removedLedgerPending.delete(tenant);
   }
   // A stored but expired key is still wanted for revocation, home and Telegram
