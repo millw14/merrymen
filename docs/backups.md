@@ -107,8 +107,9 @@ These verdicts fail the drill:
 
 The verifier reads only the allowlist `DRILL_TABLES` in
 `scripts/pg-backup/verify-restore.mjs`: the ledger, book state, the mirror's
-cursors, wallet authority and owner configuration, recovery state, and send
-and reply receipts. Every entry names an integer write stamp. It is in epoch
+cursors, wallet authority and owner configuration, the apps owners connected
+over MCP with their tokens and order proposals, recovery state, and send and
+reply receipts. Every entry names an integer write stamp. It is in epoch
 seconds or milliseconds, written with the row, and it never moves backwards.
 Each value is normalised to seconds on its own, because both units are in use.
 

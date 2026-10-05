@@ -178,7 +178,8 @@ test("the allowlist names plain identifiers once each, and covers the ledger, au
     assert.ok(Object.isFrozen(DRILL_TABLES.find((t) => t.table === table)));
   }
   const names = DRILL_TABLES.map((t) => t.table);
-  for (const must of ["trades", "flows", "equity", "decisions", "fee_accruals", "risk_periods", "mirror_state", "paper_checkpoints", "grants", "tenant_settings", "fleet_recovery_health", "recovery_reply_offsets", "announcements"]) {
+  for (const must of ["trades", "flows", "equity", "decisions", "fee_accruals", "risk_periods", "mirror_state", "paper_checkpoints", "grants", "tenant_settings", "fleet_recovery_health", "recovery_reply_offsets", "announcements",
+    "agent_account", "mcp_connections", "mcp_tokens", "mcp_proposals", "notify_deliveries", "announcement_attempts"]) {
     assert.ok(names.includes(must), `${must} is allowlisted`);
   }
   assert.ok(Object.isFrozen(DRILL_TABLES));

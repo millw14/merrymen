@@ -106,13 +106,25 @@ export const DRILL_TABLES = Object.freeze([
   { table: "telegram_bot_claims", stamp: "claimed_at" },
   { table: "holder_claims", stamp: "claimed_at" },
   { table: "agent_identity", stamp: "created_at" },
+  // One account, one identity, ever (account-claim.ts). Insert-only.
+  { table: "agent_account", stamp: "claimed_at" },
+  // The apps an owner connected over MCP, and the tokens that act for them.
+  // A connection is re-stamped when re-approved or revoked; a token is
+  // insert-only, and pruning one reads as `source-changed`.
+  { table: "mcp_connections", stamp: "updated_at" },
+  { table: "mcp_tokens", stamp: "created_at" },
   // Recovery state, and the receipts that stop a send or a reply repeating.
   { table: "fleet_recovery_health", stamp: "since_at" },
   { table: "paper_recovery_health", stamp: "updated_at" },
   { table: "recovery_reply_offsets", stamp: "armed_at" },
   { table: "tenant_recovery_reply_state", stamp: "updated_at_ms" },
   { table: "announcements", stamp: "sent_at" },
+  { table: "announcement_attempts", stamp: "claimed_at" },
   { table: "tg_group_notices", stamp: "claimed_at" },
+  { table: "notify_deliveries", stamp: "created_at" },
+  // An app's order proposals: one per (tenant, idempotency key), carrying the
+  // order it became. Re-stamped on every change of status.
+  { table: "mcp_proposals", stamp: "updated_at" },
   // Sealed owner memory and group state that the ferries restore into a home.
   { table: "tenant_personal_memory", stamp: "updated_at_ms" },
   { table: "tenant_tg_groups", stamp: "updated_at_ms" },
