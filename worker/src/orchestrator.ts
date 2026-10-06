@@ -149,7 +149,7 @@ import {
   ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed,
   homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
-  resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
+  normaliseCarried, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
   RESUME_APPROVE_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
   type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type PreviewEntry, type ResumeCheck, type ResumePreviewScope, type ResumeRevoke,
 } from "./ledger-resume";
@@ -3202,7 +3202,7 @@ function sayTenantAlert(tenant: string, line: string): void {
  * the approval (`refused`): the operator previews again and approves what is
  * true now.
  */
-type ResumeVerdict = { go: false } | { go: true; registered: string | null };
+type ResumeVerdict = { go: false } | { go: true; registered: string | null; /** The registered book's generation, beside `registered`. */ generation?: string };
 const resumeChecks = new Map<string, { key: string; at: number; result: GapResult | "running" }>();
 const RESUME_CHAIN_RETRY_MS = 60_000;
 let resumeChainForTest: ((chainId: number) => GapChain | null) | null = null;
@@ -3377,7 +3377,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
         "Its new account is refused by the continuity gate as before; preview again and approve what is true now");
       return { go: true, registered: null };
     }
-    return { go: true, registered: approval.approvalId };
+    return { go: true, registered: approval.approvalId, ...(approval.generation ? { generation: approval.generation } : {}) };
   }
   const held = (line: string): ResumeVerdict => { sayTenantAlert(tenant, `${tenant}: resume admission — ${line}`); return { go: false }; };
   const home = childHome(tenant);
@@ -3482,7 +3482,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     log(`${tenant}: resume admission — new book registered as generation ${receipt.generation} (receipt ${receipt.receiptDigest.slice(0, 12)}…` +
       `${chainRead ? `; chain read through block ${chainRead.head}` : ""}); the lost book's cursors and snapshot rows are archived; the ordinary spawn path takes it from here`);
     resumeChecks.delete(tenant);
-    return { go: true, registered: approval.approvalId };
+    return { go: true, registered: approval.approvalId, generation: receipt.generation };
   } catch (e) {
     sayTenantAlert(tenant, `[alert] ${tenant}: resume admission deferred (${errorKind(e)}) — the tenant stays held and the step resumes on the next pass`);
     return { go: false };
@@ -3541,6 +3541,42 @@ async function attestedSeedReady(tenant: `0x${string}`, smartAccount: string): P
     return false;
   } finally {
     raw?.close();
+  }
+}
+
+/**
+ * A REGISTERED BOOK'S HOME, MADE WHAT THE OFFSET HANDOFF READS FROM US, just
+ * before the handoff reads it.
+ *
+ * The carry is normalised as it is moved (ledger-resume.ts normaliseCarried
+ * says what and why), but tenants admitted by the build before that were
+ * carried as they were: registered, seeded, and refused by the handoff on the
+ * restored link with no offset, with nothing that would ever change the file.
+ * This puts them right on the next pass, on exactly the carry's terms. And a
+ * home that carried no telegram.json gets the same restored link from
+ * writeTelegramForChild on its first spawn, which the handoff refused the same
+ * way wherever the listener holds an offset for the bot; it is made the same.
+ *
+ * ONLY WHERE THIS PROCESS IS THE ONLY WRITER THERE HAS BEEN since the archive:
+ * the approval is `registered` (resumeAdmission said so this pass), the home's
+ * recovery generation is that book's, and the book holds no agent row, so no
+ * worker has armed in it. A worker that ran without arming writes only the
+ * shape the handoff reads, which this leaves as it is. Anywhere else nothing
+ * is touched, and the handoff reads what is there as it always has.
+ */
+function normaliseRegisteredHome(tenant: `0x${string}`, generation: string): void {
+  const home = childHome(tenant);
+  if (readRecoveryGeneration(home)?.generation !== generation) return;
+  let book: DatabaseSync | null = null;
+  try {
+    book = new DatabaseSync(path.join(home, "merrymen.db"), { readOnly: true });
+    if (book.prepare("SELECT 1 FROM agents LIMIT 1").get()) return;
+  } catch { return; } finally { book?.close(); }
+  try {
+    const changed = normaliseCarried(home);
+    if (changed.length) log(`${tenant}: resume admission — files carried or restored into the new home normalised for the offset handoff (${changed.join(", ")})`);
+  } catch (e) {
+    log(`${tenant}: resume admission — the new home's files could not be normalised (${errorKind(e)}); the offset handoff reads them as they are`);
   }
 }
 
@@ -3764,7 +3800,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // which is what returning here used to do, for days: HOLD the tenant
       // instead. Trading stays off, a hold process answers the bot, the
       // restore is tried again on a backoff, and the owner is told once.
-      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour);
+      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour, resume.registered ? resume.generation : undefined);
       return;
     } else {
       // Not a practice book (live, or the flag unset): nothing to restart
@@ -3814,6 +3850,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       }
     }
     await writeTelegramForChild(tenant);
+    // A REGISTERED BOOK'S HOME, before the handoff reads it (normaliseRegisteredHome).
+    if (resume.registered && resume.generation) normaliseRegisteredHome(tenant, resume.generation);
     if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
       try {
         const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
@@ -4178,6 +4216,10 @@ function holderBotReady(settings: MerrymenSettings | null): boolean {
  * reconcile's early retry later in this pass does not run the restore and the
  * reset again for it; and if the answer could not be had just then, the first
  * retry comes at the quick pace rather than after the backoff.
+ *
+ * `registered` is the generation of a registered attested book this home
+ * holds, when spawnChild has one: its files are normalised for the handoff
+ * here too, as spawnChild's are (normaliseRegisteredHome).
  */
 async function spawnHolder(
   tenant: `0x${string}`,
@@ -4186,12 +4228,14 @@ async function spawnHolder(
   settings: MerrymenSettings | null,
   lease: TenantLease,
   honour: HeldHonour | null,
+  registered?: string,
 ): Promise<void> {
   if (operatorHeld(tenant)) return;
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
   await writeTelegramForChild(tenant);
+  if (registered) normaliseRegisteredHome(tenant, registered);
   if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
     // Refused as spawnChild's handoff is (see there), and for the same reason:
     // a throw here rejected through reconcile() and took the supervisor down.
