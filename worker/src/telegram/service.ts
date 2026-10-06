@@ -365,8 +365,9 @@ function utcStamp(sec: number, nowSec: number): string {
  * process handled is still pending there until its next poll (bindBot says
  * the same of a switch). A redeploy in that window, the handling time plus
  * POLL_GAP_MS, perhaps in the middle of the trade itself, wipes the home and
- * the offset with it (orchestrator.ts restoredTelegramFile restores none), and
- * the next process asks from 0 and is handed that batch again. The date rule
+ * the offset with it (orchestrator.ts restoredTelegramFile restores none: it
+ * writes 0, no saved offset), and the next process asks from 0 and is handed
+ * that batch again. The date rule
  * holds it back, rightly; but told "I didn't act on it — resend", an owner
  * whose /buy had filled before the redeploy, with the reply lost to it, would
  * buy twice.

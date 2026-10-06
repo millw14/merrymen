@@ -8,7 +8,7 @@
  * through reconcile() is orchestrator-ledger-resume.integration.test.ts.
  */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -22,7 +22,7 @@ import type { TenantLease } from "./tenant-lease";
 import { handoffRecoveryReplyOffset } from "./recovery-reply-handoff";
 import { RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import {
-  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, parseResumeApprovals,
+  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, offsetRestoredLink, parseResumeApprovals,
   parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
   type GapChain, type PreviewEntry,
 } from "./ledger-resume";
@@ -511,7 +511,7 @@ describe("the home archive", () => {
   }
 
   it("carries a telegram.json the handoff reads: the orchestrator's restored link gains offset 0, a file our writers left at the umask becomes 0600", async () => {
-    // The shape writeTelegramForChild writes (restoredTelegramFile): no offset at all.
+    // The shape writeTelegramForChild wrote (restoredTelegramFile) before it wrote `offset: 0`: no offset at all.
     const restored = { linkCode: "K7M2QX", ownerId: 555, linkedAt: 7, firedAlerts: { "drawdown:20": 1000 } };
     const a = carry("c01", JSON.stringify(restored, null, 2), 0o600, { "telegram-promoted.json": ["{}", 0o644], paused: ["paused", 0o644] });
     assert.deepEqual(JSON.parse(readFileSync(a.file, "utf8")), { offset: 0, ...restored }, "only the offset is added; the link, owner and stamps are as they were");
@@ -541,6 +541,15 @@ describe("the home archive", () => {
     const e = carry("c05", JSON.stringify({ offset: 500, botId: "801" }), 0o600);
     assert.equal(await handoff(e.h, listener()), "accepted");
     assert.equal(JSON.parse(readFileSync(e.file, "utf8")).offset, 500);
+    // The restored link as writeTelegramForChild writes it now, its offset
+    // already there: not the legacy shape, so carried byte for byte, and read
+    // by the handoff as it is.
+    const now = JSON.stringify({ offset: 0, ...restored }, null, 2);
+    const f = carry("c06", now, 0o600);
+    assert.deepEqual(f.r.normalised, []);
+    assert.equal(readFileSync(f.file, "utf8"), now);
+    assert.equal(await handoff(f.h, listener()), "accepted");
+    assert.deepEqual(JSON.parse(readFileSync(f.file, "utf8")), { offset: 101, ...restored });
   });
 
   it("leaves anything but the restored link, and anything our writers did not leave, exactly as it is, and the handoff still refuses it by name", async () => {
@@ -738,6 +747,138 @@ describe("the home archive", () => {
     assert.equal(readFileSync(path.join(other, "telegram.json"), "utf8"), JSON.stringify({ linkCode: "X" }));
     assert.equal(lstatSync(path.join(other, "telegram.json")).mode & 0o777, 0o644);
     assert.deepEqual(normaliseCarriedFile(path.join(other, "missing.json"), () => true), [], "no file, nothing to say");
+  });
+
+  // ── any home's restored link, as an earlier build left it ─────────────────
+  /**
+   * A home that was never archived or registered, holding `body` at `mode` as
+   * its telegram.json: what an ordinary tenant's home on the fleet volume
+   * holds after a build before restoredTelegramFile wrote `offset: 0`.
+   */
+  function ordinary(id: string, body: string, mode = 0o600) {
+    const h = path.join(root, "vol", "children", id); mkdirSync(h, { recursive: true, mode: 0o700 });
+    const file = path.join(h, "telegram.json"); writeFileSync(file, body); chmodSync(file, mode);
+    return { h, file };
+  }
+
+  it("offsetRestoredLink gives an earlier build's restored link offset 0 in any home, and the handoff then admits it with the listener's mark", async () => {
+    for (const [id, link] of [
+      ["o01", { linkCode: "K7M2QX", ownerId: 555, linkedAt: 1_790_000_000 }], // a linked tenant, from the mirror
+      ["o02", { ownerId: 555 }], // an owner recovered from the allowlist, the fleet's usual case
+      ["o03", { linkCode: "NTE49D" }], // the dashboard's code, nobody linked yet
+      ["o04", { linkCode: "K7M2QX", ownerId: 555, linkedAt: 7, firedAlerts: { "drawdown:20": 1000 } }], // with the owner's alert stamps
+      ["o05", { linkCode: "", ownerId: 555, linkedAt: 0 }], // the shape before #202
+    ] as const) {
+      const body = JSON.stringify(link, null, 2), o = ordinary(id, body);
+      assert.equal(await handoff(o.h, listener()), "HANDOFF_OFFSET", `${id}: what the deployed build met, on every pass`);
+      assert.equal(readFileSync(o.file, "utf8"), body, `${id}: and the handoff alone never changes it`);
+      assert.deepEqual(offsetRestoredLink(o.h, () => true), ["telegram.json: offset"], id);
+      assert.deepEqual(JSON.parse(readFileSync(o.file, "utf8")), { offset: 0, ...link }, `${id}: the offset alone is added, exactly what the restore writes now`);
+      assert.equal(lstatSync(o.file).mode & 0o7777, 0o600, id);
+      assert.equal(lstatSync(o.file).nlink, 1, id);
+      assert.equal(await handoff(o.h, listener()), "accepted", id);
+      assert.deepEqual(JSON.parse(readFileSync(o.file, "utf8")), { offset: 101, ...link }, `${id}: the link kept, and the listener's high-water mark handed over`);
+      // No longer the earlier build's shape: the next pass leaves it as it is.
+      const handed = readFileSync(o.file, "utf8");
+      assert.deepEqual(offsetRestoredLink(o.h, () => true), [], id);
+      assert.equal(readFileSync(o.file, "utf8"), handed, id);
+    }
+  });
+
+  it("offsetRestoredLink leaves every other file exactly as it is, never a mode, and the handoff still refuses each by name", async () => {
+    const link = { linkCode: "K7M2QX", ownerId: 555 };
+    // A restored link larger than the handoff reads, its stamps padded out: the shape, but not a file any writer of ours left.
+    const stamps = Object.fromEntries(Array.from({ length: 20_000 }, (_, i) => [`drawdown:${i}`, 1000 + i]));
+    for (const [id, body, mode, code] of [
+      // Not the restored link. HANDOFF_OFFSET is unchanged for every other shape without an offset.
+      ["o11", JSON.stringify({ ...link, linkedChats: [555] }), 0o600, "HANDOFF_OFFSET"], // a key the restore never wrote
+      ["o12", JSON.stringify({ ...link, botId: "801" }), 0o600, "HANDOFF_OFFSET"],
+      ["o13", JSON.stringify({ linkCode: 7 }), 0o600, "HANDOFF_OFFSET"], // one of its keys, of another type
+      ["o14", JSON.stringify({ ownerId: "555" }), 0o600, "HANDOFF_OFFSET"],
+      ["o15", JSON.stringify({ ownerId: 0 }), 0o600, "HANDOFF_OFFSET"],
+      ["o16", JSON.stringify({ ...link, firedAlerts: { "drawdown:20": "soon" } }), 0o600, "HANDOFF_OFFSET"],
+      ["o17", JSON.stringify({}), 0o600, "HANDOFF_OFFSET"],
+      ["o18", JSON.stringify({ offset: null, ...link }), 0o600, "HANDOFF_OFFSET"], // an offset that is there and wrong is not a missing one
+      ["o19", String.fromCharCode(0xfeff) + JSON.stringify(link), 0o600, "HANDOFF_PARSE"], // no writer of ours wrote a byte-order mark
+      ["o20", "{ not json", 0o600, "HANDOFF_PARSE"],
+      ["o21", JSON.stringify([link]), 0o600, "HANDOFF_SHAPE"],
+      ["o22", JSON.stringify({ ...link, firedAlerts: stamps }), 0o600, "HANDOFF_SIZE"],
+      // Already what the handoff reads: nothing to do.
+      ["o23", JSON.stringify({ offset: 0, ...link }), 0o600, "accepted"],
+      // The restored link, but not as the restore has written it since #198. Never a mode, here.
+      ["o24", JSON.stringify(link), 0o644, "HANDOFF_MODE"], // the umask, before #198: normaliseCarriedFile's, and only in a registered home
+      ["o25", JSON.stringify(link), 0o666, "HANDOFF_MODE"],
+      ["o26", JSON.stringify(link), 0o400, "HANDOFF_OFFSET"],
+      ["o27", JSON.stringify(link), 0o700, "HANDOFF_OFFSET"],
+      ["o28", JSON.stringify(link), 0o4600, "HANDOFF_OFFSET"],
+    ] as const) {
+      const o = ordinary(id, body, mode);
+      assert.deepEqual(offsetRestoredLink(o.h, () => true), [], id);
+      assert.equal(readFileSync(o.file, "utf8"), body, `${id}: left byte for byte`);
+      assert.equal(lstatSync(o.file).mode & 0o7777, mode, `${id}: and with its own mode`);
+      assert.equal(await handoff(o.h, listener()), code, id);
+      if (code !== "accepted") assert.equal(readFileSync(o.file, "utf8"), body, `${id}: the refused file is left as it was`);
+    }
+  });
+
+  it("offsetRestoredLink never follows a link, never writes through a second name or a home that is not the home's own, writes nothing without the writer, and never throws", async () => {
+    const LINK = JSON.stringify({ linkCode: "K7M2QX", ownerId: 555 }, null, 2);
+    // telegram.json a symlink to a restored link elsewhere.
+    const sym = ordinary("o31", "placeholder"); rmSync(sym.file);
+    const target = path.join(root, "vol", "o31-target.json"); writeFileSync(target, LINK, { mode: 0o600 });
+    symlinkSync(target, sym.file);
+    assert.deepEqual(offsetRestoredLink(sym.h, () => true), []);
+    assert.equal(readFileSync(target, "utf8"), LINK, "the link is never followed");
+    assert.ok(lstatSync(sym.file).isSymbolicLink());
+    assert.equal(await handoff(sym.h, listener()), "HANDOFF_SYMLINK");
+    // A second name.
+    const two = ordinary("o32", LINK); linkSync(two.file, path.join(root, "vol", "o32-second-name"));
+    assert.deepEqual(offsetRestoredLink(two.h, () => true), []);
+    assert.equal(readFileSync(two.file, "utf8"), LINK);
+    assert.equal(await handoff(two.h, listener()), "HANDOFF_LINKS");
+    // The home reached through a link, itself or a directory above it: what
+    // the handoff refuses as HANDOFF_HOME, never written here first.
+    const real = ordinary("o33", LINK), via = path.join(root, "vol", "children", "o33-via"), above = path.join(root, "vol", "children-via");
+    symlinkSync(real.h, via);
+    symlinkSync(path.join(root, "vol", "children"), above);
+    for (const h of [via, path.join(above, "o33")]) {
+      assert.deepEqual(offsetRestoredLink(h, () => true), [], h);
+      assert.equal(readFileSync(real.file, "utf8"), LINK, h);
+      assert.equal(await handoff(h, listener()), "HANDOFF_HOME", h);
+    }
+    // Not a file at all, no file, no home.
+    const dir = ordinary("o34", "placeholder"); rmSync(dir.file); mkdirSync(dir.file);
+    assert.deepEqual(offsetRestoredLink(dir.h, () => true), []);
+    const none = ordinary("o35", "placeholder"); rmSync(none.file);
+    assert.deepEqual(offsetRestoredLink(none.h, () => true), [], "no file: the handoff writes one of its own");
+    assert.deepEqual(offsetRestoredLink(path.join(root, "vol", "children", "o36-never"), () => true), [], "no home");
+    // Not the writer, from the start or by the time it would write.
+    const lost = ordinary("o37", LINK);
+    assert.deepEqual(offsetRestoredLink(lost.h, () => false), []);
+    assert.equal(readFileSync(lost.file, "utf8"), LINK);
+    let asked = 0;
+    assert.deepEqual(offsetRestoredLink(lost.h, () => ++asked < 2), [], "the writer is asked again just before the write");
+    assert.equal(asked, 2);
+    assert.equal(readFileSync(lost.file, "utf8"), LINK);
+    // Replaced while it was read: by another inode, put there between the read and the write.
+    const swapped = ordinary("o38", LINK), other = JSON.stringify({ linkCode: "OTHER1", ownerId: 777 }, null, 2);
+    let calls = 0;
+    const replace = () => {
+      if (++calls === 2) { writeFileSync(`${swapped.file}.next`, other, { mode: 0o600 }); renameSync(`${swapped.file}.next`, swapped.file); }
+      return true;
+    };
+    assert.deepEqual(offsetRestoredLink(swapped.h, replace), []);
+    assert.equal(readFileSync(swapped.file, "utf8"), other, "the file that replaced it is left as it is, for the next pass to judge");
+    // A write the filesystem refuses is said by its errno, and the file is as it was.
+    if (process.getuid?.() !== 0) {
+      const shut = ordinary("o39", LINK);
+      chmodSync(shut.h, 0o500);
+      try {
+        assert.deepEqual(offsetRestoredLink(shut.h, () => true), ["telegram.json: offset write failed (EACCES)"]);
+      } finally { chmodSync(shut.h, 0o700); }
+      assert.equal(readFileSync(shut.file, "utf8"), LINK);
+      assert.deepEqual(readdirSync(shut.h), ["telegram.json"], "and no temp file is left beside it");
+    }
   });
 });
 
