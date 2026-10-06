@@ -81,7 +81,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "./db";
-import { CASH, ENTRYPOINT, classifyUsdgMovement, energyReserveTokens } from "../../packages/core/src/index";
+import { CASH, ENTRYPOINT, classifyUsdgMovement, energyReserveTokens, isEnergyReserveToken } from "../../packages/core/src/index";
 import { segmentReceipt, validatorOfNonce, type OpSegment } from "./asset-movements";
 import { legsFromReceipt, TRANSFER_TOPIC, type RawChainLog, type RpcCall } from "./chain-capital";
 import { custodyAddressesOf } from "./custody";
@@ -618,10 +618,14 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       const leg = pickAcquiredLeg(op.deltas, USDG);
       if (!leg) {
         const onlyUsdg = moved.every(([t]) => t === USDG);
-        items.push(unresolved(base, onlyUsdg
-          ? `a session key moved USDG (${saidDeltas(op.deltas)}) with nothing visible the other way: a transfer home or an energy purchase books a flow beside its row, ` +
-            "which is not one row this tool can propose"
-          : `a session key's operation moved ${saidDeltas(op.deltas)}: not one token against USDG in opposite directions, so no fill can be read without choosing one`));
+        const energy = moved.some(([t]) => isEnergyReserveToken(t));
+        items.push(unresolved(base, energy
+          ? `a session key's energy purchase (${saidDeltas(op.deltas)}): the worker books it as an 'energy-buy' flow that moves both peaks, beside its row — ` +
+            "not one row this tool can propose"
+          : onlyUsdg
+            ? `a session key moved USDG (${saidDeltas(op.deltas)}) with nothing visible the other way: a transfer home or an energy purchase books a flow beside its row, ` +
+              "which is not one row this tool can propose"
+            : `a session key's operation moved ${saidDeltas(op.deltas)}: not one token against USDG in opposite directions, so no fill can be read without choosing one`));
         continue;
       }
       const decimals = ev.decimals[leg.token] ?? null;

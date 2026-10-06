@@ -27,7 +27,7 @@ import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import { gasFields } from "./key-install-accounting";
 import { chainGapCheck, knownChainFacts, resumePreconditions } from "./ledger-resume";
-import { CASH, GRANT_TRENCHER } from "../../packages/core/src/index";
+import { CASH, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import {
   APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, parseApplyReport, planBooking, planLines,
@@ -349,6 +349,12 @@ describe("0x4b6dcd's shape: an operation with no USDG leg", () => {
     assert.match(home.why, /a transfer home or an energy purchase books a flow beside its row/);
     assert.equal(p.items.find((i) => i.key === `log:${h32("home")}#2`)?.class, "unresolved");
     assert.match(p.items.find((i) => i.key === `op:${h32("odd")}`)!.why, /names no validator this tool reads/);
+    // An energy purchase is a clean USDG-for-one-token receipt and still not a trade: its flow moves both peaks.
+    const reserve = MERRYMEN_TOKEN.address.toLowerCase();
+    const energy = await preview(await books(), fakeRpc({ txs: [fromFixture(CHAIN.buy), operation({ opHash: h32("energy"), nonce: SESSION_NONCE, block: SELL_BLOCK + 50n, tag: "energy",
+      logs: [[USDG, [TR, topic(ACCOUNT), topic(addr(0x9001))], `0x${word(2_000_000n)}`, "0x2"], [reserve, [TR, topic(addr(0x9001)), topic(ACCOUNT)], `0x${word(77n)}`, "0x3"]] })] }).rpc);
+    assert.equal(energy.verdict, "blocked");
+    assert.match(energy.items.find((i) => i.key === `op:${h32("energy")}`)!.why, /energy purchase .* 'energy-buy' flow that moves both peaks/);
   });
 });
 
