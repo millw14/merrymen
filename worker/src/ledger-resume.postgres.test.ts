@@ -169,6 +169,21 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     // The ordinary path, unchanged, takes it from here.
     assert.equal(await restoreLedgerImport(options), "present");
     await registerLedgerSource(options);
+    // A first spawn refused after its seeds leaves the restored practice book
+    // and no agent row. The next pass's gates accept it for this registration
+    // only (to_regclass and FOR SHARE in the production dialect), and refuse it
+    // once its approval is withdrawn.
+    const seeded = new DatabaseSync(path.join(home, "merrymen.db"));
+    try { seeded.prepare("INSERT INTO paper_book(agent_id,cash_usdg,vault_usdg,hwm_usdg,shares,updated_at) VALUES(?,90,0,100,'{}',1)").run(account); }
+    finally { seeded.close(); }
+    assert.equal(await restoreLedgerImport(options), "present");
+    await registerLedgerSource(options);
+    await main.query("UPDATE ledger_resume_approvals SET state='revoked' WHERE approval_id=$1", [approval.approvalId]);
+    await assert.rejects(restoreLedgerImport(options), /refused/);
+    await assert.rejects(registerLedgerSource(options), /refused/);
+    await main.query("UPDATE ledger_resume_approvals SET state='registered' WHERE approval_id=$1", [approval.approvalId]);
+    const unseed = new DatabaseSync(path.join(home, "merrymen.db"));
+    try { unseed.prepare("DELETE FROM paper_book").run(); } finally { unseed.close(); }
     const book = new DatabaseSync(path.join(home, "merrymen.db")); raws.push(book);
     await assertLedgerSourceContinuity(wrapSqlite(book), shared, tenant);
     // The child arms, seeded; its first mirror pass.
