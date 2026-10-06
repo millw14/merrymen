@@ -51,6 +51,11 @@ function pgOverSqlite(raw: DatabaseSync, said: string[]): PgClient {
       said.push(sql);
       if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") { raw.exec("BEGIN"); raw.exec("PRAGMA query_only = ON"); readOnly = true; return empty; }
       if (/current_setting\('transaction_read_only'\)/.test(sql)) return { rows: [{ ro: readOnly ? "on" : "off", iso: readOnly ? "repeatable read" : "read committed" }], rowCount: 1 };
+      // Postgres's catalogue, from sqlite's.
+      if (/FROM information_schema\.tables WHERE table_schema = current_schema\(\)/.test(sql)) {
+        const rows = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<Record<string, unknown>>).map((r) => ({ ...r }));
+        return { rows, rowCount: rows.length };
+      }
       if (sql === "BEGIN" || sql === "COMMIT") { raw.exec(sql); return empty; }
       if (sql === "ROLLBACK") { raw.exec("ROLLBACK"); if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; } return empty; }
       const stmt = raw.prepare(sql.replace(/\$(\d+)/g, "?$1"));

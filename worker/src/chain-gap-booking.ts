@@ -138,7 +138,6 @@ export class BookingRefused extends Error {
   }
 }
 
-const absentTable = (e: unknown) => /no such table|does not exist|42P01/.test(`${(e as { code?: unknown }).code ?? ""} ${(e as Error).message}`);
 
 // ── the Postgres half ────────────────────────────────────────────────────────
 
@@ -194,9 +193,27 @@ const SPELLING_TABLES = ["trades", "flows", "equity", "fee_accruals", "positions
 const num = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
 
+/**
+ * WHICH TABLES EXIST, asked of the catalogue rather than learned from a
+ * failed statement. Inside a Postgres transaction a failed statement aborts
+ * the whole transaction (25P02: every later read refuses), so the readers'
+ * usual "a missing table is none" catch cannot be used in the snapshot or the
+ * apply, which are each one transaction. Found by a real Postgres, not sqlite.
+ */
+async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
+  const rows = (await db.prepare(dialect === "postgres"
+    ? "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema()"
+    : "SELECT name FROM sqlite_master WHERE type = 'table'").all()) as Array<Record<string, unknown>>;
+  return new Set(rows.map((r) => String(r.name)));
+}
+
 export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: Dialect; nowSec: number }): Promise<BookingSnapshot> {
   const tenant = lower(o.tenant);
   if (!ADDRESS.test(tenant)) throw new BookingRefused("invalid-tenant", "the tenant is not a full 0x address");
+  const tables = await existingTables(db, o.dialect);
+  for (const needed of ["grants", "agents", "trades", "flows", "equity", "mirror_state"]) {
+    if (!tables.has(needed)) throw new BookingRefused("schema", `the ${needed} table is not in this database: it is not the ledger this tool books into`);
+  }
   const grants = (await db.prepare(GRANT_SQL[o.dialect]).all(tenant)) as Array<Record<string, unknown>>;
   if (grants.length > 1) throw new BookingRefused("ambiguous-grant", "more than one grant row names this tenant");
   let grant: BookingSnapshot["grant"] = null;
@@ -219,10 +236,8 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     mode: strOrNull(r.mode), hwmUsdg: num(r.hwm_usdg), hwmWithdrawnUsdg: num(r.hwm_withdrawn_usdg),
   }));
   const spellings = new Set<string>();
-  for (const table of SPELLING_TABLES) {
-    try {
-      for (const r of (await db.prepare(`SELECT DISTINCT agent_id FROM ${table} WHERE LOWER(agent_id) = ?`).all(account)) as Array<Record<string, unknown>>) spellings.add(String(r.agent_id));
-    } catch (e) { if (!absentTable(e)) throw e; }
+  for (const table of SPELLING_TABLES.filter((t) => tables.has(t))) {
+    for (const r of (await db.prepare(`SELECT DISTINCT agent_id FROM ${table} WHERE LOWER(agent_id) = ?`).all(account)) as Array<Record<string, unknown>>) spellings.add(String(r.agent_id));
   }
   const epoch = agents.length === 1 ? agents[0]!.epoch : null;
   let epochOpenedAt: number | null = null;
@@ -242,19 +257,18 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     const r = (await db.prepare(`SELECT COUNT(*) AS n, MAX(id) AS max_id FROM ${table} WHERE LOWER(agent_id) = ?`).get(account)) as Record<string, unknown>;
     return { n: num(r.n), maxId: num(r.max_id) };
   };
-  const open = await readOpenApproval(db, tenant);
-  let booked: BookingSnapshot["booked"] = [];
-  try {
-    booked = ((await db.prepare(`SELECT booking_id, evidence_key, table_name, row_id FROM ${BOOKINGS_TABLE} WHERE account = ? AND state = 'applied'
+  const open = tables.has("ledger_resume_approvals") ? await readOpenApproval(db, tenant) : null;
+  const booked: BookingSnapshot["booked"] = tables.has(BOOKINGS_TABLE)
+    ? ((await db.prepare(`SELECT booking_id, evidence_key, table_name, row_id FROM ${BOOKINGS_TABLE} WHERE account = ? AND state = 'applied'
         ORDER BY evidence_key, booking_id`).all(account)) as Array<Record<string, unknown>>)
-      .map((r) => ({ bookingId: String(r.booking_id), evidenceKey: String(r.evidence_key), tableName: String(r.table_name), rowId: num(r.row_id) }));
-  } catch (e) { if (!absentTable(e)) throw e; }
+      .map((r) => ({ bookingId: String(r.booking_id), evidenceKey: String(r.evidence_key), tableName: String(r.table_name), rowId: num(r.row_id) }))
+    : [];
   return {
     tenant, grant, agents, spellings: [...spellings].sort(), epochOpenedAt, knownAccounts,
     known: { ops: [...k.ops].sort(), txs: [...k.txs].sort(), flows: [...k.flows].sort() }, gapFromSec,
     ledger: { trades: await count("trades"), flows: await count("flows") },
     openApproval: open ? { state: open.state, evidence: open.evidenceDigest } : null,
-    admitted: account ? await attestedSourceInUse(db, tenant, account) : null,
+    admitted: account && tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(db, tenant, account) : null,
     booked,
   };
 }
@@ -904,20 +918,18 @@ export interface RevertReport {
  * 'reverted', keeping each row in full. A second revert of the same report is
  * `already-reverted`, changing nothing.
  */
-export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: number }): Promise<RevertReport> {
+export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: number; dialect: Dialect }): Promise<RevertReport> {
   const result = (outcome: RevertReport["outcome"]): RevertReport => {
     const body = { format: REVERT_FORMAT, bookingId: report.bookingId, tenant: report.tenant, account: report.account, revertedAtMs: o.nowMs, outcome,
       rows: report.rows.map((r) => ({ table: r.table, id: r.id, evidenceKey: r.evidenceKey })) };
     return { ...body, format: REVERT_FORMAT, reportDigest: digestOf(body) };
   };
   return db.tx(async (tx) => {
-    let receipts: Array<Record<string, unknown>>;
-    try {
-      receipts = (await tx.prepare(`SELECT * FROM ${BOOKINGS_TABLE} WHERE booking_id = ? ORDER BY evidence_key`).all(report.bookingId)) as Array<Record<string, unknown>>;
-    } catch (e) {
-      if (absentTable(e)) throw new BookingRefused("receipts", "no booking receipts exist in this database");
-      throw e;
-    }
+    // Asked of the catalogue, never learned from a failed read: one failure
+    // aborts a Postgres transaction (existingTables says why).
+    const tables = await existingTables(tx, o.dialect);
+    if (!tables.has(BOOKINGS_TABLE)) throw new BookingRefused("receipts", "no booking receipts exist in this database");
+    const receipts = (await tx.prepare(`SELECT * FROM ${BOOKINGS_TABLE} WHERE booking_id = ? ORDER BY evidence_key`).all(report.bookingId)) as Array<Record<string, unknown>>;
     const want = [...report.rows].sort((a, b) => a.evidenceKey.localeCompare(b.evidenceKey));
     const matches = receipts.length === want.length && receipts.every((r, i) => String(r.evidence_key) === want[i]!.evidenceKey
       && String(r.table_name) === want[i]!.table && Number(r.row_id) === want[i]!.id && String(r.row_digest) === want[i]!.rowDigest
@@ -927,11 +939,11 @@ export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: num
     if (!receipts.every((r) => r.state === "applied")) throw new BookingRefused("receipts", "the booking is partly reverted; nothing changed");
     const lockAgent = await tx.prepare("UPDATE agents SET epoch = epoch WHERE LOWER(smart_account) = ?").run(report.account);
     if (Number(lockAgent.changes) < 1) throw new BookingRefused("cas", "the account's registration is gone; nothing changed");
-    try {
+    if (tables.has("ledger_resume_approvals")) {
       const admitted = await tx.prepare(`SELECT state FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('archiving', 'archived', 'registered', 'applied')
           AND updated_at_ms >= ? LIMIT 1`).get(report.tenant, report.appliedAtMs);
       if (admitted) throw new BookingRefused("admitted", "the tenant's admission went past approval after this booking: its attested book counts these rows; nothing changed");
-    } catch (e) { if (e instanceof BookingRefused || !absentTable(e)) throw e; }
+    }
     for (const r of report.rows) {
       const columns = r.table === "trades" ? TRADE_COLUMNS : FLOW_COLUMNS;
       const now = (await tx.prepare(`SELECT id, ${columns.join(", ")} FROM ${r.table} WHERE id = ?`).get(r.id)) as Record<string, unknown> | undefined;

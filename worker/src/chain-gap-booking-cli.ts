@@ -213,14 +213,17 @@ export function sourceFingerprint(here = path.dirname(fileURLToPath(import.meta.
  * runtime-only dependency here, as for db.ts), BIGINT read as a number as the
  * store reads it, and a statement and lock timeout so a held lock cannot hang
  * an operator's terminal. Read-only connections are opened read-only.
+ *
+ * `loadPg` is the opt-in Postgres test's seam: it loads the same driver from
+ * where that test finds it. Nothing else passes it.
  */
-export async function connectBooking(url: string, readOnly: boolean): Promise<PgClient> {
+export async function connectBooking(url: string, readOnly: boolean, loadPg: () => Promise<unknown> = () => import(/* webpackIgnore: true */ "pg" as string)): Promise<PgClient> {
   let pg: { Client: new (c: { connectionString: string; options?: string; application_name?: string; connectionTimeoutMillis?: number }) => PgClient & { connect(): Promise<void> };
     types: { setTypeParser(oid: number, fn: (v: string) => unknown): void } };
   try {
-    // @ts-expect-error pg has no types here (runtime-only)
-    const mod = await import(/* webpackIgnore: true */ "pg");
+    const mod = (await loadPg()) as { default?: unknown };
     pg = (mod.default ?? mod) as typeof pg;
+    if (typeof pg?.Client !== "function") throw new Error("no driver");
   } catch { throw new CliError("postgres-driver-unavailable"); }
   pg.types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
   const client = new pg.Client({
@@ -306,7 +309,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     const fd = createReportFile(options.output);
     const client = await full.connect(env.DATABASE_URL, false);
     try {
-      const r = await revertBooking(pgClientDb(client, { readOnly: false }), report, { nowMs: full.nowMs() });
+      const r = await revertBooking(pgClientDb(client, { readOnly: false }), report, { nowMs: full.nowMs(), dialect: "postgres" });
       finishReportFile(fd, options.output, r);
       out(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} booking ${r.bookingId} — tenant ${r.tenant}: ${r.rows.length} row(s); report ${options.output}`);
       return 0;

@@ -519,14 +519,14 @@ describe("apply and revert", () => {
     const { b, p, rpc } = await ready();
     const report = await apply(b.db, p);
     const reparsed = parseApplyReport(JSON.stringify(report));
-    const r = await revertBooking(b.db, reparsed, { nowMs: (NOW + 60) * 1000 });
+    const r = await revertBooking(b.db, reparsed, { nowMs: (NOW + 60) * 1000, dialect: "sqlite" });
     assert.equal(r.outcome, "reverted");
     assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 0);
     const receipts = rows(b.raw, `SELECT evidence_key, state, reverted_at_ms, row_json FROM ${BOOKINGS_TABLE} ORDER BY evidence_key`);
     assert.deepEqual(receipts.map((x) => [x.state, x.reverted_at_ms]), [["reverted", (NOW + 60) * 1000], ["reverted", (NOW + 60) * 1000]]);
     assert.deepEqual(JSON.parse(String(receipts[1]!.row_json)), JSON.parse(canonical(report.rows[0]!.row)), "the row, kept in full");
     assert.equal((await admissionSays(b, rpc)).status, "missing");
-    assert.equal((await revertBooking(b.db, reparsed, { nowMs: NOW * 1000 })).outcome, "already-reverted");
+    assert.equal((await revertBooking(b.db, reparsed, { nowMs: NOW * 1000, dialect: "sqlite" })).outcome, "already-reverted");
     // Reverted, the evidence can be booked again by a new preview.
     const again = await preview(b, rpc);
     assert.equal(again.verdict, "ready");
@@ -537,12 +537,12 @@ describe("apply and revert", () => {
     const { b, p } = await ready();
     const report = await apply(b.db, p);
     b.raw.prepare("UPDATE trades SET realized_pnl_usdg = 0.1 WHERE user_op_hash = ?").run(SELL_OP);
-    await assert.rejects(revertBooking(b.db, report, { nowMs: NOW * 1000 }), (e: unknown) => (e as BookingRefused).code === "cas" && /no longer exactly as booked/.test((e as Error).message));
+    await assert.rejects(revertBooking(b.db, report, { nowMs: NOW * 1000, dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "cas" && /no longer exactly as booked/.test((e as Error).message));
     b.raw.prepare("UPDATE trades SET realized_pnl_usdg = NULL WHERE user_op_hash = ?").run(SELL_OP);
     await ensureLedgerResumeSchema(b.db);
     b.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms)
       VALUES ('a', ?, ?, 4663, ?, ?, '{}', 'r', 'registered', ?, ?)`).run(SHOGUN_TENANT, ACCOUNT, SHOGUN_TENANT, "e".repeat(64), NOW * 1000 + 1, NOW * 1000 + 1);
-    await assert.rejects(revertBooking(b.db, report, { nowMs: NOW * 1000 }), (e: unknown) => (e as BookingRefused).code === "admitted");
+    await assert.rejects(revertBooking(b.db, report, { nowMs: NOW * 1000, dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "admitted");
     assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 1, "nothing changed");
     const tampered = { ...report, rows: report.rows.map((r) => ({ ...r, id: r.id + 1 })) };
     assert.throws(() => parseApplyReport(JSON.stringify(tampered)), (e: unknown) => (e as BookingRefused).code === "report");
