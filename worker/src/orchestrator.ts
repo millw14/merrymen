@@ -4230,8 +4230,8 @@ function holderBotReady(settings: MerrymenSettings | null): boolean {
  * retry comes at the quick pace rather than after the backoff.
  *
  * `registered` is the generation of a registered attested book this home
- * holds, when spawnChild has one: its files are normalised for the handoff
- * here too, as spawnChild's are (normaliseRegisteredHome).
+ * holds, when spawnChild has one: its telegram.json is normalised for the
+ * handoff here too, as spawnChild's is (normaliseRegisteredHome).
  */
 async function spawnHolder(
   tenant: `0x${string}`,
