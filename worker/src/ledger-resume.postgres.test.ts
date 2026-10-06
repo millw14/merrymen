@@ -223,7 +223,7 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const { evidence, digest } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
     const entry: PreviewEntry = { tenant, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
       anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
-    const verdict = await autoPaperVerdict(shared, entry);
+    const verdict = await autoPaperVerdict(shared, entry, { consentEnforced: true });
     assert.equal(verdict.kind, "manual");
     assert.match((verdict as { why: string[] }).why.join(" "), /approval is already open/);
     // An automatic approval of another tenant, through the operator's insert, says so in its row.

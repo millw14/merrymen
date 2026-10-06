@@ -150,8 +150,8 @@ import {
   homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
   normaliseCarriedFile, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
-  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_SOURCE, autoPaperRoom, autoPaperVerdict, countOpenApprovals, grantRowKey, observeGrantChanges,
-  parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
+  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, autoPaperRoom, autoPaperVerdict, countOpenApprovals,
+  evidenceHasHistory, grantRowKey, noteGrantAttempt, observeGrantChanges, parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
   RESUME_APPROVE_ENV, RESUME_AUTO_PAPER_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
   type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type OwedGrantChange, type PreviewEntry, type ResumeCheck, type ResumePreviewScope,
   type ResumeRevoke,
@@ -3351,8 +3351,23 @@ async function drainContinuousBook(tenant: `0x${string}`, lease: TenantLease, sh
  * holds it for the pass. Guessing "live" would have bound a different chain
  * verdict into the evidence than a later clean read, and one transient store
  * error would then have refused the operator's approval outright.
+ *
+ * TRUE, WITHOUT READING, WHILE LIVE-TRADING CONSENT IS STOOD DOWN
+ * (MERRYMEN_LIVE_INTENT_STAND_DOWN=1, liveConsentEnforced). The worker then
+ * treats every owner as consenting (exec-mode.ts `consented`: a funded
+ * account goes live with liveTradingEnabled false), so the setting proves
+ * nothing about the rail it will arm on, and a deposit made during the gap is
+ * in no Postgres table the paper verdict reads. Every tenant is chain:required
+ * then — read on chain before an operator's approval admits it, and never
+ * approved by the automatic lane (autoPaperVerdict) — as held-reset.ts and
+ * the practice-reset path already treat a stood-down consent. Not a guess
+ * that varies by read: the same answer in the preview, Phase A and Phase B
+ * for as long as the variable is set, so an approval previewed under it
+ * matches its own digest, and one previewed without it is refused for
+ * changed evidence and previewed again.
  */
 async function resumeLiveIntent(tenant: `0x${string}`): Promise<boolean | null> {
+  if (!liveConsentEnforced()) return true;
   try { return (await getSettingsStore().get(tenant))?.liveTradingEnabled === true; }
   catch { return null; }
 }
@@ -3422,6 +3437,13 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       const nowSec = Math.floor(Date.now() / 1000);
       const controls = await readControlsEvidence(shared, scope, Date.now());
       const { digest, check } = await readResumeEvidence(shared, { tenant, grant, home, nowSec, controls, liveIntent });
+      // AN OUTAGE IS NOT CHANGED EVIDENCE. A controls read, an anchor or a
+      // risk period that could not be read moves the digest (ResumeCheck.
+      // unreadable says how), and refusing on that ended the approval for
+      // good: one evidence is approved once, and the same evidence read
+      // cleanly again could never be approved by anyone. Held instead, as
+      // unreadable settings are above; the next pass reads it all again.
+      if (check.unreadable.length) return held(`${check.unreadable.join("; ")} — a read that failed, not a change; held, and read again next pass`);
       if (digest !== approval.evidenceDigest) {
         return refused("approved", "the evidence changed since the preview (if the old book had an unmirrored tail, it is in Postgres now and the next preview shows it)");
       }
@@ -3454,16 +3476,35 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     // stale (or spent by an attempt that did not register), and on from its
     // head immediately before the registration; then the one transaction,
     // which re-reads the race-prone ones inside.
+    //
+    // THE OWNER'S LIVE INTENT IS READ AGAIN HERE, not carried from the top of
+    // this call. In the usual flow Phase A, the archive and Phase B run in one
+    // call, so the value read before Phase A was the one Phase B judged by,
+    // and an owner who turned live trading on while the home was archived was
+    // never seen: an automatic approval went on to the registration and a
+    // worker at `trade`, and an operator's skipped the chain read it now
+    // needs. Read now, the only window left is the registration's own few
+    // statements. Unreadable holds, as above.
+    const liveNow = await resumeLiveIntent(tenant);
+    if (liveNow === null) return held("the owner's settings could not be read, so whether it could arm live is unknown; held");
     const nowSec = Math.floor(Date.now() / 1000);
     const controls = await readControlsEvidence(shared, scope, Date.now());
     const check = await resumePreconditions(shared, { tenant, account: approval.smartAccount, grantAccount: grant.smartAccount, nowSec, controls,
-      homePendingImport: existsSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)), liveIntent });
+      homePendingImport: existsSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)), liveIntent: liveNow });
+    // An outage here holds too (Phase A says why): the home is archived
+    // already, and an approval refused for a read that failed would leave it
+    // waiting on a fresh preview and approval for nothing.
+    if (check.unreadable.length) return held(`${check.unreadable.join("; ")} — a read that failed, not a refusal; held, and read again next pass`);
     if (check.refusals.length) return refused("archived", check.refusals.join("; "));
     // AND AGAIN HERE, where it is not redundant: Phase B does not compare the
-    // digest, and an owner who turned live trading on between the archive and
-    // the registration makes an operator's approval read the chain. An
-    // automatic one never does; it ends, and the operator approves by hand.
-    if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions)) return refused("archived", AUTO_PAPER_NOT_SAFE);
+    // digest, and an owner who turned live trading on, or a position that
+    // appeared, after the preview — during the archive included, now that
+    // the intent is read again above — makes an operator's approval read the
+    // chain. An automatic one never does; it ends, and the operator approves
+    // by hand. Its evidence must have said chain:not-required, too.
+    if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions || approval.evidence.checks.chain !== "not-required")) {
+      return refused("archived", AUTO_PAPER_NOT_SAFE);
+    }
     let chainRead: ChainWindow | null = null;
     if (check.chainRequired) {
       const gate = await resumeChainGate(tenant, approval, check, shared);
@@ -3648,8 +3689,9 @@ async function refreshResumePending(): Promise<void> {
  *  1. The watch: which grant rows changed since they were last seen
  *     (observeGrantChanges, durable). The first pass with the variable on
  *     only records the roster as it stands, and admits nobody.
- *  2. Each change still owed, in roster order, waits — owed, untouched —
- *     while its grant is expired or the operator holds the tenant (the
+ *  2. Each change still owed, in the watch's order (never tried, then the
+ *     least recently tried, then the longest owed), waits — owed, untouched
+ *     — while its grant is expired or the operator holds the tenant (the
  *     accounting hold, or a rollout that does not admit it: under an
  *     explicit list it must be named). A tenant something already runs for
  *     (a worker, a spawn, a restart, a hold process) is not the gate's, and
@@ -3658,14 +3700,18 @@ async function refreshResumePending(): Promise<void> {
  *     processes running and the approvals open would leave fewer than
  *     AUTO_PAPER_HEADROOM of the MAX_LOCAL_CHILD_PROCESSES slots free. The
  *     rest stay owed, and one alert says how many wait.
- *  4. At most AUTO_PAPER_PER_PASS a pass: a fresh preview of that one tenant
- *     (previewEntryFor, the operator's own reading), recorded as a preview
- *     run and printed as one; its verdict (autoPaperVerdict); and, in the
- *     safe case only, the approval, source `auto-paper`, through the
- *     operator's own insert (recordResumeApproval). Anything else is said
- *     with the line an operator approves it by, if it passed.
- *  5. The change settled, for the key that was owed, with the run and what
- *     it came to.
+ *  4. At most AUTO_PAPER_PER_PASS answers a pass: a fresh preview of that one
+ *     tenant (previewEntryFor, the operator's own reading); its verdict
+ *     (autoPaperVerdict, which approves nobody while live-trading consent is
+ *     stood down); for a tenant the gate holds, the preview recorded as a
+ *     run and printed as one; and, in the safe case only, the approval,
+ *     source `auto-paper`, through the operator's own insert
+ *     (recordResumeApproval). Anything else is said with the line an
+ *     operator approves it by, if it passed. A preview that cannot be read
+ *     is no answer: it stays owed, goes behind the others, and spends one of
+ *     AUTO_PAPER_RETRIES_PER_PASS rather than an answer.
+ *  5. The change settled, for the key that was owed, with the run (if one
+ *     was recorded) and what it came to.
  *
  * Every step fails closed: a watch or store that cannot be read approves
  * nothing this pass, and a tenant whose turn fails stays owed for the next.
@@ -3736,29 +3782,67 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
     return;
   }
   autoPaperCapSaid = null;
-  for (const change of ready.slice(0, Math.min(AUTO_PAPER_PER_PASS, room))) {
+  // TURNS. `ready` is in the watch's order: never tried first, then the least
+  // recently tried, then the longest owed (observeGrantChanges). A pass
+  // answers at most AUTO_PAPER_PER_PASS (within the room), and spends at most
+  // AUTO_PAPER_RETRIES_PER_PASS more previews on changes that cannot be read:
+  // a preview that fails uses a retry, never an answer, so tenants whose
+  // reads never succeed cannot take the turns of the ones behind them, and a
+  // store failing for everyone costs a pass a bounded few reads.
+  const answers = Math.min(AUTO_PAPER_PER_PASS, room);
+  let answered = 0, failed = 0;
+  const stillOwed = async (change: OwedGrantChange, line: string): Promise<void> => {
+    failed += 1;
+    sayTenantAlert(change.tenant, line);
+    // Behind every change not tried since. A write that fails here loses only
+    // that place in the queue; the change is owed either way.
+    try { await noteGrantAttempt(shared, change, Date.now()); } catch { /* still owed */ }
+  };
+  const recordRun = async (entry: PreviewEntry, at: number): Promise<string> => {
+    const run = await recordPreviewRun(shared, [entry], at);
+    log(`[resume-preview] run ${run}: automatic, for ${entry.tenant}, whose grant row changed (${RESUME_AUTO_PAPER_ENV}) — ` +
+      `${entry.pass ? "it passes every Postgres precondition" : "it does not pass"}`);
+    log(previewLine(entry));
+    return run;
+  };
+  for (const change of ready) {
     if (stopping) return;
+    if (answered >= answers || answered + failed >= answers + AUTO_PAPER_RETRIES_PER_PASS) break;
     const tenant = change.tenant as `0x${string}`;
     try {
       const at = Date.now();
       const { entry, unreadable } = await previewEntryFor(shared, tenant, Math.floor(at / 1000));
-      // AN OUTAGE IS NOT AN ANSWER. A read that threw, or settings that could
-      // not be read, would settle the re-sign as "previewed, not approved"
-      // for good; it stays owed, and the next pass reads it again.
+      // AN OUTAGE IS NOT AN ANSWER. A read that threw, settings that could not
+      // be read, or a refusal a failed read caused (controls, the anchor, the
+      // risk period) would settle the re-sign as "previewed, not approved" for
+      // good; it stays owed, and a later pass reads it again.
       if (unreadable) {
-        sayTenantAlert(tenant, `[alert] ${tenant}: resume auto-paper could not read it (${entry.refusals.join("; ")}) — its re-sign is still owed a preview, tried again next pass`);
+        await stillOwed(change, `[alert] ${tenant}: resume auto-paper could not read it (${entry.refusals.join("; ")}) — its re-sign is still owed a preview, tried again on a later pass`);
         continue;
       }
-      const run = await recordPreviewRun(shared, [entry], at);
-      log(`[resume-preview] run ${run}: automatic, for ${tenant}, whose grant row changed (${RESUME_AUTO_PAPER_ENV}) — ` +
-        `${entry.pass ? "it passes every Postgres precondition" : "it does not pass"}`);
-      log(previewLine(entry));
-      const verdict = await autoPaperVerdict(shared, entry);
+      // The verdict before any run is recorded: a tenant the gate does not
+      // hold (above all a brand-new signup) records no run, so automatic runs
+      // are only ever the held tenants' and do not crowd the operator's own
+      // previews out of the runs an approval is looked up in.
+      const verdict = await autoPaperVerdict(shared, entry, { consentEnforced: liveConsentEnforced() });
       if (verdict.kind === "not-held") {
-        log(`resume auto-paper: ${tenant} re-signed; the continuity gate does not hold it (${verdict.why}) — nothing to approve`);
+        // A BOOK ON THE VOLUME, UNBLOCKED, WITH HISTORY BEHIND IT is the
+        // ordinary path's, which admits it if the book proves continuous —
+        // but the continuity gate may refuse it instead (it writes no barrier
+        // when it does, so the book still reads `present`). Then it is held
+        // like any other, and the operator needs the line to approve it by:
+        // its run is recorded, so that line is one applyResumeApprovals finds.
+        const approvable = entry.book === "present" && entry.pass && entry.digest !== null && entry.evidence !== null && evidenceHasHistory(entry.evidence);
+        const run = approvable ? await recordRun(entry, at) : null;
+        log(`resume auto-paper: ${tenant} re-signed; the continuity gate does not hold it (${verdict.why}) — nothing approved` +
+          (approvable ? `. If the gate refuses its book instead (its own [alert] says the ledger source continuity is unconfirmed, or the local ledger ` +
+            `unreadable), approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
         await settle(change, `not-held: ${verdict.why}`, run);
+        answered += 1;
         continue;
       }
+      const run = await recordRun(entry, at);
+      answered += 1;
       if (verdict.kind === "manual") {
         log(`resume auto-paper: ${tenant} re-signed and previewed in run ${run.slice(0, 12)}…, and is not approved automatically — ${verdict.why.join("; ")}` +
           (entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
@@ -3779,7 +3863,9 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
         `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
       await settle(change, "auto-approved", run);
     } catch (e) {
-      sayTenantAlert(tenant, `[alert] ${tenant}: resume auto-paper deferred (${errorKind(e)}) — its re-sign is still owed a preview, tried again next pass`);
+      // Anything that threw on the way (a verdict read that failed — schema
+      // drift included — or a write the store refused) leaves the change owed.
+      await stillOwed(change, `[alert] ${tenant}: resume auto-paper deferred (${errorKind(e)}) — its re-sign is still owed a preview, tried again on a later pass`);
     }
   }
 }
@@ -11280,8 +11366,9 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
  * never throws: a tenant that cannot be read is a line that does not pass.
  *
  * `unreadable` says the line failed for a reason that may pass on its own (a
- * read that threw, or owner settings that could not be read), as opposed to
- * a fact about the tenant: the automatic lane asks again on the next pass
+ * read that threw, owner settings that could not be read, or a refusal that
+ * a failed read caused: ledger-resume.ts ResumeCheck.unreadable), as opposed
+ * to a fact about the tenant: the automatic lane asks again on a later pass
  * rather than answer a re-sign with an outage.
  */
 async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Promise<{ entry: PreviewEntry; unreadable: boolean }> {
@@ -11307,7 +11394,12 @@ async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Prom
         holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
         grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
       },
-      unreadable: liveIntent === null,
+      // Settings that could not be read, and every refusal a failed read
+      // caused (ResumeCheck.unreadable: owner controls whose read did not
+      // complete, an anchor that could not be derived, a risk period whose
+      // read threw). Each of those would have settled a re-sign as "did not
+      // pass" on one bad read, and the lane would never have asked again.
+      unreadable: liveIntent === null || check.unreadable.length > 0,
     };
   } catch (e) {
     return { entry: { ...blank, refusals: [`could not be read (${errorKind(e)})`] }, unreadable: true };
@@ -11470,7 +11562,11 @@ export async function runOrchestrator(): Promise<void> {
   log(rolloutStartupLine(rollout));
   log(resumeAutoPaper
     ? `resume auto-paper: ${RESUME_AUTO_PAPER_ENV}=1 — a tenant whose grant row changes is previewed automatically, and a re-signed one the continuity gate holds that is paper, ` +
-      `could not arm live and holds nothing is approved by this process (at most ${AUTO_PAPER_PER_PASS} a pass, within the process cap) and admitted at its rollout level`
+      `could not arm live and holds nothing is approved by this process (at most ${AUTO_PAPER_PER_PASS} a pass, within the process cap) and admitted at its rollout level` +
+      // Said at boot, not only per tenant: with consent stood down the lane
+      // previews and approves nobody, and the operator should know why.
+      (liveConsentEnforced() ? "" : `. Live-trading consent is stood down (MERRYMEN_LIVE_INTENT_STAND_DOWN=1), so every tenant reads as able to arm live: ` +
+        "while it is set, every re-signer is previewed and left to the operator, none approved by this process")
     : `resume auto-paper: off — a re-signed tenant with history waits for an operator's preview and approval, as before`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);

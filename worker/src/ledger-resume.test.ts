@@ -489,13 +489,13 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
 
   it("the safe case: a paper tenant that passes, could not arm live, holds nothing, and whose book the gate holds", async () => {
     const f = await paperHoldingNothing();
-    assert.deepEqual(await autoPaperVerdict(f.shared, await entryOf(f, { book: "blocked" })), { kind: "auto" });
-    assert.deepEqual(await autoPaperVerdict(f.shared, await entryOf(f, { book: "absent" })), { kind: "auto" }, "absent, with history on record");
+    assert.deepEqual(await autoPaperVerdict(f.shared, await entryOf(f, { book: "blocked" }), { consentEnforced: true }), { kind: "auto" });
+    assert.deepEqual(await autoPaperVerdict(f.shared, await entryOf(f, { book: "absent" }), { consentEnforced: true }), { kind: "auto" }, "absent, with history on record");
   });
 
   it("not the gate's: a book on the volume, or no history at all, is the ordinary path's", async () => {
     const f = await paperHoldingNothing();
-    assert.equal((await autoPaperVerdict(f.shared, await entryOf(f, { book: "present" }))).kind, "not-held");
+    assert.equal((await autoPaperVerdict(f.shared, await entryOf(f, { book: "present" }), { consentEnforced: true })).kind, "not-held");
     // A brand-new account: nothing on record anywhere.
     const g = await fixture();
     for (const table of ["agents", "trades", "flows", "equity", "positions", "cost_basis", "position_floors", "mirror_state"]) {
@@ -504,13 +504,13 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     }
     const fresh = await entryOf(g, { book: "absent" });
     assert.equal(evidenceHasHistory(fresh.evidence!), false);
-    assert.equal((await autoPaperVerdict(g.shared, fresh)).kind, "not-held");
+    assert.equal((await autoPaperVerdict(g.shared, fresh, { consentEnforced: true })).kind, "not-held");
     assert.equal(evidenceHasHistory((await entryOf(f, { book: "absent" })).evidence!), true);
   });
 
   it("each departure from the safe case alone leaves it to the operator, and says why", async () => {
     const manual = async (entry: PreviewEntry, db: Db, why: RegExp) => {
-      const v = await autoPaperVerdict(db, entry);
+      const v = await autoPaperVerdict(db, entry, { consentEnforced: true });
       assert.equal(v.kind, "manual");
       assert.match((v as { why: string[] }).why.join(" | "), why);
     };
@@ -525,7 +525,7 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     queued.raw.prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES ('c1', ?, 'trade', ?)").run(queued.account, OLD * 1000);
     await manual(await entryOf(queued, { book: "blocked" }), queued.shared, /1 owner command\(s\) .* still open/);
     queued.raw.prepare("UPDATE agent_commands SET done_at = ?, result = 'never ran' WHERE id = 'c1'").run(OLD * 1000 + 1);
-    assert.deepEqual(await autoPaperVerdict(queued.shared, await entryOf(queued, { book: "blocked" })), { kind: "auto" }, "an answered command is not open");
+    assert.deepEqual(await autoPaperVerdict(queued.shared, await entryOf(queued, { book: "blocked" }), { consentEnforced: true }), { kind: "auto" }, "an answered command is not open");
     const failing = await paperHoldingNothing();
     await manual(await entryOf(failing, { book: "blocked", pass: false, refusals: ["the signed grant has expired: the owner must re-sign"] }), failing.shared, /did not pass: the signed grant has expired/);
     const intent = await paperHoldingNothing();

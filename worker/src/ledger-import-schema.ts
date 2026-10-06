@@ -36,6 +36,9 @@ export const LEDGER_IMPORT_GENERATIONS_SCHEMA = `CREATE TABLE IF NOT EXISTS tena
  *    change is still owed an automatic preview, and what that preview came
  *    to. The row `*` records that the roster was baselined, once, when the
  *    variable was first on: grants as they stood then are nobody's re-sign.
+ *    `attempted_at_ms` is the last automatic preview of an owed change that
+ *    could not be read: the least recently tried goes first, so a tenant
+ *    that never reads cannot take every turn from the ones behind it.
  */
 export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS ledger_resume_preview_runs (
@@ -67,7 +70,7 @@ export const LEDGER_RESUME_SCHEMA: readonly string[] = [
 )`,
   `CREATE TABLE IF NOT EXISTS ledger_resume_grant_watch (
   tenant TEXT PRIMARY KEY, grant_key TEXT NOT NULL, owed INTEGER NOT NULL CHECK (owed IN (0, 1)),
-  seen_at_ms BIGINT NOT NULL, settled_at_ms BIGINT, run TEXT, outcome TEXT
+  seen_at_ms BIGINT NOT NULL, settled_at_ms BIGINT, run TEXT, outcome TEXT, attempted_at_ms BIGINT
 )`,
 ];
 
