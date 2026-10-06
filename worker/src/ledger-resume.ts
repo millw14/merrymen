@@ -828,9 +828,12 @@ export const RESUME_USDG = String(CASH.USDG);
 /**
  * Moved from the old home into the new one, never left in the archive: the
  * owner's Telegram progress and link record. Unless the carry would not take
- * one (archiveTenantHome step 1), which then stays in the archive instead.
+ * one (archiveTenantHome step 1), which then stays in the archive instead —
+ * and a link record it will not take keeps telegram.json there with it.
  */
 const CARRY_MOVE = ["telegram.json", "telegram-promoted.json"] as const;
+/** Which of telegram.json's links the orchestrator has promoted (orchestrator.ts PROMOTED_LINKS_FILE). */
+const LINK_RECORD = "telegram-promoted.json";
 /** Copied: the owner's restrictive controls, which stay in the archive as evidence too. */
 const CARRY_COPY = ["paused", "controls-armed.json"] as const;
 /** Removed before the home is archived: keys and secrets, all rewritten at the next spawn from the stores. */
@@ -960,6 +963,11 @@ export function normaliseCarriedFile(file: string, mayWrite: () => boolean): str
   }
 }
 
+/** A name at `file`, whatever it is: asked with lstat, so a link is never followed, and anything but ENOENT is one. */
+function named(file: string): boolean {
+  try { lstatSync(file); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code !== "ENOENT"; }
+}
 function syncDir(dir: string): void { fsyncDirSync(dir); }
 function syncFile(file: string): void {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -980,7 +988,7 @@ function walk(dir: string, rel = ""): Array<{ path: string; type: "file" | "dir"
 /**
  * `normalised`: what normaliseCarriedFile changed in the carry, by file and
  * kind. `left`: the moved Telegram files the carry would not take (step 1),
- * which stay in the archive.
+ * or would not take without the other (the pair), which stay in the archive.
  */
 export interface ArchiveResult { archivePath: string | null; carried: string[]; normalised: string[]; left: string[] }
 
@@ -1001,7 +1009,19 @@ export interface ArchiveResult { archivePath: string | null; carried: string[]; 
  *     keeps only the source's mode and bytes. So the Telegram files are
  *     carried only as the home's own (homeOwn): one with another owner or a
  *     second name is not copied, stays in the archive (step 4), and the next
- *     spawn restores the link from the mirror (writeTelegramForChild). The
+ *     spawn restores the link from the mirror (writeTelegramForChild).
+ *     AND THE TWO ARE A PAIR. The link record is what says which of
+ *     telegram.json's linkedChats are already in the stored allowlist
+ *     (orchestrator.ts publishChildTelegram), and a home without one reads
+ *     as none promoted (readPromotedLinks: {}). Carried without it,
+ *     telegram.json would have every chat it ever linked promoted again, and
+ *     one the owner removed on the dashboard would get back its trade,
+ *     transfer and kill authority. So a record the carry will not take keeps
+ *     telegram.json in the archive beside it, and the next spawn restores
+ *     only the link's safe fields from the mirror (never linkedChats). A home
+ *     with no record carries telegram.json as it always has, and one whose
+ *     telegram.json the carry will not take still carries its record, which
+ *     can only keep a link it names from being promoted again. The
  *     owner's restrictive controls are copied whatever they are: a stop is
  *     never dropped. A copy of a file our own writers left (ourWritersLeft,
  *     asked of the source) is made what its readers accept from us
@@ -1017,16 +1037,20 @@ export interface ArchiveResult { archivePath: string | null; carried: string[]; 
  *  4. Remove the MOVED Telegram files the stage holds from the archive, now
  *     that the staged copy is their only home (and re-apply the scrub, for a
  *     rename a crash interrupted after it). One step 1 would not take is not
- *     in the stage and stays here. Never before the rename: a crash between a
- *     removal from the home and the rename used to leave the next attempt
- *     rebuilding the stage from a home that no longer held them, so the
- *     owner's link, offsets and chat settings were lost from both places.
+ *     in the stage and stays here, and so does a telegram.json whose record
+ *     stays (an earlier build's stage may hold one: it goes back). Never
+ *     before the rename: a crash between a removal from the home and the
+ *     rename used to leave the next attempt rebuilding the stage from a home
+ *     that no longer held them, so the owner's link, offsets and chat
+ *     settings were lost from both places.
  *  5. Write the archive's manifest (0600): every file's path, type, size and
  *     mode — stats, not contents.
  *  6. Move the staged carry into a fresh 0700 home, never over a file
- *     already there. A carry an earlier build staged moves as it was; the
- *     spawn path makes a registered book's telegram.json the same before the
- *     handoff reads it (orchestrator.ts normaliseRegisteredHome).
+ *     already there. A carry an earlier build staged moves as it was, but
+ *     for the pair (step 4 keeps a telegram.json staged without the record
+ *     the archive kept); the spawn path makes a registered book's
+ *     telegram.json the same before the handoff reads it (orchestrator.ts
+ *     normaliseRegisteredHome).
  *
  * With no home at all there is nothing to archive, and the result says so.
  * The archive is never deleted by any code here.
@@ -1043,13 +1067,18 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
     rmSync(stage, { recursive: true, force: true });
     mkdirSync(stage, { mode: 0o700 });
     const names = readdirSync(o.home).sort();
+    // The pair, from one look at the record before either is staged: the
+    // same look decides whether the record itself is.
+    const record = names.includes(LINK_RECORD) ? lstatSync(path.join(o.home, LINK_RECORD)) : null;
+    const recordWithheld = record !== null && !homeOwn(record);
     for (const name of names) {
       const from = path.join(o.home, name), to = path.join(stage, name);
       if (!carriedName(name)) continue;
-      const source = lstatSync(from);
+      const source = name === LINK_RECORD && record ? record : lstatSync(from);
       if (!source.isFile()) continue;
-      // The Telegram files only as the home's own; the controls whatever they are.
-      if ((CARRY_MOVE as readonly string[]).includes(name) && !homeOwn(source)) continue;
+      // The Telegram files only as the home's own, and never one without the
+      // record the home holds; the controls whatever they are.
+      if ((CARRY_MOVE as readonly string[]).includes(name) && (!homeOwn(source) || recordWithheld)) continue;
       copyFileSync(from, to, constants.COPYFILE_EXCL);
       // Asked of the source, as it was before and after the copy: the copy
       // itself is always this process's, with one name. Written in this
@@ -1077,6 +1106,17 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
   // the moved files from here on, until step 6 puts them in the new home.
   // Only those it holds: one step 1 would not take stays where it is. (With
   // no stage left, step 6 has run, and this removed them before it did.)
+  // A stage an earlier build made may hold telegram.json without the record
+  // the archive kept (it asked each file alone, or passed over a record that
+  // was not a plain file). The pair holds for it too: that copy goes back to
+  // the archive, or is dropped while the archive still has the original, and
+  // never reaches the new home alone.
+  const stagedLink = path.join(stage, "telegram.json");
+  if (existsSync(stagedLink) && !named(path.join(stage, LINK_RECORD)) && named(path.join(dest, LINK_RECORD))) {
+    if (named(path.join(dest, "telegram.json"))) rmSync(stagedLink);
+    else renameSync(stagedLink, path.join(dest, "telegram.json"));
+    syncDir(stage);
+  }
   for (const name of SCRUB) rmSync(path.join(dest, name), { recursive: true, force: true });
   for (const name of CARRY_MOVE) if (existsSync(path.join(stage, name))) rmSync(path.join(dest, name), { recursive: true, force: true });
   syncDir(dest);

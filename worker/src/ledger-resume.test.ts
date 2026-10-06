@@ -604,6 +604,91 @@ describe("the home archive", () => {
     assert.ok(existsSync(path.join(archiveRoot, gen, "telegram.json")));
   });
 
+  // ── the Telegram state and its link record are a pair ─────────────────────
+  /** A child's telegram.json as tryLink leaves it: two linked chats, with their link times. */
+  const LINKED = JSON.stringify({ offset: 40, botId: "801", linkCode: "K7M2QX", ownerId: 111, linkedChats: [111, 222], linkedChatAt: { "111": 1000, "222": 1005 } });
+  const RECORD = JSON.stringify({ "111": 1000, "222": 1005 });
+  /** A home holding that telegram.json, the home's own, and its link record made by `record`. */
+  function linkedHome(id: string, record: ((file: string) => void) | null) {
+    const h = path.join(root, "vol", "children", id), archiveRoot = path.join(root, "vol", "archive", id), gen = `00000000-0000-4000-8000-0000000002${id.slice(-2)}`;
+    mkdirSync(h, { recursive: true });
+    writeFileSync(path.join(h, "telegram.json"), LINKED, { mode: 0o600 });
+    writeFileSync(path.join(h, "merrymen.db"), "book", { mode: 0o600 });
+    record?.(path.join(h, "telegram-promoted.json"));
+    return { h, archiveRoot, gen, dest: path.join(archiveRoot, gen) };
+  }
+
+  it("A LINK RECORD THE CARRY WILL NOT TAKE KEEPS telegram.json IN THE ARCHIVE WITH IT, so no chat the record names is new in the next home", async () => {
+    // A second name, a link to a record elsewhere, and something that is not a file at all.
+    for (const [id, record] of [
+      ["p01", (file: string) => { writeFileSync(file, RECORD, { mode: 0o600 }); linkSync(file, path.join(root, "vol", "p01-second-name")); }],
+      ["p02", (file: string) => { writeFileSync(path.join(root, "vol", "p02-elsewhere.json"), RECORD, { mode: 0o600 }); symlinkSync(path.join(root, "vol", "p02-elsewhere.json"), file); }],
+      ["p03", (file: string) => { mkdirSync(file); }],
+    ] as const) {
+      const x = linkedHome(id, record);
+      const r = archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => true });
+      assert.deepEqual(r.carried, [], id);
+      assert.deepEqual(r.left, ["telegram.json", "telegram-promoted.json"], id);
+      assert.deepEqual(r.normalised, [], id);
+      assert.deepEqual(readdirSync(x.h), [], `${id}: neither reaches the new home`);
+      assert.equal(readFileSync(path.join(x.dest, "telegram.json"), "utf8"), LINKED, `${id}: the link stays in the archive as it was`);
+      assert.ok(lstatSync(path.join(x.dest, "telegram-promoted.json")), `${id}: and its record beside it`);
+      // The new home's file is the handoff's own, with no linked chat to promote.
+      assert.equal(await handoff(x.h, listener()), "accepted", id);
+      assert.deepEqual(JSON.parse(readFileSync(path.join(x.h, "telegram.json"), "utf8")), { offset: 101, botId: null, priorBots: [] }, id);
+      // Re-entry keeps both where they are.
+      assert.deepEqual(archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => true }).left, ["telegram.json", "telegram-promoted.json"], id);
+    }
+    assert.equal(readFileSync(path.join(root, "vol", "p02-elsewhere.json"), "utf8"), RECORD, "a linked record is never followed");
+  });
+
+  it("the pair holds when the stage is rebuilt after a crash before the rename", () => {
+    const x = linkedHome("p11", (file) => { writeFileSync(file, RECORD, { mode: 0o600 }); linkSync(file, path.join(root, "vol", "p11-second-name")); });
+    let calls = 0;
+    assert.throws(() => archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => ++calls < 3 }), /Lost the tenant lease/);
+    assert.deepEqual(readdirSync(path.join(x.archiveRoot, `.carry-${x.gen}`)), [], "nothing Telegram was staged");
+    const r = archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => true });
+    assert.deepEqual(r.left, ["telegram.json", "telegram-promoted.json"]);
+    assert.equal(existsSync(path.join(x.h, "telegram.json")), false);
+    assert.equal(readFileSync(path.join(x.dest, "telegram.json"), "utf8"), LINKED);
+  });
+
+  it("with no link record in the home, telegram.json is carried as it always was; with both the home's own, they are carried together", () => {
+    const none = linkedHome("p21", null);
+    const a = archiveTenantHome({ home: none.h, archiveRoot: none.archiveRoot, generation: none.gen, mayWrite: () => true });
+    assert.deepEqual(a.carried, ["telegram.json"]);
+    assert.deepEqual(a.left, []);
+    assert.equal(readFileSync(path.join(none.h, "telegram.json"), "utf8"), LINKED, "byte for byte");
+    const both = linkedHome("p22", (file) => writeFileSync(file, RECORD, { mode: 0o600 }));
+    const b = archiveTenantHome({ home: both.h, archiveRoot: both.archiveRoot, generation: both.gen, mayWrite: () => true });
+    assert.deepEqual(b.carried, ["telegram-promoted.json", "telegram.json"]);
+    assert.deepEqual(b.left, []);
+    assert.equal(readFileSync(path.join(both.h, "telegram-promoted.json"), "utf8"), RECORD);
+    assert.equal(readFileSync(path.join(both.h, "telegram.json"), "utf8"), LINKED);
+  });
+
+  it("a telegram.json an earlier build staged without the record the archive kept goes back to the archive, never to the new home alone", () => {
+    for (const [id, archiveHasLink] of [["p31", false], ["p32", true]] as const) {
+      // As an earlier build left it: the home renamed, its record kept in the
+      // archive, telegram.json staged alone — and, after a crash past step 4,
+      // removed from the archive, so the stage holds the only copy.
+      const archiveRoot = path.join(root, "vol", "archive", id), gen = `00000000-0000-4000-8000-0000000003${id.slice(-2)}`, dest = path.join(archiveRoot, gen);
+      const stage = path.join(archiveRoot, `.carry-${gen}`), h = path.join(root, "vol", "children", id);
+      mkdirSync(dest, { recursive: true }); mkdirSync(stage, { recursive: true });
+      writeFileSync(path.join(dest, "telegram-promoted.json"), RECORD, { mode: 0o600 });
+      linkSync(path.join(dest, "telegram-promoted.json"), path.join(root, "vol", `${id}-second-name`));
+      if (archiveHasLink) writeFileSync(path.join(dest, "telegram.json"), LINKED, { mode: 0o600 });
+      writeFileSync(path.join(stage, "telegram.json"), archiveHasLink ? JSON.stringify({ offset: 0 }) : LINKED, { mode: 0o600 });
+      writeFileSync(path.join(stage, "paused"), "paused", { mode: 0o600 });
+      const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+      assert.deepEqual(r.carried, ["paused"], id);
+      assert.deepEqual(r.left, ["telegram.json", "telegram-promoted.json"], id);
+      assert.equal(existsSync(path.join(h, "telegram.json")), false, `${id}: never the new home's`);
+      assert.equal(readFileSync(path.join(dest, "telegram.json"), "utf8"), LINKED, `${id}: the archive keeps the original, or the only copy`);
+      assert.equal(existsSync(stage), false, id);
+    }
+  });
+
   it("a crash after the stage keeps what was made of it; a carry an earlier build staged moves as it was, for the registered home's pass", () => {
     // This build: normalised as staged, so a crash before the move changes nothing.
     const h = path.join(root, "vol", "children", "c41"), archiveRoot = path.join(root, "vol", "archive", "c41"), gen = "00000000-0000-4000-8000-000000000141";

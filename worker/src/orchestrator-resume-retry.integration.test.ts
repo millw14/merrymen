@@ -50,7 +50,7 @@ process.env.MERRYMEN_STORE_DEK = dek.toString("base64");
 const orch = await import("./orchestrator");
 const { childHome, reconcile, setSpawnForTest, setRetirementMemoryStoreForTest, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
   setLeaseAcquireForTest, setResumeChainForTest, runResumeAdmissionControlsForTest, setKillConfirmForTest, setBasisSeedSharedForTest,
-  setPersonalMemoryStoreForTest } = orch;
+  setPersonalMemoryStoreForTest, publishChildTelegramForTest } = orch;
 // Taken now, while DATABASE_URL is unset, so both stay on files for the whole file.
 const grants = (await import("./grant-store")).getGrantStore();
 const settingsStore = (await import("./settings-store")).getSettingsStore();
@@ -434,11 +434,80 @@ it("a carried telegram.json with a second name stays in the archive, and the ten
   await pass();
   assert.equal(approval(t.tenant)?.state, "applied", linesOf(t.tenant).join("\n"));
   assert.equal(forksOf(t.tenant), 1);
-  assert.ok(linesOf(t.tenant).some((l) => /left in the archive, not the home's own: telegram\.json/.test(l)), said.join("\n"));
+  assert.ok(linesOf(t.tenant).some((l) => /left in the archive, not the home's own or held with its link record: telegram\.json$/.test(l)), said.join("\n"));
   const archived = path.join(fleet, "archive", t.tenant, approval(t.tenant)!.generation!, "telegram.json");
   assert.equal(readFileSync(archived, "utf8"), JSON.stringify({ ownerId: 31337, linkCode: "FOREIGN", offset: 9 }), "kept in the archive as it was");
   assert.equal(telegram(t.home).linkCode, undefined, "never the new home's");
   assert.equal(telegram(t.home).ownerId, undefined);
   assert.equal(telegram(t.home).offset, 700, "the listener's mark, handed over into a file of the tenant's own");
   await remove(t.tenant);
+});
+
+// ── the Telegram state and its link record are carried as a pair ────────────
+const LINKED_AT = 1_790_000_000;
+/** A child's telegram.json as tryLink leaves it: the owner's DM and a second chat, each linked once. */
+const linkedFile = (bot: string) => ({ offset: 30, botId: bot, linkCode: "K7M2QX", ownerId: 111, linkedAt: LINKED_AT,
+  linkedChats: [111, 222], linkedChatAt: { "111": LINKED_AT, "222": LINKED_AT + 5 } });
+/** The owner's allowlist as they save it on the dashboard. */
+async function keepOnly(tenant: `0x${string}`, chats: number[]) {
+  await settingsStore.put(tenant, { ...(await settingsStore.get(tenant)), telegramAllowlist: chats } as never);
+}
+const allowlist = async (tenant: `0x${string}`) => [...((await settingsStore.get(tenant))?.telegramAllowlist ?? [])].sort((a, b) => a - b);
+/** One tenant's publish and promotion, as the mirror pass runs it over the running child's home. */
+const mirrorPass = (tenant: `0x${string}`) => publishChildTelegramForTest(tenant, shared, "trading");
+
+it("A LINK RECORD THE CARRY WILL NOT TAKE keeps telegram.json in the archive with it: a chat the owner removed does not get its authority back", async () => {
+  const t = await preIncident();
+  writeFileSync(path.join(t.home, "telegram.json"), JSON.stringify(linkedFile(t.bot)), { mode: 0o600 });
+  // Both links were promoted, and the record of it has a second name.
+  const record = path.join(fleet, `promoted-${t.n}.json`);
+  writeFileSync(record, JSON.stringify({ "111": LINKED_AT, "222": LINKED_AT + 5 }), { mode: 0o600 });
+  linkSync(record, path.join(t.home, "telegram-promoted.json"));
+  // The owner has since removed 222 on the dashboard; in the old home, its record kept it out.
+  await keepOnly(t.tenant, [111]);
+  await mirrorPass(t.tenant);
+  assert.deepEqual(await allowlist(t.tenant), [111]);
+  offsetRow(t.bot, t.tenant, t.account, 900);
+  await approve(t.tenant);
+  await pass();
+  assert.equal(approval(t.tenant)?.state, "applied", linesOf(t.tenant).join("\n"));
+  assert.equal(forksOf(t.tenant), 1);
+  assert.ok(linesOf(t.tenant).some((l) => /left in the archive, not the home's own or held with its link record: telegram\.json, telegram-promoted\.json$/.test(l)), said.join("\n"));
+  const archive = path.join(fleet, "archive", t.tenant, approval(t.tenant)!.generation!);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(archive, "telegram.json"), "utf8")), linkedFile(t.bot), "kept in the archive, beside its record");
+  assert.ok(!existsSync(path.join(t.home, "telegram-promoted.json")));
+  assert.equal(telegram(t.home).linkedChats, undefined, "the new home's telegram.json names no linked chat");
+  assert.equal(telegram(t.home).offset, 900, "and holds the listener's mark");
+  for (let i = 0; i < 2; i += 1) await mirrorPass(t.tenant);
+  assert.deepEqual(await allowlist(t.tenant), [111], "222 stays removed: no trade, transfer or kill from it");
+  await remove(t.tenant);
+});
+
+it("with no link record in the old home telegram.json is carried as it always was: the six admit with nothing to promote, and a child's links are promoted once, a removal then sticking", async () => {
+  // THE SIX's shape: the orchestrator's restored link, which lists no linked chat.
+  const six = await preIncident({ telegram: { body: JSON.stringify(RESTORED_LINK, null, 2), mode: 0o600 } });
+  await keepOnly(six.tenant, [555]); // its owner removed another chat
+  // A child's own file whose links no pass has promoted yet.
+  const child = await preIncident();
+  writeFileSync(path.join(child.home, "telegram.json"), JSON.stringify(linkedFile(child.bot)), { mode: 0o600 });
+  await keepOnly(child.tenant, [111]);
+  offsetRow(six.bot, six.tenant, six.account, 910);
+  offsetRow(child.bot, child.tenant, child.account, 920);
+  await approve(six.tenant); await approve(child.tenant);
+  await pass();
+  for (const t of [six, child]) {
+    assert.equal(approval(t.tenant)?.state, "applied", linesOf(t.tenant).join("\n"));
+    assert.equal(forksOf(t.tenant), 1, t.tenant);
+    assert.ok(linesOf(t.tenant).some((l) => /carried telegram\.json/.test(l) && !/left in the archive/.test(l)), said.join("\n"));
+  }
+  assert.deepEqual(telegram(six.home), { offset: 910, ...RESTORED_LINK });
+  assert.deepEqual(telegram(child.home), { ...linkedFile(child.bot), offset: 920 }, "carried whole, as before");
+  await mirrorPass(six.tenant); await mirrorPass(six.tenant);
+  assert.deepEqual(await allowlist(six.tenant), [555], "nothing to promote, nothing put back");
+  await mirrorPass(child.tenant);
+  assert.deepEqual(await allowlist(child.tenant), [111, 222], "the child's links promoted once, as they always were");
+  await keepOnly(child.tenant, [111]);
+  await mirrorPass(child.tenant); await mirrorPass(child.tenant);
+  assert.deepEqual(await allowlist(child.tenant), [111], "and one its owner then removes stays removed");
+  await remove(six.tenant, child.tenant);
 });

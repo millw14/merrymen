@@ -3425,7 +3425,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       log(`${tenant}: resume admission — ${archived.archivePath ? `home archived to ${path.relative(volume.homeRoot, archived.archivePath)} (keys scrubbed)` : "no home on the volume: nothing to archive"}` +
         `; carried ${archived.carried.length ? archived.carried.join(", ") : "nothing"}` +
         `${archived.normalised.length ? ` (normalised ${archived.normalised.join(", ")})` : ""}` +
-        `${archived.left.length ? `; left in the archive, not the home's own: ${archived.left.join(", ")}` : ""}`);
+        `${archived.left.length ? `; left in the archive, not the home's own or held with its link record: ${archived.left.join(", ")}` : ""}`);
       approval = { ...approval, state: "archived", archivePath: archived.archivePath };
     }
     // PHASE B. The preconditions again, now; the chain read again, whole, if
