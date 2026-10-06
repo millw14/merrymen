@@ -295,6 +295,24 @@ If the tenant has no chain refusal, the preview says so. Run admission for it
 as [fleet-resume.md](fleet-resume.md) describes, so that admission refuses it
 and names what is missing. Then preview here again.
 
+**If a later refusal superseded the chain refusal**, the tool still refuses.
+Its anchor is only ever the newest decision: that one row is what proves the
+tenant held, and the heartbeat, mirror and fact times above are measured
+against it. The preview says `… refused for another reason) is not a chain
+refusal …` and, when an earlier chain refusal is still unanswered, it also
+says how to get past it. A tenant with a chain refusal no admission has
+answered reads `chain:"required"` in admission's preview, with
+`chainHeld: true`, even if it now reads as paper (for example, its owner
+turned live trading off). So:
+
+1. Preview the tenant in admission's preview.
+2. Approve that digest once, with the tenant in the rollout at `exits-only`.
+   This does not make it trade. Admission reads the chain, and while Postgres
+   still lacks what the chain showed it refuses the tenant again, recording a
+   fresh chain refusal that names it.
+3. Take the tenant out of the rollout and preview here again. The fresh
+   refusal is the newest decision now.
+
 ## Before you start
 
 - **Keep the tenant held.** Leave it out of `MERRYMEN_FLEET_ROLLOUT`. The
@@ -303,7 +321,11 @@ and names what is missing. Then preview here again.
   approve a tenant that has a chain refusal no admission has answered, even
   when its owner re-signs and it reads as paper again. Its preview is
   recorded and left to you, so the refusal stays its newest decision
-  ([fleet-resume.md](fleet-resume.md#the-safe-case-all-of-it)).
+  ([fleet-resume.md](fleet-resume.md#the-safe-case-all-of-it)). The lane's
+  line tells you to book it first. It never offers the approval of its
+  digest as a way to trade: an approval of such a tenant reads the chain
+  again, and admission refuses it again while Postgres lacks what the chain
+  showed.
 - **No approval may be open.** If one is, the preview refuses and prints the
   exact `MERRYMEN_RESUME_REVOKE=0x<tenant>:<digest>` to set. Set it, deploy,
   and start again. A booking changes the evidence that approval was given on.
@@ -450,6 +472,9 @@ step 2. The tenant's `[resume-preview]` line should show:
 
 - `pass: true`;
 - a **new** `digest`, because the booked rows are now in the evidence;
+- `chain: "required"` and `chainHeld: true`. Admission reads the chain for
+  this tenant until an admission answers the refusal. That is the check
+  step 7 watches for;
 - `lastRefusal`, still the old chain refusal. This is information only, and
   it stays until a newer approval supersedes it.
 

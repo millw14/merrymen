@@ -185,7 +185,8 @@ Each `[resume-preview]` line is one tenant:
 | `pass` | every precondition Postgres can answer holds (see [the preconditions](#the-preconditions)) |
 | `refusals` | each reason it does not, one sentence each |
 | `digest` | the evidence digest: what `0x<tenant>:<digest>` approves |
-| `chain` | `required`: the account could arm live (a live operation, any flow, or the owner's settings ask for live), so admission reads the chain first; `not-required`: a paper book that could not |
+| `chain` | `required`: the account could arm live (a live operation, any flow, or the owner's settings ask for live), or `chainHeld` is true, so admission reads the chain first; `not-required`: a paper book that could not, with no chain refusal unanswered |
+| `chainHeld` | an approval of it was refused on the chain and no admission has answered that since (no approval of it `registered` or `applied` after the refusal; a later refusal for another reason does not answer it). It reads `chain:"required"` and `exits-only` whatever its paper reading: approving it reads the chain again and refuses again until what the chain showed is booked ([step 5](#step-5-live-tenants-exits-only-before-the-paper-batches)) |
 | `suggestedLevel` | decision 6 of the plan: paper → `trade` once the canary has traded; live → `exits-only` |
 | `holdsPositions` | Postgres shows open positions or class positions; a live holder must start `exits-only` so its stops run and nothing new opens |
 | `startsPaused` | a pause is on record that the worker will start under (the home's own file, a journalled `/pause` or `/kill`, a restored pre-incident pause, or a durable pause); the owner's `/resume` lifts it |
@@ -298,12 +299,29 @@ Public chain data only; look each one up as printed. Then:
    the rollout until it is approved. If the tool cannot classify something,
    or a trade's cost basis does not reflect it, the tool reports it as
    unresolved and does not book it. Escalate those to Milla and Codex.
+4. **If a later refusal superseded the chain refusal** (for another reason,
+   such as `the evidence changed since the preview`), the tool refuses:
+   `… refused for another reason) is not a chain refusal …`. Preview the
+   tenant here and approve it once, with it in the rollout at `exits-only`.
+   This is not a way to trade. Until an admission answers it, a chain refusal
+   keeps the tenant `chain:"required"` (`chainHeld: true` in the preview),
+   even when it reads as paper. So admission reads the chain again, and while
+   Postgres still lacks what the chain showed it refuses again with a fresh
+   chain refusal. That refusal is the newest decision, which the tool books
+   on. Take the tenant out of the rollout, book it (item 3), then preview it
+   again and approve the new digest.
+
+Approving a tenant that still has an unanswered chain refusal never admits it
+on the book the chain showed to be incomplete. Its admission reads the chain
+first, even if its owner has since turned live trading off.
 
 `MERRYMEN_RESUME_AUTO_PAPER` never approves such a tenant meanwhile, even
 when its owner turns live trading off and re-signs so that it reads as paper
 again: a chain refusal that no admission has answered since keeps it yours
 ([the safe case](#the-safe-case-all-of-it)). Its re-sign is previewed, with
-the refusal in `lastRefusal`, and left to you.
+the refusal in `lastRefusal` and `chainHeld: true`, and left to you. The
+lane's line then says to book it first rather than offering
+`MERRYMEN_RESUME_APPROVE=0x<tenant>:<digest>`.
 
 ### Step 6: paper tenants, in batches
 
@@ -512,7 +530,8 @@ open approval:
    again. (Refused, the same evidence read cleanly again could never have
    been approved by anyone: one evidence is approved once.)
 3. **Check every precondition**, and read the chain where the account could
-   arm live (in the background; the tenant waits held).
+   arm live, or where a chain refusal of it is still unanswered (in the
+   background; the tenant waits held).
 4. **Archive the home**: copy the owner's pause, arm record, kill-request
    files and Telegram state into a staging directory; remove `grant.json`,
    `grants/` and `settings.json` (rewritten from their stores at the next
@@ -572,7 +591,10 @@ Each refuses on its own; none fails open.
    to or from it; and again, immediately before registration, from that
    read's head to the head then (phase step 5). An RPC failure retries. Only
    a paper tenant that could not arm live — no live operation, no flow, no
-   live intent in its settings — skips the read. While live-trading consent
+   live intent in its settings — skips the read, and only if no approval of
+   it was refused on the chain without an admission answering it since
+   (`chainHeld`): that refusal showed the Postgres those readings come from
+   to be incomplete. While live-trading consent
    is stood down (`MERRYMEN_LIVE_INTENT_STAND_DOWN=1`) no tenant can be shown
    unable to arm live (the worker then takes a funded account live whatever
    its settings say), so every tenant is read on chain.
@@ -709,6 +731,12 @@ Every reconcile pass, before the pass reads which blocked homes it admits:
      auto-paper: 0x… re-signed and previewed in run …, and is not approved
      automatically — <every reason>`, ending, if it passed,
      `approve it by hand: MERRYMEN_RESUME_APPROVE=0x<tenant>:<digest>`.
+     For a tenant with an unanswered chain refusal, the line never gives that
+     approval. It ends `Held on a chain refusal: an approval does not make it
+     trade until what the chain showed is booked: book it first …` and gives
+     the way out of a superseded refusal
+     ([Step 5](#step-5-live-tenants-exits-only-before-the-paper-batches),
+     item 4).
    - **not held**: its book is on the volume unblocked, or it has no history
      at all: the ordinary path's, which needs no approval. Nothing approved,
      and no run recorded (so a brand-new signup adds nothing to the runs an
@@ -746,14 +774,20 @@ first worker started at its rollout level.
   decision about that tenant, which no re-sign overrides);
 - **no chain refusal that no admission has answered since**: an approval of
   it refused because the chain showed operations or USDG transfers Postgres
-  lacks, with no approval of it `registered` or `applied` after that. The
-  paper reading comes from that same Postgres, which the chain showed to be
-  incomplete. A lost operation may be a live trade, and approving the tenant
-  would replace the refusal that the
-  [chain-gap booking tool](chain-gap-booking.md) books on. A later refusal
-  for another reason does not answer it. Book it, then approve it by hand
+  lacks, with no approval of it `registered` or `applied` after that. A later
+  refusal for another reason does not answer it either. The paper reading
+  comes from the Postgres the chain showed to be incomplete, and a lost
+  operation may be a live trade. Such a tenant therefore previews as
+  `chain:"required"` and `exits-only` with `chainHeld: true`, so no approval
+  admits it without a chain read. An approval of it reads the chain again,
+  and while Postgres still lacks what the chain showed, admission refuses it
+  again. Book what the chain showed with the
+  [chain-gap booking tool](chain-gap-booking.md), then preview it and approve
+  the new digest. The tool books only while a chain refusal is the tenant's
+  newest decision. If a later refusal superseded it, approve once so that
+  admission records a fresh chain refusal, then book
   ([Step 5](#step-5-live-tenants-exits-only-before-the-paper-batches),
-  "If the chain shows something Postgres lacks");
+  "If the chain shows something Postgres lacks", item 4);
 - held by the gate: its book on the volume is `blocked`, or `absent` with
   history in Postgres;
 - **live-trading consent in force**: with `MERRYMEN_LIVE_INTENT_STAND_DOWN=1`
