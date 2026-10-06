@@ -18,7 +18,9 @@
  * The restore wrote none, so an ordinary tenant whose bot the listener had
  * answered while it had no worker was refused (HANDOFF_OFFSET) on every pass
  * and got none. Driven here through both, in spawnChild's order, against the
- * listener's row in the same stand-in.
+ * listener's row in the same stand-in; and a file an earlier build restored,
+ * which the restore never rewrites, through the step spawnChild takes for it
+ * just before the handoff (ledger-resume.ts offsetRestoredLink).
  */
 import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -42,6 +44,7 @@ const { TELEGRAM_STATE_DDL, publishTenantTelegram } = await import("./telegram-s
 const { wrapSqlite } = await import("./db");
 const { RECOVERY_REPLY_SCHEMA } = await import("./recovery-reply-state");
 const { handoffRecoveryReplyOffset } = await import("./recovery-reply-handoff");
+const { offsetRestoredLink } = await import("./ledger-resume");
 const { loadTelegramState } = await import("./telegram/state");
 
 const allowlists = new Map<string, number[]>();
@@ -199,18 +202,29 @@ describe("an ordinary tenant whose bot the recovery listener answered is admitte
     assert.deepEqual(written(t), { offset: 900, botId: null, priorBots: [] });
   });
 
-  it("the handoff is not loosened: a link as a build before this one restored it, with no offset, is still refused by name and left as it is", async () => {
+  it("the handoff is not loosened: a link as a build before this one restored it, with no offset, is refused by the handoff and left by the restore; the spawn path's own step gives it its offset, and then it is admitted", async () => {
     const t = tenant();
     listened(t, 4321);
-    const legacy = JSON.stringify({ linkCode: "QX7M2K", ownerId: 555, linkedAt: 1_790_000_000 }, null, 2);
+    const link = { linkCode: "QX7M2K", ownerId: 555, linkedAt: 1_790_000_000 };
+    const legacy = JSON.stringify(link, null, 2);
     mkdirSync(childHome(t), { recursive: true });
     writeFileSync(file(t), legacy, { mode: 0o600 });
     assert.equal(await handoff(t), "HANDOFF_OFFSET");
     // Nor does the restore replace it: a file that is there is never
     // rewritten (a running child is the authority on its own link).
-    await publishTenantTelegram(shared, t, { linkCode: "QX7M2K", ownerId: 555, linkedAt: 1_790_000_000 });
+    await publishTenantTelegram(shared, t, link);
     await writeTelegramForChild(t, shared);
     assert.equal(readFileSync(file(t), "utf8"), legacy);
     assert.equal(await handoff(t), "HANDOFF_OFFSET");
+    // So this fix alone did not free a tenant an earlier build had stuck: its
+    // home is on the fleet volume and outlives the deploy. What does is the
+    // step spawnChild and spawnHolder take just before the handoff
+    // (orchestrator.ts offsetEarlierRestoredLink): that exact shape, given
+    // `offset: 0` and nothing else. reconcile() drives it in
+    // orchestrator-restored-link-offset.integration.test.ts.
+    assert.deepEqual(offsetRestoredLink(childHome(t), () => true), ["telegram.json: offset"]);
+    assert.deepEqual(written(t), { offset: 0, ...link }, "what the restore writes now");
+    assert.equal(await handoff(t), "accepted");
+    assert.deepEqual(written(t), { offset: 4321, ...link });
   });
 });
