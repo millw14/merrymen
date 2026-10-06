@@ -27,11 +27,11 @@ import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { ensureLedgerResumeSchema, LEDGER_IMPORT_SCHEMA } from "./ledger-import";
 import { gasFields } from "./key-install-accounting";
 import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, resumePreconditions } from "./ledger-resume";
-import { CASH, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
+import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import {
-  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, parseApplyReport, planBooking, planLines,
-  readBookingSnapshot, readChainEvidence, revertBooking, TRADE_COLUMNS, walkFills, type ApplyReport, type BookingPlan, type RecordedFill,
+  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, microUsdg, parseApplyReport, planBooking, planLines,
+  readBookingSnapshot, readChainEvidence, replayBasis, revertBooking, TRADE_COLUMNS, walkFills, type ApplyReport, type BookingPlan, type RecordedFill,
 } from "./chain-gap-booking";
 
 // ── the public chain, as read ────────────────────────────────────────────────
@@ -197,15 +197,16 @@ function refuse(raw: DatabaseSync, o: { tenant: string; account: string; id?: st
  * history in epoch 2, its stalled cursors and its grant — and admission's
  * chain refusal of it, which is what holds it (unless `refused: false`).
  */
-async function books(o: { tenant?: string; account?: string; trencher?: boolean; knownBuy?: boolean; mode?: string; refused?: boolean } = {}) {
+async function books(o: { tenant?: string; account?: string; trencher?: boolean; classVault?: string; knownBuy?: boolean; mode?: string; refused?: boolean } = {}) {
   const tenant = o.tenant ?? SHOGUN_TENANT, account = o.account ?? ACCOUNT;
   const raw = new DatabaseSync(":memory:"); handles.push(raw);
   const db = wrapSqlite(raw);
   await applyLedgerSchema(db); await db.exec(MIRROR_STATE_DDL); await db.exec(PAPER_CHECKPOINT_SCHEMA);
   raw.exec("CREATE TABLE grants(tenant TEXT PRIMARY KEY, grant_json TEXT NOT NULL, updated_at INTEGER NOT NULL, row_version INTEGER NOT NULL)");
   raw.prepare("INSERT INTO grants VALUES (?, ?, 1000, 1)").run(tenant, JSON.stringify({
-    smartAccount: account, owner: tenant, chainId: 4663, serialized: "never-read", grantFeatures: o.trencher === false ? ["tradeable-v2"] : ["tradeable-v2", GRANT_TRENCHER],
-    trencherVaultAddress: VAULT, trencherFactoryAddress: addr(0xfac7),
+    smartAccount: account, owner: tenant, chainId: 4663, serialized: "never-read",
+    grantFeatures: [...(o.trencher === false ? ["tradeable-v2"] : ["tradeable-v2", GRANT_TRENCHER]), ...(o.classVault ? [GRANT_PONS_CLASS] : [])],
+    trencherVaultAddress: VAULT, trencherFactoryAddress: addr(0xfac7), ...(o.classVault ? { ponsClassVaultAddress: o.classVault } : {}),
   }));
   raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
     VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 2, 25, ?)`).run(account, tenant, addr(1), o.mode ?? "live");
@@ -690,34 +691,44 @@ describe("a trade only where the seed already holds what the chain does (holding
   /** Shogun's sell of COIN missing, its buy in Postgres; the book's balances as given. */
   const sellPlan = (b: Books, o: { balances?: Record<string, Record<string, bigint>>; failBalances?: string[] } = {}) =>
     preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n }, ...o }).rpc);
-  /** What the lost book's last mirror left: a COIN position of 1000 written at `positionAt`, and its basis at `basisAt` (none when null). */
-  const snapshot = (b: Books, o: { positionAt: number; basisAt?: number | null }) => {
+  /** What the lost book's last mirror left: a COIN position of `raw` (1000) written at `positionAt`, and its basis at `basisAt` (none when null), costing 5 USDG. */
+  const snapshot = (b: Books, o: { positionAt: number; basisAt?: number | null; raw?: bigint }) => {
     b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
-      VALUES (?, 'COIN', ?, '1000', '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, COIN, o.positionAt);
-    if (o.basisAt !== null) b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '1000', '5000000', ?)").run(ACCOUNT, o.basisAt ?? o.positionAt);
+      VALUES (?, 'COIN', ?, ?, '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, COIN, (o.raw ?? 1000n).toString(), o.positionAt);
+    if (o.basisAt !== null) b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', ?, '5000000', ?)").run(ACCOUNT, (o.raw ?? 1000n).toString(), o.basisAt ?? o.positionAt);
   };
   /** The 1000 that snapshot says, held in the Trencher vault at the pinned block. */
   const inVault = { balances: { [COIN]: { [VAULT]: 1000n } } };
   const sell = (p: BookingPlan) => p.items.find((i) => i.key === `op:${SELL_OP}`)!;
   const leg = (p: BookingPlan) => p.items.find((i) => i.key === `log:${CHAIN.sell.tx}#11`)!;
+  /** What Shogun's buy and sell each moved: the same lot of COIN. */
+  const LOT = BigInt("0x29343d8834fb02ccd");
 
-  it("held, its position and basis each what the book holds at the pinned block and both written after the last trade: the trade books, and its evidence says how", async () => {
+  it("held, its position and basis each what the book holds at the pinned block, its fills walked from flat and its cost what they give: the trade books, and its evidence says how", async () => {
     const b = await books();
-    snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 });
-    const model = fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n }, ...inVault });
+    // The executor's rows, fills and all: an earlier buy of a lot for 5 USDG, and Shogun's own buy of another (the row books() wrote, with its fill).
+    b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch,
+        fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, basis_source) VALUES (?, 'swap', ?, ?, ?, 5, ?, ?, 'landed', ?, 2, 'buy', 'COIN', ?, 5, 'receipt')`)
+      .run(ACCOUNT, VAULT, USDG, COIN, h32("earlier buy"), h32("earlier buy tx"), CHAIN.buy.timestamp - 600, LOT.toString());
+    b.raw.prepare("UPDATE trades SET fill_side = 'buy', fill_symbol = 'COIN', fill_qty_raw = ?, fill_cash_usdg = 5, basis_source = 'receipt' WHERE user_op_hash = ?")
+      .run(LOT.toString(), BUY_OP);
+    // The mirror after the sell: one lot left, at half the 10 USDG the two cost.
+    snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, raw: LOT });
+    const model = fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n }, balances: { [COIN]: { [VAULT]: LOT } } });
     const p = await preview(b, model.rpc);
     assert.equal(p.verdict, "ready", planLines(p).join("\n"));
     const holding = sell(p).evidence.holding as { lastTradeAt: number; position: { updatedAt: number }; basis: { updatedAt: number }; refusal: null;
-      bookBalance: { total: string }; fills: { verdict: string; why: string } };
+      bookBalance: { total: string }; fills: { verdict: string; anchor: string }; cost: { verdict: string; basis: unknown }; bothSides: boolean };
     assert.deepEqual([holding.lastTradeAt, holding.position.updatedAt, holding.basis.updatedAt], [CHAIN.sell.timestamp, CHAIN.sell.timestamp + 5, CHAIN.sell.timestamp + 5]);
-    assert.deepEqual([holding.refusal, holding.bookBalance.total], [null, "1000"]);
+    assert.deepEqual([holding.refusal, holding.bookBalance.total], [null, LOT.toString()]);
     // PINNED: every balance was read at admission's head less 64, and the plan says which block (outside the digest, as the head is).
     assert.ok(model.balanceTags.length > 0 && model.balanceTags.every((t) => t === `0x${(HEAD - 64n).toString(16)}`), model.balanceTags.join(","));
     assert.equal(p.capture.balanceBlock, (HEAD - 64n).toString());
-    // Postgres's buy of COIN carries no fill, so the walk back to where the basis opened cannot be done: said, and the contents decide alone.
-    assert.equal(holding.fills.verdict, "unproven");
-    assert.match(holding.fills.why, /trade #1 in 0xaa07.* records no fill/);
-    assert.ok(p.warnings.some((w) => /0xaa07.*: the recorded fills could not be walked back to where its basis opened/.test(w)), p.warnings.join("\n"));
+    // A lot held ← the missed sell of one ← the buy of one ← the earlier buy of one, from flat; and (2 lots, 10 USDG) less half is the basis's cost exactly.
+    assert.deepEqual([holding.fills.verdict, holding.fills.anchor], ["reproduced", "before every fill Postgres records in the token"]);
+    assert.deepEqual(holding.cost, { verdict: "replayed", why: null, basis: { qtyRaw: LOT.toString(), costUsdg: "5000000" } });
+    assert.equal(holding.bothSides, false);
+    assert.ok(!p.warnings.some((w) => /could not be walked|was not checked/.test(w)), p.warnings.join("\n"));
   });
 
   it("not held, and none of it on chain across the account and its vault: the trade books", async () => {
@@ -726,10 +737,29 @@ describe("a trade only where the seed already holds what the chain does (holding
     const holding = sell(p).evidence.holding as { position: unknown; bookBalance: { total: string; by: Record<string, string> } };
     assert.equal(holding.position, null);
     assert.deepEqual(holding.bookBalance, { total: "0", by: { [ACCOUNT]: "0", [VAULT]: "0" } });
+    // Postgres's buy of COIN carries no fill, so the walk cannot be done: with nothing held there is nothing seeded, so it is said, not refused.
+    assert.ok(p.warnings.some((w) => /0xaa07.*: none of it is held, on chain or in the snapshot, .*could not be walked back .*trade #1 in 0xaa07.* records no fill/.test(w)),
+      p.warnings.join("\n"));
   });
 
-  it("a position or basis other than the chain's, a held position with no basis, one written before the trade, a balance the snapshot does not know of, or an unread balance: unresolved, legs and all", async () => {
+  it("a Pons class vault: positions do not cover it, so one holding the token refuses by name; one holding none is read and books", async () => {
+    const CLASS = addr(0xc1a5);
+    const holding = await sellPlan(await books({ classVault: CLASS }), { balances: { [COIN]: { [CLASS]: 7n } } });
+    assert.equal(holding.verdict, "blocked");
+    assert.equal((sell(holding).evidence.holding as { refusal: string }).refusal, "class-vault-held");
+    assert.match(sell(holding).why, new RegExp(`^not booked \\(class-vault-held\\): the account's Pons class vault ${CLASS} held 7 base units of 0xaa07.* at the pinned block: ` +
+      "Postgres's positions and cost basis cover the account and its Trencher vault"));
+    const none = await sellPlan(await books({ classVault: CLASS }));
+    assert.equal(none.verdict, "ready", planLines(none).join("\n"));
+    assert.deepEqual((sell(none).evidence.holding as { bookBalance: unknown }).bookBalance, { total: "0", by: { [ACCOUNT]: "0", [CLASS]: "0", [VAULT]: "0" } });
+  });
+
+  it("a position or basis other than the chain's, a held position with no basis, one written before the trade, a balance the snapshot does not know of, a held token whose fills cannot be walked, or an unread balance: unresolved, legs and all", async () => {
     const cases: Array<[string, (b: Books) => void, Parameters<typeof sellPlan>[1], string, RegExp]> = [
+      // Every quantity and time agrees — but Postgres's buy of COIN carries no fill (as the in-flight reconciler's rows never do), so what the book
+      // holds cannot be traced to the fills that put it there, and the seed would carry that basis into the new book.
+      ["held, the fills unwalkable", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 }), inVault, "fills-unproven",
+        /could not be walked back to where its basis opened \(trade #1 in 0xaa07.* records no fill \(side and quantity\)\): the position and basis hold the chain's quantity/],
       ["position other than the chain's", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 }), {}, "position-differs",
         /position in COIN \(0xaa07.*\) holds 1000 base units, and the book held 0 on chain at the pinned block/],
       ["basis other than the chain's", (b) => {
@@ -786,7 +816,8 @@ describe("a trade only where the seed already holds what the chain does (holding
  * and the basis after the missed fill, and the basis can still leave it out.
  * Synthetic session-key swaps of one token against USDG, on the account
  * alone; Postgres records the ordinary fills as the live path writes them
- * (fill side and quantity read off the receipt).
+ * (fill side and quantity read off the receipt, and — where a test gives it —
+ * the cash bookFill applied to the basis).
  */
 describe("the snapshot's contents against the chain, never its timestamps alone", () => {
   const TOKEN = addr(0x70c3), POOL = addr(0x900d);
@@ -796,23 +827,34 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     tag: o.tag, logs: o.side === "buy"
       ? [[USDG, [TR, topic(ACCOUNT), topic(POOL)], `0x${word(o.cash)}`, "0x2"], [TOKEN, [TR, topic(POOL), topic(ACCOUNT)], `0x${word(o.qty)}`, "0x3"]]
       : [[TOKEN, [TR, topic(ACCOUNT), topic(POOL)], `0x${word(o.qty)}`, "0x2"], [USDG, [TR, topic(POOL), topic(ACCOUNT)], `0x${word(o.cash)}`, "0x3"]] });
-  /** An ordinary fill Postgres holds, as the executor writes it. */
-  const recorded = (b: Books, o: { tag: string; side: "buy" | "sell"; qty: bigint; at: number; basisSource?: string; status?: string }) =>
+  /** An ordinary fill Postgres holds, as the executor writes it; `cash` in micro-USDG, as fill_cash_usdg carries it (none when not given). */
+  const recorded = (b: Books, o: { tag: string; side: "buy" | "sell"; qty: bigint; at: number; cash?: bigint; basisSource?: string; status?: string }) =>
     b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch,
-        fill_side, fill_symbol, fill_qty_raw, basis_source) VALUES (?, 'swap', ?, ?, ?, 1, ?, ?, ?, ?, 2, ?, 'TKN', ?, ?)`)
+        fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, basis_source) VALUES (?, 'swap', ?, ?, ?, 1, ?, ?, ?, ?, 2, ?, 'TKN', ?, ?, ?)`)
       .run(ACCOUNT, POOL, o.side === "buy" ? USDG : TOKEN, o.side === "buy" ? TOKEN : USDG, h32(o.tag), h32(`${o.tag} tx`), o.status ?? "landed", o.at, o.side,
-        o.qty.toString(), o.basisSource ?? "receipt");
-  /** The lost book's last mirror: the position (rewritten every tick) and the live basis (at its last fill), or neither. */
-  const mirrored = (b: Books, o: { raw: bigint; basisQty: bigint | null; at: number }) => {
+        o.qty.toString(), o.cash === undefined ? null : Number(o.cash) / 1e6, o.basisSource ?? "receipt");
+  /**
+   * A landed row the in-flight reconciler writes for an operation the book lost (index.ts reconcileInFlightAtArm): its legs, 'receipt', and no
+   * fill — dated `at`, when the arm wrote it.
+   */
+  const reconciled = (b: Books, o: { tag: string; side: "buy" | "sell"; at: number }) =>
+    b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch, basis_source)
+        VALUES (?, 'swap', ?, ?, ?, 1, ?, ?, 'landed', ?, 2, 'receipt')`)
+      .run(ACCOUNT, ACCOUNT, o.side === "buy" ? USDG : TOKEN, o.side === "buy" ? TOKEN : USDG, h32(o.tag), h32(`${o.tag} tx`), o.at);
+  /** The lost book's last mirror: the position (rewritten every tick) and the live basis (at its last fill, costing `cost` — 1 USDG unless given), or neither. */
+  const mirrored = (b: Books, o: { raw: bigint; basisQty: bigint | null; at: number; cost?: bigint }) => {
     b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
       VALUES (?, 'TKN', ?, ?, '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, TOKEN, o.raw.toString(), o.at + 5);
-    if (o.basisQty !== null) b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'TKN', ?, '1000000', ?)").run(ACCOUNT, o.basisQty.toString(), o.at);
+    if (o.basisQty !== null) {
+      b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'TKN', ?, ?, ?)").run(ACCOUNT, o.basisQty.toString(), (o.cost ?? 1_000_000n).toString(), o.at);
+    }
   };
   const T0 = CHAIN.sell.timestamp + 100, MISSED = SELL_BLOCK + 2_000n, MISSED_AT = CHAIN.sell.timestamp + 200, T2 = CHAIN.sell.timestamp + 300;
-  const plan = (b: Books, missed: ModelTx, o: { balance?: bigint; failBalances?: string[] } = {}) =>
-    preview(b, fakeRpc({ txs: [missed], decimals: { [TOKEN]: 18n }, balances: { [TOKEN]: { [ACCOUNT]: o.balance ?? 0n } }, failBalances: o.failBalances }).rpc);
+  const plan = (b: Books, missed: ModelTx | ModelTx[], o: { balance?: bigint; failBalances?: string[] } = {}) =>
+    preview(b, fakeRpc({ txs: [missed].flat(), decimals: { [TOKEN]: 18n }, balances: { [TOKEN]: { [ACCOUNT]: o.balance ?? 0n } }, failBalances: o.failBalances }).rpc);
   const trade = (p: BookingPlan, tag: string) => p.items.find((i) => i.key === `op:${h32(tag)}`)!;
-  const holdingOf = (p: BookingPlan, tag: string) => trade(p, tag).evidence.holding as { refusal: string | null; fills: { verdict: string; anchor: string | null } };
+  const holdingOf = (p: BookingPlan, tag: string) => trade(p, tag).evidence.holding as { refusal: string | null; fills: { verdict: string; anchor: string | null };
+    cost: { verdict: string; why: string | null; basis: { qtyRaw: string; costUsdg: string } | null }; bothSides: boolean };
 
   it("a missed buy, then an ordinary buy that rewrote both rows after it: refused while the basis leaves the missed buy out, booked once it holds it", async () => {
     const missed = swap({ tag: "missed buy", side: "buy", qty: 100n * E18, cash: 100_000_000n, block: MISSED });
@@ -837,8 +879,13 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     const holds = await run(150n * E18);
     assert.equal(holds.verdict, "ready", planLines(holds).join("\n"));
     // 150 held ← the later buy of 50 ← the missed buy of 100, from flat.
-    const { fills } = holdingOf(holds, "missed buy");
+    const { fills, cost, bothSides } = holdingOf(holds, "missed buy");
     assert.deepEqual([fills.verdict, fills.anchor], ["reproduced", "before every fill Postgres records in the token"]);
+    // The later buy's row carries no cash, so the cost cannot be replayed: for a trade all one way the quantity is the proof, and the plan says so.
+    assert.deepEqual([cost.verdict, bothSides], ["unproven", false]);
+    assert.match(cost.why!, /trades#\d+ records no exact cash for its fill \(fill_cash_usdg\)/);
+    assert.ok(holds.warnings.some((w) => /0x0+70c3: the basis's cost was not checked against the fills .*its quantity was, and with the trades booked here all buys/.test(w)),
+      holds.warnings.join("\n"));
   });
 
   it("a missed sell, then an ordinary sell: refused while the basis leaves the missed sell out, booked once it holds it", async () => {
@@ -898,10 +945,117 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     assert.match(trade(p, "missed buy").why, /op:0x[0-9a-f]{64} \(a buy of 100000000000000000000 at .*\) leaves -100000000000000000000: the fills Postgres records and the ones this plan would book are more than the chain holds/);
   });
 
+  /**
+   * A ROUND TRIP NO QUANTITY CAN SEE (review of #293). On a held token, a
+   * missed buy of 50 for 200 USDG and a missed sell of the same 50 for 50, between
+   * a recorded buy of 100 and a recorded buy of 20 that rewrote both rows. The
+   * chain, the position and the basis all hold 120, and the fills walk back
+   * from 120 to flat — yet a basis that left the round trip out costs 120 USDG,
+   * where one that holds it costs 220, and the stop-loss and take-profit would
+   * measure from 1.00 a unit instead of about 1.83. As Shogun's own Trencher
+   * lot shows, a sell of exactly the lot bought is ordinary.
+   */
+  it("a missed buy and sell of the same amount on a held token, a later buy rewriting both rows: every quantity agrees, and it books only when the basis's cost is what the fills give", async () => {
+    const roundTrip = [swap({ tag: "missed buy", side: "buy", qty: 50n * E18, cash: 200_000_000n, block: MISSED }),
+      swap({ tag: "missed sell", side: "sell", qty: 50n * E18, cash: 50_000_000n, block: MISSED + 100n })];
+    const run = async (o: { cash: boolean; cost: bigint }) => {
+      const b = await books();
+      recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0, ...(o.cash ? { cash: 100_000_000n } : {}) });
+      recorded(b, { tag: "later buy", side: "buy", qty: 20n * E18, at: T2, ...(o.cash ? { cash: 20_000_000n } : {}) });
+      mirrored(b, { raw: 120n * E18, basisQty: 120n * E18, cost: o.cost, at: T2 });
+      return plan(b, roundTrip, { balance: 120n * E18 });
+    };
+    // No cash on record: the cost cannot be replayed, and a buy with a sell needs it.
+    const unreplayed = await run({ cash: false, cost: 120_000_000n });
+    assert.equal(unreplayed.verdict, "blocked", planLines(unreplayed).join("\n"));
+    const h = holdingOf(unreplayed, "missed buy");
+    // The quantity reproduces exactly, and both rows were written after the round trip: neither says the basis holds it.
+    assert.deepEqual([h.fills.verdict, h.bothSides, h.refusal], ["reproduced", true, "fills-net-ambiguous"]);
+    assert.match(trade(unreplayed, "missed sell").why,
+      /^not booked \(fills-net-ambiguous\): the trades booked here in 0x0+70c3 include both a buy and a sell, .* \(trades#\d+ records no exact cash for its fill/);
+    assert.equal(unreplayed.items.filter((i) => i.proposal).length, 0, "neither trade, nor a leg");
+    // The cost on record: 100 at 100, +50 at 200 → 150 at 300, −50 takes a third → 100 at 200, +20 at 20 → 120 at 220. A basis at 120 left it out.
+    const wrong = await run({ cash: true, cost: 120_000_000n });
+    assert.equal(wrong.verdict, "blocked");
+    assert.equal(holdingOf(wrong, "missed buy").refusal, "basis-cost-differs");
+    assert.match(trade(wrong, "missed buy").why, new RegExp("^not booked \\(basis-cost-differs\\): Postgres's live cost basis for TKN holds 120000000000000000000 base " +
+      "units at a cost of 120\\.000000 USDG, and the fills since it last opened \\(before every fill Postgres records in the token\\), with the trades booked here, " +
+      "give 120000000000000000000 at 220\\.000000 USDG"));
+    // A basis that holds the round trip books: both trades, and their legs.
+    const right = await run({ cash: true, cost: 220_000_000n });
+    assert.equal(right.verdict, "ready", planLines(right).join("\n"));
+    assert.deepEqual(holdingOf(right, "missed sell").cost, { verdict: "replayed", why: null, basis: { qtyRaw: (120n * E18).toString(), costUsdg: "220000000" } });
+  });
+
+  it("three missed fills with a round trip among them, though they net to a buy: refused without the cost to prove the basis holds them", async () => {
+    const b = await books();
+    recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+    recorded(b, { tag: "later buy", side: "buy", qty: 20n * E18, at: T2 });
+    // The basis holds the first buy, the missed buy of 30 and the later buy — not the round trip of 50.
+    mirrored(b, { raw: 150n * E18, basisQty: 150n * E18, cost: 150_000_000n, at: T2 });
+    const p = await plan(b, [swap({ tag: "missed buy", side: "buy", qty: 50n * E18, cash: 200_000_000n, block: MISSED }),
+      swap({ tag: "missed sell", side: "sell", qty: 50n * E18, cash: 50_000_000n, block: MISSED + 100n }),
+      swap({ tag: "missed buy 30", side: "buy", qty: 30n * E18, cash: 30_000_000n, block: MISSED + 150n })], { balance: 150n * E18 });
+    assert.equal(p.verdict, "blocked", planLines(p).join("\n"));
+    assert.deepEqual(["missed buy", "missed sell", "missed buy 30"].map((t) => [trade(p, t).class, holdingOf(p, t).fills.verdict, holdingOf(p, t).refusal]),
+      Array(3).fill(["unresolved", "reproduced", "fills-net-ambiguous"]));
+    assert.equal(p.items.filter((i) => i.proposal).length, 0);
+  });
+
+  it("trades all one way: a basis of the chain's quantity at a cost the fills disprove refuses", async () => {
+    // A missed buy of 100 for 100 USDG, then a recorded buy of 50 for 60: a basis built from both costs 160.
+    const missed = swap({ tag: "missed buy", side: "buy", qty: 100n * E18, cash: 100_000_000n, block: MISSED });
+    const run = async (cost: bigint) => {
+      const b = await books();
+      recorded(b, { tag: "later buy", side: "buy", qty: 50n * E18, at: T2, cash: 60_000_000n });
+      mirrored(b, { raw: 150n * E18, basisQty: 150n * E18, cost, at: T2 });
+      return plan(b, missed, { balance: 150n * E18 });
+    };
+    const right = await run(160_000_000n);
+    assert.equal(right.verdict, "ready", planLines(right).join("\n"));
+    assert.deepEqual([holdingOf(right, "missed buy").cost.verdict, holdingOf(right, "missed buy").cost.basis?.costUsdg], ["replayed", "160000000"]);
+    assert.ok(!right.warnings.some((w) => /was not checked/.test(w)), right.warnings.join("\n"));
+    const wrong = await run(150_000_000n);
+    assert.equal(wrong.verdict, "blocked");
+    assert.equal(holdingOf(wrong, "missed buy").refusal, "basis-cost-differs");
+  });
+
+  it("a held token whose history holds the reconciler's row, which carries no fill, refuses as unproven; a token nobody holds books over the same history, with a note", async () => {
+    // A buy of 100, the reconciler's row for a lost buy of 40 (written at the arm an hour later, no fill), a buy of 10; and the missed sell of 40
+    // between them. Position, basis and chain all hold 110 — and the basis never had the sell.
+    const missed = swap({ tag: "missed sell", side: "sell", qty: 40n * E18, cash: 30_000_000n, block: MISSED });
+    const b = await books();
+    recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+    reconciled(b, { tag: "reconciled buy", side: "buy", at: T2 + 3600 });
+    recorded(b, { tag: "later buy", side: "buy", qty: 10n * E18, at: T2 });
+    mirrored(b, { raw: 110n * E18, basisQty: 110n * E18, at: T2 });
+    const p = await plan(b, missed, { balance: 110n * E18 });
+    assert.equal(p.verdict, "blocked", planLines(p).join("\n"));
+    assert.deepEqual([holdingOf(p, "missed sell").fills.verdict, holdingOf(p, "missed sell").refusal], ["unproven", "fills-unproven"]);
+    assert.match(trade(p, "missed sell").why, new RegExp("^not booked \\(fills-unproven\\): the fills Postgres records in 0x0+70c3 could not be walked back to where " +
+      "its basis opened \\(trade #\\d+ in 0x0+70c3 records no fill \\(side and quantity\\)\\)"));
+    // The same history, all of it sold by the missed sell: nothing is held or seeded, so what it cost cannot reach the new book.
+    const out = await books();
+    recorded(out, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+    reconciled(out, { tag: "reconciled buy", side: "buy", at: T2 + 3600 });
+    const flat = await plan(out, swap({ tag: "missed exit", side: "sell", qty: 140n * E18, cash: 150_000_000n, block: MISSED }));
+    assert.equal(flat.verdict, "ready", planLines(flat).join("\n"));
+    assert.deepEqual([holdingOf(flat, "missed exit").fills.verdict, holdingOf(flat, "missed exit").refusal], ["unproven", null]);
+    assert.ok(flat.warnings.some((w) => /0x0+70c3: none of it is held, on chain or in the snapshot/.test(w)), flat.warnings.join("\n"));
+  });
+
+  it("microUsdg: fill_cash_usdg back exactly as written, or not at all", () => {
+    assert.deepEqual([4.965021, 5, 0.5, "12.25", 0, 123456789.123456].map(microUsdg), ["4965021", "5000000", "500000", "12250000", "0", "123456789123456"]);
+    for (const v of [null, undefined, "", -1, 1e-7, 1.2345678, Number.NaN, Number.POSITIVE_INFINITY, 1234567890.123456, "1e3", "abc"]) {
+      assert.equal(microUsdg(v), null, String(v));
+    }
+  });
+
   it("walkFills: back to where the basis opened, and no further; an unreadable record says so rather than guess", () => {
     const fill = (id: number, side: string | null, qty: string | null, at: number, extra: Partial<RecordedFill> = {}): RecordedFill => ({
-      id, status: "landed", buyToken: side === "buy" ? TOKEN : USDG, sellToken: side === "buy" ? USDG : TOKEN, side, qtyRaw: qty, symbol: "TKN", basisSource: "receipt", at, ...extra });
-    const proposed = [{ key: "op:p", side: "buy" as const, qtyRaw: "3", at: 50, symbol: null }];
+      id, status: "landed", buyToken: side === "buy" ? TOKEN : USDG, sellToken: side === "buy" ? USDG : TOKEN, side, qtyRaw: qty, symbol: "TKN", basisSource: "receipt", at,
+      cashUsdg: null, ...extra });
+    const proposed = [{ key: "op:p", side: "buy" as const, qtyRaw: "3", cashUsdg: "6", at: 50, symbol: null }];
     const walk = (fills: RecordedFill[], total: bigint) => walkFills({ token: TOKEN, fills, proposed, symbols: new Set(["TKN"]), total });
     // Flat after #3: #1 (no fill, from before) is never read.
     const history = [fill(1, null, null, 10), fill(2, "buy", "5", 20), fill(3, "sell", "5", 30), fill(4, "buy", "7", 40)];
@@ -921,6 +1075,17 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     assert.match(short.why!, /the book still held 2 base units before the first of them/);
     // More than the chain holds: a buy bigger than what was held after it.
     assert.equal(walk(history, 5n).verdict, "exceeds");
+
+    // REPRODUCED IS A QUANTITY. The cost is replayed forward from where the walk stopped, as applyFill books it: #4 bought 7 for 70 and the
+    // proposal 3 for 6 → 10 at 76; and through a sell, which takes cost pro rata: 5 for 50, −2 takes 20 → 3 at 30, +3 for 6 → 6 at 36.
+    assert.deepEqual(replayBasis(walk([...history.slice(0, 3), fill(4, "buy", "7", 40, { cashUsdg: "70" })], 10n)),
+      { verdict: "replayed", why: null, basis: { qtyRaw: "10", costUsdg: "76" } });
+    assert.deepEqual(replayBasis(walk([fill(2, "buy", "5", 20, { cashUsdg: "50" }), fill(3, "sell", "2", 30, { cashUsdg: "1" })], 6n)),
+      { verdict: "replayed", why: null, basis: { qtyRaw: "6", costUsdg: "36" } });
+    // A walked row with no exact cash, or a walk that did not reproduce, replays nothing.
+    assert.deepEqual(replayBasis(ok), { verdict: "unproven", basis: null,
+      why: "trades#4 records no exact cash for its fill (fill_cash_usdg), so what it did to the basis's cost is not on the books" });
+    assert.deepEqual([replayBasis(short).verdict, replayBasis(walk(history, 5n)).verdict], ["unproven", "unproven"]);
   });
 });
 

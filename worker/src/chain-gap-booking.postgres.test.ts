@@ -29,7 +29,7 @@ import { MIRROR_STATE_DDL } from "./ledger-mirror";
 import { CHAIN_REFUSAL, knownChainFacts } from "./ledger-resume";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
-import { BOOKINGS_TABLE, BookingRefused } from "./chain-gap-booking";
+import { BOOKINGS_TABLE, BookingRefused, readBookingSnapshot } from "./chain-gap-booking";
 import { connectBooking, main, type PgClient } from "./chain-gap-booking-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
@@ -138,9 +138,13 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   const env = { DATABASE_URL: scoped.toString() };
   const previewFile = path.join(tmp, "preview.json");
   assert.equal(await main(["--tenant", TENANT, "--output", previewFile], env, deps), 0, printed.join("\n"));
-  const plan = JSON.parse(readFileSync(previewFile, "utf8")) as { verdict: string; previewDigest: string; items: Array<{ key: string; class: string; proposal: { row: Record<string, unknown> } | null }> };
+  const plan = JSON.parse(readFileSync(previewFile, "utf8")) as { verdict: string; previewDigest: string; items: Array<{ key: string; class: string;
+    proposal: { row: Record<string, unknown> } | null; evidence: { holding?: { cost: unknown } } }> };
   assert.deepEqual(plan.items.map((i) => [i.key, i.class]), [[`log:${OP_TX}#2`, "operation-leg"], [`op:${OP}`, "session-trade"], [`log:${DEP_TX}#0`, "deposit"]]);
   assert.equal(plan.verdict, "ready");
+  // The buy, from flat, is the basis exactly: its quantity, and the 3 USDG it cost.
+  assert.deepEqual(plan.items.find((i) => i.key === `op:${OP}`)!.evidence.holding?.cost,
+    { verdict: "replayed", why: null, basis: { qtyRaw: "1500000000000000000", costUsdg: "3000000" } });
   assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM trades")).rows[0]!.n), 0, "the preview wrote nothing");
 
   const applied = path.join(tmp, "apply.json");
@@ -175,11 +179,15 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
 
   // THE CONTENTS, NEVER THE TIMES ALONE, read on Postgres: a round trip in COIN that the executor recorded before the buy (read back as
   // the fill walk's rows), and a basis rewritten after the buy that still covers only part of what the chain holds. The preview refuses.
-  for (const [tag, side, at] of [["an earlier buy", "buy", AT - 200], ["its sell", "sell", AT - 100]] as const) {
+  for (const [tag, side, at, cash] of [["an earlier buy", "buy", AT - 200, 1.25], ["its sell", "sell", AT - 100, 1.5]] as const) {
     await setup.query(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch,
-        fill_side, fill_qty_raw, fill_symbol, basis_source) VALUES ($1, 'swap', $2, $3, $4, 1, $5, $6, 'landed', $7, 2, $8, '500000000000000000', 'COIN', 'receipt')`,
-    [ACCOUNT, POOL, side === "buy" ? USDG : COIN, side === "buy" ? COIN : USDG, h32(tag), h32(`${tag} tx`), at, side]);
+        fill_side, fill_qty_raw, fill_cash_usdg, fill_symbol, basis_source)
+        VALUES ($1, 'swap', $2, $3, $4, 1, $5, $6, 'landed', $7, 2, $8, '500000000000000000', $9, 'COIN', 'receipt')`,
+    [ACCOUNT, POOL, side === "buy" ? USDG : COIN, side === "buy" ? COIN : USDG, h32(tag), h32(`${tag} tx`), at, side, cash]);
   }
+  // fill_cash_usdg is DOUBLE PRECISION on Postgres, and reads back as the micro-USDG bookFill applied, exactly.
+  assert.deepEqual((await readBookingSnapshot(db, { tenant: TENANT, dialect: "postgres", nowSec: NOW })).fills.map((f) => [f.side, f.qtyRaw, f.cashUsdg]),
+    [["buy", "500000000000000000", "1250000"], ["sell", "500000000000000000", "1500000"]]);
   await setup.query("UPDATE cost_basis SET qty_raw = '1000000000000000000', updated_at = $1", [AT + 60]);
   const refusedFile = path.join(tmp, "refused.json");
   assert.equal(await main(["--tenant", TENANT, "--output", refusedFile], env, deps), 2, printed.join("\n"));
@@ -190,5 +198,13 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   assert.match(buy.why, /covers 1000000000000000000 base units, and the book held 1500000000000000000 on chain at the pinned block/);
   const sellId = Number((await setup.query("SELECT id FROM trades WHERE user_op_hash = $1", [h32("its sell")])).rows[0]!.id);
   assert.deepEqual([buy.evidence.holding?.fills.verdict, buy.evidence.holding?.fills.anchor], ["reproduced", `after trades#${sellId}`], "flat after the round trip");
+  // The basis's quantity the chain's again, and its cost a micro-USDG short of what the buy cost from flat: refused on the cost.
+  await setup.query("UPDATE cost_basis SET qty_raw = '1500000000000000000', cost_usdg = '2999999'");
+  const costFile = path.join(tmp, "cost.json");
+  assert.equal(await main(["--tenant", TENANT, "--output", costFile], env, deps), 2, printed.join("\n"));
+  const costed = JSON.parse(readFileSync(costFile, "utf8")) as { items: Array<{ key: string; why: string; evidence: { holding?: { refusal: string } } }> };
+  const again = costed.items.find((i) => i.key === `op:${OP}`)!;
+  assert.equal(again.evidence.holding?.refusal, "basis-cost-differs");
+  assert.match(again.why, /at a cost of 2\.999999 USDG, and the fills since it last opened .* give 1500000000000000000 at 3\.000000 USDG/);
   assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
 });
