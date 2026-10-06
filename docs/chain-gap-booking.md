@@ -30,7 +30,26 @@ already in Postgres.
 The tool runs admission's own chain check, from the same block admission
 starts at, against one read of Postgres. Then it reads each named
 transaction's receipt and block, and classifies every fact. For each token a
-trade moved, it also reads the book's balance at a pinned block (see below):
+trade moved, it also reads the book's balance at a pinned block (see below).
+
+**Where both read from.** Admission's window starts at the oldest financial
+cursor of the last mirror, at least 26 hours back, and that 26-hour bound
+moves later as time passes. For a tenant held on a chain refusal, the
+window also never starts later than where the refused read began. Each
+chain refusal records that point (`ledger_resume_approvals.chain_read_from_sec`,
+the chain time of the first block it read). So whatever a refusal named is
+still in the window however long the booking takes, and the tool and
+admission read the same window. A refusal recorded by an earlier build has
+no such value. Its start is derived from its own row: the approval's time
+less 26 hours, or a cursor stamp its evidence recorded if that is earlier.
+That is never later than where its read was asked to start. If its evidence
+cannot show that (it does not parse, or a financial cursor in it has no
+stamp), the window starts at the first block of all. Without this, a
+deposit older than every recent cursor fell out of the window a day after
+the refusal: the tool said `NOTHING-MISSING`, and an approval was admitted
+with the deposit unbooked.
+
+The classes:
 
 | Class | What it is | What it writes |
 |---|---|---|
@@ -306,26 +325,36 @@ answered reads `chain:"required"` in admission's preview, with
 turned live trading off). So:
 
 1. Preview the tenant in admission's preview.
-2. Approve that digest once, with the tenant in the rollout at `exits-only`.
-   This does not make it trade. Admission reads the chain, and while Postgres
-   still lacks what the chain showed it refuses the tenant again, recording a
-   fresh chain refusal that names it.
+2. Approve the digest that preview prints once, with the tenant in the
+   rollout at `exits-only`. This does not make it trade. Admission reads the
+   chain from where the refused read began, and while Postgres still lacks
+   what the chain showed it refuses the tenant again, recording a fresh chain
+   refusal that names it.
 3. Take the tenant out of the rollout and preview here again. The fresh
    refusal is the newest decision now.
 
+Every decision of a held tenant changes its digest: its evidence binds its
+newest decision (`checks.chainHeldSince`), so a preview after a refusal never
+prints the refused digest again. An approval of a digest already decided,
+from an older line or a variable left set, records nothing and raises
+`[alert] resume approval: 0x… is held on a chain refusal no admission has
+answered, and an approval of this exact evidence refused (…)`. Preview again
+and approve the digest that preview prints.
+
 ## Before you start
 
-- **Keep the tenant held.** Leave it out of `MERRYMEN_FLEET_ROLLOUT`. The
-  tool also refuses a tenant that has run since its refusal (above). With
+- **Keep the tenant held.** Take it out of `MERRYMEN_FLEET_ROLLOUT` before
+  you book, and leave it out until step 7. The tool also refuses a tenant
+  that has run since its refusal (above). With
   `MERRYMEN_RESUME_AUTO_PAPER=1`, the orchestrator's automatic lane does not
   approve a tenant that has a chain refusal no admission has answered, even
   when its owner re-signs and it reads as paper again. Its preview is
   recorded and left to you, so the refusal stays its newest decision
   ([fleet-resume.md](fleet-resume.md#the-safe-case-all-of-it)). The lane's
-  line tells you to book it first. It never offers the approval of its
-  digest as a way to trade: an approval of such a tenant reads the chain
-  again, and admission refuses it again while Postgres lacks what the chain
-  showed.
+  line tells you to take it out of the rollout and book it first. It never
+  offers the approval of its digest as a way to trade: an approval of such a
+  tenant reads the chain again, from where the refused read began, and
+  admission refuses it again while Postgres lacks what the chain showed.
 - **No approval may be open.** If one is, the preview refuses and prints the
   exact `MERRYMEN_RESUME_REVOKE=0x<tenant>:<digest>` to set. Set it, deploy,
   and start again. A booking changes the evidence that approval was given on.
@@ -473,7 +502,8 @@ step 2. The tenant's `[resume-preview]` line should show:
 - `pass: true`;
 - a **new** `digest`, because the booked rows are now in the evidence;
 - `chain: "required"` and `chainHeld: true`. Admission reads the chain for
-  this tenant until an admission answers the refusal. That is the check
+  this tenant until an admission answers the refusal, from the same second
+  the tool read from, so what you booked is in that read. That is the check
   step 7 watches for;
 - `lastRefusal`, still the old chain refusal. This is information only, and
   it stays until a newer approval supersedes it.
