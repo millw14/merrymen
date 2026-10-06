@@ -8,7 +8,7 @@
  * through reconcile() is orchestrator-ledger-resume.integration.test.ts.
  */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -17,10 +17,12 @@ import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
-import { ensureLedgerResumeSchema, registerAttestedGapSource, type LedgerImportVolume } from "./ledger-import";
+import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import type { TenantLease } from "./tenant-lease";
+import { handoffRecoveryReplyOffset } from "./recovery-reply-handoff";
+import { RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import {
-  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, parseResumeApprovals,
+  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, parseResumeApprovals,
   parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
   type GapChain, type PreviewEntry,
 } from "./ledger-resume";
@@ -483,7 +485,259 @@ describe("the home archive", () => {
   });
   it("with no home there is nothing to archive", () => {
     assert.deepEqual(archiveTenantHome({ home: path.join(root, "vol", "children", "none"), archiveRoot: path.join(root, "vol", "archive", "none"),
-      generation: "00000000-0000-4000-8000-000000000014", mayWrite: () => true }), { archivePath: null, carried: [] });
+      generation: "00000000-0000-4000-8000-000000000014", mayWrite: () => true }), { archivePath: null, carried: [], normalised: [], left: [] });
+  });
+
+  // ── what the carry leaves for the offset handoff ──────────────────────────
+  const tenant = addr(0x7e1), account = addr(0xacce1);
+  /** The recovery listener's high-water mark for bot 801, as the handoff reads it. */
+  function listener() {
+    const raw = new DatabaseSync(":memory:"); handles.push(raw); raw.exec(RECOVERY_REPLY_SCHEMA);
+    raw.prepare("INSERT INTO recovery_reply_offsets VALUES(?,?,?,?,?,200,101,100,1000)").run("801", tenant, account, 4663, "a".repeat(16));
+    return wrapSqlite(raw);
+  }
+  const handoff = async (h: string, shared: Db) => {
+    try { await handoffRecoveryReplyOffset({ tenant, smartAccount: account, chainId: 4663, token: "801:carry_fixture", home: h, shared, mayWrite: () => true }); return "accepted"; }
+    catch (e) { return String((e as { code?: unknown }).code); }
+  };
+  /** A home whose telegram.json is `body` at `mode`, archived and carried. */
+  function carry(id: string, body: string, mode: number, extra: Record<string, [string, number]> = {}) {
+    const h = path.join(root, "vol", "children", id); mkdirSync(h, { recursive: true });
+    for (const [name, [b, m]] of Object.entries({ "telegram.json": [body, mode] as [string, number], "merrymen.db": ["book", 0o600] as [string, number], ...extra })) {
+      writeFileSync(path.join(h, name), b); chmodSync(path.join(h, name), m);
+    }
+    const r = archiveTenantHome({ home: h, archiveRoot: path.join(root, "vol", "archive", id), generation: `00000000-0000-4000-8000-0000000001${id.slice(-2)}`, mayWrite: () => true });
+    return { h, r, file: path.join(h, "telegram.json") };
+  }
+
+  it("carries a telegram.json the handoff reads: the orchestrator's restored link gains offset 0, a file our writers left at the umask becomes 0600", async () => {
+    // The shape writeTelegramForChild writes (restoredTelegramFile): no offset at all.
+    const restored = { linkCode: "K7M2QX", ownerId: 555, linkedAt: 7, firedAlerts: { "drawdown:20": 1000 } };
+    const a = carry("c01", JSON.stringify(restored, null, 2), 0o600, { "telegram-promoted.json": ["{}", 0o644], paused: ["paused", 0o644] });
+    assert.deepEqual(JSON.parse(readFileSync(a.file, "utf8")), { offset: 0, ...restored }, "only the offset is added; the link, owner and stamps are as they were");
+    for (const name of ["telegram.json", "telegram-promoted.json", "paused"]) assert.equal(lstatSync(path.join(a.h, name)).mode & 0o777, 0o600, name);
+    assert.deepEqual(a.r.normalised, ["paused: mode", "telegram-promoted.json: mode", "telegram.json: offset"]);
+    assert.deepEqual(a.r.left, []);
+    assert.equal(await handoff(a.h, listener()), "accepted");
+    assert.deepEqual(JSON.parse(readFileSync(a.file, "utf8")), { offset: 101, ...restored }, "and the listener's high-water mark is handed over");
+    // A worker's own file from before #198, written at the umask.
+    const b = carry("c02", JSON.stringify({ offset: 40, botId: "801", priorBots: [], ownerId: 555 }), 0o644);
+    assert.deepEqual(b.r.normalised, ["telegram.json: mode"]);
+    assert.equal(readFileSync(b.file, "utf8"), JSON.stringify({ offset: 40, botId: "801", priorBots: [], ownerId: 555 }), "a mode alone is fixed without rewriting the bytes");
+    assert.equal(await handoff(b.h, listener()), "accepted");
+    assert.equal(JSON.parse(readFileSync(b.file, "utf8")).offset, 101);
+    // The restored link as writeTelegramForChild wrote it before #202 and #198: at the umask, an empty code and a zero link time.
+    const legacy = { linkCode: "", ownerId: 555, linkedAt: 0 };
+    const c = carry("c03", JSON.stringify(legacy, null, 2), 0o644);
+    assert.deepEqual(c.r.normalised, ["telegram.json: offset", "telegram.json: mode"]);
+    assert.deepEqual(JSON.parse(readFileSync(c.file, "utf8")), { offset: 0, ...legacy });
+    assert.equal(lstatSync(c.file).mode & 0o777, 0o600);
+    assert.equal(await handoff(c.h, listener()), "accepted");
+    // Already what the handoff reads: nothing is touched.
+    const d = carry("c04", JSON.stringify({ offset: 77 }), 0o600);
+    assert.deepEqual(d.r.normalised, []);
+    assert.equal(readFileSync(d.file, "utf8"), JSON.stringify({ offset: 77 }));
+    // A higher local offset is never lowered by the handoff.
+    const e = carry("c05", JSON.stringify({ offset: 500, botId: "801" }), 0o600);
+    assert.equal(await handoff(e.h, listener()), "accepted");
+    assert.equal(JSON.parse(readFileSync(e.file, "utf8")).offset, 500);
+  });
+
+  it("leaves anything but the restored link, and anything our writers did not leave, exactly as it is, and the handoff still refuses it by name", async () => {
+    const link = { linkCode: "K7M2QX", ownerId: 555 };
+    for (const [id, body, mode, code] of [
+      ["c11", JSON.stringify({ offset: 10, botId: 801 }), 0o600, "HANDOFF_BOT"], // no build ever wrote a numeric bot id
+      ["c12", JSON.stringify({ offset: null, linkCode: "K7M2QX" }), 0o600, "HANDOFF_OFFSET"], // an offset that is there and wrong is not a missing one
+      ["c13", JSON.stringify({ offset: -3 }), 0o600, "HANDOFF_OFFSET"],
+      ["c14", JSON.stringify({ offset: 1, botId: "802", priorBots: "x" }), 0o600, "HANDOFF_PRIOR_BOTS"],
+      ["c15", "{ not json", 0o600, "HANDOFF_PARSE"],
+      ["c16", JSON.stringify([{ offset: 1 }]), 0o600, "HANDOFF_SHAPE"],
+      ["c17", JSON.stringify({ linkCode: "K7M2QX", pad: "x".repeat(256 * 1024) }), 0o600, "HANDOFF_SIZE"], // larger than any the child writes
+      // No offset, but not the restored link: a key no writer of ours wrote without one, or one of another type.
+      ["c18", JSON.stringify({ linkCode: "K7M2QX", botId: 9101 }), 0o600, "HANDOFF_OFFSET"],
+      ["c19", JSON.stringify({ linkCode: "K7M2QX", botId: "801", priorBots: "x" }), 0o600, "HANDOFF_OFFSET"],
+      ["c20", JSON.stringify({ ...link, linkedChats: [555] }), 0o600, "HANDOFF_OFFSET"],
+      ["c21", JSON.stringify({ linkCode: 7 }), 0o600, "HANDOFF_OFFSET"],
+      ["c22", JSON.stringify({ ownerId: "555" }), 0o600, "HANDOFF_OFFSET"],
+      ["c23", JSON.stringify({ ...link, firedAlerts: { "drawdown:20": "soon" } }), 0o600, "HANDOFF_OFFSET"],
+      ["c24", JSON.stringify({}), 0o600, "HANDOFF_OFFSET"],
+      // A byte-order mark: no writer of ours ever wrote one.
+      ["c25", String.fromCharCode(0xfeff) + JSON.stringify(link), 0o600, "HANDOFF_PARSE"],
+      // Writable by someone else: never ours, whatever it holds, and its mode is kept for the handoff to refuse.
+      ["c26", JSON.stringify(link), 0o666, "HANDOFF_MODE"],
+      ["c27", JSON.stringify(link), 0o664, "HANDOFF_MODE"],
+      ["c28", JSON.stringify({ offset: 3 }), 0o646, "HANDOFF_MODE"],
+    ] as const) {
+      const x = carry(id, body, mode);
+      assert.equal(readFileSync(x.file, "utf8"), body, id);
+      assert.deepEqual(x.r.normalised, [], id);
+      assert.equal(lstatSync(x.file).mode & 0o777, mode, `${id}: carried with its own mode`);
+      assert.equal(await handoff(x.h, listener()), code, id);
+      assert.equal(readFileSync(x.file, "utf8"), body, `${id}: the refused file is left as it was`);
+    }
+  });
+
+  it("carries the Telegram files only as the home's own: one with a second name stays in the archive, and the next spawn restores the link", async () => {
+    const h = path.join(root, "vol", "children", "c31"), archiveRoot = path.join(root, "vol", "archive", "c31"), gen = "00000000-0000-4000-8000-000000000131";
+    mkdirSync(h, { recursive: true });
+    const elsewhere = path.join(root, "vol", "c31-elsewhere.json");
+    writeFileSync(elsewhere, JSON.stringify({ linkCode: "FOREIGN", ownerId: 31337 })); chmodSync(elsewhere, 0o644);
+    linkSync(elsewhere, path.join(h, "telegram.json"));
+    writeFileSync(path.join(h, "telegram-promoted.json"), "{}"); chmodSync(path.join(h, "telegram-promoted.json"), 0o644);
+    // The owner's stop, with a second name too: copied whatever it is, and not vouched for.
+    writeFileSync(path.join(root, "vol", "c31-paused"), "paused"); chmodSync(path.join(root, "vol", "c31-paused"), 0o644);
+    linkSync(path.join(root, "vol", "c31-paused"), path.join(h, "paused"));
+    const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.deepEqual(r.carried, ["paused", "telegram-promoted.json"]);
+    assert.deepEqual(r.left, ["telegram.json"]);
+    assert.deepEqual(r.normalised, ["telegram-promoted.json: mode"]);
+    assert.equal(existsSync(path.join(h, "telegram.json")), false, "the foreign link never reaches the new home");
+    assert.equal(readFileSync(path.join(archiveRoot, gen, "telegram.json"), "utf8"), JSON.stringify({ linkCode: "FOREIGN", ownerId: 31337 }), "it stays in the archive");
+    assert.equal(lstatSync(path.join(h, "paused")).mode & 0o777, 0o644, "the stop is carried as it was");
+    assert.equal(readFileSync(path.join(h, "paused"), "utf8"), "paused");
+    // With no telegram.json the handoff writes the listener's mark into a fresh one.
+    assert.equal(await handoff(h, listener()), "accepted");
+    assert.equal(JSON.parse(readFileSync(path.join(h, "telegram.json"), "utf8")).offset, 101);
+    // Re-entry leaves it in the archive too.
+    const again = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.deepEqual(again.left, ["telegram.json"]);
+    assert.ok(existsSync(path.join(archiveRoot, gen, "telegram.json")));
+  });
+
+  // ── the Telegram state and its link record are a pair ─────────────────────
+  /** A child's telegram.json as tryLink leaves it: two linked chats, with their link times. */
+  const LINKED = JSON.stringify({ offset: 40, botId: "801", linkCode: "K7M2QX", ownerId: 111, linkedChats: [111, 222], linkedChatAt: { "111": 1000, "222": 1005 } });
+  const RECORD = JSON.stringify({ "111": 1000, "222": 1005 });
+  /** A home holding that telegram.json, the home's own, and its link record made by `record`. */
+  function linkedHome(id: string, record: ((file: string) => void) | null) {
+    const h = path.join(root, "vol", "children", id), archiveRoot = path.join(root, "vol", "archive", id), gen = `00000000-0000-4000-8000-0000000002${id.slice(-2)}`;
+    mkdirSync(h, { recursive: true });
+    writeFileSync(path.join(h, "telegram.json"), LINKED, { mode: 0o600 });
+    writeFileSync(path.join(h, "merrymen.db"), "book", { mode: 0o600 });
+    record?.(path.join(h, "telegram-promoted.json"));
+    return { h, archiveRoot, gen, dest: path.join(archiveRoot, gen) };
+  }
+
+  it("A LINK RECORD THE CARRY WILL NOT TAKE KEEPS telegram.json IN THE ARCHIVE WITH IT, so no chat the record names is new in the next home", async () => {
+    // A second name, a link to a record elsewhere, and something that is not a file at all.
+    for (const [id, record] of [
+      ["p01", (file: string) => { writeFileSync(file, RECORD, { mode: 0o600 }); linkSync(file, path.join(root, "vol", "p01-second-name")); }],
+      ["p02", (file: string) => { writeFileSync(path.join(root, "vol", "p02-elsewhere.json"), RECORD, { mode: 0o600 }); symlinkSync(path.join(root, "vol", "p02-elsewhere.json"), file); }],
+      ["p03", (file: string) => { mkdirSync(file); }],
+    ] as const) {
+      const x = linkedHome(id, record);
+      const r = archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => true });
+      assert.deepEqual(r.carried, [], id);
+      assert.deepEqual(r.left, ["telegram.json", "telegram-promoted.json"], id);
+      assert.deepEqual(r.normalised, [], id);
+      assert.deepEqual(readdirSync(x.h), [], `${id}: neither reaches the new home`);
+      assert.equal(readFileSync(path.join(x.dest, "telegram.json"), "utf8"), LINKED, `${id}: the link stays in the archive as it was`);
+      assert.ok(lstatSync(path.join(x.dest, "telegram-promoted.json")), `${id}: and its record beside it`);
+      // The new home's file is the handoff's own, with no linked chat to promote.
+      assert.equal(await handoff(x.h, listener()), "accepted", id);
+      assert.deepEqual(JSON.parse(readFileSync(path.join(x.h, "telegram.json"), "utf8")), { offset: 101, botId: null, priorBots: [] }, id);
+      // Re-entry keeps both where they are.
+      assert.deepEqual(archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => true }).left, ["telegram.json", "telegram-promoted.json"], id);
+    }
+    assert.equal(readFileSync(path.join(root, "vol", "p02-elsewhere.json"), "utf8"), RECORD, "a linked record is never followed");
+  });
+
+  it("the pair holds when the stage is rebuilt after a crash before the rename", () => {
+    const x = linkedHome("p11", (file) => { writeFileSync(file, RECORD, { mode: 0o600 }); linkSync(file, path.join(root, "vol", "p11-second-name")); });
+    let calls = 0;
+    assert.throws(() => archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => ++calls < 3 }), /Lost the tenant lease/);
+    assert.deepEqual(readdirSync(path.join(x.archiveRoot, `.carry-${x.gen}`)), [], "nothing Telegram was staged");
+    const r = archiveTenantHome({ home: x.h, archiveRoot: x.archiveRoot, generation: x.gen, mayWrite: () => true });
+    assert.deepEqual(r.left, ["telegram.json", "telegram-promoted.json"]);
+    assert.equal(existsSync(path.join(x.h, "telegram.json")), false);
+    assert.equal(readFileSync(path.join(x.dest, "telegram.json"), "utf8"), LINKED);
+  });
+
+  it("with no link record in the home, telegram.json is carried as it always was; with both the home's own, they are carried together", () => {
+    const none = linkedHome("p21", null);
+    const a = archiveTenantHome({ home: none.h, archiveRoot: none.archiveRoot, generation: none.gen, mayWrite: () => true });
+    assert.deepEqual(a.carried, ["telegram.json"]);
+    assert.deepEqual(a.left, []);
+    assert.equal(readFileSync(path.join(none.h, "telegram.json"), "utf8"), LINKED, "byte for byte");
+    const both = linkedHome("p22", (file) => writeFileSync(file, RECORD, { mode: 0o600 }));
+    const b = archiveTenantHome({ home: both.h, archiveRoot: both.archiveRoot, generation: both.gen, mayWrite: () => true });
+    assert.deepEqual(b.carried, ["telegram-promoted.json", "telegram.json"]);
+    assert.deepEqual(b.left, []);
+    assert.equal(readFileSync(path.join(both.h, "telegram-promoted.json"), "utf8"), RECORD);
+    assert.equal(readFileSync(path.join(both.h, "telegram.json"), "utf8"), LINKED);
+  });
+
+  it("a telegram.json an earlier build staged without the record the archive kept goes back to the archive, never to the new home alone", () => {
+    for (const [id, archiveHasLink] of [["p31", false], ["p32", true]] as const) {
+      // As an earlier build left it: the home renamed, its record kept in the
+      // archive, telegram.json staged alone — and, after a crash past step 4,
+      // removed from the archive, so the stage holds the only copy.
+      const archiveRoot = path.join(root, "vol", "archive", id), gen = `00000000-0000-4000-8000-0000000003${id.slice(-2)}`, dest = path.join(archiveRoot, gen);
+      const stage = path.join(archiveRoot, `.carry-${gen}`), h = path.join(root, "vol", "children", id);
+      mkdirSync(dest, { recursive: true }); mkdirSync(stage, { recursive: true });
+      writeFileSync(path.join(dest, "telegram-promoted.json"), RECORD, { mode: 0o600 });
+      linkSync(path.join(dest, "telegram-promoted.json"), path.join(root, "vol", `${id}-second-name`));
+      if (archiveHasLink) writeFileSync(path.join(dest, "telegram.json"), LINKED, { mode: 0o600 });
+      writeFileSync(path.join(stage, "telegram.json"), archiveHasLink ? JSON.stringify({ offset: 0 }) : LINKED, { mode: 0o600 });
+      writeFileSync(path.join(stage, "paused"), "paused", { mode: 0o600 });
+      const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+      assert.deepEqual(r.carried, ["paused"], id);
+      assert.deepEqual(r.left, ["telegram.json", "telegram-promoted.json"], id);
+      assert.equal(existsSync(path.join(h, "telegram.json")), false, `${id}: never the new home's`);
+      assert.equal(readFileSync(path.join(dest, "telegram.json"), "utf8"), LINKED, `${id}: the archive keeps the original, or the only copy`);
+      assert.equal(existsSync(stage), false, id);
+    }
+  });
+
+  it("a crash after the stage keeps what was made of it; a carry an earlier build staged moves as it was, for the registered home's pass", () => {
+    // This build: normalised as staged, so a crash before the move changes nothing.
+    const h = path.join(root, "vol", "children", "c41"), archiveRoot = path.join(root, "vol", "archive", "c41"), gen = "00000000-0000-4000-8000-000000000141";
+    mkdirSync(h, { recursive: true });
+    writeFileSync(path.join(h, "telegram.json"), JSON.stringify({ linkCode: "K7M2QX" })); chmodSync(path.join(h, "telegram.json"), 0o644);
+    let calls = 0;
+    assert.throws(() => archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => ++calls < 4 }), /Lost the tenant lease/);
+    const staged = path.join(archiveRoot, `.carry-${gen}`, "telegram.json");
+    assert.deepEqual(JSON.parse(readFileSync(staged, "utf8")), { offset: 0, linkCode: "K7M2QX" });
+    assert.equal(lstatSync(staged).mode & 0o777, 0o600);
+    archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.deepEqual(JSON.parse(readFileSync(path.join(h, "telegram.json"), "utf8")), { offset: 0, linkCode: "K7M2QX" });
+    // An earlier build: the stage holds the raw copy, and the home is archived.
+    const h2 = path.join(root, "vol", "children", "c42"), root2 = path.join(root, "vol", "archive", "c42"), gen2 = "00000000-0000-4000-8000-000000000142";
+    mkdirSync(path.join(root2, gen2), { recursive: true }); mkdirSync(path.join(root2, `.carry-${gen2}`), { recursive: true });
+    const raw = path.join(root2, `.carry-${gen2}`, "telegram.json");
+    writeFileSync(raw, JSON.stringify({ linkCode: "K7M2QX" })); chmodSync(raw, 0o644);
+    const r = archiveTenantHome({ home: h2, archiveRoot: root2, generation: gen2, mayWrite: () => true });
+    assert.deepEqual(r.normalised, []);
+    assert.deepEqual(r.carried, ["telegram.json"]);
+    assert.equal(lstatSync(path.join(h2, "telegram.json")).mode & 0o777, 0o644, "moved as it was");
+    assert.deepEqual(normaliseCarriedFile(path.join(h2, "telegram.json"), () => true), ["telegram.json: offset", "telegram.json: mode"]);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(h2, "telegram.json"), "utf8")), { offset: 0, linkCode: "K7M2QX" });
+  });
+
+  it("normaliseCarriedFile never follows a link, never touches a file with a second name or one others can write, writes nothing without the writer, and never throws", () => {
+    const dir = path.join(root, "vol", "norm"); mkdirSync(dir, { recursive: true });
+    const target = path.join(root, "vol", "norm-target.json");
+    writeFileSync(target, JSON.stringify({ linkCode: "X" })); chmodSync(target, 0o644);
+    symlinkSync(target, path.join(dir, "telegram.json"));
+    assert.deepEqual(normaliseCarriedFile(path.join(dir, "telegram.json"), () => true), []);
+    assert.equal(readFileSync(target, "utf8"), JSON.stringify({ linkCode: "X" }));
+    assert.equal(lstatSync(target).mode & 0o777, 0o644);
+    writeFileSync(path.join(dir, "telegram-promoted.json"), "{}"); chmodSync(path.join(dir, "telegram-promoted.json"), 0o644);
+    linkSync(path.join(dir, "telegram-promoted.json"), path.join(dir, "second-name"));
+    assert.deepEqual(normaliseCarriedFile(path.join(dir, "telegram-promoted.json"), () => true), []);
+    assert.equal(lstatSync(path.join(dir, "telegram-promoted.json")).mode & 0o777, 0o644);
+    for (const mode of [0o666, 0o664, 0o660, 0o606, 0o744, 0o4644]) {
+      const file = path.join(dir, "paused"); rmSync(file, { force: true });
+      writeFileSync(file, "paused"); chmodSync(file, mode);
+      assert.deepEqual(normaliseCarriedFile(file, () => true), [], mode.toString(8));
+      assert.equal(lstatSync(file).mode & 0o7777, mode, mode.toString(8));
+    }
+    const other = path.join(root, "vol", "norm-writer"); mkdirSync(other, { recursive: true });
+    writeFileSync(path.join(other, "telegram.json"), JSON.stringify({ linkCode: "X" })); chmodSync(path.join(other, "telegram.json"), 0o644);
+    assert.deepEqual(normaliseCarriedFile(path.join(other, "telegram.json"), () => false), [], "not the writer: nothing written");
+    assert.equal(readFileSync(path.join(other, "telegram.json"), "utf8"), JSON.stringify({ linkCode: "X" }));
+    assert.equal(lstatSync(path.join(other, "telegram.json")).mode & 0o777, 0o644);
+    assert.deepEqual(normaliseCarriedFile(path.join(other, "missing.json"), () => true), [], "no file, nothing to say");
   });
 });
 
@@ -680,6 +934,84 @@ describe("registerAttestedGapSource", () => {
     await registerAttestedGapSource({ ...p.args, chainRead: null });
     assert.deepEqual({ ...(p.f.raw.prepare("SELECT chain_from_block, chain_head FROM ledger_resume_attestations").get() as object) }, { chain_from_block: null, chain_head: null });
   });
+  describe("the ordinary gates on the next pass, after the seeds and before the first worker arms", () => {
+    const dek = Buffer.alloc(32, 9);
+    /** What the spawn path writes before its later gates: the restored practice book, its paper basis, the live seed, a floor, the day's energy. */
+    function seed(home: string, account: string, extra?: (raw: DatabaseSync) => void) {
+      const book = new DatabaseSync(path.join(home, "merrymen.db"));
+      try {
+        book.prepare("INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares, updated_at) VALUES (?, 90, 0, 100, '{}', 1)").run(account);
+        book.prepare("INSERT INTO cost_basis VALUES (?, 'paper', 'COIN', '10', '20', 1)").run(account);
+        book.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '10', '20', 1)").run(account);
+        book.prepare("INSERT INTO position_floors VALUES (?, 'live', 'COIN', 1500, 'r1', 'entry', 1)").run(account);
+        // seedEnergyForChild, which runs before the privacy proof and the handoff.
+        book.prepare("INSERT INTO energy_days (agent_id, day, reviews, entries) VALUES (?, '2026-10-05', 3, 1)").run(account);
+        extra?.(book);
+      } finally { book.close(); }
+    }
+    const gates = async (p: Awaited<ReturnType<typeof prepared>>) => {
+      const o = { tenant: p.f.tenant, smartAccount: p.f.account, chainId: 4663, home: p.home, volume: p.volume, shared: p.f.shared, lease: p.lease, dialect: "sqlite" as const };
+      const restored = await restoreLedgerImport({ ...o, dek });
+      await registerLedgerSource(o);
+      return restored;
+    };
+    const approvalState = (p: Awaited<ReturnType<typeof prepared>>, state: string) => p.f.raw.prepare("UPDATE ledger_resume_approvals SET state = ?").run(state);
+
+    it("an attested book whose approval registered it is accepted with only its seeds in it, registered or applied", async () => {
+      const p = await prepared();
+      await registerAttestedGapSource(p.args);
+      seed(p.home, p.f.account);
+      assert.equal(await gates(p), "present", "registered: the first worker has not started");
+      approvalState(p, "applied");
+      assert.equal(await gates(p), "present", "applied: started, and perhaps died before it armed");
+    });
+
+    it("refuses as before: a row the spawn path never seeds, a withdrawn approval, another registration's digest, a tampered receipt, and an ordinary new book", async () => {
+      const refusedWith = async (label: string, make: (p: Awaited<ReturnType<typeof prepared>>) => void | Promise<void>) => {
+        const p = await prepared();
+        await registerAttestedGapSource(p.args);
+        seed(p.home, p.f.account);
+        await make(p);
+        const o = { tenant: p.f.tenant, smartAccount: p.f.account, chainId: 4663, home: p.home, volume: p.volume, shared: p.f.shared, lease: p.lease, dialect: "sqlite" as const };
+        await assert.rejects(restoreLedgerImport({ ...o, dek }), /refused/, `${label}: restoreLedgerImport`);
+        await assert.rejects(registerLedgerSource(o), /refused/, `${label}: registerLedgerSource`);
+      };
+      await refusedWith("a trade with no agent", (p) => {
+        const book = new DatabaseSync(path.join(p.home, "merrymen.db"));
+        try { book.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'swap', 'x', 1, 'paper', 1)").run(p.f.account); }
+        finally { book.close(); }
+      });
+      await refusedWith("an event with no agent", (p) => {
+        const book = new DatabaseSync(path.join(p.home, "merrymen.db"));
+        try { book.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'info', 'x', 1)").run(p.f.account); }
+        finally { book.close(); }
+      });
+      for (const state of ["refused", "revoked"]) await refusedWith(`an approval ${state}`, (p) => { approvalState(p, state); });
+      await refusedWith("an attestation recording another digest", (p) => { p.f.raw.prepare("UPDATE ledger_resume_attestations SET receipt_digest = ?").run("0".repeat(64)); });
+      await refusedWith("an attestation for another account", (p) => { p.f.raw.prepare("UPDATE ledger_resume_attestations SET smart_account = ?").run(addr(0xbad)); });
+      await refusedWith("an approval of other evidence", (p) => { p.f.raw.prepare("UPDATE ledger_resume_approvals SET evidence_digest = ?").run("f".repeat(64)); });
+      await refusedWith("a receipt bound to another digest", (p) => {
+        const row = p.f.raw.prepare("SELECT bindings_json FROM tenant_ledger_import WHERE tenant = ?").get(p.f.tenant) as { bindings_json: string };
+        const bound = JSON.parse(row.bindings_json) as Record<string, unknown>;
+        p.f.raw.prepare("UPDATE tenant_ledger_import SET bindings_json = ? WHERE tenant = ?").run(JSON.stringify({ ...bound, mutableDigest: "1".repeat(64) }), p.f.tenant);
+      });
+      // A genuinely new book (no history, no attestation) with the same rows in it.
+      const n = await fixture();
+      n.raw.exec("DELETE FROM agents; DELETE FROM trades; DELETE FROM equity; DELETE FROM positions; DELETE FROM cost_basis; DELETE FROM position_floors; DELETE FROM mirror_state");
+      const mount = path.join(root, `mount-new-${n.id}`), homeRoot = path.join(mount, "fleet");
+      mkdirSync(homeRoot, { recursive: true });
+      const st = lstatSync(mount, { bigint: true });
+      const volume: LedgerImportVolume = { id: `vol_new_${n.id}`, mountPath: mount, homeRoot, device: String(st.dev), inode: String(st.ino) };
+      const home = path.join(homeRoot, "children", n.tenant);
+      const lease: TenantLease = { tenant: n.tenant as `0x${string}`, backend: "postgres", healthy: () => true, async release() {} };
+      const o = { tenant: n.tenant, smartAccount: n.account, chainId: 4663, home, volume, shared: n.shared, lease, dialect: "sqlite" as const };
+      await registerLedgerSource(o);
+      seed(home, n.account);
+      await assert.rejects(registerLedgerSource(o), /refused/, "an ordinary new book's receipt vouches for no seeds");
+      await assert.rejects(restoreLedgerImport({ ...o, dek }), /refused/);
+    });
+  });
+
   it("an attestations table from an earlier build gains the chain window's columns", async () => {
     const f = await fixture();
     f.raw.exec(`CREATE TABLE ledger_resume_attestations (generation TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE, tenant TEXT NOT NULL, smart_account TEXT NOT NULL,

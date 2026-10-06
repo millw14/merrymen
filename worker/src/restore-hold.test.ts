@@ -431,7 +431,9 @@ describe("a held tenant's practice reset", () => {
     const hold = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true")[0] as ts.IfStatement;
     assert.ok(gate.getEnd() < hold.getStart());
     const holder = calls(hold.thenStatement, "spawnHolder")[0]!;
-    assert.equal(holder.arguments.at(-1)!.getText(), "honour", "so the hold does not look at the same reset again this pass");
+    // `honour`, and after it only the registered book's generation (normaliseRegisteredHome).
+    assert.equal(holder.arguments[5]!.getText(), "honour", "so the hold does not look at the same reset again this pass");
+    assert.equal(holder.arguments.length, 7);
   });
 
   it("retryHold HONOURS IT ONLY AFTER ITS OWN RESTORE FAILED, INSIDE THE RETRY'S CLAIM, AND HANDS BACK ONLY THROUGH handHoldBack", () => {

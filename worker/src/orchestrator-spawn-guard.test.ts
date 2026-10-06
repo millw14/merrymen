@@ -224,6 +224,8 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
     await assert.doesNotReject(reconcile(), "the refusal does not reject through reconcile");
     assert.equal(spawned.length, 0, "no worker polls a bot whose offset could not be handed over");
     assert.ok(alerts(t.tenant).some((l) => /offset/.test(l)), said.join("\n"));
+    // Which check it was, by its fixed code: here the listener's row.
+    assert.ok(alerts(t.tenant).some((l) => /offset not handed over \(Error HANDOFF_ROW\)/.test(l)), said.join("\n"));
     assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
     assert.equal(t.released.n, 0);
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");

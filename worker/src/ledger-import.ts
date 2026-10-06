@@ -232,7 +232,25 @@ function volumeOkay(volume: LedgerImportVolume, home: string, tenant: string): v
   parentDirectories(home);
   if (String(lstatSync(home, { bigint: true }).dev) !== volume.device) throw refuse();
 }
-function existingBookIdentity(file: string, account: string, chainId: number, volume: LedgerImportVolume): void {
+/**
+ * WHAT THE SPAWN PATH ITSELF PUTS INTO A BOOK BEFORE ITS FIRST WORKER ARMS:
+ * the practice book restored from its checkpoint (paper_book, and the paper
+ * rows of cost_basis), the live cost basis and floors the seeds restore
+ * (seedBasisForChild, completeAttestedSeed) and the day's energy
+ * (seedEnergyForChild). `agents` is the worker's own, written at arm
+ * (store.ts ensureAgent), and nothing else in these tables is written before.
+ */
+const SEEDED_BEFORE_ARM: readonly Table[] = ["paper_book", "cost_basis", "position_floors", "energy_days"];
+
+/**
+ * The book at `file` is this account's, on this volume: "armed" (its agent
+ * row is there), "empty" (no agent row and no row at all), or "seeded" (no
+ * agent row yet, and rows only in SEEDED_BEFORE_ARM). "seeded" is what a
+ * spawn that wrote the seeds and was then refused before its fork leaves, and
+ * a caller accepts it only for a book attestedBeforeArm vouches for; any
+ * other table holding rows with no agent row refuses here.
+ */
+function existingBookIdentity(file: string, account: string, chainId: number, volume: LedgerImportVolume): "armed" | "empty" | "seeded" {
   privateBook(file);
   if (String(lstatSync(file, { bigint: true }).dev) !== volume.device) throw refuse();
   const raw = new DatabaseSync(file, { readOnly: true });
@@ -241,13 +259,68 @@ function existingBookIdentity(file: string, account: string, chainId: number, vo
     // their ownership with bounded-result queries, without exporting/truncating them.
     const agents = raw.prepare("SELECT smart_account,chain_id FROM agents LIMIT 2").all() as Array<{ smart_account: string; chain_id: number }>;
     if (agents.length > 1 || agents.some(a => a.smart_account.toLowerCase() !== account || a.chain_id !== chainId)) throw refuse();
+    let seeded = false;
     for (const table of names) {
       if (table === "discovered_pools") continue;
       const key = table === "agents" ? "smart_account" : "agent_id";
       if (raw.prepare(`SELECT 1 FROM ${table} WHERE LOWER(${key}) <> ? OR ${key} IS NULL LIMIT 1`).get(account)) throw refuse();
-      if (agents.length === 0 && raw.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw refuse();
+      if (agents.length === 0 && raw.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) {
+        if (!SEEDED_BEFORE_ARM.includes(table)) throw refuse();
+        seeded = true;
+      }
     }
+    return agents.length ? "armed" : seeded ? "seeded" : "empty";
   } finally { raw.close(); }
+}
+
+/**
+ * AN ATTESTED-GAP BOOK WHOSE FIRST WORKER HAS NOT ARMED, AND ONLY THAT.
+ *
+ * A registered book goes through the ordinary spawn path (ledger-resume.ts
+ * Phase C), which writes its seeds — the restored practice book, the basis,
+ * the floors, the day's energy — before the later gates: the owner's
+ * privacy proof and offset handoff, the source barrier, the grant re-check,
+ * the late refusals and the local process cap. When one of those refused,
+ * no worker armed, so the book held seed rows and no agent row, and every
+ * later pass's existingBookIdentity refused it ("persistent original book is
+ * unconfirmed") for good: six admitted tenants sat there, held, with nothing
+ * left that would ever change.
+ *
+ * Such a book is accepted, unarmed and seeded, only when every link from the
+ * receipt to the operator's approval holds, in this transaction: the receipt
+ * names an identity equal to its generation (registerAttestedGapSource binds
+ * the book to it, and the caller has already proved the book carries it at
+ * the receipt's inode); that generation's attestation is for this tenant,
+ * account and chain; the receipt's bound digest is the one the attestation
+ * recorded, and is hash('attested-gap:' + approval + ':' + evidence) for the
+ * approval that attestation names; and that approval is for this tenant,
+ * account and chain, registered this generation, and is `registered` (its
+ * first worker not yet started) or `applied` (started, perhaps never armed).
+ * A refused or revoked approval, another generation's book, a receipt from
+ * any other registration, or a row in a table the spawn path never seeds,
+ * refuses as before.
+ */
+async function attestedBeforeArm(db: Db, tenant: string, account: string, chainId: number, receipt: Record<string, unknown>, dialect: Dialect): Promise<boolean> {
+  const generation = receipt.generation;
+  if (typeof generation !== "string" || !UUID.test(generation) || receipt.source_identity !== generation) return false;
+  // Asked only where an attested book is possible, and never by an error: a
+  // missing table aborts a Postgres transaction, so its absence is looked up.
+  for (const table of ["ledger_resume_attestations", "ledger_resume_approvals"] as const) {
+    const found = dialect === "postgres"
+      ? (await db.prepare(`SELECT to_regclass('${table}') AS name`).get() as { name?: unknown } | undefined)?.name
+      : (await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { name?: unknown } | undefined)?.name;
+    if (!found) return false;
+  }
+  const lock = dialect === "postgres" ? " FOR SHARE" : "";
+  const bound = JSON.parse(String(receipt.bindings_json)) as Bindings;
+  const a = await db.prepare(`SELECT approval_id, tenant, smart_account, chain_id, receipt_digest FROM ledger_resume_attestations WHERE generation = ?${lock}`)
+    .get(generation) as Record<string, unknown> | undefined;
+  if (!a || a.tenant !== tenant || a.smart_account !== account || Number(a.chain_id) !== chainId || a.receipt_digest !== bound.mutableDigest) return false;
+  const p = await db.prepare(`SELECT tenant, smart_account, chain_id, evidence_digest, state, generation FROM ledger_resume_approvals WHERE approval_id = ?${lock}`)
+    .get(a.approval_id) as Record<string, unknown> | undefined;
+  return !!p && p.tenant === tenant && p.smart_account === account && Number(p.chain_id) === chainId && p.generation === generation
+    && hash(`attested-gap:${String(a.approval_id)}:${String(p.evidence_digest)}`) === bound.mutableDigest
+    && (p.state === "registered" || p.state === "applied");
 }
 function readSourceIdentity(raw: DatabaseSync, tenant: string, account: string, chainId: number): string {
   try {
@@ -411,7 +484,7 @@ export async function restoreLedgerImport(o: {
       if (row.source_inode !== String(lstatSync(file, { bigint: true }).ino)) throw refuse();
       verifySourceIdentity(file, tenant, account, o.chainId, row.source_identity);
       if (!pending) {
-        existingBookIdentity(file, account, o.chainId, o.volume);
+        if (existingBookIdentity(file, account, o.chainId, o.volume) === "seeded" && !(await attestedBeforeArm(db, tenant, account, o.chainId, row, dialect))) throw refuse();
         leaseOkay(o.lease, tenant); return "present";
       }
       if (pending.generation !== row.generation || pending.sourceDigest !== row.source_digest || pending.volumeId !== o.volume.id) throw refuse();
@@ -506,21 +579,23 @@ export async function registerLedgerSource(o: {
   await o.shared.tx(async db => {
     leaseOkay(o.lease, tenant);
     const current = await grantBinding(db, tenant, dialect, true);
-    const prior = await db.prepare(`SELECT state,target_volume_id,bindings_json,source_inode,source_identity FROM tenant_ledger_import WHERE tenant = ?${dialect === "postgres" ? " FOR UPDATE" : ""}`).get(tenant) as Record<string, unknown> | undefined;
+    const prior = await db.prepare(`SELECT generation,state,target_volume_id,bindings_json,source_inode,source_identity FROM tenant_ledger_import WHERE tenant = ?${dialect === "postgres" ? " FOR UPDATE" : ""}`).get(tenant) as Record<string, unknown> | undefined;
     if (current.smartAccount !== account || current.chainId !== o.chainId) throw refuse();
     if (prior && prior.state !== "deleted") {
       const original = JSON.parse(String(prior.bindings_json)) as Bindings;
       if (prior.state !== "consumed" || prior.target_volume_id !== o.volume.id || original.grant.smartAccount !== account || original.grant.chainId !== o.chainId) throw refuse();
-      existingBookIdentity(file, account, o.chainId, o.volume);
+      const book = existingBookIdentity(file, account, o.chainId, o.volume);
       if (prior.source_inode !== String(lstatSync(file, { bigint: true }).ino)) throw refuse();
       verifySourceIdentity(file, tenant, account, o.chainId, prior.source_identity);
+      if (book === "seeded" && !(await attestedBeforeArm(db, tenant, account, o.chainId, prior, dialect))) throw refuse();
       return;
     }
     if (prior?.state === "deleted") {
       const original = JSON.parse(String(prior.bindings_json)) as Bindings;
       if (!present(file) || prior.target_volume_id !== o.volume.id || original.grant.smartAccount !== account || original.grant.chainId !== o.chainId
           || original.grant.owner !== current.owner || prior.source_inode !== String(lstatSync(file, { bigint: true }).ino)) throw refuse();
-      existingBookIdentity(file, account, o.chainId, o.volume);
+      // A deleted receipt reattaches only a book its worker armed, or an empty one.
+      if (existingBookIdentity(file, account, o.chainId, o.volume) === "seeded") throw refuse();
       verifySourceIdentity(file, tenant, account, o.chainId, prior.source_identity);
       const raw = new DatabaseSync(file, { readOnly: true });
       try { assertSettled(raw); await assertLedgerSourceContinuity(wrapSqlite(raw), db, tenant); }
