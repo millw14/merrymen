@@ -19,6 +19,12 @@ reviewed the exact rows and a backup exists.
 The order is: **preview → the owner reviews → backup → apply → preview the
 tenant again → approve → rollout.**
 
+**The tool books only a tenant that refusal holds.** It checks this in
+Postgres, not on trust (see [Which tenants it books](#which-tenants-it-books)).
+A tenant still running on its own book is refused. Booking it would race its
+mirror for the same operation, and the mirror skips any trade whose hash is
+already in Postgres.
+
 ## What it books, and what it refuses
 
 The tool runs admission's own chain check, from the same block admission
@@ -27,7 +33,7 @@ transaction's receipt and block, and classifies every fact:
 
 | Class | What it is | What it writes |
 |---|---|---|
-| `session-trade` | The session key's swap: USDG one way, one token the other, read across the account and its custody vault | A `trades` row, as the in-flight reconciler writes a landed operation the book lost: `kind 'swap'`, `status 'landed'`, `basis_source 'receipt'`, the two legs, the fill (side, quantity and cash from the Transfer logs), gas from the EntryPoint's own event (sponsored or owner-paid), `created_at` at the block time |
+| `session-trade` | The session key's swap: USDG one way, one token the other, read across the account and its custody vault | A `trades` row, as the in-flight reconciler writes a landed operation the book lost: `kind 'swap'`, `status 'landed'`, `basis_source 'receipt'`, the two legs, the fill (side, quantity and cash from the Transfer logs), gas from the EntryPoint's own event (sponsored or owner-paid), `created_at` at the block time. **Only when the cost-basis snapshot already reflects the trade** (see below) |
 | `session-no-movement` | A session-key operation that moved nothing across the book's edge (an approval, a key install, a probe) | The reconciler's notional-0 row, so the operation is counted |
 | `session-reverted` | A session-key operation that the EntryPoint recorded as failed | A resolved revert's row: `status 'reverted'`, its gas, notional 0 |
 | `operation-leg` | A USDG transfer inside one of those operations | Nothing extra: the operation's row carries its transaction hash, which answers it |
@@ -44,11 +50,44 @@ The `unresolved` class covers these cases:
 - USDG arrived from another hosted account or from the account's own vault.
 - A USDG transfer of the account sits outside its operation's execution.
 - The fact is not yet 64 blocks deep, or it landed before the current
-  accounting epoch opened.
-- A receipt could not be read.
+  accounting epoch opened. The current epoch has no trade, flow or equity
+  row yet, so its opening cannot be dated.
+- The fact landed after admission's chain refusal of the tenant, or within a
+  minute before it. Admission never found it missing from the book a worker
+  would run on. Let admission refuse the tenant again, then preview again.
+- A trade the cost-basis snapshot does not reflect (next section).
+- A receipt or a balance could not be read.
 
 **One unresolved fact blocks the whole tenant.** Escalate it to Milla and
 Codex with the preview file.
+
+### A trade books only if the cost-basis snapshot reflects it
+
+When a tenant is admitted, the new book takes its cost basis from Postgres's
+`cost_basis` table, for each symbol that Postgres's `positions` table shows
+held. Both tables are the lost book's last mirrored snapshot. The in-flight
+reconciler books the basis beside every row it writes. This tool writes
+neither table, so a booked trade that the snapshot does not reflect would
+cause one of two faults:
+
+- **After a buy:** the new book holds the token with no basis, and both the
+  stop-loss and the take-profit skip it.
+- **After a sell:** the new book restores a basis for a position it no longer
+  holds.
+
+So a `session-trade` is booked only in one of two cases. Each is checked over
+every booked trade in that token, at the time of the last one:
+
+- **The snapshot holds the token.** Its `positions` row and its live
+  `cost_basis` row were both written at or after that trade.
+- **The snapshot holds none of it.** The book (the account and its custody
+  vault) also holds none on chain now. The tool reads this with `balanceOf` at
+  `latest`.
+
+In any other case the trade and its USDG leg are `unresolved`, and so is the
+tenant. Each trade's `evidence.holding` shows the position, the basis, their
+times and the balances read. Resolving such a trade needs a reviewed basis
+decision.
 
 The tool never does any of the following:
 
@@ -66,28 +105,60 @@ Two consequences need a reviewer's eye:
 - **A deposit after the last equity mark** shows as drift at the worker's
   first look. The worker marks contributions unknown and suppresses the fee
   rather than guess. This is existing fail-closed behaviour.
-- **A booked trade does not move the cost basis.** The attested book is seeded
-  from the lost book's last mirrored snapshot. If that snapshot was taken
-  before the trade, the basis is stale by that trade. Check it on the
-  dashboard at `exits-only`, before `trade`.
+- **A booked trade does not move the cost basis.** It is booked only when
+  the snapshot already reflects it, as described above. Still check the
+  positions, basis and floors on the dashboard at `exits-only`, before
+  `trade`.
 
 ## The three tenants held on 2026-10-06
 
 | Tenant | Line | Shape | Expected |
 |---|---|---|---|
-| `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row |
+| `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row, if the cost-basis snapshot reflects the trade. Otherwise `unresolved`: escalate for a basis decision |
 | `0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5` | 1 op, 0 transfers | An operation with no USDG leg | `session-no-movement` books the reconciler's row. A root-key `owner-operation` blocks: escalate |
 | `0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d` | 0 ops, 1 transfer | A lone USDG transfer | `deposit` → one `flows` row. Outbound, or from a hosted account or vault, blocks |
 
 The preview settles which shape each tenant is in. These are expectations, not
 results.
 
+## Which tenants it books
+
+Postgres does not record which tenants a deploy's `MERRYMEN_FLEET_ROLLOUT`
+runs. So the tool proves from Postgres that the tenant is held, and refuses
+the preview (`refused:`, exit code `2`) unless all of the following are true:
+
+- **Admission's newest decision for the tenant is a chain refusal.** This is
+  its newest `ledger_resume_approvals` row that was not revoked, in state
+  `refused`, with a reason starting "the chain holds operations or USDG
+  transfers for the account that Postgres lacks". A revoked approval is
+  skipped because it decided nothing. Admission drains the old book's tail
+  into Postgres before reading the chain, so this refusal shows that the old
+  book lacked those facts too.
+- **Nothing has written for the tenant since that refusal.** Its heartbeat
+  (`agents.beat_at`) and its newest mirror cursor (`mirror_state.updated_at`)
+  are no later than the refusal. All three times come from the orchestrator's
+  clock.
+- **Its book has been quiet for 10 minutes**, by the same two timestamps.
+
+On top of that, only facts that landed at least a minute before the refusal
+are booked. A later fact is `unresolved`, which covers a worker running under
+a stuck mirror. The apply checks the heartbeat, the mirror cursor, the mode,
+the approvals, the attestations and the snapshot again, inside its
+transaction. If any of them moved since the preview, it refuses.
+
+If the tenant has no chain refusal, the preview says so. Run admission for it
+as [fleet-resume.md](fleet-resume.md) describes, so that admission refuses it
+and names what is missing. Then preview here again.
+
 ## Before you start
 
-- **The tenant must stay held.** Leave it out of `MERRYMEN_FLEET_ROLLOUT`.
+- **Keep the tenant held.** Leave it out of `MERRYMEN_FLEET_ROLLOUT`. The
+  tool also refuses a tenant that has run since its refusal (above).
 - **No approval may be open.** If one is, the preview refuses and prints the
   exact `MERRYMEN_RESUME_REVOKE=0x<tenant>:<digest>` to set. Set it, deploy,
   and start again. A booking changes the evidence that approval was given on.
+  The revoked approval is passed over, so the chain refusal before it still
+  holds the tenant.
 - **Where to run it.** Use a shell that can reach the shared Postgres. A
   container in this project can, and the hosted image already installs the
   `pg` driver and `tsx`. `DATABASE_URL` comes from the existing private
@@ -97,7 +168,8 @@ results.
 - **The RPC.** The default is the public Robinhood Chain mainnet RPC.
   `MERRYMEN_CHAIN_GAP_RPC` selects another. The transport admits only
   `eth_chainId`, `eth_blockNumber`, `eth_getLogs`, `eth_getTransactionReceipt`,
-  `eth_getBlockByNumber`, and `eth_call` for `decimals()` at `latest`.
+  `eth_getBlockByNumber`, and `eth_call` at `latest` for exactly two view
+  calls: `decimals()`, and `balanceOf` of one address.
 
 ## 1. Preview
 
@@ -123,7 +195,7 @@ anything not booked, any notes, and:
 chain-gap booking READY — tenant 0x…, account 0x…, epoch 2: 2 fact(s) on chain that Postgres lacks, 1 row(s) proposed
   operation-leg: USDG in 4.965021 in tx 0x… log 11 at block 79494846 → covered by op:0x…
   session-trade: operation 0x… in tx 0x… at block 79494846 → trades row
-  note: a trade is booked without touching cost_basis, …
+  note: a trade is booked without touching cost_basis, positions or position_floors, because the snapshot … already reflects it …
 previewDigest 3f…
 PREVIEW ONLY — 0 database writes. The plan is in /…/preview.json.
 ```
@@ -143,14 +215,21 @@ Send the preview file to Milla. For each item, check:
 - the class and its `why`;
 - the proposed row, column by column;
 - the `evidence`: block hash, validator, payer, the book's net movement and
-  the fill amounts;
+  the fill amounts, and for a trade its `holding` (the position and basis
+  rows, their times, and the balances read);
 - the `remaining` list, which must be empty;
 - the `warnings`.
 
-The `previewDigest` is what the review approves. It covers the code that
-produced the preview (by file digest), the database (by host, port and name),
-every Postgres fact the plan depends on, and every proposed row. It does not
-cover the time of the preview or the chain head.
+The `previewDigest` is what the review approves. It covers:
+
+- the code that produced the preview, by file digest;
+- the database, by host, port and name;
+- every Postgres fact the plan depends on, including the tenant's approvals,
+  heartbeat, mirror cursor, positions and cost basis;
+- the balances read;
+- every proposed row.
+
+It does not cover the time of the preview or the chain head.
 
 ## 3. Backup
 
@@ -181,11 +260,16 @@ Then, in **one transaction**, the apply:
 
 1. locks the agent row;
 2. compares every Postgres fact again (compare-and-set), refusing if any
-   changed;
+   changed. This includes the tenant's heartbeat, mirror cursor, mode,
+   approvals, attestations, positions and cost basis, so a tenant that woke
+   up after the preview is refused;
 3. inserts exactly the proposed rows and reads each one back;
 4. proves the flows are still distinct and that admission's chain-fact rule
    is now answered for every fact;
-5. records one receipt per row in `chain_gap_bookings`.
+5. records one receipt per row in `chain_gap_bookings`. Each receipt also
+   records the tenant's admission state at that moment (`admission_json`):
+   its approvals, attestations, heartbeat and mirror cursor. The revert is
+   decided against this.
 
 Receipts are unique per (account, epoch, `op:<userOpHash>` or
 `log:<tx>#<log>`) while applied. Any failure rolls the whole transaction back.
@@ -241,12 +325,27 @@ node --import tsx worker/src/chain-gap-booking-cli.ts \
 
 In one transaction, the revert:
 
-- verifies the report against its own digest and against the receipts;
+- verifies the report against its own digest and against the receipts. The
+  report's apply time and admission state must be the ones the receipts
+  hold;
 - refuses if any row is no longer exactly as written;
-- refuses if an approval of the tenant moved to `archiving`, `archived`,
-  `registered` or `applied` after the apply. The attested book counts those
-  rows, and removing them would leave it short of its attestation;
+- refuses if anything has relied on the rows since the apply. It compares
+  what the database records now with the receipts' `admission_json`, and
+  never compares one machine's clock with another's. It refuses for any of
+  the following:
+  - an attested book is in use for the tenant;
+  - an attestation was recorded after the apply;
+  - an approval created after the apply is still `approved`. Revoke it first;
+  - an approval created after the apply reached `archiving`, `archived`,
+    `registered` or `applied`, or minted a generation or archived a home on
+    its way to `refused` or `revoked`;
+  - an approval that existed at the apply has changed;
+  - the tenant's heartbeat or mirror cursor moved, which means a worker
+    wrote its book;
 - removes the rows and marks each receipt `reverted`, keeping the row in full.
+
+An approval created after the apply that was refused or revoked before it
+minted anything did not rely on the rows, so it does not block a revert.
 
 Running it a second time prints `ALREADY REVERTED` and changes nothing.
 

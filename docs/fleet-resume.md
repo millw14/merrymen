@@ -291,8 +291,12 @@ Public chain data only; look each one up as printed. Then:
 3. Book what is missing with the reviewed operator tool,
    [docs/chain-gap-booking.md](chain-gap-booking.md): preview, the owner of
    the books reviews it, backup, apply, preview the tenant again here, and
-   approve it per tenant. Anything the tool cannot classify it reports
-   unresolved and will not book; escalate those to Milla and Codex.
+   approve it per tenant. The tool books a tenant only while this refusal
+   is its newest admission decision and nothing has written its book since,
+   and it books only what landed before the refusal. Keep the tenant out of
+   the rollout until it is approved. If the tool cannot classify something,
+   or a trade's cost basis does not reflect it, the tool reports it as
+   unresolved and does not book it. Escalate those to Milla and Codex.
 
 ### Step 6: paper tenants, in batches
 
