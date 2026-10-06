@@ -313,6 +313,9 @@ it("activity landing after the chain read and before the registration refuses: t
     assert.equal(a.state, "refused", "and Phase B's re-read refused what landed since");
     assert.match(String(a.reason), /Postgres lacks, landed after the admission's first chain read/);
     assert.ok(String(a.reason).endsWith(`: USDG in amount unread in tx 0xlanded-late log 0 at block ${HEAD + 300n}`), "and names what landed");
+    // Where the admission's read began, which the re-read continued: the whole read's first block, not the re-read's.
+    const began = rows("SELECT chain_read_from_sec FROM ledger_resume_approvals WHERE tenant = ? AND state = 'refused'", t.tenant)[0]!.chain_read_from_sec;
+    assert.ok(typeof began === "number" && began <= nowSec() - 26 * 3600 - 600 && began > nowSec() - 50 * 3600, String(began));
     assert.equal(forksOf(t.tenant).length, 0);
     assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0, "nothing attested");
     assert.deepEqual(cursorsOf(t.tenant), cursors, "no cursor moved");
@@ -631,7 +634,9 @@ for (const recorded of ["as this build records it", "as an earlier build left it
       await reconcile(); await settle();
       const r1 = refusalsOf(t.tenant).at(-1)!;
       assert.deepEqual([r1.state, r1.reason], ["refused", `${CHAIN_REFUSAL}: ${named}`]);
-      assert.ok(Number(r1.chain_read_from_sec) <= nowSec() - 26 * 3600 - 600, "the refusal records where its read began: 26 hours back, before the deposit");
+      // The refusal records where its read began: the chain's time of its first block, 26 hours back and more, before the deposit.
+      assert.equal(typeof r1.chain_read_from_sec, "number", "recorded");
+      assert.ok(Number(r1.chain_read_from_sec) <= nowSec() - 26 * 3600 - 600 && Number(r1.chain_read_from_sec) > nowSec() - 40 * 3600, String(r1.chain_read_from_sec));
       if (recorded !== "as this build records it") raw.prepare("UPDATE ledger_resume_approvals SET chain_read_from_sec = NULL WHERE approval_id = ?").run(String(r1.approval_id));
 
       // 2. Its owner turns live trading off. A day on: twenty hours by the clock and the chain, and a row lands that changes its evidence.
@@ -657,7 +662,8 @@ for (const recorded of ["as this build records it", "as an earlier build left it
         await reconcile(); await settle();
         const r2 = refusalsOf(t.tenant).at(-1)!;
         assert.deepEqual([r2.state, r2.reason], ["refused", `${CHAIN_REFUSAL}: ${named}`], "refused afresh for the same deposit — never admitted without it");
-        assert.ok(Number(r2.chain_read_from_sec) < depositAt, "from before the deposit");
+        assert.equal(typeof r2.chain_read_from_sec, "number");
+        assert.ok(Number(r2.chain_read_from_sec) < depositAt && Number(r2.chain_read_from_sec) > depositAt - 30 * 3600, "from before the deposit");
         assert.equal(forksOf(t.tenant).length, 0);
         assert.deepEqual(readdirSync(t.home).sort(), home, "its home untouched");
         assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0);
@@ -683,6 +689,26 @@ for (const recorded of ["as this build records it", "as an earlier build left it
     await getGrantStore().remove(t.tenant); await reconcile();
   });
 }
+
+it("an approval an earlier build recorded, on its table from before the column, is refused by this build's first pass with where its read began", async () => {
+  const t = await preIncident({ live: true });
+  const p = await preview(t.tenant);
+  await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p.entries[0]!.digest}` });
+  chainLogs = [unbookedDeposit(t.account, HEAD - 3_000n, `0x${"e1".repeat(32)}`)];
+  // The table as the earlier build left it, and this build's process starting with no preview or approval of its own to run.
+  raw.exec("ALTER TABLE ledger_resume_approvals DROP COLUMN chain_read_from_sec");
+  setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
+  try {
+    await sayings(async (said) => {
+      await reconcile(); await settle();
+      assert.ok(!said.some((l) => l.includes(`${t.tenant}: resume admission deferred`)), said.join("\n"));
+    });
+    const r = refusalsOf(t.tenant).at(-1)!;
+    assert.match(String(r.reason), new RegExp(`^${CHAIN_REFUSAL}: `));
+    assert.equal(typeof r.chain_read_from_sec, "number", "the column is added first, and the refusal writes it");
+  } finally { chainLogs = []; }
+  await getGrantStore().remove(t.tenant); await reconcile();
+});
 
 it("every decision of a held tenant changes its digest: refused on the chain while live, then for stale evidence, then turned paper — the preview's digest is approvable, reads the chain, and refuses afresh", async () => {
   const { holdOf, readBookingSnapshot } = await import("./chain-gap-booking");
