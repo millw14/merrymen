@@ -21,12 +21,21 @@ export const LEDGER_IMPORT_GENERATIONS_SCHEMA = `CREATE TABLE IF NOT EXISTS tena
  *    (MERRYMEN_RESUME_APPROVE=run:<digest>) binds to exactly what was shown.
  *  - ledger_resume_approvals: one per (tenant, evidence digest). At most one
  *    OPEN approval per tenant (approved → archiving → archived → registered);
- *    applied, refused and revoked are terminal.
+ *    applied, refused and revoked are terminal. `source` says who approved:
+ *    `operator` (MERRYMEN_RESUME_APPROVE; null on a row from before the
+ *    column) or `auto-paper` (the orchestrator's own approval of a re-signed
+ *    paper tenant, MERRYMEN_RESUME_AUTO_PAPER).
  *  - ledger_resume_attestations: what each registered generation archived and
  *    replaced, with the receipt digest bound into tenant_ledger_import, and
  *    the chain window read for it (chain_from_block..chain_head, both
  *    inclusive; null for a tenant that needed no chain read).
  *  - mirror_state_archive / ledger_snapshot_archive: the exact pre-images.
+ *  - ledger_resume_grant_watch: under MERRYMEN_RESUME_AUTO_PAPER only, what
+ *    the orchestrator last saw of each tenant's grant row (a digest of its
+ *    expiry and its server-stamped update time, nothing secret), whether a
+ *    change is still owed an automatic preview, and what that preview came
+ *    to. The row `*` records that the roster was baselined, once, when the
+ *    variable was first on: grants as they stood then are nobody's re-sign.
  */
 export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS ledger_resume_preview_runs (
@@ -37,6 +46,7 @@ export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   evidence_digest TEXT NOT NULL, evidence_json TEXT NOT NULL, preview_run TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('approved','archiving','archived','registered','applied','refused','revoked')),
   generation TEXT UNIQUE, archive_path TEXT, reason TEXT, created_at_ms BIGINT NOT NULL, updated_at_ms BIGINT NOT NULL,
+  source TEXT,
   UNIQUE (tenant, evidence_digest)
 )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS ledger_resume_one_open_per_tenant ON ledger_resume_approvals (tenant)
@@ -55,15 +65,21 @@ export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   generation TEXT NOT NULL, tenant TEXT NOT NULL, table_name TEXT NOT NULL, seq BIGINT NOT NULL, row_digest TEXT NOT NULL,
   row_json TEXT NOT NULL, archived_at_ms BIGINT NOT NULL, PRIMARY KEY (generation, table_name, seq)
 )`,
+  `CREATE TABLE IF NOT EXISTS ledger_resume_grant_watch (
+  tenant TEXT PRIMARY KEY, grant_key TEXT NOT NULL, owed INTEGER NOT NULL CHECK (owed IN (0, 1)),
+  seen_at_ms BIGINT NOT NULL, settled_at_ms BIGINT, run TEXT, outcome TEXT
+)`,
 ];
 
 /**
  * The chain window's columns, for a ledger_resume_attestations table created
- * by an earlier build of this branch, before they were in its CREATE. Db.exec
+ * by an earlier build of this branch, before they were in its CREATE; and the
+ * approvals' `source`, for the table production created before it was. Db.exec
  * makes each `ADD COLUMN IF NOT EXISTS` on Postgres; on sqlite a re-run fails
  * with "duplicate column name", which ensureLedgerResumeSchema expects.
  */
 export const LEDGER_RESUME_ADDITIVE_DDL: readonly string[] = [
   "ALTER TABLE ledger_resume_attestations ADD COLUMN chain_from_block TEXT",
   "ALTER TABLE ledger_resume_attestations ADD COLUMN chain_head TEXT",
+  "ALTER TABLE ledger_resume_approvals ADD COLUMN source TEXT",
 ];
