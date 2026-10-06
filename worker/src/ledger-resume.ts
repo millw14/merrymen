@@ -47,7 +47,9 @@
  *      again, immediately before registration, from that read's head to the
  *      head then, which is the head the attestation records. An RPC failure
  *      retries. Only a paper tenant that could not arm live — no live
- *      operation, no flow, no live intent in its settings — skips it.
+ *      operation, no flow, no live intent in its settings — skips it. A
+ *      refusal names every operation and transfer it found (chainRefusal),
+ *      and chain-gap-booking.ts is the reviewed way to book them.
  *   3. Nothing settled in the last 26 hours, so the new book's in-flight
  *      reconciler finds nothing to re-record.
  *   4. The flows are free of duplicate copies (distinct-flows.ts).
@@ -459,6 +461,26 @@ export async function resumePreconditions(db: Db, o: {
   let classHeld = 0;
   try { classHeld = Number(((await db.prepare("SELECT COUNT(*) AS n FROM class_positions WHERE LOWER(agent_id) = ? AND COALESCE(state, '') <> 'closed'").get(account)) as Record<string, unknown>).n); }
   catch (e) { if (!absentTable(e)) throw e; }
+  const { gapFromSec, lastMirrorAt } = await resumeGapWindow(db, o.tenant, o.nowSec);
+  return {
+    refusals, paper, chainRequired: !paper, holdsPositions: held + classHeld > 0,
+    suggestedLevel: paper ? "trade" : "exits-only", anchor, riskPeriod, unresolved, gapFromSec, lastMirrorAt,
+  };
+}
+
+/**
+ * WHERE THE CHAIN READ STARTS, AND WHEN THE GAP BEGAN, for one tenant now.
+ *
+ * Its own function so the chain-gap booking tool (chain-gap-booking.ts) reads
+ * from exactly the second the admission's chain check reads from: a booking
+ * that covered a narrower window would leave an operation it never saw for
+ * the admission to refuse on, and one that guessed a wider one would propose
+ * rows the admission never asked about. One computation, two readers.
+ *
+ * `gapFromSec` only moves later as `nowSec` advances (it is a minimum with
+ * `nowSec - 26h`), so a window read now covers every later admission's.
+ */
+export async function resumeGapWindow(db: Db, tenant: string, nowSec: number): Promise<{ gapFromSec: number; lastMirrorAt: number | null }> {
   // WHEN THE GAP BEGAN, AND FROM WHERE THE CHAIN IS READ — two different
   // questions. The gap began at the last pass that copied anything (the
   // newest cursor). But a cursor only moves when rows arrive, and the
@@ -473,16 +495,13 @@ export async function resumePreconditions(db: Db, o: {
     const at = Number(v);
     return !Number.isFinite(at) ? null : at > 1e12 ? Math.floor(at / 1000) : at;
   };
-  const tenantKey = o.tenant.toLowerCase();
+  const tenantKey = tenant.toLowerCase();
   const lastMirrorAt = stamp(((await db.prepare("SELECT MAX(updated_at) AS at FROM mirror_state WHERE tenant = ?").get(tenantKey)) as Record<string, unknown> | undefined)?.at);
   const cursorHoles = FINANCIAL_CURSORS.map(() => "?").join(", ");
   const oldestFinancial = stamp(((await db.prepare(`SELECT MIN(updated_at) AS at FROM mirror_state WHERE tenant = ? AND table_name IN (${cursorHoles})`)
     .get(tenantKey, ...FINANCIAL_CURSORS)) as Record<string, unknown> | undefined)?.at);
-  const gapFromSec = Math.min(oldestFinancial ?? lastMirrorAt ?? o.nowSec, lastMirrorAt ?? o.nowSec, o.nowSec - GAP_WINDOW_SEC) - 600;
-  return {
-    refusals, paper, chainRequired: !paper, holdsPositions: held + classHeld > 0,
-    suggestedLevel: paper ? "trade" : "exits-only", anchor, riskPeriod, unresolved, gapFromSec, lastMirrorAt,
-  };
+  const gapFromSec = Math.min(oldestFinancial ?? lastMirrorAt ?? nowSec, lastMirrorAt ?? nowSec, nowSec - GAP_WINDOW_SEC) - 600;
+  return { gapFromSec, lastMirrorAt };
 }
 
 /** The evidence and the preconditions together, as the preview prints them and Phase A recomputes them. */
@@ -528,7 +547,16 @@ export interface PreviewEntry {
   anchor: string | null; riskPeriod: string | null; home: "absent" | "present" | null; lastMirrorAt: number | null;
   holdsPositions: boolean | null; startsPaused: boolean | null; grantExpiresAt: number | null; book: "absent" | "blocked" | "present" | null;
   evidence: ResumeEvidence | null;
+  /**
+   * WHY THE TENANT'S LAST APPROVAL WAS REFUSED, when its newest approval was:
+   * the reason as admission recorded it (a chain refusal names each operation
+   * and transfer it found, readLastRefusal), the evidence it was for, and when.
+   * Information for the operator, never a gate: `pass` is decided by the
+   * preconditions alone. Optional so a run recorded before it existed parses.
+   */
+  lastRefusal?: LastRefusal | null;
 }
+export interface LastRefusal { evidence: string; reason: string; atMs: number }
 /** The run's digest: what an approval of the whole run binds to. */
 export const previewRunDigest = (entries: readonly PreviewEntry[]): string =>
   hash(canonical(entries.map((e) => [e.tenant, e.digest, e.pass])));
@@ -565,6 +593,34 @@ function approvalOf(r: Record<string, unknown>): ApprovalRow {
     generation: r.generation === null || r.generation === undefined ? null : String(r.generation),
     archivePath: r.archive_path === null || r.archive_path === undefined ? null : String(r.archive_path),
   };
+}
+
+/**
+ * THE TENANT'S NEWEST APPROVAL, IF IT WAS REFUSED: why, for which evidence and
+ * when — for the preview line (PreviewEntry.lastRefusal).
+ *
+ * WHY THE PREVIEW SAYS IT. A refusal used to reach the operator once, as an
+ * [alert] in one deploy's log, and the preview that the runbook then asks for
+ * printed the same tenant `pass: true` with nothing beside it — the chain
+ * check is not a Postgres precondition, so the preview cannot see it. The
+ * operator approved the new digest, the chain check refused again, and the
+ * loop said nothing about what to fix. The reason names it (chainRefusal), so
+ * the preview carries the reason.
+ *
+ * Null when the newest approval is not refused (approved, revoked, applied —
+ * anything newer than the refusal supersedes it) and when there is none. A
+ * missing table is none: nothing was ever approved.
+ */
+export async function readLastRefusal(db: Db, tenant: string): Promise<LastRefusal | null> {
+  try {
+    const row = (await db.prepare(`SELECT state, evidence_digest, reason, updated_at_ms FROM ledger_resume_approvals WHERE tenant = ?
+        ORDER BY updated_at_ms DESC, created_at_ms DESC LIMIT 1`).get(tenant.toLowerCase())) as Record<string, unknown> | undefined;
+    if (!row || row.state !== "refused") return null;
+    return { evidence: `${String(row.evidence_digest).slice(0, 12)}…`, reason: String(row.reason ?? "").slice(0, 500), atMs: Number(row.updated_at_ms) };
+  } catch (e) {
+    if (absentTable(e)) return null;
+    throw e;
+  }
 }
 
 /** The tenant's one open approval, or null. A missing table is none: nothing was ever approved. */
@@ -697,15 +753,153 @@ export interface GapChain {
   getBlockTimestamp(block: bigint): Promise<number>;
   getLogs(args: { address: `0x${string}`; fromBlock: bigint; toBlock: bigint; topics: (Hex | Hex[] | null)[] }): Promise<RawLog[]>;
 }
+/**
+ * ONE THING ON CHAIN THAT POSTGRES LACKS, named by public chain data only: an
+ * operation by its userOpHash, transaction and block (and whether the
+ * EntryPoint recorded it as succeeding), or a USDG transfer by its
+ * transaction, log, block, direction and amount (base units, 6dp).
+ *
+ * WHY A REFUSAL NAMES THEM. The check used to say "1 operation(s) and 1
+ * transfer(s) on chain that Postgres lacks" and stop, and nothing else a
+ * deploy prints could say which: three live tenants sat held on that line
+ * with the operator unable to tell a lost trade row from an owner's deposit
+ * without reading the chain by hand. Every field here is already public on
+ * the chain; nothing from the owner's settings, keys or books is in it.
+ *
+ * Null where the log did not carry it (a block number, a log index, an
+ * amount that is not one 32-byte word), never a guess.
+ */
+export type MissingChainFact =
+  | { kind: "operation"; userOpHash: string; txHash: string; block: string | null; logIndex: number | null; success: boolean | null }
+  | { kind: "transfer"; txHash: string; block: string | null; logIndex: number | null; direction: "in" | "out" | "self"; amountRaw: string | null; counterparty: string | null };
+
 export type GapResult =
   | { status: "clean"; fromBlock: string; head: string; ops: number; transfers: number }
-  | { status: "missing"; ops: number; transfers: number }
+  | {
+    status: "missing"; ops: number; transfers: number;
+    /** The window read, as for `clean`, so a refusal can say where it looked. */
+    fromBlock: string; head: string;
+    /** Every operation and transfer the counts are made of, in chain order. */
+    found: MissingChainFact[];
+  }
   | { status: "unavailable"; why: string };
 
 const USEROP_TOPIC = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f" as Hex;
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
 /** This chain runs near ten blocks a second (index.ts BLOCKS_PER_SEC); the estimate is checked against a timestamp before it is trusted. */
 const BLOCKS_PER_SEC_GUESS = 12n;
+
+/** A hex quantity a log carried, as a decimal string; null when it carried none or not one. */
+function hexQuantity(v: unknown): string | null {
+  if (typeof v !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(v)) return null;
+  return BigInt(v).toString();
+}
+/** The address in the low 20 bytes of a 32-byte topic, or null. */
+function topicAddress(t: unknown): string | null {
+  return typeof t === "string" && /^0x[0-9a-fA-F]{64}$/.test(t) ? `0x${t.slice(-40).toLowerCase()}` : null;
+}
+const factOrder = (f: MissingChainFact) => [f.block === null ? -1n : BigInt(f.block), BigInt(f.logIndex ?? -1)] as const;
+
+/**
+ * WHAT THE CHAIN SHOWS THAT POSTGRES DOES NOT HOLD, from logs already read.
+ * PURE: chainGapCheck's decision, and the booking tool's proof that its rows
+ * would answer it (chain-gap-booking.ts), are this one function.
+ *
+ * An operation is held when Postgres has a trade row with its userOpHash. A
+ * USDG transfer is held when Postgres has a trade row with its transaction
+ * hash, or a flow with its tx#log, or when an operation Postgres holds is in
+ * the same transaction (its leg, booked with it even where its row kept no tx
+ * hash). One log read as both from and to the account (a self-transfer) is
+ * one movement, not two.
+ */
+export function chainFactsPostgresLacks(o: {
+  account: string;
+  opLogs: readonly RawLog[]; outLogs: readonly RawLog[]; inLogs: readonly RawLog[];
+  known: { ops: ReadonlySet<string>; txs: ReadonlySet<string>; flows: ReadonlySet<string> };
+}): MissingChainFact[] {
+  const found: MissingChainFact[] = [];
+  const bookedTxs = new Set<string>();
+  const index = (l: RawLog) => (l.logIndex === undefined ? null : Number(BigInt(l.logIndex)));
+  for (const l of o.opLogs) {
+    const opHash = String(l.topics[1] ?? "").toLowerCase();
+    const tx = String(l.transactionHash).toLowerCase();
+    if (o.known.ops.has(opHash)) { bookedTxs.add(tx); continue; }
+    // success is the second word of the event's data (nonce, success, cost, used).
+    const data = String(l.data ?? "").replace(/^0x/, "");
+    const word = /^[0-9a-fA-F]{256}$/.test(data) ? BigInt(`0x${data.slice(64, 128)}`) : null;
+    found.push({ kind: "operation", userOpHash: opHash, txHash: tx, block: hexQuantity(l.blockNumber), logIndex: index(l),
+      success: word === 1n ? true : word === 0n ? false : null });
+  }
+  const account = o.account.toLowerCase();
+  const seen = new Set<string>();
+  for (const l of [...o.outLogs, ...o.inLogs]) {
+    const tx = String(l.transactionHash).toLowerCase();
+    const i = index(l);
+    if (o.known.txs.has(tx) || bookedTxs.has(tx)) continue;
+    if (i !== null && o.known.flows.has(`${tx}:${i}`)) continue;
+    if (i !== null) {
+      if (seen.has(`${tx}:${i}`)) continue;
+      seen.add(`${tx}:${i}`);
+    }
+    const from = topicAddress(l.topics[1]), to = topicAddress(l.topics[2]);
+    const direction = from === account && to === account ? "self" : from === account ? "out" : "in";
+    found.push({ kind: "transfer", txHash: tx, block: hexQuantity(l.blockNumber), logIndex: i, direction,
+      amountRaw: hexQuantity(l.data), counterparty: direction === "out" ? to : direction === "in" ? from : account });
+  }
+  return found.sort((a, b) => {
+    const [ab, ai] = factOrder(a), [bb, bi] = factOrder(b);
+    return ab < bb ? -1 : ab > bb ? 1 : ai < bi ? -1 : ai > bi ? 1 : 0;
+  });
+}
+
+/** USDG base units (6dp) as a decimal figure, exactly: "5.000000". */
+export function usdg6(raw: string): string {
+  const v = BigInt(raw), sign = v < 0n ? "-" : "", abs = v < 0n ? -v : v;
+  return `${sign}${abs / 1_000_000n}.${(abs % 1_000_000n).toString().padStart(6, "0")}`;
+}
+
+/** One found fact as an operator reads it: every hash in full, so it can be pasted into an explorer. */
+export function describeChainFact(f: MissingChainFact): string {
+  const at = f.block === null ? "" : ` at block ${f.block}`;
+  if (f.kind === "operation") {
+    return `operation ${f.userOpHash} in tx ${f.txHash}${at}${f.success === false ? " (reverted)" : f.success === null ? " (outcome unread)" : ""}`;
+  }
+  const amount = f.amountRaw === null ? "amount unread" : usdg6(f.amountRaw);
+  return `USDG ${f.direction} ${amount} in tx ${f.txHash}${f.logIndex === null ? "" : ` log ${f.logIndex}`}${at}`;
+}
+
+/**
+ * The found facts as one line, as many as fit in `maxChars`, then how many
+ * more. A refusal's reason is stored in 500 characters (moveApproval), and a
+ * deploy log line is one line; the booking tool's preview lists them all.
+ */
+export function describeChainFacts(found: readonly MissingChainFact[], maxChars = 1_800): string {
+  const parts: string[] = [];
+  let used = 0;
+  for (const f of found) {
+    const s = describeChainFact(f);
+    if (parts.length && used + s.length + 2 > maxChars) break;
+    parts.push(s);
+    used += s.length + 2;
+  }
+  const more = found.length - parts.length;
+  return parts.join("; ") + (more > 0 ? `; and ${more} more (the booking preview lists every one)` : "");
+}
+
+/** The words a chain refusal starts with. The orchestrator's tests and the runbook quote them. */
+export const CHAIN_REFUSAL = "the chain holds operations or USDG transfers for the account that Postgres lacks";
+/** Room for the facts inside the 500-character reason, after the longest prefix. */
+const REASON_FACT_CHARS = 330;
+
+/**
+ * An admission's refusal for chain activity Postgres lacks, naming it. Fits
+ * the stored reason: the prefix the runbook quotes, then as many facts as fit
+ * (an operation and its USDG leg do, with every hash in full).
+ */
+export function chainRefusal(found: readonly MissingChainFact[], landedAfterFirstRead = false): string {
+  const head = landedAfterFirstRead ? `${CHAIN_REFUSAL}, landed after the admission's first chain read` : CHAIN_REFUSAL;
+  return found.length ? `${head}: ${describeChainFacts(found, REASON_FACT_CHARS)}` : head;
+}
 
 /**
  * IS THERE ANYTHING ON CHAIN FOR THIS ACCOUNT THAT POSTGRES DOES NOT HOLD?
@@ -759,23 +953,11 @@ export async function chainGapCheck(o: {
     const out = await getLogsAdaptive(reader, { address: o.usdg as `0x${string}`, topics: [TRANSFER_TOPIC, account] }, from, head, span, o.log);
     const into = await getLogsAdaptive(reader, { address: o.usdg as `0x${string}`, topics: [TRANSFER_TOPIC, null, account] }, from, head, span, o.log);
     if (!ops.complete || !out.complete || !into.complete) return { status: "unavailable", why: "the log read did not cover the whole window" };
-    let missingOps = 0, missingTransfers = 0;
-    // The transactions of operations Postgres holds: a USDG leg inside one is
-    // that operation's, booked with it, even where its row kept no tx hash.
-    const bookedTxs = new Set<string>();
-    for (const l of ops.logs) {
-      const opHash = String(l.topics[1] ?? "").toLowerCase();
-      if (!o.known.ops.has(opHash)) missingOps += 1;
-      else bookedTxs.add(String(l.transactionHash).toLowerCase());
+    const found = chainFactsPostgresLacks({ account: o.account, opLogs: ops.logs, outLogs: out.logs, inLogs: into.logs, known: o.known });
+    if (found.length) {
+      return { status: "missing", ops: found.filter((f) => f.kind === "operation").length, transfers: found.filter((f) => f.kind === "transfer").length,
+        fromBlock: String(from), head: String(head), found };
     }
-    for (const l of [...out.logs, ...into.logs]) {
-      const tx = String(l.transactionHash).toLowerCase();
-      const index = l.logIndex === undefined ? null : Number(BigInt(l.logIndex));
-      if (o.known.txs.has(tx) || bookedTxs.has(tx)) continue;
-      if (index !== null && o.known.flows.has(`${tx}:${index}`)) continue;
-      missingTransfers += 1;
-    }
-    if (missingOps || missingTransfers) return { status: "missing", ops: missingOps, transfers: missingTransfers };
     return { status: "clean", fromBlock: String(from), head: String(head), ops: ops.logs.length, transfers: out.logs.length + into.logs.length };
   } catch (e) {
     const kind = e instanceof Error && /^[A-Za-z]{1,40}$/.test(e.name) ? e.name : "Error";

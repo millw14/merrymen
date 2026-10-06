@@ -73,7 +73,7 @@ setSpawnForTest((_c, _a, options) => {
 });
 
 /** The chain the gap check reads: the logs it holds, its head, and whether it answers at all. */
-let chainLogs: Array<{ address: string; topics: string[]; tx: string; index: number; block?: bigint }> = [];
+let chainLogs: Array<{ address: string; topics: string[]; tx: string; index: number; block?: bigint; data?: string }> = [];
 let chainDown = false;
 const HEAD = 3_000_000n;
 let head = HEAD;
@@ -87,7 +87,8 @@ const chain: GapChain = {
     // A fixture log sits at its block (HEAD - 100 unless it says), so it is read once, by the span that covers it.
     return chainLogs.filter((l) => (l.block ?? HEAD - 100n) >= a.fromBlock && (l.block ?? HEAD - 100n) <= a.toBlock && l.address.toLowerCase() === a.address.toLowerCase()
       && a.topics.every((t, i) => t === null || String(t).toLowerCase() === String(l.topics[i] ?? "").toLowerCase()))
-      .map((l) => ({ topics: l.topics as `0x${string}`[], data: "0x" as `0x${string}`, transactionHash: l.tx as `0x${string}`, logIndex: `0x${l.index.toString(16)}` as `0x${string}` }));
+      .map((l) => ({ topics: l.topics as `0x${string}`[], data: (l.data ?? "0x") as `0x${string}`, transactionHash: l.tx as `0x${string}`,
+        logIndex: `0x${l.index.toString(16)}` as `0x${string}`, blockNumber: `0x${(l.block ?? HEAD - 100n).toString(16)}` as `0x${string}` }));
   },
 };
 setResumeChainForTest(() => chain);
@@ -246,14 +247,35 @@ it("an RPC failure keeps the tenant held and retries; chain activity Postgres la
   const q = await preview(u.tenant);
   await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${u.tenant}:${q.entries[0]!.digest}` });
   const topic = (x: string) => `0x${x.slice(2).padStart(64, "0")}`;
-  chainLogs = [{ address: String(CASH.USDG), topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", topic(addr(0xfeed)), topic(u.account)], tx: "0xunbooked", index: 1 }];
+  chainLogs = [{ address: String(CASH.USDG), topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", topic(addr(0xfeed)), topic(u.account)], tx: "0xunbooked", index: 1,
+    data: `0x${(7_250_000n).toString(16).padStart(64, "0")}` }];
+  const said: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => { said.push(a.map(String).join(" ")); realLog(...a); };
   try {
     await reconcile(); await settle();
     assert.equal(approval(u.tenant)?.state, "refused");
-    assert.match(String(approval(u.tenant)?.reason), /Postgres lacks/);
+    // THE REFUSAL NAMES WHAT IT FOUND: the transaction, log, block, direction
+    // and amount, in the stored reason, its [alert] line and the chain check's line.
+    const named = `USDG in 7.250000 in tx 0xunbooked log 1 at block ${HEAD - 100n}`;
+    assert.equal(String(approval(u.tenant)?.reason), `the chain holds operations or USDG transfers for the account that Postgres lacks: ${named}`);
+    assert.ok(said.some((l) => l.includes(`${u.tenant}: resume chain check missing — 0 operation(s) and 1 transfer(s) on chain that Postgres lacks, blocks `) && l.endsWith(named)),
+      "the chain check's own line names it");
+    assert.ok(said.some((l) => l.includes(`[alert] ${u.tenant}: resume approval REFUSED — `) && l.includes(named)), "and the [alert] says it");
     assert.equal(forksOf(u.tenant).length, 0);
     assert.equal(existsSync(path.join(u.home, "grant.json")), true, "refused before anything moved");
-  } finally { chainLogs = []; }
+    // AND THE NEXT PREVIEW CARRIES IT beside the verdict, which it does not
+    // change: the chain check is no Postgres precondition.
+    // (The run row is insert-once by its digest, which this identical evidence
+    // repeats, so the line is where it is said; the approval row keeps the
+    // reason as well.)
+    said.length = 0;
+    await preview(u.tenant);
+    const line = said.find((l) => l.includes("[resume-preview] {") && l.includes(u.tenant));
+    assert.ok(line?.includes(`"lastRefusal":{"evidence":"${q.entries[0]!.digest.slice(0, 12)}…"`), line);
+    assert.ok(line?.includes(named), "the preview line names the transfer");
+    assert.ok(line?.includes(`"pass":true`), "information only: the verdict is the preconditions'");
+  } finally { chainLogs = []; console.log = realLog; }
   await getGrantStore().remove(t.tenant); await getGrantStore().remove(u.tenant); await reconcile();
 });
 
@@ -281,6 +303,7 @@ it("activity landing after the chain read and before the registration refuses: t
     assert.ok(a.archive_path, "Phase A archived the home on the clean read");
     assert.equal(a.state, "refused", "and Phase B's re-read refused what landed since");
     assert.match(String(a.reason), /Postgres lacks, landed after the admission's first chain read/);
+    assert.ok(String(a.reason).endsWith(`: USDG in amount unread in tx 0xlanded-late log 0 at block ${HEAD + 300n}`), "and names what landed");
     assert.equal(forksOf(t.tenant).length, 0);
     assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0, "nothing attested");
     assert.deepEqual(cursorsOf(t.tenant), cursors, "no cursor moved");

@@ -192,6 +192,7 @@ Each `[resume-preview]` line is one tenant:
 | `book` | the home's book as the ordinary path would meet it: `absent`, `blocked` (behind a source barrier — the usual pre-incident case), or `present` |
 | `anchor`, `riskPeriod` | the accounting anchor the worker will get (`established:epoch-N` or `no-prior-accounting`), and the risk period it carries (`valid:<id>`, or `none`: the lifetime-peak drawdown breaker every agent ran on before the incident) |
 | `home` | whether the volume has a home for it (it is archived at admission) |
+| `lastRefusal` | present when the tenant's newest approval was refused: the evidence it was for, when, and the reason admission recorded. A chain refusal names each operation (userOpHash, tx, block) and each USDG transfer (tx, log, block, direction, amount) it found. Information only: `pass` does not read it, because the chain is not a Postgres precondition |
 
 Pick the canary: a `pass:true`, `chain:"not-required"` paper tenant (the plan
 names `0x3289ed018dd5ae59b42aba8ec4d49f489645abcb`). Note the run digest. Make
@@ -267,9 +268,19 @@ nothing.
 
 **If the chain shows something Postgres lacks** (`resume approval REFUSED — the
 chain holds operations or USDG transfers for the account that Postgres
-lacks`), most likely an owner's deposit or withdrawal during the hold, that
-tenant stays held. **No code path in this tree books that movement**, and this
-runbook does not invent one. Do this:
+lacks: …`), that tenant stays held. The refusal names what it found, in
+the `[alert]` line, in the `resume chain check missing — … blocks A..B: …`
+line before it, and in the next preview's `lastRefusal`:
+
+- `operation 0x<userOpHash> in tx 0x<tx> at block N` — an operation of the
+  account that has no trade row (a lost trade row, or an owner's own
+  operation); `(reverted)` when the EntryPoint recorded it as failing.
+- `USDG in|out <amount> in tx 0x<tx> log L at block N` — a USDG transfer with
+  no flow and no trade row in its transaction. When it shares a transaction
+  with a named operation it is that operation's leg; on its own it is most
+  likely an owner's deposit (`in`).
+
+Public chain data only; look each one up as printed. Then:
 
 1. List the refused tenants: those `[alert]` lines, or Railway → Postgres →
    **Data** → `ledger_resume_approvals`, rows with `state` `refused` and that
@@ -277,9 +288,11 @@ runbook does not invent one. Do this:
 2. Tell each owner (with Milla's wording) that their agent is not managing
    their positions yet and that they can manage them from their own wallet
    meanwhile.
-3. Escalate the list to Milla and Codex for a reviewed booking of the missing
-   movement. Once it is booked, preview that tenant again and approve it
-   per tenant.
+3. Book what is missing with the reviewed operator tool,
+   [docs/chain-gap-booking.md](chain-gap-booking.md): preview, the owner of
+   the books reviews it, backup, apply, preview the tenant again here, and
+   approve it per tenant. Anything the tool cannot classify it reports
+   unresolved and will not book; escalate those to Milla and Codex.
 
 ### Step 6: paper tenants, in batches
 

@@ -22,8 +22,9 @@ import type { TenantLease } from "./tenant-lease";
 import { handoffRecoveryReplyOffset } from "./recovery-reply-handoff";
 import { RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import {
-  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, parseResumeApprovals,
-  parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
+  applyResumeApprovals, archiveTenantHome, chainFactsPostgresLacks, chainGapCheck, chainRefusal, CHAIN_REFUSAL, completeAttestedSeed, describeChainFact, describeChainFacts,
+  homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, readLastRefusal,
+  readOpenApproval, readResumeEvidence, recordPreviewRun, resumeGapWindow, resumePreconditions, revokeResumeApprovals, usdg6,
   type GapChain, type PreviewEntry,
 } from "./ledger-resume";
 
@@ -265,10 +266,54 @@ describe("the chain read", () => {
   it("refuses an operation, or a deposit, Postgres lacks", async () => {
     const op = await chainGapCheck({ chain: fakeChain({ logs: [{ address: EP, topics: [OP, "0x" + "22".repeat(32), topic(ACC)], tx: "0xcc", index: 1 }] }),
       account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });
-    assert.deepEqual(op, { status: "missing", ops: 1, transfers: 0 });
+    assert.equal(op.status, "missing");
+    assert.deepEqual({ ops: (op as { ops: number }).ops, transfers: (op as { transfers: number }).transfers }, { ops: 1, transfers: 0 });
     const dep = await chainGapCheck({ chain: fakeChain({ logs: [{ address: USDG, topics: [TR, topic(addr(9)), topic(ACC)], tx: "0xdd", index: 0 }] }),
       account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });
-    assert.deepEqual(dep, { status: "missing", ops: 0, transfers: 1 });
+    assert.equal(dep.status, "missing");
+    assert.deepEqual({ ops: (dep as { ops: number }).ops, transfers: (dep as { transfers: number }).transfers }, { ops: 0, transfers: 1 });
+  });
+  it("a refusal NAMES what it found: each operation by hash, tx and block; each transfer by tx, log, block, direction and amount", async () => {
+    const opHash = "0x" + "22".repeat(32), tx = "0x" + "cc".repeat(32), depTx = "0x" + "dd".repeat(32);
+    // The EntryPoint's own event data: nonce, success, actualGasCost, actualGasUsed.
+    const word = (n: bigint) => n.toString(16).padStart(64, "0");
+    const chain: GapChain = {
+      async getBlockNumber() { return 2_000_000n; },
+      async getBlockTimestamp(b) { return NOW - Number(2_000_000n - b) / 10; },
+      async getLogs(a) {
+        const all = [
+          { address: EP, topics: [OP, opHash, topic(ACC), topic(addr(0x7777))], data: `0x${word(1n)}${word(1n)}${word(5n)}${word(6n)}`, transactionHash: tx, blockNumber: "0x1e8480", logIndex: "0xd" },
+          { address: USDG, topics: [TR, topic(addr(0x2ca2)), topic(ACC)], data: `0x${word(4_965_021n)}`, transactionHash: tx, blockNumber: "0x1e8480", logIndex: "0xb" },
+          { address: USDG, topics: [TR, topic(ACC), topic(addr(0xfeed))], data: `0x${word(5_000_000n)}`, transactionHash: depTx, blockNumber: "0x1e8481", logIndex: "0x0" },
+        ];
+        return all.filter((l) => l.address.toLowerCase() === a.address.toLowerCase() && a.topics.every((t, i) => t === null || String(t).toLowerCase() === l.topics[i]!.toLowerCase()))
+          .map(({ address: _a, ...l }) => l as never);
+      },
+    };
+    const r = await chainGapCheck({ chain, account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 4_000_000n });
+    assert.equal(r.status, "missing");
+    const m = r as Extract<typeof r, { status: "missing" }>;
+    assert.deepEqual(m.found, [
+      { kind: "transfer", txHash: tx, block: "2000000", logIndex: 11, direction: "in", amountRaw: "4965021", counterparty: addr(0x2ca2) },
+      { kind: "operation", userOpHash: opHash, txHash: tx, block: "2000000", logIndex: 13, success: true },
+      { kind: "transfer", txHash: depTx, block: "2000001", logIndex: 0, direction: "out", amountRaw: "5000000", counterparty: addr(0xfeed) },
+    ]);
+    assert.equal(m.head, "2000000"); assert.ok(Number(m.fromBlock) < 2_000_000);
+    assert.equal(describeChainFacts(m.found),
+      `USDG in 4.965021 in tx ${tx} log 11 at block 2000000; operation ${opHash} in tx ${tx} at block 2000000; USDG out 5.000000 in tx ${depTx} log 0 at block 2000001`);
+    // The stored reason fits its 500 characters with the prefix the runbook
+    // quotes, as many facts as fit, and how many more.
+    const reason = chainRefusal(m.found);
+    assert.ok(reason.startsWith(`${CHAIN_REFUSAL}: USDG in 4.965021 in tx ${tx}`));
+    assert.ok(reason.length <= 500, `${reason.length} characters`);
+    assert.match(reason, /; and 1 more \(the booking preview lists every one\)$/);
+    assert.match(chainRefusal(m.found, true), /Postgres lacks, landed after the admission's first chain read: /);
+    // A reverted operation, an unreadable amount, and a self-transfer said once.
+    assert.equal(describeChainFact({ kind: "operation", userOpHash: opHash, txHash: tx, block: null, logIndex: null, success: false }), `operation ${opHash} in tx ${tx} (reverted)`);
+    assert.equal(describeChainFact({ kind: "transfer", txHash: tx, block: "9", logIndex: 1, direction: "in", amountRaw: null, counterparty: null }), `USDG in amount unread in tx ${tx} log 1 at block 9`);
+    const self = { topics: [TR, topic(ACC), topic(ACC)] as `0x${string}`[], data: `0x${word(1n)}` as `0x${string}`, transactionHash: tx as `0x${string}`, logIndex: "0x2" as `0x${string}` };
+    assert.deepEqual(chainFactsPostgresLacks({ account: ACC, opLogs: [], outLogs: [self], inLogs: [self], known }).map((f) => (f as { direction: string }).direction), ["self"]);
+    assert.equal(usdg6("0"), "0.000000"); assert.equal(usdg6("1234567"), "1.234567"); assert.equal(usdg6("-5"), "-0.000005");
   });
   it("an RPC that fails is unavailable, never clean", async () => {
     const r = await chainGapCheck({ chain: fakeChain({ failAt: 2 }), account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });
@@ -291,7 +336,8 @@ describe("the chain read", () => {
     assert.equal(quiet.stampCalls, 0);
     assert.ok(quiet.ranges.every(([from, to]) => from === 2_000_000n && to === 2_000_500n), "exactly the earlier head to the head now");
     const late = await chainGapCheck({ chain: fakeChain({ head: 2_000_500n, logs: [earlier, landed] }), account: ACC, usdg: USDG, fromBlock: 2_000_000n, known, maxSpan: 50_000n });
-    assert.deepEqual(late, { status: "missing", ops: 0, transfers: 1 });
+    assert.deepEqual(late, { status: "missing", ops: 0, transfers: 1, fromBlock: "2000000", head: "2000500",
+      found: [{ kind: "transfer", txHash: "0xlate", block: null, logIndex: 0, direction: "in", amountRaw: null, counterparty: addr(9) }] });
     // The head has not moved: the one block already read is read again, and nothing is skipped.
     assert.equal((await chainGapCheck({ chain: fakeChain({ head: 2_000_000n }), account: ACC, usdg: USDG, fromBlock: 2_000_000n, known })).status, "clean");
   });
@@ -303,6 +349,32 @@ describe("the chain read", () => {
     const f = await fixture({ live: true });
     const k = await knownChainFacts(f.shared, f.account);
     assert.deepEqual({ ops: [...k.ops], txs: [...k.txs], flows: [...k.flows] }, { ops: ["0xop1"], txs: ["0xtx1"], flows: ["0xdep1:3"] });
+  });
+  it("reads its window from the oldest financial cursor, at least 26 hours back — the same second the preconditions report", async () => {
+    const f = await fixture({ live: true });
+    const w = await resumeGapWindow(f.shared, f.tenant, NOW);
+    assert.deepEqual(w, { gapFromSec: NOW - 40 * 3600 - 600, lastMirrorAt: NOW - 40 * 3600 });
+    const c = await f.pre();
+    assert.deepEqual({ gapFromSec: c.gapFromSec, lastMirrorAt: c.lastMirrorAt }, w);
+  });
+});
+
+describe("the last refusal, for the preview line", () => {
+  it("is the newest approval's reason when that approval was refused, and nothing once a newer one supersedes it", async () => {
+    const f = await fixture({ live: true });
+    assert.equal(await readLastRefusal(f.shared, f.tenant), null, "no table yet: nothing was ever approved");
+    await ensureLedgerResumeSchema(f.shared);
+    assert.equal(await readLastRefusal(f.shared, f.tenant), null);
+    const insert = (id: string, digest: string, state: string, at: number, reason: string | null) => f.raw.prepare(`INSERT INTO ledger_resume_approvals
+        (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason)
+        VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?)`).run(id, f.tenant, f.account, f.owner, digest, state, at, at, reason);
+    const reason = chainRefusal([{ kind: "transfer", txHash: "0x" + "dd".repeat(32), block: "12", logIndex: 0, direction: "in", amountRaw: "5000000", counterparty: addr(9) }]);
+    insert("a1", "a".repeat(64), "refused", 1_000, reason);
+    assert.deepEqual(await readLastRefusal(f.shared, f.tenant.toUpperCase().replace("0X", "0x")),
+      { evidence: `${"a".repeat(12)}…`, reason, atMs: 1_000 });
+    assert.match((await readLastRefusal(f.shared, f.tenant))!.reason, /USDG in 5\.000000 in tx 0xdddd/);
+    insert("a2", "b".repeat(64), "approved", 2_000, null);
+    assert.equal(await readLastRefusal(f.shared, f.tenant), null, "an approval of newer evidence supersedes it");
   });
 });
 
