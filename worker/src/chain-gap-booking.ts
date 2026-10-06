@@ -58,10 +58,11 @@
  *                             custody, as the fill is read) holds there, the
  *                             fills Postgres records since the basis last
  *                             opened and these reproduce that quantity from
- *                             flat, and the basis's cost is no other than
- *                             those fills give — proved to be it whenever
- *                             these include both a buy and a sell, which a
- *                             quantity cannot tell from neither. When the
+ *                             flat, and the basis's cost is exactly what
+ *                             those fills give, replayed — a buy and a sell
+ *                             that net to nothing are what a quantity cannot
+ *                             tell from neither, so a cost that cannot be
+ *                             replayed refuses too. When the
  *                             rows were written is checked too, and is never
  *                             enough alone. Otherwise the trade, and so the
  *                             tenant, is unresolved: a reviewed basis
@@ -864,8 +865,9 @@ export interface ProposedFill { key: string; side: "buy" | "sell"; qtyRaw: strin
  *
  * "REPRODUCED" PROVES THE QUANTITY, NOT THAT THE BASIS INCLUDES THE FILLS. A
  * buy and a sell of the same amount add nothing to the sum, so a basis that
- * left both out holds the chain's quantity too, at the wrong cost. What the
- * basis was built from is replayBasis's question, and holdingVerdict's.
+ * left both out — booked here, or recorded and never applied to it — holds
+ * the chain's quantity too, at the wrong cost. What the basis was built from
+ * is replayBasis's question, and holdingVerdict's.
  *
  *   below zero    a fill bought more than the book held after it: the fills
  *                 are more than the chain holds, so something moved the
@@ -885,14 +887,18 @@ export interface ProposedFill { key: string; side: "buy" | "sell"; qtyRaw: strin
  * when its operation landed: an executor's row at submission (the 'submitted'
  * placeholder, settled in place), seconds before its block; the in-flight
  * reconciler's at the arm that found its operation, which can be many hours
- * after its block — but that row carries no fill (index.ts
- * reconcileInFlightAtArm), so the walk stops at it as unproven rather than
- * read it out of order. The same second orders recorded first. A missed fill
- * that landed in the seconds between a recorded row's submission and its
- * block reads out of order: the walk may then refuse wrongly or miss an excess
- * it would otherwise find, and the replayed cost may differ from the basis
- * (which refuses). The quantity checks (holdingVerdict) do not depend on the
- * order.
+ * after its block. The reconciler writes its row with the legs and no fill
+ * (index.ts reconcileInFlightAtArm), and the walk stops at such a row as
+ * unproven. But the history repair (history-fill-repair.ts, at the
+ * orchestrator's start) later fills in its side, quantity and cash off the
+ * receipt and keeps basis_source 'receipt', and the walk then reads that row
+ * at the arm's time: out of order, perhaps by hours. The same second orders
+ * recorded first. A fill read out of order — that row, or a missed fill that
+ * landed in the seconds between a recorded row's submission and its block —
+ * can make the walk refuse wrongly or miss an excess it would otherwise find,
+ * and make the replayed cost differ from the basis (which refuses). The
+ * quantity checks (holdingVerdict) do not depend on the order, and a held
+ * token books only on a replayed cost equal to its basis's.
  */
 export interface FillWalk {
   verdict: "reproduced" | "exceeds" | "unproven";
@@ -955,7 +961,8 @@ export function walkFills(o: { token: string; fills: readonly RecordedFill[]; pr
  * rata, so what a sell was paid never reaches the basis). The quantity is the
  * chain's by construction; the cost is what a basis built from exactly these
  * fills, in this order, holds. Unproven when the walk did not reproduce, or a
- * recorded buy carries no exact cash.
+ * recorded buy carries no exact cash: a held token then refuses
+ * (holdingVerdict), whichever way its trades go.
  */
 export interface CostReplay {
   verdict: "replayed" | "unproven";
@@ -979,13 +986,13 @@ export function replayBasis(walk: FillWalk): CostReplay {
 /** Which check refused a trade's holding, by name (evidence.holding.refusal). */
 export type HoldingRefusal = "positions-ambiguous" | "balance-unread" | "class-vault-held" | "position-unreadable" | "position-differs" | "basis-missing"
   | "basis-unreadable" | "basis-differs" | "position-stale" | "basis-stale" | "held-unrecorded" | "basis-without-position" | "fills-exceed-chain"
-  | "fills-unproven" | "basis-cost-differs" | "fills-net-ambiguous";
+  | "fills-unproven" | "basis-cost-differs" | "cost-unproven";
 export interface HoldingVerdict {
   /** Null is yes. */
   why: string | null;
   refusal: HoldingRefusal | null;
   evidence: Record<string, unknown>;
-  /** What a reviewer should know that does not refuse: a check the records did not allow, and why it was not needed. */
+  /** What a reviewer should know that does not refuse: for a token nobody holds, a walk the records did not allow, and why it was not needed. */
   notes: string[];
 }
 
@@ -1021,22 +1028,29 @@ export interface HoldingVerdict {
  *                          quantity from flat (walkFills) — fills that cannot
  *                          be walked refuse; and the basis's cost is no other
  *                          than those fills give (replayBasis) — refused when
- *                          it differs, and when it cannot be replayed while
- *                          the trades booked here include both a buy and a
- *                          sell;
+ *                          it differs, and when it cannot be replayed;
  *   not held               the book holds none of the token there, no live
  *                          basis under any name the token has gone by still
  *                          covers a quantity, and the fills are never more
  *                          than the chain holds — so a seed with no position
  *                          and no basis for it is the truth, whatever it cost.
  *
- * WHY A BUY AND A SELL TOGETHER NEED THE COST. For trades all one way, the
- * quantity is proof: from where the basis last opened, a missed buy the basis
- * left out keeps it short of the chain until the chain is flat again (after
- * which the two start over together), and a missed sell keeps it long for
- * good. A buy and a sell of the same amount leave the quantity as it was and
- * the cost wrong — the stop-loss and take-profit would measure from a price
- * the book never paid. So those need the cost replayed, and equal.
+ * WHY A HELD TOKEN NEEDS THE COST, WHICHEVER WAY ITS TRADES GO. The quantity
+ * checks show the basis holds what the chain does; they cannot show it was
+ * built from every fill. A buy and a sell that net to nothing leave the
+ * quantity as it was and the cost wrong — the stop-loss and take-profit would
+ * measure from a price the book never paid — and only one of the two need be
+ * booked here: the other can be a fill Postgres records that the basis never
+ * had. The in-flight reconciler writes its row and skips bookFill for a token
+ * it does not watch, and the history repair fills that row in later
+ * (history-fill-repair.ts); and the mirrored cost_basis can be stale, left by
+ * a delete the mirror skipped while the child read rebuilt (basis-seed.ts).
+ * Nothing here can prove the basis is exactly applyFill over the fills
+ * recorded since its anchor, so the
+ * cost is replayed and must equal the basis's, and a cost that cannot be
+ * replayed (a walked buy with no exact cash on record) refuses
+ * (cost-unproven). Only a token nobody holds books without it: nothing is
+ * seeded for it.
  *
  * THE CLASS VAULT. Positions and cost_basis cover the account and its Trencher
  * vault (the worker merges the vault's balance into the position); a Pons
@@ -1064,9 +1078,7 @@ export function holdingVerdict(o: { token: string; holdings: Holdings; fills: re
   const total = balance && balance.total !== null ? BigInt(balance.total) : null;
   const fills = total === null ? null : walkFills({ token, fills: o.fills, proposed: o.proposed, symbols, total });
   const cost = fills === null ? null : replayBasis(fills);
-  // Both ways among the trades booked here: what a quantity cannot tell from neither.
-  const bothSides = o.proposed.some((p) => p.side === "buy") && o.proposed.some((p) => p.side === "sell");
-  const evidence = { lastTradeAt, position, basis, namedBasis, bookBalance: balance, fills, cost, bothSides };
+  const evidence = { lastTradeAt, position, basis, namedBasis, bookBalance: balance, fills, cost };
   const refuse = (refusal: HoldingRefusal, why: string): HoldingVerdict => ({ why, refusal, evidence: { ...evidence, refusal }, notes: [] });
   const decide = "a reviewed basis decision, or the tenant stays held";
 
@@ -1140,14 +1152,15 @@ export function holdingVerdict(o: { token: string; holdings: Holdings; fills: re
       "not built from those fills — a buy and a sell the lost book never booked to it, for one — so the attested book's stop-loss and take-profit would measure " +
       `from a cost it never paid — ${decide}`);
   }
-  if (cost!.verdict !== "replayed" && bothSides) {
-    return refuse("fills-net-ambiguous", `the trades booked here in ${token} include both a buy and a sell, so a basis holding the chain's quantity does not show it ` +
-      "includes them — a buy and a sell the lost book never booked leave the quantity as it was and the cost wrong — and the cost cannot be replayed to prove it " +
-      `(${cost!.why}) — ${decide}`);
+  // A HELD TOKEN'S COST MUST BE REPLAYED, whichever way the trades booked here go: a buy and a sell that net to nothing — one of them booked
+  // here, the other a fill Postgres records that the basis never had — leave every quantity above as it was and the cost wrong.
+  if (cost!.verdict !== "replayed") {
+    return refuse("cost-unproven", `Postgres's live cost basis for ${p.symbol} holds the chain's ${qty} base units at a cost of ${usdg6(costUsdg.toString())} USDG, ` +
+      `and what the fills since it last opened (${fills!.anchor}) cost cannot be replayed to check it (${cost!.why}): a basis of the chain's quantity can still ` +
+      "leave out a buy and a sell that net to nothing — this trade, and a fill Postgres records that the lost book never booked to the basis, for one — and " +
+      `the attested book's stop-loss and take-profit would measure from a cost it never paid — ${decide}`);
   }
-  return { why: null, refusal: null, evidence: { ...evidence, refusal: null }, notes: cost!.verdict === "replayed" ? []
-    : [`${token}: the basis's cost was not checked against the fills (${cost!.why}); its quantity was, and with the trades booked here all ${o.proposed[0]!.side}s ` +
-      "a basis that left one out could not have matched it"] };
+  return { why: null, refusal: null, evidence: { ...evidence, refusal: null }, notes: [] };
 }
 
 /**

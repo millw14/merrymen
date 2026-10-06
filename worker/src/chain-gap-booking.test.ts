@@ -30,7 +30,7 @@ import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, resumePreconditions } fr
 import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import {
-  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, microUsdg, parseApplyReport, planBooking, planLines,
+  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, holdingVerdict, microUsdg, parseApplyReport, planBooking, planLines,
   readBookingSnapshot, readChainEvidence, replayBasis, revertBooking, TRADE_COLUMNS, walkFills, type ApplyReport, type BookingPlan, type RecordedFill,
 } from "./chain-gap-booking";
 
@@ -718,7 +718,7 @@ describe("a trade only where the seed already holds what the chain does (holding
     const p = await preview(b, model.rpc);
     assert.equal(p.verdict, "ready", planLines(p).join("\n"));
     const holding = sell(p).evidence.holding as { lastTradeAt: number; position: { updatedAt: number }; basis: { updatedAt: number }; refusal: null;
-      bookBalance: { total: string }; fills: { verdict: string; anchor: string }; cost: { verdict: string; basis: unknown }; bothSides: boolean };
+      bookBalance: { total: string }; fills: { verdict: string; anchor: string }; cost: { verdict: string; basis: unknown } };
     assert.deepEqual([holding.lastTradeAt, holding.position.updatedAt, holding.basis.updatedAt], [CHAIN.sell.timestamp, CHAIN.sell.timestamp + 5, CHAIN.sell.timestamp + 5]);
     assert.deepEqual([holding.refusal, holding.bookBalance.total], [null, LOT.toString()]);
     // PINNED: every balance was read at admission's head less 64, and the plan says which block (outside the digest, as the head is).
@@ -727,8 +727,7 @@ describe("a trade only where the seed already holds what the chain does (holding
     // A lot held ← the missed sell of one ← the buy of one ← the earlier buy of one, from flat; and (2 lots, 10 USDG) less half is the basis's cost exactly.
     assert.deepEqual([holding.fills.verdict, holding.fills.anchor], ["reproduced", "before every fill Postgres records in the token"]);
     assert.deepEqual(holding.cost, { verdict: "replayed", why: null, basis: { qtyRaw: LOT.toString(), costUsdg: "5000000" } });
-    assert.equal(holding.bothSides, false);
-    assert.ok(!p.warnings.some((w) => /could not be walked|was not checked/.test(w)), p.warnings.join("\n"));
+    assert.ok(!p.warnings.some((w) => /could not be walked/.test(w)), p.warnings.join("\n"));
   });
 
   it("not held, and none of it on chain across the account and its vault: the trade books", async () => {
@@ -756,8 +755,9 @@ describe("a trade only where the seed already holds what the chain does (holding
 
   it("a position or basis other than the chain's, a held position with no basis, one written before the trade, a balance the snapshot does not know of, a held token whose fills cannot be walked, or an unread balance: unresolved, legs and all", async () => {
     const cases: Array<[string, (b: Books) => void, Parameters<typeof sellPlan>[1], string, RegExp]> = [
-      // Every quantity and time agrees — but Postgres's buy of COIN carries no fill (as the in-flight reconciler's rows never do), so what the book
-      // holds cannot be traced to the fills that put it there, and the seed would carry that basis into the new book.
+      // Every quantity and time agrees — but Postgres's buy of COIN carries no fill (as the in-flight reconciler writes its rows, until the history
+      // repair fills them in), so what the book holds cannot be traced to the fills that put it there, and the seed would carry that basis into the
+      // new book.
       ["held, the fills unwalkable", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 }), inVault, "fills-unproven",
         /could not be walked back to where its basis opened \(trade #1 in 0xaa07.* records no fill \(side and quantity\)\): the position and basis hold the chain's quantity/],
       ["position other than the chain's", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 }), {}, "position-differs",
@@ -854,14 +854,15 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     preview(b, fakeRpc({ txs: [missed].flat(), decimals: { [TOKEN]: 18n }, balances: { [TOKEN]: { [ACCOUNT]: o.balance ?? 0n } }, failBalances: o.failBalances }).rpc);
   const trade = (p: BookingPlan, tag: string) => p.items.find((i) => i.key === `op:${h32(tag)}`)!;
   const holdingOf = (p: BookingPlan, tag: string) => trade(p, tag).evidence.holding as { refusal: string | null; fills: { verdict: string; anchor: string | null };
-    cost: { verdict: string; why: string | null; basis: { qtyRaw: string; costUsdg: string } | null }; bothSides: boolean };
+    cost: { verdict: string; why: string | null; basis: { qtyRaw: string; costUsdg: string } | null } };
 
-  it("a missed buy, then an ordinary buy that rewrote both rows after it: refused while the basis leaves the missed buy out, booked once it holds it", async () => {
+  it("a missed buy, then an ordinary buy that rewrote both rows after it: refused while the basis leaves the missed buy out, or its cost cannot be replayed; booked once it holds it at what the fills cost", async () => {
     const missed = swap({ tag: "missed buy", side: "buy", qty: 100n * E18, cash: 100_000_000n, block: MISSED });
-    const run = async (basisQty: bigint) => {
+    // The later buy of 50 for 50 USDG, its cash on record or not; the basis as given, costing 150 USDG (the two buys').
+    const run = async (basisQty: bigint, o: { cash?: boolean } = {}) => {
       const b = await books();
-      recorded(b, { tag: "later buy", side: "buy", qty: 50n * E18, at: T2 });
-      mirrored(b, { raw: 150n * E18, basisQty, at: T2 });
+      recorded(b, { tag: "later buy", side: "buy", qty: 50n * E18, at: T2, ...(o.cash === false ? {} : { cash: 50_000_000n }) });
+      mirrored(b, { raw: 150n * E18, basisQty, cost: 150_000_000n, at: T2 });
       return plan(b, missed, { balance: 150n * E18 });
     };
     const left = await run(50n * E18);
@@ -878,23 +879,33 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
 
     const holds = await run(150n * E18);
     assert.equal(holds.verdict, "ready", planLines(holds).join("\n"));
-    // 150 held ← the later buy of 50 ← the missed buy of 100, from flat.
-    const { fills, cost, bothSides } = holdingOf(holds, "missed buy");
+    // 150 held ← the later buy of 50 ← the missed buy of 100, from flat; and 100 + 50 USDG is the basis's cost exactly.
+    const { fills, cost } = holdingOf(holds, "missed buy");
     assert.deepEqual([fills.verdict, fills.anchor], ["reproduced", "before every fill Postgres records in the token"]);
-    // The later buy's row carries no cash, so the cost cannot be replayed: for a trade all one way the quantity is the proof, and the plan says so.
-    assert.deepEqual([cost.verdict, bothSides], ["unproven", false]);
-    assert.match(cost.why!, /trades#\d+ records no exact cash for its buy \(fill_cash_usdg\)/);
-    assert.ok(holds.warnings.some((w) => /0x0+70c3: the basis's cost was not checked against the fills .*its quantity was, and with the trades booked here all buys/.test(w)),
-      holds.warnings.join("\n"));
+    assert.deepEqual(cost, { verdict: "replayed", why: null, basis: { qtyRaw: (150n * E18).toString(), costUsdg: "150000000" } });
+    assert.ok(!holds.warnings.some((w) => /0x0+70c3:/.test(w)), holds.warnings.join("\n"));
+
+    // The same, with the later buy's cash not on record: every quantity agrees, and the trades are all buys — but the cost cannot be replayed,
+    // and nothing else says the basis was built from these fills. Refused, legs and all.
+    const unreplayed = await run(150n * E18, { cash: false });
+    assert.equal(unreplayed.verdict, "blocked", planLines(unreplayed).join("\n"));
+    const u = holdingOf(unreplayed, "missed buy");
+    assert.deepEqual([u.fills.verdict, u.cost.verdict, u.refusal], ["reproduced", "unproven", "cost-unproven"]);
+    assert.match(trade(unreplayed, "missed buy").why, new RegExp("^not booked \\(cost-unproven\\): Postgres's live cost basis for TKN holds the chain's " +
+      "150000000000000000000 base units at a cost of 150\\.000000 USDG, and what the fills since it last opened \\(before every fill Postgres records in the " +
+      "token\\) cost cannot be replayed to check it \\(trades#\\d+ records no exact cash for its buy \\(fill_cash_usdg\\)"));
+    assert.equal(unreplayed.items.filter((i) => i.proposal).length, 0, "its USDG leg waits on it");
+    assert.ok(!unreplayed.warnings.some((w) => /was not checked/.test(w)), "no note books it in place of the cost");
   });
 
-  it("a missed sell, then an ordinary sell: refused while the basis leaves the missed sell out, booked once it holds it", async () => {
+  it("a missed sell, then an ordinary sell: refused while the basis leaves the missed sell out, or the first buy's cash is not on record; booked once it holds it", async () => {
     const missed = swap({ tag: "missed sell", side: "sell", qty: 40n * E18, cash: 44_000_000n, block: MISSED });
-    const run = async (basisQty: bigint) => {
+    // The first buy of 100 for 100 USDG, its cash on record or not. Each sell takes cost pro rata: 100 at 100 → 60 at 60 → 30 at 30.
+    const run = async (basisQty: bigint, o: { cash?: boolean } = {}) => {
       const b = await books();
-      recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+      recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0, ...(o.cash === false ? {} : { cash: 100_000_000n }) });
       recorded(b, { tag: "later sell", side: "sell", qty: 30n * E18, at: T2 });
-      mirrored(b, { raw: 30n * E18, basisQty, at: T2 });
+      mirrored(b, { raw: 30n * E18, basisQty, cost: 30_000_000n, at: T2 });
       return plan(b, missed, { balance: 30n * E18 });
     };
     const left = await run(70n * E18);
@@ -903,8 +914,13 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     assert.match(trade(left, "missed sell").why, /covers 70000000000000000000 base units, and the book held 30000000000000000000 on chain/);
     const holds = await run(30n * E18);
     assert.equal(holds.verdict, "ready", planLines(holds).join("\n"));
-    // 30 held ← the later sell ← the missed sell ← the first buy, from flat.
+    // 30 held ← the later sell ← the missed sell ← the first buy, from flat; and 30 at 30 USDG is the basis exactly.
     assert.equal(holdingOf(holds, "missed sell").fills.verdict, "reproduced");
+    assert.deepEqual(holdingOf(holds, "missed sell").cost.basis, { qtyRaw: (30n * E18).toString(), costUsdg: "30000000" });
+    // The trades booked here are all sells, and the quantities all agree — but with the buy's cash not on record, the cost is unproven.
+    const unreplayed = await run(30n * E18, { cash: false });
+    assert.equal(unreplayed.verdict, "blocked", planLines(unreplayed).join("\n"));
+    assert.deepEqual([holdingOf(unreplayed, "missed sell").fills.verdict, holdingOf(unreplayed, "missed sell").refusal], ["reproduced", "cost-unproven"]);
   });
 
   it("a token fully exited — no position, no basis, nothing on chain — books; a basis left over the flat book refuses", async () => {
@@ -965,14 +981,14 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
       mirrored(b, { raw: 120n * E18, basisQty: 120n * E18, cost: o.cost, at: T2 });
       return plan(b, roundTrip, { balance: 120n * E18 });
     };
-    // No cash on record: the cost cannot be replayed, and a buy with a sell needs it.
+    // No cash on record: the cost cannot be replayed, and a held token needs it.
     const unreplayed = await run({ cash: false, cost: 120_000_000n });
     assert.equal(unreplayed.verdict, "blocked", planLines(unreplayed).join("\n"));
     const h = holdingOf(unreplayed, "missed buy");
     // The quantity reproduces exactly, and both rows were written after the round trip: neither says the basis holds it.
-    assert.deepEqual([h.fills.verdict, h.bothSides, h.refusal], ["reproduced", true, "fills-net-ambiguous"]);
+    assert.deepEqual([h.fills.verdict, h.cost.verdict, h.refusal], ["reproduced", "unproven", "cost-unproven"]);
     assert.match(trade(unreplayed, "missed sell").why,
-      /^not booked \(fills-net-ambiguous\): the trades booked here in 0x0+70c3 include both a buy and a sell, .* \(trades#\d+ records no exact cash for its buy/);
+      /^not booked \(cost-unproven\): Postgres's live cost basis for TKN holds the chain's 120000000000000000000 base units .* \(trades#\d+ records no exact cash for its buy/);
     assert.equal(unreplayed.items.filter((i) => i.proposal).length, 0, "neither trade, nor a leg");
     // The cost on record: 100 at 100, +50 at 200 → 150 at 300, −50 takes a third → 100 at 200, +20 at 20 → 120 at 220. A basis at 120 left it out.
     const wrong = await run({ cash: true, cost: 120_000_000n });
@@ -998,8 +1014,73 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
       swap({ tag: "missed buy 30", side: "buy", qty: 30n * E18, cash: 30_000_000n, block: MISSED + 150n })], { balance: 150n * E18 });
     assert.equal(p.verdict, "blocked", planLines(p).join("\n"));
     assert.deepEqual(["missed buy", "missed sell", "missed buy 30"].map((t) => [trade(p, t).class, holdingOf(p, t).fills.verdict, holdingOf(p, t).refusal]),
-      Array(3).fill(["unresolved", "reproduced", "fills-net-ambiguous"]));
+      Array(3).fill(["unresolved", "reproduced", "cost-unproven"]));
     assert.equal(p.items.filter((i) => i.proposal).length, 0);
+  });
+
+  /**
+   * ONE WAY HERE, THE OTHER IN POSTGRES (review of #293). The quantity checks
+   * cannot prove the cost even when every trade booked here goes one way: the
+   * other leg of a round trip can be a fill Postgres records that the basis
+   * never had (the reconciler's row for a token it did not watch, filled in
+   * later by the history repair; or a stale mirrored basis). A recorded buy
+   * of 100 with no cash on record, a recorded sell of 50 for 60 that the
+   * basis never had, the missed buy of 50 for 500, and a recorded buy of 10
+   * for 10 that rewrote both rows: the chain, the position and the basis all
+   * hold 110, the walk reproduces it from flat, and the basis costs 110 USDG
+   * where one holding every fill (the first buy at 100) costs 560. The stop-
+   * loss and take-profit would measure from about 1.0 a unit instead of 5.1.
+   */
+  it("a missed buy offset by a recorded sell the basis never had: every quantity agrees, and it books only on a cost replayed and equal", async () => {
+    const missed = swap({ tag: "missed buy", side: "buy", qty: 50n * E18, cash: 500_000_000n, block: MISSED });
+    const run = async (o: { firstCash: boolean; cost: bigint }) => {
+      const b = await books();
+      recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0, ...(o.firstCash ? { cash: 100_000_000n } : {}) });
+      recorded(b, { tag: "unbooked sell", side: "sell", qty: 50n * E18, at: T0 + 50, cash: 60_000_000n });
+      recorded(b, { tag: "later buy", side: "buy", qty: 10n * E18, at: T2, cash: 10_000_000n });
+      mirrored(b, { raw: 110n * E18, basisQty: 110n * E18, cost: o.cost, at: T2 });
+      return plan(b, missed, { balance: 110n * E18 });
+    };
+    // The first buy's cash not on record: before, this booked on the quantities with a note. Now the cost is unproven, and it refuses.
+    const unreplayed = await run({ firstCash: false, cost: 110_000_000n });
+    assert.equal(unreplayed.verdict, "blocked", planLines(unreplayed).join("\n"));
+    const h = trade(unreplayed, "missed buy").evidence.holding as { refusal: string; fills: { verdict: string; anchor: string };
+      position: { updatedAt: number }; basis: { updatedAt: number } };
+    assert.ok(h.position.updatedAt > MISSED_AT && h.basis.updatedAt > MISSED_AT, "both rows were written after the missed buy");
+    assert.deepEqual([h.fills.verdict, h.fills.anchor, h.refusal], ["reproduced", "before every fill Postgres records in the token", "cost-unproven"]);
+    assert.equal(trade(unreplayed, "missed buy").class, "unresolved");
+    assert.deepEqual(unreplayed.items.filter((i) => i.proposal), [], "neither the trade nor its leg");
+    assert.deepEqual(unreplayed.warnings, []);
+    // The cash on record: 100 at 100, −50 takes half → 50 at 50, +50 at 500 → 100 at 550, +10 at 10 → 110 at 560. A basis at 110 left the sell out.
+    const wrong = await run({ firstCash: true, cost: 110_000_000n });
+    assert.equal(wrong.verdict, "blocked");
+    assert.equal(holdingOf(wrong, "missed buy").refusal, "basis-cost-differs");
+    assert.match(trade(wrong, "missed buy").why, /at a cost of 110\.000000 USDG, and the fills since it last opened .* give 110000000000000000000 at 560\.000000 USDG/);
+    // A basis built from every fill books.
+    const right = await run({ firstCash: true, cost: 560_000_000n });
+    assert.equal(right.verdict, "ready", planLines(right).join("\n"));
+    assert.deepEqual(holdingOf(right, "missed buy").cost.basis, { qtyRaw: (110n * E18).toString(), costUsdg: "560000000" });
+  });
+
+  it("holdingVerdict over the same history, read directly: a held token whose cost cannot be replayed refuses, whichever way the trades booked here go", () => {
+    const fill = (id: number, side: "buy" | "sell", qty: bigint, at: number, cashUsdg: string | null): RecordedFill => ({ id, status: "landed",
+      buyToken: side === "buy" ? TOKEN : USDG, sellToken: side === "buy" ? USDG : TOKEN, side, qtyRaw: qty.toString(), symbol: "TKN", basisSource: "receipt", at, cashUsdg });
+    const fills = [fill(1, "buy", 100n * E18, 1000, null), fill(2, "sell", 50n * E18, 2000, "60000000"), fill(3, "buy", 10n * E18, 3100, "10000000")];
+    const holdings = { positions: [{ symbol: "TKN", token: TOKEN, rawBalance: (110n * E18).toString(), updatedAt: 3200 }],
+      basis: [{ symbol: "TKN", qtyRaw: (110n * E18).toString(), costUsdg: "110000000", updatedAt: 3100 }] };
+    const balance = { total: (110n * E18).toString(), by: { [ACCOUNT]: (110n * E18).toString() } };
+    const v = holdingVerdict({ token: TOKEN, holdings, fills, balance, classVault: null,
+      proposed: [{ key: "op:m", side: "buy", qtyRaw: (50n * E18).toString(), cashUsdg: "500000000", at: 3000, symbol: "TKN" }] });
+    assert.equal(v.refusal, "cost-unproven");
+    assert.match(v.why!, /trades#1 records no exact cash for its buy/);
+    assert.deepEqual(v.notes, []);
+    // A sell booked here over a buy Postgres records and the basis never had: the same hole the other way, and the same refusal.
+    const sold = holdingVerdict({ token: TOKEN, classVault: null, balance: { total: (100n * E18).toString(), by: { [ACCOUNT]: (100n * E18).toString() } },
+      fills: [fill(1, "buy", 100n * E18, 1000, null), fill(2, "buy", 40n * E18, 2000, "400000000")],
+      holdings: { positions: [{ symbol: "TKN", token: TOKEN, rawBalance: (100n * E18).toString(), updatedAt: 3200 }],
+        basis: [{ symbol: "TKN", qtyRaw: (100n * E18).toString(), costUsdg: "100000000", updatedAt: 3100 }] },
+      proposed: [{ key: "op:s", side: "sell", qtyRaw: (40n * E18).toString(), cashUsdg: "30000000", at: 3000, symbol: "TKN" }] });
+    assert.deepEqual([sold.refusal, sold.notes], ["cost-unproven", []]);
   });
 
   it("trades all one way: a basis of the chain's quantity at a cost the fills disprove refuses", async () => {
@@ -1042,6 +1123,20 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     assert.equal(flat.verdict, "ready", planLines(flat).join("\n"));
     assert.deepEqual([holdingOf(flat, "missed exit").fills.verdict, holdingOf(flat, "missed exit").refusal], ["unproven", null]);
     assert.ok(flat.warnings.some((w) => /0x0+70c3: none of it is held, on chain or in the snapshot/.test(w)), flat.warnings.join("\n"));
+  });
+
+  it("a reconciler's row the history repair filled in is read at the arm's time, out of order: a flat round trip across it refuses rather than books", async () => {
+    // The reconciler's buy of 100 landed before the missed sell of 100, but its row was written at the arm an hour after the sell, and the history
+    // repair (history-fill-repair.ts) later filled in its fill off the receipt, keeping 'receipt'. Nothing is held on chain or in the snapshot.
+    const b = await books();
+    reconciled(b, { tag: "reconciled buy", side: "buy", at: MISSED_AT + 3600 });
+    b.raw.prepare("UPDATE trades SET fill_side = 'buy', fill_symbol = 'TKN', fill_qty_raw = ?, fill_cash_usdg = 100 WHERE user_op_hash = ?")
+      .run((100n * E18).toString(), h32("reconciled buy"));
+    const p = await plan(b, swap({ tag: "missed sell", side: "sell", qty: 100n * E18, cash: 101_000_000n, block: MISSED }));
+    assert.equal(p.verdict, "blocked", planLines(p).join("\n"));
+    assert.deepEqual([trade(p, "missed sell").class, holdingOf(p, "missed sell").fills.verdict, holdingOf(p, "missed sell").refusal],
+      ["unresolved", "exceeds", "fills-exceed-chain"]);
+    assert.match(trade(p, "missed sell").why, /trades#\d+ \(a buy of 100000000000000000000 at .*\) leaves -100000000000000000000/);
   });
 
   it("microUsdg: fill_cash_usdg back exactly as written, or not at all", () => {
