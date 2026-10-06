@@ -347,6 +347,72 @@ it("a clean chain read is not reused after a failed registration: the retry read
   await getGrantStore().remove(t.tenant); await reconcile();
 });
 
+/**
+ * The same chain, as the booking tool's JSON-RPC reads it: blocks dated as
+ * the gap check dates them, each fixture log in a receipt of its transaction.
+ */
+const bookingRpc = async (method: string, params: unknown[]): Promise<unknown> => {
+  const blockOf = (b: bigint) => ({ number: `0x${b.toString(16)}`, hash: `0x${b.toString(16).padStart(64, "b")}`,
+    timestamp: `0x${(Math.floor(Date.now() / 1000) - Math.ceil(Number(head - b) / 10)).toString(16)}` });
+  const logOf = (l: (typeof chainLogs)[number]) => ({ address: l.address, topics: l.topics, data: l.data ?? "0x", logIndex: `0x${l.index.toString(16)}`,
+    blockNumber: `0x${(l.block ?? HEAD - 100n).toString(16)}`, transactionHash: l.tx });
+  if (method === "eth_chainId") return "0x1237";
+  if (method === "eth_blockNumber") return `0x${head.toString(16)}`;
+  if (method === "eth_getBlockByNumber") return blockOf(BigInt(params[0] as string));
+  if (method === "eth_getLogs") {
+    const f = params[0] as { address: `0x${string}`; fromBlock: string; toBlock: string; topics: (`0x${string}` | null)[] };
+    return chain.getLogs({ address: f.address, fromBlock: BigInt(f.fromBlock), toBlock: BigInt(f.toBlock), topics: f.topics });
+  }
+  if (method === "eth_getTransactionReceipt") {
+    const logs = chainLogs.filter((l) => l.tx === params[0]);
+    if (!logs.length) return null;
+    const block = logs[0]!.block ?? HEAD - 100n;
+    return { status: "0x1", blockNumber: `0x${block.toString(16)}`, blockHash: blockOf(block).hash, from: addr(0xfeed), to: String(CASH.USDG), logs: logs.map(logOf) };
+  }
+  throw new Error(`unexpected ${method}`);
+};
+
+it("a tenant refused for a deposit Postgres lacks is booked by the chain-gap tool, previews again with new evidence, and is admitted", async () => {
+  const { applyBooking, planBooking, readBookingSnapshot, readChainEvidence } = await import("./chain-gap-booking");
+  const t = await preIncident({ live: true });
+  const p = await preview(t.tenant);
+  await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p.entries[0]!.digest}` });
+  const depositTx = `0x${"de".repeat(32)}`;
+  chainLogs = [{ address: String(CASH.USDG), topics: [TRANSFER_TOPIC, topicOf(addr(0xfeed)), topicOf(t.account)], tx: depositTx, index: 3, block: HEAD - 1_000n,
+    data: `0x${(6_000_000n).toString(16).padStart(64, "0")}` }];
+  try {
+    await reconcile(); await settle();
+    assert.equal(approval(t.tenant)?.state, "refused");
+    assert.match(String(approval(t.tenant)?.reason), new RegExp(`: USDG in 6\\.000000 in tx ${depositTx} log 3 at block ${HEAD - 1_000n}$`));
+    const before = financial(t.account);
+
+    // THE BOOKING, as the operator runs it: the preview against the same
+    // books and chain, then the apply of exactly the digest reviewed.
+    const snap = await readBookingSnapshot(shared, { tenant: t.tenant, dialect: "sqlite", nowSec: nowSec() });
+    const plan = planBooking(snap, await readChainEvidence(bookingRpc, snap, { sleep: async () => {} }), { nowSec: nowSec(), source: { test: 1 }, target: "integration" });
+    assert.equal(plan.verdict, "ready");
+    assert.deepEqual(plan.items.map((i) => i.class), ["deposit"]);
+    await applyBooking(shared, plan, { confirm: plan.previewDigest, backupRef: "integration-backup-1", dialect: "sqlite", nowMs: Date.now() });
+    const after = financial(t.account);
+    assert.deepEqual(after.trades, before.trades, "no trade row touched");
+    assert.deepEqual(after.agents, before.agents, "no peak, epoch or fee moved");
+    assert.deepEqual(after.flows.slice(0, -1), before.flows);
+    assert.deepEqual((({ id: _id, ...rest }) => rest)(after.flows.at(-1)!), { agent_id: t.account, direction: "in", amount_usdg: 6, tx_hash: depositTx,
+      block_number: Number(HEAD - 1_000n), log_index: 3, source: "chain-log", epoch: 2, chain_id: 4663, at: plan.items[0]!.evidence.blockTime });
+
+    // THE RE-PREVIEW PASSES, on new evidence, and the approval of that
+    // evidence admits the tenant: its chain check now finds nothing missing.
+    const q = await preview(t.tenant);
+    assert.deepEqual({ pass: q.entries[0]!.pass, refusals: q.entries[0]!.refusals }, { pass: true, refusals: [] });
+    assert.notEqual(q.entries[0]!.digest, p.entries[0]!.digest, "the booked flow is in the evidence");
+    await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${q.entries[0]!.digest}` });
+    await reconcile(); await settle();
+    assert.equal(approval(t.tenant)?.state, "applied");
+    assert.equal(forksOf(t.tenant).length, 1, "admitted through the ordinary path");
+  } finally { chainLogs = []; }
+  await getGrantStore().remove(t.tenant); await reconcile();
+});
+
 it("a paper tenant needs no chain read; evidence that changed after the preview refuses with nothing moved", async () => {
   const t = await preIncident({ live: false });
   const p = await preview(t.tenant);
