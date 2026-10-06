@@ -47,9 +47,10 @@
  *      again, immediately before registration, from that read's head to the
  *      head then, which is the head the attestation records. An RPC failure
  *      retries. Only a paper tenant that could not arm live — no live
- *      operation, no flow, no live intent in its settings — skips it. A
- *      refusal names every operation and transfer it found (chainRefusal),
- *      and chain-gap-booking.ts is the reviewed way to book them.
+ *      operation, no flow, no live intent in its settings, and no chain
+ *      refusal that no admission has answered since — skips it. A refusal
+ *      names every operation and transfer it found (chainRefusal), and
+ *      chain-gap-booking.ts is the reviewed way to book them.
  *   3. Nothing settled in the last 26 hours, so the new book's in-flight
  *      reconciler finds nothing to re-record.
  *   4. The flows are free of duplicate copies (distinct-flows.ts).
@@ -322,9 +323,24 @@ export const evidenceDigest = (e: ResumeEvidence): string => hash(canonical(e));
 
 export interface ResumeCheck {
   refusals: string[];
-  /** A paper tenant that could not arm live: no live operation, no flow and no live intent on record. No chain read is needed. */
+  /**
+   * A paper tenant that could not arm live: no live operation, no flow and no
+   * live intent on record, and no chain refusal of it that no admission has
+   * answered since (`chainHeld`). No chain read is needed.
+   */
   paper: boolean;
   chainRequired: boolean;
+  /**
+   * AN APPROVAL OF IT WAS REFUSED ON THE CHAIN, AND NO ADMISSION HAS ANSWERED
+   * THAT SINCE (unansweredChainRefusal). Then it is never `paper`, whatever
+   * Postgres and the owner's settings say now: the chain showed that Postgres
+   * incomplete, so the tenant is read on chain again (chain:required) and
+   * starts exits-only. So an approval of it never admits it on that book: its
+   * chain read refuses again while Postgres still lacks what the chain showed,
+   * which records a fresh chain refusal, the newest decision the booking tool
+   * books on (chain-gap-booking.ts holdOf).
+   */
+  chainHeld: boolean;
   holdsPositions: boolean;
   /** decision 6: paper tenants may trade once the canary has; live tenants holding positions start exits-only. */
   suggestedLevel: "trade" | "exits-only";
@@ -502,16 +518,25 @@ export async function resumePreconditions(db: Db, o: {
   // operation, ANY flow on record (a deposit is a funded account), or the
   // owner's stored live intent makes the tenant one the chain is read for,
   // and one that starts exits-only.
+  //
+  // AND SO DOES A CHAIN REFUSAL NO ADMISSION HAS ANSWERED (chainHeld). Every
+  // reading above comes from the Postgres that refusal showed incomplete,
+  // and the owner's settings may have changed since: an owner who turned
+  // live trading off after it reads as paper again, though what Postgres
+  // lacks may be a live trade. Read as paper, an approval would admit it with
+  // no chain read, on that book, and supersede the refusal the booking tool
+  // books on. Read on chain, an approval refuses again until it is booked.
   const liveOps = Number(((await db.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id) = ?
       AND ((user_op_hash IS NOT NULL AND user_op_hash <> '') OR status IN ('landed', 'submitted', 'sent', 'pending', 'reverted', 'dropped'))`).get(account)) as Record<string, unknown>).n);
-  const paper = agent?.mode === "paper" && liveOps === 0 && flowCount === 0 && o.liveIntent !== true;
+  const chainHeld = await unansweredChainRefusal(db, o.tenant);
+  const paper = agent?.mode === "paper" && liveOps === 0 && flowCount === 0 && o.liveIntent !== true && !chainHeld;
   const held = Number(((await db.prepare("SELECT COUNT(*) AS n FROM positions WHERE LOWER(agent_id) = ? AND raw_balance <> '0'").get(account)) as Record<string, unknown>).n);
   let classHeld = 0;
   try { classHeld = Number(((await db.prepare("SELECT COUNT(*) AS n FROM class_positions WHERE LOWER(agent_id) = ? AND COALESCE(state, '') <> 'closed'").get(account)) as Record<string, unknown>).n); }
   catch (e) { if (!absentTable(e)) throw e; }
   const { gapFromSec, lastMirrorAt } = await resumeGapWindow(db, o.tenant, o.nowSec);
   return {
-    refusals, paper, chainRequired: !paper, holdsPositions: held + classHeld > 0,
+    refusals, paper, chainRequired: !paper, chainHeld, holdsPositions: held + classHeld > 0,
     suggestedLevel: paper ? "trade" : "exits-only", anchor, riskPeriod, unresolved, gapFromSec, lastMirrorAt, unreadable,
   };
 }
@@ -603,6 +628,14 @@ export interface PreviewEntry {
    * preconditions alone. Optional so a run recorded before it existed parses.
    */
   lastRefusal?: LastRefusal | null;
+  /**
+   * A CHAIN REFUSAL OF IT THAT NO ADMISSION HAS ANSWERED (ResumeCheck.
+   * chainHeld): it reads chain:required whatever its paper reading, and an
+   * approval of it reads the chain again rather than admitting it — never a
+   * way to trade until what the chain showed is booked. Unlike `lastRefusal`
+   * it is not only the newest decision. Optional so an older run parses.
+   */
+  chainHeld?: boolean;
 }
 export interface LastRefusal { evidence: string; reason: string; atMs: number }
 /** The run's digest: what an approval of the whole run binds to. */
@@ -1220,8 +1253,13 @@ async function openRows(db: Db, account: string): Promise<{ live: number; comman
  * here. The orchestrator also reads the owner's live intent as true then
  * (resumeLiveIntent), so the preview already says chain:required; this says
  * the reason in its own words, and holds even if that ever changes.
+ *
+ * `chainHeld` on a `manual` verdict: a chain refusal of it that no admission
+ * has answered (unansweredChainRefusal). The lane's line then says what
+ * CHAIN_HELD_NEXT says, never "approve it by hand" with its digest: an
+ * approval of it reads the chain again rather than letting it trade.
  */
-export type AutoPaperVerdict = { kind: "auto" } | { kind: "manual"; why: string[] } | { kind: "not-held"; why: string };
+export type AutoPaperVerdict = { kind: "auto" } | { kind: "manual"; why: string[]; chainHeld?: true } | { kind: "not-held"; why: string };
 export async function autoPaperVerdict(db: Db, entry: PreviewEntry, o: { consentEnforced: boolean }): Promise<AutoPaperVerdict> {
   const e = entry.evidence;
   if (!e || !entry.digest) return { kind: "manual", why: [`its evidence could not be read (${entry.refusals.join("; ") || "no evidence"})`] };
@@ -1234,7 +1272,16 @@ export async function autoPaperVerdict(db: Db, entry: PreviewEntry, o: { consent
     why.push("live-trading consent is stood down on this deployment (MERRYMEN_LIVE_INTENT_STAND_DOWN=1): a funded account arms live whatever its owner's settings say");
   }
   if (!entry.pass) why.push(`it did not pass: ${entry.refusals.join("; ")}`);
-  if (entry.chain !== "not-required" || e.checks.chain !== "not-required") why.push("it could arm live (chain:required): a live tenant is only ever approved by hand");
+  // Asked of the store as well as the line, so a line that does not carry it
+  // (an older build's) is never read as "not held".
+  const chainHeld = entry.chainHeld === true || await unansweredChainRefusal(db, entry.tenant);
+  if (chainHeld) {
+    // It reads chain:required for this (ResumeCheck.chainHeld), which is said
+    // here in its own words rather than as "it could arm live".
+    why.push("admission refused it on the chain, for operations or USDG transfers Postgres lacks, and nothing has admitted it since: its paper reading " +
+      "comes from a Postgres the chain showed incomplete, so it is read on chain (chain:required) and no approval admits it until what the chain " +
+      "showed is booked (docs/chain-gap-booking.md)");
+  } else if (entry.chain !== "not-required" || e.checks.chain !== "not-required") why.push("it could arm live (chain:required): a live tenant is only ever approved by hand");
   if (entry.holdsPositions !== false) why.push("Postgres shows it holding positions");
   if (e.checks.unresolved !== 0) why.push("it has unresolved trades on record");
   const open = await openRows(db, e.account);
@@ -1244,36 +1291,61 @@ export async function autoPaperVerdict(db: Db, entry: PreviewEntry, o: { consent
     .all(entry.tenant, ...OPEN_STATES)) as Array<Record<string, unknown>>).map((r) => String(r.state));
   if (prior.includes("revoked")) why.push("an operator revoked an earlier approval of it, so only an operator approves it again");
   if (prior.some((s) => s !== "revoked")) why.push("an approval is already open for it");
-  if (await unansweredChainRefusal(db, entry.tenant)) {
-    why.push("admission refused it on the chain, for operations or USDG transfers Postgres lacks, and nothing has admitted it since: the paper reading " +
-      "comes from a Postgres the chain showed incomplete — book what the chain shows (docs/chain-gap-booking.md), then preview it and approve it by hand");
-  }
-  return why.length ? { kind: "manual", why } : { kind: "auto" };
+  if (!why.length) return { kind: "auto" };
+  return chainHeld ? { kind: "manual", why, chainHeld: true } : { kind: "manual", why };
 }
+
+/**
+ * WHAT AN OPERATOR DOES WITH A TENANT HELD ON A CHAIN REFUSAL NO ADMISSION
+ * HAS ANSWERED (ResumeCheck.chainHeld), as the automatic lane's line and the
+ * preview's summary both say it: never "approve it by hand" as a way to
+ * trade. An approval of it reads the chain again, and while Postgres still
+ * lacks what the chain showed it is only refused again.
+ *
+ * The booking tool books only while a chain refusal is the tenant's newest
+ * decision (chain-gap-booking.ts holdOf), so a later refusal for another
+ * reason — evidence that changed, say — leaves it nothing to book on. One
+ * approval, with the tenant in the rollout so admission runs for it, is the
+ * way out: admission reads the chain (the tenant reads chain:required) and
+ * records a fresh chain refusal, which is its newest decision again.
+ */
+export const CHAIN_HELD_NEXT = "an approval does not make it trade until what the chain showed is booked: book it first (docs/chain-gap-booking.md). " +
+  "If the booking tool refuses because a later refusal superseded the chain refusal, preview it and approve it once, with it in the rollout at " +
+  "exits-only, so admission reads the chain again (it refuses it again while Postgres lacks what the chain showed, recording a fresh chain refusal); " +
+  "then book it, then preview it again and approve the digest that preview prints";
 
 /**
  * HAS ADMISSION REFUSED THIS TENANT ON THE CHAIN, WITH NOTHING ADMITTED
  * SINCE? Any approval of it refused with the chain refusal's words
  * (CHAIN_REFUSAL: this build's chainRefusal and the shorter reason before
  * it alike), later than every approval of it that reached `registered` or
- * `applied`.
+ * `applied`. A table not there yet holds no refusal; any other read that
+ * fails throws, and every caller fails closed on a throw.
  *
- * WHY THE AUTOMATIC LANE ASKS. The chain check runs only for a tenant that
- * could arm live, and a chain refusal proves Postgres lacks operations or
+ * WHY IT IS ASKED. The chain check used to run only for a tenant that could
+ * arm live, and a chain refusal proves Postgres lacks operations or
  * transfers of the account. "Paper and could not arm live" is read from
  * that same Postgres (no live operation, no flow) and the owner's settings:
  * an owner who turns live trading off after the refusal, and re-signs, would
- * read as the safe case though the operation Postgres lost may be a live
- * trade. Approving it would admit it on that book, and supersede the
- * refusal the booking tool books on (chain-gap-booking.ts holdOf), so what
- * the chain showed would never be booked. Not only the newest decision: an
- * operator's approval refused on other grounds since says nothing about the
- * chain. Only an admission answers it; until then the operator books it and
- * approves by hand, as the runbook says.
+ * read as paper though the operation Postgres lost may be a live trade.
+ * Approved — by the automatic lane, or by an operator's hand — it would be
+ * admitted on that book with no chain read, and supersede the refusal the
+ * booking tool books on (chain-gap-booking.ts holdOf), so what the chain
+ * showed would never be booked. So such a tenant is never paper
+ * (resumePreconditions: chain:required), and never the automatic lane's
+ * (autoPaperVerdict). Not only the newest decision: an approval refused on
+ * other grounds since says nothing about the chain. Only an admission
+ * answers it.
  */
 async function unansweredChainRefusal(db: Db, tenant: string): Promise<boolean> {
-  const rows = (await db.prepare("SELECT state, reason, updated_at_ms FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('refused', 'registered', 'applied')")
-    .all(tenant.toLowerCase())) as Array<Record<string, unknown>>;
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = (await db.prepare("SELECT state, reason, updated_at_ms FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('refused', 'registered', 'applied')")
+      .all(tenant.toLowerCase())) as Array<Record<string, unknown>>;
+  } catch (e) {
+    if (absentTable(e)) return false;
+    throw e;
+  }
   const admittedAt = Math.max(-Infinity, ...rows.filter((r) => r.state !== "refused").map((r) => Number(r.updated_at_ms)));
   return rows.some((r) => r.state === "refused" && String(r.reason ?? "").startsWith(CHAIN_REFUSAL) && !(Number(r.updated_at_ms) < admittedAt));
 }

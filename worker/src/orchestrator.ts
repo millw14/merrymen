@@ -146,7 +146,7 @@ import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } fro
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, registerAttestedGapSource, ensureLedgerResumeSchema, invalidateLedgerImportsUnlessListed } from "./ledger-import";
 import {
-  ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, chainRefusal, completeAttestedSeed,
+  ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, CHAIN_HELD_NEXT, CHAIN_REFUSAL, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, chainRefusal, completeAttestedSeed,
   describeChainFacts, homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readLastRefusal, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
   normaliseCarriedFile, offsetRestoredLink, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
@@ -3239,7 +3239,10 @@ function sayTenantAlert(tenant: string, line: string): void {
  *
  * With one: re-derive the evidence and refuse on any change; check every
  * precondition; read the chain in the background where the account has ever
- * been live (the tenant waits, held, for the answer), and again from that
+ * been live, or where an earlier chain refusal of it is still unanswered
+ * (ledger-resume.ts ResumeCheck.chainHeld: whatever its paper reading says,
+ * so an operator's approval never admits it on the book the chain showed
+ * incomplete) — the tenant waits, held, for the answer — and again from that
  * read's head immediately before the registration; drain a continuous old
  * book's tail through the existing guarded mirror; archive the home; and
  * register the empty book in one transaction. Every step re-checks the lease
@@ -3431,7 +3434,12 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
   const refused = async (from: ApprovalState, why: string): Promise<ResumeVerdict> => {
     await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why });
     resumeChecks.delete(tenant);
-    sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; preview again and approve what is true now`);
+    // A chain refusal is answered by booking what the chain showed, never by
+    // approving again: the tenant is read on chain until an admission answers
+    // it (ledger-resume.ts ResumeCheck.chainHeld), and refused again meanwhile.
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; ` +
+      (why.startsWith(CHAIN_REFUSAL) ? "book what the chain shows (docs/chain-gap-booking.md), then preview again and approve the digest that preview prints"
+        : "preview again and approve what is true now"));
     return { go: false };
   };
   if (approval.state === "registered") {
@@ -3957,8 +3965,13 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       const run = await recordRun(entry, at);
       answered += 1;
       if (verdict.kind === "manual") {
+        // HELD ON A CHAIN REFUSAL NO ADMISSION HAS ANSWERED: never offered an
+        // approval as a way to trade. One reads the chain again (the tenant is
+        // chain:required) and is refused while Postgres lacks what the chain
+        // showed; the line says what is done instead (CHAIN_HELD_NEXT).
         log(`resume auto-paper: ${tenant} re-signed and previewed in run ${run.slice(0, 12)}…, and is not approved automatically — ${verdict.why.join("; ")}` +
-          (entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
+          (verdict.chainHeld ? `. Held on a chain refusal: ${CHAIN_HELD_NEXT}`
+            : entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
         await settle(change, `previewed: ${verdict.why.join("; ")}`, run);
         continue;
       }
@@ -11482,11 +11495,21 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
   const run = await recordPreviewRun(shared, entries, Date.now());
   if (previewRunDigest(entries) !== run) throw new Error("preview run digest drifted");
   const passed = entries.filter((e) => e.pass);
+  // Passing, and held on a chain refusal no admission has answered: they read
+  // chain:required, so an approval reads the chain again, and while Postgres
+  // still lacks what it showed it refuses them again. The batch approval is
+  // never offered as their way to trade; what is, is said beside it.
+  const chainHeld = passed.filter((e) => e.chainHeld === true);
   const summary = (): void => {
     log(`[resume-preview] run ${run}: ${passed.length} of ${entries.length} tenant(s) pass every Postgres precondition` +
       (passed.some((e) => e.chain === "required") ? "; those marked chain:required are read on chain at admission and refused if it shows anything Postgres lacks" : ""));
     if (!passed.length) return;
-    log(`[resume-preview] approve every passing tenant of this run with ${RESUME_APPROVE_ENV}=run:${run}`);
+    log(`[resume-preview] approve every passing tenant of this run with ${RESUME_APPROVE_ENV}=run:${run}` +
+      (chainHeld.length ? ` — for the ${chainHeld.length} held on a chain refusal (chainHeld, below) that is a chain read, not a way to trade` : ""));
+    if (chainHeld.length) {
+      log(`[resume-preview] ${chainHeld.length} passing tenant(s) held on a chain refusal no admission has answered: ` +
+        `${chainHeld.map((e) => e.tenant).join(",")} — for each, ${CHAIN_HELD_NEXT}`);
+    }
     log(`[resume-preview] rollout for them at the plan's starting levels: ${passed.map((e) => `${e.tenant}:${e.suggestedLevel}`).join(",")}`);
     // THE PROCESS CAP. A rollout naming more tenants than fit runs the first
     // ones in roster order and defers the rest with "[alert] … local process
@@ -11538,7 +11561,9 @@ async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Prom
     // is no Postgres precondition, so this preview can pass a tenant whose
     // last admission the chain refused — and the refusal names what it found.
     // Information only: an unreadable one is said as unread, never a refusal,
-    // and never `unreadable` below.
+    // and never `unreadable` below. (What a chain refusal does to the verdict
+    // is the check's own `chainHeld`: chain:required until an admission
+    // answers it, whatever refusal came after it.)
     let lastRefusal: PreviewEntry["lastRefusal"] = null;
     try { lastRefusal = await readLastRefusal(shared, tenant); }
     catch (e) { lastRefusal = { evidence: "", reason: `the last approval could not be read (${errorKind(e)})`, atMs: 0 }; }
@@ -11549,6 +11574,7 @@ async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Prom
         riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
         holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
         grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence, lastRefusal,
+        chainHeld: check.chainHeld,
       },
       // Settings that could not be read, and every refusal a failed read
       // caused (ResumeCheck.unreadable: owner controls whose read did not

@@ -192,6 +192,51 @@ describe("the preconditions", () => {
     assert.deepEqual({ paper: i.paper, chain: i.chainRequired, level: i.suggestedLevel }, { paper: false, chain: true, level: "exits-only" });
     assert.equal((await intent.pre()).chainRequired, false, "without the intent it is the paper book it was");
   });
+  it("a paper book with a chain refusal no admission has answered is read on chain and starts exits-only, whatever came after it, until an admission answers it", async () => {
+    const f = await fixture();
+    const shape = async (db: Db = f.shared) => {
+      const p = await resumePreconditions(db, { tenant: f.tenant, account: f.account, grantAccount: f.account, nowSec: NOW, controls: CONTROLS, homePendingImport: false });
+      return { paper: p.paper, chain: p.chainRequired, held: p.chainHeld, level: p.suggestedLevel, refusals: p.refusals };
+    };
+    const PAPER = { paper: true, chain: false, held: false, level: "trade", refusals: [] };
+    const HELD = { paper: false, chain: true, held: true, level: "exits-only", refusals: [] };
+    assert.deepEqual(await shape(), PAPER, "no approvals table yet: nothing was ever refused");
+    await ensureLedgerResumeSchema(f.shared);
+    const evidence = async () => (await readResumeEvidence(f.shared, { tenant: f.tenant, grant: { smartAccount: f.account, chainId: 4663, owner: f.owner },
+      home: path.join(root, `held-${f.id}`), nowSec: NOW, controls: CONTROLS }));
+    const paperRead = await evidence();
+    const insert = (id: string, state: string, at: number, reason: string | null) => f.raw.prepare(`INSERT INTO ledger_resume_approvals
+        (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason)
+        VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?)`).run(id, f.tenant, f.account, f.owner, id.repeat(64).slice(0, 64), state, at, at, reason);
+    insert("1", "refused", 1_000, "the evidence changed since the preview");
+    assert.deepEqual(await shape(), PAPER, "a refusal for anything else holds nothing on the chain");
+    // Refused on the chain: Postgres, which every paper reading comes from, lacks what the chain showed.
+    insert("2", "refused", 2_000, chainRefusal([{ kind: "operation", userOpHash: `0x${"ab".repeat(32)}`, txHash: `0x${"cd".repeat(32)}`, block: "7", logIndex: 1, success: true }]));
+    assert.deepEqual(await shape(), HELD, "a hold on the chain, not a refusal: an approval of it reads the chain again");
+    // The evidence binds it, so an approval of the paper reading taken before the refusal no longer matches.
+    const heldRead = await evidence();
+    assert.deepEqual([paperRead.evidence.checks.chain, heldRead.evidence.checks.chain], ["not-required", "required"]);
+    assert.notEqual(heldRead.digest, paperRead.digest);
+    // Not only the newest decision: a later refusal for another reason, or a revoke, answers nothing.
+    insert("3", "refused", 3_000, "the evidence changed since the preview");
+    insert("4", "revoked", 4_000, "revoked by the operator");
+    assert.deepEqual(await shape(), HELD);
+    // The reason before chainRefusal named anything, as an older row carries it, holds the same.
+    const g = await fixture();
+    await ensureLedgerResumeSchema(g.shared);
+    g.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms, reason) VALUES ('old', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', 1, 1, ?)`)
+      .run(g.tenant, g.account, g.owner, "e".repeat(64), `${CHAIN_REFUSAL}, landed after the admission's first chain read`);
+    assert.equal((await g.pre()).chainHeld, true);
+    // A lookup that fails is never read as "not held": the whole read throws, and every caller fails closed on that.
+    await assert.rejects(shape(failing(f.shared, /SELECT state, reason, updated_at_ms FROM ledger_resume_approvals/)), /connection reset/);
+    // An admission after it answers it: the booking was made and an approval registered the new book.
+    insert("5", "registered", 5_000, null);
+    assert.deepEqual(await shape(), PAPER);
+    // And a chain refusal after that admission holds it again.
+    insert("6", "refused", 6_000, chainRefusal([]));
+    assert.deepEqual(await shape(), HELD);
+  });
   it("reads the chain from the OLDEST financial cursor, so an operation after a stalled trades cursor is never skipped", async () => {
     const f = await fixture({ live: true });
     f.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ? AND table_name = 'trades'").run(NOW - 100 * 3600, f.tenant);
@@ -567,7 +612,7 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     const entry: PreviewEntry = { tenant: f.tenant, account: f.account, chainId: 4663, owner: f.owner, digest, pass: o.pass ?? refusals.length === 0, refusals,
       chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor, riskPeriod: check.riskPeriod,
       home: o.book === "absent" ? "absent" : "present", lastMirrorAt: check.lastMirrorAt, holdsPositions: check.holdsPositions, startsPaused: false,
-      grantExpiresAt: NOW + 86_400, book: o.book, evidence };
+      grantExpiresAt: NOW + 86_400, book: o.book, evidence, chainHeld: check.chainHeld };
     return entry;
   }
 
@@ -696,8 +741,16 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     insert("2", "refused", 2_000, chainRefusal([{ kind: "operation", userOpHash: "0x" + "ab".repeat(32), txHash: "0x" + "cd".repeat(32), block: "7", logIndex: 1, success: true }]));
     const v = await autoPaperVerdict(f.shared, entry, ENFORCED);
     assert.equal(v.kind, "manual");
+    assert.equal((v as { chainHeld?: true }).chainHeld, true, "so the lane's line offers no hand approval as a way to trade");
     assert.match((v as { why: string[] }).why.join(" | "), /admission refused it on the chain.*nothing has admitted it since.*docs\/chain-gap-booking\.md/);
     assert.doesNotMatch((v as { why: string[] }).why.join(" | "), /0xabab|0xcdcd/, "a reason, never a value: it goes into the watch's outcome");
+    // Its fresh preview, taken now, reads chain:required for the hold, and says so in the hold's words, not as "it could arm live".
+    const now = await entryOf(f, { book: "blocked" });
+    assert.deepEqual([now.chain, now.chainHeld, now.suggestedLevel], ["required", true, "exits-only"]);
+    const w = await autoPaperVerdict(f.shared, now, ENFORCED);
+    assert.equal(w.kind, "manual");
+    assert.equal((w as { chainHeld?: true }).chainHeld, true);
+    assert.doesNotMatch((w as { why: string[] }).why.join(" | "), /could arm live|approved by hand/);
     // Not only the newest decision: an operator's approval refused since on other grounds says nothing about the chain.
     insert("3", "refused", 3_000, "the evidence changed since the preview");
     assert.equal((await autoPaperVerdict(f.shared, entry, ENFORCED)).kind, "manual");

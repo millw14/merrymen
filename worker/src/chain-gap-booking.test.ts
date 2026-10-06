@@ -633,9 +633,18 @@ describe("only a held tenant is booked (holdOf)", () => {
       assert.ok(p.refusals.some((r) => pattern.test(r)), `${pattern.source}: ${p.refusals.join("; ")}`);
     };
     await refusedWith((b) => b.raw.prepare("UPDATE ledger_resume_approvals SET reason = 'the stored grant names a different account, chain or owner than the approval'").run(),
-      /newest admission decision \(approval refusal…, refused for another reason\) is not a chain refusal/);
+      /newest admission decision \(approval refusal…, refused for another reason\) is not a chain refusal: this tool books only what admission refused a held tenant on$/);
     await refusedWith((b) => refuse(b.raw, { tenant: b.tenant, account: b.account, id: "admitted", atSec: REFUSED_AT + 60, state: "applied", generation: "g".repeat(36), reason: "" }),
-      /newest admission decision \(approval admitted…, applied\) is not a chain refusal/);
+      /newest admission decision \(approval admitted…, applied\) is not a chain refusal: this tool books only what admission refused a held tenant on$/);
+    // A later refusal for another reason over the chain refusal: the anchor rule stands, and the way out is said — one approval, which
+    // reads the chain again for a tenant with a chain refusal no admission has answered, and refuses it afresh while Postgres lacks it.
+    await refusedWith((b) => refuse(b.raw, { tenant: b.tenant, account: b.account, id: "evidence", atSec: REFUSED_AT + 60, reason: "the evidence changed since the preview" }),
+      /newest admission decision \(approval evidence…, refused for another reason\) is not a chain refusal: .*\. An earlier approval was refused on the chain: preview the tenant and approve it once, .*fresh chain refusal; then preview here again$/);
+    // Not when an admission answered that chain refusal before the later one: there is nothing for an approval to read the chain again for.
+    await refusedWith((b) => {
+      refuse(b.raw, { tenant: b.tenant, account: b.account, id: "admitted", atSec: REFUSED_AT + 30, state: "applied", generation: "g".repeat(36), reason: "" });
+      refuse(b.raw, { tenant: b.tenant, account: b.account, id: "evidence", atSec: REFUSED_AT + 60, reason: "the evidence changed since the preview" });
+    }, /newest admission decision \(approval evidence…, refused for another reason\) is not a chain refusal: this tool books only what admission refused a held tenant on$/);
     await refusedWith((b) => b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(REFUSED_AT + 10, ACCOUNT),
       /its worker beat at .* after admission refused it at .*: it has run since, so it is not held/);
     // The same heartbeat in milliseconds, as rows carried from elsewhere have held it.

@@ -560,8 +560,17 @@ export function holdOf(snap: BookingSnapshot, nowSec: number): { anchorSec: numb
   if (decided.state !== "refused" || !decided.chainRefusal) {
     // An open approval is refused on its own terms already (planBooking), with the revoke to set.
     if (!OPEN_APPROVAL_STATES.has(decided.state)) {
+      // A LATER REFUSAL FOR ANOTHER REASON over an older chain refusal is not
+      // booked on (the anchor rule stands), and the way out is said: admission
+      // reads the chain for a tenant with a chain refusal no admission has
+      // answered, whatever it reads as (ledger-resume.ts ResumeCheck.chainHeld),
+      // so one approval records a fresh chain refusal while Postgres lacks it.
+      const superseded = decided.state === "refused"
+        && snap.admission.approvals.find((a) => a.chainRefusal || a.state === "registered" || a.state === "applied")?.chainRefusal === true;
       refusals.push(`the tenant's newest admission decision (approval ${decided.approvalId.slice(0, 8)}…, ${decided.state === "refused" ? "refused for another reason" : decided.state}) ` +
-        "is not a chain refusal: this tool books only what admission refused a held tenant on");
+        "is not a chain refusal: this tool books only what admission refused a held tenant on" +
+        (superseded ? ". An earlier approval was refused on the chain: preview the tenant and approve it once, with it in the rollout at exits-only, so " +
+          "admission reads the chain again and, while Postgres lacks what it showed, refuses it with a fresh chain refusal; then preview here again" : ""));
     }
     return { anchorSec: null, refusals };
   }
