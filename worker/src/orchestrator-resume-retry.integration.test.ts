@@ -19,7 +19,8 @@
  * handoff run as they do in production. The grant and settings stores are
  * taken before it is set, so they stay on files. The paper restore is a seam
  * that writes what restorePaperCheckpoint writes: a practice book and its
- * paper basis, and no agent row.
+ * paper basis, and no agent row; and the day's energy, which
+ * seedEnergyForChild writes before the handoff in production.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -85,6 +86,10 @@ setPaperRestoreForTest(async (tenant, account) => {
     else {
       book.prepare("INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares, updated_at) VALUES (?, 90, 0, 100, '{}', 1)").run(account);
       book.prepare("INSERT INTO cost_basis VALUES (?, 'paper', 'COIN', '10', '20', 1)").run(account);
+      // And the day's energy, which seedEnergyForChild writes before the
+      // privacy proof and the handoff in production; its own seed cannot
+      // reach this harness's shared stand-in, so it is written here.
+      book.prepare("INSERT OR IGNORE INTO energy_days (agent_id, day, reviews, entries) VALUES (?, '2026-10-05', 3, 1)").run(account);
       line = "paper cash, holdings and basis restored";
     }
   } finally { book.close(); }
@@ -185,6 +190,7 @@ function book(home: string) {
       agents: (b.prepare("SELECT count(*) AS n FROM agents").get() as { n: number }).n,
       paper: (b.prepare("SELECT count(*) AS n FROM paper_book").get() as { n: number }).n,
       basis: (b.prepare("SELECT count(*) AS n FROM cost_basis").get() as { n: number }).n,
+      energy: (b.prepare("SELECT count(*) AS n FROM energy_days").get() as { n: number }).n,
     };
   } finally { b.close(); }
 }
@@ -202,7 +208,7 @@ it("THE SIX: registered, seeded, its carried link refused by the handoff — the
   assert.equal(forksOf(t.tenant), 0);
   assert.ok(linesOf(t.tenant).some((l) => /recovery reply offset not handed over \(Error HANDOFF_ROW\)/.test(l)), said.join("\n"));
   assert.ok(existsSync(path.join(t.home, "attested-seed.json")), "seeded and proved, as production logged");
-  assert.deepEqual(book(t.home), { agents: 0, paper: 1, basis: 2 }, "the seeds' rows, and no agent row: what the ordinary gates refused on every later pass");
+  assert.deepEqual(book(t.home), { agents: 0, paper: 1, basis: 2, energy: 1 }, "the seeds' rows, and no agent row: what the ordinary gates refused on every later pass");
   // What production holds now: the carried telegram.json as the build before
   // this one left it — the orchestrator's restored link, copied with its
   // bytes and mode — and the listener's row, which names this tenant.
@@ -360,4 +366,74 @@ it("a foreign or tampered book still refuses: a row only a worker writes, anothe
     assert.ok(linesOf(t.tenant).some((l) => /persistent original book is unconfirmed/.test(l)), `${t.tenant}: ${linesOf(t.tenant).slice(-3).join(" | ")}`);
   }
   await remove(worker.tenant, swapped.tenant, tampered.tenant);
+});
+
+it("THE SIX, from before #198: the restored link as the earlier writer left it at the umask is admitted the same way", async () => {
+  const t = await preIncident();
+  offsetRow(t.bot, addr(0x5eee), addr(0x5fff), 4200);
+  await approve(t.tenant);
+  await pass();
+  assert.equal(approval(t.tenant)?.state, "registered");
+  assert.equal(forksOf(t.tenant), 0);
+  assert.equal(book(t.home).energy, 1, "the day's energy is in the book too, with no agent row");
+  // writeTelegramForChild before #202: writeFileSync at the umask, an empty code, a zero link time.
+  const legacy = { linkCode: "", ownerId: 555, linkedAt: 0 };
+  rmSync(path.join(t.home, "telegram.json"), { force: true });
+  writeFileSync(path.join(t.home, "telegram.json"), JSON.stringify(legacy, null, 2)); chmodSync(path.join(t.home, "telegram.json"), 0o644);
+  offsetRow(t.bot, t.tenant, t.account, 4200);
+  await pass();
+  assert.equal(forksOf(t.tenant), 1);
+  assert.equal(approval(t.tenant)?.state, "applied");
+  assert.deepEqual(telegram(t.home), { offset: 4200, ...legacy });
+  assert.equal(lstatSync(path.join(t.home, "telegram.json")).mode & 0o777, 0o600);
+  assert.ok(linesOf(t.tenant).some((l) => /normalised for the offset handoff \(telegram\.json: offset, telegram\.json: mode\)/.test(l)), said.join("\n"));
+  await remove(t.tenant);
+});
+
+it("a carried or live-home telegram.json someone else could write is still refused by its mode, and nothing is reported to the owner it names", async () => {
+  const foreign = { ownerId: 424242, linkCode: "EVIL01" }, planted = { ownerId: 31337, linkCode: "FOREIGN" };
+  // Carried: a 0666 link in the old home.
+  const carried = await preIncident({ telegram: { body: JSON.stringify(foreign), mode: 0o666 } });
+  offsetRow(carried.bot, carried.tenant, carried.account, 500);
+  // In the live home: a 0666 link put there after registration.
+  const live = await preIncident();
+  offsetRow(live.bot, addr(0x5eee), addr(0x5fff), 1);
+  await approve(carried.tenant); await approve(live.tenant);
+  await pass();
+  assert.equal(approval(live.tenant)?.state, "registered");
+  rmSync(path.join(live.home, "telegram.json"), { force: true });
+  writeFileSync(path.join(live.home, "telegram.json"), JSON.stringify(planted)); chmodSync(path.join(live.home, "telegram.json"), 0o666);
+  offsetRow(live.bot, live.tenant, live.account, 600);
+  for (let i = 0; i < 2; i += 1) {
+    await pass();
+    for (const [t, body] of [[carried, foreign], [live, planted]] as const) {
+      assert.equal(approval(t.tenant)?.state, "registered", t.tenant);
+      assert.equal(forksOf(t.tenant), 0, t.tenant);
+      assert.equal(holds.filter((h) => h === t.home).length, 0, t.tenant);
+      assert.deepEqual(telegram(t.home), body, `${t.tenant}: left exactly as it was`);
+      assert.equal(lstatSync(path.join(t.home, "telegram.json")).mode & 0o777, 0o666, `${t.tenant}: its mode kept for the handoff to refuse`);
+      assert.ok(linesOf(t.tenant).some((l) => /offset not handed over \(Error HANDOFF_MODE\)/.test(l)), said.join("\n"));
+      assert.ok(!linesOf(t.tenant).some((l) => /persistent original book is unconfirmed|normalised/.test(l)), said.join("\n"));
+    }
+  }
+  await remove(carried.tenant, live.tenant);
+});
+
+it("a carried telegram.json with a second name stays in the archive, and the tenant is admitted on a file of its own", async () => {
+  const t = await preIncident();
+  const elsewhere = path.join(fleet, `elsewhere-${t.n}.json`);
+  writeFileSync(elsewhere, JSON.stringify({ ownerId: 31337, linkCode: "FOREIGN", offset: 9 }), { mode: 0o600 });
+  linkSync(elsewhere, path.join(t.home, "telegram.json"));
+  offsetRow(t.bot, t.tenant, t.account, 700);
+  await approve(t.tenant);
+  await pass();
+  assert.equal(approval(t.tenant)?.state, "applied", linesOf(t.tenant).join("\n"));
+  assert.equal(forksOf(t.tenant), 1);
+  assert.ok(linesOf(t.tenant).some((l) => /left in the archive, not the home's own: telegram\.json/.test(l)), said.join("\n"));
+  const archived = path.join(fleet, "archive", t.tenant, approval(t.tenant)!.generation!, "telegram.json");
+  assert.equal(readFileSync(archived, "utf8"), JSON.stringify({ ownerId: 31337, linkCode: "FOREIGN", offset: 9 }), "kept in the archive as it was");
+  assert.equal(telegram(t.home).linkCode, undefined, "never the new home's");
+  assert.equal(telegram(t.home).ownerId, undefined);
+  assert.equal(telegram(t.home).offset, 700, "the listener's mark, handed over into a file of the tenant's own");
+  await remove(t.tenant);
 });
