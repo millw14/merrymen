@@ -77,7 +77,7 @@
  * Any failure leaves the tenant held and the step resumable.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { createPublicClient, http, type Hex } from "viem";
 import type { Db } from "./db";
@@ -832,6 +832,81 @@ const CARRY_COPY = ["paused", "controls-armed.json"] as const;
 /** Removed before the home is archived: keys and secrets, all rewritten at the next spawn from the stores. */
 const SCRUB = ["grant.json", "grants", "settings.json"] as const;
 const MANIFEST = ".archive-manifest.json";
+/** The most of telegram.json the offset handoff reads (recovery-reply-handoff.ts); a larger one is never the child's. */
+const TELEGRAM_MAX_BYTES = 256 * 1024;
+
+/**
+ * THE CARRIED FILES, MADE WHAT THEIR READERS ACCEPT FROM US.
+ *
+ * A carried file is a copy this code made of a file an earlier build wrote,
+ * and copyFileSync keeps the source's mode and bytes. The offset handoff
+ * (recovery-reply-handoff.ts) then reads telegram.json strictly: owner-only,
+ * one name, a JSON object whose `offset` is a non-negative integer. Two shapes
+ * our own writers have left in homes fail that, and the first held six
+ * admitted tenants on "recovery reply offset not handed over" for good:
+ *
+ *  - THE ORCHESTRATOR'S RESTORED LINK. writeTelegramForChild writes the link
+ *    code, owner, link time and alert stamps and never an `offset`
+ *    (restoredTelegramFile says why: the date rule, not a restored offset,
+ *    keeps a replayed backlog from running), and the child reads a missing
+ *    offset as 0. A pre-incident home whose spawn was refused after that write
+ *    — its rebuilt book then failed the continuity proof — kept it, no worker
+ *    or hold process ever replaced it, and the archive carried it into the
+ *    new home, where the handoff refused it (HANDOFF_OFFSET) on every pass.
+ *  - A FILE FROM BEFORE 2026-09-30 (#198), written by a plain writeFileSync at
+ *    the process umask (0644), which the handoff refuses (HANDOFF_MODE).
+ *
+ * So every carried file is set to 0600, and a carried telegram.json with no
+ * `offset` at all gets `offset: 0`, which is what every reader already takes
+ * it to be; a leading byte-order mark is dropped, as loadTelegramState drops
+ * it. Rewritten whole and durably (writeFileAtomicSync), never in place.
+ *
+ * NOTHING ELSE. A file that is a symlink, has a second name, is someone
+ * else's, is larger than any the child writes, does not parse, is not an
+ * object, or carries an offset, bot id or prior bots the handoff would refuse
+ * is left exactly as it is, and the handoff refuses it by name. A numeric
+ * `botId` is not a legacy shape: no build ever wrote one (a digit string
+ * since #202), so it stays refused. Says what it changed, by file and kind,
+ * never a value.
+ */
+export function normaliseCarried(dir: string): string[] {
+  const changed: string[] = [];
+  const own = (st: { isFile(): boolean; nlink: number; uid: number }) => st.isFile() && st.nlink === 1 && st.uid === process.getuid?.();
+  for (const name of readdirSync(dir).sort()) {
+    const carried = (CARRY_MOVE as readonly string[]).includes(name) || (CARRY_COPY as readonly string[]).includes(name) || name.startsWith("kill-request-");
+    if (!carried) continue;
+    const file = path.join(dir, name), label = name.startsWith("kill-request-") ? "kill-request" : name;
+    let st = lstatSync(file);
+    if (!own(st)) continue;
+    if (name === "telegram.json" && st.size <= TELEGRAM_MAX_BYTES) {
+      let text: string | null = null;
+      const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const at = fstatSync(fd);
+        if (at.ino === st.ino && at.dev === st.dev && own(at)) text = readFileSync(fd, "utf8");
+      } finally { closeSync(fd); }
+      if (text === null) continue;
+      const bom = text.startsWith("﻿");
+      let value: unknown = null;
+      try { value = JSON.parse(bom ? text.slice(1) : text); } catch { /* left for the handoff to refuse by name */ }
+      const object = !!value && typeof value === "object" && !Array.isArray(value);
+      const noOffset = object && !Object.prototype.hasOwnProperty.call(value, "offset");
+      if (object && (bom || noOffset)) {
+        writeFileAtomicSync(file, JSON.stringify(noOffset ? { offset: 0, ...(value as Record<string, unknown>) } : value, null, 2), 0o600, { durable: true });
+        if (bom) changed.push(`${label}: byte-order mark`);
+        if (noOffset) changed.push(`${label}: offset`);
+        st = lstatSync(file);
+      }
+    }
+    if ((st.mode & 0o777) !== 0o600) {
+      chmodSync(file, 0o600);
+      syncFile(file);
+      changed.push(`${label}: mode`);
+    }
+  }
+  if (changed.length) syncDir(dir);
+  return changed;
+}
 
 function syncDir(dir: string): void { fsyncDirSync(dir); }
 function syncFile(file: string): void {
@@ -850,7 +925,8 @@ function walk(dir: string, rel = ""): Array<{ path: string; type: "file" | "dir"
   return out;
 }
 
-export interface ArchiveResult { archivePath: string | null; carried: string[] }
+/** `normalised`: what normaliseCarried changed in the carry, by file and kind. */
+export interface ArchiveResult { archivePath: string | null; carried: string[]; normalised: string[] }
 
 /**
  * MOVE A TENANT'S HOME ASIDE, WHOLE, AND LEAVE THE NEXT ONE WHAT IT MUST KEEP.
@@ -879,8 +955,11 @@ export interface ArchiveResult { archivePath: string | null; carried: string[] }
  *     owner's link, offsets and chat settings were lost from both places.
  *  5. Write the archive's manifest (0600): every file's path, type, size and
  *     mode — stats, not contents.
- *  6. Move the staged carry into a fresh 0700 home, never over a file already
- *     there.
+ *  6. Make the staged carry what its readers accept from us (normaliseCarried:
+ *     0600, and a telegram.json with no offset given offset 0), in the stage,
+ *     then move it into a fresh 0700 home, never over a file already there.
+ *     Done again on every re-entry before the move, so a carry an earlier
+ *     build staged is made the same before it is visible.
  *
  * With no home at all there is nothing to archive, and the result says so.
  * The archive is never deleted by any code here.
@@ -890,7 +969,7 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
   const dest = path.join(o.archiveRoot, o.generation), stage = path.join(o.archiveRoot, `.carry-${o.generation}`);
   if (!o.mayWrite()) throw lost();
   if (!existsSync(dest)) {
-    if (!existsSync(o.home)) return { archivePath: null, carried: [] };
+    if (!existsSync(o.home)) return { archivePath: null, carried: [], normalised: [] };
     if (!lstatSync(o.home).isDirectory()) throw new Error("the tenant home is not a plain directory");
     mkdirSync(o.archiveRoot, { recursive: true, mode: 0o700 });
     rmSync(stage, { recursive: true, force: true });
@@ -922,7 +1001,12 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
     writeFileAtomicSync(path.join(dest, MANIFEST), JSON.stringify({ version: 1, generation: o.generation, files: walk(dest) }, null, 2), 0o600, { durable: true });
   }
   const carried: string[] = [];
+  let normalised: string[] = [];
   if (existsSync(stage)) {
+    if (!o.mayWrite()) throw lost();
+    // The stage holds only this code's own copies (step 1 copies regular
+    // files and nothing else), so this changes nothing anyone else wrote.
+    normalised = normaliseCarried(stage);
     if (!o.mayWrite()) throw lost();
     mkdirSync(o.home, { recursive: true, mode: 0o700 });
     for (const name of readdirSync(stage).sort()) {
@@ -935,7 +1019,7 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
     rmSync(stage, { recursive: true, force: true });
     syncDir(o.archiveRoot);
   }
-  return { archivePath: dest, carried };
+  return { archivePath: dest, carried, normalised };
 }
 
 // ── phase C: the seed the first mirror pass will publish ────────────────────

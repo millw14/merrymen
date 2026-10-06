@@ -3423,7 +3423,8 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       const archived = archiveTenantHome({ home, archiveRoot: path.join(volume.homeRoot, "archive", tenant), generation: approval.generation!, mayWrite: owned });
       if (!(await moveApproval(shared, approval.approvalId, "archiving", "archived", { archivePath: archived.archivePath }))) return held("the approval changed under it; held");
       log(`${tenant}: resume admission — ${archived.archivePath ? `home archived to ${path.relative(volume.homeRoot, archived.archivePath)} (keys scrubbed)` : "no home on the volume: nothing to archive"}` +
-        `; carried ${archived.carried.length ? archived.carried.join(", ") : "nothing"}`);
+        `; carried ${archived.carried.length ? archived.carried.join(", ") : "nothing"}` +
+        `${archived.normalised.length ? ` (normalised ${archived.normalised.join(", ")})` : ""}`);
       approval = { ...approval, state: "archived", archivePath: archived.archivePath };
     }
     // PHASE B. The preconditions again, now; the chain read again, whole, if
