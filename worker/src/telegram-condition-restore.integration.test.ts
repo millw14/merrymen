@@ -45,8 +45,9 @@ test("real child publish → lost home → restore retains cooldown without rest
   rmSync(file);
   await writeTelegramForChild(tenant, db);
   const restored = JSON.parse(readFileSync(file, "utf8"));
-  assert.deepEqual(restored, state);
-  assert.ok(!("offset" in restored) && !("linkedChats" in restored) && !("botToken" in restored));
+  assert.deepEqual(restored, { offset: 0, ...state });
+  assert.equal(restored.offset, 0, "never the lost file's offset (987): 0, no saved offset");
+  assert.ok(!("linkedChats" in restored) && !("botToken" in restored));
   assert.ok(stamp + 6 * 3600 > Math.floor(Date.now() / 1000), "original six-hour expiry survives, not a refreshed timestamp");
 });
 
@@ -54,10 +55,10 @@ test("owner changes and fallback owners cannot inherit a different recipient's c
   await publishTenantTelegram(db, tenant, { ...state, ownerId: owner + 1 });
   assert.deepEqual(await readTenantConditionAlerts(db, tenant, owner + 1), {});
   assert.deepEqual(restoredTelegramFile({ ...state }, owner + 1), {
-    linkCode: state.linkCode, ownerId: owner + 1, linkedAt: state.linkedAt,
+    offset: 0, linkCode: state.linkCode, ownerId: owner + 1, linkedAt: state.linkedAt,
   });
   assert.deepEqual(restoredTelegramFile({ ...state, ownerId: null }, owner), {
-    linkCode: state.linkCode, ownerId: owner, linkedAt: state.linkedAt,
+    offset: 0, linkCode: state.linkCode, ownerId: owner, linkedAt: state.linkedAt,
   });
   assert.equal(await publishTelegramRuntime(db, tenant, { ...state, ownerId: owner + 1, firedAlerts: {} }, live), null);
   assert.deepEqual(await readTenantConditionAlerts(db, tenant, owner + 1), {});

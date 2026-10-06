@@ -1323,13 +1323,35 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
  *
  * NEVER `linkedChats`. It is the list the parent promotes into the stored
  * allowlist, and restoring it would put back every chat the owner has since
- * removed on the dashboard. Nor the offset: the date rule in service.ts is
- * what keeps a replayed backlog from running.
+ * removed on the dashboard. Nor a saved offset: the date rule in service.ts
+ * is what keeps a replayed backlog from running.
+ *
+ * BUT `offset: 0`, WRITTEN OUT. Not a restored offset: 0 is what every reader
+ * already takes a missing one to be (telegram/state.ts loadTelegramState, and
+ * the hold process through it), so the child asks from no saved offset
+ * exactly as it did, `blind` (service.ts staleSummaryText), with the date
+ * rule holding the backlog back. What it changes is the one strict reader.
+ * The offset handoff (recovery-reply-handoff.ts) refuses a telegram.json with
+ * no offset (HANDOFF_OFFSET), rightly: it cannot raise a high-water mark that
+ * is not there. This used to write none, so an ordinary tenant whose file
+ * was lost, and whose bot the recovery listener had answered meanwhile (a
+ * recovery_reply_offsets row for it), had its link restored here and then
+ * refused by the handoff on every pass: no worker (and for a held tenant no
+ * hold process), for as long as the row stood. With the offset written, the handoff
+ * raises it to the listener's mark as it does for any file, and the child
+ * starts past what the listener already answered. The handoff still refuses
+ * a missing offset from anyone else. A file a build before this one restored
+ * has none; a registered book's home is put right before the handoff reads
+ * it (normaliseRegisteredHome, ledger-resume.ts normaliseCarriedFile).
+ *
+ * Only on a file that has something else in it: with nothing to restore this
+ * is still null, and no file is written (writeTelegramForChild), which the
+ * handoff reads as offset 0 already.
  */
 export function restoredTelegramFile(
   tg: { linkCode: string | null; linkedAt: number | null; ownerId?: number | null; firedAlerts?: Record<string, number> } | null,
   ownerId: number | null,
-): { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } | null {
+): { offset: 0; linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } | null {
   const out: { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } = {};
   if (tg?.linkCode) out.linkCode = tg.linkCode;
   if (ownerId) {
@@ -1340,7 +1362,7 @@ export function restoredTelegramFile(
       if (Object.keys(firedAlerts).length) out.firedAlerts = firedAlerts;
     }
   }
-  return Object.keys(out).length > 0 ? out : null;
+  return Object.keys(out).length > 0 ? { offset: 0, ...out } : null;
 }
 
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childState: string): Promise<void> {
@@ -3557,9 +3579,11 @@ async function attestedSeedReady(tenant: `0x${string}`, smartAccount: string): P
  * the carry's terms: telegram.json alone, only as our own writers left it
  * (this user's, one name, nobody else can write it), and an offset added
  * only to the restored link exactly. And a home that carried no telegram.json
- * gets the same restored link from writeTelegramForChild on its first spawn,
+ * got the same restored link from writeTelegramForChild on its first spawn,
  * which the handoff refused the same way wherever the listener holds an
- * offset for the bot; it is made the same.
+ * offset for the bot; it is made the same. writeTelegramForChild writes
+ * `offset: 0` itself now (restoredTelegramFile), which this leaves as it is;
+ * a file a build before that restored is what is left for this to put right.
  *
  * The file a build before this one carried was a copy, so whether its source
  * had another owner or a second name is gone with it; that copy has been

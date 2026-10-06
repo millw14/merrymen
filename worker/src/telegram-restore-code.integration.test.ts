@@ -64,7 +64,7 @@ describe("writeTelegramForChild restores the published code", () => {
     const t = tenant();
     await publishTenantTelegram(shared, t, { linkCode: "NTE49D", ownerId: null, linkedAt: null });
     await writeTelegramForChild(t, shared);
-    assert.deepEqual(written(t), { linkCode: "NTE49D" });
+    assert.deepEqual(written(t), { offset: 0, linkCode: "NTE49D" });
     assert.ok(said.some((l) => l.includes("telegram link code restored (shown on the dashboard)")));
     assert.ok(!said.some((l) => l.includes("NTE49D")), "the code is never logged");
   });
@@ -73,7 +73,7 @@ describe("writeTelegramForChild restores the published code", () => {
     const t = tenant();
     await publishTenantTelegram(shared, t, { linkCode: "JS945A", ownerId: 555, linkedAt: 1_790_000_000 });
     await writeTelegramForChild(t, shared);
-    assert.deepEqual(written(t), { linkCode: "JS945A", ownerId: 555, linkedAt: 1_790_000_000 });
+    assert.deepEqual(written(t), { offset: 0, linkCode: "JS945A", ownerId: 555, linkedAt: 1_790_000_000 });
     assert.ok(said.some((l) => l.includes("telegram link restored")));
     assert.ok(!said.some((l) => l.includes("JS945A")));
   });
@@ -82,7 +82,7 @@ describe("writeTelegramForChild restores the published code", () => {
     const t = tenant();
     allowlists.set(t, [-1001, 777, 555]);
     await writeTelegramForChild(t, shared);
-    assert.deepEqual(written(t), { ownerId: 555 }, "the child mints a code and starts the bond at the next link");
+    assert.deepEqual(written(t), { offset: 0, ownerId: 555 }, "the child mints a code and starts the bond at the next link");
   });
 
   it("nothing to restore writes no file", async () => {
@@ -106,10 +106,13 @@ describe("restoredTelegramFile", () => {
   it("writes only the fields it has, and never the chats the owner may have removed since", () => {
     assert.equal(restoredTelegramFile(null, null), null);
     assert.equal(restoredTelegramFile({ linkCode: "", linkedAt: 5 }, null), null, "a linkedAt with no owner means nothing");
-    assert.deepEqual(restoredTelegramFile({ linkCode: "ABCDEF", linkedAt: null }, null), { linkCode: "ABCDEF" });
-    assert.deepEqual(restoredTelegramFile(null, 555), { ownerId: 555 });
+    assert.deepEqual(restoredTelegramFile({ linkCode: "ABCDEF", linkedAt: null }, null), { offset: 0, linkCode: "ABCDEF" });
+    assert.deepEqual(restoredTelegramFile(null, 555), { offset: 0, ownerId: 555 });
     const all = restoredTelegramFile({ linkCode: "ABCDEF", linkedAt: 7 }, 555)!;
-    assert.deepEqual(all, { linkCode: "ABCDEF", ownerId: 555, linkedAt: 7 });
-    assert.ok(!("linkedChats" in all) && !("offset" in all));
+    assert.deepEqual(all, { offset: 0, linkCode: "ABCDEF", ownerId: 555, linkedAt: 7 });
+    assert.ok(!("linkedChats" in all));
+    // Never a saved offset: 0, what every reader takes a missing one to be,
+    // written out for the handoff, which refuses a file with none.
+    assert.equal(all.offset, 0);
   });
 });

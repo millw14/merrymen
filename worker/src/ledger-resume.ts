@@ -865,15 +865,21 @@ function ourWritersLeft(st: Stats): boolean {
   return homeOwn(st) && (st.mode & 0o7777 & ~0o644) === 0;
 }
 
-/** The keys restoredTelegramFile writes, and writeTelegramForChild wrote before #202: never an offset, a bot or prior bots. */
+/**
+ * The keys restoredTelegramFile wrote, and writeTelegramForChild before #202:
+ * never an offset, a bot or prior bots. It writes `offset: 0` beside them now,
+ * which the handoff reads as it is; what is recognised here is the file a
+ * build before that left in a home, which is still in archives and homes.
+ */
 const RESTORED_LINK_KEYS: readonly string[] = ["linkCode", "ownerId", "linkedAt", "firedAlerts"];
 
 /**
  * THE ORCHESTRATOR'S RESTORED LINK, and nothing else: what
- * writeTelegramForChild writes (restoredTelegramFile: some of the link code,
- * the owner, the link time and the owner's alert stamps) and, before #202,
- * `{ linkCode (perhaps ""), ownerId, linkedAt (perhaps 0) }`. Another key, or
- * one of these of another type, is not it.
+ * writeTelegramForChild wrote before it wrote an offset (restoredTelegramFile:
+ * some of the link code, the owner, the link time and the owner's alert
+ * stamps) and, before #202, `{ linkCode (perhaps ""), ownerId, linkedAt
+ * (perhaps 0) }`. Another key, or one of these of another type, is not it;
+ * nor is what it writes now, which has its offset already.
  */
 function restoredLink(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -895,8 +901,9 @@ function restoredLink(value: unknown): value is Record<string, unknown> {
  * and the first held six admitted tenants on "recovery reply offset not
  * handed over" for good:
  *
- *  - THE ORCHESTRATOR'S RESTORED LINK (restoredLink). writeTelegramForChild
- *    writes no `offset` (restoredTelegramFile says why: the date rule, not a
+ *  - THE ORCHESTRATOR'S RESTORED LINK (restoredLink), as writeTelegramForChild
+ *    wrote it before it wrote `offset: 0`: no `offset` at all
+ *    (restoredTelegramFile says why none is restored: the date rule, not a
  *    restored offset, keeps a replayed backlog from running), and the child
  *    reads a missing offset as 0. A pre-incident home whose spawn was refused
  *    after that write (its rebuilt book then failed the continuity proof)

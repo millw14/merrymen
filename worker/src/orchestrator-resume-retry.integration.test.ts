@@ -135,7 +135,10 @@ async function putGrant(tenant: `0x${string}`, g: StoredGrant) {
     .run(tenant, JSON.stringify({ smartAccount: g.smartAccount, owner: g.owner, chainId: g.chainId }), nowSec());
 }
 
-/** The restored link exactly as writeTelegramForChild writes it (restoredTelegramFile): no offset at all. */
+/**
+ * The restored link exactly as writeTelegramForChild wrote it (restoredTelegramFile)
+ * before it wrote `offset: 0`: no offset at all. What the six's homes hold.
+ */
 const RESTORED_LINK = { linkCode: "K7M2QX", ownerId: 555, linkedAt: 1_790_000_000 };
 
 let seq = 0;

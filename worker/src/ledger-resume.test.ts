@@ -511,7 +511,7 @@ describe("the home archive", () => {
   }
 
   it("carries a telegram.json the handoff reads: the orchestrator's restored link gains offset 0, a file our writers left at the umask becomes 0600", async () => {
-    // The shape writeTelegramForChild writes (restoredTelegramFile): no offset at all.
+    // The shape writeTelegramForChild wrote (restoredTelegramFile) before it wrote `offset: 0`: no offset at all.
     const restored = { linkCode: "K7M2QX", ownerId: 555, linkedAt: 7, firedAlerts: { "drawdown:20": 1000 } };
     const a = carry("c01", JSON.stringify(restored, null, 2), 0o600, { "telegram-promoted.json": ["{}", 0o644], paused: ["paused", 0o644] });
     assert.deepEqual(JSON.parse(readFileSync(a.file, "utf8")), { offset: 0, ...restored }, "only the offset is added; the link, owner and stamps are as they were");
@@ -541,6 +541,15 @@ describe("the home archive", () => {
     const e = carry("c05", JSON.stringify({ offset: 500, botId: "801" }), 0o600);
     assert.equal(await handoff(e.h, listener()), "accepted");
     assert.equal(JSON.parse(readFileSync(e.file, "utf8")).offset, 500);
+    // The restored link as writeTelegramForChild writes it now, its offset
+    // already there: not the legacy shape, so carried byte for byte, and read
+    // by the handoff as it is.
+    const now = JSON.stringify({ offset: 0, ...restored }, null, 2);
+    const f = carry("c06", now, 0o600);
+    assert.deepEqual(f.r.normalised, []);
+    assert.equal(readFileSync(f.file, "utf8"), now);
+    assert.equal(await handoff(f.h, listener()), "accepted");
+    assert.deepEqual(JSON.parse(readFileSync(f.file, "utf8")), { offset: 101, ...restored });
   });
 
   it("leaves anything but the restored link, and anything our writers did not leave, exactly as it is, and the handoff still refuses it by name", async () => {
