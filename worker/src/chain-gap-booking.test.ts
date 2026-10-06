@@ -31,7 +31,7 @@ import { CASH, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/in
 import type { RpcCall } from "./chain-capital";
 import {
   APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, parseApplyReport, planBooking, planLines,
-  readBookingSnapshot, readChainEvidence, revertBooking, TRADE_COLUMNS, type ApplyReport, type BookingPlan,
+  readBookingSnapshot, readChainEvidence, revertBooking, TRADE_COLUMNS, walkFills, type ApplyReport, type BookingPlan, type RecordedFill,
 } from "./chain-gap-booking";
 
 // ── the public chain, as read ────────────────────────────────────────────────
@@ -131,6 +131,7 @@ function fakeRpc(o: {
 }) {
   const head = o.head ?? HEAD;
   const calls: string[] = [];
+  const balanceTags: string[] = [];
   const blockOf = (b: bigint) => {
     const real = o.txs.find((t) => t.block === b && t.blockHash);
     return { number: `0x${b.toString(16)}`, hash: real?.blockHash ?? h32(`block ${b}`),
@@ -156,12 +157,15 @@ function fakeRpc(o: {
     }
     if (method === "eth_call") {
       const [call, tag] = params as [{ to: string; data: string }, string];
-      assert.equal(tag, "latest");
       if (call.data.startsWith("0x70a08231")) {
+        // PINNED: a balance is read at admission's head less the 64 confirmations every booked fact has, never at "latest".
+        balanceTags.push(tag);
+        assert.equal(tag, `0x${(head - 64n).toString(16)}`);
         assert.match(call.data, /^0x70a08231[0]{24}[0-9a-f]{40}$/);
         if (o.failBalances?.includes(call.to.toLowerCase())) throw new Error("rpc-read-failed");
         return `0x${word(o.balances?.[call.to.toLowerCase()]?.[`0x${call.data.slice(-40)}`] ?? 0n)}`;
       }
+      assert.equal(tag, "latest");
       assert.equal(call.data, "0x313ce567");
       const d = o.decimals?.[call.to.toLowerCase()];
       if (d === undefined) throw new Error("execution reverted");
@@ -169,7 +173,7 @@ function fakeRpc(o: {
     }
     throw new Error(`method ${method} is outside the fake`);
   };
-  return { rpc, calls };
+  return { rpc, calls, balanceTags };
 }
 
 // ── the shared database ──────────────────────────────────────────────────────
@@ -667,6 +671,8 @@ describe("only a held tenant is booked (holdOf)", () => {
       ["an approval", (b) => refuse(b.raw, { tenant: b.tenant, account: b.account, id: "newer", atSec: NOW - 10 })],
       ["a position", (b) => b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
         VALUES (?, 'X', ?, '1', '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, addr(0x99), NOW)],
+      // No count or maximum id moves: only the fills' own digest sees it.
+      ["a recorded fill repaired in place", (b) => b.raw.prepare("UPDATE trades SET fill_side = 'buy', fill_qty_raw = '1', basis_source = 'receipt' WHERE user_op_hash = ?").run(BUY_OP)],
     ];
     for (const [what, wake] of wakes) {
       const b = await books();
@@ -674,32 +680,44 @@ describe("only a held tenant is booked (holdOf)", () => {
       const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), dep] }).rpc);
       assert.equal(p.verdict, "ready", what);
       wake(b);
-      await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "cas" && /\((admission|agents|holdings)\)/.test((e as Error).message), what);
+      await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "cas" && /\((admission|agents|holdings|fills)\)/.test((e as Error).message), what);
       assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?", dep.tx)[0]!.n, 0, what);
     }
   });
 });
 
-describe("a trade only where the seed already knows what it did (holdingVerdict)", () => {
+describe("a trade only where the seed already holds what the chain does (holdingVerdict)", () => {
   /** Shogun's sell of COIN missing, its buy in Postgres; the book's balances as given. */
   const sellPlan = (b: Books, o: { balances?: Record<string, Record<string, bigint>>; failBalances?: string[] } = {}) =>
     preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n }, ...o }).rpc);
-  /** What the lost book's last mirror left: a COIN position written at `positionAt`, and its basis at `basisAt` (none when null). */
+  /** What the lost book's last mirror left: a COIN position of 1000 written at `positionAt`, and its basis at `basisAt` (none when null). */
   const snapshot = (b: Books, o: { positionAt: number; basisAt?: number | null }) => {
     b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
       VALUES (?, 'COIN', ?, '1000', '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, COIN, o.positionAt);
     if (o.basisAt !== null) b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '1000', '5000000', ?)").run(ACCOUNT, o.basisAt ?? o.positionAt);
   };
+  /** The 1000 that snapshot says, held in the Trencher vault at the pinned block. */
+  const inVault = { balances: { [COIN]: { [VAULT]: 1000n } } };
   const sell = (p: BookingPlan) => p.items.find((i) => i.key === `op:${SELL_OP}`)!;
   const leg = (p: BookingPlan) => p.items.find((i) => i.key === `log:${CHAIN.sell.tx}#11`)!;
 
-  it("held, with the position and its basis both written after the last trade in the token: the trade books, and its evidence says why", async () => {
+  it("held, its position and basis each what the book holds at the pinned block and both written after the last trade: the trade books, and its evidence says how", async () => {
     const b = await books();
     snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 });
-    const p = await sellPlan(b);
+    const model = fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n }, ...inVault });
+    const p = await preview(b, model.rpc);
     assert.equal(p.verdict, "ready", planLines(p).join("\n"));
-    const holding = sell(p).evidence.holding as { lastTradeAt: number; position: { updatedAt: number }; basis: { updatedAt: number } };
+    const holding = sell(p).evidence.holding as { lastTradeAt: number; position: { updatedAt: number }; basis: { updatedAt: number }; refusal: null;
+      bookBalance: { total: string }; fills: { verdict: string; why: string } };
     assert.deepEqual([holding.lastTradeAt, holding.position.updatedAt, holding.basis.updatedAt], [CHAIN.sell.timestamp, CHAIN.sell.timestamp + 5, CHAIN.sell.timestamp + 5]);
+    assert.deepEqual([holding.refusal, holding.bookBalance.total], [null, "1000"]);
+    // PINNED: every balance was read at admission's head less 64, and the plan says which block (outside the digest, as the head is).
+    assert.ok(model.balanceTags.length > 0 && model.balanceTags.every((t) => t === `0x${(HEAD - 64n).toString(16)}`), model.balanceTags.join(","));
+    assert.equal(p.capture.balanceBlock, (HEAD - 64n).toString());
+    // Postgres's buy of COIN carries no fill, so the walk back to where the basis opened cannot be done: said, and the contents decide alone.
+    assert.equal(holding.fills.verdict, "unproven");
+    assert.match(holding.fills.why, /trade #1 in 0xaa07.* records no fill/);
+    assert.ok(p.warnings.some((w) => /0xaa07.*: the recorded fills could not be walked back to where its basis opened/.test(w)), p.warnings.join("\n"));
   });
 
   it("not held, and none of it on chain across the account and its vault: the trade books", async () => {
@@ -710,17 +728,26 @@ describe("a trade only where the seed already knows what it did (holdingVerdict)
     assert.deepEqual(holding.bookBalance, { total: "0", by: { [ACCOUNT]: "0", [VAULT]: "0" } });
   });
 
-  it("a stale position, a held position with no basis, a basis older than the trade, a balance the snapshot does not know of, or an unread balance: unresolved, legs and all", async () => {
-    const cases: Array<[string, (b: Books) => void, Parameters<typeof sellPlan>[1], RegExp]> = [
-      ["position before the trade", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp - 60 }), {},
+  it("a position or basis other than the chain's, a held position with no basis, one written before the trade, a balance the snapshot does not know of, or an unread balance: unresolved, legs and all", async () => {
+    const cases: Array<[string, (b: Books) => void, Parameters<typeof sellPlan>[1], string, RegExp]> = [
+      ["position other than the chain's", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 }), {}, "position-differs",
+        /position in COIN \(0xaa07.*\) holds 1000 base units, and the book held 0 on chain at the pinned block/],
+      ["basis other than the chain's", (b) => {
+        snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 });
+        b.raw.prepare("UPDATE cost_basis SET qty_raw = '400'").run();
+      }, inVault, "basis-differs", /live cost basis for COIN covers 400 base units, and the book held 1000 on chain at the pinned block/],
+      ["position before the trade", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp - 60 }), inVault, "position-stale",
         /position in COIN \(0xaa07.*\) was last written 2026-.*, before the tenant's last trade in it .*: the attested book is seeded from that snapshot/],
-      ["no basis", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, basisAt: null }), {}, /holds a position in COIN .* with no live cost basis/],
-      ["basis before the trade", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, basisAt: CHAIN.sell.timestamp - 60 }), {},
+      ["no basis", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, basisAt: null }), inVault, "basis-missing", /holds a position in COIN .* with no live cost basis/],
+      ["basis before the trade", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, basisAt: CHAIN.sell.timestamp - 60 }), inVault, "basis-stale",
         /cost basis for COIN was last written .* before the tenant's last trade in it/],
-      ["held on chain, not in the snapshot", () => {}, { balances: { [COIN]: { [VAULT]: 7n } } }, /the book holds 7 base units of 0xaa07.* on chain now, and the snapshot .* holds none/],
-      ["balance unread", () => {}, { failBalances: [COIN] }, /the book's balance of 0xaa07.* could not be read/],
+      ["held on chain, not in the snapshot", () => {}, { balances: { [COIN]: { [VAULT]: 7n } } }, "held-unrecorded",
+        /the book held 7 base units of 0xaa07.* on chain at the pinned block .*, and the snapshot .* holds none/],
+      ["balance unread", () => {}, { failBalances: [COIN] }, "balance-unread", /the book's balance of 0xaa07.* at the pinned block could not be read/],
+      ["balance unread, the snapshot holding it", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 }), { failBalances: [COIN] }, "balance-unread",
+        /could not be read .*cannot be proved/],
     ];
-    for (const [what, setup, chain, pattern] of cases) {
+    for (const [what, setup, chain, refusal, pattern] of cases) {
       const b = await books();
       setup(b);
       const p = await sellPlan(b, chain);
@@ -728,6 +755,7 @@ describe("a trade only where the seed already knows what it did (holdingVerdict)
       assert.equal(sell(p).class, "unresolved", what);
       assert.equal(sell(p).proposal, null, what);
       assert.match(sell(p).why, pattern, what);
+      assert.equal((sell(p).evidence.holding as { refusal: string }).refusal, refusal, what);
       assert.equal(leg(p).class, "unresolved", `${what}: its leg waits on it`);
       assert.equal(p.remaining.length, 2, what);
     }
@@ -740,12 +768,159 @@ describe("a trade only where the seed already knows what it did (holdingVerdict)
     assert.equal(ok.verdict, "ready");
     assert.deepEqual(ok.items.filter((i) => i.class === "session-trade").map((i) => (i.evidence.holding as { lastTradeAt: number }).lastTradeAt),
       [CHAIN.sell.timestamp, CHAIN.sell.timestamp]);
+    // The two fills, from flat, are the chain's nothing exactly.
+    assert.deepEqual(ok.items.filter((i) => i.class === "session-trade").map((i) => (i.evidence.holding as { fills: { verdict: string } }).fills.verdict),
+      ["reproduced", "reproduced"]);
     // A snapshot taken between the buy and the sell knows the buy and not the sell: neither books.
     const between = await books({ knownBuy: false });
     snapshot(between, { positionAt: CHAIN.buy.timestamp + 10 });
     const no = await preview(between, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n } }).rpc);
     assert.equal(no.verdict, "blocked");
     assert.deepEqual(no.items.filter((i) => i.fact.kind === "operation").map((i) => i.class), ["unresolved", "unresolved"]);
+  });
+});
+
+/**
+ * WHEN THE SNAPSHOT WAS WRITTEN IS NEVER ENOUGH (Codex on #293). A missed
+ * fill followed by an ordinary one in the same token rewrites the position
+ * and the basis after the missed fill, and the basis can still leave it out.
+ * Synthetic session-key swaps of one token against USDG, on the account
+ * alone; Postgres records the ordinary fills as the live path writes them
+ * (fill side and quantity read off the receipt).
+ */
+describe("the snapshot's contents against the chain, never its timestamps alone", () => {
+  const TOKEN = addr(0x70c3), POOL = addr(0x900d);
+  const E18 = 10n ** 18n;
+  /** A session key's swap of TOKEN against USDG, on chain: the missed one. */
+  const swap = (o: { tag: string; side: "buy" | "sell"; qty: bigint; cash: bigint; block: bigint }) => operation({ opHash: h32(o.tag), nonce: SESSION_NONCE, block: o.block,
+    tag: o.tag, logs: o.side === "buy"
+      ? [[USDG, [TR, topic(ACCOUNT), topic(POOL)], `0x${word(o.cash)}`, "0x2"], [TOKEN, [TR, topic(POOL), topic(ACCOUNT)], `0x${word(o.qty)}`, "0x3"]]
+      : [[TOKEN, [TR, topic(ACCOUNT), topic(POOL)], `0x${word(o.qty)}`, "0x2"], [USDG, [TR, topic(POOL), topic(ACCOUNT)], `0x${word(o.cash)}`, "0x3"]] });
+  /** An ordinary fill Postgres holds, as the executor writes it. */
+  const recorded = (b: Books, o: { tag: string; side: "buy" | "sell"; qty: bigint; at: number; basisSource?: string; status?: string }) =>
+    b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch,
+        fill_side, fill_symbol, fill_qty_raw, basis_source) VALUES (?, 'swap', ?, ?, ?, 1, ?, ?, ?, ?, 2, ?, 'TKN', ?, ?)`)
+      .run(ACCOUNT, POOL, o.side === "buy" ? USDG : TOKEN, o.side === "buy" ? TOKEN : USDG, h32(o.tag), h32(`${o.tag} tx`), o.status ?? "landed", o.at, o.side,
+        o.qty.toString(), o.basisSource ?? "receipt");
+  /** The lost book's last mirror: the position (rewritten every tick) and the live basis (at its last fill), or neither. */
+  const mirrored = (b: Books, o: { raw: bigint; basisQty: bigint | null; at: number }) => {
+    b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+      VALUES (?, 'TKN', ?, ?, '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, TOKEN, o.raw.toString(), o.at + 5);
+    if (o.basisQty !== null) b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'TKN', ?, '1000000', ?)").run(ACCOUNT, o.basisQty.toString(), o.at);
+  };
+  const T0 = CHAIN.sell.timestamp + 100, MISSED = SELL_BLOCK + 2_000n, MISSED_AT = CHAIN.sell.timestamp + 200, T2 = CHAIN.sell.timestamp + 300;
+  const plan = (b: Books, missed: ModelTx, o: { balance?: bigint; failBalances?: string[] } = {}) =>
+    preview(b, fakeRpc({ txs: [missed], decimals: { [TOKEN]: 18n }, balances: { [TOKEN]: { [ACCOUNT]: o.balance ?? 0n } }, failBalances: o.failBalances }).rpc);
+  const trade = (p: BookingPlan, tag: string) => p.items.find((i) => i.key === `op:${h32(tag)}`)!;
+  const holdingOf = (p: BookingPlan, tag: string) => trade(p, tag).evidence.holding as { refusal: string | null; fills: { verdict: string; anchor: string | null } };
+
+  it("a missed buy, then an ordinary buy that rewrote both rows after it: refused while the basis leaves the missed buy out, booked once it holds it", async () => {
+    const missed = swap({ tag: "missed buy", side: "buy", qty: 100n * E18, cash: 100_000_000n, block: MISSED });
+    const run = async (basisQty: bigint) => {
+      const b = await books();
+      recorded(b, { tag: "later buy", side: "buy", qty: 50n * E18, at: T2 });
+      mirrored(b, { raw: 150n * E18, basisQty, at: T2 });
+      return plan(b, missed, { balance: 150n * E18 });
+    };
+    const left = await run(50n * E18);
+    // Both rows were written after the missed buy — the timestamps alone would have booked it.
+    const h = trade(left, "missed buy").evidence.holding as { position: { updatedAt: number }; basis: { updatedAt: number } };
+    assert.ok(h.position.updatedAt > MISSED_AT && h.basis.updatedAt > MISSED_AT);
+    assert.equal(left.verdict, "blocked", planLines(left).join("\n"));
+    assert.equal(trade(left, "missed buy").class, "unresolved");
+    assert.equal(holdingOf(left, "missed buy").refusal, "basis-differs");
+    assert.match(trade(left, "missed buy").why,
+      /^not booked \(basis-differs\): Postgres's live cost basis for TKN covers 50000000000000000000 base units, and the book held 150000000000000000000 on chain at the pinned block/);
+    assert.ok(planLines(left).some((l) => /why: not booked \(basis-differs\)/.test(l)), "named at the console");
+    assert.equal(left.items.filter((i) => i.proposal).length, 0, "its USDG leg waits on it");
+
+    const holds = await run(150n * E18);
+    assert.equal(holds.verdict, "ready", planLines(holds).join("\n"));
+    // 150 held ← the later buy of 50 ← the missed buy of 100, from flat.
+    const { fills } = holdingOf(holds, "missed buy");
+    assert.deepEqual([fills.verdict, fills.anchor], ["reproduced", "before every fill Postgres records in the token"]);
+  });
+
+  it("a missed sell, then an ordinary sell: refused while the basis leaves the missed sell out, booked once it holds it", async () => {
+    const missed = swap({ tag: "missed sell", side: "sell", qty: 40n * E18, cash: 44_000_000n, block: MISSED });
+    const run = async (basisQty: bigint) => {
+      const b = await books();
+      recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+      recorded(b, { tag: "later sell", side: "sell", qty: 30n * E18, at: T2 });
+      mirrored(b, { raw: 30n * E18, basisQty, at: T2 });
+      return plan(b, missed, { balance: 30n * E18 });
+    };
+    const left = await run(70n * E18);
+    assert.equal(left.verdict, "blocked");
+    assert.equal(holdingOf(left, "missed sell").refusal, "basis-differs");
+    assert.match(trade(left, "missed sell").why, /covers 70000000000000000000 base units, and the book held 30000000000000000000 on chain/);
+    const holds = await run(30n * E18);
+    assert.equal(holds.verdict, "ready", planLines(holds).join("\n"));
+    // 30 held ← the later sell ← the missed sell ← the first buy, from flat.
+    assert.equal(holdingOf(holds, "missed sell").fills.verdict, "reproduced");
+  });
+
+  it("a token fully exited — no position, no basis, nothing on chain — books; a basis left over the flat book refuses", async () => {
+    const missed = swap({ tag: "missed exit", side: "sell", qty: 100n * E18, cash: 101_000_000n, block: MISSED });
+    const b = await books();
+    recorded(b, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+    const flat = await plan(b, missed);
+    assert.equal(flat.verdict, "ready", planLines(flat).join("\n"));
+    assert.deepEqual([holdingOf(flat, "missed exit").refusal, holdingOf(flat, "missed exit").fills.verdict], [null, "reproduced"]);
+    const stale = await books();
+    recorded(stale, { tag: "first buy", side: "buy", qty: 100n * E18, at: T0 });
+    stale.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'TKN', ?, '1000000', ?)").run(ACCOUNT, (100n * E18).toString(), T0);
+    const p = await plan(stale, missed);
+    assert.equal(p.verdict, "blocked");
+    assert.equal(holdingOf(p, "missed exit").refusal, "basis-without-position");
+    assert.match(trade(p, "missed exit").why, /yet its live cost basis under TKN still covers 100000000000000000000/);
+  });
+
+  it("an unreadable balance refuses, even under a snapshot that holds the trade and was written after it", async () => {
+    const missed = swap({ tag: "missed buy", side: "buy", qty: 100n * E18, cash: 100_000_000n, block: MISSED });
+    const b = await books();
+    mirrored(b, { raw: 100n * E18, basisQty: 100n * E18, at: T2 });
+    const p = await plan(b, missed, { balance: 100n * E18, failBalances: [TOKEN] });
+    assert.equal(p.verdict, "blocked");
+    assert.equal(holdingOf(p, "missed buy").refusal, "balance-unread");
+    assert.match(trade(p, "missed buy").why, /balance of 0x0+70c3 at the pinned block could not be read \(0x05a198.* unread\)/);
+  });
+
+  it("fills more than the chain holds refuse, even with the position and basis equal to it", async () => {
+    // Postgres records a buy of 150 and the chain holds 150: there is no room for a missed buy of 100 before it.
+    const missed = swap({ tag: "missed buy", side: "buy", qty: 100n * E18, cash: 100_000_000n, block: MISSED });
+    const b = await books();
+    recorded(b, { tag: "later buy", side: "buy", qty: 150n * E18, at: T2 });
+    mirrored(b, { raw: 150n * E18, basisQty: 150n * E18, at: T2 });
+    const p = await plan(b, missed, { balance: 150n * E18 });
+    assert.equal(p.verdict, "blocked");
+    assert.equal(holdingOf(p, "missed buy").refusal, "fills-exceed-chain");
+    assert.match(trade(p, "missed buy").why, /op:0x[0-9a-f]{64} \(a buy of 100000000000000000000 at .*\) leaves -100000000000000000000: the fills Postgres records and the ones this plan would book are more than the chain holds/);
+  });
+
+  it("walkFills: back to where the basis opened, and no further; an unreadable record says so rather than guess", () => {
+    const fill = (id: number, side: string | null, qty: string | null, at: number, extra: Partial<RecordedFill> = {}): RecordedFill => ({
+      id, status: "landed", buyToken: side === "buy" ? TOKEN : USDG, sellToken: side === "buy" ? USDG : TOKEN, side, qtyRaw: qty, symbol: "TKN", basisSource: "receipt", at, ...extra });
+    const proposed = [{ key: "op:p", side: "buy" as const, qtyRaw: "3", at: 50, symbol: null }];
+    const walk = (fills: RecordedFill[], total: bigint) => walkFills({ token: TOKEN, fills, proposed, symbols: new Set(["TKN"]), total });
+    // Flat after #3: #1 (no fill, from before) is never read.
+    const history = [fill(1, null, null, 10), fill(2, "buy", "5", 20), fill(3, "sell", "5", 30), fill(4, "buy", "7", 40)];
+    const ok = walk(history, 10n);
+    assert.deepEqual([ok.verdict, ok.anchor, ok.walked.map((w) => [w.ref, w.heldBefore])], ["reproduced", "after trades#3", [["op:p", "7"], ["trades#4", "0"]]]);
+    // Another token's row is not this one's, however large.
+    assert.equal(walk([...history, fill(5, "buy", "999", 45, { buyToken: addr(0xabc), symbol: "OTHER" })], 10n).verdict, "reproduced");
+    // A fill read from a quote, a row still in flight, and records that run out holding some: the walk cannot say.
+    for (const [extra, why] of [[{ basisSource: "quote" }, /trade #4's fill is from its quote, not read off its receipt/],
+      [{ status: "submitted" }, /trade #4 in 0x0+70c3 is still 'submitted'/]] as const) {
+      const w = walk([...history.slice(0, 3), fill(4, "buy", "7", 40, extra)], 10n);
+      assert.equal(w.verdict, "unproven");
+      assert.match(w.why!, why);
+    }
+    const short = walk([fill(4, "buy", "7", 40)], 12n);
+    assert.deepEqual([short.verdict, short.anchor], ["unproven", null]);
+    assert.match(short.why!, /the book still held 2 base units before the first of them/);
+    // More than the chain holds: a buy bigger than what was held after it.
+    assert.equal(walk(history, 5n).verdict, "exceeds");
   });
 });
 

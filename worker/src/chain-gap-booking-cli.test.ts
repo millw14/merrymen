@@ -131,7 +131,7 @@ describe("arguments", () => {
 });
 
 describe("the chain transport", () => {
-  it("admits a fixed list of reads, and eth_call for decimals() and balanceOf(one address) at latest only", async () => {
+  it("admits a fixed list of reads, and eth_call for decimals() at latest and balanceOf(one address) at a pinned block number only", async () => {
     const asked: unknown[] = [];
     const fetchImpl = (async (_url: string, init: { body: string }) => {
       const body = JSON.parse(init.body) as { id: number; method: string };
@@ -142,16 +142,22 @@ describe("the chain transport", () => {
     const token = `0x${"aa".repeat(20)}`, holder = "bb".repeat(20);
     assert.equal(await rpc("eth_blockNumber", []), "0x12");
     assert.equal(await rpc("eth_call", [{ to: token, data: "0x313ce567" }, "latest"]), "0x12");
-    assert.equal(await rpc("eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "latest"]), "0x12");
+    assert.equal(await rpc("eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "0x4dfe3ca"]), "0x12");
     for (const [method, params] of [["eth_sendRawTransaction", ["0x"]], ["eth_getBalance", []], ["eth_call", [{ to: token, data: "0xa9059cbb" }, "latest"]],
       ["eth_call", [{ to: token, data: "0x313ce567" }, "0x1"]], ["eth_call", [{ to: token, data: "0x313ce567", from: `0x${"bb".repeat(20)}` }, "latest"]],
-      // balanceOf with anything but one zero-padded address: a second word, a dirty pad, a short address, or another block.
-      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}${"0".repeat(64)}` }, "latest"]],
-      ["eth_call", [{ to: token, data: `0x70a08231${"1".repeat(24)}${holder}` }, "latest"]],
-      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder.slice(2)}` }, "latest"]],
+      // balanceOf with anything but one zero-padded address: a second word, a dirty pad, a short address.
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}${"0".repeat(64)}` }, "0x4dfe3ca"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"1".repeat(24)}${holder}` }, "0x4dfe3ca"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder.slice(2)}` }, "0x4dfe3ca"]],
+      // ...or at anything but a block number: a tag ("latest" too: it could hold what landed after the facts), a padded or upper-case quantity, a hash, an object.
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "latest"]],
       ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "earliest"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "0x04dfe3ca"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "0x4DFE3CA"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, `0x${"ab".repeat(32)}`]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, { blockNumber: "0x4dfe3ca" }]],
       // transfer(address,uint256) shaped like it: the selector is what is admitted, not the length.
-      ["eth_call", [{ to: token, data: `0xa9059cbb${"0".repeat(24)}${holder}` }, "latest"]]] as const) {
+      ["eth_call", [{ to: token, data: `0xa9059cbb${"0".repeat(24)}${holder}` }, "0x4dfe3ca"]]] as const) {
       await assert.rejects(rpc(method, params as unknown as unknown[]), (e: unknown) => e instanceof CliError && /allowlist/.test(e.code), `${method} ${JSON.stringify(params)}`);
     }
     assert.deepEqual(asked, ["eth_blockNumber", "eth_call", "eth_call"], "nothing refused left the process");

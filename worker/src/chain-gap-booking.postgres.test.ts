@@ -8,7 +8,8 @@
  * the shell's gate), REPEATABLE READ READ ONLY proved by current_setting,
  * BIGINT ids returned by INSERT … RETURNING, the flows identity's partial
  * unique index with ON CONFLICT DO NOTHING RETURNING, the receipts' partial
- * unique index, and the row lock the apply takes.
+ * unique index, the row lock the apply takes, and the recorded fills read
+ * back (BIGINT times, TEXT quantities) for a trade's holding to be judged on.
  *
  * Each run creates its own database and drops it. Run with
  * MERRYMEN_TEST_PG_URL=postgres://…@127.0.0.1:<port>/<db> and the `pg`
@@ -171,5 +172,23 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = $1", [OP])).rows[0]!.n), 0);
   assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM flows WHERE tx_hash = $1", [DEP_TX])).rows[0]!.n), 0);
   assert.deepEqual((await setup.query(`SELECT state FROM ${BOOKINGS_TABLE} ORDER BY evidence_key`)).rows.map((r) => r.state), ["reverted", "reverted"]);
+
+  // THE CONTENTS, NEVER THE TIMES ALONE, read on Postgres: a round trip in COIN that the executor recorded before the buy (read back as
+  // the fill walk's rows), and a basis rewritten after the buy that still covers only part of what the chain holds. The preview refuses.
+  for (const [tag, side, at] of [["an earlier buy", "buy", AT - 200], ["its sell", "sell", AT - 100]] as const) {
+    await setup.query(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch,
+        fill_side, fill_qty_raw, fill_symbol, basis_source) VALUES ($1, 'swap', $2, $3, $4, 1, $5, $6, 'landed', $7, 2, $8, '500000000000000000', 'COIN', 'receipt')`,
+    [ACCOUNT, POOL, side === "buy" ? USDG : COIN, side === "buy" ? COIN : USDG, h32(tag), h32(`${tag} tx`), at, side]);
+  }
+  await setup.query("UPDATE cost_basis SET qty_raw = '1000000000000000000', updated_at = $1", [AT + 60]);
+  const refusedFile = path.join(tmp, "refused.json");
+  assert.equal(await main(["--tenant", TENANT, "--output", refusedFile], env, deps), 2, printed.join("\n"));
+  const refused = JSON.parse(readFileSync(refusedFile, "utf8")) as { verdict: string; items: Array<{ key: string; class: string; why: string;
+    evidence: { holding?: { refusal: string; fills: { verdict: string; anchor: string } } } }> };
+  const buy = refused.items.find((i) => i.key === `op:${OP}`)!;
+  assert.deepEqual([refused.verdict, buy.class, buy.evidence.holding?.refusal], ["blocked", "unresolved", "basis-differs"]);
+  assert.match(buy.why, /covers 1000000000000000000 base units, and the book held 1500000000000000000 on chain at the pinned block/);
+  const sellId = Number((await setup.query("SELECT id FROM trades WHERE user_op_hash = $1", [h32("its sell")])).rows[0]!.id);
+  assert.deepEqual([buy.evidence.holding?.fills.verdict, buy.evidence.holding?.fills.anchor], ["reproduced", `after trades#${sellId}`], "flat after the round trip");
   assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
 });

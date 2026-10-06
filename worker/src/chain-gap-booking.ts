@@ -49,14 +49,19 @@
  *                             not write cost_basis or positions — the
  *                             attested book is seeded from them as the lost
  *                             book last mirrored them (planAttestedSeed) —
- *                             so it books a trade only when that snapshot
- *                             already says what the trade did: the position
- *                             and its basis written after the tenant's last
- *                             trade in the token, or no position in the
- *                             snapshot and none on chain either (read now,
- *                             across the book). Otherwise the trade, and so
- *                             the tenant, is unresolved: a reviewed basis
- *                             decision, never a guess (holdingVerdict).
+ *                             so it books a trade only when that snapshot's
+ *                             CONTENTS already say what the trade did: the
+ *                             position's raw balance and its basis quantity
+ *                             each equal to what the book (the account and
+ *                             its custody, as the fill is read) holds on
+ *                             chain at a block 64 deep, or none of the token
+ *                             in the snapshot, its basis or on chain; and the
+ *                             fills Postgres records since the basis last
+ *                             opened, with these, never more than the chain
+ *                             holds. When they were written is checked too,
+ *                             and is never enough alone. Otherwise the trade,
+ *                             and so the tenant, is unresolved: a reviewed
+ *                             basis decision, never a guess (holdingVerdict).
  *   a session-key operation   the reconciler's row for an op with no USDG leg
  *     that moved nothing      (notional 0, no tokens): its hash is known, so
  *                             the op is counted, and nothing is attributed.
@@ -76,11 +81,11 @@
  * historical ETH price is proved here — NULL is "unpriced", as in the worker),
  * no decision, no peak moved, no cost basis or position touched (those are
  * snapshot tables the lost book's last mirror already wrote, and an attested
- * book is seeded from them — which is why a trade the snapshot does not
- * already reflect is refused, above), no risk period. A fill's price is the
- * ratio of the two amounts the logs moved, scaled by the token's own
- * decimals(); when that cannot be read the price is NULL and the rest of the
- * row stands.
+ * book is seeded from them — which is why a trade whose token the snapshot
+ * does not already hold exactly as the chain does is refused, above), no risk
+ * period. A fill's price is the ratio of the two amounts the logs moved,
+ * scaled by the token's own decimals(); when that cannot be read the price is
+ * NULL and the rest of the row stands.
  *
  * AND IT REFUSES WHAT IT CANNOT CLASSIFY. Every operation and transfer the
  * admission's own chain check finds (chainGapCheck, called here exactly as
@@ -145,12 +150,19 @@ export const BOOKING_CONFIRMATIONS = 64n;
 export const BOOKINGS_TABLE = "chain_gap_bookings";
 /** How the reconciler and the key-install resolver name a revert whose message is gone. */
 const REVERTED_RULE = "reverted on-chain (resolved)";
-/** `decimals()`: one of the two calls this tool makes, and its transport admits. */
+/** `decimals()`: one of the two calls this tool makes, and its transport admits — at "latest" only. */
 export const DECIMALS_SELECTOR = "0x313ce567";
-/** `balanceOf(address)`: the other — how much of a traded token the book holds now (holdingVerdict). */
+/**
+ * `balanceOf(address)`: the other — how much of a traded token the book held
+ * at the pinned block (holdingVerdict), and at a block number only: a balance
+ * read at "latest" could include what landed after the facts it is compared
+ * with.
+ */
 export const BALANCE_OF_SELECTOR = "0x70a08231";
 /** A balanceOf call's whole data: the selector and one address, zero-padded to a word. Nothing else is admitted. */
 export const BALANCE_OF_CALL = /^0x70a08231[0]{24}[0-9a-f]{40}$/;
+/** A block number as a JSON-RPC quantity: what a balanceOf is pinned to. Never a tag. */
+export const BLOCK_QUANTITY = /^0x(0|[1-9a-f][0-9a-f]{0,15})$/;
 /**
  * HOW LONG THE TENANT'S BOOK MUST HAVE BEEN SILENT before it is booked: no
  * heartbeat and no mirrored row for ten minutes. A running worker beats every
@@ -243,6 +255,13 @@ export interface BookingSnapshot {
   admission: AdmissionState;
   /** What the attested book would be seeded from (planAttestedSeed): the account's positions, and its live cost basis. */
   holdings: Holdings;
+  /**
+   * Every trade row of the account that names a token or a fill symbol and
+   * may have moved one ('landed', or 'submitted' with its outcome unknown),
+   * by id: the recorded fills a traded token's holding is walked back through
+   * (holdingVerdict).
+   */
+  fills: RecordedFill[];
 }
 
 /** One approval of the tenant, reduced to what the hold and a revert decide on. Never its evidence or its reason's text. */
@@ -271,6 +290,11 @@ export interface AdmissionState {
 export interface Holdings {
   positions: Array<{ symbol: string; token: string; rawBalance: string; updatedAt: number | null }>;
   basis: Array<{ symbol: string; qtyRaw: string; costUsdg: string; updatedAt: number | null }>;
+}
+/** One trade row as the fill walk reads it: its legs and its fill, as Postgres holds them. Tokens lowercased. */
+export interface RecordedFill {
+  id: number; status: string; buyToken: string | null; sellToken: string | null;
+  side: string | null; qtyRaw: string | null; symbol: string | null; basisSource: string | null; at: number | null;
 }
 
 const GRANT_SQL: Record<Dialect, string> = {
@@ -366,6 +390,22 @@ async function readHoldings(db: Db, tables: ReadonlySet<string>, account: string
   return { positions, basis };
 }
 
+/**
+ * The account's trade rows that could have moved a token, by id: 'landed', or
+ * 'submitted' (its outcome unknown, so whatever it moved is not recorded). A
+ * reverted, rejected, dropped or paper row moved nothing on chain.
+ */
+async function readFills(db: Db, account: string): Promise<RecordedFill[]> {
+  const rows = (await db.prepare(`SELECT id, status, buy_token, sell_token, fill_side, fill_qty_raw, fill_symbol, basis_source, created_at FROM trades
+      WHERE LOWER(agent_id) = ? AND status IN ('landed', 'submitted') AND (buy_token IS NOT NULL OR sell_token IS NOT NULL OR fill_symbol IS NOT NULL)`)
+    .all(account)) as Array<Record<string, unknown>>;
+  const tok = (v: unknown) => (v === null || v === undefined || v === "" ? null : lower(v));
+  return rows.map((r) => ({
+    id: num(r.id), status: String(r.status), buyToken: tok(r.buy_token), sellToken: tok(r.sell_token), side: strOrNull(r.fill_side),
+    qtyRaw: strOrNull(r.fill_qty_raw), symbol: strOrNull(r.fill_symbol), basisSource: strOrNull(r.basis_source), at: unixSec(r.created_at),
+  })).sort((a, b) => a.id - b.id);
+}
+
 export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: Dialect; nowSec: number }): Promise<BookingSnapshot> {
   const tenant = lower(o.tenant);
   if (!ADDRESS.test(tenant)) throw new BookingRefused("invalid-tenant", "the tenant is not a full 0x address");
@@ -431,6 +471,7 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     booked,
     admission: await readAdmissionState(db, tables, tenant, account, o.nowSec),
     holdings: await readHoldings(db, tables, account),
+    fills: await readFills(db, account),
   };
 }
 
@@ -439,11 +480,13 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  * proposals were computed from, and what the hold was proved from. A tenant
  * that woke between the preview and the apply — a heartbeat, a mirrored row,
  * a new approval, a mode change — moves one of these, and the apply refuses.
+ * The recorded fills by digest: a row's fill repaired in place moves no count
+ * or maximum id, and the holding was judged on it.
  */
 function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
     epochOpenedAt: s.epochOpenedAt, known: s.known, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
-    admission: s.admission, holdings: s.holdings };
+    admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills) };
 }
 
 // ── the hold ─────────────────────────────────────────────────────────────────
@@ -525,10 +568,17 @@ export interface ChainEvidence {
   decimals: Record<string, number | null>;
   /**
    * balanceOf() of each token a proposed fill names, for every address of the
-   * book (the account and its custody), read at the latest block, in base
-   * units. `total` is null unless every address answered.
+   * book (the account and its custody), read at `balanceBlock`, in base units.
+   * `total` is null unless every address answered.
    */
   balances: Record<string, { total: string | null; by: Record<string, string | null> }>;
+  /**
+   * THE PINNED BLOCK the balances were read at: admission's head less
+   * BOOKING_CONFIRMATIONS, so at or after every fact this plan books (each is
+   * that deep) and as final as they are. Null when no balance was read. Kept
+   * out of the digest, as the head is: it moves on every preview.
+   */
+  balanceBlock: string | null;
 }
 
 /**
@@ -588,15 +638,16 @@ function readOp(receipt: NonNullable<TxEvidence["receipt"]>, userOpHash: string,
  * READ THE CHAIN FOR ONE SNAPSHOT: admission's own check from the second
  * admission reads from, then the receipt and block of every transaction it
  * named, then decimals() of every token a fill would name and how much of it
- * each address of the book holds now. Reads only; the transport admits
- * nothing else (chain-gap-booking-cli.ts createBookingRpc).
+ * each address of the book held at the pinned block (balanceBlock). Reads
+ * only; the transport admits nothing else (chain-gap-booking-cli.ts
+ * createBookingRpc).
  */
 export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: {
   log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; maxSpan?: bigint;
 } = {}): Promise<ChainEvidence> {
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const rpcChainId = Number(BigInt(String(await patiently(() => rpc("eth_chainId", []), sleep))));
-  const empty = { rpcChainId, txs: {}, decimals: {}, balances: {} };
+  const empty = { rpcChainId, txs: {}, decimals: {}, balances: {}, balanceBlock: null };
   if (!snap.grant) return { ...empty, gap: { status: "unavailable", why: "no stored grant names the account to read" } };
   const known = { ops: new Set(snap.known.ops), txs: new Set(snap.known.txs), flows: new Set(snap.known.flows) };
   const gap = await chainGapCheck({ chain: gapChainOf(rpc, sleep), account: snap.grant.account, usdg: RESUME_USDG, sinceSec: snap.gapFromSec, known,
@@ -624,6 +675,12 @@ export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: 
   const balances: ChainEvidence["balances"] = {};
   const book = [snap.grant.account, ...snap.grant.custody];
   const word = (v: unknown): bigint | null => (typeof v === "string" && /^0x[0-9a-fA-F]{1,64}$/.test(v) ? BigInt(v) : null);
+  // PINNED, NEVER "latest": the deepest block every booked fact is at or
+  // before (each must be BOOKING_CONFIRMATIONS deep under this same head),
+  // and as final as they are. A balance read at "latest" could already hold
+  // what landed after them — or what a reorg will take back.
+  const pinned = BigInt(gap.head) - BOOKING_CONFIRMATIONS;
+  const balanceBlock = pinned >= 0n ? pinned : null;
   for (const f of gap.found) {
     const receipt = f.kind === "operation" ? txs[f.txHash]?.receipt : null;
     if (!receipt || f.kind !== "operation") continue;
@@ -634,19 +691,22 @@ export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: 
       const d = word(await patiently(() => rpc("eth_call", [{ to: leg.token, data: DECIMALS_SELECTOR }, "latest"]), sleep)) ?? -1n;
       decimals[leg.token] = d >= 0n && d <= 36n ? Number(d) : null;
     } catch { decimals[leg.token] = null; }
-    // WHAT THE BOOK HOLDS OF IT NOW, address by address: whether a snapshot
-    // that holds none of the token is right to (holdingVerdict).
+    // WHAT THE BOOK HELD OF IT AT THE PINNED BLOCK, address by address: what
+    // the snapshot's position and basis must equal (holdingVerdict).
     const by: Record<string, string | null> = {};
     for (const holder of book) {
+      if (balanceBlock === null) { by[holder] = null; continue; }
       try {
-        const v = word(await patiently(() => rpc("eth_call", [{ to: leg.token, data: `${BALANCE_OF_SELECTOR}${holder.slice(2).padStart(64, "0")}` }, "latest"]), sleep));
+        const v = word(await patiently(() => rpc("eth_call", [{ to: leg.token, data: `${BALANCE_OF_SELECTOR}${holder.slice(2).padStart(64, "0")}` },
+          `0x${balanceBlock.toString(16)}`]), sleep));
         by[holder] = v === null ? null : v.toString();
       } catch { by[holder] = null; }
     }
     const read = Object.values(by);
     balances[leg.token] = { total: read.every((v) => v !== null) ? read.reduce((s, v) => s + BigInt(v!), 0n).toString() : null, by };
   }
-  return { rpcChainId, gap: { status: "missing", fromBlock: gap.fromBlock, head: gap.head, found: gap.found }, txs, decimals, balances };
+  return { rpcChainId, gap: { status: "missing", fromBlock: gap.fromBlock, head: gap.head, found: gap.found }, txs, decimals, balances,
+    balanceBlock: Object.keys(balances).length && balanceBlock !== null ? balanceBlock.toString() : null };
 }
 
 // ── the plan ─────────────────────────────────────────────────────────────────
@@ -714,8 +774,8 @@ export interface BookingPlan {
   remaining: MissingChainFact[];
   cas: ReturnType<typeof casFacts>;
   previewDigest: string;
-  /** Not in the digest: when, where on the chain, and what the reviewer should know. */
-  capture: { capturedAtSec: number; fromBlock: string | null; head: string | null; rpcChainId: number; confirmations: number };
+  /** Not in the digest: when, where on the chain (and the pinned block the balances were read at), and what the reviewer should know. */
+  capture: { capturedAtSec: number; fromBlock: string | null; head: string | null; rpcChainId: number; confirmations: number; balanceBlock: string | null };
   warnings: string[];
   observations: { mode: string | null; hwmUsdg: number | null; hwmWithdrawnUsdg: number | null; epochOpenedAt: number | null };
 }
@@ -751,68 +811,214 @@ export function factsStillMissing(found: readonly MissingChainFact[], held: { op
     : !(held.txs.has(f.txHash) || opTxs.has(f.txHash) || (f.logIndex !== null && held.flows.has(`${f.txHash}:${f.logIndex}`))));
 }
 
+/** A decimal count of base units, as positions and cost_basis store one; null for anything else. */
+const baseUnits = (v: string | null | undefined): bigint | null => (typeof v === "string" && /^[0-9]{1,78}$/.test(v) ? BigInt(v) : null);
+/** A balance read, address by address, in words: which part of the book holds what. */
+const saidBy = (b: ChainEvidence["balances"][string]): string => Object.entries(b.by).map(([a, v]) => `${a} ${v ?? "unread"}`).join(", ");
+
+/** One trade this plan would book in a token: what the holding is judged on. */
+export interface ProposedFill { key: string; side: "buy" | "sell"; qtyRaw: string; at: number; symbol: string | null }
+
 /**
- * DOES THE SNAPSHOT THE ATTESTED BOOK IS SEEDED FROM ALREADY SAY WHAT THE
- * TENANT'S TRADES IN THIS TOKEN DID? PURE. Null `why` is yes.
+ * WALKING THE TOKEN'S FILLS BACK TO WHERE ITS BASIS OPENED. PURE.
+ *
+ * The weighted-average basis is deleted when a position goes flat and opened
+ * again by the next buy (store.ts setBasis), so what the book holds now is
+ * the sum of the fills since it was last flat: the basis's anchor. Walking
+ * back from the balance the chain gave, newest first, through every fill
+ * Postgres records in the token and every fill this plan books, the book held
+ * `after − bought` or `after + sold` before each. The walk is done when it has
+ * passed every proposed fill and stands at zero: those fills, from flat,
+ * reproduce the chain's quantity exactly ("reproduced").
+ *
+ *   below zero    a fill bought more than the book held after it: the fills
+ *                 are more than the chain holds, so something moved the
+ *                 token that neither Postgres nor this plan records
+ *                 ("exceeds"). Refuses.
+ *   unreadable    a row in the token that is still in flight, carries no
+ *                 fill, or whose quantity is a quote's rather than its
+ *                 receipt's; or the records run out with the book still
+ *                 holding some (a holding from before fills were recorded,
+ *                 or from outside a fill). The walk cannot say, so the data
+ *                 does not allow this cross-check ("unproven"): the contents
+ *                 checks decide alone, and the plan says so.
+ *
+ * Recorded rows are dated by when the worker wrote them, proposed ones by
+ * their block; the same second orders recorded first. A recorded row written
+ * after a later missed fill landed can read out of order — which can only
+ * refuse, never book.
+ */
+export interface FillWalk {
+  verdict: "reproduced" | "exceeds" | "unproven";
+  why: string | null;
+  /** Where the book was last flat: after this fill, or before every fill Postgres records in the token. Null unless reproduced. */
+  anchor: string | null;
+  /** Every fill walked, newest first: what it moved, and what the book held before it. */
+  walked: Array<{ ref: string; at: number; side: "buy" | "sell"; qtyRaw: string; heldBefore: string }>;
+}
+export function walkFills(o: { token: string; fills: readonly RecordedFill[]; proposed: readonly ProposedFill[]; symbols: ReadonlySet<string>; total: bigint }): FillWalk {
+  const { token } = o;
+  type Step = { ref: string; at: number; order: number; seq: number; side: "buy" | "sell"; qty: bigint; illegible: string | null; proposed: boolean };
+  // Rows naming the token by either leg, or — with no leg at all — by a name it has gone by.
+  const named = o.fills.filter((f) => f.buyToken === token || f.sellToken === token
+    || (f.buyToken === null && f.sellToken === null && f.symbol !== null && o.symbols.has(f.symbol)));
+  const steps: Step[] = named.map((f) => {
+    const base = { ref: `trades#${f.id}`, at: f.at ?? Number.POSITIVE_INFINITY, order: 0, seq: f.id, proposed: false };
+    const qty = baseUnits(f.qtyRaw);
+    const own = f.side === "buy" ? f.buyToken : f.sellToken;
+    const illegible = f.status !== "landed" ? `trade #${f.id} in ${token} is still '${f.status}': what it moved is not recorded`
+      : (f.side !== "buy" && f.side !== "sell") || qty === null ? `trade #${f.id} in ${token} records no fill (side and quantity)`
+        : f.basisSource !== "receipt" ? `trade #${f.id}'s fill is ${f.basisSource === null ? "unsourced" : `from its ${f.basisSource}`}, not read off its receipt, so its quantity is not what the chain moved`
+          : own !== null && own !== token ? `trade #${f.id} names ${token} but its ${f.side} is of ${own}`
+            : f.at === null ? `trade #${f.id} in ${token} has no time` : null;
+    return { ...base, side: f.side === "sell" ? "sell" : "buy", qty: qty ?? 0n, illegible };
+  });
+  const proposed = [...o.proposed].sort((a, b) => byText(a.key, b.key));
+  steps.push(...proposed.map((p, i) => ({ ref: p.key, at: p.at, order: 1, seq: i, side: p.side, qty: BigInt(p.qtyRaw), illegible: null, proposed: true })));
+  steps.sort((a, b) => a.at - b.at || a.order - b.order || a.seq - b.seq);
+  const walked: FillWalk["walked"] = [];
+  let after = o.total, left = proposed.length;
+  for (let i = steps.length - 1; ; i--) {
+    if (left === 0 && after === 0n) {
+      return { verdict: "reproduced", why: null, anchor: i < 0 ? "before every fill Postgres records in the token" : `after ${steps[i]!.ref}`, walked };
+    }
+    if (i < 0) {
+      return { verdict: "unproven", anchor: null, walked, why: `walked back through every fill Postgres records in ${token}, the book still held ${after} base units ` +
+        "before the first of them: what it held from before them, or from outside a fill, is not on the books" };
+    }
+    const s = steps[i]!;
+    if (s.illegible) return { verdict: "unproven", why: s.illegible, anchor: null, walked };
+    const before = s.side === "buy" ? after - s.qty : after + s.qty;
+    walked.push({ ref: s.ref, at: s.at, side: s.side, qtyRaw: s.qty.toString(), heldBefore: before.toString() });
+    if (before < 0n) {
+      return { verdict: "exceeds", anchor: null, walked, why: `walking back from the ${o.total} base units of ${token} the book held at the pinned block, ${s.ref} ` +
+        `(a ${s.side} of ${s.qty} at ${iso(s.at)}) leaves ${before}: the fills Postgres records and the ones this plan would book are more than the chain holds, ` +
+        "so something moved the token that neither records" };
+    }
+    after = before;
+    if (s.proposed) left--;
+  }
+}
+
+/** Which check refused a trade's holding, by name (evidence.holding.refusal). */
+export type HoldingRefusal = "positions-ambiguous" | "balance-unread" | "position-unreadable" | "position-differs" | "basis-missing" | "basis-unreadable"
+  | "basis-differs" | "position-stale" | "basis-stale" | "held-unrecorded" | "basis-without-position" | "fills-exceed-chain";
+export interface HoldingVerdict {
+  /** Null is yes. */
+  why: string | null;
+  refusal: HoldingRefusal | null;
+  evidence: Record<string, unknown>;
+  /** What a reviewer should know that does not refuse: the fill walk could not be done (FillWalk "unproven"). */
+  notes: string[];
+}
+
+/**
+ * DOES THE SNAPSHOT THE ATTESTED BOOK IS SEEDED FROM ALREADY HOLD WHAT THE
+ * CHAIN DOES IN THIS TOKEN, ONCE THE MISSING TRADES ARE INCLUDED? PURE. Null
+ * `why` is yes.
  *
  * WHY A TRADE ROW ALONE IS NOT ENOUGH. Admission seeds the new book's cost
  * basis from Postgres's cost_basis, for exactly the symbols Postgres's
  * positions show held (ledger-resume.ts planAttestedSeed). Both are the lost
- * book's last mirrored snapshot. If that snapshot predates a booked BUY, the
- * new book holds the token with no basis — and both mechanical exits refuse a
- * position with no basis, so an exits-only tenant's stops would silently skip
- * it (the failure ledger-resume.ts names). If it predates a booked SELL, the
- * seed restores a basis for a position the account no longer holds, and a
- * later buy averages against it. The in-flight reconciler avoids both by
- * booking the basis beside its row (bookFill); this tool writes no basis, so
- * it proves the snapshot already reflects the trade instead:
+ * book's last mirrored snapshot. If that snapshot leaves out a booked BUY, the
+ * new book holds the token with no basis, or with a basis for less than it
+ * holds — and both mechanical exits measure from that basis. If it leaves out
+ * a booked SELL, the seed restores a basis for more than the account holds,
+ * and a later buy averages against it. The in-flight reconciler avoids both
+ * by booking the basis beside its row (bookFill); this tool writes no basis,
+ * so it proves the snapshot's CONTENTS already reflect the trade instead.
  *
- *   held in the snapshot   the position row AND its live basis were both
- *                          written at or after the last trade in the token
- *                          (the worker rewrites every held position each
- *                          tick and the basis at each fill, and the mirror
- *                          carries both stamps as written);
- *   not held               the book (the account and its custody, as the
- *                          fills are read) holds none of the token on chain
- *                          now — so a seed with no position and no basis for
- *                          it is the truth, whatever the snapshot's age.
+ * WHEN THE SNAPSHOT WAS WRITTEN IS NEVER ENOUGH. A missed buy followed by an
+ * ordinary buy rewrites both rows after the missed one, and the basis can
+ * still leave the missed fill out. So the quantities are compared with the
+ * chain itself, at the pinned block (readChainEvidence: admission's head less
+ * BOOKING_CONFIRMATIONS, so every booked fact is in it), across the book as
+ * the fill was read (the account and its custody):
  *
- * Anything else is a reviewed basis decision, never this tool's: the trade
- * and its legs stay unresolved, and the tenant stays held.
+ *   held in the snapshot   the position's raw balance AND its live basis's
+ *                          quantity each equal the book's balance there; the
+ *                          position and basis were written at or after the
+ *                          last trade in the token (necessary, never
+ *                          sufficient alone);
+ *   not held               the book holds none of the token there, and no
+ *                          live basis under any name the token has gone by
+ *                          still covers a quantity — so a seed with no
+ *                          position and no basis for it is the truth;
+ *   either way             the fills since the basis last opened, recorded
+ *                          and proposed, are never more than the chain holds
+ *                          (walkFills), and reproduce it where the records
+ *                          allow the walk.
+ *
+ * A balance that could not be read proves nothing, so it refuses. Anything
+ * else is a reviewed basis decision, never this tool's: the trade and its legs
+ * stay unresolved, and the tenant stays held.
  */
-export function holdingVerdict(holdings: Holdings, balance: ChainEvidence["balances"][string] | null, token: string, lastTradeAt: number):
-  { why: string | null; evidence: Record<string, unknown> } {
+export function holdingVerdict(o: { token: string; holdings: Holdings; fills: readonly RecordedFill[]; balance: ChainEvidence["balances"][string] | null;
+  proposed: readonly ProposedFill[] }): HoldingVerdict {
+  const { token, holdings, balance } = o;
+  const lastTradeAt = Math.max(...o.proposed.map((p) => p.at));
   const rows = holdings.positions.filter((p) => p.token === token);
   const position = rows[0] ?? null;
   // Held exactly as the seed reads it: raw_balance <> '0'.
   const held = rows.some((p) => p.rawBalance !== "0");
   const basis = position ? holdings.basis.find((b) => b.symbol === position.symbol) ?? null : null;
-  const evidence = { lastTradeAt, position, basis, bookBalance: balance };
-  if (rows.length > 1) return { why: `Postgres holds ${rows.length} position rows for ${token}, so which one the seed would read is not one answer`, evidence };
+  // Every name the token has gone by here: its position's, the proposals', and the recorded fills' that name it by address.
+  const symbols = new Set([...rows.map((p) => p.symbol), ...o.proposed.flatMap((p) => (p.symbol ? [p.symbol] : [])),
+    ...o.fills.filter((f) => f.buyToken === token || f.sellToken === token).flatMap((f) => (f.symbol ? [f.symbol] : []))]);
+  const namedBasis = holdings.basis.filter((b) => symbols.has(b.symbol));
+  const total = balance && balance.total !== null ? BigInt(balance.total) : null;
+  const fills = total === null ? null : walkFills({ token, fills: o.fills, proposed: o.proposed, symbols, total });
+  const evidence = { lastTradeAt, position, basis, namedBasis, bookBalance: balance, fills };
+  const refuse = (refusal: HoldingRefusal, why: string): HoldingVerdict => ({ why, refusal, evidence: { ...evidence, refusal }, notes: [] });
+  const decide = "a reviewed basis decision, or the tenant stays held";
+
+  if (rows.length > 1) return refuse("positions-ambiguous", `Postgres holds ${rows.length} position rows for ${token}, so which one the seed would read is not one answer`);
+  if (!balance || total === null) {
+    return refuse("balance-unread", `the book's balance of ${token} at the pinned block could not be read${balance ? ` (${saidBy(balance)})` : ""}, so whether ` +
+      "Postgres's position and cost basis hold what the chain does once this trade is included cannot be proved — preview again");
+  }
   if (held) {
-    if (position!.updatedAt === null || position!.updatedAt < lastTradeAt) {
-      return { why: `Postgres's position in ${position!.symbol} (${token}) was last written ${iso(position!.updatedAt)}, before the tenant's last trade in it ` +
-        `(${iso(lastTradeAt)}): the attested book is seeded from that snapshot and would not know what the trade did — a reviewed basis decision, or the tenant stays held`, evidence };
+    const p = position!;
+    const raw = baseUnits(p.rawBalance);
+    if (raw === null) return refuse("position-unreadable", `Postgres's position in ${p.symbol} (${token}) holds "${p.rawBalance}", not a count of base units`);
+    if (raw !== total) {
+      return refuse("position-differs", `Postgres's position in ${p.symbol} (${token}) holds ${raw} base units, and the book held ${total} on chain at the pinned block ` +
+        `(${saidBy(balance)}): the snapshot the attested book is seeded from is not the chain's once this trade is included — ${decide}`);
     }
     if (!basis) {
-      return { why: `Postgres holds a position in ${position!.symbol} (${token}) with no live cost basis: the attested book would hold it with nothing for ` +
-        "its stop-loss or take-profit to measure from — a reviewed basis decision, or the tenant stays held", evidence };
+      return refuse("basis-missing", `Postgres holds a position in ${p.symbol} (${token}) with no live cost basis: the attested book would hold it with nothing for ` +
+        `its stop-loss or take-profit to measure from — ${decide}`);
+    }
+    const qty = baseUnits(basis.qtyRaw);
+    if (qty === null) return refuse("basis-unreadable", `Postgres's live cost basis for ${p.symbol} covers "${basis.qtyRaw}", not a count of base units`);
+    if (qty !== total) {
+      return refuse("basis-differs", `Postgres's live cost basis for ${p.symbol} covers ${qty} base units, and the book held ${total} on chain at the pinned block ` +
+        `(${saidBy(balance)}): the basis does not account for what the chain did — a fill the lost book never booked to it, for one — so the attested book ` +
+        `would be seeded with a cost for the wrong quantity — ${decide}`);
+    }
+    if (p.updatedAt === null || p.updatedAt < lastTradeAt) {
+      return refuse("position-stale", `Postgres's position in ${p.symbol} (${token}) was last written ${iso(p.updatedAt)}, before the tenant's last trade in it ` +
+        `(${iso(lastTradeAt)}): the attested book is seeded from that snapshot and would not know what the trade did — ${decide}`);
     }
     if (basis.updatedAt === null || basis.updatedAt < lastTradeAt) {
-      return { why: `Postgres's cost basis for ${position!.symbol} was last written ${iso(basis.updatedAt)}, before the tenant's last trade in it ` +
-        `(${iso(lastTradeAt)}): the attested book would be seeded with a basis that leaves the trade out — a reviewed basis decision, or the tenant stays held`, evidence };
+      return refuse("basis-stale", `Postgres's cost basis for ${p.symbol} was last written ${iso(basis.updatedAt)}, before the tenant's last trade in it ` +
+        `(${iso(lastTradeAt)}): the attested book would be seeded with a basis that leaves the trade out — ${decide}`);
     }
-    return { why: null, evidence };
+  } else {
+    if (total !== 0n) {
+      return refuse("held-unrecorded", `the book held ${total} base units of ${token} on chain at the pinned block (${saidBy(balance)}), and the snapshot the attested ` +
+        `book is seeded from holds none: it would hold a position with no cost basis, which both mechanical exits refuse — ${decide}`);
+    }
+    const left = namedBasis.filter((b) => baseUnits(b.qtyRaw) !== 0n);
+    if (left.length) {
+      return refuse("basis-without-position", `the book held none of ${token} on chain at the pinned block and Postgres holds no position in it, yet its live cost ` +
+        `basis under ${left.map((b) => `${b.symbol} still covers ${b.qtyRaw}`).join(", ")}: the basis does not account for what the chain did — ${decide}`);
+    }
   }
-  if (!balance || balance.total === null) {
-    return { why: `the book's balance of ${token} could not be read, and Postgres's snapshot holds none of it: whether the attested book would hold it ` +
-      "with no cost basis is unknown — preview again", evidence };
-  }
-  if (BigInt(balance.total) !== 0n) {
-    return { why: `the book holds ${balance.total} base units of ${token} on chain now, and the snapshot the attested book is seeded from holds none: ` +
-      "it would hold a position with no cost basis, which both mechanical exits refuse — a reviewed basis decision, or the tenant stays held", evidence };
-  }
-  return { why: null, evidence };
+  if (fills!.verdict === "exceeds") return refuse("fills-exceed-chain", `${fills!.why} — ${decide}`);
+  return { why: null, refusal: null, evidence: { ...evidence, refusal: null }, notes: fills!.verdict === "unproven"
+    ? [`${token}: the recorded fills could not be walked back to where its basis opened (${fills!.why}), so its position and basis were checked against the chain without them`]
+    : [] };
 }
 
 /**
@@ -1018,9 +1224,10 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       log_index: f.logIndex!, source: "chain-log", epoch, chain_id: chainId!, at: blockTime } } });
   }
 
-  // A TRADE ONLY WHERE THE SEED ALREADY KNOWS WHAT IT DID (holdingVerdict),
-  // decided per token over every trade booked in it, at the last of them.
-  // Before the legs below, so a trade refused here takes its legs with it.
+  // A TRADE ONLY WHERE THE SEED ALREADY HOLDS WHAT THE CHAIN DOES
+  // (holdingVerdict): its contents against the chain at the pinned block,
+  // decided per token over every trade booked in it. Before the legs below,
+  // so a trade refused here takes its legs with it.
   const tradesIn = new Map<string, BookingItem[]>();
   for (const it of items) {
     if (it.class !== "session-trade" || it.proposal?.table !== "trades") continue;
@@ -1028,12 +1235,17 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
     tradesIn.set(token, [...(tradesIn.get(token) ?? []), it]);
   }
   for (const [token, trades] of tradesIn) {
-    const lastAt = Math.max(...trades.map((it) => (it.proposal!.row as TradeProposal).created_at));
-    const verdict = holdingVerdict(snap.holdings, ev.balances[token] ?? null, token, lastAt);
+    const proposed = trades.map((it) => {
+      const row = it.proposal!.row as TradeProposal;
+      return { key: it.key, side: row.fill_side!, qtyRaw: row.fill_qty_raw!, at: row.created_at, symbol: row.fill_symbol };
+    });
+    const verdict = holdingVerdict({ token, holdings: snap.holdings, fills: snap.fills, balance: ev.balances[token] ?? null, proposed });
     for (const it of trades) {
       it.evidence = { ...it.evidence, holding: verdict.evidence };
-      if (verdict.why) { it.class = "unresolved"; it.why = `not booked: ${verdict.why}`; it.proposal = null; }
+      // Named at the console too: the refusal's name, then its sentence.
+      if (verdict.why) { it.class = "unresolved"; it.why = `not booked (${verdict.refusal}): ${verdict.why}`; it.proposal = null; }
     }
+    if (!verdict.why) warnings.push(...verdict.notes);
   }
 
   // An operation's leg is covered only when its operation was proposed.
@@ -1067,7 +1279,8 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
   }
   if (proposals.some((it) => it.class === "session-trade")) {
     warnings.push("a trade is booked without touching cost_basis, positions or position_floors, because the snapshot the attested book is seeded from already " +
-      "reflects it (each trade's evidence.holding says how): check its positions, basis and floors on the dashboard at exits-only all the same");
+      `holds what the chain does in its token at block ${ev.balanceBlock} (each trade's evidence.holding says how): check its positions, basis and floors ` +
+      "on the dashboard at exits-only all the same");
   }
   const blocked = items.some((it) => !it.proposal && it.class !== "operation-leg") || remaining.length > 0;
   const verdict: BookingPlan["verdict"] = refusals.length ? "blocked" : ev.gap.status === "clean" ? "nothing-missing" : blocked || !proposals.length ? "blocked" : "ready";
@@ -1076,7 +1289,7 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
   return {
     ...bound, format: BOOKING_FORMAT, previewDigest: digestOf(bound),
     capture: { capturedAtSec: o.nowSec, fromBlock: ev.gap.status === "unavailable" ? null : ev.gap.fromBlock, head: head === null ? null : head.toString(),
-      rpcChainId: ev.rpcChainId, confirmations: Number(BOOKING_CONFIRMATIONS) },
+      rpcChainId: ev.rpcChainId, confirmations: Number(BOOKING_CONFIRMATIONS), balanceBlock: ev.balanceBlock },
     warnings,
     observations: { mode: agent?.mode ?? null, hwmUsdg: agent?.hwmUsdg ?? null, hwmWithdrawnUsdg: agent?.hwmWithdrawnUsdg ?? null, epochOpenedAt: snap.epochOpenedAt },
   };

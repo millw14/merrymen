@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 import { translateQuery, translateSchema, type Db } from "./db";
 import type { RpcCall } from "./chain-capital";
 import {
-  applyBooking, BALANCE_OF_CALL, BookingRefused, canonical, DECIMALS_SELECTOR, parseApplyReport, planBooking, planLines, readBookingSnapshot, readChainEvidence,
+  applyBooking, BALANCE_OF_CALL, BLOCK_QUANTITY, BookingRefused, canonical, DECIMALS_SELECTOR, parseApplyReport, planBooking, planLines, readBookingSnapshot, readChainEvidence,
   revertBooking, type BookingPlan,
 } from "./chain-gap-booking";
 
@@ -101,11 +101,12 @@ const RPC_METHODS = ["eth_chainId", "eth_blockNumber", "eth_getLogs", "eth_getTr
 /**
  * THE ONLY WAY THIS TOOL TALKS TO A NODE: a fixed list of reads, refused
  * before anything leaves the process otherwise. `eth_call` is admitted for two
- * view calls only, at "latest", with no `from`, value or gas: `decimals()`
- * with no arguments, and `balanceOf(address)` with exactly one zero-padded
- * address. A node's error text is kept on the error so the adaptive log reader
- * can tell a rate limit from a range it should narrow (rpc-error.ts), and
- * never printed.
+ * view calls only, with no `from`, value or gas: `decimals()` with no
+ * arguments, at "latest"; and `balanceOf(address)` with exactly one
+ * zero-padded address, at a block number and never a tag — the pinned block
+ * the holding is judged at (chain-gap-booking.ts readChainEvidence). A node's
+ * error text is kept on the error so the adaptive log reader can tell a rate
+ * limit from a range it should narrow (rpc-error.ts), and never printed.
  */
 export function createBookingRpc(url: string, fetchImpl: typeof fetch = fetch): RpcCall {
   let parsed: URL;
@@ -116,8 +117,9 @@ export function createBookingRpc(url: string, fetchImpl: typeof fetch = fetch): 
     if (!RPC_METHODS.includes(method)) throw new CliError("rpc-method-outside-read-allowlist");
     if (method === "eth_call") {
       const [call, tag, ...rest] = params as [Record<string, unknown> | undefined, unknown];
-      if (rest.length || tag !== "latest" || !call || Object.keys(call).sort().join(",") !== "data,to"
-        || (call.data !== DECIMALS_SELECTOR && !(typeof call.data === "string" && BALANCE_OF_CALL.test(call.data)))
+      const decimals = call?.data === DECIMALS_SELECTOR && tag === "latest";
+      const balance = typeof call?.data === "string" && BALANCE_OF_CALL.test(call.data) && typeof tag === "string" && BLOCK_QUANTITY.test(tag);
+      if (rest.length || !call || Object.keys(call).sort().join(",") !== "data,to" || !(decimals || balance)
         || typeof call.to !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(call.to)) throw new CliError("rpc-call-outside-read-allowlist");
     }
     const requestId = ++id;
