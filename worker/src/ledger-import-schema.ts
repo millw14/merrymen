@@ -39,6 +39,9 @@ export const LEDGER_IMPORT_GENERATIONS_SCHEMA = `CREATE TABLE IF NOT EXISTS tena
  *    `attempted_at_ms` is the last automatic preview of an owed change that
  *    could not be read: the least recently tried goes first, so a tenant
  *    that never reads cannot take every turn from the ones behind it.
+ *    `seen_at_ms` is when the owed key was first seen: an auto-paper approval
+ *    of the tenant created since is that change's answer, even one whose
+ *    insert's reply was lost (ledger-resume.ts answeredGrantChanges).
  */
 export const LEDGER_RESUME_SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS ledger_resume_preview_runs (

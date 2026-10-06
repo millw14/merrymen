@@ -150,8 +150,8 @@ import {
   homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
   normaliseCarriedFile, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
-  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, autoPaperRecordWait, autoPaperRoom,
-  autoPaperVerdict, countOpenApprovals,
+  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, answeredGrantChanges, autoPaperRecordWait,
+  autoPaperRoom, autoPaperVerdict, countOpenApprovals,
   evidenceHasHistory, grantRowKey, noteGrantAttempt, observeGrantChanges, parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
   RESUME_APPROVE_ENV, RESUME_AUTO_PAPER_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
   type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type OwedGrantChange, type PreviewEntry, type ResumeCheck, type ResumePreviewScope,
@@ -3689,7 +3689,11 @@ async function refreshResumePending(): Promise<void> {
  *
  *  1. The watch: which grant rows changed since they were last seen
  *     (observeGrantChanges, durable). The first pass with the variable on
- *     only records the roster as it stands, and admits nobody.
+ *     only records the roster as it stands, and admits nobody. A change an
+ *     earlier attempt already approved without settling it (an insert that
+ *     committed before its connection dropped, or a settle that failed after
+ *     one: answeredGrantChanges, durable) is settled on that approval first,
+ *     whatever Phase A has made of it, and never previewed or approved again.
  *  2. Each change still owed, in the watch's order (never tried, then the
  *     least recently tried, then the longest owed), waits — owed, untouched
  *     — while its grant is expired or the operator holds the tenant (the
@@ -3740,6 +3744,7 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
   if (!url && !retirementMemoryStoreForTest) return;
   let shared: Db;
   let owed: OwedGrantChange[];
+  let onRecord: Map<string, { key: string; state: string; run: string }>;
   try {
     shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
     if (!autoPaperSchemaReady) {
@@ -3757,14 +3762,15 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       return;
     }
     owed = seen.owed;
+    onRecord = owed.length ? await answeredGrantChanges(shared) : new Map();
   } catch (e) {
     log(`[alert] resume auto-paper: the re-sign watch could not be read or recorded (${errorKind(e)}) — nothing previewed or approved this pass`);
     return;
   }
-  const settle = async (change: OwedGrantChange, outcome: string, run: string | null): Promise<void> => {
-    if (!(await settleGrantChange(shared, change, { outcome, run }, Date.now()))) {
-      log(`resume auto-paper: ${change.tenant} — its grant row changed again meanwhile; still owed a preview`);
-    }
+  const settle = async (change: OwedGrantChange, outcome: string, run: string | null): Promise<boolean> => {
+    if (await settleGrantChange(shared, change, { outcome, run }, Date.now())) return true;
+    log(`resume auto-paper: ${change.tenant} — its grant row changed again meanwhile; still owed a preview`);
+    return false;
   };
   // A back-off belongs to the change it was for: one settled, or moved on by a
   // newer re-sign, is forgotten, and a new change starts with none.
@@ -3772,10 +3778,25 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
   for (const [t, r] of autoPaperRecordRetry) if (owedKey.get(t) !== r.key) autoPaperRecordRetry.delete(t);
   const ready: OwedGrantChange[] = [];
   for (const change of owed) {
+    const t = change.tenant;
+    // ANSWERED ALREADY, though the attempt that answered it never settled it:
+    // an automatic approval of it is on record since the change was seen
+    // (answeredGrantChanges says how). That approval is its answer, whatever
+    // Phase A has made of it since — refused included — so it is settled on
+    // it, needing no turn, and never previewed or approved again.
+    const done = onRecord.get(t);
+    if (done && done.key === change.key) {
+      try {
+        if (await settle(change, `auto-approved: recorded by an earlier attempt that did not settle it (now ${done.state})`, done.run)) {
+          log(`resume auto-paper: ${t} — an earlier attempt's automatic approval of it is on record (now ${done.state}), though that attempt never settled it: ` +
+            "its re-sign is settled on it, and not previewed or approved again");
+        }
+      } catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
+      continue;
+    }
     // Owed, untouched, until its turn: an expired grant is answered by the
     // re-sign that comes next, a held tenant by the rollout that admits it.
-    if (!unexpired.has(change.tenant) || operatorHeld(change.tenant)) continue;
-    const t = change.tenant;
+    if (!unexpired.has(t) || operatorHeld(t)) continue;
     if (children.has(t) || spawning.has(t) || holders.has(t) || restartPending.has(t) || exitingChildren.has(t) || retiringExpired.has(t)) {
       try { await settle(change, "not-held: a worker, spawn, restart or hold process runs for it", null); }
       catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
@@ -3886,9 +3907,11 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
         // It stays owed, goes behind every change not tried since, and sits
         // out a growing number of its turns; then a fresh preview and the
         // insert again. An insert that did commit before its connection
-        // dropped is found by that attempt on record (this evidence, or an
-        // approval already open) and settled there; the approval it left goes
-        // on to Phase A like any other.
+        // dropped left an approval that goes on to Phase A like any other,
+        // and the change is settled on it at the start of a later pass
+        // (answeredGrantChanges), before any turn, whatever Phase A made of
+        // it: previewed again after Phase A refused it, the tenant would be
+        // approved a second time with no new re-sign.
         const had = autoPaperRecordRetry.get(tenant);
         const failures = had?.key === change.key ? had.failures + 1 : 1, wait = autoPaperRecordWait(failures);
         autoPaperRecordRetry.set(tenant, { key: change.key, failures, wait });

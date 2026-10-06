@@ -31,7 +31,7 @@ import { leaseKey, type TenantLease } from "./tenant-lease";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
-import { autoPaperVerdict, countOpenApprovals, grantRowKey, noteGrantAttempt, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
+import { answeredGrantChanges, autoPaperVerdict, countOpenApprovals, grantRowKey, noteGrantAttempt, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -290,5 +290,23 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     } };
     assert.deepEqual(await record(racing, entryFor(raced, "2".repeat(64))), { recorded: false, why: "the store refused the approval" }, "final: never asked again");
     assert.equal((await readOpenApproval(shared, raced))!.approvalId, won);
+  });
+
+  await t.test("an owed change an automatic approval landed for since it was seen is found from BIGINT stamps, in any state, until it is settled", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const { evidence } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const who = address(0xabe01), run = "f".repeat(64), seenAt = Date.now();
+    const k = { tenant: who, key: grantRowKey({ tenant: who, expiresAt: NOW + 20, updatedAt: NOW }) };
+    assert.deepEqual((await observeGrantChanges(shared, [k], seenAt)).owed, [k], "a new grant row: owed");
+    assert.equal((await answeredGrantChanges(shared)).has(who), false);
+    // The insert commits; the lane never hears so. Then Phase A refuses it.
+    const entry: PreviewEntry = { tenant: who, account, chainId: 4663, owner, digest: "3".repeat(64), pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
+      anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
+    assert.deepEqual(await recordResumeApproval(shared, { entry, run, at: seenAt, nowMs: seenAt + 5, source: "auto-paper" }, () => {}), { recorded: true });
+    assert.deepEqual((await answeredGrantChanges(shared)).get(who), { key: k.key, state: "approved", run });
+    await main.query("UPDATE ledger_resume_approvals SET state = 'refused' WHERE tenant = $1", [who]);
+    assert.deepEqual((await answeredGrantChanges(shared)).get(who), { key: k.key, state: "refused", run }, "refused since: still the answer");
+    assert.equal(await settleGrantChange(shared, k, { outcome: "auto-approved: x", run }, seenAt + 9), true);
+    assert.equal((await answeredGrantChanges(shared)).has(who), false, "settled: owed nothing");
   });
 });

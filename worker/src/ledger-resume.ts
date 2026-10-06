@@ -1065,6 +1065,39 @@ export async function settleGrantChange(db: Db, owed: OwedGrantChange, o: { outc
 }
 
 /**
+ * OWED CHANGES THE LANE HAS ALREADY ANSWERED WITHOUT HEARING SO: for each
+ * tenant whose change is owed, the latest automatic (auto-paper) approval of
+ * it recorded since that change was first seen (the watch's seen_at_ms), in
+ * whatever state it is in now, with the key it answers and its run.
+ *
+ * An insert can commit and its connection drop before the reply
+ * (recordResumeApproval says `transient`), and the settle after a recorded
+ * approval can fail; either way the change is still owed while the approval
+ * goes on to Phase A like any other. Previewed again, the tenant could be
+ * approved twice: once Phase A has refused the first approval (evidence that
+ * changed), it is no longer open, the fresh preview has a new digest, and
+ * neither the verdict nor the insert's own checks stop a second — an
+ * automatic re-approval after a refusal, which the lane never makes (its
+ * owner signs again first: docs/fleet-resume.md, "Evidence that changes").
+ * So such an approval is the change's answer, and the change is settled on
+ * it with nothing previewed. Read from the store, not from the lane's memory,
+ * so a restart in between finds it too.
+ *
+ * Only the lane writes auto-paper rows, and only for a change it read as
+ * owed. An approval binds the book's evidence, not the grant, so one that
+ * landed for a key that moved meanwhile (another replica's attempt) answers
+ * the newer key as well. Settling on it only ever approves less.
+ */
+export async function answeredGrantChanges(db: Db): Promise<Map<string, { key: string; state: string; run: string }>> {
+  const rows = (await db.prepare(`SELECT w.tenant AS tenant, w.grant_key AS grant_key, a.state AS state, a.preview_run AS run
+    FROM ledger_resume_grant_watch w JOIN ledger_resume_approvals a ON a.tenant = w.tenant
+    WHERE w.owed = 1 AND a.source = ? AND a.created_at_ms >= w.seen_at_ms ORDER BY a.created_at_ms, a.approval_id`).all(AUTO_PAPER_SOURCE)) as
+    Array<Record<string, unknown>>;
+  // In the order they were recorded: the latest for a tenant is the one kept.
+  return new Map(rows.map((r) => [String(r.tenant), { key: String(r.grant_key), state: String(r.state), run: String(r.run) }]));
+}
+
+/**
  * HAS POSTGRES ANY HISTORY FOR THE TENANT, as its evidence says: an agent
  * registration, a lost book's cursor past zero, or a row in any log or
  * snapshot table. Without any, a tenant whose home holds no book is a new

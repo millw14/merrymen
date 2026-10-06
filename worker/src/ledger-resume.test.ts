@@ -26,7 +26,7 @@ import {
   parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
   AUTO_PAPER_HEADROOM, autoPaperRoom, autoPaperVerdict, countOpenApprovals, evidenceHasHistory, grantRowKey, observeGrantChanges, parseResumeAutoPaper,
   noteGrantAttempt, recordResumeApproval, resumeAutoPaperOn, settleGrantChange, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RECORD_MAX_WAIT, autoPaperRecordWait,
-  type GapChain, type PreviewEntry,
+  answeredGrantChanges, type GapChain, type PreviewEntry,
 } from "./ledger-resume";
 
 const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-ledger-resume-")));
@@ -707,6 +707,40 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     assert.deepEqual({ ...f.raw.prepare("SELECT attempted_at_ms AS at FROM ledger_resume_grant_watch WHERE tenant = ?").get(c) }, { at: null });
     assert.equal(await settleGrantChange(f.shared, owed[0]!, { outcome: "auto-approved", run: null }, 80), true);
     assert.deepEqual((await order([k(a, 1), k(b, 1), k(c, 2), k(d, 1)], 90)).map((o) => o.tenant), [c, d, b]);
+  });
+
+  it("an owed change is answered by an automatic approval recorded since it was seen, in any state — not by an older one, an operator's, or once it is settled", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    const t = f.tenant, k = (v: number) => ({ tenant: t, key: grantRowKey({ tenant: t, expiresAt: v, updatedAt: v }) });
+    const approve = async (digest: string, nowMs: number, source: "operator" | "auto-paper") =>
+      assert.deepEqual(await recordResumeApproval(f.shared, { entry: { ...entry, digest }, run, at: 1, nowMs, source }, () => {}), { recorded: true });
+    const end = (digest: string, state: string) => f.raw.prepare("UPDATE ledger_resume_approvals SET state = ? WHERE evidence_digest = ?").run(state, digest);
+    const found = async () => Object.fromEntries(await answeredGrantChanges(f.shared));
+    assert.deepEqual(await observeGrantChanges(f.shared, [], 1), { baselined: 0, owed: [] });
+    // An automatic approval from before the change was seen belongs to an earlier one.
+    await approve("1".repeat(64), 5, "auto-paper"); end("1".repeat(64), "refused");
+    assert.deepEqual((await observeGrantChanges(f.shared, [k(1)], 10)).owed, [k(1)]);
+    assert.deepEqual(await found(), {});
+    // An operator's approval is never the lane's answer.
+    await approve("2".repeat(64), 12, "operator"); end("2".repeat(64), "refused");
+    assert.deepEqual(await found(), {});
+    // The lane's own, since: whatever Phase A has made of it, it is the answer.
+    await approve("3".repeat(64), 15, "auto-paper");
+    assert.deepEqual(await found(), { [t]: { key: k(1).key, state: "approved", run } });
+    end("3".repeat(64), "refused");
+    assert.deepEqual(await found(), { [t]: { key: k(1).key, state: "refused", run } }, "refused since: still the answer, never a reason to approve again");
+    // The owner signs again: a new change, seen after it, which that approval does not answer.
+    assert.deepEqual((await observeGrantChanges(f.shared, [k(2)], 20)).owed, [k(2)]);
+    assert.deepEqual(await found(), {});
+    // Of two since, the latest.
+    await approve("4".repeat(64), 25, "auto-paper"); end("4".repeat(64), "refused");
+    await approve("5".repeat(64), 26, "auto-paper");
+    assert.deepEqual(await found(), { [t]: { key: k(2).key, state: "approved", run } });
+    // Settled, it is owed nothing.
+    assert.equal(await settleGrantChange(f.shared, k(2), { outcome: "auto-approved", run }, 30), true);
+    assert.deepEqual(await found(), {});
   });
 
   it("an approval finds its preview run beyond the newest 200, by the run's digest or by the evidence digest", async () => {

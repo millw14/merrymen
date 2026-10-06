@@ -664,10 +664,24 @@ Every reconcile pass, before the pass reads which blocked homes it admits:
      could not be reached or gave up (<code>): an outage, not a refusal — its
      re-sign is still owed`). From the third in a row it is `[alert] 0x…:
      resume auto-paper could not record its approval 3 or more times in a
-     row`. The back-off is kept in memory: a restart asks again at once. An
-     insert the store refuses (its uniqueness: another approval recorded
-     meanwhile, by another replica for instance) is final, and settled as
-     `not-recorded: …`.
+     row`. The back-off is kept in memory: a restart asks again at once.
+     There is no final give-up: a store that never takes the insert approves
+     nothing, and the `[alert]` (repeated at most hourly) is what tells you.
+     **An insert that committed before its connection dropped is the
+     change's answer**, though the lane was told it failed: the approval it
+     left goes on to Phase A like any other, and at the start of a later
+     pass, before any turn, the lane finds it (an `auto-paper` approval of
+     the tenant created since the change was seen, in whatever state it is
+     now, read from the tables, so a restart in between finds it too) and
+     settles the change on it with nothing previewed (log: `resume
+     auto-paper: 0x… — an earlier attempt's automatic approval of it is on
+     record (now <state>)`; outcome `auto-approved: recorded by an earlier
+     attempt that did not settle it (now <state>)`). The same holds for a
+     settle that failed after a recorded approval. So an approval Phase A
+     refuses meanwhile is never followed by a second one: see [Evidence that
+     changes](#evidence-that-changes). An insert the store refuses (its
+     uniqueness: another approval recorded meanwhile, by another replica for
+     instance) is final, and settled as `not-recorded: …`.
    - **held, but not the safe case**: nothing approved. Log: `resume
      auto-paper: 0x… re-signed and previewed in run …, and is not approved
      automatically — <every reason>`, ending, if it passed,
@@ -682,8 +696,9 @@ Every reconcile pass, before the pass reads which blocked homes it admits:
      attempt in the same pass arms the owner's controls into the home before
      the gate answers, which changes what that digest binds.
 5. **Settled**, for the exact change that was owed, with the run (if one was
-   recorded) and the outcome (`auto-approved`, `previewed: …`, `not-held:
-   …`). A second re-sign meanwhile stays owed.
+   recorded) and the outcome (`auto-approved`, `auto-approved: recorded by
+   an earlier attempt …`, `previewed: …`, `not-held: …`). A second re-sign
+   meanwhile stays owed.
 
 From the approval on, nothing tells it apart from an operator's: in the same
 pass `spawnChild` runs [the phases](#the-phases) — Phase A re-derives the
@@ -732,9 +747,11 @@ every admitted tenant does.
 Exactly as for an operator's approval: Phase A compares the digest, and
 anything that changed since the automatic preview refuses the approval
 (`evidence changed since the preview`), with nothing moved. **The lane does
-not try again by itself**: the change it was owed is answered. The tenant
-stays held until its owner signs again (a new change, a new preview) or you
-preview and approve it by hand.
+not try again by itself**: the change it was owed is answered — also when the
+approval's insert committed but its reply was lost, and the change was still
+owed when Phase A refused it (the lane settles it on that approval rather
+than previewing again). The tenant stays held until its owner signs again (a
+new change, a new preview) or you preview and approve it by hand.
 
 A read that fails is not a change ([the phases](#the-phases), step 2): the
 approval holds, and the next pass reads again. Refused on such a read, an
