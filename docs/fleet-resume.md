@@ -402,8 +402,11 @@ in the log), and approves and admits by itself the one case the preview
 proves safe: a paper tenant that could not arm live and holds nothing. Every
 other re-signer, live ones always, is previewed and left to you: its log
 line ends with the exact `MERRYMEN_RESUME_APPROVE=0x<tenant>:<digest>` to
-set (step 2). While live-trading consent is stood down
-(`MERRYMEN_LIVE_INTENT_STAND_DOWN=1`) that is every re-signer. Tenants that
+set (step 2). A tenant with a chain refusal that no admission has answered is
+the exception: its line says to book what the chain showed first
+([Step 5](#step-5-live-tenants-exits-only-before-the-paper-batches)), since
+an approval of it only reads the chain again. While live-trading consent is
+stood down (`MERRYMEN_LIVE_INTENT_STAND_DOWN=1`) that is every re-signer. Tenants that
 are ready for another reason than a re-sign (a refusal fixed, a late tenant
 whose grant did not change) still take steps 1 and 2. See
 [the automatic lane](#automatic-admission-of-re-signed-paper-tenants).
