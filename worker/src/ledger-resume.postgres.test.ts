@@ -31,6 +31,7 @@ import { leaseKey, type TenantLease } from "./tenant-lease";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
+import { autoPaperVerdict, countOpenApprovals, grantRowKey, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -196,5 +197,40 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const agent = (await main.query("SELECT epoch, hwm_usdg FROM agents WHERE lower(smart_account)=$1", [account])).rows[0]!;
     assert.deepEqual([String(agent.epoch), Number(agent.hwm_usdg)], ["2", 100], "the ratchets hold: same epoch, same peak");
     assert.equal(Number((await main.query("SELECT count(*) AS n FROM trades WHERE lower(agent_id)=$1", [account])).rows[0]!.n), 1, "no trade copied twice");
+  });
+
+  await t.test("MERRYMEN_RESUME_AUTO_PAPER in the production dialect: the source column's ALTER, the roster's write stamp, the watch, the verdict's reads", async () => {
+    // Production's approvals table predates `source`: the ALTER adds it, and a row from before reads as the operator's.
+    await main.query("ALTER TABLE ledger_resume_approvals DROP COLUMN source");
+    await ensureLedgerResumeSchema(shared);
+    await ensureLedgerResumeSchema(shared);
+    assert.equal((await readOpenApproval(shared, tenant))!.source, "operator");
+    // The roster carries each record's server stamp, which a re-sign moves.
+    const listed = (await grants.listTenantExpiries()).find((r) => r.tenant === tenant)!;
+    assert.equal(typeof listed.updatedAt, "number");
+    // The watch: a baseline in one transaction, then owed (BIGINT `owed` comes back as a string here) until settled for that key.
+    const roster = [{ tenant, key: grantRowKey(listed) }];
+    assert.deepEqual(await observeGrantChanges(shared, roster, 1), { baselined: 1, owed: [] });
+    assert.deepEqual(await observeGrantChanges(shared, roster, 2), { baselined: null, owed: [] });
+    const moved = [{ tenant, key: grantRowKey({ ...listed, expiresAt: (listed.expiresAt ?? 0) + 1 }) }];
+    const { owed } = await observeGrantChanges(shared, moved, 3);
+    assert.deepEqual(owed, moved);
+    assert.deepEqual((await observeGrantChanges(shared, moved, 4)).owed, moved, "still owed");
+    assert.equal(await settleGrantChange(shared, owed[0]!, { outcome: "previewed: x", run: null }, 5), true);
+    assert.equal(await settleGrantChange(shared, owed[0]!, { outcome: "previewed: x", run: null }, 6), false, "settled once");
+    // The verdict's reads (agent_commands, the live book rows, the approvals by state) run here: this tenant has its approval open.
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const { evidence, digest } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const entry: PreviewEntry = { tenant, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
+      anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
+    const verdict = await autoPaperVerdict(shared, entry);
+    assert.equal(verdict.kind, "manual");
+    assert.match((verdict as { why: string[] }).why.join(" "), /approval is already open/);
+    // An automatic approval of another tenant, through the operator's insert, says so in its row.
+    const other = address(0xabc02);
+    const recorded = await recordResumeApproval(shared, { entry: { ...entry, tenant: other, digest: "a".repeat(64) }, run: "b".repeat(64), at: Date.now(), nowMs: Date.now(), source: "auto-paper" }, () => {});
+    assert.deepEqual(recorded, { recorded: true });
+    assert.equal((await main.query("SELECT source FROM ledger_resume_approvals WHERE tenant=$1", [other])).rows[0]!.source, "auto-paper");
+    assert.equal(await countOpenApprovals(shared), 2, "this tenant's registered approval and the new one");
   });
 });
