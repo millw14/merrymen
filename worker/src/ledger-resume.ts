@@ -77,7 +77,7 @@
  * Any failure leaves the tenant held and the step resumable.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import { createPublicClient, http, type Hex } from "viem";
 import type { Db } from "./db";
@@ -825,7 +825,11 @@ export const RESUME_USDG = String(CASH.USDG);
 
 // ── phase A: the home ────────────────────────────────────────────────────────
 
-/** Moved from the old home into the new one, never left in the archive: the owner's Telegram progress and link record. */
+/**
+ * Moved from the old home into the new one, never left in the archive: the
+ * owner's Telegram progress and link record. Unless the carry would not take
+ * one (archiveTenantHome step 1), which then stays in the archive instead.
+ */
 const CARRY_MOVE = ["telegram.json", "telegram-promoted.json"] as const;
 /** Copied: the owner's restrictive controls, which stay in the archive as evidence too. */
 const CARRY_COPY = ["paused", "controls-armed.json"] as const;
@@ -835,77 +839,125 @@ const MANIFEST = ".archive-manifest.json";
 /** The most of telegram.json the offset handoff reads (recovery-reply-handoff.ts); a larger one is never the child's. */
 const TELEGRAM_MAX_BYTES = 256 * 1024;
 
+const carriedName = (name: string) =>
+  (CARRY_MOVE as readonly string[]).includes(name) || (CARRY_COPY as readonly string[]).includes(name) || name.startsWith("kill-request-");
+
 /**
- * THE CARRIED FILES, MADE WHAT THEIR READERS ACCEPT FROM US.
- *
- * A carried file is a copy this code made of a file an earlier build wrote,
- * and copyFileSync keeps the source's mode and bytes. The offset handoff
- * (recovery-reply-handoff.ts) then reads telegram.json strictly: owner-only,
- * one name, a JSON object whose `offset` is a non-negative integer. Two shapes
- * our own writers have left in homes fail that, and the first held six
- * admitted tenants on "recovery reply offset not handed over" for good:
- *
- *  - THE ORCHESTRATOR'S RESTORED LINK. writeTelegramForChild writes the link
- *    code, owner, link time and alert stamps and never an `offset`
- *    (restoredTelegramFile says why: the date rule, not a restored offset,
- *    keeps a replayed backlog from running), and the child reads a missing
- *    offset as 0. A pre-incident home whose spawn was refused after that write
- *    — its rebuilt book then failed the continuity proof — kept it, no worker
- *    or hold process ever replaced it, and the archive carried it into the
- *    new home, where the handoff refused it (HANDOFF_OFFSET) on every pass.
- *  - A FILE FROM BEFORE 2026-09-30 (#198), written by a plain writeFileSync at
- *    the process umask (0644), which the handoff refuses (HANDOFF_MODE).
- *
- * So every carried file is set to 0600, and a carried telegram.json with no
- * `offset` at all gets `offset: 0`, which is what every reader already takes
- * it to be; a leading byte-order mark is dropped, as loadTelegramState drops
- * it. Rewritten whole and durably (writeFileAtomicSync), never in place.
- *
- * NOTHING ELSE. A file that is a symlink, has a second name, is someone
- * else's, is larger than any the child writes, does not parse, is not an
- * object, or carries an offset, bot id or prior bots the handoff would refuse
- * is left exactly as it is, and the handoff refuses it by name. A numeric
- * `botId` is not a legacy shape: no build ever wrote one (a digit string
- * since #202), so it stays refused. Says what it changed, by file and kind,
- * never a value.
+ * THE HOME'S OWN FILE: a regular file of this process's user, with one name.
+ * A copy is always that, whatever its source was, so the carry asks it of the
+ * source, before the copy hides another owner or a second name.
  */
-export function normaliseCarried(dir: string): string[] {
+function homeOwn(st: Stats): boolean {
+  return st.isFile() && st.nlink === 1 && st.uid === process.getuid?.();
+}
+
+/**
+ * AS OUR OWN WRITERS LEFT IT: the home's own, and nobody else can write it.
+ * 0600 is every writer since 2026-09-30 (#198, writeFileAtomicSync); 0644 is
+ * a plain writeFileSync before that, at the container's umask (022). Group or
+ * world write, an exec or a special bit is no writer of ours, and such a file
+ * is never vouched for here: its readers judge it as it is.
+ */
+function ourWritersLeft(st: Stats): boolean {
+  return homeOwn(st) && (st.mode & 0o7777 & ~0o644) === 0;
+}
+
+/** The keys restoredTelegramFile writes, and writeTelegramForChild wrote before #202: never an offset, a bot or prior bots. */
+const RESTORED_LINK_KEYS: readonly string[] = ["linkCode", "ownerId", "linkedAt", "firedAlerts"];
+
+/**
+ * THE ORCHESTRATOR'S RESTORED LINK, and nothing else: what
+ * writeTelegramForChild writes (restoredTelegramFile: some of the link code,
+ * the owner, the link time and the owner's alert stamps) and, before #202,
+ * `{ linkCode (perhaps ""), ownerId, linkedAt (perhaps 0) }`. Another key, or
+ * one of these of another type, is not it.
+ */
+function restoredLink(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>, keys = Object.keys(v), stamps = v.firedAlerts;
+  return keys.length > 0 && keys.every((k) => RESTORED_LINK_KEYS.includes(k))
+    && (v.linkCode === undefined || typeof v.linkCode === "string")
+    && (v.ownerId === undefined || (Number.isSafeInteger(v.ownerId) && v.ownerId !== 0))
+    && (v.linkedAt === undefined || (typeof v.linkedAt === "number" && Number.isFinite(v.linkedAt) && v.linkedAt >= 0))
+    && (stamps === undefined || (!!stamps && typeof stamps === "object" && !Array.isArray(stamps)
+      && Object.values(stamps).every((at) => Number.isSafeInteger(at) && Number(at) > 0)));
+}
+
+/**
+ * A CARRIED FILE, MADE WHAT ITS READERS ACCEPT FROM US.
+ *
+ * The offset handoff (recovery-reply-handoff.ts) reads telegram.json
+ * strictly: owner-only, one name, a JSON object whose `offset` is a
+ * non-negative integer. Two things our own writers left in homes fail that,
+ * and the first held six admitted tenants on "recovery reply offset not
+ * handed over" for good:
+ *
+ *  - THE ORCHESTRATOR'S RESTORED LINK (restoredLink). writeTelegramForChild
+ *    writes no `offset` (restoredTelegramFile says why: the date rule, not a
+ *    restored offset, keeps a replayed backlog from running), and the child
+ *    reads a missing offset as 0. A pre-incident home whose spawn was refused
+ *    after that write (its rebuilt book then failed the continuity proof)
+ *    kept it, no worker or hold process ever replaced it, and the archive
+ *    carried it into the new home, where the handoff refused it
+ *    (HANDOFF_OFFSET) on every pass.
+ *  - A FILE FROM BEFORE #198, written at the umask (0644), which the handoff
+ *    refuses (HANDOFF_MODE).
+ *
+ * So a file our own writers left (ourWritersLeft) is set to 0600, and a
+ * telegram.json that is exactly the restored link gets `offset: 0`, which is
+ * what every reader already takes it to be, rewritten whole and durably
+ * (writeFileAtomicSync), never in place.
+ *
+ * NOTHING ELSE. A symlink, a file with a second name or another owner, one
+ * anyone else could have written (0666, 0664, an exec or a special bit), one
+ * larger than any the child writes, and a telegram.json that is anything but
+ * the restored link (it does not parse, or holds an offset, a bot or prior
+ * bots of its own, or a key no writer of ours wrote) are left exactly as they
+ * are, and the handoff judges them by name. A numeric `botId` is not a legacy
+ * shape: no build ever wrote one (a digit string since #202).
+ *
+ * Never throws: a file it cannot read or rewrite is left as it was and said
+ * so, and its readers judge it. Says what it changed by file and kind, never
+ * a value, and writes nothing once `mayWrite` says this process is no longer
+ * the writer.
+ */
+export function normaliseCarriedFile(file: string, mayWrite: () => boolean): string[] {
+  const name = path.basename(file), label = name.startsWith("kill-request-") ? "kill-request" : name;
   const changed: string[] = [];
-  const own = (st: { isFile(): boolean; nlink: number; uid: number }) => st.isFile() && st.nlink === 1 && st.uid === process.getuid?.();
-  for (const name of readdirSync(dir).sort()) {
-    const carried = (CARRY_MOVE as readonly string[]).includes(name) || (CARRY_COPY as readonly string[]).includes(name) || name.startsWith("kill-request-");
-    if (!carried) continue;
-    const file = path.join(dir, name), label = name.startsWith("kill-request-") ? "kill-request" : name;
-    let st = lstatSync(file);
-    if (!own(st)) continue;
-    if (name === "telegram.json" && st.size <= TELEGRAM_MAX_BYTES) {
-      let text: string | null = null;
-      const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        const at = fstatSync(fd);
-        if (at.ino === st.ino && at.dev === st.dev && own(at)) text = readFileSync(fd, "utf8");
-      } finally { closeSync(fd); }
-      if (text === null) continue;
-      const bom = text.charCodeAt(0) === 0xfeff;
+  let fd: number | null = null;
+  try {
+    const st = lstatSync(file);
+    if (!ourWritersLeft(st)) return [];
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const at = fstatSync(fd);
+    if (at.ino !== st.ino || at.dev !== st.dev || !ourWritersLeft(at)) return [];
+    if (name === "telegram.json" && at.size <= TELEGRAM_MAX_BYTES) {
       let value: unknown = null;
-      try { value = JSON.parse(bom ? text.slice(1) : text); } catch { /* left for the handoff to refuse by name */ }
-      const object = !!value && typeof value === "object" && !Array.isArray(value);
-      const noOffset = object && !Object.prototype.hasOwnProperty.call(value, "offset");
-      if (object && (bom || noOffset)) {
-        writeFileAtomicSync(file, JSON.stringify(noOffset ? { offset: 0, ...(value as Record<string, unknown>) } : value, null, 2), 0o600, { durable: true });
-        if (bom) changed.push(`${label}: byte-order mark`);
-        if (noOffset) changed.push(`${label}: offset`);
-        st = lstatSync(file);
+      try { value = JSON.parse(readFileSync(fd, "utf8")); } catch { /* left for the handoff to refuse by name */ }
+      if (restoredLink(value)) {
+        const now = lstatSync(file);
+        if (now.ino !== at.ino || now.dev !== at.dev || now.ctimeMs !== at.ctimeMs || !mayWrite()) return [];
+        writeFileAtomicSync(file, JSON.stringify({ offset: 0, ...value }, null, 2), 0o600, { durable: true });
+        changed.push(`${label}: offset`);
+        if ((at.mode & 0o777) !== 0o600) changed.push(`${label}: mode`);
+        return changed;
       }
     }
-    if ((st.mode & 0o777) !== 0o600) {
-      chmodSync(file, 0o600);
-      syncFile(file);
+    if ((at.mode & 0o777) !== 0o600) {
+      if (!mayWrite()) return [];
+      fchmodSync(fd, 0o600);
+      fsyncSync(fd);
       changed.push(`${label}: mode`);
     }
+    return changed;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    // No file is nothing to normalise: a home that carried none, and had none restored.
+    if (code === "ENOENT" && !changed.length) return [];
+    return [...changed, `${label}: left as it was (${typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? code : "error"})`];
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* opened read-only: nothing to lose */ } }
   }
-  if (changed.length) syncDir(dir);
-  return changed;
 }
 
 function syncDir(dir: string): void { fsyncDirSync(dir); }
@@ -925,8 +977,12 @@ function walk(dir: string, rel = ""): Array<{ path: string; type: "file" | "dir"
   return out;
 }
 
-/** `normalised`: what normaliseCarried changed in the carry, by file and kind. */
-export interface ArchiveResult { archivePath: string | null; carried: string[]; normalised: string[] }
+/**
+ * `normalised`: what normaliseCarriedFile changed in the carry, by file and
+ * kind. `left`: the moved Telegram files the carry would not take (step 1),
+ * which stay in the archive.
+ */
+export interface ArchiveResult { archivePath: string | null; carried: string[]; normalised: string[]; left: string[] }
 
 /**
  * MOVE A TENANT'S HOME ASIDE, WHOLE, AND LEAVE THE NEXT ONE WHAT IT MUST KEEP.
@@ -941,25 +997,36 @@ export interface ArchiveResult { archivePath: string | null; carried: string[]; 
  *     record. Rebuilt from the home on every attempt until the rename — which
  *     is only safe because, until the rename, the home still holds every
  *     original the stage copies (step 2 removes no carried file).
+ *     A copy is this process's, with one name, whatever its source was, and
+ *     keeps only the source's mode and bytes. So the Telegram files are
+ *     carried only as the home's own (homeOwn): one with another owner or a
+ *     second name is not copied, stays in the archive (step 4), and the next
+ *     spawn restores the link from the mirror (writeTelegramForChild). The
+ *     owner's restrictive controls are copied whatever they are: a stop is
+ *     never dropped. A copy of a file our own writers left (ourWritersLeft,
+ *     asked of the source) is made what its readers accept from us
+ *     (normaliseCarriedFile: 0600, and the restored link given offset 0);
+ *     any other copy keeps the source's mode and bytes, and its readers
+ *     judge it as they would have in the home.
  *  2. Scrub the home of its keys and secrets: grant.json (the session key),
  *     grants/ (archived keys), settings.json (bot token and provider keys).
  *     Each is rewritten by the next spawn from its store, so nothing is lost
  *     and no key ever enters the archive.
  *  3. Rename the home to archive/<tenant>/<generation> (0700) in one step on
  *     the same volume, and sync both parents.
- *  4. Remove the MOVED Telegram files from the archive, now that the staged
- *     copy is their only home (and re-apply the scrub, for a rename a crash
- *     interrupted after it). Never before the rename: a crash between a
+ *  4. Remove the MOVED Telegram files the stage holds from the archive, now
+ *     that the staged copy is their only home (and re-apply the scrub, for a
+ *     rename a crash interrupted after it). One step 1 would not take is not
+ *     in the stage and stays here. Never before the rename: a crash between a
  *     removal from the home and the rename used to leave the next attempt
  *     rebuilding the stage from a home that no longer held them, so the
  *     owner's link, offsets and chat settings were lost from both places.
  *  5. Write the archive's manifest (0600): every file's path, type, size and
  *     mode — stats, not contents.
- *  6. Make the staged carry what its readers accept from us (normaliseCarried:
- *     0600, and a telegram.json with no offset given offset 0), in the stage,
- *     then move it into a fresh 0700 home, never over a file already there.
- *     Done again on every re-entry before the move, so a carry an earlier
- *     build staged is made the same before it is visible.
+ *  6. Move the staged carry into a fresh 0700 home, never over a file
+ *     already there. A carry an earlier build staged moves as it was; the
+ *     spawn path makes a registered book's telegram.json the same before the
+ *     handoff reads it (orchestrator.ts normaliseRegisteredHome).
  *
  * With no home at all there is nothing to archive, and the result says so.
  * The archive is never deleted by any code here.
@@ -968,18 +1035,31 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
   const lost = () => new Error("Lost the tenant lease while archiving its home; the next pass resumes the archive.");
   const dest = path.join(o.archiveRoot, o.generation), stage = path.join(o.archiveRoot, `.carry-${o.generation}`);
   if (!o.mayWrite()) throw lost();
+  const normalised: string[] = [];
   if (!existsSync(dest)) {
-    if (!existsSync(o.home)) return { archivePath: null, carried: [], normalised: [] };
+    if (!existsSync(o.home)) return { archivePath: null, carried: [], normalised: [], left: [] };
     if (!lstatSync(o.home).isDirectory()) throw new Error("the tenant home is not a plain directory");
     mkdirSync(o.archiveRoot, { recursive: true, mode: 0o700 });
     rmSync(stage, { recursive: true, force: true });
     mkdirSync(stage, { mode: 0o700 });
-    const names = readdirSync(o.home);
+    const names = readdirSync(o.home).sort();
     for (const name of names) {
-      const carried = (CARRY_MOVE as readonly string[]).includes(name) || (CARRY_COPY as readonly string[]).includes(name) || name.startsWith("kill-request-");
-      if (!carried || !lstatSync(path.join(o.home, name)).isFile()) continue;
-      copyFileSync(path.join(o.home, name), path.join(stage, name), constants.COPYFILE_EXCL);
-      syncFile(path.join(stage, name));
+      const from = path.join(o.home, name), to = path.join(stage, name);
+      if (!carriedName(name)) continue;
+      const source = lstatSync(from);
+      if (!source.isFile()) continue;
+      // The Telegram files only as the home's own; the controls whatever they are.
+      if ((CARRY_MOVE as readonly string[]).includes(name) && !homeOwn(source)) continue;
+      copyFileSync(from, to, constants.COPYFILE_EXCL);
+      // Asked of the source, as it was before and after the copy: the copy
+      // itself is always this process's, with one name. Written in this
+      // attempt's own stage, like the copy, and the lease is asked once the
+      // copies are made, as it is for them: the next attempt rebuilds it.
+      const after = lstatSync(from);
+      if (ourWritersLeft(source) && after.ino === source.ino && after.dev === source.dev && after.ctimeMs === source.ctimeMs) {
+        normalised.push(...normaliseCarriedFile(to, () => true));
+      }
+      syncFile(to);
     }
     syncDir(stage); syncDir(o.archiveRoot);
     if (!o.mayWrite()) throw lost();
@@ -995,18 +1075,17 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
   // From here the old home is the archive. Re-entry lands here. The stage is
   // never rebuilt past this point (dest exists), so it holds the only copy of
   // the moved files from here on, until step 6 puts them in the new home.
-  for (const name of [...SCRUB, ...CARRY_MOVE]) rmSync(path.join(dest, name), { recursive: true, force: true });
+  // Only those it holds: one step 1 would not take stays where it is. (With
+  // no stage left, step 6 has run, and this removed them before it did.)
+  for (const name of SCRUB) rmSync(path.join(dest, name), { recursive: true, force: true });
+  for (const name of CARRY_MOVE) if (existsSync(path.join(stage, name))) rmSync(path.join(dest, name), { recursive: true, force: true });
   syncDir(dest);
   if (!existsSync(path.join(dest, MANIFEST))) {
     writeFileAtomicSync(path.join(dest, MANIFEST), JSON.stringify({ version: 1, generation: o.generation, files: walk(dest) }, null, 2), 0o600, { durable: true });
   }
+  const left = CARRY_MOVE.filter((name) => { try { lstatSync(path.join(dest, name)); return true; } catch { return false; } });
   const carried: string[] = [];
-  let normalised: string[] = [];
   if (existsSync(stage)) {
-    if (!o.mayWrite()) throw lost();
-    // The stage holds only this code's own copies (step 1 copies regular
-    // files and nothing else), so this changes nothing anyone else wrote.
-    normalised = normaliseCarried(stage);
     if (!o.mayWrite()) throw lost();
     mkdirSync(o.home, { recursive: true, mode: 0o700 });
     for (const name of readdirSync(stage).sort()) {
@@ -1019,7 +1098,7 @@ export function archiveTenantHome(o: { home: string; archiveRoot: string; genera
     rmSync(stage, { recursive: true, force: true });
     syncDir(o.archiveRoot);
   }
-  return { archivePath: dest, carried, normalised };
+  return { archivePath: dest, carried, normalised, left };
 }
 
 // ── phase C: the seed the first mirror pass will publish ────────────────────

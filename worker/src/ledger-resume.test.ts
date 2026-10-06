@@ -22,7 +22,7 @@ import type { TenantLease } from "./tenant-lease";
 import { handoffRecoveryReplyOffset } from "./recovery-reply-handoff";
 import { RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import {
-  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarried, parseResumeApprovals,
+  applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, parseResumeApprovals,
   parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
   type GapChain, type PreviewEntry,
 } from "./ledger-resume";
@@ -485,7 +485,7 @@ describe("the home archive", () => {
   });
   it("with no home there is nothing to archive", () => {
     assert.deepEqual(archiveTenantHome({ home: path.join(root, "vol", "children", "none"), archiveRoot: path.join(root, "vol", "archive", "none"),
-      generation: "00000000-0000-4000-8000-000000000014", mayWrite: () => true }), { archivePath: null, carried: [], normalised: [] });
+      generation: "00000000-0000-4000-8000-000000000014", mayWrite: () => true }), { archivePath: null, carried: [], normalised: [], left: [] });
   });
 
   // ── what the carry leaves for the offset handoff ──────────────────────────
@@ -510,13 +510,14 @@ describe("the home archive", () => {
     return { h, r, file: path.join(h, "telegram.json") };
   }
 
-  it("carries a telegram.json the handoff reads: an orchestrator-restored link gains offset 0, a loose mode becomes 0600, a byte-order mark goes", async () => {
+  it("carries a telegram.json the handoff reads: the orchestrator's restored link gains offset 0, a file our writers left at the umask becomes 0600", async () => {
     // The shape writeTelegramForChild writes (restoredTelegramFile): no offset at all.
     const restored = { linkCode: "K7M2QX", ownerId: 555, linkedAt: 7, firedAlerts: { "drawdown:20": 1000 } };
     const a = carry("c01", JSON.stringify(restored, null, 2), 0o600, { "telegram-promoted.json": ["{}", 0o644], paused: ["paused", 0o644] });
     assert.deepEqual(JSON.parse(readFileSync(a.file, "utf8")), { offset: 0, ...restored }, "only the offset is added; the link, owner and stamps are as they were");
     for (const name of ["telegram.json", "telegram-promoted.json", "paused"]) assert.equal(lstatSync(path.join(a.h, name)).mode & 0o777, 0o600, name);
     assert.deepEqual(a.r.normalised, ["paused: mode", "telegram-promoted.json: mode", "telegram.json: offset"]);
+    assert.deepEqual(a.r.left, []);
     assert.equal(await handoff(a.h, listener()), "accepted");
     assert.deepEqual(JSON.parse(readFileSync(a.file, "utf8")), { offset: 101, ...restored }, "and the listener's high-water mark is handed over");
     // A worker's own file from before #198, written at the umask.
@@ -525,65 +526,133 @@ describe("the home archive", () => {
     assert.equal(readFileSync(b.file, "utf8"), JSON.stringify({ offset: 40, botId: "801", priorBots: [], ownerId: 555 }), "a mode alone is fixed without rewriting the bytes");
     assert.equal(await handoff(b.h, listener()), "accepted");
     assert.equal(JSON.parse(readFileSync(b.file, "utf8")).offset, 101);
-    // A byte-order mark the child's own loader would have dropped.
-    const c = carry("c03", String.fromCharCode(0xfeff) + JSON.stringify({ offset: 500, botId: "801" }), 0o600);
-    assert.deepEqual(c.r.normalised, ["telegram.json: byte-order mark"]);
+    // The restored link as writeTelegramForChild wrote it before #202 and #198: at the umask, an empty code and a zero link time.
+    const legacy = { linkCode: "", ownerId: 555, linkedAt: 0 };
+    const c = carry("c03", JSON.stringify(legacy, null, 2), 0o644);
+    assert.deepEqual(c.r.normalised, ["telegram.json: offset", "telegram.json: mode"]);
+    assert.deepEqual(JSON.parse(readFileSync(c.file, "utf8")), { offset: 0, ...legacy });
+    assert.equal(lstatSync(c.file).mode & 0o777, 0o600);
     assert.equal(await handoff(c.h, listener()), "accepted");
-    assert.equal(JSON.parse(readFileSync(c.file, "utf8")).offset, 500, "a higher local offset is never lowered");
     // Already what the handoff reads: nothing is touched.
     const d = carry("c04", JSON.stringify({ offset: 77 }), 0o600);
     assert.deepEqual(d.r.normalised, []);
     assert.equal(readFileSync(d.file, "utf8"), JSON.stringify({ offset: 77 }));
+    // A higher local offset is never lowered by the handoff.
+    const e = carry("c05", JSON.stringify({ offset: 500, botId: "801" }), 0o600);
+    assert.equal(await handoff(e.h, listener()), "accepted");
+    assert.equal(JSON.parse(readFileSync(e.file, "utf8")).offset, 500);
   });
 
-  it("leaves what is not a shape our writers left exactly as it is, and the handoff still refuses it by name", async () => {
-    for (const [id, body, code] of [
-      ["c11", JSON.stringify({ offset: 10, botId: 801 }), "HANDOFF_BOT"], // no build ever wrote a numeric bot id
-      ["c12", JSON.stringify({ offset: null, linkCode: "K7M2QX" }), "HANDOFF_OFFSET"], // an offset that is there and wrong is not a missing one
-      ["c13", JSON.stringify({ offset: -3 }), "HANDOFF_OFFSET"],
-      ["c14", JSON.stringify({ offset: 1, botId: "802", priorBots: "x" }), "HANDOFF_PRIOR_BOTS"],
-      ["c15", "{ not json", "HANDOFF_PARSE"],
-      ["c16", JSON.stringify([{ offset: 1 }]), "HANDOFF_SHAPE"],
-      ["c17", JSON.stringify({ linkCode: "K7M2QX", pad: "x".repeat(256 * 1024) }), "HANDOFF_SIZE"], // larger than any the child writes: not even its offset is added
+  it("leaves anything but the restored link, and anything our writers did not leave, exactly as it is, and the handoff still refuses it by name", async () => {
+    const link = { linkCode: "K7M2QX", ownerId: 555 };
+    for (const [id, body, mode, code] of [
+      ["c11", JSON.stringify({ offset: 10, botId: 801 }), 0o600, "HANDOFF_BOT"], // no build ever wrote a numeric bot id
+      ["c12", JSON.stringify({ offset: null, linkCode: "K7M2QX" }), 0o600, "HANDOFF_OFFSET"], // an offset that is there and wrong is not a missing one
+      ["c13", JSON.stringify({ offset: -3 }), 0o600, "HANDOFF_OFFSET"],
+      ["c14", JSON.stringify({ offset: 1, botId: "802", priorBots: "x" }), 0o600, "HANDOFF_PRIOR_BOTS"],
+      ["c15", "{ not json", 0o600, "HANDOFF_PARSE"],
+      ["c16", JSON.stringify([{ offset: 1 }]), 0o600, "HANDOFF_SHAPE"],
+      ["c17", JSON.stringify({ linkCode: "K7M2QX", pad: "x".repeat(256 * 1024) }), 0o600, "HANDOFF_SIZE"], // larger than any the child writes
+      // No offset, but not the restored link: a key no writer of ours wrote without one, or one of another type.
+      ["c18", JSON.stringify({ linkCode: "K7M2QX", botId: 9101 }), 0o600, "HANDOFF_OFFSET"],
+      ["c19", JSON.stringify({ linkCode: "K7M2QX", botId: "801", priorBots: "x" }), 0o600, "HANDOFF_OFFSET"],
+      ["c20", JSON.stringify({ ...link, linkedChats: [555] }), 0o600, "HANDOFF_OFFSET"],
+      ["c21", JSON.stringify({ linkCode: 7 }), 0o600, "HANDOFF_OFFSET"],
+      ["c22", JSON.stringify({ ownerId: "555" }), 0o600, "HANDOFF_OFFSET"],
+      ["c23", JSON.stringify({ ...link, firedAlerts: { "drawdown:20": "soon" } }), 0o600, "HANDOFF_OFFSET"],
+      ["c24", JSON.stringify({}), 0o600, "HANDOFF_OFFSET"],
+      // A byte-order mark: no writer of ours ever wrote one.
+      ["c25", String.fromCharCode(0xfeff) + JSON.stringify(link), 0o600, "HANDOFF_PARSE"],
+      // Writable by someone else: never ours, whatever it holds, and its mode is kept for the handoff to refuse.
+      ["c26", JSON.stringify(link), 0o666, "HANDOFF_MODE"],
+      ["c27", JSON.stringify(link), 0o664, "HANDOFF_MODE"],
+      ["c28", JSON.stringify({ offset: 3 }), 0o646, "HANDOFF_MODE"],
     ] as const) {
-      const x = carry(id, body, 0o600);
+      const x = carry(id, body, mode);
       assert.equal(readFileSync(x.file, "utf8"), body, id);
       assert.deepEqual(x.r.normalised, [], id);
+      assert.equal(lstatSync(x.file).mode & 0o777, mode, `${id}: carried with its own mode`);
       assert.equal(await handoff(x.h, listener()), code, id);
       assert.equal(readFileSync(x.file, "utf8"), body, `${id}: the refused file is left as it was`);
     }
   });
 
-  it("a carry an earlier build staged is made the same before it reaches the new home", () => {
-    const h = path.join(root, "vol", "children", "c21"), archiveRoot = path.join(root, "vol", "archive", "c21"), gen = "00000000-0000-4000-8000-000000000121";
+  it("carries the Telegram files only as the home's own: one with a second name stays in the archive, and the next spawn restores the link", async () => {
+    const h = path.join(root, "vol", "children", "c31"), archiveRoot = path.join(root, "vol", "archive", "c31"), gen = "00000000-0000-4000-8000-000000000131";
+    mkdirSync(h, { recursive: true });
+    const elsewhere = path.join(root, "vol", "c31-elsewhere.json");
+    writeFileSync(elsewhere, JSON.stringify({ linkCode: "FOREIGN", ownerId: 31337 })); chmodSync(elsewhere, 0o644);
+    linkSync(elsewhere, path.join(h, "telegram.json"));
+    writeFileSync(path.join(h, "telegram-promoted.json"), "{}"); chmodSync(path.join(h, "telegram-promoted.json"), 0o644);
+    // The owner's stop, with a second name too: copied whatever it is, and not vouched for.
+    writeFileSync(path.join(root, "vol", "c31-paused"), "paused"); chmodSync(path.join(root, "vol", "c31-paused"), 0o644);
+    linkSync(path.join(root, "vol", "c31-paused"), path.join(h, "paused"));
+    const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.deepEqual(r.carried, ["paused", "telegram-promoted.json"]);
+    assert.deepEqual(r.left, ["telegram.json"]);
+    assert.deepEqual(r.normalised, ["telegram-promoted.json: mode"]);
+    assert.equal(existsSync(path.join(h, "telegram.json")), false, "the foreign link never reaches the new home");
+    assert.equal(readFileSync(path.join(archiveRoot, gen, "telegram.json"), "utf8"), JSON.stringify({ linkCode: "FOREIGN", ownerId: 31337 }), "it stays in the archive");
+    assert.equal(lstatSync(path.join(h, "paused")).mode & 0o777, 0o644, "the stop is carried as it was");
+    assert.equal(readFileSync(path.join(h, "paused"), "utf8"), "paused");
+    // With no telegram.json the handoff writes the listener's mark into a fresh one.
+    assert.equal(await handoff(h, listener()), "accepted");
+    assert.equal(JSON.parse(readFileSync(path.join(h, "telegram.json"), "utf8")).offset, 101);
+    // Re-entry leaves it in the archive too.
+    const again = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
+    assert.deepEqual(again.left, ["telegram.json"]);
+    assert.ok(existsSync(path.join(archiveRoot, gen, "telegram.json")));
+  });
+
+  it("a crash after the stage keeps what was made of it; a carry an earlier build staged moves as it was, for the registered home's pass", () => {
+    // This build: normalised as staged, so a crash before the move changes nothing.
+    const h = path.join(root, "vol", "children", "c41"), archiveRoot = path.join(root, "vol", "archive", "c41"), gen = "00000000-0000-4000-8000-000000000141";
     mkdirSync(h, { recursive: true });
     writeFileSync(path.join(h, "telegram.json"), JSON.stringify({ linkCode: "K7M2QX" })); chmodSync(path.join(h, "telegram.json"), 0o644);
     let calls = 0;
-    // Lost at the first check of the move: the stage holds the raw copies, as
-    // a build without the normalisation left it.
     assert.throws(() => archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => ++calls < 4 }), /Lost the tenant lease/);
     const staged = path.join(archiveRoot, `.carry-${gen}`, "telegram.json");
-    assert.equal(lstatSync(staged).mode & 0o777, 0o644, "copied with its source's mode");
-    assert.deepEqual(JSON.parse(readFileSync(staged, "utf8")), { linkCode: "K7M2QX" });
-    const r = archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
-    assert.deepEqual(r.normalised, ["telegram.json: offset"]);
+    assert.deepEqual(JSON.parse(readFileSync(staged, "utf8")), { offset: 0, linkCode: "K7M2QX" });
+    assert.equal(lstatSync(staged).mode & 0o777, 0o600);
+    archiveTenantHome({ home: h, archiveRoot, generation: gen, mayWrite: () => true });
     assert.deepEqual(JSON.parse(readFileSync(path.join(h, "telegram.json"), "utf8")), { offset: 0, linkCode: "K7M2QX" });
-    assert.equal(lstatSync(path.join(h, "telegram.json")).mode & 0o777, 0o600);
+    // An earlier build: the stage holds the raw copy, and the home is archived.
+    const h2 = path.join(root, "vol", "children", "c42"), root2 = path.join(root, "vol", "archive", "c42"), gen2 = "00000000-0000-4000-8000-000000000142";
+    mkdirSync(path.join(root2, gen2), { recursive: true }); mkdirSync(path.join(root2, `.carry-${gen2}`), { recursive: true });
+    const raw = path.join(root2, `.carry-${gen2}`, "telegram.json");
+    writeFileSync(raw, JSON.stringify({ linkCode: "K7M2QX" })); chmodSync(raw, 0o644);
+    const r = archiveTenantHome({ home: h2, archiveRoot: root2, generation: gen2, mayWrite: () => true });
+    assert.deepEqual(r.normalised, []);
+    assert.deepEqual(r.carried, ["telegram.json"]);
+    assert.equal(lstatSync(path.join(h2, "telegram.json")).mode & 0o777, 0o644, "moved as it was");
+    assert.deepEqual(normaliseCarriedFile(path.join(h2, "telegram.json"), () => true), ["telegram.json: offset", "telegram.json: mode"]);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(h2, "telegram.json"), "utf8")), { offset: 0, linkCode: "K7M2QX" });
   });
 
-  it("normaliseCarried never follows a link, never touches a file with a second name, and touches nothing it does not carry", () => {
+  it("normaliseCarriedFile never follows a link, never touches a file with a second name or one others can write, writes nothing without the writer, and never throws", () => {
     const dir = path.join(root, "vol", "norm"); mkdirSync(dir, { recursive: true });
     const target = path.join(root, "vol", "norm-target.json");
     writeFileSync(target, JSON.stringify({ linkCode: "X" })); chmodSync(target, 0o644);
     symlinkSync(target, path.join(dir, "telegram.json"));
-    writeFileSync(path.join(dir, "telegram-promoted.json"), "{}"); chmodSync(path.join(dir, "telegram-promoted.json"), 0o644);
-    linkSync(path.join(dir, "telegram-promoted.json"), path.join(dir, "second-name"));
-    writeFileSync(path.join(dir, "settings.json"), "{}"); chmodSync(path.join(dir, "settings.json"), 0o644);
-    assert.deepEqual(normaliseCarried(dir), []);
+    assert.deepEqual(normaliseCarriedFile(path.join(dir, "telegram.json"), () => true), []);
     assert.equal(readFileSync(target, "utf8"), JSON.stringify({ linkCode: "X" }));
     assert.equal(lstatSync(target).mode & 0o777, 0o644);
+    writeFileSync(path.join(dir, "telegram-promoted.json"), "{}"); chmodSync(path.join(dir, "telegram-promoted.json"), 0o644);
+    linkSync(path.join(dir, "telegram-promoted.json"), path.join(dir, "second-name"));
+    assert.deepEqual(normaliseCarriedFile(path.join(dir, "telegram-promoted.json"), () => true), []);
     assert.equal(lstatSync(path.join(dir, "telegram-promoted.json")).mode & 0o777, 0o644);
-    assert.equal(lstatSync(path.join(dir, "settings.json")).mode & 0o777, 0o644);
+    for (const mode of [0o666, 0o664, 0o660, 0o606, 0o744, 0o4644]) {
+      const file = path.join(dir, "paused"); rmSync(file, { force: true });
+      writeFileSync(file, "paused"); chmodSync(file, mode);
+      assert.deepEqual(normaliseCarriedFile(file, () => true), [], mode.toString(8));
+      assert.equal(lstatSync(file).mode & 0o7777, mode, mode.toString(8));
+    }
+    const other = path.join(root, "vol", "norm-writer"); mkdirSync(other, { recursive: true });
+    writeFileSync(path.join(other, "telegram.json"), JSON.stringify({ linkCode: "X" })); chmodSync(path.join(other, "telegram.json"), 0o644);
+    assert.deepEqual(normaliseCarriedFile(path.join(other, "telegram.json"), () => false), [], "not the writer: nothing written");
+    assert.equal(readFileSync(path.join(other, "telegram.json"), "utf8"), JSON.stringify({ linkCode: "X" }));
+    assert.equal(lstatSync(path.join(other, "telegram.json")).mode & 0o777, 0o644);
+    assert.deepEqual(normaliseCarriedFile(path.join(other, "missing.json"), () => true), [], "no file, nothing to say");
   });
 });
 
@@ -782,7 +851,7 @@ describe("registerAttestedGapSource", () => {
   });
   describe("the ordinary gates on the next pass, after the seeds and before the first worker arms", () => {
     const dek = Buffer.alloc(32, 9);
-    /** What the spawn path writes before its later gates: the restored practice book, its paper basis, the live seed, a floor. */
+    /** What the spawn path writes before its later gates: the restored practice book, its paper basis, the live seed, a floor, the day's energy. */
     function seed(home: string, account: string, extra?: (raw: DatabaseSync) => void) {
       const book = new DatabaseSync(path.join(home, "merrymen.db"));
       try {
@@ -790,6 +859,8 @@ describe("registerAttestedGapSource", () => {
         book.prepare("INSERT INTO cost_basis VALUES (?, 'paper', 'COIN', '10', '20', 1)").run(account);
         book.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '10', '20', 1)").run(account);
         book.prepare("INSERT INTO position_floors VALUES (?, 'live', 'COIN', 1500, 'r1', 'entry', 1)").run(account);
+        // seedEnergyForChild, which runs before the privacy proof and the handoff.
+        book.prepare("INSERT INTO energy_days (agent_id, day, reviews, entries) VALUES (?, '2026-10-05', 3, 1)").run(account);
         extra?.(book);
       } finally { book.close(); }
     }
