@@ -15,6 +15,7 @@ every step from the Railway dashboard, followed by what each mechanism does:
 - [The runbook](#the-runbook-from-todays-production-to-trading-agents): steps 0 to 8, each with what to check and how to roll back.
 - [Owner stop requests](#owner-stop-requests-applied-before-any-worker-arms) (`worker/src/recovery-reply-arm.ts`): every recorded `/pause` and `/kill` is applied once before a worker arms.
 - [Attested-gap admission](#attested-gap-admission) (`worker/src/ledger-resume.ts`): preview, approve, archive the home, register an empty book under the approval, prove its seed, spawn through the ordinary path.
+- [Automatic admission of re-signed paper tenants](#automatic-admission-of-re-signed-paper-tenants) (`MERRYMEN_RESUME_AUTO_PAPER`): a re-sign is previewed by the orchestrator itself, and a paper tenant that could not arm live and holds nothing is approved by it, through the same path.
 - [The volume steps](#the-volume-steps-adopt-release-re-halt) (`worker/src/persistent-home.ts`): adopt the volume under its halt, release the halt into a rollout scope, re-halt it for a rollback.
 
 This is an application change requiring Milla's review under `AGENTS.md`.
@@ -331,7 +332,9 @@ the continuity gate, and stays held, as it is today. Then remove
 `MERRYMEN_RESUME_PREVIEW`, `MERRYMEN_RESUME_APPROVE` and
 `MERRYMEN_RESUME_REVOKE` (left set they change nothing, and the preview costs a
 boot a few seconds). Keep `MERRYMEN_ADOPT_HOME_HALT_SHA256` and the operation
-token: re-halt needs both.
+token: re-halt needs both. `MERRYMEN_RESUME_AUTO_PAPER`, if you set it, is a
+standing control like the rollout: keep it for as long as you want re-signed
+paper tenants admitted without you.
 
 ### Steady state: re-signers and late tenants
 
@@ -348,6 +351,17 @@ refused by the continuity gate until admitted:
 
 A tenant with no history at all (a brand-new account) needs none of this: the
 ordinary empty-book path admits it.
+
+**With `MERRYMEN_RESUME_AUTO_PAPER=1`, re-signers need less of this.** The
+orchestrator previews a tenant itself when its grant row changes (step 1
+happens on its own, within a reconcile pass of the re-sign, and the line is
+in the log), and approves and admits by itself the one case the preview
+proves safe: a paper tenant that could not arm live and holds nothing. Every
+other re-signer, live ones always, is previewed and left to you: its log
+line ends with the exact `MERRYMEN_RESUME_APPROVE=0x<tenant>:<digest>` to
+set (step 2). Tenants that are ready for another reason than a re-sign (a
+refusal fixed, a late tenant whose grant did not change) still take steps 1
+and 2. See [the automatic lane](#automatic-admission-of-re-signed-paper-tenants).
 
 ### What cannot be honoured
 
@@ -435,6 +449,7 @@ grant's key is never written into a home.
 | `MERRYMEN_RESUME_PREVIEW` | `all`, or `0x…,0x…` | at boot, halted or not: one line per tenant and a run digest; writes only its run row (`ledger_resume_preview_runs`) |
 | `MERRYMEN_RESUME_APPROVE` | `0x<tenant>:<digest>` and/or `run:<run digest>`, comma separated | records approvals. A per-tenant digest must be one a recorded run showed passing; a run approves exactly the tenants that passed in it, less any admitted since that run was taken |
 | `MERRYMEN_RESUME_REVOKE` | `0x<tenant>:<digest>` and/or `run:<run digest>`, comma separated | withdraws approvals not yet archiving or registered: that tenant's approval of that evidence, or every approval recorded from that run |
+| `MERRYMEN_RESUME_AUTO_PAPER` | `1`, or unset | every reconcile pass: previews a tenant whose grant row changed, and approves a re-signed paper tenant in the safe case itself ([below](#automatic-admission-of-re-signed-paper-tenants)) |
 
 A malformed value refuses boot. Each approval is unique per tenant and
 evidence digest, so a variable left set approves nothing twice and never
@@ -543,9 +558,137 @@ Each refuses on its own; none fails open.
 `approved` → `archiving` → `archived` → `registered` → `applied`; `refused`
 (the evidence changed, a precondition failed, or a registered book's grant
 moved to another account before its first worker: preview again) and
-`revoked` are terminal. Every row stays: `ledger_resume_approvals`,
-`ledger_resume_attestations`, `mirror_state_archive`,
-`ledger_snapshot_archive`, and the archived homes on the volume.
+`revoked` are terminal. Each row's `source` says who approved it: `operator`
+(null on a row from before the column) or `auto-paper`. Every row stays:
+`ledger_resume_approvals`, `ledger_resume_attestations`,
+`mirror_state_archive`, `ledger_snapshot_archive`,
+`ledger_resume_grant_watch`, and the archived homes on the volume.
+
+## Automatic admission of re-signed paper tenants
+
+`MERRYMEN_RESUME_AUTO_PAPER=1`. `worker/src/ledger-resume.ts` (the watch,
+the safe case, the room) and `orchestrator.ts` `autoAdmitResignedPaper` (one
+reconcile pass of it). Off by default; this is an application change
+requiring Milla's review under `AGENTS.md`.
+
+### Why
+
+64 tenants' grants expired during the hold. When one of those owners
+re-signs, the continuity gate holds the tenant, which has history and no
+surviving book, until an operator previews it and approves its digest
+([steady state](#steady-state-re-signers-and-late-tenants)): two deploys per
+re-signer. For most of them, a paper book that could never have armed live,
+the preview already proves everything the approval binds, with no chain to
+read.
+
+### What it does
+
+Every reconcile pass, before the pass reads which blocked homes it admits:
+
+1. **The re-sign watch.** Each grant row is digested from its expiry and the
+   store's own server-stamped write time (`updated_at`), never anything
+   secret. Every signature sets its own expiry and every write its own stamp,
+   so a re-sign always changes it. A change, or a grant row never seen
+   before, is owed one automatic preview, recorded in
+   `ledger_resume_grant_watch`, so a re-sign made while the orchestrator was
+   down (a deploy, a crash) is seen at the next start. **The first pass with
+   the variable on records the roster as it stands and owes nothing**:
+   turning it on admits nobody by itself (log: `resume auto-paper: on — N
+   grant row(s) recorded as they stand, none of them a re-sign`). A tenant
+   that re-signed before then takes the manual steps.
+2. **Its turn.** An owed change waits, untouched, while the grant is
+   expired or the operator holds the tenant: `MERRYMEN_ACCOUNTING_HOLD_TENANTS`,
+   or a `MERRYMEN_FLEET_ROLLOUT` that does not admit it. **Under an explicit
+   list the tenant must be named**, and it is previewed and admitted on the
+   first pass after it is, at the level named. Under `all` it trades. A
+   tenant something already runs for (a worker, a spawn, a restart, a hold
+   process) is not the gate's: the change is settled with nothing previewed,
+   which is what an ordinary renewal of a running agent comes to.
+3. **The cap, before anything is read.** No automatic admission while the
+   running workers and holds plus every open approval leave fewer than 8 of
+   the 48 process slots free (the runbook's batch bound of 40). Everything
+   owed stays owed; the log says once
+   `[alert] resume auto-paper: N re-signed tenant(s) wait for a process slot`.
+   Never raise the cap to fit.
+4. **At most 2 a pass**: a fresh preview of that one tenant, the operator's
+   own reading, recorded in `ledger_resume_preview_runs` and printed as
+   `[resume-preview] run <digest>: automatic, for 0x…, whose grant row
+   changed` and its `[resume-preview] {…}` line. Then the verdict:
+   - **the safe case**: the orchestrator records the approval itself,
+     `source = 'auto-paper'`, bound to that preview's evidence digest,
+     through the same insert as `MERRYMEN_RESUME_APPROVE` (one approval per
+     evidence, one open per tenant, never for a tenant admitted since the
+     preview). Log: `resume approval: 0x… approved automatically (auto-paper
+     …)` and `resume auto-paper: 0x… self-approved … its admission starts this
+     pass, at <level>`.
+   - **held, but not the safe case**: nothing approved. Log: `resume
+     auto-paper: 0x… re-signed and previewed in run …, and is not approved
+     automatically — <every reason>`, ending, if it passed,
+     `approve it by hand: MERRYMEN_RESUME_APPROVE=0x<tenant>:<digest>`.
+   - **not held**: its book is on the volume unblocked, or it has no history
+     at all: the ordinary path's, which needs no approval. Nothing approved.
+5. **Settled**, for the exact change that was owed, with the run and the
+   outcome (`auto-approved`, `previewed: …`, `not-held: …`). A second
+   re-sign meanwhile stays owed.
+
+From the approval on, nothing tells it apart from an operator's: in the same
+pass `spawnChild` runs [the phases](#the-phases) — Phase A re-derives the
+evidence and refuses on any change, the home is archived, the book
+registered and attested (the same receipt and `ledger_resume_attestations`
+row, with no chain window, since none is needed), the seed proved, and the
+first worker started at its rollout level.
+
+### The safe case, all of it
+
+- the fresh preview passes every [precondition](#the-preconditions)
+  (including an unexpired grant, readable owner settings and no accounting
+  hold);
+- `chain: "not-required"`: paper, and it could not arm live — no live
+  operation, no flow, no live intent in the owner's settings;
+- no positions (no token balance, no open class position), no live cost
+  basis with a quantity, no live floor, no live trench entry;
+- no unresolved trade, and no owner command with a financial effect left
+  unanswered (`agent_commands`: an order, a self-test or a practice reset
+  with no `done_at`);
+- no approval open for it, and **none of it ever revoked** (a revoke is your
+  decision about that tenant, which no re-sign overrides);
+- held by the gate: its book on the volume is `blocked`, or `absent` with
+  history in Postgres.
+
+**A live or chain-required tenant is never approved automatically**, and
+this lane never reads the chain. If an automatically approved tenant turns
+out to be able to arm live, or to hold positions, by the time its admission
+runs (an owner who turns live trading on between the archive and the
+registration), the approval is refused (`an automatic (auto-paper) approval
+admits only a paper tenant …`) where an operator's would have read the
+chain; preview it and approve it by hand.
+
+### Evidence that changes
+
+Exactly as for an operator's approval: Phase A compares the digest, and
+anything that changed since the automatic preview refuses the approval
+(`evidence changed since the preview`), with nothing moved. **The lane does
+not try again by itself**: the change it was owed is answered. The tenant
+stays held until its owner signs again (a new change, a new preview) or you
+preview and approve it by hand.
+
+### Watching it, and stopping it
+
+- Railway → Postgres → **Data** → `ledger_resume_grant_watch`: one row per
+  tenant (`owed` 1 while a preview is owed; `outcome` and `run` once
+  answered), and the row `*`, the baseline.
+- `ledger_resume_approvals` where `source = 'auto-paper'`: every approval the
+  orchestrator gave itself, with its `preview_run` and `evidence_digest`.
+- `MERRYMEN_RESUME_REVOKE` withdraws an automatic approval exactly as an
+  operator's (by `0x<tenant>:<digest>` or `run:<digest>`), until it is
+  archiving.
+- To stop: remove `MERRYMEN_RESUME_AUTO_PAPER` and deploy. Nothing is
+  previewed, approved or watched; approvals already recorded proceed as
+  approvals do (revoke them, or narrow the rollout, to stop those). Turned on
+  again later, the watch's baseline still stands, so re-signs made while it
+  was off are owed then.
+- Under `FLEET_HALT` no reconcile pass runs, so nothing is previewed or
+  approved either.
 
 ## The volume steps: adopt, release, re-halt
 
