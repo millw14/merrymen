@@ -31,7 +31,7 @@ import { leaseKey, type TenantLease } from "./tenant-lease";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
-import { autoPaperVerdict, countOpenApprovals, grantRowKey, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
+import { autoPaperVerdict, countOpenApprovals, grantRowKey, noteGrantAttempt, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -232,5 +232,36 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     assert.deepEqual(recorded, { recorded: true });
     assert.equal((await main.query("SELECT source FROM ledger_resume_approvals WHERE tenant=$1", [other])).rows[0]!.source, "auto-paper");
     assert.equal(await countOpenApprovals(shared), 2, "this tenant's registered approval and the new one");
+  });
+
+  await t.test("the review fixes in the production dialect: turn order from BIGINT stamps, drift that throws, a failed controls read told apart", async () => {
+    // Turn order: never tried, then the least recently tried, then the longest owed — with the stamps as strings.
+    const [a, b, c] = [address(0xabd01), address(0xabd02), address(0xabd03)];
+    const k = (who: string) => ({ tenant: who, key: grantRowKey({ tenant: who, expiresAt: NOW + 10, updatedAt: NOW }) });
+    await observeGrantChanges(shared, [k(a), k(b)], 10);
+    let owed = (await observeGrantChanges(shared, [k(c), k(b), k(a)], 20)).owed;
+    assert.deepEqual(owed.map((o) => o.tenant), [b, a, c], "a and b owed since the first pass, in roster order between them; c since now");
+    await noteGrantAttempt(shared, owed[0]!, 30);
+    await noteGrantAttempt(shared, owed[1]!, 31);
+    assert.equal(typeof (await main.query("SELECT attempted_at_ms FROM ledger_resume_grant_watch WHERE tenant=$1", [b])).rows[0]!.attempted_at_ms, "string", "BIGINT, as Postgres returns it");
+    owed = (await observeGrantChanges(shared, [k(a), k(b), k(c)], 40)).owed;
+    assert.deepEqual(owed.map((o) => o.tenant), [c, b, a]);
+    // A missing column is 42703, whose message also says "does not exist": drift throws, never reads as no open command.
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    assert.equal(controls.failed, false);
+    const { evidence, digest } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const entry: PreviewEntry = { tenant, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
+      anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
+    await main.query("ALTER TABLE agent_commands DROP COLUMN done_at");
+    try {
+      await assert.rejects(autoPaperVerdict(shared, entry, { consentEnforced: true }), (e: { code?: unknown }) => e.code === "42703");
+    } finally { await main.query("ALTER TABLE agent_commands ADD COLUMN done_at BIGINT"); }
+    assert.equal((await autoPaperVerdict(shared, entry, { consentEnforced: true })).kind, "manual", "restored, it reads again");
+    // A controls read that fails (the store refuses) is `failed`, an outage the admission holds on.
+    const refusing: Db = { ...shared, prepare: (sql: string) => /recovery_reply_controls/.test(sql)
+      ? { run: async () => { throw new Error("x"); }, get: async () => { throw new Error("x"); }, all: async () => { throw Object.assign(new Error("terminating connection"), { code: "57P01" }); } }
+      : shared.prepare(sql) };
+    const failed = await readControlsEvidence(refusing, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    assert.deepEqual([failed.readable, failed.failed, failed.digest], [false, true, "unreadable"]);
   });
 });
