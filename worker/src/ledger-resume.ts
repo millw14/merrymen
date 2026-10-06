@@ -869,32 +869,49 @@ export function describeChainFact(f: MissingChainFact): string {
 }
 
 /**
- * The found facts as one line, as many as fit in `maxChars`, then how many
- * more. A refusal's reason is stored in 500 characters (moveApproval), and a
- * deploy log line is one line; the booking tool's preview lists them all.
+ * The found facts as ONE LINE OF AT MOST `maxChars` CHARACTERS: as many as
+ * fit, then how many more. A refusal's reason is stored in 500 characters
+ * (moveApproval cuts there), and a deploy log line is one line; the booking
+ * tool's preview lists them all.
+ *
+ * THE COUNT IS INSIDE THE LIMIT. It used to be appended after the facts that
+ * fit, so a reason with many facts ran past 500 and the cut took "and N more"
+ * off the end — the one part that says the list is incomplete. Its room is now
+ * reserved at its widest (every fact unsaid, so the most digits), and saying
+ * one more fact only ever shortens it. A first fact too long for the room is
+ * not cut mid-hash: the line says how many there are instead.
  */
 export function describeChainFacts(found: readonly MissingChainFact[], maxChars = 1_800): string {
+  const said = found.map(describeChainFact);
+  const all = said.join("; ");
+  if (all.length <= maxChars) return all;
+  const more = (n: number) => `and ${n} more (the booking preview lists every one)`;
+  const room = maxChars - more(found.length).length - 2;
   const parts: string[] = [];
   let used = 0;
-  for (const f of found) {
-    const s = describeChainFact(f);
-    if (parts.length && used + s.length + 2 > maxChars) break;
+  for (const s of said) {
+    const next = used + (parts.length ? 2 : 0) + s.length;
+    if (next > room) break;
     parts.push(s);
-    used += s.length + 2;
+    used = next;
   }
-  const more = found.length - parts.length;
-  return parts.join("; ") + (more > 0 ? `; and ${more} more (the booking preview lists every one)` : "");
+  const line = parts.length ? `${parts.join("; ")}; ${more(found.length - parts.length)}` : `${found.length} of them (the booking preview lists every one)`;
+  return line.slice(0, maxChars);
 }
 
-/** The words a chain refusal starts with. The orchestrator's tests and the runbook quote them. */
+/** The words a chain refusal starts with. The orchestrator's tests, the booking tool and the runbook quote them. */
 export const CHAIN_REFUSAL = "the chain holds operations or USDG transfers for the account that Postgres lacks";
-/** Room for the facts inside the 500-character reason, after the longest prefix. */
-const REASON_FACT_CHARS = 330;
+/** The longer of the two ways a chain refusal starts (chainRefusal), with the ": " before the facts. */
+const LONGEST_REFUSAL_HEAD = `${CHAIN_REFUSAL}, landed after the admission's first chain read: `;
+/** Room for the facts, and the count of those that did not fit, inside the 500-character reason after the longest head. */
+const REASON_FACT_CHARS = 500 - LONGEST_REFUSAL_HEAD.length;
 
 /**
  * An admission's refusal for chain activity Postgres lacks, naming it. Fits
- * the stored reason: the prefix the runbook quotes, then as many facts as fit
- * (an operation and its USDG leg do, with every hash in full).
+ * the stored reason, whole: the prefix the runbook quotes, then as many facts
+ * as fit (an operation and its USDG leg do, with every hash in full), then how
+ * many more — never more than 500 characters, so moveApproval's cut never
+ * lands on it.
  */
 export function chainRefusal(found: readonly MissingChainFact[], landedAfterFirstRead = false): string {
   const head = landedAfterFirstRead ? `${CHAIN_REFUSAL}, landed after the admission's first chain read` : CHAIN_REFUSAL;

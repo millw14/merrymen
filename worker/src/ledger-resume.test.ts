@@ -315,6 +315,36 @@ describe("the chain read", () => {
     assert.deepEqual(chainFactsPostgresLacks({ account: ACC, opLogs: [], outLogs: [self], inLogs: [self], known }).map((f) => (f as { direction: string }).direction), ["self"]);
     assert.equal(usdg6("0"), "0.000000"); assert.equal(usdg6("1234567"), "1.234567"); assert.equal(usdg6("-5"), "-0.000005");
   });
+  it("a refusal's reason is never longer than the 500 characters it is stored in, and keeps its count of the facts that did not fit", () => {
+    // The widest facts there are: full hashes, the largest amount a 32-byte
+    // word holds, block numbers and log indexes far past today's.
+    const hash = (n: number) => `0x${n.toString(16).padStart(64, "f")}`;
+    const wide = (n: number): Parameters<typeof describeChainFact>[0] => n % 3 === 0
+      ? { kind: "operation", userOpHash: hash(n), txHash: hash(n + 1), block: String(2n ** 63n + BigInt(n)), logIndex: 4_000_000 + n, success: null }
+      : { kind: "transfer", txHash: hash(n), block: String(2n ** 63n + BigInt(n)), logIndex: 4_000_000 + n, direction: n % 3 === 1 ? "out" : "self",
+        amountRaw: (2n ** 256n - 1n - BigInt(n)).toString(), counterparty: null };
+    // And today's widths: a few USDG amounts, block numbers near 79 million.
+    const typical = (n: number): Parameters<typeof describeChainFact>[0] => n % 2 === 0
+      ? { kind: "operation", userOpHash: hash(n), txHash: hash(n + 1), block: String(79_494_846 + n), logIndex: 13, success: true }
+      : { kind: "transfer", txHash: hash(n), block: String(79_494_846 + n), logIndex: n % 40, direction: "in", amountRaw: String(4_965_021 * n), counterparty: null };
+    let longest = 0;
+    for (const count of [1, 2, 3, 4, 7, 10, 99, 100, 101, 999, 1_000, 1_200]) for (const shape of [wide, typical]) {
+      const found = Array.from({ length: count }, (_, i) => shape(i));
+      for (const late of [false, true]) {
+        const reason = chainRefusal(found, late);
+        longest = Math.max(longest, reason.length);
+        assert.ok(reason.length <= 500, `${count} fact(s), late=${late}: ${reason.length} characters`);
+        assert.ok(reason.startsWith(late ? `${CHAIN_REFUSAL}, landed after the admission's first chain read: ` : `${CHAIN_REFUSAL}: `));
+        // Whatever did not fit is counted, whole, at the end.
+        const said = (reason.match(/(?:operation|USDG) /g) ?? []).length - 1;
+        if (said < count) assert.match(reason, new RegExp(`(?:and ${count - said} more|${count} of them) \\(the booking preview lists every one\\)$`), reason);
+      }
+    }
+    assert.ok(longest > 400, "the limit is used, not avoided");
+    // The line on its own holds to any limit it is given.
+    const many = Array.from({ length: 50 }, (_, i) => wide(i));
+    for (const max of [120, 250, 371, 1_800]) assert.ok(describeChainFacts(many, max).length <= max, `limit ${max}`);
+  });
   it("an RPC that fails is unavailable, never clean", async () => {
     const r = await chainGapCheck({ chain: fakeChain({ failAt: 2 }), account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 2_000_000n });
     assert.equal(r.status, "unavailable");
