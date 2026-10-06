@@ -3714,7 +3714,7 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
     if (!unexpired.has(change.tenant) || operatorHeld(change.tenant)) continue;
     const t = change.tenant;
     if (children.has(t) || spawning.has(t) || holders.has(t) || restartPending.has(t) || exitingChildren.has(t) || retiringExpired.has(t)) {
-      try { await settle(change, "not-held: a worker, spawn, restart or hold process is its", null); }
+      try { await settle(change, "not-held: a worker, spawn, restart or hold process runs for it", null); }
       catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
       continue;
     }
@@ -3783,8 +3783,6 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
     }
   }
 }
-/** Test seam: forget that the watch's schema was created, for a test that swaps the shared database. */
-export function resetAutoPaperForTest(): void { autoPaperSchemaReady = false; autoPaperCapSaid = null; }
 
 /**
  * APPLY THE OWNER'S RECORDED /pause AND /kill FOR ONE TENANT, under its lease,
@@ -11471,7 +11469,7 @@ export async function runOrchestrator(): Promise<void> {
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   log(rolloutStartupLine(rollout));
   log(resumeAutoPaper
-    ? `resume auto-paper: ${RESUME_AUTO_PAPER_ENV}=1 — a re-signed tenant held by the continuity gate is previewed automatically, and one that is paper, ` +
+    ? `resume auto-paper: ${RESUME_AUTO_PAPER_ENV}=1 — a tenant whose grant row changes is previewed automatically, and a re-signed one the continuity gate holds that is paper, ` +
       `could not arm live and holds nothing is approved by this process (at most ${AUTO_PAPER_PER_PASS} a pass, within the process cap) and admitted at its rollout level`
     : `resume auto-paper: off — a re-signed tenant with history waits for an operator's preview and approval, as before`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
