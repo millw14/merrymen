@@ -488,11 +488,15 @@ it("on: re-signers whose previews never read cannot starve the ones behind them 
       mkdirSync(path.dirname(settingsFile(s.tenant)), { recursive: true });
       writeFileSync(settingsFile(s.tenant), "{ not json", { mode: 0o600 });
     }
-    // The stuck ones re-sign first, so they are owed longest and come first in line.
-    for (const s of stuck) await s.resign();
-    await new Promise((r) => setTimeout(r, 5));
-    await pass();
-    for (const s of stuck) assert.equal(watch(s.tenant)!.owed, 1, "nothing to approve: their own settings are unreadable");
+    // The stuck ones re-sign first, while the fleet is at the cap: owed, untried, and so first in line.
+    setPhantomProcessesForTest(40);
+    try {
+      for (const s of stuck) await s.resign();
+      await pass();
+    } finally { setPhantomProcessesForTest(0); }
+    for (const s of stuck) assert.deepEqual({ ...watch(s.tenant)! }, { owed: 1, outcome: null, run: null });
+    assert.deepEqual(stuck.map((s) => rows("SELECT attempted_at_ms AS at FROM ledger_resume_grant_watch WHERE tenant = ?", s.tenant)[0]!.at), [null, null], "not tried yet");
+    // The readable one re-signs after them; in the next pass both of theirs are tried and fail first.
     await healthy.resign();
     await pass();
     assert.deepEqual(approvals(healthy.tenant).map((a) => [a.state, a.source]), [["applied", "auto-paper"]], "answered in the pass it was owed, behind two that could not be read");
