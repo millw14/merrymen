@@ -39,7 +39,7 @@ test("every refusal names its check by a fixed code, never a value, and the text
  assert.equal(code(()=>mergeRecoveryReplyOffset(null,"801",1)),"HANDOFF_SHAPE");
  assert.equal(code(()=>mergeRecoveryReplyOffset([],"801",1)),"HANDOFF_SHAPE");
  assert.equal(code(()=>mergeRecoveryReplyOffset({offset:1},"801",-1)),"HANDOFF_ROW");
- // The orchestrator's restored link (restoredTelegramFile) never carries an offset.
+ // A missing offset is refused whoever wrote it: among them the orchestrator's restored link as it was before it wrote `offset: 0` (restoredTelegramFile).
  assert.equal(code(()=>mergeRecoveryReplyOffset({linkCode:"K7M2QX",ownerId:7,linkedAt:5},"801",1)),"HANDOFF_OFFSET");
  assert.equal(code(()=>mergeRecoveryReplyOffset({offset:null},"801",1)),"HANDOFF_OFFSET");
  assert.equal(code(()=>mergeRecoveryReplyOffset({offset:1.5},"801",1)),"HANDOFF_OFFSET");
