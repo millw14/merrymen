@@ -29,11 +29,12 @@ already in Postgres.
 
 The tool runs admission's own chain check, from the same block admission
 starts at, against one read of Postgres. Then it reads each named
-transaction's receipt and block, and classifies every fact:
+transaction's receipt and block, and classifies every fact. For each token a
+trade moved, it also reads the book's balance at a pinned block (see below):
 
 | Class | What it is | What it writes |
 |---|---|---|
-| `session-trade` | The session key's swap: USDG one way, one token the other, read across the account and its custody vault | A `trades` row, as the in-flight reconciler writes a landed operation the book lost: `kind 'swap'`, `status 'landed'`, `basis_source 'receipt'`, the two legs, the fill (side, quantity and cash from the Transfer logs), gas from the EntryPoint's own event (sponsored or owner-paid), `created_at` at the block time. **Only when the cost-basis snapshot already reflects the trade** (see below) |
+| `session-trade` | The session key's swap: USDG one way, one token the other, read across the account and its custody vault | A `trades` row, as the in-flight reconciler writes a landed operation the book lost: `kind 'swap'`, `status 'landed'`, `basis_source 'receipt'`, the two legs, the fill (side, quantity and cash from the Transfer logs), gas from the EntryPoint's own event (sponsored or owner-paid), `created_at` at the block time. **Only when the cost-basis snapshot already holds what the chain does in that token** (see below) |
 | `session-no-movement` | A session-key operation that moved nothing across the book's edge (an approval, a key install, a probe) | The reconciler's notional-0 row, so the operation is counted |
 | `session-reverted` | A session-key operation that the EntryPoint recorded as failed | A resolved revert's row: `status 'reverted'`, its gas, notional 0 |
 | `operation-leg` | A USDG transfer inside one of those operations | Nothing extra: the operation's row carries its transaction hash, which answers it |
@@ -55,39 +56,89 @@ The `unresolved` class covers these cases:
 - The fact landed after admission's chain refusal of the tenant, or within a
   minute before it. Admission never found it missing from the book a worker
   would run on. Let admission refuse the tenant again, then preview again.
-- A trade the cost-basis snapshot does not reflect (next section).
+- A trade whose token the cost-basis snapshot does not hold as the chain does
+  (next section).
 - A receipt or a balance could not be read.
 
 **One unresolved fact blocks the whole tenant.** Escalate it to Milla and
 Codex with the preview file.
 
-### A trade books only if the cost-basis snapshot reflects it
+### A trade books only if the cost-basis snapshot holds what the chain does
 
 When a tenant is admitted, the new book takes its cost basis from Postgres's
 `cost_basis` table, for each symbol that Postgres's `positions` table shows
 held. Both tables are the lost book's last mirrored snapshot. The in-flight
 reconciler books the basis beside every row it writes. This tool writes
-neither table, so a booked trade that the snapshot does not reflect would
-cause one of two faults:
+neither table, so a booked trade that the snapshot leaves out would cause one
+of two faults:
 
-- **After a buy:** the new book holds the token with no basis, and both the
-  stop-loss and the take-profit skip it.
-- **After a sell:** the new book restores a basis for a position it no longer
-  holds.
+- **After a buy:** the new book holds the token with no basis, or with a
+  basis for less than it holds, and the stop-loss and take-profit measure
+  from the wrong cost.
+- **After a sell:** the new book restores a basis for more than it holds.
 
-So a `session-trade` is booked only in one of two cases. Each is checked over
-every booked trade in that token, at the time of the last one:
+**When the rows were written is never enough.** A missed buy followed by an
+ordinary buy rewrites both rows after the missed one, and the basis can still
+leave the missed buy out. So the tool compares what the rows **contain** with
+the chain.
 
-- **The snapshot holds the token.** Its `positions` row and its live
-  `cost_basis` row were both written at or after that trade.
-- **The snapshot holds none of it.** The book (the account and its custody
-  vault) also holds none on chain now. The tool reads this with `balanceOf` at
-  `latest`.
+It reads the token's balance with `balanceOf` for each address of the book
+(the account and its custody vault, as the fill was read) at a **pinned
+block**: admission's chain head less 64. Every booked fact is at least 64
+blocks deep under that head, so the balance includes all of them and is as
+final as they are. A balance read at `latest` could include later activity,
+so the transport refuses one.
+
+A `session-trade` is booked only if one of these holds, judged over every
+booked trade in that token together:
+
+- **The snapshot holds the token.** Its `positions` row's raw balance **and**
+  its live `cost_basis` row's quantity each equal the book's balance at the
+  pinned block. Both rows were also written at or after the last booked trade
+  in the token. That check is necessary but never enough alone.
+- **The snapshot holds none of it.** The book holds none at the pinned block,
+  and no live `cost_basis` row under any name the token has gone by still
+  covers a quantity.
+
+Then, either way, the tool walks the token's fills back from the balance:
+every fill Postgres records in the token, and every trade the plan books,
+newest first. Before each fill the book held what it holds after, less what
+was bought or plus what was sold. The walk ends when it has passed every
+booked trade and stands at zero: that is where the basis last opened, and the
+fills since then reproduce the chain's quantity exactly.
+
+- If the walk goes **below zero**, the fills are more than the chain holds.
+  Something moved the token that neither Postgres nor the plan records, and
+  the trade is refused.
+- If the records **do not allow** the walk, the plan says why in a `note:`
+  and in `evidence.holding.fills`, and the contents checks above decide alone.
+  This happens when a row in the token is still `submitted`, carries no fill,
+  or has a fill from a quote rather than its receipt, or when the records run
+  out with the book still holding some.
+
+Recorded rows are dated by when the worker wrote them, and booked trades by
+their block. If a recorded row was written after a missed fill that landed
+later, the walk reads them out of order. That can only refuse, never book.
 
 In any other case the trade and its USDG leg are `unresolved`, and so is the
-tenant. Each trade's `evidence.holding` shows the position, the basis, their
-times and the balances read. Resolving such a trade needs a reviewed basis
-decision.
+tenant. A balance that cannot be read proves nothing, so it also leaves the
+trade `unresolved`. Each trade's `evidence.holding` shows the position, the
+basis, the balances read, the fill walk, and `refusal`, which names the check
+that refused:
+
+| `refusal` | What it found |
+|---|---|
+| `balance-unread` | The book's balance at the pinned block could not be read for every address |
+| `position-differs` | The position's raw balance is not the chain's |
+| `basis-missing` | A held position has no live cost basis |
+| `basis-differs` | The basis quantity is not the chain's: for example, a fill the lost book never booked to it |
+| `position-stale`, `basis-stale` | A row was written before the last booked trade in the token |
+| `held-unrecorded` | The chain holds the token and the snapshot holds none |
+| `basis-without-position` | The chain and the positions hold none, but a basis still covers a quantity |
+| `fills-exceed-chain` | The fill walk went below zero |
+| `positions-ambiguous`, `position-unreadable`, `basis-unreadable` | The snapshot cannot be read as one answer |
+
+Resolving any of these needs a reviewed basis decision.
 
 The tool never does any of the following:
 
@@ -106,15 +157,16 @@ Two consequences need a reviewer's eye:
   first look. The worker marks contributions unknown and suppresses the fee
   rather than guess. This is existing fail-closed behaviour.
 - **A booked trade does not move the cost basis.** It is booked only when
-  the snapshot already reflects it, as described above. Still check the
-  positions, basis and floors on the dashboard at `exits-only`, before
-  `trade`.
+  the snapshot's position and basis already hold what the chain does, as
+  described above. The basis's cost is not checked against the fills, only
+  its quantity. Still check the positions, basis and floors on the dashboard
+  at `exits-only`, before `trade`.
 
 ## The three tenants held on 2026-10-06
 
 | Tenant | Line | Shape | Expected |
 |---|---|---|---|
-| `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row, if the cost-basis snapshot reflects the trade. Otherwise `unresolved`: escalate for a basis decision |
+| `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row, if Postgres's position and cost basis in the token hold what the chain does. Otherwise `unresolved`: escalate for a basis decision |
 | `0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5` | 1 op, 0 transfers | An operation with no USDG leg | `session-no-movement` books the reconciler's row. A root-key `owner-operation` blocks: escalate |
 | `0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d` | 0 ops, 1 transfer | A lone USDG transfer | `deposit` → one `flows` row. Outbound, or from a hosted account or vault, blocks |
 
@@ -168,8 +220,11 @@ and names what is missing. Then preview here again.
 - **The RPC.** The default is the public Robinhood Chain mainnet RPC.
   `MERRYMEN_CHAIN_GAP_RPC` selects another. The transport admits only
   `eth_chainId`, `eth_blockNumber`, `eth_getLogs`, `eth_getTransactionReceipt`,
-  `eth_getBlockByNumber`, and `eth_call` at `latest` for exactly two view
-  calls: `decimals()`, and `balanceOf` of one address.
+  `eth_getBlockByNumber`, and `eth_call` for exactly two view calls:
+  `decimals()` at `latest`, and `balanceOf` of one address at a block number
+  (never a tag). The node must still serve state 64 blocks back. The public
+  RPC does. If a node cannot, the balance reads as unread and the trade is
+  `unresolved`.
 
 ## 1. Preview
 
@@ -195,7 +250,7 @@ anything not booked, any notes, and:
 chain-gap booking READY — tenant 0x…, account 0x…, epoch 2: 2 fact(s) on chain that Postgres lacks, 1 row(s) proposed
   operation-leg: USDG in 4.965021 in tx 0x… log 11 at block 79494846 → covered by op:0x…
   session-trade: operation 0x… in tx 0x… at block 79494846 → trades row
-  note: a trade is booked without touching cost_basis, positions or position_floors, because the snapshot … already reflects it …
+  note: a trade is booked without touching cost_basis, positions or position_floors, because the snapshot … already holds what the chain does in its token at block …
 previewDigest 3f…
 PREVIEW ONLY — 0 database writes. The plan is in /…/preview.json.
 ```
@@ -215,8 +270,9 @@ Send the preview file to Milla. For each item, check:
 - the class and its `why`;
 - the proposed row, column by column;
 - the `evidence`: block hash, validator, payer, the book's net movement and
-  the fill amounts, and for a trade its `holding` (the position and basis
-  rows, their times, and the balances read);
+  the fill amounts, and for a trade its `holding`: the position and basis
+  rows and their times, the balances read at the pinned block
+  (`capture.balanceBlock`), the fill walk, and the `refusal`, if any;
 - the `remaining` list, which must be empty;
 - the `warnings`.
 
@@ -225,11 +281,13 @@ The `previewDigest` is what the review approves. It covers:
 - the code that produced the preview, by file digest;
 - the database, by host, port and name;
 - every Postgres fact the plan depends on, including the tenant's approvals,
-  heartbeat, mirror cursor, positions and cost basis;
+  heartbeat, mirror cursor, positions and cost basis, and its recorded fills
+  (by digest);
 - the balances read;
 - every proposed row.
 
-It does not cover the time of the preview or the chain head.
+It does not cover the time of the preview, the chain head or the pinned
+block.
 
 ## 3. Backup
 
@@ -261,8 +319,8 @@ Then, in **one transaction**, the apply:
 1. locks the agent row;
 2. compares every Postgres fact again (compare-and-set), refusing if any
    changed. This includes the tenant's heartbeat, mirror cursor, mode,
-   approvals, attestations, positions and cost basis, so a tenant that woke
-   up after the preview is refused;
+   approvals, attestations, positions, cost basis and recorded fills, so a
+   tenant that woke up after the preview is refused;
 3. inserts exactly the proposed rows and reads each one back;
 4. proves the flows are still distinct and that admission's chain-fact rule
    is now answered for every fact;
