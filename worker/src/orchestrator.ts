@@ -150,7 +150,8 @@ import {
   homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
   normaliseCarriedFile, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
-  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, autoPaperRoom, autoPaperVerdict, countOpenApprovals,
+  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, autoPaperRecordWait, autoPaperRoom,
+  autoPaperVerdict, countOpenApprovals,
   evidenceHasHistory, grantRowKey, noteGrantAttempt, observeGrantChanges, parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
   RESUME_APPROVE_ENV, RESUME_AUTO_PAPER_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
   type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type OwedGrantChange, type PreviewEntry, type ResumeCheck, type ResumePreviewScope,
@@ -3709,7 +3710,12 @@ async function refreshResumePending(): Promise<void> {
  *     (recordResumeApproval). Anything else is said with the line an
  *     operator approves it by, if it passed. A preview that cannot be read
  *     is no answer: it stays owed, goes behind the others, and spends one of
- *     AUTO_PAPER_RETRIES_PER_PASS rather than an answer.
+ *     AUTO_PAPER_RETRIES_PER_PASS rather than an answer. Nor is an approval
+ *     the store could not take for an outage (recordResumeApproval
+ *     `transient`): it stays owed, goes behind the others, and sits out a
+ *     growing number of its turns (autoPaperRecordWait) before it is
+ *     previewed and inserted again — an [alert] from
+ *     AUTO_PAPER_RECORD_ALERT_AFTER failures in a row.
  *  5. The change settled, for the key that was owed, with the run (if one
  *     was recorded) and what it came to.
  *
@@ -3721,6 +3727,13 @@ async function refreshResumePending(): Promise<void> {
 let autoPaperSchemaReady = false;
 /** The last "waiting for a process slot" count said, so the alert is said once per change rather than every pass. */
 let autoPaperCapSaid: number | null = null;
+/**
+ * Owed changes whose approval the store could not take for an outage, by
+ * tenant: for which grant row, how many times in a row, and how many more of
+ * its turns it sits out. Kept in memory: a restart asks again at once, which
+ * costs one preview. Forgotten once that change is no longer owed.
+ */
+const autoPaperRecordRetry = new Map<string, { key: string; failures: number; wait: number }>();
 async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; key: string }>, unexpired: ReadonlySet<string>): Promise<void> {
   if (!resumeAutoPaperOn(process.env)) return;
   const url = process.env.DATABASE_URL;
@@ -3753,6 +3766,10 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       log(`resume auto-paper: ${change.tenant} — its grant row changed again meanwhile; still owed a preview`);
     }
   };
+  // A back-off belongs to the change it was for: one settled, or moved on by a
+  // newer re-sign, is forgotten, and a new change starts with none.
+  const owedKey = new Map(owed.map((c) => [c.tenant, c.key]));
+  for (const [t, r] of autoPaperRecordRetry) if (owedKey.get(t) !== r.key) autoPaperRecordRetry.delete(t);
   const ready: OwedGrantChange[] = [];
   for (const change of owed) {
     // Owed, untouched, until its turn: an expired grant is answered by the
@@ -3764,6 +3781,10 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
       continue;
     }
+    // Owed, untouched, for the turns it sits out after an approval the store
+    // could not take (below): those turns go to the changes behind it.
+    const retry = autoPaperRecordRetry.get(t);
+    if (retry && retry.wait > 0) { retry.wait -= 1; continue; }
     ready.push(change);
   }
   if (!ready.length) { autoPaperCapSaid = null; return; }
@@ -3857,6 +3878,28 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       // here the same Phase A that re-derives the evidence and refuses on any
       // change. The level is the rollout's, as for every spawn.
       const recorded = await recordResumeApproval(shared, { entry, run, at, nowMs: Date.now(), source: AUTO_PAPER_SOURCE }, log);
+      if (!recorded.recorded && recorded.transient) {
+        // AN OUTAGE IS NOT AN ANSWER HERE EITHER. The insert failed because
+        // the store could not be reached or gave the statement up, which says
+        // nothing about the tenant: settled now, no approval would exist and
+        // nothing would ask again until its owner happened to sign once more.
+        // It stays owed, goes behind every change not tried since, and sits
+        // out a growing number of its turns; then a fresh preview and the
+        // insert again. An insert that did commit before its connection
+        // dropped is found by that attempt on record (this evidence, or an
+        // approval already open) and settled there; the approval it left goes
+        // on to Phase A like any other.
+        const had = autoPaperRecordRetry.get(tenant);
+        const failures = had?.key === change.key ? had.failures + 1 : 1, wait = autoPaperRecordWait(failures);
+        autoPaperRecordRetry.set(tenant, { key: change.key, failures, wait });
+        try { await noteGrantAttempt(shared, change, Date.now()); } catch { /* still owed */ }
+        const next = wait ? `previewed and tried again after it sits out ${wait} more of its turn(s)` : "previewed and tried again on the next pass";
+        if (failures >= AUTO_PAPER_RECORD_ALERT_AFTER) {
+          sayTenantAlert(tenant, `[alert] ${tenant}: resume auto-paper could not record its approval ${AUTO_PAPER_RECORD_ALERT_AFTER} or more times in a row — ` +
+            `${recorded.why}: an outage, not a refusal — its re-sign is still owed, tried again with back-off`);
+        } else log(`resume auto-paper: ${tenant} could not record its approval — ${recorded.why}: an outage, not a refusal — its re-sign is still owed, ${next}`);
+        continue;
+      }
       if (!recorded.recorded) {
         log(`resume auto-paper: ${tenant} not approved automatically — ${recorded.why}`);
         await settle(change, `not-recorded: ${recorded.why}`, run);

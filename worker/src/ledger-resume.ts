@@ -80,7 +80,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import { createPublicClient, http, type Hex } from "viem";
-import type { Db } from "./db";
+import { isTransientDbError, type Db } from "./db";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import { planBasisSeed, planFloorSeed, type BasisSeedRow, type FloorSeedRow } from "./basis-seed";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -732,9 +732,20 @@ export async function applyResumeApprovals(db: Db, approvals: readonly ResumeApp
  * open approval for other evidence (one open per tenant, which the table
  * enforces as well). A duplicate of the same evidence is silent, as a
  * variable left set across boots must be; every other refusal is said.
+ *
+ * AN OUTAGE IS NOT A REFUSAL. An insert the store could not take because it
+ * could not be reached or gave the statement up (db.ts isTransientDbError: a
+ * reset connection, a statement timeout, a serialization or deadlock abort)
+ * says nothing about the tenant, and comes back `transient`: the automatic
+ * lane keeps the re-sign owed and asks again on a later pass, and an
+ * operator's boot is told that the variable, left set, records it on the
+ * next. Anything else the insert meets — above all the table's own
+ * uniqueness, another approval recorded meanwhile — is the store's answer,
+ * and final, as before.
  */
+export type RecordedApproval = { recorded: true } | { recorded: false; why: string; transient?: true };
 export async function recordResumeApproval(db: Db, o: { entry: PreviewEntry; run: string; at: number; nowMs: number; source: ApprovalSource },
-  log: (line: string) => void): Promise<{ recorded: true } | { recorded: false; why: string }> {
+  log: (line: string) => void): Promise<RecordedApproval> {
   const { entry, run, at, nowMs, source } = o;
   if (!entry.pass || !entry.digest || !entry.evidence) return { recorded: false, why: "the entry did not pass, or carries no evidence" };
   const existing = (await db.prepare("SELECT state, source, reason FROM ledger_resume_approvals WHERE tenant = ? AND evidence_digest = ?").get(entry.tenant, entry.digest)) as
@@ -773,7 +784,19 @@ export async function recordResumeApproval(db: Db, o: { entry: PreviewEntry; run
     await db.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run,
         state, created_at_ms, updated_at_ms, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`)
       .run(randomUUID(), entry.tenant, e.account, e.chainId, e.owner, entry.digest, canonical(e), run, nowMs, nowMs, source);
-  } catch {
+  } catch (err) {
+    if (isTransientDbError(err)) {
+      // By its code (a SQLSTATE or a Node errno), or its class: never what it
+      // said, which can carry a connection string.
+      const code = (err as { code?: unknown }).code, name = (err as Error).name;
+      const why = `the store could not be reached or gave up (${typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? code : /^[A-Za-z]{1,40}$/.test(name) ? name : "Error"})`;
+      // The automatic lane says its own line, with its back-off.
+      if (source === "operator") {
+        log(`[alert] resume approval: ${entry.tenant} could not be recorded — ${why}: an outage, not a refusal — not approved by this boot; ` +
+          "left set, the variable records it on the next");
+      }
+      return { recorded: false, why, transient: true };
+    }
     log(`[alert] resume approval: ${entry.tenant} could not be recorded (another approval is open, or the store refused) — not approved`);
     return { recorded: false, why: "the store refused the approval" };
   }
@@ -905,6 +928,24 @@ export const AUTO_PAPER_RETRIES_PER_PASS = 2;
  * holds: 40). An operator may fill them by hand; this never does.
  */
 export const AUTO_PAPER_HEADROOM = 8;
+
+/**
+ * AN APPROVAL THE STORE COULD NOT TAKE (recordResumeApproval `transient`: an
+ * outage, not a refusal). The re-sign stays owed, and its change sits out a
+ * growing number of its turns before it is previewed and inserted again:
+ * none after its first failure (the next pass asks again), then 1, 3, 7 … up
+ * to AUTO_PAPER_RECORD_MAX_WAIT, about ten minutes of fifteen-second passes.
+ * So a store that keeps failing costs each such tenant one preview every few
+ * minutes, not one a pass, and the turns it sits out go to the changes behind
+ * it. From AUTO_PAPER_RECORD_ALERT_AFTER failures in a row, an [alert].
+ */
+export const AUTO_PAPER_RECORD_ALERT_AFTER = 3;
+export const AUTO_PAPER_RECORD_MAX_WAIT = 40;
+/** The turns a change sits out after its `failures`-th transient failure in a row (from 1). */
+export function autoPaperRecordWait(failures: number): number {
+  const n = Math.max(1, Math.min(30, Math.floor(Number.isFinite(failures) ? failures : 1)));
+  return Math.min(AUTO_PAPER_RECORD_MAX_WAIT, 2 ** (n - 1) - 1);
+}
 
 /**
  * HOW MANY MORE AUTOMATIC ADMISSIONS FIT, under a cap of `cap` processes:

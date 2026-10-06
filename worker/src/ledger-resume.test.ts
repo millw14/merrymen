@@ -25,7 +25,7 @@ import {
   applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, parseResumeApprovals,
   parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
   AUTO_PAPER_HEADROOM, autoPaperRoom, autoPaperVerdict, countOpenApprovals, evidenceHasHistory, grantRowKey, observeGrantChanges, parseResumeAutoPaper,
-  noteGrantAttempt, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
+  noteGrantAttempt, recordResumeApproval, resumeAutoPaperOn, settleGrantChange, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RECORD_MAX_WAIT, autoPaperRecordWait,
   type GapChain, type PreviewEntry,
 } from "./ledger-resume";
 
@@ -600,6 +600,57 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     assert.equal((await readOpenApproval(g.shared, g.tenant))!.source, "operator");
     g.raw.prepare("UPDATE ledger_resume_approvals SET source = NULL").run();
     assert.equal((await readOpenApproval(g.shared, g.tenant))!.source, "operator");
+  });
+
+  it("an insert the store could not take for an outage is transient and records nothing; the store's own answer is final, as before", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    const insert = /INSERT INTO ledger_resume_approvals/;
+    // What the error says can carry a connection string: never in a line or a reason.
+    const coded = (code: string) => () => Object.assign(new Error("postgres://merrymen:hunter2@db.internal/x: canceling statement"), { code });
+    const auto = (db: Db, lines: string[]) => recordResumeApproval(db, { entry, run, at: 1, nowMs: 2, source: "auto-paper" }, (l) => lines.push(l));
+    for (const code of ["57014", "40001", "40P01", "08006", "08001", "57P01", "53300", "55P03", "ECONNRESET", "ETIMEDOUT"]) {
+      const lines: string[] = [];
+      assert.deepEqual(await auto(failing(f.shared, insert, coded(code)), lines), { recorded: false, why: `the store could not be reached or gave up (${code})`, transient: true }, code);
+      assert.deepEqual(lines, [], `${code}: the automatic lane says its own line, with its back-off`);
+    }
+    // The client's own words for a connection that ended, with no code: by its class.
+    assert.deepEqual(await auto(failing(f.shared, insert, () => new Error("Connection terminated unexpectedly")), []),
+      { recorded: false, why: "the store could not be reached or gave up (Error)", transient: true });
+    // An operator's boot is told, and told the variable records it on the next.
+    const said: string[] = [];
+    assert.equal((await recordResumeApproval(failing(f.shared, insert, coded("57014")), { entry, run, at: 1, nowMs: 2, source: "operator" }, (l) => said.push(l)) as { transient?: true }).transient, true);
+    assert.deepEqual(said, [`[alert] resume approval: ${f.tenant} could not be recorded — the store could not be reached or gave up (57014): an outage, not a refusal — ` +
+      "not approved by this boot; left set, the variable records it on the next"]);
+    assert.equal(await countOpenApprovals(f.shared), 0, "nothing recorded by any of them");
+    // The store's answer — its uniqueness, a check, schema drift, an error it has no code for — is final, exactly as before.
+    for (const error of [coded("23505"), coded("23514"), coded("42703"), () => new Error("UNIQUE constraint failed: ledger_resume_approvals.tenant")]) {
+      const lines: string[] = [];
+      assert.deepEqual(await auto(failing(f.shared, insert, error), lines), { recorded: false, why: "the store refused the approval" }, error().message);
+      assert.deepEqual(lines, [`[alert] resume approval: ${f.tenant} could not be recorded (another approval is open, or the store refused) — not approved`]);
+    }
+    // A real one: another replica's approval of the same evidence lands between the checks and the insert.
+    const racing = new Proxy(f.shared, {
+      get(target, prop, receiver) {
+        if (prop !== "prepare") { const v = Reflect.get(target, prop, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!insert.test(sql)) return stmt;
+          return { get: stmt.get.bind(stmt), all: stmt.all.bind(stmt), run: async (...args: unknown[]) => { await stmt.run("another-replica", ...args.slice(1)); return stmt.run(...args); } };
+        };
+      },
+    });
+    assert.deepEqual(await auto(racing, []), { recorded: false, why: "the store refused the approval" }, "the table's own uniqueness: settled, never asked again");
+    assert.equal((await readOpenApproval(f.shared, f.tenant))!.approvalId, "another-replica", "the approval on record is the one that won");
+    assert.deepEqual(await auto(f.shared, []), { recorded: false, why: "an approval of this evidence is already on record (approved)" });
+  });
+
+  it("an approval the store could not take sits out a growing number of turns — the next pass, then 1, 3, 7 … up to 40 — and is an [alert] from the third in a row", () => {
+    assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 30].map(autoPaperRecordWait), [0, 1, 3, 7, 15, 31, 40, 40, 40]);
+    assert.equal(AUTO_PAPER_RECORD_MAX_WAIT, 40, "about ten minutes of fifteen-second passes");
+    assert.equal(AUTO_PAPER_RECORD_ALERT_AFTER, 3);
+    for (const odd of [0, -3, NaN, Infinity]) assert.equal(autoPaperRecordWait(odd), 0, String(odd));
   });
 
   it("nobody is approved while live-trading consent is stood down: a funded account would arm live whatever its settings say", async () => {

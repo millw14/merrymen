@@ -264,4 +264,31 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const failed = await readControlsEvidence(refusing, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
     assert.deepEqual([failed.readable, failed.failed, failed.digest], [false, true, "unreadable"]);
   });
+
+  await t.test("an approval insert the production store gives up on is transient; the table's own uniqueness is final", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const { evidence } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const entryFor = (who: `0x${string}`, digest: string): PreviewEntry => ({ tenant: who, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required",
+      suggestedLevel: "trade", anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400,
+      book: "blocked", evidence });
+    const record = (db: Db, entry: PreviewEntry) => recordResumeApproval(db, { entry, run: "e".repeat(64), at: Date.now(), nowMs: Date.now(), source: "auto-paper" }, () => {});
+    // A real statement timeout: another session holds the table in SHARE mode, which lets the checks read and makes the insert wait.
+    const slow = address(0xabf01), blocker = await connect();
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE ledger_resume_approvals IN SHARE MODE");
+    await main.query("SET statement_timeout = 300");
+    try {
+      assert.deepEqual(await record(shared, entryFor(slow, "1".repeat(64))), { recorded: false, why: "the store could not be reached or gave up (57014)", transient: true });
+    } finally { await main.query("SET statement_timeout = 10000"); await blocker.query("ROLLBACK"); }
+    assert.equal((await main.query("SELECT 1 FROM ledger_resume_approvals WHERE tenant=$1", [slow])).rowCount, 0, "nothing recorded");
+    assert.deepEqual(await record(shared, entryFor(slow, "1".repeat(64))), { recorded: true }, "asked again once the store answers, it is recorded");
+    // A real unique violation (23505): another replica's approval of the same evidence lands between the checks and the insert.
+    const raced = address(0xabf02), won = "00000000-0000-4000-8000-0000000000a2";
+    const racing: Db = { ...shared, prepare: (sql: string) => {
+      const stmt = shared.prepare(sql);
+      return /INSERT INTO ledger_resume_approvals/.test(sql) ? { ...stmt, run: async (...args: unknown[]) => { await stmt.run(won, ...args.slice(1)); return stmt.run(...args); } } : stmt;
+    } };
+    assert.deepEqual(await record(racing, entryFor(raced, "2".repeat(64))), { recorded: false, why: "the store refused the approval" }, "final: never asked again");
+    assert.equal((await readOpenApproval(shared, raced))!.approvalId, won);
+  });
 });

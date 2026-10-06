@@ -16,6 +16,7 @@
  * file store; the shared database is real sqlite with the ledger schema.
  */
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -63,9 +64,23 @@ const onLeaseCheck = new Map<string, () => void>();
 setLeaseAcquireForTest(async (tenant) => ({ tenant, backend: "postgres", healthy: () => { onLeaseCheck.get(tenant)?.(); return !unhealthy.has(tenant); }, async release() {} }) as TenantLease);
 // A read of the owner-control journal that fails while set: an outage of one read, never a fact about the tenant.
 let controlsReadFails = false;
+/**
+ * The approval's insert, while set: `outage` fails it with that SQLSTATE (the
+ * store gave the statement up), and `raced` first records another replica's
+ * approval of the same evidence, so the insert meets the table's own
+ * uniqueness — once.
+ */
+let approvalInsert: { outage: string } | "raced" | null = null;
+const anotherReplica = randomUUID();
 const realPrepare = shared.prepare.bind(shared);
 (shared as { prepare: typeof shared.prepare }).prepare = (sql: string) => {
   if (controlsReadFails && /FROM recovery_reply_controls/.test(sql)) throw Object.assign(new Error("connection reset"), { code: "08006" });
+  if (approvalInsert && /INSERT INTO ledger_resume_approvals/.test(sql)) {
+    if (approvalInsert !== "raced") throw Object.assign(new Error("canceling statement due to statement timeout"), { code: approvalInsert.outage });
+    approvalInsert = null;
+    const stmt = realPrepare(sql);
+    return { get: stmt.get.bind(stmt), all: stmt.all.bind(stmt), run: async (...args: unknown[]) => { await stmt.run(anotherReplica, ...args.slice(1)); return stmt.run(...args); } };
+  }
   return realPrepare(sql);
 };
 // What the orchestrator says, without its prefix. MERRYMEN_TEST_VERBOSE=1 prints it as well.
@@ -579,4 +594,79 @@ it("on: a re-signed tenant whose unblocked book the continuity gate refuses is l
     assert.equal(forksOf(t.tenant).length, 1);
     await cleanUp(t.tenant);
   } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
+});
+
+/** The automatic previews taken of a tenant, as the log prints them (a run is content-addressed: the same evidence previewed again is the same row). */
+const runsFor = (tenant: string) => lines.filter((l) => l.startsWith("[resume-preview] run ") && l.includes(`: automatic, for ${tenant},`)).length;
+
+it("on: an approval the store gives up on is an outage, not an answer — the re-sign stays owed, is tried again with back-off, is an [alert] from the third in a row, and is admitted once the store takes it", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    const t = await preIncident();
+    await pass();
+    const before = lines.length;
+    const said = () => lines.slice(before);
+    approvalInsert = { outage: "57014" };
+    try {
+      await t.resign();
+      // 1st: previewed, the insert times out — still owed, and asked again on the very next pass.
+      await pass();
+      assert.deepEqual({ ...watch(t.tenant)! }, { owed: 1, outcome: null, run: null }, "not settled as 'not-recorded': no approval exists, and nothing else would ask again");
+      assert.equal(approvals(t.tenant).length, 0);
+      assert.equal(runsFor(t.tenant), 1);
+      assert.equal(typeof rows("SELECT attempted_at_ms AS at FROM ledger_resume_grant_watch WHERE tenant = ?", t.tenant)[0]!.at, "number", "behind every change not tried since");
+      assert.ok(said().includes(`resume auto-paper: ${t.tenant} could not record its approval — the store could not be reached or gave up (57014): an outage, not a refusal — ` +
+        "its re-sign is still owed, previewed and tried again on the next pass"), said().join("\n"));
+      // 2nd: on the next pass; then it sits a turn out.
+      await pass();
+      assert.equal(runsFor(t.tenant), 2, "tried again on the next pass");
+      assert.ok(said().some((l) => l.endsWith("its re-sign is still owed, previewed and tried again after it sits out 1 more of its turn(s)")));
+      await pass();
+      assert.equal(runsFor(t.tenant), 2, "then it sits a turn out: no preview, no insert");
+      // 3rd in a row: an [alert], and three turns out.
+      await pass();
+      assert.equal(runsFor(t.tenant), 3);
+      assert.deepEqual(said().filter((l) => l.startsWith("[alert]")), [`[alert] ${t.tenant}: resume auto-paper could not record its approval 3 or more times in a row — ` +
+        "the store could not be reached or gave up (57014): an outage, not a refusal — its re-sign is still owed, tried again with back-off"],
+        "one [alert], from the third — none from the insert itself");
+      assert.ok(!said().some((l) => l.includes("not approved automatically")), "never settled as a refusal");
+      assert.equal(watch(t.tenant)!.owed, 1);
+    } finally { approvalInsert = null; }
+    // The store takes inserts again: the three turns are sat out, then a fresh preview is approved and admitted.
+    await pass(); await pass(); await pass();
+    assert.equal(runsFor(t.tenant), 3, "three turns out");
+    assert.equal(forksOf(t.tenant).length, 0);
+    await pass();
+    assert.equal(runsFor(t.tenant), 4);
+    const [a] = approvals(t.tenant);
+    assert.deepEqual([a?.state, a?.source], ["applied", "auto-paper"]);
+    assert.deepEqual(watch(t.tenant), { owed: 0, outcome: "auto-approved", run: a!.preview_run });
+    assert.equal(forksOf(t.tenant).length, 1);
+    assert.equal(chainReads, 0);
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; approvalInsert = null; }
+});
+
+it("on: an approval the store refuses — another replica's approval of the same evidence, recorded between the checks and the insert — settles the re-sign as before, and that approval admits it", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    const t = await preIncident();
+    await pass();
+    approvalInsert = "raced";
+    try {
+      await t.resign();
+      await pass();
+    } finally { approvalInsert = null; }
+    const w = watch(t.tenant)!;
+    assert.deepEqual([w.owed, w.outcome], [0, "not-recorded: the store refused the approval"], "the store's own answer is final: settled, as before");
+    assert.ok(lines.includes(`[alert] resume approval: ${t.tenant} could not be recorded (another approval is open, or the store refused) — not approved`));
+    // The approval on record is the one that won the race, and the same pass admits it.
+    assert.deepEqual(rows("SELECT approval_id, state, source FROM ledger_resume_approvals WHERE tenant = ?", t.tenant),
+      [{ approval_id: anotherReplica, state: "applied", source: "auto-paper" }]);
+    assert.equal(forksOf(t.tenant).length, 1);
+    const runs = runsFor(t.tenant);
+    await pass(); await pass();
+    assert.equal(runsFor(t.tenant), runs, "never previewed again");
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; approvalInsert = null; }
 });

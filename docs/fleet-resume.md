@@ -654,7 +654,20 @@ Every reconcile pass, before the pass reads which blocked homes it admits:
      evidence, one open per tenant, never for a tenant admitted since the
      preview). Log: `resume approval: 0x… approved automatically (auto-paper
      …)` and `resume auto-paper: 0x… self-approved … its admission starts this
-     pass, at <level>`.
+     pass, at <level>`. **An insert the store gives up on is no answer
+     either**: a connection that dropped, a statement timeout (57014), a
+     serialization or deadlock abort (40001, 40P01), the 08, 53 and 57P0x
+     classes. The change stays owed, goes behind every change not tried
+     since, and sits out a growing number of its turns (none, then 1, 3, 7 …
+     up to 40, about ten minutes) before it is previewed and inserted again
+     (log: `resume auto-paper: 0x… could not record its approval — the store
+     could not be reached or gave up (<code>): an outage, not a refusal — its
+     re-sign is still owed`). From the third in a row it is `[alert] 0x…:
+     resume auto-paper could not record its approval 3 or more times in a
+     row`. The back-off is kept in memory: a restart asks again at once. An
+     insert the store refuses (its uniqueness: another approval recorded
+     meanwhile, by another replica for instance) is final, and settled as
+     `not-recorded: …`.
    - **held, but not the safe case**: nothing approved. Log: `resume
      auto-paper: 0x… re-signed and previewed in run …, and is not approved
      automatically — <every reason>`, ending, if it passed,
