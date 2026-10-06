@@ -32,6 +32,7 @@ import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
 import { answeredGrantChanges, autoPaperVerdict, countOpenApprovals, grantRowKey, noteGrantAttempt, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
+import { chainRefusal, resumePreconditions } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -308,5 +309,26 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     assert.deepEqual((await answeredGrantChanges(shared)).get(who), { key: k.key, state: "refused", run }, "refused since: still the answer");
     assert.equal(await settleGrantChange(shared, k, { outcome: "auto-approved: x", run }, seenAt + 9), true);
     assert.equal((await answeredGrantChanges(shared)).has(who), false, "settled: owed nothing");
+  });
+
+  await t.test("a chain refusal no admission has answered is read from BIGINT stamps: held through later refusals, answered by a registration", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const who = address(0xac0f01);
+    const held = async () => (await resumePreconditions(shared, { tenant: who, account, grantAccount: account, nowSec: NOW, controls, homePendingImport: false })).chainHeld;
+    const insert = (id: string, state: string, at: number, reason: string | null) => main.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account,
+        chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason) VALUES ($1, $2, $3, 4663, $4, $5, '{}', 'r', $6, $7, $7, $8)`,
+      [`held-${id}`, who, account, owner, id.repeat(64).slice(0, 64), state, at, reason]);
+    assert.equal(await held(), false, "nothing refused");
+    // Stamps past 2^31, as Date.now() is: BIGINT comes back as a string here, and is compared as a number.
+    const at = Date.now();
+    await insert("1", "refused", at, chainRefusal([]));
+    assert.equal(typeof (await main.query("SELECT updated_at_ms FROM ledger_resume_approvals WHERE approval_id = 'held-1'")).rows[0]!.updated_at_ms, "string");
+    assert.equal(await held(), true);
+    await insert("2", "refused", at + 1_000, "the evidence changed since the preview");
+    assert.equal(await held(), true, "a later refusal for another reason answers nothing");
+    await insert("3", "registered", at - 1, null);
+    assert.equal(await held(), true, "an admission before the chain refusal answers nothing");
+    await main.query("UPDATE ledger_resume_approvals SET updated_at_ms = $1 WHERE approval_id = 'held-3'", [at + 2_000]);
+    assert.equal(await held(), false, "an admission after it answers it");
   });
 });
