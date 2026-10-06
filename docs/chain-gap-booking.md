@@ -83,54 +83,113 @@ leave the missed buy out. So the tool compares what the rows **contain** with
 the chain.
 
 It reads the token's balance with `balanceOf` for each address of the book
-(the account and its custody vault, as the fill was read) at a **pinned
+(the account and its custody vaults, as the fill was read) at a **pinned
 block**: admission's chain head less 64. Every booked fact is at least 64
 blocks deep under that head, so the balance includes all of them and is as
 final as they are. A balance read at `latest` could include later activity,
 so the transport refuses one.
 
+`positions` and `cost_basis` cover the account and its Trencher vault (the
+worker adds the vault's balance to the position). A Pons class vault's
+holding belongs to the class book, `class_positions`, which is seeded
+separately. So **a tenant with a class vault cannot book a trade in a token
+that the class vault holds**: the trade is refused as `class-vault-held`.
+
 A `session-trade` is booked only if one of these holds, judged over every
 booked trade in that token together:
 
-- **The snapshot holds the token.** Its `positions` row's raw balance **and**
-  its live `cost_basis` row's quantity each equal the book's balance at the
-  pinned block. Both rows were also written at or after the last booked trade
-  in the token. That check is necessary but never enough alone.
-- **The snapshot holds none of it.** The book holds none at the pinned block,
-  and no live `cost_basis` row under any name the token has gone by still
-  covers a quantity.
+- **The snapshot holds none of it.** The book holds none at the pinned
+  block, no live `cost_basis` row under any name the token has gone by
+  still covers a quantity, and the fill walk (below) does not go below
+  zero. Nothing is seeded for the token, so what it cost cannot reach the
+  new book.
+- **The snapshot holds the token.** All of the following are true:
+  - its `positions` row's raw balance **and** its live `cost_basis` row's
+    quantity each equal the book's balance at the pinned block;
+  - both rows were written at or after the last booked trade in the token.
+    That check is necessary but never enough alone;
+  - the fill walk reproduces the balance;
+  - the basis's cost is what those fills give (the cost replay, below). If
+    the replay cannot be done, the trade books only if every booked trade
+    in the token goes the same way: all buys, or all sells.
 
-Then, either way, the tool walks the token's fills back from the balance:
-every fill Postgres records in the token, and every trade the plan books,
-newest first. Before each fill the book held what it holds after, less what
-was bought or plus what was sold. The walk ends when it has passed every
-booked trade and stands at zero: that is where the basis last opened, and the
-fills since then reproduce the chain's quantity exactly.
+### The fill walk
+
+The tool walks the token's fills back from the balance: every fill Postgres
+records in the token, and every trade the plan books, newest first. Before
+each fill the book held what it holds after, less what was bought or plus
+what was sold. The walk ends when it has passed every booked trade and
+stands at zero. That is where the basis last opened, and the fills since
+then reproduce the chain's quantity exactly (`reproduced`).
+
+**`reproduced` proves the quantity, not that the basis includes the fills.**
+A buy and a sell of the same amount add nothing to the total. So a basis
+that left both out holds the chain's quantity too, at the wrong cost. The
+cost replay is what tells them apart.
 
 - If the walk goes **below zero**, the fills are more than the chain holds.
   Something moved the token that neither Postgres nor the plan records, and
-  the trade is refused.
-- If the records **do not allow** the walk, the plan says why in a `note:`
-  and in `evidence.holding.fills`, and the contents checks above decide alone.
-  This happens when a row in the token is still `submitted`, carries no fill,
-  or has a fill from a quote rather than its receipt, or when the records run
-  out with the book still holding some.
+  the trade is refused (`fills-exceed-chain`).
+- If the records **do not allow** the walk (`unproven`), a held token is
+  refused (`fills-unproven`). This happens when a row in the token is still
+  `submitted`, carries no fill, or has a fill from a quote rather than its
+  receipt, or when the records run out with the book still holding some.
+  The in-flight reconciler's rows never carry a fill, so a held token whose
+  history includes one is refused. For a token nobody holds, the plan says
+  why in a `note:` and in `evidence.holding.fills`, and the trade books.
 
-Recorded rows are dated by when the worker wrote them, and booked trades by
-their block. A worker writes its row a few seconds after its operation lands.
-If a missed fill landed in those seconds, the walk reads the two out of
-order. It may then refuse wrongly, or miss an excess it would otherwise
-find. Either way, the contents checks above still decide.
+### The cost replay
+
+From where the walk stopped, the tool replays the walked fills forward,
+oldest first, with the worker's own weighted-average arithmetic
+(`basis.ts` `applyFill`). It uses each recorded row's `fill_qty_raw` and
+`fill_cash_usdg`, and each booked trade's quantity and exact cash from its
+receipt. The result, in `evidence.holding.cost`, is what a basis built from
+exactly those fills holds.
+
+- If the replay can be done and the basis's cost differs, the trade is
+  refused (`basis-cost-differs`), whichever way the trades go.
+- The replay cannot be done when a walked row has no `fill_cash_usdg`, or
+  one that does not read back as an exact amount of at most 6 decimals.
+  Then:
+  - if the booked trades in the token include **both a buy and a sell**,
+    the trade is refused (`fills-net-ambiguous`);
+  - if they all go one way, the quantity checks are proof enough, and a
+    `note:` says that the cost was not checked. A buy that the basis left
+    out keeps the basis short of the chain until the chain is flat again,
+    after which the two start over together. A sell that the basis left out
+    keeps it long for good. Either way the quantities would differ.
+
+### When each fill happened
+
+Booked trades are dated by their block. Recorded rows are dated by
+`created_at`, which is when the row was first written, not when its
+operation landed:
+
+- An executor writes its row as `submitted` when it sends the operation, a
+  few seconds before the block, and settles that row in place.
+- The in-flight reconciler writes its row when an arm finds the operation,
+  which can be many hours after the block. That row carries no fill, so the
+  walk stops there as `unproven` rather than read it out of order.
+
+If a missed fill landed in the seconds between a recorded row's submission
+and its block, the walk reads the two out of order. It may then refuse
+wrongly, or miss an excess it would otherwise find, and the replayed cost
+may differ from the basis, which refuses. The quantity checks do not depend
+on the order.
+
+### What a refusal says
 
 In any other case the trade and its USDG leg are `unresolved`, and so is the
 tenant. A balance that cannot be read proves nothing, so it also leaves the
 trade `unresolved`. Each trade's `evidence.holding` shows the position, the
-basis, the balances read, the fill walk, and `refusal`, which names the check
-that refused:
+basis, the balances read, the fill walk, the cost replay, and `refusal`,
+which names the check that refused:
 
 | `refusal` | What it found |
 |---|---|
 | `balance-unread` | The book's balance at the pinned block could not be read for every address |
+| `class-vault-held` | A Pons class vault holds the token, and positions and cost basis do not cover it |
 | `position-differs` | The position's raw balance is not the chain's |
 | `basis-missing` | A held position has no live cost basis |
 | `basis-differs` | The basis quantity is not the chain's: for example, a fill the lost book never booked to it |
@@ -138,9 +197,14 @@ that refused:
 | `held-unrecorded` | The chain holds the token and the snapshot holds none |
 | `basis-without-position` | The chain and the positions hold none, but a basis still covers a quantity |
 | `fills-exceed-chain` | The fill walk went below zero |
+| `fills-unproven` | The token is held, and its fills could not be walked back to where its basis opened |
+| `basis-cost-differs` | The basis's cost is not what the walked fills give: for example, a buy and a sell the lost book never booked to it |
+| `fills-net-ambiguous` | The booked trades in the token include a buy and a sell, and the cost could not be replayed |
 | `positions-ambiguous`, `position-unreadable`, `basis-unreadable` | The snapshot cannot be read as one answer |
 
 Resolving any of these needs a reviewed basis decision.
+
+### What it never does
 
 The tool never does any of the following:
 
@@ -160,9 +224,11 @@ Two consequences need a reviewer's eye:
   rather than guess. This is existing fail-closed behaviour.
 - **A booked trade does not move the cost basis.** It is booked only when
   the snapshot's position and basis already hold what the chain does, as
-  described above. The basis's cost is not checked against the fills, only
-  its quantity. Still check the positions, basis and floors on the dashboard
-  at `exits-only`, before `trade`.
+  described above. The basis's cost is checked against the fills whenever
+  the records allow the replay, and the replay is required when the booked
+  trades in a token include a buy and a sell. Otherwise only the quantity is
+  checked, and a `note:` says so. Still check the positions, basis and floors
+  on the dashboard at `exits-only`, before `trade`.
 
 ## The three tenants held on 2026-10-06
 
@@ -274,7 +340,8 @@ Send the preview file to Milla. For each item, check:
 - the `evidence`: block hash, validator, payer, the book's net movement and
   the fill amounts, and for a trade its `holding`: the position and basis
   rows and their times, the balances read at the pinned block
-  (`capture.balanceBlock`), the fill walk, and the `refusal`, if any;
+  (`capture.balanceBlock`), the fill walk, the cost replay, and the
+  `refusal`, if any;
 - the `remaining` list, which must be empty;
 - the `warnings`.
 
