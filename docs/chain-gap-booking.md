@@ -110,8 +110,8 @@ booked trade in that token together:
     That check is necessary but never enough alone;
   - the fill walk reproduces the balance;
   - the basis's cost is what those fills give (the cost replay, below). If
-    the replay cannot be done, the trade books only if every booked trade
-    in the token goes the same way: all buys, or all sells.
+    the replay cannot be done, the trade is refused, whichever way the
+    booked trades go.
 
 ### The fill walk
 
@@ -124,8 +124,10 @@ then reproduce the chain's quantity exactly (`reproduced`).
 
 **`reproduced` proves the quantity, not that the basis includes the fills.**
 A buy and a sell of the same amount add nothing to the total. So a basis
-that left both out holds the chain's quantity too, at the wrong cost. The
-cost replay is what tells them apart.
+that left both out holds the chain's quantity too, at the wrong cost. Only
+one of the two need be a trade the plan books: the other can be a fill that
+Postgres records and the basis never had. The cost replay is what tells
+them apart.
 
 - If the walk goes **below zero**, the fills are more than the chain holds.
   Something moved the token that neither Postgres nor the plan records, and
@@ -134,9 +136,11 @@ cost replay is what tells them apart.
   refused (`fills-unproven`). This happens when a row in the token is still
   `submitted`, carries no fill, or has a fill from a quote rather than its
   receipt, or when the records run out with the book still holding some.
-  The in-flight reconciler's rows never carry a fill, so a held token whose
-  history includes one is refused. For a token nobody holds, the plan says
-  why in a `note:` and in `evidence.holding.fills`, and the trade books.
+  The in-flight reconciler writes its rows without a fill, so a held token
+  whose history includes one that has not been repaired is refused (see
+  [When each fill happened](#when-each-fill-happened) for a repaired one).
+  For a token nobody holds, the plan says why in a `note:` and in
+  `evidence.holding.fills`, and the trade books.
 
 ### The cost replay
 
@@ -152,14 +156,27 @@ exactly those fills holds.
 - The replay cannot be done when a walked buy has no `fill_cash_usdg`, or
   one that does not read back as an exact amount of at most 6 decimals. A
   sell's cash is its proceeds, which never reach the basis, so a sell needs
-  none. Then:
-  - if the booked trades in the token include **both a buy and a sell**,
-    the trade is refused (`fills-net-ambiguous`);
-  - if they all go one way, the quantity checks are proof enough, and a
-    `note:` says that the cost was not checked. A buy that the basis left
-    out keeps the basis short of the chain until the chain is flat again,
-    after which the two start over together. A sell that the basis left out
-    keeps it long for good. Either way the quantities would differ.
+  none. Then the trade is refused (`cost-unproven`), whichever way the
+  booked trades go.
+
+**The quantity checks are never proof of the cost alone,** even when every
+booked trade goes the same way. A booked buy can be offset by a recorded
+sell that the basis never had, or a booked sell by such a buy: the total
+nets to nothing, so the position, the basis quantity, the row times and the
+fill walk all agree, while the cost is wrong. A basis can lack a recorded
+fill in at least two ways:
+
+- the in-flight reconciler writes a row and skips the basis when it does not
+  watch the token, and the history repair later fills in that row's fill
+  (`history-fill-repair.ts`);
+- the mirrored `cost_basis` can be stale, left by a delete the mirror
+  skipped (`basis-seed.ts`).
+
+Nothing in the tool can prove that the basis is exactly the worker's
+arithmetic over every recorded fill since it opened, so the cost must be
+replayed and equal. `fill_cash_usdg` was added on 2026-08-26, so a buy
+written before then has no cash unless the history repair filled it in.
+A token whose basis opened before then is likely to refuse here.
 
 ### When each fill happened
 
@@ -170,14 +187,22 @@ operation landed:
 - An executor writes its row as `submitted` when it sends the operation, a
   few seconds before the block, and settles that row in place.
 - The in-flight reconciler writes its row when an arm finds the operation,
-  which can be many hours after the block. That row carries no fill, so the
-  walk stops there as `unproven` rather than read it out of order.
+  which can be many hours after the block. It writes the row without a
+  fill, and the walk stops at such a row as `unproven`. But the history
+  repair (`history-fill-repair.ts`, when the orchestrator starts) later fills
+  in that row's side, quantity and cash from the receipt and keeps
+  `basis_source` `receipt`. The walk then reads the repaired row at the
+  arm's time, perhaps hours after its block: out of order.
 
-If a missed fill landed in the seconds between a recorded row's submission
-and its block, the walk reads the two out of order. It may then refuse
-wrongly, or miss an excess it would otherwise find, and the replayed cost
-may differ from the basis, which refuses. The quantity checks do not depend
-on the order.
+A row read out of order, or a missed fill that landed in the seconds between
+a recorded row's submission and its block, can make the walk refuse
+wrongly, or miss an excess it would otherwise find. It can also make the
+replayed cost differ from the basis, which refuses. For example, a repaired
+reconciler buy of 100 whose row was written hours after its block, and a
+missed sell of 100 between the two, is a flat round trip. The walk dates the
+buy after the sell, so it goes below zero and refuses the sell
+(`fills-exceed-chain`). The quantity checks do not depend on the order, and
+a held token books only when the replayed cost equals the basis's.
 
 ### What a refusal says
 
@@ -196,11 +221,11 @@ which names the check that refused:
 | `basis-differs` | The basis quantity is not the chain's: for example, a fill the lost book never booked to it |
 | `position-stale`, `basis-stale` | A row was written before the last booked trade in the token |
 | `held-unrecorded` | The chain holds the token and the snapshot holds none |
-| `basis-without-position` | The chain and the positions hold none, but a basis still covers a quantity |
+| `basis-without-position` | The chain and the positions hold none, but a basis still covers a quantity. Admission seeds a basis only for a symbol that `positions` shows held (`planAttestedSeed`), so a reviewed decision can weigh that this basis would not reach the new book |
 | `fills-exceed-chain` | The fill walk went below zero |
 | `fills-unproven` | The token is held, and its fills could not be walked back to where its basis opened |
 | `basis-cost-differs` | The basis's cost is not what the walked fills give: for example, a buy and a sell the lost book never booked to it |
-| `fills-net-ambiguous` | The booked trades in the token include a buy and a sell, and the cost could not be replayed |
+| `cost-unproven` | The token is held, and the cost could not be replayed: a walked buy has no exact `fill_cash_usdg` |
 | `positions-ambiguous`, `position-unreadable`, `basis-unreadable` | The snapshot cannot be read as one answer |
 
 Resolving any of these needs a reviewed basis decision.
@@ -225,11 +250,10 @@ Two consequences need a reviewer's eye:
   rather than guess. This is existing fail-closed behaviour.
 - **A booked trade does not move the cost basis.** It is booked only when
   the snapshot's position and basis already hold what the chain does, as
-  described above. The basis's cost is checked against the fills whenever
-  the records allow the replay, and the replay is required when the booked
-  trades in a token include a buy and a sell. Otherwise only the quantity is
-  checked, and a `note:` says so. Still check the positions, basis and floors
-  on the dashboard at `exits-only`, before `trade`.
+  described above. For a held token, that includes the basis's cost, which
+  must equal what the replayed fills give: a cost that cannot be replayed
+  refuses. Still check the positions, basis and floors on the dashboard at
+  `exits-only`, before `trade`.
 
 ## The three tenants held on 2026-10-06
 
