@@ -3828,16 +3828,19 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       if (verdict.kind === "not-held") {
         // A BOOK ON THE VOLUME, UNBLOCKED, WITH HISTORY BEHIND IT is the
         // ordinary path's, which admits it if the book proves continuous —
-        // but the continuity gate may refuse it instead (it writes no barrier
-        // when it does, so the book still reads `present`). Then it is held
-        // like any other, and the operator needs the line to approve it by:
-        // its run is recorded, so that line is one applyResumeApprovals finds.
-        const approvable = entry.book === "present" && entry.pass && entry.digest !== null && entry.evidence !== null && evidenceHasHistory(entry.evidence);
-        const run = approvable ? await recordRun(entry, at) : null;
+        // but the gate may refuse it instead (it writes no barrier when it
+        // does, so the book still reads `present`), and then it is held like
+        // any other. The operator is told how to approve it then. Not with
+        // this preview's digest: the ordinary path's own attempt this pass
+        // changes what the evidence binds (it arms the owner's controls into
+        // the home before the gate answers), so that digest would only be
+        // refused as changed evidence. A preview taken after the gate has
+        // answered is the one to approve.
+        const present = entry.book === "present" && entry.evidence !== null && evidenceHasHistory(entry.evidence);
         log(`resume auto-paper: ${tenant} re-signed; the continuity gate does not hold it (${verdict.why}) — nothing approved` +
-          (approvable ? `. If the gate refuses its book instead (its own [alert] says the ledger source continuity is unconfirmed, or the local ledger ` +
-            `unreadable), approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
-        await settle(change, `not-held: ${verdict.why}`, run);
+          (present ? `. If the gate refuses its book instead (its own [alert] names the book as unconfirmed or unreadable), preview it again ` +
+            `(${RESUME_PREVIEW_ENV}=${tenant}) and approve the digest that preview prints` : ""));
+        await settle(change, `not-held: ${verdict.why}`, null);
         answered += 1;
         continue;
       }
