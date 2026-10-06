@@ -521,6 +521,11 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     const basis = await paperHoldingNothing();
     basis.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'OLD', '5', '1', ?)").run(basis.account, OLD);
     await manual(await entryOf(basis, { book: "blocked" }), basis.shared, /1 live book row/);
+    const queued = await paperHoldingNothing();
+    queued.raw.prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES ('c1', ?, 'trade', ?)").run(queued.account, OLD * 1000);
+    await manual(await entryOf(queued, { book: "blocked" }), queued.shared, /1 owner command\(s\) .* still open/);
+    queued.raw.prepare("UPDATE agent_commands SET done_at = ?, result = 'never ran' WHERE id = 'c1'").run(OLD * 1000 + 1);
+    assert.deepEqual(await autoPaperVerdict(queued.shared, await entryOf(queued, { book: "blocked" })), { kind: "auto" }, "an answered command is not open");
     const failing = await paperHoldingNothing();
     await manual(await entryOf(failing, { book: "blocked", pass: false, refusals: ["the signed grant has expired: the owner must re-sign"] }), failing.shared, /did not pass: the signed grant has expired/);
     const intent = await paperHoldingNothing();

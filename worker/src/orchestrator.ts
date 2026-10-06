@@ -150,8 +150,11 @@ import {
   homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
   normaliseCarriedFile, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
-  RESUME_APPROVE_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
-  type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type PreviewEntry, type ResumeCheck, type ResumePreviewScope, type ResumeRevoke,
+  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_SOURCE, autoPaperRoom, autoPaperVerdict, countOpenApprovals, grantRowKey, observeGrantChanges,
+  parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
+  RESUME_APPROVE_ENV, RESUME_AUTO_PAPER_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
+  type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type OwedGrantChange, type PreviewEntry, type ResumeCheck, type ResumePreviewScope,
+  type ResumeRevoke,
 } from "./ledger-resume";
 import {
   adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST,
@@ -774,6 +777,14 @@ export function staleThresholdSec(tickSeconds: number): number {
 
 const children = new Map<string, Child>();
 
+/**
+ * Test seam (setPhantomProcessesForTest): processes this supervisor counts as
+ * running beside its own, so a test can stand the fleet at the process cap
+ * without forking 48 fakes. Zero outside tests; it only ever adds, so every
+ * cap it meets refuses sooner, never later.
+ */
+let phantomProcessesForTest = 0;
+
 /** Count processes still alive, including ones that have been told to exit. */
 function localChildProcessCount(): number {
   const processes = new Set<ChildProcess>();
@@ -783,10 +794,13 @@ function localChildProcessCount(): number {
     if (held.leaving) processes.add(held.leaving);
   }
   for (const exiting of exitingChildren.values()) for (const proc of exiting) processes.add(proc);
-  return processes.size;
+  return processes.size + phantomProcessesForTest;
 }
 export function localChildProcessCountForTest(): number {
   return localChildProcessCount();
+}
+export function setPhantomProcessesForTest(n: number): void {
+  phantomProcessesForTest = Math.max(0, Math.floor(n));
 }
 
 /**
@@ -3203,6 +3217,9 @@ function sayTenantAlert(tenant: string, line: string): void {
  * true now.
  */
 type ResumeVerdict = { go: false } | { go: true; registered: string | null; /** The registered book's generation, beside `registered`. */ generation?: string };
+/** Why an automatic approval ends where an operator's would read the chain or start exits-only. */
+const AUTO_PAPER_NOT_SAFE = "an automatic (auto-paper) approval admits only a paper tenant that could not arm live and holds no positions, " +
+  "and this one now could arm live or holds positions: preview it again and approve it by hand";
 const resumeChecks = new Map<string, { key: string; at: number; result: GapResult | "running" }>();
 const RESUME_CHAIN_RETRY_MS = 60_000;
 let resumeChainForTest: ((chainId: number) => GapChain | null) | null = null;
@@ -3409,6 +3426,11 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
         return refused("approved", "the evidence changed since the preview (if the old book had an unmirrored tail, it is in Postgres now and the next preview shows it)");
       }
       if (check.refusals.length) return refused("approved", check.refusals.join("; "));
+      // AN AUTOMATIC APPROVAL IS ONLY EVER THE SAFE CASE (ledger-resume.ts
+      // autoPaperVerdict) and never reads the chain to get there. The digest
+      // binds both facts, so here they cannot differ from the preview; asked
+      // anyway, where the archive starts, so the rule stands on its own.
+      if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions)) return refused("approved", AUTO_PAPER_NOT_SAFE);
       if (check.chainRequired) {
         const gate = await resumeChainGate(tenant, approval, check, shared);
         if (gate === "missing") return refused("approved", "the chain holds operations or USDG transfers for the account that Postgres lacks");
@@ -3437,6 +3459,11 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     const check = await resumePreconditions(shared, { tenant, account: approval.smartAccount, grantAccount: grant.smartAccount, nowSec, controls,
       homePendingImport: existsSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)), liveIntent });
     if (check.refusals.length) return refused("archived", check.refusals.join("; "));
+    // AND AGAIN HERE, where it is not redundant: Phase B does not compare the
+    // digest, and an owner who turned live trading on between the archive and
+    // the registration makes an operator's approval read the chain. An
+    // automatic one never does; it ends, and the operator approves by hand.
+    if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions)) return refused("archived", AUTO_PAPER_NOT_SAFE);
     let chainRead: ChainWindow | null = null;
     if (check.chainRequired) {
       const gate = await resumeChainGate(tenant, approval, check, shared);
@@ -3610,6 +3637,147 @@ async function refreshResumePending(): Promise<void> {
     resumePendingTenants = new Set();
   }
 }
+
+/**
+ * MERRYMEN_RESUME_AUTO_PAPER, ONE RECONCILE PASS OF IT (ledger-resume.ts says
+ * what the safe case is and why it is the only one).
+ *
+ * Asked by reconcile with the roster's grant rows and the unexpired set,
+ * before the pass reads which blocked homes it admits. In order:
+ *
+ *  1. The watch: which grant rows changed since they were last seen
+ *     (observeGrantChanges, durable). The first pass with the variable on
+ *     only records the roster as it stands, and admits nobody.
+ *  2. Each change still owed, in roster order, waits — owed, untouched —
+ *     while its grant is expired or the operator holds the tenant (the
+ *     accounting hold, or a rollout that does not admit it: under an
+ *     explicit list it must be named). A tenant something already runs for
+ *     (a worker, a spawn, a restart, a hold process) is not the gate's, and
+ *     its change is settled with nothing previewed.
+ *  3. THE CAP, before anything is read: no automatic admission while the
+ *     processes running and the approvals open would leave fewer than
+ *     AUTO_PAPER_HEADROOM of the MAX_LOCAL_CHILD_PROCESSES slots free. The
+ *     rest stay owed, and one alert says how many wait.
+ *  4. At most AUTO_PAPER_PER_PASS a pass: a fresh preview of that one tenant
+ *     (previewEntryFor, the operator's own reading), recorded as a preview
+ *     run and printed as one; its verdict (autoPaperVerdict); and, in the
+ *     safe case only, the approval, source `auto-paper`, through the
+ *     operator's own insert (recordResumeApproval). Anything else is said
+ *     with the line an operator approves it by, if it passed.
+ *  5. The change settled, for the key that was owed, with the run and what
+ *     it came to.
+ *
+ * Every step fails closed: a watch or store that cannot be read approves
+ * nothing this pass, and a tenant whose turn fails stays owed for the next.
+ * Nothing here takes a lease, touches a home or writes a financial row; the
+ * approval goes on to resumeAdmission, under the lease, like any other.
+ */
+let autoPaperSchemaReady = false;
+/** The last "waiting for a process slot" count said, so the alert is said once per change rather than every pass. */
+let autoPaperCapSaid: number | null = null;
+async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; key: string }>, unexpired: ReadonlySet<string>): Promise<void> {
+  if (!resumeAutoPaperOn(process.env)) return;
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return;
+  let shared: Db;
+  let owed: OwedGrantChange[];
+  try {
+    shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    if (!autoPaperSchemaReady) {
+      await ensureLedgerResumeSchema(shared);
+      // What the preview's `startsPaused` reads, as runResumeAdmissionControls
+      // creates it: additive DDL the arm and every mirror pass run anyway.
+      await shared.exec(CONTROL_RECEIPTS_SCHEMA);
+      await ensureTelegramSchema(shared);
+      autoPaperSchemaReady = true;
+    }
+    const seen = await observeGrantChanges(shared, roster, Date.now());
+    if (seen.baselined !== null) {
+      log(`resume auto-paper: on — ${seen.baselined} grant row(s) recorded as they stand, none of them a re-sign; from now on a tenant whose grant row changes ` +
+        `is previewed automatically, and a re-signed paper tenant in the safe case is approved by this process (docs/fleet-resume.md)`);
+      return;
+    }
+    owed = seen.owed;
+  } catch (e) {
+    log(`[alert] resume auto-paper: the re-sign watch could not be read or recorded (${errorKind(e)}) — nothing previewed or approved this pass`);
+    return;
+  }
+  const settle = async (change: OwedGrantChange, outcome: string, run: string | null): Promise<void> => {
+    if (!(await settleGrantChange(shared, change, { outcome, run }, Date.now()))) {
+      log(`resume auto-paper: ${change.tenant} — its grant row changed again meanwhile; still owed a preview`);
+    }
+  };
+  const ready: OwedGrantChange[] = [];
+  for (const change of owed) {
+    // Owed, untouched, until its turn: an expired grant is answered by the
+    // re-sign that comes next, a held tenant by the rollout that admits it.
+    if (!unexpired.has(change.tenant) || operatorHeld(change.tenant)) continue;
+    const t = change.tenant;
+    if (children.has(t) || spawning.has(t) || holders.has(t) || restartPending.has(t) || exitingChildren.has(t) || retiringExpired.has(t)) {
+      try { await settle(change, "not-held: a worker, spawn, restart or hold process is its", null); }
+      catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
+      continue;
+    }
+    ready.push(change);
+  }
+  if (!ready.length) { autoPaperCapSaid = null; return; }
+  let room: number;
+  try { room = autoPaperRoom({ running: localChildProcessCount(), open: await countOpenApprovals(shared), cap: MAX_LOCAL_CHILD_PROCESSES }); }
+  catch (e) {
+    log(`[alert] resume auto-paper: open approvals could not be counted (${errorKind(e)}) — nothing previewed or approved this pass`);
+    return;
+  }
+  if (room <= 0) {
+    if (autoPaperCapSaid !== ready.length) {
+      log(`[alert] resume auto-paper: ${ready.length} re-signed tenant(s) wait for a process slot — workers, holds and open approvals leave fewer than ` +
+        `${AUTO_PAPER_HEADROOM} of the ${MAX_LOCAL_CHILD_PROCESSES} free; each is previewed and approved once one frees (never raise the cap to fit)`);
+    }
+    autoPaperCapSaid = ready.length;
+    return;
+  }
+  autoPaperCapSaid = null;
+  for (const change of ready.slice(0, Math.min(AUTO_PAPER_PER_PASS, room))) {
+    if (stopping) return;
+    const tenant = change.tenant as `0x${string}`;
+    try {
+      const at = Date.now();
+      const entry = await previewEntryFor(shared, tenant, Math.floor(at / 1000));
+      const run = await recordPreviewRun(shared, [entry], at);
+      log(`[resume-preview] run ${run}: automatic, for ${tenant}, whose grant row changed (${RESUME_AUTO_PAPER_ENV}) — ` +
+        `${entry.pass ? "it passes every Postgres precondition" : "it does not pass"}`);
+      log(previewLine(entry));
+      const verdict = await autoPaperVerdict(shared, entry);
+      if (verdict.kind === "not-held") {
+        log(`resume auto-paper: ${tenant} re-signed; the continuity gate does not hold it (${verdict.why}) — nothing to approve`);
+        await settle(change, `not-held: ${verdict.why}`, run);
+        continue;
+      }
+      if (verdict.kind === "manual") {
+        log(`resume auto-paper: ${tenant} re-signed and previewed in run ${run.slice(0, 12)}…, and is not approved automatically — ${verdict.why.join("; ")}` +
+          (entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
+        await settle(change, `previewed: ${verdict.why.join("; ")}`, run);
+        continue;
+      }
+      // THE SAFE CASE. The operator's own insert, with this process as the
+      // approver: the same uniqueness, the same one-open-per-tenant, and from
+      // here the same Phase A that re-derives the evidence and refuses on any
+      // change. The level is the rollout's, as for every spawn.
+      const recorded = await recordResumeApproval(shared, { entry, run, at, nowMs: Date.now(), source: AUTO_PAPER_SOURCE }, log);
+      if (!recorded.recorded) {
+        log(`resume auto-paper: ${tenant} not approved automatically — ${recorded.why}`);
+        await settle(change, `not-recorded: ${recorded.why}`, run);
+        continue;
+      }
+      log(`resume auto-paper: ${tenant} self-approved (a re-signed paper tenant that could not arm live and holds nothing; evidence ` +
+        `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
+      await settle(change, "auto-approved", run);
+    } catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: resume auto-paper deferred (${errorKind(e)}) — its re-sign is still owed a preview, tried again next pass`);
+    }
+  }
+}
+/** Test seam: forget that the watch's schema was created, for a test that swaps the shared database. */
+export function resetAutoPaperForTest(): void { autoPaperSchemaReady = false; autoPaperCapSaid = null; }
 
 /**
  * APPLY THE OWNER'S RECORDED /pause AND /kill FOR ONE TENANT, under its lease,
@@ -5559,6 +5727,8 @@ export async function reconcile(): Promise<void> {
   const store = getGrantStore();
   let tenants: `0x${string}`[];
   let expiresAtByTenant: Map<string, number | null>;
+  /** Each grant row as the re-sign watch tells one signature from the next (ledger-resume.ts grantRowKey). */
+  let grantKeys: Array<{ tenant: string; key: string }>;
   // Before the listing is asked for: the group-memory sweep below judges only
   // rows written before this, never one a newer grant's child has published.
   const listedAtMs = Date.now();
@@ -5571,6 +5741,7 @@ export async function reconcile(): Promise<void> {
         })));
     tenants = roster.map((entry) => entry.tenant);
     expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
+    grantKeys = roster.map((entry) => ({ tenant: entry.tenant.toLowerCase(), key: grantRowKey(entry) }));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
     lastRolloutCounts = null; // the heartbeat says so, rather than repeat an older pass's figures
@@ -5678,6 +5849,13 @@ export async function reconcile(): Promise<void> {
   // crash restart); if another replica holds it, skip this tenant and try again
   // next reconcile.
   let capacityDeferred = 0;
+  // A RE-SIGNED TENANT THE CONTINUITY GATE HOLDS, previewed and — in the one
+  // safe case — approved by this process itself (MERRYMEN_RESUME_AUTO_PAPER;
+  // off, this returns at once). Before the pending set is read, so a tenant
+  // approved here is archived and admitted by the spawn loop of this pass,
+  // on the evidence its preview read moments ago. Removed tenants are not
+  // watched: a kill above has taken them out of `wanted`.
+  await autoAdmitResignedPaper(grantKeys.filter((g) => wanted.has(g.tenant)), eligible);
   await refreshResumePending();
   for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
@@ -11057,37 +11235,11 @@ async function runRecoveryReportOnly(): Promise<void> {
  */
 const PREVIEW_LINE_GAP_MS = 25;
 async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<void> {
-  const store = getGrantStore();
-  const roster = (await store.listTenants()).map((t) => t.toLowerCase());
+  const roster = (await getGrantStore().listTenants()).map((t) => t.toLowerCase());
   const tenants = scope.scope === "all" ? roster : [...scope.tenants];
   const nowSec = Math.floor(Date.now() / 1000);
   const entries: PreviewEntry[] = [];
-  for (const tenant of [...new Set(tenants)].sort()) {
-    const blank: PreviewEntry = { tenant, account: null, chainId: null, owner: null, digest: null, pass: false, refusals: [], chain: null,
-      suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null,
-      holdsPositions: null, startsPaused: null, grantExpiresAt: null, book: null, evidence: null };
-    try {
-      const grant = await store.get(tenant as `0x${string}`);
-      if (!grant) { entries.push({ ...blank, refusals: ["no stored grant"] }); continue; }
-      const scopeOf = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
-      const controls = await readControlsEvidence(shared, scopeOf, Date.now());
-      const liveIntent = await resumeLiveIntent(tenant as `0x${string}`);
-      const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant, home: childHome(tenant), nowSec, controls, liveIntent: liveIntent ?? true });
-      const refusals = [...check.refusals];
-      if (liveIntent === null) refusals.push("the owner's settings could not be read, so whether it could arm live is unknown: preview again");
-      if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
-      if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
-      entries.push({
-        tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
-        chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
-        riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
-        holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
-        grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
-      });
-    } catch (e) {
-      entries.push({ ...blank, refusals: [`could not be read (${errorKind(e)})`] });
-    }
-  }
+  for (const tenant of [...new Set(tenants)].sort()) entries.push(await previewEntryFor(shared, tenant, nowSec));
   const run = await recordPreviewRun(shared, entries, Date.now());
   if (previewRunDigest(entries) !== run) throw new Error("preview run digest drifted");
   const passed = entries.filter((e) => e.pass);
@@ -11113,6 +11265,40 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
     await new Promise((r) => setTimeout(r, PREVIEW_LINE_GAP_MS));
   }
   summary();
+}
+
+/**
+ * ONE TENANT'S PREVIEW LINE, as the operator's preview (runResumePreview) and
+ * the automatic one for a re-signed tenant (autoAdmitResignedPaper) both
+ * print and record it: one reading, so what the orchestrator approves by
+ * itself is exactly what an operator would have been shown. Read-only, and
+ * never throws: a tenant that cannot be read is a line that does not pass.
+ */
+async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Promise<PreviewEntry> {
+  const blank: PreviewEntry = { tenant, account: null, chainId: null, owner: null, digest: null, pass: false, refusals: [], chain: null,
+    suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null,
+    holdsPositions: null, startsPaused: null, grantExpiresAt: null, book: null, evidence: null };
+  try {
+    const grant = await getGrantStore().get(tenant as `0x${string}`);
+    if (!grant) return { ...blank, refusals: ["no stored grant"] };
+    const scopeOf = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+    const controls = await readControlsEvidence(shared, scopeOf, Date.now());
+    const liveIntent = await resumeLiveIntent(tenant as `0x${string}`);
+    const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant, home: childHome(tenant), nowSec, controls, liveIntent: liveIntent ?? true });
+    const refusals = [...check.refusals];
+    if (liveIntent === null) refusals.push("the owner's settings could not be read, so whether it could arm live is unknown: preview again");
+    if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
+    if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
+    return {
+      tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
+      chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
+      riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
+      holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
+      grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
+    };
+  } catch (e) {
+    return { ...blank, refusals: [`could not be read (${errorKind(e)})`] };
+  }
 }
 
 /**
@@ -11229,6 +11415,9 @@ export async function runOrchestrator(): Promise<void> {
     approvals: parseResumeApprovals(process.env[RESUME_APPROVE_ENV]),
     revokes: parseResumeRevokes(process.env[RESUME_REVOKE_ENV]),
   };
+  // And the automatic lane for re-signed paper tenants: `1` or unset, and
+  // anything else refuses here. Read again every pass, failing closed.
+  const resumeAutoPaper = parseResumeAutoPaper(process.env[RESUME_AUTO_PAPER_ENV]);
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
   if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
   // NAMED TENANTS AND THE FAILURE-ONLY REPORTER ARE TWO ANSWERS TO ONE
@@ -11266,6 +11455,10 @@ export async function runOrchestrator(): Promise<void> {
   // child starts. A malformed entry must never silently drop from a hold.
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   log(rolloutStartupLine(rollout));
+  log(resumeAutoPaper
+    ? `resume auto-paper: ${RESUME_AUTO_PAPER_ENV}=1 — a re-signed tenant held by the continuity gate is previewed automatically, and one that is paper, ` +
+      `could not arm live and holds nothing is approved by this process (at most ${AUTO_PAPER_PER_PASS} a pass, within the process cap) and admitted at its rollout level`
+    : `resume auto-paper: off — a re-signed tenant with history waits for an operator's preview and approval, as before`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing

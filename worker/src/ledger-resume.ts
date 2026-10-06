@@ -760,7 +760,9 @@ export async function revokeResumeApprovals(db: Db, revokes: readonly ResumeRevo
  *     operation, no flow, no live intent in the owner's settings — so there
  *     is no chain read to need, and none is skipped;
  *   - no positions (no token balance, no open class position), no live book
- *     rows (live cost basis, floors or trench entries) and no unresolved trade;
+ *     rows (live cost basis, floors or trench entries), no unresolved trade,
+ *     and no owner command with a financial effect left unanswered (an
+ *     order, a self-test, a practice reset);
  *   - no approval open for it, and none of it ever revoked by the operator: a
  *     revoke is an operator's decision about that tenant, which no re-sign
  *     overrides;
@@ -917,18 +919,28 @@ export function evidenceHasHistory(e: ResumeEvidence): boolean {
   return false;
 }
 
-/** Live rows a paper book has no business holding: a live cost basis with a quantity, a live floor, a live trench entry. */
-async function liveBookRows(db: Db, account: string): Promise<number> {
-  let rows = 0;
+/**
+ * WHAT IS STILL OPEN FOR THE ACCOUNT beyond what the preconditions ask: live
+ * rows a paper book has no business holding (a live cost basis with a
+ * quantity, a live floor, a live trench entry), and owner commands with a
+ * financial effect nobody has answered (an order, a self-test, a practice
+ * reset: agent_commands, `done_at` null). An operator may well admit such a
+ * tenant; the orchestrator does not, by itself. A table not there yet holds
+ * nothing.
+ */
+async function openRows(db: Db, account: string): Promise<{ live: number; commands: number }> {
+  const count = async (sql: string): Promise<number> => {
+    try { return Number(((await db.prepare(sql).get(account.toLowerCase())) as Record<string, unknown>).n); }
+    catch (e) { if (absentTable(e)) return 0; throw e; }
+  };
+  let live = 0;
   for (const sql of [
     "SELECT COUNT(*) AS n FROM cost_basis WHERE LOWER(agent_id) = ? AND mode = 'live' AND qty_raw <> '0'",
     "SELECT COUNT(*) AS n FROM position_floors WHERE LOWER(agent_id) = ? AND mode = 'live'",
     "SELECT COUNT(*) AS n FROM trench_positions WHERE LOWER(agent_id) = ? AND mode = 'live'",
-  ]) {
-    try { rows += Number(((await db.prepare(sql).get(account.toLowerCase())) as Record<string, unknown>).n); }
-    catch (e) { if (!absentTable(e)) throw e; }
-  }
-  return rows;
+  ]) live += await count(sql);
+  const commands = await count("SELECT COUNT(*) AS n FROM agent_commands WHERE LOWER(agent_id) = ? AND kind IN ('trade', 'selftest', 'paper-reset') AND done_at IS NULL");
+  return { live, commands };
 }
 
 /**
@@ -950,8 +962,9 @@ export async function autoPaperVerdict(db: Db, entry: PreviewEntry): Promise<Aut
   if (entry.chain !== "not-required" || e.checks.chain !== "not-required") why.push("it could arm live (chain:required): a live tenant is only ever approved by hand");
   if (entry.holdsPositions !== false) why.push("Postgres shows it holding positions");
   if (e.checks.unresolved !== 0) why.push("it has unresolved trades on record");
-  const live = await liveBookRows(db, e.account);
-  if (live > 0) why.push(`${live} live book row(s) (cost basis, floors or trench entries) are on record`);
+  const open = await openRows(db, e.account);
+  if (open.live > 0) why.push(`${open.live} live book row(s) (cost basis, floors or trench entries) are on record`);
+  if (open.commands > 0) why.push(`${open.commands} owner command(s) (an order, a self-test or a practice reset) are still open`);
   const prior = ((await db.prepare(`SELECT state FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('revoked', ${OPEN_STATES.map(() => "?").join(", ")})`)
     .all(entry.tenant, ...OPEN_STATES)) as Array<Record<string, unknown>>).map((r) => String(r.state));
   if (prior.includes("revoked")) why.push("an operator revoked an earlier approval of it, so only an operator approves it again");
