@@ -550,10 +550,17 @@ export function previewLine(e: PreviewEntry): string {
 // ── approvals ────────────────────────────────────────────────────────────────
 
 export type ApprovalState = "approved" | "archiving" | "archived" | "registered" | "applied" | "refused" | "revoked";
+/**
+ * WHO APPROVED: the operator (MERRYMEN_RESUME_APPROVE), or the orchestrator
+ * itself for a re-signed paper tenant (MERRYMEN_RESUME_AUTO_PAPER, below). A
+ * row from before the column reads as the operator's, which it was.
+ */
+export type ApprovalSource = "operator" | "auto-paper";
+export const AUTO_PAPER_SOURCE = "auto-paper" satisfies ApprovalSource;
 export interface ApprovalRow {
   approvalId: string; tenant: string; smartAccount: string; chainId: number; owner: string;
   evidenceDigest: string; evidence: ResumeEvidence; previewRun: string; state: ApprovalState;
-  generation: string | null; archivePath: string | null;
+  generation: string | null; archivePath: string | null; source: ApprovalSource;
 }
 const OPEN_STATES = ["approved", "archiving", "archived", "registered"] as const;
 
@@ -564,6 +571,7 @@ function approvalOf(r: Record<string, unknown>): ApprovalRow {
     previewRun: String(r.preview_run), state: String(r.state) as ApprovalState,
     generation: r.generation === null || r.generation === undefined ? null : String(r.generation),
     archivePath: r.archive_path === null || r.archive_path === undefined ? null : String(r.archive_path),
+    source: r.source === AUTO_PAPER_SOURCE ? AUTO_PAPER_SOURCE : "operator",
   };
 }
 
@@ -631,29 +639,61 @@ export async function applyResumeApprovals(db: Db, approvals: readonly ResumeApp
   }
   let added = 0;
   for (const { entry, run, at } of wanted) {
-    const existing = (await db.prepare("SELECT state FROM ledger_resume_approvals WHERE tenant = ? AND evidence_digest = ?").get(entry.tenant, entry.digest)) as Record<string, unknown> | undefined;
-    if (existing) continue;
-    // ADMITTED SINCE THAT PREVIEW WAS TAKEN: the run's evidence is from before
-    // the tenant's new book, so it cannot be what is true now, and approving it
-    // could only archive a running book. (Phase A would refuse the stale digest
-    // anyway; this says so at once and records nothing.)
-    const since = (await db.prepare(`SELECT 1 AS x FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('registered', 'applied') AND updated_at_ms >= ? LIMIT 1`)
-      .get(entry.tenant, at)) as Record<string, unknown> | undefined;
-    if (since) { log(`resume approval: ${entry.tenant} was admitted after preview run ${run.slice(0, 12)}… was taken — not approved from it`); continue; }
-    const open = await readOpenApproval(db, entry.tenant);
-    if (open) { log(`[alert] resume approval: ${entry.tenant} already has an open approval (${open.state}) for other evidence — revoke it first; not approved`); continue; }
-    const e = entry.evidence!;
-    try {
-      await db.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run,
-          state, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)`)
-        .run(randomUUID(), entry.tenant, e.account, e.chainId, e.owner, entry.digest, canonical(e), run, nowMs, nowMs);
-      added += 1;
-      log(`resume approval: ${entry.tenant} approved for evidence ${entry.digest!.slice(0, 12)}… (preview run ${run.slice(0, 12)}…)`);
-    } catch {
-      log(`[alert] resume approval: ${entry.tenant} could not be recorded (another approval is open, or the store refused) — not approved`);
-    }
+    if ((await recordResumeApproval(db, { entry, run, at, nowMs, source: "operator" }, log)).recorded) added += 1;
   }
   return added;
+}
+
+/**
+ * RECORD ONE APPROVAL OF ONE PREVIEWED ENTRY, whoever gave it: the operator's
+ * variable above, or the orchestrator's own approval of a re-signed paper
+ * tenant (MERRYMEN_RESUME_AUTO_PAPER, below). One insert path, so both are
+ * held to the same rules — and nothing after the row tells them apart:
+ * Phase A, the archive, the registration and its attestation, the seed proof
+ * and the first worker are one path for both (orchestrator.ts
+ * resumeAdmission), which reads `source` only to refuse more, never less.
+ *
+ * Only an entry that passed, with its digest and its evidence. Never twice
+ * for the same evidence (unique per tenant and digest, whatever its state: an
+ * applied, refused or revoked approval is never reopened), never for a
+ * tenant admitted since the preview was taken (`at`), and never beside an
+ * open approval for other evidence (one open per tenant, which the table
+ * enforces as well). A duplicate of the same evidence is silent, as a
+ * variable left set across boots must be; every other refusal is said.
+ */
+export async function recordResumeApproval(db: Db, o: { entry: PreviewEntry; run: string; at: number; nowMs: number; source: ApprovalSource },
+  log: (line: string) => void): Promise<{ recorded: true } | { recorded: false; why: string }> {
+  const { entry, run, at, nowMs, source } = o;
+  if (!entry.pass || !entry.digest || !entry.evidence) return { recorded: false, why: "the entry did not pass, or carries no evidence" };
+  const existing = (await db.prepare("SELECT state FROM ledger_resume_approvals WHERE tenant = ? AND evidence_digest = ?").get(entry.tenant, entry.digest)) as Record<string, unknown> | undefined;
+  if (existing) return { recorded: false, why: `an approval of this evidence is already on record (${String(existing.state)})` };
+  // ADMITTED SINCE THAT PREVIEW WAS TAKEN: the run's evidence is from before
+  // the tenant's new book, so it cannot be what is true now, and approving it
+  // could only archive a running book. (Phase A would refuse the stale digest
+  // anyway; this says so at once and records nothing.)
+  const since = (await db.prepare(`SELECT 1 AS x FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('registered', 'applied') AND updated_at_ms >= ? LIMIT 1`)
+    .get(entry.tenant, at)) as Record<string, unknown> | undefined;
+  if (since) {
+    log(`resume approval: ${entry.tenant} was admitted after preview run ${run.slice(0, 12)}… was taken — not approved from it`);
+    return { recorded: false, why: "it was admitted after the preview was taken" };
+  }
+  const open = await readOpenApproval(db, entry.tenant);
+  if (open) {
+    log(`[alert] resume approval: ${entry.tenant} already has an open approval (${open.state}) for other evidence — revoke it first; not approved`);
+    return { recorded: false, why: `an approval is already open for it (${open.state})` };
+  }
+  const e = entry.evidence;
+  try {
+    await db.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run,
+        state, created_at_ms, updated_at_ms, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`)
+      .run(randomUUID(), entry.tenant, e.account, e.chainId, e.owner, entry.digest, canonical(e), run, nowMs, nowMs, source);
+  } catch {
+    log(`[alert] resume approval: ${entry.tenant} could not be recorded (another approval is open, or the store refused) — not approved`);
+    return { recorded: false, why: "the store refused the approval" };
+  }
+  log(`resume approval: ${entry.tenant} approved ${source === AUTO_PAPER_SOURCE ? "automatically (auto-paper: a re-signed paper tenant) " : ""}` +
+    `for evidence ${entry.digest.slice(0, 12)}… (preview run ${run.slice(0, 12)}…)`);
+  return { recorded: true };
 }
 
 /**
@@ -687,6 +727,236 @@ export async function revokeResumeApprovals(db: Db, revokes: readonly ResumeRevo
     // Already applied, refused or revoked: nothing to withdraw, and left set
     // across boots this says nothing more.
   }
+}
+
+// ── automatic admission of re-signed paper tenants ──────────────────────────
+
+/**
+ * MERRYMEN_RESUME_AUTO_PAPER: THE ORCHESTRATOR APPROVES ONE CASE ITSELF.
+ *
+ * WHY. Sixty-four tenants' grants expired during the hold. When such an owner
+ * re-signs, the continuity gate holds the tenant (it has history and no
+ * surviving book) until an operator previews it, reads its line and approves
+ * its digest (docs/fleet-resume.md, steady state): two deploys per re-signer,
+ * for tenants of whom the commonest kind — a paper book that could never have
+ * armed live — is proved safe by the preview itself, with no chain to read.
+ *
+ * WHAT. With the variable `1`, every change to a tenant's grant row (a
+ * re-sign: a new expiry and a new server stamp, grantRowKey) is owed ONE
+ * automatic preview of that tenant, recorded as any preview run is and
+ * printed as one. If the tenant is held by the continuity gate and the
+ * preview shows the safe case (autoPaperVerdict), the orchestrator records
+ * the approval itself — source `auto-paper`, bound to that preview's evidence
+ * digest, through the same insert as the operator's (recordResumeApproval) —
+ * and from there it is an approval like any other: Phase A re-derives the
+ * evidence and refuses on any change, the home is archived, the book
+ * registered and attested, the seed proved, and the first worker starts at
+ * whatever level MERRYMEN_FLEET_ROLLOUT gives the tenant.
+ *
+ * THE SAFE CASE, all of it:
+ *   - every precondition passes (the preview's own `pass`, which includes an
+ *     unexpired grant, readable owner settings and no accounting hold);
+ *   - chain:not-required: a paper book that could not arm live — no live
+ *     operation, no flow, no live intent in the owner's settings — so there
+ *     is no chain read to need, and none is skipped;
+ *   - no positions (no token balance, no open class position), no live book
+ *     rows (live cost basis, floors or trench entries) and no unresolved trade;
+ *   - no approval open for it, and none of it ever revoked by the operator: a
+ *     revoke is an operator's decision about that tenant, which no re-sign
+ *     overrides;
+ *   - and held by the gate: its book on the volume is blocked, or absent with
+ *     history on record. A tenant whose book is present, or one with no
+ *     history at all, is the ordinary path's, which needs no approval (and an
+ *     approval there would only archive a book the ordinary path runs).
+ *
+ * NEVER a live or chain-required tenant: it is previewed, its line printed,
+ * and left to the operator's hand. Never a tenant the rollout does not admit
+ * (its preview stays owed until it does: under an explicit list it must be
+ * named; under `all` it trades). Never more than AUTO_PAPER_PER_PASS a pass,
+ * and never past the process cap less AUTO_PAPER_HEADROOM. And never a
+ * change seen before the variable was first on: the first pass with it
+ * baselines the roster as it stands, so turning it on admits nobody by
+ * itself.
+ *
+ * Unset: nothing here runs, nothing is read or written, and every tenant is
+ * held exactly as before. Malformed refuses boot, as every resume variable
+ * does; read at runtime it fails closed (resumeAutoPaperOn).
+ */
+export const RESUME_AUTO_PAPER_ENV = "MERRYMEN_RESUME_AUTO_PAPER";
+/** `1`: on. Unset: off. Anything else — `0`, `true`, an empty value — refuses boot rather than guess. */
+export function parseResumeAutoPaper(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  if (raw === "1") return true;
+  throw refuseEnv(RESUME_AUTO_PAPER_ENV, "is not 1 (remove it to turn automatic admission of re-signed paper tenants off)");
+}
+/** The same, read every pass: a value that cannot be read approves nobody. */
+export function resumeAutoPaperOn(env: Record<string, string | undefined> = process.env): boolean {
+  try { return parseResumeAutoPaper(env[RESUME_AUTO_PAPER_ENV]); } catch { return false; }
+}
+
+/** The most owed re-signers one reconcile pass previews, and so the most it can approve. The rest wait for the next pass. */
+export const AUTO_PAPER_PER_PASS = 2;
+/**
+ * Process slots an automatic admission leaves free under the cap: the
+ * runbook's own batch bound (48 workers and holds, less room for restarts and
+ * holds: 40). An operator may fill them by hand; this never does.
+ */
+export const AUTO_PAPER_HEADROOM = 8;
+
+/**
+ * HOW MANY MORE AUTOMATIC ADMISSIONS FIT, under a cap of `cap` processes:
+ * what runs now, and every open approval, which takes a slot as soon as its
+ * tenant is admitted (a registered book past the cap waits for one, counted
+ * or not). None at or past the cap less its headroom.
+ */
+export function autoPaperRoom(o: { running: number; open: number; cap: number }): number {
+  return Math.max(0, o.cap - AUTO_PAPER_HEADROOM - o.running - o.open);
+}
+
+/** Approvals not yet applied or ended: each will take a process slot. A missing table is none. */
+export async function countOpenApprovals(db: Db): Promise<number> {
+  try {
+    return Number(((await db.prepare(`SELECT COUNT(*) AS n FROM ledger_resume_approvals WHERE state IN (${OPEN_STATES.map(() => "?").join(", ")})`)
+      .get(...OPEN_STATES)) as Record<string, unknown>).n);
+  } catch (e) {
+    if (absentTable(e)) return 0;
+    throw e;
+  }
+}
+
+/** The watch's baseline row: present once the roster as it stood when the variable was first on has been recorded as nobody's re-sign. */
+const WATCH_BASELINE = "*";
+
+/**
+ * WHAT A GRANT ROW IS, AS THE WATCH TELLS ONE SIGNATURE FROM THE NEXT: the
+ * tenant, its expiry and the record's server-stamped write time, digested.
+ * Every put stamps its own write time (grant-store.ts toRecord), and every
+ * signature its own expiry, so a re-sign always changes it. Nothing secret
+ * goes in, and nothing that changes without a signature: a replacement stop
+ * leaves both as they were, and the put that follows it moves them.
+ */
+export function grantRowKey(r: { tenant: string; expiresAt: number | null; updatedAt?: number | null }): string {
+  return hash(canonical({ tenant: r.tenant.toLowerCase(), expiresAt: r.expiresAt ?? null, updatedAt: r.updatedAt ?? null }));
+}
+
+export interface OwedGrantChange { tenant: string; key: string }
+
+/**
+ * WHICH GRANT ROWS CHANGED, durably, so a re-sign made while the orchestrator
+ * was down (a deploy, a crash) is seen at the next start rather than lost.
+ *
+ * The first call with no baseline records every roster row as it stands, as
+ * settled (`baseline`), and owes nothing: turning the variable on admits
+ * nobody by itself. From then on a row the watch has never seen (a new grant
+ * row: a re-grant after a removal, or a new tenant) or one whose key moved is
+ * owed a preview, and stays owed until settleGrantChange settles that exact
+ * key — across passes and restarts — so a tenant waiting for the rollout, a
+ * slot or the per-pass budget is previewed when its turn comes, and a second
+ * re-sign meanwhile is simply the change still owed. A row that leaves the
+ * roster keeps its watch row, so a grant signed again later is a change.
+ */
+export async function observeGrantChanges(db: Db, roster: ReadonlyArray<{ tenant: string; key: string }>, nowMs: number):
+  Promise<{ baselined: number | null; owed: OwedGrantChange[] }> {
+  const rows = (await db.prepare("SELECT tenant, grant_key, owed FROM ledger_resume_grant_watch").all()) as Array<Record<string, unknown>>;
+  const seen = new Map(rows.map((r) => [String(r.tenant), { key: String(r.grant_key), owed: Number(r.owed) === 1 }]));
+  if (!seen.has(WATCH_BASELINE)) {
+    await db.tx(async (tx) => {
+      for (const r of roster) {
+        await tx.prepare(`INSERT INTO ledger_resume_grant_watch (tenant, grant_key, owed, seen_at_ms, settled_at_ms, run, outcome)
+          VALUES (?, ?, 0, ?, ?, NULL, 'baseline') ON CONFLICT (tenant) DO NOTHING`).run(r.tenant.toLowerCase(), r.key, nowMs, nowMs);
+      }
+      await tx.prepare(`INSERT INTO ledger_resume_grant_watch (tenant, grant_key, owed, seen_at_ms, settled_at_ms, run, outcome)
+        VALUES (?, '', 0, ?, ?, NULL, 'baseline') ON CONFLICT (tenant) DO NOTHING`).run(WATCH_BASELINE, nowMs, nowMs);
+    });
+    return { baselined: roster.length, owed: [] };
+  }
+  const owed: OwedGrantChange[] = [];
+  for (const r of roster) {
+    const tenant = r.tenant.toLowerCase(), had = seen.get(tenant);
+    if (!had) {
+      await db.prepare(`INSERT INTO ledger_resume_grant_watch (tenant, grant_key, owed, seen_at_ms, settled_at_ms, run, outcome)
+        VALUES (?, ?, 1, ?, NULL, NULL, NULL) ON CONFLICT (tenant) DO NOTHING`).run(tenant, r.key, nowMs);
+    } else if (had.key !== r.key) {
+      await db.prepare(`UPDATE ledger_resume_grant_watch SET grant_key = ?, owed = 1, seen_at_ms = ?, settled_at_ms = NULL, run = NULL, outcome = NULL
+        WHERE tenant = ? AND grant_key = ?`).run(r.key, nowMs, tenant, had.key);
+    } else if (!had.owed) continue;
+    owed.push({ tenant, key: r.key });
+  }
+  return { baselined: null, owed };
+}
+
+/**
+ * The change is answered: by an automatic approval, a preview the operator
+ * reads, or the finding that the gate does not hold the tenant. Settled only
+ * for the key that was owed, so a re-sign landing meanwhile stays owed.
+ * `outcome` is a short fixed word and a reason with no value in it.
+ */
+export async function settleGrantChange(db: Db, owed: OwedGrantChange, o: { outcome: string; run: string | null }, nowMs: number): Promise<boolean> {
+  const r = await db.prepare(`UPDATE ledger_resume_grant_watch SET owed = 0, settled_at_ms = ?, run = ?, outcome = ? WHERE tenant = ? AND grant_key = ? AND owed = 1`)
+    .run(nowMs, o.run, o.outcome.slice(0, 500), owed.tenant, owed.key);
+  return r.changes === 1;
+}
+
+/**
+ * HAS POSTGRES ANY HISTORY FOR THE TENANT, as its evidence says: an agent
+ * registration, a lost book's cursor past zero, or a row in any log or
+ * snapshot table. Without any, a tenant whose home holds no book is a new
+ * account, which the ordinary path admits on its own.
+ */
+export function evidenceHasHistory(e: ResumeEvidence): boolean {
+  if (e.pg.agent) return true;
+  if (e.pg.mirrorState.some((c) => Array.isArray(c) && c[1] !== "0" && c[1] !== "null")) return true;
+  for (const table of LOG_SUMMARY) {
+    const count = (e.pg.tables[table] as { n?: string } | undefined)?.n;
+    if (count !== undefined && count !== "0" && count !== "null") return true;
+  }
+  for (const table of SNAPSHOT_SUMMARY) {
+    const t = e.pg.tables[table] as { n: number } | "absent" | undefined;
+    if (t !== "absent" && (t?.n ?? 0) > 0) return true;
+  }
+  return false;
+}
+
+/** Live rows a paper book has no business holding: a live cost basis with a quantity, a live floor, a live trench entry. */
+async function liveBookRows(db: Db, account: string): Promise<number> {
+  let rows = 0;
+  for (const sql of [
+    "SELECT COUNT(*) AS n FROM cost_basis WHERE LOWER(agent_id) = ? AND mode = 'live' AND qty_raw <> '0'",
+    "SELECT COUNT(*) AS n FROM position_floors WHERE LOWER(agent_id) = ? AND mode = 'live'",
+    "SELECT COUNT(*) AS n FROM trench_positions WHERE LOWER(agent_id) = ? AND mode = 'live'",
+  ]) {
+    try { rows += Number(((await db.prepare(sql).get(account.toLowerCase())) as Record<string, unknown>).n); }
+    catch (e) { if (!absentTable(e)) throw e; }
+  }
+  return rows;
+}
+
+/**
+ * IS THIS FRESH PREVIEW THE SAFE CASE? `auto`: the orchestrator may approve
+ * it itself. `manual`: the gate holds it and only an operator approves it,
+ * each reason said. `not-held`: the gate does not hold it; the ordinary path
+ * decides, and an approval would be wrong (it would archive a book that path
+ * runs). Read-only. Errs towards `manual`: anything it cannot show safe is
+ * the operator's, as it is today.
+ */
+export type AutoPaperVerdict = { kind: "auto" } | { kind: "manual"; why: string[] } | { kind: "not-held"; why: string };
+export async function autoPaperVerdict(db: Db, entry: PreviewEntry): Promise<AutoPaperVerdict> {
+  const e = entry.evidence;
+  if (!e || !entry.digest) return { kind: "manual", why: [`its evidence could not be read (${entry.refusals.join("; ") || "no evidence"})`] };
+  if (entry.book === "present") return { kind: "not-held", why: "its book is on the volume and not behind a barrier: the ordinary path decides" };
+  if (entry.book !== "blocked" && !evidenceHasHistory(e)) return { kind: "not-held", why: "no history on record: the ordinary path admits a new book" };
+  const why: string[] = [];
+  if (!entry.pass) why.push(`it did not pass: ${entry.refusals.join("; ")}`);
+  if (entry.chain !== "not-required" || e.checks.chain !== "not-required") why.push("it could arm live (chain:required): a live tenant is only ever approved by hand");
+  if (entry.holdsPositions !== false) why.push("Postgres shows it holding positions");
+  if (e.checks.unresolved !== 0) why.push("it has unresolved trades on record");
+  const live = await liveBookRows(db, e.account);
+  if (live > 0) why.push(`${live} live book row(s) (cost basis, floors or trench entries) are on record`);
+  const prior = ((await db.prepare(`SELECT state FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('revoked', ${OPEN_STATES.map(() => "?").join(", ")})`)
+    .all(entry.tenant, ...OPEN_STATES)) as Array<Record<string, unknown>>).map((r) => String(r.state));
+  if (prior.includes("revoked")) why.push("an operator revoked an earlier approval of it, so only an operator approves it again");
+  if (prior.some((s) => s !== "revoked")) why.push("an approval is already open for it");
+  return why.length ? { kind: "manual", why } : { kind: "auto" };
 }
 
 // ── the chain ────────────────────────────────────────────────────────────────
