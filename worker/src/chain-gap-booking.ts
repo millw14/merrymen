@@ -463,12 +463,14 @@ function casFacts(s: BookingSnapshot) {
  * Then nothing may have written for the tenant since: its heartbeat and its
  * newest mirror cursor are no later than the refusal (admission ran with no
  * worker for it — owned() refuses one — so a later beat is a worker that
- * started after it), and both have been silent for BOOKING_QUIET_SEC. All
- * three times are the orchestrator host's own clock; the operator's never
- * enters. A worker running under a wedged mirror would show none of this, so
- * the anchor also bounds the facts: only what landed before the refusal is
- * booked (planBooking's `settled`), and that was proved missing from the book
- * the worker would run on.
+ * started after it), and both have been silent for BOOKING_QUIET_SEC. The
+ * rule that decides compares three times from the orchestrator host's own
+ * clock with each other; only the quiet floor is measured against the
+ * operator's, and a clock there that runs ahead can only weaken that floor,
+ * never the rule under it. A worker running under a wedged mirror would show
+ * none of this, so the anchor also bounds the facts: only what landed before
+ * the refusal is booked (planBooking's `settled`), and that was proved
+ * missing from the book the worker would run on.
  *
  * `anchorSec` is null when there is no anchor; the refusals then say why.
  */
