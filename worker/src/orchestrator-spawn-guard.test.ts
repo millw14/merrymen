@@ -264,7 +264,10 @@ describe("one tenant's refusal holds that tenant, not the fleet", () => {
 
     await assert.doesNotReject(reconcile(), "the failure does not reject through reconcile");
     assert.equal(spawned.length, 0, "no worker starts without the privacy proof");
-    assert.ok(alerts(t.tenant).some((l) => /privacy/.test(l)), said.join("\n"));
+    // Held by the first gate that needs the recovery tables: the owner's
+    // recorded controls (recovery-reply-arm.ts) read them before the privacy
+    // proof does, and refuse alike.
+    assert.ok(alerts(t.tenant).some((l) => /privacy|owner controls could not be applied/.test(l)), said.join("\n"));
     assert.ok(!alerts(t.tenant).some((l) => /spawn-guard\.invalid|outage-secret|ECONNREFUSED|postgres:/.test(l)), "and no connection detail is logged");
     assert.equal(hasLeaseForTest(t.tenant), true, "the tenant stays held by this replica");
     await assert.doesNotReject(reconcile(), "and the next pass holds it again");

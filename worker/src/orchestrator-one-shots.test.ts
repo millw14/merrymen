@@ -47,6 +47,10 @@ describe("every orchestrator one-shot is counted from the commit that adds it", 
     "runBuilderPass", "runNewsPass", "startGroupChatPass", "startXPostPass", // every pass, standing features
     "startFleetHeartbeat", // every pass, halted or not, on no variable: the fleet_heartbeat row (fleet-heartbeat.ts)
     "startFomoPass", // every pass, a standing feature behind its own opt-in (MERRYMEN_FOMO_ENABLED, docs/fomo.md): research only, it places no order
+    // MERRYMEN_RESUME_PREVIEW / _APPROVE / _REVOKE: the staged rollout's own admission controls (ledger-resume.ts,
+    // docs/fleet-resume.md), idempotent per (tenant, evidence digest) and read every boot like MERRYMEN_FLEET_ROLLOUT.
+    // Counted as one-shots, the guard would refuse the very boot that approves the first tenant.
+    "runResumeAdmissionControls",
   ]);
 
   it("finds them where they are", () => {
