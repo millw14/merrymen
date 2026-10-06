@@ -89,7 +89,9 @@ describe("the restore gate holds instead of returning", () => {
     const start = calls(hold, "startHolderProcess")[0];
     assert.ok(link && start, "it restores the link, and it starts the hold process");
     assert.ok(link.getEnd() < start.getStart(), "the link first: a link restored after the bot is polled is read from a replaced file");
-    assert.equal(link.arguments.map((a) => a.getText()).join(","), "tenant");
+    // The tenant, and the stand-in shared database the reconcile tests restore
+    // through (retirementMemoryStoreForTest), unset in production.
+    assert.equal(link.arguments.map((a) => a.getText()).join(","), "tenant,retirementMemoryStoreForTest?.shared");
     // Under the lease spawnChild checked, asked again after the last await.
     const late = bodyCalls(hold, "lateSpawnRefusal")[0];
     assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());

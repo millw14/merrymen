@@ -56,7 +56,9 @@ describe("a fresh child gets its link back", () => {
     // read from a file the child has already replaced with a fresh default.
     const spawnBlock = ORCH.slice(ORCH.indexOf("await writeBootstrapForChild(tenant, smartAccount);"));
     const beforeSpawn = spawnBlock.slice(0, spawnBlock.indexOf("const proc = spawn("));
-    assert.match(beforeSpawn, /await writeTelegramForChild\(tenant\);/, "seeded before the child starts");
+    // With the stand-in shared database the reconcile tests restore through
+    // (retirementMemoryStoreForTest); unset in production, which reads Postgres.
+    assert.match(beforeSpawn, /await writeTelegramForChild\(tenant, retirementMemoryStoreForTest\?\.shared\);/, "seeded before the child starts");
   });
 
   it("NEVER overwrites a live child's own link", () => {

@@ -77,7 +77,7 @@
  * Any failure leaves the tenant held and the step resumable.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import { createPublicClient, http, type Hex } from "viem";
 import { isTransientDbError, type Db } from "./db";
@@ -1363,15 +1363,21 @@ function ourWritersLeft(st: Stats): boolean {
   return homeOwn(st) && (st.mode & 0o7777 & ~0o644) === 0;
 }
 
-/** The keys restoredTelegramFile writes, and writeTelegramForChild wrote before #202: never an offset, a bot or prior bots. */
+/**
+ * The keys restoredTelegramFile wrote, and writeTelegramForChild before #202:
+ * never an offset, a bot or prior bots. It writes `offset: 0` beside them now,
+ * which the handoff reads as it is; what is recognised here is the file a
+ * build before that left in a home, which is still in archives and homes.
+ */
 const RESTORED_LINK_KEYS: readonly string[] = ["linkCode", "ownerId", "linkedAt", "firedAlerts"];
 
 /**
  * THE ORCHESTRATOR'S RESTORED LINK, and nothing else: what
- * writeTelegramForChild writes (restoredTelegramFile: some of the link code,
- * the owner, the link time and the owner's alert stamps) and, before #202,
- * `{ linkCode (perhaps ""), ownerId, linkedAt (perhaps 0) }`. Another key, or
- * one of these of another type, is not it.
+ * writeTelegramForChild wrote before it wrote an offset (restoredTelegramFile:
+ * some of the link code, the owner, the link time and the owner's alert
+ * stamps) and, before #202, `{ linkCode (perhaps ""), ownerId, linkedAt
+ * (perhaps 0) }`. Another key, or one of these of another type, is not it;
+ * nor is what it writes now, which has its offset already.
  */
 function restoredLink(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -1393,8 +1399,9 @@ function restoredLink(value: unknown): value is Record<string, unknown> {
  * and the first held six admitted tenants on "recovery reply offset not
  * handed over" for good:
  *
- *  - THE ORCHESTRATOR'S RESTORED LINK (restoredLink). writeTelegramForChild
- *    writes no `offset` (restoredTelegramFile says why: the date rule, not a
+ *  - THE ORCHESTRATOR'S RESTORED LINK (restoredLink), as writeTelegramForChild
+ *    wrote it before it wrote `offset: 0`: no `offset` at all
+ *    (restoredTelegramFile says why none is restored: the date rule, not a
  *    restored offset, keeps a replayed backlog from running), and the child
  *    reads a missing offset as 0. A pre-incident home whose spawn was refused
  *    after that write (its rebuilt book then failed the continuity proof)
@@ -1456,6 +1463,93 @@ export function normaliseCarriedFile(file: string, mayWrite: () => boolean): str
     // No file is nothing to normalise: a home that carried none, and had none restored.
     if (code === "ENOENT" && !changed.length) return [];
     return [...changed, `${label}: left as it was (${typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? code : "error"})`];
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* opened read-only: nothing to lose */ } }
+  }
+}
+
+/**
+ * AN EARLIER BUILD'S RESTORED LINK, IN ANY HOME, GIVEN THE OFFSET THE RESTORE
+ * WRITES NOW, just before the offset handoff reads it. The offset, and nothing
+ * else.
+ *
+ * writeTelegramForChild wrote the restored link (restoredLink) with no offset
+ * until it wrote `offset: 0` (orchestrator.ts restoredTelegramFile), and the
+ * handoff refuses a telegram.json with none (HANDOFF_OFFSET). Child homes live
+ * on the fleet volume (persistent-home.ts), so a link an earlier build
+ * restored outlives the deploy that fixed the restore, and the restore never
+ * rewrites a file that is there (a running child is the authority on its own
+ * link). An ordinary tenant whose bot the recovery listener had answered, and
+ * whose spawn the handoff had refused on that file, was refused on every pass
+ * after the fix exactly as before it: no worker, and held no hold process, for
+ * as long as the listener's row stood. A registered book's home is put right
+ * by normaliseRegisteredHome (normaliseCarriedFile); nothing put an ordinary
+ * one right. This does, on these terms:
+ *
+ *  - ONLY THE RESTORED LINK, EXACTLY (restoredLink): the keys writeTelegramForChild
+ *    wrote, of the types it wrote, and no other. No child writes that shape:
+ *    saveTelegramState (telegram/state.ts) writes the whole state, its offset
+ *    with it, and so does the hold process through it. A file of that shape
+ *    is the restore's, and no worker or hold process has saved over it.
+ *  - ONLY `offset: 0`, which every reader already takes the missing one to be
+ *    (telegram/state.ts loadTelegramState, and the hold process through it),
+ *    and which the restore itself writes now: the home ends exactly as this
+ *    build's restore would have left it, and the child asks from no saved
+ *    offset as it did, with the date rule (service.ts) holding a replayed
+ *    backlog back. The handoff then raises it to the listener's mark, as it
+ *    does any file.
+ *  - ONLY AS THE RESTORE HAS WRITTEN IT SINCE #198: this user's, one name,
+ *    0600 exactly, no larger than the handoff reads, in a home that is this
+ *    user's own plain directory at its real path (what the handoff asks of it,
+ *    HANDOFF_HOME). Opened without following a link, asked again of the
+ *    descriptor, and again by name (inode, device, size and times, and the
+ *    home's own) after the writer is asked the last time and just before the
+ *    write; rewritten whole and durably (writeFileAtomicSync), never in place.
+ *  - NEVER A MODE. A restored link at the umask (0644, from before #198) is
+ *    left as it is, and the handoff refuses it by its mode (HANDOFF_MODE) as
+ *    it always has. Vouching for who wrote a file is normaliseCarriedFile's,
+ *    and only in a registered book's home, where nobody else can have been.
+ *  - ONLY WITH THE HANDOFF'S OWN WRITER PROOF (`mayWrite`: the lease, no late
+ *    refusal, so no child running for the tenant, and no source barrier),
+ *    asked first and again before the write, in the window where the handoff
+ *    writes this same file.
+ *
+ * Anything else, every other file with no offset among it, is left exactly as
+ * it is, and the handoff judges it by name as it always has: HANDOFF_OFFSET
+ * is unchanged for every shape but this one. Never throws; says what it
+ * changed by kind, never a value, and what it could not, by its errno.
+ */
+export function offsetRestoredLink(home: string, mayWrite: () => boolean): string[] {
+  const label = "telegram.json";
+  /** As the restore has left it since #198: the home's own, nobody else can write it, 0600 exactly, no larger than the handoff reads. */
+  const asRestored = (s: Stats) => ourWritersLeft(s) && (s.mode & 0o7777) === 0o600 && s.size <= TELEGRAM_MAX_BYTES;
+  let fd: number | null = null, writing = false;
+  try {
+    if (!mayWrite()) return [];
+    const dir = path.resolve(home), d = lstatSync(dir);
+    if (!d.isDirectory() || d.uid !== process.getuid?.() || realpathSync(dir) !== dir) return [];
+    const file = path.join(dir, label), st = lstatSync(file);
+    if (!asRestored(st)) return [];
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const at = fstatSync(fd);
+    if (at.ino !== st.ino || at.dev !== st.dev || !asRestored(at)) return [];
+    let value: unknown = null;
+    try { value = JSON.parse(readFileSync(fd, "utf8")); } catch { return []; }
+    if (!restoredLink(value)) return [];
+    if (!mayWrite()) return [];
+    const now = lstatSync(file), still = lstatSync(dir);
+    if (now.ino !== at.ino || now.dev !== at.dev || now.size !== at.size || now.mtimeMs !== at.mtimeMs || now.ctimeMs !== at.ctimeMs
+      || still.ino !== d.ino || still.dev !== d.dev) return [];
+    writing = true;
+    writeFileAtomicSync(file, JSON.stringify({ offset: 0, ...value }, null, 2), 0o600, { durable: true });
+    return [`${label}: offset`];
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    // No home or no file is nothing to give an offset to: the handoff writes
+    // the listener's mark into a file of its own.
+    if (code === "ENOENT" && !writing) return [];
+    const kind = typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? code : "error";
+    return [writing ? `${label}: offset write failed (${kind})` : `${label}: left as it was (${kind})`];
   } finally {
     if (fd !== null) { try { closeSync(fd); } catch { /* opened read-only: nothing to lose */ } }
   }
