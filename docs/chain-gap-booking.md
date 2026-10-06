@@ -149,9 +149,10 @@ exactly those fills holds.
 
 - If the replay can be done and the basis's cost differs, the trade is
   refused (`basis-cost-differs`), whichever way the trades go.
-- The replay cannot be done when a walked row has no `fill_cash_usdg`, or
-  one that does not read back as an exact amount of at most 6 decimals.
-  Then:
+- The replay cannot be done when a walked buy has no `fill_cash_usdg`, or
+  one that does not read back as an exact amount of at most 6 decimals. A
+  sell's cash is its proceeds, which never reach the basis, so a sell needs
+  none. Then:
   - if the booked trades in the token include **both a buy and a sell**,
     the trade is refused (`fills-net-ambiguous`);
   - if they all go one way, the quantity checks are proof enough, and a

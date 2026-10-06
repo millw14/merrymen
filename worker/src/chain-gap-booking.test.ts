@@ -883,7 +883,7 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     assert.deepEqual([fills.verdict, fills.anchor], ["reproduced", "before every fill Postgres records in the token"]);
     // The later buy's row carries no cash, so the cost cannot be replayed: for a trade all one way the quantity is the proof, and the plan says so.
     assert.deepEqual([cost.verdict, bothSides], ["unproven", false]);
-    assert.match(cost.why!, /trades#\d+ records no exact cash for its fill \(fill_cash_usdg\)/);
+    assert.match(cost.why!, /trades#\d+ records no exact cash for its buy \(fill_cash_usdg\)/);
     assert.ok(holds.warnings.some((w) => /0x0+70c3: the basis's cost was not checked against the fills .*its quantity was, and with the trades booked here all buys/.test(w)),
       holds.warnings.join("\n"));
   });
@@ -972,7 +972,7 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
     // The quantity reproduces exactly, and both rows were written after the round trip: neither says the basis holds it.
     assert.deepEqual([h.fills.verdict, h.bothSides, h.refusal], ["reproduced", true, "fills-net-ambiguous"]);
     assert.match(trade(unreplayed, "missed sell").why,
-      /^not booked \(fills-net-ambiguous\): the trades booked here in 0x0+70c3 include both a buy and a sell, .* \(trades#\d+ records no exact cash for its fill/);
+      /^not booked \(fills-net-ambiguous\): the trades booked here in 0x0+70c3 include both a buy and a sell, .* \(trades#\d+ records no exact cash for its buy/);
     assert.equal(unreplayed.items.filter((i) => i.proposal).length, 0, "neither trade, nor a leg");
     // The cost on record: 100 at 100, +50 at 200 → 150 at 300, −50 takes a third → 100 at 200, +20 at 20 → 120 at 220. A basis at 120 left it out.
     const wrong = await run({ cash: true, cost: 120_000_000n });
@@ -1082,9 +1082,11 @@ describe("the snapshot's contents against the chain, never its timestamps alone"
       { verdict: "replayed", why: null, basis: { qtyRaw: "10", costUsdg: "76" } });
     assert.deepEqual(replayBasis(walk([fill(2, "buy", "5", 20, { cashUsdg: "50" }), fill(3, "sell", "2", 30, { cashUsdg: "1" })], 6n)),
       { verdict: "replayed", why: null, basis: { qtyRaw: "6", costUsdg: "36" } });
+    // What a sell was paid never reaches the basis, so a sell with no cash on record replays the same.
+    assert.deepEqual(replayBasis(walk([fill(2, "buy", "5", 20, { cashUsdg: "50" }), fill(3, "sell", "2", 30)], 6n)).basis, { qtyRaw: "6", costUsdg: "36" });
     // A walked row with no exact cash, or a walk that did not reproduce, replays nothing.
     assert.deepEqual(replayBasis(ok), { verdict: "unproven", basis: null,
-      why: "trades#4 records no exact cash for its fill (fill_cash_usdg), so what it did to the basis's cost is not on the books" });
+      why: "trades#4 records no exact cash for its buy (fill_cash_usdg), so what it added to the basis's cost is not on the books" });
     assert.deepEqual([replayBasis(short).verdict, replayBasis(walk(history, 5n)).verdict], ["unproven", "unproven"]);
   });
 });

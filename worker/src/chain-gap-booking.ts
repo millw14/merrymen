@@ -234,8 +234,8 @@ export interface BookingSnapshot {
   tenant: string;
   /**
    * `classVault` is the one custody address whose holdings positions and
-   * cost_basis do not cover (custody.ts grantPonsClassVault): the class book
-   * is class_positions. The Trencher vault's are merged into the position.
+   * cost_basis do not cover (core grant.ts grantPonsClassVault): the class
+   * book is class_positions. The Trencher vault's are merged into the position.
    */
   grant: { account: string; owner: string | null; chainId: number | null; custody: string[]; classVault: string | null } | null;
   /** Every registration row for the account (more than one is a refusal). */
@@ -952,9 +952,10 @@ export function walkFills(o: { token: string; fills: readonly RecordedFill[]; pr
  * Forward from where a reproduced walk stopped — flat, so nothing — through
  * every fill it walked, oldest first, by the arithmetic the live path books a
  * fill with (basis.ts applyFill: a buy adds its cash, a sell takes cost pro
- * rata). The quantity is the chain's by construction; the cost is what a
- * basis built from exactly these fills, in this order, holds. Unproven when
- * the walk did not reproduce, or a recorded row carries no exact cash.
+ * rata, so what a sell was paid never reaches the basis). The quantity is the
+ * chain's by construction; the cost is what a basis built from exactly these
+ * fills, in this order, holds. Unproven when the walk did not reproduce, or a
+ * recorded buy carries no exact cash.
  */
 export interface CostReplay {
   verdict: "replayed" | "unproven";
@@ -966,10 +967,11 @@ export function replayBasis(walk: FillWalk): CostReplay {
   if (walk.verdict !== "reproduced") return { verdict: "unproven", basis: null, why: "the fills were not walked back to where the basis opened" };
   let basis: BasisRow = ZERO_BASIS;
   for (const s of [...walk.walked].reverse()) {
-    if (s.cashUsdg === null) {
-      return { verdict: "unproven", basis: null, why: `${s.ref} records no exact cash for its fill (fill_cash_usdg), so what it did to the basis's cost is not on the books` };
+    if (s.side === "buy" && s.cashUsdg === null) {
+      return { verdict: "unproven", basis: null, why: `${s.ref} records no exact cash for its buy (fill_cash_usdg), so what it added to the basis's cost is not on the books` };
     }
-    basis = applyFill(basis, { side: s.side, qtyRaw: BigInt(s.qtyRaw), cashUsdg: BigInt(s.cashUsdg) }).basis;
+    // A sell's cash is its proceeds: applyFill reads it for realised P&L only, never for the basis.
+    basis = applyFill(basis, { side: s.side, qtyRaw: BigInt(s.qtyRaw), cashUsdg: s.cashUsdg === null ? 0n : BigInt(s.cashUsdg) }).basis;
   }
   return { verdict: "replayed", why: null, basis: { qtyRaw: basis.qtyRaw.toString(), costUsdg: basis.costUsdg.toString() } };
 }
