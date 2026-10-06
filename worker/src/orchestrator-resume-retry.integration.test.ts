@@ -24,7 +24,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -355,8 +355,13 @@ it("a foreign or tampered book still refuses: a row only a worker writes, anothe
   try { w.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'swap', 'x', 1, 'paper', 1)").run(worker.account); }
   finally { w.close(); }
   // Another book in its place, at another inode: the same rows, its own identity copied in.
-  const file = path.join(swapped.home, "merrymen.db"), copy = `${file}.copy`;
-  writeFileSync(copy, readFileSync(file), { mode: 0o600 }); rmSync(file); writeFileSync(file, readFileSync(copy), { mode: 0o600 }); rmSync(copy);
+  // Written beside the original and renamed over it, so both hold an inode at
+  // once and the copy's cannot be the original's: removing the original first
+  // lets ext4 hand its freed inode straight back to the next file (APFS never
+  // reuses one), and the book at the receipt's inode is then the same book.
+  const file = path.join(swapped.home, "merrymen.db"), copy = `${file}.copy`, original = lstatSync(file, { bigint: true }).ino;
+  writeFileSync(copy, readFileSync(file), { mode: 0o600 }); renameSync(copy, file);
+  assert.notEqual(lstatSync(file, { bigint: true }).ino, original, "another inode, on every filesystem");
   // An attestation recording another receipt.
   raw.prepare("UPDATE ledger_resume_attestations SET receipt_digest = ? WHERE tenant = ?").run("0".repeat(64), tampered.tenant);
   await pass();
