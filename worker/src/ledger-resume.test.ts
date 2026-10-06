@@ -17,7 +17,7 @@ import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
-import { ensureLedgerResumeSchema, registerAttestedGapSource, type LedgerImportVolume } from "./ledger-import";
+import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import type { TenantLease } from "./tenant-lease";
 import { handoffRecoveryReplyOffset } from "./recovery-reply-handoff";
 import { RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
@@ -780,6 +780,82 @@ describe("registerAttestedGapSource", () => {
     await registerAttestedGapSource({ ...p.args, chainRead: null });
     assert.deepEqual({ ...(p.f.raw.prepare("SELECT chain_from_block, chain_head FROM ledger_resume_attestations").get() as object) }, { chain_from_block: null, chain_head: null });
   });
+  describe("the ordinary gates on the next pass, after the seeds and before the first worker arms", () => {
+    const dek = Buffer.alloc(32, 9);
+    /** What the spawn path writes before its later gates: the restored practice book, its paper basis, the live seed, a floor. */
+    function seed(home: string, account: string, extra?: (raw: DatabaseSync) => void) {
+      const book = new DatabaseSync(path.join(home, "merrymen.db"));
+      try {
+        book.prepare("INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares, updated_at) VALUES (?, 90, 0, 100, '{}', 1)").run(account);
+        book.prepare("INSERT INTO cost_basis VALUES (?, 'paper', 'COIN', '10', '20', 1)").run(account);
+        book.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '10', '20', 1)").run(account);
+        book.prepare("INSERT INTO position_floors VALUES (?, 'live', 'COIN', 1500, 'r1', 'entry', 1)").run(account);
+        extra?.(book);
+      } finally { book.close(); }
+    }
+    const gates = async (p: Awaited<ReturnType<typeof prepared>>) => {
+      const o = { tenant: p.f.tenant, smartAccount: p.f.account, chainId: 4663, home: p.home, volume: p.volume, shared: p.f.shared, lease: p.lease, dialect: "sqlite" as const };
+      const restored = await restoreLedgerImport({ ...o, dek });
+      await registerLedgerSource(o);
+      return restored;
+    };
+    const approvalState = (p: Awaited<ReturnType<typeof prepared>>, state: string) => p.f.raw.prepare("UPDATE ledger_resume_approvals SET state = ?").run(state);
+
+    it("an attested book whose approval registered it is accepted with only its seeds in it, registered or applied", async () => {
+      const p = await prepared();
+      await registerAttestedGapSource(p.args);
+      seed(p.home, p.f.account);
+      assert.equal(await gates(p), "present", "registered: the first worker has not started");
+      approvalState(p, "applied");
+      assert.equal(await gates(p), "present", "applied: started, and perhaps died before it armed");
+    });
+
+    it("refuses as before: a row the spawn path never seeds, a withdrawn approval, another registration's digest, a tampered receipt, and an ordinary new book", async () => {
+      const refusedWith = async (label: string, make: (p: Awaited<ReturnType<typeof prepared>>) => void | Promise<void>) => {
+        const p = await prepared();
+        await registerAttestedGapSource(p.args);
+        seed(p.home, p.f.account);
+        await make(p);
+        const o = { tenant: p.f.tenant, smartAccount: p.f.account, chainId: 4663, home: p.home, volume: p.volume, shared: p.f.shared, lease: p.lease, dialect: "sqlite" as const };
+        await assert.rejects(restoreLedgerImport({ ...o, dek }), /refused/, `${label}: restoreLedgerImport`);
+        await assert.rejects(registerLedgerSource(o), /refused/, `${label}: registerLedgerSource`);
+      };
+      await refusedWith("a trade with no agent", (p) => {
+        const book = new DatabaseSync(path.join(p.home, "merrymen.db"));
+        try { book.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'swap', 'x', 1, 'paper', 1)").run(p.f.account); }
+        finally { book.close(); }
+      });
+      await refusedWith("an event with no agent", (p) => {
+        const book = new DatabaseSync(path.join(p.home, "merrymen.db"));
+        try { book.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'info', 'x', 1)").run(p.f.account); }
+        finally { book.close(); }
+      });
+      for (const state of ["refused", "revoked"]) await refusedWith(`an approval ${state}`, (p) => { approvalState(p, state); });
+      await refusedWith("an attestation recording another digest", (p) => { p.f.raw.prepare("UPDATE ledger_resume_attestations SET receipt_digest = ?").run("0".repeat(64)); });
+      await refusedWith("an attestation for another account", (p) => { p.f.raw.prepare("UPDATE ledger_resume_attestations SET smart_account = ?").run(addr(0xbad)); });
+      await refusedWith("an approval of other evidence", (p) => { p.f.raw.prepare("UPDATE ledger_resume_approvals SET evidence_digest = ?").run("f".repeat(64)); });
+      await refusedWith("a receipt bound to another digest", (p) => {
+        const row = p.f.raw.prepare("SELECT bindings_json FROM tenant_ledger_import WHERE tenant = ?").get(p.f.tenant) as { bindings_json: string };
+        const bound = JSON.parse(row.bindings_json) as Record<string, unknown>;
+        p.f.raw.prepare("UPDATE tenant_ledger_import SET bindings_json = ? WHERE tenant = ?").run(JSON.stringify({ ...bound, mutableDigest: "1".repeat(64) }), p.f.tenant);
+      });
+      // A genuinely new book (no history, no attestation) with the same rows in it.
+      const n = await fixture();
+      n.raw.exec("DELETE FROM agents; DELETE FROM trades; DELETE FROM equity; DELETE FROM positions; DELETE FROM cost_basis; DELETE FROM position_floors; DELETE FROM mirror_state");
+      const mount = path.join(root, `mount-new-${n.id}`), homeRoot = path.join(mount, "fleet");
+      mkdirSync(homeRoot, { recursive: true });
+      const st = lstatSync(mount, { bigint: true });
+      const volume: LedgerImportVolume = { id: `vol_new_${n.id}`, mountPath: mount, homeRoot, device: String(st.dev), inode: String(st.ino) };
+      const home = path.join(homeRoot, "children", n.tenant);
+      const lease: TenantLease = { tenant: n.tenant as `0x${string}`, backend: "postgres", healthy: () => true, async release() {} };
+      const o = { tenant: n.tenant, smartAccount: n.account, chainId: 4663, home, volume, shared: n.shared, lease, dialect: "sqlite" as const };
+      await registerLedgerSource(o);
+      seed(home, n.account);
+      await assert.rejects(registerLedgerSource(o), /refused/, "an ordinary new book's receipt vouches for no seeds");
+      await assert.rejects(restoreLedgerImport({ ...o, dek }), /refused/);
+    });
+  });
+
   it("an attestations table from an earlier build gains the chain window's columns", async () => {
     const f = await fixture();
     f.raw.exec(`CREATE TABLE ledger_resume_attestations (generation TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE, tenant TEXT NOT NULL, smart_account TEXT NOT NULL,
