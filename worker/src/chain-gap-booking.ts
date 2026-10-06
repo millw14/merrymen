@@ -844,9 +844,11 @@ export interface ProposedFill { key: string; side: "buy" | "sell"; qtyRaw: strin
  *                 checks decide alone, and the plan says so.
  *
  * Recorded rows are dated by when the worker wrote them, proposed ones by
- * their block; the same second orders recorded first. A recorded row written
- * after a later missed fill landed can read out of order — which can only
- * refuse, never book.
+ * their block; the same second orders recorded first. A worker writes its row
+ * seconds after its operation lands, and a missed fill that landed in those
+ * seconds reads out of order: the walk may then refuse wrongly, or miss an
+ * excess it would otherwise find. The contents checks (holdingVerdict) do not
+ * depend on the order, and decide either way.
  */
 export interface FillWalk {
   verdict: "reproduced" | "exceeds" | "unproven";

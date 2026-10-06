@@ -117,8 +117,10 @@ fills since then reproduce the chain's quantity exactly.
   out with the book still holding some.
 
 Recorded rows are dated by when the worker wrote them, and booked trades by
-their block. If a recorded row was written after a missed fill that landed
-later, the walk reads them out of order. That can only refuse, never book.
+their block. A worker writes its row a few seconds after its operation lands.
+If a missed fill landed in those seconds, the walk reads the two out of
+order. It may then refuse wrongly, or miss an excess it would otherwise
+find. Either way, the contents checks above still decide.
 
 In any other case the trade and its USDG leg are `unresolved`, and so is the
 tenant. A balance that cannot be read proves nothing, so it also leaves the
