@@ -151,9 +151,18 @@ const snapshots = (account: string) => ({
   positions: rows(`SELECT ${POSITION_COLUMNS} FROM positions WHERE agent_id = ?`, account), cost_basis: rows("SELECT * FROM cost_basis WHERE agent_id = ?", account),
   position_floors: rows("SELECT * FROM position_floors WHERE agent_id = ?", account),
 });
+/**
+ * One preview, and the run it recorded: the run its own summary line names. Not the newest row by its time — a
+ * run repeated keeps the time it was first taken, and one taken while a test moved the clock on is dated ahead.
+ */
 async function preview(...tenants: string[]) {
-  await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_PREVIEW: tenants.join(",") });
-  const run = raw.prepare("SELECT run, entries_json FROM ledger_resume_preview_runs ORDER BY created_at_ms DESC, rowid DESC LIMIT 1").get() as { run: string; entries_json: string };
+  const said: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => { said.push(a.map(String).join(" ")); realLog(...a); };
+  try { await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_PREVIEW: tenants.join(",") }); } finally { console.log = realLog; }
+  const digest = said.map((l) => /\[resume-preview\] run ([0-9a-f]{64}):/.exec(l)?.[1]).find(Boolean);
+  assert.ok(digest, "the preview names its run");
+  const run = raw.prepare("SELECT run, entries_json FROM ledger_resume_preview_runs WHERE run = ?").get(digest) as { run: string; entries_json: string };
   return { run: run.run, entries: JSON.parse(run.entries_json) as Array<{ tenant: string; account: string | null; digest: string; pass: boolean; refusals: string[]; chain: string; suggestedLevel: string }> };
 }
 const approval = (tenant: string) => raw.prepare("SELECT state, reason, generation, archive_path FROM ledger_resume_approvals WHERE tenant = ? ORDER BY created_at_ms DESC, rowid DESC LIMIT 1").get(tenant) as
@@ -266,16 +275,15 @@ it("an RPC failure keeps the tenant held and retries; chain activity Postgres la
     assert.equal(forksOf(u.tenant).length, 0);
     assert.equal(existsSync(path.join(u.home, "grant.json")), true, "refused before anything moved");
     // AND THE NEXT PREVIEW CARRIES IT beside the verdict, which it does not
-    // change: the chain check is no Postgres precondition.
-    // (The run row is insert-once by its digest, which this identical evidence
-    // repeats, so the line is where it is said; the approval row keeps the
-    // reason as well.)
+    // change: the chain check is no Postgres precondition. The line says it,
+    // and so does the run row, the record a log that drops lines cannot lose.
     said.length = 0;
-    await preview(u.tenant);
+    const r = await preview(u.tenant);
     const line = said.find((l) => l.includes("[resume-preview] {") && l.includes(u.tenant));
     assert.ok(line?.includes(`"lastRefusal":{"evidence":"${q.entries[0]!.digest.slice(0, 12)}…"`), line);
     assert.ok(line?.includes(named), "the preview line names the transfer");
     assert.ok(line?.includes(`"pass":true`), "information only: the verdict is the preconditions'");
+    assert.ok((r.entries[0] as { lastRefusal?: { reason: string } }).lastRefusal?.reason.endsWith(named), "the run row names it too");
   } finally { chainLogs = []; console.log = realLog; }
   await getGrantStore().remove(t.tenant); await getGrantStore().remove(u.tenant); await reconcile();
 });
@@ -587,14 +595,157 @@ it("a tenant held on a chain refusal is admitted only on a chain read that answe
   await getGrantStore().remove(t.tenant); await reconcile();
 });
 
+/**
+ * A day passes, by this process's clock and by the chain's: every reader here
+ * (the orchestrator, the fake chain, the booking tool) takes the time from
+ * Date.now(), and the head moves at the chain's ten blocks a second.
+ */
+async function aDayOn<T>(hours: number, fn: () => Promise<T>): Promise<T> {
+  const realNow = Date.now.bind(Date);
+  Date.now = () => realNow() + hours * 3_600_000;
+  head = HEAD + BigInt(hours) * 3600n * 10n;
+  try { return await fn(); } finally { Date.now = realNow; head = HEAD; }
+}
+const refusalsOf = (tenant: string) =>
+  rows("SELECT approval_id, state, reason, updated_at_ms, chain_read_from_sec FROM ledger_resume_approvals WHERE tenant = ? ORDER BY created_at_ms, rowid", tenant);
+
+for (const recorded of ["as this build records it", "as an earlier build left it, with no start recorded"] as const) {
+  it(`a chain-held tenant is read from where its refused read began however late (the refusal ${recorded}): a deposit older than every cursor stays in the window a day on — booked, refused again, then admitted`, async () => {
+    const { applyBooking, holdOf, planBooking, readBookingSnapshot, readChainEvidence } = await import("./chain-gap-booking");
+    const { getSettingsStore } = await import("./settings-store");
+    const t = await preIncident({ live: false });
+    for (const table of ["positions", "cost_basis", "position_floors"]) raw.prepare(`DELETE FROM ${table} WHERE agent_id = ?`).run(t.account);
+    // EVERY FINANCIAL CURSOR RECENT: the last mirror copied rows two hours ago, so the read starts 26 hours back, not at a cursor.
+    raw.prepare("UPDATE mirror_state SET updated_at = ?, last_stamp = ? WHERE tenant = ?").run(nowSec() - 2 * 3600, nowSec() - 3 * 3600, t.tenant);
+    // A 9 USDG deposit twenty hours ago, older than every cursor, that Postgres lacks.
+    const depositBlock = HEAD - 20n * 3600n * 10n, depositTx = `0x${"5e".repeat(32)}`;
+    chainLogs = [{ address: String(CASH.USDG), topics: [TRANSFER_TOPIC, topicOf(addr(0xfeed)), topicOf(t.account)], tx: depositTx, index: 4, block: depositBlock,
+      data: `0x${(9_000_000n).toString(16).padStart(64, "0")}` }];
+    const named = `USDG in 9.000000 in tx ${depositTx} log 4 at block ${depositBlock}`;
+    const depositAt = nowSec() - 20 * 3600;
+    try {
+      // 1. Its owner's settings asked for live trading: read on chain, and refused for the deposit, with where that read began.
+      await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+      const p1 = await preview(t.tenant);
+      await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p1.entries[0]!.digest}` });
+      await reconcile(); await settle();
+      const r1 = refusalsOf(t.tenant).at(-1)!;
+      assert.deepEqual([r1.state, r1.reason], ["refused", `${CHAIN_REFUSAL}: ${named}`]);
+      assert.ok(Number(r1.chain_read_from_sec) <= nowSec() - 26 * 3600 - 600, "the refusal records where its read began: 26 hours back, before the deposit");
+      if (recorded !== "as this build records it") raw.prepare("UPDATE ledger_resume_approvals SET chain_read_from_sec = NULL WHERE approval_id = ?").run(String(r1.approval_id));
+
+      // 2. Its owner turns live trading off. A day on: twenty hours by the clock and the chain, and a row lands that changes its evidence.
+      await getSettingsStore().put(t.tenant, { liveTradingEnabled: false } as never);
+      await aDayOn(20, async () => {
+        raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(t.account, OLD + 11);
+        assert.ok(nowSec() - 26 * 3600 > depositAt, "26 hours back from now is past the deposit: the window used to start after it");
+
+        // 3. The booking tool anchors on that refusal and still lists the deposit (it used to say nothing is missing).
+        const snap = await readBookingSnapshot(shared, { tenant: t.tenant, dialect: "sqlite", nowSec: nowSec() });
+        assert.equal(holdOf(snap, nowSec()).anchorSec, Math.floor(Number(r1.updated_at_ms) / 1000));
+        assert.ok(snap.gapFromSec < depositAt, `the booking tool reads from ${snap.gapFromSec}, before the deposit at ${depositAt}`);
+        const plan = planBooking(snap, await readChainEvidence(bookingRpc, snap, { sleep: async () => {} }), { nowSec: nowSec(), source: { test: 3 }, target: "integration" });
+        assert.deepEqual([plan.verdict, plan.items.map((i) => i.class)], ["ready", ["deposit"]]);
+
+        // 4. Previewed, it is still held; approved by hand before anything is booked, admission reads from where the refused read began and refuses again.
+        const p2 = await preview(t.tenant);
+        const e2 = p2.entries[0]! as (typeof p2.entries)[number] & { chainHeld?: boolean };
+        assert.deepEqual([e2.pass, e2.chain, e2.chainHeld], [true, "required", true]);
+        const home = readdirSync(t.home).sort();
+        await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${e2.digest}` });
+        assert.equal(approval(t.tenant)?.state, "approved");
+        await reconcile(); await settle();
+        const r2 = refusalsOf(t.tenant).at(-1)!;
+        assert.deepEqual([r2.state, r2.reason], ["refused", `${CHAIN_REFUSAL}: ${named}`], "refused afresh for the same deposit — never admitted without it");
+        assert.ok(Number(r2.chain_read_from_sec) < depositAt, "from before the deposit");
+        assert.equal(forksOf(t.tenant).length, 0);
+        assert.deepEqual(readdirSync(t.home).sort(), home, "its home untouched");
+        assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0);
+        assert.equal(rows("SELECT * FROM flows WHERE agent_id = ? AND tx_hash = ?", t.account, depositTx).length, 0);
+
+        // 5. Booked on that fresh refusal, previewed and approved: admitted on a chain read whose window covers the deposit.
+        const snap2 = await readBookingSnapshot(shared, { tenant: t.tenant, dialect: "sqlite", nowSec: nowSec() });
+        assert.equal(holdOf(snap2, nowSec()).anchorSec, Math.floor(Number(r2.updated_at_ms) / 1000));
+        const plan2 = planBooking(snap2, await readChainEvidence(bookingRpc, snap2, { sleep: async () => {} }), { nowSec: nowSec(), source: { test: 4 }, target: "integration" });
+        assert.deepEqual([plan2.verdict, plan2.items.map((i) => i.class)], ["ready", ["deposit"]]);
+        await applyBooking(shared, plan2, { confirm: plan2.previewDigest, backupRef: "integration-backup-3", dialect: "sqlite", nowMs: Date.now() });
+        const p3 = await preview(t.tenant);
+        assert.notEqual(p3.entries[0]!.digest, e2.digest);
+        await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p3.entries[0]!.digest}` });
+        await reconcile(); await settle();
+        assert.equal(approval(t.tenant)?.state, "applied");
+        assert.equal(forksOf(t.tenant).length, 1, "admitted through the ordinary path");
+        const attested = rows("SELECT chain_from_block, chain_head FROM ledger_resume_attestations WHERE tenant = ?", t.tenant)[0]!;
+        assert.ok(BigInt(String(attested.chain_from_block)) < depositBlock, "on a chain window that covers the deposit");
+        assert.equal(rows("SELECT * FROM flows WHERE agent_id = ? AND tx_hash = ?", t.account, depositTx).length, 1, "booked");
+      });
+    } finally { chainLogs = []; }
+    await getGrantStore().remove(t.tenant); await reconcile();
+  });
+}
+
+it("every decision of a held tenant changes its digest: refused on the chain while live, then for stale evidence, then turned paper — the preview's digest is approvable, reads the chain, and refuses afresh", async () => {
+  const { holdOf, readBookingSnapshot } = await import("./chain-gap-booking");
+  const { getSettingsStore } = await import("./settings-store");
+  const t = await preIncident({ live: false });
+  for (const table of ["positions", "cost_basis", "position_floors"]) raw.prepare(`DELETE FROM ${table} WHERE agent_id = ?`).run(t.account);
+  const depositTx = `0x${"c4".repeat(32)}`;
+  chainLogs = [{ address: String(CASH.USDG), topics: [TRANSFER_TOPIC, topicOf(addr(0xfeed)), topicOf(t.account)], tx: depositTx, index: 1, block: HEAD - 2_000n,
+    data: `0x${(3_000_000n).toString(16).padStart(64, "0")}` }];
+  let chainOpens = 0;
+  setResumeChainForTest(() => { chainOpens += 1; return chain; });
+  try {
+    await sayings(async (said) => {
+      // R1: live trading on, so the evidence reads chain:required already; approved, and refused on the chain.
+      await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+      const d0 = (await preview(t.tenant)).entries[0]!.digest;
+      raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(t.account, OLD + 21);
+      const d1 = (await preview(t.tenant)).entries[0]!.digest;
+      await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${d1}` });
+      await reconcile(); await settle();
+      assert.match(String(approval(t.tenant)?.reason), new RegExp(`^${CHAIN_REFUSAL}: `));
+      // R2: the stale d0 approved, and refused for evidence that changed.
+      await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${d0}` });
+      await reconcile();
+      assert.deepEqual(refusalsOf(t.tenant).map((r) => r.state), ["refused", "refused"]);
+      assert.match(String(approval(t.tenant)?.reason), /evidence changed/);
+      // Its owner turns live trading off: it reads chain:required for the hold now, not the intent — and its digest is not d1's.
+      await getSettingsStore().put(t.tenant, { liveTradingEnabled: false } as never);
+      const p3 = await preview(t.tenant);
+      const e3 = p3.entries[0]! as (typeof p3.entries)[number] & { chainHeld?: boolean };
+      assert.deepEqual([e3.pass, e3.chain, e3.chainHeld], [true, "required", true]);
+      assert.notEqual(e3.digest, d1, "the refused digest is never printed again");
+      // The refused d1, approved again from an old line: nothing is recorded, and it is said.
+      const from = said.length;
+      await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${d1}` });
+      assert.deepEqual(refusalsOf(t.tenant).map((r) => r.state), ["refused", "refused"]);
+      assert.ok(said.slice(from).some((l) => l.startsWith(`[alert] resume approval: ${t.tenant} is held on a chain refusal no admission has answered, and an approval of this exact evidence refused`)),
+        said.slice(from).join("\n"));
+      // The digest the preview printed is approved, reads the chain, and records a fresh chain refusal the booking tool anchors on.
+      const opens = chainOpens;
+      await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${e3.digest}` });
+      assert.equal(approval(t.tenant)?.state, "approved", "recorded");
+      await reconcile(); await settle();
+      assert.ok(chainOpens > opens, "the chain was read, though it reads as paper");
+      const r3 = refusalsOf(t.tenant).at(-1)!;
+      assert.match(String(r3.reason), new RegExp(`^${CHAIN_REFUSAL}: `));
+      assert.equal(forksOf(t.tenant).length, 0);
+      const snap = await readBookingSnapshot(shared, { tenant: t.tenant, dialect: "sqlite", nowSec: nowSec() });
+      assert.equal(holdOf(snap, nowSec()).anchorSec, Math.floor(Number(r3.updated_at_ms) / 1000));
+    });
+  } finally { chainLogs = []; setResumeChainForTest(() => chain); }
+  await getGrantStore().remove(t.tenant); await reconcile();
+});
+
 it("a paper tenant needs no chain read; evidence that changed after the preview refuses with nothing moved", async () => {
   const t = await preIncident({ live: false });
   const p = await preview(t.tenant);
   assert.equal(p.entries[0]!.chain, "not-required");
   assert.equal(p.entries[0]!.suggestedLevel, "trade");
   await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `run:${p.run}` });
-  // Something lands in the books after the operator looked.
+  // Something lands in the books after the operator looked — and a preview taken then shows it, before admission has run.
   raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(t.account, OLD + 5);
+  const seen = await preview(t.tenant);
   await reconcile();
   assert.equal(approval(t.tenant)?.state, "refused");
   assert.match(String(approval(t.tenant)?.reason), /evidence changed/);
@@ -603,6 +754,11 @@ it("a paper tenant needs no chain read; evidence that changed after the preview 
   // Previewed again and approved again, it is admitted with no chain read at all: a refusal for anything but the chain holds nothing on it.
   const again = await preview(t.tenant);
   assert.deepEqual([again.entries[0]!.chain, (again.entries[0] as { chainHeld?: boolean }).chainHeld, again.entries[0]!.suggestedLevel], ["not-required", false, "trade"]);
+  // The same evidence as the preview taken before the refusal, so the same run: its recorded row now says that refusal, not the reading before it.
+  assert.equal(again.run, seen.run);
+  const stored = JSON.parse(String(rows("SELECT entries_json FROM ledger_resume_preview_runs WHERE run = ?", again.run)[0]!.entries_json)) as
+    Array<{ lastRefusal?: { reason: string } | null }>;
+  assert.match(String(stored[0]!.lastRefusal?.reason), /evidence changed/);
   await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `run:${again.run}` });
   setResumeChainForTest(() => { throw new Error("a paper tenant must not read the chain"); });
   try { await reconcile(); await new Promise((r) => setTimeout(r, 20)); }

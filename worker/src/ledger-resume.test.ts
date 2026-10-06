@@ -27,7 +27,7 @@ import {
   readOpenApproval, readResumeEvidence, recordPreviewRun, resumeGapWindow, resumePreconditions, revokeResumeApprovals, usdg6,
   AUTO_PAPER_HEADROOM, autoPaperRoom, autoPaperVerdict, countOpenApprovals, evidenceHasHistory, grantRowKey, observeGrantChanges, parseResumeAutoPaper,
   noteGrantAttempt, recordResumeApproval, resumeAutoPaperOn, settleGrantChange, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RECORD_MAX_WAIT, autoPaperRecordWait,
-  answeredGrantChanges, type GapChain, type PreviewEntry,
+  answeredGrantChanges, chainHoldOf, chainReadFloor, readChainHold, type DecisionRow, type GapChain, type PreviewEntry,
 } from "./ledger-resume";
 
 const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-ledger-resume-")));
@@ -470,6 +470,213 @@ describe("the chain read", () => {
     assert.deepEqual(w, { gapFromSec: NOW - 40 * 3600 - 600, lastMirrorAt: NOW - 40 * 3600 });
     const c = await f.pre();
     assert.deepEqual({ gapFromSec: c.gapFromSec, lastMirrorAt: c.lastMirrorAt }, w);
+  });
+  it("a whole read says where it began: the chain's own time of its first block, in whole seconds, and 0 from the first block of all", async () => {
+    // Ten blocks a second; the blocks behind the head are dated in fractions here, so the start is seen floored.
+    const stamps = (b: bigint) => (b === 2_000_000n ? NOW : NOW - Number(2_000_000n - b) / 10 - 0.3);
+    const clean = await chainGapCheck({ chain: fakeChain({ stamps }), account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 4_000_000n });
+    assert.equal(clean.status, "clean");
+    const c = clean as Extract<typeof clean, { status: "clean" }>;
+    assert.equal(c.fromSec, Math.floor(stamps(BigInt(c.fromBlock))), "the time of the very block it started at, floored");
+    assert.ok(c.fromSec! <= NOW - 30 * 3600, "at or before the second it was asked to start from");
+    const missing = await chainGapCheck({ chain: fakeChain({ stamps, logs: [{ address: USDG, topics: [TR, topic(addr(9)), topic(ACC)], tx: "0xnew", index: 0 }] }),
+      account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known, maxSpan: 4_000_000n });
+    assert.equal(missing.status, "missing");
+    assert.equal((missing as { fromSec?: number }).fromSec, c.fromSec, "a refusal's read says it as well");
+    // A chain younger than the window: the read starts at block 0, which nothing is before.
+    const young = await chainGapCheck({ chain: fakeChain({ head: 5_000n }), account: ACC, usdg: USDG, sinceSec: NOW - 30 * 3600, known });
+    assert.deepEqual([(young as { fromBlock: string }).fromBlock, (young as { fromSec?: number }).fromSec], ["0", 0]);
+    // A re-read from a block already reached says nothing: the whole read it continues already did.
+    const tail = await chainGapCheck({ chain: fakeChain({ head: 2_000_500n }), account: ACC, usdg: USDG, fromBlock: 2_000_000n, known });
+    assert.equal(Object.hasOwn(tail, "fromSec"), false);
+  });
+});
+
+describe("a tenant held on a chain refusal: its window and its digest", () => {
+  const ev = (cursors: Array<[string, string, string]>) => JSON.stringify({ pg: { mirrorState: cursors } });
+  const row = (o: Partial<DecisionRow> & { approvalId: string; state: string; updatedAtMs: number }): DecisionRow => ({
+    reason: o.state === "refused" ? chainRefusal([]) : "", createdAtMs: o.updatedAtMs - 1_000, chainReadFromSec: null, evidenceJson: "{}", ...o,
+  });
+
+  it("is held by a chain refusal no admission has answered, read from the earliest of their reads, and names its newest decision", () => {
+    assert.deepEqual(chainHoldOf([]), { held: false, readFromSec: null, since: null });
+    const r1 = row({ approvalId: "r1", state: "refused", updatedAtMs: 10_000, chainReadFromSec: NOW - 30 * 3600 });
+    assert.deepEqual(chainHoldOf([r1]), { held: true, readFromSec: NOW - 30 * 3600, since: "r1@10000" });
+    // A later refusal for another reason is the newest decision, and answers nothing; nor does a revoke, which is newer still.
+    const other = row({ approvalId: "r2", state: "refused", updatedAtMs: 20_000, reason: "the evidence changed since the preview" });
+    const revoked = row({ approvalId: "r3", state: "revoked", updatedAtMs: 30_000, reason: "revoked by the operator" });
+    assert.deepEqual(chainHoldOf([r1, other, revoked]), { held: true, readFromSec: NOW - 30 * 3600, since: "r3@30000" });
+    // Two unanswered: the earlier start of the two, whichever refusal came first.
+    const r4 = row({ approvalId: "r4", state: "refused", updatedAtMs: 40_000, chainReadFromSec: NOW - 50 * 3600 });
+    assert.equal(chainHoldOf([r1, other, revoked, r4]).readFromSec, NOW - 50 * 3600);
+    // An admission after them answers both; a chain refusal after the admission holds again, from its own read alone.
+    const admitted = row({ approvalId: "a5", state: "applied", updatedAtMs: 50_000 });
+    assert.equal(chainHoldOf([r1, r4, admitted]).held, false);
+    const r6 = row({ approvalId: "r6", state: "refused", updatedAtMs: 60_000, chainReadFromSec: NOW - 3 * 3600 });
+    assert.deepEqual(chainHoldOf([r1, r4, admitted, r6]), { held: true, readFromSec: NOW - 3 * 3600, since: "r6@60000" });
+    // An admission BEFORE a refusal answers nothing; a time that reads as no number is never "before" one.
+    assert.equal(chainHoldOf([row({ approvalId: "a0", state: "registered", updatedAtMs: 5_000 }), r1]).held, true);
+    assert.equal(chainHoldOf([admitted, row({ approvalId: "rn", state: "refused", updatedAtMs: Number.NaN, chainReadFromSec: 7 })]).held, true);
+    // A recorded start that is no number is read as a row from before the column.
+    assert.equal(chainHoldOf([row({ approvalId: "rx", state: "refused", updatedAtMs: 1, chainReadFromSec: Number.NaN, evidenceJson: "not json" })]).readFromSec, 0);
+  });
+
+  it("a row from before the column is read from a start derived from itself, never later than its read was asked to start, or else from the first block", () => {
+    const created = (NOW - 60) * 1000;
+    // The approval's own time less 26 hours, and every financial cursor's stamp in its evidence: the earliest of them.
+    assert.equal(chainReadFloor({ createdAtMs: created, evidenceJson: ev([["equity", "12", String(NOW - 3 * 3600)], ["events", "9", "null"], ["trades", "40", String(NOW - 2 * 3600)]]) }),
+      NOW - 60 - 26 * 3600, "recent cursors: the 26-hour term");
+    assert.equal(chainReadFloor({ createdAtMs: created, evidenceJson: ev([["trades", "40", String(OLD)], ["flows", "3", String(OLD + 5)]]) }), OLD, "old cursors: the oldest stamp");
+    assert.equal(chainReadFloor({ createdAtMs: created, evidenceJson: ev([["trades", "40", String(OLD * 1000)]]) }), OLD, "a stamp in milliseconds is read in seconds");
+    assert.equal(chainReadFloor({ createdAtMs: created, evidenceJson: ev([]) }), NOW - 60 - 26 * 3600, "no cursor at all: the 26-hour term alone");
+    assert.equal(chainReadFloor({ createdAtMs: created, evidenceJson: ev([["events", "9", String(OLD)], ["decisions", "5", "null"]]) }), OLD,
+      "no financial cursor: any stamped cursor bounds the newest");
+    // Whatever cannot be shown: the first block of all.
+    for (const [why, json] of [["a financial cursor with no stamp", ev([["trades", "40", String(OLD)], ["equity", "12", "null"]])],
+      ["cursors none of which is stamped", ev([["decisions", "5", "null"]])], ["evidence that does not parse", "{"], ["no cursors recorded at all", "{}"],
+      ["no evidence", null], ["a cursor that is not one", JSON.stringify({ pg: { mirrorState: ["trades"] } })]] as const) {
+      assert.equal(chainReadFloor({ createdAtMs: created, evidenceJson: json }), 0, why);
+    }
+    assert.equal(chainReadFloor({ createdAtMs: Number.NaN, evidenceJson: ev([]) }), 0, "an approval time that is no number");
+  });
+
+  it("whatever the cursors did since, a window over a row from before the column never starts later than that refused read was asked to", async () => {
+    for (const shape of ["recent cursors", "old cursors"] as const) {
+      const f = await fixture({ live: true });
+      await ensureLedgerResumeSchema(f.shared);
+      if (shape === "recent cursors") {
+        // Every financial cursor two hours old: the read starts 26 hours back, the bug's own shape.
+        f.raw.prepare("UPDATE mirror_state SET updated_at = ?, last_stamp = ? WHERE tenant = ?").run(NOW - 2 * 3600, NOW - 3 * 3600, f.tenant);
+        f.raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, 'equity', 5, ?, ?)").run(f.tenant, NOW - 2 * 3600 - 30, NOW - 2 * 3600);
+      }
+      // The read as admission took it at NOW, and the approval's evidence then; the refusal written by a build before the column.
+      const asked = (await f.pre()).gapFromSec;
+      const { evidence } = await readResumeEvidence(f.shared, { tenant: f.tenant, grant: { smartAccount: f.account, chainId: 4663, owner: f.owner },
+        home: path.join(root, `floor-${f.id}`), nowSec: NOW, controls: CONTROLS });
+      f.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+          created_at_ms, updated_at_ms, reason) VALUES ('legacy', ?, ?, 4663, ?, ?, ?, 'r', 'refused', ?, ?, ?)`)
+        .run(f.tenant, f.account, f.owner, "d".repeat(64), JSON.stringify(evidence), (NOW - 120) * 1000, (NOW + 60) * 1000, chainRefusal([]));
+      // A day on, the mirror has moved every cursor later (a worker ran on its own book meanwhile).
+      f.raw.prepare("UPDATE mirror_state SET updated_at = ?, last_stamp = ? WHERE tenant = ?").run(NOW + 19 * 3600, NOW + 18 * 3600, f.tenant);
+      const later = await resumePreconditions(f.shared, { tenant: f.tenant, account: f.account, grantAccount: f.account, nowSec: NOW + 20 * 3600, controls: CONTROLS, homePendingImport: false });
+      assert.equal(later.chainHeld, true, shape);
+      assert.ok(later.gapFromSec <= asked, `${shape}: read from ${later.gapFromSec}, the refused read was asked to start at ${asked}`);
+      // Without the hold the window would have moved past it: the defect this closes.
+      const unheld = await resumeGapWindow(f.shared, f.tenant, NOW + 20 * 3600, { held: false, readFromSec: null, since: null });
+      assert.ok(unheld.gapFromSec > asked, `${shape}: unheld, the window moved later`);
+    }
+  });
+
+  it("the window starts 600 seconds before the hold's read began, whatever the cursors say; a hold with no start reads from the first block", async () => {
+    const f = await fixture({ live: true });
+    f.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ?").run(NOW - 2 * 3600, f.tenant);
+    const at = (hold: Parameters<typeof resumeGapWindow>[3]) => resumeGapWindow(f.shared, f.tenant, NOW, hold).then((w) => w.gapFromSec);
+    assert.equal(await at({ held: false, readFromSec: null, since: null }), NOW - 26 * 3600 - 600);
+    assert.equal(await at({ held: true, readFromSec: NOW - 40 * 3600, since: "x@1" }), NOW - 40 * 3600 - 600);
+    assert.equal(await at({ held: true, readFromSec: NOW - 3600, since: "x@1" }), NOW - 26 * 3600 - 600, "a later start never moves the window later");
+    assert.equal(await at({ held: true, readFromSec: null, since: "x@1" }), -600);
+    assert.equal(await at({ held: false, readFromSec: NOW - 90 * 3600, since: null }), NOW - 26 * 3600 - 600, "not held: no start of a hold applies");
+  });
+
+  it("is read from the store as the rule decides it: an absent table holds nothing, a table from before the column reads its rows as such, other drift throws", async () => {
+    const f = await fixture();
+    assert.deepEqual(await readChainHold(f.shared, f.tenant), { held: false, readFromSec: null, since: null }, "no table yet");
+    assert.deepEqual(await readChainHold(f.shared, f.tenant, { table: false, readFromColumn: false }), { held: false, readFromSec: null, since: null });
+    // The table as production created it before chain_read_from_sec.
+    f.raw.exec(`CREATE TABLE ledger_resume_approvals (approval_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, smart_account TEXT NOT NULL, chain_id BIGINT NOT NULL,
+      owner TEXT NOT NULL, evidence_digest TEXT NOT NULL, evidence_json TEXT NOT NULL, preview_run TEXT NOT NULL, state TEXT NOT NULL, generation TEXT UNIQUE,
+      archive_path TEXT, reason TEXT, created_at_ms BIGINT NOT NULL, updated_at_ms BIGINT NOT NULL, source TEXT, UNIQUE (tenant, evidence_digest))`);
+    f.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms, reason) VALUES ('old', ?, ?, 4663, ?, ?, ?, 'r', 'refused', ?, ?, ?)`)
+      .run(f.tenant, f.account, f.owner, "e".repeat(64), ev([["trades", "40", String(OLD)]]), NOW * 1000, NOW * 1000, chainRefusal([]));
+    const legacy = { held: true, readFromSec: OLD, since: `old@${NOW * 1000}` };
+    assert.deepEqual(await readChainHold(f.shared, f.tenant), legacy, "the column is not there: the row is read as written before it");
+    assert.deepEqual(await readChainHold(f.shared, f.tenant, { table: true, readFromColumn: false }), legacy);
+    // Brought up to date, the column is there and a refusal writes it.
+    await ensureLedgerResumeSchema(f.shared);
+    f.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms) VALUES ('new', ?, ?, 4663, ?, ?, '{}', 'r', 'approved', ?, ?)`).run(f.tenant, f.account, f.owner, "f".repeat(64), NOW * 1000 + 1, NOW * 1000 + 1);
+    await assert.rejects(moveApproval(f.shared, "new", "approved", "refused", { reason: chainRefusal([]), chainReadFromSec: 12.5 }, NOW * 1000 + 2), /not a whole second/);
+    assert.ok(await moveApproval(f.shared, "new", "approved", "refused", { reason: chainRefusal([]), chainReadFromSec: OLD - 77 }, NOW * 1000 + 2));
+    assert.deepEqual(await readChainHold(f.shared, f.tenant), { held: true, readFromSec: OLD - 77, since: `new@${NOW * 1000 + 2}` });
+    // A missing column other than that one is drift, and throws.
+    const g = await fixture();
+    g.raw.exec("CREATE TABLE ledger_resume_approvals (approval_id TEXT, tenant TEXT, state TEXT, created_at_ms BIGINT, updated_at_ms BIGINT, evidence_json TEXT)");
+    await assert.rejects(readChainHold(g.shared, g.tenant), /no such column: reason/);
+  });
+
+  it("while held, the evidence names the newest decision, so each decision changes the digest; an open approval does not, and nobody else's evidence changes", async () => {
+    const f = await fixture();
+    for (const table of ["positions", "cost_basis", "position_floors"]) f.raw.prepare(`DELETE FROM ${table} WHERE agent_id = ?`).run(f.account);
+    await ensureLedgerResumeSchema(f.shared);
+    const read = () => readResumeEvidence(f.shared, { tenant: f.tenant, grant: { smartAccount: f.account, chainId: 4663, owner: f.owner },
+      home: path.join(root, `since-${f.id}`), nowSec: NOW, controls: CONTROLS });
+    const insert = (id: string, state: string, at: number, reason: string | null) => f.raw.prepare(`INSERT INTO ledger_resume_approvals
+        (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason, chain_read_from_sec)
+        VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?, ?)`).run(id, f.tenant, f.account, f.owner, id.repeat(64).slice(0, 64), state, at, at, reason,
+      reason?.startsWith(CHAIN_REFUSAL) ? NOW - 30 * 3600 : null);
+    const paper = await read();
+    assert.equal(Object.hasOwn(paper.evidence.checks, "chainHeldSince"), false, "not held: the field is not there at all");
+    insert("1", "refused", 1_000, "the evidence changed since the preview");
+    assert.equal((await read()).digest, paper.digest, "a refusal for anything else changes nothing for a tenant not held");
+    insert("2", "refused", 2_000, chainRefusal([]));
+    const r1 = await read();
+    assert.equal(r1.evidence.checks.chainHeldSince, "2@2000");
+    insert("3", "refused", 3_000, "the evidence changed since the preview");
+    const r2 = await read();
+    assert.equal(r2.evidence.checks.chainHeldSince, "3@3000");
+    assert.notEqual(r2.digest, r1.digest, "a later refusal for another reason makes a fresh digest");
+    insert("4", "revoked", 4_000, "revoked by the operator");
+    const r3 = await read();
+    assert.notEqual(r3.digest, r2.digest, "and so does a revoke");
+    // An approval of r3 is open: Phase A recomputes exactly r3's digest.
+    insert("5", "approved", 5_000, null);
+    assert.equal((await read()).digest, r3.digest, "an open approval is no decision: Phase A reads what the preview read");
+    // Answered by an admission: the field is gone again.
+    f.raw.prepare("UPDATE ledger_resume_approvals SET state = 'applied', updated_at_ms = 6000 WHERE approval_id = '5'").run();
+    assert.equal(Object.hasOwn((await read()).evidence.checks, "chainHeldSince"), false);
+  });
+
+  it("an ordinary tenant's digest is byte for byte what the builds before the field computed (pinned from cc5deca7 and from main)", async () => {
+    // Fixed scenarios, computed by readResumeEvidence on the build at cc5deca7 and on origin/main at 1e81a22e: identical on both.
+    const PINNED: Array<[{ live: boolean; approvals: "none" | "table" | "other-refusal" | "answered-chain"; liveIntent?: boolean }, string]> = [
+      [{ live: false, approvals: "none" }, "5d5b03cf4ceb946467dde42192e093a3889a1f158292bf78e93ab54b8c335d12"],
+      [{ live: false, approvals: "table" }, "5d5b03cf4ceb946467dde42192e093a3889a1f158292bf78e93ab54b8c335d12"],
+      [{ live: false, approvals: "other-refusal" }, "5d5b03cf4ceb946467dde42192e093a3889a1f158292bf78e93ab54b8c335d12"],
+      [{ live: true, approvals: "answered-chain" }, "9392defa3d594e7521b55be68e8a41ab1adfe0049d7b3ab2137ee87d1d7ff535"],
+      [{ live: false, approvals: "other-refusal", liveIntent: true }, "f43746c02be8c516f482e7028f5e3efa72b920d583fd9c807708fb4731e8ab21"],
+    ];
+    for (const [o, digest] of PINNED) {
+      const tenant = addr(0x7e57), account = addr(0xacc7e57), owner = addr(0x0e57);
+      const raw = new DatabaseSync(":memory:"); handles.push(raw);
+      const shared = wrapSqlite(raw);
+      await applyLedgerSchema(shared); await shared.exec(MIRROR_STATE_DDL); await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+      raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
+        VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 2, 120, ?)`).run(account, owner, addr(1), o.live ? "live" : "paper");
+      if (o.live) {
+        raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at, user_op_hash, tx_hash, epoch) VALUES (?, 'swap', 'x', 5, 'landed', ?, '0xop1', '0xtx1', 2)`).run(account, OLD);
+        raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, at, epoch, chain_id) VALUES (?, 'in', 100, '0xdep1', 10, 3, 'deposit', ?, 2, 4663)`).run(account, OLD);
+      } else {
+        raw.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at, epoch) VALUES (?, 'swap', 'x', 5, 'paper', ?, 2)").run(account, OLD);
+      }
+      raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 90, 0, 10, 100, ?, 2, ?)").run(account, OLD, o.live ? "live" : "paper");
+      raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, 'trades', 40, ?, ?)").run(tenant, OLD, NOW - 40 * 3600);
+      raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, 'equity', 12, ?, ?)").run(tenant, OLD, NOW - 40 * 3600);
+      if (o.approvals !== "none") await ensureLedgerResumeSchema(shared);
+      const insert = (id: string, state: string, at: number, reason: string | null) => raw.prepare(`INSERT INTO ledger_resume_approvals
+          (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason)
+          VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?)`).run(id, tenant, account, owner, id.repeat(64).slice(0, 64), state, at, at, reason);
+      if (o.approvals === "other-refusal") insert("1", "refused", 1_000, "the evidence changed since the preview");
+      if (o.approvals === "answered-chain") {
+        insert("1", "refused", 1_000, chainRefusal([{ kind: "transfer", txHash: `0x${"de".repeat(32)}`, block: "7", logIndex: 1, direction: "in", amountRaw: "5000000", counterparty: addr(0xfeed) }]));
+        insert("2", "applied", 2_000, null);
+        insert("3", "refused", 3_000, "the evidence changed since the preview");
+      }
+      const r = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home: "/nonexistent/merrymen-golden-home", nowSec: NOW,
+        controls: CONTROLS, ...(o.liveIntent === undefined ? {} : { liveIntent: o.liveIntent }) });
+      assert.equal(r.digest, digest, JSON.stringify(o));
+      assert.equal(Object.hasOwn(r.evidence.checks, "chainHeldSince"), false);
+    }
   });
 });
 
@@ -971,6 +1178,49 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     const quiet: string[] = [];
     assert.equal(await applyResumeApprovals(g.shared, [{ kind: "run", run: gRun }], 3, (l) => quiet.push(l)), 0);
     assert.deepEqual(quiet, []);
+  });
+
+  it("an operator approving evidence already decided for a tenant held on a chain refusal is told so; the digest a fresh preview prints is approvable", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    assert.equal(await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: entry.digest! }], 2, () => {}), 1);
+    // Admission refused it on the chain.
+    assert.ok(await moveApproval(f.shared, (await readOpenApproval(f.shared, f.tenant))!.approvalId, "approved", "refused",
+      { reason: chainRefusal([]), chainReadFromSec: NOW - 30 * 3600 }, 3));
+    // The operator approves that evidence again — a line copied before the refusal, or the variable left set.
+    const lines: string[] = [];
+    assert.equal(await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: entry.digest! }], 4, (l) => lines.push(l)), 0);
+    assert.equal(lines.length, 1, lines.join("\n"));
+    assert.match(lines[0]!, new RegExp(`^\\[alert\\] resume approval: ${f.tenant} is held on a chain refusal no admission has answered, and an approval of this exact ` +
+      "evidence refused \\(the chain holds .*\\) — one evidence is never approved twice, so nothing is recorded\\. Preview it again and approve the digest that preview prints"));
+    assert.deepEqual(await recordResumeApproval(f.shared, { entry, run, at: 1, nowMs: 5, source: "operator" }, () => {}),
+      { recorded: false, why: "an approval of this evidence is already on record (refused)" });
+    // A fresh preview binds the refusal (checks.chainHeldSince): a new digest, recorded.
+    const fresh = await entryOf(f, { book: "blocked" });
+    assert.equal(fresh.chainHeld, true);
+    assert.notEqual(fresh.digest, entry.digest);
+    const freshRun = await recordPreviewRun(f.shared, [fresh], 6);
+    assert.equal(await applyResumeApprovals(f.shared, [{ kind: "run", run: freshRun }], 7, () => {}), 1);
+  });
+});
+
+describe("the recorded preview run", () => {
+  it("a preview that comes to a recorded run's digest replaces what was said beside the verdicts, and keeps when the run was first taken", async () => {
+    const f = await fixture();
+    await ensureLedgerResumeSchema(f.shared);
+    const { evidence, digest } = await readResumeEvidence(f.shared, { tenant: f.tenant, grant: { smartAccount: f.account, chainId: 4663, owner: f.owner },
+      home: path.join(root, `run-${f.id}`), nowSec: NOW, controls: CONTROLS });
+    const entry: PreviewEntry = { tenant: f.tenant, account: f.account, chainId: 4663, owner: f.owner, digest, pass: true, refusals: [], chain: "not-required",
+      suggestedLevel: "trade", anchor: "established:epoch-2", riskPeriod: "none", home: "absent", lastMirrorAt: null, holdsPositions: false, startsPaused: false,
+      grantExpiresAt: NOW + 86_400, book: "blocked", evidence, lastRefusal: null, chainHeld: false };
+    const run = await recordPreviewRun(f.shared, [entry], 1_000);
+    const refused = { ...entry, lastRefusal: { evidence: "aaaa…", reason: "the evidence changed since the preview", atMs: 1_500 } };
+    assert.equal(await recordPreviewRun(f.shared, [refused], 2_000), run, "the same tenants, digests and verdicts: the same run");
+    const stored = f.raw.prepare("SELECT created_at_ms, entries_json FROM ledger_resume_preview_runs WHERE run = ?").get(run) as Record<string, unknown>;
+    assert.equal(Number(stored.created_at_ms), 1_000, "first taken then");
+    assert.deepEqual((JSON.parse(String(stored.entries_json)) as PreviewEntry[])[0]!.lastRefusal, refused.lastRefusal, "and says the newest refusal");
+    assert.equal((f.raw.prepare("SELECT COUNT(*) AS n FROM ledger_resume_preview_runs").get() as { n: number }).n, 1);
   });
 });
 

@@ -206,5 +206,22 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   const again = costed.items.find((i) => i.key === `op:${OP}`)!;
   assert.equal(again.evidence.holding?.refusal, "basis-cost-differs");
   assert.match(again.why, /at a cost of 2\.999999 USDG, and the fills since it last opened .* give 1500000000000000000 at 3\.000000 USDG/);
+
+  // THE WINDOW, FROM THE REFUSAL'S OWN START: the snapshot reads where the refused read began, inside its read-only transaction.
+  const startFile = path.join(tmp, "start.json");
+  assert.equal(await main(["--tenant", TENANT, "--output", startFile], env, deps), 2, printed.join("\n"));
+  const fromRecorded = BigInt(String((JSON.parse(readFileSync(startFile, "utf8")) as { capture: { fromBlock: string } }).capture.fromBlock));
+  // A TABLE FROM BEFORE THE COLUMN, read in that transaction: its absence is asked of the catalogue, never learnt from a statement that
+  // fails (which would abort the snapshot, 25P02), and the refusal is read as one from before it — its start derived, and here, with no
+  // cursors in its evidence to date it, the first block of all.
+  await setup.query("ALTER TABLE ledger_resume_approvals DROP COLUMN chain_read_from_sec");
+  const legacyFile = path.join(tmp, "legacy.json");
+  assert.equal(await main(["--tenant", TENANT, "--output", legacyFile], env, deps), 2, printed.join("\n"));
+  const legacy = JSON.parse(readFileSync(legacyFile, "utf8")) as { verdict: string; capture: { fromBlock: string }; refusals: string[] };
+  assert.equal(legacy.verdict, "blocked");
+  assert.deepEqual(legacy.refusals, [], "held as before: only the basis refuses");
+  assert.equal(legacy.capture.fromBlock, "0", "read from the first block of all");
+  assert.ok(fromRecorded > 0n, "where the recorded start had it read from a later block");
+  await ensureLedgerResumeSchema(db);
   assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
 });
