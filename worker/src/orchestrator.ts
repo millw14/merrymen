@@ -149,7 +149,7 @@ import {
   ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed,
   homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
   previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
-  normaliseCarriedFile, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
+  normaliseCarriedFile, offsetRestoredLink, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
   RESUME_APPROVE_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
   type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type PreviewEntry, type ResumeCheck, type ResumePreviewScope, type ResumeRevoke,
 } from "./ledger-resume";
@@ -1337,12 +1337,21 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
  * was lost, and whose bot the recovery listener had answered meanwhile (a
  * recovery_reply_offsets row for it), had its link restored here and then
  * refused by the handoff on every pass: no worker (and for a held tenant no
- * hold process), for as long as the row stood. With the offset written, the handoff
- * raises it to the listener's mark as it does for any file, and the child
- * starts past what the listener already answered. The handoff still refuses
- * a missing offset from anyone else. A file a build before this one restored
- * has none; a registered book's home is put right before the handoff reads
- * it (normaliseRegisteredHome, ledger-resume.ts normaliseCarriedFile).
+ * hold process), for as long as the row stood. With the offset written, the
+ * handoff raises it to the listener's mark as it does for any file, and the
+ * child starts past what the listener already answered. The handoff still
+ * refuses a missing offset from anyone else.
+ *
+ * A FILE A BUILD BEFORE THIS ONE RESTORED HAS NONE, AND THIS NEVER PUTS IT
+ * RIGHT: writeTelegramForChild writes only into a home with no telegram.json,
+ * and child homes outlive a deploy on the fleet volume (persistent-home.ts).
+ * So the spawn path gives that file its offset just before the handoff reads
+ * it, in every home, registered or not (offsetEarlierRestoredLink,
+ * ledger-resume.ts offsetRestoredLink: that exact shape, at 0600, and the
+ * offset alone), after a registered book's home is put right its own way
+ * (normaliseRegisteredHome). One restored at the umask, before #198, is not
+ * put right in an ordinary home: the handoff still refuses it by its mode
+ * (HANDOFF_MODE), and what becomes of it is an operator's decision.
  *
  * Only on a file that has something else in it: with nothing to restore this
  * is still null, and no file is written (writeTelegramForChild), which the
@@ -3584,6 +3593,9 @@ async function attestedSeedReady(tenant: `0x${string}`, smartAccount: string): P
  * offset for the bot; it is made the same. writeTelegramForChild writes
  * `offset: 0` itself now (restoredTelegramFile), which this leaves as it is;
  * a file a build before that restored is what is left for this to put right.
+ * (Outside a registered book's home, offsetEarlierRestoredLink gives that
+ * file its offset, and only its offset: never a mode, which is this
+ * function's alone, where nobody else can have been.)
  *
  * The file a build before this one carried was a copy, so whether its source
  * had another owner or a second name is gone with it; that copy has been
@@ -3610,6 +3622,29 @@ function normaliseRegisteredHome(tenant: `0x${string}`, generation: string, mayW
   } catch { return; } finally { book?.close(); }
   const changed = normaliseCarriedFile(path.join(home, "telegram.json"), mayWrite);
   if (changed.length) log(`${tenant}: resume admission — the new home's telegram.json normalised for the offset handoff (${changed.join(", ")})`);
+}
+
+/**
+ * ANY HOME'S RESTORED LINK FROM AN EARLIER BUILD, GIVEN ITS OFFSET just before
+ * the offset handoff reads it, under the handoff's own writer proof.
+ *
+ * restoredTelegramFile writes `offset: 0` now, but only into a home with no
+ * telegram.json: one an earlier build restored with no offset is still there
+ * on the fleet volume after the deploy, and the handoff refused it
+ * (HANDOFF_OFFSET) on every pass, holding an ordinary tenant whose bot the
+ * recovery listener had answered without a worker (or, held, a hold process)
+ * for as long as the listener's row stood. normaliseRegisteredHome puts a
+ * registered book's home right; this puts every home's restored link right,
+ * the offset and nothing else, on the terms ledger-resume.ts
+ * offsetRestoredLink sets out. Any other file is left for the handoff to
+ * judge as it always has.
+ *
+ * Only where the handoff runs (a hosted fleet, the bot switched on), and so
+ * only on a file it is about to read.
+ */
+function offsetEarlierRestoredLink(tenant: `0x${string}`, mayWrite: () => boolean): void {
+  const changed = offsetRestoredLink(childHome(tenant), mayWrite);
+  if (changed.length) log(`${tenant}: telegram.json as an earlier build restored it, given the offset its restore writes now, for the offset handoff (${changed.join(", ")})`);
 }
 
 /** The approval's last step: its first worker has started. */
@@ -3882,19 +3917,22 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       }
     }
     await writeTelegramForChild(tenant);
+    /** The handoff's writer proof, for the handoff and for what puts its file right just before it. */
+    const handoffWriter = () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant));
     // A REGISTERED BOOK'S HOME, before the handoff reads it, under the
     // handoff's own writer proof (normaliseRegisteredHome).
-    if (resume.registered && resume.generation) {
-      normaliseRegisteredHome(tenant, resume.generation,
-        () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)));
-    }
+    if (resume.registered && resume.generation) normaliseRegisteredHome(tenant, resume.generation, handoffWriter);
     if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
       try {
         const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        // AND ANY HOME'S RESTORED LINK AN EARLIER BUILD WROTE WITH NO OFFSET,
+        // registered or not, just before the handoff reads it
+        // (offsetEarlierRestoredLink). Never throws.
+        offsetEarlierRestoredLink(tenant, handoffWriter);
         await handoffRecoveryReplyOffset({
           tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
           home: childHome(tenant), shared,
-          mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+          mayWrite: handoffWriter,
         });
       } catch (e) {
         // The handoff is what puts the child's poll at or past what the
@@ -4255,7 +4293,10 @@ function holderBotReady(settings: MerrymenSettings | null): boolean {
  *
  * `registered` is the generation of a registered attested book this home
  * holds, when spawnChild has one: its telegram.json is normalised for the
- * handoff here too, as spawnChild's is (normaliseRegisteredHome).
+ * handoff here too, as spawnChild's is (normaliseRegisteredHome). And, held
+ * or not, registered or not, a restored link an earlier build wrote with no
+ * offset is given its offset just before the handoff, as spawnChild's is
+ * (offsetEarlierRestoredLink).
  */
 async function spawnHolder(
   tenant: `0x${string}`,
@@ -4271,10 +4312,9 @@ async function spawnHolder(
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
   await writeTelegramForChild(tenant);
-  if (registered) {
-    normaliseRegisteredHome(tenant, registered,
-      () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)));
-  }
+  /** The handoff's writer proof, as spawnChild's is. */
+  const handoffWriter = () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant));
+  if (registered) normaliseRegisteredHome(tenant, registered, handoffWriter);
   if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
     // Refused as spawnChild's handoff is (see there), and for the same reason:
     // a throw here rejected through reconcile() and took the supervisor down.
@@ -4285,10 +4325,13 @@ async function spawnHolder(
       const grant = await getGrantStore().get(tenant);
       if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
       const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+      // An earlier build's restored link, given its offset just before the
+      // handoff reads it, as spawnChild's is (offsetEarlierRestoredLink).
+      offsetEarlierRestoredLink(tenant, handoffWriter);
       await handoffRecoveryReplyOffset({
         tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
         home: childHome(tenant), shared,
-        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+        mayWrite: handoffWriter,
       });
     } catch (e) {
       sayTenantAlert(tenant, `[alert] ${tenant}: recovery reply offset not handed over (${errorKind(e)}) — trading stays held, with no hold process to answer its bot`);
