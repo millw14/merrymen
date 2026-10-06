@@ -17,7 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -40,8 +40,10 @@ process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 29).toString("base64");
 
 const orch = await import("./orchestrator");
 const { childHome, reconcile, setSpawnForTest, setRetirementMemoryStoreForTest, setPaperRestoreForTest, setPersistentHomeVerifierForTest,
-  setLeaseAcquireForTest, setResumeChainForTest, setKillConfirmForTest, setBasisSeedSharedForTest, setPhantomProcessesForTest } = orch;
+  setLeaseAcquireForTest, setResumeChainForTest, setKillConfirmForTest, setBasisSeedSharedForTest, setPhantomProcessesForTest, runResumeAdmissionControlsForTest } = orch;
 const { getGrantStore } = await import("./grant-store");
+const { getSettingsStore } = await import("./settings-store");
+const { recordResumeApproval } = await import("./ledger-resume");
 
 const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw), dek = Buffer.alloc(32, 29);
 await applyLedgerSchema(shared); await shared.exec(MIRROR_STATE_DDL); await shared.exec(PAPER_CHECKPOINT_SCHEMA);
@@ -56,7 +58,16 @@ setKillConfirmForTest(async () => {});
 let chainReads = 0;
 setResumeChainForTest(() => { chainReads += 1; throw new Error("an automatic approval must never need a chain read"); });
 const unhealthy = new Set<string>();
-setLeaseAcquireForTest(async (tenant) => ({ tenant, backend: "postgres", healthy: () => !unhealthy.has(tenant), async release() {} }) as TenantLease);
+/** Run whenever the tenant's lease is asked whether it still holds: the archive asks before every write, so a test can act in the middle of one. */
+const onLeaseCheck = new Map<string, () => void>();
+setLeaseAcquireForTest(async (tenant) => ({ tenant, backend: "postgres", healthy: () => { onLeaseCheck.get(tenant)?.(); return !unhealthy.has(tenant); }, async release() {} }) as TenantLease);
+// A read of the owner-control journal that fails while set: an outage of one read, never a fact about the tenant.
+let controlsReadFails = false;
+const realPrepare = shared.prepare.bind(shared);
+(shared as { prepare: typeof shared.prepare }).prepare = (sql: string) => {
+  if (controlsReadFails && /FROM recovery_reply_controls/.test(sql)) throw Object.assign(new Error("connection reset"), { code: "08006" });
+  return realPrepare(sql);
+};
 // What the orchestrator says, without its prefix. MERRYMEN_TEST_VERBOSE=1 prints it as well.
 const lines: string[] = [];
 const realLog = console.log;
@@ -146,6 +157,14 @@ const approvals = (tenant: string) => rows("SELECT state, source, reason, previe
 const watch = (tenant: string) => rows("SELECT owed, outcome, run FROM ledger_resume_grant_watch WHERE tenant = ?", tenant)[0];
 const forksOf = (tenant: string) => forks.filter((f) => f.home === childHome(tenant));
 const table = (name: string) => rows("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", name).length > 0;
+const settingsFile = (tenant: string) => path.join(fleet, "tenant-settings", `${tenant}.json`);
+/** The owner's settings with live trading switched on, sealed as the store writes them — but not stored yet: written by the test when it chooses. */
+async function liveSettingsFor(tenant: `0x${string}`): Promise<Buffer> {
+  await getSettingsStore().put(tenant, { liveTradingEnabled: true } as never);
+  const sealed = readFileSync(settingsFile(tenant));
+  rmSync(settingsFile(tenant));
+  return sealed;
+}
 async function pass() { await reconcile(); await new Promise((r) => setTimeout(r, 20)); }
 async function cleanUp(...tenants: string[]) {
   for (const t of tenants) await getGrantStore().remove(t as `0x${string}`);
@@ -310,7 +329,6 @@ it("on: no automatic admission past the process cap less its headroom, and at mo
 
 it("on: a re-sign whose preview cannot be read stays owed, and is answered once it can be", async () => {
   process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
-  const settingsFile = (tenant: string) => path.join(fleet, "tenant-settings", `${tenant}.json`);
   try {
     const t = await preIncident();
     await pass();
@@ -350,6 +368,211 @@ it("on: a re-sign the gate does not hold — a running worker, or a new account 
     await pass();
     assert.match(String(watch(fresh)?.outcome), /^not-held: no history on record/);
     assert.equal(approvals(fresh).length, 0, "the ordinary path's, which needs no approval");
+    // And no preview run for it: runs are the held tenants', never every signup's, so an
+    // operator's own preview is not crowded out of the runs an approval is looked up in.
+    assert.equal(watch(fresh)!.run, null);
+    assert.equal(rows("SELECT run FROM ledger_resume_preview_runs WHERE entries_json LIKE ?", `%${fresh}%`).length, 0);
     await cleanUp(t.tenant, fresh);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
+});
+
+it("on, with live-trading consent stood down: a re-signed paper tenant reads as able to arm live, and is previewed and left to the operator — never approved, never read on chain", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  process.env.MERRYMEN_LIVE_INTENT_STAND_DOWN = "1";
+  try {
+    const t = await preIncident();
+    await pass();
+    await t.resign();
+    await pass(); await pass();
+    assert.deepEqual(approvals(t.tenant), [], "no approval: a funded account would arm live whatever its owner's settings say");
+    assert.equal(forksOf(t.tenant).length, 0);
+    assert.equal(chainReads, 0);
+    const w = watch(t.tenant)!;
+    assert.equal(w.owed, 0, "answered once");
+    assert.match(String(w.outcome), /live-trading consent is stood down on this deployment/);
+    assert.match(String(w.outcome), /could arm live \(chain:required\)/);
+    const [entry] = JSON.parse(String(rows("SELECT entries_json FROM ledger_resume_preview_runs WHERE run = ?", w.run)[0]!.entries_json)) as Array<{ pass: boolean; chain: string; suggestedLevel: string }>;
+    assert.deepEqual([entry!.pass, entry!.chain, entry!.suggestedLevel], [true, "required", "exits-only"], "the preview an operator reads says so too");
+    assert.ok(existsSync(path.join(t.home, "ledger-source-blocked.json")), "its home untouched");
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; delete process.env.MERRYMEN_LIVE_INTENT_STAND_DOWN; }
+});
+
+it("on: an owner who turns live trading on while the home is being archived ends the automatic approval at Phase B — nothing registered, nothing forked, no chain read", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    const t = await preIncident();
+    const live = await liveSettingsFor(t.tenant);
+    await pass();
+    // Phase A, the archive and Phase B run in one call; the switch lands in the middle of the archive.
+    let switched = false;
+    onLeaseCheck.set(t.tenant, () => {
+      if (!switched && approvals(t.tenant)[0]?.state === "archiving") { writeFileSync(settingsFile(t.tenant), live, { mode: 0o600 }); switched = true; }
+    });
+    await t.resign();
+    try { await pass(); } finally { onLeaseCheck.delete(t.tenant); }
+    assert.equal(switched, true, "the owner's settings changed during the archive");
+    const [a] = approvals(t.tenant);
+    assert.deepEqual([a!.state, a!.source], ["refused", "auto-paper"]);
+    assert.match(String(a!.reason), /an automatic \(auto-paper\) approval admits only a paper tenant that could not arm live/);
+    assert.equal(forksOf(t.tenant).length, 0, "no worker at trade for an owner who now wants the live rail");
+    assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0, "nothing registered");
+    assert.equal(chainReads, 0);
+    rmSync(settingsFile(t.tenant), { force: true });
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; onLeaseCheck.clear(); }
+});
+
+it("on: an automatic approval left archived by a failed registration is refused at Phase B on a later pass once the owner wants the live rail — nothing forked, no chain read", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  const realTx = shared.tx.bind(shared);
+  try {
+    const t = await preIncident();
+    const live = await liveSettingsFor(t.tenant);
+    await pass();
+    // The registration fails once its approval is archived: the process dies there.
+    let failRegistration = true;
+    (shared as { tx: typeof shared.tx }).tx = async (fn) => {
+      if (failRegistration && approvals(t.tenant)[0]?.state === "archived") { failRegistration = false; throw new Error("process killed mid-registration"); }
+      return realTx(fn);
+    };
+    await t.resign();
+    try { await pass(); } finally { (shared as { tx: typeof shared.tx }).tx = realTx; }
+    assert.equal(failRegistration, false, "the registration was attempted, and failed");
+    assert.deepEqual(approvals(t.tenant).map((a) => [a.state, a.source]), [["archived", "auto-paper"]]);
+    // Before the next pass the owner turns live trading on.
+    writeFileSync(settingsFile(t.tenant), live, { mode: 0o600 });
+    await pass();
+    const [a] = approvals(t.tenant);
+    assert.equal(a!.state, "refused");
+    assert.match(String(a!.reason), /an automatic \(auto-paper\) approval admits only a paper tenant/);
+    assert.equal(forksOf(t.tenant).length, 0);
+    assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0);
+    assert.equal(chainReads, 0, "where an operator's approval would read the chain, an automatic one ends");
+    rmSync(settingsFile(t.tenant), { force: true });
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; (shared as { tx: typeof shared.tx }).tx = realTx; }
+});
+
+it("an auto-paper approval of a tenant that could arm live — a row the lane itself never writes — is refused at Phase A without reading the chain", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    const t = await preIncident({ live: true });
+    await pass();
+    await t.resign();
+    await pass();
+    // The lane previewed it and left it to the operator; its run shows it passing, chain:required.
+    const w = watch(t.tenant)!;
+    const [entry] = JSON.parse(String(rows("SELECT entries_json FROM ledger_resume_preview_runs WHERE run = ?", w.run)[0]!.entries_json));
+    assert.deepEqual([entry.pass, entry.chain], [true, "required"]);
+    // Stand in for any path that could write such a row: the insert itself, marked auto-paper.
+    assert.deepEqual(await recordResumeApproval(shared, { entry, run: String(w.run), at: Date.now(), nowMs: Date.now(), source: "auto-paper" }, () => {}), { recorded: true });
+    await pass();
+    const [a] = approvals(t.tenant);
+    assert.equal(a!.state, "refused");
+    assert.match(String(a!.reason), /an automatic \(auto-paper\) approval admits only a paper tenant/);
+    assert.equal(chainReads, 0, "refused where an operator's approval would start its chain read");
+    assert.equal(forksOf(t.tenant).length, 0);
+    assert.ok(existsSync(path.join(t.home, "ledger-source-blocked.json")), "refused before anything moved");
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
+});
+
+it("on: re-signers whose previews never read cannot starve the ones behind them — a readable one is admitted in the same pass, and they go to the back", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    const stuck = [await preIncident(), await preIncident()];
+    const healthy = await preIncident();
+    await pass();
+    for (const s of stuck) {
+      mkdirSync(path.dirname(settingsFile(s.tenant)), { recursive: true });
+      writeFileSync(settingsFile(s.tenant), "{ not json", { mode: 0o600 });
+    }
+    // The stuck ones re-sign first, so they are owed longest and come first in line.
+    for (const s of stuck) await s.resign();
+    await new Promise((r) => setTimeout(r, 5));
+    await pass();
+    for (const s of stuck) assert.equal(watch(s.tenant)!.owed, 1, "nothing to approve: their own settings are unreadable");
+    await healthy.resign();
+    await pass();
+    assert.deepEqual(approvals(healthy.tenant).map((a) => [a.state, a.source]), [["applied", "auto-paper"]], "answered in the pass it was owed, behind two that could not be read");
+    assert.equal(forksOf(healthy.tenant).length, 1);
+    for (const s of stuck) {
+      assert.equal(watch(s.tenant)!.owed, 1, "still owed: an outage is not an answer");
+      assert.equal(approvals(s.tenant).length, 0);
+      assert.equal(typeof rows("SELECT attempted_at_ms AS at FROM ledger_resume_grant_watch WHERE tenant = ?", s.tenant)[0]!.at, "number", "and behind every change not tried since");
+    }
+    for (const s of stuck) rmSync(settingsFile(s.tenant));
+    await pass();
+    for (const s of stuck) assert.equal(forksOf(s.tenant).length, 1, "answered once they read");
+    await cleanUp(healthy.tenant, ...stuck.map((s) => s.tenant));
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
+});
+
+it("on: a controls read that fails is an outage, not an answer — the re-sign stays owed, an approval's Phase A holds rather than refuses, and both go on once it reads", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    // The automatic preview: one controls read fails, and the re-sign is still owed.
+    const t = await preIncident();
+    await pass();
+    await t.resign();
+    controlsReadFails = true;
+    try { await pass(); } finally { controlsReadFails = false; }
+    assert.deepEqual({ ...watch(t.tenant)! }, { owed: 1, outcome: null, run: null }, "not settled as 'did not pass'");
+    assert.equal(table("ledger_resume_approvals") ? approvals(t.tenant).length : 0, 0);
+    assert.ok(lines.some((l) => l.includes(`${t.tenant}: resume auto-paper could not read it (owner controls cannot be read (controls unreadable (Error)))`)));
+    await pass();
+    assert.deepEqual(approvals(t.tenant).map((a) => [a.state, a.source]), [["applied", "auto-paper"]], "previewed again, read, and admitted");
+    assert.equal(forksOf(t.tenant).length, 1);
+
+    // Phase A: approved while its lease could not be held; then the controls read fails during the admission.
+    const u = await preIncident();
+    await pass();
+    unhealthy.add(u.tenant);
+    await u.resign();
+    try { await pass(); } finally { unhealthy.delete(u.tenant); }
+    assert.deepEqual(approvals(u.tenant).map((a) => [a.state, a.source]), [["approved", "auto-paper"]]);
+    controlsReadFails = true;
+    try { await pass(); } finally { controlsReadFails = false; }
+    assert.deepEqual(approvals(u.tenant).map((a) => a.state), ["approved"], "held, not refused for 'evidence changed': the same evidence could never have been approved again");
+    assert.ok(existsSync(path.join(u.home, "ledger-source-blocked.json")), "nothing moved");
+    assert.ok(lines.some((l) => l.includes(`${u.tenant}: resume admission — owner controls cannot be read (controls unreadable (Error)) — a read that failed, not a change`)));
+    await pass();
+    assert.deepEqual(approvals(u.tenant).map((a) => a.state), ["applied"]);
+    assert.equal(forksOf(u.tenant).length, 1);
+    await cleanUp(t.tenant, u.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; controlsReadFails = false; }
+});
+
+it("on: a re-signed tenant whose unblocked book the continuity gate refuses is left to the ordinary path, and the operator is told how to approve it — which works", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    // Its book is on the volume with no barrier, and proves nothing: the gate refuses it.
+    const t = await preIncident();
+    rmSync(path.join(t.home, "ledger-source-blocked.json"));
+    await pass();
+    await t.resign();
+    await pass();
+    assert.equal(forksOf(t.tenant).length, 0, "the continuity gate holds it");
+    const w = watch(t.tenant)!;
+    assert.deepEqual([w.owed, w.run], [0, null], "answered, with no run of its own");
+    assert.match(String(w.outcome), /^not-held: its book is on the volume and not behind a barrier: the ordinary path decides/);
+    assert.equal(table("ledger_resume_approvals") ? approvals(t.tenant).length : 0, 0, "never approved automatically");
+    // Not "the gate does not hold it" and nothing more: the line says what to do if the gate refuses it.
+    // Not this preview's digest either — the ordinary path's attempt this pass armed the owner's
+    // controls into the home, which that digest binds — but a preview taken after the gate answered.
+    assert.ok(lines.some((l) => l.includes(`${t.tenant} re-signed; the continuity gate does not hold it`) &&
+      l.includes(`If the gate refuses its book instead`) && l.includes(`preview it again (MERRYMEN_RESUME_PREVIEW=${t.tenant})`)), "the operator is told what to do");
+    // What the line says works: preview, approve the digest it prints, and the same phases admit it.
+    await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_PREVIEW: t.tenant });
+    const latest = rows("SELECT run, entries_json FROM ledger_resume_preview_runs ORDER BY created_at_ms DESC LIMIT 1")[0]!;
+    const [entry] = JSON.parse(String(latest.entries_json)) as Array<{ tenant: string; pass: boolean; digest: string; book: string }>;
+    assert.deepEqual([entry!.tenant, entry!.pass, entry!.book], [t.tenant, true, "present"]);
+    await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${entry!.digest}` });
+    assert.deepEqual(approvals(t.tenant).map((a) => [a.state, a.source]), [["approved", "operator"]]);
+    await pass();
+    assert.deepEqual(approvals(t.tenant).map((a) => a.state), ["applied"]);
+    assert.equal(forksOf(t.tenant).length, 1);
+    await cleanUp(t.tenant);
   } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
 });
