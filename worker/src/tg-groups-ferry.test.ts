@@ -1547,7 +1547,7 @@ describe("the orchestrator ferries it where the contract says", () => {
   test("restore: in spawnChild, behind the lease refusal, after the link restore and before spawn()", () => {
     const spawnFn = body("async function spawnChild(");
     const refusal = spawnFn.indexOf("no healthy lease — not spawning");
-    const link = spawnFn.indexOf("await writeTelegramForChild(tenant);");
+    const link = spawnFn.indexOf("await writeTelegramForChild(tenant, retirementMemoryStoreForTest?.shared);");
     const restore = spawnFn.indexOf("await restoreTgGroupsForChild(tenant);");
     const proc = spawnFn.indexOf("proc = spawn(");
     assert.ok(refusal > 0 && link > refusal, "the lease refusal comes first");

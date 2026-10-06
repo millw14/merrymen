@@ -3916,7 +3916,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         return;
       }
     }
-    await writeTelegramForChild(tenant);
+    // The shared database is the same test seam the gates around this read
+    // through; in production it is unset, and this reads Postgres as before.
+    await writeTelegramForChild(tenant, retirementMemoryStoreForTest?.shared);
     /** The handoff's writer proof, for the handoff and for what puts its file right just before it. */
     const handoffWriter = () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant));
     // A REGISTERED BOOK'S HOME, before the handoff reads it, under the
@@ -4311,7 +4313,8 @@ async function spawnHolder(
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
-  await writeTelegramForChild(tenant);
+  // Through the same test seam as spawnChild's; unset in production.
+  await writeTelegramForChild(tenant, retirementMemoryStoreForTest?.shared);
   /** The handoff's writer proof, as spawnChild's is. */
   const handoffWriter = () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant));
   if (registered) normaliseRegisteredHome(tenant, registered, handoffWriter);
