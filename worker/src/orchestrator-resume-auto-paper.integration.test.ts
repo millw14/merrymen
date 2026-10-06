@@ -304,9 +304,10 @@ it("on: a re-signed paper tenant the chain refused at its last admission is prev
     assert.ok(!said.some((l) => l.includes(`MERRYMEN_RESUME_APPROVE=${t.tenant}:`)), said.join("\n"));
     assert.ok(!said.some((l) => l.includes(entry!.digest) && /approve it by hand/.test(l)));
     const manual = said.find((l) => l.startsWith(`resume auto-paper: ${t.tenant} re-signed and previewed in run `));
-    assert.ok(manual?.includes("Held on a chain refusal: an approval does not make it trade until what the chain showed is booked: book it first " +
-      "(docs/chain-gap-booking.md). If the booking tool refuses because a later refusal superseded the chain refusal, preview it and approve it once"), manual);
-    assert.ok(manual?.endsWith("then book it, then preview it again and approve the digest that preview prints"), manual);
+    assert.ok(manual?.includes("Held on a chain refusal: an approval does not make it trade until what the chain showed is booked, because admission reads " +
+      "the chain again from where the refused read began. Take it out of MERRYMEN_FLEET_ROLLOUT and book it first (docs/chain-gap-booking.md). If the booking " +
+      "tool refuses because a later refusal superseded the chain refusal, preview it and approve the digest that preview prints once"), manual);
+    assert.ok(manual?.endsWith("Then take it out of the rollout, book it, preview it again and approve the digest that preview prints, with it in the rollout at exits-only"), manual);
     assert.ok(existsSync(path.join(t.home, "ledger-source-blocked.json")), "its home untouched");
     await cleanUp(t.tenant);
   } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }

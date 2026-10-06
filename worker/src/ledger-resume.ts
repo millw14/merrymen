@@ -43,14 +43,16 @@
  *      this tree, so any such row refuses that tenant).
  *   2. Nothing on chain Postgres lacks: every UserOperationEvent and USDG
  *      Transfer touching the account, from the oldest financial cursor of the
- *      last mirror (and at least 26 hours back) to head, is in Postgres; and
- *      again, immediately before registration, from that read's head to the
- *      head then, which is the head the attestation records. An RPC failure
- *      retries. Only a paper tenant that could not arm live — no live
- *      operation, no flow, no live intent in its settings, and no chain
- *      refusal that no admission has answered since — skips it. A refusal
- *      names every operation and transfer it found (chainRefusal), and
- *      chain-gap-booking.ts is the reviewed way to book them.
+ *      last mirror (and at least 26 hours back, and for a tenant held on a
+ *      chain refusal no later than that refused read began) to head, is in
+ *      Postgres; and again, immediately before registration, from that
+ *      read's head to the head then, which is the head the attestation
+ *      records. An RPC failure retries. Only a paper tenant that could not
+ *      arm live — no live operation, no flow, no live intent in its settings,
+ *      and no chain refusal that no admission has answered since — skips it.
+ *      A refusal names every operation and transfer it found (chainRefusal)
+ *      and records where its read began, and chain-gap-booking.ts is the
+ *      reviewed way to book them, from the same window (resumeGapWindow).
  *   3. Nothing settled in the last 26 hours, so the new book's in-flight
  *      reconciler finds nothing to re-record.
  *   4. The flows are free of duplicate copies (distinct-flows.ts).
@@ -313,8 +315,13 @@ export interface ResumeEvidence {
    * on after the preview refuses the approval: the operator previews again
    * and sees the tenant as chain-read and exits-only, rather than putting a
    * now-live tenant at `trade` from a stale line.
+   *
+   * `chainHeldSince` only while the tenant is held on a chain refusal no
+   * admission has answered (ResumeCheck.chainHeldSince); absent otherwise,
+   * so every other tenant's evidence, and digest, is byte for byte what it
+   * was before the field existed.
    */
-  checks: { anchor: string; riskPeriod: string; controls: string; unresolved: number; chain: "required" | "not-required" };
+  checks: { anchor: string; riskPeriod: string; controls: string; unresolved: number; chain: "required" | "not-required"; chainHeldSince?: string };
   home: HomeIdentity;
 }
 export const evidenceDigest = (e: ResumeEvidence): string => hash(canonical(e));
@@ -338,16 +345,23 @@ export interface ResumeCheck {
    * starts exits-only. So an approval of it never admits it on that book: its
    * chain read refuses again while Postgres still lacks what the chain showed,
    * which records a fresh chain refusal, the newest decision the booking tool
-   * books on (chain-gap-booking.ts holdOf).
+   * books on (chain-gap-booking.ts holdOf). And it is read from no later than
+   * its refused reads began (`gapFromSec`, resumeGapWindow).
    */
   chainHeld: boolean;
+  /** While `chainHeld`: the tenant's newest decision (ChainHold.since), which the evidence binds. Null otherwise. */
+  chainHeldSince: string | null;
   holdsPositions: boolean;
   /** decision 6: paper tenants may trade once the canary has; live tenants holding positions start exits-only. */
   suggestedLevel: "trade" | "exits-only";
   anchor: string;
   riskPeriod: string;
   unresolved: number;
-  /** From where the chain is read: the oldest financial cursor of the last mirror, and at least 26 hours back. */
+  /**
+   * From where the chain is read: the oldest financial cursor of the last
+   * mirror, at least 26 hours back, and for a `chainHeld` tenant no later than
+   * its refused reads began (resumeGapWindow).
+   */
   gapFromSec: number;
   /** When the last mirror pass copied anything for the tenant: when the gap began. */
   lastMirrorAt: number | null;
@@ -528,32 +542,47 @@ export async function resumePreconditions(db: Db, o: {
   // books on. Read on chain, an approval refuses again until it is booked.
   const liveOps = Number(((await db.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id) = ?
       AND ((user_op_hash IS NOT NULL AND user_op_hash <> '') OR status IN ('landed', 'submitted', 'sent', 'pending', 'reverted', 'dropped'))`).get(account)) as Record<string, unknown>).n);
-  const chainHeld = await unansweredChainRefusal(db, o.tenant);
+  const hold = await readChainHold(db, o.tenant);
+  const chainHeld = hold.held;
   const paper = agent?.mode === "paper" && liveOps === 0 && flowCount === 0 && o.liveIntent !== true && !chainHeld;
   const held = Number(((await db.prepare("SELECT COUNT(*) AS n FROM positions WHERE LOWER(agent_id) = ? AND raw_balance <> '0'").get(account)) as Record<string, unknown>).n);
   let classHeld = 0;
   try { classHeld = Number(((await db.prepare("SELECT COUNT(*) AS n FROM class_positions WHERE LOWER(agent_id) = ? AND COALESCE(state, '') <> 'closed'").get(account)) as Record<string, unknown>).n); }
   catch (e) { if (!absentTable(e)) throw e; }
-  const { gapFromSec, lastMirrorAt } = await resumeGapWindow(db, o.tenant, o.nowSec);
+  // THE ONE WINDOW, from the same hold: a held tenant is read from no later
+  // than its refused reads began, however long ago that was.
+  const { gapFromSec, lastMirrorAt } = await resumeGapWindow(db, o.tenant, o.nowSec, hold);
   return {
-    refusals, paper, chainRequired: !paper, chainHeld, holdsPositions: held + classHeld > 0,
+    refusals, paper, chainRequired: !paper, chainHeld, chainHeldSince: hold.since, holdsPositions: held + classHeld > 0,
     suggestedLevel: paper ? "trade" : "exits-only", anchor, riskPeriod, unresolved, gapFromSec, lastMirrorAt, unreadable,
   };
+}
+
+/** When the last mirror pass copied anything for the tenant (its newest cursor), in unix seconds: when the gap began. */
+export async function lastMirrorPassAt(db: Db, tenant: string): Promise<number | null> {
+  return stampSec(((await db.prepare("SELECT MAX(updated_at) AS at FROM mirror_state WHERE tenant = ?").get(tenant.toLowerCase())) as Record<string, unknown> | undefined)?.at);
 }
 
 /**
  * WHERE THE CHAIN READ STARTS, AND WHEN THE GAP BEGAN, for one tenant now.
  *
- * Its own function so the chain-gap booking tool (chain-gap-booking.ts) reads
- * from exactly the second the admission's chain check reads from: a booking
- * that covered a narrower window would leave an operation it never saw for
- * the admission to refuse on, and one that guessed a wider one would propose
- * rows the admission never asked about. One computation, two readers.
+ * THE ONE WINDOW. Admission's chain check (orchestrator.ts resumeChainGate,
+ * from ResumeCheck.gapFromSec) and the chain-gap booking tool
+ * (chain-gap-booking.ts readBookingSnapshot) both read from exactly the second
+ * this returns: a booking that covered a narrower window would leave an
+ * operation it never saw for the admission to refuse on, and one that
+ * guessed a wider one would propose rows the admission never asked about.
+ * `hold` is the tenant's chain hold, read by each caller (readChainHold), and
+ * it is not optional: no caller can ask for a window without saying it.
  *
- * `gapFromSec` only moves later as `nowSec` advances (it is a minimum with
- * `nowSec - 26h`), so a window read now covers every later admission's.
+ * Without a hold, `gapFromSec` moves later as `nowSec` advances (a minimum
+ * with `nowSec - 26h`). WITH ONE IT NEVER STARTS LATER THAN THE HOLD'S READS
+ * BEGAN (ChainHold.readFromSec): what a refused read covered, every read
+ * after it covers, however long after — so the facts it named are listed by
+ * the booking tool and refused on by admission until they are booked, and
+ * never dropped out of the window by a clock that moved on.
  */
-export async function resumeGapWindow(db: Db, tenant: string, nowSec: number): Promise<{ gapFromSec: number; lastMirrorAt: number | null }> {
+export async function resumeGapWindow(db: Db, tenant: string, nowSec: number, hold: ChainHold): Promise<{ gapFromSec: number; lastMirrorAt: number | null }> {
   // WHEN THE GAP BEGAN, AND FROM WHERE THE CHAIN IS READ — two different
   // questions. The gap began at the last pass that copied anything (the
   // newest cursor). But a cursor only moves when rows arrive, and the
@@ -561,19 +590,18 @@ export async function resumeGapWindow(db: Db, tenant: string, nowSec: number): P
   // snapshots kept moving: an operation that landed after a STALLED financial
   // cursor is neither in Postgres nor after the newest cursor. So the chain
   // read starts at the OLDEST of the financial cursors (trades, flows,
-  // equity), still at least 26 hours back. A quiet table's cursor is old too,
-  // which only makes the read longer, never less complete.
-  const stamp = (v: unknown): number | null => {
-    if (v === null || v === undefined) return null;
-    const at = Number(v);
-    return !Number.isFinite(at) ? null : at > 1e12 ? Math.floor(at / 1000) : at;
-  };
-  const tenantKey = tenant.toLowerCase();
-  const lastMirrorAt = stamp(((await db.prepare("SELECT MAX(updated_at) AS at FROM mirror_state WHERE tenant = ?").get(tenantKey)) as Record<string, unknown> | undefined)?.at);
+  // equity), still at least 26 hours back, and no later than a held
+  // tenant's refused reads began. A quiet table's cursor is old too, which
+  // only makes the read longer, never less complete. The 600 seconds come off
+  // every term, the hold's too: a block that shares its second with the
+  // refused read's first block is never after the new read's start.
+  const lastMirrorAt = await lastMirrorPassAt(db, tenant);
   const cursorHoles = FINANCIAL_CURSORS.map(() => "?").join(", ");
-  const oldestFinancial = stamp(((await db.prepare(`SELECT MIN(updated_at) AS at FROM mirror_state WHERE tenant = ? AND table_name IN (${cursorHoles})`)
-    .get(tenantKey, ...FINANCIAL_CURSORS)) as Record<string, unknown> | undefined)?.at);
-  const gapFromSec = Math.min(oldestFinancial ?? lastMirrorAt ?? nowSec, lastMirrorAt ?? nowSec, nowSec - GAP_WINDOW_SEC) - 600;
+  const oldestFinancial = stampSec(((await db.prepare(`SELECT MIN(updated_at) AS at FROM mirror_state WHERE tenant = ? AND table_name IN (${cursorHoles})`)
+    .get(tenant.toLowerCase(), ...FINANCIAL_CURSORS)) as Record<string, unknown> | undefined)?.at);
+  // Held with no start said (no reader of this build makes one): from the first block of all.
+  const heldFrom = hold.held ? hold.readFromSec ?? 0 : Infinity;
+  const gapFromSec = Math.min(oldestFinancial ?? lastMirrorAt ?? nowSec, lastMirrorAt ?? nowSec, nowSec - GAP_WINDOW_SEC, heldFrom) - 600;
   return { gapFromSec, lastMirrorAt };
 }
 
@@ -591,11 +619,24 @@ export async function readResumeEvidence(db: Db, o: {
     homePendingImport: home.markers?.includes("ledger-import.pending.json") ?? false,
     homeBook: homeBookState(home), liveIntent: o.liveIntent,
   });
+  // A HELD TENANT'S EVIDENCE NAMES ITS NEWEST DECISION. Every decision of it
+  // then changes its digest. Without that, a held tenant whose owner turned
+  // live trading off after a refusal read chain:required whatever its
+  // settings said, and its evidence could come back byte for byte as it was
+  // when an earlier approval of it was refused on the chain (that approval
+  // already read chain:required, for the live intent): the preview printed
+  // that refused digest again, an approval of it was never recorded (one
+  // evidence is approved once), and the way out the runbook gives — approve
+  // once so admission records a fresh chain refusal — did nothing at all.
+  // Absent for every other tenant (ResumeEvidence.checks says why). Phase A
+  // recomputes the same: while the approval is open no other decision of the
+  // tenant can be made (one open per tenant), and the open one is no decision.
   const evidence: ResumeEvidence = {
     version: 1, tenant, account, chainId: o.grant.chainId, owner: o.grant.owner.toLowerCase(),
     pg: await readPgEvidence(db, { tenant, account, nowSec: o.nowSec }),
     checks: { anchor: check.anchor, riskPeriod: check.riskPeriod, controls: o.controls.digest, unresolved: check.unresolved,
-      chain: check.chainRequired ? "required" : "not-required" },
+      chain: check.chainRequired ? "required" : "not-required",
+      ...(check.chainHeld ? { chainHeldSince: check.chainHeldSince ?? "unknown" } : {}) },
     home,
   };
   return { evidence, digest: evidenceDigest(evidence), check };
@@ -631,9 +672,11 @@ export interface PreviewEntry {
   /**
    * A CHAIN REFUSAL OF IT THAT NO ADMISSION HAS ANSWERED (ResumeCheck.
    * chainHeld): it reads chain:required whatever its paper reading, and an
-   * approval of it reads the chain again rather than admitting it — never a
-   * way to trade until what the chain showed is booked. Unlike `lastRefusal`
-   * it is not only the newest decision. Optional so an older run parses.
+   * approval of it reads the chain again, from where the refused read began,
+   * rather than admitting it — never a way to trade until what the chain
+   * showed is booked. Unlike `lastRefusal` it is not only the newest
+   * decision. Optional so an older run parses; a reader that decides on it
+   * asks the evidence (checks.chainHeldSince) and the store as well.
    */
   chainHeld?: boolean;
 }
@@ -642,10 +685,26 @@ export interface LastRefusal { evidence: string; reason: string; atMs: number }
 export const previewRunDigest = (entries: readonly PreviewEntry[]): string =>
   hash(canonical(entries.map((e) => [e.tenant, e.digest, e.pass])));
 
+/**
+ * RECORD A PREVIEW RUN, by its digest. A run that comes to a digest already
+ * recorded keeps its first `created_at_ms` (when that preview was first
+ * taken, which an approval of it measures admissions against) and takes the
+ * newest entries.
+ *
+ * WHY THE ENTRIES ARE REPLACED. The digest binds each tenant, its evidence
+ * digest and its verdict, and nothing else; the entries also carry what was
+ * said beside them (the last refusal, the chain hold). Kept insert-once, a
+ * tenant refused since — for evidence that changed, say — whose new preview
+ * repeated an earlier run's digests left that run row saying the refusal
+ * before it, or none, though the log line said the new one; and the row is
+ * the record a log that dropped lines cannot replace. What an approval of the
+ * run binds cannot change this way: the same digest is the same tenants, the
+ * same evidence and the same verdicts.
+ */
 export async function recordPreviewRun(db: Db, entries: readonly PreviewEntry[], nowMs: number): Promise<string> {
   await ensureLedgerResumeSchema(db);
   const run = previewRunDigest(entries);
-  await db.prepare("INSERT INTO ledger_resume_preview_runs (run, created_at_ms, entries_json) VALUES (?, ?, ?) ON CONFLICT (run) DO NOTHING")
+  await db.prepare("INSERT INTO ledger_resume_preview_runs (run, created_at_ms, entries_json) VALUES (?, ?, ?) ON CONFLICT (run) DO UPDATE SET entries_json = excluded.entries_json")
     .run(run, nowMs, canonical(entries));
   return run;
 }
@@ -735,13 +794,22 @@ export async function readPreRegistrationTenants(db: Db): Promise<Set<string>> {
   }
 }
 
-/** One state move, conditional on the state it was read in. Returns whether it moved. */
+/**
+ * One state move, conditional on the state it was read in. Returns whether it
+ * moved. `chainReadFromSec`, on a chain refusal: the chain time of the first
+ * block the refused read covered (GapResult.fromSec), which holds every later
+ * read of the tenant at or before it while the refusal is unanswered.
+ */
 export async function moveApproval(db: Db, approvalId: string, from: ApprovalState, to: ApprovalState,
-  fields: { generation?: string; archivePath?: string | null; reason?: string } = {}, nowMs = Date.now()): Promise<boolean> {
+  fields: { generation?: string; archivePath?: string | null; reason?: string; chainReadFromSec?: number } = {}, nowMs = Date.now()): Promise<boolean> {
   const sets = ["state = ?", "updated_at_ms = ?"], args: unknown[] = [to, nowMs];
   if (fields.generation !== undefined) { sets.push("generation = ?"); args.push(fields.generation); }
   if (fields.archivePath !== undefined) { sets.push("archive_path = ?"); args.push(fields.archivePath); }
   if (fields.reason !== undefined) { sets.push("reason = ?"); args.push(fields.reason.slice(0, 500)); }
+  if (fields.chainReadFromSec !== undefined) {
+    if (!Number.isSafeInteger(fields.chainReadFromSec)) throw new Error("a chain refusal's read start is not a whole second");
+    sets.push("chain_read_from_sec = ?"); args.push(fields.chainReadFromSec);
+  }
   const r = await db.prepare(`UPDATE ledger_resume_approvals SET ${sets.join(", ")} WHERE approval_id = ? AND state = ?`).run(...args, approvalId, from);
   return r.changes === 1;
 }
@@ -833,6 +901,15 @@ export async function applyResumeApprovals(db: Db, approvals: readonly ResumeApp
  * and final, as before.
  */
 export type RecordedApproval = { recorded: true } | { recorded: false; why: string; transient?: true };
+/**
+ * Is the tenant held on a chain refusal, by its line, its evidence, or the
+ * store now? For an alert only: a lookup that fails says nothing either way,
+ * and the alert is then said only if the line or the evidence say it.
+ */
+async function chainHeldNow(db: Db, entry: PreviewEntry): Promise<boolean> {
+  if (entry.chainHeld === true || entry.evidence?.checks.chainHeldSince !== undefined) return true;
+  try { return (await readChainHold(db, entry.tenant)).held; } catch { return false; }
+}
 export async function recordResumeApproval(db: Db, o: { entry: PreviewEntry; run: string; at: number; nowMs: number; source: ApprovalSource },
   log: (line: string) => void): Promise<RecordedApproval> {
   const { entry, run, at, nowMs, source } = o;
@@ -850,6 +927,18 @@ export async function recordResumeApproval(db: Db, o: { entry: PreviewEntry; run
       log(`[alert] resume approval: ${entry.tenant} — an automatic (auto-paper) approval of this exact evidence ${String(existing.state)}` +
         `${existing.reason ? ` (${String(existing.reason).slice(0, 200)})` : ""}, and one evidence is never approved twice — not approved. ` +
         "Preview it again once its evidence changes, and approve the digest that preview prints");
+    } else if (source === "operator" && (existing.state === "refused" || existing.state === "revoked" || existing.state === "applied")
+      && await chainHeldNow(db, entry)) {
+      // NOR FOR A TENANT HELD ON A CHAIN REFUSAL. The way out the runbook
+      // gives it is an approval (CHAIN_HELD_NEXT), and an approval of evidence
+      // already decided is never recorded: said, rather than left to look
+      // like one that is waiting. Since every decision of a held tenant
+      // changes its evidence (checks.chainHeldSince), the digest a fresh
+      // preview prints is never this one.
+      log(`[alert] resume approval: ${entry.tenant} is held on a chain refusal no admission has answered, and an approval of this exact evidence ` +
+        `${existing.source === AUTO_PAPER_SOURCE ? "(auto-paper) " : ""}${String(existing.state)}` +
+        `${existing.reason ? ` (${String(existing.reason).slice(0, 200)})` : ""} — one evidence is never approved twice, so nothing is recorded. ` +
+        "Preview it again and approve the digest that preview prints (each decision of a held tenant changes its digest)");
     }
     return { recorded: false, why: `an approval of this evidence is already on record (${String(existing.state)})` };
   }
@@ -965,7 +1054,7 @@ export async function revokeResumeApprovals(db: Db, revokes: readonly ResumeRevo
  *     revoke is an operator's decision about that tenant, which no re-sign
  *     overrides;
  *   - no chain refusal of it that an admission has not answered since
- *     (unansweredChainRefusal): the chain showed the Postgres this reads
+ *     (chainHoldOf): the chain showed the Postgres this reads
  *     incomplete, and what it showed is booked by the operator's reviewed
  *     tool, never stepped past by a re-sign;
  *   - and held by the gate: its book on the volume is blocked, or absent with
@@ -1255,7 +1344,7 @@ async function openRows(db: Db, account: string): Promise<{ live: number; comman
  * the reason in its own words, and holds even if that ever changes.
  *
  * `chainHeld` on a `manual` verdict: a chain refusal of it that no admission
- * has answered (unansweredChainRefusal). The lane's line then says what
+ * has answered (chainHoldOf). The lane's line then says what
  * CHAIN_HELD_NEXT says, never "approve it by hand" with its digest: an
  * approval of it reads the chain again rather than letting it trade.
  */
@@ -1272,9 +1361,11 @@ export async function autoPaperVerdict(db: Db, entry: PreviewEntry, o: { consent
     why.push("live-trading consent is stood down on this deployment (MERRYMEN_LIVE_INTENT_STAND_DOWN=1): a funded account arms live whatever its owner's settings say");
   }
   if (!entry.pass) why.push(`it did not pass: ${entry.refusals.join("; ")}`);
-  // Asked of the store as well as the line, so a line that does not carry it
-  // (an older build's) is never read as "not held".
-  const chainHeld = entry.chainHeld === true || await unansweredChainRefusal(db, entry.tenant);
+  // Asked of the line, of the evidence it binds, and of the store, so a line
+  // that does not carry it (an older build's, or a run row from before its
+  // entries were refreshed) is never read as "not held". A store lookup that
+  // fails throws, and the lane keeps the re-sign owed.
+  const chainHeld = entry.chainHeld === true || e.checks.chainHeldSince !== undefined || (await readChainHold(db, entry.tenant)).held;
   if (chainHeld) {
     // It reads chain:required for this (ResumeCheck.chainHeld), which is said
     // here in its own words rather than as "it could arm live".
@@ -1302,25 +1393,57 @@ export async function autoPaperVerdict(db: Db, entry: PreviewEntry, o: { consent
  * trade. An approval of it reads the chain again, and while Postgres still
  * lacks what the chain showed it is only refused again.
  *
- * The booking tool books only while a chain refusal is the tenant's newest
- * decision (chain-gap-booking.ts holdOf), so a later refusal for another
- * reason — evidence that changed, say — leaves it nothing to book on. One
- * approval, with the tenant in the rollout so admission runs for it, is the
- * way out: admission reads the chain (the tenant reads chain:required) and
- * records a fresh chain refusal, which is its newest decision again.
+ * The booking tool books only a tenant out of the rollout (nothing may write
+ * its book meanwhile), and only while a chain refusal is its newest decision
+ * (chain-gap-booking.ts holdOf), so a later refusal for another reason —
+ * evidence that changed, say — leaves it nothing to book on. One approval,
+ * with the tenant in the rollout so admission runs for it, is the way out:
+ * admission reads the chain (the tenant reads chain:required), from no later
+ * than the refused read began (resumeGapWindow), and records a fresh chain
+ * refusal, which is its newest decision again. Every decision of a held
+ * tenant changes its digest (checks.chainHeldSince), so the digest the
+ * preview prints is always one that can still be approved.
  */
-export const CHAIN_HELD_NEXT = "an approval does not make it trade until what the chain showed is booked: book it first (docs/chain-gap-booking.md). " +
-  "If the booking tool refuses because a later refusal superseded the chain refusal, preview it and approve it once, with it in the rollout at " +
-  "exits-only, so admission reads the chain again (it refuses it again while Postgres lacks what the chain showed, recording a fresh chain refusal); " +
-  "then book it, then preview it again and approve the digest that preview prints";
+export const CHAIN_HELD_NEXT = "an approval does not make it trade until what the chain showed is booked, because admission reads the chain again from where the " +
+  "refused read began. Take it out of MERRYMEN_FLEET_ROLLOUT and book it first (docs/chain-gap-booking.md). If the booking tool refuses because a later " +
+  "refusal superseded the chain refusal, preview it and approve the digest that preview prints once, with it in the rollout at exits-only: admission " +
+  "reads the chain again and, while Postgres lacks what the chain showed, refuses it with a fresh chain refusal. Then take it out of the rollout, " +
+  "book it, preview it again and approve the digest that preview prints, with it in the rollout at exits-only";
+
+/**
+ * A TENANT HELD ON A CHAIN REFUSAL NO ADMISSION HAS ANSWERED, as admission,
+ * the preview, the automatic lane and the chain-gap booking tool all read it
+ * (chainHoldOf, the one rule; readChainHold, the one read).
+ *
+ * `held`: an approval of it was refused with the chain refusal's words
+ * (CHAIN_REFUSAL: this build's chainRefusal and the shorter reason before it
+ * alike), and no approval of it reached `registered` or `applied` after that.
+ *
+ * `readFromSec`: a chain time no later than the first block ANY of those
+ * unanswered refusals' reads covered (the earliest of them; each later one
+ * started earlier still, from this). The chain read starts at least 600
+ * seconds before it (resumeGapWindow), so whatever a refused read covered,
+ * every later read of the tenant covers too, however much later it is taken.
+ *
+ * `since`: the tenant's newest decision (refused, registered, applied or
+ * revoked), bound into the evidence as checks.chainHeldSince, so that every
+ * decision of a held tenant changes its digest and the digest a preview
+ * prints for it is never one already decided (readResumeEvidence says why).
+ */
+export interface ChainHold { held: boolean; readFromSec: number | null; since: string | null }
+const NOT_HELD: ChainHold = { held: false, readFromSec: null, since: null };
+/** One approval of the tenant as the hold reads it. `chainReadFromSec` and `evidenceJson` matter only on a chain refusal. */
+export interface DecisionRow {
+  approvalId: string; state: string; reason: string; createdAtMs: number; updatedAtMs: number;
+  chainReadFromSec: number | null; evidenceJson: string | null;
+}
+/** The states that are a decision about the tenant: everything but an approval still open. */
+const DECIDED_STATES = ["refused", "registered", "applied", "revoked"] as const;
 
 /**
  * HAS ADMISSION REFUSED THIS TENANT ON THE CHAIN, WITH NOTHING ADMITTED
- * SINCE? Any approval of it refused with the chain refusal's words
- * (CHAIN_REFUSAL: this build's chainRefusal and the shorter reason before
- * it alike), later than every approval of it that reached `registered` or
- * `applied`. A table not there yet holds no refusal; any other read that
- * fails throws, and every caller fails closed on a throw.
+ * SINCE — and if so, from where must it be read, and what was decided last?
+ * PURE: the rule, over the tenant's decided approvals however they were read.
  *
  * WHY IT IS ASKED. The chain check used to run only for a tenant that could
  * arm live, and a chain refusal proves Postgres lacks operations or
@@ -1336,18 +1459,109 @@ export const CHAIN_HELD_NEXT = "an approval does not make it trade until what th
  * (autoPaperVerdict). Not only the newest decision: an approval refused on
  * other grounds since says nothing about the chain. Only an admission
  * answers it.
+ *
+ * AND READ FROM WHERE IT WAS REFUSED. A read's start used to be only the
+ * oldest financial cursor, at least 26 hours back — a second that moves
+ * later as time passes. When every cursor was recent at the refusal, a fact
+ * older than them was inside the refused read and, a day on, outside every
+ * read: the booking tool found "nothing missing", and an approval read
+ * clean and admitted the tenant with the fact unbooked, which then answered
+ * the refusal for good. So a held tenant is read from no later than its
+ * refused reads began (readFromSec), by admission and the booking tool alike.
  */
-async function unansweredChainRefusal(db: Db, tenant: string): Promise<boolean> {
+export function chainHoldOf(rows: readonly DecisionRow[]): ChainHold {
+  const admittedAt = Math.max(-Infinity, ...rows.filter((r) => r.state === "registered" || r.state === "applied").map((r) => r.updatedAtMs));
+  // A time that does not read as a number is never "before the admission".
+  const unanswered = rows.filter((r) => r.state === "refused" && r.reason.startsWith(CHAIN_REFUSAL) && !(r.updatedAtMs < admittedAt));
+  if (!unanswered.length) return NOT_HELD;
+  const readFromSec = Math.min(...unanswered.map((r) => (r.chainReadFromSec !== null && Number.isFinite(r.chainReadFromSec) ? r.chainReadFromSec : chainReadFloor(r))));
+  const newest = rows.filter((r) => (DECIDED_STATES as readonly string[]).includes(r.state))
+    .sort((a, b) => b.updatedAtMs - a.updatedAtMs || b.createdAtMs - a.createdAtMs || (a.approvalId < b.approvalId ? -1 : a.approvalId > b.approvalId ? 1 : 0))[0]!;
+  return { held: true, readFromSec: Number.isFinite(readFromSec) ? readFromSec : 0, since: `${newest.approvalId}@${newest.updatedAtMs}` };
+}
+
+/** A cursor stamp as unix seconds, whichever unit it was written in, or null (resumeGapWindow's own reading). */
+function stampSec(v: unknown): number | null {
+  if (v === null || v === undefined || v === "" || v === "null") return null;
+  const at = Number(v);
+  return !Number.isFinite(at) ? null : at > 1e12 ? Math.floor(at / 1000) : at;
+}
+
+/**
+ * WHERE A CHAIN REFUSAL'S READ BEGAN, FOR A ROW WRITTEN BEFORE THAT WAS
+ * RECORDED (chain_read_from_sec null): a second never later than the one the
+ * refused read was asked to start from, derived from the row alone. Fails
+ * closed: whatever cannot be shown reads from the first block of all (0).
+ *
+ * The refused read started from min(oldest financial cursor, newest cursor,
+ * its now - 26h) - 600, every term as it stood at the read (resumeGapWindow).
+ *  - Its now was after the approval was recorded (admission acts only on an
+ *    open approval), so `now - 26h` is at least created_at - 26h.
+ *  - The cursors then were the approval's own evidence (pg.mirrorState):
+ *    Phase A reads the chain only once the evidence, cursors included, has
+ *    matched the digest approved, and between the archive and the
+ *    registration no book of the tenant exists to mirror. A cursor's stamp
+ *    is the creation time of the row it points at, which was mirrored, and so
+ *    stamped `updated_at`, no earlier than it was written. So each stamp is
+ *    no later than its cursor's updated_at then: the financial cursors'
+ *    stamps bound the oldest financial cursor (each must have one), and with
+ *    none of those, any stamped cursor bounds the newest (no cursor at all is
+ *    the `now` term alone).
+ * Not the CURRENT cursors: they only move later, and are no bound on what
+ * they were. Evidence that does not parse, a financial cursor with no stamp,
+ * or cursors none of which is stamped: 0. The window helper takes its 600
+ * seconds off this as off every start, so the read begins no later than the
+ * refused read was asked to; what that read's own search for a block old
+ * enough stepped back past, the row never recorded.
+ */
+export function chainReadFloor(r: { createdAtMs: number; evidenceJson: string | null }): number {
+  const created = Math.floor(r.createdAtMs / 1000);
+  if (!Number.isFinite(created)) return 0;
+  let cursors: unknown;
+  try { cursors = (JSON.parse(String(r.evidenceJson)) as { pg?: { mirrorState?: unknown } } | null)?.pg?.mirrorState; } catch { return 0; }
+  if (!Array.isArray(cursors) || cursors.some((c) => !Array.isArray(c))) return 0;
+  const read = (cursors as unknown[][]).map((c) => ({ table: String(c[0]), stamp: stampSec(c[2]) }));
+  const financial = read.filter((c) => (FINANCIAL_CURSORS as readonly string[]).includes(c.table));
+  if (financial.some((c) => c.stamp === null)) return 0;
+  const stamps = (financial.length ? financial : read).flatMap((c) => (c.stamp === null ? [] : [c.stamp]));
+  if (read.length && !stamps.length) return 0;
+  return Math.max(0, Math.min(created - GAP_WINDOW_SEC, ...stamps));
+}
+
+/**
+ * THE TENANT'S CHAIN HOLD, READ (chainHoldOf decides). A table not there yet
+ * holds no refusal. Any other read that fails throws, and every caller fails
+ * closed on a throw (a preview that does not pass, an admission deferred).
+ *
+ * `schema`, when the caller already knows it from the catalogue: inside one
+ * Postgres transaction a failed statement aborts the rest (the booking
+ * tool's snapshot, chain-gap-booking.ts existingTables), so nothing is learnt
+ * from a failure there. Without it, a column not there yet (a table an
+ * earlier build created, before this process ensured the schema) reads every
+ * row as one written before the column: its start is derived, which is never
+ * later (chainReadFloor). Only that column; any other drift throws.
+ */
+export async function readChainHold(db: Db, tenant: string, schema?: { table: boolean; readFromColumn: boolean }): Promise<ChainHold> {
+  if (schema && !schema.table) return NOT_HELD;
+  const select = (withColumn: boolean) => db.prepare(`SELECT approval_id, state, reason, created_at_ms, updated_at_ms, evidence_json${withColumn ? ", chain_read_from_sec" : ""}
+      FROM ledger_resume_approvals WHERE tenant = ? AND state IN (${DECIDED_STATES.map(() => "?").join(", ")})`).all(tenant.toLowerCase(), ...DECIDED_STATES);
   let rows: Array<Record<string, unknown>>;
   try {
-    rows = (await db.prepare("SELECT state, reason, updated_at_ms FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('refused', 'registered', 'applied')")
-      .all(tenant.toLowerCase())) as Array<Record<string, unknown>>;
+    try { rows = (await select(schema?.readFromColumn ?? true)) as Array<Record<string, unknown>>; }
+    catch (e) {
+      const err = e as { code?: unknown; message?: unknown } | null;
+      if (schema || !/chain_read_from_sec/.test(String(err?.message ?? "")) || !(err?.code === "42703" || /no such column/.test(String(err?.message ?? "")))) throw e;
+      rows = (await select(false)) as Array<Record<string, unknown>>;
+    }
   } catch (e) {
-    if (absentTable(e)) return false;
+    if (absentTable(e)) return NOT_HELD;
     throw e;
   }
-  const admittedAt = Math.max(-Infinity, ...rows.filter((r) => r.state !== "refused").map((r) => Number(r.updated_at_ms)));
-  return rows.some((r) => r.state === "refused" && String(r.reason ?? "").startsWith(CHAIN_REFUSAL) && !(Number(r.updated_at_ms) < admittedAt));
+  return chainHoldOf(rows.map((r) => ({
+    approvalId: String(r.approval_id), state: String(r.state), reason: String(r.reason ?? ""), createdAtMs: Number(r.created_at_ms), updatedAtMs: Number(r.updated_at_ms),
+    chainReadFromSec: r.chain_read_from_sec === null || r.chain_read_from_sec === undefined ? null : Number(r.chain_read_from_sec),
+    evidenceJson: r.evidence_json === null || r.evidence_json === undefined ? null : String(r.evidence_json),
+  })));
 }
 
 // ── the chain ────────────────────────────────────────────────────────────────
@@ -1378,14 +1592,23 @@ export type MissingChainFact =
   | { kind: "operation"; userOpHash: string; txHash: string; block: string | null; logIndex: number | null; success: boolean | null }
   | { kind: "transfer"; txHash: string; block: string | null; logIndex: number | null; direction: "in" | "out" | "self"; amountRaw: string | null; counterparty: string | null };
 
+/**
+ * `fromSec`, on a whole read (from `sinceSec`): the chain's own time of the
+ * first block it read, or 0 when it read from the first block of all. A chain
+ * refusal records it (ledger_resume_approvals.chain_read_from_sec), and every
+ * later read of the tenant starts at least 600 seconds before it while that
+ * refusal stands (resumeGapWindow), so strictly before that block: never a
+ * block it covered left out. Absent on a re-read from a block already reached.
+ */
 export type GapResult =
-  | { status: "clean"; fromBlock: string; head: string; ops: number; transfers: number }
+  | { status: "clean"; fromBlock: string; head: string; ops: number; transfers: number; fromSec?: number }
   | {
     status: "missing"; ops: number; transfers: number;
     /** The window read, as for `clean`, so a refusal can say where it looked. */
     fromBlock: string; head: string;
     /** Every operation and transfer the counts are made of, in chain order. */
     found: MissingChainFact[];
+    fromSec?: number;
   }
   | { status: "unavailable"; why: string };
 
@@ -1553,6 +1776,8 @@ export async function chainGapCheck(o: {
   try {
     const head = await o.chain.getBlockNumber();
     let from: bigint;
+    /** The chain's time of `from`, on a whole read: what a refusal records as where its read began. */
+    let fromSec: number | undefined;
     if (o.fromBlock !== undefined) {
       if (o.fromBlock < 0n || head < o.fromBlock) return { status: "unavailable", why: "the chain's head is behind the block already read" };
       from = o.fromBlock;
@@ -1561,11 +1786,18 @@ export async function chainGapCheck(o: {
       const headAt = await o.chain.getBlockTimestamp(head);
       let back = BigInt(Math.max(0, headAt - sinceSec)) * BLOCKS_PER_SEC_GUESS + 1000n;
       from = head > back ? head - back : 0n;
-      for (let i = 0; from > 0n && (await o.chain.getBlockTimestamp(from)) > sinceSec; i++) {
+      // The first block of all is dated 0 here: no block is earlier, and no
+      // later read that starts at or before it can leave one out.
+      fromSec = 0;
+      for (let i = 0; from > 0n; i++) {
+        const at = await o.chain.getBlockTimestamp(from);
+        // A whole second, never later than the block's own.
+        if (at <= sinceSec) { fromSec = Math.floor(at); break; }
         if (i >= 8) return { status: "unavailable", why: "could not find a block old enough to start from" };
         back *= 2n;
         from = head > back ? head - back : 0n;
       }
+      if (!Number.isFinite(fromSec)) return { status: "unavailable", why: "the starting block's time could not be read" };
     }
     const span = o.maxSpan ?? 50_000n;
     const account = addressTopic(o.account);
@@ -1576,11 +1808,12 @@ export async function chainGapCheck(o: {
     const into = await getLogsAdaptive(reader, { address: o.usdg as `0x${string}`, topics: [TRANSFER_TOPIC, null, account] }, from, head, span, o.log);
     if (!ops.complete || !out.complete || !into.complete) return { status: "unavailable", why: "the log read did not cover the whole window" };
     const found = chainFactsPostgresLacks({ account: o.account, opLogs: ops.logs, outLogs: out.logs, inLogs: into.logs, known: o.known });
+    const started = fromSec === undefined ? {} : { fromSec };
     if (found.length) {
       return { status: "missing", ops: found.filter((f) => f.kind === "operation").length, transfers: found.filter((f) => f.kind === "transfer").length,
-        fromBlock: String(from), head: String(head), found };
+        fromBlock: String(from), head: String(head), found, ...started };
     }
-    return { status: "clean", fromBlock: String(from), head: String(head), ops: ops.logs.length, transfers: out.logs.length + into.logs.length };
+    return { status: "clean", fromBlock: String(from), head: String(head), ops: ops.logs.length, transfers: out.logs.length + into.logs.length, ...started };
   } catch (e) {
     const kind = e instanceof Error && /^[A-Za-z]{1,40}$/.test(e.name) ? e.name : "Error";
     return { status: "unavailable", why: `the chain could not be read (${kind})` };

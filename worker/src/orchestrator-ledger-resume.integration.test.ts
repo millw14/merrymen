@@ -456,7 +456,7 @@ it("a paper tenant held on a chain refusal no admission has answered: the lane l
       // The booking tool has nothing to book on — its newest decision is not a chain refusal — and says what to do.
       const superseded = holdOf(await readBookingSnapshot(shared, { tenant: t.tenant, dialect: "sqlite", nowSec: nowSec() }), nowSec());
       assert.equal(superseded.anchorSec, null);
-      assert.match(superseded.refusals.join(" "), /refused for another reason\) is not a chain refusal: .*An earlier approval was refused on the chain: preview the tenant and approve it once, .*fresh chain refusal; then preview here again$/);
+      assert.match(superseded.refusals.join(" "), /refused for another reason\) is not a chain refusal: .*An earlier approval was refused on the chain: preview the tenant in admission's preview and approve the digest it prints once, .*fresh chain refusal; then take it out of the rollout and preview here again$/);
 
       // 3. Its owner turns live trading off and signs again: it reads as paper, holding nothing. The automatic lane previews it and leaves it,
       //    never offering the approval of its digest as a way to trade, and reads no chain.
@@ -490,7 +490,8 @@ it("a paper tenant held on a chain refusal no admission has answered: the lane l
         const fresh = approvalsOf(t.tenant).at(-1)!;
         assert.deepEqual([fresh.state, fresh.reason], ["refused", `${CHAIN_REFUSAL}: ${named}`], "a fresh chain refusal, naming what is still missing");
         assert.ok(said.slice(from).some((l) => l === `[alert] ${t.tenant}: resume approval REFUSED — ${CHAIN_REFUSAL}: ${named}. The tenant stays held; ` +
-          "book what the chain shows (docs/chain-gap-booking.md), then preview again and approve the digest that preview prints"), "its alert says to book it, not to approve again");
+          "take it out of MERRYMEN_FLEET_ROLLOUT and book what the chain shows (docs/chain-gap-booking.md), then preview again and approve the digest that preview prints"),
+          "its alert says to book it, not to approve again");
         assert.equal(forksOf(t.tenant).length, 0, "never admitted on the book the chain showed incomplete");
         assert.deepEqual(readdirSync(t.home).sort(), home, "its home untouched");
         assert.equal(readFileSync(path.join(t.home, "grant.json"), "utf8"), "OLD SESSION KEY");
@@ -515,7 +516,8 @@ it("a paper tenant held on a chain refusal no admission has answered: the lane l
         assert.ok(summary.some((l) => l === `[resume-preview] approve every passing tenant of this run with MERRYMEN_RESUME_APPROVE=run:${q.run} — for the 1 held on ` +
           "a chain refusal (chainHeld, below) that is a chain read, not a way to trade"), summary.join("\n"));
         assert.ok(summary.some((l) => l.startsWith(`[resume-preview] 1 passing tenant(s) held on a chain refusal no admission has answered: ${t.tenant} — for each, ` +
-          "an approval does not make it trade until what the chain showed is booked: book it first (docs/chain-gap-booking.md)")), summary.join("\n"));
+          "an approval does not make it trade until what the chain showed is booked, because admission reads the chain again from where the refused read began. " +
+          "Take it out of MERRYMEN_FLEET_ROLLOUT and book it first (docs/chain-gap-booking.md)")), summary.join("\n"));
         await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${qe.digest}` });
         await reconcile(); await settle();
         assert.equal(approval(t.tenant)?.state, "applied");
@@ -536,9 +538,10 @@ it("a tenant held on a chain refusal is admitted only on a chain read that answe
   // Refused on the chain at an earlier admission, as admission records it; the owner's settings ask for nothing live.
   await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_PREVIEW: t.tenant }); // the resume tables
   raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
-      created_at_ms, updated_at_ms, reason, source) VALUES ('held-e', ?, ?, 4663, ?, ?, '{}', ?, 'refused', ?, ?, ?, 'operator')`)
+      created_at_ms, updated_at_ms, reason, source, chain_read_from_sec) VALUES ('held-e', ?, ?, 4663, ?, ?, '{}', ?, 'refused', ?, ?, ?, 'operator', ?)`)
     .run(t.tenant, t.account, t.owner, "f".repeat(64), "e".repeat(64), Date.now() - 60_000, Date.now() - 60_000,
-      chainRefusal([{ kind: "transfer", txHash: `0x${"de".repeat(32)}`, block: "7", logIndex: 1, direction: "in", amountRaw: "5000000", counterparty: addr(0xfeed) }]));
+      chainRefusal([{ kind: "transfer", txHash: `0x${"de".repeat(32)}`, block: "7", logIndex: 1, direction: "in", amountRaw: "5000000", counterparty: addr(0xfeed) }]),
+      nowSec() - 41 * 3600);
   const p = await preview(t.tenant);
   assert.deepEqual([p.entries[0]!.pass, p.entries[0]!.chain, (p.entries[0] as { chainHeld?: boolean }).chainHeld], [true, "required", true]);
   await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p.entries[0]!.digest}` });
@@ -563,7 +566,7 @@ it("a tenant held on a chain refusal is admitted only on a chain read that answe
   // The refusal lookup itself fails: admission defers, and a preview does not pass.
   const realPrepare = shared.prepare.bind(shared);
   (shared as { prepare: typeof shared.prepare }).prepare = (sql: string) => {
-    if (/^SELECT state, reason, updated_at_ms FROM ledger_resume_approvals/.test(sql)) throw Object.assign(new Error("connection reset"), { code: "08006" });
+    if (/^SELECT approval_id, state, reason, created_at_ms, updated_at_ms, evidence_json/.test(sql)) throw Object.assign(new Error("connection reset"), { code: "08006" });
     return realPrepare(sql);
   };
   try {

@@ -3256,6 +3256,8 @@ type ResumeVerdict = { go: false } | { go: true; registered: string | null; /** 
 const AUTO_PAPER_NOT_SAFE = "an automatic (auto-paper) approval admits only a paper tenant that could not arm live and holds no positions, " +
   "and this one now could arm live or holds positions: preview it again and approve it by hand";
 const resumeChecks = new Map<string, { key: string; at: number; result: GapResult | "running" }>();
+/** Whether this process has brought the resume tables up to date (resumeAdmission says why it asks). */
+let resumeApprovalSchemaReady = false;
 const RESUME_CHAIN_RETRY_MS = 60_000;
 let resumeChainForTest: ((chainId: number) => GapChain | null) | null = null;
 const resumeCheckPromises = new Set<Promise<void>>();
@@ -3263,8 +3265,13 @@ const resumeCheckPromises = new Set<Promise<void>>();
 export function setResumeChainForTest(fn: ((chainId: number) => GapChain | null) | null): void { resumeChainForTest = fn; resumeChecks.clear(); }
 export async function resumeChecksSettledForTest(): Promise<void> { await Promise.all([...resumeCheckPromises]); }
 
-/** The window a clean chain read covered: its first block and the head it reached, both inclusive. */
-type ChainWindow = { fromBlock: string; head: string };
+/**
+ * The window a clean chain read covered: its first block and the head it
+ * reached, both inclusive, and the chain's time of that first block
+ * (GapResult.fromSec), which a refusal on the re-read records as where the
+ * admission's read began.
+ */
+type ChainWindow = { fromBlock: string; head: string; fromSec?: number };
 
 /**
  * The chain read for one approval: the window a clean read covered (fresh
@@ -3274,16 +3281,18 @@ type ChainWindow = { fromBlock: string; head: string };
  * and spends it.
  *
  * `missing` carries the facts, so the refusal can name each one (chainRefusal)
- * and the next preview can show it (readLastRefusal).
+ * and the next preview can show it (readLastRefusal); and where that read
+ * began (`fromSec`), which the refusal records, so every later read of the
+ * tenant starts no later (ledger-resume.ts resumeGapWindow).
  */
-type ChainMissing = { missing: readonly MissingChainFact[] };
+type ChainMissing = { missing: readonly MissingChainFact[]; fromSec?: number };
 async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<ChainWindow | ChainMissing | "held"> {
   const now = Date.now();
   const had = resumeChecks.get(tenant);
   if (had && had.key === approval.approvalId) {
     if (had.result === "running") return "held";
-    if (had.result.status === "missing") return { missing: had.result.found };
-    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return { fromBlock: had.result.fromBlock, head: had.result.head };
+    if (had.result.status === "missing") return { missing: had.result.found, fromSec: had.result.fromSec };
+    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return { fromBlock: had.result.fromBlock, head: had.result.head, fromSec: had.result.fromSec };
     if (had.result.status === "unavailable" && now - had.at < RESUME_CHAIN_RETRY_MS) return "held";
   }
   const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
@@ -3293,7 +3302,8 @@ async function resumeChainGate(tenant: string, approval: ApprovalRow, check: Res
   }
   const known = await knownChainFacts(shared, approval.smartAccount);
   resumeChecks.set(tenant, { key: approval.approvalId, at: now, result: "running" });
-  log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}; the tenant stays held until it answers`);
+  log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}` +
+    `${check.chainHeld ? " (held on a chain refusal: from no later than that refused read began)" : ""}; the tenant stays held until it answers`);
   const p = chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, sinceSec: check.gapFromSec, known, log })
     .then((result) => {
       resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result });
@@ -3431,14 +3441,27 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     return { go: false };
   }
   if (!approval) return { go: true, registered: null };
-  const refused = async (from: ApprovalState, why: string): Promise<ResumeVerdict> => {
-    await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why });
+  // THE COLUMN A CHAIN REFUSAL WRITES (chain_read_from_sec), on a table an
+  // earlier build created: an approval recorded before this build's deploy
+  // is acted on by a process that may never have previewed or approved
+  // anything, and so never ensured the schema. Once per process.
+  if (!resumeApprovalSchemaReady) {
+    try { await ensureLedgerResumeSchema(shared); resumeApprovalSchemaReady = true; }
+    catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: resume approval tables could not be brought up to date (${errorKind(e)}) — retaining its home without starting a worker`);
+      return { go: false };
+    }
+  }
+  /** `chainReadFromSec`: on a chain refusal, where the refused read began (GapResult.fromSec); every later read of the tenant starts no later. */
+  const refused = async (from: ApprovalState, why: string, chainReadFromSec?: number): Promise<ResumeVerdict> => {
+    await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why, ...(chainReadFromSec === undefined ? {} : { chainReadFromSec }) });
     resumeChecks.delete(tenant);
     // A chain refusal is answered by booking what the chain showed, never by
     // approving again: the tenant is read on chain until an admission answers
     // it (ledger-resume.ts ResumeCheck.chainHeld), and refused again meanwhile.
     sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; ` +
-      (why.startsWith(CHAIN_REFUSAL) ? "book what the chain shows (docs/chain-gap-booking.md), then preview again and approve the digest that preview prints"
+      (why.startsWith(CHAIN_REFUSAL) ? "take it out of MERRYMEN_FLEET_ROLLOUT and book what the chain shows (docs/chain-gap-booking.md), then preview again " +
+        "and approve the digest that preview prints"
         : "preview again and approve what is true now"));
     return { go: false };
   };
@@ -3507,7 +3530,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       if (check.chainRequired) {
         const gate = await resumeChainGate(tenant, approval, check, shared);
         if (gate === "held") return { go: false };
-        if ("missing" in gate) return refused("approved", chainRefusal(gate.missing));
+        if ("missing" in gate) return refused("approved", chainRefusal(gate.missing), gate.fromSec);
       }
       if (!owned()) return { go: false };
       const generation = randomUUID();
@@ -3560,7 +3583,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     if (check.chainRequired) {
       const gate = await resumeChainGate(tenant, approval, check, shared);
       if (gate === "held") return { go: false };
-      if ("missing" in gate) return refused("archived", chainRefusal(gate.missing));
+      if ("missing" in gate) return refused("archived", chainRefusal(gate.missing), gate.fromSec);
       chainRead = gate;
     }
     const counted = async (db: Db) => {
@@ -3580,9 +3603,10 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       const first = chainRead;
       resumeChecks.delete(tenant);
       const tail = await resumeChainTail(tenant, approval, BigInt(first.head), shared);
-      if (tail.status === "missing") return refused("archived", chainRefusal(tail.found, true));
+      // The admission's read began where the whole read did: that is what the refusal records.
+      if (tail.status === "missing") return refused("archived", chainRefusal(tail.found, true), first.fromSec);
       if (tail.status !== "clean") return held(`the chain could not be read again before registration (${tail.why}); held, and read whole on the next pass`);
-      chainRead = { fromBlock: first.fromBlock, head: tail.head };
+      chainRead = { fromBlock: first.fromBlock, head: tail.head, ...(first.fromSec === undefined ? {} : { fromSec: first.fromSec }) };
     }
     if (!owned()) return { go: false };
     const receipt = await registerAttestedGapSource({
@@ -5341,6 +5365,7 @@ export function setRetirementMirrorForTest(fn: ((tenant: string) => Promise<bool
 /** Real sealed-memory retirement tests use SQLite without reaching production. */
 export function setRetirementMemoryStoreForTest(store: typeof retirementMemoryStoreForTest): void {
   retirementMemoryStoreForTest = store;
+  resumeApprovalSchemaReady = false;
 }
 
 /** Save the writer's final groups, or only its forget journal when its groups are held. */

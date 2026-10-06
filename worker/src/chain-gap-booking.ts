@@ -94,7 +94,9 @@
  *
  * AND IT REFUSES WHAT IT CANNOT CLASSIFY. Every operation and transfer the
  * admission's own chain check finds (chainGapCheck, called here exactly as
- * admission calls it, from the same second — resumeGapWindow) gets one of the
+ * admission calls it, from the same second — resumeGapWindow, which for a
+ * tenant held on a chain refusal never starts later than that refused read
+ * began, so what it named stays in the window however late this runs) gets one of the
  * classes above or is UNRESOLVED, and one unresolved fact blocks the whole
  * tenant: an owner's own (root-key) operation, which the agent's book has no
  * writer for and booking as the agent's would misattribute; a session key
@@ -140,8 +142,8 @@ import { flowDuplicateReport } from "./distinct-flows";
 import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
 import {
-  attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, readOpenApproval, resumeGapWindow, RESUME_USDG, usdg6,
-  type GapChain, type MissingChainFact,
+  attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, lastMirrorPassAt, readChainHold, readOpenApproval, resumeGapWindow,
+  RESUME_USDG, usdg6, type GapChain, type MissingChainFact,
 } from "./ledger-resume";
 import { admitCapitalFlow, tradingModeOf } from "./paper-boundary";
 import { classifyRpcError } from "./rpc-error";
@@ -249,7 +251,7 @@ export interface BookingSnapshot {
   knownAccounts: string[];
   /** What a chain log could be in Postgres for this account (knownChainFacts), sorted. */
   known: { ops: string[]; txs: string[]; flows: string[] };
-  /** Where admission's chain read starts (resumeGapWindow). */
+  /** Where admission's chain read starts (resumeGapWindow): for a tenant held on a chain refusal, no later than that refused read began. */
   gapFromSec: number;
   /** The account's trades and flows by count and maximum id: the evidence apply compares and sets on. */
   ledger: { trades: { n: number; maxId: number }; flows: { n: number; maxId: number } };
@@ -358,6 +360,14 @@ async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
   return new Set(rows.map((r) => String(r.name)));
 }
 
+/** A table's columns, asked of the catalogue for the same reason (existingTables). Only for a table it says exists. */
+async function existingColumns(db: Db, dialect: Dialect, table: string): Promise<Set<string>> {
+  const rows = (await db.prepare(dialect === "postgres"
+    ? "SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?"
+    : "SELECT name FROM pragma_table_info(?)").all(table)) as Array<Record<string, unknown>>;
+  return new Set(rows.map((r) => String(r.name)));
+}
+
 /**
  * WHERE THE TENANT STANDS WITH ADMISSION, read in the caller's transaction:
  * the snapshot's, an apply's (inside its compare-and-set), and a revert's.
@@ -368,7 +378,7 @@ async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
  * chain refusal, minted a generation or archived a home: nothing of their
  * evidence, and no reason's text beyond the prefix test.
  */
-async function readAdmissionState(db: Db, tables: ReadonlySet<string>, tenant: string, account: string, nowSec: number): Promise<AdmissionState> {
+async function readAdmissionState(db: Db, tables: ReadonlySet<string>, tenant: string, account: string): Promise<AdmissionState> {
   const approvals: ApprovalFact[] = tables.has("ledger_resume_approvals")
     ? ((await db.prepare(`SELECT approval_id, state, reason, generation, archive_path, created_at_ms, updated_at_ms FROM ledger_resume_approvals
         WHERE tenant = ?`).all(tenant)) as Array<Record<string, unknown>>).map((r) => ({
@@ -386,7 +396,7 @@ async function readAdmissionState(db: Db, tables: ReadonlySet<string>, tenant: s
     const s = unixSec(r.beat_at);
     if (s !== null) beatAt = beatAt === null ? s : Math.max(beatAt, s);
   }
-  const { lastMirrorAt } = await resumeGapWindow(db, tenant, nowSec);
+  const lastMirrorAt = await lastMirrorPassAt(db, tenant);
   return { approvals, attestations, liveness: { beatAt, lastMirrorAt } };
 }
 
@@ -483,7 +493,18 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
   const knownAccounts = ((await db.prepare("SELECT DISTINCT LOWER(smart_account) AS a FROM agents ORDER BY a").all()) as Array<Record<string, unknown>>)
     .map((r) => String(r.a)).filter((a) => ADDRESS.test(a));
   const k = await knownChainFacts(db, account);
-  const { gapFromSec } = await resumeGapWindow(db, tenant, o.nowSec);
+  // ADMISSION'S OWN WINDOW, from the same hold (ledger-resume.ts
+  // resumeGapWindow): for a tenant held on a chain refusal, no later than the
+  // refused read began, however long ago — so every fact that refusal named
+  // is in what this reads, as it is in what admission will read. The hold is
+  // read without a statement that could fail (the snapshot is one
+  // transaction): the column's presence is asked of the catalogue, and rows
+  // from before it are read as such (their start derived, never later).
+  const approvalsTable = tables.has("ledger_resume_approvals");
+  const hold = await readChainHold(db, tenant, {
+    table: approvalsTable, readFromColumn: approvalsTable && (await existingColumns(db, o.dialect, "ledger_resume_approvals")).has("chain_read_from_sec"),
+  });
+  const { gapFromSec } = await resumeGapWindow(db, tenant, o.nowSec, hold);
   const count = async (table: "trades" | "flows") => {
     const r = (await db.prepare(`SELECT COUNT(*) AS n, MAX(id) AS max_id FROM ${table} WHERE LOWER(agent_id) = ?`).get(account)) as Record<string, unknown>;
     return { n: num(r.n), maxId: num(r.max_id) };
@@ -501,7 +522,7 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     openApproval: open ? { state: open.state, evidence: open.evidenceDigest } : null,
     admitted: account && tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(db, tenant, account) : null,
     booked,
-    admission: await readAdmissionState(db, tables, tenant, account, o.nowSec),
+    admission: await readAdmissionState(db, tables, tenant, account),
     holdings: await readHoldings(db, tables, account),
     fills: await readFills(db, account),
   };
@@ -564,13 +585,15 @@ export function holdOf(snap: BookingSnapshot, nowSec: number): { anchorSec: numb
       // booked on (the anchor rule stands), and the way out is said: admission
       // reads the chain for a tenant with a chain refusal no admission has
       // answered, whatever it reads as (ledger-resume.ts ResumeCheck.chainHeld),
-      // so one approval records a fresh chain refusal while Postgres lacks it.
+      // from no later than the refused read began (resumeGapWindow), so one
+      // approval records a fresh chain refusal while Postgres lacks it.
       const superseded = decided.state === "refused"
         && snap.admission.approvals.find((a) => a.chainRefusal || a.state === "registered" || a.state === "applied")?.chainRefusal === true;
       refusals.push(`the tenant's newest admission decision (approval ${decided.approvalId.slice(0, 8)}…, ${decided.state === "refused" ? "refused for another reason" : decided.state}) ` +
         "is not a chain refusal: this tool books only what admission refused a held tenant on" +
-        (superseded ? ". An earlier approval was refused on the chain: preview the tenant and approve it once, with it in the rollout at exits-only, so " +
-          "admission reads the chain again and, while Postgres lacks what it showed, refuses it with a fresh chain refusal; then preview here again" : ""));
+        (superseded ? ". An earlier approval was refused on the chain: preview the tenant in admission's preview and approve the digest it prints once, " +
+          "with it in the rollout at exits-only, so admission reads the chain again from where that refused read began and, while Postgres lacks what it " +
+          "showed, refuses it with a fresh chain refusal; then take it out of the rollout and preview here again" : ""));
     }
     return { anchorSec: null, refusals };
   }
@@ -1754,7 +1777,7 @@ export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: num
     }
     const lockAgent = await tx.prepare("UPDATE agents SET epoch = epoch WHERE LOWER(smart_account) = ?").run(report.account);
     if (Number(lockAgent.changes) < 1) throw new BookingRefused("cas", "the account's registration is gone; nothing changed");
-    const now = await readAdmissionState(tx, tables, report.tenant, report.account, Math.floor(o.nowMs / 1000));
+    const now = await readAdmissionState(tx, tables, report.tenant, report.account);
     const inUse = tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(tx, report.tenant, report.account) : null;
     const stood = admittedSince(report.admission, { ...now, inUse });
     if (stood) throw new BookingRefused(stood.code, `${stood.why}; nothing changed`);

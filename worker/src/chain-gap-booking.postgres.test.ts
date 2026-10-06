@@ -125,8 +125,8 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   // What holds it, in the resume tables as the orchestrator creates them on Postgres: admission's chain refusal, a day after both facts landed.
   await ensureLedgerResumeSchema(db);
   await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
-      created_at_ms, updated_at_ms) VALUES ('a1', $1, $2, 4663, $1, $3, '{}', 'r', 'refused', $4, $5, $5)`,
-  [TENANT, ACCOUNT, "e".repeat(64), `${CHAIN_REFUSAL}: operation ${OP} in tx ${OP_TX} at block ${BLOCK}`, (AT + 86_400) * 1000]);
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('a1', $1, $2, 4663, $1, $3, '{}', 'r', 'refused', $4, $5, $5, $6)`,
+  [TENANT, ACCOUNT, "e".repeat(64), `${CHAIN_REFUSAL}: operation ${OP} in tx ${OP_TX} at block ${BLOCK}`, (AT + 86_400) * 1000, AT - 4200]);
 
   // THE SERVER HOLDS THE READ-ONLY CONNECTION TO IT, whatever the shell lets through.
   const ro = await connectBooking(scoped.toString(), true, loadPg); clients.push(ro);

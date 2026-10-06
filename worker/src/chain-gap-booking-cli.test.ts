@@ -58,6 +58,10 @@ function pgOverSqlite(raw: DatabaseSync, said: string[]): PgClient {
         const rows = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<Record<string, unknown>>).map((r) => ({ ...r }));
         return { rows, rowCount: rows.length };
       }
+      if (/FROM information_schema\.columns WHERE table_schema = current_schema\(\) AND table_name = \$1/.test(sql)) {
+        const rows = (raw.prepare("SELECT name FROM pragma_table_info(?)").all(params[0] as string) as Array<Record<string, unknown>>).map((r) => ({ ...r }));
+        return { rows, rowCount: rows.length };
+      }
       if (sql === "BEGIN" || sql === "COMMIT") { raw.exec(sql); return empty; }
       if (sql === "ROLLBACK") { raw.exec("ROLLBACK"); if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; } return empty; }
       const stmt = raw.prepare(sql.replace(/\$(\d+)/g, "?$1"));
@@ -84,11 +88,12 @@ async function shared() {
   for (const table of ["trades", "flows", "equity"]) {
     raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, 4, 1, ?)").run(TENANT, table, DEPOSIT_AT - 3600);
   }
-  // What holds it: admission's chain refusal, an hour before the preview, naming the deposit.
+  // What holds it: admission's chain refusal, an hour before the preview, naming the deposit, and where its read began (the cursors, less 600s).
   await ensureLedgerResumeSchema(db);
   raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
-      created_at_ms, updated_at_ms) VALUES ('a1', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', ?, ?, ?)`)
-    .run(TENANT, ACCOUNT, TENANT, "e".repeat(64), `${CHAIN_REFUSAL}: USDG in 9.000000 in tx ${DEPOSIT_TX} log 2 at block ${BLOCK}`, (NOW - 3660) * 1000, (NOW - 3600) * 1000);
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('a1', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', ?, ?, ?, ?)`)
+    .run(TENANT, ACCOUNT, TENANT, "e".repeat(64), `${CHAIN_REFUSAL}: USDG in 9.000000 in tx ${DEPOSIT_TX} log 2 at block ${BLOCK}`, (NOW - 3660) * 1000, (NOW - 3600) * 1000,
+      DEPOSIT_AT - 4200);
   return raw;
 }
 

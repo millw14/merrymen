@@ -183,13 +183,20 @@ after(() => { for (const h of handles) h.close(); });
 
 /** When admission last refused the held tenants here: half an hour before the preview, long after everything on the fixture chain landed. */
 const REFUSED_AT = NOW - 1800;
-/** Admission's refusal of the tenant, as moveApproval records one. */
-function refuse(raw: DatabaseSync, o: { tenant: string; account: string; id?: string; atSec?: number; reason?: string; state?: string; generation?: string | null }) {
+/**
+ * Admission's refusal of the tenant, as moveApproval records one: a chain
+ * refusal says where its read began (`readFromSec`, the cursors' start less
+ * 600s unless given; null as a row from before the column has it).
+ */
+function refuse(raw: DatabaseSync, o: { tenant: string; account: string; id?: string; atSec?: number; reason?: string; state?: string; generation?: string | null;
+  readFromSec?: number | null }) {
   const at = (o.atSec ?? REFUSED_AT) * 1000;
+  const reason = o.reason ?? `${CHAIN_REFUSAL}: operation ${SELL_OP} in tx ${CHAIN.sell.tx} at block ${SELL_BLOCK}`;
+  const chain = (o.state ?? "refused") === "refused" && reason.startsWith(CHAIN_REFUSAL);
   raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, generation,
-      reason, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?, ?)`)
+      reason, created_at_ms, updated_at_ms, chain_read_from_sec) VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?, ?, ?)`)
     .run(o.id ?? "refusal", o.tenant, o.account, o.tenant, h32(`evidence ${o.id ?? "refusal"}`).slice(2), o.state ?? "refused", o.generation ?? null,
-      o.reason ?? `${CHAIN_REFUSAL}: operation ${SELL_OP} in tx ${CHAIN.sell.tx} at block ${SELL_BLOCK}`, at - 60_000, at);
+      reason, at - 60_000, at, chain ? (o.readFromSec === undefined ? CHAIN.root.timestamp - 3600 - 600 : o.readFromSec) : null);
 }
 
 /**
@@ -639,7 +646,7 @@ describe("only a held tenant is booked (holdOf)", () => {
     // A later refusal for another reason over the chain refusal: the anchor rule stands, and the way out is said — one approval, which
     // reads the chain again for a tenant with a chain refusal no admission has answered, and refuses it afresh while Postgres lacks it.
     await refusedWith((b) => refuse(b.raw, { tenant: b.tenant, account: b.account, id: "evidence", atSec: REFUSED_AT + 60, reason: "the evidence changed since the preview" }),
-      /newest admission decision \(approval evidence…, refused for another reason\) is not a chain refusal: .*\. An earlier approval was refused on the chain: preview the tenant and approve it once, .*fresh chain refusal; then preview here again$/);
+      /newest admission decision \(approval evidence…, refused for another reason\) is not a chain refusal: .*\. An earlier approval was refused on the chain: preview the tenant in admission's preview and approve the digest it prints once, .*from where that refused read began.*fresh chain refusal; then take it out of the rollout and preview here again$/);
     // Not when an admission answered that chain refusal before the later one: there is nothing for an approval to read the chain again for.
     await refusedWith((b) => {
       refuse(b.raw, { tenant: b.tenant, account: b.account, id: "admitted", atSec: REFUSED_AT + 30, state: "applied", generation: "g".repeat(36), reason: "" });

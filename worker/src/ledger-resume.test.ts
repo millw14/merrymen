@@ -229,7 +229,7 @@ describe("the preconditions", () => {
       .run(g.tenant, g.account, g.owner, "e".repeat(64), `${CHAIN_REFUSAL}, landed after the admission's first chain read`);
     assert.equal((await g.pre()).chainHeld, true);
     // A lookup that fails is never read as "not held": the whole read throws, and every caller fails closed on that.
-    await assert.rejects(shape(failing(f.shared, /SELECT state, reason, updated_at_ms FROM ledger_resume_approvals/)), /connection reset/);
+    await assert.rejects(shape(failing(f.shared, /SELECT approval_id, state, reason, created_at_ms, updated_at_ms, evidence_json/)), /connection reset/);
     // An admission after it answers it: the booking was made and an approval registered the new book.
     insert("5", "registered", 5_000, null);
     assert.deepEqual(await shape(), PAPER);
@@ -466,7 +466,7 @@ describe("the chain read", () => {
   });
   it("reads its window from the oldest financial cursor, at least 26 hours back — the same second the preconditions report", async () => {
     const f = await fixture({ live: true });
-    const w = await resumeGapWindow(f.shared, f.tenant, NOW);
+    const w = await resumeGapWindow(f.shared, f.tenant, NOW, { held: false, readFromSec: null, since: null });
     assert.deepEqual(w, { gapFromSec: NOW - 40 * 3600 - 600, lastMirrorAt: NOW - 40 * 3600 });
     const c = await f.pre();
     assert.deepEqual({ gapFromSec: c.gapFromSec, lastMirrorAt: c.lastMirrorAt }, w);
