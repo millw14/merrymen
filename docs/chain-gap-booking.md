@@ -298,7 +298,12 @@ and names what is missing. Then preview here again.
 ## Before you start
 
 - **Keep the tenant held.** Leave it out of `MERRYMEN_FLEET_ROLLOUT`. The
-  tool also refuses a tenant that has run since its refusal (above).
+  tool also refuses a tenant that has run since its refusal (above). With
+  `MERRYMEN_RESUME_AUTO_PAPER=1`, the orchestrator's automatic lane does not
+  approve a tenant that has a chain refusal no admission has answered, even
+  when its owner re-signs and it reads as paper again. Its preview is
+  recorded and left to you, so the refusal stays its newest decision
+  ([fleet-resume.md](fleet-resume.md#the-safe-case-all-of-it)).
 - **No approval may be open.** If one is, the preview refuses and prints the
   exact `MERRYMEN_RESUME_REVOKE=0x<tenant>:<digest>` to set. Set it, deploy,
   and start again. A booking changes the evidence that approval was given on.

@@ -299,6 +299,12 @@ Public chain data only; look each one up as printed. Then:
    or a trade's cost basis does not reflect it, the tool reports it as
    unresolved and does not book it. Escalate those to Milla and Codex.
 
+`MERRYMEN_RESUME_AUTO_PAPER` never approves such a tenant meanwhile, even
+when its owner turns live trading off and re-signs so that it reads as paper
+again: a chain refusal that no admission has answered since keeps it yours
+([the safe case](#the-safe-case-all-of-it)). Its re-sign is previewed, with
+the refusal in `lastRefusal`, and left to you.
+
 ### Step 6: paper tenants, in batches
 
 Add paper tenants (the preview's `:trade` entries) to `MERRYMEN_FLEET_ROLLOUT`,
@@ -738,6 +744,16 @@ first worker started at its rollout level.
   with no `done_at`);
 - no approval open for it, and **none of it ever revoked** (a revoke is your
   decision about that tenant, which no re-sign overrides);
+- **no chain refusal that no admission has answered since**: an approval of
+  it refused because the chain showed operations or USDG transfers Postgres
+  lacks, with no approval of it `registered` or `applied` after that. The
+  paper reading comes from that same Postgres, which the chain showed to be
+  incomplete. A lost operation may be a live trade, and approving the tenant
+  would replace the refusal that the
+  [chain-gap booking tool](chain-gap-booking.md) books on. A later refusal
+  for another reason does not answer it. Book it, then approve it by hand
+  ([Step 5](#step-5-live-tenants-exits-only-before-the-paper-batches),
+  "If the chain shows something Postgres lacks");
 - held by the gate: its book on the volume is `blocked`, or `absent` with
   history in Postgres;
 - **live-trading consent in force**: with `MERRYMEN_LIVE_INTENT_STAND_DOWN=1`

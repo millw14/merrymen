@@ -44,7 +44,7 @@ const { childHome, reconcile, setSpawnForTest, setRetirementMemoryStoreForTest, 
   setLeaseAcquireForTest, setResumeChainForTest, setKillConfirmForTest, setBasisSeedSharedForTest, setPhantomProcessesForTest, runResumeAdmissionControlsForTest } = orch;
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
-const { recordResumeApproval } = await import("./ledger-resume");
+const { chainRefusal, recordResumeApproval } = await import("./ledger-resume");
 
 const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw), dek = Buffer.alloc(32, 29);
 await applyLedgerSchema(shared); await shared.exec(MIRROR_STATE_DDL); await shared.exec(PAPER_CHECKPOINT_SCHEMA);
@@ -265,6 +265,36 @@ it("on: a re-signed live tenant is previewed and left to the operator — never 
     const [entry] = JSON.parse(String(run.entries_json)) as Array<{ pass: boolean; chain: string; digest: string }>;
     assert.deepEqual([entry!.pass, entry!.chain], [true, "required"]);
     assert.ok(lines.some((l) => l.includes(`approve it by hand: MERRYMEN_RESUME_APPROVE=${t.tenant}:${entry!.digest}`)), "the operator is told the exact approval");
+    assert.ok(existsSync(path.join(t.home, "ledger-source-blocked.json")), "its home untouched");
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
+});
+
+it("on: a re-signed paper tenant the chain refused at its last admission is previewed with that refusal and left to the operator — never approved past it", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  try {
+    const t = await preIncident();
+    await pass();
+    // An operator's approval of it, from when its owner's settings asked for live trading, was refused on the chain:
+    // an operation Postgres lacks, which may be a live trade its paper reading never sees.
+    const reason = chainRefusal([{ kind: "operation", userOpHash: `0x${"ab".repeat(32)}`, txHash: `0x${"cd".repeat(32)}`, block: "7", logIndex: 1, success: true }]);
+    const refusedAt = Date.now() - 60_000;
+    raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms, reason, source) VALUES (?, ?, ?, 4663, ?, ?, '{}', ?, 'refused', ?, ?, ?, 'operator')`)
+      .run(randomUUID(), t.tenant, t.account, t.owner, "f".repeat(64), "e".repeat(64), refusedAt, refusedAt, reason);
+    // Its owner has since turned live trading off (no settings on record: paper), and signs again.
+    await t.resign();
+    await pass(); await pass();
+    assert.deepEqual(approvals(t.tenant).map((a) => a.state), ["refused"], "nothing approved past the chain refusal");
+    assert.equal(forksOf(t.tenant).length, 0);
+    assert.equal(chainReads, 0, "nothing read on chain by this lane");
+    const w = watch(t.tenant)!;
+    assert.equal(w.owed, 0, "answered once: not previewed every pass");
+    assert.match(String(w.outcome), /^previewed: .*admission refused it on the chain/);
+    const [entry] = JSON.parse(String(rows("SELECT entries_json FROM ledger_resume_preview_runs WHERE run = ?", w.run)[0]!.entries_json)) as
+      Array<{ pass: boolean; chain: string; lastRefusal?: { reason: string; atMs: number } | null }>;
+    assert.deepEqual([entry!.pass, entry!.chain], [true, "not-required"], "the paper reading passes: the refusal is what holds it");
+    assert.deepEqual([entry!.lastRefusal?.reason, entry!.lastRefusal?.atMs], [reason, refusedAt], "and the preview line carries what the chain showed");
     assert.ok(existsSync(path.join(t.home, "ledger-source-blocked.json")), "its home untouched");
     await cleanUp(t.tenant);
   } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }

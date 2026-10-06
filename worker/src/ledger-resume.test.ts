@@ -682,6 +682,37 @@ describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_P
     await manual(entry, revoked.shared, /an operator revoked an earlier approval/);
   });
 
+  it("a chain refusal no admission has answered leaves it to the operator, whatever the paper reading says now", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    assert.deepEqual(await autoPaperVerdict(f.shared, entry, ENFORCED), { kind: "auto" }, "the safe case to start with");
+    const insert = (id: string, state: string, at: number, reason: string | null) => f.raw.prepare(`INSERT INTO ledger_resume_approvals
+        (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason)
+        VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?)`).run(id, f.tenant, f.account, f.owner, id.repeat(64).slice(0, 64), state, at, at, reason);
+    // A refusal for anything else is no reason: the lane's re-sign rule answers it (docs/fleet-resume.md, "Evidence that changes").
+    insert("1", "refused", 1_000, "the evidence changed since the preview");
+    assert.deepEqual(await autoPaperVerdict(f.shared, entry, ENFORCED), { kind: "auto" });
+    // Refused on the chain — the owner has since turned live trading off, so it reads as paper again.
+    insert("2", "refused", 2_000, chainRefusal([{ kind: "operation", userOpHash: "0x" + "ab".repeat(32), txHash: "0x" + "cd".repeat(32), block: "7", logIndex: 1, success: true }]));
+    const v = await autoPaperVerdict(f.shared, entry, ENFORCED);
+    assert.equal(v.kind, "manual");
+    assert.match((v as { why: string[] }).why.join(" | "), /admission refused it on the chain.*nothing has admitted it since.*docs\/chain-gap-booking\.md/);
+    assert.doesNotMatch((v as { why: string[] }).why.join(" | "), /0xabab|0xcdcd/, "a reason, never a value: it goes into the watch's outcome");
+    // Not only the newest decision: an operator's approval refused since on other grounds says nothing about the chain.
+    insert("3", "refused", 3_000, "the evidence changed since the preview");
+    assert.equal((await autoPaperVerdict(f.shared, entry, ENFORCED)).kind, "manual");
+    // The reason before chainRefusal named anything, as an older row carries it, holds the same.
+    const g = await paperHoldingNothing();
+    const ge = await entryOf(g, { book: "blocked" });
+    g.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms, reason) VALUES ('old', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', 1, 1, ?)`)
+      .run(g.tenant, g.account, g.owner, "e".repeat(64), `${CHAIN_REFUSAL}, landed after the admission's first chain read`);
+    assert.equal((await autoPaperVerdict(g.shared, ge, ENFORCED)).kind, "manual");
+    // An admission after it answers it: the booking was made and an operator's approval applied.
+    insert("4", "applied", 4_000, null);
+    assert.deepEqual(await autoPaperVerdict(f.shared, entry, ENFORCED), { kind: "auto" });
+  });
+
   it("an automatic approval goes through the operator's insert, and says who gave it", async () => {
     const f = await paperHoldingNothing();
     const entry = await entryOf(f, { book: "blocked" });

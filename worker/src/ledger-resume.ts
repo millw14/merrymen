@@ -931,6 +931,10 @@ export async function revokeResumeApprovals(db: Db, revokes: readonly ResumeRevo
  *   - no approval open for it, and none of it ever revoked by the operator: a
  *     revoke is an operator's decision about that tenant, which no re-sign
  *     overrides;
+ *   - no chain refusal of it that an admission has not answered since
+ *     (unansweredChainRefusal): the chain showed the Postgres this reads
+ *     incomplete, and what it showed is booked by the operator's reviewed
+ *     tool, never stepped past by a re-sign;
  *   - and held by the gate: its book on the volume is blocked, or absent with
  *     history on record. A tenant whose book is present, or one with no
  *     history at all, is the ordinary path's, which needs no approval (and an
@@ -1240,7 +1244,38 @@ export async function autoPaperVerdict(db: Db, entry: PreviewEntry, o: { consent
     .all(entry.tenant, ...OPEN_STATES)) as Array<Record<string, unknown>>).map((r) => String(r.state));
   if (prior.includes("revoked")) why.push("an operator revoked an earlier approval of it, so only an operator approves it again");
   if (prior.some((s) => s !== "revoked")) why.push("an approval is already open for it");
+  if (await unansweredChainRefusal(db, entry.tenant)) {
+    why.push("admission refused it on the chain, for operations or USDG transfers Postgres lacks, and nothing has admitted it since: the paper reading " +
+      "comes from a Postgres the chain showed incomplete — book what the chain shows (docs/chain-gap-booking.md), then preview it and approve it by hand");
+  }
   return why.length ? { kind: "manual", why } : { kind: "auto" };
+}
+
+/**
+ * HAS ADMISSION REFUSED THIS TENANT ON THE CHAIN, WITH NOTHING ADMITTED
+ * SINCE? Any approval of it refused with the chain refusal's words
+ * (CHAIN_REFUSAL: this build's chainRefusal and the shorter reason before
+ * it alike), later than every approval of it that reached `registered` or
+ * `applied`.
+ *
+ * WHY THE AUTOMATIC LANE ASKS. The chain check runs only for a tenant that
+ * could arm live, and a chain refusal proves Postgres lacks operations or
+ * transfers of the account. "Paper and could not arm live" is read from
+ * that same Postgres (no live operation, no flow) and the owner's settings:
+ * an owner who turns live trading off after the refusal, and re-signs, would
+ * read as the safe case though the operation Postgres lost may be a live
+ * trade. Approving it would admit it on that book, and supersede the
+ * refusal the booking tool books on (chain-gap-booking.ts holdOf), so what
+ * the chain showed would never be booked. Not only the newest decision: an
+ * operator's approval refused on other grounds since says nothing about the
+ * chain. Only an admission answers it; until then the operator books it and
+ * approves by hand, as the runbook says.
+ */
+async function unansweredChainRefusal(db: Db, tenant: string): Promise<boolean> {
+  const rows = (await db.prepare("SELECT state, reason, updated_at_ms FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('refused', 'registered', 'applied')")
+    .all(tenant.toLowerCase())) as Array<Record<string, unknown>>;
+  const admittedAt = Math.max(-Infinity, ...rows.filter((r) => r.state !== "refused").map((r) => Number(r.updated_at_ms)));
+  return rows.some((r) => r.state === "refused" && String(r.reason ?? "").startsWith(CHAIN_REFUSAL) && !(Number(r.updated_at_ms) < admittedAt));
 }
 
 // ── the chain ────────────────────────────────────────────────────────────────
