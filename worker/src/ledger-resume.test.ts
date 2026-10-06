@@ -526,7 +526,7 @@ describe("the home archive", () => {
     assert.equal(await handoff(b.h, listener()), "accepted");
     assert.equal(JSON.parse(readFileSync(b.file, "utf8")).offset, 101);
     // A byte-order mark the child's own loader would have dropped.
-    const c = carry("c03", "﻿" + JSON.stringify({ offset: 500, botId: "801" }), 0o600);
+    const c = carry("c03", String.fromCharCode(0xfeff) + JSON.stringify({ offset: 500, botId: "801" }), 0o600);
     assert.deepEqual(c.r.normalised, ["telegram.json: byte-order mark"]);
     assert.equal(await handoff(c.h, listener()), "accepted");
     assert.equal(JSON.parse(readFileSync(c.file, "utf8")).offset, 500, "a higher local offset is never lowered");

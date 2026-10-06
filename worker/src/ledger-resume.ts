@@ -886,7 +886,7 @@ export function normaliseCarried(dir: string): string[] {
         if (at.ino === st.ino && at.dev === st.dev && own(at)) text = readFileSync(fd, "utf8");
       } finally { closeSync(fd); }
       if (text === null) continue;
-      const bom = text.startsWith("﻿");
+      const bom = text.charCodeAt(0) === 0xfeff;
       let value: unknown = null;
       try { value = JSON.parse(bom ? text.slice(1) : text); } catch { /* left for the handoff to refuse by name */ }
       const object = !!value && typeof value === "object" && !Array.isArray(value);

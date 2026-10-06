@@ -61,7 +61,7 @@ test("every refusal names its check by a fixed code, never a value, and the text
  rmSync(file);mkdirSync(file);assert.equal(await handoff(),"HANDOFF_NOT_FILE");
  put(" ".repeat(256*1024+1));assert.equal(await handoff(),"HANDOFF_SIZE");
  put("{not json");assert.equal(await handoff(),"HANDOFF_PARSE");
- put("﻿"+JSON.stringify({offset:10,botId:"801"}));assert.equal(await handoff(),"HANDOFF_PARSE");
+ put(String.fromCharCode(0xfeff)+JSON.stringify({offset:10,botId:"801"}));assert.equal(await handoff(),"HANDOFF_PARSE");
  put(JSON.stringify({linkCode:"K7M2QX",ownerId:7}));assert.equal(await handoff(),"HANDOFF_OFFSET");
  put(JSON.stringify({offset:10,botId:801}));assert.equal(await handoff(),"HANDOFF_BOT");
  put(JSON.stringify({offset:10,botId:"801"}));assert.equal(await handoff(),"accepted");assert.equal(JSON.parse(readFileSync(file,"utf8")).offset,101);
