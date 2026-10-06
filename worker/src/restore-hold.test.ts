@@ -148,6 +148,12 @@ describe("held tenants reach only the loops they belong in", () => {
       .sort();
     assert.deepEqual(readers, [
       "adoptHolderForTest",
+      // MERRYMEN_RESUME_AUTO_PAPER asks `holders.has` of a re-signed tenant
+      // and nothing else: one with a hold process is past the continuity
+      // gate (held by the paper-restore gate instead, which retryHold and
+      // handHoldBack answer), so its re-sign is settled with nothing
+      // previewed or approved. No held tenant is visited, started or serviced.
+      "autoAdmitResignedPaper",
       // The SIGTERM drain (fleet-drain.ts): it writes a hold's home down as
       // held, so its final pass never copies the book and handles its memory
       // forget-only; it signals the hold process and waits for it to go; and

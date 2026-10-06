@@ -412,10 +412,13 @@ export async function durablePauseLifted(db: Db, scope: ControlScope, pausedAtSe
  * WHAT B7's EVIDENCE BINDS FOR CONTROLS (ledger-resume.ts): the fold and the
  * standing legacy pause, as one digest. `readable` false is the journal or
  * the events refusing to be read, or a malformed journal; a preview reports
- * it and an admission refuses on it.
+ * it. `failed` tells the two apart: true when the read itself did not
+ * complete (the store refused, or the journal is too large to fold), which
+ * an admission holds on and reads again, rather than a malformed journal,
+ * which is a fact about it and refused (ledger-resume.ts ResumeCheck.unreadable).
  */
 export async function readControlsEvidence(db: Db, scope: ControlScope, nowMs: number): Promise<{
-  readable: boolean; why: string | null; digest: string; fold: ControlFold | null; legacy: LegacyPause | null; journal: "present" | "absent";
+  readable: boolean; why: string | null; failed: boolean; digest: string; fold: ControlFold | null; legacy: LegacyPause | null; journal: "present" | "absent";
 }> {
   try {
     const journal = await readRecoveryControls(db, scope);
@@ -430,10 +433,10 @@ export async function readControlsEvidence(db: Db, scope: ControlScope, nowMs: n
       legacy: legacy ? `${legacy.eventId}:${legacy.atSec}` : null,
     };
     const digest = createHash("sha256").update(JSON.stringify(body)).digest("hex");
-    return { readable: fold.malformed === null, why: fold.malformed, digest, fold, legacy, journal: body.journal as "present" | "absent" };
+    return { readable: fold.malformed === null, why: fold.malformed, failed: false, digest, fold, legacy, journal: body.journal as "present" | "absent" };
   } catch (e) {
     const kind = e instanceof Error && /^[A-Za-z]{1,40}$/.test(e.name) ? e.name : "Error";
-    return { readable: false, why: `controls unreadable (${kind})`, digest: "unreadable", fold: null, legacy: null, journal: "absent" };
+    return { readable: false, why: `controls unreadable (${kind})`, failed: true, digest: "unreadable", fold: null, legacy: null, journal: "absent" };
   }
 }
 

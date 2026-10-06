@@ -24,7 +24,9 @@ import { RECOVERY_REPLY_SCHEMA } from "./recovery-reply-state";
 import {
   applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed, homeIdentity, knownChainFacts, moveApproval, normaliseCarriedFile, offsetRestoredLink, parseResumeApprovals,
   parseResumePreview, parseResumeRevokes, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, resumePreconditions, revokeResumeApprovals,
-  type GapChain, type PreviewEntry,
+  AUTO_PAPER_HEADROOM, autoPaperRoom, autoPaperVerdict, countOpenApprovals, evidenceHasHistory, grantRowKey, observeGrantChanges, parseResumeAutoPaper,
+  noteGrantAttempt, recordResumeApproval, resumeAutoPaperOn, settleGrantChange, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RECORD_MAX_WAIT, autoPaperRecordWait,
+  answeredGrantChanges, type GapChain, type PreviewEntry,
 } from "./ledger-resume";
 
 const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-ledger-resume-")));
@@ -34,7 +36,21 @@ const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
 const NOW = 1_800_000_000;
 const OLD = NOW - 5 * 86_400;
 const CONTROLS = { readable: true, why: null, digest: "c".repeat(64) };
+/** The deployment's live-trading consent in force, as everywhere but a migration (settings.ts enforceLiveIntent). */
+const ENFORCED = { consentEnforced: true };
 let fixtures = 0;
+
+/** `db`, except that every statement matching `pattern` fails with `error`: an outage, or schema drift, in one read. */
+function failing(db: Db, pattern: RegExp, error: () => Error = () => Object.assign(new Error("connection reset"), { code: "08006" })): Db {
+  const fail = async (): Promise<never> => { throw error(); };
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === "prepare") return (sql: string) => (pattern.test(sql) ? { run: fail, get: fail, all: fail } : target.prepare(sql));
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
 
 /** A shared database with one tenant's pre-incident history: a paper or live book, its cursors, its snapshots. */
 async function fixture(o: { live?: boolean } = {}) {
@@ -120,14 +136,37 @@ describe("the preconditions", () => {
       const p = await f.pre();
       assert.equal(p.refusals.length, 1, p.refusals.join(" | "));
       assert.match(p.refusals[0]!, why);
+      assert.deepEqual(p.unreadable, [], "a fact about the tenant, not an outage: refused, never held on");
     });
   }
   it("refuses on unreadable controls alone, and on a half-applied import in the home alone", async () => {
     const f = await fixture({ live: true });
     const a = await resumePreconditions(f.shared, { tenant: f.tenant, account: f.account, grantAccount: f.account, nowSec: NOW, controls: { readable: false, why: "malformed" }, homePendingImport: false });
     assert.deepEqual(a.refusals.map((r) => /owner controls/.test(r)), [true]);
+    assert.deepEqual(a.unreadable, [], "a malformed journal is a fact");
     const b = await resumePreconditions(f.shared, { tenant: f.tenant, account: f.account, grantAccount: f.account, nowSec: NOW, controls: CONTROLS, homePendingImport: true });
     assert.deepEqual(b.refusals.map((r) => /half-applied/.test(r)), [true]);
+  });
+  it("lists apart the refusals an outage caused — a controls read that failed, an anchor or a risk period that could not be read — so an admission holds on them", async () => {
+    const f = await fixture({ live: true });
+    const check = (db: Db, controls: { readable: boolean; why: string | null; failed?: boolean } = CONTROLS) =>
+      resumePreconditions(db, { tenant: f.tenant, account: f.account, grantAccount: f.account, nowSec: NOW, controls, homePendingImport: false });
+    // The controls read did not complete (recovery-reply-arm.ts readControlsEvidence `failed`).
+    const controls = await check(f.shared, { readable: false, why: "controls unreadable (Error)", failed: true });
+    assert.deepEqual([controls.refusals, controls.unreadable], [["owner controls cannot be read (controls unreadable (Error))"], ["owner controls cannot be read (controls unreadable (Error))"]]);
+    // The anchor's own read fails: deriveBootstrapAccounting answers `unknown`, which it gives for nothing else.
+    const anchor = await check(failing(f.shared, /SELECT hwm_usdg, hwm_withdrawn_usdg, epoch FROM agents/));
+    assert.equal(anchor.anchor, "unknown");
+    assert.deepEqual([anchor.refusals, anchor.unreadable], [["the accounting anchor cannot be derived"], ["the accounting anchor cannot be derived"]]);
+    // A valid risk period reads as valid; the same with its carried read failing is an outage, not "invalid".
+    f.raw.prepare("INSERT INTO risk_periods VALUES ('r-valid', ?, ?, 100, 120, 0, 'practice reset')").run(f.account, OLD);
+    const clean = await check(f.shared);
+    assert.deepEqual([clean.refusals, clean.riskPeriod], [[], "valid:r-valid"]);
+    const risk = await check(failing(f.shared, /FROM risk_periods WHERE agent_id = \?/));
+    assert.equal(risk.riskPeriod, "invalid");
+    assert.equal(risk.unreadable.length, 1);
+    assert.match(risk.unreadable[0]!, /risk period on record is invalid/);
+    assert.deepEqual(risk.refusals, risk.unreadable);
   });
   it("refuses a book with rows but no accounting anchor, and admits a genuinely empty one", async () => {
     const raw = new DatabaseSync(":memory:"); handles.push(raw);
@@ -407,6 +446,345 @@ describe("approvals", () => {
     await revokeResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest }], 3, (l) => lines.push(l));
     assert.equal((await readOpenApproval(f.shared, f.tenant))?.state, "registered");
     assert.match(lines[0]!, /past the point a revoke undoes/);
+  });
+});
+
+describe("automatic admission of re-signed paper tenants (MERRYMEN_RESUME_AUTO_PAPER)", () => {
+  /** A pre-incident paper tenant that holds nothing: the fixture less its position, live basis and floor. */
+  async function paperHoldingNothing() {
+    const f = await fixture();
+    for (const table of ["positions", "cost_basis", "position_floors"]) f.raw.prepare(`DELETE FROM ${table} WHERE agent_id = ?`).run(f.account);
+    return f;
+  }
+  /** Its preview line, as the orchestrator's previewEntryFor builds it, for a home in the given state. */
+  async function entryOf(f: Awaited<ReturnType<typeof fixture>>, o: { book: "absent" | "blocked" | "present"; pass?: boolean; refusals?: string[] }) {
+    await ensureLedgerResumeSchema(f.shared);
+    const { evidence, digest, check } = await readResumeEvidence(f.shared, { tenant: f.tenant, grant: { smartAccount: f.account, chainId: 4663, owner: f.owner },
+      home: path.join(root, `auto-${f.id}`), nowSec: NOW, controls: CONTROLS });
+    const refusals = o.refusals ?? check.refusals;
+    const entry: PreviewEntry = { tenant: f.tenant, account: f.account, chainId: 4663, owner: f.owner, digest, pass: o.pass ?? refusals.length === 0, refusals,
+      chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor, riskPeriod: check.riskPeriod,
+      home: o.book === "absent" ? "absent" : "present", lastMirrorAt: check.lastMirrorAt, holdsPositions: check.holdsPositions, startsPaused: false,
+      grantExpiresAt: NOW + 86_400, book: o.book, evidence };
+    return entry;
+  }
+
+  it("the variable is 1 or unset; anything else refuses boot, and at runtime approves nobody", () => {
+    assert.equal(parseResumeAutoPaper(undefined), false);
+    assert.equal(parseResumeAutoPaper("1"), true);
+    for (const bad of ["0", "", "true", " 1", "1 ", "yes"]) assert.throws(() => parseResumeAutoPaper(bad), /MERRYMEN_RESUME_AUTO_PAPER is not 1/);
+    assert.equal(resumeAutoPaperOn({ MERRYMEN_RESUME_AUTO_PAPER: "1" }), true);
+    assert.equal(resumeAutoPaperOn({}), false);
+    assert.equal(resumeAutoPaperOn({ MERRYMEN_RESUME_AUTO_PAPER: "true" }), false, "fails closed");
+  });
+
+  it("room under the process cap: the runbook's 40 of 48, counting open approvals as taken", () => {
+    assert.equal(AUTO_PAPER_HEADROOM, 8);
+    assert.equal(autoPaperRoom({ running: 0, open: 0, cap: 48 }), 40);
+    assert.equal(autoPaperRoom({ running: 39, open: 0, cap: 48 }), 1);
+    assert.equal(autoPaperRoom({ running: 40, open: 0, cap: 48 }), 0);
+    assert.equal(autoPaperRoom({ running: 30, open: 10, cap: 48 }), 0);
+    assert.equal(autoPaperRoom({ running: 48, open: 3, cap: 48 }), 0, "never negative");
+  });
+
+  it("a grant row's key moves with a re-sign (its expiry and its server stamp), not with the tenant's spelling", () => {
+    const t = addr(0xa1);
+    const k = grantRowKey({ tenant: t, expiresAt: 100, updatedAt: 50 });
+    assert.equal(grantRowKey({ tenant: t.toUpperCase().replace("0X", "0x"), expiresAt: 100, updatedAt: 50 }), k);
+    assert.notEqual(grantRowKey({ tenant: t, expiresAt: 200, updatedAt: 50 }), k);
+    assert.notEqual(grantRowKey({ tenant: t, expiresAt: 100, updatedAt: 51 }), k);
+    assert.notEqual(grantRowKey({ tenant: t, expiresAt: 100 }), k, "a store that cannot say when it wrote is a different reading, never a match");
+  });
+
+  it("the watch baselines the roster once, then owes a preview for each changed or new grant row until that exact key is settled", async () => {
+    const f = await fixture();
+    await ensureLedgerResumeSchema(f.shared);
+    const [a, b, c] = [addr(0xb1), addr(0xb2), addr(0xb3)];
+    const key = (tenant: string, expiresAt: number) => ({ tenant, key: grantRowKey({ tenant, expiresAt, updatedAt: expiresAt - 7 * 86_400 }) });
+    // First sight: everything as it stands is nobody's re-sign.
+    assert.deepEqual(await observeGrantChanges(f.shared, [key(a, 10), key(b, 20)], 1), { baselined: 2, owed: [] });
+    assert.deepEqual(await observeGrantChanges(f.shared, [key(a, 10), key(b, 20)], 2), { baselined: null, owed: [] }, "nothing changed");
+    // b re-signs; c is a new grant row.
+    const changed = await observeGrantChanges(f.shared, [key(a, 10), key(b, 99), key(c, 30)], 3);
+    assert.deepEqual(changed.owed.map((o) => o.tenant), [b, c]);
+    // Owed across passes (and restarts: it is in the table) until settled.
+    assert.deepEqual((await observeGrantChanges(f.shared, [key(a, 10), key(b, 99), key(c, 30)], 4)).owed.map((o) => o.tenant), [b, c]);
+    assert.equal(await settleGrantChange(f.shared, changed.owed[0]!, { outcome: "auto-approved", run: "r".repeat(64) }, 5), true);
+    assert.deepEqual((await observeGrantChanges(f.shared, [key(a, 10), key(b, 99), key(c, 30)], 6)).owed.map((o) => o.tenant), [c]);
+    // A second re-sign while the first is owed: the newer key is what is owed, and settling the old one does nothing.
+    const stale = changed.owed[1]!;
+    const again = await observeGrantChanges(f.shared, [key(a, 10), key(b, 99), key(c, 31)], 7);
+    assert.equal(again.owed[0]!.key, key(c, 31).key);
+    assert.equal(await settleGrantChange(f.shared, stale, { outcome: "previewed: x", run: null }, 8), false);
+    // A removed tenant keeps its row; signed again later, it is a change.
+    assert.deepEqual((await observeGrantChanges(f.shared, [key(b, 99)], 9)).owed.map((o) => o.tenant), [], "c left the roster: nothing owed for it now");
+    assert.deepEqual((await observeGrantChanges(f.shared, [key(a, 10), key(b, 99), key(c, 31)], 10)).owed.map((o) => o.tenant), [c], "still owed on return");
+    const rows = f.raw.prepare("SELECT tenant, owed, outcome FROM ledger_resume_grant_watch ORDER BY tenant").all().map((r) => ({ ...r }));
+    assert.deepEqual(rows, [{ tenant: "*", owed: 0, outcome: "baseline" }, { tenant: a, owed: 0, outcome: "baseline" }, { tenant: b, owed: 0, outcome: "auto-approved" },
+      { tenant: c, owed: 1, outcome: null }]);
+  });
+
+  it("the safe case: a paper tenant that passes, could not arm live, holds nothing, and whose book the gate holds", async () => {
+    const f = await paperHoldingNothing();
+    assert.deepEqual(await autoPaperVerdict(f.shared, await entryOf(f, { book: "blocked" }), ENFORCED), { kind: "auto" });
+    assert.deepEqual(await autoPaperVerdict(f.shared, await entryOf(f, { book: "absent" }), ENFORCED), { kind: "auto" }, "absent, with history on record");
+  });
+
+  it("not the gate's: a book on the volume, or no history at all, is the ordinary path's", async () => {
+    const f = await paperHoldingNothing();
+    assert.equal((await autoPaperVerdict(f.shared, await entryOf(f, { book: "present" }), ENFORCED)).kind, "not-held");
+    // A brand-new account: nothing on record anywhere.
+    const g = await fixture();
+    for (const table of ["agents", "trades", "flows", "equity", "positions", "cost_basis", "position_floors", "mirror_state"]) {
+      g.raw.prepare(`DELETE FROM ${table} WHERE ${table === "agents" ? "smart_account" : table === "mirror_state" ? "tenant" : "agent_id"} = ?`)
+        .run(table === "mirror_state" ? g.tenant : g.account);
+    }
+    const fresh = await entryOf(g, { book: "absent" });
+    assert.equal(evidenceHasHistory(fresh.evidence!), false);
+    assert.equal((await autoPaperVerdict(g.shared, fresh, ENFORCED)).kind, "not-held");
+    assert.equal(evidenceHasHistory((await entryOf(f, { book: "absent" })).evidence!), true);
+  });
+
+  it("each departure from the safe case alone leaves it to the operator, and says why", async () => {
+    const manual = async (entry: PreviewEntry, db: Db, why: RegExp) => {
+      const v = await autoPaperVerdict(db, entry, ENFORCED);
+      assert.equal(v.kind, "manual");
+      assert.match((v as { why: string[] }).why.join(" | "), why);
+    };
+    const live = await fixture({ live: true });
+    await manual(await entryOf(live, { book: "blocked" }), live.shared, /could arm live \(chain:required\)/);
+    const holding = await fixture(); // the paper fixture holds a token balance
+    await manual(await entryOf(holding, { book: "blocked" }), holding.shared, /holding positions/);
+    const basis = await paperHoldingNothing();
+    basis.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'OLD', '5', '1', ?)").run(basis.account, OLD);
+    await manual(await entryOf(basis, { book: "blocked" }), basis.shared, /1 live book row/);
+    const queued = await paperHoldingNothing();
+    queued.raw.prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES ('c1', ?, 'trade', ?)").run(queued.account, OLD * 1000);
+    await manual(await entryOf(queued, { book: "blocked" }), queued.shared, /1 owner command\(s\) .* still open/);
+    queued.raw.prepare("UPDATE agent_commands SET done_at = ?, result = 'never ran' WHERE id = 'c1'").run(OLD * 1000 + 1);
+    assert.deepEqual(await autoPaperVerdict(queued.shared, await entryOf(queued, { book: "blocked" }), ENFORCED), { kind: "auto" }, "an answered command is not open");
+    const failing = await paperHoldingNothing();
+    await manual(await entryOf(failing, { book: "blocked", pass: false, refusals: ["the signed grant has expired: the owner must re-sign"] }), failing.shared, /did not pass: the signed grant has expired/);
+    const intent = await paperHoldingNothing();
+    const turnedLive = await readResumeEvidence(intent.shared, { tenant: intent.tenant, grant: { smartAccount: intent.account, chainId: 4663, owner: intent.owner },
+      home: path.join(root, "auto-intent"), nowSec: NOW, controls: CONTROLS, liveIntent: true });
+    const intentEntry = { ...(await entryOf(intent, { book: "blocked" })), evidence: turnedLive.evidence, digest: turnedLive.digest };
+    await manual(intentEntry, intent.shared, /could arm live/);
+    // An operator's revoke is never overridden by a re-sign.
+    const revoked = await paperHoldingNothing();
+    const entry = await entryOf(revoked, { book: "blocked" });
+    const run = await recordPreviewRun(revoked.shared, [entry], 1);
+    await applyResumeApprovals(revoked.shared, [{ kind: "run", run }], 2, () => {});
+    await manual(entry, revoked.shared, /approval is already open/);
+    await revokeResumeApprovals(revoked.shared, [{ kind: "run", run }], 3, () => {});
+    await manual(entry, revoked.shared, /an operator revoked an earlier approval/);
+  });
+
+  it("an automatic approval goes through the operator's insert, and says who gave it", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    const lines: string[] = [];
+    assert.deepEqual(await recordResumeApproval(f.shared, { entry, run, at: 1, nowMs: 2, source: "auto-paper" }, (l) => lines.push(l)), { recorded: true });
+    assert.match(lines[0]!, /approved automatically \(auto-paper/);
+    const open = (await readOpenApproval(f.shared, f.tenant))!;
+    assert.deepEqual({ state: open.state, source: open.source, digest: open.evidenceDigest, run: open.previewRun }, { state: "approved", source: "auto-paper", digest: entry.digest, run });
+    // Never twice for the same evidence, whoever asks; an operator's run approval of the same evidence adds nothing.
+    assert.equal((await recordResumeApproval(f.shared, { entry, run, at: 1, nowMs: 3, source: "auto-paper" }, () => {})).recorded, false);
+    assert.equal(await applyResumeApprovals(f.shared, [{ kind: "run", run }], 4, () => {}), 0);
+    assert.equal(await countOpenApprovals(f.shared), 1);
+    // The operator's own, and a row from before the column, read as the operator's.
+    const g = await paperHoldingNothing();
+    const ge = await entryOf(g, { book: "blocked" });
+    await applyResumeApprovals(g.shared, [{ kind: "run", run: await recordPreviewRun(g.shared, [ge], 1) }], 2, () => {});
+    assert.equal((await readOpenApproval(g.shared, g.tenant))!.source, "operator");
+    g.raw.prepare("UPDATE ledger_resume_approvals SET source = NULL").run();
+    assert.equal((await readOpenApproval(g.shared, g.tenant))!.source, "operator");
+  });
+
+  it("an insert the store could not take for an outage is transient and records nothing; the store's own answer is final, as before", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    const insert = /INSERT INTO ledger_resume_approvals/;
+    // What the error says can carry a connection string: never in a line or a reason.
+    const coded = (code: string) => () => Object.assign(new Error("postgres://merrymen:hunter2@db.internal/x: canceling statement"), { code });
+    const auto = (db: Db, lines: string[]) => recordResumeApproval(db, { entry, run, at: 1, nowMs: 2, source: "auto-paper" }, (l) => lines.push(l));
+    for (const code of ["57014", "40001", "40P01", "08006", "08001", "57P01", "53300", "55P03", "ECONNRESET", "ETIMEDOUT"]) {
+      const lines: string[] = [];
+      assert.deepEqual(await auto(failing(f.shared, insert, coded(code)), lines), { recorded: false, why: `the store could not be reached or gave up (${code})`, transient: true }, code);
+      assert.deepEqual(lines, [], `${code}: the automatic lane says its own line, with its back-off`);
+    }
+    // The client's own words for a connection that ended, with no code: by its class.
+    assert.deepEqual(await auto(failing(f.shared, insert, () => new Error("Connection terminated unexpectedly")), []),
+      { recorded: false, why: "the store could not be reached or gave up (Error)", transient: true });
+    // An operator's boot is told, and told the variable records it on the next.
+    const said: string[] = [];
+    assert.equal((await recordResumeApproval(failing(f.shared, insert, coded("57014")), { entry, run, at: 1, nowMs: 2, source: "operator" }, (l) => said.push(l)) as { transient?: true }).transient, true);
+    assert.deepEqual(said, [`[alert] resume approval: ${f.tenant} could not be recorded — the store could not be reached or gave up (57014): an outage, not a refusal — ` +
+      "not approved by this boot; left set, the variable records it on the next"]);
+    assert.equal(await countOpenApprovals(f.shared), 0, "nothing recorded by any of them");
+    // The store's answer — its uniqueness, a check, schema drift, an error it has no code for — is final, exactly as before.
+    for (const error of [coded("23505"), coded("23514"), coded("42703"), () => new Error("UNIQUE constraint failed: ledger_resume_approvals.tenant")]) {
+      const lines: string[] = [];
+      assert.deepEqual(await auto(failing(f.shared, insert, error), lines), { recorded: false, why: "the store refused the approval" }, error().message);
+      assert.deepEqual(lines, [`[alert] resume approval: ${f.tenant} could not be recorded (another approval is open, or the store refused) — not approved`]);
+    }
+    // A real one: another replica's approval of the same evidence lands between the checks and the insert.
+    const racing = new Proxy(f.shared, {
+      get(target, prop, receiver) {
+        if (prop !== "prepare") { const v = Reflect.get(target, prop, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!insert.test(sql)) return stmt;
+          return { get: stmt.get.bind(stmt), all: stmt.all.bind(stmt), run: async (...args: unknown[]) => { await stmt.run("another-replica", ...args.slice(1)); return stmt.run(...args); } };
+        };
+      },
+    });
+    assert.deepEqual(await auto(racing, []), { recorded: false, why: "the store refused the approval" }, "the table's own uniqueness: settled, never asked again");
+    assert.equal((await readOpenApproval(f.shared, f.tenant))!.approvalId, "another-replica", "the approval on record is the one that won");
+    assert.deepEqual(await auto(f.shared, []), { recorded: false, why: "an approval of this evidence is already on record (approved)" });
+  });
+
+  it("an approval the store could not take sits out a growing number of turns — the next pass, then 1, 3, 7 … up to 40 — and is an [alert] from the third in a row", () => {
+    assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 30].map(autoPaperRecordWait), [0, 1, 3, 7, 15, 31, 40, 40, 40]);
+    assert.equal(AUTO_PAPER_RECORD_MAX_WAIT, 40, "about ten minutes of fifteen-second passes");
+    assert.equal(AUTO_PAPER_RECORD_ALERT_AFTER, 3);
+    for (const odd of [0, -3, NaN, Infinity]) assert.equal(autoPaperRecordWait(odd), 0, String(odd));
+  });
+
+  it("nobody is approved while live-trading consent is stood down: a funded account would arm live whatever its settings say", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    assert.deepEqual(await autoPaperVerdict(f.shared, entry, ENFORCED), { kind: "auto" }, "the safe case, with consent in force");
+    const v = await autoPaperVerdict(f.shared, entry, { consentEnforced: false });
+    assert.equal(v.kind, "manual");
+    assert.match((v as { why: string[] }).why.join(" | "), /live-trading consent is stood down on this deployment \(MERRYMEN_LIVE_INTENT_STAND_DOWN=1\)/);
+  });
+
+  it("a missing column is schema drift, not an absent table: the verdict throws rather than read it as nothing open", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    // Postgres's words for a missing column also say "does not exist"; its code is 42703, not 42P01.
+    const pgDrift = failing(f.shared, /FROM agent_commands/, () => Object.assign(new Error('column "done_at" does not exist'), { code: "42703" }));
+    await assert.rejects(autoPaperVerdict(pgDrift, entry, ENFORCED), /column "done_at" does not exist/);
+    const sqliteDrift = failing(f.shared, /FROM cost_basis/, () => new Error("no such column: qty_raw"));
+    await assert.rejects(autoPaperVerdict(sqliteDrift, entry, ENFORCED), /no such column/);
+    const classDrift = failing(f.shared, /FROM class_positions/, () => Object.assign(new Error('column "state" does not exist'), { code: "42703" }));
+    await assert.rejects(resumePreconditions(classDrift, { tenant: f.tenant, account: f.account, grantAccount: f.account, nowSec: NOW, controls: CONTROLS, homePendingImport: false }),
+      /column "state" does not exist/, "the preview's position count too");
+    // A table not there yet still holds nothing, in either dialect.
+    const pgAbsent = failing(f.shared, /FROM agent_commands/, () => Object.assign(new Error('relation "agent_commands" does not exist'), { code: "42P01" }));
+    assert.deepEqual(await autoPaperVerdict(pgAbsent, entry, ENFORCED), { kind: "auto" });
+    const sqliteAbsent = failing(f.shared, /FROM trench_positions/, () => new Error("no such table: trench_positions"));
+    assert.deepEqual(await autoPaperVerdict(sqliteAbsent, entry, ENFORCED), { kind: "auto" });
+  });
+
+  it("owed changes come in turn order: never tried first, then the least recently tried, then the longest owed", async () => {
+    const f = await fixture();
+    await ensureLedgerResumeSchema(f.shared);
+    const [a, b, c, d] = [addr(0xd1), addr(0xd2), addr(0xd3), addr(0xd4)];
+    const k = (tenant: string, v: number) => ({ tenant, key: grantRowKey({ tenant, expiresAt: v, updatedAt: v }) });
+    assert.deepEqual(await observeGrantChanges(f.shared, [], 1), { baselined: 0, owed: [] });
+    await observeGrantChanges(f.shared, [k(c, 1), k(d, 1)], 10);
+    const order = async (roster: Array<{ tenant: string; key: string }>, at: number) => (await observeGrantChanges(f.shared, roster, at)).owed;
+    // Whatever the roster's order, the longest owed come first.
+    let owed = await order([k(a, 1), k(b, 1), k(c, 1), k(d, 1)], 20);
+    assert.deepEqual(owed.map((o) => o.tenant), [c, d, a, b]);
+    // c and d are tried and cannot be read: behind a and b, c (tried first) before d. a and b,
+    // owed since the same pass and never tried, are in roster order between themselves.
+    await noteGrantAttempt(f.shared, owed[0]!, 30);
+    await noteGrantAttempt(f.shared, owed[1]!, 31);
+    owed = await order([k(d, 1), k(c, 1), k(b, 1), k(a, 1)], 40);
+    assert.deepEqual(owed.map((o) => o.tenant), [b, a, c, d]);
+    // b is tried too, later still; c's owner signs again — a new change, never tried, owed from now.
+    await noteGrantAttempt(f.shared, owed[0]!, 50);
+    owed = await order([k(a, 1), k(b, 1), k(c, 2), k(d, 1)], 60);
+    assert.deepEqual(owed.map((o) => o.tenant), [a, c, d, b]);
+    assert.deepEqual({ ...f.raw.prepare("SELECT attempted_at_ms AS at FROM ledger_resume_grant_watch WHERE tenant = ?").get(c) }, { at: null }, "a new change is untried");
+    // A note for a key no longer owed changes nothing, and a settled change is no one's turn.
+    await noteGrantAttempt(f.shared, k(c, 1), 70);
+    assert.deepEqual({ ...f.raw.prepare("SELECT attempted_at_ms AS at FROM ledger_resume_grant_watch WHERE tenant = ?").get(c) }, { at: null });
+    assert.equal(await settleGrantChange(f.shared, owed[0]!, { outcome: "auto-approved", run: null }, 80), true);
+    assert.deepEqual((await order([k(a, 1), k(b, 1), k(c, 2), k(d, 1)], 90)).map((o) => o.tenant), [c, d, b]);
+  });
+
+  it("an owed change is answered by an automatic approval recorded since it was seen, in any state — not by an older one, an operator's, or once it is settled", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    const t = f.tenant, k = (v: number) => ({ tenant: t, key: grantRowKey({ tenant: t, expiresAt: v, updatedAt: v }) });
+    const approve = async (digest: string, nowMs: number, source: "operator" | "auto-paper") =>
+      assert.deepEqual(await recordResumeApproval(f.shared, { entry: { ...entry, digest }, run, at: 1, nowMs, source }, () => {}), { recorded: true });
+    const end = (digest: string, state: string) => f.raw.prepare("UPDATE ledger_resume_approvals SET state = ? WHERE evidence_digest = ?").run(state, digest);
+    const found = async () => Object.fromEntries(await answeredGrantChanges(f.shared));
+    assert.deepEqual(await observeGrantChanges(f.shared, [], 1), { baselined: 0, owed: [] });
+    // An automatic approval from before the change was seen belongs to an earlier one.
+    await approve("1".repeat(64), 5, "auto-paper"); end("1".repeat(64), "refused");
+    assert.deepEqual((await observeGrantChanges(f.shared, [k(1)], 10)).owed, [k(1)]);
+    assert.deepEqual(await found(), {});
+    // An operator's approval is never the lane's answer.
+    await approve("2".repeat(64), 12, "operator"); end("2".repeat(64), "refused");
+    assert.deepEqual(await found(), {});
+    // The lane's own, since: whatever Phase A has made of it, it is the answer.
+    await approve("3".repeat(64), 15, "auto-paper");
+    assert.deepEqual(await found(), { [t]: { key: k(1).key, state: "approved", run } });
+    end("3".repeat(64), "refused");
+    assert.deepEqual(await found(), { [t]: { key: k(1).key, state: "refused", run } }, "refused since: still the answer, never a reason to approve again");
+    // The owner signs again: a new change, seen after it, which that approval does not answer.
+    assert.deepEqual((await observeGrantChanges(f.shared, [k(2)], 20)).owed, [k(2)]);
+    assert.deepEqual(await found(), {});
+    // Of two since, the latest.
+    await approve("4".repeat(64), 25, "auto-paper"); end("4".repeat(64), "refused");
+    await approve("5".repeat(64), 26, "auto-paper");
+    assert.deepEqual(await found(), { [t]: { key: k(2).key, state: "approved", run } });
+    // Settled, it is owed nothing.
+    assert.equal(await settleGrantChange(f.shared, k(2), { outcome: "auto-approved", run }, 30), true);
+    assert.deepEqual(await found(), {});
+  });
+
+  it("an approval finds its preview run beyond the newest 200, by the run's digest or by the evidence digest", async () => {
+    const old = await paperHoldingNothing();
+    const oldEntry = await entryOf(old, { book: "blocked" });
+    const oldRun = await recordPreviewRun(old.shared, [oldEntry], 1);
+    const other = await paperHoldingNothing();
+    const otherEntry = await entryOf(other, { book: "blocked" });
+    const otherRun = await recordPreviewRun(other.shared, [otherEntry], 1);
+    // Two hundred newer runs in each, none of them these tenants' (the automatic lane records one per held re-signer).
+    for (const f of [old, other]) {
+      for (let i = 0; i < 200; i++) {
+        await recordPreviewRun(f.shared, [{ ...oldEntry, tenant: addr(0xe000 + i), digest: i.toString(16).padStart(64, "0") }], 2 + i);
+      }
+    }
+    const lines: string[] = [];
+    assert.equal(await applyResumeApprovals(old.shared, [{ kind: "tenant", tenant: old.tenant, digest: oldEntry.digest! }], 1_000, (l) => lines.push(l)), 1, lines.join("\n"));
+    assert.equal((await readOpenApproval(old.shared, old.tenant))!.previewRun, oldRun);
+    assert.equal(await applyResumeApprovals(other.shared, [{ kind: "run", run: otherRun }], 1_000, (l) => lines.push(l)), 1, lines.join("\n"));
+    assert.equal((await readOpenApproval(other.shared, other.tenant))!.previewRun, otherRun);
+    // What no run ever showed passing is still refused.
+    assert.equal(await applyResumeApprovals(old.shared, [{ kind: "tenant", tenant: old.tenant, digest: "f".repeat(64) }], 1_001, (l) => lines.push(l)), 0);
+    assert.match(lines.at(-1)!, /no recorded preview run shows that digest passing/);
+  });
+
+  it("an operator approving evidence an automatic approval already ended on is told why, never skipped in silence", async () => {
+    const f = await paperHoldingNothing();
+    const entry = await entryOf(f, { book: "blocked" });
+    const run = await recordPreviewRun(f.shared, [entry], 1);
+    await recordResumeApproval(f.shared, { entry, run, at: 1, nowMs: 2, source: "auto-paper" }, () => {});
+    await moveApproval(f.shared, (await readOpenApproval(f.shared, f.tenant))!.approvalId, "approved", "refused", { reason: "owner controls cannot be read (x)" });
+    const lines: string[] = [];
+    assert.equal(await applyResumeApprovals(f.shared, [{ kind: "tenant", tenant: f.tenant, digest: entry.digest! }], 3, (l) => lines.push(l)), 0);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /^\[alert\] resume approval: .* an automatic \(auto-paper\) approval of this exact evidence refused \(owner controls cannot be read \(x\)\), and one evidence is never approved twice/);
+    // The operator's own approval of the same evidence, left set across boots, stays silent as before.
+    const g = await paperHoldingNothing();
+    const ge = await entryOf(g, { book: "blocked" });
+    const gRun = await recordPreviewRun(g.shared, [ge], 1);
+    await applyResumeApprovals(g.shared, [{ kind: "run", run: gRun }], 2, () => {});
+    await moveApproval(g.shared, (await readOpenApproval(g.shared, g.tenant))!.approvalId, "approved", "refused", { reason: "x" });
+    const quiet: string[] = [];
+    assert.equal(await applyResumeApprovals(g.shared, [{ kind: "run", run: gRun }], 3, (l) => quiet.push(l)), 0);
+    assert.deepEqual(quiet, []);
   });
 });
 
