@@ -20,6 +20,8 @@ import { after, describe, it } from "node:test";
 import { wrapSqlite } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
+import { ensureLedgerResumeSchema } from "./ledger-import";
+import { CHAIN_REFUSAL } from "./ledger-resume";
 import { CASH } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused, BOOKINGS_TABLE } from "./chain-gap-booking";
@@ -82,6 +84,11 @@ async function shared() {
   for (const table of ["trades", "flows", "equity"]) {
     raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, 4, 1, ?)").run(TENANT, table, DEPOSIT_AT - 3600);
   }
+  // What holds it: admission's chain refusal, an hour before the preview, naming the deposit.
+  await ensureLedgerResumeSchema(db);
+  raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+      created_at_ms, updated_at_ms) VALUES ('a1', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', ?, ?, ?)`)
+    .run(TENANT, ACCOUNT, TENANT, "e".repeat(64), `${CHAIN_REFUSAL}: USDG in 9.000000 in tx ${DEPOSIT_TX} log 2 at block ${BLOCK}`, (NOW - 3660) * 1000, (NOW - 3600) * 1000);
   return raw;
 }
 
@@ -124,7 +131,7 @@ describe("arguments", () => {
 });
 
 describe("the chain transport", () => {
-  it("admits a fixed list of reads, and eth_call for decimals() at latest only", async () => {
+  it("admits a fixed list of reads, and eth_call for decimals() and balanceOf(one address) at latest only", async () => {
     const asked: unknown[] = [];
     const fetchImpl = (async (_url: string, init: { body: string }) => {
       const body = JSON.parse(init.body) as { id: number; method: string };
@@ -132,13 +139,22 @@ describe("the chain transport", () => {
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "0x12" }), { status: 200 });
     }) as unknown as typeof fetch;
     const rpc = createBookingRpc("https://rpc.example/", fetchImpl);
+    const token = `0x${"aa".repeat(20)}`, holder = "bb".repeat(20);
     assert.equal(await rpc("eth_blockNumber", []), "0x12");
-    assert.equal(await rpc("eth_call", [{ to: `0x${"aa".repeat(20)}`, data: "0x313ce567" }, "latest"]), "0x12");
-    for (const [method, params] of [["eth_sendRawTransaction", ["0x"]], ["eth_getBalance", []], ["eth_call", [{ to: `0x${"aa".repeat(20)}`, data: "0xa9059cbb" }, "latest"]],
-      ["eth_call", [{ to: `0x${"aa".repeat(20)}`, data: "0x313ce567" }, "0x1"]], ["eth_call", [{ to: `0x${"aa".repeat(20)}`, data: "0x313ce567", from: `0x${"bb".repeat(20)}` }, "latest"]]] as const) {
-      await assert.rejects(rpc(method, params as unknown as unknown[]), (e: unknown) => e instanceof CliError && /allowlist/.test(e.code), method);
+    assert.equal(await rpc("eth_call", [{ to: token, data: "0x313ce567" }, "latest"]), "0x12");
+    assert.equal(await rpc("eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "latest"]), "0x12");
+    for (const [method, params] of [["eth_sendRawTransaction", ["0x"]], ["eth_getBalance", []], ["eth_call", [{ to: token, data: "0xa9059cbb" }, "latest"]],
+      ["eth_call", [{ to: token, data: "0x313ce567" }, "0x1"]], ["eth_call", [{ to: token, data: "0x313ce567", from: `0x${"bb".repeat(20)}` }, "latest"]],
+      // balanceOf with anything but one zero-padded address: a second word, a dirty pad, a short address, or another block.
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}${"0".repeat(64)}` }, "latest"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"1".repeat(24)}${holder}` }, "latest"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder.slice(2)}` }, "latest"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "earliest"]],
+      // transfer(address,uint256) shaped like it: the selector is what is admitted, not the length.
+      ["eth_call", [{ to: token, data: `0xa9059cbb${"0".repeat(24)}${holder}` }, "latest"]]] as const) {
+      await assert.rejects(rpc(method, params as unknown as unknown[]), (e: unknown) => e instanceof CliError && /allowlist/.test(e.code), `${method} ${JSON.stringify(params)}`);
     }
-    assert.deepEqual(asked, ["eth_blockNumber", "eth_call"], "nothing refused left the process");
+    assert.deepEqual(asked, ["eth_blockNumber", "eth_call", "eth_call"], "nothing refused left the process");
     assert.throws(() => createBookingRpc("ftp://rpc.example/"), (e: unknown) => (e as CliError).code === "unsupported-rpc-url");
   });
   it("a rate limit and a node's refusal keep what the adaptive reader needs to tell them apart; a forged answer is refused", async () => {

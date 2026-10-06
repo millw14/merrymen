@@ -29,8 +29,8 @@ import { fileURLToPath } from "node:url";
 import { translateQuery, translateSchema, type Db } from "./db";
 import type { RpcCall } from "./chain-capital";
 import {
-  applyBooking, BookingRefused, canonical, DECIMALS_SELECTOR, parseApplyReport, planBooking, planLines, readBookingSnapshot, readChainEvidence, revertBooking,
-  type BookingPlan,
+  applyBooking, BALANCE_OF_CALL, BookingRefused, canonical, DECIMALS_SELECTOR, parseApplyReport, planBooking, planLines, readBookingSnapshot, readChainEvidence,
+  revertBooking, type BookingPlan,
 } from "./chain-gap-booking";
 
 export const DEFAULT_RPC = "https://rpc.mainnet.chain.robinhood.com";
@@ -41,9 +41,10 @@ export const HELP = `Chain-gap booking — PREVIEW FIRST. docs/chain-gap-booking
   node --import tsx worker/src/chain-gap-booking-cli.ts --revert /absolute/apply-report.json --output /absolute/new-revert-report.json
 
 Required environment: DATABASE_URL. Optional: MERRYMEN_CHAIN_GAP_RPC (defaults to the public Robinhood Chain mainnet RPC).
+Only a held tenant is booked: its newest admission decision a chain refusal, nothing written for it since, and only what landed before it.
 The preview reads Postgres read-only and the chain; it writes only its own report, created once with mode 0600.
 --apply recomputes the preview and writes exactly its proposed rows in one transaction, only when the digest is the one you confirm.
---revert removes one applied booking's rows, only if each is still exactly as written and the tenant was not admitted on them.
+--revert removes one applied booking's rows, only if each is still exactly as written and nothing stood on them since (no admission, approval or worker).
 Neither DATABASE_URL nor the RPC URL is printed or saved.
 `;
 
@@ -99,10 +100,12 @@ const RPC_METHODS = ["eth_chainId", "eth_blockNumber", "eth_getLogs", "eth_getTr
 
 /**
  * THE ONLY WAY THIS TOOL TALKS TO A NODE: a fixed list of reads, refused
- * before anything leaves the process otherwise. `eth_call` is admitted for one
- * call only — `decimals()` with no arguments, at "latest". A node's error text
- * is kept on the error so the adaptive log reader can tell a rate limit from a
- * range it should narrow (rpc-error.ts), and never printed.
+ * before anything leaves the process otherwise. `eth_call` is admitted for two
+ * view calls only, at "latest", with no `from`, value or gas: `decimals()`
+ * with no arguments, and `balanceOf(address)` with exactly one zero-padded
+ * address. A node's error text is kept on the error so the adaptive log reader
+ * can tell a rate limit from a range it should narrow (rpc-error.ts), and
+ * never printed.
  */
 export function createBookingRpc(url: string, fetchImpl: typeof fetch = fetch): RpcCall {
   let parsed: URL;
@@ -113,7 +116,8 @@ export function createBookingRpc(url: string, fetchImpl: typeof fetch = fetch): 
     if (!RPC_METHODS.includes(method)) throw new CliError("rpc-method-outside-read-allowlist");
     if (method === "eth_call") {
       const [call, tag, ...rest] = params as [Record<string, unknown> | undefined, unknown];
-      if (rest.length || tag !== "latest" || !call || Object.keys(call).sort().join(",") !== "data,to" || call.data !== DECIMALS_SELECTOR
+      if (rest.length || tag !== "latest" || !call || Object.keys(call).sort().join(",") !== "data,to"
+        || (call.data !== DECIMALS_SELECTOR && !(typeof call.data === "string" && BALANCE_OF_CALL.test(call.data)))
         || typeof call.to !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(call.to)) throw new CliError("rpc-call-outside-read-allowlist");
     }
     const requestId = ++id;

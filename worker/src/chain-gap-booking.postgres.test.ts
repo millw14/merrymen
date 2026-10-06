@@ -25,7 +25,8 @@ import { CASH } from "../../packages/core/src/index";
 import { translateQuery, translateSchema, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
-import { knownChainFacts } from "./ledger-resume";
+import { CHAIN_REFUSAL, knownChainFacts } from "./ledger-resume";
+import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
 import { BOOKINGS_TABLE, BookingRefused } from "./chain-gap-booking";
 import { connectBooking, main, type PgClient } from "./chain-gap-booking-cli";
@@ -72,7 +73,11 @@ const rpc: RpcCall = async (method, params) => {
     const t = TXS.find((x) => x.tx === params[0])!;
     return { status: "0x1", blockNumber: `0x${t.block.toString(16)}`, blockHash: blockOf(t.block).hash, from: `0x${"d0".repeat(20)}`, to: EP, logs: logsOf(t) };
   }
-  if (method === "eth_call") return `0x${word(18n)}`;
+  if (method === "eth_call") {
+    // decimals() is 18; the account still holds what the buy brought it.
+    const data = (params[0] as { data: string }).data;
+    return data.startsWith("0x70a08231") ? `0x${word(data.endsWith(ACCOUNT.slice(2)) ? 1_500_000_000_000_000_000n : 0n)}` : `0x${word(18n)}`;
+  }
   throw new Error(method);
 };
 
@@ -112,6 +117,15 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   for (const table of ["trades", "flows", "equity"]) {
     await setup.query("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ($1, $2, 1, 1, $3)", [TENANT, table, AT - 3600]);
   }
+  // The lost book's last mirror, taken after the buy: the position and the basis the attested book would be seeded from already hold it.
+  await setup.query(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+    VALUES ($1, 'COIN', $2, '1500000000000000000', '1', 2, 0, 'pool', 3, $3)`, [ACCOUNT, COIN, AT + 30]);
+  await setup.query("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES ($1, 'live', 'COIN', '1500000000000000000', '3000000', $2)", [ACCOUNT, AT + 30]);
+  // What holds it, in the resume tables as the orchestrator creates them on Postgres: admission's chain refusal, a day after both facts landed.
+  await ensureLedgerResumeSchema(db);
+  await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+      created_at_ms, updated_at_ms) VALUES ('a1', $1, $2, 4663, $1, $3, '{}', 'r', 'refused', $4, $5, $5)`,
+  [TENANT, ACCOUNT, "e".repeat(64), `${CHAIN_REFUSAL}: operation ${OP} in tx ${OP_TX} at block ${BLOCK}`, (AT + 86_400) * 1000]);
 
   // THE SERVER HOLDS THE READ-ONLY CONNECTION TO IT, whatever the shell lets through.
   const ro = await connectBooking(scoped.toString(), true, loadPg); clients.push(ro);
@@ -140,7 +154,15 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   assert.ok(k.ops.has(OP) && k.txs.has(OP_TX) && k.flows.has(`${DEP_TX}:0`), "what admission's chain check reads now answers every fact");
   // The receipts' key: a second applied booking of the same evidence is refused by the server.
   await assert.rejects(setup.query(`INSERT INTO ${BOOKINGS_TABLE} (booking_id, tenant, account, epoch, chain_id, evidence_key, table_name, row_id, row_json, row_digest,
-    preview_digest, backup_ref, state, applied_at_ms) VALUES ('other', $1, $2, 2, 4663, $3, 'trades', 1, '{}', 'd', 'p', 'b', 'applied', 1)`, [TENANT, ACCOUNT, `op:${OP}`]), /duplicate key/);
+    preview_digest, backup_ref, admission_json, state, applied_at_ms) VALUES ('other', $1, $2, 2, 4663, $3, 'trades', 1, '{}', 'd', 'p', 'b', '{}', 'applied', 1)`,
+  [TENANT, ACCOUNT, `op:${OP}`]), /duplicate key/);
+  // Each receipt keeps where the tenant stood with admission — read on Postgres, inside the apply's transaction — and the report says the same.
+  const report = JSON.parse(readFileSync(applied, "utf8")) as { appliedAtMs: number; admission: { approvals: Array<{ approvalId: string; chainRefusal: boolean }> } };
+  const kept = (await setup.query(`SELECT DISTINCT admission_json, applied_at_ms FROM ${BOOKINGS_TABLE}`)).rows;
+  assert.equal(kept.length, 1);
+  assert.deepEqual(JSON.parse(String(kept[0]!.admission_json)), report.admission);
+  assert.equal(Number(kept[0]!.applied_at_ms), report.appliedAtMs);
+  assert.deepEqual(report.admission.approvals.map((a) => [a.approvalId, a.chainRefusal]), [["a1", true]]);
   // Applied once: a second apply finds nothing missing.
   await assert.rejects(main(["--tenant", TENANT, "--apply", "--confirm", plan.previewDigest, "--backup-ref", "pg-local-drill", "--output", path.join(tmp, "again.json")], env, deps),
     (e: unknown) => e instanceof BookingRefused && e.code === "nothing-missing");

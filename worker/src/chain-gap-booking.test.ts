@@ -17,21 +17,21 @@
  * those receipts, consistently: getLogs, receipts and blocks are one model.
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
-import { ensureLedgerResumeSchema } from "./ledger-import";
+import { ensureLedgerResumeSchema, LEDGER_IMPORT_SCHEMA } from "./ledger-import";
 import { gasFields } from "./key-install-accounting";
-import { chainGapCheck, knownChainFacts, resumePreconditions } from "./ledger-resume";
+import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, resumePreconditions } from "./ledger-resume";
 import { CASH, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import {
   APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, parseApplyReport, planBooking, planLines,
-  readBookingSnapshot, readChainEvidence, revertBooking, TRADE_COLUMNS, type BookingPlan,
+  readBookingSnapshot, readChainEvidence, revertBooking, TRADE_COLUMNS, type ApplyReport, type BookingPlan,
 } from "./chain-gap-booking";
 
 // ── the public chain, as read ────────────────────────────────────────────────
@@ -122,7 +122,13 @@ const fromFixture = (f: FixtureTx): ModelTx => ({ tx: f.tx, block: BigInt(f.bloc
  * sell's own block (its real time), each receipt's logs the only logs there
  * are. Every method the tool's transport admits, and nothing else.
  */
-function fakeRpc(o: { txs: ModelTx[]; head?: bigint; chainId?: number; decimals?: Record<string, bigint>; failReceipts?: boolean }) {
+function fakeRpc(o: {
+  txs: ModelTx[]; head?: bigint; chainId?: number; decimals?: Record<string, bigint>; failReceipts?: boolean;
+  /** balanceOf answers by token, then holder; any other holder of a token holds none. A token named in `failBalances` cannot be read. */
+  balances?: Record<string, Record<string, bigint>>; failBalances?: string[];
+  /** Transactions whose receipt names a block hash that is not the canonical block's at that height. */
+  orphaned?: string[];
+}) {
   const head = o.head ?? HEAD;
   const calls: string[] = [];
   const blockOf = (b: bigint) => {
@@ -145,11 +151,18 @@ function fakeRpc(o: { txs: ModelTx[]; head?: bigint; chainId?: number; decimals?
     if (method === "eth_getTransactionReceipt") {
       if (o.failReceipts) throw new Error("rpc-read-failed");
       const t = o.txs.find((x) => x.tx === params[0]);
-      return t ? { status: t.status ?? "0x1", blockNumber: `0x${t.block.toString(16)}`, blockHash: blockOf(t.block).hash, from: t.from, to: t.to, transactionHash: t.tx, logs: logsOf(t) } : null;
+      return t ? { status: t.status ?? "0x1", blockNumber: `0x${t.block.toString(16)}`, blockHash: o.orphaned?.includes(t.tx) ? h32(`orphan of ${t.block}`) : blockOf(t.block).hash,
+        from: t.from, to: t.to, transactionHash: t.tx, logs: logsOf(t) } : null;
     }
     if (method === "eth_call") {
       const [call, tag] = params as [{ to: string; data: string }, string];
-      assert.equal(call.data, "0x313ce567"); assert.equal(tag, "latest");
+      assert.equal(tag, "latest");
+      if (call.data.startsWith("0x70a08231")) {
+        assert.match(call.data, /^0x70a08231[0]{24}[0-9a-f]{40}$/);
+        if (o.failBalances?.includes(call.to.toLowerCase())) throw new Error("rpc-read-failed");
+        return `0x${word(o.balances?.[call.to.toLowerCase()]?.[`0x${call.data.slice(-40)}`] ?? 0n)}`;
+      }
+      assert.equal(call.data, "0x313ce567");
       const d = o.decimals?.[call.to.toLowerCase()];
       if (d === undefined) throw new Error("execution reverted");
       return `0x${word(d)}`;
@@ -164,8 +177,23 @@ function fakeRpc(o: { txs: ModelTx[]; head?: bigint; chainId?: number; decimals?
 const handles: DatabaseSync[] = [];
 after(() => { for (const h of handles) h.close(); });
 
-/** One tenant's Postgres as the incident left it: its registration, its history in epoch 2, its stalled cursors and its grant. */
-async function books(o: { tenant?: string; account?: string; trencher?: boolean; knownBuy?: boolean; mode?: string } = {}) {
+/** When admission last refused the held tenants here: half an hour before the preview, long after everything on the fixture chain landed. */
+const REFUSED_AT = NOW - 1800;
+/** Admission's refusal of the tenant, as moveApproval records one. */
+function refuse(raw: DatabaseSync, o: { tenant: string; account: string; id?: string; atSec?: number; reason?: string; state?: string; generation?: string | null }) {
+  const at = (o.atSec ?? REFUSED_AT) * 1000;
+  raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, generation,
+      reason, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 4663, ?, ?, '{}', 'r', ?, ?, ?, ?, ?)`)
+    .run(o.id ?? "refusal", o.tenant, o.account, o.tenant, h32(`evidence ${o.id ?? "refusal"}`).slice(2), o.state ?? "refused", o.generation ?? null,
+      o.reason ?? `${CHAIN_REFUSAL}: operation ${SELL_OP} in tx ${CHAIN.sell.tx} at block ${SELL_BLOCK}`, at - 60_000, at);
+}
+
+/**
+ * One tenant's Postgres as the incident left it: its registration, its
+ * history in epoch 2, its stalled cursors and its grant — and admission's
+ * chain refusal of it, which is what holds it (unless `refused: false`).
+ */
+async function books(o: { tenant?: string; account?: string; trencher?: boolean; knownBuy?: boolean; mode?: string; refused?: boolean } = {}) {
   const tenant = o.tenant ?? SHOGUN_TENANT, account = o.account ?? ACCOUNT;
   const raw = new DatabaseSync(":memory:"); handles.push(raw);
   const db = wrapSqlite(raw);
@@ -191,6 +219,8 @@ async function books(o: { tenant?: string; account?: string; trencher?: boolean;
   for (const table of ["trades", "flows", "equity", "events"]) {
     raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, 9, ?, ?)").run(tenant, table, opened, CHAIN.root.timestamp - 3600);
   }
+  await ensureLedgerResumeSchema(db);
+  if (o.refused !== false) refuse(raw, { tenant, account });
   return { raw, db, tenant, account };
 }
 
@@ -487,7 +517,13 @@ describe("apply and revert", () => {
     assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 1);
     // And the receipts' own key refuses a second applied booking of the same evidence outright.
     assert.throws(() => b.raw.prepare(`INSERT INTO ${BOOKINGS_TABLE} (booking_id, tenant, account, epoch, chain_id, evidence_key, table_name, row_id, row_json, row_digest,
-      preview_digest, backup_ref, state, applied_at_ms) VALUES ('x', ?, ?, 2, 4663, ?, 'trades', 1, '{}', 'd', 'p', 'b', 'applied', 1)`).run(SHOGUN_TENANT, ACCOUNT, `op:${SELL_OP}`), /UNIQUE/);
+      preview_digest, backup_ref, admission_json, state, applied_at_ms) VALUES ('x', ?, ?, 2, 4663, ?, 'trades', 1, '{}', 'd', 'p', 'b', '{}', 'applied', 1)`)
+      .run(SHOGUN_TENANT, ACCOUNT, `op:${SELL_OP}`), /UNIQUE/);
+    // Each receipt keeps where the tenant stood with admission, as the report does: the chain refusal that held it, and nothing since.
+    const kept = rows(b.raw, `SELECT DISTINCT admission_json FROM ${BOOKINGS_TABLE} WHERE booking_id = ?`, report.bookingId);
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0]!.admission_json, canonical(report.admission));
+    assert.deepEqual(report.admission.approvals.map((a) => [a.approvalId, a.state, a.chainRefusal]), [["refusal", "refused", true]]);
   });
 
   it("refuses, writing nothing: a digest the owner did not review, no backup named, a plan that is not ready, books that moved since the preview", async () => {
@@ -553,5 +589,273 @@ describe("apply and revert", () => {
     const tampered = { ...report, rows: report.rows.map((r) => ({ ...r, id: r.id + 1 })) };
     assert.throws(() => parseApplyReport(JSON.stringify(tampered)), (e: unknown) => (e as BookingRefused).code === "report");
     assert.throws(() => parseApplyReport("{"), (e: unknown) => (e as BookingRefused).code === "report");
+  });
+});
+
+// ── what the reviews asked to see refused ───────────────────────────────────
+
+const applyNow = (db: Db, p: BookingPlan, extra: Partial<{ confirm: string; backupRef: string; nowMs: number }> = {}) =>
+  applyBooking(db, p, { confirm: p.previewDigest, backupRef: "railway-backup-2026-10-06T09:00Z", dialect: "sqlite", nowMs: NOW * 1000, ...extra });
+/** A deposit from outside the system: the simplest fact that books. */
+const depositAt = (block: bigint, tag = "deposit") => lone({ from: addr(0xd0d0), to: ACCOUNT, amount: 12_500_000n, block, tag });
+/** The fixture chain's block at a given second: ten a second, dated from the sell's own block. */
+const blockAt = (sec: number) => SELL_BLOCK + BigInt((sec - CHAIN.sell.timestamp) * 10);
+type Books = Awaited<ReturnType<typeof books>>;
+
+describe("only a held tenant is booked (holdOf)", () => {
+  it("a tenant admission never refused — running, its heartbeat 5s old, its mirror 60s, an operation 30s and 300 blocks deep — is BLOCKED, and nothing applies", async () => {
+    const b = await books({ refused: false });
+    b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(NOW - 5, ACCOUNT);
+    b.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ?").run(NOW - 60, SHOGUN_TENANT);
+    const op = h32("not mirrored yet");
+    const { rpc } = fakeRpc({ txs: [fromFixture(CHAIN.buy), operation({ opHash: op, nonce: SESSION_NONCE, block: HEAD - 300n, tag: "not mirrored yet" })] });
+    const p = await preview(b, rpc);
+    assert.deepEqual(p.items.map((i) => i.class), ["session-no-movement"], "the operation itself classifies; the tenant is what is refused");
+    assert.equal(p.verdict, "blocked");
+    assert.ok(p.refusals.some((r) => /admission has never refused this tenant on the chain/.test(r)), p.refusals.join("; "));
+    await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "not-ready");
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", op)[0]!.n, 0, "the child's own row stays the one the mirror brings");
+  });
+
+  it("refused for another reason, admitted since, a heartbeat or a mirrored row after the chain refusal, or a book written in the last ten minutes: each refuses", async () => {
+    const txs = [fromFixture(CHAIN.buy), depositAt(SELL_BLOCK + 1_000n)];
+    assert.equal((await preview(await books(), fakeRpc({ txs }).rpc)).verdict, "ready", "held on a chain refusal, nothing since: it books");
+    const refusedWith = async (setup: (b: Books) => void, pattern: RegExp) => {
+      const b = await books();
+      setup(b);
+      const p = await preview(b, fakeRpc({ txs }).rpc);
+      assert.equal(p.verdict, "blocked", pattern.source);
+      assert.ok(p.refusals.some((r) => pattern.test(r)), `${pattern.source}: ${p.refusals.join("; ")}`);
+    };
+    await refusedWith((b) => b.raw.prepare("UPDATE ledger_resume_approvals SET reason = 'the stored grant names a different account, chain or owner than the approval'").run(),
+      /newest admission decision \(approval refusal…, refused for another reason\) is not a chain refusal/);
+    await refusedWith((b) => refuse(b.raw, { tenant: b.tenant, account: b.account, id: "admitted", atSec: REFUSED_AT + 60, state: "applied", generation: "g".repeat(36), reason: "" }),
+      /newest admission decision \(approval admitted…, applied\) is not a chain refusal/);
+    await refusedWith((b) => b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(REFUSED_AT + 10, ACCOUNT),
+      /its worker beat at .* after admission refused it at .*: it has run since, so it is not held/);
+    // The same heartbeat in milliseconds, as rows carried from elsewhere have held it.
+    await refusedWith((b) => b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run((REFUSED_AT + 10) * 1000, ACCOUNT), /its worker beat at /);
+    await refusedWith((b) => b.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ? AND table_name = 'events'").run(REFUSED_AT + 10, SHOGUN_TENANT),
+      /rows were mirrored for it at .* after admission refused it/);
+    // Before the refusal, but not ten minutes ago.
+    await refusedWith((b) => {
+      b.raw.prepare("UPDATE ledger_resume_approvals SET updated_at_ms = ?").run((NOW - 60) * 1000);
+      b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(NOW - 300, ACCOUNT);
+    }, /its book was written 300s ago \(heartbeat or mirror\): preview again once it has been quiet for 10 minutes/);
+  });
+
+  it("a revoked approval after the chain refusal decided nothing; a fact that landed after the refusal, or within a minute before it, is not booked", async () => {
+    const b = await books();
+    refuse(b.raw, { tenant: b.tenant, account: b.account, id: "withdrawn", atSec: REFUSED_AT + 600, state: "revoked", reason: "revoked by the operator" });
+    const early = depositAt(SELL_BLOCK + 1_000n, "early"), edge = depositAt(blockAt(REFUSED_AT - 30), "edge"), late = depositAt(blockAt(REFUSED_AT + 120), "late");
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), early, edge, late] }).rpc);
+    assert.deepEqual(p.refusals, [], "the revoked approval is passed over: the chain refusal before it still holds the tenant");
+    assert.equal(p.items.find((i) => i.fact.txHash === early.tx)?.class, "deposit");
+    for (const t of [edge, late]) {
+      const it = p.items.find((i) => i.fact.txHash === t.tx)!;
+      assert.equal(it.class, "unresolved");
+      assert.match(it.why, /not before admission's chain refusal of this tenant at .*: let admission refuse the tenant again/);
+    }
+    assert.equal(p.verdict, "blocked");
+  });
+
+  it("a tenant that wakes between the preview and the apply is refused by the compare-and-set, writing nothing", async () => {
+    const wakes: Array<[string, (b: Books) => void]> = [
+      ["a heartbeat", (b) => b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(NOW, ACCOUNT)],
+      ["a mirrored row", (b) => b.raw.prepare("UPDATE mirror_state SET updated_at = ? WHERE tenant = ? AND table_name = 'events'").run(NOW, SHOGUN_TENANT)],
+      ["its mode", (b) => b.raw.prepare("UPDATE agents SET mode = 'paper' WHERE smart_account = ?").run(ACCOUNT)],
+      ["an approval", (b) => refuse(b.raw, { tenant: b.tenant, account: b.account, id: "newer", atSec: NOW - 10 })],
+      ["a position", (b) => b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+        VALUES (?, 'X', ?, '1', '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, addr(0x99), NOW)],
+    ];
+    for (const [what, wake] of wakes) {
+      const b = await books();
+      const dep = depositAt(SELL_BLOCK + 1_000n);
+      const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), dep] }).rpc);
+      assert.equal(p.verdict, "ready", what);
+      wake(b);
+      await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "cas" && /\((admission|agents|holdings)\)/.test((e as Error).message), what);
+      assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?", dep.tx)[0]!.n, 0, what);
+    }
+  });
+});
+
+describe("a trade only where the seed already knows what it did (holdingVerdict)", () => {
+  /** Shogun's sell of COIN missing, its buy in Postgres; the book's balances as given. */
+  const sellPlan = (b: Books, o: { balances?: Record<string, Record<string, bigint>>; failBalances?: string[] } = {}) =>
+    preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n }, ...o }).rpc);
+  /** What the lost book's last mirror left: a COIN position written at `positionAt`, and its basis at `basisAt` (none when null). */
+  const snapshot = (b: Books, o: { positionAt: number; basisAt?: number | null }) => {
+    b.raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+      VALUES (?, 'COIN', ?, '1000', '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, COIN, o.positionAt);
+    if (o.basisAt !== null) b.raw.prepare("INSERT INTO cost_basis VALUES (?, 'live', 'COIN', '1000', '5000000', ?)").run(ACCOUNT, o.basisAt ?? o.positionAt);
+  };
+  const sell = (p: BookingPlan) => p.items.find((i) => i.key === `op:${SELL_OP}`)!;
+  const leg = (p: BookingPlan) => p.items.find((i) => i.key === `log:${CHAIN.sell.tx}#11`)!;
+
+  it("held, with the position and its basis both written after the last trade in the token: the trade books, and its evidence says why", async () => {
+    const b = await books();
+    snapshot(b, { positionAt: CHAIN.sell.timestamp + 5 });
+    const p = await sellPlan(b);
+    assert.equal(p.verdict, "ready", planLines(p).join("\n"));
+    const holding = sell(p).evidence.holding as { lastTradeAt: number; position: { updatedAt: number }; basis: { updatedAt: number } };
+    assert.deepEqual([holding.lastTradeAt, holding.position.updatedAt, holding.basis.updatedAt], [CHAIN.sell.timestamp, CHAIN.sell.timestamp + 5, CHAIN.sell.timestamp + 5]);
+  });
+
+  it("not held, and none of it on chain across the account and its vault: the trade books", async () => {
+    const p = await sellPlan(await books());
+    assert.equal(p.verdict, "ready");
+    const holding = sell(p).evidence.holding as { position: unknown; bookBalance: { total: string; by: Record<string, string> } };
+    assert.equal(holding.position, null);
+    assert.deepEqual(holding.bookBalance, { total: "0", by: { [ACCOUNT]: "0", [VAULT]: "0" } });
+  });
+
+  it("a stale position, a held position with no basis, a basis older than the trade, a balance the snapshot does not know of, or an unread balance: unresolved, legs and all", async () => {
+    const cases: Array<[string, (b: Books) => void, Parameters<typeof sellPlan>[1], RegExp]> = [
+      ["position before the trade", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp - 60 }), {},
+        /position in COIN \(0xaa07.*\) was last written 2026-.*, before the tenant's last trade in it .*: the attested book is seeded from that snapshot/],
+      ["no basis", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, basisAt: null }), {}, /holds a position in COIN .* with no live cost basis/],
+      ["basis before the trade", (b) => snapshot(b, { positionAt: CHAIN.sell.timestamp + 5, basisAt: CHAIN.sell.timestamp - 60 }), {},
+        /cost basis for COIN was last written .* before the tenant's last trade in it/],
+      ["held on chain, not in the snapshot", () => {}, { balances: { [COIN]: { [VAULT]: 7n } } }, /the book holds 7 base units of 0xaa07.* on chain now, and the snapshot .* holds none/],
+      ["balance unread", () => {}, { failBalances: [COIN] }, /the book's balance of 0xaa07.* could not be read/],
+    ];
+    for (const [what, setup, chain, pattern] of cases) {
+      const b = await books();
+      setup(b);
+      const p = await sellPlan(b, chain);
+      assert.equal(p.verdict, "blocked", what);
+      assert.equal(sell(p).class, "unresolved", what);
+      assert.equal(sell(p).proposal, null, what);
+      assert.match(sell(p).why, pattern, what);
+      assert.equal(leg(p).class, "unresolved", `${what}: its leg waits on it`);
+      assert.equal(p.remaining.length, 2, what);
+    }
+  });
+
+  it("a buy and a sell of one token, both missing, are judged at the last of them", async () => {
+    // A round trip: the snapshot holds none, the chain holds none — both book.
+    const flat = await books({ knownBuy: false });
+    const ok = await preview(flat, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n } }).rpc);
+    assert.equal(ok.verdict, "ready");
+    assert.deepEqual(ok.items.filter((i) => i.class === "session-trade").map((i) => (i.evidence.holding as { lastTradeAt: number }).lastTradeAt),
+      [CHAIN.sell.timestamp, CHAIN.sell.timestamp]);
+    // A snapshot taken between the buy and the sell knows the buy and not the sell: neither books.
+    const between = await books({ knownBuy: false });
+    snapshot(between, { positionAt: CHAIN.buy.timestamp + 10 });
+    const no = await preview(between, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell)], decimals: { [COIN]: 18n } }).rpc);
+    assert.equal(no.verdict, "blocked");
+    assert.deepEqual(no.items.filter((i) => i.fact.kind === "operation").map((i) => i.class), ["unresolved", "unresolved"]);
+  });
+});
+
+describe("the guards no test exercised", () => {
+  it("an epoch with no row yet cannot be dated: nothing is booked into it", async () => {
+    const b = await books();
+    for (const table of ["trades", "flows", "equity"]) b.raw.prepare(`UPDATE ${table} SET epoch = 1`).run();
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), depositAt(SELL_BLOCK + 1_000n)] }).rpc);
+    assert.equal(p.observations.epochOpenedAt, null);
+    assert.equal(p.verdict, "blocked");
+    assert.match(p.items[0]!.why, /accounting epoch 2 holds no trade, flow or equity row yet, so when it opened cannot be dated/);
+  });
+
+  it("a receipt whose block is not the canonical block at its height is not booked", async () => {
+    const dep = depositAt(SELL_BLOCK + 1_000n);
+    const p = await preview(await books(), fakeRpc({ txs: [fromFixture(CHAIN.buy), dep], orphaned: [dep.tx] }).rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.match(p.items[0]!.why, /the receipt's block 0x[0-9a-f]{64} is not the canonical block 0x[0-9a-f]{64} at that height/);
+  });
+
+  it("apply refuses, writing nothing, when the flows would not be distinct, and when admission would still find a fact", async () => {
+    // The same deposit already filed with no log index: the booked log beside it is one transfer booked two ways.
+    const b = await books();
+    const dep = depositAt(SELL_BLOCK + 1_000n);
+    b.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, at, epoch, chain_id)
+      VALUES (?, 'in', 12.5, ?, NULL, NULL, 'deposit', ?, 2, 4663)`).run(ACCOUNT, dep.tx, CHAIN.sell.timestamp + 100);
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), dep] }).rpc);
+    assert.equal(p.verdict, "ready", "admission's chain rule does not read a row with no log index as the log");
+    await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "flows");
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?", dep.tx)[0]!.n, 1, "rolled back");
+    assert.equal(rows(b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE}`)[0]!.n, 0);
+    // A plan whose proposals do not answer every fact it found.
+    const c = await books();
+    const q = await preview(c, fakeRpc({ txs: [fromFixture(CHAIN.buy), depositAt(SELL_BLOCK + 1_000n)] }).rpc);
+    const unanswered = { kind: "transfer" as const, txHash: h32("never proposed"), block: "1", logIndex: 0, direction: "in" as const, amountRaw: "1", counterparty: null };
+    await assert.rejects(applyNow(c.db, { ...q, found: [...q.found, unanswered] }), (e: unknown) => (e as BookingRefused).code === "coverage");
+    assert.equal(rows(c.raw, "SELECT COUNT(*) AS n FROM flows WHERE source = 'chain-log' AND amount_usdg = 12.5")[0]!.n, 0, "rolled back");
+  });
+});
+
+describe("revert, decided by what the database recorded", () => {
+  async function applied(o: { operatorAheadSec?: number } = {}) {
+    const b = await books();
+    const dep = depositAt(SELL_BLOCK + 1_000n);
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), dep] }).rpc);
+    assert.equal(p.verdict, "ready");
+    const report = await applyNow(b.db, p, { nowMs: (NOW + (o.operatorAheadSec ?? 0)) * 1000 });
+    return { b, dep, report };
+  }
+  /** Admission at the orchestrator's own time: an approval, and for a registration its attestation and its consumed import. */
+  async function admit(b: Books, o: { atSec: number; state: string; generation?: string | null; archived?: boolean; attested?: boolean; consumed?: boolean }) {
+    const id = `admission-${o.state}-${o.atSec}`;
+    const generation = o.generation === undefined ? randomUUID() : o.generation;
+    refuse(b.raw, { tenant: b.tenant, account: b.account, id, atSec: o.atSec, state: o.state, generation,
+      reason: o.state === "refused" ? "the stored grant names a different account, chain or owner than the registered book" : "" });
+    if (o.archived) b.raw.prepare("UPDATE ledger_resume_approvals SET archive_path = '/data/archive/x' WHERE approval_id = ?").run(id);
+    if (o.attested && generation) {
+      b.raw.prepare(`INSERT INTO ledger_resume_attestations (generation, approval_id, tenant, smart_account, chain_id, owner, evidence_digest, receipt_digest, mirror_state_digest,
+        snapshot_digest, created_at_ms) VALUES (?, ?, ?, ?, 4663, ?, 'e', 'r', 'm', 's', ?)`).run(generation, id, b.tenant, b.account, b.tenant, o.atSec * 1000);
+      if (o.consumed) {
+        await b.db.exec(LEDGER_IMPORT_SCHEMA);
+        b.raw.prepare(`INSERT INTO tenant_ledger_import (tenant, generation, target_volume_id, state, bytes, sha256, source_digest, bindings_json, created_at_ms,
+          grant_updated_at, grant_row_version) VALUES (?, ?, 'v', 'consumed', 1, 's', 'd', '{}', ?, '1', '1')`).run(b.tenant, generation, o.atSec * 1000);
+      }
+    }
+  }
+  const revert = (b: Books, report: ApplyReport) => revertBooking(b.db, parseApplyReport(JSON.stringify(report)), { nowMs: (NOW + 900) * 1000, dialect: "sqlite" });
+  const stillBooked = (b: Books, dep: ModelTx) => rows(b.raw, "SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?", dep.tx)[0]!.n;
+
+  it("the operator's clock five minutes ahead and the tenant admitted two minutes after the apply: refused, nothing changed", async () => {
+    const { b, dep, report } = await applied({ operatorAheadSec: 300 });
+    await admit(b, { atSec: NOW + 120, state: "applied", attested: true, consumed: true });
+    await assert.rejects(revert(b, report), (e: unknown) => (e as BookingRefused).code === "admitted" && /runs an attested book/.test((e as Error).message));
+    assert.equal(stillBooked(b, dep), 1);
+  });
+
+  it("registered after the apply, then refused on a grant change with its attestation in place: refused, nothing changed", async () => {
+    const { b, dep, report } = await applied();
+    await admit(b, { atSec: NOW + 60, state: "refused", attested: true, archived: true });
+    await assert.rejects(revert(b, report), (e: unknown) => (e as BookingRefused).code === "admitted" && /attested a book for the tenant after this booking/.test((e as Error).message));
+    assert.equal(stillBooked(b, dep), 1);
+  });
+
+  it("an approval past approval with no attestation yet, an approval still only approved, and a heartbeat since: each refuses", async () => {
+    const archived = await applied();
+    await admit(archived.b, { atSec: NOW + 60, state: "archived", archived: true });
+    await assert.rejects(revert(archived.b, archived.report), (e: unknown) => (e as BookingRefused).code === "admitted" && /went past approval \(now archived/.test((e as Error).message));
+    const open = await applied();
+    await admit(open.b, { atSec: NOW + 60, state: "approved", generation: null });
+    await assert.rejects(revert(open.b, open.report), (e: unknown) => (e as BookingRefused).code === "open-approval" && /MERRYMEN_RESUME_REVOKE/.test((e as Error).message));
+    const beat = await applied();
+    beat.b.raw.prepare("UPDATE agents SET beat_at = ? WHERE smart_account = ?").run(NOW + 30, ACCOUNT);
+    await assert.rejects(revert(beat.b, beat.report), (e: unknown) => (e as BookingRefused).code === "moved");
+    for (const x of [archived, open, beat]) assert.equal(stillBooked(x.b, x.dep), 1);
+  });
+
+  it("an approval refused or revoked after the apply, before it minted anything, stood on nothing: the revert goes ahead", async () => {
+    const { b, dep, report } = await applied();
+    await admit(b, { atSec: NOW + 60, state: "refused", generation: null });
+    await admit(b, { atSec: NOW + 120, state: "revoked", generation: null });
+    assert.equal((await revert(b, report)).outcome, "reverted");
+    assert.equal(stillBooked(b, dep), 0);
+  });
+
+  it("a report whose time or admission record is not the receipts' reverts nothing, even with its own digest recomputed", async () => {
+    const { b, dep, report } = await applied();
+    const reseal = (r: ApplyReport): ApplyReport => { const { reportDigest: _d, ...body } = r; return { ...r, reportDigest: digestOf(body) }; };
+    for (const forged of [reseal({ ...report, appliedAtMs: report.appliedAtMs - 3_600_000 }), reseal({ ...report, admission: { ...report.admission, approvals: [] } })]) {
+      await assert.rejects(revert(b, forged), (e: unknown) => (e as BookingRefused).code === "receipts");
+    }
+    assert.equal(stillBooked(b, dep), 1);
   });
 });

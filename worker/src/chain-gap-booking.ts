@@ -10,7 +10,25 @@
  * booked the missing movement (docs/fleet-resume.md said so, and escalated).
  * This is that booking, reviewed, for one tenant at a time.
  *
- * WHAT IT PROPOSES IS WHAT THE EXISTING WRITERS WRITE, and nothing they do not:
+ * ONLY FOR A TENANT THAT IS HELD, PROVED FROM POSTGRES (holdOf). Nothing in
+ * Postgres says which tenants a deploy's MERRYMEN_FLEET_ROLLOUT runs, and a
+ * tenant still running on its own book can have an operation on chain that
+ * its mirror has not copied yet — a wedged mirror under a live worker widens
+ * that from seconds to hours. Booking it then would be worse than late: the
+ * mirror skips a child trade whose user_op_hash Postgres already holds
+ * (ledger-mirror.ts), so the child's evidenced row (its decision, realised
+ * P&L, gas in USDG, fees) would never reach the shared tape, and the booked
+ * row with its NULLs would stand in for it for good. So the tool books only a
+ * tenant whose newest admission decision is a CHAIN REFUSAL — admission
+ * drained the old book's tail into Postgres, read the chain, and found these
+ * facts missing from both — and only facts that landed BEFORE that refusal.
+ * Nothing may have written for the tenant since (its heartbeat and its mirror
+ * cursors are no newer than the refusal, and both have been quiet for
+ * BOOKING_QUIET_SEC). Anything newer waits for admission to refuse the tenant
+ * on it, so no booking ever races a worker for a row.
+ *
+ * WHAT IT PROPOSES IS WHAT THE EXISTING WRITERS WRITE, and nothing they do not —
+ * with one difference, said here rather than hidden:
  *
  *   a session-key trade leg   the in-flight reconciler's row for a landed op
  *                             the book lost (index.ts reconcileInFlightAtArm:
@@ -24,6 +42,21 @@
  *                             logs moved them, and the gas the EntryPoint's
  *                             own event recorded (key-install-accounting.ts
  *                             gasFields' split by payer).
+ *                             THE DIFFERENCE: beside that row the reconciler
+ *                             also books the fill's cost basis (bookFill),
+ *                             because a held position with no basis is one
+ *                             both mechanical exits refuse. This tool does
+ *                             not write cost_basis or positions — the
+ *                             attested book is seeded from them as the lost
+ *                             book last mirrored them (planAttestedSeed) —
+ *                             so it books a trade only when that snapshot
+ *                             already says what the trade did: the position
+ *                             and its basis written after the tenant's last
+ *                             trade in the token, or no position in the
+ *                             snapshot and none on chain either (read now,
+ *                             across the book). Otherwise the trade, and so
+ *                             the tenant, is unresolved: a reviewed basis
+ *                             decision, never a guess (holdingVerdict).
  *   a session-key operation   the reconciler's row for an op with no USDG leg
  *     that moved nothing      (notional 0, no tokens): its hash is known, so
  *                             the op is counted, and nothing is attributed.
@@ -43,9 +76,11 @@
  * historical ETH price is proved here — NULL is "unpriced", as in the worker),
  * no decision, no peak moved, no cost basis or position touched (those are
  * snapshot tables the lost book's last mirror already wrote, and an attested
- * book is seeded from them), no risk period. A fill's price is the ratio of
- * the two amounts the logs moved, scaled by the token's own decimals(); when
- * that cannot be read the price is NULL and the rest of the row stands.
+ * book is seeded from them — which is why a trade the snapshot does not
+ * already reflect is refused, above), no risk period. A fill's price is the
+ * ratio of the two amounts the logs moved, scaled by the token's own
+ * decimals(); when that cannot be read the price is NULL and the rest of the
+ * row stands.
  *
  * AND IT REFUSES WHAT IT CANNOT CLASSIFY. Every operation and transfer the
  * admission's own chain check finds (chainGapCheck, called here exactly as
@@ -57,7 +92,8 @@
  * purchase books a flow beside its row, which is two writers' work, not this
  * one's); several tokens; USDG leaving with no operation of the account; an
  * operation's leg outside its own execution; anything not 64 blocks deep;
- * anything before the current accounting epoch opened.
+ * anything before the current accounting epoch opened, or in an epoch with no
+ * row yet to date its opening by; anything after admission's refusal.
  *
  * PREVIEW, THEN APPLY, BOUND BY ONE DIGEST. The preview reads Postgres in one
  * read-only snapshot, then the chain, and states every fact, its class, its
@@ -74,7 +110,11 @@
  * tx#log): a receipt is unique per key while applied, and a second apply finds
  * nothing missing. Revert takes the apply report, proves each row is still
  * exactly as written and the tenant was not admitted on them, and removes
- * them, keeping the receipt (state 'reverted', the row in full).
+ * them, keeping the receipt (state 'reverted', the row in full). "Not
+ * admitted" is decided by what the database recorded, never by comparing two
+ * machines' clocks: each receipt keeps the tenant's approvals, attestations,
+ * heartbeat and mirror cursor as they stood at the apply, and a revert refuses
+ * when any of them moved since — or when an attested book is in use at all.
  *
  * Reviewed operator tool: never imported by the orchestrator or a worker.
  * docs/chain-gap-booking.md is the runbook.
@@ -89,7 +129,7 @@ import { flowDuplicateReport } from "./distinct-flows";
 import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
 import {
-  attestedSourceInUse, chainGapCheck, describeChainFact, knownChainFacts, readOpenApproval, resumeGapWindow, RESUME_USDG, usdg6,
+  attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, readOpenApproval, resumeGapWindow, RESUME_USDG, usdg6,
   type GapChain, type MissingChainFact,
 } from "./ledger-resume";
 import { admitCapitalFlow, tradingModeOf } from "./paper-boundary";
@@ -105,8 +145,29 @@ export const BOOKING_CONFIRMATIONS = 64n;
 export const BOOKINGS_TABLE = "chain_gap_bookings";
 /** How the reconciler and the key-install resolver name a revert whose message is gone. */
 const REVERTED_RULE = "reverted on-chain (resolved)";
-/** `decimals()`: the one call this tool makes, and the only one its transport admits. */
+/** `decimals()`: one of the two calls this tool makes, and its transport admits. */
 export const DECIMALS_SELECTOR = "0x313ce567";
+/** `balanceOf(address)`: the other — how much of a traded token the book holds now (holdingVerdict). */
+export const BALANCE_OF_SELECTOR = "0x70a08231";
+/** A balanceOf call's whole data: the selector and one address, zero-padded to a word. Nothing else is admitted. */
+export const BALANCE_OF_CALL = /^0x70a08231[0]{24}[0-9a-f]{40}$/;
+/**
+ * HOW LONG THE TENANT'S BOOK MUST HAVE BEEN SILENT before it is booked: no
+ * heartbeat and no mirrored row for ten minutes. A running worker beats every
+ * tick and its mirror runs every few seconds, so this is many times either;
+ * it is a floor under the stronger rule (nothing written since admission's
+ * refusal), not a substitute for it.
+ */
+export const BOOKING_QUIET_SEC = 600;
+/**
+ * A fact must have landed at least this long before admission's chain
+ * refusal to be booked on it: block times are the chain's clock and the
+ * refusal's is the orchestrator's, and a minute is far more than they differ
+ * and far less than a respawned worker takes to send anything.
+ */
+export const ANCHOR_MARGIN_SEC = 60;
+/** Approval states that are still open (ledger-import-schema.ts): an approval in one is being acted on. */
+const OPEN_APPROVAL_STATES: ReadonlySet<string> = new Set(["approved", "archiving", "archived", "registered"]);
 
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const HASH = /^0x[0-9a-f]{64}$/;
@@ -174,6 +235,42 @@ export interface BookingSnapshot {
   admitted: string | null;
   /** Bookings already applied for this account and not reverted. */
   booked: Array<{ bookingId: string; evidenceKey: string; tableName: string; rowId: number }>;
+  /**
+   * WHERE THE TENANT STANDS WITH ADMISSION: every approval, every attestation,
+   * and when its book was last written. What the hold is proved from (holdOf),
+   * and what a revert compares against (admittedSince).
+   */
+  admission: AdmissionState;
+  /** What the attested book would be seeded from (planAttestedSeed): the account's positions, and its live cost basis. */
+  holdings: Holdings;
+}
+
+/** One approval of the tenant, reduced to what the hold and a revert decide on. Never its evidence or its reason's text. */
+export interface ApprovalFact {
+  approvalId: string; state: string; createdAtMs: number; updatedAtMs: number;
+  /** Refused, with a reason that starts as admission's chain refusal does (ledger-resume.ts CHAIN_REFUSAL). */
+  chainRefusal: boolean;
+  /** Set when the approval reached 'archiving': a generation was minted for it. */
+  generation: string | null;
+  /** Set when the approval reached 'archived': the home was moved aside for it. */
+  archived: boolean;
+}
+export interface AdmissionState {
+  /** Newest first: by updated_at_ms, then created_at_ms, then id. */
+  approvals: ApprovalFact[];
+  /** Every attested generation recorded for the tenant, sorted. */
+  attestations: string[];
+  /**
+   * When the tenant's book was last written, as far as Postgres can see, in
+   * unix seconds: the worker's heartbeat (agents.beat_at, carried by the
+   * mirror) and the newest mirror cursor (mirror_state.updated_at, which moves
+   * only when rows arrive).
+   */
+  liveness: { beatAt: number | null; lastMirrorAt: number | null };
+}
+export interface Holdings {
+  positions: Array<{ symbol: string; token: string; rawBalance: string; updatedAt: number | null }>;
+  basis: Array<{ symbol: string; qtyRaw: string; costUsdg: string; updatedAt: number | null }>;
 }
 
 const GRANT_SQL: Record<Dialect, string> = {
@@ -192,6 +289,21 @@ const GRANT_SQL: Record<Dialect, string> = {
 const SPELLING_TABLES = ["trades", "flows", "equity", "fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "paper_checkpoints", "risk_periods"];
 const num = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
+/** Code-unit order: the same on every machine and in every locale, so a digest over a sorted list is too. */
+const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/**
+ * A stamp in unix seconds, whichever unit it was written in: seconds where
+ * this system writes it, but rows carried in from elsewhere have held
+ * milliseconds (autonomy-funnel.ts beatSec, ledger-resume.ts's own stamp).
+ * Normalised per value, never by a guess across rows.
+ */
+const unixSec = (v: unknown): number | null => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
+};
+const iso = (sec: number | null): string => (sec === null ? "never" : new Date(sec * 1000).toISOString());
 
 /**
  * WHICH TABLES EXIST, asked of the catalogue rather than learned from a
@@ -205,6 +317,53 @@ async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
     ? "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema()"
     : "SELECT name FROM sqlite_master WHERE type = 'table'").all()) as Array<Record<string, unknown>>;
   return new Set(rows.map((r) => String(r.name)));
+}
+
+/**
+ * WHERE THE TENANT STANDS WITH ADMISSION, read in the caller's transaction:
+ * the snapshot's, an apply's (inside its compare-and-set), and a revert's.
+ * Tables not created yet read as empty — asked of the catalogue, never
+ * learned from a failed read (existingTables says why).
+ *
+ * The approvals are reduced to their states, times and whether they were a
+ * chain refusal, minted a generation or archived a home: nothing of their
+ * evidence, and no reason's text beyond the prefix test.
+ */
+async function readAdmissionState(db: Db, tables: ReadonlySet<string>, tenant: string, account: string, nowSec: number): Promise<AdmissionState> {
+  const approvals: ApprovalFact[] = tables.has("ledger_resume_approvals")
+    ? ((await db.prepare(`SELECT approval_id, state, reason, generation, archive_path, created_at_ms, updated_at_ms FROM ledger_resume_approvals
+        WHERE tenant = ?`).all(tenant)) as Array<Record<string, unknown>>).map((r) => ({
+      approvalId: String(r.approval_id), state: String(r.state), createdAtMs: num(r.created_at_ms), updatedAtMs: num(r.updated_at_ms),
+      chainRefusal: String(r.state) === "refused" && String(r.reason ?? "").startsWith(CHAIN_REFUSAL),
+      generation: strOrNull(r.generation), archived: r.archive_path !== null && r.archive_path !== undefined && String(r.archive_path) !== "",
+    })).sort((a, b) => b.updatedAtMs - a.updatedAtMs || b.createdAtMs - a.createdAtMs || byText(a.approvalId, b.approvalId))
+    : [];
+  const attestations = tables.has("ledger_resume_attestations")
+    ? ((await db.prepare("SELECT generation FROM ledger_resume_attestations WHERE tenant = ?").all(tenant)) as Array<Record<string, unknown>>)
+      .map((r) => String(r.generation)).sort(byText)
+    : [];
+  let beatAt: number | null = null;
+  for (const r of (await db.prepare("SELECT beat_at FROM agents WHERE LOWER(smart_account) = ?").all(account)) as Array<Record<string, unknown>>) {
+    const s = unixSec(r.beat_at);
+    if (s !== null) beatAt = beatAt === null ? s : Math.max(beatAt, s);
+  }
+  const { lastMirrorAt } = await resumeGapWindow(db, tenant, nowSec);
+  return { approvals, attestations, liveness: { beatAt, lastMirrorAt } };
+}
+
+/** The account's positions and live cost basis, as planAttestedSeed reads them (any spelling of the account), in a fixed order. */
+async function readHoldings(db: Db, tables: ReadonlySet<string>, account: string): Promise<Holdings> {
+  const positions: Holdings["positions"] = tables.has("positions")
+    ? ((await db.prepare("SELECT symbol, token, raw_balance, updated_at FROM positions WHERE LOWER(agent_id) = ?").all(account)) as Array<Record<string, unknown>>)
+      .map((r) => ({ symbol: String(r.symbol ?? ""), token: lower(r.token), rawBalance: String(r.raw_balance ?? "0"), updatedAt: unixSec(r.updated_at) }))
+      .sort((a, b) => byText(a.symbol, b.symbol) || byText(a.token, b.token))
+    : [];
+  const basis: Holdings["basis"] = tables.has("cost_basis")
+    ? ((await db.prepare("SELECT symbol, qty_raw, cost_usdg, updated_at FROM cost_basis WHERE LOWER(agent_id) = ? AND mode = 'live'").all(account)) as Array<Record<string, unknown>>)
+      .map((r) => ({ symbol: String(r.symbol ?? ""), qtyRaw: String(r.qty_raw ?? "0"), costUsdg: String(r.cost_usdg ?? "0"), updatedAt: unixSec(r.updated_at) }))
+      .sort((a, b) => byText(a.symbol, b.symbol))
+    : [];
+  return { positions, basis };
 }
 
 export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: Dialect; nowSec: number }): Promise<BookingSnapshot> {
@@ -270,13 +429,80 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     openApproval: open ? { state: open.state, evidence: open.evidenceDigest } : null,
     admitted: account && tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(db, tenant, account) : null,
     booked,
+    admission: await readAdmissionState(db, tables, tenant, account, o.nowSec),
+    holdings: await readHoldings(db, tables, account),
   };
 }
 
-/** The part of a snapshot apply compares inside its transaction: what the proposals were computed from. */
+/**
+ * The part of a snapshot apply compares inside its transaction: what the
+ * proposals were computed from, and what the hold was proved from. A tenant
+ * that woke between the preview and the apply — a heartbeat, a mirrored row,
+ * a new approval, a mode change — moves one of these, and the apply refuses.
+ */
 function casFacts(s: BookingSnapshot) {
-  return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId }) => ({ smartAccount, epoch, chainId })), spellings: s.spellings,
-    epochOpenedAt: s.epochOpenedAt, known: s.known, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked };
+  return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
+    epochOpenedAt: s.epochOpenedAt, known: s.known, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
+    admission: s.admission, holdings: s.holdings };
+}
+
+// ── the hold ─────────────────────────────────────────────────────────────────
+
+/**
+ * IS THIS TENANT HELD, AS FAR AS POSTGRES CAN PROVE IT? PURE.
+ *
+ * The anchor is the tenant's newest admission decision — its newest approval
+ * that was not revoked (a revoked approval decided nothing: it was withdrawn
+ * before it could admit) — and it must be a CHAIN REFUSAL. That one row says
+ * three things at once: admission ran for this tenant (it is a pre-incident
+ * tenant whose book is attested, not one running on its own); it drained the
+ * old book's tail into Postgres before it read the chain (orchestrator.ts
+ * drainContinuousBook, run first in Phase A); and the chain then held
+ * operations or transfers that Postgres, and so that book, lacked.
+ *
+ * Then nothing may have written for the tenant since: its heartbeat and its
+ * newest mirror cursor are no later than the refusal (admission ran with no
+ * worker for it — owned() refuses one — so a later beat is a worker that
+ * started after it), and both have been silent for BOOKING_QUIET_SEC. All
+ * three times are the orchestrator host's own clock; the operator's never
+ * enters. A worker running under a wedged mirror would show none of this, so
+ * the anchor also bounds the facts: only what landed before the refusal is
+ * booked (planBooking's `settled`), and that was proved missing from the book
+ * the worker would run on.
+ *
+ * `anchorSec` is null when there is no anchor; the refusals then say why.
+ */
+export function holdOf(snap: BookingSnapshot, nowSec: number): { anchorSec: number | null; refusals: string[] } {
+  const refusals: string[] = [];
+  const decided = snap.admission.approvals.find((a) => a.state !== "revoked") ?? null;
+  if (!decided) {
+    refusals.push(`admission has never refused this tenant on the chain (no approval of it was decided): this tool books only a tenant held on a chain refusal, ` +
+      `whose newest approval was refused with "${CHAIN_REFUSAL}" — a tenant running on its own book has its mirror to bring these rows`);
+    return { anchorSec: null, refusals };
+  }
+  if (decided.state !== "refused" || !decided.chainRefusal) {
+    // An open approval is refused on its own terms already (planBooking), with the revoke to set.
+    if (!OPEN_APPROVAL_STATES.has(decided.state)) {
+      refusals.push(`the tenant's newest admission decision (approval ${decided.approvalId.slice(0, 8)}…, ${decided.state === "refused" ? "refused for another reason" : decided.state}) ` +
+        "is not a chain refusal: this tool books only what admission refused a held tenant on");
+    }
+    return { anchorSec: null, refusals };
+  }
+  const anchorSec = Math.floor(decided.updatedAtMs / 1000);
+  const { beatAt, lastMirrorAt } = snap.admission.liveness;
+  if (beatAt !== null && beatAt > anchorSec) {
+    refusals.push(`its worker beat at ${iso(beatAt)}, after admission refused it at ${iso(anchorSec)}: it has run since, so it is not held — ` +
+      "keep it out of MERRYMEN_FLEET_ROLLOUT, let admission refuse it again, then preview again");
+  }
+  if (lastMirrorAt !== null && lastMirrorAt > anchorSec) {
+    refusals.push(`rows were mirrored for it at ${iso(lastMirrorAt)}, after admission refused it at ${iso(anchorSec)}: something wrote its book since, so it is not held — ` +
+      "keep it out of MERRYMEN_FLEET_ROLLOUT, let admission refuse it again, then preview again");
+  }
+  const last = Math.max(beatAt ?? 0, lastMirrorAt ?? 0);
+  if (last > 0 && nowSec - last < BOOKING_QUIET_SEC) {
+    refusals.push(`its book was written ${Math.max(0, nowSec - last)}s ago (heartbeat or mirror): preview again once it has been quiet for ${BOOKING_QUIET_SEC / 60} minutes`);
+  }
+  return { anchorSec, refusals };
 }
 
 // ── the chain half ───────────────────────────────────────────────────────────
@@ -295,6 +521,12 @@ export interface ChainEvidence {
   txs: Record<string, TxEvidence>;
   /** decimals() of each token a proposed fill names, read at the latest block; null when it could not be read. */
   decimals: Record<string, number | null>;
+  /**
+   * balanceOf() of each token a proposed fill names, for every address of the
+   * book (the account and its custody), read at the latest block, in base
+   * units. `total` is null unless every address answered.
+   */
+  balances: Record<string, { total: string | null; by: Record<string, string | null> }>;
 }
 
 /**
@@ -353,15 +585,16 @@ function readOp(receipt: NonNullable<TxEvidence["receipt"]>, userOpHash: string,
 /**
  * READ THE CHAIN FOR ONE SNAPSHOT: admission's own check from the second
  * admission reads from, then the receipt and block of every transaction it
- * named, then decimals() of every token a fill would name. Reads only; the
- * transport admits nothing else (chain-gap-booking-cli.ts createBookingRpc).
+ * named, then decimals() of every token a fill would name and how much of it
+ * each address of the book holds now. Reads only; the transport admits
+ * nothing else (chain-gap-booking-cli.ts createBookingRpc).
  */
 export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: {
   log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; maxSpan?: bigint;
 } = {}): Promise<ChainEvidence> {
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const rpcChainId = Number(BigInt(String(await patiently(() => rpc("eth_chainId", []), sleep))));
-  const empty = { rpcChainId, txs: {}, decimals: {} };
+  const empty = { rpcChainId, txs: {}, decimals: {}, balances: {} };
   if (!snap.grant) return { ...empty, gap: { status: "unavailable", why: "no stored grant names the account to read" } };
   const known = { ops: new Set(snap.known.ops), txs: new Set(snap.known.txs), flows: new Set(snap.known.flows) };
   const gap = await chainGapCheck({ chain: gapChainOf(rpc, sleep), account: snap.grant.account, usdg: RESUME_USDG, sinceSec: snap.gapFromSec, known,
@@ -386,7 +619,9 @@ export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: 
     txs[tx] = { receipt, block };
   }
   const decimals: Record<string, number | null> = {};
+  const balances: ChainEvidence["balances"] = {};
   const book = [snap.grant.account, ...snap.grant.custody];
+  const word = (v: unknown): bigint | null => (typeof v === "string" && /^0x[0-9a-fA-F]{1,64}$/.test(v) ? BigInt(v) : null);
   for (const f of gap.found) {
     const receipt = f.kind === "operation" ? txs[f.txHash]?.receipt : null;
     if (!receipt || f.kind !== "operation") continue;
@@ -394,12 +629,22 @@ export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: 
     const leg = op ? pickAcquiredLeg(op.deltas, USDG) : null;
     if (!leg || leg.token in decimals) continue;
     try {
-      const out = String(await patiently(() => rpc("eth_call", [{ to: leg.token, data: DECIMALS_SELECTOR }, "latest"]), sleep));
-      const d = /^0x[0-9a-fA-F]{1,64}$/.test(out) ? BigInt(out) : -1n;
+      const d = word(await patiently(() => rpc("eth_call", [{ to: leg.token, data: DECIMALS_SELECTOR }, "latest"]), sleep)) ?? -1n;
       decimals[leg.token] = d >= 0n && d <= 36n ? Number(d) : null;
     } catch { decimals[leg.token] = null; }
+    // WHAT THE BOOK HOLDS OF IT NOW, address by address: whether a snapshot
+    // that holds none of the token is right to (holdingVerdict).
+    const by: Record<string, string | null> = {};
+    for (const holder of book) {
+      try {
+        const v = word(await patiently(() => rpc("eth_call", [{ to: leg.token, data: `${BALANCE_OF_SELECTOR}${holder.slice(2).padStart(64, "0")}` }, "latest"]), sleep));
+        by[holder] = v === null ? null : v.toString();
+      } catch { by[holder] = null; }
+    }
+    const read = Object.values(by);
+    balances[leg.token] = { total: read.every((v) => v !== null) ? read.reduce((s, v) => s + BigInt(v!), 0n).toString() : null, by };
   }
-  return { rpcChainId, gap: { status: "missing", fromBlock: gap.fromBlock, head: gap.head, found: gap.found }, txs, decimals };
+  return { rpcChainId, gap: { status: "missing", fromBlock: gap.fromBlock, head: gap.head, found: gap.found }, txs, decimals, balances };
 }
 
 // ── the plan ─────────────────────────────────────────────────────────────────
@@ -505,6 +750,70 @@ export function factsStillMissing(found: readonly MissingChainFact[], held: { op
 }
 
 /**
+ * DOES THE SNAPSHOT THE ATTESTED BOOK IS SEEDED FROM ALREADY SAY WHAT THE
+ * TENANT'S TRADES IN THIS TOKEN DID? PURE. Null `why` is yes.
+ *
+ * WHY A TRADE ROW ALONE IS NOT ENOUGH. Admission seeds the new book's cost
+ * basis from Postgres's cost_basis, for exactly the symbols Postgres's
+ * positions show held (ledger-resume.ts planAttestedSeed). Both are the lost
+ * book's last mirrored snapshot. If that snapshot predates a booked BUY, the
+ * new book holds the token with no basis — and both mechanical exits refuse a
+ * position with no basis, so an exits-only tenant's stops would silently skip
+ * it (the failure ledger-resume.ts names). If it predates a booked SELL, the
+ * seed restores a basis for a position the account no longer holds, and a
+ * later buy averages against it. The in-flight reconciler avoids both by
+ * booking the basis beside its row (bookFill); this tool writes no basis, so
+ * it proves the snapshot already reflects the trade instead:
+ *
+ *   held in the snapshot   the position row AND its live basis were both
+ *                          written at or after the last trade in the token
+ *                          (the worker rewrites every held position each
+ *                          tick and the basis at each fill, and the mirror
+ *                          carries both stamps as written);
+ *   not held               the book (the account and its custody, as the
+ *                          fills are read) holds none of the token on chain
+ *                          now — so a seed with no position and no basis for
+ *                          it is the truth, whatever the snapshot's age.
+ *
+ * Anything else is a reviewed basis decision, never this tool's: the trade
+ * and its legs stay unresolved, and the tenant stays held.
+ */
+export function holdingVerdict(holdings: Holdings, balance: ChainEvidence["balances"][string] | null, token: string, lastTradeAt: number):
+  { why: string | null; evidence: Record<string, unknown> } {
+  const rows = holdings.positions.filter((p) => p.token === token);
+  const position = rows[0] ?? null;
+  // Held exactly as the seed reads it: raw_balance <> '0'.
+  const held = rows.some((p) => p.rawBalance !== "0");
+  const basis = position ? holdings.basis.find((b) => b.symbol === position.symbol) ?? null : null;
+  const evidence = { lastTradeAt, position, basis, bookBalance: balance };
+  if (rows.length > 1) return { why: `Postgres holds ${rows.length} position rows for ${token}, so which one the seed would read is not one answer`, evidence };
+  if (held) {
+    if (position!.updatedAt === null || position!.updatedAt < lastTradeAt) {
+      return { why: `Postgres's position in ${position!.symbol} (${token}) was last written ${iso(position!.updatedAt)}, before the tenant's last trade in it ` +
+        `(${iso(lastTradeAt)}): the attested book is seeded from that snapshot and would not know what the trade did — a reviewed basis decision, or the tenant stays held`, evidence };
+    }
+    if (!basis) {
+      return { why: `Postgres holds a position in ${position!.symbol} (${token}) with no live cost basis: the attested book would hold it with nothing for ` +
+        "its stop-loss or take-profit to measure from — a reviewed basis decision, or the tenant stays held", evidence };
+    }
+    if (basis.updatedAt === null || basis.updatedAt < lastTradeAt) {
+      return { why: `Postgres's cost basis for ${position!.symbol} was last written ${iso(basis.updatedAt)}, before the tenant's last trade in it ` +
+        `(${iso(lastTradeAt)}): the attested book would be seeded with a basis that leaves the trade out — a reviewed basis decision, or the tenant stays held`, evidence };
+    }
+    return { why: null, evidence };
+  }
+  if (!balance || balance.total === null) {
+    return { why: `the book's balance of ${token} could not be read, and Postgres's snapshot holds none of it: whether the attested book would hold it ` +
+      "with no cost basis is unknown — preview again", evidence };
+  }
+  if (BigInt(balance.total) !== 0n) {
+    return { why: `the book holds ${balance.total} base units of ${token} on chain now, and the snapshot the attested book is seeded from holds none: ` +
+      "it would hold a position with no cost basis, which both mechanical exits refuse — a reviewed basis decision, or the tenant stays held", evidence };
+  }
+  return { why: null, evidence };
+}
+
+/**
  * CLASSIFY EVERY FACT AND PROPOSE ITS ROW. PURE: the snapshot and the chain
  * evidence in, the plan and its digest out. Nothing here reads or writes.
  */
@@ -527,6 +836,10 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
   }
   if (snap.admitted) refusals.push(`already admitted (attested generation ${snap.admitted.slice(0, 8)}…): its running book's own reconciler books what it lacks`);
   if (ev.gap.status === "unavailable") refusals.push(`the chain could not be read (${ev.gap.why}); preview again`);
+  // HELD, OR NOTHING (holdOf): the newest decision a chain refusal, nothing
+  // written for the tenant since, and only facts from before it.
+  const hold = holdOf(snap, o.nowSec);
+  refusals.push(...hold.refusals);
 
   const found = ev.gap.status === "missing" ? ev.gap.found : [];
   const head = ev.gap.status === "unavailable" ? null : BigInt(ev.gap.head);
@@ -546,8 +859,22 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
     if (factBlock(f) !== null && factBlock(f) !== at) return `the log says block ${f.block} and the receipt says block ${at}`;
     if (head === null || head - at < BOOKING_CONFIRMATIONS) return `it is not yet ${BOOKING_CONFIRMATIONS} blocks deep; preview again shortly`;
     if (epoch === null) return `the account's epoch cannot be named`;
-    if (snap.epochOpenedAt !== null && tx.block.timestamp < snap.epochOpenedAt) {
-      return `it landed before accounting epoch ${epoch} opened (${new Date(snap.epochOpenedAt * 1000).toISOString()}), so which epoch it belongs to is not this tool's to say`;
+    // AN EPOCH WITH NO ROW CANNOT BE DATED. The opening is read as the
+    // earliest row of the current epoch; with none, a fact of any age would
+    // pass as this epoch's — the very guess this tool does not make.
+    if (snap.epochOpenedAt === null) {
+      return `accounting epoch ${epoch} holds no trade, flow or equity row yet, so when it opened cannot be dated, and which epoch this belongs to is not this tool's to say`;
+    }
+    if (tx.block.timestamp < snap.epochOpenedAt) {
+      return `it landed before accounting epoch ${epoch} opened (${iso(snap.epochOpenedAt)}), so which epoch it belongs to is not this tool's to say`;
+    }
+    // ONLY WHAT ADMISSION REFUSED THE TENANT ON (holdOf): a fact that landed
+    // after the refusal — or within a minute before it, where the chain's
+    // clock and the orchestrator's are not compared to the second — was never
+    // proved missing from the book a worker would run on.
+    if (hold.anchorSec !== null && tx.block.timestamp > hold.anchorSec - ANCHOR_MARGIN_SEC) {
+      return `it landed at ${iso(tx.block.timestamp)}, not before admission's chain refusal of this tenant at ${iso(hold.anchorSec)}, so no admission has ` +
+        "found it missing from the book a worker would run on: let admission refuse the tenant again (fleet-resume.md), then preview again";
     }
     return null;
   };
@@ -630,7 +957,6 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       }
       const decimals = ev.decimals[leg.token] ?? null;
       const price = decimals === null ? null : usdgNumber(leg.cashUsdg) / (Number(leg.qtyRaw) / 10 ** decimals);
-      if (decimals === null) warnings.push(`${f.userOpHash}: decimals() of ${leg.token} could not be read, so its fill_price_usd stays NULL; side, quantity and cash are booked`);
       base.evidence = { ...base.evidence, fill: { token: leg.token, side: leg.side, qtyRaw: leg.qtyRaw.toString(), cashRaw: leg.cashUsdg.toString(), decimals,
         decimalsReadAt: "latest" } };
       items.push({ ...base, class: "session-trade", why: `a session key's ${leg.side} of ${leg.token}: ${usdg6(leg.cashUsdg.toString())} USDG ${leg.side === "buy" ? "out" : "in"} ` +
@@ -690,6 +1016,24 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       log_index: f.logIndex!, source: "chain-log", epoch, chain_id: chainId!, at: blockTime } } });
   }
 
+  // A TRADE ONLY WHERE THE SEED ALREADY KNOWS WHAT IT DID (holdingVerdict),
+  // decided per token over every trade booked in it, at the last of them.
+  // Before the legs below, so a trade refused here takes its legs with it.
+  const tradesIn = new Map<string, BookingItem[]>();
+  for (const it of items) {
+    if (it.class !== "session-trade" || it.proposal?.table !== "trades") continue;
+    const token = it.proposal.row.fill_side === "buy" ? it.proposal.row.buy_token! : it.proposal.row.sell_token!;
+    tradesIn.set(token, [...(tradesIn.get(token) ?? []), it]);
+  }
+  for (const [token, trades] of tradesIn) {
+    const lastAt = Math.max(...trades.map((it) => (it.proposal!.row as TradeProposal).created_at));
+    const verdict = holdingVerdict(snap.holdings, ev.balances[token] ?? null, token, lastAt);
+    for (const it of trades) {
+      it.evidence = { ...it.evidence, holding: verdict.evidence };
+      if (verdict.why) { it.class = "unresolved"; it.why = `not booked: ${verdict.why}`; it.proposal = null; }
+    }
+  }
+
   // An operation's leg is covered only when its operation was proposed.
   for (const it of items) {
     if (it.class !== "operation-leg") continue;
@@ -713,8 +1057,15 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
     warnings.push("a flow is booked without moving agents.hwm_usdg, hwm_withdrawn_usdg or a risk period: a peak the lost book already moved would move twice. " +
       "A deposit after the last equity mark reads as drift at the first look, and the worker marks contributions unknown rather than guess");
   }
+  for (const it of proposals) {
+    const fill = it.class === "session-trade" ? (it.evidence.fill as { token: string; decimals: number | null }) : null;
+    if (fill && fill.decimals === null) {
+      warnings.push(`${it.key}: decimals() of ${fill.token} could not be read, so its fill_price_usd stays NULL; side, quantity and cash are booked`);
+    }
+  }
   if (proposals.some((it) => it.class === "session-trade")) {
-    warnings.push("a trade is booked without touching cost_basis, positions or position_floors: those are the lost book's last mirrored snapshot, which the attested book is seeded from");
+    warnings.push("a trade is booked without touching cost_basis, positions or position_floors, because the snapshot the attested book is seeded from already " +
+      "reflects it (each trade's evidence.holding says how): check its positions, basis and floors on the dashboard at exits-only all the same");
   }
   const blocked = items.some((it) => !it.proposal && it.class !== "operation-leg") || remaining.length > 0;
   const verdict: BookingPlan["verdict"] = refusals.length ? "blocked" : ev.gap.status === "clean" ? "nothing-missing" : blocked || !proposals.length ? "blocked" : "ready";
@@ -752,6 +1103,12 @@ export function planLines(p: BookingPlan): string[] {
  * from which preview, under which backup, and whether it was reverted.
  * Unique per (account, epoch, evidence key) while applied — the idempotency
  * the booking promises — and kept, never deleted, after a revert.
+ *
+ * `admission_json` is where the tenant stood with admission at the apply
+ * (AdmissionState: its approvals, attestations, heartbeat and mirror cursor),
+ * the same on every receipt of a booking. A revert compares the tenant's
+ * state now against it — the database's own record, not the report's word
+ * and not two machines' clocks (admittedSince).
  */
 export const BOOKINGS_SCHEMA = `
   CREATE TABLE IF NOT EXISTS ${BOOKINGS_TABLE} (
@@ -767,6 +1124,7 @@ export const BOOKINGS_SCHEMA = `
     row_digest TEXT NOT NULL,
     preview_digest TEXT NOT NULL,
     backup_ref TEXT NOT NULL,
+    admission_json TEXT NOT NULL,
     state TEXT NOT NULL,
     applied_at_ms INTEGER NOT NULL,
     reverted_at_ms INTEGER,
@@ -784,7 +1142,10 @@ export const BACKUP_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 export interface AppliedRow { table: "trades" | "flows"; id: number; evidenceKey: string; row: Record<string, unknown>; rowDigest: string }
 export interface ApplyReport {
   format: typeof APPLY_FORMAT; bookingId: string; tenant: string; account: string; chainId: number; epoch: number;
-  previewDigest: string; backupRef: string; appliedAtMs: number; rows: AppliedRow[]; reportDigest: string;
+  previewDigest: string; backupRef: string; appliedAtMs: number;
+  /** Where the tenant stood with admission when the rows were written: what a revert compares against (kept in every receipt too). */
+  admission: AdmissionState;
+  rows: AppliedRow[]; reportDigest: string;
 }
 
 /** A row as stored, reduced to the columns that were written, plus its id: what a revert compares against. */
@@ -878,12 +1239,18 @@ export async function applyBooking(db: Db, plan: BookingPlan, o: {
     const still = factsStillMissing(plan.found, { ops: new Set(after.known.ops), txs: new Set(after.known.txs), flows: new Set(after.known.flows) });
     if (still.length) throw new BookingRefused("coverage", `admission would still find ${still.length} fact(s) Postgres lacks; nothing was written`);
     const appliedAtMs = o.nowMs;
+    // WHERE THE TENANT STANDS WITH ADMISSION as these rows are written, read
+    // inside this transaction (the compare-and-set above proved it is what the
+    // reviewed plan saw). A revert is decided against this record.
+    const admission = now.admission;
     for (const r of rows) {
       await tx.prepare(`INSERT INTO ${BOOKINGS_TABLE} (booking_id, tenant, account, epoch, chain_id, evidence_key, table_name, row_id, row_json, row_digest,
-          preview_digest, backup_ref, state, applied_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?)`)
-        .run(bookingId, plan.tenant, account, epoch, chainId, r.evidenceKey, r.table, r.id, canonical(r.row), r.rowDigest, plan.previewDigest, o.backupRef, appliedAtMs);
+          preview_digest, backup_ref, admission_json, state, applied_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?)`)
+        .run(bookingId, plan.tenant, account, epoch, chainId, r.evidenceKey, r.table, r.id, canonical(r.row), r.rowDigest, plan.previewDigest, o.backupRef,
+          canonical(admission), appliedAtMs);
     }
-    const body = { format: APPLY_FORMAT, bookingId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef, appliedAtMs, rows };
+    const body = { format: APPLY_FORMAT, bookingId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef, appliedAtMs,
+      admission, rows };
     return { ...body, format: APPLY_FORMAT, reportDigest: digestOf(body) };
   });
 }
@@ -902,6 +1269,10 @@ export function parseApplyReport(text: string): ApplyReport {
     || r.rows.some((x) => (x.table !== "trades" && x.table !== "flows") || !Number.isSafeInteger(x.id) || digestOf(x.row) !== x.rowDigest)) {
     throw new BookingRefused("report", "the apply report's rows do not verify");
   }
+  const a = r.admission as Partial<AdmissionState> | undefined;
+  if (!a || !Array.isArray(a.approvals) || !Array.isArray(a.attestations) || !a.liveness || typeof a.liveness !== "object" || !Number.isSafeInteger(r.appliedAtMs)) {
+    throw new BookingRefused("report", "the apply report does not say where the tenant stood with admission at the apply (a report from an earlier build of this tool?)");
+  }
   return r;
 }
 
@@ -911,16 +1282,78 @@ export interface RevertReport {
 }
 
 /**
+ * HAS ANYTHING STOOD ON THE BOOKED ROWS SINCE THE APPLY? PURE: where the
+ * tenant stood with admission then (the receipts' record) and where it stands
+ * now, in; the first reason a revert must refuse, or null, out.
+ *
+ * Decided by what the database recorded, never by time. The guard this
+ * replaces asked whether an approval had moved past 'approved' with an
+ * updated_at_ms at or after the report's appliedAtMs — the orchestrator's
+ * clock against the operator's — and missed two reachable states: an
+ * operator clock running ahead, and an approval registered after the apply
+ * that then ended 'refused' (the grant-change path), its attestation and
+ * consumed import still in place. Here:
+ *
+ *   an attested book in use        refuses: its attestation counts the rows.
+ *   an attestation not there then  refuses, whatever its approval says now.
+ *   an approval not there then     refuses while it is only approved (revoke
+ *                                  it first: it was given on evidence holding
+ *                                  the rows), and for good once it went past
+ *                                  that — archiving, archived, registered or
+ *                                  applied, or minted a generation or archived
+ *                                  a home on its way to refused or revoked.
+ *                                  One refused or revoked before any of that
+ *                                  stood on nothing.
+ *   an approval there then that    refuses: nothing moves a decided approval
+ *   moved, or is gone              but admission.
+ *   a heartbeat or a mirrored row  refuses: a worker ran on the tenant's book,
+ *   since                          and the mirror skips a child trade whose
+ *                                  hash Postgres holds — the booked row may be
+ *                                  all that stands for the child's own, and
+ *                                  taking it would lose the operation.
+ */
+export function admittedSince(was: AdmissionState, is: AdmissionState & { inUse: string | null }): { code: string; why: string } | null {
+  if (is.inUse) return { code: "admitted", why: `the tenant runs an attested book (generation ${is.inUse.slice(0, 8)}…), whose attestation counts these rows` };
+  const newAttestation = is.attestations.find((g) => !was.attestations.includes(g));
+  if (newAttestation) return { code: "admitted", why: `admission attested a book for the tenant after this booking (generation ${newAttestation.slice(0, 8)}…), counting these rows` };
+  for (const a of is.approvals) {
+    const before = was.approvals.find((b) => b.approvalId === a.approvalId);
+    if (!before) {
+      if (a.state === "approved" && a.generation === null && !a.archived) {
+        return { code: "open-approval", why: "an approval of the tenant made after this booking is open (approved), given on evidence that holds these rows: " +
+          "withdraw it with MERRYMEN_RESUME_REVOKE and deploy first" };
+      }
+      if (OPEN_APPROVAL_STATES.has(a.state) || a.state === "applied" || a.generation !== null || a.archived) {
+        return { code: "admitted", why: `an approval of the tenant made after this booking went past approval (now ${a.state}` +
+          `${a.generation !== null ? ", a generation minted" : ""}${a.archived ? ", its home archived" : ""}): admission stood on these rows` };
+      }
+      continue;
+    }
+    if (before.state !== a.state || before.updatedAtMs !== a.updatedAtMs) {
+      return { code: "admitted", why: `approval ${a.approvalId.slice(0, 8)}… moved since this booking (${before.state} → ${a.state}): only admission moves a decided approval` };
+    }
+  }
+  const gone = was.approvals.find((b) => !is.approvals.some((a) => a.approvalId === b.approvalId));
+  if (gone) return { code: "admitted", why: `approval ${gone.approvalId.slice(0, 8)}… that stood at this booking is gone` };
+  if (is.liveness.beatAt !== was.liveness.beatAt || is.liveness.lastMirrorAt !== was.liveness.lastMirrorAt) {
+    return { code: "moved", why: `the tenant's book has been written since this booking (heartbeat ${iso(was.liveness.beatAt)} → ${iso(is.liveness.beatAt)}, ` +
+      `mirror ${iso(was.liveness.lastMirrorAt)} → ${iso(is.liveness.lastMirrorAt)}): a worker may hold rows these stand in for` };
+  }
+  return null;
+}
+
+/**
  * TAKE ONE BOOKING BACK, AS ONE TRANSACTION, ONLY IF NOTHING STOOD ON IT.
  *
  * Refuses unless every receipt of the booking is still 'applied' and matches
- * the report, every row is still exactly as written (a row something has
- * since changed is no longer only this booking's), and no approval of the
- * tenant moved past 'approved' after the apply — admission bound those rows
- * into an attested book, and taking them away would leave that book short of
- * what its attestation counted. Then the rows go and the receipts say
- * 'reverted', keeping each row in full. A second revert of the same report is
- * `already-reverted`, changing nothing.
+ * the report — its rows, its time and its record of where the tenant stood
+ * with admission, each as the database holds it — every row is still exactly
+ * as written (a row something has since changed is no longer only this
+ * booking's), and nothing stood on the rows since (admittedSince): admission
+ * binding them into an attested book, an approval given on evidence that
+ * holds them, or a worker writing the tenant's book. Then the rows go and the
+ * receipts say 'reverted', keeping each row in full. A second revert of the
+ * same report is `already-reverted`, changing nothing.
  */
 export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: number; dialect: Dialect }): Promise<RevertReport> {
   const result = (outcome: RevertReport["outcome"]): RevertReport => {
@@ -933,21 +1366,29 @@ export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: num
     // aborts a Postgres transaction (existingTables says why).
     const tables = await existingTables(tx, o.dialect);
     if (!tables.has(BOOKINGS_TABLE)) throw new BookingRefused("receipts", "no booking receipts exist in this database");
-    const receipts = (await tx.prepare(`SELECT * FROM ${BOOKINGS_TABLE} WHERE booking_id = ? ORDER BY evidence_key`).all(report.bookingId)) as Array<Record<string, unknown>>;
-    const want = [...report.rows].sort((a, b) => a.evidenceKey.localeCompare(b.evidenceKey));
+    // Ordered here, not by the database: a collation may order these keys differently from the report's.
+    const receipts = ((await tx.prepare(`SELECT * FROM ${BOOKINGS_TABLE} WHERE booking_id = ?`).all(report.bookingId)) as Array<Record<string, unknown>>)
+      .sort((a, b) => byText(String(a.evidence_key), String(b.evidence_key)));
+    const want = [...report.rows].sort((a, b) => byText(a.evidenceKey, b.evidenceKey));
+    // THE DATABASE'S RECORD, NOT THE REPORT'S WORD: the report verifies only
+    // against its own digest, so its time and its admission record must be the
+    // ones every receipt holds.
     const matches = receipts.length === want.length && receipts.every((r, i) => String(r.evidence_key) === want[i]!.evidenceKey
       && String(r.table_name) === want[i]!.table && Number(r.row_id) === want[i]!.id && String(r.row_digest) === want[i]!.rowDigest
-      && String(r.account) === report.account && String(r.preview_digest) === report.previewDigest);
+      && String(r.account) === report.account && String(r.tenant) === report.tenant && String(r.preview_digest) === report.previewDigest
+      && Number(r.applied_at_ms) === report.appliedAtMs && String(r.admission_json) === canonical(report.admission));
     if (!matches) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
     if (receipts.every((r) => r.state === "reverted")) return result("already-reverted");
     if (!receipts.every((r) => r.state === "applied")) throw new BookingRefused("receipts", "the booking is partly reverted; nothing changed");
+    for (const needed of ["agents", "mirror_state"]) {
+      if (!tables.has(needed)) throw new BookingRefused("schema", `the ${needed} table is not in this database; nothing changed`);
+    }
     const lockAgent = await tx.prepare("UPDATE agents SET epoch = epoch WHERE LOWER(smart_account) = ?").run(report.account);
     if (Number(lockAgent.changes) < 1) throw new BookingRefused("cas", "the account's registration is gone; nothing changed");
-    if (tables.has("ledger_resume_approvals")) {
-      const admitted = await tx.prepare(`SELECT state FROM ledger_resume_approvals WHERE tenant = ? AND state IN ('archiving', 'archived', 'registered', 'applied')
-          AND updated_at_ms >= ? LIMIT 1`).get(report.tenant, report.appliedAtMs);
-      if (admitted) throw new BookingRefused("admitted", "the tenant's admission went past approval after this booking: its attested book counts these rows; nothing changed");
-    }
+    const now = await readAdmissionState(tx, tables, report.tenant, report.account, Math.floor(o.nowMs / 1000));
+    const inUse = tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(tx, report.tenant, report.account) : null;
+    const stood = admittedSince(report.admission, { ...now, inUse });
+    if (stood) throw new BookingRefused(stood.code, `${stood.why}; nothing changed`);
     for (const r of report.rows) {
       const columns = r.table === "trades" ? TRADE_COLUMNS : FLOW_COLUMNS;
       const now = (await tx.prepare(`SELECT id, ${columns.join(", ")} FROM ${r.table} WHERE id = ?`).get(r.id)) as Record<string, unknown> | undefined;
