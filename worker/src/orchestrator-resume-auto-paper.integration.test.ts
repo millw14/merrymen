@@ -308,6 +308,28 @@ it("on: no automatic admission past the process cap less its headroom, and at mo
   } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; setPhantomProcessesForTest(0); }
 });
 
+it("on: a re-sign whose preview cannot be read stays owed, and is answered once it can be", async () => {
+  process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
+  const settingsFile = (tenant: string) => path.join(fleet, "tenant-settings", `${tenant}.json`);
+  try {
+    const t = await preIncident();
+    await pass();
+    // The owner's settings cannot be read: whether it could arm live is unknown.
+    mkdirSync(path.dirname(settingsFile(t.tenant)), { recursive: true });
+    writeFileSync(settingsFile(t.tenant), "{ not json", { mode: 0o600 });
+    await t.resign();
+    await pass(); await pass();
+    assert.equal(approvals(t.tenant).length, 0);
+    assert.equal(watch(t.tenant)!.owed, 1, "an outage is not an answer: still owed");
+    assert.ok(lines.some((l) => l.includes(`${t.tenant}: resume auto-paper could not read it`)));
+    rmSync(settingsFile(t.tenant));
+    await pass();
+    assert.deepEqual(approvals(t.tenant).map((a) => [a.state, a.source]), [["applied", "auto-paper"]]);
+    assert.equal(forksOf(t.tenant).length, 1);
+    await cleanUp(t.tenant);
+  } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
+});
+
 it("on: a re-sign the gate does not hold — a running worker, or a new account with no history — is settled with nothing approved", async () => {
   process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
   try {

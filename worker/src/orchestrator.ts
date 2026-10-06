@@ -3741,7 +3741,14 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
     const tenant = change.tenant as `0x${string}`;
     try {
       const at = Date.now();
-      const entry = await previewEntryFor(shared, tenant, Math.floor(at / 1000));
+      const { entry, unreadable } = await previewEntryFor(shared, tenant, Math.floor(at / 1000));
+      // AN OUTAGE IS NOT AN ANSWER. A read that threw, or settings that could
+      // not be read, would settle the re-sign as "previewed, not approved"
+      // for good; it stays owed, and the next pass reads it again.
+      if (unreadable) {
+        sayTenantAlert(tenant, `[alert] ${tenant}: resume auto-paper could not read it (${entry.refusals.join("; ")}) — its re-sign is still owed a preview, tried again next pass`);
+        continue;
+      }
       const run = await recordPreviewRun(shared, [entry], at);
       log(`[resume-preview] run ${run}: automatic, for ${tenant}, whose grant row changed (${RESUME_AUTO_PAPER_ENV}) — ` +
         `${entry.pass ? "it passes every Postgres precondition" : "it does not pass"}`);
@@ -11239,7 +11246,7 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
   const tenants = scope.scope === "all" ? roster : [...scope.tenants];
   const nowSec = Math.floor(Date.now() / 1000);
   const entries: PreviewEntry[] = [];
-  for (const tenant of [...new Set(tenants)].sort()) entries.push(await previewEntryFor(shared, tenant, nowSec));
+  for (const tenant of [...new Set(tenants)].sort()) entries.push((await previewEntryFor(shared, tenant, nowSec)).entry);
   const run = await recordPreviewRun(shared, entries, Date.now());
   if (previewRunDigest(entries) !== run) throw new Error("preview run digest drifted");
   const passed = entries.filter((e) => e.pass);
@@ -11273,14 +11280,19 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
  * print and record it: one reading, so what the orchestrator approves by
  * itself is exactly what an operator would have been shown. Read-only, and
  * never throws: a tenant that cannot be read is a line that does not pass.
+ *
+ * `unreadable` says the line failed for a reason that may pass on its own (a
+ * read that threw, or owner settings that could not be read), as opposed to
+ * a fact about the tenant: the automatic lane asks again on the next pass
+ * rather than answer a re-sign with an outage.
  */
-async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Promise<PreviewEntry> {
+async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Promise<{ entry: PreviewEntry; unreadable: boolean }> {
   const blank: PreviewEntry = { tenant, account: null, chainId: null, owner: null, digest: null, pass: false, refusals: [], chain: null,
     suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null,
     holdsPositions: null, startsPaused: null, grantExpiresAt: null, book: null, evidence: null };
   try {
     const grant = await getGrantStore().get(tenant as `0x${string}`);
-    if (!grant) return { ...blank, refusals: ["no stored grant"] };
+    if (!grant) return { entry: { ...blank, refusals: ["no stored grant"] }, unreadable: false };
     const scopeOf = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
     const controls = await readControlsEvidence(shared, scopeOf, Date.now());
     const liveIntent = await resumeLiveIntent(tenant as `0x${string}`);
@@ -11290,14 +11302,17 @@ async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Prom
     if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
     if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
     return {
-      tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
-      chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
-      riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
-      holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
-      grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
+      entry: {
+        tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
+        chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
+        riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
+        holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
+        grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
+      },
+      unreadable: liveIntent === null,
     };
   } catch (e) {
-    return { ...blank, refusals: [`could not be read (${errorKind(e)})`] };
+    return { entry: { ...blank, refusals: [`could not be read (${errorKind(e)})`] }, unreadable: true };
   }
 }
 
