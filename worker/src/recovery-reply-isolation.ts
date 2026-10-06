@@ -32,9 +32,11 @@
  * ever put into a line: the codes are constants and the prefix is sliced from
  * an address the roster already validated.
  *
- * Imports only the shared refusal message, so a test can exercise the
- * vocabulary without PostgreSQL, Telegram or a home.
+ * Imports only the shared refusal message and db.ts's test of a transient
+ * failure (which opens nothing), so a test can exercise the vocabulary
+ * without PostgreSQL, Telegram or a home.
  */
+import { isTransientDbError } from "./db";
 import { recoveryReplyRefused } from "./recovery-reply-proof";
 
 /** Why ONE actor stopped (or was never admitted). Never fleet-wide. */
@@ -119,27 +121,18 @@ export function tenantTag(tenant: unknown): string {
 /**
  * TRANSIENT DATABASE FAILURES: retry this actor, never stop the fleet.
  *
- * 57014 is the statement timeout PostgreSQL logged at 11:01:01 on 2026-10-05
+ * Which failures are weather is db.ts's isTransientDbError: among them 57014,
+ * the statement timeout PostgreSQL logged at 11:01:01 on 2026-10-05
  * ("canceling statement due to statement timeout" on one tenant's settings
- * read); 55P03 is lock_not_available, what `FOR SHARE NOWAIT` (and the 500ms
- * lock_timeout) answer while the web is writing that tenant's row; the 08
- * class and the 57P0x codes are a dropped or restarting server; 53xxx is the
- * server out of connections or memory; 40001/40P01 are serialization and
- * deadlock aborts. The node codes and pg/pg-pool messages are the client side
- * of the same events: a reset socket, a pool that could not hand out a
- * connection in time, a connection that ended under a query.
+ * read), and 55P03, what `FOR SHARE NOWAIT` (and the 500ms lock_timeout)
+ * answer while the web is writing that tenant's row.
  *
  * Deliberately NOT transient: anything that is our own refusal (a changed or
  * malformed scope), and any other SQLSTATE. Those are decisions, not weather.
  */
-const TRANSIENT_SQLSTATE = /^(?:08[0-9A-Z]{3}|53[0-9A-Z]{3}|57014|57P0[1-4]|55P03|40001|40P01)$/;
-const TRANSIENT_NODE = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENOTFOUND"]);
-const TRANSIENT_MESSAGE = /^(?:Connection terminated|Client has encountered a connection error|Client was closed and is not queryable|timeout exceeded when trying to connect|Query read timeout|timeout expired)/;
 export function isTransientReplyDbError(e: unknown): boolean {
-  if (!(e instanceof Error) || e instanceof ReplyActorStop || e instanceof RecoveryReplyFleetRefusal) return false;
-  const code = (e as { code?: unknown }).code;
-  if (typeof code === "string" && (TRANSIENT_SQLSTATE.test(code) || TRANSIENT_NODE.has(code))) return true;
-  return TRANSIENT_MESSAGE.test(e.message);
+  if (e instanceof ReplyActorStop || e instanceof RecoveryReplyFleetRefusal) return false;
+  return isTransientDbError(e);
 }
 
 /**

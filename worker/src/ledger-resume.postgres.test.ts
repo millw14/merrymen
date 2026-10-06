@@ -31,6 +31,7 @@ import { leaseKey, type TenantLease } from "./tenant-lease";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
+import { answeredGrantChanges, autoPaperVerdict, countOpenApprovals, grantRowKey, noteGrantAttempt, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -196,5 +197,116 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     const agent = (await main.query("SELECT epoch, hwm_usdg FROM agents WHERE lower(smart_account)=$1", [account])).rows[0]!;
     assert.deepEqual([String(agent.epoch), Number(agent.hwm_usdg)], ["2", 100], "the ratchets hold: same epoch, same peak");
     assert.equal(Number((await main.query("SELECT count(*) AS n FROM trades WHERE lower(agent_id)=$1", [account])).rows[0]!.n), 1, "no trade copied twice");
+  });
+
+  await t.test("MERRYMEN_RESUME_AUTO_PAPER in the production dialect: the source column's ALTER, the roster's write stamp, the watch, the verdict's reads", async () => {
+    // Production's approvals table predates `source`: the ALTER adds it, and a row from before reads as the operator's.
+    await main.query("ALTER TABLE ledger_resume_approvals DROP COLUMN source");
+    await ensureLedgerResumeSchema(shared);
+    await ensureLedgerResumeSchema(shared);
+    assert.equal((await readOpenApproval(shared, tenant))!.source, "operator");
+    // The roster carries each record's server stamp, which a re-sign moves.
+    const listed = (await grants.listTenantExpiries()).find((r) => r.tenant === tenant)!;
+    assert.equal(typeof listed.updatedAt, "number");
+    // The watch: a baseline in one transaction, then owed (BIGINT `owed` comes back as a string here) until settled for that key.
+    const roster = [{ tenant, key: grantRowKey(listed) }];
+    assert.deepEqual(await observeGrantChanges(shared, roster, 1), { baselined: 1, owed: [] });
+    assert.deepEqual(await observeGrantChanges(shared, roster, 2), { baselined: null, owed: [] });
+    const moved = [{ tenant, key: grantRowKey({ ...listed, expiresAt: (listed.expiresAt ?? 0) + 1 }) }];
+    const { owed } = await observeGrantChanges(shared, moved, 3);
+    assert.deepEqual(owed, moved);
+    assert.deepEqual((await observeGrantChanges(shared, moved, 4)).owed, moved, "still owed");
+    assert.equal(await settleGrantChange(shared, owed[0]!, { outcome: "previewed: x", run: null }, 5), true);
+    assert.equal(await settleGrantChange(shared, owed[0]!, { outcome: "previewed: x", run: null }, 6), false, "settled once");
+    // The verdict's reads (agent_commands, the live book rows, the approvals by state) run here: this tenant has its approval open.
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const { evidence, digest } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const entry: PreviewEntry = { tenant, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
+      anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
+    const verdict = await autoPaperVerdict(shared, entry, { consentEnforced: true });
+    assert.equal(verdict.kind, "manual");
+    assert.match((verdict as { why: string[] }).why.join(" "), /approval is already open/);
+    // An automatic approval of another tenant, through the operator's insert, says so in its row.
+    const other = address(0xabc02);
+    const recorded = await recordResumeApproval(shared, { entry: { ...entry, tenant: other, digest: "a".repeat(64) }, run: "b".repeat(64), at: Date.now(), nowMs: Date.now(), source: "auto-paper" }, () => {});
+    assert.deepEqual(recorded, { recorded: true });
+    assert.equal((await main.query("SELECT source FROM ledger_resume_approvals WHERE tenant=$1", [other])).rows[0]!.source, "auto-paper");
+    assert.equal(await countOpenApprovals(shared), 2, "this tenant's registered approval and the new one");
+  });
+
+  await t.test("the review fixes in the production dialect: turn order from BIGINT stamps, drift that throws, a failed controls read told apart", async () => {
+    // Turn order: never tried, then the least recently tried, then the longest owed — with the stamps as strings.
+    const [a, b, c] = [address(0xabd01), address(0xabd02), address(0xabd03)];
+    const k = (who: string) => ({ tenant: who, key: grantRowKey({ tenant: who, expiresAt: NOW + 10, updatedAt: NOW }) });
+    await observeGrantChanges(shared, [k(a), k(b)], 10);
+    let owed = (await observeGrantChanges(shared, [k(c), k(b), k(a)], 20)).owed;
+    assert.deepEqual(owed.map((o) => o.tenant), [b, a, c], "a and b owed since the first pass, in roster order between them; c since now");
+    await noteGrantAttempt(shared, owed[0]!, 30);
+    await noteGrantAttempt(shared, owed[1]!, 31);
+    assert.equal(typeof (await main.query("SELECT attempted_at_ms FROM ledger_resume_grant_watch WHERE tenant=$1", [b])).rows[0]!.attempted_at_ms, "string", "BIGINT, as Postgres returns it");
+    owed = (await observeGrantChanges(shared, [k(a), k(b), k(c)], 40)).owed;
+    assert.deepEqual(owed.map((o) => o.tenant), [c, b, a]);
+    // A missing column is 42703, whose message also says "does not exist": drift throws, never reads as no open command.
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    assert.equal(controls.failed, false);
+    const { evidence, digest } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const entry: PreviewEntry = { tenant, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
+      anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
+    await main.query("ALTER TABLE agent_commands DROP COLUMN done_at");
+    try {
+      await assert.rejects(autoPaperVerdict(shared, entry, { consentEnforced: true }), (e: { code?: unknown }) => e.code === "42703");
+    } finally { await main.query("ALTER TABLE agent_commands ADD COLUMN done_at BIGINT"); }
+    assert.equal((await autoPaperVerdict(shared, entry, { consentEnforced: true })).kind, "manual", "restored, it reads again");
+    // A controls read that fails (the store refuses) is `failed`, an outage the admission holds on.
+    const refusing: Db = { ...shared, prepare: (sql: string) => /recovery_reply_controls/.test(sql)
+      ? { run: async () => { throw new Error("x"); }, get: async () => { throw new Error("x"); }, all: async () => { throw Object.assign(new Error("terminating connection"), { code: "57P01" }); } }
+      : shared.prepare(sql) };
+    const failed = await readControlsEvidence(refusing, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    assert.deepEqual([failed.readable, failed.failed, failed.digest], [false, true, "unreadable"]);
+  });
+
+  await t.test("an approval insert the production store gives up on is transient; the table's own uniqueness is final", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const { evidence } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const entryFor = (who: `0x${string}`, digest: string): PreviewEntry => ({ tenant: who, account, chainId: 4663, owner, digest, pass: true, refusals: [], chain: "not-required",
+      suggestedLevel: "trade", anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400,
+      book: "blocked", evidence });
+    const record = (db: Db, entry: PreviewEntry) => recordResumeApproval(db, { entry, run: "e".repeat(64), at: Date.now(), nowMs: Date.now(), source: "auto-paper" }, () => {});
+    // A real statement timeout: another session holds the table in SHARE mode, which lets the checks read and makes the insert wait.
+    const slow = address(0xabf01), blocker = await connect();
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE ledger_resume_approvals IN SHARE MODE");
+    await main.query("SET statement_timeout = 300");
+    try {
+      assert.deepEqual(await record(shared, entryFor(slow, "1".repeat(64))), { recorded: false, why: "the store could not be reached or gave up (57014)", transient: true });
+    } finally { await main.query("SET statement_timeout = 10000"); await blocker.query("ROLLBACK"); }
+    assert.equal((await main.query("SELECT 1 FROM ledger_resume_approvals WHERE tenant=$1", [slow])).rowCount, 0, "nothing recorded");
+    assert.deepEqual(await record(shared, entryFor(slow, "1".repeat(64))), { recorded: true }, "asked again once the store answers, it is recorded");
+    // A real unique violation (23505): another replica's approval of the same evidence lands between the checks and the insert.
+    const raced = address(0xabf02), won = "00000000-0000-4000-8000-0000000000a2";
+    const racing: Db = { ...shared, prepare: (sql: string) => {
+      const stmt = shared.prepare(sql);
+      return /INSERT INTO ledger_resume_approvals/.test(sql) ? { ...stmt, run: async (...args: unknown[]) => { await stmt.run(won, ...args.slice(1)); return stmt.run(...args); } } : stmt;
+    } };
+    assert.deepEqual(await record(racing, entryFor(raced, "2".repeat(64))), { recorded: false, why: "the store refused the approval" }, "final: never asked again");
+    assert.equal((await readOpenApproval(shared, raced))!.approvalId, won);
+  });
+
+  await t.test("an owed change an automatic approval landed for since it was seen is found from BIGINT stamps, in any state, until it is settled", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const { evidence } = await readResumeEvidence(shared, { tenant, grant: { smartAccount: account, chainId: 4663, owner }, home, nowSec: NOW, controls });
+    const who = address(0xabe01), run = "f".repeat(64), seenAt = Date.now();
+    const k = { tenant: who, key: grantRowKey({ tenant: who, expiresAt: NOW + 20, updatedAt: NOW }) };
+    assert.deepEqual((await observeGrantChanges(shared, [k], seenAt)).owed, [k], "a new grant row: owed");
+    assert.equal((await answeredGrantChanges(shared)).has(who), false);
+    // The insert commits; the lane never hears so. Then Phase A refuses it.
+    const entry: PreviewEntry = { tenant: who, account, chainId: 4663, owner, digest: "3".repeat(64), pass: true, refusals: [], chain: "not-required", suggestedLevel: "trade",
+      anchor: null, riskPeriod: null, home: "present", lastMirrorAt: null, holdsPositions: false, startsPaused: false, grantExpiresAt: NOW + 86400, book: "blocked", evidence };
+    assert.deepEqual(await recordResumeApproval(shared, { entry, run, at: seenAt, nowMs: seenAt + 5, source: "auto-paper" }, () => {}), { recorded: true });
+    assert.deepEqual((await answeredGrantChanges(shared)).get(who), { key: k.key, state: "approved", run });
+    await main.query("UPDATE ledger_resume_approvals SET state = 'refused' WHERE tenant = $1", [who]);
+    assert.deepEqual((await answeredGrantChanges(shared)).get(who), { key: k.key, state: "refused", run }, "refused since: still the answer");
+    assert.equal(await settleGrantChange(shared, k, { outcome: "auto-approved: x", run }, seenAt + 9), true);
+    assert.equal((await answeredGrantChanges(shared)).has(who), false, "settled: owed nothing");
   });
 });
