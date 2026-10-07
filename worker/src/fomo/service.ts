@@ -109,6 +109,7 @@ import {
   type ResearchStatusData,
   type ResolveData,
   type TailData,
+  type ExtendTailData,
   type ThesisView,
   type TokenActivityData,
   type TokenRef,
@@ -3102,6 +3103,48 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     });
   }
 
+  /**
+   * MAKE A RUNNING TAIL LONGER (the +1h button on a notice): by whole hours,
+   * never past 12 hours from now, never shorter than it already runs, and
+   * never a revived one (store.ts extendTail). Refused like a new tail when
+   * tails are switched off or there is no live feed, because it keeps
+   * telling what nothing would tell. Local only: no provider call, ever.
+   */
+  async function toolExtendTail(ic: Inv, args: ToolArgs["fomo_extend_tail"]): Promise<FomoEnvelope<ExtendTailData>> {
+    const a = new Answer();
+    a.requested = { trader: args.trader.kind, hours: args.hours };
+    const refuse = (reason: string, message: string): FomoEnvelope<ExtendTailData> =>
+      finish<ExtendTailData>(ic, a, { cls: "profile", mode: "cached-ok", subject: null, data: null, rows: 0, essential: [], status: "unavailable", reason, message });
+    if (!tailsEnabled) return refuse("tails-disabled", "Tailing is switched off on this service right now, so I haven't made that tail longer.");
+    if (!liveFeed) return refuse("tail-needs-live-feed", "Tailing needs Fomo's live feed, which only the hosted service has; this install can't tail.");
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    const ref = args.trader;
+    const active = await store.activeTails(db, tenant, ic.now);
+    let match = ref.kind === "user-id" ? active.find((t) => t.userId === ref.value) : active.find((t) => (t.handle ?? "").toLowerCase() === ref.value.toLowerCase());
+    if (!match && ref.kind === "handle") {
+      // A rename since the tail began: our own record maps the handle to the id (free; never a provider read).
+      const known = await store.traderByHandle(db, ref.value).catch(() => null);
+      if (known) match = active.find((t) => t.userId === known.userId);
+    }
+    const ended = (): FomoEnvelope<ExtendTailData> =>
+      finish<ExtendTailData>(ic, a, { cls: "profile", mode: "cached-ok", subject: null, data: null, rows: 0, essential: [], status: "empty", reason: "tail-not-active", message: "That tail has already ended." });
+    if (!match) return ended();
+    const res = await store.extendTail(db, { tenant, userId: match.userId, addMs: args.hours * HOUR, nowMs: ic.now });
+    if (!res.ok) return ended();
+    const trader = { userId: match.userId, handle: tailHandle(match.handle) };
+    const left = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
+    return finish(ic, a, {
+      cls: "profile",
+      mode: "cached-ok",
+      subject: { kind: "trader", trader: { userId: trader.userId, handle: trader.handle, displayName: null, verified: null } },
+      data: { action: "extend", trader, previousExpiresAtMs: res.previousExpiresAtMs, expiresAtMs: res.tail.expiresAtMs, capped: res.capped, activeTails: left },
+      rows: 1,
+      essential: [],
+      status: "ok",
+    });
+  }
+
   // ── Health ──────────────────────────────────────────────────────────
 
   async function healthOf(now: number): Promise<FomoServiceHealth> {
@@ -3299,6 +3342,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         return toolTail(ic, args as ToolArgs[typeof tool]);
       case "fomo_untail_trader":
         return toolUntail(ic, args as ToolArgs[typeof tool]);
+      case "fomo_extend_tail":
+        return toolExtendTail(ic, args as ToolArgs[typeof tool]);
     }
   }
 

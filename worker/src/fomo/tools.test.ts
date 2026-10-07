@@ -214,7 +214,13 @@ describe("validation", () => {
     const all = untail.validate({ all: true });
     assert.ok(all.ok && all.args.all === true && all.args.trader === null);
     for (const raw of [{}, { all: false }, { trader: "unipcs", all: true }, { all: "true" }, { trader: "a/b" }]) assert.equal(untail.validate(raw).ok, false, JSON.stringify(raw));
-    for (const n of ["fomo_tail_trader", "fomo_untail_trader"] as const) {
+    const extend = FOMO_TOOL_DEFS.fomo_extend_tail;
+    const plusOne = extend.validate({ trader: USER });
+    assert.ok(plusOne.ok && plusOne.args.trader.kind === "user-id" && plusOne.args.hours === 1, "one hour unless asked");
+    for (const raw of [{}, { trader: USER, hours: 0 }, { trader: USER, hours: 13 }, { trader: USER, consider: true }, { trader: "a/b" }]) {
+      assert.equal(extend.validate(raw).ok, false, JSON.stringify(raw));
+    }
+    for (const n of ["fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail"] as const) {
       assert.ok(MUTATION_TOOL_NAMES.includes(n));
       assert.equal(FOMO_TOOL_DEFS[n].mutation, true);
       assert.equal(FOMO_TOOL_DEFS[n].ownerOnly, true);

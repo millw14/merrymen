@@ -76,7 +76,8 @@ import { FOMO_ATTRIBUTION, renderEnvelope } from "../fomo/render";
 import type { ResearchStatusData } from "../fomo/tools";
 import type { FomoEnvelope } from "../fomo/types";
 import type { FollowReadiness } from "../fomo-child";
-import { canConsider, considerRefusedNote, tailAmbiguousText, tailCardText, tailHandle, tailListText } from "./fomo-tail";
+import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText } from "./fomo-tail";
+import type { ExtendTailData } from "../fomo/tools";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, TAIL_USAGE, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
@@ -2421,6 +2422,69 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /**
+   * A RUNNING TAIL'S STOP OR +1h (the buttons under each tail notice,
+   * fomo/tail-notices.ts: `ftl:stop:<userId>`, `ftl:ext:<userId>`).
+   *
+   * They act on the tail as it is in the store NOW, not on anything parked in
+   * this process, so a notice sent before a restart still works (pollOnce
+   * routes them past the backlog rule, like the groups' own buttons). Only the
+   * linked owner, pressing in her own DM (fromId === chatId === ownerId, the
+   * trusted ids Telegram sends; the user id in the data is only which of HER
+   * tails): anyone else is answered and nothing changes. Stop is
+   * fomo_untail_trader; +1h is fomo_extend_tail, which only ever moves the
+   * end later and never past 12 hours from now (never fomo_tail_trader with
+   * one hour, which would cut a longer tail to one). Both are local: no
+   * provider call. A short toast answers the press, and a plain line follows
+   * as a reply to the notice, so the notice itself keeps what it told her.
+   */
+  const handleTailButton = async (cb: TgCallback, cfg: ResolvedConfig): Promise<void> => {
+    const token = cfg.telegramBotToken!;
+    const opts = { token };
+    const parsed = parseTailCallback(cb.data);
+    if (!parsed) {
+      await answerCallbackQuery(opts, cb.id, "That button has expired.");
+      return;
+    }
+    const ownerId = stateRef.get().ownerId;
+    if (ownerId === null || cb.fromId !== ownerId || cb.chatId !== ownerId || !cfg.telegramAllowlist.includes(ownerId)) {
+      if (!cfg.telegramAllowlist.includes(cb.chatId) && !cfg.telegramAllowlist.includes(cb.fromId)) tally.refused(cb.chatId);
+      await answerCallbackQuery(opts, cb.id, "Only my owner can change a tail.");
+      return;
+    }
+    const b = deps.fomoOff === true ? null : fomoBroker();
+    if (!b) {
+      await answerCallbackQuery(opts, cb.id, "Tailing isn't available here.");
+      return;
+    }
+    let env: FomoEnvelope;
+    try {
+      env =
+        parsed.action === "stop"
+          ? await b.call("fomo_untail_trader", { trader: parsed.userId }, tailOpts(cb.chatId))
+          : await b.call("fomo_extend_tail", { trader: parsed.userId, hours: 1 }, tailOpts(cb.chatId));
+    } catch {
+      await answerCallbackQuery(opts, cb.id, "That didn't go through; try again.");
+      return;
+    }
+    if (env.reason === "invalid-args") {
+      await answerCallbackQuery(opts, cb.id, "That button has expired.");
+      return;
+    }
+    const ext = parsed.action === "ext" && env.status === "ok" ? (env.data as ExtendTailData | null) : null;
+    const toast =
+      parsed.action === "stop"
+        ? env.status === "ok" ? "Stopped" : env.status === "empty" ? "That tail had already stopped." : "Couldn't stop it right now."
+        : ext
+          ? ext.expiresAtMs <= ext.previousExpiresAtMs ? "Already as long as a tail runs (12 h)" : ext.capped ? "Extended to the 12-hour limit" : "+1h"
+          : env.status === "empty" ? "That tail has ended." : "Couldn't extend it right now.";
+    await answerCallbackQuery(opts, cb.id, toast);
+    const text = tailAnswer(env);
+    const sent = await sendMessage(opts, cb.chatId, text, { replyToMessageId: cb.messageId, disablePreview: true });
+    if (sent.ok) await pushHistory(cb.chatId, "assistant", stripThinkingBlock(text.replace(/<[^>]+>/g, "")));
+    console.log(`[telegram] fomo tail ${parsed.action === "stop" ? "stop" : "+1h"} pressed: ${env.status}`);
+  };
+
+  /**
    * One poll. Returns how long to wait before the next, in ms. The bot
    * binding, the backoff and the menu push it calls are defined just below.
    *
@@ -2620,6 +2684,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           // stranger's group to its 24-hour leave.
           if (tgGroups && cb.data.startsWith("tgg:")) {
             await tgGroups.onCallback(cb);
+            return;
+          }
+          // A running tail's Stop and +1h act on the stored tail as it is now
+          // (handleTailButton), so one sent before a restart still works.
+          if (cb.data.startsWith("ftl:")) {
+            await handleTailButton(cb, c);
             return;
           }
           // One from before this process started listening answers a question

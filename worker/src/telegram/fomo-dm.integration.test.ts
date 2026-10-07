@@ -930,3 +930,65 @@ describe("a Fomo tail asked for in words, in the owner's DM", () => {
     });
   });
 });
+
+describe("a running tail's Stop and +1h buttons", () => {
+  /** The tail's expiry as stored. */
+  const expiry = (h: Harness): number | null => {
+    const r = h.fx.raw.prepare("SELECT expires_at_ms FROM fomo_tails").get() as { expires_at_ms: number } | undefined;
+    return r ? Number(r.expires_at_ms) : null;
+  };
+  /** Press a notice button and wait for its toast. */
+  const pressNotice = async (h: Harness, data: string, from = OWNER, chat = from): Promise<string> => {
+    const before = toasts(h).length;
+    h.press(data, 77_000, from, chat);
+    await h.until(() => toasts(h).length > before);
+    return toasts(h).at(-1)!;
+  };
+
+  it("+1h adds an hour to her running tail, by its stored end, and says so; Stop stops it", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      const end = expiry(h)!;
+      assert.equal(await pressNotice(h, `ftl:ext:${KALEO_ID}`), "+1h");
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: KALEO_ID, hours: 1 });
+      assert.equal(h.fx.calls.at(-1)!.tool, "fomo_extend_tail", "never fomo_tail_trader with one hour");
+      assert.equal(expiry(h), end + 3_600_000);
+      await h.until(() => /now\./.test(h.sentTo(OWNER).at(-1) ?? ""));
+      assert.match(h.sentTo(OWNER).at(-1)!, /^Tailing CryptoKaleo until \d\d:\d\d UTC now\./);
+      assert.equal((h.lastBody(OWNER)!.reply_parameters as { message_id: number }).message_id, 77_000, "a reply to the notice; the notice keeps its words");
+      assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`), "Stopped");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+      assert.equal(await pressNotice(h, `ftl:ext:${KALEO_ID}`), "That tail has ended.");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0, "an ended tail is never revived by +1h");
+      assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`), "That tail had already stopped.");
+    });
+  });
+
+  it("+1h never shortens a tail and never passes 12 hours from now", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      await tailAndPress(h, "/tail CryptoKaleo 12h", "tell");
+      const end = expiry(h)!;
+      const toast = await pressNotice(h, `ftl:ext:${KALEO_ID}`);
+      assert.match(toast, /12-hour limit|as long as a tail runs/);
+      const after = expiry(h)!;
+      assert.ok(after >= end, "never shortened");
+      assert.ok(after <= Date.now() + 12 * 3_600_000, "never past 12 hours from now");
+    });
+  });
+
+  it("only the owner, in her own DM: anyone else's press, or hers from a group, changes nothing", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      const end = expiry(h);
+      const n = h.fx.calls.length;
+      assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`, FRIEND), "Only my owner can change a tail.");
+      assert.equal(await pressNotice(h, `ftl:ext:${KALEO_ID}`, FRIEND, OWNER), "Only my owner can change a tail.");
+      assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`, OWNER, GROUP), "Only my owner can change a tail.");
+      assert.equal(await pressNotice(h, "ftl:boom:x"), "That button has expired.");
+      assert.equal(await pressNotice(h, "ftl:ext:not-a-user-id"), "That button has expired.");
+      assert.equal(h.fx.calls.filter((c) => c.tool !== "fomo_extend_tail").length, n, "nothing but the malformed id reached the service");
+      assert.equal(expiry(h), end);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+    });
+  });
+});

@@ -36,6 +36,7 @@ import type {
   ResearchStatusData,
   ResolveData,
   TailData,
+  ExtendTailData,
   TokenActivityData,
   TokenThesesData,
   TraderActivityData,
@@ -342,7 +343,7 @@ function isTraderTool(tool: FomoToolName): boolean {
  */
 export function needsDirectMessage(env: FomoEnvelope): boolean {
   if (isTraderTool(env.tool) || env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
-  if (env.tool === "fomo_tail_trader" || env.tool === "fomo_untail_trader") return true;
+  if (env.tool === "fomo_tail_trader" || env.tool === "fomo_untail_trader" || env.tool === "fomo_extend_tail") return true;
   if (env.subject?.kind === "trader") return true;
   // A leaderboard cut to Merrymen's watched traders names the watch list itself (chat.ts deflects it first).
   if (env.tool === "fomo_get_rankings" && (env.data as RankingsData | null)?.board === "traders" && env.coverage.requested.cohortOnly === true) return true;
@@ -717,9 +718,14 @@ export const TAIL_COVERAGE_LINE =
  * audience anyway. Never says "copy": a tail tells, and at most adds one
  * signal to the normal review.
  */
-function bodyTail(env: FomoEnvelope<TailData | UntailData>, audience: Audience, now: number): string[] {
+function bodyTail(env: FomoEnvelope<TailData | UntailData | ExtendTailData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d || audience !== "owner") return [];
+  if (d.action === "extend") {
+    const name = who(d.trader.handle, d.trader.userId);
+    if (d.expiresAtMs <= d.previousExpiresAtMs) return [`${name}'s tail already runs as long as a tail can (12 hours from now), until ${utcClock(d.expiresAtMs)}.`];
+    return [`Tailing ${name} until ${utcClock(d.expiresAtMs)} now${d.capped ? " (as long as a tail can run, 12 hours from now)" : ""}.`];
+  }
   if (d.action === "untail") {
     if (d.all) return [d.removed > 0 ? `Stopped all ${plural(d.removed, "tail", "tails")}.` : "You weren't tailing anyone."];
     const name = d.trader ? who(d.trader.handle, d.trader.userId) : "that trader";
@@ -766,7 +772,8 @@ function body(env: FomoEnvelope, audience: Audience, now: number): string[] {
       return bodyWatch(env as FomoEnvelope<WatchData>, audience);
     case "fomo_tail_trader":
     case "fomo_untail_trader":
-      return bodyTail(env as FomoEnvelope<TailData | UntailData>, audience, now);
+    case "fomo_extend_tail":
+      return bodyTail(env as FomoEnvelope<TailData | UntailData | ExtendTailData>, audience, now);
   }
 }
 

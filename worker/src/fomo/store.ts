@@ -2950,6 +2950,41 @@ export async function recentlyEndedTails(db: Db, tenant: string, sinceMs: number
   return rows.flatMap((r) => tailOf(r) ?? []);
 }
 
+export type ExtendTailResult =
+  | { ok: true; tail: FomoTail; previousExpiresAtMs: number; capped: boolean }
+  | { ok: false; reason: "not-active" };
+
+/**
+ * MAKE ONE RUNNING TAIL LONGER by `addMs` (the +1h button on a notice):
+ * never past `tailMaxMs` from now, and never shorter than it already runs.
+ * addTail with a short span would REPLACE the end and could cut it; this only
+ * ever moves the end later (or leaves it, at the limit, `capped`). An ended
+ * tail is never revived here: tailing it again is a new tail, counted
+ * against the cap, through addTail. Read and written under the owner's lock
+ * row, like addTail, so a concurrent stop or renewal is not lost. Owner state
+ * only: nothing here sizes, orders or grants.
+ */
+export async function extendTail(db: Db, t: { tenant: string; userId: string; addMs: number; nowMs: number }): Promise<ExtendTailResult> {
+  const tenant = tenantOf(t.tenant);
+  const userId = keyOf(t.userId, "userId", 128);
+  const now = intOf(t.nowMs, "nowMs");
+  const add = intOf(t.addMs, "addMs");
+  if (add <= 0) throw new TypeError("fomo store: an extension must add time");
+  return db.tx(async (tx): Promise<ExtendTailResult> => {
+    await lockTenant(tx, tenant, "tails", now);
+    const row = (await tx.prepare(`SELECT ${TAIL_COLUMNS} FROM fomo_tails WHERE tenant = ? AND user_id = ?`).get(tenant, userId)) as Row | undefined;
+    const cur = row ? tailOf(row) : null;
+    if (!cur || cur.expiresAtMs <= now) return { ok: false, reason: "not-active" };
+    const limit = now + FOMO_LIMITS.tailMaxMs;
+    const wanted = cur.expiresAtMs + add;
+    const next = Math.max(cur.expiresAtMs, Math.min(wanted, limit));
+    if (next > cur.expiresAtMs) {
+      await tx.prepare("UPDATE fomo_tails SET expires_at_ms = ? WHERE tenant = ? AND user_id = ? AND expires_at_ms = ?").run(next, tenant, userId, cur.expiresAtMs);
+    }
+    return { ok: true, tail: { ...cur, expiresAtMs: next }, previousExpiresAtMs: cur.expiresAtMs, capped: wanted > limit };
+  });
+}
+
 /**
  * EVERY TRADER ANYBODY IS TAILING NOW → the owners tailing them (the only
  * tenants a tailed trader's events are routed to for it), at most `limit`

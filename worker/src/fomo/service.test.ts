@@ -43,6 +43,7 @@ import {
 import { renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
+  ExtendTailData,
   OpportunitiesData,
   RankingsData,
   ResearchCoinData,
@@ -846,6 +847,31 @@ describe("tails", () => {
     assert.equal((await h.invoke("fomo_tail_trader", { trader: KALEO, hours: 13 })).reason, "invalid-args");
     assert.equal((await h.invoke("fomo_tail_trader", { trader: KALEO, hours: 0 })).reason, "invalid-args");
     assert.equal((await h.invoke("fomo_tail_trader", { hours: 2 })).reason, "invalid-args");
+  });
+
+  it("+1h makes a running tail longer, never shorter, never past 12 hours from now, never a revived one; at no cost", async () => {
+    const h = await harness({ liveFeed: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3 });
+    const calls = h.calls.length;
+    const one = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: KALEO }, { now: NOW + 60_000 });
+    assert.equal(one.status, "ok");
+    assert.deepEqual(one.data, { action: "extend", trader: { userId: KALEO, handle: "CryptoKaleo" }, previousExpiresAtMs: NOW + 3 * HOUR, expiresAtMs: NOW + 4 * HOUR, capped: false, activeTails: 1 });
+    assert.match(renderEnvelope(one, { audience: "owner", maxChars: 2000, now: NOW }), /^Tailing CryptoKaleo until 20:05 UTC now\./);
+    const byHandle = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: "cryptokaleo", hours: 12 });
+    assert.ok(byHandle.data?.capped && byHandle.data.expiresAtMs === NOW + 12 * HOUR, "capped at 12 hours from now");
+    const again = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: KALEO });
+    assert.equal(again.data?.expiresAtMs, NOW + 12 * HOUR, "nothing added, nothing taken");
+    assert.match(renderEnvelope(again, { audience: "owner", maxChars: 2000, now: NOW }), /already runs as long as a tail can/);
+    assert.equal(h.calls.length, calls, "extending never reads the provider");
+    const ended = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: KALEO }, { now: NOW + 12 * HOUR });
+    assert.equal(ended.status, "empty");
+    assert.equal(ended.reason, "tail-not-active");
+    assert.match(renderEnvelope(ended, { audience: "owner", maxChars: 2000, now: NOW }), /^That tail has already ended\./);
+    assert.deepEqual(await store.activeTails(h.db, OWNER, NOW + 12 * HOUR), [], "not revived");
+    const g = await h.invoke("fomo_extend_tail", { trader: KALEO }, { audience: "group", surface: "telegram-group", groupId: "-100123" });
+    assert.equal(g.reason, "owner-only");
+    const off = await harness({ liveFeed: true, tailsEnabled: false });
+    assert.equal((await off.invoke("fomo_extend_tail", { trader: KALEO })).reason, "tails-disabled");
   });
 
   it("a group can neither start nor stop a tail, nor see one", async () => {

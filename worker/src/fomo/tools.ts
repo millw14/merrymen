@@ -22,7 +22,8 @@
  * tools take), so a plan always validates.
  *
  * MUTATIONS ARE A SEPARATE REGISTRY. `fomo_watch_coin`, `fomo_unwatch_coin`,
- * `fomo_tail_trader` and `fomo_untail_trader` write the owner's state;
+ * `fomo_tail_trader`, `fomo_untail_trader` and `fomo_extend_tail` write the
+ * owner's state;
  * `toolSpecs` never offers them to a model loop, and the service refuses them
  * for any audience but the owner.
  */
@@ -82,6 +83,8 @@ export const TOOL_LIMITS = {
   watchDays: { min: 1, max: 30, default: 7 },
   /** A tail's length in whole hours (store.ts FOMO_LIMITS.tailMinMs..tailMaxMs). */
   tailHours: { min: 1, max: 12, default: 3 },
+  /** Whole hours one extension adds (the +1h button: 1); the end never passes 12 hours from now. */
+  tailExtendHours: { min: 1, max: 12, default: 1 },
 } as const;
 
 export const READ_TOOL_NAMES: readonly FomoReadToolName[] = [
@@ -95,7 +98,7 @@ export const READ_TOOL_NAMES: readonly FomoReadToolName[] = [
   "fomo_research_coin",
   "fomo_get_research_status",
 ];
-export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader"];
+export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail"];
 export const TOOL_NAMES: readonly FomoToolName[] = [...READ_TOOL_NAMES, ...MUTATION_TOOL_NAMES];
 
 export function isFomoToolName(v: unknown): v is FomoToolName {
@@ -211,6 +214,11 @@ export interface UntailArgs {
   trader: TraderRef | null;
   all: boolean;
 }
+/** One running tail made longer: whole hours (TOOL_LIMITS.tailExtendHours), never past 12 from now. */
+export interface ExtendTailArgs {
+  trader: TraderRef;
+  hours: number;
+}
 
 export interface ToolArgs {
   fomo_resolve_subject: ResolveArgs;
@@ -226,6 +234,7 @@ export interface ToolArgs {
   fomo_unwatch_coin: UnwatchArgs;
   fomo_tail_trader: TailArgs;
   fomo_untail_trader: UntailArgs;
+  fomo_extend_tail: ExtendTailArgs;
 }
 
 export type ValidateResult<A> = { ok: true; args: A } | { ok: false; reason: string };
@@ -584,6 +593,21 @@ export interface UntailData {
   all: boolean;
   /** Tails stopped by this call (0 when there was none). */
   removed: number;
+  activeTails: number;
+}
+
+/**
+ * A running tail made longer (fomo_extend_tail, the +1h button). Owner only.
+ * Never shortens a tail and never revives an ended one: `expiresAtMs` is
+ * never before `previousExpiresAtMs`, and never past 12 hours from now.
+ */
+export interface ExtendTailData {
+  action: "extend";
+  trader: { userId: string; handle: string | null };
+  previousExpiresAtMs: number;
+  expiresAtMs: number;
+  /** The 12-hour limit cut the extension short (or left nothing to add). */
+  capped: boolean;
   activeTails: number;
 }
 
@@ -1162,6 +1186,32 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
       if (all && o.trader !== undefined) return { ok: false, reason: "trader-or-all-not-both" };
       if (!all && o.trader === undefined) return { ok: false, reason: "trader-or-all-required" };
       return collect<UntailArgs>({ trader: traderArg(o.trader, false), all: okv(all) });
+    },
+  },
+
+  fomo_extend_tail: {
+    description: "Owner only: make one running tail longer by whole hours (default 1). Never shortens it, never past 12 hours from now, never restarts an ended one.",
+    schema: schema(
+      {
+        trader: S.trader,
+        hours: { type: "integer", minimum: TOOL_LIMITS.tailExtendHours.min, maximum: TOOL_LIMITS.tailExtendHours.max },
+      },
+      ["trader"],
+    ),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["trader", "hours"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const hours: Field<number> =
+        o.hours === undefined
+          ? okv(TOOL_LIMITS.tailExtendHours.default)
+          : intIn(o.hours, TOOL_LIMITS.tailExtendHours.min, TOOL_LIMITS.tailExtendHours.max) !== null
+            ? okv(o.hours as number)
+            : bad("hours-out-of-range");
+      return collect<ExtendTailArgs>({ trader: traderArg(o.trader, true) as Field<TraderRef>, hours });
     },
   },
 };

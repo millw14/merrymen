@@ -1029,6 +1029,31 @@ describe("tails", () => {
     assert.deepEqual((await S.recentlyEndedTails(db, B, T0, T0 + HOUR)).map((t) => t.userId), ["u-3"], "the ended row stays for its summary");
   });
 
+  it("an extension only ever moves a running tail's end later, never past 12 hours from now, and never revives one", async () => {
+    const { db } = await fresh();
+    await add(db, A, "u-1", T0, T0 + 3 * HOUR, true);
+    const one = await S.extendTail(db, { tenant: A, userId: "u-1", addMs: HOUR, nowMs: T0 + MIN });
+    assert.ok(one.ok && one.previousExpiresAtMs === T0 + 3 * HOUR && one.tail.expiresAtMs === T0 + 4 * HOUR && !one.capped);
+    assert.ok(one.ok && one.tail.createdAtMs === T0 && one.tail.consider === true, "its start and consider are kept");
+    // Near the limit: cut to 12 hours from now, never past it.
+    await add(db, A, "u-2", T0, T0 + 12 * HOUR);
+    const capped = await S.extendTail(db, { tenant: A, userId: "u-2", addMs: HOUR, nowMs: T0 + 30 * MIN });
+    assert.ok(capped.ok && capped.tail.expiresAtMs === T0 + 12 * HOUR + 30 * MIN && capped.capped);
+    const full = await S.extendTail(db, { tenant: A, userId: "u-2", addMs: HOUR, nowMs: T0 + 30 * MIN });
+    assert.ok(full.ok && full.tail.expiresAtMs === full.previousExpiresAtMs && full.capped, "at the limit nothing is added, and nothing is taken away");
+    // A tail that runs longer than "now + 12h" could only be cut by a cap: it never is.
+    const shorter = await S.extendTail(db, { tenant: A, userId: "u-2", addMs: HOUR, nowMs: T0 });
+    assert.ok(shorter.ok && shorter.tail.expiresAtMs === T0 + 12 * HOUR + 30 * MIN, "never shortened");
+    assert.equal((await S.activeTails(db, A, T0)).find((t) => t.userId === "u-2")?.expiresAtMs, T0 + 12 * HOUR + 30 * MIN);
+    // Ended, unknown, another owner's: nothing.
+    await add(db, A, "u-3", T0, T0 + HOUR);
+    assert.deepEqual(await S.extendTail(db, { tenant: A, userId: "u-3", addMs: HOUR, nowMs: T0 + HOUR }), { ok: false, reason: "not-active" });
+    assert.deepEqual(await S.extendTail(db, { tenant: A, userId: "u-404", addMs: HOUR, nowMs: T0 }), { ok: false, reason: "not-active" });
+    assert.deepEqual(await S.extendTail(db, { tenant: B, userId: "u-1", addMs: HOUR, nowMs: T0 }), { ok: false, reason: "not-active" });
+    assert.equal((await S.activeTails(db, A, T0)).find((t) => t.userId === "u-1")?.expiresAtMs, T0 + 4 * HOUR, "B's attempt changed nothing of A's");
+    await assert.rejects(S.extendTail(db, { tenant: A, userId: "u-1", addMs: 0, nowMs: T0 }), /must add time/);
+  });
+
   it("ended tails are kept a day for their summary, then pruned", async () => {
     const { db, raw } = await fresh();
     await add(db, A, "u-old", T0 - 2 * DAY, T0 - 2 * DAY + HOUR);
