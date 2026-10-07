@@ -707,6 +707,14 @@ describe("who chose a capital movement: only the owner's own is filed as capital
     assert.equal(p.verdict, "blocked");
     assert.deepEqual([...new Set(codes(p))], ["capital-in-session-op"], "an inbound movement needs no root-key operation, but none beside a session key's");
     assert.ok(!p.proposals.inserts.some((i) => i.key === leg.key));
+    // The session key's operation alone says so, with no trades row naming the transaction (admission then also finds the operation unanswered).
+    const b = await books();
+    b.raw.prepare("DELETE FROM trades WHERE tx_hash = ?").run(target.tx);
+    const bare = await preview(b, fakeRpc({ txs }).rpc);
+    const why = bare.refusals.find((r) => r.code === "capital-in-session-op")!.why;
+    assert.match(why, new RegExp(`^${leg.key} \\(USDG in \\d+\\.\\d{6}\\) is in a transaction where the agent acted, not the owner's root key: the account's operation\\(s\\) 0x[0-9a-f]{8}… \\(permission validator, this log inside it\\)\\. `));
+    assert.doesNotMatch(why, /trades row/);
+    assert.ok(!bare.proposals.inserts.some((i) => i.key === leg.key));
   });
 
   it("capital-in-session-op: a trades row naming the deposit's transaction, answering no root-key operation in it, says the agent acted there", async () => {
