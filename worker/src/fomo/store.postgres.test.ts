@@ -268,8 +268,9 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       const tailed = await S.activeTails(db, A, T0);
       assert.equal(tailed.length, 3);
       assert.equal(typeof tailed[0]!.consider, "boolean", "consider reads back as a boolean from a BIGINT");
-      assert.deepEqual(await S.tenantsTailing(db, tailed[0]!.userId, T0), [a]);
-      assert.equal((await S.tailedUserIds(db, T0, 10)).length, 3);
+      const owners = await S.tailOwners(db, T0, 10);
+      assert.equal(owners.size, 3);
+      assert.deepEqual(owners.get(tailed[0]!.userId), [a]);
       assert.deepEqual(await S.recentlyEndedTails(db, A, T0 + 3 * HOUR - MIN, T0 + 3 * HOUR).then((r) => r.length), 3);
       assert.equal(await S.removeTail(db, A, tailed[0]!.userId), true);
       assert.equal(await S.removeAllTails(db, A, T0), 2);

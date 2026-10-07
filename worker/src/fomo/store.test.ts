@@ -990,12 +990,17 @@ describe("tails", () => {
     await add(db, A, "u-1", T0, T0 + HOUR, true);
     await add(db, B, "u-1", T0, T0 + 2 * HOUR);
     await add(db, B, "u-2", T0, T0 + 3 * HOUR, false, null);
-    assert.deepEqual(await S.tenantsTailing(db, "u-1", T0 + 1), [a, B]);
-    assert.deepEqual(await S.tenantsTailing(db, "u-1", T0 + HOUR), [B], "an ended tail routes nothing");
-    assert.deepEqual(await S.tenantsTailing(db, "u-none", T0), []);
-    assert.deepEqual(await S.tailedUserIds(db, T0 + 1, 10), ["u-1", "u-2"]);
-    assert.deepEqual(await S.tailedUserIds(db, T0 + 1, 1), ["u-1"], "the limit holds");
-    assert.deepEqual(await S.tailedUserIds(db, T0 + 3 * HOUR, 10), []);
+    const owners = async (at: number, limit = 10) => [...(await S.tailOwners(db, at, limit))];
+    assert.deepEqual(await owners(T0 + 1), [
+      ["u-1", [a, B]],
+      ["u-2", [B]],
+    ]);
+    assert.deepEqual(await owners(T0 + HOUR), [
+      ["u-1", [B]],
+      ["u-2", [B]],
+    ], "an ended tail routes nothing");
+    assert.deepEqual(await owners(T0 + 1, 1), [["u-1", [a, B]]], "the limit counts traders, each with all its owners");
+    assert.deepEqual(await owners(T0 + 3 * HOUR), []);
     // A's tail ended at T0 + 1h: an end summary can find it for a while, and never another owner's.
     assert.deepEqual((await S.recentlyEndedTails(db, A, T0 + HOUR - 15 * MIN, T0 + HOUR + MIN)).map((t) => t.userId), ["u-1"]);
     assert.deepEqual(await S.recentlyEndedTails(db, A, T0 + HOUR, T0 + 2 * HOUR), [], "ended before the window");
@@ -1004,7 +1009,7 @@ describe("tails", () => {
     assert.equal((await S.activeTails(db, B, T0 + 1)).find((t) => t.userId === "u-2")?.handle, null);
     assert.equal(await S.removeTail(db, B, "u-1"), true);
     assert.equal(await S.removeTail(db, B, "u-1"), false);
-    assert.deepEqual(await S.tenantsTailing(db, "u-1", T0 + 1), [a]);
+    assert.deepEqual([...(await S.tailOwners(db, T0 + 1, 10))], [["u-1", [a]], ["u-2", [B]]]);
     // Stopping all stops only the active ones, and only the owner's own.
     await add(db, B, "u-3", T0, T0 + HOUR);
     assert.equal(await S.removeAllTails(db, B, T0 + HOUR), 1, "u-3 had ended already; only u-2 is stopped");
@@ -1241,7 +1246,7 @@ describe("tenant isolation", () => {
     assert.deepEqual(await S.heldTokensFor(db, B, 0), []);
     assert.deepEqual(await S.activeTails(db, B, T0), []);
     assert.deepEqual(await S.recentlyEndedTails(db, B, T0 - DAY, T0), []);
-    assert.deepEqual(await S.tenantsTailing(db, "u-1", T0), [a], "a tailed trader names only the owner tailing it");
+    assert.deepEqual([...(await S.tailOwners(db, T0, 10))], [["u-1", [a]]], "a tailed trader names only the owner tailing it");
 
     // And cannot change it.
     assert.equal(await S.completeRequest(db, B, "req-a", "ok", T0), false);

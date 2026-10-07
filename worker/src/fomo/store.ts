@@ -2935,20 +2935,31 @@ export async function recentlyEndedTails(db: Db, tenant: string, sinceMs: number
   return rows.flatMap((r) => tailOf(r) ?? []);
 }
 
-/** Owners with an unexpired tail on a trader: the only tenants a tailed trader's events are routed to for it. */
-export async function tenantsTailing(db: Db, userId: string, nowMs: number): Promise<string[]> {
+/**
+ * EVERY TRADER ANYBODY IS TAILING NOW → the owners tailing them (the only
+ * tenants a tailed trader's events are routed to for it), at most `limit`
+ * traders by id, each owner list sorted. ONE query for the whole fleet: the
+ * leader's routing reads this every interest refresh, so it must not cost a
+ * round trip per tailed trader. Rows are bounded by the trader limit times
+ * the owners tailing each (each owner holds at most activeTailsPerTenant).
+ */
+export async function tailOwners(db: Db, nowMs: number, limit: number): Promise<Map<string, string[]>> {
+  const now = intOf(nowMs, "nowMs");
   const rows = (await db
-    .prepare("SELECT tenant FROM fomo_tails WHERE user_id = ? AND expires_at_ms > ? ORDER BY tenant")
-    .all(keyOf(userId, "userId", 128), intOf(nowMs, "nowMs"))) as Row[];
-  return rows.flatMap((r) => (typeof r.tenant === "string" ? [r.tenant] : []));
-}
-
-/** Every trader anybody is tailing now, at most `limit` (the fleet routing's read). */
-export async function tailedUserIds(db: Db, nowMs: number, limit: number): Promise<string[]> {
-  const rows = (await db
-    .prepare("SELECT DISTINCT user_id FROM fomo_tails WHERE expires_at_ms > ? ORDER BY user_id LIMIT ?")
-    .all(intOf(nowMs, "nowMs"), pageOf(limit, FOMO_LIMITS.tailedTradersFleet))) as Row[];
-  return rows.flatMap((r) => (typeof r.user_id === "string" ? [r.user_id] : []));
+    .prepare(
+      `SELECT user_id, tenant FROM fomo_tails
+        WHERE expires_at_ms > ? AND user_id IN (SELECT DISTINCT user_id FROM fomo_tails WHERE expires_at_ms > ? ORDER BY user_id LIMIT ?)
+        ORDER BY user_id, tenant`,
+    )
+    .all(now, now, pageOf(limit, FOMO_LIMITS.tailedTradersFleet))) as Row[];
+  const out = new Map<string, string[]>();
+  for (const r of rows) {
+    if (typeof r.user_id !== "string" || typeof r.tenant !== "string") continue;
+    const list = out.get(r.user_id);
+    if (list) list.push(r.tenant);
+    else out.set(r.user_id, [r.tenant]);
+  }
+  return out;
 }
 
 // ── tenant routes ───────────────────────────────────────────────────────────

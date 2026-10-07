@@ -154,9 +154,8 @@ import {
   setTenantRoute,
   subjectPublicationCount,
   sweepJobs,
-  tailedUserIds,
+  tailOwners,
   tenantKey,
-  tenantsTailing,
   tenantsWatching,
   traderEvidence,
   transitionPublication,
@@ -996,8 +995,9 @@ export async function fleetInterest(
   // child file's tails block) but asks for no research.
   const tailed = new Map<string, string[]>();
   if (opts.tails !== false) {
-    for (const userId of await tailedUserIds(db, now, FOMO_LIMITS.tailedTradersFleet)) {
-      const who = (await tenantsTailing(db, userId, now)).filter((t) => routable.has(t));
+    // One read for the fleet (store.ts tailOwners), not one per tailed trader.
+    for (const [userId, owners] of await tailOwners(db, now, FOMO_LIMITS.tailedTradersFleet)) {
+      const who = owners.filter((t) => routable.has(t));
       if (who.length > 0) tailed.set(userId, who);
     }
   }

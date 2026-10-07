@@ -453,7 +453,8 @@ the confirm card and the Stop and +1h button handling are a separate change.
   `following`).
 - **Caps.** 3 active tails per owner (renewing one does not count, and may change its
   hours and `consider`), 1–12 hours each, counted under the owner's lock row like
-  watches. The fleet's routing reads at most 200 tailed traders. Per tail: 10 coins in
+  watches. The fleet's routing reads at most 200 tailed traders, with their owners, in
+  one query (`store.ts tailOwners`). Per tail: 10 coins in
   the child file, 20 events in its tails block, 30 notices, 2 thesis reads (1 per coin),
   and 6 routed research events per owner and trader an hour (buys and theses only).
 - **Storage.** `fomo_tails` (tenant, provider user id, display handle, `consider`,
