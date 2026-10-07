@@ -39,6 +39,7 @@ export type { DecisionLifecycle } from "./decision-lifecycle";
 // The one definition of a flow's identity. Imported rather than restated so
 // the reader and the writer cannot disagree about what makes a flow unique.
 import { flowKey } from "./deposit-log";
+import { OWNER_OPERATION_COLUMNS, type OwnerOperationRow } from "./owner-operations";
 // The paper/live boundary. A rule rather than a convention, enforced at the one
 // function every flow writer passes through — see addFlow.
 import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
@@ -365,6 +366,51 @@ const SQLITE_SCHEMA = `
       entry_sec INTEGER NOT NULL DEFAULT (unixepoch()),
       PRIMARY KEY (agent_id, mode, symbol)
     );
+    -- AN OPERATION THE OWNER'S OWN KEY SIGNED, which is not an agent trade.
+    --
+    -- The in-flight reconciler finds every successful operation of the account
+    -- the ledger has no row for. One signed by the ROOT validator (the owner's
+    -- sudo key, proved from the nonce the EntryPoint's own event carries) is a
+    -- withdrawal, a revocation or a vault sweep the owner chose, and recording
+    -- it in trades made it an agent trade: counted toward the caps, shown on
+    -- every tape, journaled as a fill, and its USDG leg hidden from the deposit
+    -- scanner. It is recorded here instead (owner-operations.ts says what each
+    -- column means), and nowhere else: never trades, flows, positions,
+    -- cost_basis, the journal or a peak. Its USDG capital legs stay the
+    -- deposit scanner's flows.
+    --
+    -- APPEND-ONLY AND IDEMPOTENT BY IDENTITY: (chain_id, user_op_hash) is
+    -- unique, the child inserts ON CONFLICT DO NOTHING, and so does the mirror
+    -- (ledger-mirror.ts), which copies by that identity rather than by this
+    -- table's id. The tenant column is NULL in a child and stamped by the mirror from
+    -- its own grant, never from the child. Admission lets a row answer an
+    -- operation only after re-deriving it from the receipt (ledger-resume.ts).
+    CREATE TABLE IF NOT EXISTS owner_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant TEXT,
+      agent_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      user_op_hash TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      block_number INTEGER NOT NULL,
+      block_time INTEGER NOT NULL,
+      log_index INTEGER NOT NULL,
+      nonce TEXT NOT NULL,
+      validator TEXT NOT NULL CHECK (validator = 'root'),
+      disposition TEXT NOT NULL CHECK (disposition IN ('acknowledged', 'review')),
+      review_reason TEXT,
+      usdg_legs_json TEXT NOT NULL,
+      covers_logs_json TEXT NOT NULL,
+      token_moves_json TEXT NOT NULL,
+      paymaster TEXT NOT NULL,
+      gas_wei TEXT,
+      source TEXT NOT NULL,
+      recorded_epoch INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      CHECK ((disposition = 'acknowledged' AND review_reason IS NULL) OR (disposition = 'review' AND review_reason IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS owner_operations_identity ON owner_operations (chain_id, user_op_hash);
+    CREATE INDEX IF NOT EXISTS owner_operations_agent_time ON owner_operations (agent_id, created_at DESC);
 `;
 
 /**
@@ -3788,7 +3834,45 @@ export async function listOpHashes(agentId: string): Promise<Set<string>> {
     .all(agentId)) as { user_op_hash: string | null }[];
   const set = new Set<string>();
   for (const r of rows) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  // AND EVERY OWNER OPERATION ALREADY RECORDED (recordOwnerOperation), so a
+  // later arm does not find it again. Best effort: a read that fails leaves
+  // the op to be found and recorded again, which its unique identity makes a
+  // no-op — never a trades row (index.ts reconcileInFlightAtArm).
+  try {
+    const owner = (await getDb()
+      .prepare(`SELECT user_op_hash FROM owner_operations WHERE agent_id = ?`)
+      .all(agentId)) as { user_op_hash: string | null }[];
+    for (const r of owner) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  } catch {
+    // an older ledger without the table records no owner operation yet
+  }
   return set;
+}
+
+/**
+ * RECORD AN OPERATION THE OWNER'S OWN KEY SIGNED — never as a trade.
+ *
+ * One INSERT with a unique identity, (chain_id, user_op_hash), ON CONFLICT DO
+ * NOTHING: 'inserted' the first time, 'present' after, so a crash on either
+ * side of it leaves nothing to replay (the record moves no money, and a
+ * second insert changes nothing). 'failed' on any error, and NEVER a fallback
+ * to a trades row: an owner operation left unrecorded is found again at the
+ * next arm, and is still never booked as the agent's.
+ */
+export async function recordOwnerOperation(row: OwnerOperationRow): Promise<"inserted" | "present" | "failed"> {
+  try {
+    const cols = OWNER_OPERATION_COLUMNS;
+    const res = await getDb()
+      .prepare(
+        `INSERT INTO owner_operations (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
+         ON CONFLICT (chain_id, user_op_hash) DO NOTHING`,
+      )
+      .run(...cols.map((c) => row[c]));
+    return Number(res.changes) > 0 ? "inserted" : "present";
+  } catch (e) {
+    console.error("[store] owner operation not recorded:", e instanceof Error ? e.message : String(e));
+    return "failed";
+  }
 }
 
 /**
