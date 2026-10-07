@@ -457,10 +457,10 @@ describe("the router: a line no rule knew (route.ts)", () => {
   const requestsOnly = (q: SpyAsk): TgFomoAnswer | null =>
     q.request?.kind === "trader" ? { text: TG_FOMO_DEFLECTION, deflect: true } : q.request ? { text: "Top traders on Fomo in the last 24h, by money made on closed trades:\n1. an unnamed trader, +$41k", deflect: false } : null;
 
-  let ownerAsks: Array<{ handle: string; fromId: number }>;
+  let ownerAsks: Array<{ handle: string; fromId: number; about?: string }>;
   let ownerOutcome: TgOwnerOutcome;
   const ownerPort = () => ({
-    research: async (q: { handle: string; fromId: number }): Promise<TgOwnerOutcome> => {
+    research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades" }): Promise<TgOwnerOutcome> => {
       ownerAsks.push(q);
       return ownerOutcome;
     },
@@ -495,7 +495,7 @@ describe("the router: a line no rule knew (route.ts)", () => {
     pick = { action: "fomo_trader", trader: "unipcs" };
     make({ owner: ownerPort });
     await said(msg("pine do you know unipcs on fomo", { fromId: OWNER, fromFirstName: "Milla" }));
-    assert.deepEqual(ownerAsks, [{ handle: "unipcs", fromId: OWNER }]);
+    assert.deepEqual(ownerAsks, [{ handle: "unipcs", fromId: OWNER, about: "profile" }]);
     const room = tg.texts(CHAT);
     assert.equal(room.length, 1);
     assert.match(room[0]!, /sent it to your DMs/);
@@ -537,10 +537,10 @@ describe("the router: a line no rule knew (route.ts)", () => {
     await said(msg("pine what's the coin everyone keeps talking about"));
     pick = "fomo_board";
     clock += 3 * MIN;
-    await said(msg("pine tell me something interesting today", { fromId: ANN + 1 }));
+    await said(msg("pine any good plays out there today", { fromId: ANN + 1 }));
     pick = { action: "chat" };
     clock += 3 * MIN;
-    await said(msg("pine how was your weekend honestly", { fromId: ANN + 2 }));
+    await said(msg("pine what's the best pizza topping honestly", { fromId: ANN + 2 }));
     assert.equal(fomo!.asks.filter((a) => a.request).length, 0);
     assert.equal(routeCalls, 3);
     assert.equal(chatCalls, 3, "each line still got the persona's answer");
@@ -590,5 +590,159 @@ describe("the router: a line no rule knew (route.ts)", () => {
     make();
     await said(msg("pine i'm sorry, who's been winning the most lately"));
     assert.equal(routeCalls, 0);
+  });
+});
+
+describe("the router after review (2026-10-07)", () => {
+  let pick: Record<string, unknown> | string;
+  let routeCalls: number;
+  let chatCalls: number;
+  let ownerAsks: Array<{ handle: string; fromId: number; about?: string }>;
+  let ownerOutcome: TgOwnerOutcome;
+  const ownerPort = () => ({
+    research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades" }): Promise<TgOwnerOutcome> => {
+      ownerAsks.push(q);
+      return ownerOutcome;
+    },
+  });
+  beforeEach(() => {
+    pick = { action: "chat" };
+    routeCalls = 0;
+    chatCalls = 0;
+    ownerAsks = [];
+    ownerOutcome = "sent";
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tools?: unknown };
+      if (body.tools) {
+        routeCalls++;
+        const message = typeof pick === "string" ? { content: pick } : { tool_calls: [{ function: { name: "route", arguments: JSON.stringify(pick) } }] };
+        return { ok: true, json: async () => ({ choices: [{ message }] }) };
+      }
+      chatCalls++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "ngl no clue" } }] }) };
+    }) as never;
+    // The real port's shape: a trader request is deflected; an owner's plain
+    // trader question comes back deflected with the trader for her DM.
+    fomo!.answer = (q) => {
+      if (q.request?.kind === "trader") return { text: TG_FOMO_DEFLECTION, deflect: true };
+      if (q.request) return { text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood", deflect: false };
+      if (/who is trader unipcs/.test(q.text)) {
+        return q.owner ? { text: TG_FOMO_DEFLECTION, deflect: true, trader: { handle: "unipcs", about: "profile" } } : { text: TG_FOMO_DEFLECTION, deflect: true };
+      }
+      return null;
+    };
+  });
+
+  /** A line replying to one of the bot's own lines. */
+  const replyToBot = (text: string, quoted: string, over: Partial<TgMessage> = {}): TgMessage =>
+    msg(text, { replyTo: { messageId: 4_242, fromId: BOT.id, fromIsBot: true, text: quoted }, ...over });
+
+  it("banter never pays for a routing call", async () => {
+    make();
+    await said(msg("pine how was your weekend honestly"));
+    await said(msg("pine tell me a joke please", { fromId: ANN + 1 }));
+    assert.equal(routeCalls, 0);
+    assert.equal(chatCalls, 2);
+  });
+
+  it("the owner's plain 'who is trader unipcs on fomo?': her DM, not the room's deflection", async () => {
+    make({ owner: ownerPort });
+    await said(msg("pine who is trader unipcs on fomo?", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.deepEqual(ownerAsks, [{ handle: "unipcs", fromId: OWNER, about: "profile" }]);
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 1);
+    assert.match(room[0]!, /sent it to your DMs/);
+    for (const t of room) assert.doesNotMatch(t, /unipcs/i);
+  });
+
+  it("the same plain question from anyone else: the deflection, and her DM untouched", async () => {
+    make({ owner: ownerPort });
+    await said(msg("pine who is trader unipcs on fomo?"));
+    assert.deepEqual(ownerAsks, []);
+    assert.deepEqual(tg.texts(CHAT), [TG_FOMO_DEFLECTION]);
+  });
+
+  it("a short reply to its own Fomo question is read in that light: 'trending' is Fomo's board", async () => {
+    pick = { action: "fomo_board", board: "trending" };
+    make();
+    await said(replyToBot("trending", "top traders today, or what's trending?"));
+    assert.equal(routeCalls, 1);
+    assert.deepEqual(fomo!.asks.filter((a) => a.request).map((a) => a.request), [{ kind: "board", board: "trending" }]);
+  });
+
+  it("'$pons' under its own 'which coin?' is that coin's theses, not a chart", async () => {
+    pick = { action: "fomo_coin", coin: "PONS", aspect: "theses" };
+    make();
+    await said(replyToBot("$pons", "which coin? i can pull its theses on fomo"));
+    assert.deepEqual(fomo!.asks.filter((a) => a.request).map((a) => a.request), [{ kind: "coin", symbol: "PONS", aspect: "theses" }]);
+    assert.deepEqual(desk!.asks, [], "the desk never took it");
+  });
+
+  it("a chat pick on such a reply leaves the desk and the persona as before", async () => {
+    pick = { action: "chat" };
+    make();
+    await said(replyToBot("lol whatever", "top traders today, or what's trending on fomo?"));
+    assert.equal(routeCalls, 1);
+    assert.equal(chatCalls, 1);
+  });
+
+  it("anyone's trader asks take none of the room's research answers", async () => {
+    pick = { action: "fomo_trader", trader: "unipcs" };
+    make({ owner: ownerPort });
+    for (let i = 0; i < 7; i++) {
+      clock += 20 * SEC;
+      await said(msg(`pine do you know unipcs on fomo ${"!".repeat(i + 1)}`, { fromId: ANN + 10 + i }));
+    }
+    pick = { action: "fomo_leaderboard" };
+    clock += 20 * SEC;
+    await said(msg("pine i'm sorry, who's been winning the most lately", { fromId: ANN + 30 }));
+    assert.deepEqual(fomo!.asks.filter((a) => a.request).map((a) => a.request).slice(-1), [{ kind: "leaderboard" }]);
+    assert.doesNotMatch(tg.texts(CHAT).slice(-1)[0] ?? "", /too many/i);
+  });
+
+  it("a market or coin read the router picks goes to the desk", async () => {
+    make();
+    pick = { action: "market_read" };
+    await said(msg("pine how are the charts looking out there"));
+    pick = { action: "coin_read", coin: "cashcat" };
+    clock += 3 * MIN;
+    await said(msg("pine is cashcat cooked or what", { fromId: ANN + 1 }));
+    assert.deepEqual(desk!.asks.slice(-2), [{ kind: "market" }, { kind: "coin", query: "cashcat" }]);
+  });
+
+  it("her DM unreachable twice in an hour: the room is told once, and the second is logged, not dropped silently", async () => {
+    pick = { action: "fomo_trader", trader: "unipcs" };
+    ownerOutcome = "dm-first";
+    make({ owner: ownerPort });
+    await said(msg("pine do you know unipcs on fomo", { fromId: OWNER, fromFirstName: "Milla" }));
+    clock += 3 * MIN;
+    await said(msg("pine do you know unipcs on fomo though", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(tg.texts(CHAT).length, 1);
+    assert.ok(logs.some((l) => /owner research dm-first, already told this hour/.test(l)));
+  });
+
+  it("five calls with no answer rest the router for ten minutes", async () => {
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tools?: unknown };
+      if (body.tools) {
+        routeCalls++;
+        return { ok: false, status: 500, json: async () => ({ error: { message: "down" } }), text: async () => "down" };
+      }
+      chatCalls++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "ngl no clue" } }] }) };
+    }) as never;
+    make();
+    for (let i = 0; i < 6; i++) {
+      clock += 30 * SEC;
+      await said(msg(`pine who's the best trader over there ${i}`, { fromId: ANN + 40 + i }));
+    }
+    assert.equal(routeCalls, 5);
+    clock += 10 * MIN + 1;
+    await said(msg("pine who's the best trader over there now", { fromId: ANN + 60 }));
+    assert.equal(routeCalls, 6);
   });
 });

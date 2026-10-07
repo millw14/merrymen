@@ -34,11 +34,11 @@
 
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion, type AnswerFomoResult } from "./fomo/chat";
-import { classifyFomoQuestion } from "./fomo/intent";
+import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
-import type { TgFomoAnswer, TgFomoMoves, TgFomoPort, TgFomoRequest } from "./telegram/tg-groups/types";
+import type { TgFomoAnswer, TgFomoMoves, TgFomoPort, TgFomoRequest, TgTraderAbout } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
 export const TG_FOMO_MAX_CHARS = 600;
@@ -117,6 +117,18 @@ export function requestText(r: TgFomoRequest): string | null {
     default:
       return null;
   }
+}
+
+/**
+ * The one trader a deflected plan was about, and what about them; null for
+ * anything else (two traders, the owner's own state, a cohort board).
+ */
+export function traderAsked(plan: FomoQuestionPlan | null | undefined): { handle: string; about: TgTraderAbout } | null {
+  if (!plan || !["trader-context", "trader-holdings", "trader-activity"].includes(plan.intent)) return null;
+  const handles = plan.subjects.flatMap((s) => (s.kind === "trader" && typeof s.handle === "string" ? [s.handle.replace(/^@/, "")] : []));
+  if (handles.length !== 1 || !ASKABLE_HANDLE.test(handles[0]!)) return null;
+  const about: TgTraderAbout = plan.intent === "trader-holdings" ? "holdings" : plan.intent === "trader-activity" ? "trades" : "profile";
+  return { handle: handles[0]!, about };
 }
 
 // ─── The owner's moves ──────────────────────────────────────────────────────
@@ -358,7 +370,11 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         remember(q.chatId, conversationKey);
         if (r.text.trim() === GROUP_DM_DEFLECTION) {
           log("[tg-fomo] group ask deflected");
-          return { text: TG_FOMO_DEFLECTION, deflect: true };
+          // HER ASK ABOUT ONE TRADER goes to her DM (handler.ts): the handle
+          // as the planner read it, never for anyone else, never for a
+          // structured request (the router names its own) or the owner's state.
+          const trader = q.owner === true && !q.request ? traderAsked(r.plan) : null;
+          return trader ? { text: TG_FOMO_DEFLECTION, deflect: true, trader } : { text: TG_FOMO_DEFLECTION, deflect: true };
         }
         log(`[tg-fomo] group ask answered (${r.toolsCalled.length} lookup(s))${q.request ? " (routed)" : ""}`);
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false };

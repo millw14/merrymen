@@ -523,8 +523,9 @@ Surface limits:
   `/buy` resolves) go to her DM, and the room hears only that they went. A line no rule
   reads is routed by the group model to a closed menu (docs/tg-groups.md); a Fomo pick
   runs as a fixed question through the same planner. The owner's ask about one trader by
-  name is answered read-only in her DM (`AnswerFomoInput.readOnly`), at most six per 10
-  minutes.
+  name (routed, or planned and deflected in the room) is answered read-only in her DM
+  (`AnswerFomoInput.readOnly`) as one of three fixed questions (profile, holdings, this
+  week's trades), at most six per 10 minutes.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.

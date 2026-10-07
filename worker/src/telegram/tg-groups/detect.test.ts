@@ -1000,9 +1000,15 @@ describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)",
     assert.equal(deskNameOk(42), null);
   });
 
-  it("worth one routing call: a question mark, or three words once names are gone", () => {
+  it("worth one routing call: a question mark or three words, and a word from what the router serves", () => {
     assert.equal(routeWorthy("do you know unipcs on fomo"), true);
     assert.equal(routeWorthy("top?"), true);
+    assert.equal(routeWorthy("i'm sorry, who's been winning the most lately"), true);
+    assert.equal(routeWorthy("what are the whales dumping lately"), true);
+    assert.equal(routeWorthy("is $pons any good"), true);
+    assert.equal(routeWorthy("how was your weekend?"), false, "banter never pays for a routing call");
+    assert.equal(routeWorthy("tell me a joke please"), false);
+    assert.equal(routeWorthy("what do you think about life"), false);
     assert.equal(routeWorthy("@shogun_bot ok bro", ["shogun_bot"]), false);
     assert.equal(routeWorthy("lol"), false);
     assert.equal(routeWorthy("🔥🔥🔥"), false);

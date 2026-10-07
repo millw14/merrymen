@@ -1720,17 +1720,28 @@ export function deskNameOk(name: unknown, selfNames: readonly string[] = []): st
 
 /** Words it takes, names gone, before a line without a question mark is worth one routing call. */
 const ROUTE_MIN_WORDS = 3;
+/**
+ * A word from what the router can serve: Fomo, traders and their standing,
+ * coins and their boards, the crowd buying or selling, the market. Never what
+ * a line means (the model reads that); only whether it could be one of those
+ * at all, so "how was your weekend" never pays for a routing call.
+ */
+const ROUTE_CUE =
+  /\b(?:fomo|traders?|trading|top|best|winning|winners?|leading|leaders?|leaderboards?|ranks?|ranking|rankings|goat|whales?|smart money|degens?|trending|hot|graduat\w*|launch\w*|coins?|tokens?|tickers?|memes?|memecoins?|markets?|charts?|price|pump\w*|dump\w*|moon\w*|runners?|gems?|alpha|plays?|calls?|thesis|theses|hold|holds|holding|held|holders|bags?|bought|buy\w*|sold|sell\w*|ape[ds]?|aping|offload\w*|loading|loaded|accumulat\w*|exit\w*|profits?|gains?|pnl|p&l|made|making|rekt|wallets?|tail\w*|track\w*|monitor\w*|keep tabs|cooked|legit|rug\w*|entry|send\w*)\b/u;
 
 /**
  * IS THIS LINE WORTH ONE ROUTING CALL (handler.ts)? A question mark, or three
- * words once its names and handles are gone: "lol", "ok bro" and a lone emoji
- * are the persona's without asking anyone.
+ * words once its names and handles are gone, and a word from what the router
+ * serves (ROUTE_CUE) or a $tag: "lol", "ok bro", a lone emoji and banter
+ * ("how was your weekend?") are the persona's without asking anyone.
  */
 export function routeWorthy(text: unknown, selfNames: readonly string[] = []): boolean {
   if (typeof text !== "string" || !text.trim()) return false;
-  const words = wordsOf(norm(unnamed(text, selfNames)));
+  const t = norm(unnamed(text, selfNames));
+  const words = wordsOf(t);
   if (words.length === 0) return false;
-  return /[?？]/u.test(text) || words.length >= ROUTE_MIN_WORDS;
+  if (!/[?？]/u.test(text) && words.length < ROUTE_MIN_WORDS) return false;
+  return ROUTE_CUE.test(t) || DESK_TRADING_CUE.test(t) || /(?:^|[^\p{L}\p{N}_])\$[A-Za-z]/u.test(text);
 }
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */

@@ -265,6 +265,19 @@ function classify(e: unknown): Failure {
   return { kind, pause: null };
 }
 
+/** Calls a caller leaves untouched: of the day's allowance, and of this chat's hour. */
+export interface TgModelReserve {
+  day: number;
+  hour: number;
+}
+
+export interface TgModelRunOptions {
+  /** Refuse (at no cost) unless this much allowance is left after the call. */
+  reserve?: TgModelReserve;
+  /** Refuse (at no cost) unless at least this long is left of the box once a slot is free. */
+  minCallMs?: number;
+}
+
 export interface TgModelGateOptions {
   /** Calls per agent per UTC day (`tgGroupsPerDay`). 0 disables the model. */
   perDay: number;
@@ -319,19 +332,13 @@ export class TgModelGate {
   /**
    * Could a call that is only nice to have run now and still leave `reserve`
    * of the day's and this chat's hour's allowance for the lines that must be
-   * written? A read-only look, like `available`. The router asks this: it
-   * gives way first, so understanding a line never costs the next answer.
+   * written? A read-only look, like `available`; `run` with the same
+   * reserve enforces it where the allowance is taken. The router uses both:
+   * it gives way first.
    */
-  headroom(chatId: number, reserve: { day: number; hour: number }): boolean {
+  headroom(chatId: number, reserve: TgModelReserve): boolean {
     try {
-      if (!this.available(chatId)) return false;
-      const now = this.now();
-      const llm = this.store.state.llm;
-      const usedToday = llm.day === utcDay(now) ? llm.used : 0;
-      const h = this.store.room(chatId)?.llmHour;
-      const usedHour = h && h.hour === utcHour(now) ? h.n : 0;
-      const r = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
-      return this.perDay - usedToday > r(reserve?.day) && this.perChatHour - usedHour > r(reserve?.hour);
+      return this.available(chatId) && this.leaves(chatId, this.now(), reserve);
     } catch {
       return false;
     }
@@ -342,13 +349,28 @@ export class TgModelGate {
     return this.perDay;
   }
 
+  /** A chat's hourly allowance: what a caller sizes a reserve from. */
+  get hourAllowance(): number {
+    return this.perChatHour;
+  }
+
+  /** Would one more call still leave `reserve` of the day and of this chat's hour? */
+  private leaves(chatId: number, now: number, reserve: TgModelReserve | undefined): boolean {
+    const r = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+    const llm = this.store.state.llm;
+    const usedToday = llm.day === utcDay(now) ? llm.used : 0;
+    const h = this.store.room(chatId)?.llmHour;
+    const usedHour = h && h.hour === utcHour(now) ? h.n : 0;
+    return this.perDay - usedToday > r(reserve?.day) && this.perChatHour - usedHour > r(reserve?.hour);
+  }
+
   /**
    * Run one model call for `chatId`, or answer null. The allowance is taken
    * only once a slot is free — a call dropped while waiting costs nothing —
    * and the time box covers the wait as well as the call: a line that took
    * twenty seconds to start is as late as one that took twenty to write.
    */
-  async run<T>(chatId: number, fn: () => Promise<T>, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<T | null> {
+  async run<T>(chatId: number, fn: () => Promise<T>, timeoutMs: number = DEFAULT_TIMEOUT_MS, opts: TgModelRunOptions = {}): Promise<T | null> {
     try {
       const box = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
       const started = Date.now();
@@ -365,7 +387,12 @@ export class TgModelGate {
         // A slot that came free at the very end of the box is not worth a
         // call: it would be abandoned at once and still cost the allowance.
         const remaining = box - (Date.now() - started);
-        if (remaining < Math.min(MIN_CALL_MS, box / 4)) return null;
+        const floor = typeof opts?.minCallMs === "number" && Number.isFinite(opts.minCallMs) && opts.minCallMs > 0 ? opts.minCallMs : Math.min(MIN_CALL_MS, box / 4);
+        if (remaining < floor) return null;
+        // A reserve is checked where the allowance is taken, with nothing
+        // awaited in between: calls that all looked ahead at once cannot
+        // spend it between them.
+        if (opts?.reserve && !this.leaves(chatId, at, opts.reserve)) return null;
         if (!this.store.takeLlm(this.perDay)) return null;
         if (!this.store.takeRoomLlm(chatId, this.perChatHour)) return null;
 

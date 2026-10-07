@@ -51,6 +51,7 @@ import {
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
   TG_FOMO_UNAVAILABLE,
+  traderAsked,
 } from "./tg-fomo-port";
 
 type Rec = Record<string, unknown>;
@@ -195,6 +196,44 @@ describe("createTgFomoPort", () => {
       assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, q);
       for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re, q);
     }
+  });
+
+  it("the owner's trader question names the trader for her DM; nobody else's does", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const asks: Array<[string, { handle: string; about: string }]> = [
+      ["who is trader unipcs on fomo?", { handle: "unipcs", about: "profile" }],
+      ["what is @CryptoKaleo holding on fomo?", { handle: "CryptoKaleo", about: "holdings" }],
+      ["what has @frankdegods bought on fomo this week?", { handle: "frankdegods", about: "trades" }],
+    ];
+    for (const [q, trader] of asks) {
+      assert.deepEqual(await port.ask({ text: q, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, trader }, q);
+      assert.deepEqual(await port.ask({ text: q, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true }, `${q} (not the owner)`);
+    }
+    // Her own state, a watched-cohort board, a request: deflected with no trader.
+    for (const q of ["who's the top of our watched traders on fomo today", "what are you researching on fomo?"]) {
+      const a = await port.ask({ text: q, chatId: GROUP, owner: true });
+      assert.ok(a?.deflect && !("trader" in a), q);
+    }
+    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.equal(s.calls.length, 0, "nothing looked up for any of them");
+  });
+
+  it("the fixed questions her DM is asked plan the read she asked for, and only reads", () => {
+    const plan = (q: string) => classifyFomoQuestion(q, { memory: null, now: NOW, selfNames: [] });
+    const want: Array<[string, string, "profile" | "holdings" | "trades"]> = [
+      ["who is trader unipcs on fomo?", "fomo_get_trader_context", "profile"],
+      ["what is trader unipcs holding on fomo?", "fomo_get_trader_context", "holdings"],
+      ["what has trader unipcs been trading on fomo this week?", "fomo_get_trader_activity", "trades"],
+    ];
+    for (const [q, tool, about] of want) {
+      const p = plan(q);
+      assert.deepEqual(p?.toolCalls.map((c) => c.tool), [tool], q);
+      assert.ok(!p!.toolCalls.some((c) => isMutationTool(c.tool)), q);
+      assert.deepEqual(traderAsked(p), { handle: "unipcs", about }, q);
+    }
+    assert.equal(traderAsked(plan("what are the theses on $PONS on fomo?")), null);
+    assert.equal(traderAsked(null), null);
   });
 
   it("a trader question is deflected before anything is looked up", async () => {

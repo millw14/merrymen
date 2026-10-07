@@ -443,11 +443,19 @@ export interface TgFomoMoves {
   dm: string;
 }
 
+/** What the owner asked about one trader: who they are, what they hold, what they traded. */
+export type TgTraderAbout = "profile" | "holdings" | "trades";
+
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
   /** Only when the owner asked (`owner` on the ask): her next moves. */
   moves?: TgFomoMoves;
+  /**
+   * Only when the owner asked about one trader by name and the room was
+   * deflected: the handle as the planner read it, for her DM (handler.ts).
+   */
+  trader?: { handle: string; about: TgTraderAbout };
 }
 
 export interface TgFomoPort {
@@ -486,7 +494,7 @@ export interface TgOwnerPort {
    * Read-only research on one Fomo trader, asked as a fixed question code
    * writes and answered in her DM. Never changes anything. Never throws.
    */
-  research(q: { handle: string; fromId: number }): Promise<TgOwnerOutcome>;
+  research(q: { handle: string; fromId: number; about?: TgTraderAbout }): Promise<TgOwnerOutcome>;
 }
 
 /**

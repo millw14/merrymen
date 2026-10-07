@@ -972,9 +972,26 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const t = Date.now();
         while (ownerAsks.length > 0 && ownerAsks[0]! <= t - OWNER_ASKS_WINDOW_MS) ownerAsks.shift();
         if (ownerAsks.length >= OWNER_ASKS_MAX) return "busy";
-        if (!(await sendChatAction({ token }, ownerId)).ok) return "dm-first";
+        // Taken before anything is awaited, so asks at the same moment see it;
+        // given back only when her DM could not be proved (nothing was spent).
         ownerAsks.push(t);
-        const text = `who is trader ${handle} on fomo?`;
+        let proved = false;
+        try {
+          proved = (await sendChatAction({ token }, ownerId)).ok;
+        } finally {
+          if (!proved) {
+            const i = ownerAsks.lastIndexOf(t);
+            if (i >= 0) ownerAsks.splice(i, 1);
+          }
+        }
+        if (!proved) return "dm-first";
+        // The fixed question for what she asked (tg-fomo-port.test.ts pins each plan).
+        const text =
+          q.about === "holdings"
+            ? `what is trader ${handle} holding on fomo?`
+            : q.about === "trades"
+              ? `what has trader ${handle} been trading on fomo this week?`
+              : `who is trader ${handle} on fomo?`;
         const r = await answerFomoDm({
           text,
           broker,

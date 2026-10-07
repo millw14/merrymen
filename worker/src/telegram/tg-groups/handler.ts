@@ -134,6 +134,7 @@ import type {
   TgPerson,
   TgPublicFact,
   TgRoom,
+  TgTraderAbout,
 } from "./types";
 import { readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
 import { readSubject, type SubjectReading } from "./understand";
@@ -1988,9 +1989,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * The casual group line after a slash command, or after an ask that was
    * answered in the asker's DM (TgCommandNotice). Rate-limited here.
    */
-  const commandNotice = async (chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> => {
+  const commandNotice = async (
+    chatId: number,
+    messageId: number | undefined,
+    fromId: number,
+    what: TgCommandNotice,
+    threadId?: number,
+    // For a routed ask: re-checked inside the queued send, like every lane's.
+    extra: { stillWanted?: () => boolean; replyByMs?: number } = {},
+  ): Promise<boolean> => {
+    let said = false;
     try {
-      if (!canTalk(chatId)) return;
+      if (!canTalk(chatId)) return false;
       const now = clock();
       // "sent it to your DMs" and "done, couldn't DM you" each answer one
       // command that ran for someone entitled to run it: every one is said.
@@ -1998,7 +2008,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (what !== "dm-sent" && what !== "done-no-dm") {
         const k = `${what}:${chatId}:${fromId}`;
         const last = refusedAt.get(k);
-        if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
+        if (last !== undefined && now - last < REFUSE_EVERY_MS) return false;
         refusedAt.set(k, now);
       }
       // These answer a command the sender was entitled to run, so they go
@@ -2009,6 +2019,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         ...(isMsgId(threadId) ? { threadId } : {}),
         bornAtMs: now,
         ownerAddressed: entitled,
+        ...(extra.stillWanted ? { stillWanted: extra.stillWanted } : {}),
+        ...(typeof extra.replyByMs === "number" ? { replyByMs: extra.replyByMs } : {}),
       };
       const fixedPool: readonly string[] | null =
         what === "owner-only"
@@ -2043,19 +2055,23 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
               ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
               ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
               bornAtMs: now,
+              ...(reply.replyByMs !== undefined ? { replyByMs: reply.replyByMs } : {}),
+              ...(reply.stillWanted ? { stillWanted: reply.stillWanted } : {}),
               followUp: false,
               ownerAddressed: entitled,
             });
             if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
+            said = !!sent;
             return;
           }
-          await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply);
+          said = !!(await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply));
         },
         { force: true },
       );
     } catch (e) {
       fail("notice", e);
     }
+    return said;
   };
 
   /**
@@ -2202,6 +2218,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           intent = null;
         }
       }
+      // A REPLY TO ITS OWN FOMO LINE ("which coin?" → "pons", "top traders
+      // or trending?" → "trending"): what it means is in the line it answers,
+      // so the router reads it before the desk takes "$pons" for a chart or
+      // "trending" for the market, however short it is.
+      const routable = researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic";
+      const fomoThread = routable && repliesToOwnFomo(j);
+      if (fomoThread && (await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
       const deskAsk = researchable ? deskAskFor(j, context, coinQuestion, intent) : null;
@@ -2240,9 +2263,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
       // NO RULE KNEW THIS LINE. Before the persona answers it, the group's
       // model picks once from what it can do (route.ts), and code checks the
-      // pick. Not for a line read as an ordinary topic, and only with
-      // allowance to spare: routing never costs the answer itself.
-      if (researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic" && routeWorthy(j.line.text, selfNamesOf(selfNow()))) {
+      // pick. Not for a line read as an ordinary topic or one with nothing
+      // the router serves, and only from the first half of the allowance.
+      if (routable && !fomoThread && routeWorthy(j.line.text, selfNamesOf(selfNow()))) {
         const routed = await routeLine(chatId, j, replyOpts, persona);
         if (routed === "taken") return null;
       }
@@ -2556,8 +2579,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       log("[tg-groups] said research");
       return "sent";
     };
-    const slot = fomoRoom(chatId);
-    if (!slot) return send(FOMO_BUSY);
+    // A trader request is deflected by the port before anything is planned
+    // or spent, so it takes none of the room's research answers.
+    const free = request?.kind === "trader";
+    const slot = free ? null : fomoRoom(chatId);
+    if (!free && !slot) return send(FOMO_BUSY);
+    const refund = (): void => {
+      if (slot) fomoRefund(slot);
+    };
     stageOf(chatId, "research: ask");
     // The bot's own names go with the line: an addressed line almost always
     // carries "@thisbot", which the research must not read as a trader.
@@ -2573,11 +2602,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(selfNames.length ? { selfNames } : {}),
     }, replyByMs - RESEARCH_SEND_MS - clock());
     if (r === null) {
-      fomoRefund(slot);
+      refund();
       return "not-research";
     }
     if (r === "failed") {
-      fomoRefund(slot);
+      refund();
       return "not-research";
     }
     if (r === "timeout") {
@@ -2585,11 +2614,20 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       return send(FOMO_LATE);
     }
     if (typeof r !== "object" || typeof r.text !== "string") {
-      fomoRefund(slot);
+      refund();
       return "not-research";
     }
     // A deflection is still an answer about research: a follow-up here goes back to it.
     rememberFomo(chatId, j.threadId);
+    // HER PLAIN ASK ABOUT ONE TRADER ("who is trader unipcs on fomo?"): the
+    // room is deflected, and her DM gets the answer instead.
+    if (owner && r.deflect && r.trader && !request) {
+      const where = await ownerTraderAsk(chatId, j, o, r.trader.handle, r.trader.about);
+      if (where !== "room") {
+        refund();
+        return where === "dm" ? "sent" : "not-wanted";
+      }
+    }
     // HER MOVES: the commands go to her DM first, and the room hears that they
     // went only when the DM landed (never a claim that is not true), at most
     // once per room and kind in MOVES_EVERY_MS.
@@ -2624,7 +2662,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const t = j.msg.replyTo?.text;
     return typeof t === "string" && t.trim() ? t.slice(0, 400) : null;
   };
+  /**
+   * A reply to one of its own lines about Fomo: a research answer, or the
+   * persona asking which board or coin they meant. What "pons" or
+   * "trending" means there is in the line it answers.
+   */
+  const repliesToOwnFomo = (j: LineJob): boolean => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id) return false;
+    return /\b(?:fomo|theses|thesis|trending|top traders?|traders?|graduated|most held)\b/iu.test(q.text ?? "");
+  };
   const routeLabel = (r: TgRoute): string => (r.action === "fomo" ? `fomo:${r.request.kind}` : r.action);
+  /** "not-wanted", told apart as act's whyLost does. */
+  const whyGone = (j: LineJob, why: Quiet): Quiet =>
+    why !== "not-wanted" ? why : forgotten(j) ? "forgotten" : j.addressed !== null && burstPassed(j.msg.chatId, j) ? "burst" : "not-wanted";
 
   /**
    * Ask what the line wants and run it. "taken": a lane has it (detached, and
@@ -2633,12 +2685,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const routeLine = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent): Promise<"taken" | "persona"> => {
     try {
       if (!routerOn() || routeBreaker.open()) return "persona";
-      const reserve = { day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 10)), hour: ROUTE_RESERVE_HOUR };
-      if (!gate.headroom(chatId, reserve)) return "persona";
+      // Routing only ever spends the first half of the day and of this
+      // chat's hour: the rest is kept for the lines that must be written.
+      const reserve = {
+        day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 2)),
+        hour: Math.max(ROUTE_RESERVE_HOUR, Math.ceil(gate.hourAllowance / 2)),
+      };
       const box = Math.min(ROUTE_TIMEOUT_MS, j.bornAtMs + RESEARCH_REPLY_MS - RESEARCH_SEND_MS - ROUTE_LEAVES_MS - clock());
       if (box < ROUTE_MIN_BOX_MS) return "persona";
       const selfNames = selfNamesOf(selfNow());
-      const replied = repliedText(j);
       stageOf(chatId, "route");
       const { route, why } = await readRoute({
         model: modelNow(),
@@ -2647,7 +2702,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         room: store.room(chatId),
         trigger: j.line,
         timeoutMs: box,
-        ctx: { line: j.line.text, replied, selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
+        reserve,
+        ctx: { line: j.line.text, replied: repliedText(j), selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
       });
       routeBreaker.note(why);
       // Counts and kinds only: never the line, a name or a coin.
@@ -2661,6 +2717,30 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
 
+  /**
+   * HER OWN ASK ABOUT ONE TRADER, ANSWERED IN HER DM: a trader is never
+   * discussed in the room (rule 3), so the room hears only where it went.
+   * "dm": her DM has it, or was asked to be opened, and the room was told (or
+   * rightly left alone); "gone": the line stopped being wanted first;
+   * "room": not hers, or her DM could not take it, and the caller says the
+   * room's deflection.
+   */
+  const ownerTraderAsk = async (chatId: number, j: LineJob, o: SpeakOpts, handle: string, about: TgTraderAbout): Promise<"dm" | "gone" | "room"> => {
+    const owner = j.isOwner ? ownerNow() : null;
+    if (!owner) return "room";
+    if (o.stillWanted && !o.stillWanted()) return "gone";
+    stageOf(chatId, "owner research");
+    const outcome = await owner.research({ handle, fromId: j.line.fromId, about });
+    if (outcome !== "sent" && outcome !== "dm-first") return "room";
+    const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, {
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      replyByMs: j.bornAtMs + RESEARCH_REPLY_MS,
+    });
+    // "dm me first" is said once an hour; the DM itself is the answer to "sent".
+    if (!said && j.addressed !== null) log(`[tg-groups] owner research ${outcome === "sent" ? "sent, room line not said" : "dm-first, already told this hour"}`);
+    return "dm";
+  };
+
   /** One routed line, off the chat queue. Whatever happens, the line is answered or its slot released. */
   const runRoute = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, route: TgRoute): Promise<void> => {
     const messageId = j.line.messageId;
@@ -2669,7 +2749,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const done = (ok: boolean, why?: Quiet): void => {
       if (ok) return;
       releaseReply(chatId, messageId);
-      if (j.addressed !== null) quietLine(why ?? lost);
+      if (j.addressed !== null) quietLine(whyGone(j, why ?? lost));
     };
     /** The persona's answer, exactly as without the router. */
     const asBefore = async (): Promise<void> => {
@@ -2685,17 +2765,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           return done(r === "sent", r === "sent" ? undefined : r);
         }
         case "fomo-trader": {
-          // HER OWN ASK, ANSWERED IN HER DM: a trader is never discussed in
-          // the room (rule 3). The room hears only that her DM has it.
-          const owner = j.isOwner ? ownerNow() : null;
-          if (owner) {
-            stageOf(chatId, "route: owner research");
-            const outcome = await owner.research({ handle: route.handle, fromId: j.line.fromId });
-            if (outcome === "sent" || outcome === "dm-first") {
-              await commandNotice(chatId, messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId);
-              return;
-            }
-          }
+          const where = await ownerTraderAsk(chatId, j, opts, route.handle, route.about);
+          if (where === "dm") return;
+          if (where === "gone") return done(false, "not-wanted");
           const r = await fomoAnswer(chatId, j, opts, { kind: "trader" });
           if (r === "not-research") return await asBefore();
           return done(r === "sent", r === "sent" ? undefined : r);
@@ -3942,7 +4014,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     },
 
-    commandNotice,
+    async commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> {
+      await commandNotice(chatId, messageId, fromId, what, threadId);
+    },
 
     async codeLeaked(chatId: number): Promise<void> {
       try {

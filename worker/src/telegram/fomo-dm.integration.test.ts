@@ -166,6 +166,9 @@ async function withDm(
     fomoOff?: boolean;
     /** Groups on, with a group model whose routing calls answer with this pick. */
     groupPick?: Record<string, unknown>;
+    /** The owner never pressed /start: Telegram refuses anything sent to her DM. */
+    dmBlocked?: boolean;
+    allowlist?: number[];
   },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
@@ -175,7 +178,7 @@ async function withDm(
   const cfg: Record<string, unknown> = {
     telegramEnabled: true,
     telegramBotToken: "111:a",
-    telegramAllowlist: [OWNER, FRIEND],
+    telegramAllowlist: opts.allowlist ?? [OWNER, FRIEND],
     telegramControlEnabled: true,
     telegramTransferEnabled: false,
     telegramPcControlEnabled: false,
@@ -207,6 +210,9 @@ async function withDm(
     const call: Call = { method: m[2]!, body: init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {} };
     calls.push(call);
     const ok = (result: unknown) => ({ ok: true, status: 200, json: async () => ({ ok: true, result }) });
+    if (opts.dmBlocked && (call.method === "sendChatAction" || call.method === "sendMessage") && call.body.chat_id === OWNER) {
+      return { ok: false, status: 403, json: async () => ({ ok: false, error_code: 403, description: "Forbidden: bot can't initiate conversation with a user" }) };
+    }
     if (call.method === "getMe") return ok({ id: 111, username: "bot111", first_name: "Pine" });
     if (call.method === "getUpdates") return ok(queue.splice(0));
     if (call.method === "sendMessage") {
@@ -597,6 +603,40 @@ describe("the owner's group ask about one trader, answered in her DM", () => {
       const turns = await recentChatTurns(OWNER, 4);
       assert.ok(turns.some((t) => t.role === "user" && t.content === "who is trader unipcs on fomo?"));
       assert.ok(!turns.some((t) => /do you know/.test(t.content)));
+    });
+  });
+
+  it("her plain wording, 'who is trader unipcs on fomo?': the real port names the trader, and her DM gets it", async () => {
+    await withDm({ groupPick: { action: "chat" } }, async (h) => {
+      h.sayInGroup("pine what is trader unipcs holding on fomo?");
+      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_trader_context"]);
+      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
+      assert.match(h.sentTo(OWNER)[0]!, /^You asked about Fomo trader unipcs in a group/);
+      assert.doesNotMatch(h.sentTo(GROUP)[0]!, /unipcs/i);
+      const turns = await recentChatTurns(OWNER, 4);
+      assert.ok(turns.some((t) => t.role === "user" && t.content === "what is trader unipcs holding on fomo?"));
+    });
+  });
+
+  it("her DM unreachable: nothing is looked up, nothing enters her history, and the room is told to /start", async () => {
+    // A handle no other test here asks about: the DM history is the file's own.
+    await withDm({ groupPick: { action: "fomo_trader", trader: "bobbyx" }, dmBlocked: true }, async (h) => {
+      h.sayInGroup("pine do you know bobbyx on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.match(h.sentTo(GROUP)[0]!, /\/start/);
+      const turns = await recentChatTurns(OWNER, 8);
+      assert.ok(!turns.some((t) => /bobbyx/.test(t.content)));
+    });
+  });
+
+  it("not on the allowlist: her DM would not answer her, so nothing is looked up or sent there", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" }, allowlist: [FRIEND] }, async (h) => {
+      h.sayInGroup("pine do you know unipcs on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.deepEqual(h.sentTo(OWNER), []);
     });
   });
 
