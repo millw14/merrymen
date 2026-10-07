@@ -211,7 +211,12 @@ export function targetDigest(databaseUrl: string): string {
 export function sourceFingerprint(here = path.dirname(fileURLToPath(import.meta.url))): Record<string, string> {
   const files = ["chain-gap-booking.ts", "chain-gap-booking-cli.ts", "ledger-resume.ts", "asset-movements.ts", "basis.ts", "basis-seed.ts", "chain-capital.ts", "fills.ts",
     "inflight-reconcile.ts", "custody.ts", "distinct-flows.ts", "paper-boundary.ts", "token-label.ts", "../../packages/core/src/capital-classify.ts",
-    "../../packages/core/src/grant.ts", "../../packages/core/src/trencher-vault.ts"];
+    "../../packages/core/src/grant.ts", "../../packages/core/src/trencher-vault.ts",
+    // How an owner operation is read, and the scanner inputs that reading shares: admission re-derives owner records with them.
+    "owner-operations.ts", "deposit-log.ts",
+    // Which owner records admission loads at all: only for the account the tenant's grant names (ledger-mirror.ts
+    // tenantGrantAccount), with the tables asked of the catalogue (db.ts tablePresent).
+    "ledger-mirror.ts", "db.ts"];
   return Object.fromEntries(files.map((f) => [f, createHash("sha256").update(readFileSync(path.resolve(here, f))).digest("hex")]));
 }
 
@@ -222,9 +227,12 @@ export function sourceFingerprint(here = path.dirname(fileURLToPath(import.meta.
  * an operator's terminal. Read-only connections are opened read-only.
  *
  * `loadPg` is the opt-in Postgres test's seam: it loads the same driver from
- * where that test finds it. Nothing else passes it.
+ * where that test finds it. `applicationName` names the session in
+ * pg_stat_activity for another read-only tool on this connection (the owner
+ * operations audit); unset, it is this tool's own, as it always was.
  */
-export async function connectBooking(url: string, readOnly: boolean, loadPg: () => Promise<unknown> = () => import(/* webpackIgnore: true */ "pg" as string)): Promise<PgClient> {
+export async function connectBooking(url: string, readOnly: boolean, loadPg: () => Promise<unknown> = () => import(/* webpackIgnore: true */ "pg" as string),
+  applicationName?: string): Promise<PgClient> {
   let pg: { Client: new (c: { connectionString: string; options?: string; application_name?: string; connectionTimeoutMillis?: number }) => PgClient & { connect(): Promise<void> };
     types: { setTypeParser(oid: number, fn: (v: string) => unknown): void } };
   try {
@@ -234,7 +242,8 @@ export async function connectBooking(url: string, readOnly: boolean, loadPg: () 
   } catch { throw new CliError("postgres-driver-unavailable"); }
   pg.types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
   const client = new pg.Client({
-    connectionString: url, connectionTimeoutMillis: 10_000, application_name: readOnly ? "merrymen-chain-gap-preview-readonly" : "merrymen-chain-gap-apply",
+    connectionString: url, connectionTimeoutMillis: 10_000,
+    application_name: applicationName ?? (readOnly ? "merrymen-chain-gap-preview-readonly" : "merrymen-chain-gap-apply"),
     options: `-c statement_timeout=30000 -c lock_timeout=5000${readOnly ? " -c default_transaction_read_only=on" : ""}`,
   });
   await client.connect();

@@ -1006,3 +1006,49 @@ it("a registered approval whose grant moved to a new account before its first wo
   assert.equal(approval(t.tenant)?.state, "approved");
   await getGrantStore().remove(t.tenant); await reconcile();
 });
+
+it("an operation the owner's own key signed is answered by its mirrored owner record — re-derived from the receipt — and a 'review' record answers nothing", async () => {
+  // A root-key operation of each account that moved nothing (an
+  // invalidateNonce's shape), each in its own transaction, with no trade row:
+  // the in-flight reconciler recorded it as the owner's, and the mirror
+  // stamped the record with the tenant.
+  const EP = "0x0000000071727de22e5e9d8baf0edac6f37da032";
+  const UOE = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
+  const BEFORE = "0xbb47ee3e183a558b1a2ff0874b079f3fc5478b7454eacf2bfc5af2ff5878f972";
+  const ROOT_NONCE = (0x845adb2c711129d4f3966735ed98a9f09fc4ce57n << 64n) | 4n;
+  const w = (n: bigint) => n.toString(16).padStart(64, "0");
+  const receipts: Record<string, Array<{ address: string; topics: string[]; data: string; logIndex: string }>> = {};
+  const rootOp = (account: string, n: number) => {
+    const hash = `0x${"7".repeat(62)}${n.toString(16).padStart(2, "0")}`, tx = `0x${"8".repeat(62)}${n.toString(16).padStart(2, "0")}`;
+    const event = { address: EP, topics: [UOE, hash, topicOf(account), topicOf(addr(0))], data: `0x${w(ROOT_NONCE)}${w(1n)}${w(1000n)}${w(50n)}` };
+    receipts[tx] = [{ address: EP, topics: [BEFORE], data: "0x", logIndex: "0x0" }, { ...event, logIndex: "0x1" }];
+    chainLogs.push({ ...event, tx, index: 1 });
+    return { hash, tx };
+  };
+  const record = (tenant: string, account: string, op: { hash: string; tx: string }, disposition: "acknowledged" | "review") =>
+    raw.prepare(`INSERT INTO owner_operations (tenant, agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition, review_reason,
+        usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+      VALUES (?, ?, 4663, ?, ?, ?, ?, 1, ?, 'root', ?, ?, '[]', '[]', '[]', ?, '1000', 'arm-reconcile', 2, ?)`)
+      .run(tenant, account, op.hash, op.tx, Number(HEAD - 100n), nowSec() - 3 * 86_400, `0x${ROOT_NONCE.toString(16)}`, disposition,
+        disposition === "review" ? "token-departed" : null, addr(0), nowSec() - 3 * 86_400);
+  const owned: GapChain = { ...chain, async getReceiptLogs(tx: string) { return receipts[tx] ?? null; } };
+  setResumeChainForTest(() => owned);
+  try {
+    const t = await preIncident({ live: true });
+    record(t.tenant, t.account, rootOp(t.account, 1), "acknowledged");
+    const u = await preIncident({ live: true });
+    const uOp = rootOp(u.account, 2);
+    record(u.tenant, u.account, uOp, "review");
+    const p = await preview(t.tenant, u.tenant);
+    assert.deepEqual(p.entries.map((e) => e.pass), [true, true]);
+    await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `run:${p.run}` });
+    await reconcile(); await settle();
+    assert.equal(approval(t.tenant)?.state, "applied", "the owner's operation was answered: admitted");
+    assert.equal(forksOf(t.tenant).length, 1);
+    assert.equal(approval(u.tenant)?.state, "refused", "a review record answers nothing");
+    assert.equal(String(approval(u.tenant)?.reason), `${CHAIN_REFUSAL}: operation ${uOp.hash} in tx ${uOp.tx} at block ${HEAD - 100n}`);
+    assert.equal(forksOf(u.tenant).length, 0);
+    assert.equal(rows("SELECT COUNT(*) AS n FROM trades WHERE user_op_hash IN (?, ?)", uOp.hash, `0x${"7".repeat(62)}01`)[0]!.n, 0, "and no trades row was written for either");
+    await getGrantStore().remove(t.tenant); await getGrantStore().remove(u.tenant); await reconcile();
+  } finally { chainLogs = []; setResumeChainForTest(() => chain); }
+});

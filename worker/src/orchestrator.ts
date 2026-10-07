@@ -3286,7 +3286,7 @@ type ChainWindow = { fromBlock: string; head: string; fromSec?: number };
  * tenant starts no later (ledger-resume.ts resumeGapWindow).
  */
 type ChainMissing = { missing: readonly MissingChainFact[]; fromSec?: number };
-async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<ChainWindow | ChainMissing | "held"> {
+async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db, custody: readonly string[]): Promise<ChainWindow | ChainMissing | "held"> {
   const now = Date.now();
   const had = resumeChecks.get(tenant);
   if (had && had.key === approval.approvalId) {
@@ -3300,11 +3300,15 @@ async function resumeChainGate(tenant: string, approval: ApprovalRow, check: Res
     sayTenantAlert(tenant, `[alert] ${tenant}: resume admission needs a chain read and this orchestrator has no RPC for chain ${approval.chainId} — held`);
     return "held";
   }
-  const known = await knownChainFacts(shared, approval.smartAccount);
+  // The owner records this tenant's mirror stamped, on its chain: each answers
+  // its operation only once re-derived from the receipt over the grant's
+  // custody (ledger-resume.ts ownerAnswersFor).
+  const known = await knownChainFacts(shared, approval.smartAccount, { tenant, chainId: approval.chainId });
   resumeChecks.set(tenant, { key: approval.approvalId, at: now, result: "running" });
   log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}` +
     `${check.chainHeld ? " (held on a chain refusal: from no later than that refused read began)" : ""}; the tenant stays held until it answers`);
-  const p = chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, sinceSec: check.gapFromSec, known, log })
+  const p = chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, sinceSec: check.gapFromSec, known,
+    ownerContext: { custody, chainId: approval.chainId }, log })
     .then((result) => {
       resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result });
       // A MISSING ANSWER NAMES WHAT IT FOUND: each operation by its
@@ -3341,17 +3345,18 @@ async function resumeChainGate(tenant: string, approval: ApprovalRow, check: Res
  * a slow endpoint holds the supervisor. Anything but clean holds or refuses.
  */
 const RESUME_TAIL_READ_MS = 45_000;
-async function resumeChainTail(tenant: string, approval: ApprovalRow, fromBlock: bigint, shared: Db): Promise<GapResult> {
+async function resumeChainTail(tenant: string, approval: ApprovalRow, fromBlock: bigint, shared: Db, custody: readonly string[]): Promise<GapResult> {
   const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
   if (!chain) return { status: "unavailable", why: `no RPC for chain ${approval.chainId}` };
-  const known = await knownChainFacts(shared, approval.smartAccount);
+  const known = await knownChainFacts(shared, approval.smartAccount, { tenant, chainId: approval.chainId });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<GapResult>((resolve) => {
     timer = setTimeout(() => resolve({ status: "unavailable", why: "the re-read did not finish in time" }), RESUME_TAIL_READ_MS);
     timer.unref?.();
   });
   try {
-    const result = await Promise.race([chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, fromBlock, known, log }), late]);
+    const result = await Promise.race([chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, fromBlock, known,
+      ownerContext: { custody, chainId: approval.chainId }, log }), late]);
     log(`${tenant}: resume chain re-read before registration ${result.status}${result.status === "clean" ? ` — blocks ${result.fromBlock}..${result.head}, nothing Postgres lacks`
       : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${fromBlock} that Postgres lacks: ` +
         describeChainFacts(result.found) : ` — ${result.why}`}`);
@@ -3528,7 +3533,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       // anyway, where the archive starts, so the rule stands on its own.
       if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions)) return refused("approved", AUTO_PAPER_NOT_SAFE);
       if (check.chainRequired) {
-        const gate = await resumeChainGate(tenant, approval, check, shared);
+        const gate = await resumeChainGate(tenant, approval, check, shared, custodyAddressesOf(grant));
         if (gate === "held") return { go: false };
         if ("missing" in gate) return refused("approved", chainRefusal(gate.missing), gate.fromSec);
       }
@@ -3581,7 +3586,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     }
     let chainRead: ChainWindow | null = null;
     if (check.chainRequired) {
-      const gate = await resumeChainGate(tenant, approval, check, shared);
+      const gate = await resumeChainGate(tenant, approval, check, shared, custodyAddressesOf(grant));
       if (gate === "held") return { go: false };
       if ("missing" in gate) return refused("archived", chainRefusal(gate.missing), gate.fromSec);
       chainRead = gate;
@@ -3602,7 +3607,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       // stand on this one (resumeChainTail says why).
       const first = chainRead;
       resumeChecks.delete(tenant);
-      const tail = await resumeChainTail(tenant, approval, BigInt(first.head), shared);
+      const tail = await resumeChainTail(tenant, approval, BigInt(first.head), shared, custodyAddressesOf(grant));
       // The admission's read began where the whole read did: that is what the refusal records.
       if (tail.status === "missing") return refused("archived", chainRefusal(tail.found, true), first.fromSec);
       if (tail.status !== "clean") return held(`the chain could not be read again before registration (${tail.why}); held, and read whole on the next pass`);
