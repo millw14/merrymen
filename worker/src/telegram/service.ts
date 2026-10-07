@@ -985,7 +985,41 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           }
         }
         if (!proved) return "dm-first";
-        // The fixed question for what she asked (tg-fomo-port.test.ts pins each plan).
+        const wanted = (): boolean => {
+          try {
+            return !q.stillWanted || q.stillWanted() === true;
+          } catch {
+            return false;
+          }
+        };
+        if (!wanted()) {
+          // Nothing looked up yet: the slot goes back.
+          const i = ownerAsks.lastIndexOf(t);
+          if (i >= 0) ownerAsks.splice(i, 1);
+          return "gone";
+        }
+        // HER DM'S RESEARCH MEMORY CHANGES ONLY WITH A DELIVERED ANSWER. The
+        // lookup remembers its subject under her DM's key as it plans; here
+        // that write is held aside and made only once Telegram took the DM,
+        // so a failed or abandoned handoff leaves her last subject as it was.
+        const dmKey = fomoDmKey(ownerId);
+        let held: { json: string } | "cleared" | null = null;
+        const provisional: FomoBroker = {
+          call: (tool, args, opts) => broker.call(tool, args, opts),
+          memory: {
+            get: async (k) => (k === dmKey && held !== null ? (held === "cleared" ? null : held.json) : broker.memory.get(k)),
+            set: async (k, json) => {
+              if (k === dmKey) held = { json };
+              else await broker.memory.set(k, json);
+            },
+            clear: async (k) => {
+              if (k === dmKey) held = "cleared";
+              else await broker.memory.clear(k);
+            },
+          },
+          report: (r) => broker.report(r),
+          configured: () => broker.configured(),
+        };
         const text =
           q.about === "holdings"
             ? `what is trader ${handle} holding on fomo?`
@@ -994,9 +1028,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
               : `who is trader ${handle} on fomo?`;
         const r = await answerFomoDm({
           text,
-          broker,
+          broker: provisional,
           audience: "owner",
-          conversationKey: fomoDmKey(ownerId),
+          conversationKey: dmKey,
           active: false,
           nowMs: t,
           creds: null,
@@ -1004,9 +1038,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           readOnly: true,
         });
         if (!r.handled) return "unavailable";
+        // Checked again right before the send: an ask superseded or forgotten
+        // while the lookup ran is not answered, and nothing is written.
+        if (!wanted()) return "gone";
         const html = `${esc(`You asked about Fomo trader ${handle} in a group, so here it is privately.`)}\n\n${esc(r.text)}`;
         const sent = await sendMessage({ token }, ownerId, html, { disablePreview: true });
         if (!sent.ok) return "dm-first";
+        const kept = held as { json: string } | "cleared" | null;
+        if (kept === "cleared") await broker.memory.clear(dmKey);
+        else if (kept !== null) await broker.memory.set(dmKey, kept.json);
         rememberFomoAnswer(ownerId, sent.messageId);
         if (fomoActive.size > 512 && !fomoActive.has(ownerId)) fomoActive.delete(fomoActive.keys().next().value!);
         fomoActive.set(ownerId, t);

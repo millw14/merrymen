@@ -2759,7 +2759,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!owner) return "room";
     if (o.stillWanted && !o.stillWanted()) return "gone";
     stageOf(chatId, "owner research");
-    const outcome = await owner.research({ handle, fromId: j.line.fromId, about });
+    const outcome = await owner.research({ handle, fromId: j.line.fromId, about, ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}) });
+    if (outcome === "gone") return "gone";
     if (outcome !== "sent" && outcome !== "dm-first") return "room";
     const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, {
       ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),

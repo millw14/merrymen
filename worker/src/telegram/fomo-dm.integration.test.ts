@@ -111,9 +111,12 @@ async function fomoFixture() {
   const direct = createDirectBroker(service, TENANT, { now: () => Date.now() });
   const calls: { tool: FomoToolName; args: Rec; opts: BrokerCallOptions }[] = [];
   const cleared: string[] = [];
+  /** A lookup can be held open (hold.until), to act while it runs. */
+  const hold: { until: Promise<void> | null } = { until: null };
   const broker: FomoBroker = {
-    call: (tool, args, opts) => {
+    call: async (tool, args, opts) => {
       calls.push({ tool, args: { ...args }, opts: { ...opts, signal: undefined } });
+      if (hold.until) await hold.until;
       return direct.call(tool, args, opts);
     },
     memory: {
@@ -124,7 +127,7 @@ async function fomoFixture() {
     report: (r) => direct.report(r),
     configured: () => direct.configured(),
   };
-  return { raw, db, service, broker, calls, cleared, provider, access };
+  return { raw, db, service, broker, calls, cleared, provider, access, hold };
 }
 type Fixture = Awaited<ReturnType<typeof fomoFixture>>;
 
@@ -144,6 +147,8 @@ interface Harness {
   cfg: Record<string, unknown>;
   /** A live line in the group from `from`. */
   sayInGroup: (text: string, from?: number) => void;
+  /** From now on, messages to her DM fail (the typing action still goes through). */
+  ownerSendsFail: (fail: boolean) => void;
   /** A live DM from `from`, optionally replying to a message (Telegram's reply_to_message). */
   say: (text: string, from?: number, replyTo?: Record<string, unknown>) => void;
   /** The message_id Telegram gave each sendMessage, in order. */
@@ -189,6 +194,8 @@ async function withDm(
     ...(opts.llm ? { groqApiKey: "gsk_test_not_a_real_key", groqModel: "test-model" } : {}),
   };
   let state = blankState();
+  /** Telegram takes the typing action but refuses messages to her DM. */
+  const ownerSends = { fail: false };
   const queue: unknown[] = [];
   let updateId = 1;
   let nextMessageId = 50_000;
@@ -210,7 +217,7 @@ async function withDm(
     const call: Call = { method: m[2]!, body: init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {} };
     calls.push(call);
     const ok = (result: unknown) => ({ ok: true, status: 200, json: async () => ({ ok: true, result }) });
-    if (opts.dmBlocked && (call.method === "sendChatAction" || call.method === "sendMessage") && call.body.chat_id === OWNER) {
+    if ((opts.dmBlocked && (call.method === "sendChatAction" || call.method === "sendMessage") || (ownerSends.fail && call.method === "sendMessage")) && call.body.chat_id === OWNER) {
       return { ok: false, status: 403, json: async () => ({ ok: false, error_code: 403, description: "Forbidden: bot can't initiate conversation with a user" }) };
     }
     if (call.method === "getMe") return ok({ id: 111, username: "bot111", first_name: "Pine" });
@@ -245,6 +252,9 @@ async function withDm(
       state = s;
     },
     cfg,
+    ownerSendsFail: (fail) => {
+      ownerSends.fail = fail;
+    },
     sayInGroup: (text, from = OWNER) => {
       const id = updateId++;
       queue.push({
@@ -637,6 +647,42 @@ describe("the owner's group ask about one trader, answered in her DM", () => {
       await h.until(() => h.sentTo(GROUP).length > 0);
       assert.deepEqual(h.fx.calls, []);
       assert.deepEqual(h.sentTo(OWNER), []);
+    });
+  });
+
+  it("a DM that fails after the lookup leaves her DM's research subject as it was", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
+      await ask(h, "what are the theses on $PONS");
+      h.ownerSendsFail(true);
+      const before = h.fx.calls.length;
+      h.sayInGroup("pine do you know unipcs on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls.slice(before).map((c) => c.tool), ["fomo_get_trader_context"], "the lookup ran");
+      h.ownerSendsFail(false);
+      await ask(h, "What about the sellers?");
+      const last = h.fx.calls[h.fx.calls.length - 1]!;
+      assert.equal(last.tool, "fomo_get_token_activity", "the follow-up is still about the coin she last asked about");
+      assert.equal(last.args.token, PONS);
+    });
+  });
+
+  it("an ask forgotten while its lookup runs is not answered: no DM, nothing in her history", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "zedtrader" } }, async (h) => {
+      let release!: () => void;
+      h.fx.hold.until = new Promise<void>((r) => {
+        release = r;
+      });
+      h.sayInGroup("pine do you know zedtrader on fomo");
+      await h.until(() => h.fx.calls.length > 0);
+      h.sayInGroup("/forgetme");
+      await h.advance(2_000);
+      h.fx.hold.until = null;
+      release();
+      await h.advance(5_000);
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_trader_context"]);
+      assert.ok(!h.sentTo(OWNER).some((t) => /zedtrader/.test(t)), "no DM for a forgotten ask");
+      const turns = await recentChatTurns(OWNER, 8);
+      assert.ok(!turns.some((t) => /zedtrader/.test(t.content)));
     });
   });
 

@@ -653,7 +653,10 @@ DM with a typing action before any lookup, and asks one fixed question
 read-only ("who is trader X on fomo?", "what is trader X holding on
 fomo?", or "what has trader X been trading on fomo this week?"; nothing can
 be watched or changed from a room). Only that question and its answer enter
-her DM history. The room hears "sent it to your DMs" and never the name, or
+her DM history, and her DM's research subject changes only once the answer
+was delivered (a failed send leaves her last subject as it was). An ask
+superseded by a newer line of hers, or forgotten, while the lookup runs is
+not answered and writes nothing. The room hears "sent it to your DMs" and never the name, or
 "dm me /start first" (once an hour, counted only once it was said) when her
 DM cannot be reached. At most six of these per 10 minutes. Anyone else gets
 the room's deflection, which, made before any lookup, spends none of the

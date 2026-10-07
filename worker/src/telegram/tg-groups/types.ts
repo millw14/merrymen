@@ -482,8 +482,8 @@ export interface TgFomoPort {
   forget?(chatId: number): Promise<void>;
 }
 
-/** How a handoff to the owner's DM went. */
-export type TgOwnerOutcome = "sent" | "dm-first" | "busy" | "unavailable";
+/** How a handoff to the owner's DM went. "gone": her line stopped being wanted first, and nothing was sent. */
+export type TgOwnerOutcome = "sent" | "dm-first" | "busy" | "unavailable" | "gone";
 
 /**
  * THE OWNER'S OWN ASKS, ANSWERED IN HER DM (service.ts builds it). A group
@@ -496,7 +496,17 @@ export interface TgOwnerPort {
    * Read-only research on one Fomo trader, asked as a fixed question code
    * writes and answered in her DM. Never changes anything. Never throws.
    */
-  research(q: { handle: string; fromId: number; about?: TgTraderAbout }): Promise<TgOwnerOutcome>;
+  research(q: {
+    handle: string;
+    fromId: number;
+    about?: TgTraderAbout;
+    /**
+     * Whether her line is still wanted (a newer line of the burst, or a
+     * forget, says no): checked before the lookup and again right before the
+     * DM is sent, so a superseded or forgotten ask sends and writes nothing.
+     */
+    stillWanted?: () => boolean;
+  }): Promise<TgOwnerOutcome>;
 }
 
 /**

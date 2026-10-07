@@ -458,10 +458,13 @@ describe("the router: a line no rule knew (route.ts)", () => {
     q.request?.kind === "trader" ? { text: TG_FOMO_DEFLECTION, deflect: true } : q.request ? { text: "Top traders on Fomo in the last 24h, by money made on closed trades:\n1. an unnamed trader, +$41k", deflect: false } : null;
 
   let ownerAsks: Array<{ handle: string; fromId: number; about?: string }>;
+  let wantedChecks: Array<(() => boolean) | null>;
   let ownerOutcome: TgOwnerOutcome;
   const ownerPort = () => ({
-    research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades" }): Promise<TgOwnerOutcome> => {
-      ownerAsks.push(q);
+    research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades"; stillWanted?: () => boolean }): Promise<TgOwnerOutcome> => {
+      const { stillWanted, ...ask } = q;
+      ownerAsks.push(ask);
+      wantedChecks.push(stillWanted ?? null);
       return ownerOutcome;
     },
   });
@@ -471,6 +474,7 @@ describe("the router: a line no rule knew (route.ts)", () => {
     routeCalls = 0;
     chatCalls = 0;
     ownerAsks = [];
+    wantedChecks = [];
     ownerOutcome = "sent";
     useModel();
     fomo!.answer = requestsOnly;
@@ -598,11 +602,14 @@ describe("the router after review (2026-10-07)", () => {
   let routeCalls: number;
   let chatCalls: number;
   let ownerAsks: Array<{ handle: string; fromId: number; about?: string }>;
+  let wantedChecks: Array<(() => boolean) | null>;
   let ownerOutcome: TgOwnerOutcome;
   let chatReply: string;
   const ownerPort = () => ({
-    research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades" }): Promise<TgOwnerOutcome> => {
-      ownerAsks.push(q);
+    research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades"; stillWanted?: () => boolean }): Promise<TgOwnerOutcome> => {
+      const { stillWanted, ...ask } = q;
+      ownerAsks.push(ask);
+      wantedChecks.push(stillWanted ?? null);
       return ownerOutcome;
     },
   });
@@ -611,6 +618,7 @@ describe("the router after review (2026-10-07)", () => {
     routeCalls = 0;
     chatCalls = 0;
     ownerAsks = [];
+    wantedChecks = [];
     ownerOutcome = "sent";
     chatReply = "ngl no clue";
     envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
@@ -777,6 +785,17 @@ describe("the router after review (2026-10-07)", () => {
     clock += 3 * MIN;
     await said(msg("pine is cashcat cooked or what", { fromId: ANN + 1 }));
     assert.deepEqual(desk!.asks.slice(-2), [{ kind: "market" }, { kind: "coin", query: "cashcat" }]);
+  });
+
+  it("her DM handoff carries the line's still-wanted check; 'gone' says nothing and frees the line", async () => {
+    pick = { action: "fomo_trader", trader: "unipcs" };
+    ownerOutcome = "gone";
+    make({ owner: ownerPort });
+    await said(msg("pine do you know unipcs on fomo", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(typeof wantedChecks[0], "function");
+    assert.equal(wantedChecks[0]!(), true, "wanted while nothing newer came");
+    assert.deepEqual(tg.texts(CHAT), []);
+    assert.ok(logs.some((l) => /addressed line got nothing/.test(l)));
   });
 
   it("her DM unreachable twice in an hour: the room is told once, and the second is logged, not dropped silently", async () => {
