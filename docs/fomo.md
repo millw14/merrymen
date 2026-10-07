@@ -453,7 +453,15 @@ the confirm card and the Stop and +1h button handling are a separate change.
   `following`).
 - **Caps.** 3 active tails per owner (renewing one does not count, and may change its
   hours and `consider`), 1–12 hours each, counted under the owner's lock row like
-  watches. The fleet's routing reads at most 200 tailed traders, with their owners, in
+  watches.
+- **Tailing again soon after the end continues the tail.** There is one row per owner
+  and trader, and an ended tail's row is what its end summary is read from for 15
+  minutes. Tailing the same trader again inside those 15 minutes continues that tail
+  rather than replacing the row: it keeps its start (its notices, caps and sent log carry
+  on, and the minutes between are covered), counts against the 3 again, and gets one
+  more end summary at its new end that says the whole span ("from" its first start).
+  An end summary already sent stays sent; each end has its own. Later than 15 minutes,
+  tailing again starts a new tail. The fleet's routing reads at most 200 tailed traders, with their owners, in
   one query (`store.ts tailOwners`). Per tail: 10 coins in
   the child file, 20 events in its tails block, 30 notices, 2 thesis reads (1 per coin),
   and 6 routed research events per owner and trader an hour (buys and theses only).
@@ -500,7 +508,7 @@ the confirm card and the Stop and +1h button handling are a separate change.
   follow entry is a vault-custody entry), live follow not enabled, trading held), the
   coverage floor and when the tail ends. Their words are sanitised,
   clipped to 280 characters, links removed and addresses only in short form. An end
-  summary counts what the feed showed. Each notice is recorded durably before it is
+  summary says when the tail started and ended and counts what the feed showed. Each notice is recorded durably before it is
   sent, so a crash can lose a notice but never repeat one; a log that cannot be read
   sends nothing. The log records when each notice was told (it forgets an entry 8 hours
   after that, and never one an event still in the file needs) apart from the event time

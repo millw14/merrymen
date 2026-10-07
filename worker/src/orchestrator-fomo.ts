@@ -285,8 +285,8 @@ const THESIS_SIGNAL_SCAN = 10;
 export const TAIL_SIGNAL_SCAN = 10;
 /** A tail's events in the child file reach back at most this far (and never before the tail began). */
 export const TAIL_EVENT_WINDOW_MS = 2 * HOUR;
-/** A tail that ended is carried this long, so its end summary can be sent. */
-export const TAIL_ENDED_KEEP_MS = 15 * MIN;
+/** A tail that ended is carried this long, so its end summary can be sent (re-tailing inside it continues the tail: store.ts addTail). */
+export const TAIL_ENDED_KEEP_MS = FOMO_LIMITS.tailEndedKeepMs;
 /** Events read per tail before the kind filter and the 20-event bound. */
 const TAIL_EVENT_SCAN = 60;
 /** Events read to tally a whole ended tail (a floor past this, said so). */

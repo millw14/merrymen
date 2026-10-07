@@ -155,13 +155,27 @@ describe("which notices are due", () => {
     assert.equal(
       end.html,
       [
-        "Tail on <b>unipcs</b> ended at 13:55 UTC.",
+        "Tail on <b>unipcs</b> (from 13:00 UTC) ended at 13:55 UTC.",
         "The feed showed 4 buys, 1 sell and 2 theses across 3 coins.",
         "Anything I entered came as a normal trade receipt.",
         TAIL_COVERAGE,
       ].join("\n"),
     );
     assert.deepEqual(tailNotices(input([t], { log: end.logAfter })).notices, [], "once");
+  });
+
+  it("a tail continued after it ended (store.ts addTail) gets a summary of its own at its new end, from its first start", () => {
+    const totals = { buys: 1, sells: 0, theses: 0, coins: 1, capped: false };
+    const first = tail([], { ended: true, expiresAt: NOW - 5 * MIN, totals });
+    const told = pass(input([first])).notices[0]!;
+    assert.equal(told.kind, "end");
+    const resumed = tail([], { expiresAt: NOW + HOUR });
+    assert.deepEqual(tailNotices(input([resumed], { log: told.logAfter })).notices, [], "running again: no summary");
+    const second = tail([], { ended: true, expiresAt: NOW + HOUR, totals: { ...totals, buys: 3 } });
+    const end2 = tailNotices(input([second], { log: told.logAfter, now: NOW + HOUR + MIN })).notices;
+    assert.equal(end2.length, 1);
+    assert.match(end2[0]!.html, /^Tail on <b>unipcs<\/b> \(from 13:00 UTC\) ended at 15:00 UTC\.\nThe feed showed 3 buys/);
+    assert.deepEqual(tailNotices(input([second], { log: end2[0]!.logAfter, now: NOW + HOUR + 2 * MIN })).notices, [], "once");
   });
 });
 

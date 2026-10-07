@@ -170,7 +170,8 @@ const h = (s: string): string => createHash("sha256").update(s).digest("base64ur
 const tailKeyOf = (t: ChildTail): string => `t:${h(`${t.userId}|${t.createdAt}`)}`;
 const groupKey = (userId: string, tokenKey: string, kind: string): string => `g:${h(`${userId}|${tokenKey}|${kind}`)}`;
 const readKey = (tailKey: string, tokenKey: string): string => `r:${h(`${tailKey}|${tokenKey}`)}`;
-const endKey = (tailKey: string): string => `e:${h(tailKey)}`;
+/** Per END, not per tail: a tail continued after it ended (store.ts addTail) has a second end, and a summary of its own. */
+const endKey = (tailKey: string, expiresAt: number): string => `e:${h(`${tailKey}|${expiresAt}`)}`;
 const coinKey = (e: ChildTailEvent): string => e.token?.key ?? "no-coin";
 const NOTICE_KINDS: ReadonlySet<string> = new Set(["buy", "sell", "thesis"]);
 
@@ -199,7 +200,7 @@ function neededKeys(tails: readonly ChildTail[]): Set<string> {
   const out = new Set<string>();
   for (const t of tails) {
     const tk = tailKeyOf(t);
-    if (t.ended) out.add(endKey(tk));
+    if (t.ended) out.add(endKey(tk, t.expiresAt));
     for (const e of t.events) {
       if (!NOTICE_KINDS.has(e.kind)) continue;
       out.add(groupKey(t.userId, coinKey(e), e.kind));
@@ -411,7 +412,7 @@ export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: T
   for (const tail of i.tails) {
     if (!tail.ended) continue;
     const tailKey = tailKeyOf(tail);
-    const ek = endKey(tailKey);
+    const ek = endKey(tailKey, tail.expiresAt);
     if (log.sent[ek] !== undefined) continue;
     log.sent[ek] = i.now;
     push({ key: ek, tailUserId: tail.userId, kind: "end", html: endSummary(tail), buttons: [] });
@@ -670,5 +671,6 @@ function endSummary(tail: ChildTail): string {
   const counts = t
     ? `The feed showed ${t.buys} ${t.buys === 1 ? "buy" : "buys"}, ${t.sells} ${t.sells === 1 ? "sell" : "sells"} and ${t.theses} ${t.theses === 1 ? "thesis" : "theses"} across ${t.coins} ${t.coins === 1 ? "coin" : "coins"}${t.capped ? " (at least: I counted the first 500)" : ""}.`
     : "I couldn't count what the feed showed for it.";
-  return [`Tail on <b>${name}</b> ended at ${clock(tail.expiresAt)}.`, counts, "Anything I entered came as a normal trade receipt.", esc(TAIL_COVERAGE)].join("\n");
+  // The span is said: a tail continued after it ended sums from its first start.
+  return [`Tail on <b>${name}</b> (from ${clock(tail.createdAt)}) ended at ${clock(tail.expiresAt)}.`, counts, "Anything I entered came as a normal trade receipt.", esc(TAIL_COVERAGE)].join("\n");
 }

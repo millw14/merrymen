@@ -891,6 +891,26 @@ describe("tails", () => {
     off.pass.stop();
   });
 
+  it("re-tailing within 15 minutes of the end continues the tail: one row, its start kept, one summary of the whole span", async () => {
+    const db = await freshDb();
+    const start = T0 - 3 * HOUR - 5 * MIN;
+    await tail(db, T1, STAR, { at: start, hours: 3 }); // ended five minutes ago
+    await store.insertEvents(db, [event(1, STAR, rh("77"), start + HOUR), event(2, STAR, rh("77"), T0 + 30 * MIN)]);
+    const again = await tail(db, T1, STAR, { at: T0, hours: 1 });
+    assert.ok(again.ok && again.created && again.tail.createdAtMs === start);
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    assert.deepEqual(
+      r.last(T1).tails?.map((t) => [t.createdAt, t.expiresAt, t.ended]),
+      [[start, T0 + HOUR, false]],
+      "the continued tail, not a new one beside or instead of the old",
+    );
+    await r.run([T1], T0 + HOUR + MIN);
+    const ended = r.last(T1).tails?.[0];
+    assert.deepEqual([ended?.createdAt, ended?.ended, ended?.totals?.buys], [start, true, 2], "the summary counts from the first start");
+    r.pass.stop();
+  });
+
   it("only a considered tail of a trader the cohort does not mark unfollowable adds triggers, from its start", () => {
     const now = T0;
     const t = (userId: string, consider: boolean, createdAtMs: number, expiresAtMs = now + HOUR) => ({ tenant: T1, userId, handle: null, consider, createdAtMs, expiresAtMs, createdVia: "telegram-dm" as const });

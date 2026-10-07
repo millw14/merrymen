@@ -540,6 +540,12 @@ export const FOMO_LIMITS = {
   tailMinMs: 3_600_000,
   /** A tail must expire, and within this. */
   tailMaxMs: 12 * 3_600_000,
+  /**
+   * An ended tail is carried in its owner's file this long, for its end
+   * summary (orchestrator-fomo.ts TAIL_ENDED_KEEP_MS); tailing the same
+   * trader again inside it CONTINUES that tail (addTail).
+   */
+  tailEndedKeepMs: 15 * 60_000,
   /** Distinct tailed traders the fleet's research routing reads (orchestrator-fomo.ts fleetInterest). */
   tailedTradersFleet: 200,
   /** Active position dependencies one owner may hold. */
@@ -2848,9 +2854,17 @@ export type AddTailResult =
  * stranger's trades long after anyone asked). At most `activeTailsPerTenant`
  * are active at once; renewing a tail that is still active does not count
  * against that and may change its expiry and `consider`, re-activating an
- * expired one does count (and restarts its created time). Counted and written
- * under the owner's lock row, so two concurrent adds cannot pass the cap
- * together. Owner state only: nothing here sizes, orders or grants.
+ * expired one does count. Counted and written under the owner's lock row, so
+ * two concurrent adds cannot pass the cap together. Owner state only: nothing
+ * here sizes, orders or grants.
+ *
+ * ONE ROW PER (OWNER, TRADER), SO A TAIL THAT ENDED LESS THAN
+ * `tailEndedKeepMs` AGO IS CONTINUED, NOT REPLACED. Its row is what its end
+ * summary is read from in that window; restarting it there would overwrite
+ * the row and lose the summary. So it keeps its start (the same tail
+ * instance: the child's notices, caps and sent log carry on, and the minutes
+ * between are covered too), and one end summary at the new end tells the
+ * whole span from that start. Later than that, re-activating restarts it.
  */
 export async function addTail(
   db: Db,
@@ -2872,6 +2886,7 @@ export async function addTail(
       .prepare("SELECT created_at_ms, expires_at_ms FROM fomo_tails WHERE tenant = ? AND user_id = ?")
       .get(tenant, userId)) as Row | undefined;
     const wasActive = existing !== undefined && (num(existing.expires_at_ms) ?? 0) > now;
+    const justEnded = existing !== undefined && !wasActive && (num(existing.expires_at_ms) ?? 0) > now - FOMO_LIMITS.tailEndedKeepMs;
     if (!wasActive) {
       const c = (await tx
         .prepare("SELECT COUNT(*) AS n FROM fomo_tails WHERE tenant = ? AND expires_at_ms > ?")
@@ -2879,7 +2894,7 @@ export async function addTail(
       const active = num(c?.n) ?? 0;
       if (active >= FOMO_LIMITS.activeTailsPerTenant) return { ok: false, reason: "cap-reached", active };
     }
-    const createdAt = wasActive ? num(existing?.created_at_ms) ?? now : now;
+    const createdAt = wasActive || justEnded ? num(existing?.created_at_ms) ?? now : now;
     await tx
       .prepare(
         `INSERT INTO fomo_tails (tenant, user_id, handle, consider, created_at_ms, expires_at_ms, created_via) VALUES (?, ?, ?, ?, ?, ?, ?)

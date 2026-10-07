@@ -973,9 +973,20 @@ describe("tails", () => {
     const later = T0 + 3 * HOUR;
     assert.deepEqual((await S.activeTails(db, A, later)).map((t) => [t.userId, t.consider, t.createdVia]), [["u-1", true, "telegram-dm"]]);
     const back = await add(db, A, "u-0", later);
-    assert.ok(back.ok && back.created && back.tail.createdAtMs === later, "re-activating an ended tail restarts it and counts");
+    assert.ok(back.ok && back.created && back.tail.createdAtMs === T0, "re-activating a tail that ended under 15 minutes ago continues it (keeps its start) and counts");
     assert.ok((await add(db, A, "u-7", later)).ok);
     assert.deepEqual(await add(db, A, "u-8", later), { ok: false, reason: "cap-reached", active: 3 });
+  });
+
+  it("a tail ended under 15 minutes ago is continued (its end summary is not lost); later it restarts", async () => {
+    const { db } = await fresh();
+    assert.equal(S.FOMO_LIMITS.tailEndedKeepMs, 15 * MIN);
+    await add(db, A, "u-1", T0, T0 + HOUR);
+    await add(db, A, "u-2", T0, T0 + HOUR);
+    const soon = await add(db, A, "u-1", T0 + HOUR + 14 * MIN, T0 + 3 * HOUR);
+    assert.ok(soon.ok && soon.created && soon.tail.createdAtMs === T0 && soon.tail.expiresAtMs === T0 + 3 * HOUR);
+    const late = await add(db, A, "u-2", T0 + HOUR + 15 * MIN, T0 + 3 * HOUR);
+    assert.ok(late.ok && late.created && late.tail.createdAtMs === T0 + HOUR + 15 * MIN, "15 minutes on, it is a new tail");
   });
 
   it("concurrent adds cannot pass the cap together", async () => {
