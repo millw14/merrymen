@@ -339,9 +339,10 @@ export async function readClosedEpochSnapshot(db: Db, o: { tenant: string; diale
       .all(account)) as Array<Record<string, unknown>>).map((r) => ({ repairId: String(r.repair_id), epoch: num(r.epoch), action: String(r.action),
       evidenceKey: String(r.evidence_key), tableName: String(r.table_name), state: String(r.state) }))
     : [];
+  const seedBefore = rawGrantAccount ? await planAttestedSeed(db, rawGrantAccount) : { basis: [], floors: [] };
+  // Last: a catalogue read that fails aborts a Postgres transaction, so nothing is read after it.
   let identityIndex = false;
   try { identityIndex = (await inspectChainIdentityIndex(db, o.dialect)).valid; } catch { identityIndex = false; }
-  const seedBefore = rawGrantAccount ? await planAttestedSeed(db, rawGrantAccount) : { basis: [], floors: [] };
   return {
     booking, epoch: P, rawGrantAccount, agent, flows: { rows: mutable.flowsRaw.map(flowRowOf), fingerprint: flowFingerprintOf(mutable.flowsRaw) },
     quarantine: { rows: mutable.quarantine }, bounds, marks, nextEquity, events, commands, trades, feeAccruals, riskPeriods,
@@ -513,7 +514,7 @@ export interface OpReport {
   answeredBy: Array<{ id: number; kind: string; status: string; amountUsdg: number; epoch: number; createdAt: number | null }>;
   /** A root-key operation answered by a 'swap' row: an owner's operation recorded as an agent trade (the validator-blind reconciler). */
   ownerOperationRecordedAsTrade: boolean;
-  /** For a root-key operation in the epoch: what else it moved across the book's edge, in kind. Review only, never a booking. */
+  /** For a root-key operation: what else it moved across the book's edge, in kind. Review only, never a booking. */
   inKind: Array<{ token: string; direction: "in" | "out"; amountRaw: string; counterparty: string; logIndex: number }>;
 }
 export interface BoundaryProof {
@@ -822,8 +823,16 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     refuse("epoch-rows-ahead", `rows are filed under epoch ${maxEpoch}, ahead of the registration's epoch ${currentEpoch}: the mirror copied rows before the agents row (paper-checkpoint.ts), so which epoch is open is not one answer`);
   }
   if (currentEpoch !== null && currentEpoch > P && !later.length) refuse("next-epoch-empty", `no row is filed under any epoch after ${P}, so when epoch ${P} closed cannot be dated`);
-  if (upperSec !== null && lastMark !== null && lastMark > upperSec) {
-    refuse("epochs-overlap", `epoch ${P} has a valuation at ${iso(lastMark)}, after ${upperFrom} at ${iso(upperSec)}: the two epochs overlap in time, so epoch ${P}'s window is not a partition`);
+  // TWO EPOCHS IN ONE SPAN OF TIME: a valuation of this epoch (stamped as written) after a later epoch's first row, or after an event that
+  // closes this one. The mirror copies append-only rows before the agents row (paper-checkpoint.ts), so after a failed pass and a
+  // redeploy a child can write this epoch's rows after the next one's began; the window is then no partition.
+  if (rowsMin !== null && lastMark !== null && lastMark > rowsMin) {
+    refuse("epochs-overlap", `epoch ${P} has a valuation at ${iso(lastMark)}, after a later epoch's first row at ${iso(rowsMin)}: the two epochs overlap in time, so epoch ${P}'s window is not a partition`);
+  }
+  for (const e of closing) {
+    if (lastMark !== null && e.at < lastMark) {
+      refuse("boundary-contradicted", `an event closing epoch ${P} (${e.class}, #${e.id}) is stamped ${iso(e.at)}, before epoch ${P}'s own valuation at ${iso(lastMark)}: the epoch's rows and its boundary disagree`);
+    }
   }
   for (const m of movements) m.epochByTime = m.at === null || upperSec === null ? null : m.at < upperSec ? P : "later";
   if (upperSec === null) for (const m of movements) m.epochByTime = null;
@@ -864,9 +873,6 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
       refuse("boundary-undated", `nothing written while epoch ${P} was still open dates it after its last capital fact (${iso(maxFact)}): no epoch-${P} valuation in ` +
         `[${iso(maxFact + BOUNDARY_MARGIN_SEC)}, ${iso(upperSec)}], no held-reset event closing it after then, and no paper opening paired with runPaperReset's line ` +
         "(a paper-opening row alone is not one: getPaperBook writes the same row with no bump)");
-    }
-    for (const e of closing) {
-      if (e.at <= maxFact) refuse("boundary-contradicted", `an event closing epoch ${P} (${e.class}, #${e.id}) is stamped ${iso(e.at)}, at or before the last capital fact filed in it (${iso(maxFact)})`);
     }
   }
 
@@ -956,7 +962,7 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     const answeredBy = snap.trades.filter((t) => t.userOpHash === op.userOpHash).map(({ id, kind, status, amountUsdg, epoch, createdAt }) => ({ id, kind, status, amountUsdg, epoch, createdAt }));
     const epochByTime = at === null || upperSec === null ? null : at < upperSec ? P : "later";
     const inKind: OpReport["inKind"] = [];
-    if (validator === "root" && epochByTime === P) {
+    if (validator === "root") {
       const seg = segmentReceipt(chain.txs[tx]?.receipt?.logs ?? []).segments.find((s) => s.op.userOpHash === op.userOpHash);
       for (const leg of legsFromReceipt(seg?.logs ?? [])) {
         if (lower(leg.token) === USDG || BigInt(leg.amountRaw) === 0n) continue;
@@ -976,7 +982,7 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
         "an owner operation recorded as an agent trade by the validator-blind in-flight reconciler (index.ts reconcileInFlightAtArm). Left in place: it is what answers the operation for admission, " +
         "and a later audit that removes it re-holds this tenant");
     }
-    if (inKind.length) {
+    if (inKind.length && epochByTime === P) {
       warnings.push(`operation ${op.userOpHash} (root key) also moved ${inKind.map((k) => `${k.direction} ${k.amountRaw} of ${k.token}`).join(", ")} in kind: review only, never a flow ` +
         `(capital-classify.ts asset-out), so epoch ${P}'s P&L reads that value as a loss rather than a withdrawal`);
     }
