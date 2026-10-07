@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { EarlyCandidateBook } from "./early-candidates";
-import { FomoChild, memoryExplorationStore, type FomoChildSettings, type FomoLiveFacts } from "./fomo-child";
+import { FOMO_CHILD, FomoChild, memoryExplorationStore, type FomoChildSettings, type FomoLiveFacts } from "./fomo-child";
 import type { ChildFomoRead } from "./fomo/child-file";
 import type { ChildFomoFile, ChildTail, FomoAccess } from "./fomo/contract";
 import { robinhoodChain, tokenIdentity } from "./fomo/identity";
@@ -38,7 +38,9 @@ const TAIL: ChildTail = {
   totals: null,
 };
 
-function rig(o: { settings?: Partial<FomoChildSettings>; live?: Partial<FomoLiveFacts>; fileAccess?: FomoAccess; tails?: ChildTail[] | undefined; off?: boolean } = {}) {
+function rig(o: { settings?: Partial<FomoChildSettings>; live?: Partial<FomoLiveFacts>; fileAccess?: FomoAccess; tails?: ChildTail[] | undefined; off?: boolean; noFile?: boolean } = {}) {
+  const clock = { now: T0 };
+  let reads = 0;
   const settings: FomoChildSettings = {
     dataAccess: true,
     monitoring: false,
@@ -50,7 +52,7 @@ function rig(o: { settings?: Partial<FomoChildSettings>; live?: Partial<FomoLive
     scoutPerTokenUsdg: 10,
     ...o.settings,
   };
-  const file: ChildFomoFile = {
+  let file: ChildFomoFile = {
     version: 1,
     writtenAt: T0 - 1_000,
     tenant: TENANT,
@@ -86,8 +88,11 @@ function rig(o: { settings?: Partial<FomoChildSettings>; live?: Partial<FomoLive
     earlyBook: () => new EarlyCandidateBook(() => T0),
     counters: { takeFollowEntry: () => false, refundFollowEntry: () => {} },
     ledgerStore: memoryExplorationStore(),
-    readFile: (): ChildFomoRead => ({ file, reason: "ok", droppedSignals: 0 }),
-    now: () => T0,
+    readFile: (): ChildFomoRead => {
+      reads++;
+      return o.noFile ? { file: null, reason: "absent", droppedSignals: 0 } : { file, reason: "ok", droppedSignals: 0 };
+    },
+    now: () => clock.now,
   });
   const tick = (held: { token: string }[] = []) =>
     child.tick({
@@ -97,13 +102,16 @@ function rig(o: { settings?: Partial<FomoChildSettings>; live?: Partial<FomoLive
       basis: async () => null,
       entrySec: async () => null,
     });
-  return { child, tick };
+  /** The orchestrator rewrites fomo.json (a new block). */
+  const rewrite = (tails: ChildTail[]) => {
+    file = { ...file, writtenAt: clock.now, tails };
+  };
+  return { child, tick, clock, rewrite, reads: () => reads, settings };
 }
 
 describe("FomoChild tail accessors", () => {
   it("tails(): the file's block, copied, and nothing without data access or with Fomo off", () => {
     const r = rig({ tails: [TAIL] });
-    assert.deepEqual(r.child.tails(), [], "nothing before the first read");
     r.tick();
     const got = r.child.tails();
     assert.deepEqual(got, [TAIL]);
@@ -118,6 +126,40 @@ describe("FomoChild tail accessors", () => {
     const none = rig();
     none.tick();
     assert.deepEqual(none.child.tails(), [], "a file without the block has no tails");
+  });
+
+  it("tails() never waits for the trading tick: a never-ticked child (no grant, a killed agent) reads the file itself (review 2026-10-07)", () => {
+    // An owner who only researches (data access on, no signed grant) never
+    // runs the trading tick; her tails used to be [] forever.
+    const r = rig({ tails: [TAIL], settings: { follow: false, monitoring: false }, fileAccess: { dataAccess: true, monitoring: false, follow: false } });
+    assert.deepEqual(r.child.tails(), [TAIL], "no tick needed");
+    // The tail ends: the orchestrator's next file says so, and it is seen
+    // with no tick, once the read interval has passed (not on every ask).
+    r.rewrite([{ ...TAIL, ended: true, totals: { buys: 1, sells: 0, theses: 0, coins: 1, capped: false } }]);
+    assert.equal(r.child.tails()[0]!.ended, false, "read at most every fileReadEveryMs");
+    const n = r.reads();
+    r.clock.now += FOMO_CHILD.fileReadEveryMs;
+    assert.equal(r.child.tails()[0]!.ended, true, "the end is seen, so its summary is sent");
+    assert.equal(r.reads(), n + 1);
+    // Ended and gone: nothing more, so the notifier stops reading its log.
+    r.rewrite([]);
+    r.clock.now += FOMO_CHILD.fileReadEveryMs;
+    assert.deepEqual(r.child.tails(), []);
+    // The tick's own view is untouched by these reads: the follow path sees what it saw.
+    assert.equal(r.child.health().read, "not-read");
+  });
+
+  it("tails() with no tick still honours the owner's data access, read now, and the file's", () => {
+    const r = rig({ tails: [TAIL] });
+    assert.equal(r.child.tails().length, 1);
+    r.settings.dataAccess = false;
+    assert.deepEqual(r.child.tails(), [], "her setting, read at the moment of asking");
+    r.settings.dataAccess = true;
+    assert.equal(r.child.tails().length, 1);
+    assert.deepEqual(rig({ tails: [TAIL], fileAccess: { dataAccess: false, monitoring: false, follow: false } }).child.tails(), [], "the file narrows it");
+    assert.deepEqual(rig({ tails: [TAIL], noFile: true }).child.tails(), [], "no file, no tails");
+    assert.deepEqual(rig({ tails: [TAIL], off: true }).child.tails(), [], "Fomo off here");
+    assert.deepEqual(rig({ tails: [TAIL], live: { settings: undefined as never } }).child.tails(), [], "a live read that throws is no tails");
   });
 
   it("holds(): a held Robinhood coin by its token key, as of the last tick", () => {

@@ -532,7 +532,12 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   that cannot be read sends nothing. The log records when each notice was told (it forgets an entry 8 hours
   after that, and never one an event still in the file needs) apart from the event time
   it covers from (the 5-minute coalescing), so an alert the fleet observed hours after
-  the provider's own time is told once, not on every pass.
+  the provider's own time is told once, not on every pass. The child reads the tails
+  block itself (`FomoChild.tails()`, at most every 10 seconds, with the owner's data
+  access read at that moment), apart from the trading tick, which an owner who only
+  researches (no signed grant) never runs and a killed agent stops: she is still told,
+  and still gets the end summary, and the follow path never sees its file change
+  between ticks.
 - **Only trades made during the tail.** An event whose own time (the provider's, else
   when it was observed) is before the tail began, such as a late recovery of an older
   alert, is not in the tails block, not told, not in the end summary's tally and never a

@@ -1927,6 +1927,15 @@ export class FomoChild {
   private file: ChildFomoFile | null = null;
   private fileReason: FomoChildReadReason = "not-read";
   private fileReadAt = Number.NEGATIVE_INFINITY;
+  /**
+   * THE TAILS' OWN READ OF fomo.json (tails()), apart from the tick's: the
+   * notices must not depend on the trading tick, which returns early with no
+   * grant, an expired one, a killed agent or an unreadable market, and the
+   * follow path must not see its file change between ticks. Read at most
+   * every fileReadEveryMs, by the notifier's own asking.
+   */
+  private tailFile: ChildFomoFile | null = null;
+  private tailFileReadAt = Number.NEGATIVE_INFINITY;
   private lastTickAt: number | null = null;
   private access: FomoAccess = NO_ACCESS;
   private context: string | null = null;
@@ -2912,13 +2921,41 @@ export class FomoChild {
   }
 
   /**
-   * The owner's tails from the last file read (contract.ts ChildTail), for the
-   * tail notices. Copies. None when Fomo is off here or data access is off
-   * (the owner's setting or the file's): the notices then say nothing.
+   * The owner's tails (contract.ts ChildTail), for the tail notices. Copies.
+   * None when Fomo is off here or data access is off (the owner's setting, read
+   * now, or the file's): the notices then say nothing.
+   *
+   * ITS OWN READ, NOT THE TICK'S (review 2026-10-07). The tick reads the file
+   * only inside the trading tick, which an owner who only researches (data
+   * access on, no signed grant: all a tail needs) never runs, and which stops
+   * when she kills her agent: her tails were then never told, or frozen as
+   * last read with no end summary. This reads fomo.json itself, at most every
+   * fileReadEveryMs, and never touches the tick's file or access, so the
+   * follow path sees exactly what it saw. A stale or unreadable file is no
+   * tails (the reader's own bounds).
    */
   tails(): ChildTail[] {
-    if (this.isOff() || !this.access.dataAccess) return [];
-    return (this.file?.tails ?? []).map((t) => ({ ...t, events: t.events.map((e) => ({ ...e, label: { ...e.label } })), totals: t.totals ? { ...t.totals } : null }));
+    if (this.isOff()) return [];
+    const now = this.now();
+    if (now - this.tailFileReadAt >= FOMO_CHILD.fileReadEveryMs) {
+      this.tailFileReadAt = now;
+      try {
+        const tenant = this.deps.ownTenant();
+        const read = tenant ? (this.deps.readFile ?? readChildFomoFile)(this.deps.home(), tenant, now) : null;
+        this.tailFile = read && read.reason === "ok" ? read.file : null;
+      } catch {
+        this.tailFile = null;
+      }
+    }
+    let owner: FomoAccess;
+    try {
+      const s = this.deps.live().settings;
+      owner = { dataAccess: s.dataAccess, monitoring: s.monitoring, follow: s.follow };
+    } catch {
+      return [];
+    }
+    if (!effectiveAccess(owner, this.tailFile?.access ?? null).dataAccess) return [];
+    return (this.tailFile?.tails ?? []).map((t) => ({ ...t, events: t.events.map((e) => ({ ...e, label: { ...e.label } })), totals: t.totals ? { ...t.totals } : null }));
   }
 
   /** Whether this agent holds a Robinhood coin now (by token key), as of the last tick. Unknown is no. */
