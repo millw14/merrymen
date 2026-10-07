@@ -186,6 +186,31 @@ test("Postgres: owner_operations' DDL, its identity, the mirror and admission's 
     [[INVALIDATE, FX.invalidateNonce!.tx], [nextHash, FX.invalidateNonce!.tx]].sort());
   await setup.query("DELETE FROM owner_operations WHERE user_op_hash = $1", [nextHash]);
 
+  // WITH NO ACCOUNT TO NAME (a tenant no grant names, as on a removed tenant's
+  // final pass): a record Postgres lacks fails the pass and moves no cursor;
+  // once it is held under the tenant, a rebuilt child's re-read of it is
+  // settled by the held check, on the real server.
+  const LOST = `0x${"0e".repeat(20)}`;
+  const lost = { ...invalidate, user_op_hash: `0x${"6f".repeat(32)}` };
+  const lostChild = (at: number) => {
+    const raw = new DatabaseSync(":memory:");
+    t.after(() => raw.close());
+    return applyLedgerSchema(wrapSqlite(raw)).then(() => {
+      raw.prepare(`INSERT INTO owner_operations (${cols.join(", ")}, created_at) VALUES (${cols.map(() => "?").join(", ")}, ?)`).run(...cols.map((c) => lost[c]), at);
+      return wrapSqlite(raw);
+    });
+  };
+  const lostCursor = async () => Number((await setup.query("SELECT COUNT(*) AS n FROM mirror_state WHERE tenant = $1", [LOST])).rows[0]!.n);
+  const unplaced = await mirrorOwnerOperations({ tenant: LOST, child: await lostChild(8000), shared: db, batch: 500, nowSec: 8100 });
+  assert.match(unplaced.failed ?? "", /no account to be copied under/);
+  assert.equal(await lostCursor(), 0);
+  const placed = await mirrorOwnerOperations({ tenant: LOST, child: await lostChild(8000), shared: db, batch: 500, nowSec: 8200, account: ACCOUNT });
+  assert.deepEqual([placed.failed, placed.copied], [undefined, { owner_operations: 1 }]);
+  const reread = await mirrorOwnerOperations({ tenant: LOST, child: await lostChild(9000), shared: db, batch: 500, nowSec: 9100 });
+  assert.deepEqual([reread.failed, reread.copied], [undefined, { owner_operations: 0, owner_operations_already_mirrored: 1 }]);
+  await setup.query("DELETE FROM owner_operations WHERE tenant = $1", [LOST]);
+  await setup.query("DELETE FROM mirror_state WHERE tenant = $1", [LOST]);
+
   // THE AUDIT, through its shell, against this Postgres: and what the old reconciler wrote.
   await setup.query(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
     VALUES ($1, $2, $3, 4663, '{}', 1, 9999999999, 'armed', 1, 349, 'idle')`, [ACCOUNT, TENANT, `0x${"01".repeat(20)}`]);
