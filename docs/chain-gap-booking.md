@@ -58,7 +58,7 @@ The classes:
 | `session-reverted` | A session-key operation that the EntryPoint recorded as failed | A resolved revert's row: `status 'reverted'`, its gas, notional 0 |
 | `operation-leg` | A USDG transfer inside one of those operations | Nothing extra: the operation's row carries its transaction hash, which answers it |
 | `deposit` | USDG in from outside the system, with no operation of the account and nothing paired | A `flows` row, as the chain-capital reconstruction writes one: `source 'chain-log'`, its `tx#log`, the block time |
-| `owner-operation` | An operation signed by the owner's own key (the root validator) | **Nothing. It blocks.** The agent's book has no writer for an owner's operation, and booking it as the agent's trade would misattribute it |
+| `owner-operation` | An operation signed by the owner's own key (the root validator) that no owner record answers | **Nothing. It blocks.** The agent's book has no writer for an owner's operation, and booking it as the agent's trade would misattribute it. An acknowledged owner record that the receipt re-derives as acknowledged answers it in admission's own check, so the fact never reaches this tool ([owner-operations.md](owner-operations.md)). Otherwise the item shows the record Postgres holds, if any, and the reading re-derived from the receipt, as evidence only |
 | `unresolved` | Anything else, with the reason in words | **Nothing. It blocks.** |
 
 The `unresolved` class covers these cases:
@@ -279,7 +279,7 @@ Two consequences need a reviewer's eye:
 | Tenant | Line | Shape | Expected |
 |---|---|---|---|
 | `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row, if Postgres's position and cost basis in the token hold what the chain does. Otherwise `unresolved`: escalate for a basis decision |
-| `0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5` | 1 op, 0 transfers | An operation with no USDG leg | `session-no-movement` books the reconciler's row. A root-key `owner-operation` blocks: escalate |
+| `0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5` | 1 op, 0 transfers | An operation with no USDG leg | It is the owner's `recoverFunds` (root key; its USDG leg is the flow already on record). `owner-operation` blocks. The owner decided to leave it held. Re-derived from its receipt it is `review` (NVDA dust left in kind), so no owner record would answer it either ([owner-operations.md](owner-operations.md#the-tenants-held-on-2026-10-06)) |
 | `0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d` | 0 ops, 1 transfer | A lone USDG transfer | `deposit` → one `flows` row. Outbound, or from a hosted account or vault, blocks |
 
 The preview settles which shape each tenant is in. These are expectations, not
@@ -410,6 +410,12 @@ The verdict is one of:
 - `NOTHING-MISSING`: admission's check is already clean for this tenant.
   Exit code `0`.
 - `BLOCKED`: see `refused:` and `why:`. Exit code `2`. Nothing can be applied.
+
+**A preview from an earlier build does not apply.** The digest binds the code
+that produced it, and since owner operations were split from trades
+([owner-operations.md](owner-operations.md)) it also binds the owner records
+admission reads (`known.ownerOps`, `ownerRecords`). Preview again on the
+deployed build before any apply.
 
 ## 2. The owner of the books reviews it
 
