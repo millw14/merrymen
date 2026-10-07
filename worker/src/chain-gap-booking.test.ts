@@ -30,9 +30,10 @@ import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, resumePreconditions } fr
 import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import {
-  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, holdingVerdict, microUsdg, parseApplyReport, planBooking, planLines,
-  readBookingSnapshot, readChainEvidence, replayBasis, revertBooking, staleBasisVerdict, TRADE_COLUMNS, walkFills, type ApplyReport, type BookingPlan, type Holdings,
-  type RecordedFill, type StaleBasis,
+  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, commitEvidence, currentXact, digestOf, factsStillMissing, gapChainOf, holdingVerdict, isServerXact,
+  microUsdg, noReceiptRefusal, parseApplyReport, planBooking, planLines, readBookingReceipts, readBookingSnapshot, readChainEvidence, replayBasis, revertBooking,
+  stampCommitOutcome, staleBasisVerdict, TRADE_COLUMNS, walkFills, xactStatusOf, type ApplyReport, type BookingPlan, type Holdings, type RecordedFill, type StaleBasis,
+  type XactStatus,
 } from "./chain-gap-booking";
 
 // ── the public chain, as read ────────────────────────────────────────────────
@@ -502,7 +503,7 @@ describe("apply and revert", () => {
     assert.equal(p.verdict, "ready", planLines(p).join("\n"));
     return { b, p, rpc: model.rpc, dep };
   }
-  const apply = (db: Db, p: BookingPlan, extra: Partial<{ confirm: string; backupRef: string; nowMs: number }> = {}) =>
+  const apply = (db: Db, p: BookingPlan, extra: Partial<{ confirm: string; backupRef: string; nowMs: number; persist: (r: ApplyReport) => void }> = {}) =>
     applyBooking(db, p, { confirm: p.previewDigest, backupRef: "railway-backup-2026-10-06T09:00Z", dialect: "sqlite", nowMs: NOW * 1000, ...extra });
 
   it("writes exactly the proposed rows once, records a receipt for each, and admission's chain check is then clean — its preconditions unchanged", async () => {
@@ -602,6 +603,128 @@ describe("apply and revert", () => {
     const tampered = { ...report, rows: report.rows.map((r) => ({ ...r, id: r.id + 1 })) };
     assert.throws(() => parseApplyReport(JSON.stringify(tampered)), (e: unknown) => (e as BookingRefused).code === "report");
     assert.throws(() => parseApplyReport("{"), (e: unknown) => (e as BookingRefused).code === "report");
+  });
+
+  it("hands its report to persist inside the transaction, once, after every receipt: a persist that fails rolls all of it back", async () => {
+    const { b, p } = await ready();
+    const handed: Array<{ report: ApplyReport; receipts: number; trades: number }> = [];
+    const report = await apply(b.db, p, { persist: (r: ApplyReport) => {
+      handed.push({ report: r, receipts: Number(rows(b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE}`)[0]!.n), trades: Number(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n) });
+    } });
+    assert.equal(handed.length, 1);
+    assert.deepEqual(handed[0]!.report, report, "the report persisted is the one returned");
+    assert.deepEqual([handed[0]!.receipts, handed[0]!.trades], [2, 1], "every row and receipt already written, inside the transaction");
+    const failing = await ready();
+    await assert.rejects(apply(failing.b.db, failing.p, { persist: () => { throw new Error("ENOSPC: the disk is full"); } }), /ENOSPC/);
+    assert.equal(rows(failing.b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 0);
+    assert.equal(rows(failing.b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE}`)[0]!.n, 0);
+  });
+
+  it("a report says its commit's outcome under its own digest; either stamp reverts the same booking, and no other value is a report", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const unknown = stampCommitOutcome(report, "unknown"), committed = stampCommitOutcome(unknown, "committed");
+    for (const r of [unknown, committed]) {
+      const { reportDigest, ...body } = r;
+      assert.equal(reportDigest, digestOf(body));
+      assert.deepEqual({ ...parseApplyReport(JSON.stringify(r)), commitOutcome: undefined, reportDigest: undefined }, { ...report, commitOutcome: undefined, reportDigest: undefined }, "every other field as applied");
+    }
+    assert.deepEqual([unknown.commitOutcome, committed.commitOutcome], ["unknown", "committed"]);
+    const { reportDigest: _d, ...body } = { ...report, commitOutcome: "maybe" };
+    assert.throws(() => parseApplyReport(JSON.stringify({ ...body, reportDigest: digestOf(body) })), (e: unknown) => (e as BookingRefused).code === "report" && /commitOutcome/.test((e as Error).message));
+    // It names the database it was applied to, as the plan does; a report naming none, or nothing, is not one.
+    assert.equal(report.target, p.target);
+    for (const target of ["", 7]) {
+      const { reportDigest: _t, ...named } = { ...report, target };
+      assert.throws(() => parseApplyReport(JSON.stringify({ ...named, reportDigest: digestOf(named) })), (e: unknown) => (e as BookingRefused).code === "report" && /target/.test((e as Error).message));
+    }
+    // DID IT COMMIT? The receipts, read and checked against the report, change nothing.
+    assert.equal((await readBookingReceipts(b.db, unknown, { dialect: "sqlite" })).verdict, "applied");
+    assert.equal((await revertBooking(b.db, parseApplyReport(JSON.stringify(unknown)), { nowMs: (NOW + 60) * 1000, dialect: "sqlite" })).outcome, "reverted");
+    const back = await readBookingReceipts(b.db, committed, { dialect: "sqlite" });
+    assert.deepEqual([back.verdict, back.writesPerformed, back.receipts.map((r) => [r.state, r.revertedAtMs])], ["reverted", 0, [["reverted", (NOW + 60) * 1000], ["reverted", (NOW + 60) * 1000]]]);
+  });
+
+  it("no receipt on sqlite proves nothing: the look says unknown and a revert refuses no-receipt — sqlite cannot say what became of a transaction", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    assert.equal(report.xact, undefined, "sqlite names no transaction");
+    const never = { ...report, bookingId: "never-committed" };
+    const fresh = await books();
+    for (const [db, why] of [[fresh.db, /no receipt of it is visible \(this database has no receipts table\)/], [b.db, /no receipt of it is visible, and that alone does not prove/]] as const) {
+      const look = await readBookingReceipts(db, never, { dialect: "sqlite" });
+      assert.deepEqual([look.verdict, look.transaction, look.receipts, look.rows, look.writesPerformed], ["unknown", { id: null, status: "unrecorded" }, [], [], 0]);
+      assert.match(look.why, why);
+    }
+    await assert.rejects(revertBooking(b.db, never, { nowMs: NOW * 1000, dialect: "sqlite" }),
+      (e: unknown) => (e as BookingRefused).code === "no-receipt" && /no receipt of booking never-committed is visible here, and that alone does not prove/.test((e as Error).message));
+    // A report naming a transaction, read where no server can be asked: unreadable, still unknown.
+    const named = { ...never, xact: { id: "741", system: "7693842931899834703" } };
+    assert.deepEqual((await readBookingReceipts(b.db, named, { dialect: "sqlite" })).transaction, { id: "741", status: "unreadable" });
+    await assert.rejects(revertBooking(b.db, named, { nowMs: NOW * 1000, dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "no-receipt");
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 1, "nothing changed");
+    await assert.rejects(readBookingReceipts(b.db, { ...report, appliedAtMs: report.appliedAtMs + 1 }, { dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "receipts");
+  });
+
+  it("the look says applied only while every booked row is exactly as written: changed or gone is diverged, as a revert would refuse it", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const look = () => readBookingReceipts(b.db, report, { dialect: "sqlite" });
+    const standing = await look();
+    assert.equal(standing.verdict, "applied");
+    assert.deepEqual(standing.rows.map((r) => r.now), report.rows.map(() => "as-booked"));
+    const trade = report.rows.find((r) => r.table === "trades")!, other = report.rows.find((r) => r !== trade)!;
+    b.raw.prepare("UPDATE trades SET reject_rule = 'edited by hand' WHERE id = ?").run(trade.id);
+    const changed = await look();
+    assert.equal(changed.verdict, "diverged");
+    assert.deepEqual(changed.rows.map((r) => [r.evidenceKey, r.now]), report.rows.map((r) => [r.evidenceKey, r === trade ? "changed" : "as-booked"]));
+    assert.match(changed.why, new RegExp(`1 of its ${report.rows.length} row\\(s\\) are no longer as booked \\(${trade.evidenceKey.replace(/[#$]/g, "\\$&")} changed\\)`));
+    await assert.rejects(revertBooking(b.db, report, { nowMs: (NOW + 60) * 1000, dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "cas");
+    b.raw.prepare("UPDATE trades SET reject_rule = NULL WHERE id = ?").run(trade.id);
+    assert.equal((await look()).verdict, "applied", "as booked again");
+    b.raw.prepare(`DELETE FROM ${other.table} WHERE id = ?`).run(other.id);
+    assert.deepEqual((await look()).rows.map((r) => r.now), report.rows.map((r) => (r === other ? "gone" : "as-booked")));
+    assert.equal(rows(b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE} WHERE state = 'applied'`)[0]!.n, report.rows.length, "the look changed nothing");
+  });
+
+  it("a report's transaction names an id and a server, or nothing: any other shape is not a report", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const seal = (xact: unknown) => { const { reportDigest: _d, ...body } = { ...report, xact }; return JSON.stringify({ ...body, reportDigest: digestOf(body) }); };
+    for (const ok of [{ id: "741", system: "7693842931899834703" }, { id: "18446744073709551615", system: "-1" }, { id: "5", system: null }]) {
+      assert.deepEqual(parseApplyReport(seal(ok)).xact, ok);
+      assert.equal(isServerXact(ok), true, JSON.stringify(ok));
+    }
+    for (const bad of [null, "741", {}, { id: "741" }, { id: 741, system: null }, { id: "0", system: null }, { id: "07", system: null }, { id: "741", system: 7 },
+      { id: "741", system: "x" }, { id: "741", system: null, extra: 1 }, { id: "1".repeat(21), system: null }]) {
+      assert.throws(() => parseApplyReport(seal(bad)), (e: unknown) => (e as BookingRefused).code === "report" && /xact/.test((e as Error).message), JSON.stringify(bad));
+      assert.equal(isServerXact(bad), false, JSON.stringify(bad));
+    }
+  });
+
+  it("the server's word on an apply's transaction is read by one rule, for any tool whose apply names it: no receipt is not-committed only when it aborted", async () => {
+    const every: XactStatus[] = ["aborted", "committed", "committed-after-snapshot", "in-progress", "forgotten", "other-server", "unrecorded", "unreadable"];
+    assert.deepEqual(every.map((status) => commitEvidence(false, { status })),
+      ["not-committed", "committed-no-receipt", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"]);
+    assert.deepEqual(every.map((status) => commitEvidence(true, { status })),
+      ["contradicted", "receipts", "receipts", "contradicted", "receipts", "receipts", "receipts", "receipts"]);
+    // A revert's refusal: the codes and the rule shared, the words the tool's own around the server's.
+    const said = { notCommitted: (why: string) => `never committed: ${why}`, noReceipt: (why: string) => `not proved: ${why}` };
+    for (const status of every) {
+      const e = noReceiptRefusal({ status, why: "the server's word" }, said);
+      assert.deepEqual([e instanceof BookingRefused, e.code, e.message],
+        [true, ...(status === "aborted" ? ["not-committed", "never committed: the server's word"] : ["no-receipt", "not proved: the server's word"])], status);
+    }
+    // Another tool's report: no transaction named, or null, is unrecorded; sqlite names none, and cannot be asked of one.
+    const b = await books();
+    assert.equal(await currentXact(b.db, "sqlite"), null);
+    for (const report of [{}, { xact: null }]) assert.equal((await xactStatusOf(b.db, report, "sqlite")).status, "unrecorded");
+    assert.equal((await xactStatusOf(b.db, { xact: { id: "741", system: "7693842931899834703" } }, "sqlite")).status, "unreadable");
+    // ...and its report, sealed as this one is, carries its commit's outcome the same way.
+    const { reportDigest: _d, ...body } = { format: "another.repair.apply.v1", repairId: "r-1", actions: [{ action: "insert-flow" }], reportDigest: "" };
+    const stamped = stampCommitOutcome({ ...body, reportDigest: digestOf(body) }, "unknown");
+    const { reportDigest, ...sealed } = stamped;
+    assert.deepEqual([stamped.commitOutcome, stamped.repairId, reportDigest], ["unknown", "r-1", digestOf(sealed)]);
   });
 });
 
