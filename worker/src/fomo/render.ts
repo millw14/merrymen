@@ -305,7 +305,14 @@ function freshnessLine(env: FomoEnvelope, now: number): string | null {
   return null;
 }
 
-function coverageLine(env: FomoEnvelope): string | null {
+/**
+ * The skill caveat on a leaderboard's money figures. The owner keeps it; a
+ * group does not hear it (Milla, 2026-10-07: the room has had a post about
+ * what the figures are and where they come from).
+ */
+const SKILL_CAVEAT = /not a measure of skill|not a skill measure/i;
+
+function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string | null {
   const c = env.coverage;
   const parts: string[] = [];
   if (env.status === "partial" && c.missing.length) parts.push(`Not read: ${c.missing.slice(0, 3).join(", ")}.`);
@@ -313,7 +320,8 @@ function coverageLine(env: FomoEnvelope): string | null {
   if (c.capped) parts.push("More records exist than were read, so counts are a floor.");
   // Notes that change what the answer means: limits, removed rows, transfers that are not trades, stored copies, unread parts.
   const keep = c.notes.filter((n) =>
-    /floor|filter|gap|snapshot|truncat|caps holdings|not the whole|removed|left out|unknown, not zero|not a measure|not skill|not proven|transfer|carried|could not be|not compared|not complete|reach back/i.test(n),
+    /floor|filter|gap|snapshot|truncat|caps holdings|not the whole|removed|left out|unknown, not zero|not a measure|not skill|not proven|transfer|carried|could not be|not compared|not complete|reach back/i.test(n)
+      && !(audience === "group" && SKILL_CAVEAT.test(n)),
   );
   for (const n of keep.slice(0, 3)) parts.push(n);
   return parts.length ? parts.join(" ") : null;
@@ -523,7 +531,7 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
       // trades, which stay in a direct message.
       // "P&L" and "profit" are words the group gate keeps for its own book: plain words instead.
       const scope = windowWords(d.window);
-      const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades (provider-reported, not a skill measure):`];
+      const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades:`];
       for (const r of d.traders.slice(0, GROUP_BOARD_ROWS)) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
       return out;
     }
@@ -713,7 +721,7 @@ function envelopeLines(env: FomoEnvelope, audience: Audience, now: number): stri
   if (!lines.length) lines.push(env.message ? sanitizeText(env.message, 240) : "Nothing usable came back from Fomo.");
   const f = freshnessLine(env, now);
   if (f) lines.push(f);
-  const c = coverageLine(env);
+  const c = coverageLine(env, audience);
   if (c) lines.push(c);
   return lines;
 }
@@ -744,7 +752,8 @@ function finalize(text: string, audience: Audience): string {
 export function renderEnvelope(env: FomoEnvelope, opts: RenderOptions): string {
   const lines = envelopeLines(env, opts.audience, opts.now);
   const deflected = lines.length === 1 && lines[0] === GROUP_DM_DEFLECTION;
-  const tail = deflected || env.status === "needs-clarification" ? [] : [FOMO_ATTRIBUTION];
+  // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
+  const tail = deflected || env.status === "needs-clarification" || opts.audience === "group" ? [] : [FOMO_ATTRIBUTION];
   return finalize(fit(lines, tail, opts.maxChars), opts.audience);
 }
 
@@ -765,7 +774,7 @@ export function renderAnswer(envs: readonly FomoEnvelope[], plan: FomoQuestionPl
   const anyAnswered = envs.some((e) => e.status !== "needs-clarification");
   const tail: string[] = [];
   if (plan?.analysisRequested && !plan.infoOnly) tail.push(NOT_PERMISSION_LINE);
-  if (anyAnswered) tail.push(FOMO_ATTRIBUTION);
+  if (anyAnswered && opts.audience === "owner") tail.push(FOMO_ATTRIBUTION);
   return finalize(fit(lines, tail, opts.maxChars), opts.audience);
 }
 

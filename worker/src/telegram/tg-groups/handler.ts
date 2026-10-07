@@ -87,6 +87,8 @@ import {
   isQuestionToRoom,
   isShush,
   isTradeTalk,
+  reactionOnly,
+  routeWorthy,
   selfNamesOf,
   type BotSelf,
   type DeskIntent,
@@ -126,13 +128,17 @@ import type {
   TgDeskPort,
   TgDeskThought,
   TgFomoPort,
+  TgFomoRequest,
   TgGroupFactsPort,
   TgLine,
+  TgOwnerPort,
   TgPerson,
   TgPublicFact,
   TgRoom,
+  TgTraderAbout,
 } from "./types";
-import { readSubject } from "./understand";
+import { readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
+import { readSubject, type SubjectReading } from "./understand";
 import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
 // ─── The numbers ───────────────────────────────────────────────────────────
@@ -147,6 +153,17 @@ const STALE_MS = 90 * SEC;
 /** An explicit research answer has one budget from receipt through its send. */
 const RESEARCH_REPLY_MS = 30 * SEC;
 const RESEARCH_SEND_MS = 5 * SEC;
+/** What a routing call must leave the research it picks, of the reply deadline. */
+const ROUTE_LEAVES_MS = 8 * SEC;
+/** How long a reply to its own Fomo line is read in that line's light. */
+const FOMO_THREAD_MS = 2 * 60 * MIN;
+/** The persona asking back which Fomo board or coin was meant. */
+const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|graduated|most held)\b/iu;
+/** A routing call with less time than this is not worth making. */
+const ROUTE_MIN_BOX_MS = 1_500;
+/** The allowance routing never touches: the day's (at least 20, or a tenth) and this chat's hour. */
+const ROUTE_RESERVE_DAY = 20;
+const ROUTE_RESERVE_HOUR = 4;
 /** One person's addressed lines closer together than this are one burst: only their last is answered. */
 const BURST_MS = 15 * SEC;
 /** A question to the room waits this long, so pacing can see whether anyone answered it. */
@@ -310,6 +327,8 @@ export interface TgGroupsDeps {
    * line goes on to the desk and the persona as before.
    */
   fomo?: () => TgFomoPort | null;
+  /** The owner's asks that are answered in her DM (a trader by name). Absent: the room's deflection. */
+  owner?: () => TgOwnerPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
   /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
@@ -664,6 +683,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   // claims do); losing them to a restart costs at most one extra casual line.
   /** Messages that already got their one immediate reply ("never two replies to one message"). */
   const repliedTo = new Lru<string, true>(LRU_MAX);
+  /** Its own Fomo lines (research answers, and the persona asking which one they meant), by message: when said. */
+  const fomoLines = new Lru<string, number>(LRU_MAX);
+  const markFomoLine = (chatId: number, messageId: number | undefined): void => {
+    if (isMsgId(messageId)) fomoLines.set(msgKey(chatId, messageId), clock());
+  };
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
   const messageIngressOrder = new Lru<string, number>(LRU_MAX);
@@ -1362,6 +1386,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!sent) return null;
     // A migrated chat has no message the old reply id means.
     recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    // The persona asking which Fomo board or coin was meant: the answer to it
+    // is read in its light (repliesToOwnFomo).
+    if (intent.kind === "answer" && fomoNow() !== null && /[?？]/u.test(text) && FOMO_ASK_BACK.test(text)) markFomoLine(sent.chatId, sent.messageId);
     log(`[tg-groups] said ${intent.kind}`);
     return sent;
   };
@@ -1972,6 +1999,104 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
+   * The casual group line after a slash command, or after an ask that was
+   * answered in the asker's DM (TgCommandNotice). Rate-limited here.
+   */
+  const commandNotice = async (
+    chatId: number,
+    messageId: number | undefined,
+    fromId: number,
+    what: TgCommandNotice,
+    threadId?: number,
+    // For a routed ask: re-checked inside the queued send, like every lane's.
+    extra: { stillWanted?: () => boolean; replyByMs?: number } = {},
+  ): Promise<boolean> => {
+    let said = false;
+    try {
+      if (!canTalk(chatId)) return false;
+      const now = clock();
+      // "sent it to your DMs" and "done, couldn't DM you" each answer one
+      // command that ran for someone entitled to run it: every one is said.
+      // Refusals and "dm me first" at most once per person per hour.
+      // Checked again in queue order, and counted only once one was said: a
+      // notice dropped on its way (a deadline, a newer line) leaves the hour.
+      const k = what !== "dm-sent" && what !== "done-no-dm" ? `${what}:${chatId}:${fromId}` : null;
+      const limited = (): boolean => {
+        if (k === null) return false;
+        const last = refusedAt.get(k);
+        return last !== undefined && clock() - last < REFUSE_EVERY_MS;
+      };
+      const counted = (): void => {
+        if (k !== null) refusedAt.set(k, clock());
+      };
+      if (limited()) return false;
+      // These answer a command the sender was entitled to run, so they go
+      // out in a shushed chat like the owner calling it.
+      const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
+      const reply: SpeakOpts = {
+        ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
+        ...(isMsgId(threadId) ? { threadId } : {}),
+        bornAtMs: now,
+        ownerAddressed: entitled,
+        ...(extra.stillWanted ? { stillWanted: extra.stillWanted } : {}),
+        ...(typeof extra.replyByMs === "number" ? { replyByMs: extra.replyByMs } : {}),
+      };
+      const fixedPool: readonly string[] | null =
+        what === "owner-only"
+          ? OWNER_ONLY_LINES
+          : what === "link-here"
+            ? LINK_HERE_LINES
+            : what === "dm-first"
+              ? DM_FIRST_LINES
+              : what === "done-no-dm"
+                ? DONE_NO_DM_LINES
+                : null;
+      await enqueue(
+        chatId,
+        async () => {
+          if (limited()) return;
+          if (fixedPool) {
+            // Its own small fixed pool, gated like every template.
+            const pool = fixedPool;
+            const room = store.room(chatId);
+            const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
+            const start = Math.floor(roll() * pool.length);
+            let text: string | null = null;
+            for (let i = 0; i < pool.length && text === null; i++) {
+              const cand = pool[(start + i) % pool.length] ?? "";
+              const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
+              if (v.ok) text = v.text;
+            }
+            if (!text) return;
+            const sent = await deliver({
+              chatId,
+              intent: { kind: "private-read-refuse" },
+              text,
+              ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
+              ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
+              bornAtMs: now,
+              ...(reply.replyByMs !== undefined ? { replyByMs: reply.replyByMs } : {}),
+              ...(reply.stillWanted ? { stillWanted: reply.stillWanted } : {}),
+              followUp: false,
+              ownerAddressed: entitled,
+            });
+            if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
+            said = !!sent;
+            if (said) counted();
+            return;
+          }
+          said = !!(await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply));
+          if (said) counted();
+        },
+        { force: true },
+      );
+    } catch (e) {
+      fail("notice", e);
+    }
+    return said;
+  };
+
+  /**
    * Act on pacing's decision. Books are kept only after a line or reaction
    * actually landed. Null when something landed; else why nothing did (Quiet).
    */
@@ -2080,6 +2205,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
 
     if (!reserveReply(chatId, messageId)) return "already-answered";
+    // What the persona says when nothing below takes the line (the desk's
+    // intent shadows the name in the block).
+    const persona: TgIntent = intent;
     if (dec.act === "answer" && dec.mood !== "injection" && dec.mood !== "bot-question") {
       const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
       const context = coinContext(j);
@@ -2103,14 +2231,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // coin, or no answer at all, keeps the desk's read.
       const researchable = !request && dec.mood !== "private-ask" && !isInjection(j.line.text);
       let intent = deskIntentOf(j.line.text, chatId);
+      let reading: SubjectReading | null = null;
       if (researchable && intent?.kind === "coin" && intent.loose && d.desk && coinFactsOn()) {
         stageOf(chatId, "read: coin or topic");
-        const reading = await readSubject({ model: modelNow(), gate, chatId, room: store.room(chatId), trigger: j.line, name: intent.name });
+        reading = await readSubject({ model: modelNow(), gate, chatId, room: store.room(chatId), trigger: j.line, name: intent.name });
         if (reading === "topic") {
           log("[tg-groups] an opinion ask read as a topic, not a coin");
           intent = null;
         }
       }
+      // A REPLY TO ITS OWN FOMO LINE ("which coin?" → "pons", "top traders
+      // or trending?" → "trending"): what it means is in the line it answers,
+      // so the router reads it before the desk takes "$pons" for a chart or
+      // "trending" for the market, however short it is.
+      const routable = researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic";
+      const fomoThread = routable && repliesToOwnFomo(j);
+      if (fomoThread && (await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
       const deskAsk = researchable ? deskAskFor(j, context, coinQuestion, intent) : null;
@@ -2147,8 +2283,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         })());
         return null;
       }
+      // NO RULE KNEW THIS LINE. Before the persona answers it, the group's
+      // model picks once from what it can do (route.ts), and code checks the
+      // pick. Not for a line read as an ordinary topic or one with nothing
+      // the router serves, and only from the first half of the allowance.
+      if (routable && !fomoThread && routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId))) {
+        const routed = await routeLine(chatId, j, replyOpts, persona);
+        if (routed === "taken") return null;
+      }
     }
-    const sent = await speak(chatId, intent, replyOpts);
+    const sent = await speak(chatId, persona, replyOpts);
     if (!sent) {
       releaseReply(chatId, messageId);
       return whyLost();
@@ -2354,43 +2498,55 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * WHAT OF A RESEARCH ANSWER A ROOM MAY HEAR: each line through the group
    * line gate on its own, as a `research` line (no @handles, addresses,
    * links, cashtags, advice, claims, private state or plumbing; the published
-   * figures a code-built board carries, a leaderboard's P&L or a coin's
-   * market cap, may stand beside its source), refused lines DROPPED, never
-   * repaired. The port's source line ("Source: …") is the attribution: when
-   * it is refused nothing is sent, because unattributed research is not said
-   * in a room. Null when nothing sayable is left.
+   * figures a code-built board carries, a leaderboard's money made or a
+   * coin's market cap, may stand), refused lines DROPPED, never repaired, and
+   * at most FOMO_MAX_LINES lines and FOMO_MAX_CHARS characters. A group answer
+   * carries no source line: the room has had its post about where the data
+   * comes from (Milla, 2026-10-07). Null when nothing sayable is left.
    */
-  const fomoSayable = (text: string): string | null => {
+  const fomoSayable = (text: string, tail?: string): string | null => {
     const agentName = selfNow()?.name ?? "";
     const lines = text.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-    const sourceAt = lines.findIndex((l) => /^source:/iu.test(l));
-    let source: string | null = null;
     const kept: string[] = [];
     let refused = 0;
-    for (const [i, l] of lines.entries()) {
+    for (const l of lines) {
       const v = admitTgLine(l, { agentName, kind: "research", recentOwn: [] });
       if (!v.ok) {
         refused += 1;
         continue;
       }
-      if (i === sourceAt) source = v.text;
-      else kept.push(v.text);
+      kept.push(v.text);
     }
     if (refused) log(`[tg-groups] research lines dropped by the gate (${refused})`);
-    if (sourceAt >= 0 && source === null) return null;
+    // A tail line (the owner's "sent the trade moves … to your DM") keeps the
+    // last slot; refused by the gate, it is dropped and the answer still goes.
+    const last = tail !== undefined ? admitTgLine(tail, { agentName, kind: "research", recentOwn: [] }) : null;
+    const end = last?.ok ? last.text : null;
     const out: string[] = [];
-    let used = source ? source.length + 1 : 0;
+    let used = end ? end.length + 1 : 0;
     for (const l of kept) {
-      if (out.length >= FOMO_MAX_LINES - (source ? 1 : 0) || used + l.length + 1 > FOMO_MAX_CHARS) break;
+      if (out.length >= FOMO_MAX_LINES - (end ? 1 : 0) || used + l.length + 1 > FOMO_MAX_CHARS) break;
       out.push(l);
       used += l.length + 1;
     }
     if (!out.length) return null;
-    return [...out, ...(source ? [source] : [])].join("\n");
+    return [...out, ...(end ? [end] : [])].join("\n");
+  };
+
+  /** How often the owner's moves go out per room and kind of answer. */
+  const MOVES_EVERY_MS = 30 * MIN;
+  const movesAt = new Map<string, number>();
+  const movesDue = (chatId: number, kind: string): boolean => {
+    const at = movesAt.get(`${chatId}:${kind}`);
+    return at === undefined || clock() - at >= MOVES_EVERY_MS;
+  };
+  const movesSaid = (chatId: number, kind: string): void => {
+    if (movesAt.size > 512) movesAt.delete(movesAt.keys().next().value!);
+    movesAt.set(`${chatId}:${kind}`, clock());
   };
 
   /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
-  const readFomo = async (port: TgFomoPort, q: { text: string; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+  const readFomo = async (port: TgFomoPort, q: { text: string; request?: TgFomoRequest; owner?: boolean; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
     if (ms <= 0) return "timeout";
     const ask = { ...q, timeoutMs: ms };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2415,7 +2571,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * whether it is still wanted are all checked again right before the send.
    * "not-research": the research did not take it, and the caller goes on.
    */
-  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts): Promise<"sent" | "not-research" | Quiet> => {
+  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest): Promise<"sent" | "not-research" | Quiet> => {
     const port = fomoNow();
     if (!port) return "not-research";
     const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
@@ -2442,22 +2598,38 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       });
       if (!sent) return lost;
       recordOwn(sent.chatId, sent.messageId, text.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined, undefined, sent.chatId === chatId ? o.threadId : undefined);
+      markFomoLine(sent.chatId, sent.messageId);
       log("[tg-groups] said research");
       return "sent";
     };
-    const slot = fomoRoom(chatId);
-    if (!slot) return send(FOMO_BUSY);
+    // A trader request is deflected by the port before anything is planned
+    // or spent, so it takes none of the room's research answers.
+    const free = request?.kind === "trader";
+    const slot = free ? null : fomoRoom(chatId);
+    if (!free && !slot) return send(FOMO_BUSY);
+    const refund = (): void => {
+      if (slot) fomoRefund(slot);
+    };
     stageOf(chatId, "research: ask");
     // The bot's own names go with the line: an addressed line almost always
     // carries "@thisbot", which the research must not read as a trader.
     const selfNames = selfNamesOf(selfNow());
-    const r = await readFomo(port, { text: j.line.text, chatId, ...(j.threadId !== undefined ? { threadId: j.threadId } : {}), ...(selfNames.length ? { selfNames } : {}) }, replyByMs - RESEARCH_SEND_MS - clock());
+    // The owner is the trusted sender id, never a line sent through a chat (j.isOwner excludes `via`).
+    const owner = j.isOwner === true;
+    const r = await readFomo(port, {
+      text: j.line.text,
+      ...(request ? { request } : {}),
+      ...(owner ? { owner } : {}),
+      chatId,
+      ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
+      ...(selfNames.length ? { selfNames } : {}),
+    }, replyByMs - RESEARCH_SEND_MS - clock());
     if (r === null) {
-      fomoRefund(slot);
+      refund();
       return "not-research";
     }
     if (r === "failed") {
-      fomoRefund(slot);
+      refund();
       return "not-research";
     }
     if (r === "timeout") {
@@ -2465,13 +2637,194 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       return send(FOMO_LATE);
     }
     if (typeof r !== "object" || typeof r.text !== "string") {
-      fomoRefund(slot);
+      refund();
       return "not-research";
     }
     // A deflection is still an answer about research: a follow-up here goes back to it.
     rememberFomo(chatId, j.threadId);
-    const text = fomoSayable(r.text) ?? FOMO_UNSAYABLE;
+    // Deflected before anything was looked up: it cost nothing, so it takes nothing.
+    if (r.deflect && r.free === true) refund();
+    // HER PLAIN ASK ABOUT ONE TRADER ("who is trader unipcs on fomo?"): the
+    // room is deflected, and her DM gets the answer instead.
+    if (owner && r.deflect && r.trader && !request) {
+      const where = await ownerTraderAsk(chatId, j, o, r.trader.handle, r.trader.about);
+      if (where !== "room") {
+        refund();
+        return where === "dm" ? "sent" : "not-wanted";
+      }
+    }
+    // HER MOVES: the commands go to her DM first, and the room hears that they
+    // went only when the DM landed (never a claim that is not true), at most
+    // once per room and kind in MOVES_EVERY_MS.
+    let movesLine: string | undefined;
+    if (owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(r.text) !== null) {
+      stageOf(chatId, "research: owner moves");
+      if (await dmOwner(r.moves.dm)) {
+        movesSaid(chatId, r.moves.kind);
+        movesLine = r.moves.room;
+        log("[tg-groups] owner moves sent to the DM");
+      }
+    }
+    const text = fomoSayable(r.text, movesLine) ?? FOMO_UNSAYABLE;
     return send(text);
+  };
+
+  // ── what a line wants, when no rule knew (route.ts) ──
+
+  const routeBreaker = new RouteBreaker(clock);
+  /** MERRYMEN_TG_GROUPS_ROUTER=0 turns it off; it needs a model and something to route to. */
+  const routerOn = (): boolean =>
+    (env().MERRYMEN_TG_GROUPS_ROUTER ?? "").trim() !== "0" && modelNow() !== null && (fomoNow() !== null || deskNow() !== null);
+  const ownerNow = (): TgOwnerPort | null => {
+    try {
+      return d.owner?.() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** The text of the line this one replies to, when Telegram quoted it. */
+  const repliedText = (j: LineJob): string | null => {
+    const t = j.msg.replyTo?.text;
+    return typeof t === "string" && t.trim() ? t.slice(0, 400) : null;
+  };
+  /**
+   * A reply to one of its own lines about Fomo: a research answer, or the
+   * persona asking which board or coin they meant. What "pons" or
+   * "trending" means there is in the line it answers.
+   */
+  const repliesToOwnFomo = (j: LineJob): boolean => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return false;
+    // By message, never by its words: a desk read that says "trending up"
+    // keeps its own follow-ups, bound to the coin it read.
+    const at = fomoLines.get(msgKey(j.msg.chatId, q.messageId));
+    if (at === undefined || clock() - at > FOMO_THREAD_MS) return false;
+    return !reactionOnly(j.line.text, selfNamesOf(me));
+  };
+  const routeLabel = (r: TgRoute): string => (r.action === "fomo" ? `fomo:${r.request.kind}` : r.action);
+  /** "not-wanted", told apart as act's whyLost does. */
+  const whyGone = (j: LineJob, why: Quiet): Quiet =>
+    why !== "not-wanted" ? why : forgotten(j) ? "forgotten" : j.addressed !== null && burstPassed(j.msg.chatId, j) ? "burst" : "not-wanted";
+
+  /**
+   * Ask what the line wants and run it. "taken": a lane has it (detached, and
+   * it answers or says why not); "persona": the persona answers it, as before.
+   */
+  const routeLine = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent): Promise<"taken" | "persona"> => {
+    try {
+      if (!routerOn() || routeBreaker.open()) return "persona";
+      // Routing only ever spends the first half of the day and of this
+      // chat's hour: the rest is kept for the lines that must be written.
+      const reserve = {
+        day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 2)),
+        hour: Math.max(ROUTE_RESERVE_HOUR, Math.ceil(gate.hourAllowance / 2)),
+      };
+      const box = Math.min(ROUTE_TIMEOUT_MS, j.bornAtMs + RESEARCH_REPLY_MS - RESEARCH_SEND_MS - ROUTE_LEAVES_MS - clock());
+      if (box < ROUTE_MIN_BOX_MS) return "persona";
+      const selfNames = selfNamesOf(selfNow());
+      stageOf(chatId, "route");
+      const { route, why } = await readRoute({
+        model: modelNow(),
+        gate,
+        chatId,
+        room: store.room(chatId),
+        trigger: j.line,
+        timeoutMs: box,
+        reserve,
+        ctx: { line: j.line.text, replied: repliedText(j), selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
+      });
+      routeBreaker.note(why);
+      // Counts and kinds only: never the line, a name or a coin.
+      log(`[tg-groups] route ${route ? routeLabel(route) : why}`);
+      if (!route || route.action === "chat" || route.action === "fomo-tail") return "persona";
+      track(runRoute(chatId, j, o, persona, route));
+      return "taken";
+    } catch (e) {
+      fail("route", e);
+      return "persona";
+    }
+  };
+
+  /**
+   * HER OWN ASK ABOUT ONE TRADER, ANSWERED IN HER DM: a trader is never
+   * discussed in the room (rule 3), so the room hears only where it went.
+   * "dm": her DM has it, or was asked to be opened, and the room was told (or
+   * rightly left alone); "gone": the line stopped being wanted first;
+   * "room": not hers, or her DM could not take it, and the caller says the
+   * room's deflection.
+   */
+  const ownerTraderAsk = async (chatId: number, j: LineJob, o: SpeakOpts, handle: string, about: TgTraderAbout): Promise<"dm" | "gone" | "room"> => {
+    const owner = j.isOwner ? ownerNow() : null;
+    if (!owner) return "room";
+    if (o.stillWanted && !o.stillWanted()) return "gone";
+    stageOf(chatId, "owner research");
+    const outcome = await owner.research({ handle, fromId: j.line.fromId, about, ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}) });
+    if (outcome === "gone") return "gone";
+    if (outcome !== "sent" && outcome !== "dm-first") return "room";
+    const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, {
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      replyByMs: j.bornAtMs + RESEARCH_REPLY_MS,
+    });
+    // "dm me first" is said once an hour; the DM itself is the answer to "sent".
+    if (!said && j.addressed !== null) log(`[tg-groups] owner research ${outcome === "sent" ? "sent, room line not said" : "dm-first, room line not said (told this hour, or dropped)"}`);
+    return "dm";
+  };
+
+  /** One routed line, off the chat queue. Whatever happens, the line is answered or its slot released. */
+  const runRoute = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, route: TgRoute): Promise<void> => {
+    const messageId = j.line.messageId;
+    let lost: Quiet = "send-failed";
+    const opts: SpeakOpts = { ...o, miss: (why) => { lost = why; o.miss?.(why); } };
+    const done = (ok: boolean, why?: Quiet): void => {
+      if (ok) return;
+      releaseReply(chatId, messageId);
+      if (j.addressed !== null) quietLine(whyGone(j, why ?? lost));
+    };
+    /** The persona's answer, exactly as without the router. */
+    const asBefore = async (): Promise<void> => {
+      const sent = await speak(chatId, persona, opts);
+      if (sent) noteAnswered(sent.chatId, j, false);
+      done(!!sent);
+    };
+    try {
+      switch (route.action) {
+        case "fomo": {
+          const r = await fomoAnswer(chatId, j, opts, route.request);
+          if (r === "not-research") return await asBefore();
+          return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "fomo-trader": {
+          const where = await ownerTraderAsk(chatId, j, opts, route.handle, route.about);
+          if (where === "dm") return;
+          if (where === "gone") return done(false, "not-wanted");
+          const r = await fomoAnswer(chatId, j, opts, { kind: "trader" });
+          if (r === "not-research") return await asBefore();
+          return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "market":
+        case "coin": {
+          if (!deskNow() || (route.action === "coin" && !coinFactsOn())) return await asBefore();
+          const context = route.action === "coin" ? coinContext(j) : null;
+          const ask: TgDeskAsk =
+            route.action === "market"
+              ? { kind: "market" }
+              : context && context.memo?.name && context.memo.name.toLowerCase() === route.name.toLowerCase()
+                ? { kind: "coin", address: context.address }
+                : { kind: "coin", query: route.name };
+          const timed: SpeakOpts = { ...opts, replyByMs: j.bornAtMs + RESEARCH_REPLY_MS, accountAnswer: accountResearchAnswer(j.line, j.seenAtMs) };
+          const deskOpts = ask.kind === "coin" ? { ...timed, stillWanted: () => (!o.stillWanted || o.stillWanted()) && coinFactsOn() } : timed;
+          const note = context && "address" in ask && ask.address === context.address ? deskNoteFor(context.memo) : undefined;
+          const sent = await deskAnswer(chatId, j, ask, deskOpts, note, deskRoom(chatId));
+          return done(!!sent);
+        }
+        default:
+          return await asBefore();
+      }
+    } catch (e) {
+      fail("routed answer", e);
+      done(false);
+    }
   };
 
   /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
@@ -3693,73 +4046,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     },
 
     async commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> {
-      try {
-        if (!canTalk(chatId)) return;
-        const now = clock();
-        // "sent it to your DMs" and "done, couldn't DM you" each answer one
-        // command that ran for someone entitled to run it: every one is said.
-        // Refusals and "dm me first" at most once per person per hour.
-        if (what !== "dm-sent" && what !== "done-no-dm") {
-          const k = `${what}:${chatId}:${fromId}`;
-          const last = refusedAt.get(k);
-          if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
-          refusedAt.set(k, now);
-        }
-        // These answer a command the sender was entitled to run, so they go
-        // out in a shushed chat like the owner calling it.
-        const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
-        const reply: SpeakOpts = {
-          ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
-          ...(isMsgId(threadId) ? { threadId } : {}),
-          bornAtMs: now,
-          ownerAddressed: entitled,
-        };
-        const fixedPool: readonly string[] | null =
-          what === "owner-only"
-            ? OWNER_ONLY_LINES
-            : what === "link-here"
-              ? LINK_HERE_LINES
-              : what === "dm-first"
-                ? DM_FIRST_LINES
-                : what === "done-no-dm"
-                  ? DONE_NO_DM_LINES
-                  : null;
-        await enqueue(
-          chatId,
-          async () => {
-            if (fixedPool) {
-              // Its own small fixed pool, gated like every template.
-              const pool = fixedPool;
-              const room = store.room(chatId);
-              const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
-              const start = Math.floor(roll() * pool.length);
-              let text: string | null = null;
-              for (let i = 0; i < pool.length && text === null; i++) {
-                const cand = pool[(start + i) % pool.length] ?? "";
-                const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
-                if (v.ok) text = v.text;
-              }
-              if (!text) return;
-              const sent = await deliver({
-                chatId,
-                intent: { kind: "private-read-refuse" },
-                text,
-                ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
-                ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
-                bornAtMs: now,
-                followUp: false,
-                ownerAddressed: entitled,
-              });
-              if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
-              return;
-            }
-            await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply);
-          },
-          { force: true },
-        );
-      } catch (e) {
-        fail("notice", e);
-      }
+      await commandNotice(chatId, messageId, fromId, what, threadId);
     },
 
     async codeLeaked(chatId: number): Promise<void> {

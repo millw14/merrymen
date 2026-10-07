@@ -314,6 +314,8 @@ const FOMO_PLATFORM: readonly RegExp[] = [
   /\bfomo (?:app|traders?|users?|people|leaderboards?|feed|data|api|status|health|research|rankings?|trending|theses|community|platform|family|accounts?|profiles?|handles?|tokens?|coins?|holders?|watch ?list|alerts?|activity|top|integration|connection|stream)\b/,
   /\bfomo's (?:leaderboard|top|traders?|data|feed|trending|theses|users?|rankings?|community|app)\b/,
   /\bfomo\.family\b|\bfomoapi\b/,
+  // "who's on top fomo today", "top of fomo".
+  /\btop (?:of |on )?(?:the )?fomo\b/,
   /\b(?:is|does) (?:the )?fomo(?: \S+)? (?:still )?(?:working|work|up|down|ok|okay|alive|connected|live|running|broken|healthy|online|offline)\b/,
   // Fomo as the one speaking: "what is fomo saying about PEPE", "fomo thinks".
   /\b(?:is|are|does) (?:the )?fomo (?:crowd |community |people )?(?:saying|say|think|thinking)\b|\bfomo (?:says|thinks)\b/,

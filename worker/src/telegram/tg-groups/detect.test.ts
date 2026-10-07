@@ -21,6 +21,7 @@ import {
   addressedSmallTalk,
   asksAboutCoin,
   asksHowItIs,
+  deskNameOk,
   extractCaHits,
   extractCas,
   extractCashtags,
@@ -41,6 +42,8 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  reactionOnly,
+  routeWorthy,
   selfNamesOf,
   type BotSelf,
 } from "./detect";
@@ -964,12 +967,16 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     ["how does fomo work", "platform"],
     ["can you use fomo?", "platform"],
     ["what is fomo saying about pepe?", "platform"],
+    // Missed on 2026-10-07 18:58, before the model ever saw them.
+    ["shogun who's on top fomo today?", "platform"],
+    ["i'm sorry who's the top trader on fomo today", "platform"],
   ];
   for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
   const no = [
     "i have fomo lol", "pure fomo in on that one", "fomo into it?", "don't fomo", "pine fomo'd so hard", "pine thoughts on pepe?",
     "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
     "is fomo on robinhood", "i bought it with fomo lol",
+    "that's what fomo does lol", "i have fomo who cares", "pure fomo who's buying this", "top fomo moment lol",
   ];
   for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
 });
@@ -979,4 +986,46 @@ describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
   const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
   for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
+});
+
+describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)", () => {
+  it("a name: two characters or more, not a stop word, not the bot, not a number", () => {
+    assert.equal(deskNameOk("CashCat"), "cashcat");
+    assert.equal(deskNameOk("$pons"), "pons");
+    assert.equal(deskNameOk("market"), null);
+    assert.equal(deskNameOk("it"), null);
+    assert.equal(deskNameOk("x"), null);
+    assert.equal(deskNameOk("420"), null);
+    assert.equal(deskNameOk("Shogun", ["shogun"]), null);
+    assert.equal(deskNameOk("@merrymanme_bot", ["@merrymanme_bot"]), null);
+    assert.equal(deskNameOk(42), null);
+  });
+
+  it("worth one routing call: a question mark or three words, and a word from what the router serves", () => {
+    assert.equal(routeWorthy("do you know unipcs on fomo"), true);
+    assert.equal(routeWorthy("top?"), true);
+    assert.equal(routeWorthy("i'm sorry, who's been winning the most lately"), true);
+    assert.equal(routeWorthy("what are the whales dumping lately"), true);
+    assert.equal(routeWorthy("is $pons any good"), true);
+    assert.equal(routeWorthy("how was your weekend?"), false, "banter never pays for a routing call");
+    assert.equal(routeWorthy("tell me a joke please"), false);
+    assert.equal(routeWorthy("what do you think about life"), false);
+    assert.equal(routeWorthy("anyone know what unipcs is up to"), true);
+    assert.equal(routeWorthy("what are people saying about pons"), true);
+    assert.equal(routeWorthy("why is everyone into pons"), true);
+    assert.equal(routeWorthy("what's up with pons lately", [], ["pons"]), true, "a coin this chat knows");
+    assert.equal(routeWorthy("what's new with pons lately"), false, "an unknown name with no cue");
+    assert.equal(routeWorthy("@shogun_bot ok bro", ["shogun_bot"]), false);
+    assert.equal(routeWorthy("lol"), false);
+    assert.equal(routeWorthy("🔥🔥🔥"), false);
+    assert.equal(routeWorthy(""), false);
+    assert.equal(routeWorthy(null), false);
+  });
+});
+
+describe("reactionOnly", () => {
+  it("laughter, acks and emoji are reactions; a short answer is not", () => {
+    for (const t of ["lol", "LMAO", "hahaha", "facts", "🔥", "😂😂", "lol ok", "@pinebot lol"]) assert.equal(reactionOnly(t, ["pinebot"]), true, t);
+    for (const t of ["pons", "$pons", "trending", "yes", "top traders", "the second one"]) assert.equal(reactionOnly(t), false, t);
+  });
 });

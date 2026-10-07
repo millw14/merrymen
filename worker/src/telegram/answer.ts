@@ -317,6 +317,11 @@ export interface FomoDmInput {
    * from the replied-to message first, gets everything else.
    */
   repliesToOther?: boolean;
+  /**
+   * Reads only, even for the owner (fomo/chat.ts AnswerFomoInput.readOnly):
+   * an answer made on her behalf from somewhere other than her own DM.
+   */
+  readOnly?: boolean;
   /** Test seam: the whole budget. */
   deadlineMs?: number;
   /** Test seam: the one-shot model call (llm.ts llmText). */
@@ -470,6 +475,7 @@ export async function answerFomoDm(i: FomoDmInput): Promise<FomoDmAnswer> {
         maxChars: FOMO_DM_MAX_CHARS,
         selfNames,
         ...(i.repliesToOther === true ? { ignoreMemory: true } : {}),
+        ...(i.readOnly === true ? { readOnly: true } : {}),
         ...(compose ? { compose } : {}),
       }),
       remaining(),

@@ -25,6 +25,7 @@ import {
   TG_GROUPS_GROQ_BASE_URL,
   TG_GROUPS_GROQ_DEFAULT_MODEL,
   TgModelGate,
+  callChoice,
   callText,
   describeTgGroupsModel,
   resolveTgGroupsModel,
@@ -606,5 +607,31 @@ describe("callText", () => {
   it("throws what the provider said, for the gate to classify", async () => {
     globalThis.fetch = (async () => ({ ok: false, status: 429, text: async () => '{"error":{"code":"rate_limit_exceeded","message":"slow"}}' })) as never;
     await assert.rejects(callText(m, "sys", "go", 900), /429/);
+  });
+});
+
+describe("callChoice", () => {
+  const realFetch = globalThis.fetch;
+  const m: TgModel = { creds: { provider: "groq", transport: "openai", baseUrl: "https://llm.test/v1", apiKey: "k", model: "fake", vision: false }, label: "groq/fake", source: "dedicated" };
+  const spec = { name: "route", description: "pick one", schema: { type: "object", properties: { action: { type: "string", enum: ["a", "b"] } }, required: ["action"], additionalProperties: false } };
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("forces the one tool, with the floor under its budget, and hands back the arguments for code to judge", async () => {
+    let body: { max_tokens?: number; tools?: Array<{ function: { name: string } }>; tool_choice?: { function?: { name: string } } } = {};
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      body = JSON.parse(init.body);
+      return { ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "route", arguments: '{"action":"b"}' } }] } }] }) };
+    }) as never;
+    assert.deepEqual(await callChoice(m, "sys", "go", spec, 40), { action: "b" });
+    assert.ok((body.max_tokens ?? 0) >= 600);
+    assert.equal(body.tools?.[0]?.function.name, "route");
+    assert.equal(body.tool_choice?.function?.name, "route");
+  });
+
+  it("an answer in words instead of the tool is no choice at all", async () => {
+    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "i pick b" } }] }) })) as never;
+    assert.deepEqual(await callChoice(m, "sys", "go", spec, 600), {});
   });
 });

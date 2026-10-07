@@ -33,7 +33,7 @@
  * in code here. See types.ts.
  */
 import { describeLlmFailure, isLlmProviderFailure } from "../../llm-failure";
-import { llmText, resolveLlm, type LlmCreds } from "../../llm";
+import { llmText, llmToolCall, resolveLlm, type LlmCreds, type ToolSpec } from "../../llm";
 import type { ResolvedConfig } from "../../settings";
 import { stripThinkingBlock } from "../interpreter";
 import { utcDay, utcHour, type TgGroupsStore } from "./store";
@@ -265,6 +265,19 @@ function classify(e: unknown): Failure {
   return { kind, pause: null };
 }
 
+/** Calls a caller leaves untouched: of the day's allowance, and of this chat's hour. */
+export interface TgModelReserve {
+  day: number;
+  hour: number;
+}
+
+export interface TgModelRunOptions {
+  /** Refuse (at no cost) unless this much allowance is left after the call. */
+  reserve?: TgModelReserve;
+  /** Refuse (at no cost) unless at least this long is left of the box once a slot is free. */
+  minCallMs?: number;
+}
+
 export interface TgModelGateOptions {
   /** Calls per agent per UTC day (`tgGroupsPerDay`). 0 disables the model. */
   perDay: number;
@@ -317,19 +330,58 @@ export class TgModelGate {
   }
 
   /**
+   * Could a call that is only nice to have run now and still leave `reserve`
+   * of the day's and this chat's hour's allowance for the lines that must be
+   * written? A read-only look, like `available`; `run` with the same
+   * reserve enforces it where the allowance is taken. The router uses both:
+   * it gives way first.
+   */
+  headroom(chatId: number, reserve: TgModelReserve): boolean {
+    try {
+      return this.available(chatId) && this.leaves(chatId, this.now(), reserve);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The day's allowance: what a caller sizes a reserve from. */
+  get dailyAllowance(): number {
+    return this.perDay;
+  }
+
+  /** A chat's hourly allowance: what a caller sizes a reserve from. */
+  get hourAllowance(): number {
+    return this.perChatHour;
+  }
+
+  /** Would one more call still leave `reserve` of the day and of this chat's hour? */
+  private leaves(chatId: number, now: number, reserve: TgModelReserve | undefined): boolean {
+    const r = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+    const llm = this.store.state.llm;
+    const usedToday = llm.day === utcDay(now) ? llm.used : 0;
+    const h = this.store.room(chatId)?.llmHour;
+    const usedHour = h && h.hour === utcHour(now) ? h.n : 0;
+    return this.perDay - usedToday > r(reserve?.day) && this.perChatHour - usedHour > r(reserve?.hour);
+  }
+
+  /**
    * Run one model call for `chatId`, or answer null. The allowance is taken
    * only once a slot is free — a call dropped while waiting costs nothing —
    * and the time box covers the wait as well as the call: a line that took
    * twenty seconds to start is as late as one that took twenty to write.
    */
-  async run<T>(chatId: number, fn: () => Promise<T>, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<T | null> {
+  async run<T>(chatId: number, fn: () => Promise<T>, timeoutMs: number = DEFAULT_TIMEOUT_MS, opts: TgModelRunOptions = {}): Promise<T | null> {
     try {
       const box = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
       const started = Date.now();
       const now = this.now();
       if (this.paused(now) || !this.dayHasRoom(now) || !this.roomHasRoom(chatId, now)) return null;
       if (this.waiters.length >= MAX_WAITING) return null;
-      if (!(await this.acquire(box))) return null;
+      // A caller that needs time for the call itself waits for a slot only
+      // as long as one could still be used.
+      const minCall = typeof opts?.minCallMs === "number" && Number.isFinite(opts.minCallMs) && opts.minCallMs > 0 ? opts.minCallMs : 0;
+      if (box - minCall <= 0) return null;
+      if (!(await this.acquire(box - minCall))) return null;
 
       let handedOff = false;
       try {
@@ -339,7 +391,12 @@ export class TgModelGate {
         // A slot that came free at the very end of the box is not worth a
         // call: it would be abandoned at once and still cost the allowance.
         const remaining = box - (Date.now() - started);
-        if (remaining < Math.min(MIN_CALL_MS, box / 4)) return null;
+        const floor = typeof opts?.minCallMs === "number" && Number.isFinite(opts.minCallMs) && opts.minCallMs > 0 ? opts.minCallMs : Math.min(MIN_CALL_MS, box / 4);
+        if (remaining < floor) return null;
+        // A reserve is checked where the allowance is taken, with nothing
+        // awaited in between: calls that all looked ahead at once cannot
+        // spend it between them.
+        if (opts?.reserve && !this.leaves(chatId, at, opts.reserve)) return null;
         if (!this.store.takeLlm(this.perDay)) return null;
         if (!this.store.takeRoomLlm(chatId, this.perChatHour)) return null;
 
@@ -485,4 +542,30 @@ export async function callText(m: TgModel, system: string, prompt: string, maxTo
   const budget = Math.max(MIN_TOKENS, typeof maxTokens === "number" && Number.isFinite(maxTokens) ? Math.floor(maxTokens) : 0);
   const out = await llmText(m.creds, { system, prompt, maxTokens: budget });
   return stripThinkingBlock(out);
+}
+
+/**
+ * A closed choice the model must make by calling one tool: the tool's JSON
+ * Schema is the menu. Re-exported here so the rest of tg-groups describes a
+ * choice without reaching the model client (one door: boundary.test.ts).
+ */
+export interface TgChoiceSpec {
+  name: string;
+  description: string;
+  /** JSON Schema of the arguments. Keep `required` minimal: some providers validate it server-side. */
+  schema: Record<string, unknown>;
+}
+
+/**
+ * ONE FORCED CHOICE. The model answers by calling `spec` with arguments,
+ * which come back as an object for code to validate; nothing it writes is
+ * sent anywhere. {} when it answered in words instead. Throws what the
+ * client throws (a malformed reply included); run it inside
+ * `TgModelGate.run`, which classifies and swallows.
+ */
+export async function callChoice(m: TgModel, system: string, prompt: string, spec: TgChoiceSpec, maxTokens: number): Promise<Record<string, unknown>> {
+  const budget = Math.max(MIN_TOKENS, typeof maxTokens === "number" && Number.isFinite(maxTokens) ? Math.floor(maxTokens) : 0);
+  const tool: ToolSpec = { name: spec.name, description: spec.description, schema: spec.schema };
+  const out = await llmToolCall(m.creds, { system, messages: [{ role: "user", content: prompt }], tool, maxTokens: budget });
+  return out && typeof out === "object" && !Array.isArray(out) ? out : {};
 }

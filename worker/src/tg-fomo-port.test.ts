@@ -40,14 +40,18 @@ import { createTgGroups, type TgGroups } from "./telegram/tg-groups/handler";
 import { __resetMemoryPassThrottleForTest } from "./telegram/tg-groups/memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
 import type { CoinLook, NominateResult, TgCoinsPort, TrencherReadiness } from "./telegram/tg-groups/types";
+import { classifyFomoQuestion } from "./fomo/intent";
+import { isMutationTool } from "./fomo/tools";
 import {
   createTgFomoPort,
   groupWords,
+  ownerMoves,
+  requestText,
   tgGroupConversationKey,
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
-  TG_FOMO_SOURCE,
   TG_FOMO_UNAVAILABLE,
+  traderAsked,
 } from "./tg-fomo-port";
 
 type Rec = Record<string, unknown>;
@@ -159,7 +163,7 @@ describe("createTgFomoPort", () => {
     assert.deepEqual([...new Set(s.tenants)], [TENANT], "the tenant is the broker's, never the text's");
     for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re);
     assert.match(a.text, /3 theses/);
-    assert.ok(a.text.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, "a group answer carries no source line (Milla, 2026-10-07)");
     assert.ok(!a.text.includes(FOMO_ATTRIBUTION));
   });
 
@@ -187,11 +191,49 @@ describe("createTgFomoPort", () => {
       assert.ok(a && !a.deflect, q);
       const lines = a.text.split("\n").filter(Boolean);
       const admitted = lines.filter((l) => admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
-      // The source line and the answer-first line are always sayable; money lines may be dropped by the gate.
-      assert.ok(admitted.includes(TG_FOMO_SOURCE), `${q}: attributed in gate-safe words`);
-      assert.ok(admitted.length >= 2, `${q}: something to say besides the source (${a.text})`);
+      // The answer-first line is always sayable; a long coverage line may be dropped by the gate.
+      assert.ok(admitted.includes(lines[0]!), `${q}: the answer is sayable (${a.text})`);
+      assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, q);
       for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re, q);
     }
+  });
+
+  it("the owner's trader question names the trader for her DM; nobody else's does", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const asks: Array<[string, { handle: string; about: string }]> = [
+      ["who is trader unipcs on fomo?", { handle: "unipcs", about: "profile" }],
+      ["what is @CryptoKaleo holding on fomo?", { handle: "CryptoKaleo", about: "holdings" }],
+      ["what has @frankdegods bought on fomo this week?", { handle: "frankdegods", about: "trades" }],
+    ];
+    for (const [q, trader] of asks) {
+      assert.deepEqual(await port.ask({ text: q, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, trader, free: true }, q);
+      assert.deepEqual(await port.ask({ text: q, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true }, `${q} (not the owner)`);
+    }
+    // Her own state, a watched-cohort board, a request: deflected with no trader.
+    for (const q of ["who's the top of our watched traders on fomo today", "what are you researching on fomo?"]) {
+      const a = await port.ask({ text: q, chatId: GROUP, owner: true });
+      assert.ok(a?.deflect && !("trader" in a), q);
+    }
+    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
+    assert.equal(s.calls.length, 0, "nothing looked up for any of them");
+  });
+
+  it("the fixed questions her DM is asked plan the read she asked for, and only reads", () => {
+    const plan = (q: string) => classifyFomoQuestion(q, { memory: null, now: NOW, selfNames: [] });
+    const want: Array<[string, string, "profile" | "holdings" | "trades"]> = [
+      ["who is trader unipcs on fomo?", "fomo_get_trader_context", "profile"],
+      ["what is trader unipcs holding on fomo?", "fomo_get_trader_context", "holdings"],
+      ["what has trader unipcs been trading on fomo this week?", "fomo_get_trader_activity", "trades"],
+    ];
+    for (const [q, tool, about] of want) {
+      const p = plan(q);
+      assert.deepEqual(p?.toolCalls.map((c) => c.tool), [tool], q);
+      assert.ok(!p!.toolCalls.some((c) => isMutationTool(c.tool)), q);
+      assert.deepEqual(traderAsked(p), { handle: "unipcs", about }, q);
+    }
+    assert.equal(traderAsked(plan("what are the theses on $PONS on fomo?")), null);
+    assert.equal(traderAsked(null), null);
   });
 
   it("a trader question is deflected before anything is looked up", async () => {
@@ -199,7 +241,7 @@ describe("createTgFomoPort", () => {
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
     for (const q of ["what is @CryptoKaleo holding on fomo?", "what has @frankdegods bought on fomo this week?", "who's the top of our watched traders on fomo today"]) {
       const a = await port.ask({ text: q, chatId: GROUP });
-      assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true }, q);
+      assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true, free: true }, q);
     }
     assert.equal(s.calls.length, 0);
     assert.equal(s.provider.length, 0);
@@ -215,9 +257,9 @@ describe("createTgFomoPort", () => {
       assert.ok(a && !a.deflect, q);
       assert.equal(s.calls[before]!.tool, "fomo_get_rankings", q);
       assert.equal(s.calls[before]!.args.board, "traders", q);
-      assert.match(a.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/, q);
+      assert.match(a.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k$/, q);
       assert.ok(!/followed|@|0x[0-9a-fA-F]{6}|https?:/.test(a.text), a.text);
-      assert.ok(a.text.endsWith(TG_FOMO_SOURCE), q);
+      assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, q);
       for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, `${q}: ${l}`);
     }
   });
@@ -266,7 +308,7 @@ describe("createTgFomoPort", () => {
     // Another account's handle is still a trader, and still deflected.
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    assert.deepEqual(await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.deepEqual(await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
     assert.equal(s.calls.length, 0);
   });
 
@@ -321,6 +363,97 @@ describe("createTgFomoPort", () => {
   });
 });
 
+describe("a model's checked choice, asked as the planner's own question", () => {
+  // Every request plans exactly the intended read, and never a write: the model reaches the provider only through these.
+  const cases: Array<[Parameters<typeof requestText>[0], string, Record<string, unknown>]> = [
+    [{ kind: "leaderboard" }, "fomo_get_rankings", { board: "traders", window: "24h" }],
+    [{ kind: "leaderboard", window: "7d" }, "fomo_get_rankings", { board: "traders", window: "7d" }],
+    [{ kind: "leaderboard", window: "30d" }, "fomo_get_rankings", { board: "traders", window: "30d" }],
+    [{ kind: "leaderboard", window: "all" }, "fomo_get_rankings", { board: "traders", window: "all" }],
+    [{ kind: "board", board: "trending" }, "fomo_get_rankings", { board: "trending-tokens" }],
+    [{ kind: "board", board: "graduated" }, "fomo_get_rankings", { board: "graduated-tokens" }],
+    [{ kind: "board", board: "most-held" }, "fomo_get_rankings", { board: "most-held-tokens" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "theses" }, "fomo_get_token_theses", { token: "PONS" }],
+    [{ kind: "coin", symbol: "pons", aspect: "buyers" }, "fomo_get_token_activity", { token: "PONS", side: "buy" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "sellers" }, "fomo_get_token_activity", { token: "PONS", side: "sell" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "activity" }, "fomo_get_token_activity", { token: "PONS" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "research" }, "fomo_research_coin", { token: "PONS", depth: "standard" }],
+    [{ kind: "crowd", side: "buy" }, "fomo_get_token_activity", { side: "buy" }],
+    [{ kind: "crowd", side: "sell", window: "7d" }, "fomo_get_token_activity", { side: "sell", window: "7d" }],
+    [{ kind: "small-coins" }, "fomo_find_opportunities", {}],
+    [{ kind: "status" }, "fomo_get_research_status", {}],
+  ];
+  for (const [r, tool, args] of cases) {
+    it(`${JSON.stringify(r)} → ${tool} ${JSON.stringify(args)}`, () => {
+      const plan = classifyFomoQuestion(requestText(r)!, { memory: null, now: NOW });
+      assert.ok(plan, requestText(r)!);
+      assert.deepEqual(plan.toolCalls.map((c) => [c.tool, c.args]), [[tool, args]]);
+      assert.ok(!plan.toolCalls.some((c) => isMutationTool(c.tool)));
+    });
+  }
+  it("'about' is the fixed capabilities answer, and a trader or a ticker that is not one has no question", () => {
+    assert.equal(classifyFomoQuestion(requestText({ kind: "about" })!, { memory: null, now: NOW })?.intent, "capabilities");
+    assert.equal(requestText({ kind: "trader" }), null);
+    assert.equal(requestText({ kind: "coin", symbol: "not a ticker!", aspect: "theses" }), null);
+  });
+
+  it("a trader request is deflected before anything is planned or spent", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
+    assert.equal(s.calls.length, 0);
+  });
+
+  it("a request is answered from its fixed question, whatever the line said", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "yo who's cooking on that app today", request: { kind: "leaderboard" }, chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.match(a.text, /^Top traders on Fomo, last 24h/);
+    assert.equal(s.calls[0]!.tool, "fomo_get_rankings");
+    assert.equal(a.moves, undefined, "no moves unless the owner asked");
+  });
+});
+
+describe("the owner's moves", () => {
+  it("after the trader board: the questions that open each trader's book, for her DM; the room hears only that it went", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "who's the top trader on fomo today?", owner: true, chatId: GROUP });
+    assert.ok(a?.moves);
+    assert.equal(a.moves.kind, "traders");
+    assert.match(a.moves.dm, /<code>what is trader CryptoKaleo holding<\/code>/);
+    assert.match(a.moves.dm, /<code>what has trader frankdegods bought this week<\/code>/);
+    assert.ok(admitTgLine(a.moves.room, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
+    assert.doesNotMatch(a.moves.room, /CryptoKaleo|frankdegods|tail/i, "the room line names nobody");
+    // Every suggested question plans the intended read when she types it.
+    assert.equal(classifyFomoQuestion("what is trader CryptoKaleo holding", { memory: null, now: NOW })?.intent, "trader-holdings");
+    assert.equal(classifyFomoQuestion("what has trader frankdegods bought this week", { memory: null, now: NOW })?.intent, "trader-activity");
+  });
+
+  it("after a coin board: /buy only where /buy resolves, the CA to post for a review on Robinhood Chain, watch and theses", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, buyable: (sym) => sym === "PONS" });
+    const a = await port.ask({ text: "what's trending on fomo?", owner: true, chatId: GROUP });
+    assert.ok(a?.moves);
+    assert.equal(a.moves.kind, "coins");
+    assert.match(a.moves.dm, /<code>\/buy PONS 5<\/code>/);
+    assert.match(a.moves.dm, /<code>0x39dbed3a00000000000000000000000000000c0d<\/code>/i);
+    assert.match(a.moves.dm, /<code>watch PONS on fomo<\/code>/);
+    assert.match(a.moves.dm, /FU2O<\/b> \(solana\)\n• not tradeable from here/);
+    assert.doesNotMatch(a.moves.dm, /\/buy FU2O|\/buy CACHE/, "never /buy for a coin /buy would refuse");
+    assert.equal(classifyFomoQuestion("watch PONS on fomo", { memory: null, now: NOW })?.intent, "watch");
+  });
+
+  it("nothing for a stranger, a deflection or an answer with no usable row", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    assert.equal((await port.ask({ text: "what's trending on fomo?", chatId: GROUP }))?.moves, undefined);
+    assert.equal((await port.ask({ text: "what is @CryptoKaleo holding on fomo?", owner: true, chatId: GROUP }))?.moves, undefined);
+    assert.equal(ownerMoves({ handled: false }), null);
+  });
+});
+
 describe("groupWords", () => {
   it("puts the renderer's fixed wording into words the group gate admits", () => {
     const out = groupWords(
@@ -331,14 +464,16 @@ describe("groupWords", () => {
         NOT_PERMISSION_LINE,
         FOMO_ATTRIBUTION,
         "P&L is the provider-reported realised P&L for the window, not a measure of skill; follower counts are not used.",
+        "Trending on Fomo (board position is popularity, not quality):",
       ].join("\n"),
     ).split("\n");
     assert.equal(out[0], "PONS on robinhood in the last 24h: 1 distinct buyer and 0 sellers observed (large positions only; a floor, not a census).");
     assert.equal(out[1], "No sells: the feed only shows large positions.");
     assert.equal(out[2], "Flow (source-reported). From a copy fetched 2 min ago.");
     assert.equal(out[3], TG_FOMO_NOT_PERMISSION);
-    assert.equal(out[4], TG_FOMO_SOURCE);
-    assert.equal(out[5], "Figures are money made on closed trades, as the source reports it, and not a measure of skill.");
+    // The owner's attribution and skill caveat are dropped, never reworded into the room.
+    assert.equal(out[4], "Trending on Fomo (board position is popularity, not quality):");
+    assert.equal(out.length, 5);
     for (const l of out) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "answer", recentOwn: [] }).ok, l);
   });
 
@@ -429,7 +564,7 @@ describe("a group research question, end to end", () => {
     const first = tg.texts(GROUP);
     assert.equal(first.length, 1);
     assert.match(first[0]!, /3 theses/);
-    assert.ok(first[0]!.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(first[0]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/);
     for (const re of NO_IDENTITY) assert.doesNotMatch(first[0]!, re);
     assert.equal(s.calls[0]!.opts.audience, "group");
     assert.equal(s.calls[0]!.opts.groupId, String(GROUP));
@@ -499,8 +634,8 @@ describe("a group research question, end to end", () => {
     await groups.drain();
     const board = tg.texts(GROUP);
     assert.equal(board.length, 1);
-    assert.match(board[0]!, /^Top traders on Fomo, last 24h, by money made on closed trades \(source-reported, not a skill measure\):\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/);
-    assert.ok(board[0]!.endsWith(TG_FOMO_SOURCE));
+    assert.deepEqual(board[0]!.split("\n"), ["Top traders on Fomo, last 24h, by money made on closed trades:", "1. CryptoKaleo +$151.4k", "2. frankdegods -$4.2k"]);
+    assert.doesNotMatch(board[0]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, "no source line and no skill caveat in the room");
     assert.doesNotMatch(board[0]!, /followed|@|0x[0-9a-fA-F]{6}|https?:/);
     assert.ok(!logs.some((l) => /research lines dropped/.test(l)), "no line of the board was refused");
 
@@ -511,7 +646,7 @@ describe("a group research question, end to end", () => {
     const trending = tg.texts(GROUP);
     assert.equal(trending.length, 2);
     assert.match(trending[1]!, /\n1\. PONS on robinhood, market cap \$2\.1M\n/);
-    assert.ok(trending[1]!.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(trending[1]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/);
 
     // The lines the room actually asked on 2026-10-07, answered by code with no lookup.
     const looked = s.calls.length;

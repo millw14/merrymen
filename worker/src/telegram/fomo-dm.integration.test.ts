@@ -45,12 +45,15 @@ const { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } = await import("../fomo/render")
 const { createFomoService, runPendingJobs } = await import("../fomo/service");
 const fstore = await import("../fomo/store");
 const { recentChatTurns } = await import("../store");
+const { createTgFomoPort } = await import("../tg-fomo-port");
+const { TgGroupsStore, emptyTgGroupsState } = await import("./tg-groups/store");
 
 type Rec = Record<string, unknown>;
 
 const T0 = Date.UTC(2026, 9, 4, 16, 5);
 const ALERTS_NEWEST = 1788378000000;
 const OWNER = 5150;
+const GROUP = -1001234567890;
 const FRIEND = 6160;
 const PONS = "0x39dbed3a00000000000000000000000000000c0d";
 const OTHER = "0x" + "b2".repeat(20);
@@ -108,9 +111,12 @@ async function fomoFixture() {
   const direct = createDirectBroker(service, TENANT, { now: () => Date.now() });
   const calls: { tool: FomoToolName; args: Rec; opts: BrokerCallOptions }[] = [];
   const cleared: string[] = [];
+  /** A lookup can be held open (hold.until), to act while it runs. */
+  const hold: { until: Promise<void> | null } = { until: null };
   const broker: FomoBroker = {
-    call: (tool, args, opts) => {
+    call: async (tool, args, opts) => {
       calls.push({ tool, args: { ...args }, opts: { ...opts, signal: undefined } });
+      if (hold.until) await hold.until;
       return direct.call(tool, args, opts);
     },
     memory: {
@@ -121,7 +127,7 @@ async function fomoFixture() {
     report: (r) => direct.report(r),
     configured: () => direct.configured(),
   };
-  return { raw, db, service, broker, calls, cleared, provider, access };
+  return { raw, db, service, broker, calls, cleared, provider, access, hold };
 }
 type Fixture = Awaited<ReturnType<typeof fomoFixture>>;
 
@@ -139,6 +145,10 @@ interface Harness {
   state: () => TelegramState;
   setState: (s: TelegramState) => void;
   cfg: Record<string, unknown>;
+  /** A live line in the group from `from`. */
+  sayInGroup: (text: string, from?: number) => void;
+  /** From now on, messages to her DM fail (the typing action still goes through). */
+  ownerSendsFail: (fail: boolean) => void;
   /** A live DM from `from`, optionally replying to a message (Telegram's reply_to_message). */
   say: (text: string, from?: number, replyTo?: Record<string, unknown>) => void;
   /** The message_id Telegram gave each sendMessage, in order. */
@@ -154,7 +164,17 @@ const settle = async () => {
 };
 
 async function withDm(
-  opts: { llm?: boolean; broker?: "fixture" | "absent" | "null"; composeReply?: string | null; fomoOff?: boolean },
+  opts: {
+    llm?: boolean;
+    broker?: "fixture" | "absent" | "null";
+    composeReply?: string | null;
+    fomoOff?: boolean;
+    /** Groups on, with a group model whose routing calls answer with this pick. */
+    groupPick?: Record<string, unknown>;
+    /** The owner never pressed /start: Telegram refuses anything sent to her DM. */
+    dmBlocked?: boolean;
+    allowlist?: number[];
+  },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
   const calls: Call[] = [];
@@ -163,7 +183,7 @@ async function withDm(
   const cfg: Record<string, unknown> = {
     telegramEnabled: true,
     telegramBotToken: "111:a",
-    telegramAllowlist: [OWNER, FRIEND],
+    telegramAllowlist: opts.allowlist ?? [OWNER, FRIEND],
     telegramControlEnabled: true,
     telegramTransferEnabled: false,
     telegramPcControlEnabled: false,
@@ -174,6 +194,8 @@ async function withDm(
     ...(opts.llm ? { groqApiKey: "gsk_test_not_a_real_key", groqModel: "test-model" } : {}),
   };
   let state = blankState();
+  /** Telegram takes the typing action but refuses messages to her DM. */
+  const ownerSends = { fail: false };
   const queue: unknown[] = [];
   let updateId = 1;
   let nextMessageId = 50_000;
@@ -181,6 +203,13 @@ async function withDm(
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: T0 });
   globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
     const m = /\/bot([^/]+)\/(\w+)$/.exec(String(url));
+    if (!m && opts.groupPick && String(url).startsWith("https://llm.test/")) {
+      // The group's own model: a routing call gets the pick, anything else a short line.
+      const tools = (JSON.parse(init?.body ?? "{}") as { tools?: unknown }).tools;
+      llm.push(tools ? "group-route" : "group-line");
+      const message = tools ? { tool_calls: [{ function: { name: "route", arguments: JSON.stringify(opts.groupPick) } }] } : { content: "ngl no clue" };
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) };
+    }
     if (!m) {
       llm.push(String(url));
       return { ok: false, status: 500, json: async () => ({ error: { message: "no model in this test" } }), text: async () => "no model in this test" };
@@ -188,6 +217,9 @@ async function withDm(
     const call: Call = { method: m[2]!, body: init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {} };
     calls.push(call);
     const ok = (result: unknown) => ({ ok: true, status: 200, json: async () => ({ ok: true, result }) });
+    if ((opts.dmBlocked && (call.method === "sendChatAction" || call.method === "sendMessage") || (ownerSends.fail && call.method === "sendMessage")) && call.body.chat_id === OWNER) {
+      return { ok: false, status: 403, json: async () => ({ ok: false, error_code: 403, description: "Forbidden: bot can't initiate conversation with a user" }) };
+    }
     if (call.method === "getMe") return ok({ id: 111, username: "bot111", first_name: "Pine" });
     if (call.method === "getUpdates") return ok(queue.splice(0));
     if (call.method === "sendMessage") {
@@ -198,6 +230,18 @@ async function withDm(
     return ok(true);
   }) as typeof fetch;
   const fx = await fomoFixture();
+  const groupHome = opts.groupPick ? mkdtempSync(path.join(os.tmpdir(), "merrymen-fomo-group-")) : null;
+  const groupStore = groupHome ? new TgGroupsStore(path.join(groupHome, "tg-groups.json"), emptyTgGroupsState(), { debounceMs: 60_000 }) : null;
+  if (groupStore) {
+    cfg.telegramGroupsEnabled = true;
+    cfg.telegramGroupCoinsEnabled = false;
+    cfg.telegramGroupsChattiness = "normal";
+    groupStore.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+    groupStore.setStatus(GROUP, "approved", OWNER);
+    groupStore.update(GROUP, (r) => {
+      r.helloSaid = true;
+    });
+  }
   const h: Harness = {
     calls,
     llm,
@@ -208,6 +252,22 @@ async function withDm(
       state = s;
     },
     cfg,
+    ownerSendsFail: (fail) => {
+      ownerSends.fail = fail;
+    },
+    sayInGroup: (text, from = OWNER) => {
+      const id = updateId++;
+      queue.push({
+        update_id: id,
+        message: {
+          message_id: 1000 + id,
+          text,
+          date: Math.floor(Date.now() / 1000),
+          chat: { id: GROUP, type: "supergroup", title: "frens" },
+          from: { id: from, is_bot: false, first_name: from === OWNER ? "Milla" : "Friend" },
+        },
+      });
+    },
     say: (text, from = OWNER, replyTo) => {
       const id = updateId++;
       queue.push({
@@ -251,6 +311,23 @@ async function withDm(
     kill: () => ({ ok: true }),
     ...(opts.broker === "absent" ? {} : { fomo: () => (opts.broker === "null" ? null : fx.broker) }),
     ...(opts.fomoOff ? { fomoOff: true } : {}),
+    ...(groupStore
+      ? {
+          tgGroupsStore: groupStore,
+          fomoGroupPort: () => createTgFomoPort(() => fx.broker),
+          tgGroupsTest: {
+            rand: () => 0.99,
+            sleep: async () => {},
+            log: () => {},
+            env: {
+              MERRYMEN_TG_GROUPS_LLM_KEY: "k-test",
+              MERRYMEN_TG_GROUPS_LLM_PROVIDER: "openai",
+              MERRYMEN_TG_GROUPS_LLM_BASE_URL: "https://llm.test/v1",
+              MERRYMEN_TG_GROUPS_MODEL: "fake",
+            },
+          },
+        }
+      : {}),
     fomoComposeText: async (_creds, o) => {
       composed.push({ system: o.system, prompt: o.prompt });
       return opts.composeReply === undefined ? "On the evidence read, the support is thin and mostly one trader." : (opts.composeReply ?? "");
@@ -263,6 +340,8 @@ async function withDm(
     svc.stop();
     mock.timers.reset();
     globalThis.fetch = realFetch;
+    groupStore?.close();
+    if (groupHome) rmSync(groupHome, { recursive: true, force: true });
   }
 }
 
@@ -507,6 +586,113 @@ describe("social-trading research in a DM", () => {
       const calls = h.fx.calls.length;
       await ask(h, "What about the sellers?");
       assert.ok(!h.fx.calls.slice(calls).some((c) => c.args.token === PONS), "the forgotten coin is not looked up again");
+    });
+  });
+});
+
+describe("the owner's group ask about one trader, answered in her DM", () => {
+  it("'do you know unipcs on fomo' in a group: routed, looked up read-only in her DM, and the room hears only that it went", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
+      h.sayInGroup("pine do you know unipcs on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
+      assert.ok(h.llm.includes("group-route"), "the line was routed by the group's model");
+      const lookups = h.fx.calls.map((c) => c.tool);
+      assert.deepEqual(lookups, ["fomo_get_trader_context"], "one read; nothing that changes anything");
+      const o = h.fx.calls[0]!.opts;
+      assert.equal(o.surface, "telegram-dm");
+      assert.equal(o.audience, "owner");
+      assert.equal(o.conversationKey, `tg-dm:${OWNER}`);
+      assert.deepEqual(h.fx.calls[0]!.args, { trader: "unipcs" });
+      const dm = h.sentTo(OWNER);
+      assert.equal(dm.length, 1);
+      assert.match(dm[0]!, /^You asked about Fomo trader unipcs in a group, so here it is privately\./);
+      const room = h.sentTo(GROUP);
+      assert.equal(room.length, 1);
+      assert.doesNotMatch(room[0]!, /unipcs/i);
+      // Only the fixed question code wrote enters her DM history, never the group's words.
+      const turns = await recentChatTurns(OWNER, 4);
+      assert.ok(turns.some((t) => t.role === "user" && t.content === "who is trader unipcs on fomo?"));
+      assert.ok(!turns.some((t) => /do you know/.test(t.content)));
+    });
+  });
+
+  it("her plain wording, 'who is trader unipcs on fomo?': the real port names the trader, and her DM gets it", async () => {
+    await withDm({ groupPick: { action: "chat" } }, async (h) => {
+      h.sayInGroup("pine what is trader unipcs holding on fomo?");
+      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_trader_context"]);
+      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
+      assert.match(h.sentTo(OWNER)[0]!, /^You asked about Fomo trader unipcs in a group/);
+      assert.doesNotMatch(h.sentTo(GROUP)[0]!, /unipcs/i);
+      const turns = await recentChatTurns(OWNER, 4);
+      assert.ok(turns.some((t) => t.role === "user" && t.content === "what is trader unipcs holding on fomo?"));
+    });
+  });
+
+  it("her DM unreachable: nothing is looked up, nothing enters her history, and the room is told to /start", async () => {
+    // A handle no other test here asks about: the DM history is the file's own.
+    await withDm({ groupPick: { action: "fomo_trader", trader: "bobbyx" }, dmBlocked: true }, async (h) => {
+      h.sayInGroup("pine do you know bobbyx on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.match(h.sentTo(GROUP)[0]!, /\/start/);
+      const turns = await recentChatTurns(OWNER, 8);
+      assert.ok(!turns.some((t) => /bobbyx/.test(t.content)));
+    });
+  });
+
+  it("not on the allowlist: her DM would not answer her, so nothing is looked up or sent there", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" }, allowlist: [FRIEND] }, async (h) => {
+      h.sayInGroup("pine do you know unipcs on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.deepEqual(h.sentTo(OWNER), []);
+    });
+  });
+
+  it("a DM that fails after the lookup leaves her DM's research subject as it was", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
+      await ask(h, "what are the theses on $PONS");
+      h.ownerSendsFail(true);
+      const before = h.fx.calls.length;
+      h.sayInGroup("pine do you know unipcs on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls.slice(before).map((c) => c.tool), ["fomo_get_trader_context"], "the lookup ran");
+      h.ownerSendsFail(false);
+      await ask(h, "What about the sellers?");
+      const last = h.fx.calls[h.fx.calls.length - 1]!;
+      assert.equal(last.tool, "fomo_get_token_activity", "the follow-up is still about the coin she last asked about");
+      assert.equal(last.args.token, PONS);
+    });
+  });
+
+  it("an ask forgotten while its lookup runs is not answered: no DM, nothing in her history", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "zedtrader" } }, async (h) => {
+      let release!: () => void;
+      h.fx.hold.until = new Promise<void>((r) => {
+        release = r;
+      });
+      h.sayInGroup("pine do you know zedtrader on fomo");
+      await h.until(() => h.fx.calls.length > 0);
+      h.sayInGroup("/forgetme");
+      await h.advance(2_000);
+      h.fx.hold.until = null;
+      release();
+      await h.advance(5_000);
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_trader_context"]);
+      assert.ok(!h.sentTo(OWNER).some((t) => /zedtrader/.test(t)), "no DM for a forgotten ask");
+      const turns = await recentChatTurns(OWNER, 8);
+      assert.ok(!turns.some((t) => /zedtrader/.test(t.content)));
+    });
+  });
+
+  it("the same line from anyone else: the room's deflection, no lookup, nothing in the owner's DM", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
+      h.sayInGroup("pine do you know unipcs on fomo", FRIEND);
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.deepEqual(h.sentTo(OWNER), []);
+      assert.match(h.sentTo(GROUP)[0]!, /direct message/);
     });
   });
 });
