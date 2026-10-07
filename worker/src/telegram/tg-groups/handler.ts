@@ -2223,10 +2223,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // A FOMO TAIL ASKED FOR OUT LOUD ("pine can you tail unipcs for 3
       // hours"), read by code (packages/core tail-request.ts), never by a
       // model, and only where the research lane is wired. It is not research,
-      // so the lane above does not take it (it could read "keep tabs on trader
-      // X on fomo?" as a profile question); it is handled just below, before
-      // the desk and the router: her line goes to her DM as the confirm card,
-      // anyone else's gets the owner-only line (tailLine).
+      // so the research lane does not take it (it could read "keep tabs on
+      // trader X on fomo?" as a profile question); it is handled right after
+      // that lane, before the desk and the router: her line goes to her DM as
+      // the confirm card, anyone else's gets the owner-only line (tailLine).
       const tailAsk =
         fomoNow() !== null && dec.mood !== "private-ask" && j.addressed !== null && !isInjection(j.line.text)
           ? parseTailRequest(j.line.text, selfNamesOf(selfNow()))
