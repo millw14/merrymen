@@ -185,8 +185,25 @@ describe("the shapes no fixture carried", () => {
     assert.equal(synth([before(1), event(ROOT_NONCE, 0n)]), null, "reverted");
   });
 
-  it("zero-amount and self transfers move nothing and are not legs", () => {
-    const r = synth([before(1), transfer(USDG, ACCOUNT, ACCOUNT, 5n, 2), transfer(COIN, EOA, ACCOUNT, 0n, 3), event(ROOT_NONCE)]);
+  it("a USDG log of the account that moves nothing (a self-transfer, an amount of zero) is acknowledged AND covered by the record — admission reads it", () => {
+    const r = synth([before(1), transfer(USDG, ACCOUNT, ACCOUNT, 5n, 2), transfer(USDG, ACCOUNT, EOA, 0n, 3), transfer(COIN, EOA, ACCOUNT, 0n, 4), event(ROOT_NONCE)]);
+    assert.equal(r?.disposition, "acknowledged");
+    assert.deepEqual(r?.usdgLegs.map((l) => ({ ...l })), [
+      { logIndex: 2, from: ACCOUNT, to: ACCOUNT, amountRaw: "5", kind: "no-movement", rule: "self-transfer", answeredBy: "this-record" },
+      { logIndex: 3, from: ACCOUNT, to: EOA, amountRaw: "0", kind: "no-movement", rule: "zero-amount", answeredBy: "this-record" },
+    ]);
+    assert.deepEqual(r?.covers, [`${TX}:2`, `${TX}:3`]);
+    assert.deepEqual(r?.tokenMoves, [], "another token's zero is not a move at all: admission never reads it");
+  });
+
+  it("a USDG self-transfer OUTSIDE the execution is not the record's to cover: review (usdg-outside-segment)", () => {
+    const r = synth([transfer(USDG, ACCOUNT, ACCOUNT, 5n, 0), before(1), event(ROOT_NONCE)]);
+    assert.deepEqual(r?.reasons, ["usdg-outside-segment"]);
+    assert.deepEqual(r?.covers, []);
+  });
+
+  it("a custody contract's own USDG that moves nothing is not a leg: admission never reads a log that is not the account's", () => {
+    const r = synth([before(1), transfer(USDG, VAULT, VAULT, 5n, 2), transfer(USDG, VAULT, EOA, 0n, 3), event(ROOT_NONCE)], [VAULT]);
     assert.equal(r?.disposition, "acknowledged");
     assert.deepEqual(r?.usdgLegs, []);
   });

@@ -40,7 +40,11 @@
  *       scanner's own classifier and inputs (deposit-log.ts
  *       scannerClassifyContext) — left for the scanner's flow, the ONE live
  *       booker of a capital leg — or internal by the custody-transfer rule,
- *       which this record answers and lists in `covers`;
+ *       or moves nothing (a self-transfer, or an amount of zero); the record
+ *       answers those last two itself and lists them in `covers`, because no
+ *       flow writer books either and admission reads every USDG log of the
+ *       account (ledger-resume.ts chainFactsPostgresLacks), so a log left
+ *       unanswered would hold an 'acknowledged' operation forever;
  *   (b) no USDG moves between a custody address and an address outside the
  *       book;
  *   (c) no USDG log of the account in the same transaction sits outside this
@@ -85,14 +89,19 @@ export interface OwnerUsdgLeg {
   to: string;
   /** Base units (6dp), decimal string. */
   amountRaw: string;
-  /** The scanner's verdict for a leg of the account; 'custody-only' for a leg that never touches it. */
-  kind: CapitalKind | "custody-only";
+  /**
+   * The scanner's verdict for a leg of the account; 'custody-only' for a leg
+   * that never touches it; 'no-movement' for a leg of the account that moves
+   * nothing (rule 'self-transfer' or 'zero-amount'), which the classifier
+   * never sees.
+   */
+  kind: CapitalKind | "custody-only" | "no-movement";
   rule: string;
   /**
    * Who answers this leg in admission's check: a 'flow' the scanner books
-   * (capital), 'this-record' (custody-internal, listed in `covers`), or
-   * 'none' — a leg of the account nothing answers (the reason is in the
-   * disposition), or a custody leg admission never reads.
+   * (capital), 'this-record' (custody-internal, or no movement; listed in
+   * `covers`), or 'none' — a leg of the account nothing answers (the reason
+   * is in the disposition), or a custody leg admission never reads.
    */
   answeredBy: "flow" | "this-record" | "none";
 }
@@ -123,7 +132,7 @@ export interface OwnerOperationReading {
   disposition: "acknowledged" | "review";
   reasons: OwnerReviewReason[];
   usdgLegs: OwnerUsdgLeg[];
-  /** `${tx}:${logIndex}` of every custody-internal USDG leg of the account this record answers. */
+  /** `${tx}:${logIndex}` of every USDG leg of the account this record answers: custody-internal, or moving nothing. */
   covers: string[];
   tokenMoves: OwnerTokenMove[];
 }
@@ -243,7 +252,20 @@ export function ownerOperationOf(o: {
   for (const l of seg.logs) {
     inSegment.add(Number(BigInt(l.logIndex)));
     const t = transferOf(l);
-    if (!t || t.amount === 0n || t.from === t.to) continue;
+    if (!t) continue;
+    // (a) A USDG LOG OF THE ACCOUNT THAT MOVES NOTHING: from the account to
+    // itself, or an amount of zero. It changes no balance, the classifier
+    // calls a self-transfer ambiguous and no flow writer books either — yet
+    // admission reads it as a USDG transfer of the account like any other.
+    // So the record answers it (`covers`); left out, an 'acknowledged'
+    // reading would sit beside a log admission names missing for good.
+    if (t.token === usdg && (t.from === account || t.to === account) && (t.amount === 0n || t.from === t.to)) {
+      usdgLegs.push({ logIndex: t.logIndex, from: t.from, to: t.to, amountRaw: t.amount.toString(), kind: "no-movement",
+        rule: t.from === t.to ? "self-transfer" : "zero-amount", answeredBy: "this-record" });
+      covers.push(`${txHash}:${t.logIndex}`);
+      continue;
+    }
+    if (t.amount === 0n || t.from === t.to) continue;
     if (!inBook(t.from) && !inBook(t.to)) continue;
     if (t.token === usdg) {
       if (t.from === account || t.to === account) {

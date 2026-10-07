@@ -1603,8 +1603,9 @@ export interface GapChain {
 
 /**
  * An operation an owner record answers, as verified against the chain: its
- * transaction, and the custody-internal USDG legs of the account the record
- * itself answers (`tx:logIndex`). Nothing else in that transaction.
+ * transaction, and the USDG legs of the account the record itself answers
+ * (`tx:logIndex`): custody-internal ones, and ones that move nothing (a
+ * self-transfer, or an amount of zero). Nothing else in that transaction.
  */
 export interface OwnerAnswer { txHash: string; covers: ReadonlySet<string> }
 
@@ -1693,8 +1694,8 @@ const factOrder = (f: MissingChainFact) => [f.block === null ? -1n : BigInt(f.bl
  * (owner-operations.ts isRootSuccessOf) — so a session key's operation is
  * never answered by one, whatever a row claims. Such an operation does NOT
  * answer the USDG legs of its transaction: a capital leg still needs its
- * flow, and only the custody-internal legs the record itself covers are held
- * by it.
+ * flow, and only the legs the record itself covers (custody-internal, or
+ * moving nothing), each checked against its own log, are held by it.
  */
 export function chainFactsPostgresLacks(o: {
   account: string;
@@ -1910,7 +1911,8 @@ export async function chainGapCheck(o: {
  *     and chain, and comes out 'acknowledged' — not what the row says;
  *   - every leg that re-derived reading covers is a USDG log of the account
  *     this check read, whose counterparty, by that log's own topics, is a
- *     custody address of the grant.
+ *     custody address of the grant — or which, by its own topics and data,
+ *     moves nothing (from the account to itself, or an amount of zero).
  *
  * Only the re-derived covers are returned. A receipt that cannot be read
  * makes the whole check 'unavailable' (it retries); a reading that is not
@@ -1943,7 +1945,12 @@ export async function ownerAnswersFor(o: {
       const log = o.usdgLogs.find((u) => String(u.transactionHash).toLowerCase() === tx && u.logIndex !== undefined && Number(BigInt(u.logIndex)) === at);
       const from = log ? topicAddress(log.topics[1]) : null, to = log ? topicAddress(log.topics[2]) : null;
       const counterparty = from === account ? to : to === account ? from : null;
-      if (!c.startsWith(`${tx}:`) || counterparty === null || !custody.has(counterparty)) { sound = false; break; }
+      // A COVER IS HELD ONLY AS THE LOG ITSELF SAYS: its counterparty, by its
+      // own topics, is a custody address of the grant; or it moves nothing by
+      // its own topics and data — from the account to itself, or an amount
+      // of zero — which changes no balance and which no flow writer books.
+      const nothing = log !== undefined && ((from === account && to === account) || hexQuantity(log.data) === "0");
+      if (!c.startsWith(`${tx}:`) || counterparty === null || !(custody.has(counterparty) || nothing)) { sound = false; break; }
       covers.add(c);
     }
     if (sound) answers.set(hash, { txHash: tx, covers });

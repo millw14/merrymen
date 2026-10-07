@@ -195,6 +195,80 @@ describe("an owner record answers an operation only as the chain proves it", () 
   });
 });
 
+// ── a USDG log that moves nothing ────────────────────────────────────────────
+//
+// A root operation whose only USDG log is a self-transfer (or an amount of
+// zero) re-derives 'acknowledged'. Admission reads that log as a USDG
+// transfer of the account like any other, so the record must answer it too,
+// or the tenant is held for good on an operation its record says is settled.
+
+const TR = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const BEFORE = "0xbb47ee3e183a558b1a2ff0874b079f3fc5478b7454eacf2bfc5af2ff5878f972";
+const ROOT_NONCE = (0x845adb2c711129d4f3966735ed98a9f09fc4ce57n << 64n) | 4n;
+const word = (n: bigint) => n.toString(16).padStart(64, "0");
+const pad = (a: string) => `0x${a.replace(/^0x/, "").padStart(64, "0")}`;
+const EOA = `0x${"e0".repeat(20)}`;
+const SYNTH_OP = `0x${"5a".repeat(32)}`;
+/** A synthetic root operation of A4B in its own transaction, its execution carrying `legs` (each [from, to, amount]); `outside` puts the first leg ahead of BeforeExecution. */
+function synthetic(name: string, legs: Array<[string, string, bigint]>, o: { outside?: boolean } = {}): string {
+  const tx = `0x${name.length.toString(16).padStart(2, "0")}${"7a".repeat(31)}`;
+  const transfers: FixtureLog[] = legs.map(([from, to, amount], i) => [USDG, [TR, pad(from), pad(to)], `0x${word(amount)}`, `0x${(i + 1).toString(16)}`]);
+  const before: FixtureLog = [EP, [BEFORE], "0x", o.outside ? `0x${(legs.length + 1).toString(16)}` : "0x0"];
+  if (o.outside) transfers[0]![3] = "0x0";
+  const event: FixtureLog = [EP, [UOE, SYNTH_OP, pad(A4B), pad(`0x${"0".repeat(40)}`)], `0x${word(ROOT_NONCE)}${word(1n)}${word(1000n)}${word(50n)}`,
+    `0x${(legs.length + 2).toString(16)}`];
+  FX[name] = { tx, block: "0x4000000", timestamp: 1_790_000_000, logs: [before, ...transfers, event] };
+  return tx;
+}
+
+describe("a USDG log of the account that moves nothing", () => {
+  it("a self-transfer, alone in a root operation, is answered by its acknowledged record: clean — and without the record, both are missing", async () => {
+    const tx = synthetic("selfOnly", [[A4B, A4B, 5_000_000n]]);
+    const r = await check(chainOf(["selfOnly"]), A4B, { ...none, ownerRecords: new Map([[SYNTH_OP, tx]]) });
+    assert.equal(r.status, "clean", r.status === "missing" ? JSON.stringify(r.found) : "");
+    const bare = await check(chainOf(["selfOnly"]), A4B, none);
+    assert.equal(bare.status, "missing");
+    if (bare.status === "missing") assert.deepEqual(bare.found.map((f) => [f.kind, (f as { direction?: string }).direction ?? null]), [["transfer", "self"], ["operation", null]]);
+  });
+
+  it("an amount of zero to an outside wallet moves nothing either: answered", async () => {
+    const tx = synthetic("zeroOut", [[A4B, EOA, 0n]]);
+    const r = await check(chainOf(["zeroOut"]), A4B, { ...none, ownerRecords: new Map([[SYNTH_OP, tx]]) });
+    assert.equal(r.status, "clean", r.status === "missing" ? JSON.stringify(r.found) : "");
+  });
+
+  it("a self-transfer BESIDE a real withdrawal does not answer the withdrawal: that capital leg still needs its flow", async () => {
+    const tx = synthetic("selfAndOut", [[A4B, A4B, 5_000_000n], [A4B, EOA, 7_000_000n]]);
+    const r = await check(chainOf(["selfAndOut"]), A4B, { ...none, ownerRecords: new Map([[SYNTH_OP, tx]]) });
+    assert.equal(r.status, "missing");
+    if (r.status === "missing") assert.deepEqual(r.found.map((f) => [f.kind, f.logIndex, (f as { direction?: string }).direction]), [["transfer", 2, "out"]]);
+    const flowed = await check(chainOf(["selfAndOut"]), A4B, { ...none, flows: new Set([`${tx}:2`]), ownerRecords: new Map([[SYNTH_OP, tx]]) });
+    assert.equal(flowed.status, "clean");
+  });
+
+  it("a self-transfer OUTSIDE the operation's execution is not the record's: the reading is review, and the operation stays missing", async () => {
+    const tx = synthetic("selfOutside", [[A4B, A4B, 5_000_000n]], { outside: true });
+    const r = await check(chainOf(["selfOutside"]), A4B, { ...none, ownerRecords: new Map([[SYNTH_OP, tx]]) });
+    assert.equal(r.status, "missing");
+    if (r.status === "missing") assert.ok(r.found.some((f) => f.kind === "operation" && f.userOpHash === SYNTH_OP));
+  });
+
+  it("a cover is held only as its own log says: a covered log that moved USDG to an outside wallet is not taken on the reading's word", async () => {
+    const tx = synthetic("selfCheck", [[A4B, A4B, 5_000_000n]]);
+    const chain = chainOf(["selfCheck"]);
+    const opLogs = await chain.getLogs({ address: EP as `0x${string}`, fromBlock: 0n, toBlock: HEAD, topics: [UOE as Hex] });
+    const usdgLogs = await chain.getLogs({ address: USDG as `0x${string}`, fromBlock: 0n, toBlock: HEAD, topics: [] });
+    const known = { ops: new Set<string>(), ownerRecords: new Map([[SYNTH_OP, tx]]) };
+    const ctx = { custody: [VAULT], chainId: 4663 };
+    const answered = await ownerAnswersFor({ chain, account: A4B, usdg: USDG, opLogs, usdgLogs, known, ownerContext: ctx });
+    assert.deepEqual(answered !== "unavailable" && [...answered.get(SYNTH_OP)!.covers], [`${tx}:1`]);
+    // The log the check read says otherwise (A4B -> an outside wallet, 5 USDG): the cover does not check, and nothing is answered.
+    const lied = usdgLogs.map((l) => ({ ...l, topics: [l.topics[0]!, l.topics[1]!, pad(EOA) as Hex] }));
+    const refused = await ownerAnswersFor({ chain, account: A4B, usdg: USDG, opLogs, usdgLogs: lied, known, ownerContext: ctx });
+    assert.equal(refused !== "unavailable" && refused.has(SYNTH_OP), false);
+  });
+});
+
 // ── Postgres's side ──────────────────────────────────────────────────────────
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
