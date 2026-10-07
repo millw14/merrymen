@@ -135,7 +135,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -5956,7 +5956,8 @@ async function main() {
           }),
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           // An early pool may not report 24h volume: absent, never 0.
-          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, ...(p.volume24hUsd !== null ? { volume24hUsd: p.volume24hUsd } : {}) });
+          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, ...(p.volume24hUsd !== null ? { volume24hUsd: p.volume24hUsd } : {}),
+          heat: trenchHeat(p) });
       }
       return out;
     }

@@ -224,6 +224,8 @@ export interface Candidate {
   ageSec: number;
   price8: bigint;
   volume24hUsd?: number;
+  /** How hot its pool is now (trencher-brain.ts trenchHeat) — a review-order input only. */
+  heat?: number;
 }
 
 /** What we remember about something already held, so exits can be judged. */

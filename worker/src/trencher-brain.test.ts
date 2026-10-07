@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
@@ -90,8 +90,10 @@ test("discovery includes later pages, deduplicates pools and survives partial ou
     if (opts?.page === 3) throw new Error("page unavailable");
     return { failed: false, pools: opts?.page === 2 ? [later] : [pool()] };
   });
-  assert.equal(calls.length, 6);
-  assert.equal(new Set(calls).size, 6);
+  // Three pages of two lists, and the first page of new pools.
+  assert.equal(calls.length, 7);
+  assert.equal(new Set(calls).size, 7);
+  assert.ok(calls.includes("new_pools:1"));
   assert.equal(tape.length, 2);
   assert.ok(tape.some(p => p.tokenAddress === ROUTER));
   await assert.rejects(fetchTrenchTape(async () => ({ failed: true, pools: [] })), /All Trencher/);
@@ -123,6 +125,26 @@ test("volume screening rejects missing, thin, inactive and one-sided tape; ranks
   assert.equal(highVolumePools([pool({ volume24hUsd: null }), pool({ volume24hUsd: 99_999 }), pool({ buyers24h: 19 }), pool({ sells24h: 0 }), pool({ buckets: emptyGeckoBuckets() })]).length, 0);
   const ranked = highVolumePools([pool(), pool({ volume24hUsd: 300_000 }), pool({ tokenAddress: ROUTER, volume24hUsd: 400_000 })]);
   assert.deepEqual(ranked.map(p => p.volume24hUsd), [400_000, 300_000]);
+});
+
+test("the hottest coin NOW ranks first, not yesterday's busiest", () => {
+  const h1 = (volumeUsd: number | null, changePct: number | null) => ({ changePct, volumeUsd, buys: 5, sells: 5, buyers: 5, sellers: 5 });
+  const steady = pool({ volume24hUsd: 5_000_000, buckets: { ...pool().buckets, h1: h1(100_000, 0.5) } });
+  const hot = pool({ tokenAddress: ROUTER, volume24hUsd: 400_000, buckets: { ...pool().buckets, h1: h1(150_000, 40) } });
+  assert.deepEqual(highVolumePools([steady, hot]).map(p => p.tokenAddress), [ROUTER, TOKEN]);
+  // Movement doubles at most, either way: a fall heats a coin as a rise does.
+  assert.equal(trenchHeat(pool({ buckets: { ...pool().buckets, h1: h1(10_000, -250) } })), 20_000);
+  // No hourly figure is ranked off the day spread evenly, never off zero.
+  assert.equal(trenchHeat(pool({ volume24hUsd: 240_000 })), 10_000);
+});
+
+test("a coin hours old clears the volume screen on its last hour", () => {
+  const young = (v: number) => pool({ volume24hUsd: 60_000, buckets: { ...pool().buckets, h1: { changePct: 5, volumeUsd: v, buys: 5, sells: 5, buyers: 5, sellers: 5 } } });
+  assert.equal(trenchScreenReason(young(TRENCH_H1_VOLUME_MIN)), null);
+  assert.equal(trenchScreenReason(young(TRENCH_H1_VOLUME_MIN - 1)), "volume-below-min");
+  // Every other rule still applies to it.
+  assert.equal(trenchScreenReason({ ...young(TRENCH_H1_VOLUME_MIN), buyers24h: 19 }), "buyers-below-min");
+  assert.equal(trenchScreenReason({ ...young(TRENCH_H1_VOLUME_MIN), sells24h: 0 }), "no-sells-24h");
 });
 
 test("cash and wrapped native assets cannot enter the memecoin universe even with qualifying volume", () => {
@@ -426,7 +448,7 @@ test("a nominated coin's own page rides the tape: read with it, screened like it
   const failures = await reader.refreshNominated();
   assert.deepEqual(failures, []);
   assert.deepEqual(tokenReads.sort(), [NOMINATED, ROUTER.toLowerCase()].sort());
-  assert.equal(feedReads, 6, "a nomination's own refresh does not re-read the six feed pages");
+  assert.equal(feedReads, 7, "a nomination's own refresh does not re-read the seven feed pages");
   const snap = reader.snapshot();
   assert.deepEqual(snap.pools.map(p => p.tokenAddress), [NOMINATED], "the quiet nominated coin fails highVolumePools like any tape row");
 

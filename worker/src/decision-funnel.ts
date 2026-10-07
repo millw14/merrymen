@@ -37,7 +37,7 @@
 import type { FunnelStage } from "./fomo/types";
 import { sanitizeText } from "./research/news";
 import { recordedHoldKind, type ShadowOutcome } from "./brain-shadow";
-import { highVolumePools, TRENCH_VOLUME_MIN, type TrenchScreen } from "./trencher-brain";
+import { highVolumePools, TRENCH_H1_VOLUME_MIN, TRENCH_VOLUME_MIN, type TrenchScreen } from "./trencher-brain";
 import type { GeckoPool } from "./venues/geckoterminal";
 import { CASH } from "../../packages/core/src/index";
 
@@ -238,7 +238,7 @@ const DISCOVERY_WORDS: Readonly<Record<DiscoveryScreen, string>> = {
   "quote-asset": "a cash or bridge asset, never an entry",
   "not-memecoin": "not a memecoin by instrument class",
   "volume-unknown": "24h volume not reported",
-  "volume-below-min": `24h volume under $${TRENCH_VOLUME_MIN.toLocaleString("en-US")}`,
+  "volume-below-min": `24h volume under $${TRENCH_VOLUME_MIN.toLocaleString("en-US")} and last hour under $${TRENCH_H1_VOLUME_MIN.toLocaleString("en-US")}`,
   "buyers-below-min": "fewer than 20 distinct buyers in 24h (or not reported)",
   "no-buys-24h": "no buys in 24h (or not reported)",
   "no-sells-24h": "no sells in 24h (or not reported)",
