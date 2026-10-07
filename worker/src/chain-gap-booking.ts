@@ -52,7 +52,9 @@
  *                             so it books a trade only when that snapshot's
  *                             CONTENTS already say what the trade did. Either
  *                             none of the token is in the snapshot, its basis
- *                             or on chain at a block 64 deep; or the
+ *                             or on chain at a block 64 deep (or a basis left
+ *                             over it provably cannot reach the new book,
+ *                             staleBasisVerdict, and is named); or the
  *                             position's raw balance and its basis quantity
  *                             each equal what the book (the account and its
  *                             custody, as the fill is read) holds there, the
@@ -142,8 +144,8 @@ import { flowDuplicateReport } from "./distinct-flows";
 import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
 import {
-  attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, lastMirrorPassAt, readChainHold, readOpenApproval, resumeGapWindow,
-  RESUME_USDG, usdg6, type GapChain, type MissingChainFact,
+  attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, lastMirrorPassAt, planAttestedSeed, readChainHold, readOpenApproval,
+  resumeGapWindow, RESUME_USDG, usdg6, type GapChain, type MissingChainFact,
 } from "./ledger-resume";
 import { admitCapitalFlow, tradingModeOf } from "./paper-boundary";
 import { classifyRpcError } from "./rpc-error";
@@ -239,8 +241,16 @@ export interface BookingSnapshot {
    * `classVault` is the one custody address whose holdings positions and
    * cost_basis do not cover (core grant.ts grantPonsClassVault): the class
    * book is class_positions. The Trencher vault's are merged into the position.
+   *
+   * `spelled` is the account exactly as the grant spells it now: the agent_id
+   * the attested book's worker would register under (store.ts ensureAgent
+   * returns grant.smartAccount, and the grant store hands the child grant_json
+   * as it is). Its mirror deletes the tenant's snapshot rows by it in any
+   * letter-case (ledger-mirror.ts: `lower(agent_id) = lower(?)`); a mirror
+   * built before that matched it exactly (staleBasisVerdict says why both
+   * matter).
    */
-  grant: { account: string; owner: string | null; chainId: number | null; custody: string[]; classVault: string | null } | null;
+  grant: { account: string; spelled: string; owner: string | null; chainId: number | null; custody: string[]; classVault: string | null } | null;
   /** Every registration row for the account (more than one is a refusal). */
   agents: Array<{ smartAccount: string; epoch: number; chainId: number | null; mode: string | null; hwmUsdg: number; hwmWithdrawnUsdg: number }>;
   /** Every spelling of agent_id across the financial tables. Admission refuses more than one; so does this. */
@@ -302,7 +312,16 @@ export interface AdmissionState {
 }
 export interface Holdings {
   positions: Array<{ symbol: string; token: string; rawBalance: string; updatedAt: number | null }>;
-  basis: Array<{ symbol: string; qtyRaw: string; costUsdg: string; updatedAt: number | null }>;
+  /** `agentId` is the row's own spelling of the account: what decides whether the attested book's first mirror pass deletes it. */
+  basis: Array<{ agentId: string; symbol: string; qtyRaw: string; costUsdg: string; updatedAt: number | null }>;
+  /**
+   * THE LIVE BASIS ADMISSION WOULD SEED THE NEW BOOK WITH, computed by
+   * admission's own code on this same read (ledger-resume.ts planAttestedSeed:
+   * a live row with a quantity, for a symbol positions shows held, raw_balance
+   * <> '0'), never re-derived here. Null when a table it reads is not in the
+   * database, so it could not be asked.
+   */
+  seeded: Array<{ symbol: string; qtyRaw: string; costUsdg: string }> | null;
 }
 /**
  * One trade row as the fill walk reads it: its legs and its fill, as Postgres
@@ -400,7 +419,14 @@ export async function readAdmissionState(db: Db, tables: ReadonlySet<string>, te
   return { approvals, attestations, liveness: { beatAt, lastMirrorAt } };
 }
 
-/** The account's positions and live cost basis, as planAttestedSeed reads them (any spelling of the account), in a fixed order. */
+/**
+ * The account's positions and live cost basis, as planAttestedSeed reads them
+ * (any spelling of the account), in a fixed order — and what planAttestedSeed
+ * itself would seed from them, asked of it on this same read. It reads the
+ * floors too, so it is asked only when all three tables are there: a
+ * statement that fails would abort the snapshot's transaction
+ * (existingTables says why).
+ */
 async function readHoldings(db: Db, tables: ReadonlySet<string>, account: string): Promise<Holdings> {
   const positions: Holdings["positions"] = tables.has("positions")
     ? ((await db.prepare("SELECT symbol, token, raw_balance, updated_at FROM positions WHERE LOWER(agent_id) = ?").all(account)) as Array<Record<string, unknown>>)
@@ -408,11 +434,17 @@ async function readHoldings(db: Db, tables: ReadonlySet<string>, account: string
       .sort((a, b) => byText(a.symbol, b.symbol) || byText(a.token, b.token))
     : [];
   const basis: Holdings["basis"] = tables.has("cost_basis")
-    ? ((await db.prepare("SELECT symbol, qty_raw, cost_usdg, updated_at FROM cost_basis WHERE LOWER(agent_id) = ? AND mode = 'live'").all(account)) as Array<Record<string, unknown>>)
-      .map((r) => ({ symbol: String(r.symbol ?? ""), qtyRaw: String(r.qty_raw ?? "0"), costUsdg: String(r.cost_usdg ?? "0"), updatedAt: unixSec(r.updated_at) }))
-      .sort((a, b) => byText(a.symbol, b.symbol))
+    ? ((await db.prepare("SELECT agent_id, symbol, qty_raw, cost_usdg, updated_at FROM cost_basis WHERE LOWER(agent_id) = ? AND mode = 'live'").all(account)) as
+      Array<Record<string, unknown>>)
+      .map((r) => ({ agentId: String(r.agent_id ?? ""), symbol: String(r.symbol ?? ""), qtyRaw: String(r.qty_raw ?? "0"), costUsdg: String(r.cost_usdg ?? "0"),
+        updatedAt: unixSec(r.updated_at) }))
+      .sort((a, b) => byText(a.symbol, b.symbol) || byText(a.agentId, b.agentId))
     : [];
-  return { positions, basis };
+  const seeded: Holdings["seeded"] = tables.has("positions") && tables.has("cost_basis") && tables.has("position_floors")
+    ? (await planAttestedSeed(db, account)).basis.map((r) => ({ symbol: r.symbol, qtyRaw: r.qtyRaw, costUsdg: r.costUsdg }))
+      .sort((a, b) => byText(a.symbol, b.symbol))
+    : null;
+  return { positions, basis, seeded };
 }
 
 /**
@@ -467,7 +499,7 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     } as Parameters<typeof custodyAddressesOf>[0];
     const custody = custodyAddressesOf(stored).map(lower).sort();
     const chainId = g.chain_id === null || g.chain_id === undefined ? null : Number(g.chain_id);
-    grant = { account: lower(g.smart_account), owner: ADDRESS.test(lower(g.owner)) ? lower(g.owner) : null,
+    grant = { account: lower(g.smart_account), spelled: String(g.smart_account), owner: ADDRESS.test(lower(g.owner)) ? lower(g.owner) : null,
       chainId: Number.isSafeInteger(chainId) ? chainId : null, custody, classVault: grantPonsClassVault(stored) };
   }
   const account = grant?.account ?? "";
@@ -534,7 +566,10 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  * that woke between the preview and the apply — a heartbeat, a mirrored row,
  * a new approval, a mode change — moves one of these, and the apply refuses.
  * The recorded fills by digest: a row's fill repaired in place moves no count
- * or maximum id, and the holding was judged on it.
+ * or maximum id, and the holding was judged on it. `holdings.seeded` is
+ * defence in depth: planAttestedSeed's basis is a pure function of the
+ * positions and live cost_basis rows `holdings` already carries, read on the
+ * same snapshot.
  */
 export function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
@@ -1029,6 +1064,147 @@ export interface HoldingVerdict {
 }
 
 /**
+ * A LIVE COST BASIS LEFT OVER A TOKEN NOBODY HOLDS. PURE. Null when there is
+ * none: no live basis under a name the token has gone by covers a quantity.
+ *
+ * HOW ONE ARISES, as Shogun's TSLA did: Postgres records a buy with no fill
+ * (side and quantity null), the chain holds a buy Postgres never recorded
+ * (what this tool books), and Postgres records one sell of both lots
+ * together, which took the book flat; yet the live basis still covers one
+ * lot, and was written after that sell (holdingVerdict lists ways a basis
+ * can lack a recorded fill). Its cost cannot be replayed (a buy carries no
+ * fill), and nothing here can say what it should be.
+ *
+ * IT IS PASSED OVER ONLY WHERE IT PROVABLY CANNOT REACH THE NEW BOOK, and
+ * then it is not booked, not changed, and named: its rows in the evidence
+ * (so in the previewDigest, and compared again by the apply as part of the
+ * holdings), and a note saying why. Every one of these must hold:
+ *
+ *   the chain holds none   every address of the book was read at the pinned
+ *                          block, the class vault's among them when the grant
+ *                          names one, and each read 0;
+ *   the seed cannot carry  admission seeds the new book's basis only for a
+ *     it                   symbol positions shows held — raw_balance <> '0'
+ *                          (ledger-resume.ts planAttestedSeed, and the
+ *                          ordinary seed, orchestrator.ts seedBasisForChild,
+ *                          by the same predicate) — and no positions row is
+ *                          held under any name the token has gone by: not for
+ *                          this token, and not for another token under the
+ *                          same symbol, which the seed would hand this cost.
+ *                          And planAttestedSeed itself, asked on the same
+ *                          read (Holdings.seeded), carries none of those
+ *                          names: the seed's own code, not a copy of it;
+ *   it does not outlive    the new book's worker registers under the grant's
+ *     admission            spelling of the account as it stands when the
+ *                          worker spawns (store.ts ensureAgent), and the first
+ *                          mirror pass after it does deletes the account's
+ *                          cost_basis in any letter-case (ledger-mirror.ts:
+ *                          lower(agent_id) = lower(?)), keeping only the new
+ *                          book's own rows. So a grant re-signed under another
+ *                          letter-case of the account between the apply and
+ *                          that spawn changes nothing: the row is still the
+ *                          account's, and still deleted. That pass is not a
+ *                          rebuilt one: registration removed the lost book's
+ *                          cursors (ledger-import.ts
+ *                          registerAttestedGapSource), and only a cursor
+ *                          the book no longer matches (its row gone, or
+ *                          another there) reads as one. And every row is
+ *                          spelled exactly as the grant spells the account
+ *                          at the preview and the apply. That is what a
+ *                          mirror built before its delete took any
+ *                          letter-case needs (it matched the worker's
+ *                          spelling exactly), so the verdict does not rest
+ *                          on which build the orchestrator runs; only the
+ *                          newer build also covers a re-sign in between.
+ *
+ * Until that pass the row stays what it is today, and nothing that acts on
+ * a basis can reach it: both seeds filter by held symbols, and every page
+ * that values a holding joins basis to a positions row of the same agent and
+ * symbol (desk-positions.ts, read-agent.ts, read-token.ts, portfolio.ts), so
+ * it shows only beside a positions row under its name that holds 0 — the
+ * note says so when there is one. The one reader that lists a basis with no
+ * position is the owner's report export (reports.ts portfolioTable), for the
+ * book the agent is not running (newest equity mark of the other mode), as
+ * "not valued"; the note says that too. holdingVerdict's walk must still not
+ * go below zero (fills-exceed-chain).
+ */
+export interface StaleBasis {
+  /** Null: passed over, and `note` says why. Otherwise the check that refused, in words. */
+  why: string | null;
+  note: string | null;
+  evidence: {
+    /** The live basis rows under a name the token has gone by that still cover a quantity: not booked and not changed. */
+    rows: Holdings["basis"];
+    /** Every name the token has gone by here. */
+    names: string[];
+    /** Positions rows the seed reads as held (raw_balance <> '0') for the token or under any of those names. None, to pass. */
+    heldUnderNames: Holdings["positions"];
+    /** What planAttestedSeed carries under any of those names (null: it could not be asked). None, to pass. */
+    seededUnderNames: NonNullable<Holdings["seeded"]> | null;
+    /** Every positions row under those names: the dashboard shows the basis beside these until the first mirror pass. */
+    positionsUnderNames: Holdings["positions"];
+    /**
+     * The account as the grant spells it, as every row here must be. The
+     * attested book's first mirror pass deletes its cost_basis by this account
+     * in any letter-case (a mirror built before that, by this spelling exactly).
+     */
+    deletedAs: string | null;
+    note: string | null;
+  };
+}
+export function staleBasisVerdict(o: { token: string; names: ReadonlySet<string>; holdings: Holdings; balance: ChainEvidence["balances"][string];
+  classVault: string | null; grantSpelling: string | null }): StaleBasis | null {
+  const { token, holdings, balance } = o;
+  const rows = holdings.basis.filter((b) => o.names.has(b.symbol) && baseUnits(b.qtyRaw) !== 0n);
+  if (!rows.length) return null;
+  const names = [...o.names].sort(byText);
+  const stale = new Set(rows.map((b) => b.symbol));
+  const heldUnderNames = holdings.positions.filter((p) => p.rawBalance !== "0" && (p.token === token || o.names.has(p.symbol)));
+  const seededUnderNames = holdings.seeded === null ? null : holdings.seeded.filter((b) => o.names.has(b.symbol));
+  const positionsUnderNames = holdings.positions.filter((p) => o.names.has(p.symbol));
+  const evidence: StaleBasis["evidence"] = { rows, names, heldUnderNames, seededUnderNames, positionsUnderNames, deletedAs: o.grantSpelling, note: null };
+  const opening = `the book held none of ${token} on chain at the pinned block and Postgres holds no position in it, yet its live cost basis under ` +
+    rows.map((b) => `${b.symbol} still covers ${b.qtyRaw}`).join(", ");
+  const no = (why: string): StaleBasis => ({ why: `${opening}: ${why}`, note: null, evidence });
+  if (Object.values(balance.by).some((v) => v !== "0")) {
+    return no(`the book's balance at the pinned block is not 0 at every address (${saidBy(balance)}), so the chain holding none is not proved`);
+  }
+  if (o.classVault !== null && balance.by[o.classVault] !== "0") {
+    return no(`the account's Pons class vault ${o.classVault} was not read at the pinned block, so the chain holding none is not proved`);
+  }
+  if (heldUnderNames.length) {
+    return no(`Postgres's positions hold ${heldUnderNames.map((p) => `${p.symbol} (${p.token}) at ${p.rawBalance}`).join(", ")}, under a name ${token} has gone by: ` +
+      "admission seeds a basis for every symbol positions shows held (planAttestedSeed), so this basis would be carried into the new book beside a holding it " +
+      "does not account for");
+  }
+  if (seededUnderNames === null) return no("what admission would seed could not be asked here (a table planAttestedSeed reads is not in this database)");
+  if (seededUnderNames.length) {
+    return no(`admission's own seed, asked on this same read (planAttestedSeed), would carry ${seededUnderNames.map((b) => `${b.symbol} at ${b.qtyRaw}`).join(", ")} ` +
+      "into the new book");
+  }
+  const misspelled = rows.filter((b) => b.agentId !== o.grantSpelling);
+  if (o.grantSpelling === null || misspelled.length) {
+    return no(`${misspelled.map((b) => `the row under ${b.symbol} is spelled ${b.agentId}`).join(", ")}, not as the grant spells the account ` +
+      `(${o.grantSpelling ?? "no grant"}): a ledger mirror from before its snapshot deletes took the account in any letter-case (ledger-mirror.ts) deletes ` +
+      "the tenant's cost_basis by the worker's spelling exactly, so whether the row outlives admission would rest on which build the orchestrator runs");
+  }
+  const cost = (b: Holdings["basis"][number]) => (baseUnits(b.costUsdg) === null ? `"${b.costUsdg}"` : `${usdg6(b.costUsdg)} USDG`);
+  const beside = [...new Set(positionsUnderNames.filter((p) => stale.has(p.symbol)).map((p) => p.symbol))];
+  const note = `${token}: Postgres's live cost basis under ${rows.map((b) => `${b.symbol} (${b.qtyRaw} base units at ${cost(b)}, written ${iso(b.updatedAt)})`)
+    .join(", ")} is left over a token the book does not hold: the chain held none of it at the pinned block at any address of the book, and no position under ` +
+    `${names.join(", ")} is held. It is not booked here and not changed. It cannot reach the attested book: admission seeds a basis only for a symbol ` +
+    "positions shows held, and its own seed, asked on this read (planAttestedSeed), carries none of it; and the first mirror pass after the new book's worker " +
+    `arms deletes every cost_basis row of the account in any letter-case, keeping only the new book's own (registration removed the lost book's cursors, ` +
+    `so that pass is not a rebuilt one). This one is spelled ${o.grantSpelling}, as the grant spells the account, so a mirror from before that delete took ` +
+    "any letter-case deletes it too, so long as the grant is not re-signed under another letter-case of the account before the worker arms; the delete " +
+    "that takes any letter-case covers that as well. Until that pass it is read only as it is today, and acts on nothing: " + (beside.length
+    ? `the dashboard shows this cost beside the positions row(s) under ${beside.join(", ")} that hold 0`
+    : "no page that values a holding shows it, since each joins basis to a positions row under its name and there is none") +
+    "; and the owner's report export lists it, as not valued, only while the agent's newest equity mark is paper";
+  return { why: null, note, evidence: { ...evidence, note } };
+}
+
+/**
  * DOES THE SNAPSHOT THE ATTESTED BOOK IS SEEDED FROM ALREADY HOLD WHAT THE
  * CHAIN DOES IN THIS TOKEN, ONCE THE MISSING TRADES ARE INCLUDED? PURE. Null
  * `why` is yes.
@@ -1063,9 +1239,13 @@ export interface HoldingVerdict {
  *                          it differs, and when it cannot be replayed;
  *   not held               the book holds none of the token there, no live
  *                          basis under any name the token has gone by still
- *                          covers a quantity, and the fills are never more
- *                          than the chain holds — so a seed with no position
- *                          and no basis for it is the truth, whatever it cost.
+ *                          covers a quantity — or one does, and provably
+ *                          cannot reach the new book (staleBasisVerdict: the
+ *                          seed cannot carry it and the first mirror pass
+ *                          deletes it), and it is named, never booked or
+ *                          changed — and the fills are never more than the
+ *                          chain holds; so a seed with no position and no
+ *                          basis for it is the truth, whatever it cost.
  *
  * WHY A HELD TOKEN NEEDS THE COST, WHICHEVER WAY ITS TRADES GO. The quantity
  * checks show the basis holds what the chain does; they cannot show it was
@@ -1095,7 +1275,7 @@ export interface HoldingVerdict {
  * stay unresolved, and the tenant stays held.
  */
 export function holdingVerdict(o: { token: string; holdings: Holdings; fills: readonly RecordedFill[]; balance: ChainEvidence["balances"][string] | null;
-  proposed: readonly ProposedFill[]; classVault: string | null }): HoldingVerdict {
+  proposed: readonly ProposedFill[]; classVault: string | null; grantSpelling: string | null }): HoldingVerdict {
   const { token, holdings, balance } = o;
   const lastTradeAt = Math.max(...o.proposed.map((p) => p.at));
   const rows = holdings.positions.filter((p) => p.token === token);
@@ -1111,7 +1291,8 @@ export function holdingVerdict(o: { token: string; holdings: Holdings; fills: re
   const fills = total === null ? null : walkFills({ token, fills: o.fills, proposed: o.proposed, symbols, total });
   const cost = fills === null ? null : replayBasis(fills);
   const evidence = { lastTradeAt, position, basis, namedBasis, bookBalance: balance, fills, cost };
-  const refuse = (refusal: HoldingRefusal, why: string): HoldingVerdict => ({ why, refusal, evidence: { ...evidence, refusal }, notes: [] });
+  const refuse = (refusal: HoldingRefusal, why: string, extra: Record<string, unknown> = {}): HoldingVerdict =>
+    ({ why, refusal, evidence: { ...evidence, ...extra, refusal }, notes: [] });
   const decide = "a reviewed basis decision, or the tenant stays held";
 
   if (rows.length > 1) return refuse("positions-ambiguous", `Postgres holds ${rows.length} position rows for ${token}, so which one the seed would read is not one answer`);
@@ -1130,17 +1311,20 @@ export function holdingVerdict(o: { token: string; holdings: Holdings; fills: re
       return refuse("held-unrecorded", `the book held ${total} base units of ${token} on chain at the pinned block (${saidBy(balance)}), and the snapshot the attested ` +
         `book is seeded from holds none: it would hold a position with no cost basis, which both mechanical exits refuse — ${decide}`);
     }
-    const left = namedBasis.filter((b) => baseUnits(b.qtyRaw) !== 0n);
-    if (left.length) {
-      return refuse("basis-without-position", `the book held none of ${token} on chain at the pinned block and Postgres holds no position in it, yet its live cost ` +
-        `basis under ${left.map((b) => `${b.symbol} still covers ${b.qtyRaw}`).join(", ")}: the basis does not account for what the chain did — ${decide}`);
-    }
-    if (fills!.verdict === "exceeds") return refuse("fills-exceed-chain", `${fills!.why} — ${decide}`);
+    // A BASIS LEFT OVER THE FLAT TOKEN is passed over only where it provably
+    // cannot reach the new book, and is then named, never booked or changed (staleBasisVerdict).
+    const stale = staleBasisVerdict({ token, names: symbols, holdings, balance, classVault: o.classVault, grantSpelling: o.grantSpelling });
+    const extra = stale ? { staleBasis: stale.evidence } : {};
+    if (stale?.why) return refuse("basis-without-position", `${stale.why} — ${decide}`, extra);
+    if (fills!.verdict === "exceeds") return refuse("fills-exceed-chain", `${fills!.why} — ${decide}`, extra);
     // NOTHING IS SEEDED for a token nobody holds, so what its fills cost cannot reach the new book: an unwalkable history is said, not refused.
-    return { why: null, refusal: null, evidence: { ...evidence, refusal: null }, notes: fills!.verdict === "unproven"
-      ? [`${token}: none of it is held, on chain or in the snapshot, so the attested book is seeded with nothing for it; its recorded fills could not be walked back ` +
-        `to where its basis opened (${fills!.why})`]
-      : [] };
+    return { why: null, refusal: null, evidence: { ...evidence, ...extra, refusal: null }, notes: [
+      ...(stale?.note ? [stale.note] : []),
+      ...(fills!.verdict === "unproven"
+        ? [`${token}: none of it is held, on chain or in the snapshot, so the attested book is seeded with nothing for it; its recorded fills could not be walked back ` +
+          `to where its basis opened (${fills!.why})`]
+        : []),
+    ] };
   }
   const p = position!;
   const raw = baseUnits(p.rawBalance);
@@ -1416,7 +1600,7 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
         symbol: row.fill_symbol };
     });
     const verdict = holdingVerdict({ token, holdings: snap.holdings, fills: snap.fills, balance: ev.balances[token] ?? null, proposed,
-      classVault: snap.grant?.classVault ?? null });
+      classVault: snap.grant?.classVault ?? null, grantSpelling: snap.grant?.spelled ?? null });
     for (const it of trades) {
       it.evidence = { ...it.evidence, holding: verdict.evidence };
       // Named at the console too: the refusal's name, then its sentence.
@@ -1455,9 +1639,9 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
     }
   }
   if (proposals.some((it) => it.class === "session-trade")) {
-    warnings.push("a trade is booked without touching cost_basis, positions or position_floors, because the snapshot the attested book is seeded from already " +
-      `holds what the chain does in its token at block ${ev.balanceBlock} (each trade's evidence.holding says how): check its positions, basis and floors ` +
-      "on the dashboard at exits-only all the same");
+    warnings.push("a trade is booked without touching cost_basis, positions or position_floors, because what the attested book is seeded with already " +
+      `holds what the chain does in its token at block ${ev.balanceBlock} (each trade's evidence.holding says how, and a basis left over a flat token is named ` +
+      "in its own note): check its positions, basis and floors on the dashboard at exits-only all the same");
   }
   const blocked = items.some((it) => !it.proposal && it.class !== "operation-leg") || remaining.length > 0;
   const verdict: BookingPlan["verdict"] = refusals.length ? "blocked" : ev.gap.status === "clean" ? "nothing-missing" : blocked || !proposals.length ? "blocked" : "ready";
