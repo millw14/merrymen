@@ -23,9 +23,11 @@
  *   patient       a buy waits up to 3 minutes for an assessment of its coin,
  *                 so "my read" is a read, not a placeholder
  *   honest        coverage is said every time: the feed shows only larger
- *                 positions on Robinhood Chain, and no alert is not proof
- *                 they did not trade. A sell is a reason to re-check, never
- *                 an exit to copy. Their thesis is "their words, unverified".
+ *                 positions, the fleet watches it for Robinhood Chain (a
+ *                 notice names each event's own chain), and no alert is not
+ *                 proof they did not trade. A sell is a reason to re-check,
+ *                 never an exit to copy. Their thesis is "their words,
+ *                 unverified".
  *   safe text     third-party words are sanitised, clipped to 280
  *                 characters, links removed and every address shortened;
  *                 a notice that would still type an executable address
@@ -43,6 +45,7 @@ import type { FollowReadiness, FollowBlocker } from "../fomo-child";
 import { typesExecutable } from "./chat";
 import type { ChildTail, ChildTailEvent } from "./contract";
 import { redactExecutables } from "./dossier";
+import { TAIL_COVERAGE_LINE } from "./render";
 import { shortAddress } from "./identity";
 import type { FollowAssessment, ResearchState, TokenIdentity } from "./types";
 
@@ -80,9 +83,8 @@ export const TAIL_NOTICE_LIMITS = Object.freeze({
   logChars: 12_000,
 });
 
-/** The coverage floor, said with every notice. */
-export const TAIL_COVERAGE =
-  "Fomo's live feed only shows larger positions on Robinhood Chain; no alert is not proof they didn't trade.";
+/** The coverage floor, said with every notice: the tool answer's line (render.ts TAIL_COVERAGE_LINE), word for word. */
+export const TAIL_COVERAGE = TAIL_COVERAGE_LINE;
 
 /** Telegram callback data on a notice's buttons (handled by a later change): `ftl:stop:<userId>`, `ftl:ext:<userId>`. */
 export const TAIL_CALLBACK_PREFIX = "ftl";

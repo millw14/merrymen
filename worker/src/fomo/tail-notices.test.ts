@@ -274,6 +274,17 @@ describe("their thesis", () => {
   });
 });
 
+describe("coverage", () => {
+  it("is true whatever chain a notice names: the feed is watched for Robinhood Chain, never said to be only that", () => {
+    assert.doesNotMatch(TAIL_COVERAGE, /only shows[^;]*on Robinhood Chain;|Robinhood Chain only/);
+    assert.match(TAIL_COVERAGE, /I watch it for Robinhood Chain, so I may miss their trades elsewhere/);
+    const base = { ...coin(1), chain: { ...coin(1).chain, slug: "base" } } as TokenIdentity;
+    const html = pass(input([tail([ev(1, { kind: "sell", token: base })])])).notices[0]!.html;
+    assert.match(html, /sold <b>PONS<\/b> on Fomo \(base\)/);
+    assert.ok(html.includes(TAIL_COVERAGE), "the same line on a notice from another chain");
+  });
+});
+
 describe("why a buy has no thesis read", () => {
   it("says the reason that applies, from a closed set", () => {
     const fresh = ev(1, { at: NOW - 4 * MIN, observedAt: NOW - 4 * MIN });

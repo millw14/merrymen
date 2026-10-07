@@ -461,9 +461,13 @@ the confirm card and the Stop and +1h button handling are a separate change.
   created, expires, created via). An ended row is kept a day for the end summary, then
   pruned. Which notices were told is the owner's durable state
   `state:fomo-tail-notified` (hashed keys only; retention never prunes `state:` keys).
-- **Coverage.** The feed carries larger positions only (about $3,000 and up), on
-  Robinhood Chain only, a minute or two late. Every notice says so: no alert is not
-  proof they did not trade.
+- **Coverage.** The feed carries larger positions only (about $3,000 and up), a minute
+  or two late, and the fleet asks it for Robinhood Chain (the stream's and recovery's
+  chain filter), so a trade elsewhere reaches a tail only when the feed carries it
+  anyway. Each notice names its event's own chain, and every notice and tail answer
+  says the same line (`render.ts TAIL_COVERAGE_LINE`): larger positions only, watched
+  for Robinhood Chain, trades elsewhere may be missed, and no alert is not proof they
+  did not trade. It never says the feed is Robinhood Chain only.
 - **Routing.** A tailed trader's buys and theses route research to the owners tailing
   them only, at interactive priority with reason `tailed`; the cohort's fan-out to every
   monitoring owner is not copied. In that owner's `fomo.json` the trader's coins since

@@ -700,9 +700,16 @@ function utcClock(ms: number): string {
   return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
 }
 
-/** What the live feed can show, said with every tail (docs/fomo.md "Tailing a trader"). */
+/**
+ * What the live feed can show, said with every tail answer and every tail
+ * notice (tail-notices.ts TAIL_COVERAGE is this line; docs/fomo.md "Tailing a
+ * trader"). True whatever chain a notice names: the fleet asks the feed for
+ * Robinhood Chain (the stream's and recovery's chain filter), so a trade on
+ * another chain reaches a tail only when the feed carries it anyway, and
+ * the line never says the feed is Robinhood Chain only.
+ */
 export const TAIL_COVERAGE_LINE =
-  "Fomo's live feed only shows larger positions (about $3k and up) on Robinhood Chain; no alert is not proof they didn't trade.";
+  "Fomo's live feed only shows larger positions (about $3k and up), and I watch it for Robinhood Chain, so I may miss their trades elsewhere; no alert is not proof they didn't trade.";
 
 /**
  * A tail started, renewed or stopped. OWNER ONLY: a group is deflected before
