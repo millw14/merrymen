@@ -25,7 +25,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
-import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest, tailAsksToTake } from "../../../packages/core/src/index";
+import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest, saysTail, tailAsksToTake } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths } from "../home";
@@ -1137,7 +1137,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           const cmd: Command =
             tail.kind === "start"
               ? { kind: "tail", handle: tail.handle, hours: tail.hours, clamped: tail.clamped, ...(tail.take ? { take: true } : {}) }
-              : { kind: "untail", handle: tail.handle };
+              : tail.kind === "stop"
+                ? { kind: "untail", handle: tail.handle }
+                : { kind: "tails", which: true };
           const before = pending.get(key);
           let reply: string;
           try {
@@ -1188,6 +1190,24 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
   };
   const TAIL_UNAVAILABLE_TEXT = "Tailing a Fomo trader isn't available here: Fomo research isn't set up for this agent.";
+  /**
+   * Whether she is tailing a trader by this handle now: one local read
+   * (fomo_get_research_status, never a provider call). Unknown (no broker, a
+   * read that did not answer) is yes, so the untail runs and says what it
+   * found, as before.
+   */
+  const tailRunsFor = async (chatId: number, handle: string): Promise<boolean> => {
+    const b = deps.fomoOff === true ? null : fomoBroker();
+    if (!b) return true;
+    try {
+      const env = await b.call("fomo_get_research_status", {}, tailOpts(chatId));
+      const d = env.data as ResearchStatusData | null;
+      if (!d || !Array.isArray(d.tails)) return true;
+      return d.tails.some((x) => typeof x.handle === "string" && x.handle.toLowerCase() === handle.toLowerCase());
+    } catch {
+      return true;
+    }
+  };
   const PROVIDER_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
   /** A tail tool's answer for her DM, as Telegram HTML (the renderer's own owner words). */
   const tailAnswer = (env: FomoEnvelope): string => esc(renderEnvelope(env, { audience: "owner", maxChars: 2_000, now: Date.now() }));
@@ -1259,7 +1279,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const env = await b.call("fomo_untail_trader", handle ? { trader: handle } : { all: true }, tailOpts(msg.chatId));
         return tailAnswer(env);
       },
-      list: async () => {
+      list: async (which) => {
         const b = brokerNow();
         if (!b) return esc(TAIL_UNAVAILABLE_TEXT);
         const env = await b.call("fomo_get_research_status", {}, tailOpts(msg.chatId));
@@ -1267,7 +1287,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const d = env.data as ResearchStatusData | null;
         if (!d) return esc("I couldn't read your tails right now. Try again in a minute.");
         const rows = (Array.isArray(d.tails) ? d.tails : []).map((t) => ({ handle: t.handle, expiresAtMs: t.expiresAtMs, consider: t.consider === true }));
-        return tailListText(rows, d.tailsOff === true);
+        return tailListText(rows, d.tailsOff === true, { which: which === true });
       },
     };
   };
@@ -1916,12 +1936,23 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // enum has no tail. Hers only, in her own DM, by trusted ids: anyone
       // else's words go on below exactly as before, and "copy", "mirror" and
       // "follow" a trader are never a tail.
+      //
+      // A STOP IS AS NARROW AS A START (tail-request.ts): "stop tracking $PONS"
+      // or "stop tracking it" is not a tail stop at all and goes on to the
+      // planner's unwatch below; "stop tailing him" names nobody, so she gets
+      // her tails and the question which, and nothing stops. And a stop with
+      // no tail word that names someone she is not tailing ("stop tracking
+      // pons": a coin in lower case reads like a handle) goes on below too,
+      // as it did before tails existed: only a local read decides that, no
+      // provider call.
       const t = parseTailRequest(msg.text, fomoSelfNames(cfg));
-      if (t) {
+      if (t && (t.kind !== "stop" || t.handle === null || saysTail(msg.text) || (await tailRunsFor(msg.chatId, t.handle)))) {
         cmd =
           t.kind === "start"
             ? { kind: "tail", handle: t.handle, hours: t.hours, clamped: t.clamped, ...(tailAsksToTake(msg.text) ? { take: true } : {}) }
-            : { kind: "untail", handle: t.handle };
+            : t.kind === "stop"
+              ? { kind: "untail", handle: t.handle }
+              : { kind: "tails", which: true };
         await pushHistory(msg.chatId, "user", msg.text);
       }
     }

@@ -677,7 +677,9 @@ that 🙃", once an hour per person, and nothing else. When the router picks
 `fomo_tail` (a line the code could not read, such as "can you follow that trader for
 a bit"), code reads the line again: her line that names no trader gets the `/tail`
 usage in her DM, anyone else's the owner-only line. The pick itself never names
-anyone. The handoff runs off the chat queue.
+anyone. The handoff runs off the chat queue. A stop is read as narrowly as a start
+(docs/fomo.md "A stop is as narrow as a start"): "pine stop tracking $PONS" is no tail
+stop at all, and "pine stop tailing him" stops nothing and asks her which, in her DM.
 
 **Cost.** One call of the allowance, through the same gate. A research pick
 replaces the persona's call; a chat pick costs one more. Routing only ever
@@ -1368,7 +1370,8 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | The owner: "pine can you tail unipcs trades for the next 3 hours … take it" / "pine stop tailing unipcs" | Read by code: her DM gets the tail's confirm card (or the stop's answer); the room hears "sent it to your DMs 🤫", never the trader or "tail". Nothing starts until she presses in her DM; "take it" grants nothing |
 | Anyone else: "pine tail @unipcs for 2h" / "/tail unipcs" | "only my owner can do that 🙃" (once an hour per person), nothing else; her DM is never touched |
 | The router picks a tail for a line naming no trader ("can you shadow that trader for a bit?") | Her line: the `/tail` usage in her DM; anyone else's: the owner-only line |
-| "pine copy unipcs's trades" / "pine mirror @unipcs" / "pine track $pons" | Never a tail: the line goes on as before |
+| "pine copy unipcs's trades" / "pine mirror @unipcs" / "pine track $pons" / "pine stop tracking $PONS" | Never a tail: the line goes on as before (a coin stop never stops her tails) |
+| The owner: "pine ok stop tailing him" | Names nobody: her DM gets her tails and "Which tail should I stop?"; nothing stops, and the room hears only that it went |
 | "trending" / "$pons" in reply to its own "top traders today, or what's trending?" / "which coin?" | Read in the light of that line: Fomo's trending board / that coin's theses, not a market read or a chart |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |

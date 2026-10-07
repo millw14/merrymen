@@ -914,6 +914,34 @@ describe("a Fomo tail asked for in words, in the owner's DM", () => {
     });
   });
 
+  it("a stop is as narrow as a start: 'stop tracking $PONS on fomo' unwatches the coin and leaves her tail; 'stop tailing him' asks which (review 2026-10-07)", async () => {
+    await withDm({ liveFeed: true, readiness: () => FOLLOW_OFF }, async (h) => {
+      await ask(h, "watch $PONS on fomo for 3 days");
+      assert.equal(count(h.fx.raw, "fomo_watches"), 1);
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+      const n = h.fx.calls.length;
+      const unwatched = await ask(h, "stop tracking $PONS on fomo");
+      assert.deepEqual(h.fx.calls.slice(n).map((c) => c.tool), ["fomo_unwatch_coin"], "the planner's unwatch, as before tails existed; never fomo_untail_trader");
+      assert.match(unwatched, /^Stopped watching/);
+      assert.equal(count(h.fx.raw, "fomo_watches"), 0);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1, "her tail is untouched");
+      const which = await ask(h, "ok stop tailing him");
+      assert.match(which, /^Which tail should I stop\? I haven't stopped any yet\./);
+      assert.match(which, /CryptoKaleo until/);
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_untail_trader"), "nothing was stopped");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+      // A lower-case coin reads like a handle; she isn't tailing anyone by
+      // that name, so the line goes on below, never to an untail.
+      await ask(h, "stop tracking pons");
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_untail_trader"), JSON.stringify(h.fx.calls.map((c) => c.tool)));
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+      // Hers by name, with no tail word: still a stop of that tail.
+      assert.match(await ask(h, "stop tracking cryptokaleo"), /^Stopped tailing CryptoKaleo\./);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+    });
+  });
+
   it("copy, mirror and follow are never a tail; nor is anyone else's line; nor any line where Fomo is off", async () => {
     await withDm({ liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
       for (const line of ["copy unipcs trades for 3 hours", "mirror @unipcs", "follow unipcs for 3 hours"]) {

@@ -175,7 +175,8 @@ export interface CommandDeps {
     start(p: Extract<PendingAction, { kind: "fomo-tail" }>, consider: boolean): Promise<string>;
     /** Stop one tail, or every one (null). Only ever reduces what I do. */
     stop(handle: string | null): Promise<string>;
-    list(): Promise<string>;
+    /** /tails. `which`: she asked to stop one without saying which; the list asks, and nothing stops. */
+    list(which?: boolean): Promise<string>;
   };
   now?: () => number;
 }
@@ -489,7 +490,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       if (!t.owner) return TAIL_OWNER_ONLY_TEXT;
       if (cmd.kind === "tail") return await t.propose(cmd);
       if (cmd.kind === "untail") return await t.stop(cmd.handle);
-      return await t.list();
+      return await t.list(cmd.which === true);
     }
     case "kill": {
       deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });

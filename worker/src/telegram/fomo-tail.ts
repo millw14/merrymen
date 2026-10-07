@@ -127,18 +127,33 @@ export interface TailListRow {
   consider: boolean;
 }
 
+export interface TailListOpts {
+  /**
+   * She asked to stop a tail without saying which ("stop tailing him",
+   * tail-request.ts "stop-which"): the list leads with the question, and
+   * nothing has been stopped.
+   */
+  which?: boolean;
+}
+
 /** /tails: what runs now, plainly. */
-export function tailListText(rows: readonly TailListRow[], tailsOff: boolean): string {
+export function tailListText(rows: readonly TailListRow[], tailsOff: boolean, opts: TailListOpts = {}): string {
   if (rows.length === 0) {
+    if (opts.which) return esc("You aren't tailing anyone on Fomo, so there's nothing to stop.");
     return esc(`You aren't tailing anyone on Fomo. /tail <trader> [hours] starts one (1 to ${TAIL_MAX_HOURS} hours, 3 if you don't say).`);
   }
   const named = rows.slice(0, 3).map((r) => ({ ...r, name: tailHandle(r.handle) ?? "a trader" }));
+  const ask = opts.which ? [esc("Which tail should I stop? I haven't stopped any yet."), ""] : [];
   if (tailsOff) {
-    return esc(
-      `Tailing is switched off on this service right now, so I'm not telling you about ${named.map((r) => r.name).join(", ")}; each tail still ends on time. /untail all stops them.`,
-    );
+    return [
+      ...ask,
+      esc(
+        `Tailing is switched off on this service right now, so I'm not telling you about ${named.map((r) => r.name).join(", ")}; each tail still ends on time. /untail <trader> stops one, /untail all stops them.`,
+      ),
+    ].join("\n");
   }
   return [
+    ...ask,
     "👀 <b>Tailing on Fomo</b>",
     ...named.map((r) => `• ${esc(r.name)} until ${tailClock(r.expiresAtMs)}${r.consider ? " (their buys go to my normal review)" : " (tell only)"}`),
     esc("/untail <trader> stops one, /untail all stops them all."),

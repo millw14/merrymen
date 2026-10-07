@@ -197,12 +197,14 @@ export type Command =
    * presses a button on it. `take`: her words asked me to take the trade too
    * (natural language only), which grants nothing; the card says so.
    * `/untail [NAME|all]` stops one or every tail (null: all), `/tails` lists
-   * them. NEVER produced by the classifier: its enum does not name them, and
+   * them. `which`: her words asked to stop a tail without saying which one
+   * ("stop tailing him"): the list, asking which, and nothing stopped. NEVER
+   * produced by the classifier: its enum does not name them, and
    * coerceLlmCommand turns anything it does not know into chat.
    */
   | { kind: "tail"; handle: string; hours: number; clamped: boolean; take?: boolean }
   | { kind: "untail"; handle: string | null }
-  | { kind: "tails" }
+  | { kind: "tails"; which?: boolean }
   | { kind: "chat"; reply: string }
   | { kind: "unknown"; text: string };
 

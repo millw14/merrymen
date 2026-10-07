@@ -548,10 +548,25 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   hours …", "keep tabs on trader cupsey for a couple hours", "stop tailing unipcs",
   "untail all". It becomes the `/tail` or `/untail` it means. "copy", "copytrade",
   "mirror" and "follow" a trader are never a tail (they keep their old meaning), nor
-  is a coin ("watch PONS on fomo", "track $PONS", "track PONS"), a thing of hers
-  ("track my order", "stop monitoring the price"), a pronoun ("tail him") or the bot's
-  own name. Anyone else's words, and every line where Fomo is off in the process, go on
-  exactly as before.
+  is a coin ("watch PONS on fomo", "track $PONS", "track PONS", "keep an eye on PONS"),
+  a thing of hers ("track my order", "stop monitoring the price"), a pronoun ("tail
+  him") or the bot's own name. Anyone else's words, and every line where Fomo is off in
+  the process, go on exactly as before.
+- **A stop is as narrow as a start.** A coin is never a trader for a stop either: "stop
+  tracking $PONS on fomo", "stop monitoring PONS" or an address goes on to the
+  planner's unwatch, as before tails existed. Every tail stops at once only for "untail
+  all", "stop tailing everyone", "stop tracking everyone", or a stop with a tail word and
+  nothing else ("stop tailing", "untail", "ok stop tailing for now"). A stop with a tail
+  word that points at someone it does not name ("stop tailing him", "stop tailing the
+  second one") or "stop tracking him" / "that guy" stops nothing: she gets her `/tails`
+  list headed "Which tail should I stop? I haven't stopped any yet.". "stop tracking" or
+  "stop monitoring" with no tail word and nobody named ("stop tracking it", "stop
+  monitoring the cpu", "cancel tracking") is not about tails and goes on as before. A
+  negated stop ("don't stop tailing unipcs") or a question about one ("when will you
+  stop tailing unipcs?") stops nothing; "can you stop tailing unipcs?" does. In her DM,
+  a stop with no tail word that names someone she is not tailing ("stop tracking pons",
+  a lower-case coin) also goes on to the planner; one local read
+  (`fomo_get_research_status`) decides, never a provider call.
 - **The confirm card.** `/tail` first resolves the trader read-only
   (`fomo_resolve_subject`: our own record, else one 250-credit search). Not found: "I
   couldn't find a Fomo trader called X." Two accounts answering to the handle: up to

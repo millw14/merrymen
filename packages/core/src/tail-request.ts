@@ -12,8 +12,21 @@
  * they were (orders the DM's own gates refuse or route), and "watch PONS on
  * fomo" stays a coin watch. Only tail, track, monitor and keep tabs / an eye
  * on, beside a trader, start one; stop, end, cancel or quit tailing, and
- * untail, end one. A coin ("track $PONS", "track PONS") or a thing of hers
- * ("track my order", "stop monitoring the price") is never a trader.
+ * untail, end one. A coin ("track $PONS", "track PONS", "stop tracking
+ * $PONS", an address) or a thing of hers ("track my order", "stop monitoring
+ * the price") is never a trader, for a stop as for a start.
+ *
+ * A STOP IS AS NARROW AS A START. Stopping every tail at once is never a
+ * guess: it is "untail all", "stop tailing everyone", or a stop that says a
+ * tail word and nothing else ("stop tailing", "untail", "ok stop tailing for
+ * now"). A stop with a tail word that points at someone it does not name
+ * ("stop tailing him", "the second one") is "stop-which": she is shown her
+ * tails and asked which, and nothing stops. "stop tracking" or "stop
+ * monitoring" with no tail word and nobody named ("stop tracking it", "stop
+ * monitoring the cpu", "ok stop tracking for now") is not about tails at all
+ * and goes on as before (a coin unwatch, a question). A negated stop ("don't
+ * stop tailing unipcs") or a question about one ("when will you stop tailing
+ * unipcs?") stops nothing; "can you stop tailing unipcs?" is a stop.
  *
  * WHAT THIS IS FOR. The owner's DM (service.ts handle(): her words become the
  * /tail or /untail they mean), and the group handler for an addressed line
@@ -29,25 +42,71 @@ export const TAIL_DEFAULT_HOURS = 3;
 /**
  * A tail asked for in words. `clamped`: more than TAIL_MAX_HOURS was asked
  * for, and `hours` is the most there is. A stop's `handle` null means every
- * tail ("untail all", or a stop that names nobody).
+ * tail ("untail all", "stop tailing everyone", or a bare "stop tailing").
+ * "stop-which": a stop that points at someone it does not name ("stop tailing
+ * him"); nothing is stopped, and she is asked which (her /tails list).
  */
 export type TailRequest =
   | { kind: "start"; handle: string; hours: number; clamped: boolean }
-  | { kind: "stop"; handle: string | null };
+  | { kind: "stop"; handle: string | null }
+  | { kind: "stop-which" };
 
 const HANDLE = /^[A-Za-z0-9_]{2,30}$/;
 /** Words that sit where a trader's name would and are never one. */
 const NOT_A_HANDLE: ReadonlySet<string> = new Set([
   "it", "him", "her", "them", "this", "that", "these", "those", "the", "a", "an", "me", "my", "our", "your", "his", "their",
   "trades", "trade", "trader", "traders", "buys", "sells", "moves", "activity", "risk", "end", "fomo", "on", "for", "top", "best",
-  "everyone", "someone", "anyone", "whales", "whale", "guy", "dude", "bro", "please", "pls", "all", "tails", "tail", "tailing",
+  "everyone", "everybody", "everything", "anything", "something", "nothing", "someone", "anyone", "whales", "whale", "guy", "dude", "bro", "please", "pls", "all", "tails", "tail", "tailing",
   "next", "few", "couple", "hours", "hour", "today", "and", "of", "to", "with", "you", "u", "can", "could", "would",
   "price", "chart", "coin", "token", "market", "order", "orders", "position", "positions", "wallet", "pnl", "portfolio",
 ]);
 /** These keep their old meaning; a line using them is never a tail. */
 const NEVER_A_TAIL = /\b(?:copy|copying|copytrade|copy-trade|copytrading|mirror|mirroring|follow|following|follows)\b/iu;
 const START_CUE = /\b(?:tail|tailing|track|tracking|monitor|monitoring|keep (?:an eye|tabs) on|keep tabs|watch (?:what|how) )\b/iu;
-const STOP_CUE = /\b(?:stop|quit|end|cancel|drop)\s+(?:the\s+)?(?:tail(?:ing)?|track(?:ing)?|monitor(?:ing)?)\b|\buntail\b/iu;
+const STOP_CUE = /\b(?:stop|quit|end|cancel|drop)\s+(?:the\s+|all\s+(?:the\s+|my\s+)?|my\s+)?(?:tails?|tailing|track(?:ing)?|monitor(?:ing)?)\b|\buntail\b/iu;
+/** A word about tails themselves. A stop without one ("stop tracking …") is about tails only when it names a trader or everyone. */
+const TAIL_WORD = /\b(?:untail|tail|tails|tailing)\b/iu;
+/**
+ * "don't stop tailing unipcs", "never stop tracking him", "keep tailing, no
+ * need to end it": not a stop. Inside one clause (a comma ends it), so "not
+ * now, stop tailing unipcs" still is one.
+ */
+const NEGATED_STOP = /\b(?:don'?t|do\s+not|never|not|no\s+need\s+to|keep)\b[^.!?\n,;]{0,20}\b(?:stop|quit|end|cancel|drop|untail)\b/iu;
+/** "when will you stop tailing unipcs?": a question about a tail, not a stop. "can you stop tailing unipcs?" is a stop. */
+const STOP_QUESTION = /\b(?:when|why|how\s+long|what\s+time|until\s+when|are\s+you\s+going\s+to|will\s+you\s+ever)\b[^.!?\n]{0,30}\b(?:stop|quit|end|cancel|drop|untail)\b/iu;
+/**
+ * A coin in the line: "$PONS", a contract address, or a ticker in capitals
+ * right after track / monitor / watch / keep an eye on. A coin is never a
+ * trader, for a stop as for a start.
+ */
+function coinIn(t: string): boolean {
+  return (
+    /\$[A-Za-z]/u.test(t) ||
+    /\b0x[0-9a-fA-F]{6,}/u.test(t) ||
+    /\b(?:track|tracking|monitor|monitoring|watch|keep (?:an eye|tabs) on)\s+[A-Z0-9]{2,10}\b(?!')/u.test(t)
+  );
+}
+/** Right after a stop cue: everyone ("all", "them all", "everyone", "all my tails"). */
+const ALL_AFTER = /^[\s,]*(?:them\s+all|all(?:\s+of\s+them)?|every(?:one|body)|every\s+(?:trader|tail)|all\s+(?:the\s+|my\s+)?(?:traders|tails))\b/iu;
+/** Everyone, as people: what a stop with no tail word must say to mean every tail ("stop tracking everyone"). */
+const ALL_PEOPLE_AFTER = /^[\s,]*(?:every(?:one|body)|every\s+trader|all\s+(?:the\s+|my\s+)?traders)\b/iu;
+/** Right after a "stop tracking" with no tail word: a person she does not name ("him", "that guy"). */
+const PERSON_AFTER = /^[\s,]*(?:him|her|(?:that|this|the)\s+(?:guy|dude|trader|account|person))\b/iu;
+/** Words that say nothing about WHICH tail: a stop made only of these (and the bot's own names) means every tail. */
+const FILLER: ReadonlySet<string> = new Set([
+  "ok", "okay", "k", "kk", "hey", "yo", "so", "and", "just", "now", "right", "then", "already", "please", "pls", "plz",
+  "thanks", "thank", "thx", "ty", "can", "could", "would", "will", "you", "u", "for", "the", "day", "today", "tonight",
+  "on", "fomo", "anymore", "any", "more", "lol", "alright", "actually", "enough", "that's", "thats", "it's", "mate",
+  "bro", "guys", "a", "while", "bit", "go", "ahead", "time", "is", "up", "done", "too", "as", "well",
+]);
+/** Nothing but filler and the bot's own names: "ok stop tailing for now", "hey shogun, can you untail?". */
+function bare(words: string, selfNames: readonly string[]): boolean {
+  const self = new Set(selfNames.filter((s) => typeof s === "string").map((s) => s.replace(/^@/, "").toLowerCase()));
+  return (words.toLowerCase().match(/[a-z0-9_@']+/gu) ?? []).every((w) => {
+    const x = w.replace(/^@/, "").replace(/^'+|'+$/gu, "");
+    return x === "" || FILLER.has(x) || self.has(x);
+  });
+}
 /** "track my order", "stop monitoring the price": a thing of hers, not a person. */
 const HER_THING =
   /\b(?:track(?:ing)?|monitor(?:ing)?|keep (?:an eye|tabs) on)\s+(?:my|the|our|this|that)\s+(?:order|orders|position|positions|price|chart|wallet|pnl|portfolio|bags?|coin|token)\b/iu;
@@ -98,6 +157,46 @@ export function tailHoursIn(text: string): { hours: number; clamped: boolean } {
 }
 
 /**
+ * A STOP, read as narrowly as a start (the module's "A STOP IS AS NARROW AS
+ * A START"). In this order:
+ *
+ *   negated or a question   null ("don't stop tailing unipcs", "when will
+ *                           you stop tailing unipcs?")
+ *   a coin                  null: "stop tracking $PONS" is the coin unwatch
+ *                           it always was, never a tail stop
+ *   a trader named          that trader
+ *   everyone                every tail; without a tail word only people
+ *                           count ("stop tracking everyone", not "… all")
+ *   no tail word            null ("stop tracking it", "ok stop tracking for
+ *                           now", "stop monitoring the cpu": not about tails),
+ *                           or "stop-which" when it points at a person ("stop
+ *                           tracking him")
+ *   a tail word, bare       every tail ("stop tailing", "untail", "ok stop
+ *                           tailing for now")
+ *   a tail word, and more   "stop-which" ("stop tailing him", "stop tailing
+ *                           the second one", "untail that guy"): nothing
+ *                           stops, and she is asked which
+ */
+function stopIn(t: string, cue: RegExpExecArray, selfNames: readonly string[]): TailRequest | null {
+  if (NEGATED_STOP.test(t) || STOP_QUESTION.test(t)) return null;
+  if (coinIn(t)) return null;
+  const tailWord = TAIL_WORD.test(t);
+  const before = t.slice(0, cue.index);
+  const after = t.slice(cue.index + cue[0].length);
+  const handle = handleIn(t, selfNames);
+  if (handle) return { kind: "stop", handle };
+  const cueAll = /\ball\b/iu.test(cue[0]);
+  if (tailWord ? cueAll || ALL_AFTER.test(after) : ALL_PEOPLE_AFTER.test(after)) return { kind: "stop", handle: null };
+  if (!tailWord) return PERSON_AFTER.test(after) ? { kind: "stop-which" } : null;
+  return bare(before, selfNames) && bare(after, selfNames) ? { kind: "stop", handle: null } : { kind: "stop-which" };
+}
+
+/** Whether a line says a tail word ("tail", "tailing", "untail"): a stop that does is about tails whatever else it says. */
+export function saysTail(text: unknown): boolean {
+  return typeof text === "string" && TAIL_WORD.test(text);
+}
+
+/**
  * A tail asked for in words, or null. Null for anything that is not clearly
  * one (no cue, no trader, a copy/mirror/follow ask, a coin watch, a thing of
  * hers). `selfNames`: the agent's own names and @username, never a trader.
@@ -108,13 +207,11 @@ export function parseTailRequest(text: unknown, selfNames: readonly string[] = [
   if (!t || t.length > 400) return null;
   if (NEVER_A_TAIL.test(t)) return null;
   if (HER_THING.test(t)) return null;
-  if (STOP_CUE.test(t)) {
-    const all = /\b(?:all|every|everyone|everything)\b/iu.test(t);
-    return { kind: "stop", handle: all ? null : handleIn(t, selfNames) };
-  }
+  const stop = STOP_CUE.exec(t);
+  if (stop) return stopIn(t, stop, selfNames);
   if (!START_CUE.test(t)) return null;
-  // "track PONS", "monitor $PONS": a coin, not a trader.
-  if (/\$[A-Za-z]/u.test(t) || /\b(?:track|monitor|watch)\s+[A-Z0-9]{2,10}\b(?!')/u.test(t)) return null;
+  // "track PONS", "monitor $PONS", "keep an eye on PONS": a coin, not a trader.
+  if (coinIn(t)) return null;
   const handle = handleIn(t, selfNames);
   if (!handle) return null;
   const { hours, clamped } = tailHoursIn(t);

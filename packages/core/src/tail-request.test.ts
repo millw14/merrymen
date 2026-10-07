@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TAIL_DEFAULT_HOURS, TAIL_MAX_HOURS, parseTailArgs, parseTailRequest, tailAsksToTake, tailHoursIn } from "./tail-request";
+import { TAIL_DEFAULT_HOURS, TAIL_MAX_HOURS, parseTailArgs, parseTailRequest, saysTail, tailAsksToTake, tailHoursIn } from "./tail-request";
 
 const SELF = ["Shogun", "@merrymanme_bot"];
 
@@ -39,7 +39,47 @@ test("stop forms, one trader or all of them", () => {
   assert.deepEqual(parseTailRequest("quit tracking trader cupsey", SELF), { kind: "stop", handle: "cupsey" });
   assert.deepEqual(parseTailRequest("untail all", SELF), { kind: "stop", handle: null });
   assert.deepEqual(parseTailRequest("stop tracking everyone", SELF), { kind: "stop", handle: null });
-  assert.deepEqual(parseTailRequest("stop tailing", SELF), { kind: "stop", handle: null }, "a stop that names nobody is every tail");
+  assert.deepEqual(parseTailRequest("stop tailing", SELF), { kind: "stop", handle: null }, "a bare stop with a tail word is every tail");
+  assert.deepEqual(parseTailRequest("can you stop tailing unipcs?", SELF), { kind: "stop", handle: "unipcs" }, "a request, not a question about one");
+  assert.deepEqual(parseTailRequest("stop tracking @unipcs", SELF), { kind: "stop", handle: "unipcs" });
+  for (const line of ["untail", "ok stop tailing for now", "hey shogun, can you stop tailing?", "stop the tails please", "stop tailing them all", "untail everyone", "end all my tails"]) {
+    assert.deepEqual(parseTailRequest(line, SELF), { kind: "stop", handle: null }, line);
+  }
+});
+
+test("a stop is as narrow as a start: every tail only when she says so or says nothing else (review 2026-10-07)", () => {
+  // A coin, an address, a pronoun or a thing with no tail word: not about
+  // tails at all, so the research planner's unwatch (or the classifier) has
+  // it, as before tails existed. These used to stop EVERY tail.
+  for (const line of [
+    "stop tracking $PONS on fomo",
+    "stop tracking $PONS",
+    "pine stop tracking $PONS",
+    "stop monitoring PONS",
+    "stop tracking PONS",
+    "stop tracking it",
+    "stop tracking this",
+    "stop monitoring the cpu",
+    "ok stop tracking for now",
+    "stop tracking 0x39dbed3a00000000000000000000000000000c0d",
+    "stop tracking everything",
+    "cancel tracking",
+    "stop tailing $PONS",
+  ]) {
+    assert.equal(parseTailRequest(line, SELF), null, line);
+  }
+  // Negated, or a question about a tail: nothing stops.
+  for (const line of ["don't stop tailing unipcs", "do not stop tracking unipcs", "never stop tailing him", "when will you stop tailing unipcs?", "how long until you stop tailing unipcs", "why did you stop tailing unipcs?"]) {
+    assert.equal(parseTailRequest(line, SELF), null, line);
+  }
+  // Pointing at someone it does not name: she is asked which, and nothing stops.
+  for (const line of ["stop tracking him", "stop tailing him", "ok stop tailing him", "stop tracking that guy", "stop tailing the second one", "untail that guy"]) {
+    assert.deepEqual(parseTailRequest(line, SELF), { kind: "stop-which" }, line);
+  }
+  // A comma ends the negation's clause.
+  assert.deepEqual(parseTailRequest("not now, stop tailing unipcs", SELF), { kind: "stop", handle: "unipcs" });
+  assert.equal(saysTail("stop tailing unipcs"), true);
+  assert.equal(saysTail("stop tracking pons"), false);
 });
 
 test("never a tail: copy, mirror and follow keep their meaning; coins, her own things, pronouns and the bot itself are not traders", () => {

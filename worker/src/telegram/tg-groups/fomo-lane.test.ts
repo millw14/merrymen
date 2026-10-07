@@ -932,6 +932,20 @@ describe("a Fomo tail asked for in the room (docs/fomo.md \"Tailing a trader\")"
     assert.deepEqual(tails, []);
   });
 
+  it("a stop is as narrow as a start: a coin stop is no tail; a stop naming nobody asks which in her DM (review 2026-10-07)", async () => {
+    make({ owner: ownerPort });
+    // These used to stop every tail she had ("Stopped all 1 tail.").
+    for (const [i, line] of ["pine stop tracking $PONS", "pine stop tracking it", "pine stop monitoring PONS"].entries()) {
+      clock += 3 * MIN;
+      await said(msg(line, { fromId: OWNER, fromFirstName: "Milla", messageId: 950 + i } as Partial<TgMessage>));
+    }
+    assert.deepEqual(tails, [], "never a tail stop");
+    clock += 3 * MIN;
+    await said(msg("pine ok stop tailing him", { fromId: OWNER, fromFirstName: "Milla", messageId: 960 } as Partial<TgMessage>));
+    assert.deepEqual(tails, [{ tail: { kind: "stop-which" }, fromId: OWNER }], "asked which, never all of them");
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /tail/i);
+  });
+
   it("no research lane in this process: the line goes on as before", async () => {
     fomo = null;
     make({ owner: ownerPort });

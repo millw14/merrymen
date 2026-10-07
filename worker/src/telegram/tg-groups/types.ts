@@ -519,10 +519,15 @@ export interface TgOwnerPort {
   proposeTail?(q: { tail: TgTailAsk | null; fromId: number }): Promise<TgOwnerOutcome>;
 }
 
-/** A tail read from her group line: a start with the trader and hours, or a stop (null: all of them). */
+/**
+ * A tail read from her group line: a start with the trader and hours, a stop
+ * (null: all of them), or a stop that names nobody it can act on ("stop
+ * tailing him"): her DM lists her tails and asks which, and nothing stops.
+ */
 export type TgTailAsk =
   | { kind: "start"; handle: string; hours: number; clamped: boolean; take: boolean }
-  | { kind: "stop"; handle: string | null };
+  | { kind: "stop"; handle: string | null }
+  | { kind: "stop-which" };
 
 /**
  * THE DESK, as tg-groups sees it. index.ts builds it from worker/src/desk/;

@@ -2828,7 +2828,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (o.stillWanted && !o.stillWanted()) return "not-wanted";
     stageOf(chatId, "owner tail");
     const tail: TgTailAsk | null =
-      ask === null ? null : ask.kind === "start" ? { kind: "start", handle: ask.handle, hours: ask.hours, clamped: ask.clamped, take: tailAsksToTake(j.line.text) } : { kind: "stop", handle: ask.handle };
+      ask === null
+        ? null
+        : ask.kind === "start"
+          ? { kind: "start", handle: ask.handle, hours: ask.hours, clamped: ask.clamped, take: tailAsksToTake(j.line.text) }
+          : ask.kind === "stop"
+            ? { kind: "stop", handle: ask.handle }
+            : { kind: "stop-which" };
     const outcome = await port.proposeTail({ tail, fromId: j.line.fromId });
     // Counts and kinds only: never the trader, the hours or the line.
     log(`[tg-groups] owner tail ${tail ? tail.kind : "usage"}: ${outcome}`);
