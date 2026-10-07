@@ -1314,10 +1314,15 @@ describe("Shogun's TSLA: a basis left over a flat token (staleBasisVerdict)", ()
       "is left over a token the book does not hold: the chain held none of it at the pinned block at any address of the book, and no position under TSLA is held\\. " +
       "It is not booked here and not changed\\. It cannot reach the attested book: admission seeds a basis only for a symbol positions shows held, and its own " +
       `seed, asked on this read \\(planAttestedSeed\\), carries none of it; and the first mirror pass after the new book's worker arms deletes every cost_basis ` +
-      `row spelled ${ACCOUNT}, as this one is, keeping only the new book's own .* Until that pass it is read only as it is today, and acts on nothing: no page ` +
+      `row of the account in any letter-case, keeping only the new book's own .* Until that pass it is read only as it is today, and acts on nothing: no page ` +
       "that values a holding shows it, since each joins basis to a positions row under its name and there is none; and the owner's report export lists it, " +
       "as not valued, only while the agent's newest equity mark is paper$"));
-    assert.match(stale.note!, /so that pass is not a rebuilt one\)\. That assumes the grant is not re-signed under a different letter-case spelling of the account between the apply and the first spawn; if it is, the row stays inert .* and the next preview or admission refuses the tenant on its spellings\. Until that pass/);
+    // A RE-SIGN UNDER ANOTHER LETTER-CASE BEFORE THE WORKER ARMS is covered by the delete (ledger-mirror.test.ts), and the spelling the grant had here
+    // covers a mirror from before that delete; the note no longer rests on nobody re-signing.
+    assert.match(stale.note!, new RegExp("so that pass is not a rebuilt one\\)\\. This one is spelled " + ACCOUNT + ", as the grant spells the account, so a mirror " +
+      "from before that delete took any letter-case deletes it too, so long as the grant is not re-signed under another letter-case of the account before the " +
+      "worker arms; the delete that takes any letter-case covers that as well\\. Until that pass"));
+    assert.doesNotMatch(stale.note!, /assumes the grant is not re-signed|refuses the tenant on its spellings|exact agent_id/);
     assert.ok(p.warnings.includes(stale.note!), "and said at the console");
     assert.ok(planLines(p).some((l) => l === `  note: ${stale.note}`));
     assert.ok(p.warnings.some((w) => new RegExp(`^${TSLA}: none of it is held, on chain or in the snapshot, .*trade #94285 .* records no fill`).test(w)), p.warnings.join("\n"));
@@ -1347,8 +1352,9 @@ describe("Shogun's TSLA: a basis left over a flat token (staleBasisVerdict)", ()
       ["TSLA in the class vault", () => {}, { balances: { [TSLA]: { [SHOGUN_CLASS]: 1n } } }, "class-vault-held", /Pons class vault 0x3fcdde6e\S* held 1 base units/],
       ["the balance unread", () => {}, { failBalances: [TSLA] }, "balance-unread", /balance of 0x322f.* at the pinned block could not be read/],
       ["the grant spelling the account otherwise", () => {}, {}, "basis-without-position",
-        new RegExp(`the row under TSLA is spelled ${ACCOUNT}, not as the grant spells the account \\(0x05A198A677FBCD8F5C168D397FA7EF5EB6D65487\\): the new book's ` +
-          "first mirror pass deletes the tenant's cost_basis by the grant's spelling exactly \\(ledger-mirror\\.ts\\), so it would outlive admission"),
+        new RegExp(`the row under TSLA is spelled ${ACCOUNT}, not as the grant spells the account \\(0x05A198A677FBCD8F5C168D397FA7EF5EB6D65487\\): a ledger ` +
+          "mirror from before its snapshot deletes took the account in any letter-case \\(ledger-mirror\\.ts\\) deletes the tenant's cost_basis by the worker's " +
+          "spelling exactly, so whether the row outlives admission would rest on which build the orchestrator runs"),
         { spelled: "0x05A198A677FBCD8F5C168D397FA7EF5EB6D65487" }],
       // A buy Postgres records after the sell, with nothing on chain to show for it: walking back from 0 it leaves less than nothing.
       ["fills more than the chain holds", (b) => b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status,

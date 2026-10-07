@@ -846,19 +846,54 @@ describe("an empty child is not a flat book", () => {
  * new book starts empty and gets only what the seeds put in. So the first
  * pass with nothing to compare a cursor against cannot read the book as
  * rebuilt, and once the worker has armed (its agents row) that pass replaces
- * the agent's cost_basis with the book's own — a basis the book never had is
- * gone. A pass before the worker arms deletes nothing; it only upserts the
- * new book's own seeded rows, so the stale row is untouched. And a row under
- * another spelling of the account is never matched by the delete.
+ * the account's cost_basis with the book's own — a basis the book never had
+ * is gone. A pass before the worker arms deletes nothing; it only upserts the
+ * new book's own seeded rows, so the stale row is untouched.
+ *
+ * THE ACCOUNT IN ANY LETTER-CASE. The worker registers under the grant's
+ * spelling as it stands at spawn (store.ts ensureAgent), and an owner can
+ * re-sign under another letter-case of the same account between the booking
+ * and that spawn. Both seeds read the account in any letter-case, so a row
+ * the delete missed for its case would still be this account's to the next
+ * seed. The delete takes every spelling of the account, and only this
+ * account: an equality on both sides lowered, never a pattern.
  */
 describe("a stale shared basis after an attested registration", () => {
   const STALE = "INSERT INTO cost_basis VALUES (?, 'live', 'TSLA', '23370235163310797', '8332500', 1790028733)";
+  /** Shogun's account as the grant spelt it when the booking was applied, and two other letter-cases of the same account. */
+  const APPLIED = "0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487";
+  const RESIGNED = "0x05A198A677FBCD8F5C168D397FA7EF5EB6D65487";
+  const MIXED = "0x05a198A677fbcd8F5c168d397fa7EF5eb6d65487";
+  /**
+   * Other accounts, none of them this one: one sharing all but the last
+   * nibble, in two letter-cases, and two strings this one is a prefix of, or
+   * that are a prefix of it.
+   */
+  const OTHERS = ["0x05a198a677fbcd8f5c168d397fa7ef5eb6d65488", "0x05A198A677FBCD8F5C168D397FA7EF5EB6D65488", `${APPLIED}ff`, APPLIED.slice(0, -1)];
+  const SNAPSHOTS = ["positions", "cost_basis", "position_floors", "class_positions"] as const;
   /** A new, empty book: no rows at all until its worker arms and writes its agents row. */
   const newBook = () => {
     const raw = new DatabaseSync(":memory:");
     raw.exec(SRC);
     return raw;
   };
+  /** One row in each snapshot table under `account`, named `symbol` (and, in the class book, token `0x<symbol>`). */
+  const holding = async (db: ReturnType<typeof mem>, account: string, symbol: string) => {
+    await db.prepare("INSERT INTO positions VALUES (?, ?, ?, '1', '1', 2.0, 0, 'pool', 2.0, 9)").run(account, symbol, `0x${symbol}`);
+    await db.prepare("INSERT INTO cost_basis VALUES (?, 'live', ?, '1', '1000000', 9)").run(account, symbol);
+    await db.prepare("INSERT INTO position_floors VALUES (?, 'live', ?, 1500, 0, 'entry', 9)").run(account, symbol);
+    await db.prepare("INSERT INTO class_positions (agent_id, token, symbol, state) VALUES (?, ?, ?, 'open')").run(account, `0x${symbol}`, symbol);
+  };
+  /** Each snapshot table's rows, as "account symbol", in a fixed order. */
+  const held = async (db: ReturnType<typeof mem>) => {
+    const out: Record<string, string[]> = {};
+    for (const table of SNAPSHOTS) {
+      out[table] = ((await db.prepare(`SELECT agent_id, symbol FROM ${table}`).all()) as Array<{ agent_id: string; symbol: string }>)
+        .map((r) => `${r.agent_id} ${r.symbol}`).sort();
+    }
+    return out;
+  };
+  const inEvery = (rows: string[]) => Object.fromEntries(SNAPSHOTS.map((t) => [t, [...rows].sort()]));
 
   it("THE FIRST PASS AFTER THE WORKER ARMS DELETES IT: no cursor survived registration, so the book is not read as rebuilt", async () => {
     const shared = mem(DEST);
@@ -874,20 +909,61 @@ describe("a stale shared basis after an attested registration", () => {
     assert.equal(await count(shared, "cost_basis"), 0, "the basis the new book never had is gone");
   });
 
-  it("but a row spelled otherwise than the worker's account survives that pass, and a cursor left behind would read the book as rebuilt and keep it", async () => {
-    const spelled = mem(DEST);
-    await spelled.prepare(STALE).run("0xAGENT");
+  it("A GRANT RE-SIGNED UNDER ANOTHER LETTER-CASE BEFORE THE WORKER ARMS: the first pass after it arms, under the new spelling, still deletes the basis", async () => {
+    const shared = mem(DEST);
+    // The row as the booking left it, spelled as the grant spelt the account then.
+    await shared.prepare(STALE).run(APPLIED);
     const book = newBook();
-    book.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent', 'Shogun', 1)");
-    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared: spelled });
-    assert.equal(await count(spelled, "cost_basis"), 1, "the delete matches the account exactly as the worker spells it");
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(await count(shared, "cost_basis"), 1, "untouched before the worker arms");
+    // The owner re-signed; the orchestrator read the grant again, and the worker registered under its new spelling.
+    book.exec(`INSERT INTO agents (smart_account, name, epoch) VALUES ('${RESIGNED}', 'Shogun', 1)`);
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(r.restarted, undefined, "not a rebuilt pass");
+    assert.equal(r.failed, undefined);
+    assert.equal(await count(shared, "cost_basis"), 0, "the basis the new book never had is gone, whatever letter-case it was left under");
+    // What a later seed reads for the account, in any letter-case as both seeds do: nothing.
+    assert.deepEqual(await shared.prepare("SELECT symbol FROM cost_basis WHERE lower(agent_id) = lower(?)").all(RESIGNED), []);
+  });
 
-    const cursor = mem(DEST);
-    await cursor.prepare(STALE).run("0xagent");
-    await cursor.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ('0xten', 'trades', 9, 100, 100)").run();
-    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared: cursor });
+  it("EVERY LETTER-CASE OF THE ACCOUNT IS REPLACED on an ordinary pass, in all four snapshot tables, and no other account's rows are touched", async () => {
+    const shared = mem(DEST);
+    for (const spelling of [APPLIED, RESIGNED, MIXED]) await holding(shared, spelling, "OLD");
+    for (const other of OTHERS) await holding(shared, other, "THEIRS");
+    const raw = newBook();
+    raw.exec(`INSERT INTO agents (smart_account, name, epoch) VALUES ('${RESIGNED}', 'Shogun', 1)`);
+    const book = wrapSqlite(raw);
+    await holding(book as ReturnType<typeof mem>, RESIGNED, "NEW");
+    const r = await mirrorTenant({ tenant: "0xten", child: book, shared });
+    assert.equal(r.restarted, undefined);
+    assert.equal(r.failed, undefined, JSON.stringify(r.failed));
+    assert.deepEqual(await held(shared), inEvery([`${RESIGNED} NEW`, ...OTHERS.map((o) => `${o} THEIRS`)]),
+      "the account holds exactly the book's own rows; the neighbours and the prefixes keep theirs");
+  });
+
+  it("A REBUILT PASS STILL DELETES NOTHING, in any letter-case; positions keep their own guard, unchanged", async () => {
+    const shared = mem(DEST);
+    for (const spelling of [APPLIED, MIXED]) await holding(shared, spelling, "OLD");
+    for (const other of OTHERS) await holding(shared, other, "THEIRS");
+    // A lost book's cursor that registration did not remove, past the new book's ids.
+    const cursor = "INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ('0xten', 'trades', 9, 100, 100) " +
+      "ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = 9, last_stamp = 100";
+    await shared.prepare(cursor).run();
+    const book = newBook();
+    book.exec(`INSERT INTO agents (smart_account, name, epoch) VALUES ('${RESIGNED}', 'Shogun', 1)`);
+    const before = await held(shared);
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
     assert.ok(r.restarted, "a lost book's cursor past the new book's ids reads as a rebuild");
-    assert.equal(await count(cursor, "cost_basis"), 1, "and a rebuilt book's pass deletes no basis");
+    assert.deepEqual(await held(shared), before, "a rebuilt book with nothing to say deletes nothing, under any spelling");
+
+    // A rebuilt child that does hold a position replaces the account's positions, in any letter-case; the three history tables stay as they were.
+    await shared.prepare(cursor).run();
+    book.exec(`INSERT INTO positions VALUES ('${RESIGNED}', 'NEW', '0xNEW', '1', '1', 2.0, 0, 'pool', 2.0, 9)`);
+    const again = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.ok(again.restarted, "still read as a rebuild");
+    const after = await held(shared);
+    assert.deepEqual(after.positions, [`${RESIGNED} NEW`, ...OTHERS.map((o) => `${o} THEIRS`)].sort());
+    for (const table of ["cost_basis", "position_floors", "class_positions"] as const) assert.deepEqual(after[table], before[table], `${table}: kept on a rebuilt pass`);
   });
 });
 

@@ -263,8 +263,12 @@ reach the attested book**. Every one of the following must hold
    seed would hand it this cost. In addition, the tool calls admission's own
    `planAttestedSeed` on the snapshot's read, and that seed must carry none of
    those names.
-3. **It does not outlive admission.** Every stale row is spelled exactly as
-   the grant spells the account (see below for why).
+3. **It does not outlive admission.** The first mirror pass after the new
+   book's worker arms deletes the account's `cost_basis` in any letter-case
+   (see below). Every stale row must also be spelled exactly as the grant
+   spells the account. An older mirror, from before the delete took any
+   letter-case, matched the worker's spelling exactly, and this way it
+   deletes the row too.
 4. **The fill walk does not go below zero** (`fills-exceed-chain`).
 
 If any of these fails, the trade is refused as `basis-without-position`, and
@@ -278,7 +282,7 @@ When the trade books, the plan says so. `evidence.holding.staleBasis` holds:
 - the names checked;
 - what the seed carries under them (nothing);
 - every `positions` row under them;
-- the spelling the first mirror pass deletes by;
+- the account as the grant spells it, which every row matches;
 - a note, also printed at the console, saying the rows are not booked or
   changed, and why they cannot reach the new book.
 
@@ -304,26 +308,34 @@ change it:
    `positions` row under its symbol is held (condition 2). The new book holds
    no basis for the token.
 3. **The first mirror pass after the new book's worker arms.** The worker
-   writes its `agents` row under `grant.smartAccount`, exactly as the grant
-   spells it (`store.ts ensureAgent`). The mirror's snapshot step then runs
-   `DELETE FROM cost_basis WHERE agent_id = <that spelling>` and inserts only
-   the book's own rows (`ledger-mirror.ts`).
+   writes its `agents` row under `grant.smartAccount`, as the grant spells it
+   when the worker spawns (`store.ts ensureAgent`). The mirror's snapshot
+   step then runs `DELETE FROM cost_basis WHERE lower(agent_id) =
+   lower(<that spelling>)` and inserts only the book's own rows
+   (`ledger-mirror.ts`). `positions`, `position_floors` and
+   `class_positions` are replaced the same way.
+   - The delete takes the account in any letter-case. So if the owner
+     re-signs the grant under another letter-case of the account between
+     the apply and the first spawn, the worker registers under the new
+     spelling and the row is still deleted. An older mirror matched the
+     worker's spelling exactly, and a row under the old spelling survived
+     it, still read as the account's by both seeds (they take any
+     letter-case). Condition 3 still asks for the grant's spelling at the
+     preview and the apply, so the verdict also holds under that older
+     mirror, as long as nobody re-signs in between.
    - The delete is skipped only when the pass reads the child as rebuilt. That
      happens only when a `mirror_state` cursor no longer matches the book
      (its row is gone, or another row is there), and registration removed
      every cursor. So this pass is not a rebuilt one, and the row is
-     deleted. That is why condition 3 requires the grant's spelling: the
-     delete matches case and all, and a row under another spelling would
-     survive it.
+     deleted.
    - A pass that runs before the worker has written its `agents` row deletes
      nothing; it only upserts the new book's own seeded rows, so the stale
      row is untouched.
-   - The deletion assumes the grant is not re-signed under a different
-     letter-case spelling of the account between the apply and the first
-     spawn. If that happens, the row stays inert (the seeds filter by held
-     symbols, and the web pages join on the exact `agent_id`), and the next
-     preview or admission refuses the tenant on its spellings.
-   - `ledger-mirror.test.ts` holds each of these cases.
+   - The delete is an equality on the lowered account, never a pattern, so
+     no other account's rows are touched, whatever it shares with this one.
+   - `ledger-mirror.test.ts` holds each of these cases, and
+     `chain-gap-booking.postgres.test.ts` runs the re-signed case on
+     Postgres.
 
 Until that pass, and indefinitely if the tenant is never run, the row is
 read exactly as it is today:

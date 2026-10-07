@@ -242,11 +242,13 @@ export interface BookingSnapshot {
    * cost_basis do not cover (core grant.ts grantPonsClassVault): the class
    * book is class_positions. The Trencher vault's are merged into the position.
    *
-   * `spelled` is the account exactly as the grant spells it: the agent_id the
-   * attested book's worker registers under (store.ts ensureAgent returns
-   * grant.smartAccount, and the grant store hands the child grant_json as it
-   * is), and so the one its mirror deletes the tenant's snapshot rows by,
-   * case and all (ledger-mirror.ts: `DELETE FROM cost_basis WHERE agent_id = ?`).
+   * `spelled` is the account exactly as the grant spells it now: the agent_id
+   * the attested book's worker would register under (store.ts ensureAgent
+   * returns grant.smartAccount, and the grant store hands the child grant_json
+   * as it is). Its mirror deletes the tenant's snapshot rows by it in any
+   * letter-case (ledger-mirror.ts: `lower(agent_id) = lower(?)`); a mirror
+   * built before that matched it exactly (staleBasisVerdict says why both
+   * matter).
    */
   grant: { account: string; spelled: string; owner: string | null; chainId: number | null; custody: string[]; classVault: string | null } | null;
   /** Every registration row for the account (more than one is a refusal). */
@@ -1092,23 +1094,28 @@ export interface HoldingVerdict {
  *                          And planAttestedSeed itself, asked on the same
  *                          read (Holdings.seeded), carries none of those
  *                          names: the seed's own code, not a copy of it;
- *   it does not outlive    every row is spelled exactly as the grant spells
- *     admission            the account. The new book's worker registers under
- *                          that spelling (store.ts ensureAgent), and the first
- *                          mirror pass after it does deletes the tenant's
- *                          cost_basis by it, case and all, keeping only the
- *                          new book's own rows (ledger-mirror.ts). That pass
- *                          is not a rebuilt one: registration removed the
- *                          lost book's cursors (ledger-import.ts
+ *   it does not outlive    the new book's worker registers under the grant's
+ *     admission            spelling of the account as it stands when the
+ *                          worker spawns (store.ts ensureAgent), and the first
+ *                          mirror pass after it does deletes the account's
+ *                          cost_basis in any letter-case (ledger-mirror.ts:
+ *                          lower(agent_id) = lower(?)), keeping only the new
+ *                          book's own rows. So a grant re-signed under another
+ *                          letter-case of the account between the apply and
+ *                          that spawn changes nothing: the row is still the
+ *                          account's, and still deleted. That pass is not a
+ *                          rebuilt one: registration removed the lost book's
+ *                          cursors (ledger-import.ts
  *                          registerAttestedGapSource), and only a cursor
  *                          the book no longer matches (its row gone, or
- *                          another there) reads as one. A row under another
- *                          spelling would survive it. This assumes the
- *                          grant is not re-signed under a different
- *                          letter-case spelling between the apply and the
- *                          first spawn; if it is, the row stays inert and
- *                          the next preview or admission refuses on
- *                          spellings.
+ *                          another there) reads as one. And every row is
+ *                          spelled exactly as the grant spells the account
+ *                          at the preview and the apply. That is what a
+ *                          mirror built before its delete took any
+ *                          letter-case needs (it matched the worker's
+ *                          spelling exactly), so the verdict does not rest
+ *                          on which build the orchestrator runs; only the
+ *                          newer build also covers a re-sign in between.
  *
  * Until that pass the row stays what it is today, and nothing that acts on
  * a basis can reach it: both seeds filter by held symbols, and every page
@@ -1136,7 +1143,11 @@ export interface StaleBasis {
     seededUnderNames: NonNullable<Holdings["seeded"]> | null;
     /** Every positions row under those names: the dashboard shows the basis beside these until the first mirror pass. */
     positionsUnderNames: Holdings["positions"];
-    /** The spelling the attested book's first mirror pass deletes cost_basis by: the grant's. */
+    /**
+     * The account as the grant spells it, as every row here must be. The
+     * attested book's first mirror pass deletes its cost_basis by this account
+     * in any letter-case (a mirror built before that, by this spelling exactly).
+     */
     deletedAs: string | null;
     note: string | null;
   };
@@ -1174,8 +1185,8 @@ export function staleBasisVerdict(o: { token: string; names: ReadonlySet<string>
   const misspelled = rows.filter((b) => b.agentId !== o.grantSpelling);
   if (o.grantSpelling === null || misspelled.length) {
     return no(`${misspelled.map((b) => `the row under ${b.symbol} is spelled ${b.agentId}`).join(", ")}, not as the grant spells the account ` +
-      `(${o.grantSpelling ?? "no grant"}): the new book's first mirror pass deletes the tenant's cost_basis by the grant's spelling exactly (ledger-mirror.ts), ` +
-      "so it would outlive admission");
+      `(${o.grantSpelling ?? "no grant"}): a ledger mirror from before its snapshot deletes took the account in any letter-case (ledger-mirror.ts) deletes ` +
+      "the tenant's cost_basis by the worker's spelling exactly, so whether the row outlives admission would rest on which build the orchestrator runs");
   }
   const cost = (b: Holdings["basis"][number]) => (baseUnits(b.costUsdg) === null ? `"${b.costUsdg}"` : `${usdg6(b.costUsdg)} USDG`);
   const beside = [...new Set(positionsUnderNames.filter((p) => stale.has(p.symbol)).map((p) => p.symbol))];
@@ -1183,10 +1194,10 @@ export function staleBasisVerdict(o: { token: string; names: ReadonlySet<string>
     .join(", ")} is left over a token the book does not hold: the chain held none of it at the pinned block at any address of the book, and no position under ` +
     `${names.join(", ")} is held. It is not booked here and not changed. It cannot reach the attested book: admission seeds a basis only for a symbol ` +
     "positions shows held, and its own seed, asked on this read (planAttestedSeed), carries none of it; and the first mirror pass after the new book's worker " +
-    `arms deletes every cost_basis row spelled ${o.grantSpelling}, as this one is, keeping only the new book's own (registration removed the lost book's cursors, ` +
-    "so that pass is not a rebuilt one). That assumes the grant is not re-signed under a different letter-case spelling of the account between the apply " +
-    "and the first spawn; if it is, the row stays inert (both seeds filter by held symbols, and every page joins on the exact agent_id), and the next " +
-    "preview or admission refuses the tenant on its spellings. Until that pass it is read only as it is today, and acts on nothing: " + (beside.length
+    `arms deletes every cost_basis row of the account in any letter-case, keeping only the new book's own (registration removed the lost book's cursors, ` +
+    `so that pass is not a rebuilt one). This one is spelled ${o.grantSpelling}, as the grant spells the account, so a mirror from before that delete took ` +
+    "any letter-case deletes it too, so long as the grant is not re-signed under another letter-case of the account before the worker arms; the delete " +
+    "that takes any letter-case covers that as well. Until that pass it is read only as it is today, and acts on nothing: " + (beside.length
     ? `the dashboard shows this cost beside the positions row(s) under ${beside.join(", ")} that hold 0`
     : "no page that values a holding shows it, since each joins basis to a positions row under its name and there is none") +
     "; and the owner's report export lists it, as not valued, only while the agent's newest equity mark is paper";

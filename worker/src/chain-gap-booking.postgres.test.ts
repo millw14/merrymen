@@ -21,11 +21,12 @@ import { createRequire } from "node:module";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { CASH } from "../../packages/core/src/index";
-import { translateQuery, translateSchema, type Db } from "./db";
+import { translateQuery, translateSchema, wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
-import { MIRROR_STATE_DDL } from "./ledger-mirror";
+import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { CHAIN_REFUSAL, knownChainFacts } from "./ledger-resume";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
@@ -235,7 +236,10 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
  * lot, written after the sell; the chain holds none. What only Postgres shows:
  * admission's own seed (planAttestedSeed) asked inside the read-only
  * REPEATABLE READ snapshot through the shell's SELECT-only gate, each basis
- * row's spelling read back, and the apply's compare-and-set on the named basis.
+ * row's spelling read back, the apply's compare-and-set on the named basis,
+ * and the first mirror pass after the new book's worker arms deleting the
+ * basis on Postgres although the grant was re-signed under another
+ * letter-case of the account in between.
  */
 test("Postgres: a basis left over a flat token is named, not booked, and compared again by the apply", { skip: !url, timeout: 60_000 }, async (t) => {
   const target = new URL(url!);
@@ -329,4 +333,59 @@ test("Postgres: a basis left over a flat token is named, not booked, and compare
   assert.deepEqual(trade.map((r) => [r.fill_side, r.fill_qty_raw, r.buy_token]), [["buy", LOT, COIN]]);
   assert.deepEqual((await setup.query("SELECT agent_id, mode, symbol, qty_raw, cost_usdg, updated_at FROM cost_basis")).rows.map((r) => ({ ...r, updated_at: Number(r.updated_at) })),
     [{ agent_id: ACCOUNT, mode: "live", symbol: "COIN", qty_raw: LOT, cost_usdg: "3000000", updated_at: AT + 9000 }]);
+
+  // ── AND THEN, ON POSTGRES, WHAT BECOMES OF IT: the owner re-signs under another letter-case of the account before the first worker arms ──
+  //
+  // Registration removes the tenant's cursors; the grant is re-signed with the account upper-cased; the new book's worker registers under that
+  // spelling (store.ts ensureAgent); and the first mirror pass after it arms, on this Postgres, deletes the stale basis whatever letter-case it
+  // was left under. Rows of other accounts — a neighbour sharing all but the last nibble, in two letter-cases, and strings this account is a
+  // prefix of or that are a prefix of it — are not touched, in any snapshot table.
+  const RESIGNED = `0x${ACCOUNT.slice(2).toUpperCase()}`, MIXED = `0x${"a4A4".repeat(10)}`;
+  const OTHERS = [`0x${"a4".repeat(19)}a5`, `0x${"A4".repeat(19)}A5`, `${ACCOUNT}ff`, ACCOUNT.slice(0, -1)];
+  const snapshotRow = async (account: string, symbol: string) => {
+    await setup.query(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+      VALUES ($1, $2, $3, '1', '1', 2, 0, 'pool', 2, $4)`, [account, symbol, `0x${symbol}`, AT]);
+    await setup.query("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES ($1, 'live', $2, '1', '1000000', $3)", [account, symbol, AT]);
+    await setup.query("INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at) VALUES ($1, 'live', $2, 1500, 'entry', 'entry', $3)", [account, symbol, AT]);
+    await setup.query("INSERT INTO class_positions (agent_id, token, symbol, state) VALUES ($1, $2, $3, 'open')", [account, `0x${symbol}`, symbol]);
+  };
+  // Leftovers of the same account under a third spelling, and the other accounts' rows.
+  await snapshotRow(MIXED, "OLD");
+  for (const other of OTHERS) await snapshotRow(other, "THEIRS");
+  const snapshots = async () => {
+    const out: Record<string, string[]> = {};
+    for (const table of ["positions", "cost_basis", "position_floors", "class_positions"]) {
+      out[table] = (await setup.query(`SELECT agent_id, symbol FROM ${table}`)).rows.map((r) => `${r.agent_id} ${r.symbol}`).sort();
+    }
+    return out;
+  };
+  await setup.query("DELETE FROM mirror_state WHERE tenant = $1", [TENANT]);
+  await setup.query("UPDATE grants SET grant_json = jsonb_set(grant_json, '{smartAccount}', to_jsonb($1::text)) WHERE tenant = $2", [RESIGNED, TENANT]);
+  // The orchestrator's side of the shared ledger, on this connection: the mirror's transactions as PgDb runs them.
+  const shared: Db = {
+    prepare: db.prepare,
+    exec: db.exec,
+    async tx<T>(fn: (d: Db) => Promise<T>): Promise<T> {
+      await setup.query("BEGIN");
+      try { const out = await fn(shared); await setup.query("COMMIT"); return out; } catch (e) { await setup.query("ROLLBACK"); throw e; }
+    },
+  };
+  const book = wrapSqlite(new DatabaseSync(":memory:"));
+  await applyLedgerSchema(book);
+  const before = await snapshots();
+  const early = await mirrorTenant({ tenant: TENANT, child: book, shared, nowSec: NOW });
+  assert.equal(early.failed, undefined, JSON.stringify(early.failed));
+  assert.deepEqual(await snapshots(), before, "before the worker arms the pass deletes nothing");
+  const reread = (await setup.query("SELECT grant_json->>'smartAccount' AS a FROM grants WHERE tenant = $1", [TENANT])).rows[0]!.a as string;
+  assert.equal(reread, RESIGNED);
+  await book.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at)
+    VALUES (?, ?, ?, 4663, '{}', ?, ?)`).run(reread, TENANT, `0x${"01".repeat(20)}`, NOW - 60, NOW + 14 * 86_400);
+  const armed = await mirrorTenant({ tenant: TENANT, child: book, shared, nowSec: NOW });
+  assert.equal(armed.failed, undefined, JSON.stringify(armed.failed));
+  assert.equal(armed.restarted, undefined, "registration removed the cursors, so the pass is not a rebuilt one");
+  const after = await snapshots();
+  for (const table of Object.keys(after)) {
+    assert.deepEqual(after[table], OTHERS.map((o) => `${o} THEIRS`).sort(), `${table}: every letter-case of the account replaced by the new book's (none); the others kept`);
+  }
+  assert.deepEqual((await setup.query("SELECT symbol FROM cost_basis WHERE lower(agent_id) = lower($1)", [RESIGNED])).rows, [], "nothing left for a later seed to carry");
 });
