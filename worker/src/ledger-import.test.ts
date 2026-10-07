@@ -97,6 +97,30 @@ it("imports original IDs/stamps, full financial rows and allocation high-water; 
   await assert.rejects(stageLedgerImport({ artifact, targetVolumeId: f.volume.id, shared: f.shared, dek, lease: f.lease, assertSource() {}, dialect: "sqlite" }));
 });
 
+it("a book with mirrored owner operations stages, verifies and restores: the handover format is unchanged, and the shared record stands", async () => {
+  const f = await fixture();
+  const op = `0x${"0e".repeat(32)}`;
+  f.raw.prepare(`INSERT INTO owner_operations (agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition, review_reason,
+      usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+    VALUES (?, 4663, ?, ?, 10, 1000, 3, '0x0', 'root', 'acknowledged', NULL, '[]', '[]', '[]', ?, '1', 'arm-reconcile', 3, 1060)`)
+    .run(f.smartAccount, op, `0x${"1e".repeat(32)}`, addr(0));
+  const copied = await mirrorTenant({ tenant: f.tenant, child: f.local, shared: f.shared });
+  assert.equal(copied.failed, undefined); assert.equal(copied.copied.owner_operations, 1);
+  assert.equal(f.sharedRaw.prepare("SELECT count(*) AS n FROM mirror_state WHERE tenant=? AND table_name='owner_operations'").get(f.tenant)!.n, 1);
+  const artifact = await f.stage();
+  const verified = await verifyLedgerImport({ artifact, home: f.sourceHome, shared: f.shared, dek, lease: f.lease, assertSource() {}, dialect: "sqlite" });
+  assert.equal(verified.tables, 21, "the same tables as every other book: owner_operations is not part of the handover");
+  assert.equal(await restoreLedgerImport(f.options), "restored");
+  const importedRaw = new DatabaseSync(path.join(f.home, "merrymen.db")); handles.push(importedRaw); const imported = wrapSqlite(importedRaw);
+  // The continuity proof names a fixed set of tables, and this is not one: an empty restored table proves nothing either way.
+  await assertLedgerSourceContinuity(imported, f.shared, f.tenant);
+  for (let i = 0; i < 2; i++) {
+    const report = await mirrorTenant({ tenant: f.tenant, child: imported, shared: f.shared });
+    assert.equal(report.restarted, undefined); assert.equal(report.failed, undefined);
+  }
+  assert.equal(f.sharedRaw.prepare("SELECT count(*) AS n FROM owner_operations WHERE user_op_hash=? AND tenant=?").get(op, f.tenant)!.n, 1, "Postgres keeps the record");
+});
+
 it("lost commit acknowledgement resumes the same published generation without replaying its rows", async () => {
   const f = await fixture(); await f.stage(); let lose = true;
   const uncertain: Db = { prepare: sql => f.shared.prepare(sql), exec: sql => f.shared.exec(sql), async tx(fn) { const result = await f.shared.tx(fn); if (lose) { lose = false; throw new Error("lost COMMIT acknowledgement"); } return result; } };

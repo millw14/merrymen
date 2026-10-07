@@ -125,3 +125,30 @@ test("cold rebuilt source refuses before moving the cursor and repeated invocati
     assert.equal(f.raw.prepare("SELECT count(*) n FROM flows").get()!.n, 0);
   }
 });
+
+test("a book from before owner_operations checkpoints exactly as before: the missing table is zero rows, never a refusal", async t => {
+  const f = await fixture(t);
+  const local = new DatabaseSync(path.join(f.home, "merrymen.db"));
+  local.exec("DROP TABLE owner_operations");
+  local.close();
+  const done = await checkpointFleetLedger(f);
+  assert.equal(done.checkpointed, 1);
+  assert.equal(f.raw.prepare("SELECT count(*) n FROM flows").get()!.n, 503);
+  assert.equal(f.raw.prepare("SELECT count(*) n FROM mirror_state WHERE tenant=? AND table_name='owner_operations'").get(TENANT)!.n, 0);
+});
+
+test("an owner operation in the book is carried up under the roster's account and tenant, and the continuity proof never names it", async t => {
+  const f = await fixture(t);
+  const local = new DatabaseSync(path.join(f.home, "merrymen.db"));
+  const op = `0x${"0f".repeat(32)}`, tx = `0x${"1f".repeat(32)}`;
+  local.prepare(`INSERT INTO owner_operations (tenant, agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition,
+      review_reason, usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+    VALUES ('0xspoofed', ?, 4663, ?, ?, 10, 100, 3, '0x0', 'root', 'acknowledged', NULL, '[]', '[]', '[]', ?, '1', 'arm-reconcile', 1, 200)`)
+    .run(ACCOUNT, op, tx, `0x${"0".repeat(40)}`);
+  local.close();
+  assert.equal((await checkpointFleetLedger(f)).checkpointed, 1);
+  assert.deepEqual({ ...f.raw.prepare("SELECT tenant, agent_id, user_op_hash FROM owner_operations").get() }, { tenant: TENANT, agent_id: ACCOUNT, user_op_hash: op });
+  // A second checkpoint: the record is not copied again, and nothing about it refuses.
+  assert.equal((await checkpointFleetLedger(f)).checkpointed, 1);
+  assert.equal(f.raw.prepare("SELECT count(*) n FROM owner_operations").get()!.n, 1);
+});
