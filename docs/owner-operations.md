@@ -155,9 +155,12 @@ or more than a word) leaves the whole receipt unread, and the reading is null.
 That is the rule admission reads every amount by (`ledger-resume.ts
 hexQuantity`), so both sides fail closed the same way: the reconciler records
 nothing and finds the operation again at the next arm, and admission answers
-nothing, so the operation stays missing. (The first cut read such a log as an
-amount of zero, a leg that moves nothing, which admission then refused to
-take as covered. With no data at all, the first cut threw instead.)
+nothing, so the operation stays missing. The deposit scanner refuses such a
+receipt by the same rule (`transferAmountsReadable`) wherever it would book
+an owner's leg from a trade's transaction (below). (The first cut read such a
+log as an amount of zero, a leg that moves nothing, which admission then
+refused to take as covered. With no data at all, the first cut threw
+instead.)
 
 These are the real shapes, read from the public chain
 (`worker/src/testdata/owner-operations-receipts.json`):
@@ -215,6 +218,19 @@ decodes their amounts only for a leg it lets through, so a malformed Transfer
 elsewhere in the bundle stops nothing. An unreadable one refuses the scan
 pass, as an unreadable receipt always did for any other transaction: the
 cursor stays, and the window is read again.
+
+**A receipt with an amount that cannot be read refuses that transaction
+alone.** Before it decodes a let-through leg's receipt, the scanner checks
+every Transfer in it, whoever's operation it sits in, by the rule the record
+refuses a receipt by (`owner-operations.ts transferAmountsReadable`: one
+quantity, 1 to 64 hex digits). If any fails, the leg is not booked, the
+scanner logs one `not booked:` line for it, and the rest of the window is
+booked as usual. The record refuses the same receipt, so the reconciler
+records nothing for the operation and admission names it missing. (The first
+cut decoded the whole receipt instead. A Transfer with `0x` data anywhere in
+it threw, which refused every pass for that tenant, so no later deposit or
+withdrawal was booked. Empty data, or more than a word, was read as an amount,
+and the leg was booked from a receipt the record refused.)
 
 ## How it reaches Postgres
 
@@ -389,6 +405,17 @@ decision, not this tool's.
    it was settled, and on every tape. That over-counts, which is the safe
    direction. The audit below finds them.
 
+**Check before deploying: a peak `MERRYMEN_REPAIR_HWM=apply` already
+lowered.** The repair derives a peak from every capital leg on chain, trades'
+transactions included, and lowers it by raising `hwm_withdrawn_usdg`. It
+writes no flow. So an owner withdrawal in a trade's transaction that an apply
+already compensated has no flow row, and nothing dedupes the two. On its first
+boot this code catches the scanner up from its last recorded `chain-log`
+flow, up to 200,000 blocks back. It books that leg as a flow and lowers the
+peak a second time. Before deploying, check each tenant an apply touched for
+such a withdrawal inside that window. If there is one, decide before the
+deploy how its peak is kept from moving twice.
+
 ## Limits
 
 - **(a) Any token departure is `review`.** Almost every recovery sweep carries
@@ -409,12 +436,19 @@ decision, not this tool's.
   positions or cost_basis. That guard belongs to the closed-epoch filing work.
 - Secondary-validator (vType `0x01`) operations keep the `'swap'` booking.
 - **(e) Admission holds every USDG log of a trade's transaction by its trade
-  row** (`chainFactsPostgresLacks`), as it always has. So an owner's capital
-  leg bundled with an agent trade does not hold the tenant at admission even
-  when no flow books it. The live scanner books it now (above). One that landed
-  while no worker scanned is booked by nothing, and admission does not name it.
-  Tightening that is a change to admission for every trade, left to a
-  reviewed decision.
+  row** (`chainFactsPostgresLacks`), as it always has. An owner's capital leg
+  in such a transaction goes unheld only when its record is `acknowledged`,
+  and `acknowledged` means nothing else in the transaction moved USDG of the
+  account (rule 3). Beside an agent trade that moved the account's USDG the
+  record is `review` and answers nothing, so the operation itself holds the
+  tenant. With no record at all (an operation no arm read, or a receipt with
+  an amount that cannot be read) it holds the tenant too. In the
+  `acknowledged` case nothing holds the tenant for that leg, even when no
+  flow books it. The live scanner books it now (above). One that landed while no worker scanned
+  is booked by nothing, and admission does not name it. (A root operation
+  already held as a misbooked `'swap'` row left its leg unheld the same way
+  before this change; the audit below finds those.) Tightening that is a
+  change to admission for every trade, left to a reviewed decision.
 - Owner records are not in the persistent-home handover. Postgres keeps the
   mirrored copy, and admission fails closed if one is lost.
 - Every outstanding chain-gap booking preview recomputes to a new digest. Its
