@@ -4,11 +4,13 @@ Status: implementation under verification; no production factory is configured b
 
 The existing key names each tradable token. Autonomous Trencher instead authorizes an owner-specific vault to buy and sell tokens from verified Uniswap v3 pools. The vault owns purchased tokens, grants exact temporary router allowances, and sends sale proceeds only to the owner's smart account. The session cannot call recovery or choose a recipient. The owner can recover tokens separately.
 
-Discovery ranks active volume pools and verifies their token pair and factory provenance on-chain. It does not require custom tokens. The first version supports direct USDG routes and USDG/WETH/token routes, not v4 or ungraduated bonding curves. A valid pool and high reported volume do not establish that a token is safe or profitable.
+Discovery ranks pools by their last hour's volume, weighted by how far the price moved that hour, and verifies their token pair and factory provenance on-chain. A coin clears the volume screen with 100,000 USD of 24-hour volume or 25,000 USD in the last hour. It does not require custom tokens. The first version supports direct USDG routes and USDG/WETH/token routes, not v4 or ungraduated bonding curves. A valid pool and high reported volume do not establish that a token is safe or profitable.
+
+A new pool usually keeps no on-chain price history (its oracle holds one observation), so it has no 15-minute TWAP. The worker then samples the pool's spot every tick and averages the readings by time over five minutes. That sampled price values a holding at once. It may open a fast Trencher vault entry, or a paper one, only after four readings spanning three minutes. It must pass the same depth floor, and spot must stay within twice the pool divergence band of the average. Every other buy of such a coin stays inside the scout budget, and sampled marks never raise the high-water mark.
 
 Fast mode requires a fresh Brain buy approval, checks exits every configured 15-second tick, and prioritizes exits. Its existing thresholds are −10%, +20%, 30 minutes, and liquidity deterioration. These are decision thresholds, not guaranteed execution prices. RPC, model, bundler, liquidity and token restrictions can prevent fills.
 
-The vault caps each buy at 5 USDG and total buys at 25 USDG per contract 24-hour window, beginning with a buy after the previous window expires. Lower signed per-trade limits and worker limits still apply. The 24-hour contract window is not a continuously trailing window. Reaching its entry limit does not disable vault sells. Grant expiry, chain failure or an unsellable token can still block exits.
+The vault caps each buy at 5 USDG and total buys at 25 USDG per contract 24-hour window, beginning with a buy after the previous window expires. Fast mode enters at 2.50 USDG, so one 25 USDG window allows ten entries. Lower signed per-trade limits and worker limits still apply. The 24-hour contract window is not a continuously trailing window. Reaching its entry limit does not disable vault sells. Grant expiry, chain failure or an unsellable token can still block exits.
 
 ## Release steps
 

@@ -185,8 +185,11 @@ describe("fast Trencher exits", () => {
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_FAST).exit, true);
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_DEFAULTS).exit, false);
   });
-  it("keeps entry quality and size unchanged", () => {
-    assert.equal(TRENCHER_FAST.perEntryUsdg, TRENCHER_DEFAULTS.perEntryUsdg);
+  it("keeps entry quality, and halves the size to trade ten times in the vault's day", () => {
+    // The vault caps 25 USDG of buys a day at most 5 a buy: dollars, not trades.
+    assert.equal(TRENCHER_FAST.perEntryUsdg, 2_500_000n);
+    assert.equal(25_000_000n / TRENCHER_FAST.perEntryUsdg, 10n);
+    assert.ok(TRENCHER_FAST.perEntryUsdg <= TRENCHER_DEFAULTS.perEntryUsdg, "fast never sizes above the default");
     assert.equal(shouldEnter(candidate({ liquidityUsd: 5000 }), TRENCHER_FAST, NOW).enter, false);
     assert.equal(shouldEnter(candidate({ ageSec: 30 }), TRENCHER_FAST, NOW).enter, false);
     assert.equal(shouldEnter(candidate(), TRENCHER_FAST, NOW).enter, true);

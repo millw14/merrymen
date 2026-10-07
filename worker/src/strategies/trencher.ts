@@ -286,9 +286,19 @@ export const TRENCHER_DEFAULTS: TrencherConfig = {
 
 export type EntryVerdict = { enter: true } | { enter: false; why: string };
 
-/** Faster exits without relaxing entry quality or increasing position size. */
+/**
+ * Faster exits without relaxing entry quality, and HALF the entry size.
+ *
+ * $2.50, not $5, because the vault's limit is DOLLARS: 25 USDG of buys per
+ * contract day, at most 5 a buy (TrencherVault.sol). At $5 an entry that was
+ * five trades a day, spent by mid-morning on whatever ranked first. At $2.50 it
+ * is ten, for the same dollars at risk — a trencher that trades, not one that
+ * waits a day for its window. No limit moves: the per-buy cap, the daily cap,
+ * the owner's per-trade cap and the wall are all exactly where they were.
+ */
 export const TRENCHER_FAST: TrencherConfig = {
   ...TRENCHER_DEFAULTS,
+  perEntryUsdg: 2_500_000n, // $2.50
   stopLossBps: 1_000,
   takeProfitBps: 2_000,
   maxHoldSec: 30 * 60,

@@ -5858,7 +5858,10 @@ async function main() {
             active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"spent"}),
             active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"windowStart"}),
           ]);
-          autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+5_000_000n <= 25_000_000n;
+          // Room for one more FAST entry (TRENCHER_FAST.perEntryUsdg) in the
+          // vault's 25 USDG day — not for a $5 one, or the last $2.50 of the
+          // window would go unused.
+          autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+TRENCHER_FAST.perEntryUsdg <= 25_000_000n;
         } catch { autonomousBudget = false; autonomousBudgetUnread = true; }
       }
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);

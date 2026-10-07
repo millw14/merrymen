@@ -74,7 +74,9 @@ test("Brain receives short-window momentum and depth in dollars without fabricat
   assert.equal(social.windows.m5.buys, 10);
   assert.equal(social.windows.m5.sellers, 8);
   assert.equal(liquidity.onchainRouteDepthUsd, 250_000);
-  assert.equal(liquidity.maxEntryAsPercentOfRouteDepth, .002);
+  // A $2.50 fast entry against $250,000 of route depth.
+  assert.equal(liquidity.maxEntryUsd, 2.5);
+  assert.equal(liquidity.maxEntryAsPercentOfRouteDepth, .001);
   for (const depth of [null, NaN, Infinity, -1]) {
     const l = JSON.parse(trenchBrainSignals(p, 120_000, depth).liquidity);
     assert.equal(l.onchainRouteDepthUsd, null);
