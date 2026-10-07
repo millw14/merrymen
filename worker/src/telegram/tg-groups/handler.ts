@@ -87,6 +87,7 @@ import {
   isQuestionToRoom,
   isShush,
   isTradeTalk,
+  reactionOnly,
   routeWorthy,
   selfNamesOf,
   type BotSelf,
@@ -154,6 +155,10 @@ const RESEARCH_REPLY_MS = 30 * SEC;
 const RESEARCH_SEND_MS = 5 * SEC;
 /** What a routing call must leave the research it picks, of the reply deadline. */
 const ROUTE_LEAVES_MS = 8 * SEC;
+/** How long a reply to its own Fomo line is read in that line's light. */
+const FOMO_THREAD_MS = 2 * 60 * MIN;
+/** The persona asking back which Fomo board or coin was meant. */
+const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|graduated|most held)\b/iu;
 /** A routing call with less time than this is not worth making. */
 const ROUTE_MIN_BOX_MS = 1_500;
 /** The allowance routing never touches: the day's (at least 20, or a tenth) and this chat's hour. */
@@ -678,6 +683,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   // claims do); losing them to a restart costs at most one extra casual line.
   /** Messages that already got their one immediate reply ("never two replies to one message"). */
   const repliedTo = new Lru<string, true>(LRU_MAX);
+  /** Its own Fomo lines (research answers, and the persona asking which one they meant), by message: when said. */
+  const fomoLines = new Lru<string, number>(LRU_MAX);
+  const markFomoLine = (chatId: number, messageId: number | undefined): void => {
+    if (isMsgId(messageId)) fomoLines.set(msgKey(chatId, messageId), clock());
+  };
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
   const messageIngressOrder = new Lru<string, number>(LRU_MAX);
@@ -1376,6 +1386,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!sent) return null;
     // A migrated chat has no message the old reply id means.
     recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    // The persona asking which Fomo board or coin was meant: the answer to it
+    // is read in its light (repliesToOwnFomo).
+    if (intent.kind === "answer" && fomoNow() !== null && /[?？]/u.test(text) && FOMO_ASK_BACK.test(text)) markFomoLine(sent.chatId, sent.messageId);
     log(`[tg-groups] said ${intent.kind}`);
     return sent;
   };
@@ -2005,12 +2018,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // "sent it to your DMs" and "done, couldn't DM you" each answer one
       // command that ran for someone entitled to run it: every one is said.
       // Refusals and "dm me first" at most once per person per hour.
-      if (what !== "dm-sent" && what !== "done-no-dm") {
-        const k = `${what}:${chatId}:${fromId}`;
+      // Checked again in queue order, and counted only once one was said: a
+      // notice dropped on its way (a deadline, a newer line) leaves the hour.
+      const k = what !== "dm-sent" && what !== "done-no-dm" ? `${what}:${chatId}:${fromId}` : null;
+      const limited = (): boolean => {
+        if (k === null) return false;
         const last = refusedAt.get(k);
-        if (last !== undefined && now - last < REFUSE_EVERY_MS) return false;
-        refusedAt.set(k, now);
-      }
+        return last !== undefined && clock() - last < REFUSE_EVERY_MS;
+      };
+      const counted = (): void => {
+        if (k !== null) refusedAt.set(k, clock());
+      };
+      if (limited()) return false;
       // These answer a command the sender was entitled to run, so they go
       // out in a shushed chat like the owner calling it.
       const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
@@ -2035,6 +2054,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       await enqueue(
         chatId,
         async () => {
+          if (limited()) return;
           if (fixedPool) {
             // Its own small fixed pool, gated like every template.
             const pool = fixedPool;
@@ -2062,9 +2082,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
             });
             if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
             said = !!sent;
+            if (said) counted();
             return;
           }
           said = !!(await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply));
+          if (said) counted();
         },
         { force: true },
       );
@@ -2265,7 +2287,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // model picks once from what it can do (route.ts), and code checks the
       // pick. Not for a line read as an ordinary topic or one with nothing
       // the router serves, and only from the first half of the allowance.
-      if (routable && !fomoThread && routeWorthy(j.line.text, selfNamesOf(selfNow()))) {
+      if (routable && !fomoThread && routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId))) {
         const routed = await routeLine(chatId, j, replyOpts, persona);
         if (routed === "taken") return null;
       }
@@ -2576,6 +2598,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       });
       if (!sent) return lost;
       recordOwn(sent.chatId, sent.messageId, text.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined, undefined, sent.chatId === chatId ? o.threadId : undefined);
+      markFomoLine(sent.chatId, sent.messageId);
       log("[tg-groups] said research");
       return "sent";
     };
@@ -2619,6 +2642,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     // A deflection is still an answer about research: a follow-up here goes back to it.
     rememberFomo(chatId, j.threadId);
+    // Deflected before anything was looked up: it cost nothing, so it takes nothing.
+    if (r.deflect && r.free === true) refund();
     // HER PLAIN ASK ABOUT ONE TRADER ("who is trader unipcs on fomo?"): the
     // room is deflected, and her DM gets the answer instead.
     if (owner && r.deflect && r.trader && !request) {
@@ -2670,8 +2695,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const repliesToOwnFomo = (j: LineJob): boolean => {
     const me = selfNow();
     const q = j.msg.replyTo;
-    if (!me || !q || q.fromId !== me.id) return false;
-    return /\b(?:fomo|theses|thesis|trending|top traders?|traders?|graduated|most held)\b/iu.test(q.text ?? "");
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return false;
+    // By message, never by its words: a desk read that says "trending up"
+    // keeps its own follow-ups, bound to the coin it read.
+    const at = fomoLines.get(msgKey(j.msg.chatId, q.messageId));
+    if (at === undefined || clock() - at > FOMO_THREAD_MS) return false;
+    return !reactionOnly(j.line.text, selfNamesOf(me));
   };
   const routeLabel = (r: TgRoute): string => (r.action === "fomo" ? `fomo:${r.request.kind}` : r.action);
   /** "not-wanted", told apart as act's whyLost does. */
@@ -2737,7 +2766,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       replyByMs: j.bornAtMs + RESEARCH_REPLY_MS,
     });
     // "dm me first" is said once an hour; the DM itself is the answer to "sent".
-    if (!said && j.addressed !== null) log(`[tg-groups] owner research ${outcome === "sent" ? "sent, room line not said" : "dm-first, already told this hour"}`);
+    if (!said && j.addressed !== null) log(`[tg-groups] owner research ${outcome === "sent" ? "sent, room line not said" : "dm-first, room line not said (told this hour, or dropped)"}`);
     return "dm";
   };
 
@@ -2784,7 +2813,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
                 : { kind: "coin", query: route.name };
           const timed: SpeakOpts = { ...opts, replyByMs: j.bornAtMs + RESEARCH_REPLY_MS, accountAnswer: accountResearchAnswer(j.line, j.seenAtMs) };
           const deskOpts = ask.kind === "coin" ? { ...timed, stillWanted: () => (!o.stillWanted || o.stillWanted()) && coinFactsOn() } : timed;
-          const sent = await deskAnswer(chatId, j, ask, deskOpts, undefined, deskRoom(chatId));
+          const note = context && "address" in ask && ask.address === context.address ? deskNoteFor(context.memo) : undefined;
+          const sent = await deskAnswer(chatId, j, ask, deskOpts, note, deskRoom(chatId));
           return done(!!sent);
         }
         default:

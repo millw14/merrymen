@@ -377,7 +377,11 @@ export class TgModelGate {
       const now = this.now();
       if (this.paused(now) || !this.dayHasRoom(now) || !this.roomHasRoom(chatId, now)) return null;
       if (this.waiters.length >= MAX_WAITING) return null;
-      if (!(await this.acquire(box))) return null;
+      // A caller that needs time for the call itself waits for a slot only
+      // as long as one could still be used.
+      const minCall = typeof opts?.minCallMs === "number" && Number.isFinite(opts.minCallMs) && opts.minCallMs > 0 ? opts.minCallMs : 0;
+      if (box - minCall <= 0) return null;
+      if (!(await this.acquire(box - minCall))) return null;
 
       let handedOff = false;
       try {

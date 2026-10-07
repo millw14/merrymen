@@ -599,6 +599,7 @@ describe("the router after review (2026-10-07)", () => {
   let chatCalls: number;
   let ownerAsks: Array<{ handle: string; fromId: number; about?: string }>;
   let ownerOutcome: TgOwnerOutcome;
+  let chatReply: string;
   const ownerPort = () => ({
     research: async (q: { handle: string; fromId: number; about?: "profile" | "holdings" | "trades" }): Promise<TgOwnerOutcome> => {
       ownerAsks.push(q);
@@ -611,6 +612,7 @@ describe("the router after review (2026-10-07)", () => {
     chatCalls = 0;
     ownerAsks = [];
     ownerOutcome = "sent";
+    chatReply = "ngl no clue";
     envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
     envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
     envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
@@ -623,7 +625,7 @@ describe("the router after review (2026-10-07)", () => {
         return { ok: true, json: async () => ({ choices: [{ message }] }) };
       }
       chatCalls++;
-      return { ok: true, json: async () => ({ choices: [{ message: { content: "ngl no clue" } }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: chatReply } }] }) };
     }) as never;
     // The real port's shape: a trader request is deflected; an owner's plain
     // trader question comes back deflected with the trader for her DM.
@@ -637,9 +639,22 @@ describe("the router after review (2026-10-07)", () => {
     };
   });
 
+  /** Its own last line in the room: [message id, text]. */
+  const ownLast = (): [number, string] => {
+    const l = (store.room(CHAT)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+    return [l.messageId, l.text];
+  };
+  /** The persona asks which Fomo board or coin was meant; returns that line's id and text. */
+  const personaAsksBack = async (question: string): Promise<[number, string]> => {
+    chatReply = question;
+    await said(msg("pine how was your weekend honestly", { fromId: ANN + 90 }));
+    chatReply = "ngl no clue";
+    clock += 30 * SEC;
+    return ownLast();
+  };
   /** A line replying to one of the bot's own lines. */
-  const replyToBot = (text: string, quoted: string, over: Partial<TgMessage> = {}): TgMessage =>
-    msg(text, { replyTo: { messageId: 4_242, fromId: BOT.id, fromIsBot: true, text: quoted }, ...over });
+  const replyToBot = (text: string, [id, quoted]: [number, string], over: Partial<TgMessage> = {}): TgMessage =>
+    msg(text, { replyTo: { messageId: id, fromId: BOT.id, fromIsBot: true, text: quoted }, ...over });
 
   it("banter never pays for a routing call", async () => {
     make();
@@ -669,7 +684,8 @@ describe("the router after review (2026-10-07)", () => {
   it("a short reply to its own Fomo question is read in that light: 'trending' is Fomo's board", async () => {
     pick = { action: "fomo_board", board: "trending" };
     make();
-    await said(replyToBot("trending", "top traders today, or what's trending?"));
+    const asked = await personaAsksBack("top traders today, or what's trending?");
+    await said(replyToBot("trending", asked));
     assert.equal(routeCalls, 1);
     assert.deepEqual(fomo!.asks.filter((a) => a.request).map((a) => a.request), [{ kind: "board", board: "trending" }]);
   });
@@ -677,17 +693,51 @@ describe("the router after review (2026-10-07)", () => {
   it("'$pons' under its own 'which coin?' is that coin's theses, not a chart", async () => {
     pick = { action: "fomo_coin", coin: "PONS", aspect: "theses" };
     make();
-    await said(replyToBot("$pons", "which coin? i can pull its theses on fomo"));
+    const asked = await personaAsksBack("which coin? i can pull its theses");
+    await said(replyToBot("$pons", asked));
     assert.deepEqual(fomo!.asks.filter((a) => a.request).map((a) => a.request), [{ kind: "coin", symbol: "PONS", aspect: "theses" }]);
     assert.deepEqual(desk!.asks, [], "the desk never took it");
   });
 
-  it("a chat pick on such a reply leaves the desk and the persona as before", async () => {
+  it("a chat pick on such a reply leaves the persona as before; a reaction is never routed", async () => {
     pick = { action: "chat" };
     make();
-    await said(replyToBot("lol whatever", "top traders today, or what's trending on fomo?"));
+    const asked = await personaAsksBack("top traders today, or what's trending on fomo?");
+    await said(replyToBot("eh whatever you like", asked));
     assert.equal(routeCalls, 1);
-    assert.equal(chatCalls, 1);
+    assert.equal(chatCalls, 2);
+    clock += 3 * MIN;
+    await said(replyToBot("lol", asked, { fromId: ANN + 1 }));
+    assert.equal(routeCalls, 1, "laughter under it costs nothing");
+  });
+
+  it("a reply to a line that only says 'trending' or 'fomo' in passing is not a Fomo thread: by message, never by words", async () => {
+    pick = { action: "coin_read", coin: "PONS" };
+    make();
+    // Its own banter mentioning fomo, not a question back: not marked.
+    chatReply = "half the traders in here have fomo rn lol";
+    await said(msg("pine how was your weekend honestly", { fromId: ANN + 90 }));
+    chatReply = "ngl no clue";
+    const banter = ownLast();
+    clock += 30 * SEC;
+    await said(replyToBot("pons", banter));
+    assert.equal(routeCalls, 0);
+    // A stored desk read that says "trending up": its follow-up stays the desk's, by address, with no routing call.
+    const quote = "PONS\n\nPONS is trending up on the 1h, buyers stepping in.";
+    store.update(CHAT, (r) => {
+      r.lines.push({ messageId: 7_001, fromId: BOT.id, name: "Pine", text: quote, atMs: clock, own: true, deskAsk: { kind: "coin", address: "0xabab000000000000000000000000000000000001" } });
+    });
+    clock += 30 * SEC;
+    await said(replyToBot("what would invalidate this?", [7_001, quote], { fromId: ANN + 2 }));
+    assert.equal(routeCalls, 0);
+    assert.deepEqual(desk!.asks.slice(-1), [{ kind: "coin", address: "0xabab000000000000000000000000000000000001" }]);
+  });
+
+  it("a coin this chat knows, named plainly, and 'what's X up to' are worth routing", async () => {
+    pick = { action: "fomo_trader", trader: "unipcs" };
+    make({ owner: ownerPort });
+    await said(msg("pine anyone know what unipcs is up to", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.deepEqual(ownerAsks.map((a) => a.handle), ["unipcs"]);
   });
 
   it("anyone's trader asks take none of the room's research answers", async () => {
@@ -702,6 +752,21 @@ describe("the router after review (2026-10-07)", () => {
     await said(msg("pine i'm sorry, who's been winning the most lately", { fromId: ANN + 30 }));
     assert.deepEqual(fomo!.asks.filter((a) => a.request).map((a) => a.request).slice(-1), [{ kind: "leaderboard" }]);
     assert.doesNotMatch(tg.texts(CHAT).slice(-1)[0] ?? "", /too many/i);
+  });
+
+  it("other people's plain trader questions take none of the room's research answers either", async () => {
+    fomo!.answer = (q) =>
+      /who is trader/.test(q.text) ? { text: TG_FOMO_DEFLECTION, deflect: true, free: true }
+        : /trending/.test(q.text) ? { text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood", deflect: false }
+          : null;
+    make();
+    for (let i = 0; i < 7; i++) {
+      clock += 20 * SEC;
+      await said(msg(`pine who is trader bob${i} on fomo?`, { fromId: ANN + 100 + i }));
+    }
+    clock += 20 * SEC;
+    await said(msg("pine what's trending on fomo?", { fromId: ANN + 200 }));
+    assert.match(tg.texts(CHAT).slice(-1)[0] ?? "", /Trending on Fomo/);
   });
 
   it("a market or coin read the router picks goes to the desk", async () => {
@@ -722,7 +787,7 @@ describe("the router after review (2026-10-07)", () => {
     clock += 3 * MIN;
     await said(msg("pine do you know unipcs on fomo though", { fromId: OWNER, fromFirstName: "Milla" }));
     assert.equal(tg.texts(CHAT).length, 1);
-    assert.ok(logs.some((l) => /owner research dm-first, already told this hour/.test(l)));
+    assert.ok(logs.some((l) => /owner research dm-first, room line not said/.test(l)));
   });
 
   it("five calls with no answer rest the router for ten minutes", async () => {

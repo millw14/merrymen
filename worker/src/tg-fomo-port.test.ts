@@ -207,15 +207,15 @@ describe("createTgFomoPort", () => {
       ["what has @frankdegods bought on fomo this week?", { handle: "frankdegods", about: "trades" }],
     ];
     for (const [q, trader] of asks) {
-      assert.deepEqual(await port.ask({ text: q, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, trader }, q);
-      assert.deepEqual(await port.ask({ text: q, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true }, `${q} (not the owner)`);
+      assert.deepEqual(await port.ask({ text: q, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, trader, free: true }, q);
+      assert.deepEqual(await port.ask({ text: q, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true }, `${q} (not the owner)`);
     }
     // Her own state, a watched-cohort board, a request: deflected with no trader.
     for (const q of ["who's the top of our watched traders on fomo today", "what are you researching on fomo?"]) {
       const a = await port.ask({ text: q, chatId: GROUP, owner: true });
       assert.ok(a?.deflect && !("trader" in a), q);
     }
-    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
     assert.equal(s.calls.length, 0, "nothing looked up for any of them");
   });
 
@@ -241,7 +241,7 @@ describe("createTgFomoPort", () => {
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
     for (const q of ["what is @CryptoKaleo holding on fomo?", "what has @frankdegods bought on fomo this week?", "who's the top of our watched traders on fomo today"]) {
       const a = await port.ask({ text: q, chatId: GROUP });
-      assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true }, q);
+      assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true, free: true }, q);
     }
     assert.equal(s.calls.length, 0);
     assert.equal(s.provider.length, 0);
@@ -308,7 +308,7 @@ describe("createTgFomoPort", () => {
     // Another account's handle is still a trader, and still deflected.
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    assert.deepEqual(await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.deepEqual(await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
     assert.equal(s.calls.length, 0);
   });
 
@@ -400,7 +400,7 @@ describe("a model's checked choice, asked as the planner's own question", () => 
   it("a trader request is deflected before anything is planned or spent", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
     assert.equal(s.calls.length, 0);
   });
 

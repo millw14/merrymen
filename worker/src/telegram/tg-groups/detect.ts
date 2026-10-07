@@ -1730,18 +1730,47 @@ const ROUTE_CUE =
   /\b(?:fomo|traders?|trading|top|best|winning|winners?|leading|leaders?|leaderboards?|ranks?|ranking|rankings|goat|whales?|smart money|degens?|trending|hot|graduat\w*|launch\w*|coins?|tokens?|tickers?|memes?|memecoins?|markets?|charts?|price|pump\w*|dump\w*|moon\w*|runners?|gems?|alpha|plays?|calls?|thesis|theses|hold|holds|holding|held|holders|bags?|bought|buy\w*|sold|sell\w*|ape[ds]?|aping|offload\w*|loading|loaded|accumulat\w*|exit\w*|profits?|gains?|pnl|p&l|made|making|rekt|wallets?|tail\w*|track\w*|monitor\w*|keep tabs|cooked|legit|rug\w*|entry|send\w*)\b/u;
 
 /**
+ * Asking about something by name, with no cue word: "what's up with pons",
+ * "what are people saying about pons", "anyone know what unipcs is up to",
+ * "why is everyone into pons". The name itself is the model's to read.
+ */
+const ROUTE_ASKS_ABOUT =
+  /\b(?:up with|up to|saying about|said about|heard (?:of|about)|happening with|going on with|been doing|(?:do|d|did) (?:you|u|ya) know|anyone know|(?:everyone|everybody|people|y'?all|they|whales?) (?:is |are |r )?(?:so |all )?into)\b/u;
+
+/**
  * IS THIS LINE WORTH ONE ROUTING CALL (handler.ts)? A question mark, or three
  * words once its names and handles are gone, and a word from what the router
  * serves (ROUTE_CUE) or a $tag: "lol", "ok bro", a lone emoji and banter
  * ("how was your weekend?") are the persona's without asking anyone.
  */
-export function routeWorthy(text: unknown, selfNames: readonly string[] = []): boolean {
+export function routeWorthy(text: unknown, selfNames: readonly string[] = [], knownCoins: readonly string[] = []): boolean {
   if (typeof text !== "string" || !text.trim()) return false;
   const t = norm(unnamed(text, selfNames));
   const words = wordsOf(t);
   if (words.length === 0) return false;
   if (!/[?？]/u.test(text) && words.length < ROUTE_MIN_WORDS) return false;
-  return ROUTE_CUE.test(t) || DESK_TRADING_CUE.test(t) || /(?:^|[^\p{L}\p{N}_])\$[A-Za-z]/u.test(text);
+  if (ROUTE_CUE.test(t) || ROUTE_ASKS_ABOUT.test(t) || DESK_TRADING_CUE.test(t) || /(?:^|[^\p{L}\p{N}_])\$[A-Za-z]/u.test(text)) return true;
+  // A coin this chat already knows, named plainly: "what's up with pons lately".
+  return knownCoins.some((c) => {
+    const n = typeof c === "string" ? norm(c).replace(/^\$+/u, "") : "";
+    return n.length >= 2 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(n)}(?![\\p{L}\\p{N}])`, "u").test(t);
+  });
+}
+
+/** Laughter, an ack or an emoji: a reaction, not a question, whatever it replies to. */
+const REACTION_ONLY = /^(?:l+o+l+|lmf?a+o+|ha(?:ha)+h?|he(?:he)+|facts|true|same|fr|ikr|nice|bet|k|ok|okay|word|based|real|wow|damn|crazy|insane)$/u;
+
+/**
+ * A REACTION AND NOTHING ELSE: "lol", "facts", "🔥", "😂😂". Not a short
+ * answer ("pons", "trending", "yes"): a reply to its own Fomo question is
+ * routed however short it is (handler.ts), but a reaction never is.
+ */
+export function reactionOnly(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return true;
+  if (/\$[A-Za-z]/u.test(text)) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0) return true;
+  return words.every((w) => REACTION_ONLY.test(w));
 }
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */

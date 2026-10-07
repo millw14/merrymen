@@ -456,6 +456,8 @@ export interface TgFomoAnswer {
    * deflected: the handle as the planner read it, for her DM (handler.ts).
    */
   trader?: { handle: string; about: TgTraderAbout };
+  /** A deflection made before anything was looked up: it spends none of the room's research answers. */
+  free?: boolean;
 }
 
 export interface TgFomoPort {

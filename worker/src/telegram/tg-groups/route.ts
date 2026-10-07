@@ -26,7 +26,7 @@
  * routing never spends what the lines that must be written need.
  */
 import { deskNameOk } from "./detect";
-import { promptSafe } from "./memory";
+import { INVISIBLE, promptSafe } from "./memory";
 import { callChoice, type TgChoiceSpec, type TgModel, type TgModelGate, type TgModelReserve } from "./model";
 import type { TgFomoRequest, TgLine, TgRoom, TgTraderAbout } from "./types";
 
@@ -142,10 +142,14 @@ export const ROUTE_SYSTEM: string = routeSystem({ fomo: true, desk: true, coins:
  * nothing anyone sees, and the sign is what tells a coin from a person.
  */
 function marked(text: string): string {
+  // Invisible characters out first, and an @ right after what can end an
+  // email's local part (".", "+", "-") is left alone: promptSafe must still
+  // see, and redact, every email.
   return String(text ?? "")
     .normalize("NFKC")
+    .replace(INVISIBLE, "")
     .replace(/(^|[^\p{L}\p{N}_])[$＄﹩]([A-Za-z][A-Za-z0-9_]{0,19})(?![\p{L}\p{N}_])/gu, "$1cashtag:$2")
-    .replace(/(^|[^\p{L}\p{N}_])[@＠﹫]([A-Za-z0-9_]{2,32})(?![\p{L}\p{N}_])/gu, "$1handle:$2");
+    .replace(/(^|[^\p{L}\p{N}_.+-])[@＠﹫]([A-Za-z0-9_]{2,32})(?![\p{L}\p{N}_.])/gu, "$1handle:$2");
 }
 
 function nameIn(v: unknown): string {
@@ -350,9 +354,24 @@ export async function readRoute(o: {
     // Checked against exactly what the model was shown of the line it replies to.
     const ctx: RouteCtx = { ...o.ctx, replied: typeof o.ctx.replied === "string" ? o.ctx.replied.slice(0, REPLIED_CHARS) : null };
     const prompt = routePrompt(o.room, o.trigger, ctx.replied);
-    const raw = await o.gate.run(o.chatId, () => callChoice(model, routeSystem(ctx), prompt, routeSpec(ctx), ROUTE_TOKENS), box, { reserve, minCallMs: ROUTE_MIN_CALL_MS });
-    // No answer: either nothing was spent (the reserve, a late slot) or the call failed.
-    if (raw === null) return { route: null, why: o.gate.headroom(o.chatId, reserve) ? "no-answer" : "skipped" };
+    // The gate calls this only once the allowance is taken: a call that ran.
+    let ran = false;
+    const raw = await o.gate.run(
+      o.chatId,
+      () => {
+        ran = true;
+        return callChoice(model, routeSystem(ctx), prompt, routeSpec(ctx), ROUTE_TOKENS);
+      },
+      box,
+      { reserve, minCallMs: ROUTE_MIN_CALL_MS },
+    );
+    // Nothing back: a call that ran and failed, or nothing spent at all (the
+    // reserve, a busy slot, a late one), which says nothing about the model.
+    if (raw === null) return { route: null, why: ran ? "no-answer" : "skipped" };
+    // An answer in words, or an action not on the menu: the model did not
+    // choose, which is a no-answer; a choice code refused is "invalid".
+    const action = typeof (raw as Record<string, unknown>).action === "string" ? ((raw as Record<string, unknown>).action as string) : "";
+    if (!(routeActions(ctx) as readonly string[]).includes(action)) return { route: null, why: "no-answer" };
     const route = parseRoute(raw, ctx);
     if (!route) return { route: null, why: "invalid" };
     return { route, why: route.action === "chat" ? "chat" : "routed" };

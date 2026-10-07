@@ -42,6 +42,7 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  reactionOnly,
   routeWorthy,
   selfNamesOf,
   type BotSelf,
@@ -1009,10 +1010,22 @@ describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)",
     assert.equal(routeWorthy("how was your weekend?"), false, "banter never pays for a routing call");
     assert.equal(routeWorthy("tell me a joke please"), false);
     assert.equal(routeWorthy("what do you think about life"), false);
+    assert.equal(routeWorthy("anyone know what unipcs is up to"), true);
+    assert.equal(routeWorthy("what are people saying about pons"), true);
+    assert.equal(routeWorthy("why is everyone into pons"), true);
+    assert.equal(routeWorthy("what's up with pons lately", [], ["pons"]), true, "a coin this chat knows");
+    assert.equal(routeWorthy("what's new with pons lately"), false, "an unknown name with no cue");
     assert.equal(routeWorthy("@shogun_bot ok bro", ["shogun_bot"]), false);
     assert.equal(routeWorthy("lol"), false);
     assert.equal(routeWorthy("🔥🔥🔥"), false);
     assert.equal(routeWorthy(""), false);
     assert.equal(routeWorthy(null), false);
+  });
+});
+
+describe("reactionOnly", () => {
+  it("laughter, acks and emoji are reactions; a short answer is not", () => {
+    for (const t of ["lol", "LMAO", "hahaha", "facts", "🔥", "😂😂", "lol ok", "@pinebot lol"]) assert.equal(reactionOnly(t, ["pinebot"]), true, t);
+    for (const t of ["pons", "$pons", "trending", "yes", "top traders", "the second one"]) assert.equal(reactionOnly(t), false, t);
   });
 });

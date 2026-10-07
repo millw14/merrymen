@@ -337,7 +337,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
       try {
         if (!q || !isUsableChatId(q.chatId)) return null;
         // One trader is never answered in a room: deflected before anything is planned or spent.
-        if (q.request?.kind === "trader") return { text: TG_FOMO_DEFLECTION, deflect: true };
+        if (q.request?.kind === "trader") return { text: TG_FOMO_DEFLECTION, deflect: true, free: true };
         const text = q.request ? requestText(q.request) : typeof q.text === "string" ? q.text : null;
         if (!text || !text.trim()) return null;
         const b = brokerNow();
@@ -374,7 +374,8 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           // as the planner read it, never for anyone else, never for a
           // structured request (the router names its own) or the owner's state.
           const trader = q.owner === true && !q.request ? traderAsked(r.plan) : null;
-          return trader ? { text: TG_FOMO_DEFLECTION, deflect: true, trader } : { text: TG_FOMO_DEFLECTION, deflect: true };
+          const free = r.toolsCalled.length === 0;
+          return { text: TG_FOMO_DEFLECTION, deflect: true, ...(trader ? { trader } : {}), ...(free ? { free } : {}) };
         }
         log(`[tg-fomo] group ask answered (${r.toolsCalled.length} lookup(s))${q.request ? " (routed)" : ""}`);
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false };

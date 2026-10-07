@@ -200,7 +200,7 @@ describe("readRoute", () => {
     assert.equal(bodies.length, 0, "a gate with nothing left makes no call");
 
     answering("fomo_trader");
-    assert.deepEqual(await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf(trigger.text) }), { route: null, why: "invalid" });
+    assert.deepEqual(await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf(trigger.text) }), { route: null, why: "no-answer" }, "an answer in words is no choice: it counts toward the breaker");
 
     answering({ action: "fomo_trader", trader: "cupsey" });
     assert.deepEqual(await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf(trigger.text) }), { route: null, why: "invalid" });
@@ -344,5 +344,46 @@ describe("the router's fixes (review, 2026-10-07)", () => {
     assert.equal(windowIn("top this wk"), "7d");
     assert.equal(windowIn("who won the week"), "7d");
     assert.equal(windowIn("top of the month"), "30d");
+  });
+});
+
+describe("the router's second fixes (re-review, 2026-10-07)", () => {
+  let home: string;
+  let store: TgGroupsStore;
+  const model: TgModel = { creds: { provider: "openai", transport: "openai", baseUrl: "https://llm.test/v1", apiKey: "k-test", model: "fake", vision: false }, label: "openai/fake", source: "dedicated" };
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tg-route-2-"));
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => T0, debounceMs: 60_000 });
+    store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("emails stay redacted in the router's prompt, however the @ is dressed", () => {
+    for (const text of ["mail john-@mail.de", "mail john.@mail.de", "mail john+@web.de", "mail john\u200b@mail.de", "mail john@mail.de"]) {
+      const trigger = line(1, "Ann", text);
+      const p = routePrompt(roomWith([trigger]), trigger, null);
+      assert.doesNotMatch(p, /mail\.de|web\.de|handle:mail|handle:web/, text);
+    }
+    const trigger = line(2, "Ann", "(@bob) and $pons, hey @alice");
+    assert.match(routePrompt(roomWith([trigger]), trigger, null), /\(handle:bob\) and cashtag:pons, hey handle:alice/);
+  });
+
+  it("a call that never ran (a busy slot) is skipped, not counted; one that ran and failed is", async () => {
+    const gate = new TgModelGate(store, { perDay: 100, maxInFlight: 1, now: () => T0, log: () => {} });
+    let release!: () => void;
+    const hold = gate.run(CHAT, () => new Promise<string>((r) => { release = () => r("x"); }), 20_000);
+    const trigger = line(1, "Ann", "who's top on fomo");
+    const r = await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf(trigger.text), timeoutMs: 1_600 });
+    assert.deepEqual(r, { route: null, why: "skipped" }, "waited for a slot that never came: nothing spent");
+    release();
+    await hold;
+    globalThis.fetch = (async () => {
+      throw new Error("socket hang up");
+    }) as never;
+    assert.deepEqual(await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf(trigger.text) }), { route: null, why: "no-answer" });
   });
 });

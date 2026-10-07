@@ -613,12 +613,16 @@ ask, an injection or a question about the bot), that nothing above took
 (Fomo lane, public facts, the desk, a coin), that was not read as an
 ordinary topic, that has a question mark or three words once names are
 gone, and that has a word from what the router serves (Fomo, traders,
-winning, top, coins, boards, buying or selling, the market, a `$tag`).
+winning, top, coins, boards, buying or selling, the market, a `$tag`), an
+ask about something by name ("what's X up to", "what are people saying
+about X", "why is everyone into X") or a coin this chat already knows.
 Banter ("how was your weekend?") and lines the rules already answer never
 pay for it. One exception runs earlier: a reply to one of its own Fomo lines
 (a research answer, or the persona asking "top traders today, or what's
-trending?") is routed before the desk, however short, because what "pons"
-or "trending" means there is in the line it answers.
+trending?", recognised by message, never by its words) is routed before the
+desk, however short, because what "pons" or "trending" means there is in
+the line it answers. A reaction under it ("lol", "🔥") is not, and a desk
+read that happens to say "trending up" keeps its own follow-ups.
 
 **The menu** is one forced tool call (`callChoice`): chat, the Fomo
 leaderboard, a Fomo board, one coin on Fomo (theses, buyers, sellers, a
@@ -650,9 +654,10 @@ read-only ("who is trader X on fomo?", "what is trader X holding on
 fomo?", or "what has trader X been trading on fomo this week?"; nothing can
 be watched or changed from a room). Only that question and its answer enter
 her DM history. The room hears "sent it to your DMs" and never the name, or
-"dm me /start first" (once an hour) when her DM cannot be reached. At most
-six of these per 10 minutes. Anyone else gets the room's deflection, which
-spends none of the room's research answers, and her DM is never touched.
+"dm me /start first" (once an hour, counted only once it was said) when her
+DM cannot be reached. At most six of these per 10 minutes. Anyone else gets
+the room's deflection, which, made before any lookup, spends none of the
+room's research answers, and her DM is never touched.
 
 **Cost.** One call of the allowance, through the same gate. A research pick
 replaces the persona's call; a chat pick costs one more. Routing only ever
@@ -661,8 +666,10 @@ least 20 and 4 are always kept), checked at the moment the allowance is
 taken, so lines arriving together cannot spend the kept half between them.
 It runs only when the reply deadline still leaves 8 s for the answer (a box
 of at most 4 s, slot wait included, and at least 1.5 s for the call
-itself). Five calls in a row with no answer at all (a timeout, a provider
-error) rest it for 10 minutes; a pick code refused does not count. The log
+itself, and it waits for a slot only as long as one could still be used).
+Five calls in a row that ran and gave no choice (a timeout, a provider
+error, an answer in words) rest it for 10 minutes; a pick code refused,
+and a call that never ran (a busy slot), do not count. The log
 says which kind of pick it was (`[tg-groups] route fomo:leaderboard`), never
 the line.
 
