@@ -634,13 +634,13 @@ Receipts are unique per (account, epoch, `op:<userOpHash>` or
 whole transaction back, and the report file is removed.
 
 `SERIALIZABLE` makes every compare-and-set read one snapshot, taken before
-the agent row is locked. If anything writes that row after the snapshot, the
-lock fails with `40001` and nothing is written. A conflict with another
-`SERIALIZABLE` transaction fails the same way, at a statement or at the
-`COMMIT`. The orchestrator's transactions are a plain `BEGIN`, so they run
-at Postgres's default `READ COMMITTED`, which its serializable checks do not
-track. So a write it commits between the
-snapshot and the `COMMIT` (a few milliseconds) is still not seen, for
+the agent row is locked. If another transaction writes that row after the
+snapshot, the lock fails with `40001` and nothing is written. A conflict
+with another `SERIALIZABLE` transaction fails the same way, at a statement
+or at the `COMMIT`. The orchestrator's transactions are a plain `BEGIN`, so
+they run at Postgres's default `READ COMMITTED`, which its serializable
+checks do not track. A write the orchestrator commits between the snapshot
+and the `COMMIT` (a few milliseconds) is therefore still not seen, for
 example a new agent registration. A lock on `agents` would close that gap,
 but every worker's heartbeat would queue behind it, so the tool does not
 take one. Step 5 (admission's preview) reads the books again in any case.
@@ -678,7 +678,7 @@ new `--output`. If the books moved in the meantime, it refuses with
 ### If the apply's outcome is unknown
 
 The `COMMIT` can take effect on the server and its answer can still be lost
-on the way back. Only an answer that proves a rollback counts as one:
+on the way back. Only these answers prove that it rolled back:
 
 - an error with a SQLSTATE in class `40` (a serialization failure or a
   deadlock), except `40003` ("statement completion unknown");
