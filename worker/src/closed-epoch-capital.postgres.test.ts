@@ -30,10 +30,11 @@ import { translateQuery, translateSchema, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
-import { CHAIN_REFUSAL, knownChainFacts, planAttestedSeed } from "./ledger-resume";
+import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed } from "./ledger-resume";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
-import { BookingRefused } from "./chain-gap-booking";
+import { BookingRefused, gapChainOf } from "./chain-gap-booking";
+import { OWNER_OPERATION_COLUMNS, ownerOperationOf, ownerOperationRow } from "./owner-operations";
 import { CliError, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
 import { connectClosedEpoch, main, pgWriteDb } from "./closed-epoch-capital-cli";
@@ -73,9 +74,9 @@ const timeOf = (b: bigint): number => {
 };
 const HEAD = BigInt(FX.head), NOW = timeOf(HEAD) + 600;
 /** The public node, as the model: 10M-block spans at most, every receipt and block as read, every balance flat at the pinned block. */
-const rpc: RpcCall = async (method, params) => {
+const rpcOf = (txs: typeof TXS): RpcCall => async (method, params) => {
   const blockOf = (b: bigint) => {
-    const real = TXS.find((t) => t.block === b);
+    const real = txs.find((t) => t.block === b);
     return { number: `0x${b.toString(16)}`, hash: real?.blockHash ?? h32(`block ${b}`), timestamp: `0x${(real?.timestamp ?? timeOf(b)).toString(16)}` };
   };
   const logsOf = (t: (typeof TXS)[number]) => t.logs.map(([address, topics, data, logIndex]) => ({ address, topics, data, logIndex, blockNumber: `0x${t.block.toString(16)}`, transactionHash: t.tx }));
@@ -85,16 +86,17 @@ const rpc: RpcCall = async (method, params) => {
   if (method === "eth_getLogs") {
     const f = params[0] as { address: string; fromBlock: string; toBlock: string; topics: Array<string | null> };
     if (BigInt(f.toBlock) - BigInt(f.fromBlock) + 1n > 10_000_000n) throw new Error("query spans too many blocks; narrow the block range");
-    return TXS.filter((t) => t.block >= BigInt(f.fromBlock) && t.block <= BigInt(f.toBlock)).flatMap(logsOf)
+    return txs.filter((t) => t.block >= BigInt(f.fromBlock) && t.block <= BigInt(f.toBlock)).flatMap(logsOf)
       .filter((l) => l.address.toLowerCase() === f.address.toLowerCase() && f.topics.every((x, i) => x === null || x.toLowerCase() === String(l.topics[i]).toLowerCase()));
   }
   if (method === "eth_getTransactionReceipt") {
-    const t = TXS.find((x) => x.tx === params[0])!;
+    const t = txs.find((x) => x.tx === params[0])!;
     return { status: t.status, blockNumber: `0x${t.block.toString(16)}`, blockHash: blockOf(t.block).hash, from: t.from, to: t.to, logs: logsOf(t) };
   }
   if (method === "eth_call") return `0x${word(0n)}`;
   throw new Error(method);
 };
+const rpc = rpcOf(TXS);
 
 test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly — 0x0e1ca0 through the operator's shell", { skip: !url, timeout: 120_000 }, async (t) => {
   const target = new URL(url!);
@@ -251,4 +253,100 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
   const refused = JSON.parse(readFileSync(present, "utf8")) as { verdict: string; refusals: Array<{ code: string }> };
   assert.deepEqual([refused.verdict, refused.refusals.map((r) => r.code)], ["blocked", ["home-book-present"]]);
   assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
+});
+
+/**
+ * THE SWEEP RECORDED AS THE OWNER'S, NOT AS A 'swap' (docs/owner-operations.md): a pure USDG withdrawal under the root key, with the
+ * acknowledged record the reconciler writes and the mirror stamps, and no trades row for it. What only Postgres shows: the record read
+ * by admission's own rules (to_regclass, the grant's JSONB account, this tenant and chain) inside the preview's REPEATABLE READ READ ONLY
+ * snapshot and again inside the apply's SERIALIZABLE transaction, where the compare-and-set and the postconditions read it.
+ */
+test("Postgres: an owner record answers the owner's sweep in the read-only preview and in the SERIALIZABLE apply — 0x0e1ca0 with no 'swap' row", { skip: !url, timeout: 120_000 }, async (t) => {
+  const target = new URL(url!);
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "only a disposable LOCAL PostgreSQL is allowed");
+  const pg = (await loadPg()) as { Client: new (c: { connectionString: string }) => PgClient & { connect(): Promise<void> } };
+  const name = `mm_closed_epoch_owner_${randomBytes(6).toString("hex")}`;
+  const admin = new pg.Client({ connectionString: target.toString() }); await admin.connect();
+  await admin.query(`CREATE DATABASE ${name}`);
+  const scoped = new URL(target); scoped.pathname = `/${name}`;
+  const clients: PgClient[] = [];
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "mm-closed-epoch-owner-pg-")));
+  t.after(async () => {
+    await Promise.allSettled(clients.map((c) => c.end()));
+    try { await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); } finally { await admin.end(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+  const setup = new pg.Client({ connectionString: scoped.toString() }); await setup.connect(); clients.push(setup);
+  const db: Db = {
+    prepare(sql) { return {
+      async run(...a) { const r = await setup.query(translateQuery(sql), a); return { changes: r.rowCount ?? 0, lastInsertRowid: 0 }; },
+      async get(...a) { return (await setup.query(translateQuery(sql), a)).rows[0]; },
+      async all(...a) { return (await setup.query(translateQuery(sql), a)).rows; },
+    }; },
+    async exec(sql) { await setup.query(translateSchema(sql)); },
+    async tx() { throw new Error("not here"); },
+  };
+  // The sweep with only its USDG leg: no token leaves in kind, so the owner reading is 'acknowledged'.
+  const pure = TXS.map((x) => (x.tx === SWEEP_TX ? { ...x, logs: x.logs.filter((l) => [EP, USDG].includes(l[0].toLowerCase())) } : x));
+  const sweep = pure.find((x) => x.tx === SWEEP_TX)!;
+  const sweepOp = sweep.logs.find((l) => l[0] === EP && l[1][0] === UOE)![1][1]!;
+  await applyLedgerSchema(db); await db.exec(MIRROR_STATE_DDL); await db.exec(PAPER_CHECKPOINT_SCHEMA);
+  await setup.query(`CREATE TABLE grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json JSONB NOT NULL, sealed_session_key TEXT, updated_at BIGINT NOT NULL)`);
+  await setup.query("INSERT INTO grants VALUES ($1, 4663, $2, 'SEALED-NEVER-READ', 1)", [TENANT, JSON.stringify({ smartAccount: SPELLED, owner: TENANT, chainId: 4663,
+    grantFeatures: ["tradeable-v2", GRANT_PONS_CLASS], ponsClassVaultAddress: CLASS_VAULT, serialized: "never-read" })]);
+  await setup.query(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, hwm_withdrawn_usdg, mode, beat_at)
+    VALUES ($1, $2, $3, 4663, '{}', 1, 9999999999, 'armed', 2, 145.579752, 0, 'paper', 1789829679)`, [SPELLED, TENANT, `0x${"01".repeat(20)}`]);
+  // The seventeen session trades' rows, and none for the owner's sweep.
+  for (const x of pure.filter((y) => y.tx !== SWEEP_TX)) {
+    for (const l of x.logs.filter((y) => y[0] === EP && y[1][0] === UOE && y[1][2] === topic(ACCOUNT))) {
+      await setup.query(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch) VALUES ($1, 'swap', $1, 5, $2, $3, 'landed', $4, 1)`,
+        [SPELLED, l[1][1], x.tx, x.timestamp]);
+    }
+  }
+  for (const [at, epoch, mode, eth, cash] of [[DEPOSIT_AT + 62, 1, "live", "1000", 0.68], [1789593300, 1, "live", "1000", 0.68], [EPOCH2_AT, 2, "paper", "0", 1000]] as const) {
+    await setup.query(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at) VALUES ($1, $2, $3, 0, 0, $3, $4, $5, 0, $6, $6)`,
+      [SPELLED, eth, cash, epoch, mode, at]);
+  }
+  const reading = ownerOperationOf({ receiptLogs: sweep.logs.map(([address, topics, data, logIndex]) => ({ address, topics, data, logIndex })), userOpHash: sweepOp,
+    txHash: SWEEP_TX, account: ACCOUNT, custody: [CLASS_VAULT], usdg: USDG, chainId: 4663 })!;
+  assert.equal(reading.disposition, "acknowledged");
+  const row: Record<string, unknown> = ownerOperationRow(reading, { agentId: SPELLED, chainId: 4663, blockNumber: sweep.block, blockTime: sweep.timestamp, recordedEpoch: 1 }) as never;
+  await setup.query(`INSERT INTO owner_operations (tenant, ${OWNER_OPERATION_COLUMNS.join(", ")}, created_at) VALUES ($1, ${OWNER_OPERATION_COLUMNS.map((_, i) => `$${i + 2}`).join(", ")}, $${OWNER_OPERATION_COLUMNS.length + 2})`,
+    [TENANT, ...OWNER_OPERATION_COLUMNS.map((c) => row[c] ?? null), SWEEP_AT + 630]);
+  for (const table of ["trades", "flows", "equity", "events", "owner_operations"]) {
+    await setup.query("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ($1, $2, 9, $3, 1789829702)", [TENANT, table, EPOCH2_AT]);
+  }
+  await ensureLedgerResumeSchema(db);
+  const text = JSON.stringify({ account: ACCOUNT, home: { db: null, exists: true, ino: "7001", markers: [] }, tenant: TENANT });
+  await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('8d1c4c6b', $1, $2, 4663, $1, $3, $4, 'r', 'refused', $5, 1791248849249, 1791250434038, 1789238789)`,
+  [TENANT, ACCOUNT, createHash("sha256").update(text).digest("hex"), text, `${CHAIN_REFUSAL}: USDG in 145.499004 in tx ${DEPOSIT_TX} log 0 at block 64045884`]);
+
+  const printed: string[] = [];
+  const deps = { connect: (u: string, r: boolean) => connectClosedEpoch(u, r, loadPg), rpc: rpcOf(pure), nowMs: () => NOW * 1000, out: (l: string) => printed.push(l),
+    source: { test: "pg-owner" }, sleep: async () => {} };
+  const env = { DATABASE_URL: scoped.toString() };
+  const previewFile = path.join(tmp, "preview.json");
+  assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", previewFile], env, deps), 0, printed.join("\n"));
+  const plan = JSON.parse(readFileSync(previewFile, "utf8")) as { verdict: string; previewDigest: string; proposals: { inserts: Array<{ key: string }> };
+    ops: Array<{ userOpHash: string; admission: string | null; ownerRecords: Array<{ disposition: string; tenant: string | null }> }>;
+    admission: { found: Array<{ fact: { kind: string } }>; remaining: unknown[] } };
+  assert.equal(plan.verdict, "ready", printed.join("\n"));
+  assert.deepEqual(plan.proposals.inserts.map((i) => i.key), [`log:${DEPOSIT_TX}#0`, `log:${SWEEP_TX}#7`]);
+  const op = plan.ops.find((o) => o.userOpHash === sweepOp)!;
+  assert.deepEqual([op.admission, op.ownerRecords.map((r) => [r.disposition, r.tenant])], ["owner-record", [["acknowledged", TENANT]]]);
+  assert.deepEqual([plan.admission.found.map((d) => d.fact.kind), plan.admission.remaining.length], [["transfer", "transfer"], 0]);
+  assert.ok(printed.some((l) => l.includes(`owner operation ${sweepOp} answered by its owner record`)), printed.join("\n"));
+
+  const applied = path.join(tmp, "apply.json");
+  assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", plan.previewDigest, "--backup-ref", "pg-local-drill", "--output", applied], env, deps), 0, printed.join("\n"));
+  const flows = (await setup.query("SELECT direction, tx_hash, log_index, source, epoch FROM flows ORDER BY id")).rows;
+  assert.deepEqual(flows.map((f) => [f.direction, f.tx_hash, Number(f.log_index), f.source, Number(f.epoch)]),
+    [["in", DEPOSIT_TX, 0, "chain-log", 1], ["out", SWEEP_TX, 7, "chain-log", 1]]);
+  assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = $1", [sweepOp])).rows[0]!.n), 0, "no trades row for the owner's operation");
+  // ADMISSION, AS THE ORCHESTRATOR RUNS IT, OVER WHAT POSTGRES NOW HOLDS: clean.
+  const known = await knownChainFacts(db, ACCOUNT, { tenant: TENANT, chainId: 4663 });
+  assert.equal(known.ownerRecords.get(sweepOp), SWEEP_TX);
+  const gap = await chainGapCheck({ chain: gapChainOf(rpcOf(pure), async () => {}), account: ACCOUNT, usdg: USDG, fromBlock: 64_000_000n, known,
+    ownerContext: { custody: [CLASS_VAULT], chainId: 4663 }, maxSpan: 10_000_000n });
+  assert.equal(gap.status, "clean");
 });

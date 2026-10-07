@@ -4,7 +4,11 @@
  * THE SITUATION. Attested-gap admission (ledger-resume.ts, "B7") holds a
  * tenant while the chain shows an operation or a USDG transfer Postgres has
  * no row for, and only a row answers it: a trades row by userOpHash, or a
- * flow by tx#log in ANY epoch (knownChainFacts is epoch-blind). The booking
+ * flow by tx#log in ANY epoch (knownChainFacts is epoch-blind) — or, for an
+ * operation the owner's root key signed, an acknowledged owner record
+ * (owner_operations) that the chain re-derives (ledger-resume.ts
+ * ownerAnswersFor). A record answers the operation and the custody-internal
+ * legs it covers, never a capital leg: that still needs its flow. The booking
  * tool (chain-gap-booking.ts) files what it books into the CURRENT epoch and
  * refuses a fact from before that epoch opened, rightly: which epoch it
  * belongs to is not something it can say. So a tenant held on an owner's
@@ -88,6 +92,7 @@ import { EVIDENCED_FLOW_SOURCES, reconcileEpochCarry } from "./accounting-scope"
 import { FLOW_SNAPSHOT_COLUMNS, flowFingerprintOf, type ProposedFlowRow } from "./accounting-reconstruction";
 import { hasChainIdentityIndex, inspectChainIdentityIndex, verifyInserted } from "./accounting-repair";
 import { heldResetEvent } from "./held-reset";
+import { ownerOperationOf, type OwnerOperationReading } from "./owner-operations";
 import {
   admittedSince, ANCHOR_MARGIN_SEC, BACKUP_REF, BALANCE_OF_SELECTOR, BOOKING_CONFIRMATIONS, BOOKINGS_TABLE, BookingRefused, canonical, casFacts, digestOf,
   existingColumns, existingTables, factsStillMissing, FLOW_COLUMNS, gapChainOf, holdOf, patiently, readAdmissionState, readBookingSnapshot, sameRow,
@@ -542,7 +547,11 @@ export interface ClosedEpochChain {
   logs: { accountOut: LogRead; accountIn: LogRead; ops: LogRead; custody: Record<string, { out: LogRead; in: LogRead }> };
   /** Every transaction a log named, and every one admission's check named: its receipt and its block, read once. */
   txs: Record<string, TxEvidence>;
-  /** Admission's own chain check, exactly as admission runs it (ledger-resume.ts chainGapCheck). */
+  /**
+   * Admission's own chain check (ledger-resume.ts chainGapCheck), exactly as admission runs it (orchestrator.ts resumeChainGate) and the
+   * booking tool reads it (chain-gap-booking.ts readChainEvidence): over the trades rows, flows and acknowledged owner records Postgres
+   * holds, each record re-derived from its receipt over the grant's custody and chain before it answers anything.
+   */
   gap: ChainEvidence["gap"];
   calls: number;
 }
@@ -615,8 +624,14 @@ export async function readClosedEpochChain(rpc: RpcCall, snap: ClosedEpochSnapsh
   const ops = await read(EP, [USER_OPERATION_EVENT_TOPIC, null, addressTopic(grant.account)]);
   const custody: ClosedEpochChain["logs"]["custody"] = {};
   for (const c of grant.custody) custody[c] = { out: await read(USDG, [TRANSFER_TOPIC, addressTopic(c)]), in: await read(USDG, [TRANSFER_TOPIC, null, addressTopic(c)]) };
-  const known = { ops: new Set(snap.booking.known.ops), txs: new Set(snap.booking.known.txs), flows: new Set(snap.booking.known.flows) };
-  const g = await chainGapCheck({ chain, account: grant.account, usdg: RESUME_USDG, sinceSec: snap.booking.gapFromSec, known, maxSpan: span, ...(o.log ? { log: o.log } : {}) });
+  // AS ADMISSION READS IT, owner records included: an operation the owner's root key signed is answered by its acknowledged record, once
+  // re-derived from the receipt over the grant's own custody and chain (ledger-resume.ts ownerAnswersFor), exactly as the booking tool
+  // passes them (chain-gap-booking.ts readChainEvidence). Without them an operation admission answers would be named here, and refused.
+  const known = { ops: new Set(snap.booking.known.ops), txs: new Set(snap.booking.known.txs), flows: new Set(snap.booking.known.flows),
+    ownerRecords: new Map(snap.booking.known.ownerOps.map((p) => p.split("|") as [string, string])) };
+  const ownerContext = grant.chainId === null ? undefined : { custody: grant.custody, chainId: grant.chainId };
+  const g = await chainGapCheck({ chain, account: grant.account, usdg: RESUME_USDG, sinceSec: snap.booking.gapFromSec, known, ...(ownerContext ? { ownerContext } : {}),
+    maxSpan: span, ...(o.log ? { log: o.log } : {}) });
   const gap: ChainEvidence["gap"] = g.status === "unavailable" ? g : g.status === "clean" ? { status: "clean", fromBlock: g.fromBlock, head: g.head }
     : { status: "missing", fromBlock: g.fromBlock, head: g.head, found: g.found };
   const named = new Set<string>();
@@ -665,6 +680,23 @@ export interface OpReport {
   epochByTime: number | "later" | null;
   /** The trade rows carrying its hash: what answers it for admission, and in which epoch and when each was filed (never boundary evidence). */
   answeredBy: Array<{ id: number; kind: string; status: string; amountUsdg: number; epoch: number; createdAt: number | null }>;
+  /**
+   * The owner records Postgres holds for it (owner_operations, docs/owner-operations.md), whatever their disposition, tenant or chain:
+   * what admission answers an operation of the owner's root key by when no trades row does, but only an acknowledged one of this tenant
+   * and chain, in the operation's own transaction, that the receipt re-derives as acknowledged. Evidence only: this tool writes none.
+   */
+  ownerRecords: Array<{ disposition: string; reviewReason: string | null; tenant: string | null; chainId: number; txHash: string }>;
+  /**
+   * For a root-key operation: the owner reading re-derived from its receipt over the grant's custody and chain (owner-operations.ts
+   * ownerOperationOf), the one a record must agree with to answer it. Null for any other operation, or a receipt it cannot read.
+   */
+  ownerReading: Pick<OwnerOperationReading, "disposition" | "reasons" | "covers" | "usdgLegs" | "tokenMoves"> | null;
+  /**
+   * What answers it in admission's own check, as this tool ran it: a trades row carrying its hash, an owner record (an acknowledged one
+   * the chain re-derived), or nothing ("missing": the check names it). Null when its block is outside the window that check read, or
+   * the check could not be run.
+   */
+  admission: "trades-row" | "owner-record" | "missing" | null;
   /** A root-key operation answered by a 'swap' row: an owner's operation recorded as an agent trade (the validator-blind reconciler). */
   ownerOperationRecordedAsTrade: boolean;
   /** For a root-key operation: what else it moved across the book's edge, in kind. Review only, never a booking. */
@@ -1240,6 +1272,18 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
 
   // ── operations: who signed, and what answers each ─────────────────────────
   const book = account ? [account, ...custodyAddresses] : [];
+  /** The owner reading re-derived from a transaction's receipt over the grant's custody and chain: what an owner record must agree with. */
+  const readingOf = (tx: string, userOpHash: string): OwnerOperationReading | null => {
+    const logs = chain.txs[tx]?.receipt?.logs;
+    return logs && account && chainId !== null
+      ? ownerOperationOf({ receiptLogs: logs, userOpHash, txHash: tx, account, custody: custodyAddresses, usdg: USDG, chainId }) : null;
+  };
+  const recordsOf = (userOpHash: string): OpReport["ownerRecords"] => booking.ownerRecords.filter((r) => r.userOpHash === userOpHash)
+    .map(({ disposition, reviewReason, tenant, chainId: c, txHash }) => ({ disposition, reviewReason, tenant, chainId: c, txHash }));
+  // WHAT ADMISSION'S CHECK ANSWERED EACH BY, from the check this tool ran: the window it read, what it named, what Postgres could answer with.
+  const checked = chain.gap.status === "unavailable" ? null : { from: BigInt(chain.gap.fromBlock), to: BigInt(chain.gap.head) };
+  const namedOps = new Set(chain.gap.status === "missing" ? chain.gap.found.flatMap((f) => (f.kind === "operation" ? [lower(f.userOpHash)] : [])) : []);
+  const tradeOps = new Set(booking.known.ops), ownerOps = new Set(booking.known.ownerOps);
   const ops: OpReport[] = [];
   for (const l of reads.ops.logs) {
     const op = typeof l.address === "string" && typeof l.logIndex === "string" ? decodeUserOperationEvent(l) : null;
@@ -1248,6 +1292,10 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     const at = unsettled(tx, typeof l.blockNumber === "string" ? BigInt(l.blockNumber).toString() : null) === null ? txTime(tx) : null;
     const validator = validatorOfNonce(op.nonce);
     const answeredBy = snap.trades.filter((t) => t.userOpHash === op.userOpHash).map(({ id, kind, status, amountUsdg, epoch, createdAt }) => ({ id, kind, status, amountUsdg, epoch, createdAt }));
+    const height = typeof l.blockNumber === "string" ? BigInt(l.blockNumber) : null;
+    const admission: OpReport["admission"] = checked === null || height === null || height < checked.from || height > checked.to ? null
+      : namedOps.has(op.userOpHash) ? "missing" : tradeOps.has(op.userOpHash) ? "trades-row" : ownerOps.has(`${op.userOpHash}|${tx}`) ? "owner-record" : null;
+    const reading = validator === "root" ? readingOf(tx, op.userOpHash) : null;
     const epochByTime = at === null || upperSec === null ? null : at < upperSec ? P : "later";
     const inKind: OpReport["inKind"] = [];
     if (validator === "root") {
@@ -1264,7 +1312,9 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     }
     const ownerOperationRecordedAsTrade = validator === "root" && answeredBy.some((t) => t.kind === "swap");
     ops.push({ userOpHash: op.userOpHash, txHash: tx, block: typeof l.blockNumber === "string" ? BigInt(l.blockNumber).toString() : "?", at, validator,
-      paymaster: op.paymaster, success: op.success, epochByTime, answeredBy, ownerOperationRecordedAsTrade, inKind });
+      paymaster: op.paymaster, success: op.success, epochByTime, answeredBy, ownerRecords: recordsOf(op.userOpHash),
+      ownerReading: reading && { disposition: reading.disposition, reasons: reading.reasons, covers: reading.covers, usdgLegs: reading.usdgLegs, tokenMoves: reading.tokenMoves },
+      admission, ownerOperationRecordedAsTrade, inKind });
     if (ownerOperationRecordedAsTrade) {
       warnings.push(`operation ${op.userOpHash} (tx ${tx}) was signed by the owner's root key and is answered by trades row(s) ${answeredBy.filter((t) => t.kind === "swap").map((t) => `#${t.id} (kind 'swap', ${t.amountUsdg} USDG, epoch ${t.epoch}, written ${iso(t.createdAt)})`).join(", ")}: ` +
         "an owner operation recorded as an agent trade by the validator-blind in-flight reconciler (index.ts reconcileInFlightAtArm). Left in place: it is what answers the operation for admission, " +
@@ -1289,16 +1339,34 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
   };
   const found = chain.gap.status === "missing" ? chain.gap.found.map(date) : [];
   if (chain.gap.status === "unavailable" && !chain.unavailable) refuse("admission-unread", `admission's chain check could not be run (${chain.gap.why}); preview again`);
+  // An operation an owner record answers is not in `found` (the check took the record), nor is any leg the record covers. Its capital
+  // legs are, like any transfer: a flow on record, or one filed here, holds them.
   const held = { ops: new Set(booking.known.ops), txs: new Set(booking.known.txs), flows: new Set([...booking.known.flows, ...inserts.map((i) => `${i.row.tx_hash}:${i.row.log_index}`)]) };
   const still = new Set(factsStillMissing(found.map((d) => d.fact), held));
   const remaining = found.filter((d) => still.has(d.fact));
+  /** For an owner's operation still named: the record Postgres holds for it, if any, and why admission did not take it, in words. */
+  const ownerSaid = (f: Extract<MissingChainFact, { kind: "operation" }>): string => {
+    const tx = lower(f.txHash), hash = lower(f.userOpHash);
+    const reading = readingOf(tx, hash);
+    const derived = reading
+      ? `re-derived from the receipt over the grant's custody it is '${reading.disposition}'${reading.reasons.length ? ` (${reading.reasons.join(", ")})` : ""}`
+      : "its receipt does not read as an owner's operation";
+    const records = recordsOf(hash);
+    if (!records.length) return `. No owner record is in Postgres for it; ${derived} (docs/owner-operations.md)`;
+    const recordSaid = (r: OpReport["ownerRecords"][number]) => [`${r.disposition}${r.reviewReason ? `: ${r.reviewReason}` : ""}`,
+      ...(r.chainId !== chainId ? [`chain ${r.chainId}`] : []), ...(r.tenant !== booking.tenant ? [`tenant ${r.tenant ?? "not stamped"}`] : []),
+      ...(r.txHash !== tx ? [`in tx ${r.txHash}`] : [])].join(", ");
+    return `. Postgres holds an owner record for it (${records.map(recordSaid).join("; ")}), and admission did not take it as an answer: only an acknowledged ` +
+      `record of this tenant and chain, in the operation's own transaction, that the receipt re-derives as acknowledged answers an owner's operation; ${derived} ` +
+      "(docs/owner-operations.md)";
+  };
   const afterBoundary: DatedFact[] = [];
   for (const d of remaining) {
     if (d.at === null) { refuse("fact-undated", `admission would still find ${d.said}, and its receipt or block could not be read to date it`); continue; }
     if (upperSec !== null && d.at >= upperSec) { afterBoundary.push(d); continue; }
     if (d.fact.kind === "operation") {
       refuse("operation-unanswered", `admission would still find ${d.said}, from before epoch ${P} closed, signed by ${d.validator === "root" ? "the owner's own key (the root validator): an owner-operation (docs/chain-gap-booking.md), which no row here may record as the agent's"
-        : `a ${d.validator ?? "unread"} validator`} — this tool books no operation`);
+        : `a ${d.validator ?? "unread"} validator`} — this tool books no operation${d.validator === "root" ? ownerSaid(d.fact) : ""}`);
     } else refuse("transfer-unanswered", `admission would still find ${d.said}, from before epoch ${P} closed, which is not a capital movement this repair files`);
   }
   if (afterBoundary.length) {
@@ -1396,6 +1464,9 @@ export function closedEpochLines(p: ClosedEpochPlan): string[] {
   if (p.proposals.clears.length && p.holdings.home.durable) out.push(`  the clear holds: ${p.holdings.home.why}`);
   out.push(`  epoch ${p.epoch} net contributions ${usdg6(p.predicted.epochNetBefore)} → ${usdg6(p.predicted.epochNetAfter)} USDG; other epochs and the peaks unchanged`);
   for (const op of p.ops.filter((x) => x.ownerOperationRecordedAsTrade)) out.push(`  owner operation ${op.userOpHash} answered by an agent 'swap' row (left in place)`);
+  for (const op of p.ops.filter((x) => x.admission === "owner-record")) {
+    out.push(`  owner operation ${op.userOpHash} answered by its owner record (acknowledged, re-derived from the receipt as admission does): no trades row, and none is written`);
+  }
   out.push(`  admission after: ${p.admission.remaining.length - p.admission.afterBoundary.length} fact(s) before the boundary, ${p.admission.afterBoundary.length} after it (for chain-gap-booking)`);
   for (const w of p.warnings) out.push(`  note: ${w}`);
   out.push(`previewDigest ${p.previewDigest}`);
@@ -1608,6 +1679,8 @@ export async function applyClosedEpoch(db: Db, plan: ClosedEpochPlan, o: {
       if (!(await flowDuplicateReport(tx, account, run)).clean) throw new BookingRefused("postcondition", `the flows of ${run === undefined ? "the current run" : `epoch ${run}`} would hold duplicate or conflicting copies; nothing was written`);
     }
     const upper = plan.boundary.upperSec;
+    // What the preview's check named, now answered by rows. An operation an owner record answered is not among it: the record is the
+    // compare-and-set's (booking.known.ownerOps, booking.ownerRecords), compared before any write, and nothing here writes owner_operations.
     const known = { ops: new Set(after.booking.known.ops), txs: new Set(after.booking.known.txs), flows: new Set(after.booking.known.flows) };
     const left = factsStillMissing(plan.admission.found.map((d) => d.fact), known);
     const early = plan.admission.found.filter((d) => left.includes(d.fact) && (upper === null || d.at === null || d.at < upper));

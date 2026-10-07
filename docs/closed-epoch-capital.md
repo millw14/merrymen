@@ -2,9 +2,12 @@
 
 Admission ([fleet-resume.md](fleet-resume.md), step 5) holds a tenant while
 the chain shows an operation or a USDG transfer that Postgres has no row for.
-The booking tool ([chain-gap-booking.md](chain-gap-booking.md)) books such a
-fact into the tenant's **current** accounting epoch, and refuses one that
-landed before that epoch opened:
+An operation the owner's own key signed can also be answered by its owner
+record, once the chain re-derives it
+([owner-operations.md](owner-operations.md)). The booking tool
+([chain-gap-booking.md](chain-gap-booking.md)) books such a fact into the
+tenant's **current** accounting epoch, and refuses one that landed before
+that epoch opened:
 
 ```
 not booked: it landed before accounting epoch 2 opened (…), so which epoch it belongs to is not this tool's to say
@@ -124,6 +127,32 @@ carries no operation, and the sweep's USDG log `#7` runs inside the root-key
 operation `0x0a223e56…`. That operation is answered by the reconciler's
 `swap` row.
 
+### An owner's operation answered by its owner record
+
+The in-flight reconciler now records an operation the owner's root key
+signed in `owner_operations`, instead of booking it as an agent `'swap'`
+([owner-operations.md](owner-operations.md)). Admission answers such an
+operation by its record, but only an `acknowledged` record of this tenant
+and chain, in the operation's own transaction, that the receipt, read
+again, re-derives as `acknowledged` over the grant's custody. The record
+answers the operation and the custody-internal legs it covers. A capital
+leg still needs its flow.
+
+This tool runs admission's check the same way: with the same records, and
+the grant's custody and chain to re-derive them. So an operation admission
+answers by its record does not block here. Its USDG capital leg is filed
+like any other movement the owner made ([above](#who-moved-it)). Nothing
+here writes an owner record or a trades row for it. The preview shows,
+for each operation, the owner records Postgres holds, the reading
+re-derived from its receipt, and what admission's check answered it by
+(`admission`: `trades-row`, `owner-record` or `missing`).
+
+A record admission does not take answers nothing here either. That is a
+`review` record, one on another chain or for another tenant, one naming
+another transaction, or one that the receipt re-derives as `review` over
+the grant's custody, whatever the record says. The operation then refuses
+with `operation-unanswered`, which names the record and the reading.
+
 ### Refusals
 
 One refusal blocks the whole tenant. Each is named:
@@ -154,7 +183,7 @@ One refusal blocks the whole tenant. Each is named:
 | `outbound-only` | after the repair, epoch 1 would hold a withdrawal and no capital in |
 | `out-not-owner` | a `capital-out` movement did not run inside a successful operation that the owner's root key signed: no operation of the account in its transaction (an allowance spent), or USDG out outside that operation's execution or inside a failed one ([above](#who-moved-it)) |
 | `capital-in-session-op` | a `capital-in` or `capital-out` movement is in a transaction where the agent acted: an operation of the account that the root key did not sign, or a trades row that names the transaction and answers no root-key operation in it. It is a trade's or a transfer's leg, never filed as capital ([above](#who-moved-it)) |
-| `operation-unanswered`, `transfer-unanswered`, `fact-undated`, `admission-unread` | admission would still find something from before epoch 1 closed. An owner's root-key operation is named `owner-operation`: **this tool books no operation** |
+| `operation-unanswered`, `transfer-unanswered`, `fact-undated`, `admission-unread` | admission would still find something from before epoch 1 closed. An owner's root-key operation is named `owner-operation`: **this tool books no operation**. One that no trades row and no owner record admission takes answers is refused, with the record Postgres holds, if any, and the reading re-derived from its receipt ([above](#an-owners-operation-answered-by-its-owner-record)) |
 | `positions-ambiguous`, `class-vault-held`, `live-position-disagrees` | the stale-basis check cannot decide (below) |
 | `home-book-present`, `home-unproved` | a basis or floor would be cleared, and admission's drain of the tenant's home could put it back, or nothing proves it could not ([below](#a-clear-only-where-admissions-drain-cannot-undo-it)) |
 | `flows-duplicate` | admission's duplicate check (`distinct-flows.ts`) would find a copy or a conflict: in epoch 1 as the repair would leave it, or in the current run, which the repair never writes. The apply would refuse on the same check after its writes; the preview says so first |
@@ -290,8 +319,10 @@ Everything a reviewer would otherwise check by hand:
   it in, and what already answers it;
 - the coverage proof (logs net to the balance) and each custody vault's;
 - every operation: hash, time, validator, paymaster, the trades rows that
-  answer it (kind, amount, epoch, when written). An owner's root-key operation
-  answered by a `'swap'` row is flagged: an owner operation recorded as an
+  answer it (kind, amount, epoch, when written), the owner records Postgres
+  holds for it, the owner reading re-derived from a root-key operation's
+  receipt, and what admission's check answered it by. An owner's root-key
+  operation answered by a `'swap'` row is flagged: an owner operation recorded as an
   agent trade by the in-flight reconciler. **It is left in place**; a later
   audit that removes it re-holds the tenant;
 - what a root-key operation moved in kind (review only: never a flow);

@@ -39,6 +39,7 @@ import {
 } from "./closed-epoch-capital";
 import { heldResetEvent } from "./held-reset";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
+import { OWNER_OPERATION_COLUMNS, ownerOperationOf, ownerOperationRow, type OwnerOperationRow } from "./owner-operations";
 
 // ── the public chain, as read ────────────────────────────────────────────────
 
@@ -262,10 +263,14 @@ const apply = (b: Books, p: ClosedEpochPlan, extra: Partial<{ confirm: string; b
   applyClosedEpoch(b.db, p, { confirm: p.previewDigest, backupRef: "railway-backup-2026-10-07T09:00Z", dialect: "sqlite", nowMs: NOW * 1000, ...extra });
 const rows = (raw: DatabaseSync, sql: string, ...args: unknown[]) => (raw.prepare(sql).all(...(args as never[])) as Array<Record<string, unknown>>).map((r) => ({ ...r }));
 const codes = (p: ClosedEpochPlan) => p.refusals.map((r) => r.code);
-/** What admission's own chain check says about the account now, from the same model. */
+/**
+ * What admission's own chain check says about the account now, from the same model, as orchestrator.ts resumeChainGate runs it: with the
+ * owner records this tenant's mirror stamped on its chain, each re-derived from its receipt over the grant's custody.
+ */
 async function admissionSays(b: Books, rpc: RpcCall) {
   const snap = await readClosedEpochSnapshot(b.db, { tenant: TENANT, dialect: "sqlite", nowSec: NOW, epoch: 1 });
-  return chainGapCheck({ chain: gapChainOf(rpc, async () => {}), account: ACCOUNT, usdg: USDG, sinceSec: snap.booking.gapFromSec, known: await knownChainFacts(b.db, ACCOUNT), maxSpan: SPAN_LIMIT });
+  return chainGapCheck({ chain: gapChainOf(rpc, async () => {}), account: ACCOUNT, usdg: USDG, sinceSec: snap.booking.gapFromSec,
+    known: await knownChainFacts(b.db, ACCOUNT, { tenant: TENANT, chainId: 4663 }), ownerContext: { custody: snap.booking.grant!.custody, chainId: 4663 }, maxSpan: SPAN_LIMIT });
 }
 /** Every flows row of the account, every column, by id: what "byte for byte" is checked against. */
 const allFlows = (raw: DatabaseSync) => rows(raw, "SELECT * FROM flows WHERE LOWER(agent_id) = ? ORDER BY id", ACCOUNT);
@@ -327,6 +332,8 @@ describe("0x0e1ca0's exact shape: an owner's deposit and sweep, both inside clos
       ["root", true, 1, true, [["swap", 144.81853, 1]]]);
     assert.deepEqual(op.inKind.map((k) => [k.token, k.direction, k.counterparty]).filter(([t]) => [MU, USAR, STEAK].includes(t!)),
       [[MU, "out", FUNDER], [USAR, "out", FUNDER], [STEAK, "out", FUNDER]], "the leftovers it swept, for review only");
+    // Admission answers it by that row. No owner record is held for it, and one could answer nothing: re-derived, the sweep is 'review'.
+    assert.deepEqual([op.admission, op.ownerRecords, op.ownerReading?.disposition, op.ownerReading?.reasons], ["trades-row", [], "review", ["token-departed"]]);
     assert.equal(p.ops.filter((x) => x.validator === "permission").length, 17);
     assert.ok(p.warnings.some((w) => /owner operation recorded as an agent trade/.test(w)));
     assert.ok(p.warnings.some((w) => /no peak moves: hwm_usdg 145\.579752 less hwm_withdrawn_usdg 0/.test(w)));
@@ -606,6 +613,115 @@ describe("operations, and what admission would still find", () => {
     const recoverOp = p.ops.find((o) => o.txHash === recover)!;
     assert.deepEqual(recoverOp.inKind.map((k) => [k.token, k.direction, k.amountRaw]), [["0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec", "out", "12397031985369"]]);
     assert.deepEqual(p.proposals, { inserts: [], quarantines: [], clears: [] });
+  });
+});
+
+describe("an owner record answers the owner's operation, as admission's own check takes it (docs/owner-operations.md)", () => {
+  /**
+   * THE SWEEP AS A PURE USDG WITHDRAWAL: its MU, USAR and steakUSDG legs taken away, so the owner reading re-derives 'acknowledged'
+   * (any token leaving in kind makes it 'review', as the real sweep is). The model's balances still read every token flat at the
+   * pinned block, so the seeded MU and USAR basis is cleared as before.
+   */
+  const IN_KIND = new Set([MU, USAR, STEAK]);
+  const PURE = REAL.map((t) => (t.tx === SWEEP_TX ? { ...t, logs: t.logs.filter((l) => !IN_KIND.has(l[0].toLowerCase())) } : t));
+  /** The pure sweep with the class vault (custody in the grant) paying USDG to the funder inside the same operation's execution. */
+  const THROUGH_VAULT = PURE.map((t) => (t.tx === SWEEP_TX ? { ...t, logs: [...t.logs.filter((l) => BigInt(l[3]) < 8n),
+    [USDG, [TR, topic(CLASS_VAULT), topic(FUNDER)], `0x${word(1_000_000n)}`, "0x8"] as FixtureLog, ...t.logs.filter((l) => BigInt(l[3]) > 8n)] } : t));
+  /**
+   * THE RECORD THE IN-FLIGHT RECONCILER WRITES FOR THE SWEEP instead of a 'swap' row (index.ts reconcileInFlightAtArm: ownerOperationRow
+   * over ownerOperationOf, read over `custody`), as the mirror carries it up: the tenant stamped from the grant, the child's created_at
+   * kept, an owner_operations cursor beside the other tables'. No trades row answers the operation. `as` overrides columns.
+   */
+  function ownerRecord(b: Books, txs: ModelTx[], o: { custody?: string[]; tenant?: string; as?: Partial<OwnerOperationRow> } = {}) {
+    b.raw.prepare("DELETE FROM trades WHERE user_op_hash = ?").run(SWEEP_OP);
+    const sweep = txs.find((t) => t.tx === SWEEP_TX)!;
+    const reading = ownerOperationOf({ receiptLogs: sweep.logs.map(([address, topics, data, logIndex]) => ({ address, topics, data, logIndex })), userOpHash: SWEEP_OP,
+      txHash: SWEEP_TX, account: ACCOUNT, custody: o.custody ?? [CLASS_VAULT], usdg: USDG, chainId: 4663 })!;
+    const row: Record<string, unknown> = { ...ownerOperationRow(reading, { agentId: SPELLED, chainId: 4663, blockNumber: sweep.block, blockTime: sweep.timestamp, recordedEpoch: 1 }), ...o.as };
+    b.raw.prepare(`INSERT INTO owner_operations (tenant, ${OWNER_OPERATION_COLUMNS.join(", ")}, created_at) VALUES (?, ${OWNER_OPERATION_COLUMNS.map(() => "?").join(", ")}, ?)`)
+      .run(o.tenant ?? TENANT, ...OWNER_OPERATION_COLUMNS.map((c) => (row[c] ?? null) as string | number | null), SWEEP_AT + 630);
+    b.raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, 'owner_operations', 1, ?, ?)").run(TENANT, SWEEP_AT + 630, MIRRORED_AT);
+    return reading;
+  }
+  const sweepOp = (p: ClosedEpochPlan) => p.ops.find((x) => x.userOpHash === SWEEP_OP)!;
+
+  it("0x0e1ca0 with its sweep recorded as the owner's, not as a 'swap': admission answers the operation by the record, so the pair is filed — READY, applied, admission clean", async () => {
+    const b = await books();
+    const { rpc } = fakeRpc({ txs: PURE });
+    // THE RECORD: the operation is answered as admission answers it; its capital leg is still the chain's to file.
+    assert.equal(ownerRecord(b, PURE).disposition, "acknowledged");
+    const p = await preview(b, rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    assert.deepEqual(p.proposals.inserts.map((i) => [i.key, i.row.direction, i.row.amount_usdg, i.row.epoch]),
+      [[`log:${DEPOSIT_TX}#0`, "in", 145.499004, 1], [`log:${SWEEP_TX}#7`, "out", 144.81853, 1]]);
+    assert.deepEqual(p.admission.found.map((d) => [d.fact.kind, d.fact.txHash, d.fact.logIndex]), [["transfer", DEPOSIT_TX, 0], ["transfer", SWEEP_TX, 7]],
+      "the deposit and the sweep's capital leg, which a record never answers — never the operation");
+    assert.deepEqual([p.admission.remaining.length, p.admission.afterBoundary.length], [0, 0]);
+    const op = sweepOp(p);
+    assert.deepEqual([op.validator, op.answeredBy, op.ownerOperationRecordedAsTrade, op.admission], ["root", [], false, "owner-record"]);
+    assert.deepEqual(op.ownerRecords, [{ disposition: "acknowledged", reviewReason: null, tenant: TENANT, chainId: 4663, txHash: SWEEP_TX }]);
+    assert.deepEqual([op.ownerReading?.disposition, op.ownerReading?.covers, op.ownerReading?.usdgLegs.map((l) => [l.logIndex, l.kind, l.answeredBy])],
+      ["acknowledged", [], [[7, "capital-out", "flow"]]]);
+    assert.ok(p.ops.filter((x) => x.validator === "permission").every((x) => x.admission === "trades-row" && x.ownerRecords.length === 0 && x.ownerReading === null));
+    assert.ok(closedEpochLines(p).some((l) => l.includes(`owner operation ${SWEEP_OP} answered by its owner record`)), closedEpochLines(p).join("\n"));
+    // APPLY: every postcondition holds, admission's chain rule among them, and no trades row is written for the owner's operation.
+    const report = await apply(b, p);
+    assert.deepEqual(report.actions.map((a) => a.action), ["insert-flow", "insert-flow", "clear-live-basis", "clear-live-floor", "clear-live-basis", "clear-live-floor"]);
+    assert.deepEqual(allFlows(b.raw).map((f) => [f.tx_hash, f.log_index, f.direction, f.source, f.epoch]),
+      [[DEPOSIT_TX, 0, "in", "chain-log", 1], [SWEEP_TX, 7, "out", "chain-log", 1]]);
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SWEEP_OP)[0]!.n, 0);
+    assert.equal((await admissionSays(b, rpc)).status, "clean", "admission, as the orchestrator runs it, finds nothing");
+    assert.equal((await preview(b, rpc)).verdict, "nothing-to-do");
+  });
+
+  it("a record that changes between the preview and the apply refuses the apply (the compare-and-set binds the records), writing nothing", async () => {
+    for (const change of ["UPDATE owner_operations SET disposition = 'review', review_reason = 'token-departed'", "DELETE FROM owner_operations"]) {
+      const b = await books();
+      ownerRecord(b, PURE);
+      const p = await preview(b, fakeRpc({ txs: PURE }).rpc);
+      assert.equal(p.verdict, "ready", `${change}\n${closedEpochLines(p).join("\n")}`);
+      b.raw.exec(change);
+      await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "cas" && /\(booking\)/.test((e as Error).message), change);
+      assert.deepEqual(allFlows(b.raw), [], change);
+    }
+  });
+
+  it("a record admission does not take answers nothing, and the operation still refuses — its kind, chain, tenant, transaction or custody", async () => {
+    // NO TRADES ROW AND NO RECORD: admission names the operation, and so does this tool, saying what a record would be.
+    const bare = await books();
+    bare.raw.prepare("DELETE FROM trades WHERE user_op_hash = ?").run(SWEEP_OP);
+    const none = await preview(bare, fakeRpc({ txs: PURE }).rpc);
+    assert.equal(none.verdict, "blocked");
+    assert.match(none.refusals.find((r) => r.code === "operation-unanswered")!.why,
+      /No owner record is in Postgres for it; re-derived from the receipt over the grant's custody it is 'acknowledged'/);
+    assert.deepEqual([sweepOp(none).admission, sweepOp(none).ownerRecords], ["missing", []]);
+    const cases: Array<[string, ModelTx[], Parameters<typeof ownerRecord>[2], RegExp, "acknowledged" | "review"]> = [
+      // What the reconciler records for the real sweep (MU, USAR and steakUSDG left in kind): 'review', which admission never loads.
+      ["the real sweep's 'review' record", REAL, {}, /Postgres holds an owner record for it \(review: token-departed\)/, "review"],
+      // The same sweep under a record CLAIMING 'acknowledged': the receipt re-derives 'review', and the row decides nothing.
+      ["a record claiming 'acknowledged' that the receipt re-derives as 'review'", REAL, { as: { disposition: "acknowledged", review_reason: null } },
+        /owner record for it \(acknowledged\).*it is 'review' \(token-departed\)/, "review"],
+      ["a record on another chain", PURE, { as: { chain_id: 1 } }, /owner record for it \(acknowledged, chain 1\)/, "acknowledged"],
+      ["a record the mirror stamped for another tenant", PURE, { tenant: addr(0x7e7e) }, /owner record for it \(acknowledged, tenant 0x0{36}7e7e\)/, "acknowledged"],
+      ["a record naming another transaction", PURE, { as: { tx_hash: DEPOSIT_TX } }, new RegExp(`owner record for it \\(acknowledged, in tx ${DEPOSIT_TX}\\)`), "acknowledged"],
+      // Read by a reader that did not count the class vault as custody it is 'acknowledged'; over the GRANT's custody the vault paid
+      // USDG to the outside inside the operation ('usdg-through-custody'), so admission does not take it.
+      ["a record read over other custody than the grant's", THROUGH_VAULT, { custody: [] }, /owner record for it \(acknowledged\).*it is 'review' \(usdg-through-custody\)/, "review"],
+    ];
+    for (const [what, txs, o, said, reading] of cases) {
+      const b = await books();
+      ownerRecord(b, txs, o);
+      const p = await preview(b, fakeRpc({ txs }).rpc);
+      assert.equal(p.verdict, "blocked", what);
+      const r = p.refusals.find((x) => x.code === "operation-unanswered" && x.why.includes(SWEEP_OP));
+      assert.ok(r, `${what}: ${codes(p).join(",")}`);
+      assert.match(r.why, said, what);
+      const op = sweepOp(p);
+      assert.deepEqual([op.admission, op.ownerRecords.length, op.ownerReading?.disposition], ["missing", 1, reading], what);
+      assert.ok(p.admission.found.some((d) => d.fact.kind === "operation" && d.fact.userOpHash === SWEEP_OP), what);
+      await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "not-ready", what);
+      assert.deepEqual(allFlows(b.raw), [], what);
+    }
   });
 });
 
