@@ -31,8 +31,8 @@ import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../pa
 import type { RpcCall } from "./chain-capital";
 import {
   APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, holdingVerdict, microUsdg, parseApplyReport, planBooking, planLines,
-  readBookingSnapshot, readChainEvidence, replayBasis, revertBooking, staleBasisVerdict, TRADE_COLUMNS, walkFills, type ApplyReport, type BookingPlan, type Holdings,
-  type RecordedFill, type StaleBasis,
+  readBookingReceipts, readBookingSnapshot, readChainEvidence, replayBasis, revertBooking, stampCommitOutcome, staleBasisVerdict, TRADE_COLUMNS, walkFills, type ApplyReport,
+  type BookingPlan, type Holdings, type RecordedFill, type StaleBasis,
 } from "./chain-gap-booking";
 
 // ── the public chain, as read ────────────────────────────────────────────────
@@ -502,7 +502,7 @@ describe("apply and revert", () => {
     assert.equal(p.verdict, "ready", planLines(p).join("\n"));
     return { b, p, rpc: model.rpc, dep };
   }
-  const apply = (db: Db, p: BookingPlan, extra: Partial<{ confirm: string; backupRef: string; nowMs: number }> = {}) =>
+  const apply = (db: Db, p: BookingPlan, extra: Partial<{ confirm: string; backupRef: string; nowMs: number; persist: (r: ApplyReport) => void }> = {}) =>
     applyBooking(db, p, { confirm: p.previewDigest, backupRef: "railway-backup-2026-10-06T09:00Z", dialect: "sqlite", nowMs: NOW * 1000, ...extra });
 
   it("writes exactly the proposed rows once, records a receipt for each, and admission's chain check is then clean — its preconditions unchanged", async () => {
@@ -602,6 +602,53 @@ describe("apply and revert", () => {
     const tampered = { ...report, rows: report.rows.map((r) => ({ ...r, id: r.id + 1 })) };
     assert.throws(() => parseApplyReport(JSON.stringify(tampered)), (e: unknown) => (e as BookingRefused).code === "report");
     assert.throws(() => parseApplyReport("{"), (e: unknown) => (e as BookingRefused).code === "report");
+  });
+
+  it("hands its report to persist inside the transaction, once, after every receipt: a persist that fails rolls all of it back", async () => {
+    const { b, p } = await ready();
+    const handed: Array<{ report: ApplyReport; receipts: number; trades: number }> = [];
+    const report = await apply(b.db, p, { persist: (r: ApplyReport) => {
+      handed.push({ report: r, receipts: Number(rows(b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE}`)[0]!.n), trades: Number(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n) });
+    } });
+    assert.equal(handed.length, 1);
+    assert.deepEqual(handed[0]!.report, report, "the report persisted is the one returned");
+    assert.deepEqual([handed[0]!.receipts, handed[0]!.trades], [2, 1], "every row and receipt already written, inside the transaction");
+    const failing = await ready();
+    await assert.rejects(apply(failing.b.db, failing.p, { persist: () => { throw new Error("ENOSPC: the disk is full"); } }), /ENOSPC/);
+    assert.equal(rows(failing.b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 0);
+    assert.equal(rows(failing.b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE}`)[0]!.n, 0);
+  });
+
+  it("a report says its commit's outcome under its own digest; either stamp reverts the same booking, and no other value is a report", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const unknown = stampCommitOutcome(report, "unknown"), committed = stampCommitOutcome(unknown, "committed");
+    for (const r of [unknown, committed]) {
+      const { reportDigest, ...body } = r;
+      assert.equal(reportDigest, digestOf(body));
+      assert.deepEqual({ ...parseApplyReport(JSON.stringify(r)), commitOutcome: undefined, reportDigest: undefined }, { ...report, commitOutcome: undefined, reportDigest: undefined }, "every other field as applied");
+    }
+    assert.deepEqual([unknown.commitOutcome, committed.commitOutcome], ["unknown", "committed"]);
+    const { reportDigest: _d, ...body } = { ...report, commitOutcome: "maybe" };
+    assert.throws(() => parseApplyReport(JSON.stringify({ ...body, reportDigest: digestOf(body) })), (e: unknown) => (e as BookingRefused).code === "report" && /commitOutcome/.test((e as Error).message));
+    // DID IT COMMIT? The receipts, read and checked against the report, change nothing.
+    assert.equal((await readBookingReceipts(b.db, unknown, { dialect: "sqlite" })).verdict, "applied");
+    assert.equal((await revertBooking(b.db, parseApplyReport(JSON.stringify(unknown)), { nowMs: (NOW + 60) * 1000, dialect: "sqlite" })).outcome, "reverted");
+    const back = await readBookingReceipts(b.db, committed, { dialect: "sqlite" });
+    assert.deepEqual([back.verdict, back.writesPerformed, back.receipts.map((r) => [r.state, r.revertedAtMs])], ["reverted", 0, [["reverted", (NOW + 60) * 1000], ["reverted", (NOW + 60) * 1000]]]);
+  });
+
+  it("an apply that never committed: no receipt, so the look says not-committed and a revert refuses by name; a report the receipts contradict is refused", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const never = { ...report, bookingId: "never-committed" };
+    const fresh = await books();
+    assert.equal((await readBookingReceipts(fresh.db, never, { dialect: "sqlite" })).verdict, "not-committed", "no receipts table at all");
+    assert.equal((await readBookingReceipts(b.db, never, { dialect: "sqlite" })).verdict, "not-committed");
+    await assert.rejects(revertBooking(b.db, never, { nowMs: NOW * 1000, dialect: "sqlite" }),
+      (e: unknown) => (e as BookingRefused).code === "not-committed" && /holds no receipt of booking never-committed: that apply never committed here/.test((e as Error).message));
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 1, "nothing changed");
+    await assert.rejects(readBookingReceipts(b.db, { ...report, appliedAtMs: report.appliedAtMs + 1 }, { dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "receipts");
   });
 });
 

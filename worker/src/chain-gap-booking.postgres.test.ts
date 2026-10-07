@@ -11,6 +11,14 @@
  * unique index, the row lock the apply takes, and the recorded fills read
  * back (BIGINT times, TEXT quantities) for a trade's holding to be judged on.
  *
+ * And the write transaction as only a server shows it: SERIALIZABLE, granted
+ * and reported; a 40001 when the agent row moved after the snapshot; a
+ * deferred constraint failing the COMMIT (class 23) and a serialization
+ * failure at COMMIT (40001), each a rollback; a COMMIT answered with
+ * ROLLBACK's tag; and a backend terminated at the COMMIT, an outcome the
+ * shell cannot know — the receipts, read on the read-only connection, settle
+ * it.
+ *
  * Each run creates its own database and drops it. Run with
  * MERRYMEN_TEST_PG_URL=postgres://…@127.0.0.1:<port>/<db> and the `pg`
  * driver resolvable (NODE_PATH works: it is loaded with require here).
@@ -18,7 +26,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -30,8 +38,8 @@ import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { CHAIN_REFUSAL, knownChainFacts } from "./ledger-resume";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
-import { applyBooking, BOOKINGS_TABLE, BookingRefused, readBookingSnapshot, type BookingPlan, type StaleBasis } from "./chain-gap-booking";
-import { connectBooking, main, pgClientDb, type PgClient } from "./chain-gap-booking-cli";
+import { applyBooking, BOOKINGS_TABLE, BookingRefused, ensureBookingSchema, parseApplyReport, readBookingSnapshot, type BookingPlan, type StaleBasis } from "./chain-gap-booking";
+import { CliError, CommitOutcomeUnknown, connectBooking, main, pgClientDb, type PgClient } from "./chain-gap-booking-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 const loadPg = async () => createRequire(import.meta.url)("pg") as unknown;
@@ -388,4 +396,214 @@ test("Postgres: a basis left over a flat token is named, not booked, and compare
     assert.deepEqual(after[table], OTHERS.map((o) => `${o} THEIRS`).sort(), `${table}: every letter-case of the account replaced by the new book's (none); the others kept`);
   }
   assert.deepEqual((await setup.query("SELECT symbol FROM cost_basis WHERE lower(agent_id) = lower($1)", [RESIGNED])).rows, [], "nothing left for a later seed to carry");
+});
+
+/**
+ * THE WRITE TRANSACTION AND ITS COMMIT, on a real server: SERIALIZABLE as the
+ * server reports it; a 40001 when the agent row moved after the snapshot; a
+ * deferred constraint failing the COMMIT (23514); a serialization failure at
+ * COMMIT (40001, write skew between two SERIALIZABLE transactions); a COMMIT
+ * answered with ROLLBACK's tag; a backend terminated as the COMMIT is sent;
+ * and a COMMIT that took effect with its answer lost. Only the proven
+ * rollbacks remove the apply report; the receipts, read on the read-only
+ * connection, settle the rest.
+ */
+test("Postgres: the write transaction is SERIALIZABLE, and only an answer that proves a rollback removes the apply report", { skip: !url, timeout: 120_000 }, async (t) => {
+  const target = new URL(url!);
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "only a disposable LOCAL PostgreSQL is allowed");
+  const pg = (await loadPg()) as { Client: new (c: { connectionString: string }) => PgClient & { connect(): Promise<void> } };
+  const name = `mm_chaingap_${randomBytes(6).toString("hex")}`;
+  const admin = new pg.Client({ connectionString: target.toString() }); await admin.connect();
+  await admin.query(`CREATE DATABASE ${name}`);
+  const scoped = new URL(target); scoped.pathname = `/${name}`;
+  const clients: PgClient[] = [];
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "mm-chaingap-pg-")));
+  t.after(async () => {
+    await Promise.allSettled(clients.map((c) => c.end()));
+    try { await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); } finally { await admin.end(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+  const setup = new pg.Client({ connectionString: scoped.toString() }); await setup.connect(); clients.push(setup);
+  const db: Db = {
+    prepare(sql) { return {
+      async run(...a) { const r = await setup.query(translateQuery(sql), a); return { changes: r.rowCount ?? 0, lastInsertRowid: 0 }; },
+      async get(...a) { return (await setup.query(translateQuery(sql), a)).rows[0]; },
+      async all(...a) { return (await setup.query(translateQuery(sql), a)).rows; },
+    }; },
+    async exec(sql) { await setup.query(translateSchema(sql)); },
+    async tx() { throw new Error("not here"); },
+  };
+  // The first test's tenant, held on its chain refusal: the session buy (its position and basis already holding it) and the deposit.
+  await applyLedgerSchema(db); await db.exec(MIRROR_STATE_DDL);
+  await setup.query(`CREATE TABLE grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json JSONB NOT NULL, sealed_session_key TEXT, updated_at BIGINT NOT NULL)`);
+  await setup.query("INSERT INTO grants VALUES ($1, 4663, $2, 'SEALED-NEVER-READ', 1)", [TENANT,
+    JSON.stringify({ smartAccount: ACCOUNT, owner: TENANT, chainId: 4663, grantFeatures: ["tradeable-v2"], serialized: "never-read" })]);
+  await setup.query(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
+    VALUES ($1, $2, $3, 4663, '{}', 1, 9999999999, 'armed', 2, 50, 'live')`, [ACCOUNT, TENANT, `0x${"01".repeat(20)}`]);
+  await setup.query(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, at, epoch, chain_id)
+    VALUES ($1, 'in', 50, $2, 1, 1, 'chain-log', $3, 2, 4663)`, [ACCOUNT, h32("first"), AT - 10 * 86_400]);
+  for (const table of ["trades", "flows", "equity"]) {
+    await setup.query("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ($1, $2, 1, 1, $3)", [TENANT, table, AT - 3600]);
+  }
+  await setup.query(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+    VALUES ($1, 'COIN', $2, '1500000000000000000', '1', 2, 0, 'pool', 3, $3)`, [ACCOUNT, COIN, AT + 30]);
+  await setup.query("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES ($1, 'live', 'COIN', '1500000000000000000', '3000000', $2)", [ACCOUNT, AT + 30]);
+  await ensureLedgerResumeSchema(db);
+  await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('a1', $1, $2, 4663, $1, $3, '{}', 'r', 'refused', $4, $5, $5, $6)`,
+  [TENANT, ACCOUNT, "e".repeat(64), `${CHAIN_REFUSAL}: operation ${OP} in tx ${OP_TX} at block ${BLOCK}`, (AT + 86_400) * 1000, AT - 4200]);
+  // The receipts table exists before any apply here, so a constraint can be hung on it.
+  await ensureBookingSchema(db);
+
+  type Wrap = (c: PgClient) => Promise<PgClient> | PgClient;
+  const said: Array<{ sql: string; rows: Record<string, unknown>[]; command?: string }> = [];
+  const printed: string[] = [];
+  /** The shell's own connections; `write` wraps the write one, which is spied on either way (answers only: a statement that failed is not recorded). */
+  const shell = (write?: Wrap) => ({
+    connect: async (u: string, readOnly: boolean) => {
+      const c = await connectBooking(u, readOnly, loadPg);
+      // A backend this test terminates reports it on the idle client too; the shell's own query is what must see it.
+      (c as unknown as { on(ev: string, fn: () => void): void }).on("error", () => {});
+      clients.push(c);
+      if (readOnly) return c;
+      const spied: PgClient = {
+        async query(sql, params) { const r = await c.query(sql, params); said.push({ sql, rows: r.rows, command: r.command }); return r; },
+        end: () => c.end(),
+      };
+      return write ? write(spied) : spied;
+    },
+    rpc, nowMs: () => NOW * 1000, out: (l: string) => printed.push(l), source: { test: "pg" }, sleep: async () => {},
+  });
+  const env = { DATABASE_URL: scoped.toString() };
+  const run = (args: string[], write?: Wrap) => main(args, env, shell(write));
+  let n = 0;
+  const file = (tag: string) => path.join(tmp, `${tag}-${++n}.json`);
+  const count = async (sql: string, ...a: unknown[]) => Number((await setup.query(sql, a)).rows[0]!.n);
+  const booked = () => count("SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = $1", OP);
+  const receipts = async () => (await setup.query(`SELECT state FROM ${BOOKINGS_TABLE} ORDER BY evidence_key`)).rows.map((r) => String(r.state));
+  const previewFile = file("preview");
+  assert.equal(await run(["--tenant", TENANT, "--output", previewFile]), 0, printed.join("\n"));
+  const digest = (JSON.parse(readFileSync(previewFile, "utf8")) as { previewDigest: string }).previewDigest;
+  const applyArgs = (output: string) => ["--tenant", TENANT, "--apply", "--confirm", digest, "--backup-ref", "pg-local-drill", "--output", output];
+  const look = async (report: string) => {
+    const out = file("receipts");
+    printed.length = 0;
+    assert.equal(await run(["--revert", report, "--dry-run", "--output", out]), 0, printed.join("\n"));
+    return { line: printed[0]!, verdict: (JSON.parse(readFileSync(out, "utf8")) as { verdict: string }).verdict };
+  };
+
+  // 1. THE AGENT ROW MOVED AFTER THE SNAPSHOT: another connection touches it the moment the transaction's isolation is proved, and the
+  //    apply's lock on it fails with the server's own 40001. Rolled back: no report, nothing written. SERIALIZABLE, as the server says.
+  const moved = file("moved");
+  await assert.rejects(run(applyArgs(moved), (c) => ({
+    async query(sql, params) {
+      const r = await c.query(sql, params);
+      if (/current_setting\('transaction_isolation'\)/.test(sql)) await setup.query("UPDATE agents SET beat_at = beat_at WHERE smart_account = $1", [ACCOUNT]);
+      return r;
+    },
+    end: () => c.end(),
+  })), (e: unknown) => e instanceof BookingRefused && e.code === "conflict" && /SQLSTATE 40001, a serialization failure/.test(e.message));
+  assert.equal(existsSync(moved), false);
+  assert.equal(await booked(), 0);
+  assert.deepEqual(await receipts(), []);
+  const begin = said.findIndex((s) => /^BEGIN/.test(s.sql));
+  assert.ok(said.slice(0, begin).every((s) => /^CREATE (TABLE|UNIQUE INDEX) IF NOT EXISTS chain_gap_bookings/.test(s.sql)), "only the receipts' additive DDL before it");
+  assert.equal(said[begin]!.sql, "BEGIN ISOLATION LEVEL SERIALIZABLE");
+  assert.deepEqual(said[begin + 1]!.rows, [{ ro: "off", iso: "serializable" }], "the server granted SERIALIZABLE, on a connection that may write");
+  assert.equal(said.some((s) => s.sql === "COMMIT"), false);
+  assert.equal(said.at(-1)!.sql, "ROLLBACK");
+
+  // 2. A DEFERRED CONSTRAINT FAILS THE COMMIT (class 23): the server rolled it back after the report was written, so the report goes.
+  await setup.query(`CREATE FUNCTION refuse_at_commit() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''refused at commit'' USING ERRCODE = ''23514''; END'`);
+  await setup.query(`CREATE CONSTRAINT TRIGGER refuse_at_commit AFTER INSERT ON ${BOOKINGS_TABLE} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_at_commit()`);
+  said.length = 0;
+  const deferred = file("deferred");
+  await assert.rejects(run(applyArgs(deferred)), (e: unknown) => !(e instanceof CommitOutcomeUnknown) && (e as { code?: string }).code === "23514");
+  assert.ok(said.some((s) => /^INSERT INTO chain_gap_bookings/.test(s.sql)), "the receipts were written, inside the transaction");
+  assert.equal(said.some((s) => s.sql === "COMMIT"), false, "and the COMMIT was refused");
+  assert.equal(existsSync(deferred), false, "no report of a booking that does not exist");
+  assert.equal(await booked(), 0);
+  assert.deepEqual(await receipts(), []);
+  await setup.query(`DROP TRIGGER refuse_at_commit ON ${BOOKINGS_TABLE}`);
+
+  // 3. A SERIALIZATION FAILURE AT COMMIT (write skew: each reads what the other writes, and the other commits first): 40001, rethrown as
+  //    itself, a rollback — never an unknown outcome.
+  await setup.query("CREATE TABLE skew_a (v INTEGER)"); await setup.query("CREATE TABLE skew_b (v INTEGER)");
+  const other = new pg.Client({ connectionString: scoped.toString() }); await other.connect(); clients.push(other);
+  const writer = await connectBooking(scoped.toString(), false, loadPg); clients.push(writer);
+  let workDone = false;
+  await assert.rejects(pgClientDb(writer, { readOnly: false }).tx(async (tx) => {
+    await tx.prepare("SELECT COUNT(*) AS n FROM skew_a").get();
+    await tx.prepare("INSERT INTO skew_b (v) VALUES (1)").run();
+    await other.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    await other.query("SELECT COUNT(*) AS n FROM skew_b");
+    await other.query("INSERT INTO skew_a (v) VALUES (1)");
+    await other.query("COMMIT");
+    workDone = true;
+  }), (e: unknown) => !(e instanceof CommitOutcomeUnknown) && (e as { code?: string }).code === "40001");
+  assert.equal(workDone, true, "the work ran: it was the COMMIT that failed");
+  assert.deepEqual([await count("SELECT COUNT(*) AS n FROM skew_a"), await count("SELECT COUNT(*) AS n FROM skew_b")], [1, 0], "the other committed; this one rolled back");
+
+  // 4. A COMMIT ANSWERED WITH ROLLBACK'S TAG: a statement failed inside and was swallowed; the server ends the transaction without an error.
+  await assert.rejects(pgClientDb(writer, { readOnly: false }).tx(async (tx) => {
+    await tx.prepare("INSERT INTO skew_b (v) VALUES (2)").run();
+    try { await tx.prepare("SELECT 1 / 0 AS x").get(); } catch { /* swallowed, as no code of the tool's does */ }
+    return 1;
+  }), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+  assert.equal(await count("SELECT COUNT(*) AS n FROM skew_b"), 0);
+
+  // 5. THE BACKEND TERMINATED AS THE COMMIT IS SENT: the shell cannot know, so it keeps the report saying "unknown"; the receipts, read
+  //    on the read-only connection, say it never committed, and a revert of it is refused by name.
+  printed.length = 0;
+  const terminated = file("terminated");
+  await assert.rejects(run(applyArgs(terminated), async (c) => {
+    const pid = Number((await c.query("SELECT pg_backend_pid() AS pid")).rows[0]!.pid);
+    return {
+      async query(sql, params) {
+        if (sql === "COMMIT") assert.equal((await setup.query("SELECT pg_terminate_backend($1, 5000) AS t", [pid])).rows[0]!.t, true);
+        return c.query(sql, params);
+      },
+      end: () => c.end(),
+    };
+  }), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+  assert.ok(printed.some((l) => l.startsWith("OUTCOME UNKNOWN for booking")), printed.join("\n"));
+  const kept = parseApplyReport(readFileSync(terminated, "utf8"));
+  assert.equal(kept.commitOutcome, "unknown");
+  assert.equal(await booked(), 0);
+  assert.deepEqual(await receipts(), []);
+  const unsent = await look(terminated);
+  assert.equal(unsent.verdict, "not-committed");
+  assert.ok(unsent.line.startsWith(`NOT COMMITTED booking ${kept.bookingId}`), unsent.line);
+  await assert.rejects(run(["--revert", terminated, "--output", file("revert")]), (e: unknown) => e instanceof BookingRefused && e.code === "not-committed");
+
+  // 6. THE COMMIT TOOK EFFECT AND ITS ANSWER WAS LOST: the report stays saying "unknown", the receipts say it committed, and the report is
+  //    what --revert takes.
+  printed.length = 0;
+  const lost = file("lost");
+  await assert.rejects(run(applyArgs(lost), (c) => ({
+    async query(sql, params) {
+      const r = await c.query(sql, params);
+      if (sql === "COMMIT") throw Object.assign(new Error(`write EPIPE ${scoped.toString()}`), { code: "EPIPE" });
+      return r;
+    },
+    end: () => c.end(),
+  })), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+  assert.equal(parseApplyReport(readFileSync(lost, "utf8")).commitOutcome, "unknown");
+  assert.equal(await booked(), 1);
+  assert.deepEqual(await receipts(), ["applied", "applied"]);
+  const took = await look(lost);
+  assert.equal(took.verdict, "applied");
+  assert.ok(took.line.startsWith("COMMITTED booking"), took.line);
+  assert.equal(await run(["--revert", lost, "--output", file("revert")]), 0);
+  assert.equal(await booked(), 0);
+  assert.equal((await look(lost)).verdict, "reverted");
+
+  // 7. And acknowledged, on this server: the report written before the COMMIT, replaced by the same report saying "committed".
+  said.length = 0;
+  const applied = file("applied");
+  assert.equal(await run(applyArgs(applied)), 0, printed.join("\n"));
+  assert.equal(parseApplyReport(readFileSync(applied, "utf8")).commitOutcome, "committed");
+  assert.equal(existsSync(`${applied}.committed.tmp`), false);
+  assert.equal(said.find((s) => s.sql === "COMMIT")!.command, "COMMIT");
+  assert.equal(await booked(), 1);
+  assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
 });

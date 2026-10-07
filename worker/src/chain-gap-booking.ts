@@ -119,8 +119,11 @@
  * (--backup-ref), then in ONE transaction: locks the agent row, compares every
  * Postgres fact again (compare-and-set on the evidence: anything that moved
  * refuses), inserts exactly the proposed rows, reads them back, proves the
- * flows still distinct and the admission's chain check now answered, and
- * records a receipt per row. Idempotent by (account, epoch, userOpHash or
+ * flows still distinct and the admission's chain check now answered,
+ * records a receipt per row, and hands the caller its report to keep before
+ * the commit (so a commit whose answer is lost still has one: the shell
+ * marks it commitOutcome "unknown" until the COMMIT is acknowledged, and the
+ * receipts say which it was). Idempotent by (account, epoch, userOpHash or
  * tx#log): a receipt is unique per key while applied, and a second apply finds
  * nothing missing. Revert takes the apply report, proves each row is still
  * exactly as written and the tenant was not admitted on them, and removes
@@ -154,6 +157,7 @@ import { fillSymbolFor } from "./token-label";
 export const BOOKING_FORMAT = "merrymen.chain-gap-booking.v1";
 export const APPLY_FORMAT = "merrymen.chain-gap-booking.apply.v1";
 export const REVERT_FORMAT = "merrymen.chain-gap-booking.revert.v1";
+export const RECEIPTS_FORMAT = "merrymen.chain-gap-booking.receipts.v1";
 /** Only facts this deep are booked: a reorg could still take back a shallower one, and the row with it. The receipt gas preview's depth. */
 export const BOOKING_CONFIRMATIONS = 64n;
 /** The receipts table: one row per booked row, kept (as 'reverted') after a revert. */
@@ -1716,12 +1720,31 @@ export async function ensureBookingSchema(db: Db): Promise<void> {
 export const BACKUP_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 
 export interface AppliedRow { table: "trades" | "flows"; id: number; evidenceKey: string; row: Record<string, unknown>; rowDigest: string }
+/**
+ * What the report file knew of its own commit when it was last written. The
+ * shell writes the report INSIDE the apply's transaction, before the COMMIT
+ * is sent, as "unknown" — the receipts decide — and replaces it with
+ * "committed" once the server acknowledged the COMMIT. A report the commit's
+ * answer never reached keeps "unknown". Absent in a report from a build
+ * before this field; that one was written only after its commit returned.
+ */
+export const COMMIT_OUTCOMES = ["unknown", "committed"] as const;
+export type CommitOutcome = (typeof COMMIT_OUTCOMES)[number];
 export interface ApplyReport {
   format: typeof APPLY_FORMAT; bookingId: string; tenant: string; account: string; chainId: number; epoch: number;
   previewDigest: string; backupRef: string; appliedAtMs: number;
   /** Where the tenant stood with admission when the rows were written: what a revert compares against (kept in every receipt too). */
   admission: AdmissionState;
-  rows: AppliedRow[]; reportDigest: string;
+  rows: AppliedRow[];
+  commitOutcome?: CommitOutcome;
+  reportDigest: string;
+}
+
+/** The same report, saying `outcome` of its commit, sealed again: every other field, and so what a revert compares, unchanged. */
+export function stampCommitOutcome(report: ApplyReport, outcome: CommitOutcome): ApplyReport {
+  const { reportDigest: _digest, commitOutcome: _was, ...rest } = report;
+  const body = { ...rest, commitOutcome: outcome };
+  return { ...body, reportDigest: digestOf(body) };
 }
 
 /** A row as stored, reduced to the columns that were written, plus its id: what a revert compares against. */
@@ -1757,9 +1780,14 @@ function sameRow(a: Record<string, unknown>, b: Record<string, unknown>, columns
  * (admission's precondition 4), and admission's own chain-fact rule is run
  * over what Postgres now holds: every fact must be answered. Then a receipt
  * per row. Any failure rolls all of it back.
+ *
+ * `persist`, last, still inside the transaction: it is handed the finished
+ * report after every receipt is written and before the caller's COMMIT is
+ * sent, so the shell writes and fsyncs the report there and a commit never
+ * exists without one. If it throws, the transaction rolls back.
  */
 export async function applyBooking(db: Db, plan: BookingPlan, o: {
-  confirm: string; backupRef: string; dialect: Dialect; nowMs: number; bookingId?: string;
+  confirm: string; backupRef: string; dialect: Dialect; nowMs: number; bookingId?: string; persist?: (report: ApplyReport) => void | Promise<void>;
 }): Promise<ApplyReport> {
   if (!DIGEST.test(o.confirm) || o.confirm !== plan.previewDigest) {
     throw new BookingRefused("confirm-mismatch", "the preview recomputed now does not have the digest you confirmed: the books or the chain moved, or the code did — preview again and review that one");
@@ -1827,7 +1855,9 @@ export async function applyBooking(db: Db, plan: BookingPlan, o: {
     }
     const body = { format: APPLY_FORMAT, bookingId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef, appliedAtMs,
       admission, rows };
-    return { ...body, format: APPLY_FORMAT, reportDigest: digestOf(body) };
+    const report: ApplyReport = { ...body, format: APPLY_FORMAT, reportDigest: digestOf(body) };
+    await o.persist?.(report);
+    return report;
   });
 }
 
@@ -1849,12 +1879,72 @@ export function parseApplyReport(text: string): ApplyReport {
   if (!a || !Array.isArray(a.approvals) || !Array.isArray(a.attestations) || !a.liveness || typeof a.liveness !== "object" || !Number.isSafeInteger(r.appliedAtMs)) {
     throw new BookingRefused("report", "the apply report does not say where the tenant stood with admission at the apply (a report from an earlier build of this tool?)");
   }
+  if (r.commitOutcome !== undefined && !(COMMIT_OUTCOMES as readonly unknown[]).includes(r.commitOutcome)) {
+    throw new BookingRefused("report", "the apply report's commitOutcome is neither \"unknown\" nor \"committed\"");
+  }
   return r;
 }
 
 export interface RevertReport {
   format: typeof REVERT_FORMAT; bookingId: string; tenant: string; account: string; revertedAtMs: number;
   outcome: "reverted" | "already-reverted"; rows: Array<{ table: string; id: number; evidenceKey: string }>; reportDigest: string;
+}
+
+/** The booking's receipts, ordered here, not by the database: a collation may order these keys differently from the report's. */
+async function receiptsOf(db: Db, report: ApplyReport): Promise<Array<Record<string, unknown>>> {
+  return ((await db.prepare(`SELECT * FROM ${BOOKINGS_TABLE} WHERE booking_id = ?`).all(report.bookingId)) as Array<Record<string, unknown>>)
+    .sort((a, b) => byText(String(a.evidence_key), String(b.evidence_key)));
+}
+/**
+ * THE DATABASE'S RECORD, NOT THE REPORT'S WORD: the report verifies only
+ * against its own digest, so its rows, its time and its admission record must
+ * be the ones every receipt holds.
+ */
+function receiptsMatch(receipts: ReadonlyArray<Record<string, unknown>>, report: ApplyReport): boolean {
+  const want = [...report.rows].sort((a, b) => byText(a.evidenceKey, b.evidenceKey));
+  return receipts.length === want.length && receipts.every((r, i) => String(r.evidence_key) === want[i]!.evidenceKey
+    && String(r.table_name) === want[i]!.table && Number(r.row_id) === want[i]!.id && String(r.row_digest) === want[i]!.rowDigest
+    && String(r.account) === report.account && String(r.tenant) === report.tenant && String(r.preview_digest) === report.previewDigest
+    && Number(r.applied_at_ms) === report.appliedAtMs && String(r.admission_json) === canonical(report.admission));
+}
+/** No receipt holds the booking: its transaction never committed in this database (the receipts are written in it, and never deleted). */
+const notCommitted = (report: ApplyReport) => new BookingRefused("not-committed",
+  `this database holds no receipt of booking ${report.bookingId}: that apply never committed here, so nothing was written and there is nothing to revert ` +
+  "(an apply whose commit outcome was unknown rolled back) — preview the tenant again");
+
+export interface BookingReceipts {
+  format: typeof RECEIPTS_FORMAT; mode: "receipts"; bookingId: string; tenant: string; account: string;
+  /**
+   * not-committed: no receipt (its transaction rolled back); applied: it
+   * committed and its rows stand; reverted: it committed and was taken back;
+   * partly-reverted: receipts in both states, which one revert transaction
+   * never leaves.
+   */
+  verdict: "not-committed" | "applied" | "reverted" | "partly-reverted";
+  receipts: Array<{ evidenceKey: string; table: string; rowId: number; state: string; appliedAtMs: number; revertedAtMs: number | null }>;
+  writesPerformed: 0;
+}
+
+/**
+ * DID THE APPLY COMMIT? Read only, for an apply whose COMMIT went
+ * unanswered (the shell's --revert <report> --dry-run): the booking's
+ * receipts, checked against the report as a revert checks them. Changes
+ * nothing; on the shell's read-only connection.
+ */
+export async function readBookingReceipts(db: Db, report: ApplyReport, o: { dialect: Dialect }): Promise<BookingReceipts> {
+  const result = (verdict: BookingReceipts["verdict"], receipts: ReadonlyArray<Record<string, unknown>>): BookingReceipts => ({
+    format: RECEIPTS_FORMAT, mode: "receipts", bookingId: report.bookingId, tenant: report.tenant, account: report.account, verdict,
+    receipts: receipts.map((r) => ({ evidenceKey: String(r.evidence_key), table: String(r.table_name), rowId: Number(r.row_id), state: String(r.state),
+      appliedAtMs: Number(r.applied_at_ms), revertedAtMs: r.reverted_at_ms === null || r.reverted_at_ms === undefined ? null : Number(r.reverted_at_ms) })),
+    writesPerformed: 0,
+  });
+  const tables = await existingTables(db, o.dialect);
+  if (!tables.has(BOOKINGS_TABLE)) return result("not-committed", []);
+  const receipts = await receiptsOf(db, report);
+  if (!receipts.length) return result("not-committed", []);
+  if (!receiptsMatch(receipts, report)) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
+  const states = new Set(receipts.map((r) => String(r.state)));
+  return result(states.size === 1 && states.has("applied") ? "applied" : states.size === 1 && states.has("reverted") ? "reverted" : "partly-reverted", receipts);
 }
 
 /**
@@ -1942,18 +2032,9 @@ export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: num
     // aborts a Postgres transaction (existingTables says why).
     const tables = await existingTables(tx, o.dialect);
     if (!tables.has(BOOKINGS_TABLE)) throw new BookingRefused("receipts", "no booking receipts exist in this database");
-    // Ordered here, not by the database: a collation may order these keys differently from the report's.
-    const receipts = ((await tx.prepare(`SELECT * FROM ${BOOKINGS_TABLE} WHERE booking_id = ?`).all(report.bookingId)) as Array<Record<string, unknown>>)
-      .sort((a, b) => byText(String(a.evidence_key), String(b.evidence_key)));
-    const want = [...report.rows].sort((a, b) => byText(a.evidenceKey, b.evidenceKey));
-    // THE DATABASE'S RECORD, NOT THE REPORT'S WORD: the report verifies only
-    // against its own digest, so its time and its admission record must be the
-    // ones every receipt holds.
-    const matches = receipts.length === want.length && receipts.every((r, i) => String(r.evidence_key) === want[i]!.evidenceKey
-      && String(r.table_name) === want[i]!.table && Number(r.row_id) === want[i]!.id && String(r.row_digest) === want[i]!.rowDigest
-      && String(r.account) === report.account && String(r.tenant) === report.tenant && String(r.preview_digest) === report.previewDigest
-      && Number(r.applied_at_ms) === report.appliedAtMs && String(r.admission_json) === canonical(report.admission));
-    if (!matches) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
+    const receipts = await receiptsOf(tx, report);
+    if (!receipts.length) throw notCommitted(report);
+    if (!receiptsMatch(receipts, report)) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
     if (receipts.every((r) => r.state === "reverted")) return result("already-reverted");
     if (!receipts.every((r) => r.state === "applied")) throw new BookingRefused("receipts", "the booking is partly reverted; nothing changed");
     for (const needed of ["agents", "mirror_state"]) {
