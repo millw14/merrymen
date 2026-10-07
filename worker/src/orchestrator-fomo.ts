@@ -1013,19 +1013,32 @@ export async function fleetInterest(
 
 /**
  * WHOSE EVENTS ONE OWNER'S TAILS ADD AS FOLLOW TRIGGERS, and from when: only a
- * tail the owner asked to have considered, only from when it began (and
- * inside the breadth window), and never a cohort member the cohort marks not
- * followable (a tail does not widen what the cohort refuses). Every other
- * tail adds its coins to the file and nothing to a review's breadth.
+ * tail the owner asked to have considered, only events OBSERVED since it began
+ * (and inside the breadth window) whose own time is not before it began (a
+ * late recovery of an older trade was not made while it was tailed), and
+ * never a cohort member the cohort marks not followable (a tail does not
+ * widen what the cohort refuses). Every other tail adds its coins to the file
+ * and nothing to a review's breadth.
  */
-export function tailTriggerSince(tails: readonly FomoTail[], cohort: CohortVersion | null, now: number): Map<string, number> {
+export function tailTriggerSince(tails: readonly FomoTail[], cohort: CohortVersion | null, now: number): Map<string, TailTriggerWindow> {
   const unfollowable = new Set((cohort?.members ?? []).filter((m) => m.followable === false).map((m) => m.trader.userId));
-  const out = new Map<string, number>();
+  const out = new Map<string, TailTriggerWindow>();
   for (const t of tails) {
     if (!t.consider || unfollowable.has(t.userId) || t.expiresAtMs <= now) continue;
-    out.set(t.userId, Math.max(t.createdAtMs, now - SIGNAL_WINDOW_MS));
+    out.set(t.userId, { observedSince: Math.max(t.createdAtMs, now - SIGNAL_WINDOW_MS), eventSince: t.createdAtMs });
   }
   return out;
+}
+
+/** A considered tail's trigger window: observed at or after `observedSince`, and the event's own time at or after `eventSince` (the tail's start). */
+export interface TailTriggerWindow {
+  observedSince: number;
+  eventSince: number;
+}
+
+/** Whether a stored event falls inside a tail: its own time (the provider's, else when it was observed) is not before the tail began. */
+function inTail(e: StoredTraderEvent, createdAtMs: number): boolean {
+  return (e.sourceEventAt ?? e.observedAt) >= createdAtMs;
 }
 
 // ── the pass ────────────────────────────────────────────────────────────────
@@ -1935,8 +1948,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       // A coin known only from activity takes its label from the newest event that named it.
       const named = events.find((e) => e.tokenLabel.symbol || e.tokenLabel.name)?.tokenLabel ?? null;
       const tailedBuyer = (e: StoredTraderEvent): boolean => {
-        const since = tailTriggers.get(e.trader.userId);
-        return since !== undefined && e.observedAt >= since;
+        const w = tailTriggers.get(e.trader.userId);
+        return w !== undefined && e.observedAt >= w.observedSince && inTail(e, w.eventSince);
       };
       const triggers = events
         .filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId) || tailedBuyer(e))
@@ -1985,22 +1998,26 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     const one = async (t: FomoTail, isEnded: boolean): Promise<ChildTail> => {
       const until = isEnded ? t.expiresAtMs : now;
       const since = Math.max(t.createdAtMs, until - TAIL_EVENT_WINDOW_MS);
+      // Observed inside the tail AND not from before it began: a late
+      // recovery of an older trade is neither told nor counted.
       const kept = (await eventsForTrader(db, t.userId, since, TAIL_EVENT_SCAN)).filter(
-        (e): e is StoredTraderEvent & { kind: ChildTailEvent["kind"] } => (e.kind === "buy" || e.kind === "sell" || e.kind === "thesis") && e.observedAt <= until,
+        (e): e is StoredTraderEvent & { kind: ChildTailEvent["kind"] } =>
+          (e.kind === "buy" || e.kind === "sell" || e.kind === "thesis") && e.observedAt <= until && inTail(e, t.createdAtMs),
       );
       let totals: ChildTail["totals"] = null;
       if (isEnded) {
-        const all = (await eventsForTrader(db, t.userId, t.createdAtMs, TAIL_TOTALS_SCAN)).filter((e) => e.observedAt <= t.expiresAtMs);
+        const read = await eventsForTrader(db, t.userId, t.createdAtMs, TAIL_TOTALS_SCAN);
         const coins = new Set<string>();
         const tally = { buys: 0, sells: 0, theses: 0 };
-        for (const e of all) {
+        for (const e of read) {
+          if (e.observedAt > t.expiresAtMs || !inTail(e, t.createdAtMs)) continue;
           if (e.kind === "buy") tally.buys++;
           else if (e.kind === "sell") tally.sells++;
           else if (e.kind === "thesis") tally.theses++;
           else continue;
           if (e.token) coins.add(e.token.key);
         }
-        totals = { ...tally, coins: coins.size, capped: all.length >= TAIL_TOTALS_SCAN };
+        totals = { ...tally, coins: coins.size, capped: read.length >= TAIL_TOTALS_SCAN };
       }
       return {
         userId: t.userId,

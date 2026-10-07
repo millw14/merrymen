@@ -489,7 +489,14 @@ the confirm card and the Stop and +1h button handling are a separate change.
   clipped to 280 characters, links removed and addresses only in short form. An end
   summary counts what the feed showed. Each notice is recorded durably before it is
   sent, so a crash can lose a notice but never repeat one; a log that cannot be read
-  sends nothing.
+  sends nothing. The log records when each notice was told (it forgets an entry 8 hours
+  after that, and never one an event still in the file needs) apart from the event time
+  it covers from (the 5-minute coalescing), so an alert the fleet observed hours after
+  the provider's own time is told once, not on every pass.
+- **Only trades made during the tail.** An event whose own time (the provider's, else
+  when it was observed) is before the tail began, such as a late recovery of an older
+  alert, is not in the tails block, not told, not in the end summary's tally and never a
+  trigger.
 - **Privacy.** A tail is the owner's private state: research status lists it for the
   owner, and a group is never told about one.
 - **Kill switch.** `MERRYMEN_FOMO_TAILS=0` (orchestrator and children) stops tail

@@ -120,10 +120,11 @@ describe("which notices are due", () => {
 
   it("tells at most 30 notices per tail", () => {
     const events = Array.from({ length: 40 }, (_, i) => ev(i, { token: coin(100 + i), at: NOW - 100 * MIN + i * MIN, observedAt: NOW - 100 * MIN + i * MIN }));
-    const r = pass(input([tail(events)], { thesisRead: () => null }));
+    const long = tail(events, { createdAt: NOW - 2 * HOUR });
+    const r = pass(input([long], { thesisRead: () => null }));
     assert.equal(r.notices.length, TAIL_NOTICE_LIMITS.noticesPerTail);
     assert.equal(TAIL_NOTICE_LIMITS.noticesPerTail, 30);
-    assert.deepEqual(tailNotices(input([tail(events)], { log: r.notices.at(-1)!.logAfter })).notices, [], "capped for good");
+    assert.deepEqual(tailNotices(input([long], { log: r.notices.at(-1)!.logAfter })).notices, [], "capped for good");
   });
 
   it("a buy waits up to three minutes for my read of the coin, then goes with what there is", () => {
@@ -274,19 +275,71 @@ describe("the sent log", () => {
     assert.ok(text.length < TAIL_NOTICE_LIMITS.logChars);
     assert.ok(!text.includes(UNI) && !text.includes("unipcs") && !text.includes(coin(200).address), "keys are hashes: no id, handle or coin in the log");
     assert.equal(parseTailLog("{not json"), null);
-    assert.equal(parseTailLog(JSON.stringify({ v: 2, floor: 0, sent: {}, perTail: {} })), null);
-    assert.deepEqual(parseTailLog(JSON.stringify({ v: 1, floor: 0, sent: { "g:ok": NOW, "bad key": NOW, "g:neg": -1 }, perTail: { "t:x": { notices: 1, thesisReads: 0, at: NOW }, "t:y": { notices: -1 } } })), {
-      v: 1,
-      floor: 0,
-      sent: { "g:ok": NOW },
-      perTail: { "t:x": { notices: 1, thesisReads: 0, at: NOW } },
-    });
+    assert.equal(parseTailLog(JSON.stringify({ v: 3, floor: 0, sent: {}, anchors: {}, perTail: {} })), null);
+    assert.equal(parseTailLog(JSON.stringify({ v: 1, floor: 0, sent: {}, perTail: {} })), null, "a v1 log (event times in sent) starts over");
+    assert.deepEqual(
+      parseTailLog(
+        JSON.stringify({
+          v: 2,
+          floor: 0,
+          sent: { "g:ok": NOW, "bad key": NOW, "g:neg": -1 },
+          anchors: { "g:ok": NOW - HOUR, "g:neg": NOW, "g:orphan": NOW },
+          perTail: { "t:x": { notices: 1, thesisReads: 0, at: NOW }, "t:y": { notices: -1 } },
+        }),
+      ),
+      {
+        v: 2,
+        floor: 0,
+        sent: { "g:ok": NOW },
+        anchors: { "g:ok": NOW - HOUR },
+        perTail: { "t:x": { notices: 1, thesisReads: 0, at: NOW } },
+      },
+      "an anchor without its told entry goes with it",
+    );
   });
 
-  it("forgets entries past eight hours and tails no longer listed", () => {
+  it("forgets entries eight hours after they were told, and tails no longer listed", () => {
     const r = pass(input([tail([ev(1)])]));
     const later = tailNotices(input([], { log: r.notices[0]!.logAfter, now: NOW + 9 * HOUR }));
     assert.deepEqual(later.log.sent, {});
+    assert.deepEqual(later.log.anchors, {});
     assert.deepEqual(later.log.perTail, {});
+  });
+
+  it("an event observed hours after its own time is told once, however long it stays in the file (regression)", () => {
+    // A 12-hour tail; the fleet observes at 14:00 a buy the provider timed at
+    // 07:00 (a late recovery). The file keeps it two hours by observed time.
+    const late = ev(1, { at: NOW - 7 * HOUR, observedAt: NOW });
+    const t = tail([late], { createdAt: NOW - 11 * HOUR, expiresAt: NOW + HOUR });
+    const first = pass(input([t], { now: NOW + 3 * MIN }));
+    assert.equal(first.notices.length, 1);
+    assert.match(first.notices[0]!.html, /bought <b>PONS<\/b> on Fomo \(Robinhood Chain\) · 07:00 UTC/);
+    let log = first.notices[0]!.logAfter;
+    assert.equal(log.sent[first.notices[0]!.key], NOW + 3 * MIN, "recorded by when it was told");
+    for (const later of [HOUR, 90 * MIN, 2 * HOUR]) {
+      const again = pass(input([t], { log, now: NOW + later }));
+      assert.deepEqual(again.notices, [], `not told again ${later / MIN} min later`);
+      log = again.readLog;
+    }
+  });
+
+  it("an event whose own time is before the tail began is never told", () => {
+    const before = ev(1, { at: NOW - 2 * HOUR, observedAt: NOW - MIN });
+    const during = ev(2, { kind: "sell", at: NOW - 30 * MIN, observedAt: NOW - 29 * MIN });
+    const r = pass(input([tail([before, during], { createdAt: NOW - HOUR })]));
+    assert.deepEqual(r.notices.map((n) => n.kind), ["sell"]);
+    assert.deepEqual(r.reads, [], "and no thesis read is spent on it");
+  });
+
+  it("the key bound forgets entries the file no longer needs before one it does", () => {
+    const t = tail([ev(1)]);
+    const told = pass(input([t])).notices[0]!;
+    const log: TailSentLog = { ...told.logAfter, sent: { ...told.logAfter.sent }, anchors: { ...told.logAfter.anchors } };
+    // Pad with newer entries for groups nothing in the file can look up.
+    for (let i = 0; i < TAIL_NOTICE_LIMITS.logKeys + 50; i++) log.sent[`g:pad${i}`] = NOW + MIN + i;
+    const next = tailNotices(input([t], { log, now: NOW + 2 * MIN }));
+    assert.ok(Object.keys(next.log.sent).length <= TAIL_NOTICE_LIMITS.logKeys);
+    assert.equal(next.log.sent[told.key], NOW, "the needed entry, though oldest, is kept");
+    assert.deepEqual(next.notices, []);
   });
 });

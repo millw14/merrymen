@@ -12,8 +12,12 @@
  *   coalescing    one notice per (trader, coin, kind) per 5 minutes: later
  *                 events in the window are covered by the first notice
  *   once          the durable sent log (TailSentLog) records each notice's
- *                 group; a group already told is never told again, across
- *                 restarts and redeploys (the notifier claims before sending)
+ *                 group, when it was told and the event time it covers from;
+ *                 a group already told is never told again, across restarts
+ *                 and redeploys (the notifier claims before sending), and an
+ *                 entry outlives every event in the file it covers
+ *   in the tail   an event whose own time is before the tail began is never
+ *                 told (a late recovery of an old trade is not news of the tail)
  *   bounded       at most 30 notices per tail, 2 thesis reads per tail and 1
  *                 per (tail, coin); the end summary is said once per tail
  *   patient       a buy waits up to 3 minutes for an assessment of its coin,
@@ -58,7 +62,12 @@ export const TAIL_NOTICE_LIMITS = Object.freeze({
   thesisWaitMs: 10 * MIN,
   /** Third-party words, in characters. */
   quoteChars: 280,
-  /** The sent log forgets entries older than this (well past any tail's 2 h event window). */
+  /**
+   * The sent log forgets an entry this long after it was TOLD (or claimed):
+   * well past the child file's event window (2 h by when the fleet observed
+   * an event, which is never after it was told), so nothing still in the file
+   * can lose its entry by age.
+   */
   logKeepMs: 8 * HOUR,
   logKeys: 200,
   /** Serialised log, in characters: inside the durable store's 15 KB wire limit with room. */
@@ -77,22 +86,36 @@ export const TAIL_CALLBACK_PREFIX = "ftl";
  * short hashes, never handles, coins or ids, so the log carries nothing a
  * reader could not already see and stays small.
  *
- *   sent      `g:<hash>` → the event time a (trader, coin, kind) notice was
- *             told for (coalescing); `r:<hash>` → when a thesis read for a
- *             (tail, coin) was claimed; `e:<hash>` → when a tail's end was told
+ *   sent      WHEN each entry was told or claimed, by the wall clock:
+ *             `g:<hash>` a (trader, coin, kind) notice, `r:<hash>` a thesis
+ *             read for a (tail, coin), `e:<hash>` a tail's end (per end
+ *             time). The log forgets by this time and nothing else
+ *   anchors   `g:<hash>` → the EVENT time the group's newest notice began at:
+ *             events of the group at or before it, and up to 5 minutes after
+ *             it, are covered. Kept exactly as long as its `sent` entry
  *   perTail   tail instance → notices told and thesis reads claimed
- *   floor     events at or before this time are never told (a log that could
- *             not be parsed restarts here: at most once, never twice)
+ *   floor     events OBSERVED at or before this time are never told (a log
+ *             that could not be parsed restarts here: at most once, never
+ *             twice; nothing observed later can have been told before it)
+ *
+ * WHY TWO TIMES. A provider's event time can be hours older than when the
+ * fleet observed it (a recovery, a late alert), and the child file keeps an
+ * event by when it was observed. A log that forgot by event time would drop
+ * the entry while the event was still in the file and tell it again on every
+ * pass; one that coalesced by told time would swallow new buys after a late
+ * notice. v2: a v1 log (event times in `sent`) does not parse and restarts at
+ * a floor of now.
  */
 export interface TailSentLog {
-  v: 1;
+  v: 2;
   floor: number;
   sent: Record<string, number>;
+  anchors: Record<string, number>;
   perTail: Record<string, { notices: number; thesisReads: number; at: number }>;
 }
 
 export function emptyTailLog(floor = 0): TailSentLog {
-  return { v: 1, floor, sent: {}, perTail: {} };
+  return { v: 2, floor, sent: {}, anchors: {}, perTail: {} };
 }
 
 /** A stored log, or null when it is not one (the caller then starts over at a floor of now). */
@@ -105,9 +128,12 @@ export function parseTailLog(text: string): TailSentLog | null {
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
-  if (r.v !== 1 || !isTime(r.floor, true) || !isPlain(r.sent) || !isPlain(r.perTail)) return null;
+  if (r.v !== 2 || !isTime(r.floor, true) || !isPlain(r.sent) || !isPlain(r.anchors) || !isPlain(r.perTail)) return null;
   const sent: Record<string, number> = {};
   for (const [k, v] of Object.entries(r.sent as Record<string, unknown>)) if (/^[ger]:[A-Za-z0-9_-]{1,32}$/.test(k) && isTime(v, false)) sent[k] = v as number;
+  // An anchor without its told entry is dropped: it would outlive what the log forgets by.
+  const anchors: Record<string, number> = {};
+  for (const [k, v] of Object.entries(r.anchors as Record<string, unknown>)) if (k.startsWith("g:") && sent[k] !== undefined && isTime(v, false)) anchors[k] = v as number;
   const perTail: TailSentLog["perTail"] = {};
   for (const [k, v] of Object.entries(r.perTail as Record<string, unknown>)) {
     if (!/^t:[A-Za-z0-9_-]{1,32}$/.test(k) || !isPlain(v)) continue;
@@ -115,7 +141,7 @@ export function parseTailLog(text: string): TailSentLog | null {
     if (!count(p.notices) || !count(p.thesisReads) || !isTime(p.at, false)) continue;
     perTail[k] = { notices: p.notices as number, thesisReads: p.thesisReads as number, at: p.at as number };
   }
-  return { v: 1, floor: r.floor as number, sent, perTail };
+  return { v: 2, floor: r.floor as number, sent, anchors, perTail };
 }
 
 export function serializeTailLog(log: TailSentLog): string {
@@ -138,31 +164,75 @@ const groupKey = (userId: string, tokenKey: string, kind: string): string => `g:
 const readKey = (tailKey: string, tokenKey: string): string => `r:${h(`${tailKey}|${tokenKey}`)}`;
 const endKey = (tailKey: string): string => `e:${h(tailKey)}`;
 const coinKey = (e: ChildTailEvent): string => e.token?.key ?? "no-coin";
+const NOTICE_KINDS: ReadonlySet<string> = new Set(["buy", "sell", "thesis"]);
 
 function clone(log: TailSentLog): TailSentLog {
-  return { v: 1, floor: log.floor, sent: { ...log.sent }, perTail: Object.fromEntries(Object.entries(log.perTail).map(([k, v]) => [k, { ...v }])) };
+  return { v: 2, floor: log.floor, sent: { ...log.sent }, anchors: { ...log.anchors }, perTail: Object.fromEntries(Object.entries(log.perTail).map(([k, v]) => [k, { ...v }])) };
 }
 
-/** Old entries go; past the key bound the oldest go; tails no longer listed and old go. Never grows without bound. */
-function pruned(log: TailSentLog, now: number, live: ReadonlySet<string>): TailSentLog {
+/** Record a told (trader, coin, kind) notice: when it was told, and the event time it covers from. */
+function recordGroup(log: TailSentLog, group: string, eventAt: number, now: number): void {
+  log.sent[group] = now;
+  log.anchors[group] = Math.max(log.anchors[group] ?? 0, eventAt);
+}
+
+function forget(log: TailSentLog, key: string): void {
+  delete log.sent[key];
+  delete log.anchors[key];
+}
+
+/**
+ * THE KEYS THE TAILS STILL IN THE FILE ARE CHECKED AGAINST: every group,
+ * read and end key their events and ends could look up. The key and size
+ * bounds forget other entries first, so a busy log cannot drop the entry of
+ * an event it may see again (only a log made of nothing else could).
+ */
+function neededKeys(tails: readonly ChildTail[]): Set<string> {
+  const out = new Set<string>();
+  for (const t of tails) {
+    const tk = tailKeyOf(t);
+    if (t.ended) out.add(endKey(tk));
+    for (const e of t.events) {
+      if (!NOTICE_KINDS.has(e.kind)) continue;
+      out.add(groupKey(t.userId, coinKey(e), e.kind));
+      if (e.token) out.add(readKey(tk, e.token.key));
+    }
+  }
+  return out;
+}
+
+/** Sent keys, the oldest told first, those the file no longer needs before those it does. */
+function forgettable(log: TailSentLog, needed: ReadonlySet<string>): string[] {
+  return Object.entries(log.sent)
+    .sort((a, b) => Number(needed.has(a[0])) - Number(needed.has(b[0])) || a[1] - b[1])
+    .map(([k]) => k);
+}
+
+/**
+ * Entries told more than 8 h ago go (an event in the file was observed, so
+ * told, within its last ~2 h); past the key bound the oldest go, those the
+ * file no longer needs first; tails no longer listed and old go. Never grows
+ * without bound.
+ */
+function pruned(log: TailSentLog, now: number, tails: readonly ChildTail[]): TailSentLog {
   const out = clone(log);
+  const live = new Set(tails.map(tailKeyOf));
+  const needed = neededKeys(tails);
   const horizon = now - TAIL_NOTICE_LIMITS.logKeepMs;
-  for (const [k, at] of Object.entries(out.sent)) if (at < horizon) delete out.sent[k];
-  const keys = Object.entries(out.sent).sort((a, b) => a[1] - b[1]);
-  while (keys.length > TAIL_NOTICE_LIMITS.logKeys) delete out.sent[keys.shift()![0]];
+  for (const [k, at] of Object.entries(out.sent)) if (at < horizon && !needed.has(k)) forget(out, k);
+  const order = forgettable(out, needed);
+  while (order.length > TAIL_NOTICE_LIMITS.logKeys) forget(out, order.shift()!);
+  for (const k of Object.keys(out.anchors)) if (out.sent[k] === undefined) delete out.anchors[k];
   for (const [k, p] of Object.entries(out.perTail)) if (!live.has(k) && p.at < horizon) delete out.perTail[k];
   return out;
 }
 
-/** Keep a serialised log inside its size bound by forgetting the oldest sent entries (never the floor). */
-function fitted(log: TailSentLog): TailSentLog {
-  let out = log;
-  while (serializeTailLog(out).length > TAIL_NOTICE_LIMITS.logChars) {
-    const oldest = Object.entries(out.sent).sort((a, b) => a[1] - b[1])[0];
-    if (!oldest) break;
-    out = clone(out);
-    delete out.sent[oldest[0]];
-  }
+/** Keep a serialised log inside its size bound by forgetting sent entries, the file's unneeded and oldest first (never the floor). */
+function fitted(log: TailSentLog, tails: readonly ChildTail[]): TailSentLog {
+  if (serializeTailLog(log).length <= TAIL_NOTICE_LIMITS.logChars) return log;
+  const out = clone(log);
+  const order = forgettable(out, neededKeys(tails));
+  while (serializeTailLog(out).length > TAIL_NOTICE_LIMITS.logChars && order.length > 0) forget(out, order.shift()!);
   return out;
 }
 
@@ -225,30 +295,36 @@ interface Due {
   covered: ChildTailEvent[];
 }
 
-const NOTICE_KINDS: ReadonlySet<string> = new Set(["buy", "sell", "thesis"]);
+/**
+ * An event a tail can tell: a buy, sell or thesis observed after the log's
+ * floor, whose own time is not before the tail began. A trade from before the
+ * tail (a late recovery of an old alert) was not made while it was tailed: it
+ * is never told, and never a trigger (orchestrator-fomo.ts drops it too).
+ */
+function tellable(tail: ChildTail, e: ChildTailEvent, floor: number): boolean {
+  return NOTICE_KINDS.has(e.kind) && e.observedAt > floor && e.at >= tail.createdAt;
+}
 
 /**
  * Walk every tail's events oldest first, as the notices would be told, and
- * call `visit` for each one that is due (not told, not covered, not past the
- * floor, under the per-tail cap). `visit` returns whether it told it, so the
- * walk can record coverage and the cap as it goes.
+ * call `visit` for each one that is due (not told, not covered, tellable,
+ * under the per-tail cap). `visit` returns whether it told it, so the walk
+ * can record coverage (told now, from the event's time) and the cap as it goes.
  */
-function walk(log: TailSentLog, tails: readonly ChildTail[], visit: (d: Due) => boolean): void {
+function walk(log: TailSentLog, tails: readonly ChildTail[], now: number, visit: (d: Due) => boolean): void {
   for (const tail of tails) {
     const tailKey = tailKeyOf(tail);
     const events = tail.events
-      .filter((e) => NOTICE_KINDS.has(e.kind) && e.at > log.floor)
+      .filter((e) => tellable(tail, e, log.floor))
       .sort((a, b) => a.at - b.at || (a.eventKey < b.eventKey ? -1 : a.eventKey > b.eventKey ? 1 : 0));
     for (const ev of events) {
       const pt = log.perTail[tailKey];
       if (pt && pt.notices >= TAIL_NOTICE_LIMITS.noticesPerTail) break;
       const group = groupKey(tail.userId, coinKey(ev), ev.kind);
-      const last = log.sent[group];
-      if (last !== undefined && ev.at <= last + TAIL_NOTICE_LIMITS.coalesceMs) continue;
+      const anchor = log.anchors[group];
+      if (anchor !== undefined && ev.at <= anchor + TAIL_NOTICE_LIMITS.coalesceMs) continue;
       const covered = events.filter((x) => x.kind === ev.kind && coinKey(x) === coinKey(ev) && x.at >= ev.at && x.at <= ev.at + TAIL_NOTICE_LIMITS.coalesceMs);
-      if (visit({ tail, tailKey, ev, group, covered })) {
-        log.sent[group] = ev.at;
-      }
+      if (visit({ tail, tailKey, ev, group, covered })) recordGroup(log, group, ev.at, now);
     }
   }
 }
@@ -278,12 +354,11 @@ function perTail(log: TailSentLog, tailKey: string, now: number): { notices: num
  * crash can never re-spend a read.
  */
 export function tailThesisReads(i: TailNoticeInput): { reads: TailThesisRead[]; log: TailSentLog } {
-  const live = new Set(i.tails.map(tailKeyOf));
-  const log = fitted(pruned(i.log, i.now, live));
+  const log = fitted(pruned(i.log, i.now, i.tails), i.tails);
   const scratch = clone(log);
   const reads: TailThesisRead[] = [];
   if (i.canRead === false) return { reads, log };
-  walk(scratch, i.tails, (d) => {
+  walk(scratch, i.tails, i.now, (d) => {
     if (d.ev.kind !== "buy" || !d.ev.token || !d.ev.token.chain.slug) return true;
     if (streamThesis(d.tail, d.ev)) return true;
     const tokenKey = d.ev.token.key;
@@ -296,7 +371,7 @@ export function tailThesisReads(i: TailNoticeInput): { reads: TailThesisRead[]; 
     reads.push({ userId: d.tail.userId, tokenKey, token: d.ev.token });
     return true;
   });
-  return { reads, log: fitted(log) };
+  return { reads, log: fitted(log, i.tails) };
 }
 
 /**
@@ -305,13 +380,12 @@ export function tailThesisReads(i: TailNoticeInput): { reads: TailThesisRead[]; 
  * owed thesis read, up to 10) is left for a later pass and recorded nowhere.
  */
 export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: TailSentLog } {
-  const live = new Set(i.tails.map(tailKeyOf));
-  const log = fitted(pruned(i.log, i.now, live));
+  const log = fitted(pruned(i.log, i.now, i.tails), i.tails);
   const notices: TailNotice[] = [];
   const push = (n: Omit<TailNotice, "logAfter">): void => {
-    notices.push({ ...n, logAfter: fitted(clone(log)) });
+    notices.push({ ...n, logAfter: fitted(clone(log), i.tails) });
   };
-  walk(log, i.tails, (d) => {
+  walk(log, i.tails, i.now, (d) => {
     const p = perTail(log, d.tailKey, i.now);
     const text = noticeFor(i, d, log);
     if (text === null) {
@@ -320,11 +394,9 @@ export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: T
       return false;
     }
     p.notices++;
-    log.sent[d.group] = d.ev.at;
-    if (text.coveredThesis) {
-      const g = groupKey(d.tail.userId, coinKey(text.coveredThesis), "thesis");
-      log.sent[g] = Math.max(log.sent[g] ?? 0, text.coveredThesis.at);
-    }
+    // Recorded before the snapshot below: the claim of this notice covers it.
+    recordGroup(log, d.group, d.ev.at, i.now);
+    if (text.coveredThesis) recordGroup(log, groupKey(d.tail.userId, coinKey(text.coveredThesis), "thesis"), text.coveredThesis.at, i.now);
     push({ key: d.group, tailUserId: d.tail.userId, kind: d.ev.kind as TailNotice["kind"], html: text.html, buttons: buttonsFor(d.tail, i.now) });
     return true;
   });
