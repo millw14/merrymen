@@ -148,6 +148,7 @@ import { custodyAddressesOf } from "./custody";
 import { flowDuplicateReport } from "./distinct-flows";
 import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
+import { ownerOperationOf } from "./owner-operations";
 import {
   attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, lastMirrorPassAt, planAttestedSeed, readChainHold, readOpenApproval,
   resumeGapWindow, RESUME_USDG, usdg6, type GapChain, type MissingChainFact,
@@ -265,8 +266,18 @@ export interface BookingSnapshot {
   epochOpenedAt: number | null;
   /** Every hosted account, lowercased: a transfer from one is internal, never a deposit. */
   knownAccounts: string[];
-  /** What a chain log could be in Postgres for this account (knownChainFacts), sorted. */
-  known: { ops: string[]; txs: string[]; flows: string[] };
+  /**
+   * What a chain log could be in Postgres for this account (knownChainFacts), sorted. `ownerOps`: the
+   * acknowledged root records admission may answer an operation by ("hash|tx"), each only once the
+   * chain re-derives it (ledger-resume.ts ownerAnswersFor) — bound here so the digest and the
+   * compare-and-set see one change.
+   */
+  known: { ops: string[]; txs: string[]; flows: string[]; ownerOps: string[] };
+  /**
+   * Every owner record of the account, whatever its disposition, by hash: shown beside an
+   * owner-operation fact as evidence (the tool still never books one), and compared at apply.
+   */
+  ownerRecords: Array<{ userOpHash: string; txHash: string; chainId: number; disposition: string; reviewReason: string | null; tenant: string | null }>;
   /** Where admission's chain read starts (resumeGapWindow): for a tenant held on a chain refusal, no later than that refused read began. */
   gapFromSec: number;
   /** The account's trades and flows by count and maximum id: the evidence apply compares and sets on. */
@@ -352,7 +363,8 @@ const GRANT_SQL: Record<Dialect, string> = {
     FROM grants WHERE LOWER(tenant) = ?`,
 };
 /** The tables admission reads agent_id spellings across (ledger-resume.ts resumePreconditions). */
-const SPELLING_TABLES = ["trades", "flows", "equity", "fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "paper_checkpoints", "risk_periods"];
+const SPELLING_TABLES = ["trades", "flows", "equity", "fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "paper_checkpoints", "risk_periods",
+  "owner_operations"];
 const num = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
 /** Code-unit order: the same on every machine and in every locale, so a digest over a sorted list is too. */
@@ -530,7 +542,15 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
   }
   const knownAccounts = ((await db.prepare("SELECT DISTINCT LOWER(smart_account) AS a FROM agents ORDER BY a").all()) as Array<Record<string, unknown>>)
     .map((r) => String(r.a)).filter((a) => ADDRESS.test(a));
-  const k = await knownChainFacts(db, account);
+  // The owner records exactly as admission loads them: this tenant, account and the grant's chain.
+  const k = await knownChainFacts(db, account, grant?.chainId === null || grant?.chainId === undefined ? undefined : { tenant, chainId: grant.chainId });
+  const ownerRecords: BookingSnapshot["ownerRecords"] = account && tables.has("owner_operations")
+    ? ((await db.prepare(`SELECT tenant, user_op_hash, tx_hash, chain_id, disposition, review_reason FROM owner_operations WHERE LOWER(agent_id) = ?`)
+      .all(account)) as Array<Record<string, unknown>>).map((r) => ({
+      userOpHash: lower(r.user_op_hash), txHash: lower(r.tx_hash), chainId: num(r.chain_id), disposition: String(r.disposition),
+      reviewReason: strOrNull(r.review_reason), tenant: r.tenant === null || r.tenant === undefined ? null : lower(r.tenant),
+    })).sort((a, b) => byText(a.userOpHash, b.userOpHash) || byText(a.tenant ?? "", b.tenant ?? ""))
+    : [];
   // ADMISSION'S OWN WINDOW, from the same hold (ledger-resume.ts
   // resumeGapWindow): for a tenant held on a chain refusal, no later than the
   // refused read began, however long ago — so every fact that refusal named
@@ -555,7 +575,8 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     : [];
   return {
     tenant, grant, agents, spellings: [...spellings].sort(), epochOpenedAt, knownAccounts,
-    known: { ops: [...k.ops].sort(), txs: [...k.txs].sort(), flows: [...k.flows].sort() }, gapFromSec,
+    known: { ops: [...k.ops].sort(), txs: [...k.txs].sort(), flows: [...k.flows].sort(), ownerOps: [...k.ownerRecords].map(([h, tx]) => `${h}|${tx}`).sort() },
+    ownerRecords, gapFromSec,
     ledger: { trades: await count("trades"), flows: await count("flows") },
     openApproval: open ? { state: open.state, evidence: open.evidenceDigest } : null,
     admitted: account && tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(db, tenant, account) : null,
@@ -576,11 +597,19 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  * defence in depth: planAttestedSeed's basis is a pure function of the
  * positions and live cost_basis rows `holdings` already carries, read on the
  * same snapshot.
+ *
+ * `knownAccounts` is every hosted account, by digest: the classifier reads a
+ * transfer from one as internal, never as a deposit (planBooking's
+ * classifyUsdgMovement), so a registration between the preview's read and
+ * the apply — during a long chain read, say — can turn the counterparty of a
+ * transfer the plan books as an owner's deposit into another hosted account.
+ * By digest, not the list, so the plan and its report never carry the
+ * fleet's other accounts.
  */
 function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
-    epochOpenedAt: s.epochOpenedAt, known: s.known, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
-    admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills) };
+    epochOpenedAt: s.epochOpenedAt, known: s.known, ownerRecords: s.ownerRecords, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
+    admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills), knownAccounts: digestOf([...s.knownAccounts].sort(byText)) };
 }
 
 // ── the hold ─────────────────────────────────────────────────────────────────
@@ -687,9 +716,10 @@ export interface ChainEvidence {
 }
 
 /**
- * The admission's chain seam over this tool's transport: the same three
- * reads, nothing else. The head and timestamps wait out a rate limit here;
- * getLogs is left to getLogsAdaptive, which already does, and narrows.
+ * The admission's chain seam over this tool's transport: the same four
+ * reads, nothing else (the receipt only for an operation an owner record
+ * would answer). The head, timestamps and receipts wait out a rate limit
+ * here; getLogs is left to getLogsAdaptive, which already does, and narrows.
  */
 export function gapChainOf(rpc: RpcCall, sleep: (ms: number) => Promise<void> = (ms) => new Promise<void>((r) => setTimeout(r, ms))): GapChain {
   const hex = (n: bigint) => `0x${n.toString(16)}`;
@@ -702,6 +732,11 @@ export function gapChainOf(rpc: RpcCall, sleep: (ms: number) => Promise<void> = 
     },
     async getLogs(a) {
       return (await rpc("eth_getLogs", [{ address: a.address, fromBlock: hex(a.fromBlock), toBlock: hex(a.toBlock), topics: a.topics }])) as never;
+    },
+    // Only for an operation an owner record would answer: the record is re-derived from it (ownerAnswersFor).
+    async getReceiptLogs(txHash) {
+      const r = (await patiently(() => rpc("eth_getTransactionReceipt", [txHash]), sleep)) as { logs?: unknown } | null;
+      return r && Array.isArray(r.logs) ? (r.logs as RawChainLog[]) : null;
     },
   };
 }
@@ -754,8 +789,12 @@ export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: 
   const rpcChainId = Number(BigInt(String(await patiently(() => rpc("eth_chainId", []), sleep))));
   const empty = { rpcChainId, txs: {}, decimals: {}, balances: {}, balanceBlock: null };
   if (!snap.grant) return { ...empty, gap: { status: "unavailable", why: "no stored grant names the account to read" } };
-  const known = { ops: new Set(snap.known.ops), txs: new Set(snap.known.txs), flows: new Set(snap.known.flows) };
+  const ownerRecords = new Map(snap.known.ownerOps.map((p) => p.split("|") as [string, string]));
+  const known = { ops: new Set(snap.known.ops), txs: new Set(snap.known.txs), flows: new Set(snap.known.flows), ownerRecords };
+  // As admission reads it: an owner record answers only once re-derived over the grant's own custody and chain.
+  const ownerContext = snap.grant.chainId === null ? undefined : { custody: snap.grant.custody, chainId: snap.grant.chainId };
   const gap = await chainGapCheck({ chain: gapChainOf(rpc, sleep), account: snap.grant.account, usdg: RESUME_USDG, sinceSec: snap.gapFromSec, known,
+    ...(ownerContext ? { ownerContext } : {}),
     ...(o.maxSpan === undefined ? {} : { maxSpan: o.maxSpan }), ...(o.log ? { log: o.log } : {}) });
   if (gap.status !== "missing") return { ...empty, gap: gap.status === "clean" ? { status: "clean", fromBlock: gap.fromBlock, head: gap.head } : gap };
   const txs: Record<string, TxEvidence> = {};
@@ -1476,8 +1515,26 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       base.evidence = { ...base.evidence, userOpHash: f.userOpHash, nonce: op.seg.op.nonce.toString(), validator, success: op.seg.op.success,
         paymaster: op.seg.op.paymaster, gasWei: op.gasWei.toString(), gasUnits: op.gasUnits.toString(), bookAddresses: book, moved: saidDeltas(op.deltas) };
       if (validator === "root") {
+        // WHAT ADMISSION WOULD MAKE OF IT, AS EVIDENCE ONLY: the owner reading
+        // re-derived from this receipt over the grant's custody (the one an
+        // owner record answers by, ledger-resume.ts ownerAnswersFor), and the
+        // record Postgres holds for it, if any. Neither changes the class or
+        // the refusal: this tool never books an owner's operation.
+        const reading = ownerOperationOf({ receiptLogs: receipt.logs, userOpHash: f.userOpHash, txHash: f.txHash, account, custody: snap.grant?.custody ?? [],
+          usdg: USDG, chainId: chainId ?? 4663 });
+        const record = snap.ownerRecords.filter((r) => r.userOpHash === f.userOpHash);
+        base.evidence = { ...base.evidence,
+          ownerReading: reading && { disposition: reading.disposition, reasons: reading.reasons, covers: reading.covers, usdgLegs: reading.usdgLegs, tokenMoves: reading.tokenMoves },
+          ownerRecord: record.length ? record.map(({ disposition, reviewReason, tenant, chainId: c, txHash }) => ({ disposition, reviewReason, tenant, chainId: c, txHash })) : null };
+        const recorded = record.length
+          ? ` Postgres holds an owner record for it (${record.map((r) => r.disposition + (r.reviewReason ? `: ${r.reviewReason}` : "")).join(", ")}), and admission ` +
+            "did not take it as an answer: only an acknowledged record that the receipt re-derives as acknowledged answers an owner's operation."
+          : reading
+            ? ` No owner record is in Postgres for it; re-derived from the receipt it would be '${reading.disposition}'` +
+              `${reading.reasons.length ? ` (${reading.reasons.join(", ")})` : ""} (docs/owner-operations.md).`
+            : "";
         items.push(unresolved(base, `the owner's own key (the root validator) signed this operation (it moved ${saidDeltas(op.deltas)}): ` +
-          "the agent's book has no writer for an owner's operation, and booking it as the agent's trade would misattribute it — escalate for a reviewed decision",
+          "the agent's book has no writer for an owner's operation, and booking it as the agent's trade would misattribute it — escalate for a reviewed decision." + recorded,
         "owner-operation"));
         continue;
       }
@@ -1551,7 +1608,38 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       continue;
     }
     const { segments } = segmentReceipt(receipt.logs);
-    if (segments.some((s) => s.op.sender === account)) {
+    const mine = segments.filter((s) => s.op.sender === account);
+    if (mine.length) {
+      // THE OPERATION THAT CARRIES THIS LEG IS NOT MISSING, so admission
+      // answered it: by a trade row, or by an owner record it re-derived from
+      // this receipt (ledger-resume.ts ownerAnswersFor). An owner record
+      // answers the operation and only the legs it covers itself; it leaves a
+      // capital leg to the deposit scanner's flow. So a capital leg with no
+      // flow lands here, and is said as exactly that, never as a trade row's.
+      const holder = mine.find((s) => s.logs.some((l) => Number(BigInt(l.logIndex)) === f.logIndex)) ?? null;
+      const byOwner = holder !== null && !snap.known.ops.includes(holder.op.userOpHash) && snap.known.ownerOps.includes(`${holder.op.userOpHash}|${f.txHash}`);
+      if (holder && byOwner) {
+        const reading = ownerOperationOf({ receiptLogs: receipt.logs, userOpHash: holder.op.userOpHash, txHash: f.txHash, account, custody: snap.grant?.custody ?? [],
+          usdg: USDG, chainId: chainId ?? 4663 });
+        const leg = reading?.usdgLegs.find((l) => l.logIndex === f.logIndex) ?? null;
+        base.evidence = { ...base.evidence, ownerOperation: holder.op.userOpHash,
+          ownerReading: reading && { disposition: reading.disposition, reasons: reading.reasons, covers: reading.covers, usdgLegs: reading.usdgLegs, tokenMoves: reading.tokenMoves },
+          ownerLeg: leg };
+        const amount = f.amountRaw === null ? "an unread amount of USDG" : `${usdg6(f.amountRaw)} USDG`;
+        if (reading?.disposition === "acknowledged" && leg?.answeredBy === "flow") {
+          items.push(unresolved(base, `not booked: the ${leg.kind} leg (${amount} ${f.direction === "in" ? "in" : "out"}) of the owner's own operation ` +
+            `${holder.op.userOpHash}, which the root validator signed. Admission answers that operation by its acknowledged owner record, re-derived from this ` +
+            "receipt, but the record answers the operation only: it leaves this capital leg to the deposit scanner's flow, as it leaves every capital leg, and " +
+            "Postgres holds no flow for it. The scanner never booked it (one that landed outside every window a running worker scanned, during downtime for " +
+            "one, is never seen). This tool books no owner's capital leg: a flow for it moves the account's capital and its peaks, a reviewed hwm-repair " +
+            "decision (docs/owner-operations.md) — escalate"));
+          continue;
+        }
+        items.push(unresolved(base, `not booked: a USDG leg (${amount}) of the owner's own operation ${holder.op.userOpHash}, which an owner record answers in ` +
+          `admission's check; re-derived from this receipt, ${reading ? `the reading is '${reading.disposition}' and ${leg ? `reads this leg as ${leg.kind} (${leg.rule}), ` +
+            `answered by ${leg.answeredBy}` : "carries no such leg"}` : "the operation does not read as the owner's"}, and nothing in Postgres answers it — escalate`));
+        continue;
+      }
       items.push(unresolved(base, "an operation of this account that Postgres already holds is in this transaction, yet this leg is not answered — its row's tx hash differs"));
       continue;
     }

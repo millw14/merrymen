@@ -264,7 +264,9 @@ describe("THE EXECUTOR", () => {
     const settle = r.indexOf("await settleEnergyLanding(");
     assert.ok(r.indexOf("noteEnergyLanded(r.blockNumber);") > settle);
     // The arm seeds it from the ledger AFTER the stranded resolver ran, and before the budget.
-    const reconcile = CODE.indexOf("if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);");
+    // The owner's book (custody and chain) rides along since owner operations
+    // stopped being booked as trades (owner-operations.ts); the order is what this pins.
+    const reconcile = CODE.indexOf("if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`, { custody: custodyAddressesOf(grant), chainId: grant.chainId });");
     const seeded = CODE.indexOf("await energyLandedBlockAtArm({", reconcile);
     assert.ok(reconcile > 0 && seeded > reconcile && seeded < CODE.indexOf("await refreshBudget(agentId);", reconcile));
     assert.match(CODE.slice(seeded, seeded + 300), /newest: \(\) => newestLandedEnergyBuy\(agentId\),/);
@@ -466,6 +468,25 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.doesNotMatch(orphans, /bookCapitalFlow|bookEnergyPurchase|settleEnergyLanding|energySettleDeps/);
     // And the resolver that DOES book runs before it, so a hash is settled once.
     assert.ok(arm.indexOf("await resolveStrandedOps(") < arm.indexOf("const orphans = await findOrphanOps({"));
+  });
+
+  it("(6b) the owner's own key is never booked as the agent's: the root branch comes first, records, and continues — no trade, fill, basis or flow", () => {
+    const arm = arrow("reconcileInFlightAtArm");
+    const loop = arm.slice(arm.indexOf("for (const o of orphans) {"));
+    const root = loop.indexOf(`if (o.validator === "root") {`);
+    const trade = loop.indexOf("const wrote = await addTrade({");
+    assert.ok(root > 0 && trade > root, "the root branch is decided before any trades row");
+    // Its body: from the `if` to its own closing brace, at the loop body's indentation.
+    const close = loop.indexOf("\n        }\n", root);
+    assert.ok(close > root && close < trade);
+    const branch = loop.slice(root, close + "\n        }".length);
+    assert.match(branch, /await recordOwnerOperation\(ownerOperationRow\(o\.owner, \{/);
+    assert.match(branch, /continue;\s*\}$/, "and it always continues past the trade path");
+    assert.doesNotMatch(branch, /addTrade|bookFill|setBasis|bookCapitalFlow|addFlow|adjustAgentHwm|setAgentHwm/, "it writes nothing but the record");
+    // Every path out of it continues: a root op with no reading, too shallow, or with no block is left for the next arm.
+    assert.equal(count(branch, "continue;"), 4, "unread, shallow, blockless, recorded — each continues");
+    // The arm passes the grant's custody and chain, so the record is read over the same book the scanner classifies with.
+    assert.match(arm, /owner: ownerBook,/);
   });
 
   it("(7) energy intents are built only in the command drain's path (see WHO CAN REACH THE BUY)", () => {

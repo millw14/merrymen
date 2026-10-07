@@ -284,7 +284,17 @@ line before it, and in the next preview's `lastRefusal`:
 
 - `operation 0x<userOpHash> in tx 0x<tx> at block N` — an operation of the
   account that has no trade row (a lost trade row, or an owner's own
-  operation); `(reverted)` when the EntryPoint recorded it as failing.
+  operation); `(reverted)` when the EntryPoint recorded it as failing. An
+  operation the owner's own key (the root validator) signed is also answered
+  by its **owner record** (`owner_operations`, mirrored from the child that
+  recorded it at arm), but only for the account the tenant's own grant names,
+  and only when the chain proves it. The operation's own log must say root,
+  success and this account, and its receipt, read again, must re-derive as
+  `acknowledged` over the grant's custody. A session key's
+  operation is never answered that way. A `review` record (a token arrived or
+  left in kind, USDG that is not plain capital) answers nothing, and that
+  operation is named here. The owner's USDG deposit or withdrawal in that
+  transaction still needs its flow. See [owner-operations.md](owner-operations.md).
 - `USDG in|out <amount> in tx 0x<tx> log L at block N` — a USDG transfer with
   no flow and no trade row in its transaction. When it shares a transaction
   with a named operation it is that operation's leg; on its own it is most
@@ -626,7 +636,15 @@ Each refuses on its own; none fails open.
    last mirror (trades, flows, equity; at least 26 hours back, and for a
    `chainHeld` tenant no later than where its refused read began) to head:
    every EntryPoint `UserOperationEvent` the account sent and every USDG
-   `Transfer` to or from it; and again, immediately before registration,
+   `Transfer` to or from it. An operation is held by a trade row with its
+   userOpHash, or, for one the owner's own key signed, by an acknowledged
+   owner record that the chain re-derives ([owner-operations.md](owner-operations.md#how-admission-uses-it)).
+   A transfer is held by a trade row in its transaction, a flow with its
+   tx#log, or a leg that such an owner record covers: custody-internal, or one
+   that moves nothing (a self-transfer, or an amount of zero), each checked
+   against its own log. Any owner
+   record makes the tenant one that is read on chain. Then the read runs again,
+   immediately before registration,
    from that read's head to the head then (phase step 5). The 26-hour bound
    moves later as time passes; the refused read's start does not, so a fact
    a refusal named never drops out of a later read. An RPC failure retries. Only
