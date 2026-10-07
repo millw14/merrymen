@@ -602,12 +602,17 @@ node --import tsx worker/src/chain-gap-booking-cli.ts \
   --output /absolute/private-dir/<tenant>-apply.json
 ```
 
-Apply first recomputes the whole preview. It refuses, writing nothing, unless
+The first line it prints is the booking id and where its report goes:
+`booking <id>: its apply report is written to … before the COMMIT is sent`.
+Note the id. `--output` is created at that moment (once, mode `0600`).
+
+Apply then recomputes the whole preview. It refuses, writing nothing, unless
 the new preview is `READY` with exactly the confirmed digest. If the books,
 the chain or the code moved since the review, preview again and review that
 one.
 
-Then, in **one transaction**, the apply:
+Then, in **one transaction** at `SERIALIZABLE` (the tool asks the server and
+refuses to run at any other level), the apply:
 
 1. locks the agent row;
 2. compares every Postgres fact again (compare-and-set), refusing if any
@@ -620,22 +625,111 @@ Then, in **one transaction**, the apply:
 5. records one receipt per row in `chain_gap_bookings`. Each receipt also
    records the tenant's admission state at that moment (`admission_json`):
    its approvals, attestations, heartbeat and mirror cursor. The revert is
-   decided against this.
+   decided against this;
+6. writes the **apply report** to `--output` and fsyncs it, with
+   `"commitOutcome": "unknown"`. Only then is the `COMMIT` sent.
 
 Receipts are unique per (account, epoch, `op:<userOpHash>` or
-`log:<tx>#<log>`) while applied. Any failure rolls the whole transaction back.
+`log:<tx>#<log>`) while applied. Any failure before the `COMMIT` rolls the
+whole transaction back, and the report file is removed.
+
+`SERIALIZABLE` makes every compare-and-set read one snapshot, taken before
+the agent row is locked. If anything writes that row after the snapshot, the
+lock fails with `40001` and nothing is written. A conflict with another
+`SERIALIZABLE` transaction fails the same way, at a statement or at the
+`COMMIT`. The orchestrator's transactions are a plain `BEGIN`, so they run
+at Postgres's default `READ COMMITTED`, which its serializable checks do not
+track. So a write it commits between the
+snapshot and the `COMMIT` (a few milliseconds) is still not seen, for
+example a new agent registration. A lock on `agents` would close that gap,
+but every worker's heartbeat would queue behind it, so the tool does not
+take one. Step 5 (admission's preview) reads the books again in any case.
 
 On success the console prints
-`APPLIED booking <id> — N row(s) for tenant 0x… under backup <name>`, and
-`--output` holds the **apply report**: the booking id and every row as
+`APPLIED booking <id> — N row(s) for tenant 0x… under backup <name>`. The
+report in `--output` has then been replaced, whole, by the same report with
+`"commitOutcome": "committed"`. It holds the booking id and every row as
 written. Keep it with the runbook evidence, because it is what `--revert`
-takes. The receipts table holds the same rows if the file is lost.
+takes. The receipts table holds the same rows, but `--revert` reads them
+only to check the report.
+
+If the report cannot be marked `committed` (the tool writes
+`<output>.committed.tmp` and renames it over the report), the tool still
+prints `APPLIED`, then exits with `applied-report-not-marked-committed`. The
+booking committed. The report still says `unknown` and is still what
+`--revert` takes.
 
 The first apply creates `chain_gap_bookings`. This is additive DDL, like the
 resume tables.
 
 Applying again finds nothing missing and writes nothing
 (`refused (nothing-missing)`).
+
+### If Postgres rolls the apply back for a conflict
+
+```
+refused (conflict): Postgres rolled the apply back for a conflict with another transaction (SQLSTATE 40001, a serialization failure): nothing was written — run the same command again, with a new --output; …
+```
+
+Nothing was written, and no report is left. Run the same apply again with a
+new `--output`. If the books moved in the meantime, it refuses with
+`confirm-mismatch`. In that case, preview again.
+
+### If the apply's outcome is unknown
+
+The `COMMIT` can take effect on the server and its answer can still be lost
+on the way back. Only an answer that proves a rollback counts as one:
+
+- an error with a SQLSTATE in class `40` (a serialization failure or a
+  deadlock), except `40003` ("statement completion unknown");
+- an error in class `23` (a deferred constraint, checked at the commit);
+- the `COMMIT` answered with `ROLLBACK`'s tag (`commit-answered-rollback`).
+
+With those, nothing was written and no report is left. Anything else is an
+unknown outcome, because it can arrive after the commit was made durable.
+That includes a dropped or reset connection (`EPIPE`, `ECONNRESET`, no code),
+a terminated backend or a server shutting down or starting (`57P01`,
+`57P02`, `57P03`), a connection exception (class `08`), and a cancelled or
+timed-out statement (`57014`). The tool then keeps the report, which still
+says `"commitOutcome": "unknown"`, and prints:
+
+```
+OUTCOME UNKNOWN for booking <id>: the COMMIT was sent and no answer proved it rolled back, so it may have committed. …
+  1. Did it commit? Read only: node --import tsx worker/src/chain-gap-booking-cli.ts --revert <output> --dry-run --output /absolute/new-receipts-report.json
+     COMMITTED (receipts 'applied'): its rows stand; go on to step 5 of docs/chain-gap-booking.md, or take it back with 2.
+     NOT COMMITTED (no receipt): nothing was written; preview the tenant again.
+  2. Take it back: node --import tsx worker/src/chain-gap-booking-cli.ts --revert <output> --output /absolute/new-revert-report.json
+```
+
+It exits with `apply-outcome-unknown`. Run command 1 first. It opens a
+read-only connection and reads the booking's receipts in one read-only
+snapshot. It checks them against the report as a revert would, and writes
+its answer to its own `--output`. It changes nothing in the database. It
+prints one of:
+
+- `COMMITTED booking <id> …`: the rows stand. Carry on from step 5, or take
+  the booking back with command 2.
+- `NOT COMMITTED booking <id> …`: no receipt exists, so the transaction
+  rolled back and nothing was written. Preview the tenant again. A
+  `--revert` of this report is refused with `not-committed`.
+- `COMMITTED, THEN REVERTED booking <id> …`: it committed and has since been
+  reverted.
+
+If the process died during the apply, the same check applies to its
+`--output`. An empty or cut-short report means the apply never sent its
+`COMMIT`, because the report is written in full and fsynced first. The check
+says so (`refused (report-unfinished)`). Then nothing was written. If you
+want to see the receipts without the tool, use the booking id from the first
+line, in a read-only transaction:
+
+```sql
+BEGIN READ ONLY;
+SELECT evidence_key, table_name, row_id, state, applied_at_ms, reverted_at_ms
+  FROM chain_gap_bookings WHERE booking_id = '<id>' ORDER BY evidence_key;
+ROLLBACK;
+```
+
+No rows means it never committed.
 
 ## 5. Preview the tenant again (admission's preview)
 
@@ -678,11 +772,14 @@ node --import tsx worker/src/chain-gap-booking-cli.ts \
   --revert /absolute/private-dir/<tenant>-apply.json --output /absolute/private-dir/<tenant>-revert.json
 ```
 
-In one transaction, the revert:
+It takes the apply report, whether it says `"commitOutcome": "committed"` or
+`"unknown"` (or nothing, from a build before that field). In one transaction
+at `SERIALIZABLE`, the revert:
 
 - verifies the report against its own digest and against the receipts. The
   report's apply time and admission state must be the ones the receipts
-  hold;
+  hold. If no receipt holds the booking, it refuses with `not-committed`:
+  that apply never committed, so there is nothing to revert;
 - refuses if any row is no longer exactly as written;
 - refuses if anything has relied on the rows since the apply. It compares
   what the database records now with the receipts' `admission_json`, and
@@ -703,6 +800,17 @@ An approval created after the apply that was refused or revoked before it
 minted anything did not rely on the rows, so it does not block a revert.
 
 Running it a second time prints `ALREADY REVERTED` and changes nothing.
+
+A revert that Postgres rolls back for a conflict says `refused (conflict)`
+and changed nothing: run it again. If its `COMMIT` is sent and no answer
+proves a rollback (the same rule as the apply's), it prints
+`OUTCOME UNKNOWN for the revert of booking <id>`, leaves no revert report and
+exits with `revert-outcome-unknown`. Run the same `--revert` again with a new
+`--output`. If the first one committed, the second prints `ALREADY REVERTED`
+and changes nothing. Otherwise it reverts. To only look, run
+`--revert <apply report> --dry-run` as in
+[If the apply's outcome is unknown](#if-the-applys-outcome-is-unknown). It
+prints `COMMITTED, THEN REVERTED` once the revert has committed.
 
 After admission, there is no revert. Narrow `MERRYMEN_FLEET_ROLLOUT` and
 escalate. The last resort is the backup named in the receipts.
@@ -731,9 +839,22 @@ own, and the parts of each hash the preview did not print are synthetic.
 `ledger-mirror.test.ts` holds what the first mirror pass after an attested
 registration does to a basis the new book never had.
 
+`chain-gap-booking-cli.test.ts` holds each answer a `COMMIT` can get. A
+lost answer after the commit took effect (`EPIPE`, `ECONNRESET`, `57P01`,
+`57P02`, `57P03`, `08006`, `08007`, `57014`, `40003`, no code) keeps the
+report, and the receipts settle it. A proven rollback (`40001`, `40P01`,
+`40002`, `23505`, `23514`, `ROLLBACK`'s tag) leaves no report and writes
+nothing.
+
 The opt-in real-Postgres tests also cover the stale-basis case. There,
 admission's own seed runs inside the read-only snapshot, and the apply
-compares the named basis again. They need two things: a disposable **loopback**
+compares the named basis again. They also run the write transaction against
+the server. They check that it is `SERIALIZABLE` as the server reports it,
+and that it gets a real `40001` when the agent row moves after its snapshot.
+They fail the `COMMIT` with a deferred constraint (`23514`) and with
+serializable write skew (`40001`), and answer it with `ROLLBACK`'s tag. They
+terminate the backend as the `COMMIT` is sent, and lose the answer after a
+real commit. They need two things: a disposable **loopback**
 server in `MERRYMEN_TEST_PG_URL`, and the `pg` driver resolvable. `NODE_PATH`
 works, because the tests load the driver with `require`. Each test creates
 its own database and drops it, and never reads `DATABASE_URL`:
