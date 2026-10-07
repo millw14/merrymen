@@ -506,11 +506,11 @@ the confirm card and the Stop and +1h button handling are a separate change.
   normal review; or, when it cannot act, the reason in plain words: following off, not
   the fast Trencher strategy, scout budget off, entries paused, no Trencher vault (every
   follow entry is a vault-custody entry), live follow not enabled, trading held), the
-  coverage floor and when the tail ends. Their words are sanitised,
-  clipped to 280 characters, links removed and addresses only in short form. An end
-  summary says when the tail started and ended and counts what the feed showed. Each notice is recorded durably before it is
-  sent, so a crash can lose a notice but never repeat one; a log that cannot be read
-  sends nothing. The log records when each notice was told (it forgets an entry 8 hours
+  coverage floor and when the tail ends. Their words are sanitised, clipped to 280
+  characters, links removed and addresses only in short form. An end summary says when
+  the tail started and ended and counts what the feed showed. Each notice is recorded
+  durably before it is sent, so a crash can lose a notice but never repeat one; a log
+  that cannot be read sends nothing. The log records when each notice was told (it forgets an entry 8 hours
   after that, and never one an event still in the file needs) apart from the event time
   it covers from (the 5-minute coalescing), so an alert the fleet observed hours after
   the provider's own time is told once, not on every pass.
