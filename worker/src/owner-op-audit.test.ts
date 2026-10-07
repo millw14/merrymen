@@ -159,6 +159,7 @@ describe("the audit", () => {
   it("a receipt that cannot be read leaves coverage incomplete: exit 3, whatever else was found", async () => {
     const r = await audit(await ledger(), { rpc: chainRpc({ fail: [FX.vaultSweep!.tx] }) });
     assert.equal(r.coverage.complete, false);
+    assert.match(r.coverage.why.join(" "), /1 receipt\(s\) could not be read/);
     assert.equal(r.totals.byValidator.unread, 1);
     assert.equal(auditExitCode(r), 3);
   });

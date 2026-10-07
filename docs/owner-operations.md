@@ -148,7 +148,10 @@ Children have no `DATABASE_URL`, so the mirror carries the record up
 So it copies by identity. It keeps a `created_at` watermark opened 300 seconds
 behind itself, inserts with `ON CONFLICT DO NOTHING`, and commits the rows and
 the watermark in one transaction. A child without the table is zero rows: no
-failure and no cursor. The continuity proof and the handover format
+failure and no cursor. A tenant that has records gains an `owner_operations`
+row in `mirror_state`. That is expected: admission's evidence binds every
+cursor row, so the tenant's digest changes once, when its first record
+arrives. The continuity proof and the handover format
 (`ledger-import.ts` SPECS) are unchanged. Postgres keeps what a rebuilt or
 imported child has lost.
 

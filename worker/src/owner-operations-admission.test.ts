@@ -138,6 +138,25 @@ describe("an owner record answers an operation only as the chain proves it", () 
     assert.equal(r.status, "unavailable");
   });
 
+  it("a receipt the node says it does not have is 'unavailable' too, never clean and never skipped", async () => {
+    const chain = chainOf(["invalidateNonce"]);
+    chain.getReceiptLogs = async () => null;
+    const r = await check(chain, A4B, { ...none, ownerRecords: record("invalidateNonce") });
+    assert.equal(r.status, "unavailable");
+  });
+
+  it("the pure rule holds an operation by an owner answer only in the answer's own transaction", () => {
+    const opLog = FX.invalidateNonce!.logs.find(([, t]) => t[0] === UOE)!;
+    const op: RawLog = { topics: opLog[1] as Hex[], data: opLog[2] as Hex, transactionHash: FX.invalidateNonce!.tx as Hex, blockNumber: FX.invalidateNonce!.block as Hex,
+      logIndex: opLog[3] as Hex };
+    const answer = (txHash: string) => new Map([[OP.invalidateNonce, { txHash, covers: new Set<string>() }]]);
+    assert.deepEqual(chainFactsPostgresLacks({ account: A4B, opLogs: [op], outLogs: [], inLogs: [], known: none, ownerAnswers: answer(FX.invalidateNonce!.tx) }), []);
+    assert.deepEqual(chainFactsPostgresLacks({ account: A4B, opLogs: [op], outLogs: [], inLogs: [], known: none, ownerAnswers: answer(FX.vaultSweep!.tx) })
+      .map((f) => f.kind), ["operation"]);
+    assert.deepEqual(chainFactsPostgresLacks({ account: A9E, opLogs: [op], outLogs: [], inLogs: [], known: none, ownerAnswers: answer(FX.invalidateNonce!.tx) })
+      .map((f) => f.kind), ["operation"], "and only for this account's own operation");
+  });
+
   it("a chain that cannot read receipts answers nothing through a record: missing, fail closed", async () => {
     const r = await check(chainOf(["invalidateNonce"], { receipts: false }), A4B, { ...none, ownerRecords: record("invalidateNonce") });
     assert.equal(r.status, "missing");
