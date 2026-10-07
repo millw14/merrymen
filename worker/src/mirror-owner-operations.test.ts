@@ -149,19 +149,25 @@ for (const [label, destination] of [
       assert.equal(cursor(s.raw)?.last_id, 3);
     });
 
-    it("the account comes from the orchestrator (the argument) or its grant, never the child: with neither, nothing is copied and nothing advances", async () => {
+    it("the account comes from the orchestrator (the argument) or its grant, never the child: with neither, nothing is copied, nothing advances, and the pass is NOT a finished copy", async () => {
       const s = await shared({ grant: null });
       const child = await childWith([{ row: rowOf("recoverFunds"), at: 1000 }]);
       const r = await mirrorTenant({ tenant: TENANT, child: child.db, shared: s.db, nowSec: 2000 });
-      assert.equal(r.failed, undefined);
+      // A removed tenant's final pass reads exactly this (its grant row is gone):
+      // the child's ledger is the record's only copy, so finalMirrorBeforeAnchor,
+      // drains, retirement and the checkpoint must all keep the barrier.
+      assert.match(r.failed?.owner_operations ?? "", /no account to be copied under/);
+      assert.notEqual(r.hasMore, true);
       assert.equal(r.copied.owner_operations, 0);
       assert.equal(r.copied.owner_operations_unattributed, 1);
       assert.equal(cursor(s.raw), undefined, "left for a pass that can name the account");
       assert.match(mirrorCountsLine(TENANT, r) ?? "", /no new rows · not copied 1 \(owner_operations unattributed 1\)/);
       const still = await mirrorTenant({ tenant: TENANT, child: child.db, shared: s.db, nowSec: 2050 });
       assert.equal(still.copied.owner_operations_unattributed, 1, "said on every pass that cannot place it, never skipped silently");
+      assert.ok(still.failed?.owner_operations, "and failed on every such pass");
       // The argument names it.
       const named = await mirrorTenant({ tenant: TENANT, child: child.db, shared: s.db, nowSec: 2100, account: ACCOUNT });
+      assert.equal(named.failed, undefined);
       assert.equal(named.copied.owner_operations, 1);
       // A grant naming another account makes the child's row foreign.
       const other = await shared({ grant: OTHER });
@@ -177,10 +183,52 @@ for (const [label, destination] of [
       assert.equal(r.copied.owner_operations, 0);
       assert.equal(r.copied.owner_operations_unattributed, 1);
       assert.equal(r.copied.owner_operations_foreign, undefined);
+      assert.ok(r.failed?.owner_operations, "the fleet checkpoint refuses on it rather than checkpointing an uncopied record");
       assert.equal(cursor(s.raw), undefined, "the cursor did not pass it");
       const agreed = await mirrorTenant({ tenant: TENANT, child: child.db, shared: s.db, nowSec: 2100, account: ACCOUNT });
       assert.equal(agreed.copied.owner_operations, 1, "copied by the first pass whose account the grant agrees with");
       assert.deepEqual(held(s.raw).map((x) => [x.tenant, x.agent_id]), [[TENANT, ACCOUNT]]);
+    });
+
+    it("with no account, rows with nothing left to copy are settled, not held for ever: what Postgres already holds under this tenant, and invalid ones", async () => {
+      const s = await shared();
+      const first = await childWith([{ row: rowOf("recoverFunds"), at: 1000 }]);
+      await mirrorTenant({ tenant: TENANT, child: first.db, shared: s.db, nowSec: 2000 });
+      // The grant is removed; a rebuilt child (its witness differs) re-reads from id 0.
+      s.raw.prepare("DELETE FROM grants").run();
+      const rebuilt = await childWith([{ row: rowOf("recoverFunds"), at: 5000 }, { row: { ...rowOf("invalidateNonce"), tx_hash: "0x1234" }, at: 5001 }]);
+      const r = await mirrorTenant({ tenant: TENANT, child: rebuilt.db, shared: s.db, nowSec: 6000 });
+      assert.equal(r.failed, undefined, "every row is already in Postgres or could never be copied: a finished copy");
+      assert.equal(r.copied.owner_operations_already_mirrored, 1);
+      assert.equal(r.copied.owner_operations_invalid, 1);
+      assert.equal(r.copied.owner_operations_unattributed, undefined);
+      assert.deepEqual({ ...cursor(s.raw) }, { last_id: 2, last_stamp: 5001, updated_at: 2000 }, "passed, and the book was not written");
+      // Held under ANOTHER tenant is not held under this one: still no account, still not finished.
+      const elsewhere = await shared({ grant: null });
+      elsewhere.raw.prepare(`INSERT INTO owner_operations (tenant, ${cols.join(", ")}, created_at) VALUES (?, ${cols.map(() => "?").join(", ")}, ?)`)
+        .run(OTHER_TENANT, ...cols.map((c) => rowOf("recoverFunds")[c]), 1000);
+      const other = await mirrorTenant({ tenant: TENANT, child: rebuilt.db, shared: elsewhere.db, nowSec: 6000 });
+      assert.ok(other.failed?.owner_operations);
+      assert.equal(other.copied.owner_operations_unattributed, 1, "the invalid row is not counted as unplaced");
+      assert.equal(cursor(elsewhere.raw), undefined);
+    });
+
+    it("a REWIND re-reads from id 0, so a foreign or invalid row is counted again, and a re-read that copies nothing leaves updated_at as it was", async () => {
+      const s = await shared();
+      const first = await childWith([{ row: rowOf("recoverFunds", OTHER), at: 1000 }, { row: rowOf("invalidateNonce"), at: 1001 }]);
+      const r1 = await mirrorTenant({ tenant: TENANT, child: first.db, shared: s.db, nowSec: 2000 });
+      assert.equal(r1.copied.owner_operations_foreign, 1);
+      assert.deepEqual({ ...cursor(s.raw) }, { last_id: 2, last_stamp: 1001, updated_at: 2000 });
+      const rebuilt = await childWith([{ row: rowOf("recoverFunds", OTHER), at: 3000 }, { row: rowOf("invalidateNonce"), at: 3001 }]);
+      const r2 = await mirrorTenant({ tenant: TENANT, child: rebuilt.db, shared: s.db, nowSec: 4000 });
+      assert.equal(r2.copied.owner_operations_foreign, 1, "counted again: the re-read cannot tell it was passed before");
+      assert.equal(r2.copied.owner_operations_already_mirrored, 1);
+      assert.deepEqual({ ...cursor(s.raw) }, { last_id: 2, last_stamp: 3001, updated_at: 2000 }, "nothing inserted after a rewind: updated_at kept");
+      // On a TRUSTED cursor, passing a foreign row it had not passed does move updated_at.
+      record(rebuilt.raw, rowOf("recoverFunds", `0x${"0c".repeat(20)}`), 3002);
+      const r3 = await mirrorTenant({ tenant: TENANT, child: rebuilt.db, shared: s.db, nowSec: 5000 });
+      assert.equal(r3.copied.owner_operations_foreign, 1);
+      assert.deepEqual({ ...cursor(s.raw) }, { last_id: 3, last_stamp: 3002, updated_at: 5000 });
     });
 
     it("a REBUILT child that records the same operation again adds nothing: its witness differs, it is read from the start, and the re-recorded one is counted once", async () => {

@@ -480,27 +480,35 @@ async function setOwnerOperationsMark(db: Db, tenant: string, lastId: number, st
  *  - copied, or already there: stamped with this pass's tenant;
  *  - foreign: a full record under ANOTHER account. Never copied under this
  *    tenant (it could otherwise answer, or block, that account's operation),
- *    and settled: the cursor passes it and it is counted once, on the pass
- *    that passes it (`owner_operations_foreign`). Foreign is decided against
+ *    and settled: the cursor passes it and it is counted on the pass that
+ *    passes it (`owner_operations_foreign`) — once, unless a rewind re-reads
+ *    the ledger from id 0 and counts it again. Foreign is decided against
  *    the grant's account alone, which no child writes, and a tenant keeps its
  *    account across a grant replacement, so no later pass would copy it;
  *  - invalid: not a full lowercase hash pair, or not root. No account could
- *    copy it; settled and counted once (`owner_operations_invalid`).
+ *    copy it; settled and counted like a foreign one (`owner_operations_invalid`).
  *
  * With no account to check against (no grant, or the caller's and the
- * grant's disagree), nothing is copied, the cursor does not move, and every
- * row read is counted on every such pass (`owner_operations_unattributed`):
- * the first pass that can name the account copies it. Never skipped.
+ * grant's disagree), nothing is copied. A row Postgres already holds under
+ * this tenant, or an invalid one, has nothing left to copy; if every row read
+ * is one of those, they are settled as above. Otherwise the cursor does not
+ * move, every other row is counted on every such pass
+ * (`owner_operations_unattributed`), and the pass reports owner_operations
+ * FAILED, so no caller takes it for a finished copy: the first pass that can
+ * name the account copies them. Never skipped.
  *
  * Bounded like every table: more than a batch after the cursor sets hasMore.
  * The cursor's updated_at says when the tenant's book was last written
- * (ledger-resume.ts lastMirrorPassAt), so it moves only when a pass inserts a
- * record or passes rows no pass had passed: never on a pass that read
- * nothing, and never on a re-read after a rewind that found nothing new.
+ * (ledger-resume.ts lastMirrorPassAt). It never moves on a pass that read
+ * nothing. On a trusted cursor it moves whenever a pass settles rows (they
+ * are rows no pass had passed). After a rewind it moves only when the pass
+ * inserts a record: the re-read cannot tell which of a rebuilt ledger's rows
+ * an earlier pass passed, so a re-read that copies nothing new (already
+ * there, foreign or invalid) leaves it as it was.
  */
 export async function mirrorOwnerOperations(o: {
   tenant: string; child: Db; shared: Db; batch: number; nowSec: number; account?: string | null;
-}): Promise<{ copied: Record<string, number>; hasMore: boolean }> {
+}): Promise<{ copied: Record<string, number>; hasMore: boolean; failed?: string }> {
   const copied: Record<string, number> = {};
   const tenant = o.tenant.toLowerCase();
   const cols = OWNER_OPERATION_COLUMNS;
@@ -545,10 +553,38 @@ export async function mirrorOwnerOperations(o: {
   const granted = await tenantGrantAccount(o.shared, tenant);
   const named = o.account === undefined ? undefined : o.account ? o.account.toLowerCase() : null;
   const account = named === undefined ? granted : named !== null && (granted === null || granted === named) ? named : null;
+  /** Not a full lowercase hash pair, or not root: no account could copy it. */
+  const invalidRecord = (r: Record<string, unknown>) =>
+    !OWNER_OP_HASH.test(String(r.user_op_hash ?? "")) || !OWNER_OP_HASH.test(String(r.tx_hash ?? "")) || r.validator !== "root";
   if (!account) {
-    copied.owner_operations = 0;
-    copied.owner_operations_unattributed = rows.length;
-    return { copied, hasMore: false };
+    // NO ACCOUNT TO NAME THEM BY, AND THIS LEDGER MAY BE THEIR ONLY COPY. A
+    // removed tenant's final pass (orchestrator.ts finalMirrorBeforeAnchor,
+    // after its grant row is gone) reads a home a redeploy can take, so a
+    // record it cannot place is NOT a finished copy: the pass reports
+    // owner_operations failed, and a final copy, a drain, a retirement and the
+    // fleet checkpoint are each withheld — the lease and the home kept — until
+    // a pass can name the account. Only a row with nothing left to copy is
+    // settled without one: a record Postgres already holds under this tenant
+    // (an earlier pass with an account placed it; a rebuilt child's re-read
+    // finds these), or one no account could copy (invalid). Then the cursor
+    // passes them as any pass would.
+    let unplaced = 0;
+    for (const r of rows) {
+      if (invalidRecord(r)) continue;
+      const held = await o.shared
+        .prepare(`SELECT 1 AS held FROM owner_operations WHERE tenant = ? AND chain_id = ? AND LOWER(agent_id) = ? AND user_op_hash = ?`)
+        .get(tenant, r.chain_id, String(r.agent_id ?? "").toLowerCase(), r.user_op_hash);
+      if (!held) unplaced++;
+    }
+    if (unplaced > 0) {
+      copied.owner_operations = 0;
+      copied.owner_operations_unattributed = unplaced;
+      return {
+        copied, hasMore: false,
+        failed: `${unplaced} owner operation record(s) have no account to be copied under (no single grant names one, or the caller's disagrees with it); ` +
+          "the child's ledger is their only copy, so it is kept until a pass can name the account",
+      };
+    }
   }
   let inserted = 0, already = 0, foreign = 0, invalid = 0;
   const last = rows[rows.length - 1]!;
@@ -558,8 +594,13 @@ export async function mirrorOwnerOperations(o: {
        ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO NOTHING`,
     );
     for (const r of rows) {
-      if (!OWNER_OP_HASH.test(String(r.user_op_hash ?? "")) || !OWNER_OP_HASH.test(String(r.tx_hash ?? "")) || r.validator !== "root") {
+      if (invalidRecord(r)) {
         invalid++;
+        continue;
+      }
+      // With no account, every row left is one Postgres holds under this tenant (checked above).
+      if (!account) {
+        already++;
         continue;
       }
       if (String(r.agent_id ?? "").toLowerCase() !== account) {
@@ -1102,6 +1143,8 @@ export async function mirrorTenant(args: {
     const r = await mirrorOwnerOperations({ tenant, child, shared, batch, nowSec, account: args.account });
     Object.assign(copied, r.copied);
     if (r.hasMore) hasMore = true;
+    // Records with no account to copy them under: not a finished copy.
+    if (r.failed) failed.owner_operations = r.failed;
   } catch (e) {
     failed.owner_operations = e instanceof Error ? e.message : String(e);
   }

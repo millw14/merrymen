@@ -116,7 +116,10 @@ export async function checkpointFleetLedger(o: {
         for (let i = 0; i < 100; i++) {
           await gate();
           // The roster's account (checked against the book above), so an owner
-          // operation is copied only under the account the backup names.
+          // operation is copied only under the account the backup names. One
+          // that account and the tenant's grant cannot agree on is reported
+          // failed (ledger-mirror.ts mirrorOwnerOperations), so it refuses
+          // here rather than checkpointing a book whose record is not copied.
           final = await (o.mirror ?? mirrorTenant)({ tenant: item.e.tenant, child: handle.db, shared: o.shared, account: item.e.smartAccount });
           result.passes++;
           if (final.skipped || (final.failed && Object.keys(final.failed).length) || (final.restarted && Object.keys(final.restarted).length)) throw refuse();
