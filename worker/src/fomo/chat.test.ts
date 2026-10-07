@@ -348,6 +348,28 @@ describe("answerFomoQuestion", () => {
     }
   });
 
+  it("in a group: a trader ask is deflected before it is clarified or remembered", async () => {
+    const s = await setup();
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-mem" };
+    for (const t of ["what is he holding on fomo?", "what has @unipcs bought on fomo?"]) {
+      const r = await s.ask(t, g);
+      assert.ok(r.handled, t);
+      assert.equal(r.text, GROUP_DM_DEFLECTION, `${t}: never "Which trader do you mean?" in a room`);
+    }
+    assert.equal(await s.service.memoryGet(OWNER, "group-mem"), null, "the room's memory holds no trader");
+    assert.equal(s.brokerCalls.length, 0);
+  });
+
+  it("read-only: a handed-off owner answer runs reads, and a mutation plan is not handled at all", async () => {
+    const s = await setup();
+    const watch = await s.ask("watch $PONS on fomo", { readOnly: true });
+    assert.equal(watch.handled, false);
+    assert.equal(s.brokerCalls.length, 0, "no watch was made");
+    const read = await s.ask("what are the theses on $PONS", { readOnly: true });
+    assert.ok(read.handled);
+    assert.deepEqual(s.brokerCalls.map((c) => c.tool), ["fomo_get_token_theses"]);
+  });
+
   it("in a group: the leaderboard cut to the traders Merrymen watches is the watch list, so it is deflected with no lookup", async () => {
     const s = await setup();
     s.serve.set("/v2/leaderboard/24h", () => json(fixture("leaderboard-24h")));

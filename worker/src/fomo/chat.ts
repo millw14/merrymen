@@ -80,6 +80,13 @@ export interface AnswerFomoInput {
    * that message's subject, never the coin a research answer left behind.
    */
   ignoreMemory?: boolean;
+  /**
+   * Run reads only, even for the owner: a mutation plan (watch, unwatch) is
+   * not handled at all. For answers produced on the owner's behalf from
+   * somewhere other than her own words in her DM (a group ask handed to her
+   * DM), so that text from a room can never change her state.
+   */
+  readOnly?: boolean;
 }
 
 export type AnswerFomoResult =
@@ -205,6 +212,15 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const said = (text: string): AnswerFomoResult => ({ handled: true, text, plan, envelopes: [], toolsCalled: [], analysis: false, clarification: false });
   if (plan.intent === "capabilities") return said(audience === "group" ? FOMO_CAPABILITIES_GROUP : FOMO_CAPABILITIES_OWNER);
   if (audience === "group" && plan.intent === "health") return said(brokerConfigured(broker) ? FOMO_GROUP_ON : FOMO_GROUP_OFF);
+  if (input.readOnly === true && plan.toolCalls.some((c) => isMutationTool(c.tool))) return { handled: false };
+  if (input.readOnly === true && (plan.intent === "watch" || plan.intent === "unwatch")) return { handled: false };
+
+  // A question a group never hears answered is deflected BEFORE it is
+  // remembered or clarified: a room is never asked "Which coin do you mean?"
+  // about a trader, and the trader never lands in the room's memory.
+  if (audience === "group" && groupMustDeflect(plan)) {
+    return { handled: true, text: GROUP_DM_DEFLECTION, plan, envelopes: [], toolsCalled: [], analysis: false, clarification: false };
+  }
 
   // 3. Record what was asked about BEFORE any lookup.
   const step = applyPlan(memory, plan, now);
@@ -216,10 +232,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   }
 
   // 5. The lookups.
-  if (audience === "group" && groupMustDeflect(plan)) {
-    return { handled: true, text: GROUP_DM_DEFLECTION, plan, envelopes: [], toolsCalled: [], analysis: false, clarification: false };
-  }
-  const calls = plan.toolCalls.filter((c) => audience === "owner" || !isMutationTool(c.tool)).slice(0, MAX_CALLS_PER_QUESTION);
+  const calls = plan.toolCalls.filter((c) => (audience === "owner" && input.readOnly !== true) || !isMutationTool(c.tool)).slice(0, MAX_CALLS_PER_QUESTION);
   const envelopes: FomoEnvelope[] = [];
   const toolsCalled: FomoToolName[] = [];
   for (const [i, c] of calls.entries()) {
