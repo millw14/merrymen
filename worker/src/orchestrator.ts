@@ -146,16 +146,16 @@ import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } fro
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, registerAttestedGapSource, ensureLedgerResumeSchema, invalidateLedgerImportsUnlessListed } from "./ledger-import";
 import {
-  ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, completeAttestedSeed,
-  homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
-  previewRunDigest, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
+  ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, CHAIN_HELD_NEXT, CHAIN_REFUSAL, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, chainRefusal, completeAttestedSeed,
+  describeChainFacts, homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
+  previewRunDigest, readLastRefusal, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
   normaliseCarriedFile, offsetRestoredLink, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
   AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, answeredGrantChanges, autoPaperRecordWait,
   autoPaperRoom, autoPaperVerdict, countOpenApprovals,
   evidenceHasHistory, grantRowKey, noteGrantAttempt, observeGrantChanges, parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
   RESUME_APPROVE_ENV, RESUME_AUTO_PAPER_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
-  type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type OwedGrantChange, type PreviewEntry, type ResumeCheck, type ResumePreviewScope,
-  type ResumeRevoke,
+  type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type MissingChainFact, type OwedGrantChange, type PreviewEntry, type ResumeCheck,
+  type ResumePreviewScope, type ResumeRevoke,
 } from "./ledger-resume";
 import {
   adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST,
@@ -3239,7 +3239,10 @@ function sayTenantAlert(tenant: string, line: string): void {
  *
  * With one: re-derive the evidence and refuse on any change; check every
  * precondition; read the chain in the background where the account has ever
- * been live (the tenant waits, held, for the answer), and again from that
+ * been live, or where an earlier chain refusal of it is still unanswered
+ * (ledger-resume.ts ResumeCheck.chainHeld: whatever its paper reading says,
+ * so an operator's approval never admits it on the book the chain showed
+ * incomplete) — the tenant waits, held, for the answer — and again from that
  * read's head immediately before the registration; drain a continuous old
  * book's tail through the existing guarded mirror; archive the home; and
  * register the empty book in one transaction. Every step re-checks the lease
@@ -3253,6 +3256,8 @@ type ResumeVerdict = { go: false } | { go: true; registered: string | null; /** 
 const AUTO_PAPER_NOT_SAFE = "an automatic (auto-paper) approval admits only a paper tenant that could not arm live and holds no positions, " +
   "and this one now could arm live or holds positions: preview it again and approve it by hand";
 const resumeChecks = new Map<string, { key: string; at: number; result: GapResult | "running" }>();
+/** Whether this process has brought the resume tables up to date (resumeAdmission says why it asks). */
+let resumeApprovalSchemaReady = false;
 const RESUME_CHAIN_RETRY_MS = 60_000;
 let resumeChainForTest: ((chainId: number) => GapChain | null) | null = null;
 const resumeCheckPromises = new Set<Promise<void>>();
@@ -3260,22 +3265,34 @@ const resumeCheckPromises = new Set<Promise<void>>();
 export function setResumeChainForTest(fn: ((chainId: number) => GapChain | null) | null): void { resumeChainForTest = fn; resumeChecks.clear(); }
 export async function resumeChecksSettledForTest(): Promise<void> { await Promise.all([...resumeCheckPromises]); }
 
-/** The window a clean chain read covered: its first block and the head it reached, both inclusive. */
-type ChainWindow = { fromBlock: string; head: string };
+/**
+ * The window a clean chain read covered: its first block and the head it
+ * reached, both inclusive, and the chain's time of that first block
+ * (GapResult.fromSec), which a refusal on the re-read records as where the
+ * admission's read began.
+ */
+type ChainWindow = { fromBlock: string; head: string; fromSec?: number };
 
 /**
  * The chain read for one approval: the window a clean read covered (fresh
- * enough to rely on), `missing`, or held while it runs or after it could not.
- * A clean answer is not the whole of it in Phase B: resumeChainTail reads on
- * from its head immediately before the registration, and spends it.
+ * enough to rely on), what it found that Postgres lacks, or held while it runs
+ * or after it could not. A clean answer is not the whole of it in Phase B:
+ * resumeChainTail reads on from its head immediately before the registration,
+ * and spends it.
+ *
+ * `missing` carries the facts, so the refusal can name each one (chainRefusal)
+ * and the next preview can show it (readLastRefusal); and where that read
+ * began (`fromSec`), which the refusal records, so every later read of the
+ * tenant starts no later (ledger-resume.ts resumeGapWindow).
  */
-async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<ChainWindow | "missing" | "held"> {
+type ChainMissing = { missing: readonly MissingChainFact[]; fromSec?: number };
+async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db): Promise<ChainWindow | ChainMissing | "held"> {
   const now = Date.now();
   const had = resumeChecks.get(tenant);
   if (had && had.key === approval.approvalId) {
     if (had.result === "running") return "held";
-    if (had.result.status === "missing") return "missing";
-    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return { fromBlock: had.result.fromBlock, head: had.result.head };
+    if (had.result.status === "missing") return { missing: had.result.found, fromSec: had.result.fromSec };
+    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return { fromBlock: had.result.fromBlock, head: had.result.head, fromSec: had.result.fromSec };
     if (had.result.status === "unavailable" && now - had.at < RESUME_CHAIN_RETRY_MS) return "held";
   }
   const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
@@ -3285,12 +3302,18 @@ async function resumeChainGate(tenant: string, approval: ApprovalRow, check: Res
   }
   const known = await knownChainFacts(shared, approval.smartAccount);
   resumeChecks.set(tenant, { key: approval.approvalId, at: now, result: "running" });
-  log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}; the tenant stays held until it answers`);
+  log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}` +
+    `${check.chainHeld ? " (held on a chain refusal: from no later than that refused read began)" : ""}; the tenant stays held until it answers`);
   const p = chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, sinceSec: check.gapFromSec, known, log })
     .then((result) => {
       resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result });
+      // A MISSING ANSWER NAMES WHAT IT FOUND: each operation by its
+      // userOpHash, transaction and block, each USDG transfer by its
+      // transaction, log, block, direction and amount. Public chain data only,
+      // and every hash in full so it can be looked up as printed.
       log(`${tenant}: resume chain check ${result.status}${result.status === "clean" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${result.fromBlock}, all in Postgres`
-        : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) on chain that Postgres lacks` : ` — ${result.why}; tried again`}`);
+        : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) on chain that Postgres lacks, ` +
+          `blocks ${result.fromBlock}..${result.head}: ${describeChainFacts(result.found)}` : ` — ${result.why}; tried again`}`);
     })
     // Never a rejection loose in the supervisor: an answer nobody could record
     // is no answer, and the next pass asks again.
@@ -3330,7 +3353,8 @@ async function resumeChainTail(tenant: string, approval: ApprovalRow, fromBlock:
   try {
     const result = await Promise.race([chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, fromBlock, known, log }), late]);
     log(`${tenant}: resume chain re-read before registration ${result.status}${result.status === "clean" ? ` — blocks ${result.fromBlock}..${result.head}, nothing Postgres lacks`
-      : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${fromBlock} that Postgres lacks` : ` — ${result.why}`}`);
+      : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${fromBlock} that Postgres lacks: ` +
+        describeChainFacts(result.found) : ` — ${result.why}`}`);
     return result;
   } finally {
     clearTimeout(timer);
@@ -3417,10 +3441,28 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     return { go: false };
   }
   if (!approval) return { go: true, registered: null };
-  const refused = async (from: ApprovalState, why: string): Promise<ResumeVerdict> => {
-    await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why });
+  // THE COLUMN A CHAIN REFUSAL WRITES (chain_read_from_sec), on a table an
+  // earlier build created: an approval recorded before this build's deploy
+  // is acted on by a process that may never have previewed or approved
+  // anything, and so never ensured the schema. Once per process.
+  if (!resumeApprovalSchemaReady) {
+    try { await ensureLedgerResumeSchema(shared); resumeApprovalSchemaReady = true; }
+    catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: resume approval tables could not be brought up to date (${errorKind(e)}) — retaining its home without starting a worker`);
+      return { go: false };
+    }
+  }
+  /** `chainReadFromSec`: on a chain refusal, where the refused read began (GapResult.fromSec); every later read of the tenant starts no later. */
+  const refused = async (from: ApprovalState, why: string, chainReadFromSec?: number): Promise<ResumeVerdict> => {
+    await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why, ...(chainReadFromSec === undefined ? {} : { chainReadFromSec }) });
     resumeChecks.delete(tenant);
-    sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; preview again and approve what is true now`);
+    // A chain refusal is answered by booking what the chain showed, never by
+    // approving again: the tenant is read on chain until an admission answers
+    // it (ledger-resume.ts ResumeCheck.chainHeld), and refused again meanwhile.
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; ` +
+      (why.startsWith(CHAIN_REFUSAL) ? "take it out of MERRYMEN_FLEET_ROLLOUT and book what the chain shows (docs/chain-gap-booking.md), then preview again " +
+        "and approve the digest that preview prints"
+        : "preview again and approve what is true now"));
     return { go: false };
   };
   if (approval.state === "registered") {
@@ -3487,8 +3529,8 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions)) return refused("approved", AUTO_PAPER_NOT_SAFE);
       if (check.chainRequired) {
         const gate = await resumeChainGate(tenant, approval, check, shared);
-        if (gate === "missing") return refused("approved", "the chain holds operations or USDG transfers for the account that Postgres lacks");
         if (gate === "held") return { go: false };
+        if ("missing" in gate) return refused("approved", chainRefusal(gate.missing), gate.fromSec);
       }
       if (!owned()) return { go: false };
       const generation = randomUUID();
@@ -3540,8 +3582,8 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
     let chainRead: ChainWindow | null = null;
     if (check.chainRequired) {
       const gate = await resumeChainGate(tenant, approval, check, shared);
-      if (gate === "missing") return refused("archived", "the chain holds operations or USDG transfers for the account that Postgres lacks");
       if (gate === "held") return { go: false };
+      if ("missing" in gate) return refused("archived", chainRefusal(gate.missing), gate.fromSec);
       chainRead = gate;
     }
     const counted = async (db: Db) => {
@@ -3561,11 +3603,10 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
       const first = chainRead;
       resumeChecks.delete(tenant);
       const tail = await resumeChainTail(tenant, approval, BigInt(first.head), shared);
-      if (tail.status === "missing") {
-        return refused("archived", "the chain holds operations or USDG transfers for the account that Postgres lacks, landed after the admission's first chain read");
-      }
+      // The admission's read began where the whole read did: that is what the refusal records.
+      if (tail.status === "missing") return refused("archived", chainRefusal(tail.found, true), first.fromSec);
       if (tail.status !== "clean") return held(`the chain could not be read again before registration (${tail.why}); held, and read whole on the next pass`);
-      chainRead = { fromBlock: first.fromBlock, head: tail.head };
+      chainRead = { fromBlock: first.fromBlock, head: tail.head, ...(first.fromSec === undefined ? {} : { fromSec: first.fromSec }) };
     }
     if (!owned()) return { go: false };
     const receipt = await registerAttestedGapSource({
@@ -3948,8 +3989,13 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
       const run = await recordRun(entry, at);
       answered += 1;
       if (verdict.kind === "manual") {
+        // HELD ON A CHAIN REFUSAL NO ADMISSION HAS ANSWERED: never offered an
+        // approval as a way to trade. One reads the chain again (the tenant is
+        // chain:required) and is refused while Postgres lacks what the chain
+        // showed; the line says what is done instead (CHAIN_HELD_NEXT).
         log(`resume auto-paper: ${tenant} re-signed and previewed in run ${run.slice(0, 12)}…, and is not approved automatically — ${verdict.why.join("; ")}` +
-          (entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
+          (verdict.chainHeld ? `. Held on a chain refusal: ${CHAIN_HELD_NEXT}`
+            : entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
         await settle(change, `previewed: ${verdict.why.join("; ")}`, run);
         continue;
       }
@@ -5319,6 +5365,7 @@ export function setRetirementMirrorForTest(fn: ((tenant: string) => Promise<bool
 /** Real sealed-memory retirement tests use SQLite without reaching production. */
 export function setRetirementMemoryStoreForTest(store: typeof retirementMemoryStoreForTest): void {
   retirementMemoryStoreForTest = store;
+  resumeApprovalSchemaReady = false;
 }
 
 /** Save the writer's final groups, or only its forget journal when its groups are held. */
@@ -11473,11 +11520,21 @@ async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<
   const run = await recordPreviewRun(shared, entries, Date.now());
   if (previewRunDigest(entries) !== run) throw new Error("preview run digest drifted");
   const passed = entries.filter((e) => e.pass);
+  // Passing, and held on a chain refusal no admission has answered: they read
+  // chain:required, so an approval reads the chain again, and while Postgres
+  // still lacks what it showed it refuses them again. The batch approval is
+  // never offered as their way to trade; what is, is said beside it.
+  const chainHeld = passed.filter((e) => e.chainHeld === true);
   const summary = (): void => {
     log(`[resume-preview] run ${run}: ${passed.length} of ${entries.length} tenant(s) pass every Postgres precondition` +
       (passed.some((e) => e.chain === "required") ? "; those marked chain:required are read on chain at admission and refused if it shows anything Postgres lacks" : ""));
     if (!passed.length) return;
-    log(`[resume-preview] approve every passing tenant of this run with ${RESUME_APPROVE_ENV}=run:${run}`);
+    log(`[resume-preview] approve every passing tenant of this run with ${RESUME_APPROVE_ENV}=run:${run}` +
+      (chainHeld.length ? ` — for the ${chainHeld.length} held on a chain refusal (chainHeld, below) that is a chain read, not a way to trade` : ""));
+    if (chainHeld.length) {
+      log(`[resume-preview] ${chainHeld.length} passing tenant(s) held on a chain refusal no admission has answered: ` +
+        `${chainHeld.map((e) => e.tenant).join(",")} — for each, ${CHAIN_HELD_NEXT}`);
+    }
     log(`[resume-preview] rollout for them at the plan's starting levels: ${passed.map((e) => `${e.tenant}:${e.suggestedLevel}`).join(",")}`);
     // THE PROCESS CAP. A rollout naming more tenants than fit runs the first
     // ones in roster order and defers the rest with "[alert] … local process
@@ -11525,13 +11582,24 @@ async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Prom
     if (liveIntent === null) refusals.push("the owner's settings could not be read, so whether it could arm live is unknown: preview again");
     if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
     if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
+    // WHY THE LAST APPROVAL WAS REFUSED, beside the verdict. The chain check
+    // is no Postgres precondition, so this preview can pass a tenant whose
+    // last admission the chain refused — and the refusal names what it found.
+    // Information only: an unreadable one is said as unread, never a refusal,
+    // and never `unreadable` below. (What a chain refusal does to the verdict
+    // is the check's own `chainHeld`: chain:required until an admission
+    // answers it, whatever refusal came after it.)
+    let lastRefusal: PreviewEntry["lastRefusal"] = null;
+    try { lastRefusal = await readLastRefusal(shared, tenant); }
+    catch (e) { lastRefusal = { evidence: "", reason: `the last approval could not be read (${errorKind(e)})`, atMs: 0 }; }
     return {
       entry: {
         tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
         chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
         riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
         holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
-        grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence,
+        grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence, lastRefusal,
+        chainHeld: check.chainHeld,
       },
       // Settings that could not be read, and every refusal a failed read
       // caused (ResumeCheck.unreadable: owner controls whose read did not

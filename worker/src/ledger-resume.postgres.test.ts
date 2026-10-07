@@ -32,6 +32,7 @@ import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { ensureLedgerResumeSchema, registerAttestedGapSource, registerLedgerSource, restoreLedgerImport, type LedgerImportVolume } from "./ledger-import";
 import { applyResumeApprovals, attestedSourceInUse, moveApproval, planAttestedSeed, readOpenApproval, readResumeEvidence, recordPreviewRun, type PreviewEntry } from "./ledger-resume";
 import { answeredGrantChanges, autoPaperVerdict, countOpenApprovals, grantRowKey, noteGrantAttempt, observeGrantChanges, recordResumeApproval, settleGrantChange } from "./ledger-resume";
+import { chainReadFloor, chainRefusal, readChainHold, resumePreconditions } from "./ledger-resume";
 import { armOwnerControls, readControlsEvidence, readRecoveryControls } from "./recovery-reply-arm";
 import { readDurablePause } from "./telegram-store";
 
@@ -308,5 +309,55 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     assert.deepEqual((await answeredGrantChanges(shared)).get(who), { key: k.key, state: "refused", run }, "refused since: still the answer");
     assert.equal(await settleGrantChange(shared, k, { outcome: "auto-approved: x", run }, seenAt + 9), true);
     assert.equal((await answeredGrantChanges(shared)).has(who), false, "settled: owed nothing");
+  });
+
+  await t.test("a chain refusal no admission has answered is read from BIGINT stamps: held through later refusals, answered by a registration", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const who = address(0xac0f01);
+    const held = async () => (await resumePreconditions(shared, { tenant: who, account, grantAccount: account, nowSec: NOW, controls, homePendingImport: false })).chainHeld;
+    const insert = (id: string, state: string, at: number, reason: string | null) => main.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account,
+        chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms, reason) VALUES ($1, $2, $3, 4663, $4, $5, '{}', 'r', $6, $7, $7, $8)`,
+      [`held-${id}`, who, account, owner, id.repeat(64).slice(0, 64), state, at, reason]);
+    assert.equal(await held(), false, "nothing refused");
+    // Stamps past 2^31, as Date.now() is: BIGINT comes back as a string here, and is compared as a number.
+    const at = Date.now();
+    await insert("1", "refused", at, chainRefusal([]));
+    assert.equal(typeof (await main.query("SELECT updated_at_ms FROM ledger_resume_approvals WHERE approval_id = 'held-1'")).rows[0]!.updated_at_ms, "string");
+    assert.equal(await held(), true);
+    await insert("2", "refused", at + 1_000, "the evidence changed since the preview");
+    assert.equal(await held(), true, "a later refusal for another reason answers nothing");
+    await insert("3", "registered", at - 1, null);
+    assert.equal(await held(), true, "an admission before the chain refusal answers nothing");
+    await main.query("UPDATE ledger_resume_approvals SET updated_at_ms = $1 WHERE approval_id = 'held-3'", [at + 2_000]);
+    assert.equal(await held(), false, "an admission after it answers it");
+  });
+
+  await t.test("where a refused read began is written and read as BIGINT; a table from before the column reads its rows as such (42703), then gains it", async () => {
+    const controls = await readControlsEvidence(shared, { tenant, smartAccount: account, chainId: 4663 }, Date.now());
+    const who = address(0xac0f02);
+    const pre = (nowSec = NOW) => resumePreconditions(shared, { tenant: who, account, grantAccount: account, nowSec, controls, homePendingImport: false });
+    const at = Date.now();
+    await main.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms) VALUES ('start-1', $1, $2, 4663, $3, $4, '{}', 'r', 'approved', $5, $5)`, [who, account, owner, "1".repeat(64), at]);
+    // Admission's refusal, as moveApproval writes it: a start past 2^31, as a block time a century on would be.
+    const start = 4_102_444_800;
+    assert.equal(await moveApproval(shared, "start-1", "approved", "refused", { reason: chainRefusal([]), chainReadFromSec: start }, at + 1), true);
+    assert.equal(typeof (await main.query("SELECT chain_read_from_sec FROM ledger_resume_approvals WHERE approval_id = 'start-1'")).rows[0]!.chain_read_from_sec, "string");
+    assert.deepEqual(await readChainHold(shared, who), { held: true, readFromSec: start, since: `start-1@${at + 1}` }, "BIGINT comes back as a string, and is read as a number");
+    // An earlier start than the window's own holds it there, minus the 600 seconds.
+    await main.query("UPDATE ledger_resume_approvals SET chain_read_from_sec = $1 WHERE approval_id = 'start-1'", [OLD - 5_000]);
+    assert.equal((await pre(NOW + 20 * 3600)).gapFromSec, OLD - 5_600);
+    // The table as an earlier build left it: no column. Read outside a transaction, the 42703 says which column, and the row is read as one from before it.
+    await main.query("ALTER TABLE ledger_resume_approvals DROP COLUMN chain_read_from_sec");
+    await assert.rejects(main.query("SELECT chain_read_from_sec FROM ledger_resume_approvals"), (e: unknown) => (e as { code?: string }).code === "42703");
+    assert.deepEqual(await readChainHold(shared, who), { held: true, readFromSec: chainReadFloor({ createdAtMs: at, evidenceJson: "{}" }), since: `start-1@${at + 1}` });
+    assert.equal((await pre()).chainHeld, true);
+    // Brought up to date by the same idempotent DDL as before: the column is back (empty), and the next refusal writes it.
+    await ensureLedgerResumeSchema(shared); await ensureLedgerResumeSchema(shared);
+    assert.equal((await main.query("SELECT chain_read_from_sec FROM ledger_resume_approvals WHERE approval_id = 'start-1'")).rows[0]!.chain_read_from_sec, null);
+    await main.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state,
+        created_at_ms, updated_at_ms) VALUES ('start-2', $1, $2, 4663, $3, $4, '{}', 'r', 'approved', $5, $5)`, [who, account, owner, "2".repeat(64), at + 2]);
+    assert.equal(await moveApproval(shared, "start-2", "approved", "refused", { reason: chainRefusal([]), chainReadFromSec: OLD - 9 }, at + 3), true);
+    assert.deepEqual(await readChainHold(shared, who), { held: true, readFromSec: Math.min(OLD - 9, chainReadFloor({ createdAtMs: at, evidenceJson: "{}" })), since: `start-2@${at + 3}` });
   });
 });
