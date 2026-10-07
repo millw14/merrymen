@@ -58,7 +58,7 @@ import { entryTokenOf, type Classified } from "./decision-funnel";
 import type { EarlyOffer, EarlyOfferResult } from "./early-candidates";
 import { createDirectBroker, createIpcBroker, type BrokerPort } from "./fomo/broker";
 import { readChildFomoFile, type ChildFomoRead, type ChildFomoReadReason } from "./fomo/child-file";
-import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type FomoAccess, type FomoBroker, type MemoryRead } from "./fomo/contract";
+import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type ChildTail, type FomoAccess, type FomoBroker, type MemoryRead } from "./fomo/contract";
 import {
   FOLLOW_BOOK,
   FOLLOW_DEFAULTS,
@@ -164,6 +164,8 @@ export const FOMO_CHILD = Object.freeze({
 export const FOMO_STATE_KEYS = Object.freeze({
   exploration: "state:fomo-exploration",
   followEntries: "state:fomo-follow-entries",
+  /** Which tail notices were told (fomo/tail-notices.ts TailSentLog): claimed before each send, so never twice. */
+  tailNotified: "state:fomo-tail-notified",
 });
 
 // ─── The broker this child talks through ───────────────────────────────────
@@ -1739,6 +1741,21 @@ export interface FomoChildDeps {
 
 export type FomoChildReadReason = ChildFomoReadReason | "tenant-unknown" | "not-read";
 
+/** Why a follow nomination could not act right now: a closed list, each one of followAllowed's, the rail's, pause's or scout's own conditions. */
+export type FollowBlocker = "follow-off" | "not-fast-trencher" | "scout-off" | "paused" | "live-not-allowed" | "rail-refused";
+
+/**
+ * WHAT FOLLOWING WOULD DO WITH ONE MORE BUY, RIGHT NOW: read-only, from the
+ * same conditions the follow path itself uses (followAllowed, effectiveAccess,
+ * the rail, liveFollowAllowed, the pause, the scout budget). `mode` is the rail
+ * an entry would go to, "off" when following itself is off. Can act only with
+ * no blockers. Reporting this changes nothing: the entry gates stay the gates.
+ */
+export interface FollowReadiness {
+  mode: "off" | "paper" | "live";
+  blockers: FollowBlocker[];
+}
+
 export interface FomoChildHealth {
   at: number | null;
   read: FomoChildReadReason;
@@ -2873,6 +2890,48 @@ export class FomoChild {
 
   latestAssessment(tokenKey: string): FollowAssessment | null {
     return this.assessments.get(tokenKey) ?? null;
+  }
+
+  /**
+   * The owner's tails from the last file read (contract.ts ChildTail), for the
+   * tail notices. Copies. None when Fomo is off here or data access is off
+   * (the owner's setting or the file's): the notices then say nothing.
+   */
+  tails(): ChildTail[] {
+    if (this.isOff() || !this.access.dataAccess) return [];
+    return (this.file?.tails ?? []).map((t) => ({ ...t, events: t.events.map((e) => ({ ...e, label: { ...e.label } })), totals: t.totals ? { ...t.totals } : null }));
+  }
+
+  /** Whether this agent holds a Robinhood coin now (by token key), as of the last tick. Unknown is no. */
+  holds(tokenKey: string): boolean {
+    for (const address of this.held.keys()) if (robinhoodKey(address) === tokenKey) return true;
+    return false;
+  }
+
+  /**
+   * WHAT FOLLOWING WOULD DO WITH A BUY NOW (FollowReadiness). Read-only: the
+   * same conditions followAllowed, effectiveAccess, the rail verdict,
+   * liveFollowAllowed, the pause and the scout budget apply at the entry,
+   * read at the moment of asking. Nothing here decides or changes anything.
+   */
+  followReadiness(): FollowReadiness {
+    if (this.isOff()) return { mode: "off", blockers: ["follow-off"] };
+    let live: FomoLiveFacts;
+    try {
+      live = this.deps.live();
+    } catch {
+      return { mode: "off", blockers: ["follow-off"] };
+    }
+    const blockers: FollowBlocker[] = [];
+    const owner: FomoAccess = { dataAccess: live.settings.dataAccess, monitoring: live.settings.monitoring, follow: live.settings.follow };
+    if (!effectiveAccess(owner, this.file?.access ?? null).follow) blockers.push("follow-off");
+    if (live.settings.strategy !== "trencher" || live.settings.trencherFast !== true) blockers.push("not-fast-trencher");
+    if (live.settings.scoutEnabled !== true || !(typeof live.settings.scoutBudgetUsdg === "number" && live.settings.scoutBudgetUsdg > 0)) blockers.push("scout-off");
+    if (live.paused === true) blockers.push("paused");
+    if (live.rail !== "paper" && live.rail !== "live") blockers.push("rail-refused");
+    else if (live.rail === "live" && live.liveFollowAllowed !== true) blockers.push("live-not-allowed");
+    const mode = blockers.includes("follow-off") ? "off" : live.rail === "paper" ? "paper" : live.rail === "live" ? "live" : "off";
+    return { mode, blockers };
   }
 
   health(): FomoChildHealth {

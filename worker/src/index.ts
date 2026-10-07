@@ -176,6 +176,7 @@ import {
 } from "./fomo-child";
 import { processBrokerPort } from "./fomo/broker";
 import type { FomoBroker } from "./fomo/contract";
+import { createTailNotifier } from "./fomo/tail-notifier";
 import { createTgFomoPort } from "./tg-fomo-port";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
@@ -891,6 +892,24 @@ async function main() {
     log: (line) => console.log(line),
   });
   installFomoChild(fomoChild);
+  /**
+   * THE OWNER'S FOMO TAIL NOTICES (fomo/tail-notifier.ts), asked by the
+   * Telegram notifier only past its own gates. Read-only over the child:
+   * the tails block of this tenant's fomo.json, the latest assessment of a
+   * coin and what following would do (followReadiness). Each notice is
+   * claimed in this tenant's durable store before it is sent. Off where Fomo
+   * is off here, or with the operator's MERRYMEN_FOMO_TAILS=0.
+   */
+  const fomoTailNotifier = createTailNotifier({
+    durable: fomoDurable,
+    broker: () => fomoBroker,
+    tails: () => fomoChild.tails(),
+    readiness: () => fomoChild.followReadiness(),
+    assessmentOf: (tokenKey) => fomoChild.latestAssessment(tokenKey),
+    holds: (tokenKey) => fomoChild.holds(tokenKey),
+    enabled: () => !fomoOff && process.env.MERRYMEN_FOMO_TAILS !== "0",
+    log: (line) => console.log(line),
+  });
   /** What the follow path reads at the moment of asking: settings, pause, rail, grant limits, this tick's prices. */
   function fomoLiveFacts(): FomoLiveFacts {
     const lim = active?.limits;
@@ -14809,6 +14828,7 @@ async function main() {
     // tenant's fills. Null → the cursor matches nothing (agent_id = NULL), which
     // fails safe rather than leaking.
     getAgentId: () => active?.agentId ?? null,
+    tailNotices: () => fomoTailNotifier.next(),
   });
 
   // Stream the band's activity to its Virtuals Terminal page — landed/paper
