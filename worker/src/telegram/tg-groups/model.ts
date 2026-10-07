@@ -317,6 +317,32 @@ export class TgModelGate {
   }
 
   /**
+   * Could a call that is only nice to have run now and still leave `reserve`
+   * of the day's and this chat's hour's allowance for the lines that must be
+   * written? A read-only look, like `available`. The router asks this: it
+   * gives way first, so understanding a line never costs the next answer.
+   */
+  headroom(chatId: number, reserve: { day: number; hour: number }): boolean {
+    try {
+      if (!this.available(chatId)) return false;
+      const now = this.now();
+      const llm = this.store.state.llm;
+      const usedToday = llm.day === utcDay(now) ? llm.used : 0;
+      const h = this.store.room(chatId)?.llmHour;
+      const usedHour = h && h.hour === utcHour(now) ? h.n : 0;
+      const r = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+      return this.perDay - usedToday > r(reserve?.day) && this.perChatHour - usedHour > r(reserve?.hour);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The day's allowance: what a caller sizes a reserve from. */
+  get dailyAllowance(): number {
+    return this.perDay;
+  }
+
+  /**
    * Run one model call for `chatId`, or answer null. The allowance is taken
    * only once a slot is free — a call dropped while waiting costs nothing —
    * and the time box covers the wait as well as the call: a line that took

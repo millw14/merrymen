@@ -21,6 +21,7 @@ import {
   addressedSmallTalk,
   asksAboutCoin,
   asksHowItIs,
+  deskNameOk,
   extractCaHits,
   extractCas,
   extractCashtags,
@@ -41,6 +42,7 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  routeWorthy,
   selfNamesOf,
   type BotSelf,
 } from "./detect";
@@ -983,4 +985,28 @@ describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
   const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
   for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
+});
+
+describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)", () => {
+  it("a name: two characters or more, not a stop word, not the bot, not a number", () => {
+    assert.equal(deskNameOk("CashCat"), "cashcat");
+    assert.equal(deskNameOk("$pons"), "pons");
+    assert.equal(deskNameOk("market"), null);
+    assert.equal(deskNameOk("it"), null);
+    assert.equal(deskNameOk("x"), null);
+    assert.equal(deskNameOk("420"), null);
+    assert.equal(deskNameOk("Shogun", ["shogun"]), null);
+    assert.equal(deskNameOk("@merrymanme_bot", ["@merrymanme_bot"]), null);
+    assert.equal(deskNameOk(42), null);
+  });
+
+  it("worth one routing call: a question mark, or three words once names are gone", () => {
+    assert.equal(routeWorthy("do you know unipcs on fomo"), true);
+    assert.equal(routeWorthy("top?"), true);
+    assert.equal(routeWorthy("@shogun_bot ok bro", ["shogun_bot"]), false);
+    assert.equal(routeWorthy("lol"), false);
+    assert.equal(routeWorthy("🔥🔥🔥"), false);
+    assert.equal(routeWorthy(""), false);
+    assert.equal(routeWorthy(null), false);
+  });
 });

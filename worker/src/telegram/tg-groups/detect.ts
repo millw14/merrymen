@@ -1705,6 +1705,34 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "yesterday", "yesterdays", "tomorrow", "week", "weeks", "month", "months", "days", "year", "years", "quarter", "quarters", "earlier", "previous", "prior", "past", "before", "then", "session",
 ]);
 
+/**
+ * A NAME A MODEL CHOSE, CHECKED BY THE DESK'S OWN RULE (route.ts): at least two
+ * characters, not one of the desk's stop words, not this bot, not a number.
+ * The cleaned name, or null.
+ */
+export function deskNameOk(name: unknown, selfNames: readonly string[] = []): string | null {
+  if (typeof name !== "string") return null;
+  const n = norm(name).replace(/^[$@]+/u, "").replace(/[._-]+$/u, "");
+  if (n.length < 2 || DESK_STOP.has(n) || /^\p{N}+$/u.test(n)) return null;
+  const self = new Set(selfNames.map((s) => norm(String(s ?? "")).replace(/^@+/u, "")));
+  return self.has(n) ? null : n;
+}
+
+/** Words it takes, names gone, before a line without a question mark is worth one routing call. */
+const ROUTE_MIN_WORDS = 3;
+
+/**
+ * IS THIS LINE WORTH ONE ROUTING CALL (handler.ts)? A question mark, or three
+ * words once its names and handles are gone: "lol", "ok bro" and a lone emoji
+ * are the persona's without asking anyone.
+ */
+export function routeWorthy(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0) return false;
+  return /[?？]/u.test(text) || words.length >= ROUTE_MIN_WORDS;
+}
+
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
 const DESK_TRADING_CUE =
   /\b(?:entry|entries|chart|charts|ta|buy|buying|sell|selling|ape|aping|bag|coin|token|price|pump|pumping|dump|dumping|send|sending|ca|liq|liquidity|volume|mcap|fdv|holders|bullish|bearish|dip|setup|levels?|support|resistance|breakout|analysis|analy[sz]e|legit|rug|runner|moon|mooning|cooked)\b/u;
