@@ -1594,7 +1594,38 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       continue;
     }
     const { segments } = segmentReceipt(receipt.logs);
-    if (segments.some((s) => s.op.sender === account)) {
+    const mine = segments.filter((s) => s.op.sender === account);
+    if (mine.length) {
+      // THE OPERATION THAT CARRIES THIS LEG IS NOT MISSING, so admission
+      // answered it: by a trade row, or by an owner record it re-derived from
+      // this receipt (ledger-resume.ts ownerAnswersFor). An owner record
+      // answers the operation and only the legs it covers itself; it leaves a
+      // capital leg to the deposit scanner's flow. So a capital leg with no
+      // flow lands here, and is said as exactly that, never as a trade row's.
+      const holder = mine.find((s) => s.logs.some((l) => Number(BigInt(l.logIndex)) === f.logIndex)) ?? null;
+      const byOwner = holder !== null && !snap.known.ops.includes(holder.op.userOpHash) && snap.known.ownerOps.includes(`${holder.op.userOpHash}|${f.txHash}`);
+      if (holder && byOwner) {
+        const reading = ownerOperationOf({ receiptLogs: receipt.logs, userOpHash: holder.op.userOpHash, txHash: f.txHash, account, custody: snap.grant?.custody ?? [],
+          usdg: USDG, chainId: chainId ?? 4663 });
+        const leg = reading?.usdgLegs.find((l) => l.logIndex === f.logIndex) ?? null;
+        base.evidence = { ...base.evidence, ownerOperation: holder.op.userOpHash,
+          ownerReading: reading && { disposition: reading.disposition, reasons: reading.reasons, covers: reading.covers, usdgLegs: reading.usdgLegs, tokenMoves: reading.tokenMoves },
+          ownerLeg: leg };
+        const amount = f.amountRaw === null ? "an unread amount of USDG" : `${usdg6(f.amountRaw)} USDG`;
+        if (reading?.disposition === "acknowledged" && leg?.answeredBy === "flow") {
+          items.push(unresolved(base, `not booked: the ${leg.kind} leg (${amount} ${f.direction === "in" ? "in" : "out"}) of the owner's own operation ` +
+            `${holder.op.userOpHash}, which the root validator signed. Admission answers that operation by its acknowledged owner record, re-derived from this ` +
+            "receipt, but the record answers the operation only: it leaves this capital leg to the deposit scanner's flow, as it leaves every capital leg, and " +
+            "Postgres holds no flow for it. The scanner never booked it (one that landed outside every window a running worker scanned, during downtime for " +
+            "one, is never seen). This tool books no owner's capital leg: a flow for it moves the account's capital and its peaks, a reviewed hwm-repair " +
+            "decision (docs/owner-operations.md) — escalate"));
+          continue;
+        }
+        items.push(unresolved(base, `not booked: a USDG leg (${amount}) of the owner's own operation ${holder.op.userOpHash}, which an owner record answers in ` +
+          `admission's check; re-derived from this receipt, ${reading ? `the reading is '${reading.disposition}' and ${leg ? `reads this leg as ${leg.kind} (${leg.rule}), ` +
+            `answered by ${leg.answeredBy}` : "carries no such leg"}` : "the operation does not read as the owner's"}, and nothing in Postgres answers it — escalate`));
+        continue;
+      }
       items.push(unresolved(base, "an operation of this account that Postgres already holds is in this transaction, yet this leg is not answered — its row's tx hash differs"));
       continue;
     }

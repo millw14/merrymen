@@ -446,6 +446,30 @@ describe("owner records, as admission reads them", () => {
     assert.match(p.items[0]!.why, /No owner record is in Postgres for it; re-derived from the receipt it would be 'acknowledged'/);
   });
 
+  it("an owner record that answers the operation but not its CAPITAL leg (no flow: the scanner never saw it) says exactly that, and still blocks", async () => {
+    const b = await books();
+    const op = h32("owner withdrew while no worker ran");
+    const eoa = addr(0xe0e0);
+    const ROOT = (0x845adb2c711129d4f3966735ed98a9f09fc4ce57n << 64n) | 9n;
+    const withdraw = operation({ opHash: op, nonce: ROOT, block: SELL_BLOCK + 60n, tag: "owner withdraw", logs: [[USDG, [TR, topic(ACCOUNT), topic(eoa)], `0x${word(7_000_000n)}`, "0x2"]] });
+    b.raw.prepare(`INSERT INTO owner_operations (tenant, agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition, review_reason,
+        usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+      VALUES (?, ?, 4663, ?, ?, ?, 1, 3, '0x0', 'root', 'acknowledged', NULL, '[]', '[]', '[]', ?, '1', 'arm-reconcile', 2, 1)`)
+      .run(SHOGUN_TENANT, ACCOUNT, op, withdraw.tx, Number(withdraw.block), addr(0));
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), withdraw] }).rpc);
+    assert.equal(p.verdict, "blocked", planLines(p).join("\n"));
+    assert.deepEqual(p.items.map((i) => [i.key, i.class]), [[`log:${withdraw.tx}#2`, "unresolved"]], "the operation is answered; its capital leg is what is missing");
+    const item = p.items[0]!;
+    assert.equal(item.proposal, null);
+    assert.match(item.why, new RegExp(`capital-out leg \\(7\\.000000 USDG out\\) of the owner's own operation ${op}`));
+    assert.match(item.why, /leaves this capital leg to the deposit scanner's flow, as it leaves every capital leg, and Postgres holds no flow for it/);
+    assert.match(item.why, /This tool books no owner's capital leg/);
+    assert.doesNotMatch(item.why, /its row's tx hash differs/, "no trade row is involved, and the reason never says one is");
+    assert.equal(item.evidence.ownerOperation, op);
+    assert.deepEqual({ ...(item.evidence.ownerLeg as object) }, { logIndex: 2, from: ACCOUNT, to: eoa, amountRaw: "7000000", kind: "capital-out", rule: "no-pair-external",
+      answeredBy: "flow" });
+  });
+
   it("a record another tenant's mirror stamped answers nothing here", async () => {
     const b = await books();
     record(b.raw, { disposition: "acknowledged", tenant: addr(0xbad) });
