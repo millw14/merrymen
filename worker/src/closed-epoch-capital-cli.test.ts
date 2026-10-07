@@ -32,7 +32,7 @@ import { BookingRefused } from "./chain-gap-booking";
 import { CliError, failureLine, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
 import {
-  closedEpochSourceFingerprint, CommitOutcomeUnknown, createClosedEpochRpc, main, parseClosedEpochArgs, pgWriteDb,
+  closedEpochSourceFingerprint, commitRolledBack, CommitOutcomeUnknown, createClosedEpochRpc, main, parseClosedEpochArgs, pgWriteDb,
 } from "./closed-epoch-capital-cli";
 
 const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-closed-epoch-cli-")));
@@ -57,7 +57,7 @@ const h32 = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
 const DEPOSIT_TX = h32("the deposit"), SWEEP_TX = h32("the sweep"), SWEEP_OP = h32("the sweep op");
 
 /** Postgres's dialect, answered by sqlite: $n placeholders, the read-only transaction held to query_only, SERIALIZABLE said, the catalogue answered. */
-function pgOverSqlite(raw: DatabaseSync, said: string[], o: { loseCommitAck?: boolean } = {}): PgClient {
+function pgOverSqlite(raw: DatabaseSync, said: string[], o: { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown } } = {}): PgClient {
   let readOnly = false, serializable = false;
   const empty = { rows: [], rowCount: 0 };
   return {
@@ -83,6 +83,8 @@ function pgOverSqlite(raw: DatabaseSync, said: string[], o: { loseCommitAck?: bo
         rowCount: 1 } : empty;
       }
       if (sql === "COMMIT") {
+        // A failed COMMIT: the server either made it durable and the answer was lost, or refused it and rolled back.
+        if (o.commitFails) { raw.exec(o.commitFails.committed ? "COMMIT" : "ROLLBACK"); serializable = false; throw o.commitFails.error; }
         raw.exec("COMMIT"); serializable = false;
         if (o.loseCommitAck) throw new Error("Connection terminated unexpectedly");
         return empty;
@@ -122,9 +124,12 @@ async function shared() {
     raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, 4, 1, ?)").run(TENANT, table, EPOCH2_AT + 120);
   }
   await ensureLedgerResumeSchema(db);
+  // Admission's evidence for the chain refusal, as recordApproval stores one (its text, and the sha256 of it): the home held no book.
+  const evidence = JSON.stringify({ account: ACCOUNT, home: { db: null, exists: true, ino: "7001", markers: [] }, tenant: TENANT });
   raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
-      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('a1', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', ?, ?, ?, ?)`)
-    .run(TENANT, ACCOUNT, TENANT, "e".repeat(64), `${CHAIN_REFUSAL}: USDG in 9.000000 in tx ${DEPOSIT_TX} log 0 at block ${DEPOSIT_BLOCK}`, (NOW - 3660) * 1000, (NOW - 3600) * 1000, T0);
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('a1', ?, ?, 4663, ?, ?, ?, 'r', 'refused', ?, ?, ?, ?)`)
+    .run(TENANT, ACCOUNT, TENANT, createHash("sha256").update(evidence).digest("hex"), evidence, `${CHAIN_REFUSAL}: USDG in 9.000000 in tx ${DEPOSIT_TX} log 0 at block ${DEPOSIT_BLOCK}`,
+      (NOW - 3660) * 1000, (NOW - 3600) * 1000, T0);
   return raw;
 }
 
@@ -228,6 +233,38 @@ describe("the write connection", () => {
     await assert.rejects(pgWriteDb(client()).tx(async (db) => db.exec("CREATE TABLE x (y)")), /never inside it/);
   });
 
+  it("an error answering COMMIT is a rollback only when its SQLSTATE proves one; a transport error, a terminated backend, a connection exception or a timeout is an unknown outcome", async () => {
+    const failing = (error: unknown): PgClient => ({
+      async query(sql) {
+        if (sql === "COMMIT") throw error;
+        return { rows: [{ iso: "serializable" }], rowCount: 1 };
+      },
+      async end() {},
+    });
+    const coded = (code: string, message = "server said no") => Object.assign(new Error(message), { code });
+    // ROLLED BACK, PROVED: transaction rollback (class 40, what a SERIALIZABLE commit refuses with) and a deferred constraint (class 23).
+    for (const code of ["40001", "40P01", "40002", "40003", "40000", "23505", "23503", "23514"]) {
+      const e = coded(code);
+      assert.equal(commitRolledBack(e), true, code);
+      await assert.rejects(pgWriteDb(failing(e)).tx(async () => 1), (got: unknown) => got === e, code);
+    }
+    // NOT PROVED: each may have arrived after the commit was durable.
+    const unknown: Array<[string, unknown]> = [
+      ["EPIPE (five letters, like a SQLSTATE)", coded("EPIPE", "write EPIPE")], ["ECONNRESET", coded("ECONNRESET", "read ECONNRESET")],
+      ["ETIMEDOUT", coded("ETIMEDOUT")], ["57P01 admin shutdown", coded("57P01", "terminating connection due to administrator command")],
+      ["57P02 crash shutdown", coded("57P02")], ["57P03 cannot connect now", coded("57P03")],
+      ["08006 connection failure", coded("08006")], ["08003 connection does not exist", coded("08003")], ["08007 transaction resolution unknown", coded("08007")],
+      ["08P01 protocol violation", coded("08P01")], ["57014 statement timeout or cancel", coded("57014", "canceling statement due to statement timeout")],
+      ["53100 disk full", coded("53100")], ["XX000 internal error", coded("XX000")], ["not a SQLSTATE: lowercase", coded("40p01")],
+      ["no code: the connection ended", new Error("Connection terminated unexpectedly")], ["no code: a read timeout", new Error("Query read timeout")],
+      ["a numeric code", Object.assign(new Error("n"), { code: 40001 })], ["a thrown string", "socket hang up"], ["null", null],
+    ];
+    for (const [what, e] of unknown) {
+      assert.equal(commitRolledBack(e), false, what);
+      await assert.rejects(pgWriteDb(failing(e)).tx(async () => 1), (got: unknown) => got instanceof CommitOutcomeUnknown, what);
+    }
+  });
+
   it("the source fingerprint reads every file the plan depends on", () => {
     const f = closedEpochSourceFingerprint();
     assert.ok(Object.keys(f).length >= 20);
@@ -238,7 +275,7 @@ describe("the write connection", () => {
 
 describe("whole runs through the shell", () => {
   const env = { DATABASE_URL };
-  const run = (raw: DatabaseSync, said: string[], printed: string[], o: { loseCommitAck?: boolean; repairId?: string } = {}) => ({
+  const run = (raw: DatabaseSync, said: string[], printed: string[], o: { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown }; repairId?: string } = {}) => ({
     connect: async () => pgOverSqlite(raw, said, o), rpc: chain, nowMs: () => NOW * 1000, out: (l: string) => printed.push(l), source: { "closed-epoch-capital.ts": "fixed" },
     sleep: async () => {}, ...(o.repairId ? { repairId: () => o.repairId! } : {}),
   });
@@ -326,6 +363,36 @@ describe("whole runs through the shell", () => {
     printed.length = 0;
     assert.equal(await main(["--revert-repair", "0b5e2c3a-1d2e-4f50-8a6b-7c8d9e0f1a2b", "--output", path.join(dir, "none.json"), "--dry-run"], env, run(raw, said, printed)), 0);
     assert.match(printed[0]!, /no receipts — nothing was applied under it/);
+  });
+
+  it("a COMMIT answered by a broken pipe, a reset or a terminated backend keeps the report and says to read the receipts; one refused with a serialization failure writes nothing and leaves no file", async () => {
+    for (const [what, error] of [["EPIPE", Object.assign(new Error("write EPIPE"), { code: "EPIPE" })], ["ECONNRESET", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })],
+      ["57P01", Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" })]] as const) {
+      const raw = await shared();
+      const printed: string[] = [];
+      const preview = path.join(dir, `commit-${what}-preview.json`);
+      assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview], env, run(raw, [], printed)), 0);
+      const digest = (JSON.parse(readFileSync(preview, "utf8")) as { previewDigest: string }).previewDigest;
+      const id = "5b2d3f4a-6c7e-4f80-9a1b-2c3d4e5f6a7b";
+      const applied = path.join(dir, `commit-${what}-apply.json`);
+      await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", applied], env,
+        run(raw, [], printed, { commitFails: { committed: true, error }, repairId: id })), (e: unknown) => (e as CliError).code === "apply-outcome-unknown", what);
+      assert.equal((JSON.parse(readFileSync(applied, "utf8")) as { repairId: string }).repairId, id, `${what}: the report is kept`);
+      assert.ok(printed.some((l) => l.startsWith("outcome unknown:") && l.includes(`--revert-repair ${id} --dry-run`)), what);
+      assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ?`).get(id)!.n, 4, `${what}: it had committed, and the receipts say so`);
+    }
+    const raw = await shared();
+    const printed: string[] = [];
+    const preview = path.join(dir, "commit-40001-preview.json");
+    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview], env, run(raw, [], printed)), 0);
+    const digest = (JSON.parse(readFileSync(preview, "utf8")) as { previewDigest: string }).previewDigest;
+    const refused = Object.assign(new Error("could not serialize access due to read/write dependencies among transactions"), { code: "40001" });
+    const applied = path.join(dir, "commit-40001-apply.json");
+    await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", applied], env,
+      run(raw, [], printed, { commitFails: { committed: false, error: refused } })), (e: unknown) => e === refused);
+    assert.equal(existsSync(applied), false, "a proved rollback leaves no report to mistake for an apply");
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis").get()!.n, 1);
   });
 
   it("a blocked preview exits 2; without DATABASE_URL nothing runs; a failure line never carries a URL", async () => {

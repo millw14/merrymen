@@ -135,14 +135,33 @@ export class CommitOutcomeUnknown extends Error {
 }
 
 /**
+ * THE ERRORS AN ANSWER TO COMMIT CAN CARRY THAT PROVE NOTHING WAS COMMITTED.
+ * Class 40 (transaction rollback: a serialization failure, a deadlock — what
+ * a SERIALIZABLE commit refuses with) and class 23 (a deferred constraint,
+ * checked at commit): the server raised them while committing, before the
+ * commit record, and rolled the transaction back. Nothing else proves that.
+ * A connection that dropped or was reset (EPIPE, ECONNRESET, no code at
+ * all), a backend terminated or a server shutting down or starting (57P01,
+ * 57P02, 57P03), a connection exception (class 08, 08007 "transaction
+ * resolution unknown" among them), a cancelled or timed-out statement
+ * (57014), a resource or internal error: each can arrive after the commit
+ * was made durable, and is CommitOutcomeUnknown.
+ */
+export function commitRolledBack(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^(40|23)[0-9A-Z]{3}$/.test(code);
+}
+
+/**
  * The core's Db over ONE node-postgres connection for the apply and the
  * revert: `?` placeholders as db.ts translates them, and every transaction
  * BEGIN ISOLATION LEVEL SERIALIZABLE, proved by asking the server — so the
  * compare-and-set's reads and the writes are one unit (a 40001 rolls back
- * and writes nothing). A COMMIT the server refused (it answers with a
- * SQLSTATE) is a definite rollback and rethrown as itself; a COMMIT whose
- * answer never came (a dropped connection) is CommitOutcomeUnknown, which the
- * shell never reads as "nothing happened".
+ * and writes nothing). A COMMIT refused with a SQLSTATE that proves a
+ * rollback (commitRolledBack) is rethrown as itself; any other failure of
+ * the COMMIT — a dropped connection, a terminated backend, a timeout — is
+ * CommitOutcomeUnknown, which the shell never reads as "nothing happened":
+ * it keeps the apply report and says to read the receipts.
  */
 export function pgWriteDb(client: PgClient): Db {
   const coerce = (ps: unknown[]) => ps.map((p) => (typeof p === "bigint" ? p.toString() : p === undefined ? null : p));
@@ -174,8 +193,7 @@ export function pgWriteDb(client: PgClient): Db {
       try {
         await client.query("COMMIT");
       } catch (e) {
-        const code = (e as { code?: unknown } | null)?.code;
-        if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) throw e;
+        if (commitRolledBack(e)) throw e;
         throw new CommitOutcomeUnknown();
       }
       return out;
