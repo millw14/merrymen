@@ -110,7 +110,7 @@ function fakeRpc(o: {
   /** getLogs over any block past the pinned one is refused: admission's own window, never the history. */
   refuseBeyondPinned?: boolean;
   /** One extra log the node returns for the account's USDG-in filter from block 0, as given. */
-  extraLog?: Record<string, unknown>;
+  extraLog?: { address: string; topics: string[]; data: string; logIndex: string; blockNumber: string; transactionHash: string };
   failHead?: boolean;
 } = {}) {
   const txs = o.txs ?? REAL;
