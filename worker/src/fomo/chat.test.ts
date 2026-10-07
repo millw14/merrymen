@@ -344,7 +344,7 @@ describe("answerFomoQuestion", () => {
       assert.match(r.text, /^Top traders on Fomo, last 24h, by money made on closed trades/, t);
       assert.match(r.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/, t);
       assert.ok(!/followed|@|0x[0-9a-f]{6}/i.test(r.text), r.text);
-      assert.ok(r.text.endsWith(FOMO_ATTRIBUTION), t);
+      assert.ok(!r.text.includes(FOMO_ATTRIBUTION), `${t}: no source line in a group`);
     }
   });
 

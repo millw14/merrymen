@@ -52,7 +52,8 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    question. Fomo research lines are code-written and pass the gate as
    `research`: every clause but the money clause, so a board's market caps
    and Fomo's public leaderboard P&L (third parties' published figures, in
-   short form, beside the source line) reach the room. A market desk read may cite public market figures only when
+   short form, under a header naming Fomo; the room has had a post about the
+   source, so group answers carry no source line) reach the room. A market desk read may cite public market figures only when
    every figure in it is one the brief code measured for that answer contains
    (Market analysis); the desk is never handed the owner's book, so it has
    none of the owner's figures to cite. Hypothetical arithmetic is never
@@ -1254,7 +1255,7 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "wdyt?" / "is it good?" said to it | An unambiguous remembered coin gets a factual quick-screen take; otherwise it asks for the CA. It never claims a buy without a recorded fill |
 | "what do you think about sex" / "thoughts on pizza?" said to it, nothing marking a coin | One COIN-or-TOPIC question to the group model with the last lines as context; a topic is the persona's to answer, never "drop the CA". A $tag, ticker capitals, a trading word or a coin this chat knows makes it a coin with no question |
 | "are you serious?" under its own odd reply | Sees which of its lines it is answering; owns a misreading in a few words instead of "yeah i am" |
-| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form, and the source line. Never who it follows; one trader's holdings stay in a DM |
+| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form; no source line or skill caveat (the room has had a post about both). Never who it follows; one trader's holdings stay in a DM |
 | "what can you do with fomo" / "is fomo working?" | A fixed list of what a room can ask / whether Fomo research is on here; no lookup |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |

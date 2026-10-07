@@ -515,8 +515,9 @@ Surface limits:
   profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
   `research` (every clause but money), with money in short form ($151.4k) and four rows a
   board. "What can you do with fomo" and "is fomo working?" are answered by code with no
-  lookup: a fixed list, and whether research is on here. The attribution reads "via
-  fomoapi" there, because the gate refuses "API" and domains.
+  lookup: a fixed list, and whether research is on here. Group answers carry no
+  attribution line and no skill caveat (Milla, 2026-10-07: the room has had a post about
+  the source); owner answers keep both.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.

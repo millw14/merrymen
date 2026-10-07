@@ -46,7 +46,6 @@ import {
   tgGroupConversationKey,
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
-  TG_FOMO_SOURCE,
   TG_FOMO_UNAVAILABLE,
 } from "./tg-fomo-port";
 
@@ -159,7 +158,7 @@ describe("createTgFomoPort", () => {
     assert.deepEqual([...new Set(s.tenants)], [TENANT], "the tenant is the broker's, never the text's");
     for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re);
     assert.match(a.text, /3 theses/);
-    assert.ok(a.text.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, "a group answer carries no source line (Milla, 2026-10-07)");
     assert.ok(!a.text.includes(FOMO_ATTRIBUTION));
   });
 
@@ -187,9 +186,9 @@ describe("createTgFomoPort", () => {
       assert.ok(a && !a.deflect, q);
       const lines = a.text.split("\n").filter(Boolean);
       const admitted = lines.filter((l) => admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
-      // The source line and the answer-first line are always sayable; money lines may be dropped by the gate.
-      assert.ok(admitted.includes(TG_FOMO_SOURCE), `${q}: attributed in gate-safe words`);
-      assert.ok(admitted.length >= 2, `${q}: something to say besides the source (${a.text})`);
+      // The answer-first line is always sayable; a long coverage line may be dropped by the gate.
+      assert.ok(admitted.includes(lines[0]!), `${q}: the answer is sayable (${a.text})`);
+      assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, q);
       for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re, q);
     }
   });
@@ -215,9 +214,9 @@ describe("createTgFomoPort", () => {
       assert.ok(a && !a.deflect, q);
       assert.equal(s.calls[before]!.tool, "fomo_get_rankings", q);
       assert.equal(s.calls[before]!.args.board, "traders", q);
-      assert.match(a.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/, q);
+      assert.match(a.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k$/, q);
       assert.ok(!/followed|@|0x[0-9a-fA-F]{6}|https?:/.test(a.text), a.text);
-      assert.ok(a.text.endsWith(TG_FOMO_SOURCE), q);
+      assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, q);
       for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, `${q}: ${l}`);
     }
   });
@@ -331,14 +330,16 @@ describe("groupWords", () => {
         NOT_PERMISSION_LINE,
         FOMO_ATTRIBUTION,
         "P&L is the provider-reported realised P&L for the window, not a measure of skill; follower counts are not used.",
+        "Trending on Fomo (board position is popularity, not quality):",
       ].join("\n"),
     ).split("\n");
     assert.equal(out[0], "PONS on robinhood in the last 24h: 1 distinct buyer and 0 sellers observed (large positions only; a floor, not a census).");
     assert.equal(out[1], "No sells: the feed only shows large positions.");
     assert.equal(out[2], "Flow (source-reported). From a copy fetched 2 min ago.");
     assert.equal(out[3], TG_FOMO_NOT_PERMISSION);
-    assert.equal(out[4], TG_FOMO_SOURCE);
-    assert.equal(out[5], "Figures are money made on closed trades, as the source reports it, and not a measure of skill.");
+    // The owner's attribution and skill caveat are dropped, never reworded into the room.
+    assert.equal(out[4], "Trending on Fomo (board position is popularity, not quality):");
+    assert.equal(out.length, 5);
     for (const l of out) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "answer", recentOwn: [] }).ok, l);
   });
 
@@ -429,7 +430,7 @@ describe("a group research question, end to end", () => {
     const first = tg.texts(GROUP);
     assert.equal(first.length, 1);
     assert.match(first[0]!, /3 theses/);
-    assert.ok(first[0]!.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(first[0]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/);
     for (const re of NO_IDENTITY) assert.doesNotMatch(first[0]!, re);
     assert.equal(s.calls[0]!.opts.audience, "group");
     assert.equal(s.calls[0]!.opts.groupId, String(GROUP));
@@ -499,8 +500,8 @@ describe("a group research question, end to end", () => {
     await groups.drain();
     const board = tg.texts(GROUP);
     assert.equal(board.length, 1);
-    assert.match(board[0]!, /^Top traders on Fomo, last 24h, by money made on closed trades \(source-reported, not a skill measure\):\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/);
-    assert.ok(board[0]!.endsWith(TG_FOMO_SOURCE));
+    assert.deepEqual(board[0]!.split("\n"), ["Top traders on Fomo, last 24h, by money made on closed trades:", "1. CryptoKaleo +$151.4k", "2. frankdegods -$4.2k"]);
+    assert.doesNotMatch(board[0]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, "no source line and no skill caveat in the room");
     assert.doesNotMatch(board[0]!, /followed|@|0x[0-9a-fA-F]{6}|https?:/);
     assert.ok(!logs.some((l) => /research lines dropped/.test(l)), "no line of the board was refused");
 
@@ -511,7 +512,7 @@ describe("a group research question, end to end", () => {
     const trending = tg.texts(GROUP);
     assert.equal(trending.length, 2);
     assert.match(trending[1]!, /\n1\. PONS on robinhood, market cap \$2\.1M\n/);
-    assert.ok(trending[1]!.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(trending[1]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/);
 
     // The lines the room actually asked on 2026-10-07, answered by code with no lookup.
     const looked = s.calls.length;

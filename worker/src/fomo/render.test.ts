@@ -99,7 +99,9 @@ describe("renderEnvelope", () => {
     const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), G);
     assert.ok(text.startsWith("PONS on robinhood: 3 theses"));
     assert.ok(!/frankdegods|0x[0-9a-f]{6}|https?:|\$PONS|their words/.test(text), text);
-    assert.ok(text.endsWith(FOMO_ATTRIBUTION));
+    // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
+    assert.ok(!text.includes(FOMO_ATTRIBUTION));
+    assert.ok(renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), O).endsWith(FOMO_ATTRIBUTION));
   });
 
   it("deflects a trader question in a group to a direct message", () => {
@@ -127,18 +129,17 @@ describe("renderEnvelope", () => {
     const group = renderEnvelope(e, G);
     assert.notEqual(group, GROUP_DM_DEFLECTION);
     assert.deepEqual(group.split("\n"), [
-      "Top traders on Fomo, last 24h, by money made on closed trades (provider-reported, not a skill measure):",
+      "Top traders on Fomo, last 24h, by money made on closed trades:",
       "1. frankdegods +$151.4k",
       "2. pepe_maxi -$4.2k",
       "3. c +$1M",
       "4. d +$12",
-      FOMO_ATTRIBUTION,
     ]);
     assert.doesNotMatch(group, /followed|@/);
     // A row with no public handle is "an unnamed trader", never a piece of the provider's user id.
     const unnamed: RankingsData = { ...board, traders: [{ ...board.traders[0]!, trader: { ...board.traders[0]!.trader, handle: null } }, { ...board.traders[1]!, trader: { ...board.traders[1]!.trader, handle: "bad handle!" } }] };
     const anon = renderEnvelope(env("fomo_get_rankings", "ok", unnamed, { subject: { kind: "market" } }), G);
-    assert.match(anon, /\n1\. an unnamed trader \+\$151\.4k\n2\. an unnamed trader -\$4\.2k\n/);
+    assert.match(anon, /\n1\. an unnamed trader \+\$151\.4k\n2\. an unnamed trader -\$4\.2k$/);
     assert.doesNotMatch(anon, /1dcf7c78|2dcf7c78|trader [0-9a-f]{8}/);
     // Cut to Merrymen's watched traders, the board is the watch list: a group is sent to a DM.
     const watched = env("fomo_get_rankings", "ok", board, { subject: { kind: "market" }, coverage: { ...e.coverage, requested: { board: "traders", cohortOnly: true } } });
@@ -156,7 +157,7 @@ describe("renderEnvelope", () => {
       tokens: [{ rank: 1, token: T, label: { symbol: "PONS", name: "Pons" }, holders: null, priceUsd: null, change24hPct: null, marketCapUsd: 2_080_000, volume24hUsd: null, executionAvailability: "unknown" as never }],
     };
     const e = env("fomo_get_rankings", "ok", board, { subject: { kind: "market" } });
-    assert.match(renderEnvelope(e, G), /\n1\. PONS on robinhood, market cap \$2\.1M\n/);
+    assert.match(renderEnvelope(e, G), /\n1\. PONS on robinhood, market cap \$2\.1M$/);
     assert.match(renderEnvelope(e, O), /\n1\. \$PONS on robinhood, market cap \$2\.08M\n/);
   });
 

@@ -56,7 +56,7 @@ import { fnv1a } from "../../memory/tokens";
  *
  * `research` is a line code wrote from Fomo research (fomo/render.ts through
  * tg-fomo-port.ts), never a model's: a public leaderboard's realised P&L or a
- * coin's market cap, beside its source line. Rule 2 keeps the OWNER's money
+ * coin's market cap, under a header naming Fomo. Rule 2 keeps the OWNER's money
  * out of a group and lets a deterministic factual reply carry published
  * public figures with their source, so the money clause alone is lifted.
  * Every other clause holds, and like a template it may recur.

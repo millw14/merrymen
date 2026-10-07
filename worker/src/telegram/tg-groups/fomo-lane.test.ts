@@ -6,8 +6,8 @@
  *   - only an addressed research ask reaches the port, with the trusted chat
  *     id and topic from the update, never anything taken from the text;
  *   - every line the port returns goes through the group gate on its own, and
- *     a refused line is dropped (handles, addresses, links, cashtags, money),
- *     never repaired; a refused source line drops the whole answer;
+ *     a refused line is dropped (handles, addresses, links, cashtags), never
+ *     repaired; a group answer carries no source line (Milla, 2026-10-07);
  *   - a deflection is said as such; a question the research does not take
  *     goes on to the desk as before;
  *   - the lane is rate-bounded, deadline-bound, and delivered through the
@@ -36,7 +36,6 @@ const OWNER = 424242;
 const ANN = 717171;
 const TOKEN = "123456:SECRET-TOKEN-XYZ";
 const BOT: BotSelf = { id: 999999, username: "pinebot", name: "Pine" };
-const SOURCE = "Source: Fomo via fomoapi (independent; not affiliated with Fomo Family)";
 
 class FakeTg {
   calls: Array<{ method: string; body: Record<string, unknown> }> = [];
@@ -83,7 +82,7 @@ class SpyFomo implements TgFomoPort {
   asks: Array<{ text: string; chatId: number; threadId?: number; timeoutMs?: number }> = [];
   forgot: number[] = [];
   answer: (q: { text: string }) => TgFomoAnswer | null | Promise<TgFomoAnswer | null> = () => ({
-    text: ["PONS on robinhood in the last 24h: 1 distinct buyer and 0 sellers observed (large positions only; a floor, not a census).", SOURCE].join("\n"),
+    text: "PONS on robinhood in the last 24h: 1 distinct buyer and 0 sellers observed (large positions only; a floor, not a census).",
     deflect: false,
   });
   async ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number }): Promise<TgFomoAnswer | null> {
@@ -196,7 +195,7 @@ describe("the group research lane", () => {
     const out = tg.texts(CHAT);
     assert.equal(out.length, 1);
     assert.match(out[0]!, /1 distinct buyer/);
-    assert.ok(out[0]!.endsWith(SOURCE), "attributed");
+    assert.doesNotMatch(out[0]!, /Source:|fomoapi/, "no source line in the room");
     const send = tg.calls.find((c) => c.method === "sendMessage")!;
     assert.equal((send.body.reply_parameters as { message_id: number }).message_id, m.messageId, "a reply to the ask");
     assert.equal(desk!.asks.length, 0, "the desk was not asked as well");
@@ -215,7 +214,6 @@ describe("the group research lane", () => {
         "• more at https://fomo.family/t/pons",
         "• $PONS to the moon",
         "Provider stats, 24h: net -$11,001.",
-        SOURCE,
       ].join("\n"),
       deflect: false,
     });
@@ -223,19 +221,17 @@ describe("the group research lane", () => {
     await said(msg("pine what are the theses on pons?"));
     const out = tg.texts(CHAT);
     assert.equal(out.length, 1);
-    assert.deepEqual(out[0]!.split("\n"), ["PONS on robinhood: 3 theses from 3 authors.", SOURCE]);
+    assert.deepEqual(out[0]!.split("\n"), ["PONS on robinhood: 3 theses from 3 authors."]);
     for (const re of FORBIDDEN_IN_ROOM) assert.doesNotMatch(out[0]!, re);
     assert.ok(logs.some((l) => /research lines dropped by the gate \(5\)/.test(l)));
   });
 
-  it("an answer whose source line the gate refuses is not said at all (no unattributed research in a room)", async () => {
+  it("an owner's attribution line that reaches the lane is dropped like any refused line, and the answer still goes", async () => {
     fomo!.answer = () => ({ text: "PONS on robinhood: 3 theses from 3 authors.\nSource: Fomo via FOMO API (independent; not affiliated with fomo.family)", deflect: false });
     make();
     await said(msg("pine any theses on pons?"));
     const out = tg.texts(CHAT);
-    assert.equal(out.length, 1);
-    assert.match(out[0]!, /can't put that research into words for a group/);
-    assert.doesNotMatch(out[0]!, /3 theses/);
+    assert.deepEqual(out, ["PONS on robinhood: 3 theses from 3 authors."]);
   });
 
   it("a deflection is delivered as the port said it, with no research in it", async () => {
@@ -281,7 +277,7 @@ describe("the group research lane", () => {
     release!();
     await groups.drain();
     assert.deepEqual(tg.texts(CHAT), ["the research didn't come back in time; ask again in a bit."]);
-    resolveAsk!({ text: `late answer\n${SOURCE}`, deflect: false });
+    resolveAsk!({ text: "late answer", deflect: false });
     await groups.drain();
     assert.equal(tg.texts(CHAT).length, 1, "nothing more once the deadline passed");
   });
@@ -289,7 +285,7 @@ describe("the group research lane", () => {
   it("re-checks before the send: switched off while the research was read, nothing goes out", async () => {
     fomo!.answer = () => {
       cfg.telegramGroupsEnabled = false;
-      return { text: `PONS on robinhood: 3 theses from 3 authors.\n${SOURCE}`, deflect: false };
+      return { text: "PONS on robinhood: 3 theses from 3 authors.", deflect: false };
     };
     make();
     await said(msg("pine what are the theses on pons?"));
@@ -300,7 +296,7 @@ describe("the group research lane", () => {
   it("re-checks before the send: a shush while the research was read keeps it quiet", async () => {
     fomo!.answer = () => {
       store.update(CHAT, (r) => { r.shushedUntilMs = clock + 10 * MIN; });
-      return { text: `PONS on robinhood: 3 theses from 3 authors.\n${SOURCE}`, deflect: false };
+      return { text: "PONS on robinhood: 3 theses from 3 authors.", deflect: false };
     };
     make();
     await said(msg("pine what are the theses on pons?"));

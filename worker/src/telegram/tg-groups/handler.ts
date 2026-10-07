@@ -2354,39 +2354,34 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * WHAT OF A RESEARCH ANSWER A ROOM MAY HEAR: each line through the group
    * line gate on its own, as a `research` line (no @handles, addresses,
    * links, cashtags, advice, claims, private state or plumbing; the published
-   * figures a code-built board carries, a leaderboard's P&L or a coin's
-   * market cap, may stand beside its source), refused lines DROPPED, never
-   * repaired. The port's source line ("Source: …") is the attribution: when
-   * it is refused nothing is sent, because unattributed research is not said
-   * in a room. Null when nothing sayable is left.
+   * figures a code-built board carries, a leaderboard's money made or a
+   * coin's market cap, may stand), refused lines DROPPED, never repaired, and
+   * at most FOMO_MAX_LINES lines and FOMO_MAX_CHARS characters. A group answer
+   * carries no source line: the room has had its post about where the data
+   * comes from (Milla, 2026-10-07). Null when nothing sayable is left.
    */
   const fomoSayable = (text: string): string | null => {
     const agentName = selfNow()?.name ?? "";
     const lines = text.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-    const sourceAt = lines.findIndex((l) => /^source:/iu.test(l));
-    let source: string | null = null;
     const kept: string[] = [];
     let refused = 0;
-    for (const [i, l] of lines.entries()) {
+    for (const l of lines) {
       const v = admitTgLine(l, { agentName, kind: "research", recentOwn: [] });
       if (!v.ok) {
         refused += 1;
         continue;
       }
-      if (i === sourceAt) source = v.text;
-      else kept.push(v.text);
+      kept.push(v.text);
     }
     if (refused) log(`[tg-groups] research lines dropped by the gate (${refused})`);
-    if (sourceAt >= 0 && source === null) return null;
     const out: string[] = [];
-    let used = source ? source.length + 1 : 0;
+    let used = 0;
     for (const l of kept) {
-      if (out.length >= FOMO_MAX_LINES - (source ? 1 : 0) || used + l.length + 1 > FOMO_MAX_CHARS) break;
+      if (out.length >= FOMO_MAX_LINES || used + l.length + 1 > FOMO_MAX_CHARS) break;
       out.push(l);
       used += l.length + 1;
     }
-    if (!out.length) return null;
-    return [...out, ...(source ? [source] : [])].join("\n");
+    return out.length ? out.join("\n") : null;
   };
 
   /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */

@@ -20,11 +20,13 @@
  * or quoted third-party text, money in short form) and scrubs the result. The
  * one place a group hears traders named is Fomo's public leaderboard: its
  * handles and their P&L, never as @mentions, never who Merrymen follows
- * (Milla's call, 2026-10-07). This file rewrites the renderer's fixed wording
- * into words the group gate admits (no money figure for the feed's size floor,
- * no "P&L", no vendor-plumbing words in the source line). The handler still
- * gates every line before it is sent, as a `research` line, and drops what the
- * gate refuses rather than bending the gate.
+ * (Milla's call, 2026-10-07). A group answer carries no source line and no
+ * skill caveat: the room has had a post about where the data comes from
+ * (Milla, 2026-10-07), so the renderer leaves both to the owner's answers.
+ * This file rewrites the renderer's fixed wording into words the group gate
+ * admits (no money figure for the feed's size floor, no "P&L"). The handler
+ * still gates every line before it is sent, as a `research` line, and drops
+ * what the gate refuses rather than bending the gate.
  *
  * NO MODEL. A group answer is deterministic: no compose, so no model can be
  * talked into wording a trader's wallet into a room.
@@ -38,14 +40,6 @@ import type { TgFomoAnswer, TgFomoPort } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
 export const TG_FOMO_MAX_CHARS = 600;
-
-/**
- * The attribution as a group line. FOMO_ATTRIBUTION names the provider's
- * plumbing ("API") and the app's domain, both of which the group gate refuses
- * (ops vocabulary, a link). Same facts: the data is Fomo's, it came through an
- * independent service, and that service is not affiliated with Fomo Family.
- */
-export const TG_FOMO_SOURCE = "Source: Fomo via fomoapi (independent; not affiliated with Fomo Family)";
 
 /** NOT_PERMISSION_LINE in group words: the original names a dashboard setting, which the group gate refuses. */
 export const TG_FOMO_NOT_PERMISSION = "This is research, not a signal to buy or sell.";
@@ -83,12 +77,12 @@ export function tgGroupConversationKey(chatId: number, threadId?: number): strin
 export function groupWords(text: string): string {
   return text
     .split("\n")
+    // The owner's attribution and skill caveat never reach a room (the renderer
+    // leaves them out for a group; this is the second lock).
+    .filter((line) => line.trim() !== FOMO_ATTRIBUTION && !/\bnot a (?:measure of skill|skill measure)\b/i.test(line))
     .map((line) => {
-      if (line.trim() === FOMO_ATTRIBUTION) return TG_FOMO_SOURCE;
       if (line.trim() === NOT_PERMISSION_LINE) return TG_FOMO_NOT_PERMISSION;
       return line
-        // The leaderboard's own caveat, without "P&L", which the gate keeps for the agent's own book.
-        .replace(/\bP&L (?:is the|figures are) provider-reported realised P&L(?: for the window)?, not a measure of skill(?:; follower counts are not used)?\./g, "Figures are money made on closed trades, as the source reports it, and not a measure of skill.")
         .replace(/\(positions above (?:about |roughly |around )?\$[\d,]+(?:\.\d+)?; a floor, not a census\)/g, "(large positions only; a floor, not a census)")
         .replace(/positions above (?:about |roughly |around )?\$[\d,]+(?:\.\d+)?/g, "large positions")
         .replace(/\bprovider-reported\b/g, "source-reported")
