@@ -197,7 +197,8 @@ describe("the chain transport", () => {
     assert.equal(await rpc("eth_getLogs", [{}]), "0x12");
     assert.equal(await rpc("eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "0x4dfe3ca"]), "0x12");
     for (const [method, params] of [
-      ["eth_call", [{ to: token, data: "0x313ce567" }, "latest"]], ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "latest"]],
+      ["eth_call", [{ to: token, data: "0x313ce567" }, "latest"]], ["eth_call", [{ to: token, data: "0x313ce567" }, "0x4dfe3ca"]],
+      ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}` }, "latest"]],
       ["eth_call", [{ to: token, data: `0x70a08231${"0".repeat(24)}${holder}`, from: `0x${holder}` }, "0x1"]], ["eth_sendRawTransaction", ["0x"]], ["eth_getCode", [token, "latest"]],
     ] as const) {
       await assert.rejects(rpc(method, params as unknown as unknown[]), (e: unknown) => e instanceof CliError && /allowlist/.test(e.code), `${method} ${JSON.stringify(params)}`);

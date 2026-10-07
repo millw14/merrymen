@@ -429,7 +429,9 @@ export async function readClosedEpochChain(rpc: RpcCall, snap: ClosedEpochSnapsh
   });
   const grant = snap.booking.grant;
   if (!grant) return empty("no stored grant names the account to read");
-  const head = BigInt(String(await patiently(() => counted("eth_blockNumber", []), sleep)));
+  let head: bigint;
+  try { head = BigInt(String(await patiently(() => counted("eth_blockNumber", []), sleep))); }
+  catch { return { ...empty("the chain's head could not be read"), calls }; }
   const pinned = head - BOOKING_CONFIRMATIONS;
   if (pinned < 0n) return { ...empty("the chain is shorter than the confirmations every fact needs", head.toString()), calls };
   const book = [grant.account, ...grant.custody];
@@ -707,7 +709,6 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
   }
   if (booking.admitted) refuse("admitted", `already admitted (attested generation ${booking.admitted.slice(0, 8)}…): its running book owns its rows`);
   if (!snap.identityIndex) refuse("identity-index", "the flows_chain_identity unique index is not present with its required definition: a second row for one log could not be refused by the database");
-  if (snap.rawGrantAccount === null && grant) refuse("grant-spelling", "the grant's smartAccount could not be read as written, so what admission would seed cannot be computed");
   if (chain.unavailable) refuse("chain-unavailable", `the chain could not be read (${chain.unavailable}); preview again`);
   // HELD, OR NOTHING (chain-gap-booking.ts holdOf): the newest decision a chain refusal, nothing written for the tenant since.
   const hold = holdOf(booking, o.nowSec);

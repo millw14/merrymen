@@ -27,7 +27,7 @@ import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { MIRROR_STATE_DDL } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
-import { ensureLedgerResumeSchema } from "./ledger-import";
+import { ensureLedgerResumeSchema, LEDGER_IMPORT_SCHEMA } from "./ledger-import";
 import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed, resumePreconditions } from "./ledger-resume";
 import { flowDuplicateReport } from "./distinct-flows";
 import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
@@ -105,6 +105,13 @@ function fakeRpc(o: {
   txs?: ModelTx[]; head?: bigint; chainId?: number;
   balances?: Record<string, Record<string, bigint>>; failBalances?: string[]; pruned?: boolean;
   failReceipts?: string[]; orphaned?: string[]; refuseEveryRange?: boolean; spanLimit?: bigint;
+  /** getLogs filters naming this address in any topic are refused (a node that cannot read that range). */
+  refuseLogsFor?: string;
+  /** getLogs over any block past the pinned one is refused: admission's own window, never the history. */
+  refuseBeyondPinned?: boolean;
+  /** One extra log the node returns for the account's USDG-in filter from block 0, as given. */
+  extraLog?: Record<string, unknown>;
+  failHead?: boolean;
 } = {}) {
   const txs = o.txs ?? REAL;
   const head = o.head ?? HEAD;
@@ -117,15 +124,17 @@ function fakeRpc(o: {
   const rpc: RpcCall = async (method, params) => {
     calls.push({ method, params });
     if (method === "eth_chainId") return `0x${(o.chainId ?? 4663).toString(16)}`;
-    if (method === "eth_blockNumber") return `0x${head.toString(16)}`;
+    if (method === "eth_blockNumber") { if (o.failHead) throw new Error("rpc-read-failed"); return `0x${head.toString(16)}`; }
     if (method === "eth_getBlockByNumber") return blockOf(BigInt(params[0] as string));
     if (method === "eth_getLogs") {
       const f = params[0] as { address: string; fromBlock: string; toBlock: string; topics: Array<string | string[] | null> };
       const from = BigInt(f.fromBlock), to = BigInt(f.toBlock);
+      if ((o.refuseLogsFor && f.topics.some((t) => t === topic(o.refuseLogsFor!))) || (o.refuseBeyondPinned && to > head - 64n)) throw new Error("rpc-read-failed");
       if (o.refuseEveryRange || to - from + 1n > (o.spanLimit ?? SPAN_LIMIT)) {
         throw Object.assign(new Error(`query spans ${to - from + 1n} blocks (${from} to ${to}), but only ${o.spanLimit ?? SPAN_LIMIT} are allowed for this request; narrow the block range`), { code: -32602 });
       }
-      return txs.filter((t) => t.block >= from && t.block <= to).flatMap(logsOf)
+      const extra = o.extraLog && f.address.toLowerCase() === USDG && f.topics[2] === topic(ACCOUNT) && from === 0n ? [o.extraLog] : [];
+      return [...extra, ...txs.filter((t) => t.block >= from && t.block <= to).flatMap(logsOf)]
         .filter((l) => l.address.toLowerCase() === f.address.toLowerCase()
           && f.topics.every((want, i) => want === null || (Array.isArray(want) ? want.map((x) => x.toLowerCase()) : [want.toLowerCase()]).includes(String(l.topics[i] ?? "").toLowerCase())));
     }
@@ -801,5 +810,107 @@ describe("every other refusal, by name", () => {
     await apply(b, p);
     assert.deepEqual(await planAttestedSeed(b.db, SPELLED), { basis: [], floors: [] });
     assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM position_floors")[0]!.n, 0);
+  });
+});
+
+describe("the tenant and the chain, refused outright", () => {
+  it("no grant, no registration, two registrations, two spellings, the grant and registration on different chains", async () => {
+    const g = await books();
+    g.raw.exec("DELETE FROM grants");
+    assert.ok(codes(await preview(g, fakeRpc().rpc)).includes("no-grant"));
+    const r = await books();
+    r.raw.prepare("DELETE FROM agents WHERE smart_account = ?").run(SPELLED);
+    assert.ok(codes(await preview(r, fakeRpc().rpc)).includes("no-registration"));
+    const two = await books();
+    two.raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
+      VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 2, 0, 'paper')`).run(ACCOUNT, TENANT, addr(1));
+    assert.ok(codes(await preview(two, fakeRpc().rpc)).includes("registrations"));
+    const s = await books();
+    s.raw.prepare("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES (?, 'paper', 'X', '1', '1', 1)").run(ACCOUNT);
+    assert.ok(codes(await preview(s, fakeRpc().rpc)).includes("spellings"));
+    const c = await books();
+    c.raw.prepare("UPDATE agents SET chain_id = 46630 WHERE smart_account = ?").run(SPELLED);
+    assert.ok(codes(await preview(c, fakeRpc().rpc)).includes("chain"));
+  });
+
+  it("an attested book in use: its running book owns its rows", async () => {
+    const b = await books();
+    await b.db.exec(LEDGER_IMPORT_SCHEMA);
+    b.raw.prepare(`INSERT INTO ledger_resume_attestations (generation, approval_id, tenant, smart_account, chain_id, owner, evidence_digest, receipt_digest, mirror_state_digest,
+      snapshot_digest, created_at_ms) VALUES ('gen-1', 'x', ?, ?, 4663, ?, 'e', 'r', 'm', 's', 1)`).run(TENANT, ACCOUNT, TENANT);
+    b.raw.prepare(`INSERT INTO tenant_ledger_import (tenant, generation, target_volume_id, state, bytes, sha256, source_digest, bindings_json, created_at_ms,
+      grant_updated_at, grant_row_version) VALUES (?, 'gen-1', 'v', 'consumed', 1, 's', 'd', '{}', 1, '1', '1')`).run(TENANT);
+    assert.ok(codes(await preview(b, fakeRpc().rpc)).includes("admitted"));
+  });
+
+  it("an unreadable head, a vault whose logs cannot be read, a log the filter did not ask for, and admission's own window unread", async () => {
+    const head = await preview(await books(), fakeRpc({ failHead: true }).rpc);
+    assert.deepEqual([head.verdict, codes(head).includes("chain-unavailable")], ["blocked", true]);
+    assert.ok(codes(await preview(await books(), fakeRpc({ refuseLogsFor: CLASS_VAULT }).rpc)).includes("custody-unread"));
+    const stray = { address: USDG, topics: [TR, topic(FUNDER), topic(ACCOUNT), topic(FUNDER)], data: `0x${word(1n)}`, logIndex: "0x0", blockNumber: "0x1", transactionHash: h32("stray") };
+    assert.ok(codes(await preview(await books(), fakeRpc({ extraLog: stray }).rpc)).includes("log-unreadable"));
+    const window = await preview(await books(), fakeRpc({ refuseBeyondPinned: true }).rpc);
+    assert.deepEqual(codes(window), ["admission-unread"], "the history from block 0 to the pinned block read whole; admission's window to the head did not");
+  });
+});
+
+describe("W3 is resetPaperLedger's own pair, never a lookalike", () => {
+  it("not when the first later row is something else, nor when the opening is not a paper opening", async () => {
+    const first = await books({ marks: [DEPOSIT_AT + 62], reset: EPOCH2_AT });
+    first.raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at, epoch) VALUES (?, 'swap', 'paper', 1, 'paper', ?, 2)`).run(SPELLED, EPOCH2_AT - 5);
+    assert.deepEqual(codes(await preview(first, fakeRpc().rpc)), ["boundary-undated"]);
+    const shape = await books({ marks: [DEPOSIT_AT + 62], reset: EPOCH2_AT });
+    shape.raw.prepare("UPDATE equity SET positions_usdg = 10, cash_usdg = 990 WHERE epoch = 2 AND at = ?").run(EPOCH2_AT);
+    assert.deepEqual(codes(await preview(shape, fakeRpc().rpc)), ["boundary-undated"]);
+  });
+});
+
+describe("apply's own guards, behind the compare-and-set", () => {
+  /** A plan the apply is handed directly, its facts the database's own: only the field named is not what the preview computed. */
+  async function ready() {
+    const b = await books();
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "ready");
+    return { b, p };
+  }
+  const refused = (code: string, re?: RegExp) => (e: unknown) => e instanceof BookingRefused && e.code === code && (!re || re.test(e.message));
+  const untouched = (b: Books) => assert.deepEqual([rows(b.raw, "SELECT COUNT(*) AS n FROM flows")[0]!.n, rows(b.raw, "SELECT COUNT(*) AS n FROM cost_basis")[0]!.n], [0, 2]);
+
+  it("refuses a blocked plan and a backup named as a URL", async () => {
+    const b = await books({ marks: [DEPOSIT_AT + 62], reset: null });
+    const blocked = await preview(b, fakeRpc().rpc);
+    assert.equal(blocked.verdict, "blocked");
+    await assert.rejects(apply(b, blocked), refused("not-ready"));
+    const { b: c, p } = await ready();
+    await assert.rejects(apply(c, p, { backupRef: "https://backups.example/x" }), refused("backup-ref"));
+    untouched(c);
+  });
+
+  it("refuses when the epoch's receipts would not be the chain's set, when the net would differ, or a stand-in would stay — nothing written", async () => {
+    const { b, p } = await ready();
+    await assert.rejects(apply(b, { ...p, predicted: { ...p.predicted, epochReceiptsAfter: p.predicted.epochReceiptsAfter.slice(1) } }), refused("verify", /not exactly the chain's capital set/));
+    await assert.rejects(apply(b, { ...p, predicted: { ...p.predicted, epochNetAfter: "1" } }), refused("postcondition", /not the 0\.000001 the preview predicted/));
+    untouched(b);
+    const q = await books();
+    q.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, chain_id, at) VALUES (?, 'in', 145.499004, 'inferred', 1, 4663, ?)`).run(SPELLED, DEPOSIT_AT + 200);
+    const withStandIn = await preview(q, fakeRpc().rpc);
+    await assert.rejects(apply(q, { ...withStandIn, proposals: { ...withStandIn.proposals, quarantines: [] }, predicted: { ...withStandIn.predicted, epochNetAfter: "146179478" } }),
+      refused("postcondition", /would still hold an unevidenced stand-in/));
+  });
+
+  it("refuses when a flat token would still be seeded, when admission would still find a fact, or when the log is already a row", async () => {
+    const { b, p } = await ready();
+    await assert.rejects(apply(b, { ...p, proposals: { ...p.proposals, clears: [] } }), refused("postcondition", /would still seed a basis or floor/));
+    const ghost = { fact: { kind: "operation" as const, userOpHash: h32("ghost"), txHash: h32("ghost tx"), block: "64000000", logIndex: 1, success: true }, said: "ghost", at: DEPOSIT_AT, validator: "root" };
+    await assert.rejects(apply(b, { ...p, admission: { ...p.admission, found: [...p.admission.found, ghost] } }), refused("postcondition", /would still find 1 fact/));
+    untouched(b);
+    const k = await books();
+    k.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at) VALUES (?, 'in', 145.499004, ?, 64045884, 0, 'chain-log', 1, 4663, ?)`)
+      .run(SPELLED, DEPOSIT_TX, DEPOSIT_AT);
+    const kept = await preview(k, fakeRpc().rpc);
+    assert.deepEqual(kept.proposals.inserts.map((i) => i.key), [`log:${SWEEP_TX}#7`], "the deposit is present, only the sweep is filed");
+    const deposit = { key: `log:${DEPOSIT_TX}#0`, amountRaw: "145499004", movement: "again", row: { ...kept.proposals.inserts[0]!.row, direction: "in" as const, amount_usdg: 145.499004,
+      tx_hash: DEPOSIT_TX, block_number: 64045884, log_index: 0, at: DEPOSIT_AT } };
+    await assert.rejects(apply(k, { ...kept, proposals: { ...kept.proposals, inserts: [deposit, ...kept.proposals.inserts] } }), refused("identity", /already names this movement/));
   });
 });
