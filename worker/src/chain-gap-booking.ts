@@ -1737,6 +1737,14 @@ export interface ApplyReport {
   admission: AdmissionState;
   rows: AppliedRow[];
   commitOutcome?: CommitOutcome;
+  /**
+   * The database it was applied to, as the plan names it (the shell's
+   * targetDigest: host, port and name). A look at the receipts, or a revert,
+   * pointed at another database would read "no receipt" as "never
+   * committed"; the shell refuses that first. Absent from a report of an
+   * earlier build.
+   */
+  target?: string;
   reportDigest: string;
 }
 
@@ -1854,7 +1862,7 @@ export async function applyBooking(db: Db, plan: BookingPlan, o: {
           canonical(admission), appliedAtMs);
     }
     const body = { format: APPLY_FORMAT, bookingId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef, appliedAtMs,
-      admission, rows };
+      admission, rows, target: plan.target };
     const report: ApplyReport = { ...body, format: APPLY_FORMAT, reportDigest: digestOf(body) };
     await o.persist?.(report);
     return report;
@@ -1882,6 +1890,7 @@ export function parseApplyReport(text: string): ApplyReport {
   if (r.commitOutcome !== undefined && !(COMMIT_OUTCOMES as readonly unknown[]).includes(r.commitOutcome)) {
     throw new BookingRefused("report", "the apply report's commitOutcome is neither \"unknown\" nor \"committed\"");
   }
+  if (r.target !== undefined && (typeof r.target !== "string" || !r.target)) throw new BookingRefused("report", "the apply report's target does not name a database");
   return r;
 }
 

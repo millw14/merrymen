@@ -704,8 +704,12 @@ OUTCOME UNKNOWN for booking <id>: the COMMIT was sent and no answer proved it ro
 It exits with `apply-outcome-unknown`. Run command 1 first. It opens a
 read-only connection and reads the booking's receipts in one read-only
 snapshot. It checks them against the report as a revert would, and writes
-its answer to its own `--output`. It changes nothing in the database. It
-prints one of:
+its answer to its own `--output`. It changes nothing in the database. The
+report names the database it was applied to (`target`: host, port and name,
+as the preview digest binds them). If `DATABASE_URL` names another database,
+the check and the revert refuse with `target` before they connect. They
+never read another database's missing receipts as "never committed". The
+check prints one of:
 
 - `COMMITTED booking <id> …`: the rows stand. Carry on from step 5, or take
   the booking back with command 2.

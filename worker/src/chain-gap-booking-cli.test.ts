@@ -579,6 +579,22 @@ describe("through the shell: an apply's report outlives a COMMIT whose answer is
     assert.ok(again.printed[0]!.startsWith("ALREADY REVERTED booking"), again.printed.join("\n"));
   });
 
+  it("the report names its database: a look or a revert pointed at another is refused before it connects, never read as 'not committed'", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("applied");
+    assert.equal(await runner(raw).run(applyArgs(digest, out)), 0);
+    assert.equal(parseApplyReport(readFileSync(out, "utf8")).target, targetDigest(DATABASE_URL));
+    let connected = 0;
+    const elsewhere = { DATABASE_URL: DATABASE_URL.replace("/railway", "/staging") };
+    for (const args of [["--revert", out, "--dry-run", "--output", file("receipts")], ["--revert", out, "--output", file("revert")]]) {
+      await assert.rejects(main(args, elsewhere, { ...runner(raw).deps, connect: async () => { connected++; throw new Error("connected"); } }),
+        (e: unknown) => e instanceof BookingRefused && e.code === "target" && /applied to another database/.test(e.message), args.join(" "));
+      assert.equal(existsSync(args.at(-1)!), false);
+    }
+    assert.equal(connected, 0);
+    assert.equal(flows(raw), 1, "nothing changed");
+  });
+
   it("replacing a report is whole or nothing: the path holds the old report or the new one, never a cut-short one", () => {
     const target = file("whole");
     finishReportFile(createReportFile(target), target, { v: 1 });

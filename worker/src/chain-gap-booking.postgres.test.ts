@@ -39,7 +39,7 @@ import { CHAIN_REFUSAL, knownChainFacts } from "./ledger-resume";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
 import { applyBooking, BOOKINGS_TABLE, BookingRefused, ensureBookingSchema, parseApplyReport, readBookingSnapshot, type BookingPlan, type StaleBasis } from "./chain-gap-booking";
-import { CliError, CommitOutcomeUnknown, connectBooking, main, pgClientDb, type PgClient } from "./chain-gap-booking-cli";
+import { CliError, CommitOutcomeUnknown, connectBooking, main, pgClientDb, targetDigest, type PgClient } from "./chain-gap-booking-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 const loadPg = async () => createRequire(import.meta.url)("pg") as unknown;
@@ -601,7 +601,8 @@ test("Postgres: the write transaction is SERIALIZABLE, and only an answer that p
   said.length = 0;
   const applied = file("applied");
   assert.equal(await run(applyArgs(applied)), 0, printed.join("\n"));
-  assert.equal(parseApplyReport(readFileSync(applied, "utf8")).commitOutcome, "committed");
+  const final = parseApplyReport(readFileSync(applied, "utf8"));
+  assert.deepEqual([final.commitOutcome, final.target], ["committed", targetDigest(scoped.toString())]);
   assert.equal(existsSync(`${applied}.committed.tmp`), false);
   assert.equal(said.find((s) => s.sql === "COMMIT")!.command, "COMMIT");
   assert.equal(await booked(), 1);

@@ -631,6 +631,12 @@ describe("apply and revert", () => {
     assert.deepEqual([unknown.commitOutcome, committed.commitOutcome], ["unknown", "committed"]);
     const { reportDigest: _d, ...body } = { ...report, commitOutcome: "maybe" };
     assert.throws(() => parseApplyReport(JSON.stringify({ ...body, reportDigest: digestOf(body) })), (e: unknown) => (e as BookingRefused).code === "report" && /commitOutcome/.test((e as Error).message));
+    // It names the database it was applied to, as the plan does; a report naming none, or nothing, is not one.
+    assert.equal(report.target, p.target);
+    for (const target of ["", 7]) {
+      const { reportDigest: _t, ...named } = { ...report, target };
+      assert.throws(() => parseApplyReport(JSON.stringify({ ...named, reportDigest: digestOf(named) })), (e: unknown) => (e as BookingRefused).code === "report" && /target/.test((e as Error).message));
+    }
     // DID IT COMMIT? The receipts, read and checked against the report, change nothing.
     assert.equal((await readBookingReceipts(b.db, unknown, { dialect: "sqlite" })).verdict, "applied");
     assert.equal((await revertBooking(b.db, parseApplyReport(JSON.stringify(unknown)), { nowMs: (NOW + 60) * 1000, dialect: "sqlite" })).outcome, "reverted");

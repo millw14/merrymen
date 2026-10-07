@@ -25,7 +25,8 @@
  * A COMMIT WHOSE ANSWER NEVER CAME is not "nothing happened": only a SQLSTATE
  * that proves a rollback (commitRolledBack) removes the report. Anything else
  * — a dropped connection, a terminated backend, a timeout — keeps it, says
- * OUTCOME UNKNOWN, and prints the two commands that settle it.
+ * OUTCOME UNKNOWN, and prints the two commands that settle it. The report
+ * names its database (target), and both refuse any other.
  *
  * WHAT CROSSES THE CONSOLE: the plan's lines (tenant, account, hashes, blocks,
  * amounts — public chain data and the classes), the digest and the refusal.
@@ -408,6 +409,16 @@ function recoveryLines(report: string): string[] {
     `  2. Take it back: ${SELF} --revert ${report} --output /absolute/new-revert-report.json`,
   ];
 }
+/**
+ * The report names the database it was applied to: a look at the receipts or a revert anywhere else would read "no receipt" as "never
+ * committed". A report of an earlier build names none, and its revert is decided by the receipts alone, as before.
+ */
+function sameDatabase(report: ApplyReport, databaseUrl: string): void {
+  if (report.target !== undefined && report.target !== targetDigest(databaseUrl)) {
+    throw new BookingRefused("target", "the apply report was applied to another database (by host, port and name) than DATABASE_URL names: " +
+      "nothing was read or written — point DATABASE_URL at the database it was applied to");
+  }
+}
 /** A report file that does not parse, given to the receipts check: an apply that died before its report was whole never sent its COMMIT. */
 function unfinishedReport(): BookingRefused {
   return new BookingRefused("report-unfinished", "the apply report is empty or cut short. If it is the --output of an apply that died, that apply never sent its COMMIT " +
@@ -458,6 +469,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     try { text = readFileSync(options.report, "utf8"); } catch { throw new CliError("report-unreadable"); }
     try { JSON.parse(text); } catch { throw unfinishedReport(); }
     const report = parseApplyReport(text);
+    sameDatabase(report, env.DATABASE_URL);
     const client = await full.connect(env.DATABASE_URL, true);
     let view: BookingReceipts;
     try {
@@ -473,6 +485,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     let text: string;
     try { text = readFileSync(options.report, "utf8"); } catch { throw new CliError("report-unreadable"); }
     const report = parseApplyReport(text);
+    sameDatabase(report, env.DATABASE_URL);
     const fd = createReportFile(options.output);
     let r: RevertReport;
     try {
