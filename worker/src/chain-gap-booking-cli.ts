@@ -213,7 +213,10 @@ export function sourceFingerprint(here = path.dirname(fileURLToPath(import.meta.
     "inflight-reconcile.ts", "custody.ts", "distinct-flows.ts", "paper-boundary.ts", "token-label.ts", "../../packages/core/src/capital-classify.ts",
     "../../packages/core/src/grant.ts", "../../packages/core/src/trencher-vault.ts",
     // How an owner operation is read, and the scanner inputs that reading shares: admission re-derives owner records with them.
-    "owner-operations.ts", "deposit-log.ts"];
+    "owner-operations.ts", "deposit-log.ts",
+    // Which owner records admission loads at all: only for the account the tenant's grant names (ledger-mirror.ts
+    // tenantGrantAccount), with the tables asked of the catalogue (db.ts tablePresent).
+    "ledger-mirror.ts", "db.ts"];
   return Object.fromEntries(files.map((f) => [f, createHash("sha256").update(readFileSync(path.resolve(here, f))).digest("hex")]));
 }
 

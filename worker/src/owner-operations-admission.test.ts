@@ -200,11 +200,14 @@ describe("an owner record answers an operation only as the chain proves it", () 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
 const NOW = 1_800_000_000;
 const CONTROLS = { readable: true, why: null };
-async function sharedDb(o: { table?: boolean } = {}) {
+async function sharedDb(o: { table?: boolean; grant?: string | null } = {}) {
   const raw = new DatabaseSync(":memory:");
   const shared = wrapSqlite(raw);
   await applyLedgerSchema(shared); await shared.exec(MIRROR_STATE_DDL); await shared.exec(PAPER_CHECKPOINT_SCHEMA);
   if (o.table === false) raw.exec("DROP TABLE owner_operations");
+  // The orchestrator's grants, as the mirror and admission read them: the tenant's account.
+  raw.exec("CREATE TABLE grants (tenant TEXT PRIMARY KEY, grant_json TEXT NOT NULL)");
+  if (o.grant !== null) raw.prepare("INSERT INTO grants VALUES (?, ?)").run(TENANT, JSON.stringify({ smartAccount: o.grant ?? A4B }));
   raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
     VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 1, 0, 'paper')`).run(A4B, TENANT, addr(1));
   raw.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at, epoch) VALUES (?, 'swap', 'x', 5, 'paper', ?, 1)").run(A4B, NOW - 5 * 86_400);
@@ -229,6 +232,41 @@ describe("what Postgres offers admission", () => {
     const k = await knownChainFacts(shared, A4B, { tenant: TENANT, chainId: 4663 });
     assert.deepEqual([...k.ownerRecords], [[OP.invalidateNonce, FX.invalidateNonce!.tx]]);
     assert.equal((await knownChainFacts(shared, A4B)).ownerRecords.size, 0, "a caller that names no tenant gets no owner answers");
+  });
+
+  it("ONLY FOR THE TENANT'S OWN ACCOUNT: no grant, a grant naming another account, or two grant rows, and no owner record answers anything", async () => {
+    const ask = async (shared: Awaited<ReturnType<typeof sharedDb>>["shared"], account = A4B) =>
+      [...(await knownChainFacts(shared, account, { tenant: TENANT, chainId: 4663 })).ownerRecords];
+    const own = await sharedDb();
+    insertRecord(own.raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx });
+    assert.deepEqual(await ask(own.shared), [[OP.invalidateNonce, FX.invalidateNonce!.tx]], "the grant names this account");
+    const ungranted = await sharedDb({ grant: null });
+    insertRecord(ungranted.raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx });
+    assert.deepEqual(await ask(ungranted.shared), [], "no grant row");
+    const other = await sharedDb({ grant: A9E });
+    insertRecord(other.raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx });
+    assert.deepEqual(await ask(other.shared), [], "the grant names another account");
+    // A record stamped with this tenant under the account its grant does NOT name answers for neither.
+    insertRecord(other.raw, { hash: OP.pureUsdgWithdraw, tx: FX.pureUsdgWithdraw!.tx, agent: A9E });
+    assert.deepEqual(await ask(other.shared), [], "the caller's account is not the grant's");
+    assert.deepEqual(await ask(other.shared, A9E), [[OP.pureUsdgWithdraw, FX.pureUsdgWithdraw!.tx]], "the grant's account, and only it");
+    const two = await sharedDb();
+    insertRecord(two.raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx });
+    two.raw.prepare("INSERT INTO grants VALUES (?, ?)").run(TENANT.toUpperCase().replace(/^0X/, "0x"), JSON.stringify({ smartAccount: A4B }));
+    assert.deepEqual(await ask(two.shared), [], "two grant rows name the tenant: ambiguous, so none");
+    const table = await sharedDb();
+    table.raw.exec("DROP TABLE grants");
+    insertRecord(table.raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx });
+    assert.deepEqual(await ask(table.shared), [], "no grants table: none, and nothing thrown");
+  });
+
+  it("the identity is PER ACCOUNT: another tenant's record of the same hash under its own account neither blocks nor answers this tenant's", async () => {
+    const { raw, shared } = await sharedDb();
+    insertRecord(raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx, tenant: addr(0xbad), agent: A9E });
+    insertRecord(raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx });
+    assert.throws(() => insertRecord(raw, { hash: OP.invalidateNonce, tx: FX.invalidateNonce!.tx, agent: A4B.toUpperCase().replace(/^0X/, "0x") }), /UNIQUE/,
+      "one record per (chain, account, operation), in any letter-case");
+    assert.deepEqual([...(await knownChainFacts(shared, A4B, { tenant: TENANT, chainId: 4663 })).ownerRecords], [[OP.invalidateNonce, FX.invalidateNonce!.tx]]);
   });
 
   it("a database without the table answers no owner record, and throws nothing", async () => {

@@ -327,8 +327,10 @@ export function auditReport(snap: AuditSnapshot, ev: AuditChain, o: { nowSec: nu
   for (const g of snap.grants) if (!grantOf.has(g.account)) grantOf.set(g.account, g);
   const agentOf = new Map(snap.agents.map((a) => [a.account, a]));
   const flowsHeld = new Set(snap.flows.filter((f) => f.logIndex !== null).map((f) => `${f.account}|${f.txHash}:${f.logIndex}`));
+  // By account and hash, as the record's identity is (store.ts): another
+  // account's record of the same hash is never shown beside this row.
   const recordOf = new Map<string, AuditOwnerRecord>();
-  for (const r of snap.ownerRecords ?? []) recordOf.set(r.userOpHash, r);
+  for (const r of snap.ownerRecords ?? []) recordOf.set(`${r.account}|${r.userOpHash}`, r);
   const byValidator: Record<ValidatorClass, number> = { root: 0, permission: 0, secondary: 0, unknown: 0, "not-in-receipt": 0, unread: 0, "other-chain": 0, "no-tx": 0 };
   const rootRows: RootRow[] = [];
   const anomalies: AuditReport["anomalies"] = [];
@@ -364,7 +366,7 @@ export function auditReport(snap: AuditSnapshot, ev: AuditChain, o: { nowSec: nu
     const sellIntoCash = (t.kind === "swap" || t.kind === "curve-trade") && t.buyToken === USDG;
     const current = agent?.epoch !== null && agent?.epoch !== undefined && t.epoch === agent.epoch;
     const landed = t.status === "landed";
-    const record = recordOf.get(t.userOpHash) ?? null;
+    const record = recordOf.get(`${t.account}|${t.userOpHash}`) ?? null;
     const counted: Counted = {
       budgetSeedTrailingDay: trailing,
       budgetSeedOps: trailing ? 1 : 0,

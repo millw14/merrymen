@@ -117,6 +117,25 @@ export function wrapSqlite(raw: DatabaseSync): Db {
   return db;
 }
 
+/**
+ * IS THIS TABLE IN THE DATABASE? Asked of the catalogue, never learned from a
+ * failed statement: in a Postgres transaction a failed read aborts the rest
+ * (the chain-gap booking tool's snapshot is one), and on the first boot after
+ * a deploy the shared DDL may not have run yet. to_regclass answers NULL for
+ * an absent table on Postgres; SQLite has no such function, and its own
+ * catalogue is asked instead. `name` is a plain identifier, never input.
+ */
+export async function tablePresent(db: Pick<Db, "prepare">, name: string): Promise<boolean> {
+  if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error(`not a table name: ${name}`);
+  try {
+    const row = (await db.prepare(`SELECT to_regclass('${name}') AS t`).get()) as { t?: unknown } | undefined;
+    return row?.t !== null && row?.t !== undefined;
+  } catch (e) {
+    if (!/no such function: to_regclass/i.test(String((e as Error)?.message ?? ""))) throw e;
+    return !!(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+  }
+}
+
 // ── sqlite → postgres translation ────────────────────────────────────────────
 //
 // The store writes SQL in the sqlite dialect (that is the self-hosted default and

@@ -156,6 +156,17 @@ describe("the audit", () => {
     assert.equal(r.ownerRecords.onAnotherChain.length, 1, "and one on a chain other than its grant's is called out");
   });
 
+  it("a record of the same hash under ANOTHER account is never named beside this account's row (the identity is per account)", async () => {
+    const raw = await ledger();
+    raw.prepare(`INSERT INTO owner_operations (tenant, agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition, review_reason,
+        usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+      VALUES (?, ?, 4663, ?, ?, 1, 1, 11, '0x0', 'root', 'acknowledged', NULL, '[]', '[]', '[]', ?, '1', 'arm-reconcile', 1, 1)`)
+      .run(`0x${"0d".repeat(20)}`, `0x${"0c".repeat(20)}`, OP.recoverFunds, FX.recoverFunds!.tx, `0x${"0".repeat(40)}`);
+    const r = await audit(raw);
+    assert.equal(r.rootRows.find((x) => x.userOpHash === OP.recoverFunds)!.counted.ownerRecord, null);
+    assert.equal(r.ownerRecords.rows?.length, 1, "still listed among the records, under its own account");
+  });
+
   it("a receipt that cannot be read leaves coverage incomplete: exit 3, whatever else was found", async () => {
     const r = await audit(await ledger(), { rpc: chainRpc({ fail: [FX.vaultSweep!.tx] }) });
     assert.equal(r.coverage.complete, false);

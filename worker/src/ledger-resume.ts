@@ -85,7 +85,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import { createPublicClient, http, type Hex } from "viem";
-import { isTransientDbError, type Db } from "./db";
+import { isTransientDbError, tablePresent, type Db } from "./db";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import { planBasisSeed, planFloorSeed, type BasisSeedRow, type FloorSeedRow } from "./basis-seed";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -95,6 +95,7 @@ import { validRiskPeriod, readRiskPeriod } from "./risk-period";
 import { getLogsAdaptive, addressTopic, type RawLog } from "./inflight-reconcile";
 import { CASH, ENTRYPOINT, chainForId } from "../../packages/core/src/index";
 import { isRootSuccessOf, ownerOperationOf, type OwnerReceiptLog } from "./owner-operations";
+import { tenantGrantAccount } from "./ledger-mirror";
 
 export const RESUME_PREVIEW_ENV = "MERRYMEN_RESUME_PREVIEW";
 export const RESUME_APPROVE_ENV = "MERRYMEN_RESUME_APPROVE";
@@ -1608,21 +1609,14 @@ export interface GapChain {
 export interface OwnerAnswer { txHash: string; covers: ReadonlySet<string> }
 
 /**
- * IS THERE AN owner_operations TABLE? Asked of the catalogue, never learned
- * from a failed statement: in a Postgres transaction a failed read aborts the
- * rest (the booking tool's snapshot is one), and on the first boot after a
- * deploy the shared DDL may not have run yet. to_regclass answers NULL for an
- * absent table on Postgres; SQLite has no such function, and its catalogue is
- * asked instead. Absent means no owner record answers anything: fail closed.
+ * IS THERE AN owner_operations TABLE? Asked of the catalogue (db.ts
+ * tablePresent), never learned from a failed statement: in a Postgres
+ * transaction a failed read aborts the rest (the booking tool's snapshot is
+ * one), and on the first boot after a deploy the shared DDL may not have run
+ * yet. Absent means no owner record answers anything: fail closed.
  */
 export async function ownerOperationsPresent(db: Pick<Db, "prepare">): Promise<boolean> {
-  try {
-    const row = (await db.prepare("SELECT to_regclass('owner_operations') AS t").get()) as { t?: unknown } | undefined;
-    return row?.t !== null && row?.t !== undefined;
-  } catch (e) {
-    if (!/no such function: to_regclass/i.test(String((e as Error)?.message ?? ""))) throw e;
-    return !!(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'owner_operations'").get());
-  }
+  return tablePresent(db, "owner_operations");
 }
 /**
  * ONE THING ON CHAIN THAT POSTGRES LACKS, named by public chain data only: an
@@ -1966,6 +1960,16 @@ export async function ownerAnswersFor(o: {
  * chain — userOpHash -> tx. A 'review' record is never loaded, so its
  * operation stays missing. The table is asked of the catalogue first
  * (ownerOperationsPresent): absent, there are none.
+ *
+ * ONLY FOR THE TENANT'S OWN ACCOUNT. `account` is the caller's; an owner
+ * record answers for it only when the tenant's own grant row — the
+ * orchestrator's `grants` table, the one the mirror stamps by
+ * (ledger-mirror.ts tenantGrantAccount) — names exactly that account. No
+ * grant, two grant rows, or a grant naming another account: no owner record
+ * is loaded, whatever rows exist, and every root operation stays missing
+ * (fail closed). The identity is per account too (store.ts: chain_id,
+ * LOWER(agent_id), user_op_hash), so another tenant's child cannot pre-empt
+ * this tenant's record by recording the same hash under its own account.
  */
 export async function knownChainFacts(db: Db, account: string, owner?: { tenant: string; chainId: number }): Promise<{
   ops: Set<string>; txs: Set<string>; flows: Set<string>; ownerRecords: Map<string, string>;
@@ -1981,7 +1985,7 @@ export async function knownChainFacts(db: Db, account: string, owner?: { tenant:
   }
   for (const f of flows) if (typeof f.tx_hash === "string" && f.log_index !== null && f.log_index !== undefined) fl.add(`${f.tx_hash.toLowerCase()}:${Number(f.log_index)}`);
   const ownerRecords = new Map<string, string>();
-  if (owner && (await ownerOperationsPresent(db))) {
+  if (owner && (await ownerOperationsPresent(db)) && (await tenantGrantAccount(db, owner.tenant)) === a) {
     const rows = (await db.prepare(`SELECT user_op_hash, tx_hash FROM owner_operations
         WHERE LOWER(tenant) = ? AND LOWER(agent_id) = ? AND chain_id = ? AND validator = 'root' AND disposition = 'acknowledged'`)
       .all(owner.tenant.toLowerCase(), a, owner.chainId)) as Array<Record<string, unknown>>;

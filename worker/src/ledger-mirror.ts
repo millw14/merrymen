@@ -36,7 +36,7 @@ import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { getAddress, isAddress } from "viem";
-import type { Db } from "./db";
+import { tablePresent, type Db } from "./db";
 import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
 import { mirrorPaperCheckpoints } from "./paper-checkpoint";
@@ -264,7 +264,7 @@ export interface MirrorReport {
 /** The `copied` keys that count rows read and deliberately NOT inserted. */
 const NOT_COPIED = "_already_mirrored";
 /** The `copied` keys that count rows a child offered and this pass refused or could not place (mirrorOwnerOperations). */
-const NOT_COPIED_FOR_CAUSE = ["_foreign", "_unattributed"] as const;
+const NOT_COPIED_FOR_CAUSE = ["_foreign", "_invalid", "_unattributed"] as const;
 
 /**
  * An account id as EIP-55 spells it, or the lowercase id back when it is not
@@ -313,8 +313,9 @@ export function mirrorCountsLine(tenant: string, r: Pick<MirrorReport, "copied" 
       ? `skipped ${s} already mirrored (${refused.map(([k, v]) => `${k.slice(0, -NOT_COPIED.length)} ${v}`).join(", ")})`
       : null;
   // ROWS A CHILD OFFERED THAT WERE NOT ITS TO OFFER, or that this pass could
-  // not place: an owner operation under another account, or with no grant to
-  // name the account by (mirrorOwnerOperations). Never among the arrivals.
+  // not place: an owner operation under another account, one that is not a
+  // full root record, or one with no agreed account to name it by
+  // (mirrorOwnerOperations). Never among the arrivals.
   const kept = entries.filter(([k, v]) => held(k) && v > 0);
   const keptSaid = kept.length
     ? `not copied ${kept.reduce((a, [, v]) => a + v, 0)} (${kept.map(([k, v]) => `${k.replace(/_([a-z]+)$/, " $1")} ${v}`).join(", ")})`
@@ -396,58 +397,106 @@ export function missingOwnerOperationsTable(e: unknown): boolean {
   return /no such table/i.test(e.message) || (e as { code?: unknown }).code === "42P01";
 }
 
-/** How far the owner-operations cursor opens behind itself, as the decisions cursor does: created_at is not unique. */
-const OWNER_OPERATIONS_LOOKBACK_SEC = 300;
 const OWNER_OP_HASH = /^0x[0-9a-f]{64}$/;
 
-/** The tenant's smart account as its grant names it — the orchestrator's own table, never the child's. Null when it cannot be read. */
-async function grantAccountOf(shared: Db, tenant: string): Promise<string | null> {
+/**
+ * THE TENANT'S SMART ACCOUNT AS ITS OWN GRANT NAMES IT: the orchestrator's
+ * `grants` table, which only the orchestrator and the grant store write, never
+ * the child. Exactly one grant row for the tenant, naming a full address;
+ * anything else (no table, no row, two rows, a value that is not an address,
+ * a read that fails) is null. The table is asked of the catalogue first
+ * (db.ts tablePresent), so a database without it answers null, not an aborted
+ * statement.
+ *
+ * The mirror copies an owner record only under this account
+ * (mirrorOwnerOperations), and admission loads one only for it
+ * (ledger-resume.ts knownChainFacts): one authority for both.
+ */
+export async function tenantGrantAccount(db: Pick<Db, "prepare">, tenant: string): Promise<string | null> {
   try {
-    const row = (await shared.prepare(`SELECT grant_json->>'smartAccount' AS account FROM grants WHERE LOWER(tenant) = ?`)
-      .get(tenant.toLowerCase())) as { account?: unknown } | undefined;
-    const a = String(row?.account ?? "").toLowerCase();
+    if (!(await tablePresent(db, "grants"))) return null;
+    const rows = (await db.prepare(`SELECT grant_json->>'smartAccount' AS account FROM grants WHERE LOWER(tenant) = ?`)
+      .all(tenant.toLowerCase())) as Array<{ account?: unknown }>;
+    if (rows.length !== 1) return null;
+    const a = String(rows[0]!.account ?? "").toLowerCase();
     return /^0x[0-9a-f]{40}$/.test(a) ? a : null;
   } catch {
     return null;
   }
 }
 
+/** Write the owner-operations cursor: the child id last settled, its created_at as the witness, and when the book was last written. */
+async function setOwnerOperationsMark(db: Db, tenant: string, lastId: number, stamp: number | null, updatedAt: number): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = excluded.last_id, last_stamp = excluded.last_stamp, updated_at = excluded.updated_at`,
+    )
+    .run(tenant, "owner_operations", lastId, stamp, updatedAt);
+}
+
 /**
  * COPY THE CHILD'S OWNER OPERATIONS UP, BY THEIR IDENTITY.
  *
- * NOT A LOG TABLE, deliberately, and three reasons stand behind it. A child
- * ledger written before this table existed would fail a LOG_TABLES read with
- * "no such table" — and any `failed` entry withholds an anchor, a drain, a
- * retirement and the fleet checkpoint (orchestrator.ts finalMirrorBeforeAnchor,
- * drainContinuousBook; ledger-safeguard.ts). An id cursor with a witness would
- * also have to be in the continuity proof, and the persistent-home import
- * rebuilds a book from ledger-import.ts SPECS alone, so a book restored with
- * an empty table would refuse that proof (or rewind, and stop the guarded
- * mirror). And nothing here needs an id: a row is immutable and its identity,
- * (chain_id, user_op_hash), is unique in both databases.
+ * NOT A LOG TABLE, deliberately. A child ledger written before this table
+ * existed would fail a LOG_TABLES read with "no such table", and any `failed`
+ * entry withholds an anchor, a drain, a retirement and the fleet checkpoint
+ * (orchestrator.ts finalMirrorBeforeAnchor, drainContinuousBook;
+ * ledger-safeguard.ts): here that ledger is zero rows. And a LOG_TABLES
+ * cursor is in the continuity proof (ledger-safeguard.ts
+ * assertLedgerSourceContinuity) and the handover's final cursor, which the
+ * persistent-home import, rebuilding a book from ledger-import.ts SPECS
+ * alone, could not satisfy. This cursor is in neither, because a rewind of it
+ * can neither duplicate nor lose a record: every insert is ON CONFLICT DO
+ * NOTHING on the record's identity, (chain_id, LOWER(agent_id), user_op_hash).
  *
- * So, as the decisions copy does: a created_at watermark opened 300 seconds
- * behind itself, ascending, ON CONFLICT DO NOTHING on that identity, the rows
- * and the watermark in one transaction. A rebuilt or imported child that has
- * lost old rows changes nothing here; one that re-records an operation adds
- * nothing. Only rows newer than the watermark are counted, so the overlap
- * re-read every pass is silent, and the watermark (and its updated_at, which
- * says when the tenant's book was last written) moves only when it advances.
+ * THE CURSOR IS THE CHILD'S OWN id, WITH A WITNESS, AND NO CLOCK IN IT.
+ * mirror_state.last_id is the child id of the last row a pass settled, and
+ * last_stamp that row's created_at (the LOG_TABLES convention). A child's
+ * AUTOINCREMENT id only grows within one ledger, whatever its clock does, so a
+ * record written after the clock stepped back is still after the cursor. (A
+ * created_at watermark with a 300-second overlap, the first cut, skipped for
+ * good every record a clock stepped back by more than that wrote.) A rebuilt
+ * or imported child is told apart by the witness: when the row at last_id is
+ * gone or carries another created_at, the pass reads from id 0 again. That
+ * re-read is free (see above), so it is not reported as `restarted` and holds
+ * no drain, anchor or checkpoint. A cursor with no witness (an earlier
+ * build's) is not trusted either: read from 0.
  *
- * THE TENANT IS THE MIRROR'S, NOT THE CHILD'S. Each row is stamped with this
- * pass's tenant, and copied only when its agent_id is the account the
- * orchestrator knows for that tenant (`account`, else the shared grant), its
- * hashes are full lowercase hashes and its validator is root. Any other row is
- * skipped and counted (`owner_operations_foreign`): a child cannot place a
- * record under another tenant's account, which could otherwise either answer
- * that tenant's operation or block its genuine record (first row wins). With
- * no account to check against, nothing is copied and nothing advances
- * (`owner_operations_unattributed`), so a later pass copies it.
+ * THE BOUND, stated. A rebuilt child that already holds a row at exactly
+ * last_id, created in exactly the witnessed second, is taken for the old
+ * ledger, and its rows at lower ids are not re-read. That needs a new ledger
+ * to record as many owner operations as the old one before the mirror's first
+ * pass over it (passes run every few seconds; an imported book starts with
+ * none), the last in the same second. A record so missed is absent from
+ * Postgres, so admission names its operation and holds the tenant: fail
+ * closed, and nothing is booked from it.
  *
- * Bounded like every table: more than a batch newer than `since` sets hasMore.
- * More than a batch inside one 300-second window would hold the cursor, and
- * hold the tenant's drains and anchors with it (fail closed); a child records
- * at most the root operations of one 26-hour lookback, far fewer.
+ * THE TENANT IS THE MIRROR'S, NOT THE CHILD'S. The account is the tenant's
+ * grant (tenantGrantAccount). A caller that names one (the fleet checkpoint,
+ * its roster's) must agree with the grant wherever there is one. Each row read
+ * is then exactly one of:
+ *
+ *  - copied, or already there: stamped with this pass's tenant;
+ *  - foreign: a full record under ANOTHER account. Never copied under this
+ *    tenant (it could otherwise answer, or block, that account's operation),
+ *    and settled: the cursor passes it and it is counted once, on the pass
+ *    that passes it (`owner_operations_foreign`). Foreign is decided against
+ *    the grant's account alone, which no child writes, and a tenant keeps its
+ *    account across a grant replacement, so no later pass would copy it;
+ *  - invalid: not a full lowercase hash pair, or not root. No account could
+ *    copy it; settled and counted once (`owner_operations_invalid`).
+ *
+ * With no account to check against (no grant, or the caller's and the
+ * grant's disagree), nothing is copied, the cursor does not move, and every
+ * row read is counted on every such pass (`owner_operations_unattributed`):
+ * the first pass that can name the account copies it. Never skipped.
+ *
+ * Bounded like every table: more than a batch after the cursor sets hasMore.
+ * The cursor's updated_at says when the tenant's book was last written
+ * (ledger-resume.ts lastMirrorPassAt), so it moves only when a pass inserts a
+ * record or passes rows no pass had passed: never on a pass that read
+ * nothing, and never on a re-read after a rewind that found nothing new.
  */
 export async function mirrorOwnerOperations(o: {
   tenant: string; child: Db; shared: Db; batch: number; nowSec: number; account?: string | null;
@@ -456,15 +505,24 @@ export async function mirrorOwnerOperations(o: {
   const tenant = o.tenant.toLowerCase();
   const cols = OWNER_OPERATION_COLUMNS;
   const mark = (await o.shared
-    .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
-    .get(o.tenant, "owner_operations")) as { last_id: unknown } | undefined;
-  const watermark = Number(mark?.last_id ?? 0);
-  const since = Math.max(0, watermark - OWNER_OPERATIONS_LOOKBACK_SEC);
+    .prepare(`SELECT last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? AND table_name = ?`)
+    .get(o.tenant, "owner_operations")) as { last_id: unknown; last_stamp: unknown; updated_at: unknown } | undefined;
+  let from = 0;
+  let rewound = false;
   let fetched: Record<string, unknown>[];
   try {
+    if (mark) {
+      const at = Number(mark.last_id);
+      const stamp = mark.last_stamp === null || mark.last_stamp === undefined ? null : String(mark.last_stamp);
+      if (Number.isSafeInteger(at) && at > 0 && stamp !== null) {
+        const witness = (await o.child.prepare(`SELECT created_at FROM owner_operations WHERE id = ?`).get(at)) as { created_at?: unknown } | undefined;
+        if (witness && String(witness.created_at) === stamp) from = at;
+        else rewound = true;
+      } else if (at !== 0) rewound = true;
+    }
     fetched = (await o.child
-      .prepare(`SELECT id, ${cols.join(", ")}, created_at FROM owner_operations WHERE created_at >= ? ORDER BY created_at ASC, id ASC LIMIT ?`)
-      .all(since, o.batch + 1)) as Record<string, unknown>[];
+      .prepare(`SELECT id, ${cols.join(", ")}, created_at FROM owner_operations WHERE id > ? ORDER BY id ASC LIMIT ?`)
+      .all(from, o.batch + 1)) as Record<string, unknown>[];
   } catch (e) {
     // A ledger from before this table: it recorded none. No cursor row is
     // written for it, so a tenant with no owner operation has no trace here.
@@ -475,48 +533,51 @@ export async function mirrorOwnerOperations(o: {
     throw e;
   }
   const rows = fetched.slice(0, o.batch);
-  const fresh = (r: Record<string, unknown>) => Number(r.created_at) > watermark;
+  const kept = Number(mark?.updated_at ?? 0);
   if (!rows.length) {
     copied.owner_operations = 0;
+    // A rebuilt child with no record yet: forget the cursor it no longer
+    // holds, so the next pass does not ask the witness again. Nothing new was
+    // written, so updated_at keeps what it said.
+    if (rewound) await setOwnerOperationsMark(o.shared, o.tenant, 0, null, kept);
     return { copied, hasMore: false };
   }
-  const account = o.account === undefined ? await grantAccountOf(o.shared, tenant) : o.account ? o.account.toLowerCase() : null;
+  const granted = await tenantGrantAccount(o.shared, tenant);
+  const named = o.account === undefined ? undefined : o.account ? o.account.toLowerCase() : null;
+  const account = named === undefined ? granted : named !== null && (granted === null || granted === named) ? named : null;
   if (!account) {
     copied.owner_operations = 0;
-    const waiting = rows.filter(fresh).length;
-    if (waiting > 0) copied.owner_operations_unattributed = waiting;
+    copied.owner_operations_unattributed = rows.length;
     return { copied, hasMore: false };
   }
-  let inserted = 0, already = 0, foreign = 0;
-  const highest = Number(rows[rows.length - 1]!.created_at);
+  let inserted = 0, already = 0, foreign = 0, invalid = 0;
+  const last = rows[rows.length - 1]!;
   await o.shared.tx(async (db) => {
     const ins = db.prepare(
       `INSERT INTO owner_operations (tenant, ${cols.join(", ")}, created_at) VALUES (?, ${cols.map(() => "?").join(", ")}, ?)
-       ON CONFLICT (chain_id, user_op_hash) DO NOTHING`,
+       ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO NOTHING`,
     );
     for (const r of rows) {
-      const ours = String(r.agent_id ?? "").toLowerCase() === account && OWNER_OP_HASH.test(String(r.user_op_hash ?? ""))
-        && OWNER_OP_HASH.test(String(r.tx_hash ?? "")) && r.validator === "root";
-      if (!ours) {
-        if (fresh(r)) foreign++;
+      if (!OWNER_OP_HASH.test(String(r.user_op_hash ?? "")) || !OWNER_OP_HASH.test(String(r.tx_hash ?? "")) || r.validator !== "root") {
+        invalid++;
+        continue;
+      }
+      if (String(r.agent_id ?? "").toLowerCase() !== account) {
+        foreign++;
         continue;
       }
       const res = await ins.run(tenant, ...cols.map((c) => r[c] ?? null), r.created_at);
       if (Number(res.changes) > 0) inserted++;
-      else if (fresh(r)) already++;
+      else already++;
     }
-    if (highest > watermark) {
-      await db
-        .prepare(
-          `INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at`,
-        )
-        .run(o.tenant, "owner_operations", highest, o.nowSec);
-    }
+    // Same transaction as the rows: a crash between the two re-reads rows
+    // that ON CONFLICT absorbs, and a cursor never moves without its rows.
+    await setOwnerOperationsMark(db, o.tenant, Number(last.id), Number(last.created_at), inserted > 0 || !rewound ? o.nowSec : kept);
   });
   copied.owner_operations = inserted;
   if (already > 0) copied[`owner_operations${NOT_COPIED}`] = already;
   if (foreign > 0) copied.owner_operations_foreign = foreign;
+  if (invalid > 0) copied.owner_operations_invalid = invalid;
   return { copied, hasMore: fetched.length > o.batch };
 }
 
@@ -536,8 +597,9 @@ export async function mirrorTenant(args: {
   /**
    * The tenant's smart account as the ORCHESTRATOR knows it, never as the
    * child says: an owner_operations row is copied only under it (see
-   * mirrorOwnerOperations). Absent: read from the shared grants table, which
-   * only the orchestrator and the grant store write.
+   * mirrorOwnerOperations). It must agree with the shared grants table, which
+   * only the orchestrator and the grant store write, wherever that names one;
+   * absent, the grant alone names it.
    */
   account?: string | null;
 }): Promise<MirrorReport> {

@@ -379,12 +379,17 @@ const SQLITE_SCHEMA = `
     -- cost_basis, the journal or a peak. Its USDG capital legs stay the
     -- deposit scanner's flows.
     --
-    -- APPEND-ONLY AND IDEMPOTENT BY IDENTITY: (chain_id, user_op_hash) is
-    -- unique, the child inserts ON CONFLICT DO NOTHING, and so does the mirror
-    -- (ledger-mirror.ts), which copies by that identity rather than by this
-    -- table's id. The tenant column is NULL in a child and stamped by the mirror from
-    -- its own grant, never from the child. Admission lets a row answer an
-    -- operation only after re-deriving it from the receipt (ledger-resume.ts).
+    -- APPEND-ONLY AND IDEMPOTENT BY IDENTITY, PER ACCOUNT: (chain_id,
+    -- LOWER(agent_id), user_op_hash) is unique, the child inserts ON CONFLICT
+    -- DO NOTHING, and so does the mirror (ledger-mirror.ts), which copies by
+    -- that identity. The account is in it because Postgres holds every
+    -- tenant's records in one table: keyed on the hash alone, another
+    -- tenant's child could record this tenant's operation hash under its own
+    -- account first, and the genuine record would then never land (first row
+    -- wins). The tenant column is NULL in a child and stamped by the mirror
+    -- from its own grant, never from the child. Admission lets a row answer an
+    -- operation only for the tenant's own account, and only after re-deriving
+    -- it from the receipt (ledger-resume.ts).
     CREATE TABLE IF NOT EXISTS owner_operations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant TEXT,
@@ -409,7 +414,7 @@ const SQLITE_SCHEMA = `
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       CHECK ((disposition = 'acknowledged' AND review_reason IS NULL) OR (disposition = 'review' AND review_reason IS NOT NULL))
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS owner_operations_identity ON owner_operations (chain_id, user_op_hash);
+    CREATE UNIQUE INDEX IF NOT EXISTS owner_operations_account_identity ON owner_operations (chain_id, LOWER(agent_id), user_op_hash);
     CREATE INDEX IF NOT EXISTS owner_operations_agent_time ON owner_operations (agent_id, created_at DESC);
 `;
 
@@ -1021,6 +1026,18 @@ const SQLITE_ALTERS: string[] = [
   // amounts since the class ledger shipped, and then dropped them on the floor.
   // This is where they land, so the difference survives the fold.
   "ALTER TABLE class_positions ADD COLUMN swept_raw TEXT",
+  // ── OWNER RECORDS ARE UNIQUE PER ACCOUNT, NOT ACROSS THE FLEET ─────────
+  //
+  // The first cut of owner_operations made (chain_id, user_op_hash) unique.
+  // In the shared Postgres that let one tenant's child pre-empt another
+  // tenant's genuine record by recording the same hash under its own account
+  // first. SQLITE_SCHEMA now builds owner_operations_account_identity on
+  // (chain_id, LOWER(agent_id), user_op_hash), and this drops the old index
+  // wherever an earlier build made it. Safe on a populated table: every row
+  // set the old index admitted, the per-account one admits too (it is a
+  // strictly weaker constraint), so the new index has already built by the
+  // time this runs; and IF EXISTS makes it a no-op everywhere else.
+  "DROP INDEX IF EXISTS owner_operations_identity",
 ];
 
 // Financial readers treat account casing as one account and scope every read
@@ -3852,7 +3869,7 @@ export async function listOpHashes(agentId: string): Promise<Set<string>> {
 /**
  * RECORD AN OPERATION THE OWNER'S OWN KEY SIGNED — never as a trade.
  *
- * One INSERT with a unique identity, (chain_id, user_op_hash), ON CONFLICT DO
+ * One INSERT with a unique identity, (chain_id, LOWER(agent_id), user_op_hash), ON CONFLICT DO
  * NOTHING: 'inserted' the first time, 'present' after, so a crash on either
  * side of it leaves nothing to replay (the record moves no money, and a
  * second insert changes nothing). 'failed' on any error, and NEVER a fallback
@@ -3865,7 +3882,7 @@ export async function recordOwnerOperation(row: OwnerOperationRow): Promise<"ins
     const res = await getDb()
       .prepare(
         `INSERT INTO owner_operations (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
-         ON CONFLICT (chain_id, user_op_hash) DO NOTHING`,
+         ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO NOTHING`,
       )
       .run(...cols.map((c) => row[c]));
     return Number(res.changes) > 0 ? "inserted" : "present";

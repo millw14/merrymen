@@ -4,11 +4,15 @@
  * DATABASE_URL.
  *
  * What only Postgres can show: the translated DDL with its CHECKs and its
- * unique identity, to_regclass answering for a table before and after it
- * exists, the mirror's ON CONFLICT (chain_id, user_op_hash) on a real unique
- * index, the server itself holding the audit's connection read-only, the
- * application_name it goes by, grant_json as JSONB read field by field, and
- * every table's row count unchanged by an audit.
+ * unique identity, per account (an expression index on LOWER(agent_id)), and
+ * the migration off the first cut's fleet-wide index on a populated table;
+ * to_regclass answering for a table before and after it exists; the mirror's
+ * ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) inferring that
+ * expression index; another tenant's child unable to pre-empt a genuine
+ * record; admission loading records only for the account the tenant's JSONB
+ * grant names; the server itself holding the audit's connection read-only,
+ * the application_name it goes by, grant_json as JSONB read field by field,
+ * and every table's row count unchanged by an audit.
  *
  * Each run creates its own database and drops it. Run with
  * MERRYMEN_TEST_PG_URL=postgres://…@127.0.0.1:<port>/<db> and the `pg`
@@ -44,6 +48,8 @@ const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 const RECOVER = "0x04f8241f6d02241469b9c2bc2d2f8cc4cca719eb5c6d54f3a77077c7e41ab3a7";
 const INVALIDATE = "0x496e7211db25d250d9142105ab5024debcf05519c734d83191145af8eac09ffa";
 const SESSION = "0x75ab968e2c2dad36467d00f665ab8a2667539517a86d64fdd05d0aadb2c5e905";
+const OTHER_TENANT = `0x${"0b".repeat(20)}`;
+const OTHER_ACCOUNT = `0x${"0c".repeat(20)}`;
 const NOW = FX.recoverFunds!.timestamp + 3600;
 const fixtures = () => Object.values(FX).filter((f): f is Fixture => typeof f === "object" && f !== null && "tx" in f);
 const rpc: RpcCall = async (method, params) => {
@@ -107,7 +113,26 @@ test("Postgres: owner_operations' DDL, its identity, the mirror and admission's 
   await assert.rejects(insert({ ...recover, validator: "permission" }), /check constraint/i);
   await assert.rejects(insert({ ...recover, disposition: "acknowledged" }), /check constraint/i, "an acknowledged row carrying a review reason");
   await insert(recover);
-  await assert.rejects(insert(recover), /duplicate key/, "one record per (chain, operation)");
+  await assert.rejects(insert(recover), /duplicate key/, "one record per (chain, account, operation)");
+  await assert.rejects(insert({ ...recover, agent_id: ACCOUNT.toUpperCase().replace(/^0X/, "0x") }), /duplicate key/, "in any letter-case of the account");
+  const indexes = async () => (await setup.query("SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'owner_operations' ORDER BY indexname")).rows
+    .map((r): [string, string] => [String(r.indexname), String(r.indexdef)]);
+  assert.ok((await indexes()).some(([n, d]) => n === "owner_operations_account_identity" && /UNIQUE/.test(d) && /lower\(agent_id\)/.test(d)), JSON.stringify(await indexes()));
+  assert.ok(!(await indexes()).some(([n]) => n === "owner_operations_identity"));
+
+  // THE MIGRATION, on a populated table: a database an earlier build of this
+  // change made, with the fleet-wide (chain_id, user_op_hash) index and a row
+  // in it. Every deploy re-applies the schema: the per-account index is kept
+  // (it already holds), the fleet-wide one is dropped, and no row moves.
+  await setup.query("DROP INDEX owner_operations_account_identity");
+  await setup.query("CREATE UNIQUE INDEX owner_operations_identity ON owner_operations (chain_id, user_op_hash)");
+  await assert.rejects(insert({ ...recover, agent_id: OTHER_ACCOUNT }), /duplicate key/, "the first cut: one record per hash, fleet-wide");
+  const rowsBefore = (await setup.query("SELECT * FROM owner_operations ORDER BY id")).rows;
+  await applyLedgerSchema(db);
+  assert.deepEqual((await setup.query("SELECT * FROM owner_operations ORDER BY id")).rows, rowsBefore, "no row moved");
+  assert.deepEqual((await indexes()).map(([n]) => n).filter((n) => /identity/.test(n)), ["owner_operations_account_identity"]);
+  await applyLedgerSchema(db);
+  assert.deepEqual((await indexes()).map(([n]) => n).filter((n) => /identity/.test(n)), ["owner_operations_account_identity"], "and again: idempotent");
 
   // THE MIRROR'S INSERT, on the real unique index: a child re-recording the same operation adds nothing.
   const childRaw = new DatabaseSync(":memory:");
@@ -124,14 +149,44 @@ test("Postgres: owner_operations' DDL, its identity, the mirror and admission's 
   assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM owner_operations")).rows[0]!.n), 2);
   assert.deepEqual((await setup.query("SELECT tenant FROM owner_operations WHERE user_op_hash = $1", [INVALIDATE])).rows.map((r) => r.tenant), [TENANT]);
 
-  // ADMISSION'S READ: only the acknowledged root record of this tenant, account and chain.
-  const k = await knownChainFacts(db, ACCOUNT, { tenant: TENANT, chainId: 4663 });
-  assert.deepEqual([...k.ownerRecords], [[INVALIDATE, FX.invalidateNonce!.tx]]);
+  // ADMISSION'S READ, with no grant to name the tenant's account: nothing (fail closed).
+  assert.equal((await knownChainFacts(db, ACCOUNT, { tenant: TENANT, chainId: 4663 })).ownerRecords.size, 0, "no grant, no owner answer");
 
-  // THE AUDIT, through its shell, against this Postgres: grants as the grant store keeps them, and what the old reconciler wrote.
+  // Grants as the grant store keeps them (JSONB): this tenant's, and another tenant's naming its own account.
   await setup.query(`CREATE TABLE grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json JSONB NOT NULL, sealed_session_key TEXT, updated_at BIGINT NOT NULL)`);
   await setup.query("INSERT INTO grants VALUES ($1, 4663, $2, 'SEALED-NEVER-READ', 1)", [TENANT,
     JSON.stringify({ smartAccount: ACCOUNT, owner: TENANT, chainId: 4663, grantFeatures: ["tradeable-v2", "pons-class"], ponsClassVaultAddress: VAULT, serialized: "never-read" })]);
+  await setup.query("INSERT INTO grants VALUES ($1, 4663, $2, 'SEALED-NEVER-READ', 1)", [OTHER_TENANT,
+    JSON.stringify({ smartAccount: OTHER_ACCOUNT, owner: OTHER_TENANT, chainId: 4663, grantFeatures: ["tradeable-v2"], serialized: "never-read" })]);
+
+  // ADMISSION'S READ: only the acknowledged root record of this tenant, account and chain, under the account its grant names.
+  const k = await knownChainFacts(db, ACCOUNT, { tenant: TENANT, chainId: 4663 });
+  assert.deepEqual([...k.ownerRecords], [[INVALIDATE, FX.invalidateNonce!.tx]]);
+  assert.equal((await knownChainFacts(db, ACCOUNT, { tenant: OTHER_TENANT, chainId: 4663 })).ownerRecords.size, 0, "another tenant's grant names another account");
+
+  // ANOTHER TENANT'S CHILD CANNOT PRE-EMPT A GENUINE RECORD. It records this
+  // tenant's next operation hash under its own account, and its mirror pass
+  // runs first; this tenant's genuine record still lands, and admission reads
+  // only its own.
+  const nextHash = `0x${"5e".repeat(32)}`;
+  const forged = { ...invalidate, user_op_hash: nextHash, agent_id: OTHER_ACCOUNT };
+  const genuine = { ...invalidate, user_op_hash: nextHash };
+  const otherChild = new DatabaseSync(":memory:");
+  t.after(() => otherChild.close());
+  await applyLedgerSchema(wrapSqlite(otherChild));
+  otherChild.prepare(`INSERT INTO owner_operations (${cols.join(", ")}, created_at) VALUES (${cols.map(() => "?").join(", ")}, 7000)`).run(...cols.map((c) => forged[c]));
+  const first = await mirrorOwnerOperations({ tenant: OTHER_TENANT, child: wrapSqlite(otherChild), shared: db, batch: 500, nowSec: 7100 });
+  assert.equal(first.copied.owner_operations, 1, "copied, under the other tenant's own account");
+  childRaw.prepare(`INSERT INTO owner_operations (${cols.join(", ")}, created_at) VALUES (${cols.map(() => "?").join(", ")}, 7001)`).run(...cols.map((c) => genuine[c]));
+  const second = await mirrorOwnerOperations({ tenant: TENANT, child: wrapSqlite(childRaw), shared: db, batch: 500, nowSec: 7200 });
+  assert.deepEqual(second.copied, { owner_operations: 1 }, "the genuine record lands: not pre-empted");
+  assert.deepEqual((await setup.query("SELECT tenant, agent_id FROM owner_operations WHERE user_op_hash = $1 ORDER BY tenant", [nextHash])).rows.map((r) => [r.tenant, r.agent_id]),
+    [[OTHER_TENANT, OTHER_ACCOUNT], [TENANT, ACCOUNT]].sort());
+  assert.deepEqual([...(await knownChainFacts(db, ACCOUNT, { tenant: TENANT, chainId: 4663 })).ownerRecords].sort(),
+    [[INVALIDATE, FX.invalidateNonce!.tx], [nextHash, FX.invalidateNonce!.tx]].sort());
+  await setup.query("DELETE FROM owner_operations WHERE user_op_hash = $1", [nextHash]);
+
+  // THE AUDIT, through its shell, against this Postgres: and what the old reconciler wrote.
   await setup.query(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
     VALUES ($1, $2, $3, 4663, '{}', 1, 9999999999, 'armed', 1, 349, 'idle')`, [ACCOUNT, TENANT, `0x${"01".repeat(20)}`]);
   for (const [hash, f, amount] of [[INVALIDATE, FX.invalidateNonce!, 0], [RECOVER, FX.recoverFunds!, 348.368488]] as const) {
