@@ -560,6 +560,15 @@ describe("the owner's own operation bundled beside a trade", () => {
     ]), new Set([SESSION_OP])), []);
   });
 
+  it("a trade's receipt is only placed, never decoded, unless an owner's leg is let through: a malformed Transfer in someone else's operation stops nothing", async () => {
+    const malformed = { ...tr(PEPE, POOL, OTHER_ACCOUNT, 1n), data: "0x" };
+    const flows = await scanTrade(bundle([
+      before(), tr(TSLA, ACCT, POOL, 1n), tr(USDG, POOL, ACCT, 1_000_000n), op(SESSION_OP, SESSION),
+      malformed, op(ROOT_OP, ROOT, { sender: OTHER_ACCOUNT }),
+    ]), new Set([SESSION_OP]));
+    assert.deepEqual(flows, [], "as before, when a trade's receipt was never read");
+  });
+
   it("a receipt with no log positions cannot place the leg, so it stays skipped; an unreadable one refuses the pass, as for any other", async () => {
     assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL, { positions: false }), new Set([SESSION_OP])), []);
     await assert.rejects(() => scanTrade(bundle(WITHDRAW_BESIDE_SELL, { unreadable: true }), new Set([SESSION_OP])), /could not be read/);

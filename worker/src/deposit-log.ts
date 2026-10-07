@@ -335,12 +335,19 @@ export async function findTransferFlows(opts: {
   // within ONE transaction, and that test needs no address list and cannot go
   // stale — see capital-classify.ts.
   const out: TransferFlow[] = [];
+  const receipts = new Map<string, readonly ReceiptLog[]>();
   const legsByTx = new Map<string, TransferLeg[]>();
+  /** Every Transfer of one transaction's receipt, as legs: decoded once. */
+  const legsOf = (k: string): TransferLeg[] => {
+    let legs = legsByTx.get(k);
+    if (!legs) legsByTx.set(k, (legs = legsFromReceiptLogs(receipts.get(k) ?? [])));
+    return legs;
+  };
   /** For a trade's transaction: which of its logs a root operation of this account executed (owner-operations.ts rootExecutionLogs). */
   const rootByTx = new Map<string, Map<number, string> | null>();
   for (const c of candidates) {
     const k = c.txHash.toLowerCase();
-    if (legsByTx.has(k)) continue;
+    if (receipts.has(k)) continue;
     const receipt = await chain.getReceiptLogs(c.txHash as Hex).catch(() => null);
     if (!receipt) {
       // AN UNREADABLE RECEIPT IS NOT AN ABSENT SECOND LEG. Booking on the one
@@ -352,8 +359,13 @@ export async function findTransferFlows(opts: {
           `unknown — refusing to classify its USDG leg as capital`,
       );
     }
-    legsByTx.set(k, legsFromReceiptLogs(receipt));
+    receipts.set(k, receipt);
+    // A TRADE'S TRANSACTION IS ONLY PLACED HERE: which of its logs the
+    // owner's own execution holds. Its amounts are decoded only for a leg let
+    // through below, so a trade's receipt can refuse this pass for nothing
+    // but being unreadable, as before when it was never read at all.
     if (c.inTradeTx) rootByTx.set(k, rootExecutionLogs(receipt, smartAccount, c.txHash));
+    else legsOf(k);
   }
 
   const context = scannerClassifyContext({ custodyAddresses: opts.custodyAddresses, chainId: opts.chainId });
@@ -376,7 +388,7 @@ export async function findTransferFlows(opts: {
       const trades = await opts.tradeOpsInTx!(c.txHash);
       if (trades === null || trades.has(op)) continue;
     }
-    const legs = legsByTx.get(c.txHash.toLowerCase()) ?? [];
+    const legs = legsOf(c.txHash.toLowerCase());
     const usdgLeg: TransferLeg = {
       token: usdgToken.toLowerCase(),
       from: c.from,
