@@ -38,6 +38,13 @@ worker and bot are temporarily unavailable while held.
    bootstrap must recover the repaired contributions and the preserved HWM.
    Confirm the target child returns with the expected accounting state.
 
+`flows_quarantine` has a second writer: the closed-epoch repair
+([closed-epoch-capital.md](closed-epoch-capital.md)). Its rows carry the
+repair id (a UUID) as `run_id`, where this procedure's carry its run ID. A
+revert of that repair puts the flow back under its original id and **keeps**
+the quarantine row as history: the table stays append-only. Its receipts are
+in `closed_epoch_repairs`.
+
 Never erase a retained tenant home merely to bypass the fresh-state refusal.
 Investigate why it exists and preserve its evidence. The safe path above uses
 fresh deployment containers and leaves the durable database intact.
