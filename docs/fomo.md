@@ -445,8 +445,9 @@ the confirm card and the Stop and +1h button handling are a separate change.
 - **Permissions.** Data access is all a tail needs to be stored and to notify: the
   alerts come from events the shared feed has already stored, at no cost. Routing
   research for the trader's coins, and putting their buys in front of the follow review,
-  happen only for an owner with monitoring or follow on. The tool's answer says which
-  (`routable`).
+  happen only for an owner with monitoring or follow on, and a considered buy can only
+  lead to an entry with follow on. The tool's answer says which (`routable`,
+  `following`).
 - **Caps.** 3 active tails per owner (renewing one does not count, and may change its
   hours and `consider`), 1–12 hours each, counted under the owner's lock row like
   watches. The fleet's routing reads at most 200 tailed traders. Per tail: 10 coins in
