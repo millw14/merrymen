@@ -294,6 +294,24 @@ export const DRILL_TABLES = validateDrillTables([
   { table: "tenant_ledger_import", stamp: "created_at_ms", kind: "presence-only",
     why: "Consuming or deleting an import rewrites its state and clears its sealed body without moving created_at_ms." },
 
+  // ── The reviewed repair tools' receipts ───────────────────────────────────
+  //
+  // One row per row booked or action applied, unique per evidence while
+  // 'applied': what stops a booking or a repair being applied twice, and
+  // what its revert is decided from. Each tool inserts its receipts in its
+  // apply's transaction, stamped with that apply's own now, and its revert
+  // marks them reverted in place (`state = 'reverted', reverted_at_ms = ?`)
+  // without moving applied_at_ms. Never deleted. Created by each tool's first
+  // apply, so a drill whose restore point is before it reads it missing in
+  // the fork, as for flows_quarantine.
+  //
+  // chain-gap-booking.ts applyBooking and revertBooking.
+  { table: "chain_gap_bookings", stamp: "applied_at_ms", kind: "presence-only",
+    why: "A revert marks each receipt reverted in place without moving applied_at_ms." },
+  // closed-epoch-capital.ts applyClosedEpoch and revertClosedEpoch.
+  { table: "closed_epoch_repairs", stamp: "applied_at_ms", kind: "presence-only",
+    why: "A revert marks each receipt reverted in place without moving applied_at_ms." },
+
   // ── Wallet authority and the owner's configuration ────────────────────────
   //
   // grant-store.ts stopForReplacement rewrites grant_json and erases the
