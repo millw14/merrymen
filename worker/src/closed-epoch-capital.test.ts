@@ -25,19 +25,20 @@ import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
-import { MIRROR_STATE_DDL } from "./ledger-mirror";
+import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { ensureLedgerResumeSchema, LEDGER_IMPORT_SCHEMA } from "./ledger-import";
-import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed, resumePreconditions } from "./ledger-resume";
+import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed, readPgEvidence, resumePreconditions } from "./ledger-resume";
 import { flowDuplicateReport } from "./distinct-flows";
 import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
-import { BookingRefused, BOOKINGS_TABLE, gapChainOf } from "./chain-gap-booking";
+import { BookingRefused, BOOKINGS_TABLE, canonical, gapChainOf } from "./chain-gap-booking";
 import {
-  applyClosedEpoch, CLOSED_EPOCH_APPLY_FORMAT, classifyEvent, closedEpochLines, parseRepairReport, planClosedEpoch, readClosedEpochChain, readClosedEpochSnapshot,
-  readRepairReceipts, REPAIRS_TABLE, revertClosedEpoch, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
+  applyClosedEpoch, CLOSED_EPOCH_APPLY_FORMAT, classifyEvent, closedEpochLines, homeOfEvidence, parseRepairReport, planClosedEpoch, readClosedEpochChain, readClosedEpochSnapshot,
+  readRepairReceipts, REPAIRS_TABLE, retainedHomeVerdict, revertClosedEpoch, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
 } from "./closed-epoch-capital";
 import { heldResetEvent } from "./held-reset";
+import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 
 // ── the public chain, as read ────────────────────────────────────────────────
 
@@ -164,13 +165,34 @@ const REFUSED_CREATED_MS = 1791248849249, REFUSED_AT_MS = 1791250434038;
 const BEAT_AT = 1789829679, MIRRORED_AT = 1789829702;
 const PAPER_RESET_LINE = "paper book restarted — cash back to 1,000.00 USDG, positions cleared, and earlier paper trades closed into epoch 1 (kept, but no longer counted)";
 
+/**
+ * WHAT ADMISSION'S EVIDENCE BOUND OF THE HOME at the anchor, as recordApproval
+ * stores an evidence: its canonical text, and the sha256 of exactly that text
+ * as the digest. Only the tenant, the account and `home` are read by the tool;
+ * the rest stands in for a real evidence. `absent`: the home holds no
+ * merrymen.db (the lost book of a pre-incident tenant); `present`: an old book,
+ * unblocked; `blocked`: behind a source barrier; `no-home`: an evidence
+ * recorded before admission bound the home.
+ */
+type HomeBound = "absent" | "present" | "blocked" | "no-home";
+function anchorEvidence(home: HomeBound, o: { tenant?: string } = {}): { json: string; digest: string } {
+  const bound = home === "no-home" ? {} : { home: home === "absent" ? { exists: true, ino: "7001", db: null, markers: [] }
+    : { exists: true, ino: "7001", db: { ino: "7002", size: "4096" }, markers: home === "blocked" ? ["ledger-source-blocked.json"] : [] } };
+  const json = canonical({ version: 1, tenant: o.tenant ?? TENANT, account: ACCOUNT, chainId: 4663, owner: TENANT, pg: { agent: { epoch: "2", mode: "paper" } },
+    checks: { anchor: "established:epoch-2", riskPeriod: "none", controls: "c".repeat(64), unresolved: 0, chain: "required" }, ...bound });
+  return { json, digest: createHash("sha256").update(json).digest("hex") };
+}
+
 interface Books { raw: DatabaseSync; db: Db }
 /**
  * 0x0e1ca0's Postgres as the incident left it. `marks` are epoch 1's
  * valuations (the last at 21:15:00, after the sweep: witness W1); `reset`
- * writes runPaperReset's line beside the paper opening (W3).
+ * writes runPaperReset's line beside the paper opening (W3). `home` is what
+ * admission's evidence for the chain refusal bound of the tenant's home
+ * (absent unless said); `archived`, that the refusal came after admission
+ * archived it; `unverified`, an evidence that does not hash to its digest.
  */
-async function books(o: { marks?: number[]; reset?: number | null; mode?: string; floors?: boolean; rows?: string } = {}): Promise<Books> {
+async function books(o: { marks?: number[]; reset?: number | null; mode?: string; floors?: boolean; rows?: string; home?: HomeBound | "archived" | "unverified" } = {}): Promise<Books> {
   /** How every row spells the account; the grant always spells it SPELLED (EIP-55), as the real one does. */
   const SPELLED = o.rows ?? SPELLED_GRANT;
   const raw = new DatabaseSync(":memory:"); handles.push(raw);
@@ -220,9 +242,12 @@ async function books(o: { marks?: number[]; reset?: number | null; mode?: string
     raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, 9, ?, ?)").run(TENANT, table, EPOCH2_AT, MIRRORED_AT);
   }
   await ensureLedgerResumeSchema(db);
+  const home = o.home ?? "absent";
+  const evidence = home === "unverified" ? { json: "{}", digest: "e".repeat(64) } : anchorEvidence(home === "archived" ? "present" : home);
   raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
-      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('8d1c4c6b', ?, ?, 4663, ?, ?, '{}', 'r', 'refused', ?, ?, ?, ?)`)
-    .run(TENANT, ACCOUNT, TENANT, "e".repeat(64), `${CHAIN_REFUSAL}: USDG in 145.499004 in tx ${DEPOSIT_TX} log 0 at block 64045884`, REFUSED_CREATED_MS, REFUSED_AT_MS, 1789238789);
+      created_at_ms, updated_at_ms, chain_read_from_sec, generation, archive_path) VALUES ('8d1c4c6b', ?, ?, 4663, ?, ?, ?, 'r', 'refused', ?, ?, ?, ?, ?, ?)`)
+    .run(TENANT, ACCOUNT, TENANT, evidence.digest, evidence.json, `${CHAIN_REFUSAL}: USDG in 145.499004 in tx ${DEPOSIT_TX} log 0 at block 64045884`,
+      REFUSED_CREATED_MS, REFUSED_AT_MS, 1789238789, home === "archived" ? "g-8d1c4c6b" : null, home === "archived" ? `/data/archive/${TENANT}/g-8d1c4c6b` : null);
   return { raw, db };
 }
 
@@ -666,6 +691,198 @@ describe("the stale live basis admission would seed", () => {
       liveBasis: [], liveFloors: [], rawGrantAccount: SPELLED, balances: {}, classVault: null, mode: "paper",
     });
     assert.deepEqual(r.refusals.map((x) => x.code), ["positions-ambiguous"]);
+  });
+});
+
+describe("admission's drain of the tenant's home: a clear only where it holds (retainedHomeVerdict)", () => {
+  /**
+   * The old book in the tenant's home, CONTINUOUS with Postgres: the rows
+   * the shared cursors point at (last_id 9, stamped EPOCH2_AT) are still at
+   * their ids, and it still holds the live MU and USAR basis and floors the
+   * mirror copied up (resetPaperLedger deletes only the paper basis).
+   */
+  async function oldBook(): Promise<Books> {
+    const raw = new DatabaseSync(":memory:"); handles.push(raw);
+    const db = wrapSqlite(raw);
+    await applyLedgerSchema(db);
+    raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, hwm_withdrawn_usdg, mode)
+      VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 2, 145.579752, 0, 'paper')`).run(SPELLED, TENANT, addr(1));
+    raw.prepare("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES (?, 'live', 'MU', '5365685809818', '5026', 1789590627)").run(SPELLED);
+    raw.prepare("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES (?, 'live', 'USAR', '105986355046803', '1654', 1789590653)").run(SPELLED);
+    raw.prepare("INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at) VALUES (?, 'live', 'MU', 1500, 'standard', 'graded at entry', 1789556100)").run(SPELLED);
+    raw.prepare("INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at) VALUES (?, 'live', 'USAR', 1800, 'wide', 'graded at entry', 1789556120)").run(SPELLED);
+    raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg, updated_at) VALUES (?, 'MU', ?, '5365685809818', '1', 1, 0, 1, 1789592749)`)
+      .run(SPELLED, MU);
+    raw.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg, updated_at) VALUES (?, 'USAR', ?, '105986355046803', '1', 1, 0, 1, 1789592749)`)
+      .run(SPELLED, USAR);
+    raw.prepare("INSERT INTO trades (id, agent_id, kind, target, amount_usdg, status, created_at, epoch) VALUES (9, ?, 'swap', 'paper', 5, 'paper', ?, 2)").run(SPELLED, EPOCH2_AT);
+    raw.prepare(`INSERT INTO equity (id, agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)
+      VALUES (9, ?, '0', 1000, 0, 0, 1000, 2, 'paper', 0, ?, ?)`).run(SPELLED, EPOCH2_AT, EPOCH2_AT);
+    raw.prepare("INSERT INTO events (id, agent_id, level, message, created_at) VALUES (9, ?, 'ok', 'paper mark', ?)").run(SPELLED, EPOCH2_AT);
+    raw.prepare("INSERT INTO flows (id, agent_id, direction, amount_usdg, tx_hash, source, epoch, at) VALUES (9, ?, 'in', 0.000001, NULL, 'inferred', 2, ?)").run(SPELLED, EPOCH2_AT);
+    return { raw, db };
+  }
+
+  it("home-book-present: the drain, reproduced, puts a cleared basis and floors back and moves admission's evidence — so the repair refuses and writes nothing", async () => {
+    // THE HAZARD. The live basis and floors cleared as the apply clears them, then what drainContinuousBook does first in Phase A for
+    // a home whose book is present and continuous: the continuity proof, then the guarded mirror (mirrorTenant).
+    const hazard = await books({ home: "present" });
+    const old = await oldBook();
+    hazard.raw.exec("DELETE FROM cost_basis WHERE mode = 'live'");
+    hazard.raw.exec("DELETE FROM position_floors WHERE mode = 'live'");
+    assert.deepEqual(await planAttestedSeed(hazard.db, SPELLED), { basis: [], floors: [] }, "cleared: admission would seed nothing");
+    const cleared = await readPgEvidence(hazard.db, { tenant: TENANT, account: ACCOUNT, nowSec: NOW });
+    await assertLedgerSourceContinuity(old.db, hazard.db, TENANT);
+    const drained = await mirrorTenant({ tenant: TENANT, child: old.db, shared: hazard.db, nowSec: NOW + 60 });
+    assert.deepEqual([drained.restarted ?? {}, drained.failed ?? {}, drained.copied.cost_basis, drained.copied.position_floors], [{}, {}, 2, 2],
+      "a continuous book, not a rebuilt one: the mirror replaces the snapshot rows with its own");
+    const seeded = await planAttestedSeed(hazard.db, SPELLED);
+    assert.deepEqual([seeded.basis.map((x) => x.symbol), seeded.floors.map((x) => x.symbol)], [["MU", "USAR"], ["MU", "USAR"]], "the stale basis and floors are back, and seeded");
+    assert.notEqual(canonical(await readPgEvidence(hazard.db, { tenant: TENANT, account: ACCOUNT, nowSec: NOW })), canonical(cleared),
+      "admission's evidence moved: an approval of the cleared books is refused as changed, and the tenant's newest decision is no longer a chain refusal");
+
+    // THE GUARD: the same books, the anchor's evidence saying the old book is in the home.
+    const b = await books({ home: "present" });
+    const before = { flows: allFlows(b.raw), tables: snapshotTables(b.raw) };
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.deepEqual(codes(p), ["home-book-present"], closedEpochLines(p).join("\n"));
+    assert.match(p.refusals[0]!.why, /approval 8d1c4c6b…\) found the old book in the tenant's home .* drainContinuousBook/);
+    assert.deepEqual([p.holdings.home.durable, p.holdings.home.atAnchor?.book, p.holdings.home.atAnchor?.archived], [false, "present", false]);
+    assert.equal(p.proposals.clears.length, 4, "what would be cleared is still shown for review");
+    await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "not-ready");
+    assert.deepEqual({ flows: allFlows(b.raw), tables: snapshotTables(b.raw) }, before, "nothing written");
+  });
+
+  it("the clear holds where admission archived the home before its chain refusal, found no book there, or found it behind a source barrier", async () => {
+    for (const home of ["archived", "absent", "blocked"] as const) {
+      const p = await preview(await books({ home }), fakeRpc().rpc);
+      assert.equal(p.verdict, "ready", `${home}: ${closedEpochLines(p).join("\n")}`);
+      assert.equal(p.proposals.clears.length, 4, home);
+      assert.deepEqual([p.holdings.home.durable, p.holdings.home.atAnchor?.archived, p.holdings.home.atAnchor?.book],
+        [true, home === "archived", home === "archived" ? "present" : home], home);
+      assert.ok(closedEpochLines(p).some((l) => l.startsWith("  the clear holds: ")), home);
+    }
+  });
+
+  it("home-unproved: an evidence that does not hash to its digest, or binds no home; and read directly, one for another tenant, a malformed home, no decision", async () => {
+    for (const home of ["unverified", "no-home"] as const) {
+      const p = await preview(await books({ home }), fakeRpc().rpc);
+      assert.deepEqual(codes(p), ["home-unproved"], `${home}: ${closedEpochLines(p).join("\n")}`);
+    }
+    const at = { tenant: TENANT, account: ACCOUNT };
+    const good = anchorEvidence("absent");
+    assert.deepEqual(homeOfEvidence(good.json, good.digest, at), { book: "absent", unproved: null });
+    assert.deepEqual(homeOfEvidence(good.json, good.digest, { tenant: TENANT, account: null }).book, null, "no grant: no account to match");
+    const other = anchorEvidence("absent", { tenant: FUNDER });
+    assert.deepEqual(homeOfEvidence(other.json, other.digest, at), { book: null, unproved: "the approval's evidence names another tenant or account" });
+    assert.match(String(homeOfEvidence(good.json, "0".repeat(64), at).unproved), /does not hash to its own digest/);
+    assert.match(String(homeOfEvidence(null, null, at).unproved), /no evidence on record/);
+    const sha = (t: string) => createHash("sha256").update(t).digest("hex");
+    for (const [home, why] of [
+      [{ exists: true, markers: [] }, /not as admission's homeIdentity writes one/],
+      [{ exists: true, db: { ino: "1" }, markers: [] }, /not as admission's homeIdentity writes one/],
+      [{ exists: true, db: null }, /not as admission's homeIdentity writes one/],
+      [{ exists: "yes" }, /binds no home/],
+    ] as const) {
+      const text = canonical({ tenant: TENANT, account: ACCOUNT, home });
+      assert.match(String(homeOfEvidence(text, sha(text), at).unproved), why, JSON.stringify(home));
+    }
+    assert.match(String(homeOfEvidence("not json", sha("not json"), at).unproved), /not JSON/);
+    assert.deepEqual(homeOfEvidence(canonical({ tenant: TENANT, account: ACCOUNT, home: { exists: false } }), sha(canonical({ tenant: TENANT, account: ACCOUNT, home: { exists: false } })), at),
+      { book: "absent", unproved: null }, "no home at all: nothing to drain");
+    assert.deepEqual([retainedHomeVerdict(null).durable, retainedHomeVerdict(null).code], [false, "home-unproved"]);
+  });
+
+  it("with nothing to clear, a present home refuses nothing: the drain copies back what the books already hold", async () => {
+    const p = await preview(await books({ home: "present" }), fakeRpc({ balances: { [MU]: { [ACCOUNT]: 7n }, [USAR]: { [ACCOUNT]: 9n } } }).rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    assert.deepEqual([p.proposals.clears, p.holdings.home.durable, p.proposals.inserts.length], [[], false, 2]);
+  });
+
+  it("an anchor whose evidence is rewritten between the preview and the apply refuses the apply, writing nothing", async () => {
+    const b = await books();
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    const present = anchorEvidence("present");
+    b.raw.prepare("UPDATE ledger_resume_approvals SET evidence_json = ?, evidence_digest = ? WHERE approval_id = '8d1c4c6b'").run(present.json, present.digest);
+    const before = { flows: allFlows(b.raw), tables: snapshotTables(b.raw) };
+    await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "cas" && /\(homeAtAnchor\)/.test(e.message));
+    assert.deepEqual({ flows: allFlows(b.raw), tables: snapshotTables(b.raw) }, before);
+  });
+});
+
+describe("every hosted account, compared again at the apply", () => {
+  it("the deposit's sender registered as a hosted account after the preview (during its chain read) refuses the apply, writing nothing; read again, the deposit is internal", async () => {
+    const b = await books();
+    const { rpc } = fakeRpc();
+    const p = await preview(b, rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    b.raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
+      VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 1, 0, 'paper')`).run(FUNDER, addr(0xf1), addr(1));
+    const before = { flows: allFlows(b.raw), tables: snapshotTables(b.raw) };
+    // Nothing of this tenant's rows moved: only the fleet's accounts, by digest, inside the booking tool's compare-and-set.
+    await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "cas" && /\(booking\)/.test(e.message));
+    assert.deepEqual({ flows: allFlows(b.raw), tables: snapshotTables(b.raw) }, before);
+    assert.equal(rows(b.raw, `SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE}`)[0]!.n, 0);
+    const again = await preview(b, rpc);
+    const deposit = again.movements.find((m) => m.key === `log:${DEPOSIT_TX}#0`)!;
+    assert.deepEqual([deposit.counterpartyKnownAccount, deposit.classification!.kind], [true, "internal"]);
+    assert.ok(!again.proposals.inserts.some((i) => i.key === `log:${DEPOSIT_TX}#0`), "never filed as an owner's deposit");
+    assert.equal(p.cas.booking.knownAccounts.length, 64, "a digest: the plan never lists the fleet's other accounts");
+  });
+});
+
+describe("admission's duplicate check, asked at the preview", () => {
+  it("a current run holding two copies of one movement refuses at the preview, where the apply's postcondition used to be the first to say", async () => {
+    const b = await books();
+    for (let i = 0; i < 2; i++) {
+      b.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, source, epoch, at) VALUES (?, 'in', 3, NULL, 'inferred', 2, ?)").run(SPELLED, EPOCH2_AT + 600);
+    }
+    const p = await preview(b, fakeRpc().rpc);
+    assert.deepEqual(codes(p), ["flows-duplicate"], closedEpochLines(p).join("\n"));
+    assert.match(p.refusals[0]!.why, /the current run \(epoch 2\) holds 1 copy\(ies\) and 0 conflict\(s\)/);
+    assert.deepEqual(p.duplicates.currentRun, { epoch: 2, clean: false, verdict: "ok", copies: 1, conflicts: 0 });
+    assert.equal(p.duplicates.epochAfter.clean, true);
+  });
+
+  it("epoch 1 as the repair would leave it is asked too: two copies of one log, one with no chain stamp, refuse as a duplicate beside the conflict", async () => {
+    const b = await books();
+    for (const chain of [4663, null]) {
+      b.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+        VALUES (?, 'in', 145.499004, ?, 64045884, 0, 'chain-log', 1, ?, ?)`).run(SPELLED, DEPOSIT_TX, chain, DEPOSIT_AT);
+    }
+    const p = await preview(b, fakeRpc().rpc);
+    assert.ok(codes(p).includes("identity-conflict"));
+    assert.ok(p.refusals.some((r) => r.code === "flows-duplicate" && /after the repair epoch 1's flows would hold 1 copy\(ies\)/.test(r.why)), closedEpochLines(p).join("\n"));
+    assert.deepEqual(p.duplicates.epochAfter, { epoch: 1, clean: false, verdict: "ok", copies: 1, conflicts: 0 });
+  });
+
+  it("a row that does not read as a flow is unread, never clean: in the current run, or left in epoch 1", async () => {
+    const current = await books();
+    current.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, source, epoch, at) VALUES (?, 'sideways', 3, NULL, 'inferred', 2, ?)").run(SPELLED, EPOCH2_AT + 600);
+    const p = await preview(current, fakeRpc().rpc);
+    assert.deepEqual([codes(p), p.duplicates.currentRun], [["flows-duplicate"], { epoch: null, clean: false, verdict: "unread", copies: 0, conflicts: 0 }]);
+    const left = await books();
+    left.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+      VALUES (?, 'sideways', 1, ?, 64045884, 9, 'chain-log', 1, 4663, ?)`).run(SPELLED, DEPOSIT_TX, DEPOSIT_AT);
+    const q = await preview(left, fakeRpc().rpc);
+    assert.ok(q.refusals.some((r) => r.code === "flows-duplicate" && /verdict unread/.test(r.why)), closedEpochLines(q).join("\n"));
+    assert.deepEqual(q.duplicates.epochAfter, { epoch: 1, clean: false, verdict: "unread", copies: 0, conflicts: 0 });
+  });
+
+  it("a stand-in the repair quarantines is no duplicate after it: two identical inferred rows in epoch 1 go, and the preview is ready", async () => {
+    const b = await books();
+    for (let i = 0; i < 2; i++) {
+      b.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, source, epoch, at) VALUES (?, 'in', 145.499004, NULL, 'inferred', 1, ?)").run(SPELLED, DEPOSIT_AT + 5);
+    }
+    assert.equal((await flowDuplicateReport(b.db, ACCOUNT, 1)).clean, false, "before the repair, epoch 1 holds a copy");
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    assert.equal(p.proposals.quarantines.length, 2);
+    assert.deepEqual(p.duplicates.epochAfter, { epoch: 1, clean: true, verdict: "ok", copies: 0, conflicts: 0 });
+    await apply(b, p);
+    assert.equal((await flowDuplicateReport(b.db, ACCOUNT, 1)).clean, true);
   });
 });
 

@@ -56,6 +56,11 @@ What this tool should propose for it:
   flows, so none is expected.
 - **Delete the live MU and USAR basis and their floors.** Admission would seed
   them today (positions show both held), and the chain shows neither held.
+  This happens only if admission's evidence for the tenant's chain refusal
+  shows that the next admission cannot drain an old book back over the clear
+  ([below](#a-clear-only-where-admissions-drain-cannot-undo-it)). If that
+  evidence found the old book in the home, the preview is `BLOCKED` with
+  `home-book-present`.
 - Admission's chain check is then clean: the deposit is answered by its flows
   row (admission's flows identity reads every epoch), and the sweep's USDG leg
   was already answered by the trades row in its transaction.
@@ -115,6 +120,8 @@ One refusal blocks the whole tenant. Each is named:
 | `outbound-only` | after the repair, epoch 1 would hold a withdrawal and no capital in |
 | `operation-unanswered`, `transfer-unanswered`, `fact-undated`, `admission-unread` | admission would still find something from before epoch 1 closed. An owner's root-key operation is named `owner-operation`: **this tool books no operation** |
 | `positions-ambiguous`, `class-vault-held`, `live-position-disagrees` | the stale-basis check cannot decide (below) |
+| `home-book-present`, `home-unproved` | a basis or floor would be cleared, and admission's drain of the tenant's home could put it back, or nothing proves it could not ([below](#a-clear-only-where-admissions-drain-cannot-undo-it)) |
+| `flows-duplicate` | admission's duplicate check (`distinct-flows.ts`) would find a copy or a conflict: in epoch 1 as the repair would leave it, or in the current run, which the repair never writes. The apply would refuse on the same check after its writes; the preview says so first |
 | `not-held`, `open-approval`, `admitted`, `no-grant`, `no-registration`, `registrations`, `spellings`, `chain`, `rpc-chain`, `identity-index`, `chain-unavailable` | the tenant is not one this tool may repair now, or the database or RPC is not the one it should be |
 
 Escalate any refusal to Milla and Codex with the preview file.
@@ -179,6 +186,50 @@ A live basis outside what admission would seed is inert, named in the
 preview and left alone: admission never seeds it, and the first mirror pass
 after admission replaces Postgres's copy. `positions` is never touched.
 
+### A clear only where admission's drain cannot undo it
+
+The clear is in Postgres. Before admission reads anything for an approved
+tenant, it drains the old book in the tenant's home into Postgres
+(`orchestrator.ts` `drainContinuousBook`, the first step of Phase A). The
+mirror then replaces the account's `cost_basis` and `position_floors` with
+that book's own. An old book that is still continuous holds the live basis
+this repair would clear, so the drain puts it back. The approval is then
+refused for changed evidence, the tenant's newest decision is no longer a
+chain refusal (so this tool no longer runs for it), and a later approval
+seeds the stale basis anyway.
+
+The drain skips a home with no `merrymen.db`, and a home behind a source
+barrier (`ledger-source-blocked.json`). A home admission archived no longer
+holds its book: the archive does not carry `merrymen.db` back. This tool
+cannot read the volume, so it proves which case applies from what admission
+recorded about the anchor (the tenant's newest decision, its chain refusal):
+
+| What admission recorded | The clear | Why |
+|---|---|---|
+| The anchor reached `archived` (`archive_path` set) | holds | Admission archived the home before refusing in Phase B, and nothing has run for the tenant since (the hold proves that) |
+| The anchor's evidence binds a home with no book | holds | A Phase A chain refusal is recorded only after its drain, and only when the evidence recomputed there matched the approved digest. So this is the home the drain met |
+| The anchor's evidence binds a book behind a source barrier | holds | The drain never copies from it |
+| The anchor's evidence binds a book, unblocked | **refused** `home-book-present` | The next admission drains it back |
+| The evidence does not hash to its digest, binds no home, names another tenant, or there is no anchor | **refused** `home-unproved` | Nothing proves the clear would hold |
+
+The evidence is trusted only when the sha256 of its stored text equals the
+digest on its row, because that is how `recordApproval` writes them. Only
+the home's class is kept (absent, blocked or present), never an inode, size
+or path. The class goes into the compare-and-set: an evidence rewritten
+between the preview and the apply refuses the apply.
+
+When the refusal applies, the whole repair refuses, not just the clear.
+Filing the flows without the clear would let admission pass its chain check
+and seed the stale basis. The tenant stays held. That is a reviewed basis
+decision: escalate to Milla with the preview file. When nothing needs
+clearing (every seeded token is still held), the home does not matter: the
+drain copies back what the books already hold.
+
+Someone who restores a book into the tenant's home after the anchor (a
+manual restore or a handover), or who clears its source barrier, undoes
+this proof, and Postgres cannot show it. Do neither for a tenant being
+repaired until it is admitted.
+
 Why not change `planAttestedSeed` instead: `positions` has no mode column, a
 paper tenant can still hold real tokens with a real basis, and skipping the
 seed lets the first mirror pass delete the only copy. A seed gated on the
@@ -211,6 +262,11 @@ Everything a reviewer would otherwise check by hand:
 - fee accruals and risk periods (untouched);
 - positions, live and paper basis, live floors, class positions, what
   admission would seed before and after, and each seeded token's balances;
+- what admission recorded of the tenant's home at its chain refusal (archived,
+  or its book absent, blocked or present), and whether a clear would hold
+  (`holdings.home`);
+- admission's duplicate check over epoch 1 as the repair would leave it, and
+  over the current run (`duplicates`);
 - what admission's own chain check finds now, and what it would still find
   after the repair;
 - the proposals, the predicted epoch-1 net, and warnings, including: no peak
@@ -285,7 +341,11 @@ the confirmed digest. Then, in **one `SERIALIZABLE` transaction**:
 1. It locks the agent row (the lock `bookCapitalFlow`, `openNextEpoch` and
    `resetPaperLedger` take), and checks the flows identity index again.
 2. It compares every Postgres fact the preview relied on. Anything that moved
-   refuses, and nothing is written.
+   refuses, and nothing is written. That includes every hosted account (by
+   digest): the full chain read takes minutes, and an account registered
+   during it can turn a transfer the preview read as an owner's deposit into
+   an internal one. It also includes the home class from the anchor's
+   evidence.
 3. It checks each movement's identity once more across every epoch.
 4. It inserts the `chain-log` rows and reads each back.
 5. It **verifies** that epoch 1's receipts are exactly the chain's capital
@@ -308,8 +368,15 @@ Applying again finds nothing to do (`refused (nothing-to-do)`).
 
 ### If the apply's outcome is unknown
 
-If the commit was sent and no answer came back, the tool says
-`outcome unknown: …` and keeps the report file. Run:
+If the commit was sent and no answer proved it rolled back, the tool says
+`outcome unknown: …` and keeps the report file. Only an error answering
+`COMMIT` with a SQLSTATE in class 40 (a serialization failure or a deadlock)
+or class 23 (a deferred constraint) proves a rollback. Those are rethrown,
+and no report file is left. Any other error is an unknown outcome, because
+each can arrive after the commit was made durable. That includes a dropped
+or reset connection (`EPIPE`, `ECONNRESET`, no code), a terminated backend or
+a server shutting down or starting (`57P01`, `57P02`, `57P03`), a connection
+exception (class 08), and a cancelled or timed-out statement (`57014`). Run:
 
 ```sh
 node --import tsx worker/src/closed-epoch-capital-cli.ts \
@@ -372,6 +439,13 @@ Quarantined rows leave `flows` and appear in `flows_quarantine` with the
 repair's `quarantined_at`. A revert re-inserts a flow under its old id and
 `at`, and re-inserts `cost_basis` and `position_floors` rows with their old
 stamps. `closed_epoch_repairs` names every action with its time.
+
+The drill reads `closed_epoch_repairs` itself (`scripts/pg-backup/verify-restore.mjs`,
+beside `chain_gap_bookings`) by `applied_at_ms`, as presence-only: a revert
+marks each receipt `reverted` in place without moving that stamp. Each
+receipt is stamped with its apply's own time, so it is compared like any
+other row. The table is created by the first apply, so a drill whose restore
+point is before that reads it `missing-in-fork`, as for `flows_quarantine`.
 
 ## What it never does
 

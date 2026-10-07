@@ -616,7 +616,12 @@ Then, in **one transaction**, the apply:
 2. compares every Postgres fact again (compare-and-set), refusing if any
    changed. This includes the tenant's heartbeat, mirror cursor, mode,
    approvals, attestations, positions, cost basis and recorded fills, so a
-   tenant that woke up after the preview is refused;
+   tenant that woke up after the preview is refused. It also includes every
+   hosted account, compared by digest so the plan never lists them. The
+   classifier reads a transfer from a hosted account as internal, never as a
+   deposit. A registration made after the preview's read can therefore turn
+   a deposit the plan books into an internal transfer, while none of this
+   tenant's rows move;
 3. inserts exactly the proposed rows and reads each one back;
 4. proves the flows are still distinct and that admission's chain-fact rule
    is now answered for every fact;
@@ -716,6 +721,12 @@ Booked rows carry their block time, not the apply time. A restore drill whose
 restore point falls before the apply will report `trades` or `flows`
 `missing-in-fork` for them. `chain_gap_bookings` names each one, with the time
 it was applied.
+
+The drill also reads `chain_gap_bookings` itself (`scripts/pg-backup/verify-restore.mjs`),
+by `applied_at_ms`, as presence-only: a revert marks each receipt `reverted`
+in place without moving that stamp. The table is created by the first apply.
+A drill whose restore point is before that reads it `missing-in-fork`, as
+for `flows_quarantine`.
 
 ## Verification
 

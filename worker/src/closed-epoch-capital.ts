@@ -25,7 +25,9 @@
  * order (insert, verify, quarantine), it moves any unevidenced stand-in those
  * rows supersede to flows_quarantine. And it deletes a LIVE cost basis (and
  * its floor) that admission would seed into the attested book for a token
- * the chain shows the book no longer holds (see staleBasisPlan).
+ * the chain shows the book no longer holds (see staleBasisPlan) — only where
+ * admission's drain of the tenant's home cannot copy it back before it seeds
+ * (retainedHomeVerdict); elsewhere the tenant stays held.
  *
  * WHY A NEW TOOL AND NOT A MODE (docs/closed-epoch-capital.md says more).
  * chain-gap-booking's contract is narrow and reviewed: it answers the facts
@@ -67,14 +69,16 @@
  * Reviewed operator tool: never imported by the orchestrator or a worker.
  * docs/closed-epoch-capital.md is the runbook.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "./db";
 import { CASH, ENTRYPOINT, classifyUsdgMovement, energyReserveTokens, type Classification } from "../../packages/core/src/index";
 import { decodeUserOperationEvent, segmentReceipt, USER_OPERATION_EVENT_TOPIC, validatorOfNonce } from "./asset-movements";
 import { legsFromReceipt, TRANSFER_TOPIC, type RawChainLog, type RpcCall } from "./chain-capital";
-import { flowDuplicateReport } from "./distinct-flows";
+import { CapitalFlowsWithheld, collapseFlows, flowDuplicateReport, type FlowRecord } from "./distinct-flows";
 import { addressTopic, getLogsAdaptive } from "./inflight-reconcile";
-import { attestedSourceInUse, chainGapCheck, describeChainFact, planAttestedSeed, RESUME_USDG, usdg6, type AttestedSeedPlan, type MissingChainFact } from "./ledger-resume";
+import {
+  attestedSourceInUse, chainGapCheck, describeChainFact, homeBookState, planAttestedSeed, RESUME_USDG, usdg6, type AttestedSeedPlan, type HomeIdentity, type MissingChainFact,
+} from "./ledger-resume";
 import { planBasisSeed, planFloorSeed } from "./basis-seed";
 import { admitCapitalFlow, tradingModeOf } from "./paper-boundary";
 import { EVIDENCED_FLOW_SOURCES, reconcileEpochCarry } from "./accounting-scope";
@@ -193,6 +197,36 @@ export interface ClosedEpochSnapshot {
   identityIndex: boolean;
   /** What admission would seed into the attested book now (ledger-resume.ts planAttestedSeed, under the grant's own spelling). */
   seedBefore: AttestedSeedPlan;
+  /** What admission saw of the tenant's home at its newest decision (readHomeAtAnchor), or null with no decision. */
+  homeAtAnchor: HomeAtAnchor | null;
+  /**
+   * The current run's flows as admission's duplicate check reads them
+   * (distinct-flows.ts flowDuplicateReport): this repair never writes that
+   * run, so this is also what the apply's postcondition will read of it.
+   * Null with no registration to name the run.
+   */
+  currentRun: RunDuplicates | null;
+}
+
+/** A run's flows as the duplicate check counts them: copies and conflicts only, no amount or hash. */
+export interface RunDuplicates { epoch: number | null; clean: boolean; verdict: string; copies: number; conflicts: number }
+
+/**
+ * WHAT ADMISSION SAW OF THE TENANT'S HOME when it made its newest decision
+ * (the approval holdOf anchors on), and whether that admission archived it.
+ * Classes only: never an inode, a size or a path.
+ */
+export interface HomeAtAnchor {
+  approvalId: string; state: string; chainRefusal: boolean;
+  /**
+   * The approval reached 'archived': admission renamed the home into the
+   * archive (ledger-resume.ts archiveTenantHome), and merrymen.db is not
+   * among the files it carries back into the fresh home.
+   */
+  archived: boolean;
+  /** The home's book as the approval's evidence bound it (ledger-resume.ts homeBookState), or null when that cannot be proved (`unproved` says why). */
+  book: "absent" | "blocked" | "present" | null;
+  unproved: string | null;
 }
 
 const BOUND_TABLES: ReadonlyArray<readonly [string, string]> = [["trades", "created_at"], ["flows", "at"], ["equity", "at"], ["fee_accruals", "at"], ["paper_checkpoints", "updated_at"]];
@@ -255,6 +289,112 @@ async function readMutableFacts(db: Db, tables: ReadonlySet<string>, account: st
       .all(account)) as Array<Record<string, unknown>>).map(floorRowOf)
     : [];
   return { flowsRaw, quarantine, liveBasis, liveFloors };
+}
+
+/**
+ * THE HOME'S BOOK, FROM AN APPROVAL'S OWN EVIDENCE. PURE.
+ *
+ * recordApproval stores the evidence as `canonical(evidence)` and its digest
+ * as the sha256 of exactly that text (ledger-resume.ts evidenceDigest), so
+ * the text is trusted only when it hashes to the digest on its row; it must
+ * name this tenant and account, and bind a home as homeIdentity writes one.
+ * Anything else proves nothing, and says why.
+ */
+export function homeOfEvidence(text: unknown, digest: unknown, o: { tenant: string; account: string | null }): Pick<HomeAtAnchor, "book" | "unproved"> {
+  const no = (unproved: string) => ({ book: null, unproved });
+  if (typeof text !== "string" || typeof digest !== "string") return no("the approval has no evidence on record");
+  if (createHash("sha256").update(text).digest("hex") !== digest) return no("the approval's evidence does not hash to its own digest");
+  let e: unknown;
+  try { e = JSON.parse(text); } catch { return no("the approval's evidence is not JSON"); }
+  if (e === null || typeof e !== "object") return no("the approval's evidence is not an object");
+  const ev = e as { tenant?: unknown; account?: unknown; home?: unknown };
+  if (lower(ev.tenant) !== o.tenant || o.account === null || lower(ev.account) !== o.account) return no("the approval's evidence names another tenant or account");
+  const h = ev.home as Record<string, unknown> | null | undefined;
+  if (h === null || typeof h !== "object" || typeof h.exists !== "boolean") return no("the approval's evidence binds no home (recorded before admission bound one)");
+  if (h.exists) {
+    const d = h.db as Record<string, unknown> | null | undefined;
+    const book = d === null || (typeof d === "object" && d !== undefined && typeof d.ino === "string" && typeof d.size === "string");
+    if (!book || !Array.isArray(h.markers) || h.markers.some((m) => typeof m !== "string")) return no("the evidence's home is not as admission's homeIdentity writes one");
+  }
+  return { book: homeBookState(h as unknown as HomeIdentity), unproved: null };
+}
+
+/**
+ * The anchor's home, read in the snapshot's transaction: the newest approval
+ * that was not revoked (holdOf's anchor), its own evidence and whether it
+ * archived the home. Read by its id and the tenant, so another tenant's row
+ * is never read.
+ */
+async function readHomeAtAnchor(db: Db, tables: ReadonlySet<string>, booking: BookingSnapshot): Promise<HomeAtAnchor | null> {
+  const anchor = booking.admission.approvals.find((a) => a.state !== "revoked") ?? null;
+  if (!anchor || !tables.has("ledger_resume_approvals")) return null;
+  const r = (await db.prepare("SELECT evidence_digest, evidence_json FROM ledger_resume_approvals WHERE approval_id = ? AND tenant = ?").get(anchor.approvalId, booking.tenant)) as
+    Record<string, unknown> | undefined;
+  return { approvalId: anchor.approvalId, state: anchor.state, chainRefusal: anchor.chainRefusal, archived: anchor.archived,
+    ...homeOfEvidence(r?.evidence_json, r?.evidence_digest, { tenant: booking.tenant, account: booking.grant?.account ?? null }) };
+}
+
+/**
+ * WILL A CLEARED BASIS STAY CLEARED? PURE.
+ *
+ * The clear is in Postgres. Before admission reads anything for an approved
+ * tenant, it drains the old book in the tenant's home into Postgres
+ * (orchestrator.ts drainContinuousBook, the first step of Phase A), and the
+ * mirror replaces the account's cost_basis and position_floors with that
+ * book's own (ledger-mirror.ts). A continuous old book still holds the live
+ * basis this repair would clear (resetPaperLedger deletes only the paper
+ * basis), so the drain would put it back: the approval is then refused for
+ * changed evidence, the tenant's newest decision is no longer a chain
+ * refusal, and a later approval seeds the stale basis anyway. The drain is
+ * skipped only for a home with no merrymen.db or one behind a source barrier
+ * (`ledger-source-blocked.json`), and a book admission archived is gone from
+ * the home. This tool cannot read the volume, so it proves which from what
+ * Postgres recorded:
+ *
+ *  - the anchor ARCHIVED the home: its admission renamed the home into the
+ *    archive before its chain refusal (Phase B), and nothing has run for the
+ *    tenant since (holdOf: no heartbeat or mirrored row after the anchor, and
+ *    a held tenant spawns no worker);
+ *  - or the anchor's own evidence, verified against its digest, bound a home
+ *    with no book (`absent`) or one behind a source barrier (`blocked`). A
+ *    chain refusal is recorded in Phase A only after its drain and after the
+ *    evidence recomputed there matched that digest, so this is the home that
+ *    admission's drain met, and nothing has written since.
+ *
+ * Anything else — a book present and unblocked, an evidence that does not
+ * verify or binds no home, no anchor — does not prove the clear would hold.
+ */
+export function retainedHomeVerdict(h: HomeAtAnchor | null): { durable: boolean; code: "home-book-present" | "home-unproved" | null; why: string } {
+  if (!h) return { durable: false, code: "home-unproved", why: "admission has made no decision for this tenant, so what its home holds is on no record this tool can read" };
+  const which = `approval ${h.approvalId.slice(0, 8)}…`;
+  if (h.archived) {
+    return { durable: true, code: null, why: `admission archived the tenant's home for its newest decision (${which}) before refusing it: no old book is left in the home for the next admission to drain` };
+  }
+  if (h.book === "absent") return { durable: true, code: null, why: `admission's evidence for its newest decision (${which}) found no book in the tenant's home: there is nothing for the next admission to drain` };
+  if (h.book === "blocked") {
+    return { durable: true, code: null, why: `admission's evidence for its newest decision (${which}) found the home's book behind a source barrier, which admission's drain never copies from` };
+  }
+  if (h.book === "present") {
+    return { durable: false, code: "home-book-present", why: `admission's evidence for its newest decision (${which}) found the old book in the tenant's home (merrymen.db, no source barrier), and that admission ` +
+      "did not archive it: the next admission drains that book into Postgres before it reads anything (orchestrator.ts drainContinuousBook), and the mirror puts its " +
+      "live basis and floors back over what this repair would clear — the approval is then refused for changed evidence and a later one seeds the stale basis. " +
+      "Clearing it here would not hold, and filing the flows without it would let admission seed it: a reviewed basis decision, or the tenant stays held" };
+  }
+  return { durable: false, code: "home-unproved", why: `what the tenant's home held at admission's newest decision (${which}) cannot be proved (${h.unproved ?? "unknown"}), so whether the next ` +
+    "admission drains an old book back over this repair's clear (orchestrator.ts drainContinuousBook) cannot be said: a reviewed basis decision, or the tenant stays held" };
+}
+
+/** The current run's duplicate check, as admission runs it; a run whose rows do not read is unread, never clean. */
+async function readCurrentRun(db: Db, account: string, registered: boolean): Promise<RunDuplicates | null> {
+  if (!registered) return null;
+  try {
+    const r = await flowDuplicateReport(db, account);
+    return { epoch: r.epoch, clean: r.clean, verdict: r.verdict, copies: Object.values(r.copies).reduce((s, n) => s + n, 0),
+      conflicts: Object.values(r.conflicts).reduce((s, n) => s + n, 0) };
+  } catch (e) {
+    if (e instanceof CapitalFlowsWithheld) return { epoch: null, clean: false, verdict: "unread", copies: 0, conflicts: 0 };
+    throw e;
+  }
 }
 
 export async function readClosedEpochSnapshot(db: Db, o: { tenant: string; dialect: Dialect; nowSec: number; epoch: number }): Promise<ClosedEpochSnapshot> {
@@ -340,13 +480,15 @@ export async function readClosedEpochSnapshot(db: Db, o: { tenant: string; diale
       evidenceKey: String(r.evidence_key), tableName: String(r.table_name), state: String(r.state) }))
     : [];
   const seedBefore = rawGrantAccount ? await planAttestedSeed(db, rawGrantAccount) : { basis: [], floors: [] };
+  const homeAtAnchor = await readHomeAtAnchor(db, tables, booking);
+  const currentRun = account ? await readCurrentRun(db, account, booking.agents.length > 0) : null;
   // Last: a catalogue read that fails aborts a Postgres transaction, so nothing is read after it.
   let identityIndex = false;
   try { identityIndex = (await inspectChainIdentityIndex(db, o.dialect)).valid; } catch { identityIndex = false; }
   return {
     booking, epoch: P, rawGrantAccount, agent, flows: { rows: mutable.flowsRaw.map(flowRowOf), fingerprint: flowFingerprintOf(mutable.flowsRaw) },
     quarantine: { rows: mutable.quarantine }, bounds, marks, nextEquity, events, commands, trades, feeAccruals, riskPeriods,
-    liveBasis: mutable.liveBasis, paperBasis, liveFloors: mutable.liveFloors, classPositions, paperBook, gapBookings, repairs, identityIndex, seedBefore,
+    liveBasis: mutable.liveBasis, paperBasis, liveFloors: mutable.liveFloors, classPositions, paperBook, gapBookings, repairs, identityIndex, seedBefore, homeAtAnchor, currentRun,
   };
 }
 
@@ -364,7 +506,11 @@ function fingerprintsOf(f: { flowsRaw: ReadonlyArray<Record<string, unknown>>; q
 /**
  * Everything apply compares inside its transaction: the booking tool's own
  * set (the hold, the admission state, the known facts, the ledger's counts,
- * the holdings and fills) and every fact a closed epoch was judged on.
+ * the holdings and fills, and every hosted account, by digest, which the
+ * classifier reads a counterparty against) and every fact a closed epoch was
+ * judged on, the anchor's home among them (its evidence is not in the
+ * admission state). The current run's duplicate check is not here: it is a
+ * function of the flows and registrations already compared.
  */
 export function closedCasFacts(s: ClosedEpochSnapshot) {
   return {
@@ -372,7 +518,7 @@ export function closedCasFacts(s: ClosedEpochSnapshot) {
     quarantine: digestOf(s.quarantine.rows), bounds: s.bounds, marks: digestOf(s.marks), nextEquity: s.nextEquity, events: digestOf(s.events), commands: digestOf(s.commands),
     trades: digestOf(s.trades), feeAccruals: digestOf(s.feeAccruals), riskPeriods: digestOf(s.riskPeriods), liveBasis: s.liveBasis, paperBasis: digestOf(s.paperBasis),
     liveFloors: s.liveFloors, classPositions: digestOf(s.classPositions), paperBook: s.paperBook, gapBookings: s.gapBookings, repairs: s.repairs,
-    identityIndex: s.identityIndex, seedBefore: s.seedBefore,
+    identityIndex: s.identityIndex, seedBefore: s.seedBefore, homeAtAnchor: s.homeAtAnchor,
   };
 }
 
@@ -563,7 +709,11 @@ export interface ClosedEpochPlan {
     verdicts: Array<{ symbol: string; token: string | null; total: string | null; by: Record<string, string | null>; verdict: "clear" | "keep" | "refused"; why: string }>;
     inertBasis: BasisRow[]; inertFloors: FloorRow[];
     positions: BookingSnapshot["holdings"]["positions"]; paperBasis: BasisRow[]; classPositions: ClosedEpochSnapshot["classPositions"]; paperBook: number;
+    /** Whether a clear would survive admission's drain of the tenant's home (retainedHomeVerdict), and what it was decided from. */
+    home: { atAnchor: HomeAtAnchor | null; durable: boolean; why: string };
   };
+  /** What admission's duplicate check would read after the repair: epoch P as it would stand, and the current run, which the repair never writes. */
+  duplicates: { epochAfter: RunDuplicates; currentRun: RunDuplicates | null };
   agent: ClosedEpochSnapshot["agent"];
   trades: ClosedEpochSnapshot["trades"];
   feeAccruals: Array<Record<string, unknown>>;
@@ -611,7 +761,9 @@ const EVIDENCED: ReadonlySet<string> = new Set(EVIDENCED_FLOW_SOURCES);
  * balance, a class vault holding the token, or a live-rail position that says
  * held where the chain says flat refuses. positions is never touched: on the
  * paper rail it is the paper book's cache (store.ts), and the next worker
- * rewrites it.
+ * rewrites it. Whether a clear survives admission's drain of the tenant's
+ * home is decided apart (retainedHomeVerdict), since it rests on what admission
+ * recorded, not on the chain.
  */
 export function staleBasisPlan(o: {
   seedBefore: AttestedSeedPlan; positions: BookingSnapshot["holdings"]["positions"]; liveBasis: readonly BasisRow[]; liveFloors: readonly FloorRow[];
@@ -951,6 +1103,39 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
   const netAfter = [...kept.map((k) => k.row), ...inserts.map((i) => ({ direction: i.row.direction, amountUsdg: i.row.amount_usdg }))].reduce((s, f) => s + signed(f), 0n);
   const receiptsAfter = [...kept.map((k) => `${lower(k.row.txHash)}#${k.row.logIndex}`), ...inserts.map((i) => `${i.row.tx_hash}#${i.row.log_index}`)].sort(byText);
 
+  // ── admission's duplicate check, over what the repair would leave ──────────
+  // The apply proves both runs clean after its writes (flowDuplicateReport);
+  // asked here of the same rules (collapseFlows) over epoch P as it would
+  // stand, so a duplicate or a conflict refuses at the preview, not only at
+  // the apply. Epoch P before the repair is not the question: a stand-in this
+  // repair quarantines may be the copy.
+  const quarantinedIds = new Set(quarantines.map((q) => q.id));
+  const maxFlowId = snap.flows.rows.reduce((m, f) => Math.max(m, f.id), 0);
+  const leftRows: FlowRow[] = [
+    ...P_rows.filter((f) => !quarantinedIds.has(f.id)),
+    ...inserts.map((i, k) => ({ id: maxFlowId + 1 + k, agentId: i.row.agent_id, direction: i.row.direction, amountUsdg: i.row.amount_usdg, txHash: i.row.tx_hash,
+      blockNumber: i.row.block_number, logIndex: i.row.log_index, source: i.row.source, epoch: P, chainId: i.row.chain_id, at: i.row.at })),
+  ];
+  const registeredChains = [...new Set(booking.agents.map((a) => a.chainId).filter((c): c is number => c !== null))];
+  let epochAfter: RunDuplicates;
+  if (leftRows.some((f) => (f.direction !== "in" && f.direction !== "out") || !Number.isFinite(f.amountUsdg) || !Number.isFinite(f.at))) {
+    epochAfter = { epoch: P, clean: false, verdict: "unread", copies: 0, conflicts: 0 };
+  } else {
+    const records: FlowRecord[] = leftRows.map((f) => ({ id: f.id, agentId: f.agentId, direction: f.direction as "in" | "out", amountUsdg: f.amountUsdg, txHash: f.txHash,
+      blockNumber: f.blockNumber, logIndex: f.logIndex, source: f.source, chainId: f.chainId, at: f.at }));
+    const c = collapseFlows(records, registeredChains.length === 1 ? registeredChains[0]! : null);
+    const copies = Object.values(c.duplicates.copies).reduce((s, n) => s + n, 0), conflicts = Object.values(c.duplicates.conflicts).reduce((s, n) => s + n, 0);
+    epochAfter = { epoch: P, clean: copies === 0 && conflicts === 0, verdict: c.verdict, copies, conflicts };
+  }
+  if (!epochAfter.clean) {
+    refuse("flows-duplicate", `after the repair epoch ${P}'s flows would hold ${epochAfter.copies} copy(ies) and ${epochAfter.conflicts} conflict(s) of one movement ` +
+      `(distinct-flows.ts, verdict ${epochAfter.verdict}): admission refuses a tenant whose flows do, and so would the apply`);
+  }
+  if (snap.currentRun && !snap.currentRun.clean) {
+    refuse("flows-duplicate", `the current run (epoch ${snap.currentRun.epoch ?? "unread"}) holds ${snap.currentRun.copies} copy(ies) and ${snap.currentRun.conflicts} conflict(s) ` +
+      `of one movement (distinct-flows.ts flowDuplicateReport, verdict ${snap.currentRun.verdict}): admission refuses this tenant until that is repaired, and this repair never writes that run`);
+  }
+
   // ── operations: who signed, and what answers each ─────────────────────────
   const book = account ? [account, ...custodyAddresses] : [];
   const ops: OpReport[] = [];
@@ -1025,6 +1210,9 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
   warnings.push(...stale.warnings);
   const flatTokens = new Set(stale.verdicts.filter((v) => v.verdict === "clear").map((v) => v.symbol));
   if (stale.seedAfter.basis.some((b) => flatTokens.has(b.symbol))) refuse("seed-after", "what admission would seed after the repair still names a token the chain shows flat");
+  // A CLEAR ONLY WHERE ADMISSION'S DRAIN CANNOT UNDO IT (retainedHomeVerdict).
+  const home = retainedHomeVerdict(snap.homeAtAnchor);
+  if (stale.clears.length && !home.durable) refuse(home.code!, home.why);
   if (stale.inertBasis.length || stale.inertFloors.length) {
     warnings.push(`live basis or floor rows outside what admission would seed are left alone (inert: admission never seeds them, and the first mirror pass after admission replaces them): ` +
       `${[...stale.inertBasis.map((b) => `basis ${b.symbol}`), ...stale.inertFloors.map((f) => `floor ${f.symbol}`)].join(", ")}`);
@@ -1076,7 +1264,9 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     predicted: { epochNetBefore: netBefore.toString(), epochNetAfter: netAfter.toString(), epochReceiptsAfter: receiptsAfter },
     admission: { found, remaining, afterBoundary },
     holdings: { seedBefore: snap.seedBefore, seedAfter: stale.seedAfter, verdicts: stale.verdicts, inertBasis: stale.inertBasis, inertFloors: stale.inertFloors,
-      positions: booking.holdings.positions, paperBasis: snap.paperBasis, classPositions: snap.classPositions, paperBook: snap.paperBook },
+      positions: booking.holdings.positions, paperBasis: snap.paperBasis, classPositions: snap.classPositions, paperBook: snap.paperBook,
+      home: { atAnchor: snap.homeAtAnchor, durable: home.durable, why: home.why } },
+    duplicates: { epochAfter, currentRun: snap.currentRun },
     agent: snap.agent, trades: snap.trades, feeAccruals: snap.feeAccruals, riskPeriods: snap.riskPeriods,
     receipts: { gapBookings: snap.gapBookings, repairs: snap.repairs }, balances: chain.balances, unread: chain.unread, warnings, cas,
   };
@@ -1100,6 +1290,8 @@ export function closedEpochLines(p: ClosedEpochPlan): string[] {
   for (const i of p.proposals.inserts) out.push(`  file in epoch ${p.epoch}: ${i.movement} — ${i.key}, block ${i.row.block_number}, at ${iso(i.row.at)}`);
   for (const q of p.proposals.quarantines) out.push(`  quarantine flows #${q.id} (${q.row.source}, ${q.row.direction} ${q.row.amountUsdg}): ${q.reason}`);
   for (const c of p.proposals.clears) out.push(`  clear ${c.table} live ${c.symbol} (${c.token}): flat on chain at the pinned block`);
+  // When it would not hold, the refusal says so.
+  if (p.proposals.clears.length && p.holdings.home.durable) out.push(`  the clear holds: ${p.holdings.home.why}`);
   out.push(`  epoch ${p.epoch} net contributions ${usdg6(p.predicted.epochNetBefore)} → ${usdg6(p.predicted.epochNetAfter)} USDG; other epochs and the peaks unchanged`);
   for (const op of p.ops.filter((x) => x.ownerOperationRecordedAsTrade)) out.push(`  owner operation ${op.userOpHash} answered by an agent 'swap' row (left in place)`);
   out.push(`  admission after: ${p.admission.remaining.length - p.admission.afterBoundary.length} fact(s) before the boundary, ${p.admission.afterBoundary.length} after it (for chain-gap-booking)`);

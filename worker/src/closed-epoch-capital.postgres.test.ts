@@ -150,9 +150,15 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
     await setup.query("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ($1, $2, 9, $3, 1789829702)", [TENANT, table, EPOCH2_AT]);
   }
   await ensureLedgerResumeSchema(db);
+  // Admission's evidence for the chain refusal as recordApproval stores one: its text in a TEXT column, the sha256 of that text as the digest.
+  const evidenceOf = (book: boolean) => {
+    const text = JSON.stringify({ account: ACCOUNT, home: { db: book ? { ino: "7002", size: "4096" } : null, exists: true, ino: "7001", markers: [] }, tenant: TENANT });
+    return [text, createHash("sha256").update(text).digest("hex")] as const;
+  };
+  const [noBook, noBookDigest] = evidenceOf(false);
   await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
-      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('8d1c4c6b', $1, $2, 4663, $1, $3, '{}', 'r', 'refused', $4, 1791248849249, 1791250434038, 1789238789)`,
-  [TENANT, ACCOUNT, "e".repeat(64), `${CHAIN_REFUSAL}: USDG in 145.499004 in tx ${DEPOSIT_TX} log 0 at block 64045884`]);
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('8d1c4c6b', $1, $2, 4663, $1, $3, $4, 'r', 'refused', $5, 1791248849249, 1791250434038, 1789238789)`,
+  [TENANT, ACCOUNT, noBookDigest, noBook, `${CHAIN_REFUSAL}: USDG in 145.499004 in tx ${DEPOSIT_TX} log 0 at block 64045884`]);
 
   // THE SERVER HOLDS THE READ-ONLY CONNECTION TO IT, whatever the shell lets through.
   const ro = await connectClosedEpoch(scoped.toString(), true, loadPg); clients.push(ro);
@@ -219,5 +225,15 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
   // The identity column still hands out fresh ids after the explicit one.
   const fresh = Number((await setup.query(`INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, at) VALUES ($1, 'in', 1, 'inferred', 2, 1) RETURNING id`, [SPELLED])).rows[0]!.id);
   assert.ok(fresh > inferredId);
+  await setup.query("DELETE FROM flows WHERE id = $1", [fresh]);
+
+  // ADMISSION'S EVIDENCE READ BACK FROM POSTGRES, hashed as stored: one that found the old book in the home refuses the clear, and with it the repair.
+  const [book, bookDigest] = evidenceOf(true);
+  await setup.query("UPDATE ledger_resume_approvals SET evidence_json = $1, evidence_digest = $2 WHERE approval_id = '8d1c4c6b'", [book, bookDigest]);
+  printed.length = 0;
+  const present = path.join(tmp, "present.json");
+  assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", present], env, deps), 2, printed.join("\n"));
+  const refused = JSON.parse(readFileSync(present, "utf8")) as { verdict: string; refusals: Array<{ code: string }> };
+  assert.deepEqual([refused.verdict, refused.refusals.map((r) => r.code)], ["blocked", ["home-book-present"]]);
   assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
 });
