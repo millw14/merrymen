@@ -410,8 +410,8 @@ node --import tsx worker/src/closed-epoch-capital-cli.ts \
   --output /absolute/private-dir/<tenant>-epoch1-apply.json
 ```
 
-It prints the repair id first:
-`repair <id> — if this process dies, see what was applied with --revert-repair <id> --dry-run`.
+It prints the repair id first, and where its report goes:
+`repair <id>: its apply report is written to <output> before the COMMIT is sent. If this process dies, see whether it committed with node --import tsx worker/src/closed-epoch-capital-cli.ts --revert <output> --dry-run --output /absolute/new-receipts-report.json`.
 
 It then recomputes the preview and refuses unless it is `READY` with exactly
 the confirmed digest. Then, in **one `SERIALIZABLE` transaction**:
@@ -441,50 +441,139 @@ the confirmed digest. Then, in **one `SERIALIZABLE` transaction**:
     the server's system identifier (`pg_control_system()`). Both go in the
     report as `xact`, beside the database the plan was made for (`target`:
     host, port and name, as the preview digest binds them).
-11. It writes the apply report to `--output` and fsyncs it, **before** the
-    commit.
+11. It writes the apply report to `--output` and fsyncs it and its
+    directory. Only then is the `COMMIT` sent.
 
 The first apply creates `closed_epoch_repairs` (additive DDL). Receipts are
-unique per (account, evidence key) while applied, across every epoch.
+unique per (account, evidence key) while applied, across every epoch. Any
+failure before the `COMMIT` rolls the whole transaction back, and the report
+file is removed.
+
+On success the console prints
+`APPLIED repair <id> — N action(s) for tenant 0x…, epoch 1, under backup <name>; …`.
+The report in `--output` is the one written before the `COMMIT`. Keep it
+with the runbook evidence: `--revert` and the receipts check take it. If
+the `APPLIED` line cannot be printed (the terminal, or the pipe the console
+writes to, is gone), the tool exits with `applied-but-not-printed`. The
+apply stands, and the report is kept.
 
 Applying again finds nothing to do (`refused (nothing-to-do)`).
+
+### If Postgres rolls the apply back for a conflict
+
+```
+refused (conflict): Postgres rolled the apply back for a conflict with another transaction (SQLSTATE 40001, a serialization failure): nothing was written — run the same command again, with a new --output; …
+```
+
+Nothing was written, and no report is left. Run the same apply again with a
+new `--output`. If the books moved in the meantime, it refuses with
+`confirm-mismatch`. In that case, preview again. The same refusal comes when
+another transaction wrote the agent row after this one's snapshot, or a
+`COMMIT` fails with a serialization failure or a deadlock.
 
 ### If the apply's outcome is unknown
 
 The apply and the revert run on the booking tool's own write connection, so
-a `COMMIT`'s answer is read by its rule. If the commit was sent and no
-answer proved it rolled back, the tool says `outcome unknown: …` and keeps
-the report file. Two answers prove a rollback. One is an error answering
-`COMMIT` with a SQLSTATE in class 40 other than `40003` (a serialization
-failure or a deadlock), or in class 23 (a deferred constraint). A class 40
-one is a conflict with another transaction, said as
-`refused (conflict): Postgres rolled the apply back for a conflict with another transaction (SQLSTATE 40001, a serialization failure): nothing was written — run the same command again, with a new --output; …`.
-Run the same command again: if the books moved meanwhile, it refuses with
-`confirm-mismatch`, and you preview again. The same refusal comes when the
-agent row moved after the transaction's snapshot. A class 23 one is
-rethrown. The other answer is a `COMMIT` the server answered with the
-`ROLLBACK` tag, because the transaction had already failed. That one is
-`commit-answered-rollback`. Either way, no report file is left. Any other
-error is an unknown outcome, because each can arrive after the commit was
-made durable. That includes a dropped or reset connection (`EPIPE`,
-`ECONNRESET`, no code), a terminated backend or a server shutting down or
-starting (`57P01`, `57P02`, `57P03`), and a connection exception (class 08).
-It also includes a cancelled or timed-out statement (`57014`), `40003`
-(statement completion unknown, which a pooler can send), and an answer
-tagged neither `COMMIT` nor `ROLLBACK`. Run:
+a `COMMIT`'s answer is read by its rule. The `COMMIT` can take effect on the
+server and its answer can still be lost on the way back. Only these answers
+prove that it rolled back:
 
-```sh
-node --import tsx worker/src/closed-epoch-capital-cli.ts \
-  --revert-repair <repair id> --output /absolute/private-dir/<tenant>-receipts.json --dry-run
+- an error with a SQLSTATE in class `40` (a serialization failure or a
+  deadlock), except `40003` ("statement completion unknown"). It is said as
+  the conflict above;
+- an error in class `23` (a deferred constraint, checked at the commit). It
+  is rethrown as itself;
+- the `COMMIT` answered with `ROLLBACK`'s tag, because the transaction had
+  already failed (`commit-answered-rollback`).
+
+With those, nothing was written and no report is left. Anything else is an
+unknown outcome, because it can arrive after the commit was made durable.
+That includes a dropped or reset connection (`EPIPE`, `ECONNRESET`, no code),
+a terminated backend or a server shutting down or starting (`57P01`,
+`57P02`, `57P03`), a connection exception (class `08`), a cancelled or
+timed-out statement (`57014`), `40003` (which a pooler can send), and an
+answer tagged neither `COMMIT` nor `ROLLBACK`. The tool then keeps the
+report and prints:
+
+```
+OUTCOME UNKNOWN for repair <id>: the COMMIT was sent and no answer proved it rolled back, so it may have committed. <output> holds its apply report, written and fsynced before the COMMIT: keep it, both commands below take it. Its transaction is <xid>.
+  1. Did it commit? Read only: node --import tsx worker/src/closed-epoch-capital-cli.ts --revert <output> --dry-run --output /absolute/new-receipts-report.json
+     COMMITTED (receipts 'applied', and what it wrote unmoved): it stands; go on to step 5 of docs/closed-epoch-capital.md, or take it back with 2.
+     NOT COMMITTED (no receipt, and the server says its transaction ended without committing): nothing was written; preview the tenant again.
+     STILL UNKNOWN (no receipt yet, and no such word from the server): keep the report and run 1 again; it settles once the server ends that transaction.
+  2. Take it back: node --import tsx worker/src/closed-epoch-capital-cli.ts --revert <output> --output /absolute/new-revert-report.json
 ```
 
-It reads the receipts (read only) and says whether the repair committed.
+It exits with `apply-outcome-unknown`, even if the console fails while
+printing those lines. Run command 1 first. If `DATABASE_URL` names another
+database than the report's (`target`), it refuses with `target` before it
+connects. Otherwise it opens a read-only connection and, in one read-only
+snapshot, reads the repair's receipts and checks them against the report
+as a revert would. With none, it asks the server what became of the apply's
+transaction (`pg_xact_status` on the report's `xact` id). It writes its
+answer to its own `--output`, and changes nothing in the database.
 
-If the apply committed but its report could not be closed, the tool fails
-with `applied-but-report-not-closed`. If the report was written but the
-`APPLIED` line could not be printed, it fails with `applied-but-not-printed`.
-Either way the apply stands, and the report file is kept. The receipts
-command above shows it.
+**No receipt is not proof that the apply never committed.** The connection
+can fail while the `COMMIT` is on its way, and the server may still be
+committing, or the apply's session may still be open, when the check takes
+its snapshot. The receipts appear moments later. So the check says
+`NOT COMMITTED` only when the server says the apply's transaction ended
+without committing (`aborted`), on the server whose system identifier the
+report holds. Anything else with no receipt is `STILL UNKNOWN`. The check
+prints one of:
+
+- `COMMITTED repair <id> …`: every receipt says `applied`, and the account's
+  flows, quarantine history, live basis and floors are exactly as the apply
+  left them. The repair stands. Carry on from step 5, or take it back with
+  command 2. It exits 0.
+- `COMMITTED, BUT MOVED SINCE repair <id> …`: every receipt says `applied`,
+  but one of those has changed since (`moved` in its report names which). A
+  `--revert` refuses with `moved`. Escalate. It exits 2.
+- `NOT COMMITTED repair <id> …`: no receipt, and the server says the
+  transaction ended without committing. Nothing was written. Preview the
+  tenant again. A `--revert` of this report refuses with `not-committed`. It
+  exits 0.
+- `STILL UNKNOWN repair <id> …`: no receipt is visible, and the server has
+  not said the transaction aborted. **Keep the report**: if the repair
+  committed, the report is what `--revert` takes, and a `--revert` refuses
+  with `no-receipt` until then. It exits 2. `transaction.status` in its
+  report says what the server said, and `why` explains it:
+  - `in-progress`: the transaction is still open, or had not ended when the
+    check began. The apply may still be running or its `COMMIT` still going
+    through, or the server has not yet noticed that the apply's session is
+    gone. Run the check again in a minute. If it stays `in-progress`, look in
+    `pg_stat_activity` for an `application_name` of
+    `merrymen-closed-epoch-apply`. The server ends that session when its
+    connection is found dead. Ending it yourself (`pg_terminate_backend`)
+    rolls the transaction back if it has not committed, and the check then
+    says `NOT COMMITTED`.
+  - `committed-after-snapshot`: it committed after the check took its
+    snapshot. Run the check again: it says `COMMITTED`.
+  - `committed`: it committed before the snapshot, yet this database holds
+    no receipt of it. `DATABASE_URL` names another database on that server,
+    or the receipts were removed. Escalate.
+  - `forgotten`: the transaction is too old for the server to remember.
+  - `other-server`: this server's system identifier is not the report's,
+    or one of them could not be read. The id means nothing here.
+  - `unrecorded`: the report names no transaction, or no report was given.
+- `COMMITTED, THEN REVERTED repair <id> …`: it committed and has since been
+  reverted. It exits 0.
+
+Receipts that match the report while the server says the transaction
+aborted, or is still open, contradict each other. The check refuses
+(`receipts`): escalate.
+
+`--revert-repair <repair id> --dry-run` reads the same receipts without the
+report. With receipts it answers as above. With none it can only say
+`STILL UNKNOWN`, because only the report names the apply's transaction, so
+the server cannot be asked. It never says that nothing was applied. Run the
+check with the report.
+
+If the process died during the apply, the same check applies to its
+`--output`. An empty or cut-short report means the apply never reached its
+`COMMIT`, because the report is written in full and fsynced first. The check
+says so (`refused (report-unfinished)`). If that apply has died, nothing was
+written. If it is still running, let it finish and run the check again.
 
 ## 5. Preview the tenant in admission, approve, roll out
 
@@ -517,6 +606,12 @@ report was applied to (`target`). If it names another, it refuses with
 
 In one transaction, the revert:
 
+- with no receipt of the repair visible, changes nothing and refuses:
+  `not-committed` only when the server says the apply's transaction (the
+  report's `xact`) ended without committing, and `no-receipt` otherwise.
+  Without the report it is always `no-receipt`, because only the report names
+  that transaction. See whether it committed with the receipts check
+  (`--revert <apply report> --dry-run`);
 - verifies the receipts against their own digests, and the report against the
   receipts;
 - refuses if anything stood on the rows since (the same rules as the booking
@@ -544,12 +639,21 @@ removed:
 - `reverted-but-not-printed`: the revert committed and its report was
   written, but the `REVERTED` line could not be printed.
 
-Either way the receipts read `reverted`. Check them with
-`--revert-repair <repair id> --dry-run`, or run the revert again with a new
-`--output`, which says `ALREADY REVERTED`. A revert whose `COMMIT` answer
-proved nothing fails with `revert-outcome-unknown`, and the same check says
-whether it took. A revert that Postgres rolls back for a conflict says
-`refused (conflict)` and changed nothing: run it again.
+Either way the receipts read `reverted`. The line printed names the
+receipts check (`--revert <apply report> --dry-run`, or
+`--revert-repair <repair id> --dry-run` for a revert from the receipts
+alone), which says `COMMITTED, THEN REVERTED`. Or run the revert again with
+a new `--output`, which says `ALREADY REVERTED`.
+
+A revert whose `COMMIT` is sent and whose answer proves nothing prints
+`OUTCOME UNKNOWN for the revert of repair <id>`, leaves no revert report and
+exits with `revert-outcome-unknown`, even if that line cannot be printed.
+Run the same revert again with a new `--output`. If the first one committed,
+the second says `ALREADY REVERTED` and changes nothing. Otherwise it
+reverts. To only look, run the receipts check: it says
+`COMMITTED, THEN REVERTED` once the revert has committed. A revert that
+Postgres rolls back for a conflict says `refused (conflict)` and changed
+nothing: run it again.
 
 After admission, there is no revert:
 narrow the rollout and escalate. The last resort is the backup named in the
@@ -622,9 +726,33 @@ operations, from block 0 (`worker/src/testdata/closed-epoch-0e1ca0.json`),
 and three of 0x4b6dcd's root-key operations
 (`worker/src/testdata/closed-epoch-4b6dcd.json`).
 
-The opt-in real-Postgres test needs a disposable **loopback** server in
-`MERRYMEN_TEST_PG_URL` and the `pg` driver resolvable (`NODE_PATH` works). It
-creates its own database and drops it, and never reads `DATABASE_URL`:
+`closed-epoch-capital-cli.test.ts` holds each answer a `COMMIT` can get,
+through the shell. A lost answer after the commit took effect (`EPIPE`,
+`ECONNRESET`, `57P01`, `40003`, no code), or one tagged neither `COMMIT` nor
+`ROLLBACK`, keeps the report, and the receipts check says `COMMITTED`. A
+conflict (`40001` or `40P01` at the `COMMIT`, or `40001` on the agent row's
+lock, in the apply or the revert) is `refused (conflict)`, and the same
+command then runs cleanly. A deferred constraint (`23514`) is rethrown as
+itself, and `ROLLBACK`'s tag is `commit-answered-rollback`. Its stand-in
+server hands out transaction ids and answers `pg_xact_status`, so the check
+is shown saying `NOT COMMITTED` only for an aborted transaction, and
+`STILL UNKNOWN` for one in progress, forgotten, committed with no receipt or
+after the check's snapshot, on another server or an unreadable one, and for
+a repair id with no report. It also shows `COMMITTED, BUT MOVED SINCE` once
+a filed flow changed, refuses receipts the server contradicts and a report
+from another database before connecting, names a cut-short report, and
+keeps each outcome's code when the console breaks after it is settled.
+
+The opt-in real-Postgres tests need a disposable **loopback** server in
+`MERRYMEN_TEST_PG_URL` and the `pg` driver resolvable (`NODE_PATH` works).
+One holds a `COMMIT` on the server with a deferred trigger and drops the
+client 300 ms after sending it. While the backend is still in its `COMMIT`,
+the check says `STILL UNKNOWN`, from the report and from the repair id, and
+a revert refuses with `no-receipt`. Once the `COMMIT` lands, the check says
+`COMMITTED`, and the kept report reverts it. A backend terminated as the
+`COMMIT` is sent is `NOT COMMITTED`, on the server's word that its
+transaction aborted. Each test creates its own database and drops it, and
+never reads `DATABASE_URL`:
 
 ```sh
 MERRYMEN_TEST_PG_URL=postgres://postgres@127.0.0.1:<port>/postgres \

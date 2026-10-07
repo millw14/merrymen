@@ -70,8 +70,12 @@
  * it, requires the confirmed digest and a named backup, and in ONE
  * transaction locks the agent row, compares every fact again, inserts,
  * verifies, quarantines, clears, proves its postconditions and records one
- * receipt per action. Revert is exact: original flow ids, every pre-image,
- * the quarantine rows kept as history.
+ * receipt per action; its report names the database and the transaction
+ * itself. Revert is exact: original flow ids, every pre-image, the
+ * quarantine rows kept as history. An apply whose COMMIT went unanswered is
+ * settled as the booking tool settles one (readRepairOutcome): by its
+ * receipts, or with none by the server's word on that transaction — only
+ * "aborted" is not-committed, never a missing receipt alone.
  *
  * Reviewed operator tool: never imported by the orchestrator or a worker.
  * docs/closed-epoch-capital.md is the runbook.
@@ -94,14 +98,16 @@ import { hasChainIdentityIndex, inspectChainIdentityIndex, verifyInserted } from
 import { heldResetEvent } from "./held-reset";
 import { ownerOperationOf, type OwnerOperationReading } from "./owner-operations";
 import {
-  admittedSince, ANCHOR_MARGIN_SEC, BACKUP_REF, BALANCE_OF_SELECTOR, BOOKING_CONFIRMATIONS, BOOKINGS_TABLE, BookingRefused, canonical, casFacts, currentXact, digestOf,
-  existingColumns, existingTables, factsStillMissing, FLOW_COLUMNS, gapChainOf, holdOf, isServerXact, patiently, readAdmissionState, readBookingSnapshot, sameRow,
-  storedRow, unixSec, type AdmissionState, type BookingSnapshot, type ChainEvidence, type Dialect, type FlowProposal, type ServerXact, type TxEvidence,
+  admittedSince, ANCHOR_MARGIN_SEC, BACKUP_REF, BALANCE_OF_SELECTOR, BOOKING_CONFIRMATIONS, BOOKINGS_TABLE, BookingRefused, canonical, casFacts, commitEvidence, currentXact,
+  digestOf, existingColumns, existingTables, factsStillMissing, FLOW_COLUMNS, gapChainOf, holdOf, isServerXact, noReceiptRefusal, patiently, readAdmissionState,
+  readBookingSnapshot, sameRow, storedRow, unixSec, xactStatusOf, type AdmissionState, type BookingSnapshot, type ChainEvidence, type Dialect, type FlowProposal,
+  type ServerXact, type TxEvidence, type XactStatus,
 } from "./chain-gap-booking";
 
 export const CLOSED_EPOCH_FORMAT = "merrymen.closed-epoch-capital.v1";
 export const CLOSED_EPOCH_APPLY_FORMAT = "merrymen.closed-epoch-capital.apply.v1";
 export const CLOSED_EPOCH_REVERT_FORMAT = "merrymen.closed-epoch-capital.revert.v1";
+export const CLOSED_EPOCH_RECEIPTS_FORMAT = "merrymen.closed-epoch-capital.receipts.v1";
 /** The receipts table: one row per action, kept (as 'reverted') after a revert. */
 export const REPAIRS_TABLE = "closed_epoch_repairs";
 /**
@@ -1772,6 +1778,119 @@ export async function readRepairReceipts(db: Db, dialect: Dialect, repairId: str
   });
 }
 
+/** One apply's receipts agree on everything that apply wrote once: its tenant, account, epoch, chain, preview, admission record, fingerprints and time. */
+function receiptsAgree(receipts: readonly RepairReceipt[]): boolean {
+  const first = receipts[0]!;
+  return receipts.every((r) => r.tenant === first.tenant && r.account === first.account && r.epoch === first.epoch && r.chainId === first.chainId
+    && r.previewDigest === first.previewDigest && r.admissionJson === first.admissionJson && r.fingerprintsJson === first.fingerprintsJson && r.appliedAtMs === first.appliedAtMs);
+}
+/** THE DATABASE'S RECORD, NOT THE REPORT'S WORD: the report verifies only against its own digest, so each of its actions must be a receipt's. */
+function receiptsMatchReport(receipts: readonly RepairReceipt[], report: RepairApplyReport, repairId: string): boolean {
+  const first = receipts[0]!;
+  const want = [...report.actions].sort((a, b) => byText(a.evidenceKey, b.evidenceKey));
+  return report.repairId === repairId && want.length === receipts.length && receipts.every((r, i) => r.evidenceKey === want[i]!.evidenceKey
+    && r.action === want[i]!.action && r.table === want[i]!.table && r.rowDigest === want[i]!.rowDigest && r.rowKey === want[i]!.rowKey)
+    && first.tenant === report.tenant && first.account === report.account && first.previewDigest === report.previewDigest
+    && first.appliedAtMs === report.appliedAtMs && first.admissionJson === canonical(report.admission) && first.fingerprintsJson === canonical(report.fingerprints);
+}
+
+// ── what became of an apply whose COMMIT went unanswered ────────────────────
+
+/**
+ * WHAT THE SERVER SAYS BECAME OF THE APPLY'S TRANSACTION (chain-gap-booking.ts xactStatusOf, on the report's xact). Without the report
+ * nothing names that transaction (the receipts are written inside it, so they cannot), and the server cannot be asked.
+ */
+async function serverSays(db: Db, report: RepairApplyReport | undefined, dialect: Dialect): Promise<{ status: XactStatus; why: string }> {
+  if (!report) {
+    return { status: "unrecorded", why: "no apply report was given, and only the report names the apply's own transaction, so the server cannot be asked what became of it" };
+  }
+  return xactStatusOf(db, report, dialect);
+}
+
+/**
+ * NO RECEIPT OF THE REPAIR IS VISIBLE (chain-gap-booking.ts noReceiptRefusal, said of the repair): a revert has nothing to take. It is
+ * not-committed only on the server's word that the apply's transaction aborted; anything else (a transaction still open or committing,
+ * one committed after the snapshot, too old, another server, no report or no id) is no-receipt, which the receipts check settles.
+ */
+function noReceipt(repairId: string, x: { status: XactStatus; why: string }): BookingRefused {
+  return noReceiptRefusal(x, {
+    notCommitted: (why) => `this database holds no receipt of repair ${repairId} and ${why}: that apply never committed, so nothing was written and there is ` +
+      "nothing to revert — preview the tenant again",
+    noReceipt: (why) => `no receipt of repair ${repairId} is visible here, and that alone does not prove its apply never committed: ${why}. Nothing changed. ` +
+      "Keep the apply report, and see whether it committed with the receipts check (--revert <apply report> --dry-run)",
+  });
+}
+
+export interface RepairOutcome {
+  format: typeof CLOSED_EPOCH_RECEIPTS_FORMAT; mode: "receipts"; repairId: string; tenant: string | null; account: string | null;
+  /**
+   * applied: it committed, every receipt says 'applied', and the account's flows, quarantine history, live basis and floors are exactly
+   * as it left them (what a revert checks first). moved: it committed and every receipt says 'applied', but one of those has changed
+   * since, so a revert refuses (moved). reverted: it committed and was taken back. partly-reverted: receipts in both states, which one
+   * revert transaction never leaves. not-committed: no receipt, and the server says the apply's transaction aborted. unknown: no receipt,
+   * and nothing proves it never committed: keep the report and read again (`why` says what the server said, or that no report was given).
+   */
+  verdict: "applied" | "moved" | "reverted" | "partly-reverted" | "not-committed" | "unknown";
+  why: string;
+  /** The apply's transaction as its report names it (null: no report, or none named), and what the server said became of it. */
+  transaction: { id: string | null; status: XactStatus };
+  receipts: Array<{ action: string; evidenceKey: string; table: string; state: string; epoch: number; appliedAtMs: number; revertedAtMs: number | null;
+    previewDigest: string; backupRef: string }>;
+  /** When every receipt says 'applied': which of the account's fingerprints changed since the apply. None: it stands as applied. */
+  moved: string[];
+  writesPerformed: 0;
+}
+
+/**
+ * DID THE APPLY COMMIT, AND DOES WHAT IT WROTE STAND? Read only, in one snapshot, for an apply whose COMMIT went unanswered (the shell's
+ * --revert <report> --dry-run, or --revert-repair <id> --dry-run without the report). First the repair's receipts, each verified against
+ * its own digest, against each other and, given the report, against it, as a revert checks them. With none, what the server says became
+ * of the apply's transaction (serverSays, read by commitEvidence): only "aborted" is not-committed, and anything else is unknown —
+ * without the report, which alone names that transaction, always unknown. With every receipt 'applied', the account's flows, quarantine
+ * history, live basis and floors against the receipts' record of what the apply left, as a revert compares them first: any that changed
+ * is moved. Changes nothing; on the shell's read-only connection.
+ *
+ * Receipts that the server contradicts (it says the apply's transaction aborted, or is still open) are refused, to escalate.
+ */
+export async function readRepairOutcome(db: Db, o: { repairId: string; report?: RepairApplyReport; dialect: Dialect }): Promise<RepairOutcome> {
+  if (o.report && o.report.repairId !== o.repairId) throw new BookingRefused("report", "the apply report is of another repair");
+  const tables = await existingTables(db, o.dialect);
+  const receipts = await readRepairReceipts(db, o.dialect, o.repairId);
+  const xact = await serverSays(db, o.report, o.dialect);
+  const first = receipts[0];
+  const result = (verdict: RepairOutcome["verdict"], why: string, moved: string[] = []): RepairOutcome => ({
+    format: CLOSED_EPOCH_RECEIPTS_FORMAT, mode: "receipts", repairId: o.repairId, tenant: o.report?.tenant ?? first?.tenant ?? null,
+    account: o.report?.account ?? first?.account ?? null, verdict, why, transaction: { id: o.report?.xact?.id ?? null, status: xact.status },
+    receipts: receipts.map((r) => ({ action: r.action, evidenceKey: r.evidenceKey, table: r.table, state: r.state, epoch: r.epoch, appliedAtMs: r.appliedAtMs,
+      revertedAtMs: r.revertedAtMs, previewDigest: r.previewDigest, backupRef: r.backupRef })),
+    moved, writesPerformed: 0,
+  });
+  const evidence = commitEvidence(receipts.length > 0, xact);
+  if (evidence === "not-committed") return result("not-committed", `no receipt holds it, and ${xact.why}: nothing was written`);
+  if (evidence === "committed-no-receipt") {
+    return result("unknown", `${xact.why}, yet this database holds no receipt of it: DATABASE_URL may name another database on that server, or the receipts were removed — escalate`);
+  }
+  if (evidence === "unknown") {
+    return result("unknown", `no receipt of it is visible${tables.has(REPAIRS_TABLE) ? "" : " (this database has no receipts table)"}, and that alone does not prove it never committed: ${xact.why}`);
+  }
+  if (!receiptsAgree(receipts)) throw new BookingRefused("receipts", "the repair's receipts disagree with each other");
+  if (o.report && !receiptsMatchReport(receipts, o.report, o.repairId)) throw new BookingRefused("receipts", "the repair's receipts in the database do not match the report");
+  if (evidence === "contradicted") {
+    throw new BookingRefused("receipts", `the repair's receipts say it committed, but ${xact.why}: the report and the database disagree — escalate`);
+  }
+  const states = new Set(receipts.map((r) => r.state));
+  if (states.size !== 1) return result("partly-reverted", "its receipts are in more than one state, which one revert never leaves: escalate");
+  if (states.has("reverted")) return result("reverted", "it committed, and every receipt says it was reverted");
+  if (!states.has("applied")) throw new BookingRefused("receipts", "the repair's receipts are in a state this tool never writes");
+  const prints = JSON.parse(first!.fingerprintsJson) as { after: Fingerprints };
+  const now = fingerprintsOf(await readMutableFacts(db, tables, first!.account), first!.epoch);
+  const moved = (["flowsAll", "quarantine", "liveBasis", "liveFloors"] as const).filter((k) => now[k] !== prints.after[k]);
+  return moved.length
+    ? result("moved", `it committed, but the account's ${moved.join(", ")} changed since the apply: something wrote them after this repair, so a revert refuses (moved) — escalate`,
+      [...moved])
+    : result("applied", "it committed, and the account's flows, quarantine history, live basis and floors are exactly as it left them");
+}
+
 export interface RepairRevertReport {
   format: typeof CLOSED_EPOCH_REVERT_FORMAT; repairId: string; tenant: string; account: string; revertedAtMs: number;
   outcome: "reverted" | "already-reverted"; actions: Array<{ action: string; evidenceKey: string }>; reportDigest: string;
@@ -1793,24 +1912,20 @@ export interface RepairRevertReport {
  * its quarantine row stays as history (flows_quarantine is append-only:
  * accounting-repair.ts, and the restore drill reads it so), and the filed
  * rows go if still exactly as written. The flows and basis come back to the
- * apply's `before`, byte for byte, or nothing changes.
+ * apply's `before`, byte for byte, or nothing changes. With no receipt of
+ * the repair visible it refuses not-committed only when the server says the
+ * apply's transaction (the report's xact) aborted, and no-receipt otherwise
+ * (noReceipt): an apply still open or committing, or one whose report is not
+ * given, is never called "never committed".
  */
 export async function revertClosedEpoch(db: Db, o: { repairId: string; report?: RepairApplyReport; nowMs: number; dialect: Dialect }): Promise<RepairRevertReport> {
   return db.tx(async (tx) => {
     const receipts = await readRepairReceipts(tx, o.dialect, o.repairId);
-    if (!receipts.length) throw new BookingRefused("receipts", "no receipts exist for this repair: nothing was applied under it");
+    // None visible: "never committed" only on the server's word that the apply's transaction aborted (noReceipt).
+    if (!receipts.length) throw noReceipt(o.repairId, await serverSays(tx, o.report, o.dialect));
     const first = receipts[0]!;
-    const same = receipts.every((r) => r.tenant === first.tenant && r.account === first.account && r.epoch === first.epoch && r.chainId === first.chainId
-      && r.previewDigest === first.previewDigest && r.admissionJson === first.admissionJson && r.fingerprintsJson === first.fingerprintsJson && r.appliedAtMs === first.appliedAtMs);
-    if (!same) throw new BookingRefused("receipts", "the repair's receipts disagree with each other");
-    if (o.report) {
-      const want = [...o.report.actions].sort((a, b) => byText(a.evidenceKey, b.evidenceKey));
-      const matches = o.report.repairId === o.repairId && want.length === receipts.length && receipts.every((r, i) => r.evidenceKey === want[i]!.evidenceKey
-        && r.action === want[i]!.action && r.table === want[i]!.table && r.rowDigest === want[i]!.rowDigest && r.rowKey === want[i]!.rowKey)
-        && first.tenant === o.report.tenant && first.account === o.report.account && first.previewDigest === o.report.previewDigest
-        && first.appliedAtMs === o.report.appliedAtMs && first.admissionJson === canonical(o.report.admission) && first.fingerprintsJson === canonical(o.report.fingerprints);
-      if (!matches) throw new BookingRefused("receipts", "the repair's receipts in the database do not match the report");
-    }
+    if (!receiptsAgree(receipts)) throw new BookingRefused("receipts", "the repair's receipts disagree with each other");
+    if (o.report && !receiptsMatchReport(receipts, o.report, o.repairId)) throw new BookingRefused("receipts", "the repair's receipts in the database do not match the report");
     const result = (outcome: RepairRevertReport["outcome"]): RepairRevertReport => {
       const body = { format: CLOSED_EPOCH_REVERT_FORMAT, repairId: o.repairId, tenant: first.tenant, account: first.account, revertedAtMs: o.nowMs, outcome,
         actions: receipts.map((r) => ({ action: r.action, evidenceKey: r.evidenceKey })) };

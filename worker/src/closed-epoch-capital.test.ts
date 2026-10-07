@@ -35,7 +35,7 @@ import type { RpcCall } from "./chain-capital";
 import { BookingRefused, BOOKINGS_TABLE, canonical, digestOf, gapChainOf } from "./chain-gap-booking";
 import {
   applyClosedEpoch, capitalProvenance, CLOSED_EPOCH_APPLY_FORMAT, classifyEvent, closedEpochLines, homeOfEvidence, parseRepairReport, planClosedEpoch, readClosedEpochChain,
-  readClosedEpochSnapshot, readRepairReceipts, REPAIRS_TABLE, retainedHomeVerdict, revertClosedEpoch, signersOf, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
+  readClosedEpochSnapshot, readRepairOutcome, readRepairReceipts, REPAIRS_TABLE, retainedHomeVerdict, revertClosedEpoch, signersOf, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
 } from "./closed-epoch-capital";
 import { heldResetEvent } from "./held-reset";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
@@ -1256,7 +1256,38 @@ describe("revert, decided by what the database recorded", () => {
     assert.deepEqual(receipts.map((r) => r.state), report.actions.map(() => "applied"));
     assert.equal((await revert(b, report, false)).outcome, "reverted");
     assert.deepEqual(rows(b.raw, "SELECT COUNT(*) AS n FROM flows")[0]!.n, 0);
-    await assert.rejects(revertClosedEpoch(b.db, { repairId: "00000000-0000-4000-8000-000000000000", nowMs: NOW * 1000, dialect: "sqlite" }), refusedWith("receipts", /no receipts/));
+    // No receipt under an id, and no report to name its apply's transaction: never "nothing was applied", only that nothing proves it.
+    await assert.rejects(revertClosedEpoch(b.db, { repairId: "00000000-0000-4000-8000-000000000000", nowMs: NOW * 1000, dialect: "sqlite" }),
+      refusedWith("no-receipt", /^no receipt of repair 00000000-0000-4000-8000-000000000000 is visible here, and that alone does not prove its apply never committed: no apply report was given/));
+  });
+
+  it("the check reads the receipts, or with none the server's word: on sqlite no server can be asked, so no receipt is unknown and a revert refuses no-receipt", async () => {
+    const { b, report } = await applied();
+    const never = { ...report, repairId: "00000000-0000-4000-8000-000000000000" };
+    const look = await readRepairOutcome(b.db, { repairId: never.repairId, report: never, dialect: "sqlite" });
+    assert.deepEqual([look.verdict, look.transaction, look.receipts, look.moved, look.writesPerformed], ["unknown", { id: null, status: "unrecorded" }, [], [], 0]);
+    assert.match(look.why, /^no receipt of it is visible, and that alone does not prove it never committed: the report names no transaction/);
+    // A report naming a transaction, read where no server can be asked: unreadable, still unknown, and the revert refuses no-receipt.
+    const named = { ...never, xact: { id: "741", system: "7693842931899834703" } };
+    assert.deepEqual((await readRepairOutcome(b.db, { repairId: named.repairId, report: named, dialect: "sqlite" })).transaction, { id: "741", status: "unreadable" });
+    await assert.rejects(revertClosedEpoch(b.db, { repairId: named.repairId, report: named, nowMs: NOW * 1000, dialect: "sqlite" }),
+      refusedWith("no-receipt", /does not prove its apply never committed: this database cannot say what became of a transaction/));
+    await assert.rejects(readRepairOutcome(b.db, { repairId: report.repairId, report: never, dialect: "sqlite" }), refusedWith("report", /another repair/));
+    // Its own receipts, against the report: applied while what it wrote stands, moved once something writes the account's flows, and
+    // a revert then refuses moved; as it was again, applied; taken back, reverted.
+    const own = await readRepairOutcome(b.db, { repairId: report.repairId, report, dialect: "sqlite" });
+    assert.deepEqual([own.verdict, own.moved, own.receipts.map((r) => r.state)], ["applied", [], report.actions.map(() => "applied")]);
+    b.raw.prepare("UPDATE flows SET amount_usdg = 145.5 WHERE tx_hash = ?").run(DEPOSIT_TX);
+    const moved = await readRepairOutcome(b.db, { repairId: report.repairId, dialect: "sqlite" });
+    assert.deepEqual([moved.verdict, moved.moved], ["moved", ["flowsAll"]]);
+    assert.match(moved.why, /a revert refuses \(moved\)/);
+    await assert.rejects(revert(b, report), refusedWith("moved", /flowsAll/));
+    b.raw.prepare("UPDATE flows SET amount_usdg = 145.499004 WHERE tx_hash = ?").run(DEPOSIT_TX);
+    assert.equal((await readRepairOutcome(b.db, { repairId: report.repairId, report, dialect: "sqlite" })).verdict, "applied");
+    // A report whose receipts the database does not hold as written is refused, as a revert refuses it.
+    await assert.rejects(readRepairOutcome(b.db, { repairId: report.repairId, report: { ...report, appliedAtMs: report.appliedAtMs + 1 }, dialect: "sqlite" }), refusedWith("receipts"));
+    assert.equal((await revert(b, report)).outcome, "reverted");
+    assert.equal((await readRepairOutcome(b.db, { repairId: report.repairId, report, dialect: "sqlite" })).verdict, "reverted");
   });
 });
 

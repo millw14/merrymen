@@ -36,7 +36,7 @@ import type { RpcCall } from "./chain-capital";
 import { BookingRefused, gapChainOf } from "./chain-gap-booking";
 import { OWNER_OPERATION_COLUMNS, ownerOperationOf, ownerOperationRow } from "./owner-operations";
 import { CliError, pgClientDb, targetDigest, type PgClient } from "./chain-gap-booking-cli";
-import { REPAIRS_TABLE } from "./closed-epoch-capital";
+import { ensureClosedEpochSchema, parseRepairReport, REPAIRS_TABLE } from "./closed-epoch-capital";
 import { connectClosedEpoch, main } from "./closed-epoch-capital-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
@@ -98,11 +98,12 @@ const rpcOf = (txs: typeof TXS): RpcCall => async (method, params) => {
 };
 const rpc = rpcOf(TXS);
 
-test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly — 0x0e1ca0 through the operator's shell", { skip: !url, timeout: 120_000 }, async (t) => {
+/** A database of its own on the disposable local server, dropped after the test: its URL, a setup connection and a Db over it. */
+async function freshDatabase(t: { after(fn: () => Promise<void>): void }, prefix: string) {
   const target = new URL(url!);
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "only a disposable LOCAL PostgreSQL is allowed");
   const pg = (await loadPg()) as { Client: new (c: { connectionString: string }) => PgClient & { connect(): Promise<void> } };
-  const name = `mm_closed_epoch_${randomBytes(6).toString("hex")}`;
+  const name = `${prefix}_${randomBytes(6).toString("hex")}`;
   const admin = new pg.Client({ connectionString: target.toString() }); await admin.connect();
   await admin.query(`CREATE DATABASE ${name}`);
   const scoped = new URL(target); scoped.pathname = `/${name}`;
@@ -122,6 +123,14 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
     async exec(sql) { await setup.query(translateSchema(sql)); },
     async tx() { throw new Error("not here"); },
   };
+  return { pg, scoped, setup, db, clients, tmp };
+}
+
+/**
+ * 0x0e1ca0's books as they stood when it was held: epoch 2 (paper) open, the seventeen session trades and the owner's sweep as 'swap' rows
+ * in epoch 1, a live MU basis and floor the chain shows flat, an inferred epoch-1 stand-in, and admission's chain refusal with its evidence.
+ */
+async function seedSweptTenant(setup: PgClient, db: Db) {
   await applyLedgerSchema(db); await db.exec(MIRROR_STATE_DDL); await db.exec(PAPER_CHECKPOINT_SCHEMA);
   await setup.query(`CREATE TABLE grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json JSONB NOT NULL, sealed_session_key TEXT, updated_at BIGINT NOT NULL)`);
   await setup.query("INSERT INTO grants VALUES ($1, 4663, $2, 'SEALED-NEVER-READ', 1)", [TENANT, JSON.stringify({ smartAccount: SPELLED, owner: TENANT, chainId: 4663,
@@ -161,6 +170,13 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
   await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
       created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('8d1c4c6b', $1, $2, 4663, $1, $3, $4, 'r', 'refused', $5, 1791248849249, 1791250434038, 1789238789)`,
   [TENANT, ACCOUNT, noBookDigest, noBook, `${CHAIN_REFUSAL}: USDG in 145.499004 in tx ${DEPOSIT_TX} log 0 at block 64045884`]);
+
+  return { inferredId, evidenceOf };
+}
+
+test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly — 0x0e1ca0 through the operator's shell", { skip: !url, timeout: 120_000 }, async (t) => {
+  const { pg, scoped, setup, db, clients, tmp } = await freshDatabase(t, "mm_closed_epoch");
+  const { inferredId, evidenceOf } = await seedSweptTenant(setup, db);
 
   // THE SERVER HOLDS THE READ-ONLY CONNECTION TO IT, whatever the shell lets through.
   const ro = await connectClosedEpoch(scoped.toString(), true, loadPg); clients.push(ro);
@@ -355,4 +371,111 @@ test("Postgres: an owner record answers the owner's sweep in the read-only previ
   const gap = await chainGapCheck({ chain: gapChainOf(rpcOf(pure), async () => {}), account: ACCOUNT, usdg: USDG, fromBlock: 64_000_000n, known,
     ownerContext: { custody: [CLASS_VAULT], chainId: 4663 }, maxSpan: 10_000_000n });
   assert.equal(gap.status, "clean");
+});
+
+/**
+ * A COMMIT WHOSE ANSWER IS LOST WHILE THE SERVER IS STILL COMMITTING IT. A deferred trigger on the receipts holds the apply's COMMIT on the
+ * server for seconds (as a slow fsync or a synchronous standby can); the client's connection drops 300 ms after it sent the COMMIT, with no
+ * SQLSTATE: an unknown outcome. While the backend is still in its COMMIT no receipt is visible, and the receipts check — from the repair id
+ * alone, or from the kept report — says STILL UNKNOWN (exit 2), never "nothing was applied", and a revert refuses no-receipt. Once the
+ * COMMIT lands: COMMITTED, and the revert takes the repair back from the kept report. Then the other half of the rule on the same server:
+ * a backend terminated as the COMMIT is sent leaves the report too, and the server's word that its transaction aborted is NOT COMMITTED.
+ */
+test("Postgres: a COMMIT still landing after its answer was lost is STILL UNKNOWN, never 'nothing was applied'; landed, COMMITTED and reverted from the kept report; aborted, NOT COMMITTED", { skip: !url, timeout: 120_000 }, async (t) => {
+  const { scoped, setup, db, clients, tmp } = await freshDatabase(t, "mm_closed_epoch_commit");
+  await seedSweptTenant(setup, db);
+  await ensureClosedEpochSchema(db);
+  await setup.query(`CREATE FUNCTION slow_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF current_setting('merrymen.slept', true) IS DISTINCT FROM '1' THEN PERFORM set_config('merrymen.slept', '1', true); PERFORM pg_sleep(4); END IF; RETURN NULL; END $$`);
+  await setup.query(`CREATE CONSTRAINT TRIGGER slow_commit AFTER INSERT ON ${REPAIRS_TABLE} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_commit()`);
+  type Wrap = (c: PgClient) => Promise<PgClient> | PgClient;
+  /** The shell's own connections; `write` wraps the write one. A backend a test ends reports it on the idle client too: the shell's query must see it. */
+  const shell = (printed: string[], write?: Wrap) => ({
+    connect: async (u: string, readOnly: boolean) => {
+      const c = await connectClosedEpoch(u, readOnly, loadPg);
+      (c as unknown as { on(ev: string, fn: () => void): void }).on("error", () => {});
+      clients.push(c);
+      return readOnly || !write ? c : write(c);
+    },
+    rpc, nowMs: () => NOW * 1000, out: (l: string) => printed.push(l), source: { test: "pg-commit" }, sleep: async () => {},
+  });
+  const env = { DATABASE_URL: scoped.toString() };
+  let n = 0;
+  const file = (tag: string) => path.join(tmp, `${tag}-${++n}.json`);
+  const flows = async () => Number((await setup.query("SELECT COUNT(*) AS n FROM flows WHERE source = 'chain-log'")).rows[0]!.n);
+  /** The receipts check of `what`: its exit code, its line, and what it wrote. */
+  const look = async (what: { report: string } | { repairId: string }) => {
+    const printed: string[] = [], out = file("receipts");
+    const args = "report" in what ? ["--revert", what.report, "--dry-run", "--output", out] : ["--revert-repair", what.repairId, "--dry-run", "--output", out];
+    const code = await main(args, env, shell(printed));
+    return { code, line: printed[0]!, view: JSON.parse(readFileSync(out, "utf8")) as { verdict: string; transaction: { id: string | null; status: string } } };
+  };
+  const preview = async () => {
+    const out = file("preview"), printed: string[] = [];
+    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", out], env, shell(printed)), 0, printed.join("\n"));
+    return (JSON.parse(readFileSync(out, "utf8")) as { previewDigest: string }).previewDigest;
+  };
+  const applyArgs = (digest: string, output: string) => ["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "pg-local-drill", "--output", output];
+
+  // THE APPLY: its COMMIT on the wire, the server committing, the client's connection dropped 300 ms in (no SQLSTATE).
+  let inflight: Promise<unknown> | undefined;
+  const id = "8e5a6b7c-9d0e-4f12-8a3b-5c6d7e8f9a0b";
+  const applied = file("apply"), printed: string[] = [];
+  await assert.rejects(main(applyArgs(await preview(), applied), env, { ...shell(printed, (c) => ({
+    async query(sql, params) {
+      if (sql !== "COMMIT") return c.query(sql, params);
+      inflight = c.query(sql, params); inflight.catch(() => {});
+      await new Promise((r) => setTimeout(r, 300));
+      throw new Error("Connection terminated unexpectedly");
+    },
+    async end() { void inflight?.finally(() => c.end().catch(() => {})); },
+  })), repairId: () => id }), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+
+  // WHILE THE BACKEND IS STILL IN ITS COMMIT: no receipt is visible, and nothing proves the apply never committed — from the repair id
+  // alone (no report to name its transaction), or from the kept report (the server says the transaction is still in progress).
+  const byId = await look({ repairId: id });
+  assert.equal(byId.code, 2, byId.line);
+  assert.ok(byId.line.startsWith(`STILL UNKNOWN repair ${id}`) && !/nothing was applied/.test(byId.line), byId.line);
+  const report = parseRepairReport(readFileSync(applied, "utf8"));
+  assert.ok(report.xact, "the report names the apply's own transaction");
+  assert.ok(printed.some((l) => l.startsWith(`OUTCOME UNKNOWN for repair ${id}`)), printed.join("\n"));
+  const byReport = await look({ report: applied });
+  assert.deepEqual([byReport.code, byReport.view.verdict, byReport.view.transaction], [2, "unknown", { id: report.xact!.id, status: "in-progress" }], byReport.line);
+  await assert.rejects(main(["--revert", applied, "--output", file("revert")], env, shell([])),
+    (e: unknown) => e instanceof BookingRefused && e.code === "no-receipt" && /does not prove its apply never committed/.test(e.message));
+  const committing = (await setup.query("SELECT state, query FROM pg_stat_activity WHERE application_name = 'merrymen-closed-epoch-apply' AND state = 'active'")).rows;
+  assert.deepEqual(committing.map((r) => [r.state, r.query]), [["active", "COMMIT"]], "all of that while the apply's backend was still in its COMMIT");
+  assert.equal(await flows(), 0, "nothing of it visible outside its transaction");
+
+  // THE COMMIT LANDS: COMMITTED, from the report and from the id; and the kept report takes it back.
+  assert.equal(((await inflight) as { command?: string }).command, "COMMIT");
+  assert.equal(await flows(), 2);
+  const landed = await look({ report: applied });
+  assert.deepEqual([landed.code, landed.view.verdict, landed.view.transaction.status], [0, "applied", "committed"], landed.line);
+  assert.ok(landed.line.startsWith(`COMMITTED repair ${report.repairId}`), landed.line);
+  assert.deepEqual([(await look({ repairId: report.repairId })).view.verdict], ["applied"]);
+  const revertPrinted: string[] = [];
+  assert.equal(await main(["--revert", applied, "--output", file("revert")], env, shell(revertPrinted)), 0, revertPrinted.join("\n"));
+  assert.equal(await flows(), 0);
+  assert.equal((await look({ report: applied })).view.verdict, "reverted");
+
+  // THE BACKEND TERMINATED AS THE COMMIT IS SENT: the report stays; the server says its transaction aborted, so NOT COMMITTED (exit 0).
+  await setup.query(`DROP TRIGGER slow_commit ON ${REPAIRS_TABLE}`);
+  const ended = file("apply");
+  await assert.rejects(main(applyArgs(await preview(), ended), env, shell([], async (c) => {
+    const pid = Number((await c.query("SELECT pg_backend_pid() AS pid")).rows[0]!.pid);
+    return {
+      async query(sql, params) {
+        if (sql === "COMMIT") assert.equal((await setup.query("SELECT pg_terminate_backend($1, 5000) AS t", [pid])).rows[0]!.t, true);
+        return c.query(sql, params);
+      },
+      end: () => c.end(),
+    };
+  })), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+  const aborted = parseRepairReport(readFileSync(ended, "utf8"));
+  const never = await look({ report: ended });
+  assert.deepEqual([never.code, never.view.verdict, never.view.transaction], [0, "not-committed", { id: aborted.xact!.id, status: "aborted" }], never.line);
+  assert.ok(never.line.startsWith(`NOT COMMITTED repair ${aborted.repairId}`), never.line);
+  await assert.rejects(main(["--revert", ended, "--output", file("revert")], env, shell([])), (e: unknown) => e instanceof BookingRefused && e.code === "not-committed");
+  assert.equal(await flows(), 0);
 });

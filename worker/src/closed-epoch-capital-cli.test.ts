@@ -219,12 +219,15 @@ const chain: RpcCall = async (method, params) => {
 
 describe("arguments", () => {
   const out = path.join(dir, "x.json"), d = "a".repeat(64), id = "0b5e2c3a-1d2e-4f50-8a6b-7c8d9e0f1a2b";
-  it("parses the four modes and refuses anything else by a fixed code", () => {
+  it("parses the five modes and refuses anything else by a fixed code", () => {
     assert.deepEqual(parseClosedEpochArgs(["--tenant", TENANT.toUpperCase().replace("0X", "0x"), "--epoch", "1", "--output", out]), { mode: "preview", tenant: TENANT, epoch: 1, output: out });
     assert.deepEqual(parseClosedEpochArgs(["--dry-run", "--tenant", TENANT, "--epoch", "1", "--output", out]), { mode: "preview", tenant: TENANT, epoch: 1, output: out });
     assert.deepEqual(parseClosedEpochArgs(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", d, "--backup-ref", "bk-1", "--output", out]),
       { mode: "apply", tenant: TENANT, epoch: 1, output: out, confirm: d, backupRef: "bk-1" });
     assert.deepEqual(parseClosedEpochArgs(["--revert", out, "--output", `${out}.r`]), { mode: "revert", report: out, output: `${out}.r` });
+    // --revert with --dry-run only reads: whether its apply committed, and whether it stands.
+    assert.deepEqual(parseClosedEpochArgs(["--revert", out, "--dry-run", "--output", `${out}.c`]), { mode: "receipts", report: out, output: `${out}.c` });
+    assert.deepEqual(parseClosedEpochArgs(["--dry-run", "--revert", out, "--output", `${out}.c`]), { mode: "receipts", report: out, output: `${out}.c` });
     assert.deepEqual(parseClosedEpochArgs(["--revert-repair", id, "--output", out]), { mode: "revert-repair", repairId: id, output: out, dryRun: false });
     assert.deepEqual(parseClosedEpochArgs(["--revert-repair", id, "--output", out, "--dry-run"]), { mode: "revert-repair", repairId: id, output: out, dryRun: true });
     for (const bad of [
@@ -232,7 +235,8 @@ describe("arguments", () => {
       ["--tenant", TENANT, "--epoch", "-1", "--output", out], ["--tenant", TENANT, "--epoch", "01", "--output", out], ["--tenant", TENANT, "--epoch", "1", "--output", "rel.json"],
       ["--tenant", TENANT, "--epoch", "1", "--output", out, "--confirm", d], ["--tenant", TENANT, "--epoch", "1", "--output", out, "--backup-ref", "bk"],
       ["--tenant", TENANT, "--epoch", "1", "--output", out, "--apply", "--confirm", d], ["--tenant", TENANT, "--epoch", "1", "--output", out, "--apply", "--dry-run", "--confirm", d, "--backup-ref", "bk"],
-      ["--revert", out, "--tenant", TENANT, "--output", out], ["--revert", out, "--output", out, "--dry-run"], ["--revert", "rel.json", "--output", out],
+      ["--revert", out, "--tenant", TENANT, "--output", out], ["--revert", out, "--dry-run", "--apply", "--output", out], ["--revert", out, "--dry-run", "--confirm", d, "--output", out],
+      ["--revert", out, "--dry-run"], ["--revert", "rel.json", "--output", out], ["--revert", out, "--revert-repair", id, "--output", out],
       ["--revert-repair", "not-a-uuid", "--output", out], ["--revert-repair", id, "--epoch", "1", "--output", out], ["--revert-repair", id],
       ["--tenant", TENANT, "--epoch", "1", "--epoch", "1", "--output", out], ["--tenant", TENANT, "--epoch", "1", "--output", out, "--everything"],
     ]) assert.throws(() => parseClosedEpochArgs(bad), (e: unknown) => e instanceof CliError && e.code === "invalid-arguments", bad.join(" "));
@@ -278,12 +282,28 @@ describe("the source fingerprint", () => {
 
 describe("whole runs through the shell", () => {
   const env = { DATABASE_URL };
-  const run = (raw: DatabaseSync, said: string[], printed: string[], o: StandIn & { repairId?: string; consoleFailsOn?: RegExp } = {}) => ({
-    connect: async () => pgOverSqlite(raw, said, o), rpc: chain, nowMs: () => NOW * 1000, source: { "closed-epoch-capital.ts": "fixed" },
-    // A console that breaks (stdout's reader gone: EPIPE) on the lines it names.
-    out: (l: string) => { if (o.consoleFailsOn?.test(l)) throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" }); printed.push(l); },
-    sleep: async () => {}, ...(o.repairId ? { repairId: () => o.repairId! } : {}),
-  });
+  const run = (raw: DatabaseSync, said: string[], printed: string[], o: StandIn & { repairId?: string; consoleFailsOn?: RegExp; consoleBreaksAt?: RegExp } = {}) => {
+    let broken = false;
+    return {
+      connect: async () => pgOverSqlite(raw, said, o), rpc: chain, nowMs: () => NOW * 1000, source: { "closed-epoch-capital.ts": "fixed" },
+      // A console that breaks (stdout's reader gone: EPIPE) on the lines it names; or at the first line it names, and stays broken.
+      out: (l: string) => {
+        if (o.consoleBreaksAt?.test(l)) broken = true;
+        if (broken || o.consoleFailsOn?.test(l)) throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+        printed.push(l);
+      },
+      sleep: async () => {}, ...(o.repairId ? { repairId: () => o.repairId! } : {}),
+    };
+  };
+  /** The receipts check of a report (`--revert <report> --dry-run`), or of a repair id alone: its exit code, its line, and what it wrote. */
+  const lookAt = async (raw: DatabaseSync, what: { report: string } | { repairId: string }, o: { env?: NodeJS.ProcessEnv } = {}) => {
+    const printed: string[] = [], said: string[] = [];
+    const output = path.join(dir, `receipts-${Math.random().toString(16).slice(2)}.json`);
+    const args = "report" in what ? ["--revert", what.report, "--dry-run", "--output", output] : ["--revert-repair", what.repairId, "--dry-run", "--output", output];
+    const code = await main(args, o.env ?? env, run(raw, said, printed));
+    return { code, line: printed[0]!, said, view: JSON.parse(readFileSync(output, "utf8")) as { verdict: string; why: string; transaction: { id: string | null; status: string };
+      receipts: Array<{ state: string }>; moved: string[]; writesPerformed: number } };
+  };
 
   it("preview, a refused apply, the apply, a second apply, and the revert", async () => {
     const raw = await shared();
@@ -310,7 +330,9 @@ describe("whole runs through the shell", () => {
     const applied = path.join(dir, "apply.json");
     printed.length = 0; said.length = 0;
     assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", plan.previewDigest, "--backup-ref", "bk-2026-10-07", "--output", applied], env, deps), 0);
-    assert.match(printed[0]!, /^repair [0-9a-f-]{36} — if this process dies, see what was applied with --revert-repair [0-9a-f-]{36} --dry-run$/, "said before the transaction");
+    assert.ok(printed[0]!.startsWith(`repair ${(JSON.parse(readFileSync(applied, "utf8")) as { repairId: string }).repairId}: its apply report is written to ${applied} ` +
+      "before the COMMIT is sent. If this process dies, see whether it committed with ") && printed[0]!.endsWith(`--revert ${applied} --dry-run --output /absolute/new-receipts-report.json`),
+    `said before anything is read: ${printed[0]}`);
     assert.ok(printed.some((l) => /^APPLIED repair [0-9a-f-]{36} — 4 action\(s\) for tenant .*, epoch 1, under backup bk-2026-10-07/.test(l)), printed.join("\n"));
     assert.ok(said.indexOf("BEGIN ISOLATION LEVEL SERIALIZABLE") < said.indexOf("COMMIT"));
     assert.equal(statSync(applied).mode & 0o777, 0o600);
@@ -343,7 +365,7 @@ describe("whole runs through the shell", () => {
     assert.ok([...printed, ...said].every((l) => !/s3cret|operator@|db\.internal/.test(l)), "no credential, no host");
   });
 
-  it("a commit whose acknowledgement is lost keeps its report and says so; the receipts show it committed, and revert from them alone", async () => {
+  it("a commit whose acknowledgement is lost keeps its report and says OUTCOME UNKNOWN; the check says COMMITTED, and the receipts alone take it back", async () => {
     const raw = await shared();
     const said: string[] = [], printed: string[] = [];
     const before = raw.prepare("SELECT * FROM cost_basis").all().map((r) => ({ ...r }));
@@ -354,20 +376,34 @@ describe("whole runs through the shell", () => {
     const applied = path.join(dir, "lost-apply.json");
     await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-lost", "--output", applied], env,
       run(raw, said, printed, { loseCommitAck: true, repairId: id })), (e: unknown) => (e as CliError).code === "apply-outcome-unknown");
-    assert.ok(printed.some((l) => l.startsWith("outcome unknown:") && l.includes(`--revert-repair ${id} --dry-run`)));
-    assert.equal((JSON.parse(readFileSync(applied, "utf8")) as { repairId: string }).repairId, id, "the report was written before the commit, and kept");
-    const look = path.join(dir, "lost-receipts.json");
-    printed.length = 0; said.length = 0;
-    assert.equal(await main(["--revert-repair", id, "--output", look, "--dry-run"], env, run(raw, said, printed)), 0);
-    assert.match(printed[0]!, /4 receipt\(s\) — 4 applied, 0 reverted\. It committed/);
-    assert.deepEqual(said.filter((s) => !/^\s*(SELECT|WITH)\b/i.test(s)), ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "ROLLBACK"], "looking writes nothing");
+    const report = parseRepairReport(readFileSync(applied, "utf8"));
+    assert.equal(report.repairId, id, "the report was written before the commit, and kept");
+    const told = printed.join("\n");
+    assert.ok(told.includes(`OUTCOME UNKNOWN for repair ${id}: the COMMIT was sent and no answer proved it rolled back, so it may have committed. ${applied} holds its apply report`), told);
+    assert.ok(told.includes(`Its transaction is ${report.xact!.id}.`), told);
+    assert.ok(told.includes(`1. Did it commit? Read only: node --import tsx worker/src/closed-epoch-capital-cli.ts --revert ${applied} --dry-run --output /absolute/new-receipts-report.json`), told);
+    assert.ok(told.includes(`2. Take it back: node --import tsx worker/src/closed-epoch-capital-cli.ts --revert ${applied} --output /absolute/new-revert-report.json`), told);
+    assert.equal(printed.some((l) => l.startsWith("APPLIED")), false);
+    // Did it commit? Read only, from the report: yes, and what it wrote stands.
+    const look = await lookAt(raw, { report: applied });
+    assert.equal(look.code, 0, look.line);
+    assert.ok(look.line.startsWith(`COMMITTED repair ${id} — tenant ${TENANT}: 4 receipt(s) 'applied', and the account's flows, quarantine history, live basis and floors exactly as it left them`), look.line);
+    assert.deepEqual([look.view.verdict, look.view.transaction, look.view.moved, look.view.writesPerformed], ["applied", { id: report.xact!.id, status: "committed" }, [], 0]);
+    assert.deepEqual(look.said.filter((x) => !/^\s*(SELECT|WITH)\b/i.test(x)), ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "ROLLBACK"], "looking writes nothing");
+    // The same from the receipts alone: they are there, so no report is needed to say it committed.
+    const byId = await lookAt(raw, { repairId: id });
+    assert.deepEqual([byId.code, byId.view.verdict, byId.view.transaction], [0, "applied", { id: null, status: "unrecorded" }], byId.line);
     assert.equal(await main(["--revert-repair", id, "--output", path.join(dir, "lost-revert.json")], env, run(raw, said, printed)), 0);
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
     assert.deepEqual(raw.prepare("SELECT * FROM cost_basis").all().map((r) => ({ ...r })), before);
-    // A repair that never committed: no receipts, said as such.
-    printed.length = 0;
-    assert.equal(await main(["--revert-repair", "0b5e2c3a-1d2e-4f50-8a6b-7c8d9e0f1a2b", "--output", path.join(dir, "none.json"), "--dry-run"], env, run(raw, said, printed)), 0);
-    assert.match(printed[0]!, /no receipts — nothing was applied under it/);
+    assert.ok((await lookAt(raw, { report: applied })).line.startsWith(`COMMITTED, THEN REVERTED repair ${id}`));
+    // A repair id with no receipt, and no report to name its transaction: STILL UNKNOWN, never "nothing was applied".
+    const none = await lookAt(raw, { repairId: "0b5e2c3a-1d2e-4f50-8a6b-7c8d9e0f1a2b" });
+    assert.equal(none.code, 2, none.line);
+    assert.ok(none.line.startsWith("STILL UNKNOWN repair 0b5e2c3a-1d2e-4f50-8a6b-7c8d9e0f1a2b: no receipt of it is visible, and that alone does not prove it never committed: " +
+      "no apply report was given") && none.line.includes("--revert <apply report> --dry-run"), none.line);
+    assert.doesNotMatch(none.line, /nothing was applied/);
+    assert.deepEqual([none.view.verdict, none.view.transaction], ["unknown", { id: null, status: "unrecorded" }]);
   });
 
   /** A fresh tenant, previewed: its database and the digest to confirm. */
@@ -416,9 +452,12 @@ describe("whole runs through the shell", () => {
       await assert.rejects(main(applyArgs(digest, applied), env, run(raw, [], printed, { ...how, repairId: id })),
         (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown", what);
       assert.equal((JSON.parse(readFileSync(applied, "utf8")) as { repairId: string }).repairId, id, `${what}: the report is kept`);
-      assert.ok(printed.some((l) => l.startsWith("outcome unknown:") && l.includes(`--revert-repair ${id} --dry-run`)), what);
+      assert.ok(printed.some((l) => l.startsWith(`OUTCOME UNKNOWN for repair ${id}:`)) && printed.some((l) => l.includes(`--revert ${applied} --dry-run`)), what);
       assert.equal(count(raw, `SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ?`, id), 4, `${what}: it had committed, and the receipts say so`);
       assert.ok(printed.every((l) => !/s3cret|operator@|db\.internal/.test(l)), what);
+      // ...and the check says so too, from the kept report.
+      const look = await lookAt(raw, { report: applied });
+      assert.deepEqual([look.code, look.view.verdict], [0, "applied"], `${what}: ${look.line}`);
     }
   });
 
@@ -435,7 +474,7 @@ describe("whole runs through the shell", () => {
       assert.equal(existsSync(applied), false, `${code}: a proved rollback leaves no report to mistake for an apply`);
       assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0, code);
       assert.equal(count(raw, "SELECT COUNT(*) AS n FROM cost_basis"), 1, code);
-      assert.ok(!printed.some((l) => /^outcome unknown|^APPLIED/.test(l)), code);
+      assert.ok(!printed.some((l) => /^OUTCOME UNKNOWN|^APPLIED/.test(l)), code);
       // Run again, as it says: it applies.
       assert.equal(await main(applyArgs(digest, path.join(dir, `commit-${code}-again.json`)), env, run(raw, [], [])), 0, code);
       assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 2, code);
@@ -445,7 +484,7 @@ describe("whole runs through the shell", () => {
     const constraint = pgError("23514");
     const deferred = path.join(dir, "commit-23514-apply.json");
     await assert.rejects(main(applyArgs(digest, deferred), env, run(raw, [], [], { commitFails: { committed: false, error: constraint } })), (e: unknown) => e === constraint);
-    assert.equal(failureLine(constraint), "closed-epoch-failed: nothing was applied or reverted unless an APPLIED, a REVERTED or an outcome unknown line was printed. Use --help for invocation.");
+    assert.equal(failureLine(constraint), "closed-epoch-failed: nothing was applied or reverted unless an APPLIED, a REVERTED or an OUTCOME UNKNOWN line was printed. Use --help for invocation.");
     assert.equal(existsSync(deferred), false);
     // COMMIT answered with ROLLBACK's tag: the server ended a transaction that had already failed. Nothing committed, no report left, no receipts instruction.
     const tagged = path.join(dir, "commit-rollback-tag-apply.json");
@@ -453,7 +492,7 @@ describe("whole runs through the shell", () => {
     await assert.rejects(main(applyArgs(digest, tagged), env, run(raw, [], printed, { commitAnsweredRollback: true })),
       (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
     assert.equal(existsSync(tagged), false);
-    assert.ok(!printed.some((l) => l.startsWith("outcome unknown:")));
+    assert.ok(!printed.some((l) => l.startsWith("OUTCOME UNKNOWN")));
     assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0);
     assert.equal(count(raw, `SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE}`), 0);
     assert.equal(count(raw, "SELECT COUNT(*) AS n FROM cost_basis"), 1);
@@ -493,9 +532,118 @@ describe("whole runs through the shell", () => {
     let connected = 0;
     const elsewhere = { DATABASE_URL: DATABASE_URL.replace("/railway", "/staging") };
     const out = path.join(dir, "named-revert-elsewhere.json");
-    await assert.rejects(main(["--revert", applied, "--output", out], elsewhere, { ...run(raw, [], []), connect: async () => { connected++; throw new Error("connected"); } }),
-      (e: unknown) => e instanceof BookingRefused && e.code === "target" && /applied to another database/.test(e.message));
+    for (const args of [["--revert", applied, "--output", out], ["--revert", applied, "--dry-run", "--output", out]]) {
+      await assert.rejects(main(args, elsewhere, { ...run(raw, [], []), connect: async () => { connected++; throw new Error("connected"); } }),
+        (e: unknown) => e instanceof BookingRefused && e.code === "target" && /applied to another database/.test(e.message), args.join(" "));
+    }
     assert.deepEqual([connected, existsSync(out), count(raw, "SELECT COUNT(*) AS n FROM flows")], [0, false, 2], "nothing read, written or changed");
+    // A report cut short, or empty: the apply that writes it never reached its COMMIT (the report is whole and synced before it is sent).
+    for (const text of ["", '{"format":"merrymen.closed-epoch-capital.apply.v1","repairId":"7d4f']) {
+      const cut = path.join(dir, `named-cut-${text.length}.json`);
+      writeFileSync(cut, text);
+      await assert.rejects(main(["--revert", cut, "--dry-run", "--output", path.join(dir, `named-cut-${text.length}-out.json`)], env, run(raw, [], [])),
+        (e: unknown) => e instanceof BookingRefused && e.code === "report-unfinished" && /never reached its COMMIT/.test(e.message), JSON.stringify(text));
+    }
+  });
+
+  it("no receipt is NOT COMMITTED only on the server's word that the apply's transaction aborted; anything else is STILL UNKNOWN, and a revert refuses no-receipt", async () => {
+    const { raw, digest } = await reviewed();
+    const id = "7d4f5a6b-8e9f-4a01-9c2d-4e5f6a7b8c9d";
+    const applied = path.join(dir, "unsent-apply.json");
+    // The connection lost before the COMMIT reached the server: the server rolled it back, and the client cannot know.
+    await assert.rejects(main(applyArgs(digest, applied), env, run(raw, [], [], { commitFails: { committed: false, error: pgError("ECONNRESET", "read ECONNRESET") }, repairId: id })),
+      (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0);
+    // FROM THE REPAIR ID ALONE, which no report backs: no receipt, and nothing names its transaction to ask the server about. STILL UNKNOWN
+    // (exit 2), pointing at the check with the report — never "nothing was applied" — and its revert refuses no-receipt, changing nothing.
+    const byId = await lookAt(raw, { repairId: id });
+    assert.equal(byId.code, 2, byId.line);
+    assert.ok(byId.line.startsWith(`STILL UNKNOWN repair ${id}: no receipt of it is visible, and that alone does not prove it never committed`) &&
+      byId.line.includes("--revert <apply report> --dry-run"), byId.line);
+    assert.deepEqual([byId.view.verdict, byId.view.transaction], ["unknown", { id: null, status: "unrecorded" }]);
+    await assert.rejects(main(["--revert-repair", id, "--output", path.join(dir, "unsent-revert-by-id.json")], env, run(raw, [], [])),
+      (e: unknown) => e instanceof BookingRefused && e.code === "no-receipt" && /no apply report was given/.test(e.message));
+    const xid = parseRepairReport(readFileSync(applied, "utf8")).xact!.id, server = serverOf(raw);
+    // The server says it aborted: NOT COMMITTED (exit 0), and a revert refuses not-committed.
+    const settled = await lookAt(raw, { report: applied });
+    assert.deepEqual([settled.code, settled.view.verdict, settled.view.transaction], [0, "not-committed", { id: xid, status: "aborted" }]);
+    assert.ok(settled.line.startsWith(`NOT COMMITTED repair ${id} — tenant ${TENANT}: no receipt holds it, and the server says its transaction ${xid} ended without ` +
+      "committing: nothing was written; preview the tenant again"), settled.line);
+    await assert.rejects(main(["--revert", applied, "--output", path.join(dir, "unsent-revert.json")], env, run(raw, [], [])),
+      (e: unknown) => e instanceof BookingRefused && e.code === "not-committed");
+    // Anything short of that word is STILL UNKNOWN (exit 2), and a revert refuses no-receipt, changing nothing.
+    const stillUnknown = async (status: string, why: RegExp) => {
+      const v = await lookAt(raw, { report: applied });
+      assert.equal(v.code, 2, v.line);
+      assert.ok(v.line.startsWith(`STILL UNKNOWN repair ${id} — tenant ${TENANT}: `) && v.line.includes(`Keep ${applied}: if it committed, it is what --revert takes`), v.line);
+      assert.deepEqual([v.view.verdict, v.view.transaction.status], ["unknown", status], v.line);
+      assert.match(v.view.why, why);
+      assert.doesNotMatch(v.line, /nothing was applied|7693842931899834703|-4242/, "never 'nothing was applied', and no server identifier on the console");
+      await assert.rejects(main(["--revert", applied, "--output", path.join(dir, `unsent-revert-${status}.json`)], env, run(raw, [], [])),
+        (e: unknown) => e instanceof BookingRefused && e.code === "no-receipt" && /does not prove its apply never committed/.test(e.message), status);
+    };
+    // Its session not yet ended by the server, or its COMMIT still on the way.
+    server.status.set(xid, "in progress");
+    await stillUnknown("in-progress", new RegExp(`its transaction ${xid} is still open on the server`));
+    // Too old for the server to remember; committed, with no receipt here (another database on that server, or receipts removed); committed
+    // only after the check's snapshot was taken; another server, or one whose identity cannot be read.
+    server.status.delete(xid);
+    await stillUnknown("forgotten", /no longer remembers/);
+    server.status.set(xid, "committed");
+    await stillUnknown("committed", /committed before this read began, yet this database holds no receipt of it: .* — escalate/);
+    server.endedAfterSnapshot.add(xid);
+    await stillUnknown("committed-after-snapshot", new RegExp(`its transaction ${xid} committed after this read began`));
+    server.endedAfterSnapshot.clear();
+    server.status.set(xid, "aborted");
+    server.system = "-4242";
+    await stillUnknown("other-server", /this is not the server the apply ran on/);
+    server.system = null;
+    await stillUnknown("other-server", /could not be read at the apply or here/);
+    server.system = "7693842931899834703";
+    assert.equal((await lookAt(raw, { report: applied })).view.verdict, "not-committed", "settled again on the server's word");
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0, "nothing changed");
+  });
+
+  it("COMMITTED only while what it wrote stands: moved since is COMMITTED, BUT MOVED SINCE (exit 2), which a revert refuses; receipts the server contradicts are refused", async () => {
+    const { raw, digest } = await reviewed();
+    const applied = path.join(dir, "moved-apply.json");
+    assert.equal(await main(applyArgs(digest, applied), env, run(raw, [], [])), 0);
+    assert.equal((await lookAt(raw, { report: applied })).view.verdict, "applied");
+    raw.prepare("UPDATE flows SET amount_usdg = 9.5 WHERE tx_hash = ?").run(DEPOSIT_TX);
+    const moved = await lookAt(raw, { report: applied });
+    assert.deepEqual([moved.code, moved.view.verdict, moved.view.moved], [2, "moved", ["flowsAll"]], moved.line);
+    assert.ok(moved.line.startsWith("COMMITTED, BUT MOVED SINCE repair ") && /a revert refuses \(moved\)/.test(moved.line), moved.line);
+    await assert.rejects(main(["--revert", applied, "--output", path.join(dir, "moved-revert.json")], env, run(raw, [], [])),
+      (e: unknown) => e instanceof BookingRefused && e.code === "moved");
+    raw.prepare("UPDATE flows SET amount_usdg = 9 WHERE tx_hash = ?").run(DEPOSIT_TX);
+    assert.equal((await lookAt(raw, { report: applied })).view.verdict, "applied", "as it left them again");
+    // The server says the apply's transaction aborted, or is still open, yet its receipts are here: the two disagree, refused to escalate.
+    const xid = parseRepairReport(readFileSync(applied, "utf8")).xact!.id;
+    for (const status of ["aborted", "in progress"]) {
+      serverOf(raw).status.set(xid, status);
+      await assert.rejects(main(["--revert", applied, "--dry-run", "--output", path.join(dir, `contradicted-${status.replace(" ", "-")}.json`)], env, run(raw, [], [])),
+        (e: unknown) => e instanceof BookingRefused && e.code === "receipts" && /the report and the database disagree/.test(e.message), status);
+    }
+  });
+
+  it("a console that breaks once the outcome is unknown cannot unsay it: apply-outcome-unknown or revert-outcome-unknown, never closed-epoch-failed, the apply report kept", async () => {
+    const { raw, digest } = await reviewed();
+    const applied = path.join(dir, "broken-unknown-apply.json");
+    const printed: string[] = [];
+    const failure = await main(applyArgs(digest, applied), env, run(raw, [], printed, { loseCommitAck: true, consoleBreaksAt: /^OUTCOME UNKNOWN/ }))
+      .then(() => assert.fail("applied"), (e: unknown) => e);
+    assert.ok(failure instanceof CliError && failure.code === "apply-outcome-unknown", String(failure));
+    assert.equal(failureLine(failure), "apply-outcome-unknown. Use --help for invocation.");
+    assert.equal(printed.some((l) => /OUTCOME UNKNOWN|Did it commit/.test(l)), false, "none of it printed");
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 2, "it committed");
+    assert.ok(parseRepairReport(readFileSync(applied, "utf8")).xact, "the report is kept, naming its transaction");
+    const reverted = path.join(dir, "broken-unknown-revert.json");
+    const failed = await main(["--revert", applied, "--output", reverted], env, run(raw, [], [], { loseCommitAck: true, consoleBreaksAt: /^OUTCOME UNKNOWN/ }))
+      .then(() => assert.fail("reverted"), (e: unknown) => e);
+    assert.ok(failed instanceof CliError && failed.code === "revert-outcome-unknown", String(failed));
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0, "it took effect");
+    assert.equal(existsSync(reverted), false, "a revert of unknown outcome leaves no revert report");
+    assert.equal((await lookAt(raw, { report: applied })).view.verdict, "reverted", "and the check settles it");
   });
 
   it("a revert that committed says so whatever happens after: its report not written, or its console line broken; it never removes the report", async () => {
@@ -520,7 +668,7 @@ describe("whole runs through the shell", () => {
     await assert.rejects(main(["--revert", applied, "--output", lost], env, run(raw, [], printed, { afterCommit: () => rmSync(gone, { recursive: true, force: true }) })),
       (e: unknown) => e instanceof CliError && e.code === "reverted-but-report-not-written");
     assert.ok(printed.some((l) => /^REVERTED repair .* the revert committed and its receipts read 'reverted', but its report could not be written/.test(l)
-      && l.includes(`--revert-repair ${id} --dry-run`)), printed.join("\n"));
+      && l.includes(`--revert ${applied} --dry-run --output`)), printed.join("\n"));
     assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ? AND state = 'reverted'`).get(id)!.n, 4);
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis WHERE symbol = 'COIN'").get()!.n, 1);
