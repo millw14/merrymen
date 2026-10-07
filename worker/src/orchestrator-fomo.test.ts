@@ -823,11 +823,8 @@ describe("tails", () => {
     assert.deepEqual([sig(f1, Z2)?.reasons, sig(f1, Z2)?.priority], [["tailed"], "discovery"]);
     assert.deepEqual(
       sig(f1, Z1)!.triggers.map((e) => [e.eventKey, e.kind]),
-      [
-        [`ev:${uuid(5)}`, "sell"],
-        [`ev:${uuid(1)}`, "buy"],
-      ],
-      "a considered tail's events since it began; the earlier buy is not one, nor one observed late but timed before it began",
+      [[`ev:${uuid(1)}`, "buy"]],
+      "a considered tail's buys since it began: not its sell, not the earlier buy, nor one observed late but timed before it began",
     );
     assert.deepEqual(sig(f1, Z2)!.triggers, [], "a tell-only tail adds no breadth to any review");
     // The tails block: the owner's own, newest first, buys, sells and theses only.

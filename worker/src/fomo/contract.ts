@@ -237,9 +237,9 @@ export interface ChildSignal {
   reasons: ("held" | "watched" | "cohort" | "dependency" | "early-discovery" | "robinhood-thesis" | "tailed")[];
   /**
    * Cohort (and dependency) trader events for this token inside the breadth
-   * window, newest first, ≤ 25; plus a tailed trader's, only for a tail the
-   * owner asked to have considered (and never a cohort member marked not
-   * followable).
+   * window, newest first, ≤ 25; plus a tailed trader's BUYS, only for a tail
+   * the owner asked to have considered, only from when it began (and never a
+   * cohort member marked not followable).
    */
   triggers: TraderEvent[];
   /** When Merrymen first saw cohort activity on this token. */

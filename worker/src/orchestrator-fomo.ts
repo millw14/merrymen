@@ -1012,7 +1012,7 @@ export async function fleetInterest(
 }
 
 /**
- * WHOSE EVENTS ONE OWNER'S TAILS ADD AS FOLLOW TRIGGERS, and from when: only a
+ * WHOSE BUYS ONE OWNER'S TAILS ADD AS FOLLOW TRIGGERS, and from when: only a
  * tail the owner asked to have considered, only events OBSERVED since it began
  * (and inside the breadth window) whose own time is not before it began (a
  * late recovery of an older trade was not made while it was tailed), and
@@ -1947,7 +1947,10 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       const { events, dossier } = await tokenData(ctx, key);
       // A coin known only from activity takes its label from the newest event that named it.
       const named = events.find((e) => e.tokenLabel.symbol || e.tokenLabel.name)?.tokenLabel ?? null;
+      // A considered tail adds its trader's BUYS only ("consider their
+      // buys"): a sell, thesis or transfer of theirs is told, never breadth.
       const tailedBuyer = (e: StoredTraderEvent): boolean => {
+        if (e.kind !== "buy") return false;
         const w = tailTriggers.get(e.trader.userId);
         return w !== undefined && e.observedAt >= w.observedSince && inTail(e, w.eventSince);
       };
