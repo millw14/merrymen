@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TAIL_DEFAULT_HOURS, TAIL_MAX_HOURS, parseTailArgs, parseTailRequest, tailHoursIn } from "./tail-request";
+import { TAIL_DEFAULT_HOURS, TAIL_MAX_HOURS, parseTailArgs, parseTailRequest, tailAsksToTake, tailHoursIn } from "./tail-request";
 
 const SELF = ["Shogun", "@merrymanme_bot"];
 
@@ -84,4 +84,12 @@ test("/tail NAME [hours]: the command's own argument", () => {
     assert.equal(parseTailArgs(bad, SELF), null, bad);
   }
   assert.equal(parseTailArgs(null, SELF), null);
+});
+
+test("'take it' is noticed only so the card can say it grants nothing", () => {
+  assert.equal(tailAsksToTake("can you tail unipcs trades for the next 3 hours, inform me of his thesis and if you like the trade as well, take it"), true);
+  assert.equal(tailAsksToTake("tail unipcs and buy it if it looks good"), true);
+  assert.equal(tailAsksToTake("tail unipcs for 3h"), false);
+  assert.equal(tailAsksToTake("take a look at unipcs"), false);
+  assert.equal(tailAsksToTake(undefined), false);
 });

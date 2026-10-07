@@ -122,6 +122,15 @@ export function parseTailRequest(text: unknown, selfNames: readonly string[] = [
 }
 
 /**
+ * Her tail line also asks me to take the trade ("if you like it, take it").
+ * That grants nothing: the confirm card only says a tail never skips my
+ * normal review (telegram/fomo-tail.ts).
+ */
+export function tailAsksToTake(text: unknown): boolean {
+  return typeof text === "string" && /\b(?:take|buy|ape|enter|grab)\s+(?:it|them|that|in|the trade|the position|a position)\b|\bget in\b/iu.test(text);
+}
+
+/**
  * "/tail NAME [hours]": the command's argument. Null: show the usage. A bare
  * number is hours ("/tail unipcs 2"); anything after the name must say a
  * time ("2h", "90 minutes", "a few hours").

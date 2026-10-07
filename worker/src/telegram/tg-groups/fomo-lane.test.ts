@@ -27,7 +27,7 @@ import type { BotSelf } from "./detect";
 import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
-import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskOutcome, TgDeskPort, TgFomoAnswer, TgFomoPort, TgFomoRequest, TgOwnerOutcome, TrencherReadiness } from "./types";
+import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskOutcome, TgDeskPort, TgFomoAnswer, TgFomoPort, TgFomoRequest, TgOwnerOutcome, TgTailAsk, TrencherReadiness } from "./types";
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -551,13 +551,22 @@ describe("the router: a line no rule knew (route.ts)", () => {
     assert.equal(tg.texts(CHAT).length, 3);
   });
 
-  it("a tail request stays the persona's until tails exist", async () => {
+  it("a fomo_tail pick: code reads the line; hers that names no one gets the /tail usage in her DM, anyone else's the owner-only line", async () => {
     pick = { action: "fomo_tail" };
-    make({ owner: ownerPort });
-    await said(msg("pine can you tail unipcs trades for the next 3 hours", { fromId: OWNER, fromFirstName: "Milla" }));
-    assert.equal(fomo!.asks.filter((a) => a.request).length, 0);
-    assert.deepEqual(ownerAsks, []);
-    assert.equal(chatCalls, 1);
+    const tails: Array<{ tail: TgTailAsk | null; fromId: number }> = [];
+    make({ owner: () => ({ ...ownerPort(), proposeTail: async (q: { tail: TgTailAsk | null; fromId: number }) => (tails.push(q), "sent" as const) }) });
+    // "follow" is never a tail, so the parse fails and the router is asked.
+    await said(msg("pine can you follow unipcs on fomo for a few hours", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(routeCalls, 1);
+    assert.deepEqual(tails, [{ tail: null, fromId: OWNER }], "the usage, never the line");
+    assert.match(tg.texts(CHAT)[0]!, /DM/);
+    clock += 3 * MIN;
+    await said(msg("pine can you follow unipcs on fomo for a few hours"));
+    assert.equal(routeCalls, 2);
+    assert.equal(tails.length, 1, "nobody else's line reaches her DM");
+    assert.match(tg.texts(CHAT)[1]!, /owner/);
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /unipcs|tail/i);
+    assert.equal(chatCalls, 0, "the persona never answered either");
   });
 
   it("MERRYMEN_TG_GROUPS_ROUTER=0, a spent reserve, a private ask, a two-word line: no routing call", async () => {
@@ -828,5 +837,105 @@ describe("the router after review (2026-10-07)", () => {
     clock += 10 * MIN + 1;
     await said(msg("pine who's the best trader over there now", { fromId: ANN + 60 }));
     assert.equal(routeCalls, 6);
+  });
+});
+
+describe("a Fomo tail asked for in the room (docs/fomo.md \"Tailing a trader\")", () => {
+  let routeCalls: number;
+  let chatCalls: number;
+  let tails: Array<{ tail: TgTailAsk | null; fromId: number }>;
+  let outcome: TgOwnerOutcome;
+  const ownerPort = () => ({
+    research: async (): Promise<TgOwnerOutcome> => "sent",
+    proposeTail: async (q: { tail: TgTailAsk | null; fromId: number }): Promise<TgOwnerOutcome> => {
+      tails.push(q);
+      return outcome;
+    },
+  });
+  const MILLA = "pine can you tail unipcs trades for the next 3 hours, inform me of his thesis and if you like the trade as well, take it";
+  beforeEach(() => {
+    routeCalls = 0;
+    chatCalls = 0;
+    tails = [];
+    outcome = "sent";
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tools?: unknown };
+      if (body.tools) {
+        routeCalls++;
+        return { ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "route", arguments: JSON.stringify({ action: "fomo_trader", trader: "unipcs" }) } }] } }] }) };
+      }
+      chatCalls++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "ngl no clue" } }] }) };
+    }) as never;
+  });
+
+  it("Milla's line: code reads unipcs and 3 hours, her DM gets the card, the room hears only that it went", async () => {
+    make({ owner: ownerPort });
+    await said(msg(MILLA, { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.deepEqual(tails, [{ tail: { kind: "start", handle: "unipcs", hours: 3, clamped: false, take: true }, fromId: OWNER }]);
+    assert.equal(routeCalls, 0, "no model read it");
+    assert.equal(chatCalls, 0, "the persona never answered it");
+    assert.deepEqual(fomo!.asks, [], "not a research question");
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 1);
+    assert.match(room[0]!, /DMs? 🤫/);
+    for (const t of room) assert.doesNotMatch(t, /unipcs|tail|3 ?h/i, "rule 3: no trader, no tail in the room");
+    assert.ok(!logs.some((l) => /unipcs/.test(l)), "the log has kinds, never the trader");
+  });
+
+  it("her stop goes the same way; her DM unreachable is the dm-first line; busy or unwired says nothing about it", async () => {
+    make({ owner: ownerPort });
+    await said(msg("pine stop tailing unipcs", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.deepEqual(tails.at(-1), { tail: { kind: "stop", handle: "unipcs" }, fromId: OWNER });
+    outcome = "dm-first";
+    clock += 3 * MIN;
+    await said(msg("pine tail @unipcs for 2h", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.match(tg.texts(CHAT).at(-1)!, /\/start/);
+    outcome = "busy";
+    clock += 3 * MIN;
+    const before = tg.texts(CHAT).length;
+    await said(msg("pine tail @cupsey for 2h", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(tg.texts(CHAT).length, before, "nothing said in the room");
+    assert.equal(chatCalls, 0);
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /unipcs|cupsey|tail/i);
+  });
+
+  it("anyone else's tail line: the owner-only line, at most once an hour, and nothing else", async () => {
+    make({ owner: ownerPort });
+    await said(msg(MILLA.replace("pine", "pine pls")));
+    clock += 3 * MIN;
+    await said(msg("pine tail @unipcs for 2h"));
+    assert.deepEqual(tails, [], "her DM is never touched");
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 1, "rate-limited: once an hour per person");
+    assert.match(room[0]!, /owner/);
+    assert.equal(chatCalls + routeCalls, 0);
+    assert.deepEqual(fomo!.asks, []);
+  });
+
+  it("her line sent through a chat (an anonymous admin) is anyone's", async () => {
+    make({ owner: ownerPort });
+    await said(msg("pine tail @unipcs for 2h", { fromId: OWNER, senderChatId: CHAT } as Partial<TgMessage>));
+    assert.deepEqual(tails, []);
+  });
+
+  it("copy, mirror and follow stay what they were; a coin is never a trader", async () => {
+    make({ owner: ownerPort });
+    for (const [i, line] of ["pine copy unipcs trades for 3 hours", "pine mirror @unipcs", "pine track $pons for me"].entries()) {
+      clock += 3 * MIN;
+      await said(msg(line, { fromId: OWNER, fromFirstName: "Milla", messageId: 900 + i } as Partial<TgMessage>));
+    }
+    assert.deepEqual(tails, []);
+  });
+
+  it("no research lane in this process: the line goes on as before", async () => {
+    fomo = null;
+    make({ owner: ownerPort });
+    await said(msg(MILLA, { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.deepEqual(tails, []);
   });
 });

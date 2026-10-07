@@ -992,3 +992,69 @@ describe("a running tail's Stop and +1h buttons", () => {
     });
   });
 });
+
+describe("a Fomo tail asked for in a group, carded in the owner's DM", () => {
+  it("Milla's line in the room: the card in her DM (nothing stored), the room hears only that it went; her press there starts it", async () => {
+    await withDm({ groupPick: { action: "chat" }, liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
+      h.sayInGroup(`pine ${MILLA}`);
+      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
+      assert.ok(!h.llm.includes("group-route"), "read by code, not routed by the model");
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"], "read-only, as her DM's /tail");
+      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
+      assert.equal(h.fx.calls[0]!.opts.surface, "telegram-dm");
+      const dm = h.sentTo(OWNER);
+      assert.equal(dm.length, 1);
+      assert.match(dm[0]!, /^You asked in a group, so here it is privately\.\n\n👀 Tail unipcs on Fomo for 3 hours/);
+      assert.match(dm[0]!, /a tail never skips my normal review/);
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 3);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0, "nothing is created until she presses");
+      const room = h.sentTo(GROUP);
+      assert.equal(room.length, 1);
+      assert.match(room[0]!, /DMs? 🤫/);
+      for (const t of room) assert.doesNotMatch(t, /unipcs|tail/i);
+      const turns = await recentChatTurns(OWNER, 8);
+      assert.ok(!turns.some((t) => t.content.includes("inform me of his thesis")), "the group's words never enter her DM history");
+      const done = await pressLastCard(h, "tell");
+      assert.match(done, /^Tailing unipcs on Fomo until/);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+    });
+  });
+
+  it("her DM unreachable: nothing looked up, nothing parked; the room is told to /start", async () => {
+    await withDm({ groupPick: { action: "chat" }, liveFeed: true, readiness: () => READY, search: unipcsSearch(), dmBlocked: true }, async (h) => {
+      h.sayInGroup("pine tail @unipcs for 2h");
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.match(h.sentTo(GROUP)[0]!, /\/start/);
+    });
+  });
+
+  it("anyone else's tail line in the room: the owner-only line, no lookup, nothing in her DM", async () => {
+    await withDm({ groupPick: { action: "chat" }, liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
+      h.sayInGroup(`pine ${MILLA}`, FRIEND);
+      await h.until(() => h.sentTo(GROUP).length > 0);
+      assert.deepEqual(h.fx.calls, []);
+      assert.deepEqual(h.sentTo(OWNER), []);
+      assert.match(h.sentTo(GROUP)[0]!, /owner/);
+      assert.doesNotMatch(h.sentTo(GROUP)[0]!, /unipcs|tail/i);
+    });
+  });
+
+  it("the router's fomo_tail pick on her line that names no one: the /tail usage in her DM; on /tail typed in the room, the same card", async () => {
+    await withDm({ groupPick: { action: "fomo_tail" }, liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
+      h.sayInGroup("pine can you shadow that trader for a few hours?");
+      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
+      assert.ok(h.llm.includes("group-route"));
+      assert.match(h.sentTo(OWNER)[0]!, /couldn't tell who\. usage: \/tail <trader> \[hours\]/);
+      assert.deepEqual(h.fx.calls, []);
+      h.sayInGroup("/tail unipcs 2h");
+      await h.until(() => h.sentTo(OWNER).length > 1);
+      assert.match(h.sentTo(OWNER).at(-1)!, /^👀 Tail unipcs on Fomo for 2 hours/);
+      for (const t of h.sentTo(GROUP)) assert.doesNotMatch(t, /unipcs|tail/i);
+      h.sayInGroup("/tail unipcs 2h", FRIEND);
+      await h.until(() => h.sentTo(GROUP).length > 2);
+      assert.match(h.sentTo(GROUP).at(-1)!, /owner/);
+      assert.deepEqual(h.sentTo(FRIEND), [], "an allowlisted friend's /tail reaches no DM");
+    });
+  });
+});

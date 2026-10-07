@@ -25,7 +25,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
-import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest } from "../../../packages/core/src/index";
+import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest, tailAsksToTake } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths } from "../home";
@@ -150,11 +150,6 @@ import type { HeldGroupEntry } from "./held-groups";
  */
 const ANSWER_KINDS: ReadonlySet<string> = new Set(["chat", "status", "positions", "pnl", "trades", "why"]);
 
-/**
- * Her tail line also asks me to take the trade ("if you like it, take it").
- * That grants nothing: the card says a tail never skips my normal review.
- */
-const TAIL_TAKE = /\b(?:take|buy|ape|enter|grab)\s+(?:it|them|that|in|the trade|the position|a position)\b|\bget in\b/i;
 
 /** Buttons a command asked to have under its reply. */
 interface ReplyExtras {
@@ -511,6 +506,25 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * holds one action, and /confirm runs whatever is in it).
    */
   const pendingMeta = new Map<string, { nonce: string; action: PendingAction; messageId?: number }>();
+  /**
+   * The buttons for whatever a command just parked for this sender: ✅/✖, or
+   * a tail card's own (tell only; + consider their buys; No), recorded so a
+   * press is checked against this exact action (handleCallback). Nothing new
+   * parked: no buttons, and none left recorded once the slot is empty.
+   */
+  const buttonsForParked = (
+    pendingKey: string,
+    before: PendingAction | undefined,
+  ): { keyboard: InlineKeyboard | undefined; meta: { nonce: string; action: PendingAction; messageId?: number } | null } => {
+    const parkedNow = pending.get(pendingKey);
+    if (parkedNow && parkedNow !== before) {
+      const meta: { nonce: string; action: PendingAction; messageId?: number } = { nonce: mintNonce(), action: parkedNow };
+      pendingMeta.set(pendingKey, meta);
+      return { keyboard: parkedNow.kind === "fomo-tail" ? tailConfirmKeyboard(meta.nonce, parkedNow.considerOffered) : confirmKeyboard(meta.nonce), meta };
+    }
+    if (!parkedNow) pendingMeta.delete(pendingKey);
+    return { keyboard: undefined, meta: null };
+  };
   /**
    * Senders whose LAST reply from the bot was a settings question. Only then
    * does a typed "yes" answer it: "ok" said about something else, minutes
@@ -1074,6 +1088,78 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         await pushHistory(ownerId, "user", text);
         await pushHistory(ownerId, "assistant", r.text);
         console.log("[telegram] owner's group trader ask answered in her DM");
+        return "sent";
+      } catch {
+        return "unavailable";
+      }
+    },
+    /**
+     * HER TAIL, ASKED FOR IN A GROUP (docs/fomo.md "Tailing a trader"): what
+     * code read from her line (handler.ts parseTailRequest), never the line,
+     * becomes the /tail or /untail it means, run in HER DM exactly as if she
+     * had typed it there: the same read-only resolution, the same card, the
+     * same buttons and ten-minute expiry, and nothing created until she
+     * presses one. A stop runs as /untail would (it only reduces what I do).
+     * No trader code could read (null): her DM gets the /tail usage. Her id is
+     * checked again here, her DM proved first, and her group asks share one
+     * window with her trader questions. Only the card enters her DM history.
+     */
+    proposeTail: async (q): Promise<TgOwnerOutcome> => {
+      try {
+        const cfg = groupCfg();
+        const ownerId = stateRef.get().ownerId;
+        if (ownerId === null || q?.fromId !== ownerId) return "unavailable";
+        if (deps.fomoOff === true || !fomoBroker()) return "unavailable";
+        if (!cfg.telegramAllowlist.includes(ownerId)) return "dm-first";
+        const token = cfg.telegramBotToken;
+        if (!token) return "unavailable";
+        const t = Date.now();
+        while (ownerAsks.length > 0 && ownerAsks[0]! <= t - OWNER_ASKS_WINDOW_MS) ownerAsks.shift();
+        if (ownerAsks.length >= OWNER_ASKS_MAX) return "busy";
+        ownerAsks.push(t);
+        let proved = false;
+        try {
+          proved = (await sendChatAction({ token }, ownerId)).ok;
+        } finally {
+          if (!proved) {
+            const i = ownerAsks.lastIndexOf(t);
+            if (i >= 0) ownerAsks.splice(i, 1);
+          }
+        }
+        if (!proved) return "dm-first";
+        const key = `${ownerId}:${ownerId}`;
+        const tail = q.tail;
+        let body: string;
+        let parked: ReturnType<typeof buttonsForParked> = { keyboard: undefined, meta: null };
+        if (!tail) {
+          body = esc(`You asked me in a group to tail a Fomo trader, but I couldn't tell who. ${TAIL_USAGE}`);
+        } else {
+          const cmd: Command =
+            tail.kind === "start"
+              ? { kind: "tail", handle: tail.handle, hours: tail.hours, clamped: tail.clamped, ...(tail.take ? { take: true } : {}) }
+              : { kind: "untail", handle: tail.handle };
+          const before = pending.get(key);
+          let reply: string;
+          try {
+            reply = await executeCommand(cmd, makeCmdDeps({ chatId: ownerId, fromId: ownerId }, cfg, token, {}));
+          } catch {
+            reply = esc("That didn't go through; send it to me here with /tail.");
+          }
+          parked = buttonsForParked(key, before);
+          body = `${esc("You asked in a group, so here it is privately.")}\n\n${reply}`;
+        }
+        const sent = await sendMessage({ token }, ownerId, body, { ...(parked.keyboard ? { keyboard: parked.keyboard } : {}), disablePreview: true });
+        if (!sent.ok) {
+          // Undelivered: no question is left waiting for a press nobody can see.
+          if (parked.meta && pending.get(key) === parked.meta.action) {
+            pending.delete(key);
+            pendingMeta.delete(key);
+          }
+          return "dm-first";
+        }
+        if (parked.meta && sent.messageId !== undefined) parked.meta.messageId = sent.messageId;
+        await pushHistory(ownerId, "assistant", stripThinkingBlock(body.replace(/<[^>]+>/g, "")));
+        console.log(`[telegram] owner's group tail ask sent to her DM (${tail ? tail.kind : "usage"})`);
         return "sent";
       } catch {
         return "unavailable";
@@ -1834,7 +1920,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       if (t) {
         cmd =
           t.kind === "start"
-            ? { kind: "tail", handle: t.handle, hours: t.hours, clamped: t.clamped, ...(TAIL_TAKE.test(msg.text) ? { take: true } : {}) }
+            ? { kind: "tail", handle: t.handle, hours: t.hours, clamped: t.clamped, ...(tailAsksToTake(msg.text) ? { take: true } : {}) }
             : { kind: "untail", handle: t.handle };
         await pushHistory(msg.chatId, "user", msg.text);
       }
@@ -2036,17 +2122,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // settings change, a transfer, the kill switch, a shell command — the
     // question now carries ✅/✖ as well as the /confirm it always accepted.
     // The press is checked against this exact action (handleCallback).
-    const parkedNow = pending.get(pendingKey);
-    let keyboard = extras.keyboard;
-    let meta: { nonce: string; action: PendingAction; messageId?: number } | null = null;
-    if (parkedNow && parkedNow !== pendingBefore) {
-      meta = { nonce: mintNonce(), action: parkedNow };
-      // A tail's card has its own two yeses (tell only; + consider their buys).
-      keyboard = parkedNow.kind === "fomo-tail" ? tailConfirmKeyboard(meta.nonce, parkedNow.considerOffered) : confirmKeyboard(meta.nonce);
-      pendingMeta.set(pendingKey, meta);
-    } else if (!parkedNow) {
-      pendingMeta.delete(pendingKey);
-    }
+    const parked = buttonsForParked(pendingKey, pendingBefore);
+    const keyboard = parked.keyboard ?? extras.keyboard;
+    const meta = parked.meta;
     const sent = await say(
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",

@@ -46,6 +46,7 @@
  * in code here. See types.ts.
  */
 import { isHostedMode } from "../../../../packages/core/src/index";
+import { parseTailRequest, tailAsksToTake, type TailRequest } from "../../../../packages/core/src/tail-request";
 import type { ResolvedConfig } from "../../settings";
 import {
   answerCallbackQuery,
@@ -135,6 +136,7 @@ import type {
   TgPerson,
   TgPublicFact,
   TgRoom,
+  TgTailAsk,
   TgTraderAbout,
 } from "./types";
 import { readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
@@ -2217,13 +2219,37 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // waits inline because the line's whole job already runs off the chat
       // queue (onMessage: `fomo` lines are research), and a question the
       // research does not take must still reach the desk below.
-      if (j.fomo === true && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
+      //
+      // A FOMO TAIL ASKED FOR OUT LOUD ("pine can you tail unipcs for 3
+      // hours"), read by code (packages/core tail-request.ts), never by a
+      // model, and only where the research lane is wired. It is not research,
+      // so the lane above does not take it (it could read "keep tabs on trader
+      // X on fomo?" as a profile question); it is handled just below, before
+      // the desk and the router: her line goes to her DM as the confirm card,
+      // anyone else's gets the owner-only line (tailLine).
+      const tailAsk =
+        fomoNow() !== null && dec.mood !== "private-ask" && j.addressed !== null && !isInjection(j.line.text)
+          ? parseTailRequest(j.line.text, selfNamesOf(selfNow()))
+          : null;
+      if (j.fomo === true && !tailAsk && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
         const r = await fomoAnswer(chatId, j, replyOpts);
         if (r === "sent") return null;
         if (r !== "not-research") {
           releaseReply(chatId, messageId);
           return r;
         }
+      }
+      if (tailAsk) {
+        // Off the chat queue, like the desk below: the room's line after it
+        // (commandNotice) is queued on this chat, and the handoff to her DM
+        // must not hold up the room.
+        track((async () => {
+          const r = await tailLine(chatId, j, replyOpts, tailAsk);
+          if (r === null) return;
+          releaseReply(chatId, messageId);
+          if (j.addressed !== null) quietLine(r);
+        })());
+        return null;
       }
       // AN OPINION ASK THAT NOTHING YET MARKS AS A COIN ("what do you think
       // about sex"): the conversation settles it, once, through the group's
@@ -2737,7 +2763,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       routeBreaker.note(why);
       // Counts and kinds only: never the line, a name or a coin.
       log(`[tg-groups] route ${route ? routeLabel(route) : why}`);
-      if (!route || route.action === "chat" || route.action === "fomo-tail") return "persona";
+      if (!route || route.action === "chat") return "persona";
       track(runRoute(chatId, j, o, persona, route));
       return "taken";
     } catch (e) {
@@ -2771,6 +2797,46 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return "dm";
   };
 
+  /**
+   * A FOMO TAIL ASKED FOR IN THE ROOM (docs/fomo.md "Tailing a trader";
+   * docs/tg-groups.md rules 1 and 3). Groups never order trades and never
+   * hear a trader or a tail, so:
+   *
+   * - the owner's line (j.isOwner: the trusted sender id, never a line sent
+   *   through a chat) goes to her DM as the confirm card, through
+   *   TgOwnerPort.proposeTail with only what code read from it (`ask`; null
+   *   when it named no trader code could read: her DM gets the /tail usage).
+   *   Nothing is created until she presses a button there. The room hears
+   *   only where it went ("sent it to your DMs 🤫", or the dm-first line).
+   * - anyone else's gets the owner-only line, at most once an hour per
+   *   person (commandNotice), and nothing else: no research, no persona.
+   *
+   * Null: handled. A Quiet: nothing was said, and why.
+   */
+  const tailLine = async (chatId: number, j: LineJob, o: SpeakOpts, ask: TailRequest | null): Promise<Quiet | null> => {
+    const extra = { ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}), replyByMs: j.bornAtMs + RESEARCH_REPLY_MS };
+    if (!j.isOwner) {
+      const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, "owner-only", j.threadId, extra);
+      log(`[tg-groups] tail ask from someone else${said ? "" : ", owner-only already said this hour"}`);
+      return null;
+    }
+    const port = ownerNow();
+    if (!port?.proposeTail) {
+      log("[tg-groups] owner tail ask, no DM to send it to");
+      return "skipped";
+    }
+    if (o.stillWanted && !o.stillWanted()) return "not-wanted";
+    stageOf(chatId, "owner tail");
+    const tail: TgTailAsk | null =
+      ask === null ? null : ask.kind === "start" ? { kind: "start", handle: ask.handle, hours: ask.hours, clamped: ask.clamped, take: tailAsksToTake(j.line.text) } : { kind: "stop", handle: ask.handle };
+    const outcome = await port.proposeTail({ tail, fromId: j.line.fromId });
+    // Counts and kinds only: never the trader, the hours or the line.
+    log(`[tg-groups] owner tail ${tail ? tail.kind : "usage"}: ${outcome}`);
+    if (outcome !== "sent" && outcome !== "dm-first") return "skipped";
+    await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, extra);
+    return null;
+  };
+
   /** One routed line, off the chat queue. Whatever happens, the line is answered or its slot released. */
   const runRoute = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, route: TgRoute): Promise<void> => {
     const messageId = j.line.messageId;
@@ -2793,6 +2859,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const r = await fomoAnswer(chatId, j, opts, route.request);
           if (r === "not-research") return await asBefore();
           return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "fomo-tail": {
+          // The pick names nobody: code reads the trader and the hours from
+          // the line itself, and her line that named no one gets the usage.
+          const r = await tailLine(chatId, j, opts, parseTailRequest(j.line.text, selfNamesOf(selfNow())));
+          return done(r === null, r ?? undefined);
         }
         case "fomo-trader": {
           const where = await ownerTraderAsk(chatId, j, opts, route.handle, route.about);
