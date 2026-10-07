@@ -32,6 +32,47 @@ test("more than twelve hours is clamped to twelve, and says so", () => {
   assert.deepEqual(tailHoursIn("0h"), { hours: TAIL_DEFAULT_HOURS, clamped: false }, "nothing below an hour");
 });
 
+test("a part hour rounds up, days and weeks are the most there is and say so (review 2026-10-07)", () => {
+  // "1.5 hours" used to be 5 hours: the "5" after the dot.
+  assert.deepEqual(parseTailRequest("tail unipcs for 1.5 hours", SELF), { kind: "start", handle: "unipcs", hours: 2, clamped: false });
+  assert.deepEqual(parseTailArgs("unipcs 0.5h", SELF), { handle: "unipcs", hours: 1, clamped: false });
+  assert.deepEqual(tailHoursIn("for 2.25 hrs"), { hours: 3, clamped: false });
+  assert.deepEqual(tailHoursIn("an hour and a half"), { hours: 2, clamped: false });
+  assert.deepEqual(tailHoursIn("x3h"), { hours: TAIL_DEFAULT_HOURS, clamped: false }, "a digit inside a word is not hours");
+  // Days and weeks used to be 3 hours, silently.
+  assert.deepEqual(parseTailRequest("tail unipcs for a day", SELF), { kind: "start", handle: "unipcs", hours: 12, clamped: true });
+  assert.deepEqual(parseTailArgs("unipcs 2d", SELF), { handle: "unipcs", hours: 12, clamped: true });
+  assert.deepEqual(parseTailArgs("unipcs 1d", SELF), { handle: "unipcs", hours: 12, clamped: true });
+  assert.deepEqual(parseTailArgs("unipcs a week", SELF), { handle: "unipcs", hours: 12, clamped: true });
+  assert.deepEqual(tailHoursIn("for 2 days"), { hours: 12, clamped: true });
+  assert.deepEqual(tailHoursIn("for one whole day"), { hours: 12, clamped: true });
+  // "today" and "all day" are the rest of the day, as before: the most there is, not a clamp.
+  assert.deepEqual(tailHoursIn("all day"), { hours: 12, clamped: false });
+  assert.deepEqual(tailHoursIn("today"), { hours: 12, clamped: false });
+  // Milla's line is unchanged.
+  assert.deepEqual(parseTailRequest("can you tail unipcs trades for the next 3 hours, inform me of his thesis and if you like the trade as well, take it", SELF), {
+    kind: "start",
+    handle: "unipcs",
+    hours: 3,
+    clamped: false,
+  });
+});
+
+test("an interrogative or a quantifier after the cue is never the trader (review 2026-10-07)", () => {
+  for (const line of [
+    "can you tail what unipcs buys for 3 hours",
+    "keep an eye on what unipcs does today",
+    "monitor how unipcs trades",
+    "track every move unipcs makes",
+    "tail whatever unipcs buys",
+    "track which coins unipcs buys",
+    "track each trade unipcs makes",
+    "keep an eye on PONS",
+  ]) {
+    assert.equal(parseTailRequest(line, SELF), null, line);
+  }
+});
+
 test("stop forms, one trader or all of them", () => {
   assert.deepEqual(parseTailRequest("stop tailing unipcs", SELF), { kind: "stop", handle: "unipcs" });
   assert.deepEqual(parseTailRequest("untail @unipcs", SELF), { kind: "stop", handle: "unipcs" });

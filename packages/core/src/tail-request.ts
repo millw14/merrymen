@@ -59,6 +59,10 @@ const NOT_A_HANDLE: ReadonlySet<string> = new Set([
   "everyone", "everybody", "everything", "anything", "something", "nothing", "someone", "anyone", "whales", "whale", "guy", "dude", "bro", "please", "pls", "all", "tails", "tail", "tailing",
   "next", "few", "couple", "hours", "hour", "today", "and", "of", "to", "with", "you", "u", "can", "could", "would",
   "price", "chart", "coin", "token", "market", "order", "orders", "position", "positions", "wallet", "pnl", "portfolio",
+  // "tail what unipcs buys", "monitor how unipcs trades", "track every move
+  // unipcs makes": the word after the cue is not the trader, and a line this
+  // reader cannot place goes on as before rather than tailing "what".
+  "what", "whatever", "how", "who", "whom", "whose", "when", "where", "why", "which", "every", "each", "any",
 ]);
 /** These keep their old meaning; a line using them is never a tail. */
 const NEVER_A_TAIL = /\b(?:copy|copying|copytrade|copy-trade|copytrading|mirror|mirroring|follow|following|follows)\b/iu;
@@ -139,16 +143,25 @@ function handleIn(text: string, selfNames: readonly string[]): string | null {
 
 const SMALL: Record<string, number> = { an: 1, a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
 
-/** The hours asked for, and whether more than the most was asked. Nothing said: the default. */
+/**
+ * The hours asked for, and whether more than the most was asked. Nothing
+ * said: the default. A part hour rounds UP ("1.5 hours" is 2, "0.5h" is 1):
+ * a tail never ends before the time she asked for. Days and weeks are more
+ * than a tail can run, so they are the most there is, and `clamped` says so
+ * (the card tells her), never a silent default.
+ */
 export function tailHoursIn(text: string): { hours: number; clamped: boolean } {
   const t = String(text ?? "").toLowerCase();
   let n: number | null = null;
-  const h = /\b(\d{1,3})\s*(?:h|hr|hrs|hour|hours)\b/u.exec(t);
-  const m = /\b(\d{1,4})\s*(?:m|min|mins|minute|minutes)\b/u.exec(t);
-  const w = /\b(an|a|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:more\s+)?(?:hour|hours|hr|hrs)\b/u.exec(t);
-  if (h) n = Number(h[1]);
+  // Never the "5" of "1.5h", nor a digit inside a word: no digit, letter or dot just before.
+  const d = /(?<![\w.])\d{1,3}(?:\.\d+)?\s*(?:d|day|days|w|wk|wks|week|weeks)\b|\b(?:a|one)\s+(?:whole\s+|full\s+)?(?:day|week)\b/u.exec(t);
+  const h = /(?<![\w.])(\d{1,3}(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b/u.exec(t);
+  const m = /(?<![\w.])(\d{1,4}(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes)\b/u.exec(t);
+  const w = /\b(an|a|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:more\s+)?(?:hour|hours|hr|hrs)(\s+and\s+a\s+half)?\b/u.exec(t);
+  if (d) n = TAIL_MAX_HOURS + 1;
+  else if (h) n = Math.ceil(Number(h[1]));
   else if (m) n = Math.max(1, Math.ceil(Number(m[1]) / 60));
-  else if (w) n = SMALL[w[1]!] ?? null;
+  else if (w) n = (SMALL[w[1]!] ?? Number.NaN) + (w[2] ? 1 : 0);
   else if (/\bcouple (?:of )?(?:hours|hrs)\b/u.test(t)) n = 2;
   else if (/\b(?:a )?few (?:hours|hrs)\b/u.test(t)) n = 3;
   else if (/\b(?:rest of (?:the|my) day|all day|today|tonight)\b/u.test(t)) n = TAIL_MAX_HOURS;
@@ -242,6 +255,6 @@ export function parseTailArgs(arg: unknown, selfNames: readonly string[] = []): 
   if (!rest) return { handle, hours: TAIL_DEFAULT_HOURS, clamped: false };
   const bare = /^(\d{1,3})$/u.exec(rest);
   const asked = bare ? tailHoursIn(`${bare[1]}h`) : tailHoursIn(rest);
-  if (!bare && !/\d|hour|hr|min|day|few|couple/iu.test(rest)) return null;
+  if (!bare && !/\d|hour|hr|min|day|week|few|couple/iu.test(rest)) return null;
   return { handle, ...asked };
 }

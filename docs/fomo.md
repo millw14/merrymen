@@ -538,8 +538,9 @@ Only the linked owner, in her own DM (chat id = sender id = owner id, the truste
 Telegram sends, never anything said), can start, stop or list tails. Anyone else, in a
 DM or a group, is told "Only my owner can set up a tail." and nothing is called.
 
-- **Commands.** `/tail NAME [hours]` (1–12, 3 when unsaid; more than 12 is cut to 12
-  and the card says so), `/untail [NAME|all]` (bare is all) and `/tails` (what runs,
+- **Commands.** `/tail NAME [hours]` (1–12, 3 when unsaid; a part hour rounds up, so
+  "1.5 hours" is 2 and "0.5h" is 1; more than 12, a day or a week is cut to 12 and the
+  card says so), `/untail [NAME|all]` (bare is all) and `/tails` (what runs,
   until when, tell-only or considered). `/tail` and `/untail` are mutations to the
   interpreter, `/tails` a private read. The classifier's enum has none of them, and a
   kind it does not know becomes chat, so a model can never start or stop a tail.
@@ -550,7 +551,9 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   "mirror" and "follow" a trader are never a tail (they keep their old meaning), nor
   is a coin ("watch PONS on fomo", "track $PONS", "track PONS", "keep an eye on PONS"),
   a thing of hers ("track my order", "stop monitoring the price"), a pronoun ("tail
-  him") or the bot's own name. Anyone else's words, and every line where Fomo is off in
+  him"), a question word or quantifier where the trader would be ("tail what unipcs
+  buys", "monitor how unipcs trades", "track every move unipcs makes") or the bot's own
+  name. Anyone else's words, and every line where Fomo is off in
   the process, go on exactly as before.
 - **A stop is as narrow as a start.** A coin is never a trader for a stop either: "stop
   tracking $PONS on fomo", "stop monitoring PONS" or an address goes on to the
