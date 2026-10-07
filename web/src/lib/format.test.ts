@@ -20,6 +20,10 @@ import {
   usd,
   usdAdaptive,
   usdFixed,
+  usdExact,
+  priceAxisNumber,
+  utcTimeOnly,
+  utcDayLabel,
 } from "./format";
 import { DEFAULT_LOCALE } from "./locale";
 
@@ -246,5 +250,37 @@ describe("the seam is the only way through", () => {
       }
     }
     assert.deepEqual(offenders, [], "a currency symbol is the locale's to place");
+  });
+});
+
+
+describe("exact venue prices and UTC chart labels", () => {
+  it("preserves digits beyond Number precision and insignificant trailing zeros", () => {
+    assert.equal(usdExact("9007199254740993.12345678901234567800"), "$9,007,199,254,740,993.12345678901234567800");
+    assert.equal(usdExact("0.00000000000000000001"), "$0.00000000000000000001");
+    assert.equal(usdExact("100.00"), "$100.00");
+    assert.equal(usdExact("0"), "$0");
+    for (const bad of [null, "", "NaN", "1e-8", "-1", "1.2.3"]) assert.equal(usdExact(bad), DASH);
+  });
+  it("uses the reader's decimal separator and currency placement", () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "document");
+    try {
+      for (const [locale, expected] of [["en", "$1,234.50"], ["tr", "$1.234,50"], ["es", "1234,50\u00a0US$"]]) {
+        Object.defineProperty(globalThis, "document", { configurable: true, value: { documentElement: { lang: locale } } });
+        assert.equal(usdExact("1234.50"), expected, locale);
+      }
+    } finally {
+      if (original) Object.defineProperty(globalThis, "document", original);
+      else Reflect.deleteProperty(globalThis, "document");
+    }
+  });
+  it("keeps axes precise for sub-cent prices and states UTC regardless of host timezone", () => {
+    assert.equal(priceAxisNumber(0.000000028), "0.000000028");
+    assert.equal(priceAxisNumber(null), DASH);
+    const timestamp = Date.UTC(2026, 9, 8, 23, 59, 12);
+    assert.equal(utcTimeOnly(timestamp), "23:59:12");
+    assert.equal(utcDayLabel(timestamp), "Oct 8");
+    assert.equal(utcTimeOnly(null), DASH);
+    assert.equal(utcDayLabel(null), DASH);
   });
 });

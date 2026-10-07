@@ -73,3 +73,5 @@ export * from "./wall-release";
 // shape the wall seals, and the integer arithmetic every perp risk check is made
 // of. docs/perps.md is the contract.
 export * from "./perps";
+
+export * from "./perps-styles";

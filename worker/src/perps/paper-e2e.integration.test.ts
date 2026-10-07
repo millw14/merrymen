@@ -70,7 +70,7 @@ const u = (n: number) => BigInt(Math.round(n * 1e6));
 let clock = T_LAST + H4 + 3_600_000;
 const CANDLES = breakout("BTC-PERP", 2_000n); // 119 flat bars at 80,000.0, then a close at 80,200.0: a long breakout
 
-function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, bigint][]; candles?: typeof CANDLES }): void {
+function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, bigint][]; candles?: typeof CANDLES; shortCandles?: typeof CANDLES }): void {
   const lastHour = Math.floor((clock / 1000 - 1800) / 3600) * 3600;
   const m: LighterFeedFileMarket = {
     observedAt: clock - 1_000,
@@ -89,6 +89,7 @@ function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, b
     bookSource: "ws",
     closed4h: (v.candles ?? CANDLES).map((c) => ({ t: c.t, o: c.o.toString(), h: c.h.toString(), l: c.l.toString(), c: c.c.toString() })),
     candlesObservedAt: T_LAST + H4 + 60_000,
+    ...(v.shortCandles ? { closedByTimeframe: { "5m": { observedAt: clock - 500, rows: v.shortCandles.map(c => ({ t: c.t, o: String(c.o), h: String(c.h), l: String(c.l), c: String(c.c) })) } } } : {}),
     // 0.0010 %/h paid by longs: 10 ppm, inside perp-trend's 50 ppm limit.
     fundings1h: Array.from({ length: 8 }, (_, i) => ({ t: lastHour - (7 - i) * 3600, rate: "0.0010", direction: "long" as const })),
     fundingsObservedAt: clock - 60_000,
@@ -822,4 +823,38 @@ describe("MerrymenBrain route through the real paper lane and ledger", () => {
     assert.equal(await held(a), null); assert.equal(a.energy.claimed, 0);
     await a.lane.stopProtect();
   });
+});
+
+
+it("scalp entry profile survives process-memory reset and manual switch; protective time exit settles once", async () => {
+  const last = Math.floor((clock - 1000) / 300_000) * 300_000 - 300_000;
+  const shortCandles = CANDLES.map((c, i) => ({ ...c, t: last - (CANDLES.length - 1 - i) * 300_000 }));
+  writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]], shortCandles });
+  const a = await account({ cfg: { perpsStyle: "scalp-breakout" } });
+  const start = await equityOf(a);
+  await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+  assert.ok(await held(a));
+  const facts = await store.perpLaneLedgerFacts(a.id, "paper", Math.floor(clock / 1000) - 86400);
+  assert.equal(facts.lastEntrySignals.get(1)?.candleT, last, "exact signal candle survives feed publication lag and restart");
+  assert.equal(facts.positionStyles.get(1), "scalp-breakout", "profile recovered from durable opening fill, order and decision");
+  assert.equal((await store.perpLaneLedgerFacts(a.id, "live", 0)).positionStyles.size, 0, "paper profile cannot leak into live book");
+  const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+  try {
+    raw.prepare("UPDATE decisions SET source = 'owner-command' WHERE agent_id = ?").run(a.id);
+    assert.equal((await store.perpLaneLedgerFacts(a.id, "paper", 0)).positionStyles.size, 0, "manual evidence cannot impersonate a trend entry profile");
+    raw.prepare("UPDATE decisions SET source = 'perp-route' WHERE agent_id = ?").run(a.id);
+    raw.prepare("UPDATE perp_positions SET opened_at = NULL WHERE agent_id = ? AND mode = 'paper'").run(a.id.toLowerCase());
+    const crash = await store.perpLaneLedgerFacts(a.id, "paper", 0);
+    assert.equal(crash.positionStyles.get(1), "scalp-breakout", "crash before opened_at cache cannot lose profile");
+    assert.equal(crash.positionStyleOpenedAt.get(1), Math.floor(clock / 1000), "fill supplies durable opening time");
+  } finally { raw.close(); }
+  a.cfg = { ...a.cfg, perpsDriver: "manual", perpsStyle: "swing-trend" };
+  await a.lane.resetPaper(async () => {});
+  clock += 1800_000;
+  writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
+  await pass(a);
+  assert.equal(await held(a), null, "manual and new style cannot extend original scalp holding deadline");
+  const fills = await journalKinds(a, "perp-fill");
+  await pass(a, 2);
+  assert.equal(await journalKinds(a, "perp-fill"), fills, "timed close cannot replay");
 });

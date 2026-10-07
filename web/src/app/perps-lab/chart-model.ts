@@ -1,3 +1,4 @@
+import { usdFixed } from "../../lib/format";
 /** Fictional, fixed data for the visual comparison route. Never use as a venue quote. */
 export type SampleTick = { at: number; price: number };
 export type SampleEntry = {
@@ -55,5 +56,5 @@ export function sampleTime(at: number) {
 }
 
 export function samplePrice(price: number) {
-  return `$${price.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  return usdFixed(price, 0);
 }

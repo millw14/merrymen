@@ -332,3 +332,32 @@ export function pctBps(bps: number | null): string {
   if (Math.abs(points) < 0.05) return signedPct(0, 1, "");
   return signedPct(points, 1, points > 0 ? "+" : "−");
 }
+
+
+/** Exact nonnegative venue decimal: preserve every fractional digit without conversion through Number. */
+export function usdExact(value: string | null): string {
+  if (value === null || !/^\d+(?:\.\d+)?$/.test(value)) return DASH;
+  const [whole, fraction] = value.split(".");
+  // Intl supplies grouping, decimal separator and currency placement. A single
+  // placeholder fraction is replaced with the original venue digits verbatim.
+  return nf({ ...USD, minimumFractionDigits: fraction === undefined ? 0 : 1, maximumFractionDigits: fraction === undefined ? 0 : 1 })
+    .formatToParts(BigInt(whole!))
+    .map((part) => part.type === "fraction" ? fraction! : part.value).join("");
+}
+
+/** Compact precision for a price axis, without a currency symbol at every tick. */
+export function priceAxisNumber(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return DASH;
+  return nf({ maximumSignificantDigits: 7 }).format(n);
+}
+
+/** UTC clocks are explicitly labelled on execution charts; the reader's locale still chooses their shape. */
+export function utcTimeOnly(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return DASH;
+  return dtf("utc-time", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(new Date(ms));
+}
+
+export function utcDayLabel(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return DASH;
+  return dtf("utc-day", { timeZone: "UTC", month: "short", day: "numeric" }).format(new Date(ms));
+}

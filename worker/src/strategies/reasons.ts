@@ -416,6 +416,7 @@ export type Why =
         | "liq-inside-stop"
         | "funding-bleed"
         | "market-status"
+        | "style-expired"
         | "unknown-activity"
         | "stand-down"
         | "kill"
@@ -742,6 +743,8 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
           return `closing ${what} — its liquidation price moved inside its stop, so the stop no longer protected it.${rule}`;
         case "funding-bleed":
           return `closing ${what} — the funding paid on it passed what a position is allowed to bleed.${rule}`;
+        case "style-expired":
+          return `closing ${what} — the entry style reached its maximum holding time.${rule}`;
         case "market-status":
           return `closing ${what} — the venue changed the market's status, so it goes while it still can.${rule}`;
         case "unknown-activity":

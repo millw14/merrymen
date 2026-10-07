@@ -939,3 +939,55 @@ describe("the migration, over a ledger that already has rows", () => {
     }
   });
 });
+
+describe("durable live profile lifecycles", () => {
+  const at = 1_790_696_100_000;
+  async function tagged(agentId: string, trade: string, before: bigint, base: bigint, sideRole: "bid" | "ask", stamp: number, style?: string) {
+    let orderId: string | undefined;
+    if (style) {
+      const order = await liveOpen(agentId, 1_000_000n);
+      orderId = order.id;
+      const decisionId = `profile:${agentId}:${trade}`;
+      await store.addDecision({ id: decisionId, agent_id: agentId, source: "perp-route", action: "buy", symbol: "BTC-PERP", provenance: "deterministic-strategy", evidence_json: JSON.stringify({ perpsStyle: style }) });
+      raw.prepare("UPDATE perp_orders SET decision_id = ? WHERE id = ?").run(decisionId, orderId);
+    }
+    // Reversals name the side CLOSED in f.side; side_role and position_before
+    // alone establish the side of the newly opened remainder.
+    const side = before === 0n ? (sideRole === "bid" ? "long" : "short") : before > 0n ? "long" : "short";
+    await store.insertPerpFill(fill(agentId, { venueTradeId: trade, positionBefore: before, base, sideRole, side, venueTsMs: stamp, orderId }));
+  }
+  async function cache(id: string, side: "long" | "short", base: bigint, openedAt: number | null) {
+    await store.upsertPerpPosition({ agentId: id, mode: "live", source: "venue", marketId: 1, side, base, entryPrice: 100n, allocatedMarginMicro: 1_000_000n, openedAt });
+  }
+  it("a live reversal recovers the new side's profile after a crash before opened_at caching", async () => {
+    const id = await agent();
+    await tagged(id, "101", 0n, 10n, "bid", at, "scalp-breakout");
+    await tagged(id, "102", 10n, 15n, "ask", at + 1000, "day-patient");
+    await cache(id, "short", 5n, null);
+    const facts = await store.perpLaneLedgerFacts(id, "live", 0);
+    assert.equal(facts.positionStyles.get(1), "day-patient");
+    assert.equal(facts.positionStyleOpenedAt.get(1), (at + 1000) / 1000);
+    assert.equal((await store.perpLaneLedgerFacts(id, "paper", 0)).positionStyles.size, 0);
+    assert.equal((await store.perpLaneLedgerFacts(await agent(), "live", 0)).positionStyles.size, 0);
+  });
+  it("close/reopen on the same side drops the previous style and stale account-cache opening time", async () => {
+    const id = await agent();
+    await tagged(id, "201", 0n, 10n, "bid", at, "scalp-breakout");
+    await tagged(id, "202", 10n, 10n, "ask", at + 1000);
+    await tagged(id, "203", 0n, 8n, "bid", at + 2000, "day-patient");
+    await tagged(id, "204", 8n, 2n, "ask", at + 3000);
+    await cache(id, "long", 6n, at / 1000);
+    const facts = await store.perpLaneLedgerFacts(id, "live", 0);
+    assert.equal(facts.positionStyles.get(1), "day-patient");
+    assert.equal(facts.positionStyleOpenedAt.get(1), (at + 2000) / 1000);
+  });
+  it("numeric venue trade ordering preserves a same-millisecond partial-fill lifecycle", async () => {
+    const id = await agent();
+    await tagged(id, "9", 0n, 10n, "bid", at, "scalp-breakout");
+    await tagged(id, "10", 10n, 2n, "ask", at);
+    await cache(id, "long", 8n, null);
+    const facts = await store.perpLaneLedgerFacts(id, "live", 0);
+    assert.equal(facts.positionStyles.get(1), "scalp-breakout");
+    assert.equal(facts.positionStyleOpenedAt.get(1), at / 1000);
+  });
+});

@@ -1,3 +1,5 @@
+import type { DeskPerpRow } from "./live";
+import type { ChartBook } from "../lib/perps-chart-data";
 import type { ChartBar, ChartEntry } from "../lib/perps-chart-data";
 
 export interface ChartGeometry {
@@ -32,7 +34,8 @@ export function chartGeometry(
   const high = Math.max(...prices);
   const pad = Math.max((high - low) * 0.07, high * 0.0005);
   return {
-    width, height, left: 78, right: width - 24, top: 24, bottom: height - 47,
+    // Leave room for the larger mobile axis labels without clipping price digits.
+    width, height, left: 104, right: width - 24, top: 24, bottom: height - 47,
     timeStart, timeEnd,
     priceMin: Math.max(0, low - pad), priceMax: high + pad,
   };
@@ -47,6 +50,43 @@ export function chartY(g: ChartGeometry, price: number): number {
 }
 
 export function chartPoint(g: ChartGeometry, entry: Pick<ChartEntry, "timeMs" | "price">): { x: number; y: number } | null {
-  if (entry.timeMs < g.timeStart || entry.timeMs > g.timeEnd || !Number.isFinite(entry.price) || entry.price <= 0) return null;
+  if (!Number.isFinite(entry.timeMs) || entry.timeMs < g.timeStart || entry.timeMs > g.timeEnd || !Number.isFinite(entry.price) || entry.price <= 0) return null;
   return { x: chartX(g, entry.timeMs), y: chartY(g, entry.price) };
+}
+
+export interface PositionReference {
+  id: string;
+  kind: "entry" | "stop" | "liquidation";
+  label: string;
+  price: number;
+  priceExact: string;
+  side: DeskPerpRow["side"];
+  book: ChartBook;
+}
+
+function positiveDecimal(value: string | null): number | null {
+  if (typeof value !== "string" || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Snapshot levels carry no opening timestamp and must never become executions. */
+export function positionReferences(rows: readonly DeskPerpRow[], market: string, book: ChartBook): PositionReference[] {
+  return rows.flatMap((row, index) => {
+    if (row.market !== market || row.paper !== (book === "paper")) return [];
+    const values = [
+      ["entry", "Average entry", row.entry],
+      ["stop", "Stop trigger", row.stopTrigger],
+      ["liquidation", "Liquidation reference", row.liqPrice],
+    ] as const;
+    return values.flatMap(([kind, label, value]) => {
+      const price = positiveDecimal(value);
+      return price === null ? [] : [{ id: `${index}-${kind}`, kind, label, price, priceExact: value!, side: row.side, book }];
+    });
+  });
+}
+
+/** Off-scale risk levels are listed explicitly, never clamped onto a false price. */
+export function referenceRange(g: ChartGeometry, price: number): "above" | "below" | "visible" {
+  return price > g.priceMax ? "above" : price < g.priceMin ? "below" : "visible";
 }

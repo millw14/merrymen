@@ -1,3 +1,5 @@
+import { LogoMark } from "./LogoMark";
+export { LogoMark } from "./LogoMark";
 import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useAgentImageSrc } from "./agent-image-state";
@@ -439,41 +441,6 @@ function SearchIcon() {
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <circle cx="11" cy="11" r="6.5" />
       <path d="M16 16l5 5" />
-    </svg>
-  );
-}
-
-export function LogoMark({ size = 22 }: { size?: number }) {
-  const w = Math.round(size * (940 / 630));
-  return (
-    <svg
-      className="logo-mark"
-      width={w}
-      height={size}
-      viewBox="0 0 940 630"
-      fill="currentColor"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden
-    >
-      <rect x="280" y="1" width="324" height="47" rx="23.5" />
-      <rect x="403" y="72" width="258" height="49" rx="24.5" />
-      <rect x="138" y="137" width="51" height="54" rx="25.5" />
-      <rect x="473" y="137" width="227" height="54" rx="27" />
-      <rect x="742" y="137" width="50" height="54" rx="25" />
-      <rect x="64" y="212" width="199" height="48" rx="24" />
-      <rect x="516" y="212" width="204" height="48" rx="24" />
-      <rect x="766" y="212" width="109" height="48" rx="24" />
-      <rect x="0" y="288" width="126" height="48" rx="24" />
-      <rect x="161" y="288" width="582" height="48" rx="24" />
-      <rect x="812" y="288" width="128" height="48" rx="24" />
-      <rect x="64" y="366" width="199" height="47" rx="23.5" />
-      <rect x="518" y="366" width="202" height="47" rx="23.5" />
-      <rect x="766" y="366" width="109" height="47" rx="23.5" />
-      <rect x="138" y="436" width="51" height="48" rx="24" />
-      <rect x="473" y="436" width="227" height="48" rx="24" />
-      <rect x="742" y="436" width="51" height="48" rx="24" />
-      <rect x="403" y="510" width="259" height="48" rx="24" />
-      <rect x="280" y="582" width="324" height="47" rx="23.5" />
     </svg>
   );
 }

@@ -729,3 +729,25 @@ describe("buildPerpsReport", () => {
     assert.equal(r.incident, true);
   });
 });
+
+describe("native strategy history and durable entry profile", () => {
+  it("carries the parsed native series without substituting the legacy 4h history", () => {
+    const f = FEED();
+    const rows = [{ t: 1_000, o: 100n, h: 110n, l: 90n, c: 105n }];
+    f.markets.set(1, { ...f.markets.get(1)!, closedByTimeframe: { "5m": rows, "15m": null } });
+    const v = mustView(input({ feed: f }));
+    assert.equal(v.markets.get("BTC-PERP")!.closedByTimeframe?.["5m"], rows);
+    assert.equal(v.markets.get("BTC-PERP")!.closedByTimeframe?.["15m"], null);
+    assert.equal(v.markets.get("BTC-PERP")!.closed4h, null);
+  });
+
+  it("carries the entry's durable profile on paper and live positions", () => {
+    const paper = mustView(input({ ledger: ledger({ positions: [paperBtc()], positionStyles: new Map([[1, "scalp-breakout"]]) }) }));
+    assert.equal(paper.positions.get("BTC-PERP")!.entryStyle, "scalp-breakout");
+    const live = mustView(liveInput({ ledger: ledger({ positionStyles: new Map([[15, "scalp-confirmed"]]), positionStyleOpenedAt: new Map([[15, NOW - 3600]]) }) }));
+    assert.equal(live.positions.get("NVDA-PERP")!.entryStyle, "scalp-confirmed");
+    assert.equal(live.positions.get("NVDA-PERP")!.openedAtSec, NOW - 3600, "durable fill time survives missing live cache timestamp");
+    assert.equal(live.facts.positions.get("NVDA-PERP")!.openedAtKnown, true);
+    assert.equal(mustView(input({ ledger: ledger({ positions: [paperBtc()] }) })).positions.get("BTC-PERP")!.entryStyle, undefined);
+  });
+});

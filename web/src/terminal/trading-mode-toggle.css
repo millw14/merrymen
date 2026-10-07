@@ -8,8 +8,8 @@
   width: 190px;
   padding: var(--mode-inset);
   border: 1px solid #52656883;
-  border-radius: 999px;
-  background: #07151bed;
+  border-radius: 3px;
+  background: #11150c;
   box-shadow: inset 0 1px 4px #0008, 0 0 0 1px #0003;
 }
 .terminal-host .trading-mode-toggle .trading-mode-glide {
@@ -19,15 +19,15 @@
   bottom: var(--mode-inset);
   left: var(--mode-inset);
   width: calc((100% - 2 * var(--mode-inset)) / 2);
-  border-radius: 999px;
-  background: linear-gradient(135deg, #b6f473, #68b99b);
-  box-shadow: 0 0 15px #9eef8380, inset 0 1px 0 #fff8;
+  border-radius: 3px;
+  background: #e5e9d8;
+  box-shadow: 0 2px 0 #0006;
   transition: transform 420ms cubic-bezier(.19, 1, .22, 1), background 320ms ease, box-shadow 320ms ease;
 }
 .terminal-host .trading-mode-toggle .trading-mode-glide[data-mode="perps"] {
   transform: translateX(100%);
-  background: linear-gradient(135deg, #ad88ff, #5cd5fc);
-  box-shadow: 0 0 18px #986aff91, inset 0 1px 0 #fff8;
+  background: #d2f653;
+  box-shadow: 0 2px 0 #0006;
 }
 .terminal-host .trading-mode-toggle button {
   display: inline-flex;
@@ -36,17 +36,18 @@
   gap: 5px;
   min-height: 35px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 3px;
   background: transparent;
   color: #aebdbd;
-  font: 700 12px/1 inherit;
+  font: 600 11px/1 var(--font-geist-mono), monospace;
+  text-transform: uppercase;
   letter-spacing: .04em;
   cursor: pointer;
   transition: color 250ms ease, transform 250ms ease;
 }
 .terminal-host .trading-mode-toggle button.is-active { color: #071617; }
 .terminal-host .trading-mode-toggle button:hover { transform: translateY(-1px); }
-.terminal-host .trading-mode-toggle button:focus-visible { outline: 2px solid #b0edfc; outline-offset: -2px; }
+.terminal-host .trading-mode-toggle button:focus-visible { outline: 2px solid #d2f653; outline-offset: -2px; }
 .terminal-host .trading-mode-toggle.is-compact { width: 164px; }
 .terminal-host .trading-mode-toggle.is-compact button { min-height: 31px; font-size: 11px; }
 .terminal-host .desktop-mode-controls {

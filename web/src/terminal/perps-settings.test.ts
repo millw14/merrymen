@@ -1072,3 +1072,53 @@ describe("automatic setup is visible, current and bound to the owner", () => {
     }
   });
 });
+
+
+describe("doctrine draft isolation", () => {
+  it("describes a drafted scalp rule without changing the saved default setup hint", async () => {
+    await ui.render(createElement(PerpsSettings, { values: {}, defaults: DEFAULTS, owner: OWNER, hosted: false, onSaved() {}, initialStyle: "scalp-breakout" }));
+    await settle(2);
+    const draftHint = ui.container.querySelector("select")!.closest("label")!.textContent ?? "";
+    assert.match(draftHint, /5m candles.*Five-minute channel breaks/);
+    assert.doesNotMatch(draftHint, /4-hour/);
+    assert.match(ui.container.querySelector(".perps-readiness")?.textContent ?? "", /4-hour candles/);
+    assert.equal(writes().length, 0);
+  });
+  it("uses the saved nondefault doctrine in readiness while later edits remain drafts", async () => {
+    stored = { perpsDriver: "perp-trend", perpsStyle: "scalp-confirmed" };
+    await shown();
+    const savedHint = () => ui.container.querySelector(".perps-readiness")?.textContent ?? "";
+    assert.match(savedHint(), /15m candles.*Fifteen-minute bars/);
+    assert.doesNotMatch(savedHint(), /4-hour candles/);
+    await choose(ui.container.querySelector<HTMLSelectElement>("#perps-style")!, "day-breakout");
+    assert.match(ui.container.querySelector("select")!.closest("label")!.textContent ?? "", /1h candles.*Hourly trend breaks/);
+    assert.match(savedHint(), /15m candles.*Fifteen-minute bars/);
+    assert.doesNotMatch(savedHint(), /Hourly trend breaks/);
+    assert.equal(writes().length, 0);
+  });
+  it("keeps a radar selection unsaved until the owner presses save", async () => {
+    let consumed = 0;
+    await ui.render(createElement(PerpsSettings, { values: {}, defaults: DEFAULTS, owner: OWNER, hosted: false, onSaved() {}, initialStyle: "day-breakout", onInitialStyleConsumed() { consumed++; } }));
+    await settle(2);
+    assert.equal(writes().length, 0);
+    assert.equal(consumed, 1);
+    assert.equal(ui.container.querySelector<HTMLSelectElement>("#perps-style")?.value, "day-breakout");
+    assert.match(text(), /Unsaved doctrine: Day breakout/);
+    assert.equal(ui.container.querySelector<HTMLDetailsElement>("#perpetuals-limits")?.open, true);
+    await press(button(SAVE), "save selected doctrine");
+    assert.deepEqual(writes()[0]?.body, { perpsDriver: "perp-trend", perpsStyle: "day-breakout", owner: OWNER });
+  });
+  it("a style selection never saves switches or limits and another driver clears an incompatible style", async () => {
+    await shown();
+    await choose(ui.container.querySelector<HTMLSelectElement>("#perps-style")!, "scalp-breakout");
+    assert.equal(writes().length, 0);
+    await choose(ui.container.querySelector<HTMLSelectElement>("select")!, "manual");
+    await press(button(SAVE), "save manual driver");
+    assert.deepEqual(writes()[0]?.body, { perpsDriver: "manual", perpsStyle: "swing-trend", owner: OWNER });
+  });
+  it("saves only the chosen style and driver, retaining switches and limits", () => {
+    const body = perpsDraftBody({ ...EMPTY_PERPS_DRAFT, driver: "perp-trend", style: "scalp-confirmed" });
+    assert.deepEqual(body, { perpsDriver: "perp-trend", perpsStyle: "scalp-confirmed" });
+    assert.equal(perpsDraftProblems({ ...EMPTY_PERPS_DRAFT, driver: "perp-trend", style: "scalp-confirmed" }, {}, DEFAULTS).openBelowTrade, null);
+  });
+});

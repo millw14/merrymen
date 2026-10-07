@@ -5,7 +5,7 @@
  * the runner pushes every intent through checkPolicy → simulate → execute.
  */
 
-import type { PriceQuote } from "../../../packages/core/src/index";
+import type { PerpsStyleId, PriceQuote } from "../../../packages/core/src/index";
 import type {
   PerpBlocker,
   PerpKey,
@@ -256,6 +256,8 @@ export type PerpMarketView = {
    * the venue's own `t` (feed-reader.ts `closed4h`).
    */
   closed4h: readonly { t: number; o: bigint; h: bigint; l: bigint; c: bigint }[] | null;
+  /** Independently validated native bars. Missing timeframe is unread, never another frame. */
+  closedByTimeframe?: Partial<Record<"5m" | "15m" | "1h" | "4h", readonly { t: number; o: bigint; h: bigint; l: bigint; c: bigint }[] | null>>;
   /**
    * The last EIGHT settled hourly fundings, oldest first, signed as
    * `fundingPpmPerHour` (positive: longs pay) — feed-reader's `funding8h`.
@@ -288,6 +290,8 @@ export type PerpPositionView = {
   stop: { trigger: bigint; price: bigint; expiresAtSec: number | null; resting: boolean } | null;
   take: { trigger: bigint; price: bigint; expiresAtSec: number | null; resting: boolean } | null;
   openedAtSec: number;
+  /** Durable style of the entry; absent legacy positions use swing-trend. */
+  entryStyle?: PerpsStyleId;
   /** Funding since open, signed from the holder's view, micro-USDG. */
   fundingMicro: bigint;
 };

@@ -21,7 +21,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 
 import { mintSession } from "@/lib/auth";
 import { getSettingsStore, resetSettingsStoreForTest } from "@merrymen/settings-store";
-import { PERPS_LIVE_CONSENT_VERSION, SETTINGS_DEFAULTS, type MerrymenSettings } from "@merrymen/core";
+import { PERPS_LIVE_CONSENT_VERSION, PERPS_STYLE_CATALOG, SETTINGS_DEFAULTS, type MerrymenSettings } from "@merrymen/core";
 import { mergeSettings } from "../../../../../worker/src/settings";
 
 const TENANT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -111,6 +111,41 @@ describe("perpsDriver", () => {
     assert.equal((await stored()).perpsDriver, "manual", "a refused value left the last good one in place");
     assert.equal((await put({ perpsDriver: null })).status, 200);
     assert.equal("perpsDriver" in (await stored()), false);
+  });
+});
+
+describe("perpsStyle — measured profiles without authority changes", () => {
+  it("stores every profile without enabling trading or modifying risk limits", async () => {
+    await getSettingsStore().put(TENANT, { perpsEnabled: false, perpsLiveEnabled: false, perpsMaxLeverage: 2, perpsStopLossPct: 3 });
+    for (const profile of PERPS_STYLE_CATALOG) {
+      const result = await put({ perpsStyle: profile.id, perpsDriver: "perp-trend" });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      const saved = await stored();
+      assert.equal(saved.perpsStyle, profile.id);
+      assert.equal(saved.perpsEnabled, false);
+      assert.equal(saved.perpsLiveEnabled, false);
+      assert.equal(saved.perpsMaxLeverage, 2);
+      assert.equal(saved.perpsStopLossPct, 3);
+    }
+  });
+  it("refuses unknown profiles and incompatible Brain cadence without replacing the last saved choice", async () => {
+    await put({ perpsStyle: "scalp-breakout", perpsDriver: "perp-trend" });
+    for (const value of ["unknown", "SCALPER", 5, ["scalp-breakout"]]) {
+      const result = await put({ perpsStyle: value });
+      assert.equal(result.status, 400);
+      assert.match(errorsOf(result), /perpsStyle:/);
+      assert.equal((await stored()).perpsStyle, "scalp-breakout");
+    }
+    assert.equal((await put({ perpsDriver: "brain" })).status, 400);
+    assert.equal((await put({ perpsDriver: "manual" })).status, 200, "manual stops strategy opens without clearing the profile");
+    assert.equal((await put({ perpsDriver: "brain", perpsStyle: null })).status, 200);
+    assert.equal((await stored()).perpsStyle, undefined);
+  });
+  it("still saves OFF beside an invalid profile", async () => {
+    await getSettingsStore().put(TENANT, { perpsEnabled: true, perpsLiveEnabled: true });
+    await put({ perpsEnabled: false, perpsLiveEnabled: false, perpsStyle: "made-up" });
+    assert.equal((await stored()).perpsEnabled, false);
+    assert.equal((await stored()).perpsLiveEnabled, false);
   });
 });
 

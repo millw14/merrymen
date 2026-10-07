@@ -56,6 +56,10 @@ export const LIGHTER_FEED_FILE = "lighter-feed.json";
 export const LIGHTER_FEED_VERSION = 1;
 /** Price levels per side the file carries (best first). */
 export const FEED_BOOK_LEVELS = 10;
+/** Native venue bars, independently fetched, validated and aged. */
+export const FEED_TIMEFRAMES = { "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000 } as const;
+export type FeedTimeframe = keyof typeof FEED_TIMEFRAMES;
+
 
 /**
  * Where the feed file lives: the FLEET home when the orchestrator set one — a
@@ -120,7 +124,8 @@ export const FEED_FUNDING_HOURS = 8;
 /**
  * How long after the NEXT candle closes the last one still counts as current.
  * The writer refreshes at close + 60 s; this absorbs a retry or two and a slow
- * venue. Past it, the candles are a signal from a market that has moved on.
+ * venue. Shorter frames cap this grace at half their candle duration. Past
+ * it, the candles are a signal from a market that has moved on.
  */
 export const FEED_CANDLE_GRACE_MS = 15 * 60_000;
 /** The same for the hourly fundings, refreshed at the hour + 90 s. */
@@ -171,6 +176,7 @@ export interface LighterFeedFileMarket {
    * not fetched. Present only together with `candlesObservedAt`.
    */
   closed4h?: FeedCandleJson[];
+  closedByTimeframe?: Partial<Record<FeedTimeframe, { observedAt: number; rows: FeedCandleJson[] }>>;
   /** ms: when those candles were fetched (the moment the request went out). */
   candlesObservedAt?: number;
   /** The last settled hourly fundings, oldest first; with `fundingsObservedAt`. */
@@ -246,6 +252,7 @@ export interface PerpFeedMarket {
    * reason to synthesize candles from tick samples.
    */
   closed4h: readonly { t: number; o: bigint; h: bigint; l: bigint; c: bigint }[] | null;
+  closedByTimeframe?: Partial<Record<FeedTimeframe, readonly FeedCandle[] | null>>;
   /**
    * The last FEED_FUNDING_HOURS settled hourly fundings, oldest first, SIGNED
    * in parts per million per hour — positive means longs pay (the sign
@@ -418,6 +425,7 @@ export type FeedFundingRow = { atSec: number; ratePpm: number; direction: "long"
 /** What a market entry's history parsed to. Currency is judged at read time, not here. */
 export interface FeedHistory {
   candles: { observedAt: number; rows: FeedCandle[] } | null;
+  byTimeframe: Partial<Record<FeedTimeframe, { observedAt: number; rows: FeedCandle[] } | null>>;
   fundings: { observedAt: number; rows: FeedFundingRow[] } | null;
 }
 
@@ -431,7 +439,7 @@ const FEED_MAX_FUNDINGS = 48;
  * low bounding open and close — the rules parseMarkCandles held the venue to,
  * held again because this file is writable by every hosted child.
  */
-function parseCandles(raw: Record<string, unknown>, fileAt: number): FeedHistory["candles"] | "bad" {
+function parseCandles(raw: Record<string, unknown>, fileAt: number, candleMs = FEED_CANDLE_MS): FeedHistory["candles"] | "bad" {
   const hasRows = "closed4h" in raw;
   const hasAt = "candlesObservedAt" in raw;
   if (!hasRows && !hasAt) return null;
@@ -448,7 +456,7 @@ function parseCandles(raw: Record<string, unknown>, fileAt: number): FeedHistory
     const l = posInt(x.l);
     const c = posInt(x.c);
     if (t === null || o === null || h === null || l === null || c === null) return "bad";
-    if (t % FEED_CANDLE_MS !== 0 || t <= prev || t + FEED_CANDLE_MS > observedAt) return "bad";
+    if (t % candleMs !== 0 || t <= prev || t + candleMs > observedAt) return "bad";
     if (h < o || h < c || h < l || l > o || l > c) return "bad";
     prev = t;
     rows.push({ t, o, h, l, c });
@@ -485,28 +493,28 @@ function parseFundingRows(raw: Record<string, unknown>, fileAt: number): FeedHis
  * input to it again at its own clock rather than trusting whoever built the
  * view.
  *
- *   CLOSED AT THIS CLOCK  a candle with t + 4h > now is the one in progress;
+ *   CLOSED AT THIS CLOCK  a candle with t + candleMs > now is the one in progress;
  *                         a signal read off it is a signal from the future.
  *   CURRENT               the last closed candle must be the latest one that
  *                         could be: once the NEXT candle has closed more than
- *                         FEED_CANDLE_GRACE_MS ago, this history is stale.
+ *                         the bounded grace ago, this history is stale.
  *   CONTIGUOUS            the run ending at the last candle, each exactly
- *                         FEED_CANDLE_MS after the one before, and at least
+ *                         candleMs after the one before, and at least
  *                         FEED_MIN_CANDLES long. Only that run is returned: a
  *                         gap means the venue skipped bars (a halt), and an
  *                         EMA carried across one is an average of two markets.
  */
-export function usableClosedCandles<T extends { t: number }>(rows: readonly T[] | null | undefined, nowMs: number): T[] | null {
-  if (!rows || !Number.isFinite(nowMs)) return null;
-  const closed = rows.filter((r) => Number.isSafeInteger(r.t) && r.t + FEED_CANDLE_MS <= nowMs);
+export function usableClosedCandles<T extends { t: number }>(rows: readonly T[] | null | undefined, nowMs: number, candleMs: number = FEED_CANDLE_MS): T[] | null {
+  if (!rows || !Number.isFinite(nowMs) || !(Object.values(FEED_TIMEFRAMES) as number[]).includes(candleMs)) return null;
+  const closed = rows.filter((r) => Number.isSafeInteger(r.t) && r.t % candleMs === 0 && r.t + candleMs <= nowMs);
   const last = closed[closed.length - 1];
   if (last === undefined) return null;
-  if (nowMs >= last.t + 2 * FEED_CANDLE_MS + FEED_CANDLE_GRACE_MS) return null;
+  if (nowMs >= last.t + 2 * candleMs + Math.min(FEED_CANDLE_GRACE_MS, candleMs / 2)) return null;
   let start = closed.length - 1;
   while (start > 0) {
     const prev = closed[start - 1] as T;
     const cur = closed[start] as T;
-    if (cur.t - prev.t !== FEED_CANDLE_MS) break;
+    if (cur.t - prev.t !== candleMs) break;
     start--;
   }
   const run = closed.slice(start);
@@ -546,7 +554,7 @@ export function parseLighterFeedMarket(
   key: string,
   raw: unknown,
   fileAt: number,
-): (Omit<PerpFeedMarket, "fresh" | "bookFresh" | "closed4h" | "funding8h" | "fundingHistory"> & { history: FeedHistory }) | null {
+): (Omit<PerpFeedMarket, "fresh" | "bookFresh" | "closed4h" | "closedByTimeframe" | "funding8h" | "fundingHistory"> & { history: FeedHistory }) | null {
   if (!/^\d{1,5}$/.test(key) || !isRecord(raw)) return null;
   const marketId = Number(key);
   const market = perpMarketById(marketId);
@@ -600,8 +608,19 @@ export function parseLighterFeedMarket(
   const fundings = parseFundingRows(raw, fileAt);
   if (candles === "bad" || fundings === "bad") return null;
 
+  const byTimeframe: FeedHistory["byTimeframe"] = {};
+  if ("closedByTimeframe" in raw) {
+    if (!isRecord(raw.closedByTimeframe)) return null;
+    for (const [frame, value] of Object.entries(raw.closedByTimeframe)) {
+      if (!Object.hasOwn(FEED_TIMEFRAMES, frame) || !isRecord(value)) return null;
+      const tf = frame as FeedTimeframe;
+      const parsed = parseCandles({ closed4h: value.rows, candlesObservedAt: value.observedAt }, fileAt, FEED_TIMEFRAMES[tf]);
+      if (parsed === "bad") return null;
+      byTimeframe[tf] = parsed;
+    }
+  }
   return {
-    history: { candles, fundings },
+    history: { candles, byTimeframe, fundings },
     marketId,
     key: market.key,
     symbol: market.symbol,
@@ -653,6 +672,9 @@ export function parseLighterFeed(raw: unknown, nowMs: number, opts: LighterFeedR
       markets.set(m.marketId, {
         ...m,
         closed4h: usableClosedCandles(history.candles?.rows, nowMs),
+        closedByTimeframe: Object.fromEntries(Object.entries(FEED_TIMEFRAMES).map(([frame, ms]) => [frame,
+          usableClosedCandles(history.byTimeframe[frame as FeedTimeframe]?.rows, nowMs, ms),
+        ])),
         funding8h: usableFunding8h(history.fundings?.rows, nowMs),
         fundingHistory: history.fundings?.rows ?? null,
         fresh,

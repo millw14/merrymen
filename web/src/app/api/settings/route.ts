@@ -16,6 +16,7 @@ import {
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,
   PERPS_DRIVERS,
+  PERPS_STYLE_CATALOG,
   PERPS_LIVE_CONSENT_VERSION,
   PERPS_MARKETS_MAX,
   PERPS_NUM_BOUNDS,
@@ -26,6 +27,8 @@ import {
   TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
   isPerpKey,
+  isPerpsStyle,
+  perpsStyleForDriver,
   isValidCustomToken,
   officialCoinsFor,
   perpsNumberOk,
@@ -849,6 +852,18 @@ export async function PUT(req: Request) {
     if (v === null || v === undefined || v === "") setOrClear("perpsDriver", undefined);
     else if (typeof v === "string" && (PERPS_DRIVERS as readonly string[]).includes(v)) setOrClear("perpsDriver", v as never);
     else errors.push(`perpsDriver: must be ${PERPS_DRIVERS.join(", ")}`);
+  }
+
+  if ("perpsStyle" in body) {
+    const value = body.perpsStyle;
+    if (value === null || value === undefined || value === "") setOrClear("perpsStyle", undefined);
+    else if (isPerpsStyle(value)) setOrClear("perpsStyle", value);
+    else errors.push(`perpsStyle: must be ${PERPS_STYLE_CATALOG.map(style => style.id).join(", ")}`);
+  }
+  if (("perpsStyle" in body || "perpsDriver" in body) &&
+      !errors.some(error => error.startsWith("perpsStyle:") || error.startsWith("perpsDriver:")) &&
+      !perpsStyleForDriver(next.perpsStyle ?? SETTINGS_DEFAULTS.perpsStyle, next.perpsDriver ?? SETTINGS_DEFAULTS.perpsDriver)) {
+    errors.push("perpsStyle: this profile requires the deterministic perp-trend driver; Brain and strategist use Swing trend.");
   }
 
   /**

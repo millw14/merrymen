@@ -8,6 +8,8 @@ import { startLighterFeed, type FeedSocket, type FeedSocketCtor, type FeedTimers
 import {
   FEED_CANDLE_GRACE_MS,
   FEED_CANDLE_MS,
+  FEED_TIMEFRAMES,
+  type FeedTimeframe,
   parseLighterFeed,
   readLighterFeed,
   specToJson,
@@ -308,7 +310,7 @@ function api(opts: { candles?: (a: CandleArgs, at: number) => LighterResult<{ re
   return { api: a, calls, bind: (c: Clock) => (clock = c) };
 }
 
-async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0] = {}, held?: number[]) {
+async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0] = {}, held?: number[], frames: readonly FeedTimeframe[] = ["4h"]) {
   const clock = new Clock(at);
   const socks = sockets();
   const fa = api(apiOpts);
@@ -316,6 +318,7 @@ async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0
   const logs: string[] = [];
   const feed = startLighterFeed({
     marketIds: () => ids,
+    candleTimeframes: frames,
     ...(held !== undefined ? { heldMarketIds: () => held } : {}),
     outPath: OUT,
     home: FLEET,
@@ -481,4 +484,77 @@ test("writer: fundings are read once an hour, after the hour", async () => {
   assert.ok(m.fundings1h && m.fundings1h.length > 0);
   assert.match(m.fundings1h[0]!.rate, /^-?\d+\.\d{4}$/);
   f.feed.stop();
+});
+
+const frameRows = (ms: number, at = CAPTURED): FeedCandleJson[] => {
+  const end = Math.floor((at - 5_000) / ms) * ms;
+  return Array.from({ length: 120 }, (_, i) => ({ t: end - (120 - i) * ms, o: "100", h: "110", l: "90", c: "105" }));
+};
+
+test("timeframe reader: each native series is independent, closed, contiguous and aged at its own duration", () => {
+  for (const [frame, ms] of Object.entries(FEED_TIMEFRAMES)) {
+    const tf = frame as FeedTimeframe;
+    const rows = frameRows(ms);
+    const payload = { closedByTimeframe: { [tf]: { observedAt: CAPTURED - 5_000, rows } } };
+    const parsed = parseLighterFeed(file(market(payload)), CAPTURED)!;
+    assert.equal(parsed.markets.get(1)!.closedByTimeframe?.[tf]?.length, 120);
+    assert.equal(parsed.markets.get(1)!.closed4h, null, "no implicit fallback to legacy 4h");
+    for (const other of Object.keys(FEED_TIMEFRAMES) as FeedTimeframe[]) {
+      if (other !== tf) assert.equal(parsed.markets.get(1)!.closedByTimeframe?.[other], null);
+    }
+    const candles = rows.map((r) => ({ t: r.t }));
+    const last = candles.at(-1)!;
+    const limit = last.t + 2 * ms + Math.min(FEED_CANDLE_GRACE_MS, ms / 2);
+    assert.equal(usableClosedCandles(candles, limit - 1, ms)?.length, 120);
+    assert.equal(usableClosedCandles(candles, limit, ms), null);
+    assert.equal(usableClosedCandles(candles.slice(-99), CAPTURED, ms), null);
+    assert.equal(usableClosedCandles(candles.filter((_, i) => i !== 80), CAPTURED, ms), null);
+    assert.equal(usableClosedCandles([...candles, { t: Math.floor(CAPTURED / ms) * ms }], CAPTURED, ms)?.length, 120, "forming bar excluded");
+    const invalids = [
+      rows.map((r, i) => i === 119 ? { ...r, t: r.t + 1 } : r),
+      rows.map((r, i) => i === 119 ? { ...r, h: "1" } : r),
+      [...rows, { ...rows[119]!, t: Math.floor(CAPTURED / ms) * ms }],
+    ];
+    for (const invalid of invalids) {
+      assert.equal(parseLighterFeed(file(market({ closedByTimeframe: { [tf]: { observedAt: CAPTURED - 5_000, rows: invalid } } })), CAPTURED), null);
+    }
+  }
+});
+
+test("timeframe writer: fetches native resolutions in the shared paced slot, caches until close and never substitutes mismatched responses", async () => {
+  const frames: FeedTimeframe[] = ["4h", "1h", "15m", "5m"];
+  const f = await boot([1], CAPTURED, {
+    candles: (args, at) => {
+      const ms = FEED_TIMEFRAMES[args.resolution as FeedTimeframe];
+      const end = Math.floor(at / ms) * ms;
+      const candles = Array.from({ length: 121 }, (_, i) => ({ tMs: end - (120 - i) * ms, open: 100n, high: 110n, low: 90n, close: 105n }));
+      return { ok: true, value: { resolution: args.resolution, candles }, serverDateMs: null };
+    },
+  }, undefined, frames);
+  await f.clock.advance(12_000);
+  assert.deepEqual(f.calls.candles.map((c) => c.args.resolution), frames);
+  const allReads = [...f.calls.candles, ...f.calls.fundings].sort((a, b) => a.at - b.at);
+  for (let i = 1; i < allReads.length; i++) assert.ok(allReads[i]!.at - allReads[i - 1]!.at >= 3_000);
+  const written = f.feed.snapshot().markets["1"]!;
+  const parsed = parseLighterFeed(f.feed.snapshot(), f.clock.t)!.markets.get(1)!;
+  for (const tf of frames) {
+    assert.equal(written.closedByTimeframe?.[tf]?.rows.length, 120);
+    assert.equal(parsed.closedByTimeframe?.[tf]?.length, 120);
+    const call = f.calls.candles.find((c) => c.args.resolution === tf)!;
+    assert.equal(call.args.endSec - call.args.startSec, 499 * FEED_TIMEFRAMES[tf] / 1000);
+  }
+  await f.clock.advance(20_000);
+  assert.equal(f.calls.candles.length, 4, "no polling before the native candle closes");
+  const nextClose = (Math.floor(CAPTURED / 300_000) + 1) * 300_000;
+  await f.clock.advance(nextClose + 59_000 - f.clock.t);
+  assert.equal(f.calls.candles.filter((c) => c.args.resolution === "5m").length, 1);
+  await f.clock.advance(10_000);
+  assert.equal(f.calls.candles.filter((c) => c.args.resolution === "5m").length, 2);
+  f.feed.stop();
+
+  const mismatch = await boot([1], CAPTURED, {}, undefined, ["5m"]);
+  await mismatch.clock.advance(10_000);
+  assert.equal(mismatch.feed.snapshot().markets["1"]!.closedByTimeframe?.["5m"], undefined);
+  assert.match(mismatch.logs.join("\n"), /not 5m/);
+  mismatch.feed.stop();
 });

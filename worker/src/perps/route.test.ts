@@ -186,3 +186,9 @@ it("route fixtures: the default view breaks out on both markets (sanity for the 
   assert.equal(breakout("BTC-PERP", 0n).length, 120);
   assert.equal(NOW_SEC % 3600, 0);
 });
+
+it("Brain cannot approve an unsupported intraday profile", () => {
+  const v = view();
+  const result = runPerpRoute({ view: v, settings: { ...settings(), perpsStyle: "scalp-breakout" }, driver: "brain", perpTrendCtx: ctx(), brainApproved: true });
+  assert.equal(result.entry, null);
+});

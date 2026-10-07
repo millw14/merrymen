@@ -1,3 +1,4 @@
+import { getPerpsStyle, isPerpsStyle, type PerpsStyleId } from "../../packages/core/src/perps-styles";
 /**
  * Trade/event/equity persistence — SQLite (node:sqlite, built into Node 22+).
  * One durable file at .data/merrymen.db shared by worker (writer) and web
@@ -8117,6 +8118,9 @@ export async function perpLaneLedgerFacts(
   opensToday: number;
   lastExits: Map<number, { atSec: number; cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown" }>;
   lastOpenAt: Map<number, number>;
+  lastEntrySignals: Map<number, { style: PerpsStyleId; candleT: number }>;
+  positionStyles: Map<number, PerpsStyleId>;
+  positionStyleOpenedAt: Map<number, number>;
 }> {
   const agent = perpAgent(agentId);
   const m = perpMode(mode);
@@ -8136,6 +8140,20 @@ export async function perpLaneLedgerFacts(
         GROUP BY market_id`,
     )
     .all(agent, m, since)) as { market_id: number; at: number }[];
+  const signalRows = await db.prepare(`SELECT o.market_id, d.evidence_json FROM perp_orders o
+    JOIN decisions d ON d.id = o.decision_id AND LOWER(d.agent_id) = o.agent_id
+    WHERE o.agent_id = ? AND o.mode = ? AND o.effect = 'open' AND o.reduce_only = 0 AND o.created_at > ?
+      AND d.source = 'perp-route' AND d.provenance = 'deterministic-strategy'
+    ORDER BY o.created_at, o.id`).all(agent, m, since) as { market_id: number; evidence_json: string | null }[];
+  const lastEntrySignals = new Map<number, { style: PerpsStyleId; candleT: number }>();
+  for (const row of signalRows) {
+    try {
+      const e = JSON.parse(row.evidence_json ?? "null");
+      if (e && isPerpsStyle(e.perpsStyle) && Number.isSafeInteger(e.perpsEntryCandleT) && e.perpsEntryCandleT >= 0 &&
+          e.perpsEntryCandleT % getPerpsStyle(e.perpsStyle).candleMs === 0)
+        lastEntrySignals.set(Number(row.market_id), { style: e.perpsStyle, candleT: e.perpsEntryCandleT });
+    } catch { /* Legacy evidence has no profile signal. */ }
+  }
   const lastOpenAt = new Map<number, number>();
   for (const r of lastOpenRows) lastOpenAt.set(Number(r.market_id), Number(r.at));
 
@@ -8173,7 +8191,72 @@ export async function perpLaneLedgerFacts(
     else cause = "unknown";
     lastExits.set(market, { atSec: Math.floor(Number(r.ts) / 1000), cause });
   }
-  return { opensToday: Number(opens?.n ?? 0), lastExits, lastOpenAt };
+  // Rebuild the current lifecycle from signed fills, not position.opened_at:
+  // a crash before recordOpenStops can leave that cache null, and a close /
+  // reopen between account snapshots can leave an old same-side timestamp.
+  const styleRows = await db.prepare(`
+    SELECT f.market_id, f.position_before, f.base, f.side_role, f.venue_ts_ms, f.venue_trade_id,
+           p.side AS held_side, p.base AS held_base, d.evidence_json
+      FROM perp_fills f
+      JOIN perp_positions p ON p.agent_id = f.agent_id AND p.mode = f.mode AND p.market_id = f.market_id
+      LEFT JOIN perp_orders o ON o.id = f.order_id AND o.agent_id = f.agent_id AND o.mode = f.mode
+        AND o.effect = 'open' AND o.reduce_only = 0
+      LEFT JOIN decisions d ON d.id = o.decision_id AND LOWER(d.agent_id) = f.agent_id
+        AND d.source = 'perp-route' AND d.provenance = 'deterministic-strategy'
+      WHERE f.agent_id = ? AND f.mode = ? AND p.base != '0'
+      ORDER BY f.venue_ts_ms, f.created_at, f.venue_trade_id
+  `).all(agent, m) as { market_id: number; position_before: string | null; base: string; side_role: string;
+    venue_ts_ms: number; venue_trade_id: string; held_side: string; held_base: string; evidence_json: string | null }[];
+  styleRows.sort((a, b) => {
+    if (a.venue_ts_ms !== b.venue_ts_ms) return a.venue_ts_ms - b.venue_ts_ms;
+    // Live IDs are positive decimal integers, not lexicographic strings.
+    if (/^[0-9]+$/.test(a.venue_trade_id) && /^[0-9]+$/.test(b.venue_trade_id)) {
+      const x = BigInt(a.venue_trade_id), y = BigInt(b.venue_trade_id);
+      return x < y ? -1 : x > y ? 1 : 0;
+    }
+    return 0; // Synthetic paper IDs establish no chronological order.
+  });
+  const positionStyles = new Map<number, PerpsStyleId>();
+  const positionStyleOpenedAt = new Map<number, number>();
+  const lifecycle = new Map<number, { style?: PerpsStyleId; openedAt: number; after: bigint; held: string; heldBase: bigint }>();
+  for (let i = 0; i < styleRows.length; i++) {
+    let row = styleRows[i]!;
+    const id = Number(row.market_id);
+    // Equal-time synthetic IDs/self-trade sides use the signed chain. A
+    // discontinuity still drops prior profile state; it is never filled in.
+    const expected = lifecycle.get(id)?.after ?? 0n;
+    let match = -1;
+    for (let j = i; j < styleRows.length && styleRows[j]!.venue_ts_ms === row.venue_ts_ms; j++) {
+      const next = styleRows[j]!;
+      if (Number(next.market_id) === id && next.position_before !== null && BigInt(next.position_before) === expected) { match = j; break; }
+    }
+    if (match > i) { styleRows[i] = styleRows[match]!; styleRows[match] = row; row = styleRows[i]!; }
+    if (row.position_before === null) { lifecycle.delete(id); continue; }
+    const before = BigInt(row.position_before), delta = BigInt(row.base) * (row.side_role === "bid" ? 1n : -1n);
+    const after = before + delta;
+    const crossed = before === 0n || (before < 0n && after > 0n) || (before > 0n && after < 0n);
+    const prior = lifecycle.get(id);
+    const state = crossed || !prior || prior.after !== before
+      ? { openedAt: crossed ? Math.floor(Number(row.venue_ts_ms) / 1000) : 0, after, held: row.held_side, heldBase: BigInt(row.held_base), style: undefined as PerpsStyleId | undefined }
+      : lifecycle.get(id)!;
+    state.after = after;
+    if (after === 0n) { lifecycle.delete(id); continue; }
+    let evidence: unknown;
+    try { evidence = JSON.parse(row.evidence_json ?? "null"); } catch { evidence = null; }
+    if (evidence && typeof evidence === "object" && "perpsStyle" in evidence) {
+      const value = (evidence as { perpsStyle: unknown }).perpsStyle;
+      const style = isPerpsStyle(value) ? value : "scalp-breakout";
+      if (!state.style || getPerpsStyle(style).maxHoldHours < getPerpsStyle(state.style).maxHoldHours) state.style = style;
+    }
+    lifecycle.set(id, state);
+  }
+  for (const [id, state] of lifecycle) {
+    if (!state.style || (state.after > 0n ? "long" : "short") !== state.held ||
+        (state.after < 0n ? -state.after : state.after) !== state.heldBase) continue;
+    positionStyles.set(id, state.style);
+    positionStyleOpenedAt.set(id, state.openedAt);
+  }
+  return { opensToday: Number(opens?.n ?? 0), lastExits, lastOpenAt, lastEntrySignals, positionStyles, positionStyleOpenedAt };
 }
 
 /** Called only after independent receipt/slot/flatness verification against the active fresh owner grant. */

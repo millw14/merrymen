@@ -59,6 +59,7 @@
 
 import {
   liqDistanceBps,
+  getPerpsStyle,
   notionalMicro,
   stopPrices,
   worstPriceForTaker,
@@ -112,8 +113,8 @@ export type ProtectSettings = Pick<PerpsViewSettings, "perpsStopLossPct" | "perp
 // ── actions and memory ──────────────────────────────────────────────────────
 
 /** Every cause this loop closes for — each one a perp-risk-exit cause in strategies/reasons.ts. */
-export type ProtectCause = "liq-proximity" | "liq-inside-stop" | "stop-breached" | "stop-missing" | "funding-bleed" | "market-status";
-export type ProtectRule = "P1" | "P2" | "P3" | "P4" | "P5" | "P7";
+export type ProtectCause = "liq-proximity" | "liq-inside-stop" | "stop-breached" | "stop-missing" | "funding-bleed" | "market-status" | "style-expired";
+export type ProtectRule = "P1" | "P2" | "P3" | "P4" | "P5" | "P6" | "P7";
 export type ProtectAlertCode =
   | "perp-liq-proximity"
   | "perp-stop-missing"
@@ -473,6 +474,11 @@ export function evaluateProtection(input: ProtectInput): { actions: ProtectActio
         }
       }
     }
+
+    // Immutable entry profile survives driver/style changes and paused ticks.
+    // A fresh mark is still required to bound the reduce-only close.
+    if (close === null && mf && pos.entryStyle !== undefined && age >= getPerpsStyle(pos.entryStyle).maxHoldHours * 3600)
+      close = { rule: "P6", cause: "style-expired" };
 
     // ── the one close ───────────────────────────────────────────────────────
     if (close === null) continue;

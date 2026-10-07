@@ -1,0 +1,46 @@
+.perps-doctrines{margin-top:32px;color:#eff1de;font-family:var(--font-geist),sans-serif}
+.doctrine-header{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;padding:12px 0 22px;border-bottom:1px solid #343b28}
+.doctrine-header h2{font:400 clamp(25px,2.8vw,39px)/1.15 var(--font-geist-pixel),monospace;letter-spacing:-1px;margin:8px 0 7px}
+.doctrine-header p{font-size:12px;color:#9da58c;margin:0;line-height:1.5}
+.doctrine-filters{display:flex;gap:2px;flex-wrap:wrap}
+.doctrine-filters button{font:10px var(--font-geist-mono),monospace!important;background:transparent;color:#a8af9b;border:1px solid #343b28;padding:10px 12px;white-space:nowrap}
+.doctrine-filters button[aria-pressed=true]{color:#101509;background:#d2f653;border-color:#d2f653}
+.doctrine-families{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
+.doctrine-family:only-child{grid-column:1/-1}
+.doctrine-family-heading{display:flex;align-items:center;gap:8px;margin:22px 0 14px;flex-wrap:wrap}
+.doctrine-family-heading>span{color:#d2f653;font:9px var(--font-geist-mono),monospace;padding-right:2px}
+.doctrine-family-heading h3{font:600 11px var(--font-geist-mono),monospace;margin:0;letter-spacing:.8px}
+.doctrine-family-heading p{font-size:10px;color:#929b83;margin:0 0 0 auto}
+.doctrine-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.doctrine-family:only-child .doctrine-cards{grid-template-columns:repeat(3,minmax(0,1fr))}
+.doctrine-card{display:flex;flex-direction:column;align-items:stretch;text-align:left;min-width:0;position:relative;background:#12160f;border:1px solid #323a27;padding:15px 13px 0;color:#eff1de;transition:border-color .16s,background .16s,transform .16s}
+.doctrine-card:hover{background:#1a2112;border-color:#849351;transform:translateY(-3px)}
+.doctrine-card.is-selected{border-color:#d2f653;background:#1b2211}
+.doctrine-card.is-selected:before{content:"";position:absolute;top:0;left:0;width:26px;height:3px;background:#d2f653}
+.doctrine-card-top{display:flex;justify-content:space-between;align-items:center;color:#a3ac90;font:9px var(--font-geist-mono),monospace;letter-spacing:1px}
+.doctrine-card-top b{font-weight:500;color:#d1d8be}
+.doctrine-card.is-selected .doctrine-card-top b{color:#d2f653}
+.doctrine-diagram{width:100%;height:64px;margin:14px 0 16px;overflow:visible;color:#aab596}
+.doctrine-channel{stroke:#414b33;stroke-dasharray:3 3;stroke-width:.8}
+.doctrine-signal{stroke:currentColor;stroke-width:1.2}
+.doctrine-cross{stroke:#d2f653;stroke-width:1}
+.doctrine-diagram circle{stroke:#d2f653;stroke-width:.7;opacity:.5}
+.doctrine-card.is-selected .doctrine-signal{stroke:#d2f653}
+.doctrine-name{font:400 24px/1.15 var(--font-geist-pixel),monospace;letter-spacing:-.6px}
+.doctrine-role{font:9px var(--font-geist-mono),monospace;text-transform:uppercase;color:#acb995;letter-spacing:.5px;margin:6px 0 13px}
+.doctrine-description{font-size:11px;line-height:1.7;color:#9ea78f;flex:1;min-height:57px}
+.doctrine-specs{display:flex;align-items:center;gap:10px;margin-top:20px;border-top:1px solid #303b23;padding:11px 0;font:8px var(--font-geist-mono),monospace;color:#8c9979;flex-wrap:wrap}
+.doctrine-specs b{color:#d7dfc7;font-weight:500}.doctrine-specs i{font-style:normal;margin-left:auto;color:#d2f653}
+.doctrine-selected{display:grid;grid-template-columns:auto 1fr auto;gap:28px;align-items:center;border:1px solid #657833;background:#202814;padding:22px;margin-top:22px}
+.doctrine-selected-heading{display:flex;align-items:center;gap:13px;min-width:210px}
+.doctrine-insignia{border:1px solid #56642f;color:#d2f653;font:12px var(--font-geist-mono),monospace;padding:17px 9px;background:#161d0e;box-shadow:inset 0 0 0 3px #202814}
+.doctrine-selected-heading .perps-eyebrow{font-size:8px;letter-spacing:.7px}
+.doctrine-selected h3{font:400 28px var(--font-geist-pixel),monospace;margin:7px 0 0}
+.doctrine-selected p{font-size:11px;line-height:1.8;color:#adb89a;max-width:560px;margin:0}
+.doctrine-selected>button{font:600 10px var(--font-geist-mono),monospace!important;padding:14px 16px;background:#d2f653;border:1px solid #d2f653;color:#13190a;white-space:nowrap}
+.doctrine-selected>button span{margin-left:18px}
+.doctrine-footnote{font:9px/1.8 var(--font-geist-mono),monospace;color:#879273;margin:13px 0 0;max-width:1040px}
+@media(min-width:1300px){.doctrine-cards{grid-template-columns:repeat(3,minmax(0,1fr))}.doctrine-name{font-size:22px}.doctrine-family-heading p{width:100%;margin-left:23px}.doctrine-specs{gap:8px;font-size:8px}}
+@media(max-width:1299px){.doctrine-families{grid-template-columns:1fr}.doctrine-cards{grid-template-columns:repeat(3,minmax(0,1fr))}.doctrine-family-heading p{margin-left:12px}.doctrine-description{min-height:36px}.doctrine-selected{grid-template-columns:auto 1fr}.doctrine-selected>button{grid-column:2;justify-self:start}.doctrine-selected-heading{align-self:start}.doctrine-header{flex-wrap:wrap}}
+@media(max-width:600px){.perps-doctrines{margin-top:24px}.doctrine-header{gap:18px}.doctrine-filters button{padding:9px 10px;font-size:9px!important}.doctrine-cards,.doctrine-family:only-child .doctrine-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.doctrine-card{padding:13px 11px 0}.doctrine-name{font-size:25px}.doctrine-description{font-size:11px}.doctrine-specs{gap:6px}.doctrine-selected{grid-template-columns:1fr;gap:18px;padding:18px}.doctrine-selected>button{grid-column:auto;width:100%}.doctrine-selected p{font-size:12px}.doctrine-footnote{font-size:9px}.doctrine-family-heading p{margin-left:0}.doctrine-diagram{height:60px}}
+@media(prefers-reduced-motion:reduce){.doctrine-card{transition:none}.doctrine-card:hover{transform:none}}

@@ -9,6 +9,7 @@
  * returns only { set, hint } for them.
  */
 
+import { DEFAULT_PERPS_STYLE, type PerpsStyleId } from "./perps-styles";
 import { DEFAULT_BASKET_SYMBOLS } from "./tokens";
 import { PERP_MAX_LEVERAGE } from "./perps";
 
@@ -658,6 +659,8 @@ export interface MerrymenSettings {
   perpsRegionAttested?: boolean;
   /** The one autonomous perp producer (docs/perps.md "The perps route"). */
   perpsDriver?: PerpsDriver;
+  /** Deterministic profile; does not enable trading or change risk caps. */
+  perpsStyle?: PerpsStyleId;
   /**
    * Which perp markets the agent may OPEN, by key (`BTC-PERP`, never bare
    * `BTC`, which is a spot symbol). 1–8 keys of LIGHTER_MARKETS_V1; an unknown
@@ -884,6 +887,7 @@ export const PERPS_SETTING_KEYS = [
   "perpsLiveConsentAt",
   "perpsRegionAttested",
   "perpsDriver",
+  "perpsStyle",
   "perpsMarkets",
   ...(Object.keys(PERPS_NUM_BOUNDS) as PerpsNumKey[]),
 ] as const satisfies readonly (keyof MerrymenSettings)[];
@@ -1170,6 +1174,7 @@ export const SETTINGS_DEFAULTS = {
   perpsEnabled: false,
   perpsLiveEnabled: false,
   perpsDriver: "perp-trend" as PerpsDriver,
+  perpsStyle: DEFAULT_PERPS_STYLE,
   // The two deepest books, each reachable at the default per-trade size (a
   // minimum BTC order was ~17 USDG on 2026-09-29, ETH ~13), and two of the
   // three perp-trend trades.

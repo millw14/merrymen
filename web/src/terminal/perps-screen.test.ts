@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement, act } from "react";
 import type { ChartEntry, ChartResponse } from "../lib/perps-chart-data";
-import { PerpsScreen, type PerpsScreenProps } from "./PerpsScreen";
+import { PerpsScreen, PerpsScreenPreview, type PerpsScreenProps } from "./PerpsScreen";
 import { testDom, json } from "./test-dom";
 import { forgetAudioForTest } from "./chime";
 
@@ -107,6 +107,25 @@ describe("private perps screen", () => {
       await act(async () => { await dom.render(createElement(PerpsScreen, { ...props, ownerKey: "owner-b" })); });
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0);
       assert.match(dom.container.textContent ?? "", /Reading your chart/);
+    } finally { globalThis.fetch = original; await dom.close(); }
+  });
+});
+
+
+describe("isolated tactical preview", () => {
+  it("labels fictional data and never fetches even when changing books", async () => {
+    const dom = testDom();
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error("preview must not fetch"); };
+    try {
+      await dom.render(createElement(PerpsScreenPreview, { ...props, data: answer([entry("fixture", NOW - 1000)]) }));
+      assert.match(dom.container.textContent ?? "", /DESIGN PREVIEW · FICTIONAL DATA · NO TRADING/);
+      assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 1);
+      assert.ok(dom.container.querySelector(".perps-command-grid > .perps-position-section"));
+      await dom.click("Live");
+      assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0, "paper fixture must not appear as live history");
+      assert.equal(calls, 0);
     } finally { globalThis.fetch = original; await dom.close(); }
   });
 });

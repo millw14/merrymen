@@ -1,4 +1,5 @@
 "use client";
+import type { PerpsStyleId } from "@merrymen/core";
 import { perpsReviewLink } from "./perps-review-link";
 import { PerpsShutdownNotice } from "./PerpsShutdownNotice";
 import { PerpsRecoveryNotice } from "./PerpsRecoveryNotice";
@@ -21,6 +22,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useCallback,
   useSyncExternalStore,
 } from "react";
 import { autonomyOf } from "@merrymen/core";
@@ -80,6 +82,8 @@ import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
 import "./trading-mode-toggle.css";
 import "./perps-mode.css";
+import "./perps-chart.css";
+import "./perps-doctrines.css";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -172,6 +176,8 @@ export function App() {
    * has to be deleted.
    */
   const chatKey = chatKeyFor(account?.session ?? null);
+  const [pendingPerpsStyle, setPendingPerpsStyle] = useState<{ owner: string | null; style: PerpsStyleId } | null>(null);
+  const consumePerpsStyle = useCallback(() => setPendingPerpsStyle(null), []);
   /**
    * THE CHAT, MOUNTED ONCE, HERE — see chat-controller.ts.
    *
@@ -460,7 +466,7 @@ export function App() {
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
       {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} mode={screen.kind === "perps" ? "perps" : "spot"} onScreen={openScreen} onTab={goTab} />}
-      {desktop && (
+      {desktop && screen.kind !== "perps" && (
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
@@ -508,7 +514,7 @@ export function App() {
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
+        {screen.kind === "settings" && <Settings initialPerpsStyle={pendingPerpsStyle?.owner === chatKey ? pendingPerpsStyle?.style : undefined} onInitialPerpsStyleConsumed={consumePerpsStyle} onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
@@ -530,7 +536,7 @@ export function App() {
             hasAgent={account?.status.exists === true}
           />
         )}
-        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} perps={mine?.perps} hasAgent={account?.status.exists === true} onSpot={() => goTab("home")} onSettings={() => openScreen({ kind: "settings" })} />}
+        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} perps={mine?.perps} hasAgent={account?.status.exists === true} onSpot={() => goTab("home")} onSettings={(style) => { setPendingPerpsStyle(style ? { owner: chatKey, style } : null); openScreen({ kind: "settings" }); }} />}
         {screen.kind === "tab" && screen.tab === "feed" && (
           <Feed
             read={live.reads.theses}
@@ -720,14 +726,14 @@ export function App() {
         )}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
-      {desktop && money ? (
+      {desktop && screen.kind !== "perps" && money ? (
         <aside
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
         >
           {account && <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>}
         </aside>
-      ) : desktop && mine ? (
+      ) : desktop && screen.kind !== "perps" && mine ? (
         <DesktopPortfolio
           selectedToken={token}
           mine={mine}
@@ -738,7 +744,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}</aside> : null}
+      ) : desktop && screen.kind !== "perps" ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (

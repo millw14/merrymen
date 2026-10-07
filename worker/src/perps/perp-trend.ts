@@ -2,6 +2,11 @@
  * PERP-TREND — the perps route's deterministic producer (docs/perps.md, "The
  * perps route"; the review's perp-trend-algorithm).
  *
+ * The rule below describes the original swing-trend default. Named profiles
+ * in core/perps-styles.ts select native candle cadence, entry-channel length,
+ * and a holding deadline. Risk sizing, stops, funding gate and cooldowns do
+ * not change. No old backtest below validates the new profiles.
+ *
  * ── WHAT THIS IS NOT ────────────────────────────────────────────────────────
  *
  * IT IS NOT ALPHA. It is the plainest trend rule that can be written down in
@@ -68,6 +73,7 @@
  * restart forgets nothing.
  */
 
+import { getPerpsStyle, isPerpsStyle, type PerpsStyleId } from "../../../packages/core/src/perps-styles";
 import { PERP_TREND_UNIVERSE, PERP_TREND_MAX_HOLD_HOURS, leverageFromImfBp, perpOpenMarginBudgetMicro, type PerpKey, type PerpSide } from "../../../packages/core/src/perps";
 import type { ResolvedConfig } from "../settings";
 import type { Why } from "../strategies/reasons";
@@ -76,8 +82,8 @@ import { buildExitDraft, buildOpenDraft, type PerpExitDraft, type PerpOpenDraft 
 import { usableClosedCandles } from "./feed-reader";
 
 /**
- * FROZEN, like TRENCHER_DEFAULTS: these are the strategy, not settings. An
- * owner tunes the caps and the stop ceiling; nobody tunes the rule.
+ * The original default and invariant risk rules. Named, versioned-in-code
+ * profiles override only signal cadence, entry channel and holding deadline.
  */
 export const PERP_TREND_DEFAULTS = Object.freeze({
   candleMs: 14_400_000,
@@ -108,7 +114,7 @@ export const PERP_TREND_DEFAULTS = Object.freeze({
 export type PerpTrendSettings = Pick<
   ResolvedConfig,
   "perpsMarkets" | "perpsPerTradeUsdg" | "perpsStopLossPct" | "perpsStopSlipBps" | "perpsMaxSlippageBps" | "perpsLiqBufferPct"
->;
+> & { perpsStyle?: PerpsStyleId };
 
 /**
  * What the tick knows that the perps view does not. Every brake is a boolean
@@ -209,8 +215,8 @@ export function atrScaled(candles: readonly TrendCandle[], period: number): bigi
 }
 
 /** Everything the rule reads off one market's closed candles, or null when there are too few. */
-export function trendRead(candles: readonly TrendCandle[]): TrendRead | null {
-  const D = PERP_TREND_DEFAULTS;
+export function trendRead(candles: readonly TrendCandle[], entryChannel = 12): TrendRead | null {
+  const D = { ...PERP_TREND_DEFAULTS, entryChannel };
   const n = candles.length;
   if (n < D.minCandles) return null;
   const last = candles[n - 1] as TrendCandle;
@@ -310,20 +316,23 @@ function blockerIdle(b: NonNullable<PerpsView["opensBlocked"]>, ctx: PerpTrendCt
  * nobody read (protect.ts reads the account itself).
  */
 export function perpTrendTick(view: PerpsView | null | undefined, s: PerpTrendSettings, ctx: PerpTrendCtx): PerpTrendResult {
-  const D = PERP_TREND_DEFAULTS;
+  const profile = getPerpsStyle(isPerpsStyle(s.perpsStyle) ? s.perpsStyle : undefined);
+  const D = { ...PERP_TREND_DEFAULTS, maxHoldHours: profile.maxHoldHours };
   const out: PerpTrendResult = { exits: [], entry: null, why: [], idle: null, blocked: [], entryCandleT: null };
   if (!view) {
     out.idle = { code: "perp-signal-unread", market: null };
     return out;
   }
   const nowMs = ctx.nowSec * 1000;
-  const reads = new Map<PerpKey, TrendRead | null>();
-  const readOf = (m: PerpMarketView): TrendRead | null => {
-    if (!reads.has(m.key)) {
-      const candles = usableClosedCandles(m.closed4h, nowMs);
-      reads.set(m.key, candles === null ? null : trendRead(candles));
+  const reads = new Map<string, TrendRead | null>();
+  const readOf = (m: PerpMarketView, style = profile): TrendRead | null => {
+    const key = `${m.key}:${style.id}`;
+    if (!reads.has(key)) {
+      const rows = style.timeframe === "4h" ? m.closed4h : m.closedByTimeframe?.[style.timeframe];
+      const candles = usableClosedCandles(rows, nowMs, style.candleMs);
+      reads.set(key, candles === null ? null : trendRead(candles, style.entryChannel));
     }
-    return reads.get(m.key) ?? null;
+    return reads.get(key) ?? null;
   };
   const universe = PERP_TREND_UNIVERSE as readonly PerpKey[];
 
@@ -340,10 +349,11 @@ export function perpTrendTick(view: PerpsView | null | undefined, s: PerpTrendSe
     if (view.unresolved.has(key)) continue;
     const m = view.markets.get(key);
     if (m === undefined) continue;
-    const r = readOf(m);
+    const entryProfile = getPerpsStyle(pos.entryStyle);
+    const r = readOf(m, entryProfile);
     let cause: "trend" | "aged" | null = null;
     if (r !== null && trendExit(r, pos.side)) cause = "trend";
-    else if (ctx.nowSec - pos.openedAtSec >= D.maxHoldHours * 3600) cause = "aged";
+    else if (ctx.nowSec - pos.openedAtSec >= entryProfile.maxHoldHours * 3600) cause = "aged";
     if (cause === null) continue;
     const draft = buildExitDraft({ market: m, position: pos, effect: "close", maxSlippageBps: s.perpsMaxSlippageBps });
     if (draft === null) continue;
@@ -355,6 +365,7 @@ export function perpTrendTick(view: PerpsView | null | undefined, s: PerpTrendSe
   const allowed = new Set<string>(s.perpsMarkets);
   const covered = universe.filter((k) => allowed.has(k));
   const gate = ((): Why | null | "open" => {
+    if (s.perpsStyle !== undefined && !isPerpsStyle(s.perpsStyle)) return { code: "perp-signal-unread", market: null };
     if (view.opensBlocked !== null) return blockerIdle(view.opensBlocked, ctx);
     if (!ctx.breakerIdle) {
       return typeof ctx.breakerLimitBps === "number" && Number.isFinite(ctx.breakerLimitBps)

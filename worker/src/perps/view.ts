@@ -68,6 +68,7 @@ import {
   type PerpKey,
   type PerpMarketSpec,
   type PerpSide,
+  type PerpsStyleId,
   type PerpsReport,
   type PerpsReportPosition,
 } from "../../../packages/core/src/index";
@@ -124,6 +125,9 @@ export interface PerpsViewLedger {
    * are the cache, read only for the recorded stop/take and the open time.
    */
   positions: readonly PerpsViewLedgerRow[];
+  positionStyles?: ReadonlyMap<number, PerpsStyleId>;
+  /** Opening time reconstructed from the durable profile-bearing fill lifecycle. */
+  positionStyleOpenedAt?: ReadonlyMap<number, number>;
   /** market_ids with a perp_orders row not yet final (submitted | executed), any effect. */
   unresolvedMarkets: ReadonlySet<number>;
   /** Of those, the markets whose unresolved row is an OPEN — protect.ts leaves them to the open's own stop. */
@@ -533,6 +537,7 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
       // contiguous at the reader's clock, null otherwise). An explicit
       // `candles4h` still wins, so a test or a replay can pin its own.
       closed4h: input.candles4h?.get(listed.marketId) ?? fm.closed4h ?? null,
+      closedByTimeframe: fm.closedByTimeframe,
       funding8h: fm.funding8h,
     });
   }
@@ -611,7 +616,8 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
           r.takeTrigger !== null && r.takePrice !== null
             ? { trigger: r.takeTrigger, price: r.takePrice, expiresAtSec: null, resting: true }
             : null,
-        openedAtSec: r.openedAt ?? 0,
+        openedAtSec: input.ledger.positionStyleOpenedAt?.get(r.marketId) ?? r.openedAt ?? 0,
+        entryStyle: input.ledger.positionStyles?.get(r.marketId),
         // The paper engine books funding onto the row; none booked is a known 0 on a book this process writes.
         fundingMicro: r.fundingMicro ?? 0n,
       });
@@ -627,7 +633,7 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
         restingStopOrder: null,
         otherStopOrders: [],
         openingUnresolved: ledger.unresolvedOpenMarkets.has(r.marketId),
-        openedAtKnown: r.openedAt !== null,
+        openedAtKnown: input.ledger.positionStyleOpenedAt?.has(r.marketId) === true || r.openedAt !== null,
         held: heldOf(feed, fm),
       });
     }
@@ -745,7 +751,8 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
             ? null
             : { trigger: recorded.trigger, price: restingStopPrice ?? recorded.price, expiresAtSec: stopExpires, resting: stopState === "resting" },
         take,
-        openedAtSec: row?.openedAt ?? 0,
+        openedAtSec: input.ledger.positionStyleOpenedAt?.get(p.marketId) ?? row?.openedAt ?? 0,
+        entryStyle: input.ledger.positionStyles?.get(p.marketId),
         // HOLDER-SIGNED, as the venue renders it: negative = paid. Evidence —
         // account 18958's two longs read -0.011731 and -0.003279 in hours
         // whose /fundings direction was "long" (longs pay). The mainnet
@@ -764,7 +771,7 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
         restingStopOrder,
         otherStopOrders: otherStops,
         openingUnresolved: ledger.unresolvedOpenMarkets.has(p.marketId),
-        openedAtKnown: row?.openedAt !== null && row?.openedAt !== undefined,
+        openedAtKnown: input.ledger.positionStyleOpenedAt?.has(p.marketId) === true || (row?.openedAt !== null && row?.openedAt !== undefined),
         held: heldOf(feed, fm),
       });
     }

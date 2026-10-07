@@ -10,6 +10,8 @@ import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   HOUSE_KEY_FIELDS,
   PERPS_DRIVERS,
+  isPerpsStyle,
+  type PerpsStyleId,
   PERPS_LIVE_CONSENT_VERSION,
   PERPS_MARKETS_MAX,
   SETTINGS_DEFAULTS,
@@ -239,6 +241,7 @@ export interface ResolvedConfig {
   perpsLiveConsentAt: number | null;
   perpsRegionAttested: boolean;
   perpsDriver: PerpsDriver;
+  perpsStyle: PerpsStyleId;
   /** Markets the agent may OPEN in. May be EMPTY (see the resolver) — never widened to a default. */
   perpsMarkets: PerpKey[];
   perpsMaxLeverage: number;
@@ -541,7 +544,9 @@ export function mergeSettings(
   // the contract's default (perp-trend). Present but unrecognised — a newer
   // build's value, a damaged file — must not become an autonomous producer the
   // owner never chose; `manual` produces nothing on its own.
-  const perpsDriver: PerpsDriver =
+  const perpsStyle = isPerpsStyle(file.perpsStyle) ? file.perpsStyle : d.perpsStyle;
+  const invalidStyle = file.perpsStyle !== undefined && !isPerpsStyle(file.perpsStyle);
+  const perpsDriver: PerpsDriver = invalidStyle ? "manual" :
     file.perpsDriver === undefined
       ? d.perpsDriver
       : (PERPS_DRIVERS as readonly string[]).includes(file.perpsDriver as string)
@@ -726,6 +731,7 @@ export function mergeSettings(
     perpsLiveConsentAt: consentAt,
     perpsRegionAttested: regionAttested,
     perpsDriver,
+    perpsStyle,
     perpsMarkets,
     perpsMaxLeverage: perpsNum(file, "perpsMaxLeverage"),
     perpsPerTradeUsdg,
@@ -891,6 +897,7 @@ export function strategyKey(cfg: ResolvedConfig): string {
     // turned off, until a restart. The rest of the perps block is perpsKey's.
     cfg.perpsEnabled,
     cfg.perpsDriver,
+    cfg.perpsStyle,
     cfg.perpsMarkets.join(","),
   ].join("|");
 }
@@ -919,6 +926,7 @@ export function perpsKey(cfg: ResolvedConfig): string {
     cfg.perpsLiveConsentAt ?? "",
     cfg.perpsRegionAttested,
     cfg.perpsDriver,
+    cfg.perpsStyle,
     cfg.perpsMarkets.join(","),
     cfg.perpsMaxLeverage,
     cfg.perpsPerTradeUsdg,

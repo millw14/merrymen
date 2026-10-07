@@ -302,6 +302,7 @@ describe("a rename from chat survives the next tick", () => {
       "perpsLiveConsentAt",
       "perpsRegionAttested",
       "perpsDriver",
+      "perpsStyle",
       "perpsMarkets",
       "perpsMaxLeverage",
       "perpsPerTradeUsdg",

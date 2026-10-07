@@ -742,3 +742,14 @@ describe("startProtectLoop", () => {
     assert.equal(n, at, "a kick after stop does nothing");
   });
 });
+
+
+it("immutable style deadlines close on the protective clock, with fresh prices only", () => {
+  const held = pos({ openedAtSec: NOW - 1800 });
+  held[0].entryStyle = "scalp-breakout";
+  const actions = run(mkView([held])).actions;
+  assert.ok(actions.some(a => a.kind === "close" && a.cause === "style-expired"));
+  const stale = pos({ openedAtSec: NOW - 1800 }, { markFresh: false });
+  stale[0].entryStyle = "scalp-breakout";
+  assert.equal(closes(run(mkView([stale])).actions).length, 0);
+});

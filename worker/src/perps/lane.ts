@@ -1,3 +1,4 @@
+import { getPerpsStyle, perpsStyleForDriver, type PerpsStyleId } from "../../../packages/core/src/perps-styles";
 import { ownerControlHead } from "./owner-controls";
 import { readPerpRecoveryReference, type PerpRecoveryReference } from "../../../packages/core/src/perps";
 import { boundedRecoveryProof, verifyLiveOwnerRecovery, type PerpRecoveryContext } from "./owner-recovery-live";
@@ -167,8 +168,8 @@ import {
 
 /** The candle the entry was taken on: the 4 h bar that closed before `atSec` (perp-trend's `lastT`). */
 const H4_MS = 14_400_000;
-export function entryCandleOf(atSec: number): number {
-  return Math.floor((atSec * 1000) / H4_MS) * H4_MS - H4_MS;
+export function entryCandleOf(atSec: number, candleMs = H4_MS): number {
+  return Math.floor((atSec * 1000) / candleMs) * candleMs - candleMs;
 }
 
 /**
@@ -232,7 +233,7 @@ export type PerpLaneConfig = Pick<
   | "perpsLiveTenants"
   | "perpsEntriesHalted"
   | "paperStartUsdg"
->;
+> & { perpsStyle?: PerpsStyleId };
 
 /** The store functions the lane reads and books through — store.ts's own; a test passes the module. */
 export interface PerpLaneStore extends PaperPerpStore {
@@ -246,6 +247,9 @@ export interface PerpLaneStore extends PaperPerpStore {
     opensToday: number;
     lastExits: Map<number, { atSec: number; cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown" }>;
     lastOpenAt: Map<number, number>;
+    lastEntrySignals?: Map<number, { style: PerpsStyleId; candleT: number }>;
+    positionStyles?: Map<number, PerpsStyleId>;
+    positionStyleOpenedAt?: Map<number, number>;
   }>;
   getAgentEpoch(agentId: string): Promise<number>;
   setAgentPerps(agentId: string, json: string | null): Promise<void>;
@@ -304,6 +308,9 @@ export interface PerpLiveStore extends LiveHandleStore {
     opensToday: number;
     lastExits: Map<number, { atSec: number; cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown" }>;
     lastOpenAt: Map<number, number>;
+    lastEntrySignals?: Map<number, { style: PerpsStyleId; candleT: number }>;
+    positionStyles?: Map<number, PerpsStyleId>;
+    positionStyleOpenedAt?: Map<number, number>;
   }>;
 }
 
@@ -1120,7 +1127,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       pendingOpenNotionalMicro: orders.pendingOpen,
       opensToday: facts.opensToday,
       lastExit: lastExitOf(facts.lastExits),
-      lastEntryCandleT: lastEntryOf(facts.lastOpenAt),
+      lastEntryCandleT: lastEntryOf(facts.lastOpenAt, facts.lastEntrySignals),
+      positionStyles: facts.positionStyles,
+      positionStyleOpenedAt: facts.positionStyleOpenedAt,
       // Paper has no transfers: margin moves with each fill (rule 14).
       depositsInTransitMicro: 0n,
       withdrawalsInTransitMicro: 0n,
@@ -1215,12 +1224,14 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
    * entry execution attempted, refused or not (so a refused entry is not
    * re-proposed on every tick of the same bar).
    */
-  function lastEntryOf(lastOpenAt: Map<number, number>) {
+  function lastEntryOf(lastOpenAt: Map<number, number>, signals?: Map<number, { style: PerpsStyleId; candleT: number }>) {
     const out = new Map<PerpKey, number>(entryCandles);
     for (const [id, at] of lastOpenAt) {
       const k = perpMarketById(id)?.key ?? null;
       if (k === null) continue;
-      const t = entryCandleOf(at);
+      const profile = getPerpsStyle(deps.config().perpsStyle);
+      const signal = signals?.get(id);
+      const t = signal?.style === profile.id ? signal.candleT : entryCandleOf(at, profile.candleMs);
       if ((out.get(k) ?? -Infinity) < t) out.set(k, t);
     }
     return out;
@@ -1841,7 +1852,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       pendingOpenNotionalMicro: orders.pendingOpen,
       opensToday: led?.facts.opensToday ?? 0,
       lastExit: lastExitOf(led?.facts.lastExits ?? new Map()),
-      lastEntryCandleT: lastEntryOf(led?.facts.lastOpenAt ?? new Map()),
+      lastEntryCandleT: lastEntryOf(led?.facts.lastOpenAt ?? new Map(), led?.facts.lastEntrySignals),
+      positionStyles: led?.facts.positionStyles,
+      positionStyleOpenedAt: led?.facts.positionStyleOpenedAt,
       // T_in / T_out from the tick's payout step (payouts.ts inTransit); an
       // unknown transit is a book gap in the term below, and the committed
       // total saturates in the policy state (never counted as zero).
@@ -3065,7 +3078,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       strategistPerpIntents: handoff,
     };
     let approval: PerpsBrainApproval | null = null;
-    if (driver === "brain") {
+    if (driver === "brain" && perpsStyleForDriver(cfg.perpsStyle, driver)) {
       const context = brainContext(a);
       brainReview.reset(context);
       // Generate the same capped trend candidate the baseline would consider.
@@ -3127,7 +3140,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       }
       const stamped = await hooks.ensureDecision(intent, brainEntry !== null ? "perp:brain" : source,
         brainEntry !== null ? `MerrymenBrain reviewed the trend candidate: ${brainEntry.response.reason_codes.join(", ")}` : why ? renderWhy(why, "public") : undefined,
-        brainEntry !== null ? { whyCode: why?.code, provenance: "brain", evidence: JSON.stringify({ request: brainEntry.request, review: brainEntry.response }) } : why ? { whyCode: why.code } : undefined);
+        brainEntry !== null ? { whyCode: why?.code, provenance: "brain", evidence: JSON.stringify({ request: brainEntry.request, review: brainEntry.response }) } : entry && driver === "perp-trend" ? { whyCode: why?.code, evidence: JSON.stringify({ perpsStyle: cfg.perpsStyle ?? "swing-trend", perpsEntryCandleT: out.entryCandleT }) } : why ? { whyCode: why.code } : undefined);
       if (!stamped.ok) {
         await hooks.refundEntry(claim);
         continue;

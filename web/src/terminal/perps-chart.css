@@ -1,0 +1,31 @@
+/* Position snapshots share the price axis, never the execution timeline. */
+.perps-position-reference{color:#d9edcd;pointer-events:none}
+.perps-position-reference line{stroke:currentColor;stroke-width:1;stroke-dasharray:8 5;opacity:.72}
+.perps-position-reference text{fill:currentColor;font:9px var(--mono,monospace);letter-spacing:.45px;paint-order:stroke;stroke:#101c13;stroke-width:4px;stroke-linejoin:round}
+.perps-position-reference.is-stop{color:#dfc385}
+.perps-position-reference.is-stop line{stroke-dasharray:3 4}
+.perps-position-reference.is-liquidation{color:#efa99a}
+.perps-position-reference.is-liquidation line{stroke-dasharray:2 7}
+.perps-position-reference.is-stale{opacity:.6}
+.perps-chart-references{margin:0 13px 14px;padding:12px 0;border-top:1px solid #304632;font:10px var(--mono,monospace);color:#b9c9b2}
+.perps-reference-heading{display:block;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#a9b6a5}
+.perps-chart-references ul{display:flex;flex-wrap:wrap;gap:10px 24px;list-style:none;padding:0;margin:12px 0 0}
+.perps-chart-references li{display:flex;align-items:center;flex-wrap:wrap;gap:7px;line-height:1.5}
+.perps-chart-references li>i{width:18px;border-top:1px dashed #d9edcd}
+.perps-chart-references li.is-stop>i{border-color:#dfc385}
+.perps-chart-references li.is-liquidation>i{border-color:#efa99a}
+.perps-chart-references strong{color:#f1f1dc;font-weight:500}
+.perps-chart-references small{font-size:9px;color:#c8b789}
+.perps-chart-references.is-stale .perps-reference-heading{color:#dfc385}
+@media(max-width:767px){.perps-chart-references{font-size:9px}.perps-chart-references ul{display:grid;gap:9px}.perps-position-reference text{font-size:11px}}
+
+/* Preserve the chart's actual time/price scale on phones instead of shrinking labels. */
+.perps-chart-viewport{width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-color:#738148 #11150c;scrollbar-width:thin}
+.perps-chart-viewport:focus-visible{outline:2px solid var(--perps-green,#d2f653);outline-offset:-2px}
+.perps-chart-pan-hint{display:none}
+@media(max-width:767px){
+  .perps-chart-viewport>svg{min-width:760px;min-height:0}
+  .perps-chart-pan-hint{display:block;margin:13px 11px 6px;font:9px/1.6 var(--mono,monospace);color:#b6bea0}
+  .perps-chart-viewport .perps-chart-grid text{font-size:13px}
+  .perps-chart-viewport .perps-position-reference text{font-size:12px}
+}

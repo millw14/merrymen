@@ -818,3 +818,16 @@ describe("perps fingerprints", () => {
     assert.equal(connectionKey(mergeSettings({ perpsEnabled: true, perpsMaxLeverage: 3 }, {})), connectionKey(base));
   });
 });
+
+it("perps profiles retain all execution switches and caps, and unknown profiles disable autonomous entries", () => {
+  const baseline = mergeSettings({}, {});
+  const scalp = mergeSettings({ perpsStyle: "scalp-breakout" }, {});
+  assert.equal(scalp.perpsStyle, "scalp-breakout");
+  assert.equal(scalp.perpsMaxLeverage, baseline.perpsMaxLeverage);
+  assert.equal(scalp.perpsPerTradeUsdg, baseline.perpsPerTradeUsdg);
+  assert.equal(scalp.liveTradingEnabled, baseline.liveTradingEnabled);
+  assert.equal(scalp.perpsEnabled, baseline.perpsEnabled);
+  assert.equal(scalp.perpsLiveEnabled, baseline.perpsLiveEnabled);
+  assert.notEqual(perpsKey(scalp), perpsKey(baseline));
+  assert.equal(mergeSettings({ perpsStyle: "future-mode" } as never, {}).perpsDriver, "manual");
+});

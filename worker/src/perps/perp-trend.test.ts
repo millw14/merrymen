@@ -390,3 +390,33 @@ describe("perp-trend is deterministic", () => {
     assert.equal(BASE["BTC-PERP"], 800_000n);
   });
 });
+
+
+describe("first-class trend profiles", () => {
+  it("scalping requires its own closed five-minute evidence, never four-hour fallback", () => {
+    const base = btcOnly();
+    const selected = { ...settings(), perpsStyle: "scalp-breakout" as const };
+    assert.equal(perpTrendTick(base, selected, ctx()).entry, null);
+    const last = Math.floor(NOW_SEC * 1000 / 300_000) * 300_000 - 300_000;
+    const series = breakout("BTC-PERP", 5_000n).map((b, i, all) => ({ ...b, t: last - (all.length - 1 - i) * 300_000 }));
+    const v = withMarket(base, "BTC-PERP", { closedByTimeframe: { "5m": series } });
+    const out = perpTrendTick(v, selected, ctx());
+    assert.ok(out.entry);
+    assert.equal(out.entryCandleT, last);
+    assert.equal(out.entry.notionalUsdg, perpTrendTick(base, settings(), ctx()).entry!.notionalUsdg);
+    const gap = series.slice(); gap.splice(50, 1);
+    assert.equal(perpTrendTick(withMarket(base, "BTC-PERP", { closedByTimeframe: { "5m": gap } }), selected, ctx()).entry, null);
+  });
+  it("a saved scalp entry retains its thirty-minute deadline after switching to swing", () => {
+    const held = position("BTC-PERP", "long", { openedAtSec: NOW_SEC - 1800, entryStyle: "scalp-breakout" });
+    const r = perpTrendTick(btcOnly({ positions: new Map([["BTC-PERP", held]]) }), settings(), ctx());
+    assert.equal(r.exits.length, 1);
+    assert.deepEqual(r.why[0], { code: "perp-exit", market: "BTC-PERP", side: "long", cause: "aged" });
+  });
+  it("different channel lengths produce different measured signals", () => {
+    const rows = breakout("BTC-PERP", 5_000n);
+    rows[rows.length - 20] = { ...rows[rows.length - 20]!, h: rows.at(-1)!.c + 10_000n };
+    assert.equal(entrySignal(trendRead(rows, 12)!), "long");
+    assert.equal(entrySignal(trendRead(rows, 24)!), null);
+  });
+});

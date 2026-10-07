@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { LIGHTER_MARKETS_V1 } from "@merrymen/core";
+import { LIGHTER_MARKETS_V1, type PerpsStyleId } from "@merrymen/core";
 import type { ChartBook, ChartResponse, ChartWindow } from "../lib/perps-chart-data";
-import type { DeskPerps } from "./live";
+import { LogoMark } from "./LogoMark";
+import type { DeskPerpRow, DeskPerps } from "./live";
+import { usdExact, utcTimeOnly } from "../lib/format";
 import { money } from "./live";
+import { PerpsDoctrines } from "./PerpsDoctrines";
 import { PerpsPanel } from "./PerpsPanel";
 import { PerpsChart, entryDescription, executionTime } from "./PerpsChart";
 import { TradingModeToggle } from "./TradingModeToggle";
@@ -14,7 +17,7 @@ export interface PerpsScreenProps {
   hasAgent: boolean;
   ownerKey: string | null;
   onSpot: () => void;
-  onSettings: () => void;
+  onSettings: (style?: PerpsStyleId) => void;
 }
 
 /** Changing or removing the owner drops every private chart and its seen-fill baseline. */
@@ -22,7 +25,16 @@ export function PerpsScreen(props: PerpsScreenProps) {
   return <OwnerPerpsScreen key={props.ownerKey ?? "signed-out"} {...props} />;
 }
 
-function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings }: PerpsScreenProps) {
+/** Isolated design harness: never mounted by the authenticated terminal. */
+export function PerpsScreenPreview({ data, ...props }: PerpsScreenProps & { data: ChartResponse }) {
+  return <OwnerPerpsScreen {...props} previewData={data} />;
+}
+
+function RadarSymbol() {
+  return <svg viewBox="0 0 40 40" fill="none" aria-hidden="true"><circle cx="20" cy="20" r="15" /><circle cx="20" cy="20" r="7" /><path d="M20 0v10m0 20v10M0 20h10m20 0h10M20 20 31 9" /><path d="m29 8 4-1-1 4" /><circle cx="20" cy="20" r="2" fill="currentColor" /></svg>;
+}
+
+function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings, previewData }: PerpsScreenProps & { previewData?: ChartResponse }) {
   const [market, setMarket] = useState("BTC-PERP");
   const [chosenBook, setBook] = useState<ChartBook | null>(null);
   const book = chosenBook ?? perps?.book ?? "paper";
@@ -32,14 +44,16 @@ function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings }: Per
   const ready = ownerKey !== null && hasAgent;
   const readable = perps?.read === "ok" && perps.venueRead;
   return <main className="perps-screen">
+    {previewData ? <div className="perps-preview-notice">DESIGN PREVIEW · FICTIONAL DATA · NO TRADING</div> : null}
     <div className="perps-mobile-mode"><TradingModeToggle mode="perps" onChange={(mode) => { if (mode === "spot") onSpot(); }} /></div>
-    <header className="perps-screen-head"><div><span className="perps-eyebrow">THE PERPETUALS DESK</span><h1>Hold your ground<span aria-hidden="true">↗</span></h1><p>Your agent’s entries, right where they happened.</p></div><button className="perps-settings" type="button" onClick={onSettings}>Perps setup <span aria-hidden="true">↗</span></button></header>
+    <header className="perps-screen-head"><div className="perps-identity"><span className="perps-brand-mark"><LogoMark size={46} /></span><div><span className="perps-eyebrow">MERRYMEN / PERPETUALS DIVISION</span><h1>TACTICAL RADAR<span aria-hidden="true">_</span></h1><p>Your agent. Your positions. Every entry in sight.</p></div></div><div className="perps-head-actions"><span className="perps-radar-symbol"><RadarSymbol /></span><button className="perps-settings" type="button" onClick={() => onSettings()}>Configure desk <span aria-hidden="true">↗</span></button></div></header>
     <div className="perps-status-strip">
       <div><span>AGENT MODE</span><strong>{!ownerKey ? "Signed out" : !hasAgent ? "No agent" : perps?.mode === "paper" ? "Paper practice" : perps?.mode === "live" ? "Live money" : perps?.mode === "off" ? "Perps off" : perps?.mode === "refuse" ? "Blocked" : "Not read"}</strong></div>
       <div><span>{perps?.book === "paper" ? "PAPER PERPS" : perps?.book === "live" ? "AT LIGHTER" : "PERPS BALANCE"}</span><strong>{ready && readable && perps.atLighterUsd !== null && perps.book !== null ? money(perps.atLighterUsd) : "Not read"}{ready && readable && perps.stale ? <small> · last read</small> : null}</strong></div>
       <div><span>OPEN POSITIONS</span><strong>{ready && readable ? `${perps.rows.length}${perps.stale ? " · last read" : ""}` : "Unknown"}</strong></div>
       <div className="perps-owner-note"><span className="perps-status-dot" aria-hidden="true" /><span>Only your agent<br /><small>Owner-only entry history</small></span></div>
     </div>
+    <div className="perps-command-grid">
     <section className="perps-arena" aria-label="Perpetuals market and entries">
       <div className="perps-chart-toolbar"><label className="perps-market-picker"><span className="perps-control-label">MARKET</span><select value={market} onChange={(event) => setMarket(event.target.value)}>{LIGHTER_MARKETS_V1.map((m) => <option key={m.key} value={m.key}>{m.key}</option>)}</select></label>
         <div className="perps-segment" role="group" aria-label="Entry book">{(["paper", "live"] as const).map((b) => <button key={b} type="button" aria-pressed={book === b} onClick={() => setBook(b)}>{b === "paper" ? "Paper" : "Live"}</button>)}</div>
@@ -48,14 +62,16 @@ function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings }: Per
       </div>
       <div className={`perps-book-banner is-${book}`}><span>{book === "paper" ? "PAPER PRACTICE" : "LIVE BOOK"}</span>{book === "paper" ? "Simulated entries · no real money" : "Recorded real-money executions"}<small>Changing this view does not change your agent’s trading mode.</small></div>
       {audioUnavailable ? <p className="perps-data-note" role="status">Sound could not be enabled in this browser.</p> : null}
-      {ready ? <LiveChart key={`${market}:${book}:${windowKey}`} market={market} book={book} windowKey={windowKey} sound={sound} /> : <div className="perps-chart-empty"><span className="perps-empty-grid" aria-hidden="true">⌁</span><strong>{ownerKey ? "Your agent’s next chapter" : "Your entries belong to you"}</strong><p>{ownerKey ? "Set up your agent to follow its perpetual entries here." : "Sign in to see your agent’s private perpetual entry history."}</p><button type="button" className="perps-settings" onClick={onSettings}>{ownerKey ? "Set up perpetuals" : "Account settings"} ↗</button></div>}
+      {ready ? <LiveChart key={`${market}:${book}:${windowKey}`} market={market} book={book} windowKey={windowKey} sound={sound} positions={ready && readable && perps.book !== null ? perps.rows : undefined} positionsStale={perps?.stale} previewData={previewData} /> : <div className="perps-chart-empty"><span className="perps-empty-grid" aria-hidden="true">⌁</span><strong>{ownerKey ? "Your agent’s next chapter" : "Your entries belong to you"}</strong><p>{ownerKey ? "Set up your agent to follow its perpetual entries here." : "Sign in to see your agent’s private perpetual entry history."}</p><button type="button" className="perps-settings" onClick={() => onSettings()}>{ownerKey ? "Set up perpetuals" : "Account settings"} ↗</button></div>}
     </section>
-    {ready ? <section className="perps-position-section"><div className="perps-section-heading"><h2>Current positions</h2><span>Worker-reported account · independent of chart filters</span></div>{perps ? <PerpsPanel perps={perps} /> : <p className="perps-data-note">{perps === undefined ? "The account feed has not supplied a perpetuals report. Current positions are unknown." : "Your worker has not reported its perpetuals yet. Current positions are unknown."}</p>}</section> : null}
+    {ready ? <section className="perps-position-section"><div className="perps-section-heading"><h2>Open positions</h2><span>OWNER ONLY</span></div><p className="perps-position-explainer">Your worker’s full account. Positions stay visible across chart filters.</p>{perps ? <PerpsPanel perps={perps} /> : <p className="perps-data-note">{perps === undefined ? "The account feed has not supplied a perpetuals report. Current positions are unknown." : "Your worker has not reported its perpetuals yet. Current positions are unknown."}</p>}</section> : <aside className="perps-position-section"><div className="perps-section-heading"><h2>Open positions</h2><span>PRIVATE</span></div><p className="perps-data-note">Sign in and set up your agent to read your positions. Only the owner can access this account.</p></aside>}
+    </div>
+    <PerpsDoctrines onConfigure={onSettings} />
   </main>;
 }
 
-function LiveChart({ market, book, windowKey, sound }: { market: string; book: ChartBook; windowKey: ChartWindow; sound: boolean }) {
-  const [data, setData] = useState<ChartResponse | null>(null);
+function LiveChart({ market, book, windowKey, sound, positions, positionsStale, previewData }: { market: string; book: ChartBook; windowKey: ChartWindow; sound: boolean; positions?: DeskPerpRow[]; positionsStale?: boolean; previewData?: ChartResponse }) {
+  const [data, setData] = useState<ChartResponse | null>(previewData ? { ...previewData, market, book, window: windowKey, entries: previewData.market === market && previewData.book === book ? previewData.entries : [], candles: previewData.market === market ? previewData.candles : { state: "none", bars: [], gaps: [], stale: false, asOfMs: null } } : null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [freshIds, setFreshIds] = useState<string[]>([]);
@@ -66,6 +82,7 @@ function LiveChart({ market, book, windowKey, sound }: { market: string; book: C
   const retry = useRef<(() => void) | null>(null);
   useEffect(() => { soundRef.current = sound; }, [sound]);
   useEffect(() => {
+    if (previewData) { setBusy(false); return; }
     let stopped = false;
     let controller: AbortController | null = null;
     let baselineAt: number | null = null;
@@ -126,7 +143,7 @@ function LiveChart({ market, book, windowKey, sound }: { market: string; book: C
     const wake = () => { if (!document.hidden) loop.wake(); };
     document.addEventListener("visibilitychange", wake);
     return () => { stopped = true; controller?.abort(); loop.stop(); retry.current = null; document.removeEventListener("visibilitychange", wake); };
-  }, [market, book, windowKey]);
+  }, [market, book, windowKey, previewData]);
   useEffect(() => {
     if (freshIds.length === 0) return;
     const timer = globalThis.setTimeout(() => setFreshIds([]), 2_400);
@@ -135,18 +152,18 @@ function LiveChart({ market, book, windowKey, sound }: { market: string; book: C
   const entries = data ? [...data.entries].reverse() : [];
   const shown = expanded ? entries : entries.slice(0, 8);
   return <>
-    <div className="perps-read-line"><span>{error ? "Read interrupted" : !data ? "Reading your chart…" : data.state === "not-configured" ? "Perpetuals not configured" : busy ? "Refreshing…" : `Updated ${new Date(data.generatedAtMs).toLocaleTimeString("en-GB", { timeZone: "UTC" })} UTC`}</span><button type="button" onClick={() => retry.current?.()} disabled={busy}>{busy ? "Reading…" : "Refresh"}</button></div>
+    <div className="perps-read-line"><span>{error ? "Read interrupted" : !data ? "Reading your chart…" : data.state === "not-configured" ? "Perpetuals not configured" : busy ? "Refreshing…" : `Updated ${utcTimeOnly(data.generatedAtMs)} UTC`}</span><button type="button" onClick={() => retry.current?.()} disabled={busy || !!previewData}>{previewData ? "Preview snapshot" : busy ? "Reading…" : "Refresh"}</button></div>
     {error ? <p className="perps-data-note is-warning" role="status">{error}{data ? ` Showing the last successful read from ${executionTime(data.generatedAtMs)}; it may have changed.` : ""}</p> : null}
     <div className="perps-sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
     {data ? <>
       {data.state === "not-configured" ? <p className="perps-data-note">No perpetuals configuration was available for this account. This is not confirmation of an empty venue account.</p> : null}
       {data.candles.state !== "ok" ? <p className="perps-data-note is-warning">{data.candles.state === "unreadable" ? "Lighter mark candles could not be read." : "No Lighter mark candles were returned for this window."} Recorded entries retain their exact execution prices.</p> : data.candles.stale ? <p className="perps-data-note is-warning">Mark candles are stale{data.candles.asOfMs !== null ? `; the last candle ended ${executionTime(data.candles.asOfMs)}` : ""}.</p> : null}
       {data.candles.gaps.length > 0 ? <p className="perps-data-note">{data.candles.gaps.length} {data.candles.gaps.length === 1 ? "gap" : "gaps"} in mark-price history. Shaded intervals are missing candles.</p> : null}
-      <PerpsChart data={data} freshIds={freshIds} selectedId={selectedId} onSelect={setSelectedId} />
+      <PerpsChart positions={positions} positionsStale={positionsStale} data={data} freshIds={freshIds} selectedId={selectedId} onSelect={setSelectedId} />
       <div className="perps-entry-history"><div className="perps-section-heading"><h2>Entry log <span>{entries.length}</span></h2><span>{book === "paper" ? "Paper practice" : "Live executions"} · {windowKey}</span></div><p className="perps-history-help">Opens, additions and reversals at recorded execution prices. Closing fills are not entry markers.</p>
         {data.truncated ? <p className="perps-data-note is-warning">Partial history: only the latest 500 fills were examined. Earlier entries in this window may be missing.</p> : null}
         {data.unknownFills > 0 ? <p className="perps-data-note is-warning">{data.unknownFills} {data.unknownFills === 1 ? "fill could" : "fills could"} not be classified from its record. No entry marker has been inferred for {data.unknownFills === 1 ? "it" : "them"}.</p> : null}
-        {entries.length === 0 ? <p className="perps-history-empty">{data.state !== "ok" ? "Entry history is unavailable." : data.unknownFills || data.truncated ? "No confirmed entry markers in the available records. History is incomplete." : "No recorded entries in this market, book and time window."} This does not establish whether positions are open now.</p> : <ul className="perps-entry-list">{shown.map((entry) => <li key={entry.id}><button type="button" aria-pressed={selectedId === entry.id} className={`perps-entry-row${freshIds.includes(entry.id) ? " is-fresh" : ""}`} onClick={() => setSelectedId(entry.id)} aria-label={entryDescription(entry)}><span className={`perps-entry-badge is-${entry.side}`} aria-hidden="true">{entry.side === "long" ? "↗" : "↘"}</span><span className="perps-entry-name"><strong>{entry.side === "long" ? "Long" : "Short"} <small>{entry.kind}</small></strong><span>{entry.size} · {entry.book === "paper" ? "Paper" : "Live"} · epoch {entry.epoch}</span></span><span className="perps-entry-price"><strong>${entry.priceExact}</strong><time dateTime={new Date(entry.timeMs).toISOString()}>{executionTime(entry.timeMs)}</time></span></button></li>)}</ul>}
+        {entries.length === 0 ? <p className="perps-history-empty">{data.state !== "ok" ? "Entry history is unavailable." : data.unknownFills || data.truncated ? "No confirmed entry markers in the available records. History is incomplete." : "No recorded entries in this market, book and time window."} This does not establish whether positions are open now.</p> : <ul className="perps-entry-list">{shown.map((entry) => <li key={entry.id}><button type="button" aria-pressed={selectedId === entry.id} className={`perps-entry-row${freshIds.includes(entry.id) ? " is-fresh" : ""}`} onClick={() => setSelectedId(entry.id)} aria-label={entryDescription(entry)}><span className={`perps-entry-badge is-${entry.side}`} aria-hidden="true">{entry.side === "long" ? "↗" : "↘"}</span><span className="perps-entry-name"><strong>{entry.side === "long" ? "Long" : "Short"} <small>{entry.kind}</small></strong><span>{entry.size} · {entry.book === "paper" ? "Paper" : "Live"} · epoch {entry.epoch}</span></span><span className="perps-entry-price"><strong>{usdExact(entry.priceExact)}</strong><time dateTime={new Date(entry.timeMs).toISOString()}>{executionTime(entry.timeMs)}</time></span></button></li>)}</ul>}
         {entries.length > 8 ? <button className="perps-show-history" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "Show recent entries" : `Show all ${entries.length} entries`}</button> : null}
       </div>
     </> : <div className="perps-chart-empty" aria-busy={busy}><span className="perps-empty-grid" aria-hidden="true">⌁</span><strong>{error ? "Your chart could not be read" : "Reading the market"}</strong><p>{error ? "Entry history is unknown until a read succeeds." : "Loading Lighter mark candles and your private entry history."}</p></div>}

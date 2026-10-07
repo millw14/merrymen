@@ -176,6 +176,7 @@ describe("perpetuals are asked about, never set, by text (docs/perps.md rule 1)"
       "perpsRegionAttested",
       "perpsStopLossPct",
       "perpsStopSlipBps",
+      "perpsStyle",
       "perpsTakeProfitPct",
     ]);
   });

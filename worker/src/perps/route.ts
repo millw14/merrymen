@@ -39,6 +39,7 @@
  * PURE. The lane supplies the view, the settings and the brakes it measured.
  */
 
+import { perpsStyleForDriver } from "../../../packages/core/src/perps-styles";
 import {
   PERP_MIN_DEPOSIT_MICRO,
   isolatedMarginMicro,
@@ -124,7 +125,7 @@ export function runPerpRoute(input: PerpRouteInput): PerpRouteResult {
     const r = perpTrendTick(view, s, ctx);
     // Perps switched off in Settings stops OPENS only (rule 5, 8a): the
     // strategy still closes what it holds on its own rules.
-    const entry = s.perpsEnabled && (driver !== "brain" || input.brainApproved === true) ? r.entry : null;
+    const entry = s.perpsEnabled && perpsStyleForDriver(s.perpsStyle, driver) && (driver !== "brain" || input.brainApproved === true) ? r.entry : null;
     const why: (Why | null)[] = r.why.slice(0, r.exits.length);
     if (entry !== null) why.push(r.why[r.exits.length] ?? null);
     const produced = r.exits.length > 0 || entry !== null;

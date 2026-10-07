@@ -53,6 +53,10 @@ import { PerpsResume } from "./PerpsResume";
 import { useEffect, useRef, useState } from "react";
 import {
   PERPS_DRIVERS,
+  PERPS_STYLE_CATALOG,
+  DEFAULT_PERPS_STYLE,
+  getPerpsStyle,
+  type PerpsStyleId,
   PERPS_MARKETS_MAX,
   PERPS_NUM_BOUNDS,
   perpsBlockerText,
@@ -165,6 +169,8 @@ export interface PerpsSettingsProps {
   hosted: boolean | null;
   /** After a write the server accepted: re-read the settings so the switches show the server's answer. */
   onSaved: () => void | Promise<void>;
+  initialStyle?: PerpsStyleId;
+  onInitialStyleConsumed?: () => void;
 }
 
 type Busy = "paper" | "live" | "fields" | null;
@@ -177,17 +183,27 @@ export function PerpsSettings(props: PerpsSettingsProps) {
   return <PerpsSettingsForOwner key={`${props.hosted}:${props.owner?.toLowerCase() ?? "none"}`} {...props} />;
 }
 
-function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: PerpsSettingsProps) {
+function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initialStyle, onInitialStyleConsumed }: PerpsSettingsProps) {
   const t = useT();
   const [grants, setGrants] = useState<PerpsGrantRead>({ state: "loading" });
   const [busy, setBusy] = useState<Busy>(null);
   const [note, setNote] = useState<Note | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [attested, setAttested] = useState(false);
-  const [draft, setDraft] = useState<PerpsDraft>(EMPTY_PERPS_DRAFT);
+  const [draft, setDraft] = useState<PerpsDraft>(() => initialStyle ? { ...EMPTY_PERPS_DRAFT, driver: "perp-trend", style: initialStyle } : EMPTY_PERPS_DRAFT);
   const [statusRevision, setStatusRevision] = useState(0);
   const [readAt, setReadAt] = useState(Date.now);
   const limitsSection = useRef<HTMLDetailsElement | null>(null);
+  const initialStyleRef = useRef(initialStyle);
+  useEffect(() => {
+    if (!initialStyleRef.current || hosted === null) return;
+    if (limitsSection.current) {
+      limitsSection.current.open = true;
+      limitsSection.current.scrollIntoView?.({ block: "start" });
+    }
+    initialStyleRef.current = undefined;
+    onInitialStyleConsumed?.();
+  }, [hosted, onInitialStyleConsumed]);
   const consentTitle = useRef<HTMLElement | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
@@ -330,6 +346,13 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
 
   // ── the draft ───────────────────────────────────────────────────────────
   const driverVal: PerpsDriver = draft.driver ?? values.perpsDriver ?? defaults.perpsDriver;
+  const styleVal = draft.style ?? values.perpsStyle ?? defaults.perpsStyle ?? DEFAULT_PERPS_STYLE;
+  const selectedStyle = getPerpsStyle(styleVal);
+  const savedStyle = getPerpsStyle(values.perpsStyle ?? defaults.perpsStyle ?? DEFAULT_PERPS_STYLE);
+  const driverHint = (driver: PerpsDriver, style: typeof selectedStyle) =>
+    driver === "perp-trend" && style.id !== DEFAULT_PERPS_STYLE
+      ? `${style.timeframe} candles. ${style.description} BTC, ETH and SOL only; your configured markets and limits still apply.`
+      : t(DRIVER_HINT[driver]);
   const marketsVal = draft.markets ?? perpMarketsInForce(values, defaults);
   const problems = perpsDraftProblems(draft, values, defaults);
   const dirty = perpsDraftDirty(draft);
@@ -482,7 +505,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
 
       <section className="mm-hint perps-readiness" aria-label="Automatic perpetual trading">
         <b>{t("settings.perps.setup.title")}</b>
-        <p>{t(DRIVER_LABEL[readiness.driver])}. {t(DRIVER_HINT[readiness.driver])}</p>
+        <p>{t(DRIVER_LABEL[readiness.driver])}. {driverHint(readiness.driver, savedStyle)}</p>
         {readiness.enabled && readiness.driver !== "manual" && <p>{t("settings.perps.setup.automatic")}</p>}
         {readiness.manual && <p role="status">{t("settings.perps.setup.manual")}</p>}
         {readiness.strategistMismatch && <p role="status">{t("settings.perps.driver.strategistMismatch", { strategy })}</p>}
@@ -605,7 +628,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
           <label className="mm-field">
             <span className="mm-label">{t("settings.perps.label.driver")}</span>
             <span className="mm-input">
-              <select value={driverVal} onChange={(e) => setDraft((d) => ({ ...d, driver: e.target.value as PerpsDriver }))}>
+              <select value={driverVal} onChange={(e) => setDraft((d) => ({ ...d, driver: e.target.value as PerpsDriver, ...(e.target.value !== "perp-trend" && styleVal !== DEFAULT_PERPS_STYLE ? { style: DEFAULT_PERPS_STYLE } : {}) }))}>
                 {PERPS_DRIVERS.map((id) => (
                   <option key={id} value={id}>
                     {t(DRIVER_LABEL[id])}
@@ -613,8 +636,17 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
                 ))}
               </select>
             </span>
-            <span className="mm-hint">{t(DRIVER_HINT[driverVal])}</span>
+            <span className="mm-hint">{driverHint(driverVal, selectedStyle)}</span>
           </label>
+        </div>
+        <div className="mm-field">
+          <label className="mm-label" htmlFor="perps-style">Trading doctrine</label>
+          <span className="mm-input"><select id="perps-style" value={styleVal} onChange={(event) => setDraft((d) => ({ ...d, style: event.target.value as PerpsStyleId, driver: "perp-trend" }))}>
+            {PERPS_STYLE_CATALOG.map((style) => <option key={style.id} value={style.id}>{style.label} · {style.timeframe}</option>)}
+          </select></span>
+          <p className="mm-hint">{selectedStyle.description} Selecting a doctrine drafts the deterministic trend driver. Save perpetuals settings to apply it. Your trading switches, markets and risk limits stay as configured.</p>
+          {draft.style != null ? <p className="mm-hint" role="status"><b>Unsaved doctrine: {selectedStyle.label}.</b> Review the settings below, then save.</p> : null}
+          {driverVal !== "perp-trend" ? <p className="mm-hint">This doctrine is inactive with the current driver.</p> : null}
         </div>
         {driverVal === "strategist" && strategy !== LLM_STRATEGIST && (
           <p className="mm-hint" role="status">

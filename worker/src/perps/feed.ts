@@ -63,25 +63,20 @@
  *                   reset once a connection has stayed up a minute; the first
  *                   connect is jittered too, so a fleet restart is not a
  *                   thundering herd.
- *   HISTORY, AT     The perps route (perp-trend) reads CLOSED 4 h mark candles
- *   THE CLOSE       and the last eight hourly fundings, and no child may fetch
- *                   them itself (a paper child makes no Lighter request at all).
- *                   So for the markets in use that are in PERP_TREND_UNIVERSE
- *                   — three at most — this fetches `markPriceCandles`
- *                   (resolution 4h, count_back 150, start/end in SECONDS, both
- *                   required: the venue answers 400 without them) once per
- *                   candle, at its close + 60 s, and `fundings` (1h) once an
- *                   hour, at the hour + 90 s: at most three candle requests per
- *                   4 h and three funding requests per hour when healthy. The
- *                   candle still in progress (t + 4h > the request time) is
- *                   dropped here, before anything is written — the venue
- *                   always returns it last. History requests share the REST
- *                   depth pacing (one per depthSpacingMs between them), wait
- *                   out any fleet cooldown, and retry a failure no sooner than
- *                   a minute later. When the venue answers but has not yet
- *                   published the candle that just closed, it is asked again
- *                   a minute later for up to 15 min, then left until the next
- *                   close.
+ *   HISTORY, AT     The strategies read native CLOSED 5m, 15m, 1h and 4h mark
+ *   THE CLOSE       candles plus the last eight hourly fundings. No child may
+ *                   fetch them itself. Universe markets in use share one read
+ *                   per resolution per candle close + 60 s, count_back 499,
+ *                   with start/end in seconds. Healthy steady-state history is
+ *                   under one request/minute across the three-market universe.
+ *                   The forming candle is dropped before writing; a response
+ *                   with a different resolution is refused. Each timeframe has
+ *                   an independent cache, retry clock and freshness check.
+ *                   Funding is read at the hour + 90 s. All history shares the
+ *                   paced REST slot (one request per depthSpacingMs) and fleet
+ *                   cooldown. Failures retry no sooner than a minute; lagging
+ *                   bars retry for at most 15 min or one timeframe, whichever
+ *                   is shorter, before waiting for the next close.
  *                   HELD MARKETS GET THEIR FUNDING HISTORY TOO, whatever the
  *                   universe: a paper position's venue clock charges every
  *                   owed hour from these rows and stops at the first one it
@@ -124,7 +119,8 @@ import {
 import { readLighterCooldown, type LighterApi } from "./api";
 import {
   FEED_BOOK_LEVELS,
-  FEED_CANDLE_MS,
+  FEED_TIMEFRAMES,
+  type FeedTimeframe,
   FEED_MAX_CANDLES,
   FEED_MIN_CANDLES,
   LIGHTER_FEED_VERSION,
@@ -224,9 +220,9 @@ export const LIGHTER_FEED_DEFAULTS = Object.freeze({
   maxMessageChars: 8_000_000,
   /** A snapshot side larger than this is refused. */
   maxLevelsPerSide: 50_000,
-  /** 4 h candles asked per history read: the one in progress plus ≥ FEED_MIN_CANDLES closed. */
+  /** Native candles asked per history read: the one in progress plus ≥ FEED_MIN_CANDLES closed. */
   candleCountBack: 499,
-  /** ≥ 60_000: candles are re-read this long after each 4 h close (the contract: close + 60 s). */
+  /** ≥ 60_000: candles are re-read this long after each native candle close (the contract: close + 60 s). */
   candleRefreshLagMs: 60_000,
   /** ≥ 60_000: hourly fundings are re-read this long after each hour. */
   fundingRefreshLagMs: 90_000,
@@ -268,6 +264,8 @@ export interface LighterFeedOptions {
    * perp-trend does not trade. Absent: the universe only (the old behaviour).
    */
   heldMarketIds?: () => readonly number[];
+  /** Defaults to every native strategy timeframe; all share the fleet REST pacing slot. */
+  candleTimeframes?: readonly FeedTimeframe[];
   /** Where the file goes: lighterFeedPath(fleetHome). */
   outPath: string;
   /** The home whose fleet cooldown file applies (api.ts lighterCooldownFile: MERRYMEN_FLEET_HOME when set, else this). */
@@ -528,14 +526,18 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
     candles: { at: number; rows: MarkCandle[]; priceDecimals: number } | null;
     fundings: { at: number; rows: FundingRow[] } | null;
     candlesNextAt: number;
+    frames: Partial<Record<FeedTimeframe, { candles: MarketHistory["candles"]; nextAt: number }>>;
     fundingsNextAt: number;
   }
   const history = new Map<number, MarketHistory>();
   let historyInFlight = false;
+  // Keep the legacy 4h read first; funding is checked before extra frames.
+  const candleTimeframes = [...new Set(opts.candleTimeframes ?? ["4h", "1h", "15m", "5m"])] as FeedTimeframe[];
+  if (candleTimeframes.some((frame) => !Object.hasOwn(FEED_TIMEFRAMES, frame))) throw new Error("lighter feed: invalid candle timeframe");
   const historyOf = (id: number, t: number): MarketHistory => {
     let h = history.get(id);
     if (h === undefined) {
-      h = { candles: null, fundings: null, candlesNextAt: t, fundingsNextAt: t };
+      h = { candles: null, fundings: null, candlesNextAt: t, fundingsNextAt: t, frames: {} };
       history.set(id, h);
     }
     return h;
@@ -1044,6 +1046,12 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
             // Nor are candles: every integer in them is at the old scale. Re-read now.
             for (const [id, h] of history) {
               const v = r.value.markets.get(id);
+              for (const state of Object.values(h.frames)) {
+                if (state.candles !== null && (v === undefined || v.spec.priceDecimals !== state.candles.priceDecimals)) {
+                  state.candles = null;
+                  state.nextAt = t2;
+                }
+              }
               if (h.candles !== null && (v === undefined || v.spec.priceDecimals !== h.candles.priceDecimals)) {
                 h.candles = null;
                 h.candlesNextAt = t2;
@@ -1134,7 +1142,7 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
   function manageHistory(t: number): void {
     if (historyInFlight || t < depthNextAt) return;
     const api = opts.api;
-    let job: { id: number; kind: "candles" | "fundings"; view: PerpMarketView } | null = null;
+    let job: { id: number; kind: "candles" | "fundings"; frame?: FeedTimeframe; view: PerpMarketView } | null = null;
     // The universe gets candles AND fundings; a held market outside it gets
     // fundings only (see the header). Both only while in use (`desired`).
     const held = heldNow();
@@ -1142,13 +1150,21 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
       const view = specOf(id);
       if (view === null) continue; // no decimals yet: no candle could be scaled
       const h = historyOf(id, t);
-      if (HISTORY_MARKET_IDS.has(id) && api.markPriceCandles !== undefined && t >= h.candlesNextAt) {
-        job = { id, kind: "candles", view };
+      if (HISTORY_MARKET_IDS.has(id) && candleTimeframes.includes("4h") && api.markPriceCandles !== undefined && t >= h.candlesNextAt) {
+        job = { id, kind: "candles", frame: "4h", view };
         break;
       }
       if (api.fundings !== undefined && t >= h.fundingsNextAt) {
         job = { id, kind: "fundings", view };
         break;
+      }
+      if (HISTORY_MARKET_IDS.has(id) && api.markPriceCandles !== undefined) {
+        const frame = candleTimeframes.find((f) => f !== "4h" && t >= (h.frames[f]?.nextAt ?? t));
+        if (frame !== undefined) {
+          h.frames[frame] ??= { candles: null, nextAt: t };
+          job = { id, kind: "candles", frame, view };
+          break;
+        }
       }
     }
     if (job === null) return;
@@ -1158,6 +1174,8 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
       return;
     }
     const { id, kind } = job;
+    const frame = job.frame ?? "4h";
+    const candleMs = FEED_TIMEFRAMES[frame];
     const started = t;
     const endSec = Math.floor(started / 1000);
     historyInFlight = true;
@@ -1166,7 +1184,10 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
       historyInFlight = false;
       const h = history.get(id);
       if (h !== undefined) {
-        if (kind === "candles") h.candlesNextAt = now() + tune.historyRetryMs;
+        if (kind === "candles") {
+          if (frame === "4h") h.candlesNextAt = now() + tune.historyRetryMs;
+          else h.frames[frame]!.nextAt = now() + tune.historyRetryMs;
+        }
         else h.fundingsNextAt = now() + tune.historyRetryMs;
       }
       log(`history-${kind}-${id}`, `${kind} for market ${id} not read (${why}); retrying in ${tune.historyRetryMs} ms`);
@@ -1178,8 +1199,8 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
       try {
         p = (api.markPriceCandles as NonNullable<LighterFeedApi["markPriceCandles"]>)({
           marketId: id,
-          resolution: "4h",
-          startSec: endSec - tune.candleCountBack * (FEED_CANDLE_MS / 1000),
+          resolution: frame,
+          startSec: endSec - tune.candleCountBack * (candleMs / 1000),
           endSec,
           countBack: tune.candleCountBack,
           priceDecimals,
@@ -1196,21 +1217,24 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
             fail(`${r.error.kind}: ${r.error.detail}`);
             return;
           }
-          if (r.value.resolution !== "4h") {
-            fail(`answered resolution ${r.value.resolution}, not 4h`);
+          if (r.value.resolution !== frame) {
+            fail(`answered resolution ${r.value.resolution}, not ${frame}`);
             return;
           }
           historyInFlight = false;
           const h = history.get(id);
           if (h === undefined) return; // the market left the set meanwhile
           // The one in progress is always last; a signal read off it is from the future.
-          const closed = r.value.candles.filter((c) => c.tMs + FEED_CANDLE_MS <= started).slice(-(FEED_MAX_CANDLES - 1));
-          h.candles = { at: started, rows: closed, priceDecimals };
-          const periodStart = Math.floor(started / FEED_CANDLE_MS) * FEED_CANDLE_MS;
+          const closed = r.value.candles.filter((c) => c.tMs + candleMs <= started).slice(-(FEED_MAX_CANDLES - 1));
+          const result = { at: started, rows: closed, priceDecimals };
+          const periodStart = Math.floor(started / candleMs) * candleMs;
           const lastT = closed[closed.length - 1]?.tMs ?? -Infinity;
-          const lagging = lastT < periodStart - FEED_CANDLE_MS;
-          h.candlesNextAt =
-            lagging && started < periodStart + tune.historyLagWindowMs ? now() + tune.historyRetryMs : periodStart + FEED_CANDLE_MS + tune.candleRefreshLagMs;
+          const lagging = lastT < periodStart - candleMs;
+          const nextAt = lagging && started < periodStart + Math.min(tune.historyLagWindowMs, candleMs) ? now() + tune.historyRetryMs : periodStart + candleMs + tune.candleRefreshLagMs;
+          if (frame === "4h") {
+            h.candles = result;
+            h.candlesNextAt = nextAt;
+          } else h.frames[frame] = { candles: result, nextAt };
         },
         (e: unknown) => fail(`rejected: ${e instanceof Error ? e.message : String(e)}`),
       );
@@ -1259,14 +1283,22 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
   };
 
   /** The history fields for one market's entry, at the precision it is being written at; {} when there is none. */
-  function historyFields(id: number, priceDecimals: number): Pick<LighterFeedFileMarket, "closed4h" | "candlesObservedAt" | "fundings1h" | "fundingsObservedAt"> {
+  function historyFields(id: number, priceDecimals: number): Pick<LighterFeedFileMarket, "closed4h" | "closedByTimeframe" | "candlesObservedAt" | "fundings1h" | "fundingsObservedAt"> {
     const h = history.get(id);
-    const out: Pick<LighterFeedFileMarket, "closed4h" | "candlesObservedAt" | "fundings1h" | "fundingsObservedAt"> = {};
+    const out: Pick<LighterFeedFileMarket, "closed4h" | "closedByTimeframe" | "candlesObservedAt" | "fundings1h" | "fundingsObservedAt"> = {};
     if (h === undefined) return out;
     if (h.candles !== null && h.candles.priceDecimals === priceDecimals && h.candles.rows.length > 0) {
       out.closed4h = h.candles.rows.map((c): FeedCandleJson => ({ t: c.tMs, o: c.open.toString(), h: c.high.toString(), l: c.low.toString(), c: c.close.toString() }));
       out.candlesObservedAt = h.candles.at;
     }
+    const frames: NonNullable<LighterFeedFileMarket["closedByTimeframe"]> = {};
+    for (const frame of candleTimeframes) {
+      const c = frame === "4h" ? h.candles : h.frames[frame]?.candles;
+      if (c && c.priceDecimals === priceDecimals && c.rows.length > 0) {
+        frames[frame] = { observedAt: c.at, rows: c.rows.map((bar) => ({ t: bar.tMs, o: bar.open.toString(), h: bar.high.toString(), l: bar.low.toString(), c: bar.close.toString() })) };
+      }
+    }
+    if (Object.keys(frames).length > 0) out.closedByTimeframe = frames;
     if (h.fundings !== null && h.fundings.rows.length > 0) {
       out.fundings1h = h.fundings.rows.map((f): FeedFundingJson => ({ t: f.timestampSec, rate: pct4(f.ratePpm), direction: f.direction }));
       out.fundingsObservedAt = h.fundings.at;

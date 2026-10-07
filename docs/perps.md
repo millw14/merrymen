@@ -493,10 +493,10 @@ All perp money is TEXT integer micro-USDG (aggregated in application BigInt or
 Perps are a **route beside the owner's spot strategy**, not a strategy that
 replaces it. `perpsDriver` chooses the one autonomous producer:
 
-- `perp-trend` (default) — a deterministic producer with frozen
+- `perp-trend` (default) — a deterministic producer with named profiles and frozen
   `PERP_TREND_DEFAULTS` and a "what this is not" header (it is not alpha; its
   backtest numbers are printed honestly). Universe: `perpsMarkets ∩ {BTC, ETH,
-  SOL}`. Signal: closed 4 h mark-price candles (≥ 100 contiguous, the one in
+  SOL}`. The default `swing-trend` signal uses closed 4 h mark-price candles (≥ 100 contiguous, the one in
   progress ignored), EMA24 and Wilder ATR14. Enter long when close > the 12-bar
   high and > EMA24 (short: mirror), with no position or unresolved order in the
   market, cooldowns clear (8 h after a strategy exit, 24 h after a stop, risk
@@ -518,6 +518,59 @@ at most one entry. Each goes through `countsAsEntry` → energy claim →
 if nothing was placed. Margin deposits are produced only to fund a pending
 open (margin + 10%, within caps), never to rescue a loser; free collateral goes
 home after 24 h flat and on perps-off, kill and expiry.
+
+
+#### Deterministic style profiles
+
+`perpsStyle` selects a real native candle stream and a channel length; it does
+not rename four-hour signals. Every profile requires at least 100 contiguous,
+closed mark candles at its own cadence. Missing, stale or wrong-resolution
+history produces no entry, with no fallback to another timeframe.
+
+| Profile | Native bars | Entry channel | Holding deadline |
+| --- | --- | --- | --- |
+| `scalp-breakout` | 5 min | 12 bars | 30 min |
+| `scalp-confirmed` | 15 min | 24 bars | 1 h |
+| `scalp-selective` | 15 min | 36 bars | 1 h |
+| `day-breakout` | 1 h | 12 bars | 8 h |
+| `day-patient` | 1 h | 24 bars | 12 h |
+| `day-selective` | 1 h | 36 bars | 12 h |
+| `swing-trend` (unchanged default) | 4 h | 12 bars | 168 h |
+| `swing-patient` | 4 h | 24 bars | 168 h |
+| `swing-selective` | 4 h | 36 bars | 168 h |
+
+EMA24 confirmation, ATR14, the six-bar exit channel, the stop floor of 1.5%,
+the three-ATR stop, funding checks, at-most-1%-equity stop risk, all signed and
+owner caps, and the 10x maximum leverage remain unchanged. So do the existing
+8 h strategy-exit and 24 h risk-exit cooldowns: scalp refers to its signal and
+holding horizon, not frequent trading or high-frequency execution. A narrow
+owner stop or venue minimum can leave any profile idle. No performance claim
+or backtest result is established for these profiles.
+
+Profiles run under `perp-trend`. Brain still reviews only the original
+four-hour `swing-trend` candidate; nondefault profiles cannot open through
+Brain or the strategist. Manual may retain a dormant profile. Choosing a
+profile never enables paper or live trading, creates consent or changes caps.
+The live grant must cover the profile's holding horizon, in addition to the
+existing independent expiry safeguards.
+
+The decision records its profile and exact signal candle before execution;
+the order binds that decision to durable fills. The worker reconstructs each
+current position's lifecycle from signed `position_before` and fill deltas,
+resetting at flat/reversal boundaries and refusing to carry a profile across
+unknown or discontinuous fills. The reconstructed side and size must match
+the position. This survives a crash before the cached `opened_at` was written.
+Unrelated/manual decision evidence cannot create an entry profile.
+
+A recorded entry's profile governs its strategic exits even after a settings
+change. Its holding deadline also runs on the independent protective clock,
+including while the driver is manual or the trading tick is paused. Reaching
+the deadline **requests** a full reduce-only close: fresh readable position
+and mark evidence, executable liquidity and the existing retry spacing are
+still required, so this is not a guaranteed fill time. Existing stops remain
+in force. Legacy positions without style provenance keep the original
+strategy behavior; the worker never invents their entry profile.
+
 
 ### Autonomous operation after setup
 
@@ -606,7 +659,8 @@ required before claiming the live venue lifecycle has been verified.
 |---|---|---|---|
 | `perpsEnabled` | false | — | paper perps; dashboard-only; no env term |
 | `perpsLiveEnabled` | false | — | real perps; stored with `perpsLiveConsentVersion`, `perpsLiveConsentAt`, `perpsRegionAttested` |
-| `perpsDriver` | `perp-trend` | `perp-trend` \| `strategist` \| `manual` | the one autonomous producer |
+| `perpsDriver` | `perp-trend` | `perp-trend` \| `brain` \| `strategist` \| `manual` | the one autonomous producer |
+| `perpsStyle` | `swing-trend` | IDs in `PERPS_STYLE_CATALOG` | deterministic cadence, channel and holding deadline; never execution consent |
 | `perpsMarkets` | `["BTC-PERP","ETH-PERP"]` | 1–8 keys of `LIGHTER_MARKETS_V1` | unknown key refused, never ignored |
 | `perpsMaxLeverage` | 2 | integer 1–10 | also ≤ venue max |
 | `perpsPerTradeUsdg` | 25 | 10–100000 | effective `min(sealed per-trade, this)` |
@@ -620,7 +674,7 @@ required before claiming the live venue lifecycle has been verified.
 | `perpsMaxSlippageBps` | 50 | 5–300 | IOC worst price vs mark; stand-down uses max(this, 150) |
 
 Every key is in the worker's clamps, the web `PUT` allowlist with identical
-bounds (`perpsMarkets` and `perpsDriver` with their own branches), a rebuild
+bounds (`perpsMarkets`, `perpsDriver` and `perpsStyle` with their own branches), a rebuild
 fingerprint, and `spec-coverage.test.ts`.
 
 ## Rollout

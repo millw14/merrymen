@@ -12,7 +12,7 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
+import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type PerpsStyleId, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import { telegramLabel, telegramRow } from "../agent-status";
@@ -59,7 +59,7 @@ function Field(props: {
 }
 
 /** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
-export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
+export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, onInitialPerpsStyleConsumed}:{onFund:()=>void; slug: string | null; onSaved?: () => void; initialPerpsStyle?: PerpsStyleId; onInitialPerpsStyleConsumed?: () => void}) {
   const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -820,7 +820,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               this form's `draft`, and "Save changes" sends none of it.
               `reloadView` re-reads the values without clearing the draft, so
               switching perps off does not throw away an unsaved edit above. */}
-          <PerpsSettings values={view.values} defaults={view.defaults} owner={view.owner} hosted={hosted} onSaved={reloadView} />
+          <PerpsSettings values={view.values} defaults={view.defaults} owner={view.owner} initialStyle={initialPerpsStyle} onInitialStyleConsumed={onInitialPerpsStyleConsumed} hosted={hosted} onSaved={reloadView} />
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="mm-section">{t("settings.section.agentSettings")}</div>

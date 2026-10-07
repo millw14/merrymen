@@ -31,6 +31,7 @@ import {
   type PerpMarket,
   type PerpMarketClass,
   type PerpsDriver,
+  type PerpsStyleId,
   type PerpsNumKey,
   type PerpsReport,
 } from "@merrymen/core";
@@ -95,6 +96,7 @@ export interface PerpsStored {
   perpsLiveConsentAt?: number;
   perpsRegionAttested?: boolean;
   perpsDriver?: PerpsDriver;
+  perpsStyle?: PerpsStyleId;
   perpsMarkets?: string[];
   liveTradingEnabled?: boolean;
   strategy?: string;
@@ -114,6 +116,7 @@ export interface PerpsStored {
 export type PerpsDefaults = Record<PerpsNumKey, number> & {
   perpsEnabled: boolean;
   perpsDriver: PerpsDriver;
+  perpsStyle?: PerpsStyleId;
   perpsMarkets: string[];
   liveTradingEnabled: boolean;
   strategy: string;
@@ -181,14 +184,15 @@ export function perpMarketsInForce(stored: PerpsStored, defaults: PerpsDefaults)
 /** What the owner changed and has not saved. null / absent = untouched. */
 export interface PerpsDraft {
   driver: PerpsDriver | null;
+  style?: PerpsStyleId | null;
   markets: string[] | null;
   nums: Partial<Record<PerpsNumKey, string>>;
 }
 
-export const EMPTY_PERPS_DRAFT: PerpsDraft = Object.freeze({ driver: null, markets: null, nums: Object.freeze({}) }) as PerpsDraft;
+export const EMPTY_PERPS_DRAFT: PerpsDraft = Object.freeze({ driver: null, style: null, markets: null, nums: Object.freeze({}) }) as PerpsDraft;
 
 export function perpsDraftDirty(d: PerpsDraft): boolean {
-  return d.driver !== null || d.markets !== null || Object.keys(d.nums).length > 0;
+  return d.style != null || d.driver !== null || d.markets !== null || Object.keys(d.nums).length > 0;
 }
 
 export interface PerpsDraftProblems {
@@ -240,6 +244,7 @@ export function perpsDraftBlocked(p: PerpsDraftProblems): boolean {
 export function perpsDraftBody(d: PerpsDraft): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (d.driver !== null) body.perpsDriver = d.driver;
+  if (d.style != null) body.perpsStyle = d.style;
   if (d.markets !== null) body.perpsMarkets = [...d.markets];
   for (const k of PERPS_NUM_KEYS) {
     const raw = d.nums[k];
