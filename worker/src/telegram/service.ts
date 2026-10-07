@@ -77,7 +77,7 @@ import type { ResearchStatusData } from "../fomo/tools";
 import type { FomoEnvelope } from "../fomo/types";
 import type { FollowReadiness } from "../fomo-child";
 import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText, TAIL_MUTED_LINE, type FomoTailsState } from "./fomo-tail";
-import type { ExtendTailData } from "../fomo/tools";
+import type { ExtendTailData, UntailData } from "../fomo/tools";
 import { TAIL_CAP_SPENT_LINE } from "../fomo/tail-notices";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, TAIL_USAGE, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
@@ -261,6 +261,12 @@ export interface TelegramServiceDeps {
    * refuses at the press).
    */
   fomoTailsState?: () => FomoTailsState;
+  /**
+   * A tail she stopped, or renewed as tell-only, right after the store took
+   * it (index.ts: FomoChild.tailRevoked): the follow nominations it lent its
+   * buys to are withdrawn at once. null: every tail. Never throws here.
+   */
+  onFomoTailRevoked?: (userId: string | null) => void;
   /** Injectable for tests. */
   now?: () => number;
   /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
@@ -813,6 +819,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return null;
     }
   };
+  /** deps.onFomoTailRevoked, never throwing. */
+  const tailRevoked = (userId: string | null): void => {
+    try {
+      deps.onFomoTailRevoked?.(userId);
+    } catch {
+      // the child's entry gate and its next file read still take the tail's authority back
+    }
+  };
   /** The DM conversation the research keeps its subject memory under. */
   const fomoDmKey = (chatId: number): string => `tg-dm:${chatId}`;
   /** The linked owner, in their own private chat. Never decided by what was said. */
@@ -1341,6 +1355,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const env = await b.call("fomo_tail_trader", { trader: p.userId, hours: p.hours, consider }, tailOpts(msg.chatId));
         const text = tailAnswer(env);
         if (env.status !== "ok") return text;
+        // A tail made (or renewed as) tell-only lends no buys from now on.
+        if (!consider) tailRevoked(p.userId);
         console.log(`[telegram] fomo tail started from the owner's DM (${consider ? "consider" : "tell only"})`);
         // A tail continued inside 15 minutes of its end keeps its notice count (docs/fomo.md "caps carry on").
         const capped = await tailCapNote(p.userId);
@@ -1352,6 +1368,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const b = brokerNow();
         if (!b) return esc(TAIL_UNAVAILABLE_TEXT);
         const env = await b.call("fomo_untail_trader", handle ? { trader: handle } : { all: true }, tailOpts(msg.chatId));
+        if (env.status === "ok" || env.status === "empty") {
+          const d = env.data as UntailData | null;
+          if (d?.all === true) tailRevoked(null);
+          else if (d?.trader?.userId) tailRevoked(d.trader.userId);
+        }
         return tailAnswer(env);
       },
       list: async (which) => {
@@ -2661,6 +2682,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       await answerCallbackQuery(opts, cb.id, "That button has expired.");
       return;
     }
+    if (parsed.action === "stop" && (env.status === "ok" || env.status === "empty")) tailRevoked(parsed.userId);
     const ext = parsed.action === "ext" && env.status === "ok" ? (env.data as ExtendTailData | null) : null;
     const toast =
       parsed.action === "stop"

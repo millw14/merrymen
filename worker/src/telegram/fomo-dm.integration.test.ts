@@ -191,6 +191,8 @@ async function withDm(
     capSpent?: (userId: string) => Promise<boolean | null>;
     /** Whether a tail can work here (index.ts fomoTailsState). */
     tailsState?: () => "on" | "switched-off" | "no-live-feed";
+    /** Records the child's tailRevoked calls (index.ts onFomoTailRevoked). */
+    revoked?: Array<string | null>;
   },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
@@ -345,6 +347,7 @@ async function withDm(
     ...(opts.readiness ? { fomoFollowReadiness: opts.readiness } : {}),
     ...(opts.capSpent ? { fomoTailCapSpent: opts.capSpent } : {}),
     ...(opts.tailsState ? { fomoTailsState: opts.tailsState } : {}),
+    ...(opts.revoked ? { onFomoTailRevoked: (u: string | null) => void opts.revoked!.push(u) } : {}),
     ...(groupStore
       ? {
           tgGroupsStore: groupStore,
@@ -1068,6 +1071,23 @@ describe("a running tail's Stop and +1h buttons", () => {
     await h.until(() => toasts(h).length > before);
     return toasts(h).at(-1)!;
   };
+
+  it("a stop, Stop or a tell-only tail tells the follow child at once, for that trader (review on #301)", async () => {
+    const revoked: Array<string | null> = [];
+    await withDm({ liveFeed: true, readiness: () => READY, revoked }, async (h) => {
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.deepEqual(revoked, [KALEO_ID], "a tell-only tail lends no buys from the start");
+      await ask(h, "/untail CryptoKaleo");
+      assert.deepEqual(revoked, [KALEO_ID, KALEO_ID]);
+      await ask(h, "/untail CryptoKaleo");
+      assert.deepEqual(revoked, [KALEO_ID, KALEO_ID], "no tail was stopped: nothing to take back");
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`), "Stopped");
+      assert.equal(revoked.at(-1), KALEO_ID);
+      await ask(h, "/untail all");
+      assert.equal(revoked.at(-1), null, "all of them");
+    });
+  });
 
   it("+1h adds an hour to her running tail, by its stored end, and says so; Stop stops it", async () => {
     await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {

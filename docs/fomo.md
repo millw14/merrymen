@@ -505,7 +505,12 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   to never reports that trader as a position dependency (`fomo-child.ts
   reportDependencies`) or keeps them on the position: a tail's influence ends with the
   tail (Stop, its end, `MERRYMEN_FOMO_TAILS=0`), and its trader never becomes a 14-day
-  dependency fanned out to every monitoring owner. `following.ts`, sizing, the early book, the Trencher
+  dependency fanned out to every monitoring owner. A nomination only a tail stood behind
+  is withdrawn as soon as that tail stops, ends, turns tell-only or tails are switched
+  off: the child checks the file's tails block each tick and again at the entry gate
+  (an expiry by the clock), and a stop or tell-only renewal from her DM or the Stop
+  button withdraws it at once (`FomoChild.tailRevoked`), so a BUY already on its way
+  is dropped rather than entered on authority she took back. `following.ts`, sizing, the early book, the Trencher
   review, `take()` and policy are untouched: one buyer is at most a probe (≤ 2.5 USDG),
   and a considered tail's buy counts as a buyer like a cohort trader's, so beside
   another buyer (a cohort trader, or a second considered tail) it is breadth for a

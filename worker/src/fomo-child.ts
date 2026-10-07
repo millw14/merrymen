@@ -92,6 +92,12 @@ export const FOLLOW_SOURCE = "fomo-follow";
 export const FOMO_CHILD = Object.freeze({
   /** The orchestrator rewrites the file at most every 60 s; reading it more often than this buys nothing. */
   fileReadEveryMs: 10_000,
+  /**
+   * How long a tail stopped from her DM lends nothing, whatever the child
+   * file still says: past a whole orchestrator pass (childFileEveryMs, a
+   * minute) plus this file's own read interval, with room to spare.
+   */
+  tailRevokedHoldMs: 3 * 60_000,
   /** held-tokens reports, at most this often (contract.ts BrokerReport). */
   heldTokensEveryMs: 5 * 60_000,
   /** A coin's funnel stage is reported again no sooner than this. */
@@ -1957,6 +1963,12 @@ export class FomoChild {
   private seq = 0;
   /** Coins whose follow nomination was withdrawn (setup deteriorated) → until when their entries are dropped. */
   private withdrawn = new Map<string, number>();
+  /**
+   * Tails the owner just stopped or turned to tell-only, by trader ("*": all)
+   * → when. The child file catches up within a pass; until then (and for
+   * TAIL_REVOKED_HOLD_MS) that trader's tail-only triggers count for nothing.
+   */
+  private tailRevokedAt = new Map<string, number>();
 
   constructor(private readonly deps: FomoChildDeps) {
     this.now = deps.now ?? Date.now;
@@ -2020,6 +2032,8 @@ export class FomoChild {
       if (this.file && this.access.dataAccess && (this.access.monitoring || this.access.follow)) {
         this.assessAll(this.file, live, now);
       }
+      // Whatever the pass did: a nomination only a tail stood behind goes when the tail does.
+      this.dropLapsedTails(now);
       // Reports go only where the OWNER has research on: nothing tenant-private
       // leaves this process for an owner who turned it off.
       if (owner.dataAccess && (owner.monitoring || owner.follow)) {
@@ -2293,6 +2307,59 @@ export class FomoChild {
    * is remembered as withdrawn so gateEntry drops a BUY that arrives anyway.
    */
   private withdraw(address: string, a: FollowAssessment, now: number): void {
+    this.withdrawNomination(address, now, `follow-withdrawn:${a.state.toLowerCase()}`, `the newer assessment is ${a.state}`);
+  }
+
+  /**
+   * IS A TAIL STILL BEHIND THIS NOMINATION? Its tail-only triggers (the buys
+   * only a considered tail let in, ChildSignal.tailTriggerKeys) count only
+   * while every such trader's tail is running and considered in the newest
+   * child file, and was not just stopped from her DM: a stopped, expired or
+   * tell-only tail, or tails switched off (no tails block), takes back the
+   * authority it lent. Fails closed: no file, no tail.
+   */
+  private tailStillBehind(tracked: Pick<Tracked, "triggers" | "tailKeys">, now: number): boolean {
+    if (tracked.tailKeys.length === 0) return true;
+    const traders = new Set(tracked.triggers.filter((e) => tracked.tailKeys.includes(e.eventKey)).map((e) => lower(e.trader.userId)));
+    if (traders.size === 0) return false;
+    const all = this.tailRevokedAt.get("*");
+    const tails = this.file?.tails ?? [];
+    for (const id of traders) {
+      const revoked = this.tailRevokedAt.get(id) ?? all;
+      if (revoked !== undefined && now - revoked < FOMO_CHILD.tailRevokedHoldMs) return false;
+      const t = tails.find((x) => lower(x.userId) === id);
+      if (!t || t.ended || t.consider !== true || !(t.expiresAt > now)) return false;
+    }
+    return true;
+  }
+
+  /** Every nomination only a lapsed tail stood behind is withdrawn now, not at its TTL. */
+  private dropLapsedTails(now: number): void {
+    for (const [k, at] of this.tailRevokedAt) if (now - at >= FOMO_CHILD.tailRevokedHoldMs) this.tailRevokedAt.delete(k);
+    for (const [address, t] of [...this.tracked]) {
+      if (t.tailKeys.length > 0 && !this.tailStillBehind(t, now)) this.withdrawNomination(address, now, "follow-withdrawn:tail-ended", "the tail behind it ended");
+    }
+  }
+
+  /**
+   * HER TAIL STOPPED, OR TURNED TELL-ONLY (telegram/service.ts, right after
+   * the store said so): the nominations it lent its buys to are withdrawn at
+   * once, and its tail-only triggers count for nothing until the child file
+   * has caught up. `userId` null: every tail. Never throws.
+   */
+  tailRevoked(userId: string | null): void {
+    try {
+      const now = this.now();
+      const k = typeof userId === "string" && userId.trim() ? lower(userId.trim()) : "*";
+      this.tailRevokedAt.set(k, now);
+      if (this.tailRevokedAt.size > FOMO_CHILD.reportedMax) this.tailRevokedAt.delete(this.tailRevokedAt.keys().next().value as string);
+      this.dropLapsedTails(now);
+    } catch (e) {
+      this.once(`tail-revoked:${e instanceof Error ? e.name : "error"}`, `[fomo] a stopped tail's nominations could not be withdrawn now (${e instanceof Error ? e.name : "error"}); the entry gate still refuses them`);
+    }
+  }
+
+  private withdrawNomination(address: string, now: number, detail: string, why: string): void {
     const book = this.deps.earlyBook();
     if (!this.tracked.has(address) && this.followBook.nominated(address) === null) {
       let earlyFollow = false;
@@ -2313,14 +2380,21 @@ export class FomoChild {
     this.withdrawn.set(address, now + FOMO_CHILD.withdrawnMemoryMs);
     if (this.withdrawn.size > FOMO_CHILD.reportedMax) this.withdrawn.delete(this.withdrawn.keys().next().value as string);
     try {
-      this.deps.funnel?.note(address, null, { stage: "RESEARCH_INCOMPLETE", detail: `follow-withdrawn:${a.state.toLowerCase()}`, decisionId: null });
+      this.deps.funnel?.note(address, null, { stage: "RESEARCH_INCOMPLETE", detail, decisionId: null });
     } catch {
       // filing is best effort
     }
-    this.log(`[fomo] follow nomination withdrawn: the newer assessment is ${a.state}`);
+    this.log(`[fomo] follow nomination withdrawn: ${why}`);
   }
 
   private nominate(hint: Extract<ExecutionHint, { kind: "nominate" }>, a: FollowAssessment, s: ChildSignal): void {
+    const triggers = s.triggers.filter((e) => a.triggerEventKeys.includes(e.eventKey));
+    const tailKeys = (s.tailTriggerKeys ?? []).filter((k) => a.triggerEventKeys.includes(k));
+    // A tail she just stopped lends nothing, even from a file not yet rewritten.
+    if (tailKeys.length > 0 && !this.tailStillBehind({ triggers, tailKeys }, this.now())) {
+      this.once("tail-lapsed-nominate", "[fomo] a follow nomination a lapsed tail would have stood behind was not made");
+      return;
+    }
     const book = this.deps.earlyBook();
     if (!book) {
       this.once("early-not-ready", "[fomo] early-candidate book not ready; follow nominations wait");
@@ -2336,8 +2410,8 @@ export class FomoChild {
     this.tracked.set(address, {
       assessment: a,
       until: hint.expiresAt + FOMO_CHILD.trackedGraceMs,
-      triggers: s.triggers.filter((e) => a.triggerEventKeys.includes(e.eventKey)),
-      tailKeys: (s.tailTriggerKeys ?? []).filter((k) => a.triggerEventKeys.includes(k)),
+      triggers,
+      tailKeys,
       strength: dossierStrength(s.dossier),
     });
     const res = book.offer(address, {
@@ -2511,6 +2585,13 @@ export class FomoChild {
       if (!open && !tracked && !earlyFollow && !early && !withdrawn) return { kind: "none" };
 
       const drop = (reason: string): FollowGate => this.drop(token, reason, intent.decisionId);
+      // THE TAIL MUST STILL STAND BEHIND IT AT THE ORDER: a BUY reviewed on a
+      // tail she has since stopped, let expire or made tell-only is dropped,
+      // whatever the nomination's own TTL says.
+      if (tracked && tracked.tailKeys.length > 0 && !this.tailStillBehind(tracked, now)) {
+        this.withdrawNomination(token, now, "follow-withdrawn:tail-ended", "the tail behind it ended");
+        return drop("tail-ended");
+      }
       // A coin Fomo research touched — nominated, offered, remembered by the
       // early book or withdrawn — enters only while its NEWEST assessment is
       // still an entry: a BUY reviewed on a setup that has since gone (sellers
