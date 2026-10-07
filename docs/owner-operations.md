@@ -27,7 +27,9 @@ trade:
   trade (`deposit-log.ts`, `tradeTxHashes`). So an owner's withdrawal recorded
   this way was never booked as the capital-out flow it is, and the peak never
   came down with it. That is very likely why 0x0e1c's `hwm_withdrawn_usdg` is
-  0.
+  0. The same skip hid an owner's withdrawal that a bundler put in one
+  transaction with a genuine agent trade (see
+  [The deposit scanner and a shared bundle](#the-deposit-scanner-and-a-shared-bundle)).
 
 ## Who signed it
 
@@ -147,6 +149,16 @@ Anything else is `review`, with one or more of these reasons:
 
 ETH is fuel and is ignored.
 
+**An amount that cannot be read is not zero.** A Transfer in the receipt
+whose data is not one quantity (`0x` and 1 to 64 hex digits: no data, `0x`,
+or more than a word) leaves the whole receipt unread, and the reading is null.
+That is the rule admission reads every amount by (`ledger-resume.ts
+hexQuantity`), so both sides fail closed the same way: the reconciler records
+nothing and finds the operation again at the next arm, and admission answers
+nothing, so the operation stays missing. (The first cut read such a log as an
+amount of zero, a leg that moves nothing, which admission then refused to
+take as covered. With no data at all, the first cut threw instead.)
+
 These are the real shapes, read from the public chain
 (`worker/src/testdata/owner-operations-receipts.json`):
 
@@ -158,6 +170,49 @@ These are the real shapes, read from the public chain
 | 0x9eaa728e pure USDG root withdrawal | acknowledged; log 18 is a capital-out for the scanner's flow |
 | 0x0e1c multi-token sweep | review (`token-departed`: MU, USAR, steakUSDG) |
 | 0x4b6dcd session key's enable-mode sell | not an owner operation |
+
+## The deposit scanner and a shared bundle
+
+A record leaves an owner's capital leg (`answeredBy: "flow"`) to the deposit
+scanner. That scanner skips every USDG log in a transaction the ledger holds as
+a trade. A bundler can put the owner's root-key withdrawal and the agent's own
+swap in one `handleOps` transaction, the shape `asset-movements.test.ts` reads
+op by op. That transaction is a trade's, so the skip hid the owner's
+withdrawal for good, and contributions and the peak stayed wrong.
+
+So `deposit-log.ts findTransferFlows` now lets one kind of log in a trade's
+transaction through to the receipt classifier. The log must be a USDG log
+that the receipt places inside the execution of a successful **root**
+operation of this account (`owner-operations.ts rootExecutionLogs`, the same
+segment the record reads). That operation must also be one no trade row of the
+transaction is (`store.ts tradeOpsInTx`). Everything else in the transaction
+stays skipped, exactly as before:
+
+- the trade's own execution, so a trade's USDG legs are never classified at
+  all and never booked as capital;
+- validation-phase logs, such as a paymaster's charge;
+- another account's operations, and a reverted operation's;
+- a root operation that the ledger holds as a trade row (a misbooked `'swap'`
+  from before owner records): booking its leg moves a peak, which is an
+  `hwm-repair` decision;
+- every log of a transaction that has a trade row naming no operation, since
+  that row could be the root operation's;
+- a receipt whose logs carry no positions.
+
+What is let through is classified like any other leg, on the whole receipt's
+legs. That is the classifier and the inputs the record judged it by, so the
+scanner books exactly the legs the record leaves to it. One consequence: beside
+an agent **buy**, the token the trade brought in pairs with the owner's USDG
+across the bundle. The classifier then reads a trade, not capital. The record
+reads it the same way (`usdg-not-capital`, and `usdg-outside-segment` because
+the trade's USDG sits outside the owner's execution), so it is `review` and
+leaves nothing to a flow that is never booked.
+
+The trade-row lookup is asked only for such a leg. To find one, the scanner now
+reads the receipt of each trade's transaction in its window that moved USDG of
+the account; before, it read none of them. An unreadable one refuses the scan
+pass, as an unreadable receipt always did for any other transaction: the
+cursor stays, and the window is read again.
 
 ## How it reaches Postgres
 
@@ -199,10 +254,13 @@ admission names its operation and holds the tenant. That fails closed, and
 nothing is booked from it.
 
 The rows and the cursor commit in one transaction. The cursor's `updated_at`
-says when the tenant's book was last written (`lastMirrorPassAt`). It moves
-only when a pass inserts a record or passes rows no pass had passed. It never
-moves on a pass that read nothing, or on a re-read after a rewind that found
-nothing new. A tenant that has records gains an `owner_operations` row in
+says when the tenant's book was last written (`lastMirrorPassAt`). It never
+moves on a pass that read nothing. On a trusted cursor it moves whenever a
+pass settles rows, since those are rows no pass had passed. After a rewind it
+moves only when the pass inserts a record. The re-read cannot tell which of a
+rebuilt ledger's rows an earlier pass passed, so a re-read that copies nothing
+new (rows already there, foreign or invalid) leaves it as it was. A tenant
+that has records gains an `owner_operations` row in
 `mirror_state`. That is expected: admission's evidence binds every cursor row,
 so the tenant's digest changes once, when its first record arrives. The
 continuity proof and the handover format (`ledger-import.ts` SPECS) are
@@ -218,15 +276,33 @@ then exactly one of:
 | row | what happens | counted as |
 |---|---|---|
 | a full root record under the tenant's account | copied, stamped with the tenant, or already there | `owner_operations`, `owner_operations_already_mirrored` |
-| a full root record under **another** account | never copied under this tenant. The cursor passes it and it is counted once, on that pass. Foreign is decided against the grant's account alone, which no child writes, and a tenant keeps its account across a grant replacement, so no later pass would copy it | `owner_operations_foreign` |
-| not a full lowercase hash pair, or not root | never copied by any account. The cursor passes it and it is counted once | `owner_operations_invalid` |
+| a full root record under **another** account | never copied under this tenant. The cursor passes it and it is counted on that pass: once, unless a rewind re-reads the ledger from id 0 and counts it again. Foreign is decided against the grant's account alone, which no child writes, and a tenant keeps its account across a grant replacement, so no later pass would copy it | `owner_operations_foreign` |
+| not a full lowercase hash pair, or not root | never copied by any account. The cursor passes it and it is counted like a foreign row | `owner_operations_invalid` |
 
 With no account to check against (no grant, or the caller's account and the
-grant's disagree), nothing is copied and the cursor does not move. Every row
-read is counted on every such pass (`owner_operations_unattributed`), and the
-first pass that can name the account copies it. So a stale account can never
-turn a genuine record foreign, and no row is skipped silently. The counts line
-prints all three apart from the rows that arrived.
+grant's disagree), nothing is copied. A row with nothing left to copy is
+settled as above: a record Postgres already holds under this tenant (an earlier
+pass with an account placed it; a rebuilt child's re-read finds these), or an
+invalid one. Any other row is not, and then:
+
+- the cursor does not move;
+- each such row is counted on every such pass (`owner_operations_unattributed`);
+- the pass reports `owner_operations` as **failed**.
+
+The first pass that can name the account copies it. So a stale account can
+never turn a genuine record foreign, and no row is skipped silently. The
+counts line prints all three apart from the rows that arrived.
+
+**Why failed, not idle.** A removed tenant's last copy runs after its grant
+row is gone (`orchestrator.ts` removed-agent cleanup, `finalMirrorBeforeAnchor`).
+Its home may hold the only copy of a record the regular 15-second pass had not
+yet carried up, and a redeploy can take that home. The first cut reported such
+a pass as complete (`hasMore: false`), so the cleanup released the lease
+without keeping the tenant in `removedLedgerPending`. Reported failed, it is
+not a finished copy to any caller. The cleanup keeps the tenant pending under
+its lease and retries each pass, and a drain, a retirement and the fleet
+checkpoint refuse in the same way. A re-grant that names the account lets the
+next pass copy the record and finish.
 
 ## How admission uses it
 
@@ -274,8 +350,8 @@ event for who signed it and whether it succeeded, and the receipt and the logs
 admission itself read for what it moved. The row only says which operation to
 look at. A capital leg is still answered only by its flow, so a deposit or
 withdrawal under the owner's key still holds the tenant until the scanner books
-it. A token that arrived or left keeps the record at `review`, which answers
-nothing.
+it (except in a transaction that also holds a trade row: limit (e)). A token
+that arrived or left keeps the record at `review`, which answers nothing.
 
 Elsewhere admission is stricter, not looser. `resumePreconditions` counts owner
 records as live operations, so the tenant is read on chain. It also includes
@@ -300,7 +376,9 @@ decision, not this tool's.
    window is booked as a chain-log `out` flow and lowers the peak with it. That
    is correct accounting, and it is already what happens to an owner operation
    that lands while a worker runs (the reconciler only ever saw ops from before
-   an arm).
+   an arm). The same holds for an owner withdrawal bundled in one transaction
+   with a genuine agent trade: only the owner's own execution is let past the
+   trade skip ([The deposit scanner and a shared bundle](#the-deposit-scanner-and-a-shared-bundle)).
 2. **A root-key purchase no longer gets an automatic basis at arm.** The
    reconciler's `bookFill` is gone for root ops. The live tick's receipt
    recovery still books one where USDG was paid in the same receipt.
@@ -328,6 +406,13 @@ decision, not this tool's.
   is already answered by an existing trades row, and owner records never touch
   positions or cost_basis. That guard belongs to the closed-epoch filing work.
 - Secondary-validator (vType `0x01`) operations keep the `'swap'` booking.
+- **(e) Admission holds every USDG log of a trade's transaction by its trade
+  row** (`chainFactsPostgresLacks`), as it always has. So an owner's capital
+  leg bundled with an agent trade does not hold the tenant at admission even
+  when no flow books it. The live scanner books it now (above). One that landed
+  while no worker scanned is booked by nothing, and admission does not name it.
+  Tightening that is a change to admission for every trade, left to a
+  reviewed decision.
 - Owner records are not in the persistent-home handover. Postgres keeps the
   mirrored copy, and admission fails closed if one is lost.
 - Every outstanding chain-gap booking preview recomputes to a new digest. Its
@@ -498,15 +583,25 @@ None of this is in this change.
 
 The tests are under `worker/src/`.
 
-- `owner-operations.test.ts`: the real receipts above, and the synthetic shapes.
+- `owner-operations.test.ts`: the real receipts above, the synthetic shapes,
+  unreadable amounts, and which logs a root operation executed.
+- `deposit-log.test.ts`: the shared bundle. The owner's withdrawal beside an
+  agent sell is booked, and the trade's own USDG and validation's never are.
+  The scanner books exactly the legs the record leaves to it, beside a sell
+  and beside a buy. A misbooked root `'swap'` row, a row naming no operation,
+  a revert, another account's operation and a receipt with no positions all
+  stay skipped.
 - `inflight-reconcile.test.ts`: root orphans get readings and no fill; the
   session op is unchanged.
 - `owner-operations.integration.test.ts`: a real ledger. Recorded once; counted
-  by no limit; the withdrawal's leg is booked by the scanner.
-- `mirror-owner-operations.test.ts`, `ledger-safeguard.test.ts` and
-  `ledger-import.test.ts`: the mirror (the id cursor and its witness, a clock
-  that stepped back, foreign, invalid and unattributed rows, another tenant's
-  child unable to pre-empt a record), the fleet checkpoint, the handover.
+  by no limit; the withdrawal's leg is booked by the scanner, alone and beside
+  a trade row in the same transaction (`tradeOpsInTx`).
+- `mirror-owner-operations.test.ts`, `ledger-safeguard.test.ts`,
+  `anchor-final-mirror.test.ts` and `ledger-import.test.ts`: the mirror (the id
+  cursor and its witness, a clock that stepped back, foreign, invalid and
+  unattributed rows, a rewind's recount, another tenant's child unable to
+  pre-empt a record), the fleet checkpoint and a removed tenant's final copy
+  refusing on an unattributed record, the handover.
 - `owner-operations-admission.test.ts` and
   `orchestrator-ledger-resume.integration.test.ts`: admission, end to end.
 - `chain-gap-booking.test.ts`: the booking tool.
