@@ -141,6 +141,7 @@ import { custodyAddressesOf } from "./custody";
 import { flowDuplicateReport } from "./distinct-flows";
 import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
+import { ownerOperationOf } from "./owner-operations";
 import {
   attestedSourceInUse, CHAIN_REFUSAL, chainGapCheck, describeChainFact, knownChainFacts, lastMirrorPassAt, readChainHold, readOpenApproval, resumeGapWindow,
   RESUME_USDG, usdg6, type GapChain, type MissingChainFact,
@@ -249,8 +250,18 @@ export interface BookingSnapshot {
   epochOpenedAt: number | null;
   /** Every hosted account, lowercased: a transfer from one is internal, never a deposit. */
   knownAccounts: string[];
-  /** What a chain log could be in Postgres for this account (knownChainFacts), sorted. */
-  known: { ops: string[]; txs: string[]; flows: string[] };
+  /**
+   * What a chain log could be in Postgres for this account (knownChainFacts), sorted. `ownerOps`: the
+   * acknowledged root records admission may answer an operation by ("hash|tx"), each only once the
+   * chain re-derives it (ledger-resume.ts ownerAnswersFor) — bound here so the digest and the
+   * compare-and-set see one change.
+   */
+  known: { ops: string[]; txs: string[]; flows: string[]; ownerOps: string[] };
+  /**
+   * Every owner record of the account, whatever its disposition, by hash: shown beside an
+   * owner-operation fact as evidence (the tool still never books one), and compared at apply.
+   */
+  ownerRecords: Array<{ userOpHash: string; txHash: string; chainId: number; disposition: string; reviewReason: string | null; tenant: string | null }>;
   /** Where admission's chain read starts (resumeGapWindow): for a tenant held on a chain refusal, no later than that refused read began. */
   gapFromSec: number;
   /** The account's trades and flows by count and maximum id: the evidence apply compares and sets on. */
@@ -327,7 +338,8 @@ const GRANT_SQL: Record<Dialect, string> = {
     FROM grants WHERE LOWER(tenant) = ?`,
 };
 /** The tables admission reads agent_id spellings across (ledger-resume.ts resumePreconditions). */
-const SPELLING_TABLES = ["trades", "flows", "equity", "fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "paper_checkpoints", "risk_periods"];
+const SPELLING_TABLES = ["trades", "flows", "equity", "fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "paper_checkpoints", "risk_periods",
+  "owner_operations"];
 const num = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
 /** Code-unit order: the same on every machine and in every locale, so a digest over a sorted list is too. */
@@ -492,7 +504,15 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
   }
   const knownAccounts = ((await db.prepare("SELECT DISTINCT LOWER(smart_account) AS a FROM agents ORDER BY a").all()) as Array<Record<string, unknown>>)
     .map((r) => String(r.a)).filter((a) => ADDRESS.test(a));
-  const k = await knownChainFacts(db, account);
+  // The owner records exactly as admission loads them: this tenant, account and the grant's chain.
+  const k = await knownChainFacts(db, account, grant?.chainId === null || grant?.chainId === undefined ? undefined : { tenant, chainId: grant.chainId });
+  const ownerRecords: BookingSnapshot["ownerRecords"] = account && tables.has("owner_operations")
+    ? ((await db.prepare(`SELECT tenant, user_op_hash, tx_hash, chain_id, disposition, review_reason FROM owner_operations WHERE LOWER(agent_id) = ?`)
+      .all(account)) as Array<Record<string, unknown>>).map((r) => ({
+      userOpHash: lower(r.user_op_hash), txHash: lower(r.tx_hash), chainId: num(r.chain_id), disposition: String(r.disposition),
+      reviewReason: strOrNull(r.review_reason), tenant: r.tenant === null || r.tenant === undefined ? null : lower(r.tenant),
+    })).sort((a, b) => byText(a.userOpHash, b.userOpHash) || byText(a.tenant ?? "", b.tenant ?? ""))
+    : [];
   // ADMISSION'S OWN WINDOW, from the same hold (ledger-resume.ts
   // resumeGapWindow): for a tenant held on a chain refusal, no later than the
   // refused read began, however long ago — so every fact that refusal named
@@ -517,7 +537,8 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
     : [];
   return {
     tenant, grant, agents, spellings: [...spellings].sort(), epochOpenedAt, knownAccounts,
-    known: { ops: [...k.ops].sort(), txs: [...k.txs].sort(), flows: [...k.flows].sort() }, gapFromSec,
+    known: { ops: [...k.ops].sort(), txs: [...k.txs].sort(), flows: [...k.flows].sort(), ownerOps: [...k.ownerRecords].map(([h, tx]) => `${h}|${tx}`).sort() },
+    ownerRecords, gapFromSec,
     ledger: { trades: await count("trades"), flows: await count("flows") },
     openApproval: open ? { state: open.state, evidence: open.evidenceDigest } : null,
     admitted: account && tables.has("tenant_ledger_import") && tables.has("ledger_resume_attestations") ? await attestedSourceInUse(db, tenant, account) : null,
@@ -538,7 +559,7 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  */
 function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
-    epochOpenedAt: s.epochOpenedAt, known: s.known, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
+    epochOpenedAt: s.epochOpenedAt, known: s.known, ownerRecords: s.ownerRecords, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
     admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills) };
 }
 
@@ -646,9 +667,10 @@ export interface ChainEvidence {
 }
 
 /**
- * The admission's chain seam over this tool's transport: the same three
- * reads, nothing else. The head and timestamps wait out a rate limit here;
- * getLogs is left to getLogsAdaptive, which already does, and narrows.
+ * The admission's chain seam over this tool's transport: the same four
+ * reads, nothing else (the receipt only for an operation an owner record
+ * would answer). The head, timestamps and receipts wait out a rate limit
+ * here; getLogs is left to getLogsAdaptive, which already does, and narrows.
  */
 export function gapChainOf(rpc: RpcCall, sleep: (ms: number) => Promise<void> = (ms) => new Promise<void>((r) => setTimeout(r, ms))): GapChain {
   const hex = (n: bigint) => `0x${n.toString(16)}`;
@@ -661,6 +683,11 @@ export function gapChainOf(rpc: RpcCall, sleep: (ms: number) => Promise<void> = 
     },
     async getLogs(a) {
       return (await rpc("eth_getLogs", [{ address: a.address, fromBlock: hex(a.fromBlock), toBlock: hex(a.toBlock), topics: a.topics }])) as never;
+    },
+    // Only for an operation an owner record would answer: the record is re-derived from it (ownerAnswersFor).
+    async getReceiptLogs(txHash) {
+      const r = (await patiently(() => rpc("eth_getTransactionReceipt", [txHash]), sleep)) as { logs?: unknown } | null;
+      return r && Array.isArray(r.logs) ? (r.logs as RawChainLog[]) : null;
     },
   };
 }
@@ -713,8 +740,12 @@ export async function readChainEvidence(rpc: RpcCall, snap: BookingSnapshot, o: 
   const rpcChainId = Number(BigInt(String(await patiently(() => rpc("eth_chainId", []), sleep))));
   const empty = { rpcChainId, txs: {}, decimals: {}, balances: {}, balanceBlock: null };
   if (!snap.grant) return { ...empty, gap: { status: "unavailable", why: "no stored grant names the account to read" } };
-  const known = { ops: new Set(snap.known.ops), txs: new Set(snap.known.txs), flows: new Set(snap.known.flows) };
+  const ownerRecords = new Map(snap.known.ownerOps.map((p) => p.split("|") as [string, string]));
+  const known = { ops: new Set(snap.known.ops), txs: new Set(snap.known.txs), flows: new Set(snap.known.flows), ownerRecords };
+  // As admission reads it: an owner record answers only once re-derived over the grant's own custody and chain.
+  const ownerContext = snap.grant.chainId === null ? undefined : { custody: snap.grant.custody, chainId: snap.grant.chainId };
   const gap = await chainGapCheck({ chain: gapChainOf(rpc, sleep), account: snap.grant.account, usdg: RESUME_USDG, sinceSec: snap.gapFromSec, known,
+    ...(ownerContext ? { ownerContext } : {}),
     ...(o.maxSpan === undefined ? {} : { maxSpan: o.maxSpan }), ...(o.log ? { log: o.log } : {}) });
   if (gap.status !== "missing") return { ...empty, gap: gap.status === "clean" ? { status: "clean", fromBlock: gap.fromBlock, head: gap.head } : gap };
   const txs: Record<string, TxEvidence> = {};
@@ -1286,8 +1317,26 @@ export function planBooking(snap: BookingSnapshot, ev: ChainEvidence, o: { nowSe
       base.evidence = { ...base.evidence, userOpHash: f.userOpHash, nonce: op.seg.op.nonce.toString(), validator, success: op.seg.op.success,
         paymaster: op.seg.op.paymaster, gasWei: op.gasWei.toString(), gasUnits: op.gasUnits.toString(), bookAddresses: book, moved: saidDeltas(op.deltas) };
       if (validator === "root") {
+        // WHAT ADMISSION WOULD MAKE OF IT, AS EVIDENCE ONLY: the owner reading
+        // re-derived from this receipt over the grant's custody (the one an
+        // owner record answers by, ledger-resume.ts ownerAnswersFor), and the
+        // record Postgres holds for it, if any. Neither changes the class or
+        // the refusal: this tool never books an owner's operation.
+        const reading = ownerOperationOf({ receiptLogs: receipt.logs, userOpHash: f.userOpHash, txHash: f.txHash, account, custody: snap.grant?.custody ?? [],
+          usdg: USDG, chainId: chainId ?? 4663 });
+        const record = snap.ownerRecords.filter((r) => r.userOpHash === f.userOpHash);
+        base.evidence = { ...base.evidence,
+          ownerReading: reading && { disposition: reading.disposition, reasons: reading.reasons, covers: reading.covers, usdgLegs: reading.usdgLegs, tokenMoves: reading.tokenMoves },
+          ownerRecord: record.length ? record.map(({ disposition, reviewReason, tenant, chainId: c, txHash }) => ({ disposition, reviewReason, tenant, chainId: c, txHash })) : null };
+        const recorded = record.length
+          ? ` Postgres holds an owner record for it (${record.map((r) => r.disposition + (r.reviewReason ? `: ${r.reviewReason}` : "")).join(", ")}), and admission ` +
+            "did not take it as an answer: only an acknowledged record that the receipt re-derives as acknowledged answers an owner's operation."
+          : reading
+            ? ` No owner record is in Postgres for it; re-derived from the receipt it would be '${reading.disposition}'` +
+              `${reading.reasons.length ? ` (${reading.reasons.join(", ")})` : ""} (docs/owner-operations.md).`
+            : "";
         items.push(unresolved(base, `the owner's own key (the root validator) signed this operation (it moved ${saidDeltas(op.deltas)}): ` +
-          "the agent's book has no writer for an owner's operation, and booking it as the agent's trade would misattribute it — escalate for a reviewed decision",
+          "the agent's book has no writer for an owner's operation, and booking it as the agent's trade would misattribute it — escalate for a reviewed decision." + recorded,
         "owner-operation"));
         continue;
       }

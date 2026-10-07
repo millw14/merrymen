@@ -400,6 +400,73 @@ describe("0x4b6dcd's shape: an operation with no USDG leg", () => {
   });
 });
 
+/**
+ * AN OWNER RECORD (owner_operations, docs/owner-operations.md) is what an
+ * owner's root-key operation is answered by, and only as admission re-derives
+ * it. The tool still books no owner operation: it reads exactly what
+ * admission reads, shows the record and the re-derived reading as evidence,
+ * and binds the records into its digest and compare-and-set.
+ */
+describe("owner records, as admission reads them", () => {
+  const record = (raw: DatabaseSync, o: { disposition: "acknowledged" | "review"; tenant?: string }) =>
+    raw.prepare(`INSERT INTO owner_operations (tenant, agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition, review_reason,
+        usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+      VALUES (?, ?, 4663, ?, ?, ?, ?, 69, '0x0', 'root', ?, ?, '[]', '[]', '[]', ?, '1', 'arm-reconcile', 2, ?)`)
+      .run(o.tenant ?? SHOGUN_TENANT, ACCOUNT, ROOT_OP, CHAIN.root.tx, Number(BigInt(CHAIN.root.block)), CHAIN.root.timestamp, o.disposition,
+        o.disposition === "review" ? "segment-unread" : null, addr(0), CHAIN.root.timestamp + 60);
+
+  it("an acknowledged record the receipt re-derives answers the owner's operation: nothing missing, nothing booked", async () => {
+    const b = await books();
+    record(b.raw, { disposition: "acknowledged" });
+    const { rpc, calls } = fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.root)] });
+    const p = await preview(b, rpc);
+    assert.equal(p.verdict, "nothing-missing", planLines(p).join("\n"));
+    assert.deepEqual(p.cas.known.ownerOps, [`${ROOT_OP}|${CHAIN.root.tx}`]);
+    assert.ok(calls.includes("eth_getTransactionReceipt"), "re-derived from the receipt, not taken from the row");
+  });
+
+  it("a 'review' record answers nothing: still owner-operation, still blocked — with the record and the re-derived reading shown", async () => {
+    const b = await books();
+    record(b.raw, { disposition: "review" });
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.root)] }).rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.deepEqual(p.items.map((i) => [i.key, i.class]), [[`op:${ROOT_OP}`, "owner-operation"]]);
+    assert.deepEqual(p.items[0]!.evidence.ownerRecord, [{ disposition: "review", reviewReason: "segment-unread", tenant: SHOGUN_TENANT, chainId: 4663, txHash: CHAIN.root.tx }]);
+    assert.equal((p.items[0]!.evidence.ownerReading as { disposition: string }).disposition, "acknowledged", "what the receipt says, beside what the row says");
+    assert.match(p.items[0]!.why, /Postgres holds an owner record for it \(review: segment-unread\), and admission did not take it as an answer/);
+    assert.equal(p.items[0]!.proposal, null, "and the tool never books an owner's operation");
+  });
+
+  it("with no record, the item says what admission would make of a record re-derived from this receipt", async () => {
+    const b = await books();
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.root)] }).rpc);
+    assert.equal(p.items[0]!.class, "owner-operation");
+    assert.equal(p.items[0]!.evidence.ownerRecord, null);
+    assert.match(p.items[0]!.why, /No owner record is in Postgres for it; re-derived from the receipt it would be 'acknowledged'/);
+  });
+
+  it("a record another tenant's mirror stamped answers nothing here", async () => {
+    const b = await books();
+    record(b.raw, { disposition: "acknowledged", tenant: addr(0xbad) });
+    const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.root)] }).rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.deepEqual(p.cas.known.ownerOps, []);
+  });
+
+  it("an owner record that appears between the preview and the apply refuses the apply: the records are compared and set", async () => {
+    const b = await books();
+    const { rpc } = fakeRpc({ txs: [fromFixture(CHAIN.buy), fromFixture(CHAIN.sell), fromFixture(CHAIN.root)], decimals: { [COIN]: 18n } });
+    b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch) VALUES (?, 'swap', ?, 0, ?, ?, 'landed', ?, 2)`)
+      .run(ACCOUNT, ACCOUNT, ROOT_OP, CHAIN.root.tx, CHAIN.root.timestamp);
+    const p = await preview(b, rpc);
+    assert.equal(p.verdict, "ready", planLines(p).join("\n"));
+    record(b.raw, { disposition: "review" });
+    await assert.rejects(applyBooking(b.db, p, { confirm: p.previewDigest, backupRef: "railway-backup-2026-10-06T09:00Z", dialect: "sqlite", nowMs: NOW * 1000 }),
+      (e: unknown) => e instanceof BookingRefused && e.code === "cas" && /ownerRecords/.test(e.message));
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 0, "nothing was written");
+  });
+});
+
 describe("0x0e1ca0's shape: a lone USDG transfer", () => {
   it("USDG in from outside the system, with no operation of the account, is a chain-log flow as the reconstruction books it", async () => {
     const b = await books();
