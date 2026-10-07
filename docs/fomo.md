@@ -639,8 +639,14 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   restart still works (they are taken before the backlog rule, like the groups' own
   buttons). Only her press in her own DM counts. Stop is `fomo_untail_trader`; +1h is
   `fomo_extend_tail {hours: 1}`. A short toast answers the press ("Stopped", "+1h",
-  "Extended to the 12-hour limit", "That tail has ended.") and a plain line follows as
-  a reply to the notice, so the notice keeps what it told her.
+  "Extended to the 12-hour limit", "That tail has ended.", "That tail had already
+  ended.", "That tail had already stopped.") and a plain line follows as a reply to the
+  notice, so the notice keeps what it told her. Stopping a tail that ended on its own
+  (Stop, `/untail NAME` or her words) says "Your tail on X already ended at HH:MM UTC."
+  and leaves its row, which its end summary is read from; one she already stopped says
+  "That tail has already stopped."; never "you weren't tailing" a trader she was, and
+  never an internal id. Only a handle with no tail at all is "You weren't tailing that
+  trader."
 - **Backlog.** A `/tail` that waited out an outage is held, like an order; a late
   `/untail` runs, since it only stops something.
 - **Asked in a group.** Groups never order trades and never hear a trader or a tail

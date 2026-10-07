@@ -2664,7 +2664,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const ext = parsed.action === "ext" && env.status === "ok" ? (env.data as ExtendTailData | null) : null;
     const toast =
       parsed.action === "stop"
-        ? env.status === "ok" ? "Stopped" : env.status === "empty" ? "That tail had already stopped." : "Couldn't stop it right now."
+        ? env.status === "ok"
+          ? "Stopped"
+          : env.status === "empty"
+            ? env.reason === "tail-ended" ? "That tail had already ended." : "That tail had already stopped."
+            : "Couldn't stop it right now."
         : ext
           ? ext.expiresAtMs <= ext.previousExpiresAtMs ? "Already as long as a tail runs (12 h)" : ext.capped ? "Extended to the 12-hour limit" : "+1h"
           : env.status === "empty" ? "That tail has ended." : "Couldn't extend it right now.";

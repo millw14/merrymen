@@ -852,6 +852,30 @@ describe("tails", () => {
     assert.equal((await h.invoke("fomo_tail_trader", { hours: 2 })).reason, "invalid-args");
   });
 
+  it("stopping a tail that ended on its own says it ended, by name, and leaves its row for the summary; a stopped one by id says so plainly (review 2026-10-07)", async () => {
+    const h = await harness({ liveFeed: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 1 });
+    const later = { now: NOW + HOUR + 60_000 };
+    for (const ref of [KALEO, "CryptoKaleo", "@cryptokaleo"]) {
+      const env = await h.invoke<UntailData>("fomo_untail_trader", { trader: ref }, later);
+      assert.equal(env.status, "empty", ref);
+      assert.equal(env.reason, "tail-ended");
+      const said = renderEnvelope(env, { audience: "owner", maxChars: 2000, now: later.now });
+      assert.match(said, /^Your tail on CryptoKaleo already ended at 17:05 UTC\./, ref);
+      assert.doesNotMatch(said, /weren't tailing|[0-9a-f]{8}…/);
+    }
+    assert.equal(rows(h.raw, "fomo_tails"), 1, "the ended row stays: its end summary is read from it");
+    // A tail she stopped is gone: a Stop press (by id) is told so, never an id fragment.
+    await h.invoke<TailData>("fomo_tail_trader", { trader: FRANK, hours: 2 });
+    await h.invoke<UntailData>("fomo_untail_trader", { trader: FRANK });
+    const gone = await h.invoke<UntailData>("fomo_untail_trader", { trader: FRANK });
+    assert.equal(gone.reason, "tail-not-active");
+    assert.match(renderEnvelope(gone, { audience: "owner", maxChars: 2000, now: NOW }), /^That tail has already stopped\./);
+    assert.doesNotMatch(renderEnvelope(gone, { audience: "owner", maxChars: 2000, now: NOW }), /trader [0-9a-f]{8}/);
+    // A handle she never tailed is still that.
+    assert.match(renderEnvelope(await h.invoke<UntailData>("fomo_untail_trader", { trader: "nobody_here" }), { audience: "owner", maxChars: 2000, now: NOW }), /^You weren't tailing that trader\./);
+  });
+
   it("+1h makes a running tail longer, never shorter, never past 12 hours from now, never a revived one; at no cost", async () => {
     const h = await harness({ liveFeed: true });
     await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3 });

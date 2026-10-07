@@ -401,6 +401,14 @@ export const DEEP_JOB_CREDIT_ALLOWANCE = 15_000;
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+/** An ended tail's row is kept a day for its end summary (store retention): a stop of it is told it ended, not "you weren't tailing". */
+const TAIL_ENDED_ROW_MS = 24 * HOUR;
+
+/** "14:05 UTC": when a tail ended, as the owner reads it. */
+function utcHhMm(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
 const DAY = 24 * HOUR;
 const EXCERPT_MAX = 280;
 const MAX_EVENTS_SHOWN = 50;
@@ -3088,13 +3096,45 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       const known = await store.traderByHandle(db, ref.value).catch(() => null);
       if (known) match = active.find((t) => t.userId === known.userId);
     }
-    const asked = match ? { userId: match.userId, handle: tailHandle(match.handle) } : ref.kind === "user-id" ? { userId: ref.value, handle: null } : null;
-    const removed = match ? ((await store.removeTail(db, tenant, match.userId)) ? 1 : 0) : 0;
+    if (!match) {
+      // NOT RUNNING. A tail that ended on its own is said as that, by its
+      // name, never "you weren't tailing" (she was) nor an internal id. Its
+      // row is LEFT: its end summary is read from it. One she stopped is gone,
+      // and a Stop press (by id) says so plainly. Only a handle with no row at
+      // all is "you weren't tailing that trader".
+      const sameHandle = (h: string | null): boolean => (h ?? "").toLowerCase() === ref.value.toLowerCase();
+      const ended = await store.recentlyEndedTails(db, tenant, ic.now - TAIL_ENDED_ROW_MS, ic.now).catch(() => []);
+      let gone = ref.kind === "user-id" ? ended.find((t) => t.userId === ref.value) : ended.find((t) => sameHandle(t.handle));
+      if (!gone && ref.kind === "handle") {
+        const known = await store.traderByHandle(db, ref.value).catch(() => null);
+        if (known) gone = ended.find((t) => t.userId === known.userId);
+      }
+      const message = gone
+        ? `Your tail on ${tailHandle(gone.handle) ?? "that trader"} already ended at ${utcHhMm(gone.expiresAtMs)}.`
+        : ref.kind === "user-id"
+          ? "That tail has already stopped."
+          : "You weren't tailing that trader.";
+      const left = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
+      return finish(ic, a, {
+        cls: "profile",
+        mode: "cached-ok",
+        subject: null,
+        // A handle with no row keeps the untail data (removed 0); the other two say their message.
+        data: !gone && ref.kind === "handle" ? { action: "untail", trader: null, all: false, removed: 0, activeTails: left } : null,
+        rows: 0,
+        essential: [],
+        status: "empty",
+        reason: gone ? "tail-ended" : "tail-not-active",
+        message,
+      });
+    }
+    const asked = { userId: match.userId, handle: tailHandle(match.handle) };
+    const removed = (await store.removeTail(db, tenant, match.userId)) ? 1 : 0;
     const left = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
     return finish(ic, a, {
       cls: "profile",
       mode: "cached-ok",
-      subject: asked ? { kind: "trader", trader: { userId: asked.userId, handle: asked.handle, displayName: null, verified: null } } : null,
+      subject: { kind: "trader", trader: { userId: asked.userId, handle: asked.handle, displayName: null, verified: null } },
       data: { action: "untail", trader: asked, all: false, removed, activeTails: left },
       rows: removed,
       essential: [],

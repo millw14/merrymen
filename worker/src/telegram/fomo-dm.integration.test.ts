@@ -1103,6 +1103,21 @@ describe("a running tail's Stop and +1h buttons", () => {
     });
   });
 
+  it("Stop or /untail after a tail ended on its own: 'already ended', by name, never 'you weren't tailing' or an id; its row stays for the summary (review 2026-10-07)", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      await tailAndPress(h, "/tail CryptoKaleo 1h", "tell");
+      mock.timers.tick(61 * 60_000);
+      await h.advance(1_000);
+      assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`), "That tail had already ended.");
+      await h.until(() => /ended at/.test(h.sentTo(OWNER).at(-1) ?? ""));
+      const said = h.sentTo(OWNER).at(-1)!;
+      assert.match(said, /^Your tail on CryptoKaleo already ended at \d\d:\d\d UTC\./);
+      assert.doesNotMatch(said, /weren't tailing|trader [0-9a-f]{8}…/);
+      assert.match(await ask(h, "/untail CryptoKaleo"), /^Your tail on CryptoKaleo already ended at \d\d:\d\d UTC\./);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1, "the ended row is kept for its end summary");
+    });
+  });
+
   it("+1h never shortens a tail and never passes 12 hours from now", async () => {
     await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
       await tailAndPress(h, "/tail CryptoKaleo 12h", "tell");
