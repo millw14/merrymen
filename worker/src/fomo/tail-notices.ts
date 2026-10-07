@@ -550,6 +550,31 @@ function buttonsFor(tail: ChildTail, now: number): TailNoticeButton[] {
   ];
 }
 
+/** Why a buy's notice goes without a thesis read: a closed set, each said as it is. */
+export type NoReadReason = "no-reader" | "no-chain" | "tail-reads-spent" | "too-late";
+
+export const NO_READ_WORDS: Readonly<Record<NoReadReason, string>> = {
+  "no-reader": "I can't look theses up right now",
+  "no-chain": "this alert doesn't say which chain the coin is on",
+  "tail-reads-spent": "I read at most two per tail",
+  "too-late": "I couldn't get to it in time",
+};
+
+/**
+ * Why no read is coming for this buy, or null while one is owed (and the
+ * notice should wait for it). In this order, so the line names the reason
+ * that actually applies: no broker at all, a coin whose chain the theses
+ * route cannot be asked about, the tail's two reads spent, or the wait for a
+ * read (10 minutes, or the tail's end) ran out first.
+ */
+function whyNoRead(i: TailNoticeInput, d: Due, log: TailSentLog, age: number): NoReadReason | null {
+  if (i.canRead === false) return "no-reader";
+  if (!d.ev.token?.chain.slug) return "no-chain";
+  if ((log.perTail[d.tailKey]?.thesisReads ?? 0) >= TAIL_NOTICE_LIMITS.thesisReadsPerTail) return "tail-reads-spent";
+  if (age >= TAIL_NOTICE_LIMITS.thesisWaitMs || d.tail.ended) return "too-late";
+  return null;
+}
+
 interface Written {
   html: string;
   /** A stream thesis this notice quoted: its own thesis notice is then covered too. */
@@ -616,10 +641,10 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
     } else if (claimed) {
       // Claimed in an earlier process whose answer is gone: never read twice.
       thesisLine = "I couldn't read their theses just now.";
-    } else if (i.canRead !== false && ev.token?.chain.slug && (log.perTail[d.tailKey]?.thesisReads ?? 0) < TAIL_NOTICE_LIMITS.thesisReadsPerTail && age < TAIL_NOTICE_LIMITS.thesisWaitMs && !tail.ended) {
-      return null; // a read is owed (tailThesisReads claims it); wait for it
     } else {
-      thesisLine = "I didn't look up their thesis on this coin (I read at most two per tail).";
+      const why = whyNoRead(i, d, log, age);
+      if (why === null) return null; // a read is owed (tailThesisReads claims it); wait for it
+      thesisLine = `I didn't look up their thesis on this coin (${NO_READ_WORDS[why]}).`;
     }
   }
   const position = typeof ev.positionValueUsd === "number" && ev.positionValueUsd > 0 ? `Their position after it: about ${shortUsd(ev.positionValueUsd)} (their whole position, not this buy).` : null;

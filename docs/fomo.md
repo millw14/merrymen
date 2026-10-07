@@ -487,7 +487,9 @@ the confirm card and the Stop and +1h button handling are a separate change.
   assessment of the coin. A buy
   notice carries their position after it (never called their buy), their thesis as
   "their words, unverified" (stream text when there is some, otherwise one
-  `fomo_get_token_theses` read of that trader on that coin, 1,250 credits), Merrymen's
+  `fomo_get_token_theses` read of that trader on that coin, 1,250 credits; without one,
+  the reason in plain words: no reader, no chain on the alert, the tail's two reads
+  spent, or no time left), Merrymen's
   read from its assessment, what following would do (tell only; one signal into the
   normal review; or, when it cannot act, the reason in plain words: following off, not
   the fast Trencher strategy, scout budget off, entries paused, no Trencher vault (every

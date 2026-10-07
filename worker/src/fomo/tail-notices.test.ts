@@ -13,6 +13,7 @@ import { robinhoodChain, tokenIdentity } from "./identity";
 import {
   BLOCKER_WORDS,
   emptyTailLog,
+  NO_READ_WORDS,
   parseTailLog,
   serializeTailLog,
   TAIL_COVERAGE,
@@ -258,10 +259,34 @@ describe("their thesis", () => {
   it("a buy waits for an owed read, at most ten minutes; a read's answer is used as theirs", () => {
     const fresh = ev(1, { at: NOW - 4 * MIN, observedAt: NOW - 4 * MIN });
     assert.deepEqual(tailNotices(input([tail([fresh])], { thesisRead: () => undefined })).notices, [], "the read is owed: wait");
-    assert.match(tailNotices(input([tail([fresh])], { thesisRead: () => undefined, now: NOW + 7 * MIN })).notices[0]!.html, /I didn't look up/);
-    assert.match(tailNotices(input([tail([fresh])], { thesisRead: () => undefined, canRead: false })).notices[0]!.html, /I didn't look up/, "no broker: no wait");
+    assert.match(
+      tailNotices(input([tail([fresh])], { thesisRead: () => undefined, now: NOW + 7 * MIN })).notices[0]!.html,
+      /I didn't look up their thesis on this coin \(I couldn't get to it in time\)\./,
+      "waited ten minutes: said as late, not as the per-tail cap",
+    );
+    assert.match(
+      tailNotices(input([tail([fresh])], { thesisRead: () => undefined, canRead: false })).notices[0]!.html,
+      /I didn't look up their thesis on this coin \(I can't look theses up right now\)\./,
+      "no broker: no wait, and said so",
+    );
     assert.match(pass(input([tail([fresh])], { thesisRead: () => undefined }), () => null).notices[0]!.html, /No thesis from them on this coin that I could find\./);
     assert.match(pass(input([tail([fresh])], { thesisRead: () => undefined }), () => "failed").notices[0]!.html, /I couldn't read their theses just now\./);
+  });
+});
+
+describe("why a buy has no thesis read", () => {
+  it("says the reason that applies, from a closed set", () => {
+    const fresh = ev(1, { at: NOW - 4 * MIN, observedAt: NOW - 4 * MIN });
+    const say = (t: ChildTail, over: Partial<TailNoticeInput> = {}) => tailNotices(input([t], { thesisRead: () => undefined, ...over })).notices[0]!.html;
+    const unchained = { ...coin(1), chain: { ...coin(1).chain, slug: null } } as TokenIdentity;
+    assert.match(say(tail([ev(1, { token: unchained })])), /\(this alert doesn't say which chain the coin is on\)/);
+    const spent: TailSentLog = { ...emptyTailLog(), perTail: {} };
+    const twoRead = tailThesisReads(input([tail([ev(2, { token: coin(2) }), ev(3, { token: coin(3) })])], { thesisRead: () => undefined }));
+    Object.assign(spent.perTail, twoRead.log.perTail);
+    assert.match(say(tail([fresh]), { log: spent }), /\(I read at most two per tail\)/);
+    assert.match(say(tail([fresh], { ended: true, expiresAt: NOW - MIN })), /\(I couldn't get to it in time\)/);
+    assert.doesNotMatch(say(tail([ev(1, { token: unchained })])), /at most two per tail/, "never the cap when the cap is not why");
+    assert.deepEqual(Object.keys(NO_READ_WORDS).sort(), ["no-chain", "no-reader", "tail-reads-spent", "too-late"]);
   });
 });
 
