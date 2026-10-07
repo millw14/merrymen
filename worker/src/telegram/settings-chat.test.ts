@@ -255,8 +255,8 @@ describe("confirm buttons carry a nonce, never the action", () => {
     const n = mintNonce();
     assert.match(n, /^[a-z2-7]{10}$/);
     const [[yes, no]] = confirmKeyboard(n) as unknown as [[{ callbackData: string }, { callbackData: string }]];
-    assert.deepEqual(parseConfirmData(yes.callbackData), { yes: true, nonce: n });
-    assert.deepEqual(parseConfirmData(no.callbackData), { yes: false, nonce: n });
+    assert.deepEqual(parseConfirmData(yes.callbackData), { yes: true, consider: false, nonce: n });
+    assert.deepEqual(parseConfirmData(no.callbackData), { yes: false, consider: false, nonce: n });
     assert.ok(Buffer.byteLength(yes.callbackData) <= 64, "Telegram's limit");
     for (const forged of ["mm:y:", "mm:x:abcdefghij", "mm:y:ABCDEFGHIJ", "transfer:0xabc", "mm:y:abcdefghij;kill"]) {
       assert.equal(parseConfirmData(forged), null, forged);

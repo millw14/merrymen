@@ -27,7 +27,7 @@ import { DASHBOARD_ONLY, SEALED_ASKS, SETTING_SPECS } from "./setting-spec";
 import { PLAIN_WORDS } from "./plain-words";
 import { ENERGY_WORDS } from "./energy-words";
 import { resolveSettingName } from "./settings-chat";
-import { SETTINGS_CATALOG, catalogForPrompt } from "../../../packages/core/src/index";
+import { SETTINGS_CATALOG, TAIL_MAX_HOURS, catalogForPrompt, parseTailArgs } from "../../../packages/core/src/index";
 import { isAnalysisOnlyMessage, isExplicitTradeRequest, replyReferenceBlock } from "./question-context";
 
 /** Every value the classifier may put in `setting` — a closed set, like `kind`. */
@@ -124,7 +124,12 @@ export type Command =
   | { kind: "buy"; symbol: string; usdg: number }
   | { kind: "sell"; symbol: string; usdg: number }
   | { kind: "transfer"; to: `0x${string}`; usdg: number }
-  | { kind: "confirm" }
+  /**
+   * `consider`: only from the "👀 + consider their buys" button on a tail's
+   * confirm card (buttons.ts `mm:c:`), and honoured only for a parked tail,
+   * re-checked against what following can do at the press (service.ts).
+   */
+  | { kind: "confirm"; consider?: boolean }
   | { kind: "cancel" }
   | { kind: "alert"; symbol: string; op: ">" | "<"; price: number }
   | { kind: "alerts" }
@@ -184,6 +189,20 @@ export type Command =
     }
   /** List the settings that can be changed by text, with their current values. */
   | { kind: "settings" }
+  /**
+   * FOMO TAILS (docs/fomo.md "Tailing a trader"): the owner's, in her own DM
+   * only (service.ts checks who and where; anyone else is told it is the
+   * owner's). `/tail NAME [hours]` asks first: it resolves the trader
+   * read-only and parks a confirm card, and nothing is created until she
+   * presses a button on it. `take`: her words asked me to take the trade too
+   * (natural language only), which grants nothing; the card says so.
+   * `/untail [NAME|all]` stops one or every tail (null: all), `/tails` lists
+   * them. NEVER produced by the classifier: its enum does not name them, and
+   * coerceLlmCommand turns anything it does not know into chat.
+   */
+  | { kind: "tail"; handle: string; hours: number; clamped: boolean; take?: boolean }
+  | { kind: "untail"; handle: string | null }
+  | { kind: "tails" }
   | { kind: "chat"; reply: string }
   | { kind: "unknown"; text: string };
 
@@ -232,8 +251,11 @@ export const PC_DANGEROUS = new Set(["shell", "getfile", "type", "hotkey", "powe
 export const PC_KINDS = new Set([...Object.keys(PC_CAP_OF), "pc"]);
 const MUTATION_KINDS = new Set([
   ...CONTROL_KINDS, "open", "volume", "media", "notify", "lock", "power", "getfile", "clipset", "shell", "type", "hotkey", "watch", "unwatch",
-  "alert", "unalert", "name", "remember", "forget", "remind", "unremind", "agent",
+  "alert", "unalert", "name", "remember", "forget", "remind", "unremind", "agent", "tail", "untail",
 ]);
+
+/** What /tail and /untail say when their argument cannot be read. Plain text: the executor escapes an "unknown". */
+export const TAIL_USAGE = `usage: /tail <trader> [hours] (1 to ${TAIL_MAX_HOURS}, 3 if you don't say). /untail <trader> or /untail all stops one; /tails lists them.`;
 
 /** Pure parser for slash commands. Returns null when the text isn't a slash command. */
 export function parseSlash(text: string): Command | null {
@@ -457,6 +479,19 @@ export function parseSlash(text: string): Command | null {
       return arg ? { kind: "watch", spec: arg } : { kind: "unknown", text: "usage: /watch <cpu>80 | file <path> | proc <name>>" };
     case "watchers":
       return { kind: "watchers" };
+    // ── Fomo tails (the owner's own DM only: service.ts) ──────────────────
+    case "tail": {
+      const t = parseTailArgs(arg);
+      return t ? { kind: "tail", handle: t.handle, hours: t.hours, clamped: t.clamped } : { kind: "unknown", text: TAIL_USAGE };
+    }
+    case "untail": {
+      // Bare, or "all": every tail. Stopping only ever reduces what I do.
+      if (!arg || /^all$/i.test(arg)) return { kind: "untail", handle: null };
+      const t = parseTailArgs(arg);
+      return t && !/\s/.test(arg) ? { kind: "untail", handle: t.handle } : { kind: "unknown", text: TAIL_USAGE };
+    }
+    case "tails":
+      return { kind: "tails" };
     case "unwatch": {
       const id = Number(arg);
       return Number.isInteger(id) && id > 0 ? { kind: "unwatch", id } : { kind: "unknown", text: "usage: /unwatch <n>" };
