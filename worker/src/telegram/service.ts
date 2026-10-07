@@ -135,7 +135,7 @@ import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from 
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 import type { TgGroupsStore } from "./tg-groups/store";
-import type { TgCoinsPort, TgDeskPort, TgFomoPort, TgGroupFactsPort } from "./tg-groups/types";
+import type { TgCoinsPort, TgDeskPort, TgFomoPort, TgGroupFactsPort, TgOwnerOutcome, TgOwnerPort } from "./tg-groups/types";
 import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 import type { HeldGroupEntry } from "./held-groups";
 
@@ -615,6 +615,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * slash commands keep their rules (handleGroupCommand), and nothing else is
    * answered.
    */
+  /** The owner's group asks answered in her DM; set once the DM research below exists. */
+  let ownerPort: TgOwnerPort | null = null;
   const tgGroups: TgGroups | null = deps.tgGroupsStore
     ? createTgGroups({
         opts: () => {
@@ -628,6 +630,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         facts: () => deps.tgFacts ?? null,
         desk: () => deps.tgDesk?.() ?? null,
         fomo: () => (deps.fomoOff === true ? null : deps.fomoGroupPort?.() ?? null),
+        owner: () => ownerPort,
         self: () => {
           const bot = selfFor(groupCfg());
           // The bot's display name (getMe's first_name) is what members see on
@@ -936,6 +939,68 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (owner) for (const job of r.jobs) scheduleFomoJob(msg.chatId, token, job);
     console.log(`[telegram] answered from Fomo research: ${r.toolsCalled.join(", ") || "no lookup"}${r.composed ? " (worded by the model)" : ""}${r.timedOut ? " (timed out)" : ""}`);
     return r.composed ? escModel(r.text) : esc(r.text);
+  };
+
+  /**
+   * THE OWNER'S GROUP ASK ABOUT ONE TRADER, ANSWERED IN HER DM. A trader is
+   * private research, so the room never hears it (docs/tg-groups.md rule 3);
+   * she asked out loud, so the answer comes to her directly. Read-only even
+   * for her: what reaches the research is a fixed question code wrote, never
+   * the group's words, and it may not change anything (readOnly). Her DM is
+   * proved before anything is looked up, and only that fixed question and its
+   * answer enter her DM history.
+   */
+  const ownerAsks: number[] = [];
+  const OWNER_ASKS_WINDOW_MS = 10 * 60_000;
+  const OWNER_ASKS_MAX = 6;
+  ownerPort = {
+    research: async (q): Promise<TgOwnerOutcome> => {
+      try {
+        const cfg = groupCfg();
+        const ownerId = stateRef.get().ownerId;
+        // The trusted sender id, checked again here: never a name or what was said.
+        if (ownerId === null || q?.fromId !== ownerId) return "unavailable";
+        if (deps.fomoOff === true) return "unavailable";
+        const broker = fomoBroker();
+        if (!broker) return "unavailable";
+        const handle = typeof q.handle === "string" ? q.handle.replace(/^@/, "") : "";
+        if (!/^[A-Za-z0-9_]{2,30}$/.test(handle)) return "unavailable";
+        // Her DM answers her only when the allowlist lets her in, as handle() would.
+        if (!cfg.telegramAllowlist.includes(ownerId)) return "dm-first";
+        const token = cfg.telegramBotToken;
+        if (!token) return "unavailable";
+        const t = Date.now();
+        while (ownerAsks.length > 0 && ownerAsks[0]! <= t - OWNER_ASKS_WINDOW_MS) ownerAsks.shift();
+        if (ownerAsks.length >= OWNER_ASKS_MAX) return "busy";
+        if (!(await sendChatAction({ token }, ownerId)).ok) return "dm-first";
+        ownerAsks.push(t);
+        const text = `who is trader ${handle} on fomo?`;
+        const r = await answerFomoDm({
+          text,
+          broker,
+          audience: "owner",
+          conversationKey: fomoDmKey(ownerId),
+          active: false,
+          nowMs: t,
+          creds: null,
+          selfNames: fomoSelfNames(cfg),
+          readOnly: true,
+        });
+        if (!r.handled) return "unavailable";
+        const html = `${esc(`You asked about Fomo trader ${handle} in a group, so here it is privately.`)}\n\n${esc(r.text)}`;
+        const sent = await sendMessage({ token }, ownerId, html, { disablePreview: true });
+        if (!sent.ok) return "dm-first";
+        rememberFomoAnswer(ownerId, sent.messageId);
+        if (fomoActive.size > 512 && !fomoActive.has(ownerId)) fomoActive.delete(fomoActive.keys().next().value!);
+        fomoActive.set(ownerId, t);
+        await pushHistory(ownerId, "user", text);
+        await pushHistory(ownerId, "assistant", r.text);
+        console.log("[telegram] owner's group trader ask answered in her DM");
+        return "sent";
+      } catch {
+        return "unavailable";
+      }
+    },
   };
 
   /**

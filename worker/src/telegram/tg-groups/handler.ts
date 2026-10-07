@@ -87,6 +87,7 @@ import {
   isQuestionToRoom,
   isShush,
   isTradeTalk,
+  routeWorthy,
   selfNamesOf,
   type BotSelf,
   type DeskIntent,
@@ -129,11 +130,13 @@ import type {
   TgFomoRequest,
   TgGroupFactsPort,
   TgLine,
+  TgOwnerPort,
   TgPerson,
   TgPublicFact,
   TgRoom,
 } from "./types";
-import { readSubject } from "./understand";
+import { readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
+import { readSubject, type SubjectReading } from "./understand";
 import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
 // ─── The numbers ───────────────────────────────────────────────────────────
@@ -148,6 +151,13 @@ const STALE_MS = 90 * SEC;
 /** An explicit research answer has one budget from receipt through its send. */
 const RESEARCH_REPLY_MS = 30 * SEC;
 const RESEARCH_SEND_MS = 5 * SEC;
+/** What a routing call must leave the research it picks, of the reply deadline. */
+const ROUTE_LEAVES_MS = 8 * SEC;
+/** A routing call with less time than this is not worth making. */
+const ROUTE_MIN_BOX_MS = 1_500;
+/** The allowance routing never touches: the day's (at least 20, or a tenth) and this chat's hour. */
+const ROUTE_RESERVE_DAY = 20;
+const ROUTE_RESERVE_HOUR = 4;
 /** One person's addressed lines closer together than this are one burst: only their last is answered. */
 const BURST_MS = 15 * SEC;
 /** A question to the room waits this long, so pacing can see whether anyone answered it. */
@@ -311,6 +321,8 @@ export interface TgGroupsDeps {
    * line goes on to the desk and the persona as before.
    */
   fomo?: () => TgFomoPort | null;
+  /** The owner's asks that are answered in her DM (a trader by name). Absent: the room's deflection. */
+  owner?: () => TgOwnerPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
   /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
@@ -1973,6 +1985,80 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
+   * The casual group line after a slash command, or after an ask that was
+   * answered in the asker's DM (TgCommandNotice). Rate-limited here.
+   */
+  const commandNotice = async (chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> => {
+    try {
+      if (!canTalk(chatId)) return;
+      const now = clock();
+      // "sent it to your DMs" and "done, couldn't DM you" each answer one
+      // command that ran for someone entitled to run it: every one is said.
+      // Refusals and "dm me first" at most once per person per hour.
+      if (what !== "dm-sent" && what !== "done-no-dm") {
+        const k = `${what}:${chatId}:${fromId}`;
+        const last = refusedAt.get(k);
+        if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
+        refusedAt.set(k, now);
+      }
+      // These answer a command the sender was entitled to run, so they go
+      // out in a shushed chat like the owner calling it.
+      const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
+      const reply: SpeakOpts = {
+        ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
+        ...(isMsgId(threadId) ? { threadId } : {}),
+        bornAtMs: now,
+        ownerAddressed: entitled,
+      };
+      const fixedPool: readonly string[] | null =
+        what === "owner-only"
+          ? OWNER_ONLY_LINES
+          : what === "link-here"
+            ? LINK_HERE_LINES
+            : what === "dm-first"
+              ? DM_FIRST_LINES
+              : what === "done-no-dm"
+                ? DONE_NO_DM_LINES
+                : null;
+      await enqueue(
+        chatId,
+        async () => {
+          if (fixedPool) {
+            // Its own small fixed pool, gated like every template.
+            const pool = fixedPool;
+            const room = store.room(chatId);
+            const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
+            const start = Math.floor(roll() * pool.length);
+            let text: string | null = null;
+            for (let i = 0; i < pool.length && text === null; i++) {
+              const cand = pool[(start + i) % pool.length] ?? "";
+              const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
+              if (v.ok) text = v.text;
+            }
+            if (!text) return;
+            const sent = await deliver({
+              chatId,
+              intent: { kind: "private-read-refuse" },
+              text,
+              ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
+              ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
+              bornAtMs: now,
+              followUp: false,
+              ownerAddressed: entitled,
+            });
+            if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
+            return;
+          }
+          await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply);
+        },
+        { force: true },
+      );
+    } catch (e) {
+      fail("notice", e);
+    }
+  };
+
+  /**
    * Act on pacing's decision. Books are kept only after a line or reaction
    * actually landed. Null when something landed; else why nothing did (Quiet).
    */
@@ -2081,6 +2167,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
 
     if (!reserveReply(chatId, messageId)) return "already-answered";
+    // What the persona says when nothing below takes the line (the desk's
+    // intent shadows the name in the block).
+    const persona: TgIntent = intent;
     if (dec.act === "answer" && dec.mood !== "injection" && dec.mood !== "bot-question") {
       const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
       const context = coinContext(j);
@@ -2104,9 +2193,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // coin, or no answer at all, keeps the desk's read.
       const researchable = !request && dec.mood !== "private-ask" && !isInjection(j.line.text);
       let intent = deskIntentOf(j.line.text, chatId);
+      let reading: SubjectReading | null = null;
       if (researchable && intent?.kind === "coin" && intent.loose && d.desk && coinFactsOn()) {
         stageOf(chatId, "read: coin or topic");
-        const reading = await readSubject({ model: modelNow(), gate, chatId, room: store.room(chatId), trigger: j.line, name: intent.name });
+        reading = await readSubject({ model: modelNow(), gate, chatId, room: store.room(chatId), trigger: j.line, name: intent.name });
         if (reading === "topic") {
           log("[tg-groups] an opinion ask read as a topic, not a coin");
           intent = null;
@@ -2148,8 +2238,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         })());
         return null;
       }
+      // NO RULE KNEW THIS LINE. Before the persona answers it, the group's
+      // model picks once from what it can do (route.ts), and code checks the
+      // pick. Not for a line read as an ordinary topic, and only with
+      // allowance to spare: routing never costs the answer itself.
+      if (researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic" && routeWorthy(j.line.text, selfNamesOf(selfNow()))) {
+        const routed = await routeLine(chatId, j, replyOpts, persona);
+        if (routed === "taken") return null;
+      }
     }
-    const sent = await speak(chatId, intent, replyOpts);
+    const sent = await speak(chatId, persona, replyOpts);
     if (!sent) {
       releaseReply(chatId, messageId);
       return whyLost();
@@ -2506,6 +2604,124 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     const text = fomoSayable(r.text, movesLine) ?? FOMO_UNSAYABLE;
     return send(text);
+  };
+
+  // ── what a line wants, when no rule knew (route.ts) ──
+
+  const routeBreaker = new RouteBreaker(clock);
+  /** MERRYMEN_TG_GROUPS_ROUTER=0 turns it off; it needs a model and something to route to. */
+  const routerOn = (): boolean =>
+    (env().MERRYMEN_TG_GROUPS_ROUTER ?? "").trim() !== "0" && modelNow() !== null && (fomoNow() !== null || deskNow() !== null);
+  const ownerNow = (): TgOwnerPort | null => {
+    try {
+      return d.owner?.() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** The text of the line this one replies to, when Telegram quoted it. */
+  const repliedText = (j: LineJob): string | null => {
+    const t = j.msg.replyTo?.text;
+    return typeof t === "string" && t.trim() ? t.slice(0, 400) : null;
+  };
+  const routeLabel = (r: TgRoute): string => (r.action === "fomo" ? `fomo:${r.request.kind}` : r.action);
+
+  /**
+   * Ask what the line wants and run it. "taken": a lane has it (detached, and
+   * it answers or says why not); "persona": the persona answers it, as before.
+   */
+  const routeLine = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent): Promise<"taken" | "persona"> => {
+    try {
+      if (!routerOn() || routeBreaker.open()) return "persona";
+      const reserve = { day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 10)), hour: ROUTE_RESERVE_HOUR };
+      if (!gate.headroom(chatId, reserve)) return "persona";
+      const box = Math.min(ROUTE_TIMEOUT_MS, j.bornAtMs + RESEARCH_REPLY_MS - RESEARCH_SEND_MS - ROUTE_LEAVES_MS - clock());
+      if (box < ROUTE_MIN_BOX_MS) return "persona";
+      const selfNames = selfNamesOf(selfNow());
+      const replied = repliedText(j);
+      stageOf(chatId, "route");
+      const { route, why } = await readRoute({
+        model: modelNow(),
+        gate,
+        chatId,
+        room: store.room(chatId),
+        trigger: j.line,
+        timeoutMs: box,
+        ctx: { line: j.line.text, replied, selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
+      });
+      routeBreaker.note(why);
+      // Counts and kinds only: never the line, a name or a coin.
+      log(`[tg-groups] route ${route ? routeLabel(route) : why}`);
+      if (!route || route.action === "chat" || route.action === "fomo-tail") return "persona";
+      track(runRoute(chatId, j, o, persona, route));
+      return "taken";
+    } catch (e) {
+      fail("route", e);
+      return "persona";
+    }
+  };
+
+  /** One routed line, off the chat queue. Whatever happens, the line is answered or its slot released. */
+  const runRoute = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, route: TgRoute): Promise<void> => {
+    const messageId = j.line.messageId;
+    let lost: Quiet = "send-failed";
+    const opts: SpeakOpts = { ...o, miss: (why) => { lost = why; o.miss?.(why); } };
+    const done = (ok: boolean, why?: Quiet): void => {
+      if (ok) return;
+      releaseReply(chatId, messageId);
+      if (j.addressed !== null) quietLine(why ?? lost);
+    };
+    /** The persona's answer, exactly as without the router. */
+    const asBefore = async (): Promise<void> => {
+      const sent = await speak(chatId, persona, opts);
+      if (sent) noteAnswered(sent.chatId, j, false);
+      done(!!sent);
+    };
+    try {
+      switch (route.action) {
+        case "fomo": {
+          const r = await fomoAnswer(chatId, j, opts, route.request);
+          if (r === "not-research") return await asBefore();
+          return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "fomo-trader": {
+          // HER OWN ASK, ANSWERED IN HER DM: a trader is never discussed in
+          // the room (rule 3). The room hears only that her DM has it.
+          const owner = j.isOwner ? ownerNow() : null;
+          if (owner) {
+            stageOf(chatId, "route: owner research");
+            const outcome = await owner.research({ handle: route.handle, fromId: j.line.fromId });
+            if (outcome === "sent" || outcome === "dm-first") {
+              await commandNotice(chatId, messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId);
+              return;
+            }
+          }
+          const r = await fomoAnswer(chatId, j, opts, { kind: "trader" });
+          if (r === "not-research") return await asBefore();
+          return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "market":
+        case "coin": {
+          if (!deskNow() || (route.action === "coin" && !coinFactsOn())) return await asBefore();
+          const context = route.action === "coin" ? coinContext(j) : null;
+          const ask: TgDeskAsk =
+            route.action === "market"
+              ? { kind: "market" }
+              : context && context.memo?.name && context.memo.name.toLowerCase() === route.name.toLowerCase()
+                ? { kind: "coin", address: context.address }
+                : { kind: "coin", query: route.name };
+          const timed: SpeakOpts = { ...opts, replyByMs: j.bornAtMs + RESEARCH_REPLY_MS, accountAnswer: accountResearchAnswer(j.line, j.seenAtMs) };
+          const deskOpts = ask.kind === "coin" ? { ...timed, stillWanted: () => (!o.stillWanted || o.stillWanted()) && coinFactsOn() } : timed;
+          const sent = await deskAnswer(chatId, j, ask, deskOpts, undefined, deskRoom(chatId));
+          return done(!!sent);
+        }
+        default:
+          return await asBefore();
+      }
+    } catch (e) {
+      fail("routed answer", e);
+      done(false);
+    }
   };
 
   /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
@@ -3726,75 +3942,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     },
 
-    async commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> {
-      try {
-        if (!canTalk(chatId)) return;
-        const now = clock();
-        // "sent it to your DMs" and "done, couldn't DM you" each answer one
-        // command that ran for someone entitled to run it: every one is said.
-        // Refusals and "dm me first" at most once per person per hour.
-        if (what !== "dm-sent" && what !== "done-no-dm") {
-          const k = `${what}:${chatId}:${fromId}`;
-          const last = refusedAt.get(k);
-          if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
-          refusedAt.set(k, now);
-        }
-        // These answer a command the sender was entitled to run, so they go
-        // out in a shushed chat like the owner calling it.
-        const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
-        const reply: SpeakOpts = {
-          ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
-          ...(isMsgId(threadId) ? { threadId } : {}),
-          bornAtMs: now,
-          ownerAddressed: entitled,
-        };
-        const fixedPool: readonly string[] | null =
-          what === "owner-only"
-            ? OWNER_ONLY_LINES
-            : what === "link-here"
-              ? LINK_HERE_LINES
-              : what === "dm-first"
-                ? DM_FIRST_LINES
-                : what === "done-no-dm"
-                  ? DONE_NO_DM_LINES
-                  : null;
-        await enqueue(
-          chatId,
-          async () => {
-            if (fixedPool) {
-              // Its own small fixed pool, gated like every template.
-              const pool = fixedPool;
-              const room = store.room(chatId);
-              const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
-              const start = Math.floor(roll() * pool.length);
-              let text: string | null = null;
-              for (let i = 0; i < pool.length && text === null; i++) {
-                const cand = pool[(start + i) % pool.length] ?? "";
-                const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
-                if (v.ok) text = v.text;
-              }
-              if (!text) return;
-              const sent = await deliver({
-                chatId,
-                intent: { kind: "private-read-refuse" },
-                text,
-                ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
-                ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
-                bornAtMs: now,
-                followUp: false,
-                ownerAddressed: entitled,
-              });
-              if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
-              return;
-            }
-            await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply);
-          },
-          { force: true },
-        );
-      } catch (e) {
-        fail("notice", e);
-      }
-    },
+    commandNotice,
 
     async codeLeaked(chatId: number): Promise<void> {
       try {

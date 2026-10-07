@@ -472,6 +472,23 @@ export interface TgFomoPort {
   forget?(chatId: number): Promise<void>;
 }
 
+/** How a handoff to the owner's DM went. */
+export type TgOwnerOutcome = "sent" | "dm-first" | "busy" | "unavailable";
+
+/**
+ * THE OWNER'S OWN ASKS, ANSWERED IN HER DM (service.ts builds it). A group
+ * never hears one: a trader is private research (rule 3), so the room gets
+ * "sent it to your DMs" once her DM has it. Only the owner's own line, by the
+ * trusted sender id, reaches here, and service.ts checks that id again.
+ */
+export interface TgOwnerPort {
+  /**
+   * Read-only research on one Fomo trader, asked as a fixed question code
+   * writes and answered in her DM. Never changes anything. Never throws.
+   */
+  research(q: { handle: string; fromId: number }): Promise<TgOwnerOutcome>;
+}
+
 /**
  * THE DESK, as tg-groups sees it. index.ts builds it from worker/src/desk/;
  * this directory never imports that side (it fetches, draws and calls Brain).
