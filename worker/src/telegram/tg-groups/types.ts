@@ -458,6 +458,15 @@ export interface TgFomoAnswer {
   trader?: { handle: string; about: TgTraderAbout };
   /** A deflection made before anything was looked up: it spends none of the room's research answers. */
   free?: boolean;
+  /**
+   * How the lookups behind it went, from the research's own envelopes:
+   * "ok" (something real was read, or nothing needed reading), "empty",
+   * "budget-limited" (a research budget refused it), "unavailable" or
+   * "failed". A refusal's text is an ordinary answer otherwise, and a
+   * caller with a fallback (handler.ts: a bare "what's trending" falls back
+   * to the desk) could not tell it apart.
+   */
+  status?: "ok" | "empty" | "budget-limited" | "unavailable" | "failed";
 }
 
 export interface TgFomoPort {

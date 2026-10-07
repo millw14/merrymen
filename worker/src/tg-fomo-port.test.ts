@@ -44,6 +44,7 @@ import { classifyFomoQuestion } from "./fomo/intent";
 import { parseSlash } from "./telegram/interpreter";
 import { isMutationTool } from "./fomo/tools";
 import {
+  answerStatus,
   createTgFomoPort,
   groupWords,
   ownerMoves,
@@ -75,7 +76,7 @@ interface Setup {
   clock: { now: number };
 }
 
-async function setup(): Promise<Setup> {
+async function setup(caps: { groupHourlyCredits?: number } = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await fstore.ensureFomoSchema(db, "sqlite");
@@ -109,7 +110,7 @@ async function setup(): Promise<Setup> {
   const client = createFomoClient({ apiKey: "test_key_not_a_credential_0000", fetchImpl, now: () => clock.now, sleep: async () => {}, random: () => 0 });
   const budget = new FomoBudget({
     port: new MemoryAllowance(),
-    config: { sharedDailyCredits: 10_000_000, tenantHourlyCredits: 1_000_000, tenantDailyCredits: 1_000_000, groupHourlyCredits: 1_000_000 },
+    config: { sharedDailyCredits: 10_000_000, tenantHourlyCredits: 1_000_000, tenantDailyCredits: 1_000_000, groupHourlyCredits: caps.groupHourlyCredits ?? 1_000_000 },
     now: () => clock.now,
   });
   const tenants: string[] = [];
@@ -347,12 +348,40 @@ describe("createTgFomoPort", () => {
 
   it("no broker: a research question hears that research is unavailable here; anything else is left alone", async () => {
     const port = createTgFomoPort(() => null);
-    assert.deepEqual(await port.ask({ text: "what are fomo traders buying?", chatId: GROUP }), { text: TG_FOMO_UNAVAILABLE, deflect: false });
+    // The status says so (handler.ts: a bare "what's trending" falls back to the desk on it).
+    assert.deepEqual(await port.ask({ text: "what are fomo traders buying?", chatId: GROUP }), { text: TG_FOMO_UNAVAILABLE, deflect: false, status: "unavailable" });
     assert.equal(await port.ask({ text: "gm", chatId: GROUP }), null);
     const throwing = createTgFomoPort(() => {
       throw new Error("not wired");
     });
-    assert.deepEqual(await throwing.ask({ text: "what are fomo traders buying?", chatId: GROUP }), { text: TG_FOMO_UNAVAILABLE, deflect: false });
+    assert.deepEqual(await throwing.ask({ text: "what are fomo traders buying?", chatId: GROUP }), { text: TG_FOMO_UNAVAILABLE, deflect: false, status: "unavailable" });
+  });
+
+  it("says how the lookups went: ok for a real read, budget-limited when the room's budget refused it", async () => {
+    const ok = await setup();
+    const port = createTgFomoPort(() => ok.broker, { now: () => ok.clock.now });
+    const read = await port.ask({ text: "what's trending on fomo?", chatId: GROUP });
+    assert.equal(read?.status, "ok");
+    assert.match(read?.text ?? "", /Trending on Fomo/);
+    ok.raw.close();
+    const poor = await setup({ groupHourlyCredits: 100 });
+    const refused = await createTgFomoPort(() => poor.broker, { now: () => poor.clock.now }).ask({ text: "what's trending on fomo?", chatId: GROUP });
+    assert.equal(refused?.status, "budget-limited");
+    assert.equal(refused?.deflect, false);
+    assert.equal(poor.provider.length, 0, "nothing was bought");
+    poor.raw.close();
+  });
+
+  it("answerStatus: something real read is ok; otherwise the most telling refusal", () => {
+    const env = (status: string) => ({ status }) as never;
+    assert.equal(answerStatus([]), "ok", "nothing needed reading (what Fomo is, a clarification)");
+    assert.equal(answerStatus([env("budget-limited"), env("stale")]), "ok");
+    assert.equal(answerStatus([env("empty")]), "empty");
+    assert.equal(answerStatus([env("not-found")]), "ok", "not knowing a coin is an answer");
+    assert.equal(answerStatus([env("failed"), env("budget-limited")]), "budget-limited");
+    assert.equal(answerStatus([env("not-authorized")]), "unavailable");
+    assert.equal(answerStatus([env("unavailable")]), "unavailable");
+    assert.equal(answerStatus([env("failed")]), "failed");
   });
 
   it("refuses an unusable chat id rather than inventing a group", async () => {

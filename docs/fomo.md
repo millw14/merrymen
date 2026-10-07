@@ -768,7 +768,11 @@ Surface limits:
   rows (the DM questions to ask next, and `/buy SYM` only for a Robinhood Chain coin her
   `/buy` resolves) go to her DM, and the room hears only that they went. A line no rule
   reads is routed by the group model to a closed menu (docs/tg-groups.md); a Fomo pick
-  runs as a fixed question through the same planner. The owner's ask about one trader by
+  runs as a fixed question through the same planner. A bare "what's trending" said to it
+  (no platform or venue named) is asked as the trending board, with the desk's market
+  read as the fallback when the answer's `status` (`TgFomoAnswer.status`, from the
+  envelopes) is a budget refusal, unavailable or failed, or the read takes past 12 s
+  (docs/tg-groups.md "Market analysis"). The owner's ask about one trader by
   name (routed, or planned and deflected in the room) is answered read-only in her DM
   (`AnswerFomoInput.readOnly`) as one of three fixed questions (profile, holdings, this
   week's trades), at most six per 10 minutes.

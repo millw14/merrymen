@@ -446,6 +446,15 @@ one-liner from a model that was given no data.
 * the market's own words with a question or request ("how's the market",
   "market update"), or "what's pumping / moving", "any setups"; "what's up /
   hot" only beside a trading word;
+* a bare "what's trending" is the market read only where Fomo research is
+  not wired. Where it is, it means Fomo's trending board (decision D1,
+  2026-10-07: "I said what's trending on fomo"): the research is asked for
+  that board as a fixed request, and the desk's market read answers instead
+  when Fomo cannot (the room's research answers spent, a read past 12 s, a
+  budget refusal, research unavailable or failed, nothing sayable), inside
+  the same 30 s deadline, with nothing of Fomo's said. A venue word keeps it
+  on the desk: "what's trending on robinhood chain", "what's trending in the
+  market";
 * a bare "do a quick analysis" — bound to the coin it replies
   under, else a desk ask up the reply chain, else what this topic last asked
   within 15 minutes, else the market. A specific entry, stop, target or other
@@ -1410,6 +1419,8 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "pine copy unipcs's trades" / "pine mirror @unipcs" / "pine track $pons" / "pine stop tracking $PONS" | Never a tail: the line goes on as before (a coin stop never stops her tails) |
 | The owner: "pine ok stop tailing him" | Names nobody: her DM gets her tails and "Which tail should I stop?"; nothing stops, and the room hears only that it went |
 | "trending" / "$pons" in reply to its own "top traders today, or what's trending?" / "which coin?" | Read in the light of that line: Fomo's trending board / that coin's theses, not a market read or a chart |
+| "shogun what's trending" (Fomo wired) | Fomo's trending board. Fomo busy, late, refused by its budget, unavailable or failed: the desk's Robinhood Chain market read instead, never Fomo's refusal. "what's trending on robinhood chain", or no Fomo here: the desk |
+| "do it" / "ok" / "bet" under its own offer ("i can pull the fomo board for robinhood chain coins if you want") | A yes to that offer: the router picks what the offer named and the research answers it. Never "give me a sec" (the gate refuses fake progress), never a tail |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |

@@ -175,6 +175,22 @@ function coinMoves(c: MoveCoin, buyable: (s: string) => boolean): string[] {
   return out;
 }
 
+/**
+ * How an answer's lookups went (TgFomoAnswer.status): something real read,
+ * or nothing needed reading, is "ok"; otherwise the most telling refusal.
+ * A coin the provider does not know, or a subject to clarify, is an answer.
+ */
+export function answerStatus(envelopes: readonly FomoEnvelope[]): NonNullable<TgFomoAnswer["status"]> {
+  if (envelopes.length === 0) return "ok";
+  const has = (...st: string[]): boolean => envelopes.some((e) => st.includes(e.status));
+  if (has("ok", "partial", "capped", "stale")) return "ok";
+  if (has("empty")) return "empty";
+  if (has("not-found", "needs-clarification")) return "ok";
+  if (has("budget-limited")) return "budget-limited";
+  if (has("unavailable", "not-authorized")) return "unavailable";
+  return "failed";
+}
+
 const firstAnswered = (r: Extract<AnswerFomoResult, { handled: true }>): FomoEnvelope | null =>
   r.envelopes.find((e) => (e.status === "ok" || e.status === "partial" || e.status === "capped" || e.status === "stale") && e.data !== null) ?? null;
 
@@ -366,7 +382,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         const selfNames = selfNamesOf(q.selfNames);
         if (!b) {
           // Honest about it, but only for a question the research would have taken.
-          return classifyFomoQuestion(text, { memory: null, now: t, selfNames }) ? { text: TG_FOMO_UNAVAILABLE, deflect: false } : null;
+          return classifyFomoQuestion(text, { memory: null, now: t, selfNames }) ? { text: TG_FOMO_UNAVAILABLE, deflect: false, status: "unavailable" } : null;
         }
         const conversationKey = tgGroupConversationKey(q.chatId, q.threadId);
         const timeoutMs = typeof q.timeoutMs === "number" && Number.isFinite(q.timeoutMs) ? Math.max(1, Math.min(q.timeoutMs, 30_000)) : 25_000;
@@ -396,7 +412,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           return { text: TG_FOMO_DEFLECTION, deflect: true, ...(trader ? { trader } : {}), ...(free ? { free } : {}) };
         }
         log(`[tg-fomo] group ask answered (${r.toolsCalled.length} lookup(s))${q.request ? " (routed)" : ""}`);
-        const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false };
+        const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false, status: answerStatus(r.envelopes) };
         // Her moves, only when she asked: the trusted sender id (handler.ts), never a chat.
         if (q.owner === true) {
           let moves: TgFomoMoves | null = null;

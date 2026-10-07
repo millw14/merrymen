@@ -1117,3 +1117,106 @@ describe("live 2026-10-07: a yes under its own offer, and no fake progress (d2 r
     assert.ok(logs.includes("[tg-groups] route chat"));
   });
 });
+
+describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the desk as its fallback (D1, 2026-10-07)", () => {
+  const BOARD = "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood, market cap $2.1M";
+  it("'pine what's trending': the port is asked for the trending board, and the desk nothing", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "board" ? { text: BOARD, deflect: false, status: "ok" } : null);
+    make();
+    await said(msg("pine what's trending"));
+    assert.deepEqual(fomo!.asks.map((a) => a.request), [{ kind: "board", board: "trending" }]);
+    assert.deepEqual(desk!.asks, []);
+    assert.deepEqual(tg.texts(CHAT), [BOARD]);
+  });
+
+  it("Fomo refusing on budget, unavailable or failed: the desk's market read answers instead, and nothing of Fomo's is said", async () => {
+    for (const status of ["budget-limited", "unavailable", "failed"] as const) {
+      fomo!.answer = () => ({ text: "Fomo research is rationed right now: this group's hourly research budget is used up.", deflect: false, status });
+      desk!.asks.length = 0;
+      make();
+      const before = tg.texts(CHAT).length;
+      clock += 3 * MIN;
+      await said(msg("pine what's trending?", { fromId: ANN + status.length }));
+      assert.deepEqual(desk!.asks, [{ kind: "market" }], status);
+      const out = tg.texts(CHAT).slice(before);
+      assert.equal(out.length, 1, status);
+      assert.doesNotMatch(out[0]!, /rationed|Fomo/, status);
+      groups.stop();
+      await groups.drain();
+    }
+  });
+
+  it("a port that does not take it, or a late read, gives the desk's market read; the read is boxed so the desk keeps its time", async () => {
+    fomo!.answer = () => null;
+    make();
+    await said(msg("pine what's trending"));
+    assert.deepEqual(desk!.asks, [{ kind: "market" }]);
+    groups.stop();
+    await groups.drain();
+    const boxes: number[] = [];
+    let release: (() => void) | null = null;
+    timer = (ms) => { boxes.push(ms); return new Promise<void>((r) => { release = r; }); };
+    fomo!.answer = () => new Promise(() => {});
+    desk!.asks.length = 0;
+    make();
+    clock += 3 * MIN;
+    groups.onMessage(msg("pine what's trending", { fromId: ANN + 1 }));
+    for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setImmediate(r));
+    assert.ok(release, "the read is time-boxed");
+    assert.ok(boxes[0]! <= 12_000, `boxed at ${boxes[0]} ms`);
+    release!();
+    await groups.drain();
+    assert.deepEqual(desk!.asks, [{ kind: "market" }]);
+    assert.ok(!tg.texts(CHAT).some((t) => /didn't come back in time/.test(t)), "no 'late' line: the desk answered");
+  });
+
+  it("the room's research answers spent: the desk answers, not 'enough lookups'", async () => {
+    fomo!.answer = (q) => (q.request ? { text: BOARD, deflect: false, status: "ok" } : { text: "PONS: 1 buyer", deflect: false, status: "ok" });
+    make();
+    for (let i = 0; i < 6; i++) {
+      clock += 30 * SEC;
+      await said(msg(`pine what are fomo traders buying ${i}?`, { fromId: ANN + i }));
+    }
+    clock += 30 * SEC;
+    await said(msg("pine what's trending", { fromId: ANN + 9 }));
+    assert.deepEqual(desk!.asks, [{ kind: "market" }]);
+    assert.ok(!tg.texts(CHAT).slice(-1)[0]!.includes("enough research lookups"));
+  });
+
+  it("Fomo not wired: the desk, as before; a venue named: the desk, and Fomo is never asked", async () => {
+    fomo = null;
+    make();
+    await said(msg("pine what's trending"));
+    assert.deepEqual(desk!.asks, [{ kind: "market" }]);
+    groups.stop();
+    await groups.drain();
+    fomo = new SpyFomo();
+    desk!.asks.length = 0;
+    make();
+    clock += 3 * MIN;
+    await said(msg("pine what's trending on robinhood chain", { fromId: ANN + 1 }));
+    assert.deepEqual(fomo.asks, []);
+    assert.deepEqual(desk!.asks, [{ kind: "market" }]);
+  });
+
+  it("after a Fomo answer, 'what's trending' stays on Fomo (d1 probe 1d reversed)", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "board" || /trending on fomo/.test(q.text) ? { text: BOARD, deflect: false, status: "ok" } : null);
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    clock += 2 * MIN;
+    await said(msg("pine what's trending"));
+    assert.equal(fomo!.asks.length, 2);
+    assert.deepEqual(fomo!.asks[1]!.request, { kind: "board", board: "trending" });
+    assert.deepEqual(desk!.asks, []);
+    assert.deepEqual(tg.texts(CHAT), [BOARD, BOARD]);
+  });
+
+  it("an explicit 'what's trending on fomo' is still asked in its own words, with no fallback", async () => {
+    fomo!.answer = () => ({ text: "Fomo research is rationed right now.", deflect: false, status: "budget-limited" });
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    assert.equal(fomo!.asks[0]!.request, undefined);
+    assert.deepEqual(desk!.asks, []);
+    assert.deepEqual(tg.texts(CHAT), ["Fomo research is rationed right now."]);
+  });
+});

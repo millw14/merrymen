@@ -22,6 +22,7 @@ import {
   asksAboutCoin,
   asksHowItIs,
   consents,
+  deskAskOf,
   deskNameOk,
   extractCaHits,
   extractCas,
@@ -984,7 +985,7 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
 });
 
 describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
-  const yes = ["what about the sellers?", "and the buyers?", "pine refresh it", "this week?", "any theses?", "what changed since?"];
+  const yes = ["what about the sellers?", "and the buyers?", "pine refresh it", "this week?", "any theses?", "what changed since?", "what about robinhood chain?", "and the top?", "what's trending now?", "the other boards?"];
   const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
   for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
@@ -1051,5 +1052,19 @@ describe("consents and offerShaped: a yes under its own offer (live 2026-10-07)"
     }
     for (const t of ["half the traders in here have fomo rn lol", "top traders today, or what's trending?", "i can't say", "which coin?"]) assert.equal(offerShaped(t), false, t);
     assert.equal(offerShaped(null), false);
+  });
+});
+
+describe("a bare 'what's trending' (decision D1, 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  it("is a market ask marked trending: Fomo's board where Fomo is wired, the desk otherwise", () => {
+    for (const t of ["what's trending", "shogun what's trending", "whats trending today?", "what is trending rn", "@Merrymanme_bot what's trending?"]) {
+      assert.deepEqual(deskAskOf(t, self), { kind: "market", trending: true }, t);
+    }
+  });
+  it("a venue keeps it on the desk; other movers words are the plain market read", () => {
+    for (const t of ["what's trending on robinhood chain", "what's trending in the market", "what's trending on dexscreener", "what's moving", "what's pumping today", "top movers?", "what's trending and what's pumping"]) {
+      assert.deepEqual(deskAskOf(t, self), { kind: "market" }, t);
+    }
   });
 });

@@ -1667,7 +1667,7 @@ export function lineMood(text: string): ReactionMood | null {
  * about anything ("what do you think about sex"), so the handler settles it
  * from the conversation before the desk looks X up (understand.ts).
  */
-export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string; loose?: true } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
+export type DeskIntent = { kind: "market"; trending?: true } | { kind: "coin"; name: string; loose?: true } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
   | { kind: "discussion"; topic: "lore" | "explanation" | "setup" };
 
 /** What the conversation already says, for reading a desk ask. */
@@ -1871,7 +1871,16 @@ const DESK_MARKET_CUE =
   /\b(?:how|what|whats|update|check|analysis|analy[sz]e|look|looking|doing|vibe|vibes|sentiment|overview|outlook|read|state|today|rn|currently|now|summary|recap|breakdown|thoughts|wdyt|condition|conditions)\b|[?？]/u;
 /** What's moving: these words are about markets in any chat. */
 const DESK_MOVERS =
-  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|trending|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+/**
+ * "What's trending": a market ask too, but where Fomo research is wired a
+ * bare one means Fomo's trending board (handler.ts; live 2026-10-07: "I
+ * said what's trending on fomo"), with the desk's market read as its
+ * fallback. A venue word keeps it on the desk: "what's trending on
+ * robinhood chain", "what's trending in the market".
+ */
+const DESK_TRENDING = /\bwhat(?:'?s|s| is| are)\s+trending\b/u;
+const DESK_VENUE = /\b(?:robinhood|rh|chain|chains|onchain|on-chain|gecko|geckoterminal|dex|dexscreener|market|markets)\b/u;
 /** "what's hot / up / cooking": about markets only beside a trading word ("what's up with the dev" is not). */
 const DESK_MOVERS_WEAK = /\bwhat(?:'?s|s| is| are)\s+(?:hot|cooking|popping|running|green|up)\b/u;
 /** Asks for a chart read in words no other topic uses. */
@@ -1984,7 +1993,8 @@ export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: 
   if (DESK_LORE.test(t)) return { kind: "discussion", topic: "lore" };
   if (DESK_EXPLAIN.test(t) || DESK_EXPLAIN_SHORT.test(t)) return { kind: "discussion", topic: "explanation" };
   const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
-  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
+  if (DESK_TRENDING.test(t) && !DESK_VENUE.test(t) && !DESK_MOVERS.test(t)) return { kind: "market", trending: true };
+  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || DESK_TRENDING.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
   if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
   if (DESK_SETUP.test(t) && DESK_REQUEST.test(t)) return { kind: "discussion", topic: "setup" };
   return null;
@@ -2046,11 +2056,12 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
 /**
  * A SHORT FOLLOW-UP TO A RESEARCH ANSWER that names no subject of its own:
  * "what about the sellers?", "and the buyers?", "any theses?", "refresh it",
- * "this week?". Read only while this chat's last answer was research
- * (handler.ts), so on its own it routes nothing.
+ * "this week?", "what about robinhood chain?", "and the top?". Read only
+ * while this chat's last answer was research (handler.ts), so on its own it
+ * routes nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying)\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain)\b/u;
 const FOLLOW_UP_MAX_WORDS = 10;
 
 export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []): boolean {

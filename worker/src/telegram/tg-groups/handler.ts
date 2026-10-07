@@ -591,6 +591,12 @@ interface LineJob {
    * line runs off the chat queue, so act() may wait on the research inline.
    */
   fomo?: boolean;
+  /**
+   * A bare "what's trending" (no platform or venue named) where research is
+   * wired: Fomo's trending board, asked for as that request, with the desk's
+   * market read as the fallback when Fomo cannot answer (act()).
+   */
+  trending?: boolean;
 }
 
 /** One outgoing group line, composed and waiting to be sent. */
@@ -2255,13 +2261,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           ? parseTailRequest(j.line.text, selfNamesOf(selfNow()))
           : null;
       const tailAsk = tailParsed && (tailsHere === "on" || tailParsed.kind !== "start") ? tailParsed : null;
+      // A BARE "WHAT'S TRENDING" (j.trending) is Fomo's trending board, asked
+      // as that request; when Fomo cannot answer it (busy, late, a budget
+      // refusal, unavailable, failed) it goes on to the desk's market read
+      // below, inside the same deadline (decision D1, 2026-10-07).
+      let trendingFellBack = false;
       if (j.fomo === true && !tailAsk && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
-        const r = await fomoAnswer(chatId, j, replyOpts);
+        const r = j.trending === true
+          ? await fomoAnswer(chatId, j, replyOpts, { kind: "board", board: "trending" }, { fallback: true })
+          : await fomoAnswer(chatId, j, replyOpts);
         if (r === "sent") return null;
         if (r !== "not-research") {
           releaseReply(chatId, messageId);
           return r;
         }
+        trendingFellBack = j.trending === true;
       }
       if (tailAsk) {
         // Off the chat queue, like the desk below: the room's line after it
@@ -2295,7 +2309,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // so the router reads it before the desk takes "$pons" for a chart or
       // "trending" for the market, however short it is.
       const routable = researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic";
-      const fomoThread = routable && repliesToOwnFomo(j);
+      // A trending ask Fomo could not answer is the desk's now, never routed back to Fomo.
+      const fomoThread = routable && !trendingFellBack && repliesToOwnFomo(j);
       // Whatever the persona says to a line in a research thread stays in it.
       if (j.fomo === true || fomoThread) replyOpts = { ...replyOpts, researchThread: true };
       if (fomoThread && (await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
@@ -2545,6 +2560,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const FOMO_LATE = "the research didn't come back in time; ask again in a bit.";
   const FOMO_BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
   const FOMO_UNSAYABLE = "i can't put that research into words for a group; ask me in a direct message.";
+  /**
+   * The longest a research read with a fallback may take: what is left of the
+   * reply deadline after it still holds the desk's look and a send.
+   */
+  const FOMO_FALLBACK_MS = 12 * SEC;
 
   /**
    * WHAT OF A RESEARCH ANSWER A ROOM MAY HEAR: each line through the group
@@ -2622,8 +2642,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * the feature switch, the room's approval, the deadline, a shush and
    * whether it is still wanted are all checked again right before the send.
    * "not-research": the research did not take it, and the caller goes on.
+   *
+   * WITH A FALLBACK (a bare "what's trending", whose fallback is the desk's
+   * market read) nothing is said unless the research really answered: the
+   * room's research answers spent, a late read, a budget refusal, research
+   * unavailable or failed, or nothing sayable are all "not-research", and
+   * the read gets at most FOMO_FALLBACK_MS, so the desk still has its time
+   * inside the same deadline.
    */
-  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest): Promise<"sent" | "not-research" | Quiet> => {
+  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest, how: { fallback?: boolean } = {}): Promise<"sent" | "not-research" | Quiet> => {
     const port = fomoNow();
     if (!port) return "not-research";
     const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
@@ -2658,7 +2685,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // or spent, so it takes none of the room's research answers.
     const free = request?.kind === "trader";
     const slot = free ? null : fomoRoom(chatId);
-    if (!free && !slot) return send(FOMO_BUSY);
+    if (!free && !slot) return how.fallback ? "not-research" : send(FOMO_BUSY);
     const refund = (): void => {
       if (slot) fomoRefund(slot);
     };
@@ -2668,6 +2695,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const selfNames = selfNamesOf(selfNow());
     // The owner is the trusted sender id, never a line sent through a chat (j.isOwner excludes `via`).
     const owner = j.isOwner === true;
+    const left = replyByMs - RESEARCH_SEND_MS - clock();
     const r = await readFomo(port, {
       text: j.line.text,
       ...(request ? { request } : {}),
@@ -2675,7 +2703,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       chatId,
       ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
       ...(selfNames.length ? { selfNames } : {}),
-    }, replyByMs - RESEARCH_SEND_MS - clock());
+    }, how.fallback ? Math.min(FOMO_FALLBACK_MS, left) : left);
     if (r === null) {
       refund();
       return "not-research";
@@ -2685,11 +2713,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       return "not-research";
     }
     if (r === "timeout") {
-      log("[tg-groups] research ask timed out");
-      return send(FOMO_LATE);
+      log(`[tg-groups] research ask timed out${how.fallback ? ", the fallback answers" : ""}`);
+      return how.fallback ? "not-research" : send(FOMO_LATE);
     }
     if (typeof r !== "object" || typeof r.text !== "string") {
       refund();
+      return "not-research";
+    }
+    if (how.fallback && !r.deflect && (r.status === "budget-limited" || r.status === "unavailable" || r.status === "failed" || fomoSayable(r.text) === null)) {
+      // A refusal costs the provider nothing: the room's ask is given back.
+      if (r.status === "budget-limited" || r.status === "unavailable") refund();
+      log(`[tg-groups] research ${r.status ?? "unsayable"}, the fallback answers`);
       return "not-research";
     }
     // A deflection is still an answer about research: a follow-up here goes back to it.
@@ -3829,9 +3863,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
         // An addressed research question, or a short follow-up to this
         // topic's last research answer (fomoRecent), while a port is wired.
-        const fomoAsk = addressed !== null && fomoNow() !== null
-          && (fomoAskOf(text, selfNamesOf(me)) !== null || (fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
-        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order, ...(threadId !== undefined ? { threadId } : {}), ...(fomoAsk ? { fomo: true } : {}) };
+        // A bare "what's trending" (no platform or venue named) is Fomo's
+        // trending board there, with the desk as its fallback (act()).
+        const fomoHere = addressed !== null && fomoNow() !== null;
+        const named = fomoHere && fomoAskOf(text, selfNamesOf(me)) !== null;
+        const desked = fomoHere && !named ? deskIntentOf(text, chatId) : null;
+        const trendingAsk = desked?.kind === "market" && desked.trending === true;
+        const fomoAsk = fomoHere && (named || trendingAsk || (fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
+        const job: LineJob = {
+          msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order,
+          ...(threadId !== undefined ? { threadId } : {}),
+          ...(fomoAsk ? { fomo: true } : {}),
+          ...(trendingAsk ? { trending: true } : {}),
+        };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.
         const coin = extractCas(text).length > 0;
