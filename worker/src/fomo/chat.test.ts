@@ -15,7 +15,7 @@ import { FomoBudget, MemoryAllowance } from "./budget";
 import { answerFomoQuestion, type AnswerFomoInput, type FomoComposeInput } from "./chat";
 import type { BrokerCallOptions, FomoBroker } from "./contract";
 import { createFomoClient } from "./provider";
-import { FOMO_ATTRIBUTION, GROUP_DM_DEFLECTION, NOT_PERMISSION_LINE } from "./render";
+import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_CAPABILITIES_OWNER, FOMO_GROUP_OFF, FOMO_GROUP_ON, GROUP_DM_DEFLECTION, NOT_PERMISSION_LINE } from "./render";
 import { createFomoService, type FomoInvokeContext, type FomoServiceExt } from "./service";
 import * as store from "./store";
 import { deserialize } from "./subject-memory";
@@ -318,7 +318,7 @@ describe("answerFomoQuestion", () => {
   it("in a group: a trader question is deflected with no lookup; owner-only intents too", async () => {
     const s = await setup();
     const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
-    for (const t of ["what is @CryptoKaleo holding?", "show me the leading traders this week", "keep an eye on $PONS for me on fomo", "research status on fomo"]) {
+    for (const t of ["what is @CryptoKaleo holding?", "keep an eye on $PONS for me on fomo", "research status on fomo"]) {
       const r = await s.ask(t, g);
       assert.ok(r.handled, t);
       assert.equal(r.text, GROUP_DM_DEFLECTION, t);
@@ -329,6 +329,71 @@ describe("answerFomoQuestion", () => {
     assert.ok(coin.handled);
     assert.ok(!/frankdegods|CryptoKaleo|0x39db|\$PONS|their words/.test(coin.text), coin.text);
     assert.equal(s.brokerCalls[0]!.opts.groupId, "-100123");
+  });
+
+  it("in a group: the public leaderboard is answered, handles and short P&L, never who Merrymen follows", async () => {
+    const s = await setup();
+    s.serve.set("/v2/leaderboard/24h", () => json(fixture("leaderboard-24h")));
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    for (const t of ["who's the top trader on fomo today?", "who's the top on fomo today"]) {
+      s.brokerCalls.length = 0;
+      const r = await s.ask(t, g);
+      assert.ok(r.handled, t);
+      assert.notEqual(r.text, GROUP_DM_DEFLECTION, t);
+      assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", window: "24h" }]], t);
+      assert.match(r.text, /^Top traders on Fomo, last 24h, by money made on closed trades/, t);
+      assert.match(r.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/, t);
+      assert.ok(!/followed|@|0x[0-9a-f]{6}/i.test(r.text), r.text);
+      assert.ok(r.text.endsWith(FOMO_ATTRIBUTION), t);
+    }
+  });
+
+  it("in a group: the leaderboard cut to the traders Merrymen watches is the watch list, so it is deflected with no lookup", async () => {
+    const s = await setup();
+    s.serve.set("/v2/leaderboard/24h", () => json(fixture("leaderboard-24h")));
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    for (const t of ["who are the top traders we watch?", "top traders in our cohort on fomo", "who's the top of our watched traders on fomo today"]) {
+      const r = await s.ask(t, g);
+      assert.ok(r.handled, t);
+      assert.equal(r.text, GROUP_DM_DEFLECTION, t);
+    }
+    assert.equal(s.brokerCalls.length, 0);
+    // The owner still gets it.
+    const owner = await s.ask("who are the top traders we watch?");
+    assert.ok(owner.handled);
+    assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", cohort_only: true }]]);
+  });
+
+  it("what it can do with Fomo is a fixed answer: no lookup, nothing remembered, a room's version gate-safe", async () => {
+    const s = await setup();
+    const owner = await s.ask("what can you do with fomo");
+    assert.ok(owner.handled);
+    assert.equal(owner.text, FOMO_CAPABILITIES_OWNER);
+    assert.equal(owner.plan.intent, "capabilities");
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    const group = await s.ask("what is fomo?", g);
+    assert.ok(group.handled);
+    assert.equal(group.text, FOMO_CAPABILITIES_GROUP);
+    assert.doesNotMatch(group.text, /@|\$[A-Za-z]|fomo\.family/);
+    assert.equal(s.brokerCalls.length, 0);
+    assert.equal(s.provider.length, 0);
+    assert.equal(await s.service.memoryGet(OWNER, "conv-1"), null, "nothing remembered");
+  });
+
+  it("in a group, 'is fomo working?' says whether research is on here, never the owner's own research state", async () => {
+    const s = await setup();
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    const on = await s.ask("is fomo working?", g);
+    assert.ok(on.handled);
+    assert.equal(on.text, FOMO_GROUP_ON);
+    const off = await s.ask("is fomo not set?", { ...g, broker: { ...s.broker, configured: () => false } });
+    assert.ok(off.handled);
+    assert.equal(off.text, FOMO_GROUP_OFF);
+    assert.equal(s.brokerCalls.length, 0, "no research status is read for a room");
+    // The owner still gets the real status.
+    const owner = await s.ask("is fomo working?");
+    assert.ok(owner.handled);
+    assert.deepEqual(s.brokerCalls.map((c) => c.tool), ["fomo_get_research_status"]);
   });
 
   it("a failed lookup is reported as failed, never as a successful one, and leaves memory unresolved", async () => {

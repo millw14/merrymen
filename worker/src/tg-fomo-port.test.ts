@@ -28,7 +28,7 @@ import { createDirectBroker } from "./fomo/broker";
 import { FomoBudget, MemoryAllowance } from "./fomo/budget";
 import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import { createFomoClient } from "./fomo/provider";
-import { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } from "./fomo/render";
+import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_GROUP_ON, NOT_PERMISSION_LINE } from "./fomo/render";
 import { createFomoService } from "./fomo/service";
 import * as fstore from "./fomo/store";
 import type { FomoToolName } from "./fomo/types";
@@ -94,6 +94,11 @@ async function setup(): Promise<Setup> {
     if (p.startsWith("/v2/thesis/token/")) return json(fixture("theses-token"));
     if (/\/stats$/.test(p)) return json(fixture("token-stats"));
     if (/\/balances$/.test(p)) return json(fixture("balances"));
+    if (p.startsWith("/v2/leaderboard/tokens/")) return json(fixture("token-board-trending"));
+    if (p.startsWith("/v2/leaderboard/")) {
+      // The board answers for the window asked, captured a minute ago.
+      return json({ ...fixture("leaderboard-24h"), window: p.split("/").pop(), capturedAt: new Date(clock.now - 60_000).toISOString() });
+    }
     return json({ error: "not_found" }, 404);
   }) as typeof fetch;
   const client = createFomoClient({ apiKey: "test_key_not_a_credential_0000", fetchImpl, now: () => clock.now, sleep: async () => {}, random: () => 0 });
@@ -181,7 +186,7 @@ describe("createTgFomoPort", () => {
       const a = await port.ask({ text: q, chatId: GROUP });
       assert.ok(a && !a.deflect, q);
       const lines = a.text.split("\n").filter(Boolean);
-      const admitted = lines.filter((l) => admitTgLine(l, { agentName: "Pine", kind: "answer", recentOwn: [] }).ok);
+      const admitted = lines.filter((l) => admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
       // The source line and the answer-first line are always sayable; money lines may be dropped by the gate.
       assert.ok(admitted.includes(TG_FOMO_SOURCE), `${q}: attributed in gate-safe words`);
       assert.ok(admitted.length >= 2, `${q}: something to say besides the source (${a.text})`);
@@ -192,12 +197,38 @@ describe("createTgFomoPort", () => {
   it("a trader question is deflected before anything is looked up", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    for (const q of ["what is @CryptoKaleo holding on fomo?", "show me the leading traders this week on fomo"]) {
+    for (const q of ["what is @CryptoKaleo holding on fomo?", "what has @frankdegods bought on fomo this week?", "who's the top of our watched traders on fomo today"]) {
       const a = await port.ask({ text: q, chatId: GROUP });
       assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true }, q);
     }
     assert.equal(s.calls.length, 0);
     assert.equal(s.provider.length, 0);
+  });
+
+  it("the public leaderboard is answered in a group: Fomo handles and short P&L, never who Merrymen follows, every line sayable", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (const q of ["who's the top trader on fomo today?", "who's the top on fomo today", "show me the leading traders this week on fomo"]) {
+      s.clock.now += 30_000;
+      const before = s.calls.length;
+      const a = await port.ask({ text: q, chatId: GROUP });
+      assert.ok(a && !a.deflect, q);
+      assert.equal(s.calls[before]!.tool, "fomo_get_rankings", q);
+      assert.equal(s.calls[before]!.args.board, "traders", q);
+      assert.match(a.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/, q);
+      assert.ok(!/followed|@|0x[0-9a-fA-F]{6}|https?:/.test(a.text), a.text);
+      assert.ok(a.text.endsWith(TG_FOMO_SOURCE), q);
+      for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, `${q}: ${l}`);
+    }
+  });
+
+  it("a board's market caps reach the room in short form instead of being dropped", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "what's trending on fomo?", chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.match(a.text, /1\. PONS on robinhood, market cap \$2\.1M/);
+    for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, l);
   });
 
   it("an owner-state or watch question is deflected, and no watch is ever made from a group", async () => {
@@ -299,6 +330,7 @@ describe("groupWords", () => {
         "Flow (provider-reported). From a copy fetched 2m ago.",
         NOT_PERMISSION_LINE,
         FOMO_ATTRIBUTION,
+        "P&L is the provider-reported realised P&L for the window, not a measure of skill; follower counts are not used.",
       ].join("\n"),
     ).split("\n");
     assert.equal(out[0], "PONS on robinhood in the last 24h: 1 distinct buyer and 0 sellers observed (large positions only; a floor, not a census).");
@@ -306,6 +338,7 @@ describe("groupWords", () => {
     assert.equal(out[2], "Flow (source-reported). From a copy fetched 2 min ago.");
     assert.equal(out[3], TG_FOMO_NOT_PERMISSION);
     assert.equal(out[4], TG_FOMO_SOURCE);
+    assert.equal(out[5], "Figures are money made on closed trades, as the source reports it, and not a measure of skill.");
     for (const l of out) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "answer", recentOwn: [] }).ok, l);
   });
 
@@ -425,5 +458,75 @@ describe("a group research question, end to end", () => {
       assert.equal(s.calls.length, looked + 1, line);
       assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_get_token_theses", line);
     }
+  });
+
+  it("the room hears Fomo's public leaderboard with its figures, and a trending board with its market caps", async () => {
+    const s = await setup();
+    let clock = NOW;
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    store.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+    store.setStatus(GROUP, "approved", 4242);
+    store.update(GROUP, (r) => { r.helloSaid = true; });
+    const tg = new FakeTg();
+    let tstate = { ownerId: 4242 } as unknown as TelegramState;
+    const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const logs: string[] = [];
+    groups = createTgGroups({
+      opts: () => ({ token: "123:TOKEN", fetchFn: tg.fetchFn }),
+      store,
+      getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [4242] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => coins,
+      fomo: () => port,
+      self: () => ({ id: 999, username: "pinebot", name: "Pine" }),
+      privacyOff: () => false,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-1",
+      now: () => clock,
+      rand: () => 0.99,
+      env: {},
+      hosted: true,
+      sleep: async (ms) => { clock += Math.max(0, ms); },
+      timer: () => new Promise(() => {}),
+      log: (l) => logs.push(l),
+    });
+    let id = 100;
+    const msg = (text: string): TgMessage => ({ updateId: id, chatId: GROUP, fromId: 777 + id, fromFirstName: "Ann", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++, dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens" });
+
+    groups.onMessage(msg("pine who's the top on fomo today"));
+    await groups.drain();
+    const board = tg.texts(GROUP);
+    assert.equal(board.length, 1);
+    assert.match(board[0]!, /^Top traders on Fomo, last 24h, by money made on closed trades \(source-reported, not a skill measure\):\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/);
+    assert.ok(board[0]!.endsWith(TG_FOMO_SOURCE));
+    assert.doesNotMatch(board[0]!, /followed|@|0x[0-9a-fA-F]{6}|https?:/);
+    assert.ok(!logs.some((l) => /research lines dropped/.test(l)), "no line of the board was refused");
+
+    clock += 120_000;
+    s.clock.now += 120_000;
+    groups.onMessage(msg("pine what's trending on fomo?"));
+    await groups.drain();
+    const trending = tg.texts(GROUP);
+    assert.equal(trending.length, 2);
+    assert.match(trending[1]!, /\n1\. PONS on robinhood, market cap \$2\.1M\n/);
+    assert.ok(trending[1]!.endsWith(TG_FOMO_SOURCE));
+
+    // The lines the room actually asked on 2026-10-07, answered by code with no lookup.
+    const looked = s.calls.length;
+    clock += 120_000;
+    s.clock.now += 120_000;
+    groups.onMessage(msg("pine what can you do with fomo"));
+    await groups.drain();
+    clock += 120_000;
+    s.clock.now += 120_000;
+    groups.onMessage(msg("pine is fomo working"));
+    await groups.drain();
+    const said = tg.texts(GROUP);
+    assert.equal(said.length, 4);
+    assert.equal(said[2], FOMO_CAPABILITIES_GROUP);
+    assert.equal(said[3], FOMO_GROUP_ON);
+    assert.equal(s.calls.length, looked, "neither cost a lookup");
   });
 });

@@ -120,6 +120,32 @@ describe("desk asks", () => {
   it("never takes its own name for a coin", () => {
     assert.equal(deskAskOf("thoughts on shogun", names), null);
   });
+
+  // Asking its opinion is how people ask about anything: a name there is a
+  // coin only with something saying so, else `loose` for the conversation.
+  const opinion: Array<[string, readonly string[], ReturnType<typeof deskAskOf>]> = [
+    ["So what do you think about sex", [], { kind: "coin", name: "sex", loose: true }],
+    ["shogun thoughts on pizza?", [], { kind: "coin", name: "pizza", loose: true }],
+    ["wdyt about elon", [], { kind: "coin", name: "elon", loose: true }],
+    // The name is not its own cue.
+    ["what do you think about sending it", [], { kind: "coin", name: "sending", loose: true }],
+    // A ticker, a trading word beside it, or a coin the chat knows.
+    ["what do you think about SEX", [], { kind: "coin", name: "sex" }],
+    ["what do you think about sex coin", [], { kind: "coin", name: "sex" }],
+    ["thoughts on cashcat chart?", [], { kind: "coin", name: "cashcat" }],
+    ["thoughts on cashcat?", ["CASHCAT"], { kind: "coin", name: "cashcat" }],
+    ["thoughts on cashcat?", ["$cashcat"], { kind: "coin", name: "cashcat" }],
+    // A firm name outranks an earlier loose one.
+    ["what do you think about life, also cashcat chart?", [], { kind: "coin", name: "cashcat" }],
+    // A weakly-asked name the chat knows is a coin; unknown, it is still nothing.
+    ["how is pepe looking", ["PEPE"], { kind: "coin", name: "pepe" }],
+    ["how is pepe looking", [], null],
+    ["how is grandma looking", ["PEPE"], null],
+  ];
+  for (const [line, knownCoins, want] of opinion) {
+    it(`${JSON.stringify(line)} knowing ${JSON.stringify(knownCoins)} → ${JSON.stringify(want)}`, () =>
+      assert.deepEqual(deskAskOf(line, names, { knownCoins }), want));
+  }
 });
 
 // ─── the gate a read passes ─────────────────────────────────────────────────
@@ -384,7 +410,7 @@ async function said(m: TgMessage): Promise<void> {
 }
 
 /** Answer every group model call with `reply()`. */
-function fakeModel(reply: () => string): string[] {
+function fakeModel(reply: (prompt: string) => string): string[] {
   envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
   envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
   envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
@@ -393,11 +419,17 @@ function fakeModel(reply: () => string): string[] {
   globalThis.fetch = (async (url: string, init: { body: string }) => {
     assert.ok(String(url).startsWith("https://llm.test/"));
     const body = JSON.parse(init.body) as { messages: Array<{ content: string }> };
-    prompts.push(`${body.messages[0]?.content}\n---\n${body.messages[1]?.content}`);
-    return { ok: true, json: async () => ({ choices: [{ message: { content: reply() } }] }) };
+    const prompt = `${body.messages[0]?.content}\n---\n${body.messages[1]?.content}`;
+    prompts.push(prompt);
+    return { ok: true, json: async () => ({ choices: [{ message: { content: reply(prompt) } }] }) };
   }) as never;
   return prompts;
 }
+
+/** The one-word question understand.ts asks about a loose opinion ask. */
+const isSubjectQuestion = (p: string): boolean => /COIN or TOPIC/.test(p);
+/** A model that settles the subject question with `subject` and writes everything else as `rest`. */
+const subjectThen = (subject: "COIN" | "TOPIC", rest: () => string) => (p: string): string => (isSubjectQuestion(p) ? subject : rest());
 
 beforeEach(() => {
   home = mkdtempSync(path.join(tmpdir(), "tg-desk-"));
@@ -471,17 +503,19 @@ describe("the desk lane", () => {
   });
 
   it("uses the group model's read when every figure is grounded", async () => {
-    const prompts = fakeModel(() => JSON.stringify({ read: "cashcat keeps bleeding under the ema20 at 0.159 and rsi 37.5 says sellers still run it. 4720 sellers against 4143 buyers over 24h confirms it.", stance: "cautious", watch: "a reclaim of 0.1605", invalidation: "an hourly close above 0.1643" }));
+    const prompts = fakeModel(subjectThen("COIN", () => JSON.stringify({ read: "cashcat keeps bleeding under the ema20 at 0.159 and rsi 37.5 says sellers still run it. 4720 sellers against 4143 buyers over 24h confirms it.", stance: "cautious", watch: "a reclaim of 0.1605", invalidation: "an hourly close above 0.1643" })));
     make();
     await said(msg("pine thoughts on cashcat?"));
     const caption = String(tg.of("sendPhoto")[0]?.body.caption);
     assert.match(caption, /keeps bleeding under the ema20/);
     assert.match(caption, /Next: A reclaim of 0\.1605/);
     assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: model in /.test(l)));
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0]!, /EVIDENCE BRIEF:\nCOIN: CASHCAT/);
-    assert.match(prompts[0]!, /<question>\npine thoughts on cashcat\?\n<\/question>/);
-    assert.doesNotMatch(prompts[0]!, /424242|717171|SECRET-TOKEN/, "no ids or token reach the model");
+    // "thoughts on cashcat?" in a room that never named it: one word settles coin or topic, then the read.
+    assert.equal(prompts.length, 2);
+    assert.ok(isSubjectQuestion(prompts[0]!));
+    assert.match(prompts[1]!, /EVIDENCE BRIEF:\nCOIN: CASHCAT/);
+    assert.match(prompts[1]!, /<question>\npine thoughts on cashcat\?\n<\/question>/);
+    for (const p of prompts) assert.doesNotMatch(p, /424242|717171|SECRET-TOKEN/, "no ids or token reach the model");
   });
 
   it("sends the floor, never a repaired line, when the model invents a figure", async () => {
@@ -506,7 +540,8 @@ describe("the desk lane", () => {
     await said(msg("pine thoughts on cashcat?"));
     assert.equal(desk.thinks.length, 1);
     assert.match(desk.thinks[0]!.voice, /^You are Pine\./);
-    assert.equal(prompts.length, 0, "the group model is not asked when Brain answered");
+    // Its one call was the coin-or-topic question ("{}" settles nothing, so the desk still reads).
+    assert.equal(prompts.filter((p) => !isSubjectQuestion(p)).length, 0, "the group model is not asked for the read when Brain answered");
     assert.ok(logs.some((l) => /^\[tg-groups\] desk coin read: brain in /.test(l)));
     assert.match(String(tg.of("sendPhoto")[0]?.body.caption), /sellers in control/);
   });
@@ -539,6 +574,44 @@ describe("the desk lane", () => {
     assert.ok(text.length > 0, "it still answers");
     assert.equal(text, deskMissLine("not-found", "coin"));
     assert.ok(logs.includes("[tg-groups] desk coin miss (not-found)"));
+  });
+
+  it("reads 'what do you think about sex' as a topic: the persona answers, and no coin is looked up", async () => {
+    const prompts = fakeModel(subjectThen("TOPIC", () => "lol not touching that one"));
+    make();
+    await said(msg("pine what do you think about sex"));
+    assert.equal(desk!.asks.length, 0, "no coin search for an everyday word");
+    assert.equal(tg.of("sendPhoto").length, 0);
+    const texts = tg.of("sendMessage").map((c) => String(c.body.text));
+    assert.ok(!texts.includes(deskMissLine("ambiguous", "coin")), "never 'more than one coin with that name'");
+    assert.ok(texts.some((t) => /not touching that one/.test(t)), "the persona answers it");
+    assert.ok(isSubjectQuestion(prompts[0]!));
+    assert.match(prompts[0]!, /«sex»/);
+    assert.match(prompts[0]!, /→ \S+: pine what do you think about sex/);
+    assert.ok(logs.includes("[tg-groups] an opinion ask read as a topic, not a coin"));
+    assert.ok(!logs.some((l) => /\bsex\b/.test(l)), "logs carry no text");
+  });
+
+  it("reads an opinion ask as a coin when the conversation says so, and the desk looks it up", async () => {
+    fakeModel(subjectThen("COIN", () => "{}"));
+    make();
+    await said(msg("pine what do you think about cashcat"));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", query: "cashcat" }]);
+  });
+
+  it("asks nothing when the chat already knows the coin: a $tag said here makes 'thoughts on cashcat?' a coin", async () => {
+    const prompts = fakeModel(() => "{}");
+    make();
+    store.addLine(CHAT, { messageId: 7_001, fromId: ANN, name: "Ann", text: "$CASHCAT is moving today", atMs: clock });
+    await said(msg("pine thoughts on cashcat?"));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", query: "cashcat" }]);
+    assert.equal(prompts.filter(isSubjectQuestion).length, 0);
+  });
+
+  it("without a model an opinion ask keeps its old reading: the desk looks the name up", async () => {
+    make();
+    await said(msg("pine what do you think about sex"));
+    assert.deepEqual(desk!.asks, [{ kind: "coin", query: "sex" }]);
   });
 
   it("does not read for a line that asks something private", async () => {

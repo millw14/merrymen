@@ -952,11 +952,24 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     ["what's the thesis on pepe?", "theses"],
     ["are the top traders buying pons?", "trader-flow"],
     ["pine what are whales selling", "trader-flow"],
+    // The feature itself, and the lines a room actually asked on 2026-10-07.
+    ["whats the top trader on fomo today", "platform"],
+    ["who's the top on fomo today", "platform"],
+    ["what can you do with fomo", "platform"],
+    ["pine what do you know about fomo", "platform"],
+    ["is fomo working", "platform"],
+    ["is fomo on?", "platform"],
+    ["is fomo not set?", "platform"],
+    ["what is fomo?", "platform"],
+    ["how does fomo work", "platform"],
+    ["can you use fomo?", "platform"],
+    ["what is fomo saying about pepe?", "platform"],
   ];
   for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
   const no = [
     "i have fomo lol", "pure fomo in on that one", "fomo into it?", "don't fomo", "pine fomo'd so hard", "pine thoughts on pepe?",
     "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
+    "is fomo on robinhood", "i bought it with fomo lol",
   ];
   for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
 });

@@ -111,7 +111,7 @@ disposes. Execution is the existing intent → policy → executor path.
 | Rendering and chat | none shared | `worker/src/fomo/render.ts` (answer-first text, model evidence block, runtime rules) and `chat.ts` (the one pipeline every chat surface calls) |
 | Key custody and processes | vendor keys orchestrator-only (`CHILD_SECRET_STRIP`) | Key held by the orchestrator, the web process and the self-hosted worker. Stripped from hosted children under both names. Hosted children ask the orchestrator over a new IPC channel (`fomo/broker.ts`), and the orchestrator stamps the tenant from which child asked. |
 | App chat | `web/src/app/api/chat/route.ts`, `web/src/lib/agent-chat.ts` | `web/src/lib/fomo-chat.ts` and `fomo-runtime.ts`. Factual questions are answered by code from tool results; analytical ones get a fenced evidence block and runtime rules. |
-| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates only and deflects trader questions to DMs. |
+| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates and Fomo's public leaderboard, and deflects questions about one trader to DMs. |
 | MCP | `web/src/mcp/tools/*` | `web/src/mcp/tools/fomo.ts` |
 | Fleet ingestion | orchestrator passes | `worker/src/orchestrator-fomo.ts`: one singleton-lease leader runs the alerts stream, cohort refresh, research queue, jobs, publication drafts and retention. Every replica writes `fomo.json` for its own children (`fomo/child-file.ts`). |
 | Discovery funnel | `trencher-brain.ts` `TRENCH_VOLUME_MIN = 100_000`, `trencher-discovery.ts` `DISCOVERY_SLICE = 20` | `worker/src/early-candidates.ts`: an early path ahead of both, with every execution guard kept. `worker/src/decision-funnel.ts` instruments every stage. |
@@ -509,9 +509,14 @@ Surface limits:
   per model answer, because the poll loop is serial. The model loop never starts deep
   research; that comes only from the planner on explicit owner wording.
 - **Telegram groups:** 6 research answers per chat and 30 per agent per 10 minutes.
-  Answers are coin-level only, with no money figures, handles, addresses or links (the
-  group gate is unchanged). The attribution reads "via fomoapi" there, because the gate
-  refuses "API" and domains.
+  Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
+  leaderboard (Milla's call, 2026-10-07): its handles and their provider-reported money
+  made on closed trades, never who Merrymen follows. One trader's holdings, trades or
+  profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
+  `research` (every clause but money), with money in short form ($151.4k) and four rows a
+  board. "What can you do with fomo" and "is fomo working?" are answered by code with no
+  lookup: a fixed list, and whether research is on here. The attribution reads "via
+  fomoapi" there, because the gate refuses "API" and domains.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.

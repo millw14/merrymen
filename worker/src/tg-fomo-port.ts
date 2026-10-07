@@ -14,14 +14,17 @@
  * the text. The conversation key is built from that same chat id and topic.
  * The asker's words reach only the deterministic planner, as data.
  *
- * WHAT A GROUP NEVER HEARS. The planner deflects a question about a trader or
- * the owner's own research state before anything is spent; the renderer gives
- * a group coin-level aggregates only (no handles, wallets, addresses, links,
- * cashtags or quoted third-party text) and scrubs the result; and this file
- * rewrites the renderer's fixed wording into words the group gate admits (no
- * money figure for the feed's size floor, no vendor-plumbing words in the
- * source line). The handler still gates every line before it is sent, and
- * drops what the gate refuses rather than bending the gate.
+ * WHAT A GROUP NEVER HEARS. The planner deflects a question about one trader
+ * or the owner's own research state before anything is spent; the renderer
+ * gives a group coin-level aggregates (no wallets, addresses, links, cashtags
+ * or quoted third-party text, money in short form) and scrubs the result. The
+ * one place a group hears traders named is Fomo's public leaderboard: its
+ * handles and their P&L, never as @mentions, never who Merrymen follows
+ * (Milla's call, 2026-10-07). This file rewrites the renderer's fixed wording
+ * into words the group gate admits (no money figure for the feed's size floor,
+ * no "P&L", no vendor-plumbing words in the source line). The handler still
+ * gates every line before it is sent, as a `research` line, and drops what the
+ * gate refuses rather than bending the gate.
  *
  * NO MODEL. A group answer is deterministic: no compose, so no model can be
  * talked into wording a trader's wallet into a room.
@@ -30,7 +33,7 @@
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion } from "./fomo/chat";
 import { classifyFomoQuestion } from "./fomo/intent";
-import { FOMO_ATTRIBUTION, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { TgFomoAnswer, TgFomoPort } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
@@ -55,8 +58,8 @@ export const TG_FOMO_NOT_PERMISSION = "This is research, not a signal to buy or 
  */
 export const TG_FOMO_DEFLECTION = "That one is for a direct message, not the group.";
 
-/** Said for a research question when no research is reachable from this agent. */
-export const TG_FOMO_UNAVAILABLE = "Fomo research isn't available here right now.";
+/** Said for a research question when no research is reachable from this agent: the same words as "is fomo working?" off. */
+export const TG_FOMO_UNAVAILABLE = FOMO_GROUP_OFF;
 
 export interface TgFomoPortOptions {
   /** Milliseconds. */
@@ -84,6 +87,8 @@ export function groupWords(text: string): string {
       if (line.trim() === FOMO_ATTRIBUTION) return TG_FOMO_SOURCE;
       if (line.trim() === NOT_PERMISSION_LINE) return TG_FOMO_NOT_PERMISSION;
       return line
+        // The leaderboard's own caveat, without "P&L", which the gate keeps for the agent's own book.
+        .replace(/\bP&L (?:is the|figures are) provider-reported realised P&L(?: for the window)?, not a measure of skill(?:; follower counts are not used)?\./g, "Figures are money made on closed trades, as the source reports it, and not a measure of skill.")
         .replace(/\(positions above (?:about |roughly |around )?\$[\d,]+(?:\.\d+)?; a floor, not a census\)/g, "(large positions only; a floor, not a census)")
         .replace(/positions above (?:about |roughly |around )?\$[\d,]+(?:\.\d+)?/g, "large positions")
         .replace(/\bprovider-reported\b/g, "source-reported")

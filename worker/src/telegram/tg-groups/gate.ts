@@ -53,8 +53,15 @@ import { fnv1a } from "../../memory/tokens";
  * `buy` must say paper when it was paper; `fixed` (a code template) is not
  * held to the repeat clause, since a template recurs by design and pacing caps
  * how often.
+ *
+ * `research` is a line code wrote from Fomo research (fomo/render.ts through
+ * tg-fomo-port.ts), never a model's: a public leaderboard's realised P&L or a
+ * coin's market cap, beside its source line. Rule 2 keeps the OWNER's money
+ * out of a group and lets a deterministic factual reply carry published
+ * public figures with their source, so the money clause alone is lifted.
+ * Every other clause holds, and like a template it may recur.
  */
-export type TgLineKind = "banter" | "answer" | "roast" | "kind" | "coin" | "buy" | "fade" | "fixed";
+export type TgLineKind = "banter" | "answer" | "roast" | "kind" | "coin" | "buy" | "fade" | "fixed" | "research";
 
 export interface TgGateCtx {
   /** The agent's own name: taken off as a leading label, and may appear in the line. */
@@ -110,11 +117,13 @@ function U(re: RegExp): RegExp {
   return new RegExp(re.source.replace(/\\b/g, WORD_EDGE), re.flags.includes("u") ? re.flags : `${re.flags}u`);
 }
 
-const KINDS: ReadonlySet<string> = new Set(["banter", "answer", "roast", "kind", "coin", "buy", "fade", "fixed"]);
+const KINDS: ReadonlySet<string> = new Set(["banter", "answer", "roast", "kind", "coin", "buy", "fade", "fixed", "research"]);
 /** Lines about a coin: not one digit or number word, in any sense. */
 const FIGURE_KINDS: ReadonlySet<string> = new Set(["coin", "buy", "fade"]);
-/** Lines that may tease: never about looks, bodies or family. */
-const TEASE_KINDS: ReadonlySet<string> = new Set(["roast", "banter", "answer"]);
+/** Lines that may tease: never about looks, bodies or family. Research quotes names it did not choose, so it is held to the same. */
+const TEASE_KINDS: ReadonlySet<string> = new Set(["roast", "banter", "answer", "research"]);
+/** Code-written lines: a template, or research rendered from a lookup. Never the repeat clause; only research may carry a published figure. */
+const CODE_KINDS: ReadonlySet<string> = new Set(["fixed", "research"]);
 
 // ── tidy ────────────────────────────────────────────────────────────────────
 
@@ -490,8 +499,8 @@ const TRADE_CLAIM: readonly RegExp[] = [
   /\b(?:already|still)\s+(?:holding|in (?:on )?it|got (?:some|a bag))\b/,
   /\b(?:i|i'?ve|ive)\s+(?:got|have)\s+(?:a bag|a (?:little|small) bag|a position|a stake)\b/,
 ].map(U);
-/** Line kinds with no trade facts behind them: where TRADE_CLAIM applies. */
-const CLAIM_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast"]);
+/** Line kinds with no trade facts behind them: where TRADE_CLAIM applies. Research reports other people's trades, never its own. */
+const CLAIM_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast", "research"]);
 
 /** Markup or a transcript label: judged after the link clause, so "pump [.] fun" is logged as the link it is. */
 function markupRefusal(r: Readings, names: readonly string[]): boolean {
@@ -1469,7 +1478,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   // NAMES OUT for the figure, money and ops clauses only (see nameStripper).
   const strip = nameStripper(agentName, names);
   const unnamed = strip ? r.low.map((t) => t.replace(strip, " ")) : r.low;
-  if (unnamed.some((t) => MONEY.some((re) => re.test(t)))) return refuse("money");
+  if (kind !== "research" && unnamed.some((t) => MONEY.some((re) => re.test(t)))) return refuse("money");
   if (kind === null || FIGURE_KINDS.has(kind)) {
     if (unnamed.some((t) => NUMERAL.test(t) || QUANTITY.test(t) || CJK_NUMERAL.test(t))) return refuse("figures");
   }
@@ -1498,7 +1507,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   // word for word are a repeat. "lol" after "lol" is one: a person does not
   // send the same "lol" twice running, and pacing decides which of its own
   // lines the caller hands in.
-  if (kind !== "fixed") {
+  if (kind === null || !CODE_KINDS.has(kind)) {
     const mine = canonOf(tidied).toLowerCase();
     for (const prev of strings(ctx?.recentOwn)) {
       const was = canonOf(prev).toLowerCase();
