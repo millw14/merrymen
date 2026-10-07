@@ -34,9 +34,9 @@ import { CHAIN_REFUSAL, knownChainFacts, planAttestedSeed } from "./ledger-resum
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused } from "./chain-gap-booking";
-import type { PgClient } from "./chain-gap-booking-cli";
+import { CliError, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
-import { connectClosedEpoch, main } from "./closed-epoch-capital-cli";
+import { connectClosedEpoch, main, pgWriteDb } from "./closed-epoch-capital-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 const loadPg = async () => createRequire(import.meta.url)("pg") as unknown;
@@ -163,6 +163,13 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
   // THE SERVER HOLDS THE READ-ONLY CONNECTION TO IT, whatever the shell lets through.
   const ro = await connectClosedEpoch(scoped.toString(), true, loadPg); clients.push(ro);
   await assert.rejects(ro.query("INSERT INTO events (agent_id, message) VALUES ('x', 'y')"), /read-only transaction/);
+  // A COMMIT ENDING A TRANSACTION THAT HAD ALREADY FAILED: the server answers it with ROLLBACK's tag, and the write connection says nothing committed.
+  const rw = await connectClosedEpoch(scoped.toString(), false, loadPg); clients.push(rw);
+  await assert.rejects(pgWriteDb(rw).tx(async (w) => {
+    await w.prepare("INSERT INTO events (agent_id, message) VALUES (?, ?)").run("x", "tag-probe");
+    try { await w.prepare("SELECT 1 / 0 AS z").get(); } catch { /* swallowed: the transaction is aborted */ }
+  }), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+  assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM events WHERE message = 'tag-probe'")).rows[0]!.n), 0, "nothing committed");
   // Read after the shell's connection set the driver's BIGINT parser (process-wide), so both sides read numbers alike.
   const flowsBefore = (await setup.query("SELECT * FROM flows ORDER BY id")).rows;
 
@@ -217,7 +224,15 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
     (e: unknown) => e instanceof BookingRefused && e.code === "nothing-to-do");
 
   // REVERT FROM THE RECEIPTS ALONE: the stand-in back under its original id (an explicit id into the identity column), the basis back, the quarantine row kept.
-  assert.equal(await main(["--revert-repair", report.repairId, "--output", path.join(tmp, "revert.json")], env, deps), 0, printed.join("\n"));
+  // Its console breaks (EPIPE) on the REVERTED line, after the commit: the report is kept, and the code says the revert stands.
+  const revertFile = path.join(tmp, "revert.json");
+  const brokenOut = (l: string) => { if (/^REVERTED /.test(l)) throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" }); printed.push(l); };
+  await assert.rejects(main(["--revert-repair", report.repairId, "--output", revertFile], env, { ...deps, out: brokenOut }),
+    (e: unknown) => e instanceof CliError && e.code === "reverted-but-not-printed");
+  assert.equal((JSON.parse(readFileSync(revertFile, "utf8")) as { outcome: string }).outcome, "reverted", "the committed revert's report is kept");
+  printed.length = 0;
+  assert.equal(await main(["--revert-repair", report.repairId, "--output", path.join(tmp, "revert-again.json")], env, deps), 0, printed.join("\n"));
+  assert.ok(printed.some((l) => /^ALREADY REVERTED repair /.test(l)), printed.join("\n"));
   assert.deepEqual((await setup.query("SELECT * FROM flows ORDER BY id")).rows, flowsBefore);
   assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM flows_quarantine")).rows[0]!.n), 1);
   assert.deepEqual((await setup.query("SELECT qty_raw, cost_usdg, updated_at FROM cost_basis")).rows.map((r) => [r.qty_raw, r.cost_usdg, Number(r.updated_at)]), [["5365685809818", "5026", 1789590627]]);

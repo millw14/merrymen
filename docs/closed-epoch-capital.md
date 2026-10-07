@@ -405,14 +405,20 @@ Applying again finds nothing to do (`refused (nothing-to-do)`).
 ### If the apply's outcome is unknown
 
 If the commit was sent and no answer proved it rolled back, the tool says
-`outcome unknown: …` and keeps the report file. Only an error answering
-`COMMIT` with a SQLSTATE in class 40 (a serialization failure or a deadlock)
-or class 23 (a deferred constraint) proves a rollback. Those are rethrown,
-and no report file is left. Any other error is an unknown outcome, because
-each can arrive after the commit was made durable. That includes a dropped
-or reset connection (`EPIPE`, `ECONNRESET`, no code), a terminated backend or
-a server shutting down or starting (`57P01`, `57P02`, `57P03`), a connection
-exception (class 08), and a cancelled or timed-out statement (`57014`). Run:
+`outcome unknown: …` and keeps the report file. Two answers prove a
+rollback, as in the booking tool. One is an error answering `COMMIT` with a
+SQLSTATE in class 40 other than `40003` (a serialization failure or a
+deadlock), or in class 23 (a deferred constraint). That error is rethrown.
+The other is a `COMMIT` the server answered with the `ROLLBACK` tag, because
+the transaction had already failed. That one is
+`commit-answered-rollback`. Either way, no report file is left. Any other
+error is an unknown outcome, because each can arrive after the commit was
+made durable. That includes a dropped or reset connection (`EPIPE`,
+`ECONNRESET`, no code), a terminated backend or a server shutting down or
+starting (`57P01`, `57P02`, `57P03`), and a connection exception (class 08).
+It also includes a cancelled or timed-out statement (`57014`), `40003`
+(statement completion unknown, which a pooler can send), and an answer
+tagged neither `COMMIT` nor `ROLLBACK`. Run:
 
 ```sh
 node --import tsx worker/src/closed-epoch-capital-cli.ts \
@@ -420,6 +426,12 @@ node --import tsx worker/src/closed-epoch-capital-cli.ts \
 ```
 
 It reads the receipts (read only) and says whether the repair committed.
+
+If the apply committed but its report could not be closed, the tool fails
+with `applied-but-report-not-closed`. If the report was written but the
+`APPLIED` line could not be printed, it fails with `applied-but-not-printed`.
+Either way the apply stands, and the report file is kept. The receipts
+command above shows it.
 
 ## 5. Preview the tenant in admission, approve, roll out
 
@@ -463,7 +475,25 @@ In one transaction, the revert:
 - proves the flows, basis and floors are byte for byte as before the apply,
   and marks the receipts `reverted`.
 
-A second revert says `ALREADY REVERTED`. After admission, there is no revert:
+A second revert says `ALREADY REVERTED`.
+
+Once the revert has committed, nothing that fails afterwards turns it into
+a failure that reads as "nothing happened", and the revert report is never
+removed:
+
+- `reverted-but-report-not-written`: the revert committed, but its report
+  could not be written and synced to `--output`. What is there may be
+  partial.
+- `reverted-but-not-printed`: the revert committed and its report was
+  written, but the `REVERTED` line could not be printed.
+
+Either way the receipts read `reverted`. Check them with
+`--revert-repair <repair id> --dry-run`, or run the revert again with a new
+`--output`, which says `ALREADY REVERTED`. A revert whose `COMMIT` answer
+proved nothing fails with `revert-outcome-unknown`, and the same check says
+whether it took.
+
+After admission, there is no revert:
 narrow the rollout and escalate. The last resort is the backup named in the
 receipts.
 

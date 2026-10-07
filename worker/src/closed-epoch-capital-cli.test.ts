@@ -2,8 +2,9 @@
  * THE OPERATOR'S SHELL AROUND THE CLOSED-EPOCH REPAIR: its arguments, its
  * narrower chain transport, its SERIALIZABLE write connection (and what it
  * says when a commit's answer never comes), its source fingerprint, and whole
- * runs — preview, a refused apply, the apply, a second apply, the revert, and
- * an apply whose commit acknowledgement is lost, reverted from its receipts.
+ * runs — preview, a refused apply, the apply, a second apply, the revert, an
+ * apply whose commit acknowledgement is lost, reverted from its receipts, and
+ * a revert that committed before its report or its console line failed.
  *
  * The plan itself is closed-epoch-capital.test.ts's, on 0x0e1ca0's real
  * chain. Here the chain is a small synthetic one of the same shape (an
@@ -15,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -57,7 +58,8 @@ const h32 = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
 const DEPOSIT_TX = h32("the deposit"), SWEEP_TX = h32("the sweep"), SWEEP_OP = h32("the sweep op");
 
 /** Postgres's dialect, answered by sqlite: $n placeholders, the read-only transaction held to query_only, SERIALIZABLE said, the catalogue answered. */
-function pgOverSqlite(raw: DatabaseSync, said: string[], o: { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown } } = {}): PgClient {
+type StandIn = { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown }; commitAnsweredRollback?: boolean; afterCommit?: () => void };
+function pgOverSqlite(raw: DatabaseSync, said: string[], o: StandIn = {}): PgClient {
   let readOnly = false, serializable = false;
   const empty = { rows: [], rowCount: 0 };
   return {
@@ -85,7 +87,10 @@ function pgOverSqlite(raw: DatabaseSync, said: string[], o: { loseCommitAck?: bo
       if (sql === "COMMIT") {
         // A failed COMMIT: the server either made it durable and the answer was lost, or refused it and rolled back.
         if (o.commitFails) { raw.exec(o.commitFails.committed ? "COMMIT" : "ROLLBACK"); serializable = false; throw o.commitFails.error; }
+        // A transaction that had already failed: Postgres ends it, and answers COMMIT with ROLLBACK's tag (node-postgres's `command`).
+        if (o.commitAnsweredRollback) { raw.exec("ROLLBACK"); serializable = false; return { ...empty, command: "ROLLBACK" }; }
         raw.exec("COMMIT"); serializable = false;
+        o.afterCommit?.();
         if (o.loseCommitAck) throw new Error("Connection terminated unexpectedly");
         return empty;
       }
@@ -242,8 +247,8 @@ describe("the write connection", () => {
       async end() {},
     });
     const coded = (code: string, message = "server said no") => Object.assign(new Error(message), { code });
-    // ROLLED BACK, PROVED: transaction rollback (class 40, what a SERIALIZABLE commit refuses with) and a deferred constraint (class 23).
-    for (const code of ["40001", "40P01", "40002", "40003", "40000", "23505", "23503", "23514"]) {
+    // ROLLED BACK, PROVED: transaction rollback (class 40 but 40003, what a SERIALIZABLE commit refuses with) and a deferred constraint (class 23).
+    for (const code of ["40001", "40P01", "40002", "40000", "23505", "23503", "23514"]) {
       const e = coded(code);
       assert.equal(commitRolledBack(e), true, code);
       await assert.rejects(pgWriteDb(failing(e)).tx(async () => 1), (got: unknown) => got === e, code);
@@ -256,12 +261,29 @@ describe("the write connection", () => {
       ["08006 connection failure", coded("08006")], ["08003 connection does not exist", coded("08003")], ["08007 transaction resolution unknown", coded("08007")],
       ["08P01 protocol violation", coded("08P01")], ["57014 statement timeout or cancel", coded("57014", "canceling statement due to statement timeout")],
       ["53100 disk full", coded("53100")], ["XX000 internal error", coded("XX000")], ["not a SQLSTATE: lowercase", coded("40p01")],
+      ["40003 statement completion unknown: class 40, but it says only that it does not know", coded("40003", "statement completion unknown")],
       ["no code: the connection ended", new Error("Connection terminated unexpectedly")], ["no code: a read timeout", new Error("Query read timeout")],
       ["a numeric code", Object.assign(new Error("n"), { code: 40001 })], ["a thrown string", "socket hang up"], ["null", null],
     ];
     for (const [what, e] of unknown) {
       assert.equal(commitRolledBack(e), false, what);
       await assert.rejects(pgWriteDb(failing(e)).tx(async () => 1), (got: unknown) => got instanceof CommitOutcomeUnknown, what);
+    }
+  });
+
+  it("a COMMIT the server answers with ROLLBACK's tag rolled back; COMMIT's own tag, or none said, committed; any other tag is an unknown outcome", async () => {
+    const tagged = (command: unknown): PgClient => ({
+      async query(sql) {
+        if (sql === "COMMIT") return { rows: [], rowCount: null, ...(command === undefined ? {} : { command }) } as Awaited<ReturnType<PgClient["query"]>>;
+        return { rows: [{ iso: "serializable" }], rowCount: 1 };
+      },
+      async end() {},
+    });
+    await assert.rejects(pgWriteDb(tagged("ROLLBACK")).tx(async () => 1), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+    assert.equal(await pgWriteDb(tagged("COMMIT")).tx(async () => 7), 7);
+    assert.equal(await pgWriteDb(tagged(undefined)).tx(async () => 7), 7, "a client that does not say a tag (these stand-ins) is read as COMMIT's answer");
+    for (const odd of [null, "", "commit", "BEGIN", "SELECT"]) {
+      await assert.rejects(pgWriteDb(tagged(odd)).tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown, String(odd));
     }
   });
 
@@ -275,8 +297,10 @@ describe("the write connection", () => {
 
 describe("whole runs through the shell", () => {
   const env = { DATABASE_URL };
-  const run = (raw: DatabaseSync, said: string[], printed: string[], o: { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown }; repairId?: string } = {}) => ({
-    connect: async () => pgOverSqlite(raw, said, o), rpc: chain, nowMs: () => NOW * 1000, out: (l: string) => printed.push(l), source: { "closed-epoch-capital.ts": "fixed" },
+  const run = (raw: DatabaseSync, said: string[], printed: string[], o: StandIn & { repairId?: string; consoleFailsOn?: RegExp } = {}) => ({
+    connect: async () => pgOverSqlite(raw, said, o), rpc: chain, nowMs: () => NOW * 1000, source: { "closed-epoch-capital.ts": "fixed" },
+    // A console that breaks (stdout's reader gone: EPIPE) on the lines it names.
+    out: (l: string) => { if (o.consoleFailsOn?.test(l)) throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" }); printed.push(l); },
     sleep: async () => {}, ...(o.repairId ? { repairId: () => o.repairId! } : {}),
   });
 
@@ -365,9 +389,11 @@ describe("whole runs through the shell", () => {
     assert.match(printed[0]!, /no receipts — nothing was applied under it/);
   });
 
-  it("a COMMIT answered by a broken pipe, a reset or a terminated backend keeps the report and says to read the receipts; one refused with a serialization failure writes nothing and leaves no file", async () => {
+  it("a COMMIT answered by a broken pipe, a reset, a terminated backend or 40003 keeps the report and says to read the receipts; one refused with a serialization failure, or answered with ROLLBACK's tag, writes nothing and leaves no file", async () => {
     for (const [what, error] of [["EPIPE", Object.assign(new Error("write EPIPE"), { code: "EPIPE" })], ["ECONNRESET", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })],
-      ["57P01", Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" })]] as const) {
+      ["57P01", Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" })],
+      // Class 40, but "statement completion unknown" (a pooler can answer so): the commit may have landed.
+      ["40003", Object.assign(new Error("statement completion unknown"), { code: "40003" })]] as const) {
       const raw = await shared();
       const printed: string[] = [];
       const preview = path.join(dir, `commit-${what}-preview.json`);
@@ -393,6 +419,68 @@ describe("whole runs through the shell", () => {
     assert.equal(existsSync(applied), false, "a proved rollback leaves no report to mistake for an apply");
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis").get()!.n, 1);
+
+    // COMMIT answered with ROLLBACK's tag: the server ended a transaction that had already failed. Nothing committed, no report left, no receipts instruction.
+    const tagged = path.join(dir, "commit-rollback-tag-apply.json");
+    printed.length = 0;
+    await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", tagged], env,
+      run(raw, [], printed, { commitAnsweredRollback: true })), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+    assert.equal(existsSync(tagged), false);
+    assert.ok(!printed.some((l) => l.startsWith("outcome unknown:")));
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
+    assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE}`).get()!.n, 0);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis").get()!.n, 1);
+  });
+
+  it("a revert that committed says so whatever happens after: its report not written, or its console line broken; it never removes the report", async () => {
+    const raw = await shared();
+    const printed: string[] = [];
+    const preview = path.join(dir, "after-preview.json");
+    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview], env, run(raw, [], printed)), 0);
+    const digest = (JSON.parse(readFileSync(preview, "utf8")) as { previewDigest: string }).previewDigest;
+    const id = "6c3e4f5a-7d8e-4f91-8b2c-3d4e5f6a7b8c";
+    const applied = path.join(dir, "after-apply.json");
+    // The apply committed and its report is closed, but its APPLIED line could not be printed: the code says it applied.
+    await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-after", "--output", applied], env,
+      run(raw, [], printed, { repairId: id, consoleFailsOn: /^APPLIED / })), (e: unknown) => e instanceof CliError && e.code === "applied-but-not-printed");
+    assert.equal((JSON.parse(readFileSync(applied, "utf8")) as { repairId: string }).repairId, id, "the apply report is kept");
+    assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ? AND state = 'applied'`).get(id)!.n, 4);
+
+    // THE REVERT COMMITS, THEN ITS REPORT CANNOT BE WRITTEN (its directory went away under it): the receipts read 'reverted', and the run says so.
+    const gone = path.join(dir, "after-gone");
+    mkdirSync(gone);
+    const lost = path.join(gone, "revert.json");
+    printed.length = 0;
+    await assert.rejects(main(["--revert", applied, "--output", lost], env, run(raw, [], printed, { afterCommit: () => rmSync(gone, { recursive: true, force: true }) })),
+      (e: unknown) => e instanceof CliError && e.code === "reverted-but-report-not-written");
+    assert.ok(printed.some((l) => /^REVERTED repair .* the revert committed and its receipts read 'reverted', but its report could not be written/.test(l)
+      && l.includes(`--revert-repair ${id} --dry-run`)), printed.join("\n"));
+    assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ? AND state = 'reverted'`).get(id)!.n, 4);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis WHERE symbol = 'COIN'").get()!.n, 1);
+    assert.match(failureLine(new CliError("reverted-but-report-not-written")), /^reverted-but-report-not-written\./, "stderr says it reverted even when stdout says nothing");
+
+    // ITS CONSOLE LINE BREAKS (EPIPE) after the report is written: the report stays, and the code says the revert stands.
+    const kept = path.join(dir, "after-revert-kept.json");
+    await assert.rejects(main(["--revert-repair", id, "--output", kept], env, run(raw, [], printed, { consoleFailsOn: /REVERTED repair/ })),
+      (e: unknown) => e instanceof CliError && e.code === "reverted-but-not-printed");
+    assert.deepEqual((({ repairId, outcome }) => ({ repairId, outcome }))(JSON.parse(readFileSync(kept, "utf8")) as { repairId: string; outcome: string }),
+      { repairId: id, outcome: "already-reverted" }, "the report is written, and kept");
+    // A real revert's console breaking the same way: set the repair back up and take it back again.
+    const raw2 = await shared();
+    const preview2 = path.join(dir, "after-preview-2.json");
+    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview2], env, run(raw2, [], printed)), 0);
+    const digest2 = (JSON.parse(readFileSync(preview2, "utf8")) as { previewDigest: string }).previewDigest;
+    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest2, "--backup-ref", "bk-after", "--output", path.join(dir, "after-apply-2.json")], env,
+      run(raw2, [], printed, { repairId: id })), 0);
+    const reverted = path.join(dir, "after-revert-2.json");
+    await assert.rejects(main(["--revert-repair", id, "--output", reverted], env, run(raw2, [], printed, { consoleFailsOn: /^REVERTED repair/ })),
+      (e: unknown) => e instanceof CliError && e.code === "reverted-but-not-printed");
+    assert.equal((JSON.parse(readFileSync(reverted, "utf8")) as { outcome: string }).outcome, "reverted", "the report of the revert that committed is kept");
+    assert.equal(raw2.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ? AND state = 'reverted'`).get(id)!.n, 4);
+    printed.length = 0;
+    assert.equal(await main(["--revert-repair", id, "--output", path.join(dir, "after-revert-3.json")], env, run(raw2, [], printed)), 0);
+    assert.ok(printed.some((l) => /^ALREADY REVERTED repair /.test(l)), "a rerun says ALREADY REVERTED");
   });
 
   it("a blocked preview exits 2; without DATABASE_URL nothing runs; a failure line never carries a URL", async () => {

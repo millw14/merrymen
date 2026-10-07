@@ -39,7 +39,7 @@ import { BALANCE_OF_CALL, BLOCK_QUANTITY, BookingRefused, canonical } from "./ch
 import { CliError, createBookingRpc, createReportFile, DEFAULT_RPC, failureLine, finishReportFile, pgClientDb, targetDigest, type PgClient } from "./chain-gap-booking-cli";
 import {
   applyClosedEpoch, closedEpochLines, parseRepairReport, planClosedEpoch, readClosedEpochChain, readClosedEpochSnapshot, readRepairReceipts, REPAIR_ID, revertClosedEpoch,
-  type ClosedEpochPlan, type RepairApplyReport,
+  type ClosedEpochPlan, type RepairApplyReport, type RepairRevertReport,
 } from "./closed-epoch-capital";
 
 export const HELP = `Closed-epoch capital repair — PREVIEW FIRST. docs/closed-epoch-capital.md is the runbook.
@@ -129,27 +129,34 @@ export function createClosedEpochRpc(url: string, fetchImpl: typeof fetch = fetc
 
 // ── Postgres ─────────────────────────────────────────────────────────────────
 
-/** The commit was sent and no answer came: whether it took is for the receipts to say. */
+/** The commit was sent and no answer proved it rolled back: whether it took is for the receipts to say. */
 export class CommitOutcomeUnknown extends Error {
   constructor() { super("commit-outcome-unknown"); this.name = "CommitOutcomeUnknown"; }
 }
 
 /**
- * THE ERRORS AN ANSWER TO COMMIT CAN CARRY THAT PROVE NOTHING WAS COMMITTED.
- * Class 40 (transaction rollback: a serialization failure, a deadlock — what
- * a SERIALIZABLE commit refuses with) and class 23 (a deferred constraint,
- * checked at commit): the server raised them while committing, before the
- * commit record, and rolled the transaction back. Nothing else proves that.
- * A connection that dropped or was reset (EPIPE, ECONNRESET, no code at
- * all), a backend terminated or a server shutting down or starting (57P01,
- * 57P02, 57P03), a connection exception (class 08, 08007 "transaction
- * resolution unknown" among them), a cancelled or timed-out statement
- * (57014), a resource or internal error: each can arrive after the commit
- * was made durable, and is CommitOutcomeUnknown.
+ * THE ERRORS AN ANSWER TO COMMIT CAN CARRY THAT PROVE NOTHING WAS COMMITTED
+ * (chain-gap-booking-cli's rule, the same pattern): a SQLSTATE the server
+ * raised while committing, before the commit record, having rolled the
+ * transaction back.
+ *
+ *   class 40, transaction rollback: 40001 serialization_failure (what a
+ *   SERIALIZABLE commit refuses with), 40P01 deadlock_detected, 40002
+ *   transaction_integrity_constraint_violation. NOT 40003
+ *   statement_completion_unknown, which says just that it does not know.
+ *   class 23, integrity constraint violation: a deferred constraint, checked
+ *   at commit.
+ *
+ * Nothing else proves it. A connection that dropped or was reset (EPIPE,
+ * ECONNRESET, no code at all), a backend terminated or a server shutting
+ * down or starting (57P01, 57P02, 57P03), a connection exception (class 08,
+ * 08007 "transaction resolution unknown" among them), a cancelled or
+ * timed-out statement (57014), a resource or internal error, and 40003: each
+ * can arrive after the commit was made durable, and is CommitOutcomeUnknown.
  */
 export function commitRolledBack(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code;
-  return typeof code === "string" && /^(40|23)[0-9A-Z]{3}$/.test(code);
+  const code = (e as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && /^(?:40(?!003)[0-9A-Z]{3}|23[0-9A-Z]{3})$/.test(code);
 }
 
 /**
@@ -158,10 +165,14 @@ export function commitRolledBack(e: unknown): boolean {
  * BEGIN ISOLATION LEVEL SERIALIZABLE, proved by asking the server — so the
  * compare-and-set's reads and the writes are one unit (a 40001 rolls back
  * and writes nothing). A COMMIT refused with a SQLSTATE that proves a
- * rollback (commitRolledBack) is rethrown as itself; any other failure of
- * the COMMIT — a dropped connection, a terminated backend, a timeout — is
- * CommitOutcomeUnknown, which the shell never reads as "nothing happened":
- * it keeps the apply report and says to read the receipts.
+ * rollback (commitRolledBack) is rethrown as itself. A COMMIT the server
+ * answered with ROLLBACK's command tag (it ended a transaction that had
+ * already failed: nothing committed) is "commit-answered-rollback", as in
+ * chain-gap-booking-cli. Any other failure of the COMMIT — a dropped
+ * connection, a terminated backend, a timeout, 40003, or an answer whose tag
+ * is neither COMMIT nor ROLLBACK — is CommitOutcomeUnknown, which the shell
+ * never reads as "nothing happened": it keeps the apply report and says to
+ * read the receipts.
  */
 export function pgWriteDb(client: PgClient): Db {
   const coerce = (ps: unknown[]) => ps.map((p) => (typeof p === "bigint" ? p.toString() : p === undefined ? null : p));
@@ -190,12 +201,16 @@ export function pgWriteDb(client: PgClient): Db {
         try { await client.query("ROLLBACK"); } catch { /* the original error wins */ }
         throw e;
       }
+      let answer: Awaited<ReturnType<PgClient["query"]>> & { command?: unknown };
       try {
-        await client.query("COMMIT");
+        answer = await client.query("COMMIT");
       } catch (e) {
         if (commitRolledBack(e)) throw e;
         throw new CommitOutcomeUnknown();
       }
+      // node-postgres's `command` is the tag the server answered with. A stand-in that does not say one is read as COMMIT's own answer.
+      if (answer.command === "ROLLBACK") throw new CliError("commit-answered-rollback");
+      if (answer.command !== undefined && answer.command !== "COMMIT") throw new CommitOutcomeUnknown();
       return out;
     },
   });
@@ -277,6 +292,8 @@ async function computePlan(tenant: string, epoch: number, env: NodeJS.ProcessEnv
 
 export async function main(args: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env, deps: ClosedEpochCliDeps = {}): Promise<number> {
   const out = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  /** A line said once the outcome is settled (committed, or unknown): a console that fails cannot replace the error that says which. */
+  const say = (line: string) => { try { out(line); } catch { /* the CliError thrown next still says it */ } };
   const options = parseClosedEpochArgs(args);
   if ("help" in options) { out(HELP); return 0; }
   if (!env.DATABASE_URL) throw new CliError("database-url-required");
@@ -314,21 +331,32 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     }
     const repairId = report?.repairId ?? (options as { repairId: string }).repairId;
     const fd = createReportFile(options.output);
-    const client = await full.connect(env.DATABASE_URL, false);
+    let r: RepairRevertReport;
     try {
-      const r = await revertClosedEpoch(pgWriteDb(client), { repairId, ...(report ? { report } : {}), nowMs: full.nowMs(), dialect: "postgres" });
-      finishReportFile(fd, options.output, r);
-      out(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} repair ${r.repairId} — tenant ${r.tenant}: ${r.actions.length} action(s); report ${options.output}`);
-      return 0;
+      const client = await full.connect(env.DATABASE_URL, false);
+      try {
+        r = await revertClosedEpoch(pgWriteDb(client), { repairId, ...(report ? { report } : {}), nowMs: full.nowMs(), dialect: "postgres" });
+      } finally { await client.end().catch(() => {}); }
     } catch (e) {
+      // Nothing committed (the COMMIT was never sent, or its answer proved a rollback), or no answer came: this run's report describes nothing either way.
       try { closeSync(fd); } catch { /* already closed */ }
       rmSync(options.output, { force: true });
       if (e instanceof CommitOutcomeUnknown) {
-        out(`outcome unknown: the revert's commit was sent and no answer came back — run --revert-repair ${repairId} --dry-run to see whether its receipts read 'reverted'`);
+        say(`outcome unknown: the revert's commit was sent and no answer proved it rolled back — run --revert-repair ${repairId} --dry-run to see whether its receipts read 'reverted'`);
         throw new CliError("revert-outcome-unknown");
       }
       throw e;
-    } finally { await client.end().catch(() => {}); }
+    }
+    // COMMITTED: the receipts read 'reverted' whatever happens to this run's report or its console line now, so nothing below removes the report.
+    const verb = r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED";
+    try { finishReportFile(fd, options.output, r); } catch {
+      say(`${verb} repair ${r.repairId} — tenant ${r.tenant}: the revert committed and its receipts read 'reverted', but its report could not be written to ${options.output} ` +
+        `(what is there may be partial). See the receipts with --revert-repair ${r.repairId} --dry-run`);
+      throw new CliError("reverted-but-report-not-written");
+    }
+    try { out(`${verb} repair ${r.repairId} — tenant ${r.tenant}: ${r.actions.length} action(s); report ${options.output}`); }
+    catch { throw new CliError("reverted-but-not-printed"); }
+    return 0;
   }
 
   if (options.mode === "preview") {
@@ -344,7 +372,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
   const fd = createReportFile(options.output);
   const repairId = full.repairId?.() ?? randomUUID();
   out(`repair ${repairId} — if this process dies, see what was applied with --revert-repair ${repairId} --dry-run`);
-  let phase: "before" | "committed" = "before";
+  let phase: "before" | "committed" | "reported" = "before";
   try {
     const plan = await computePlan(options.tenant, options.epoch, env, full);
     for (const line of closedEpochLines(plan)) out(line);
@@ -357,6 +385,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       });
       phase = "committed";
       closeOpenReport(fd, options.output);
+      phase = "reported";
       out(`APPLIED repair ${report.repairId} — ${report.actions.length} action(s) for tenant ${report.tenant}, epoch ${report.epoch}, under backup ${report.backupRef}; ` +
         `the apply report (what --revert takes) is ${options.output}. Preview the tenant again with MERRYMEN_RESUME_PREVIEW before approving it.`);
       return 0;
@@ -364,11 +393,13 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
   } catch (e) {
     if (e instanceof CommitOutcomeUnknown) {
       try { closeSync(fd); } catch { /* already closed */ }
-      out(`outcome unknown: the commit was sent and no answer came back. ${options.output} holds the report written before the commit — ` +
+      say(`outcome unknown: the commit was sent and no answer proved it rolled back. ${options.output} holds the report written before the commit — ` +
         `run --revert-repair ${repairId} --dry-run to see whether its receipts exist`);
       throw new CliError("apply-outcome-unknown");
     }
+    // Committed: the report written before the commit stays, and the code says the apply stands.
     if (phase === "committed") throw new CliError("applied-but-report-not-closed");
+    if (phase === "reported") throw new CliError("applied-but-not-printed");
     try { closeSync(fd); } catch { /* already closed */ }
     rmSync(options.output, { force: true });
     throw e;
