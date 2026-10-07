@@ -142,6 +142,9 @@ describe("FomoChild tail accessors", () => {
       [{ live: { rail: "refuse" } }, { mode: "off", blockers: ["rail-refused"] }],
       [{ live: { rail: "live", liveFollowAllowed: false } }, { mode: "live", blockers: ["live-not-allowed"] }],
       [{ live: { rail: "live", liveFollowAllowed: true } }, { mode: "live", blockers: [] }],
+      // Every follow entry is a vault-custody entry (verifyAskAllowed, grantCoversToken): no vault, no entry.
+      [{ live: { vault: false } }, { mode: "paper", blockers: ["no-vault"] }],
+      [{ live: { vault: false, paused: true } }, { mode: "paper", blockers: ["paused", "no-vault"] }],
       [{ off: true }, { mode: "off", blockers: ["follow-off"] }],
     ];
     for (const [o, want] of cases) {

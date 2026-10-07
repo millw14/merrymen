@@ -1741,8 +1741,8 @@ export interface FomoChildDeps {
 
 export type FomoChildReadReason = ChildFomoReadReason | "tenant-unknown" | "not-read";
 
-/** Why a follow nomination could not act right now: a closed list, each one of followAllowed's, the rail's, pause's or scout's own conditions. */
-export type FollowBlocker = "follow-off" | "not-fast-trencher" | "scout-off" | "paused" | "live-not-allowed" | "rail-refused";
+/** Why a follow nomination could not act right now: a closed list, each one of followAllowed's, the rail's, pause's, scout's or the vault's own conditions. */
+export type FollowBlocker = "follow-off" | "not-fast-trencher" | "scout-off" | "paused" | "live-not-allowed" | "rail-refused" | "no-vault";
 
 /**
  * WHAT FOLLOWING WOULD DO WITH ONE MORE BUY, RIGHT NOW: read-only, from the
@@ -2911,8 +2911,10 @@ export class FomoChild {
   /**
    * WHAT FOLLOWING WOULD DO WITH A BUY NOW (FollowReadiness). Read-only: the
    * same conditions followAllowed, effectiveAccess, the rail verdict,
-   * liveFollowAllowed, the pause and the scout budget apply at the entry,
-   * read at the moment of asking. Nothing here decides or changes anything.
+   * liveFollowAllowed, the pause, the scout budget and the vault (every
+   * follow entry is a vault-custody entry: verifyAskAllowed and
+   * grantCoversToken both require it) apply at the entry, read at the moment
+   * of asking. Nothing here decides or changes anything.
    */
   followReadiness(): FollowReadiness {
     if (this.isOff()) return { mode: "off", blockers: ["follow-off"] };
@@ -2928,6 +2930,7 @@ export class FomoChild {
     if (live.settings.strategy !== "trencher" || live.settings.trencherFast !== true) blockers.push("not-fast-trencher");
     if (live.settings.scoutEnabled !== true || !(typeof live.settings.scoutBudgetUsdg === "number" && live.settings.scoutBudgetUsdg > 0)) blockers.push("scout-off");
     if (live.paused === true) blockers.push("paused");
+    if (live.vault !== true) blockers.push("no-vault");
     if (live.rail !== "paper" && live.rail !== "live") blockers.push("rail-refused");
     else if (live.rail === "live" && live.liveFollowAllowed !== true) blockers.push("live-not-allowed");
     const mode = blockers.includes("follow-off") ? "off" : live.rail === "paper" ? "paper" : live.rail === "live" ? "live" : "off";

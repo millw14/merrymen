@@ -473,6 +473,7 @@ export const BLOCKER_WORDS: Readonly<Record<FollowBlocker, string>> = {
   paused: "entries are paused",
   "live-not-allowed": "live follow isn't enabled for this agent",
   "rail-refused": "trading is held right now",
+  "no-vault": "your agent has no Trencher vault, which every follow entry needs",
 };
 
 /** Reason codes an owner is told about, in words: a closed map; other codes are not said. */

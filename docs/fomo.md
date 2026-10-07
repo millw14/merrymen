@@ -487,8 +487,9 @@ the confirm card and the Stop and +1h button handling are a separate change.
   `fomo_get_token_theses` read of that trader on that coin, 1,250 credits), Merrymen's
   read from its assessment, what following would do (tell only; one signal into the
   normal review; or, when it cannot act, the reason in plain words: following off, not
-  the fast Trencher strategy, scout budget off, entries paused, live follow not enabled,
-  trading held), the coverage floor and when the tail ends. Their words are sanitised,
+  the fast Trencher strategy, scout budget off, entries paused, no Trencher vault (every
+  follow entry is a vault-custody entry), live follow not enabled, trading held), the
+  coverage floor and when the tail ends. Their words are sanitised,
   clipped to 280 characters, links removed and addresses only in short form. An end
   summary counts what the feed showed. Each notice is recorded durably before it is
   sent, so a crash can lose a notice but never repeat one; a log that cannot be read

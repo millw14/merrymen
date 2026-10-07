@@ -194,6 +194,7 @@ describe("what a notice says", () => {
     assert.match(say(true, { mode: "live", blockers: [] }), /one signal into my normal review/);
     assert.match(say(true, { mode: "paper", blockers: ["paused", "scout-off"] }), /following can't act right now \(entries are paused; your scout budget is off or 0\), so this only informs you\./);
     assert.match(say(true, { mode: "off", blockers: ["follow-off"] }), /\(following is off\)/);
+    assert.match(say(true, { mode: "paper", blockers: ["no-vault"] }), /following can't act right now \(your agent has no Trencher vault, which every follow entry needs\), so this only informs you\./);
     assert.match(say(true, null), /can't tell right now whether following can act/);
     for (const b of Object.keys(BLOCKER_WORDS)) assert.ok(BLOCKER_WORDS[b as keyof typeof BLOCKER_WORDS].length > 5);
   });
