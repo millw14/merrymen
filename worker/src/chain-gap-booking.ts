@@ -1099,8 +1099,9 @@ export interface HoldingVerdict {
  *                          is not a rebuilt one: registration removed the
  *                          lost book's cursors (ledger-import.ts
  *                          registerAttestedGapSource), and only a cursor
- *                          past the book's ids reads as one. A row under
- *                          another spelling would survive it.
+ *                          the book no longer matches (its row gone, or
+ *                          another there) reads as one. A row under another
+ *                          spelling would survive it.
  *
  * Until that pass the row stays what it is today, and nothing that acts on
  * a basis can reach it: both seeds filter by held symbols, and every page

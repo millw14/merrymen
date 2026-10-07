@@ -76,7 +76,9 @@ The `unresolved` class covers these cases:
   minute before it. Admission never found it missing from the book a worker
   would run on. Let admission refuse the tenant again, then preview again.
 - A trade whose token the cost-basis snapshot does not hold as the chain does
-  (next section).
+  (next section). A basis left over a token nobody holds is passed over only
+  where it provably cannot reach the new book
+  ([A basis left over a token nobody holds](#a-basis-left-over-a-token-nobody-holds)).
 - A receipt or a balance could not be read.
 
 **One unresolved fact blocks the whole tenant.** Escalate it to Milla and
@@ -121,7 +123,10 @@ booked trade in that token together:
   block, no live `cost_basis` row under any name the token has gone by
   still covers a quantity, and the fill walk (below) does not go below
   zero. Nothing is seeded for the token, so what it cost cannot reach the
-  new book.
+  new book. A `cost_basis` row that does still cover a quantity here is
+  passed over only when it provably cannot reach the new book either. It is
+  then named in the plan, and never booked or changed (see
+  [A basis left over a token nobody holds](#a-basis-left-over-a-token-nobody-holds)).
 - **The snapshot holds the token.** All of the following are true:
   - its `positions` row's raw balance **and** its live `cost_basis` row's
     quantity each equal the book's balance at the pinned block;
@@ -223,6 +228,122 @@ buy after the sell, so it goes below zero and refuses the sell
 (`fills-exceed-chain`). The quantity checks do not depend on the order, and
 a held token books only when the replayed cost equals the basis's.
 
+### A basis left over a token nobody holds
+
+Shogun's TSLA preview of 2026-10-07 is the case this covers:
+
+- Postgres records a buy with no fill (trade #94285, side and quantity null).
+- The chain holds a buy Postgres never recorded (the operation this tool
+  books).
+- Postgres records one sell of both lots together (trade #101069,
+  46757368332762768 base units, which is the two buys exactly).
+- The live `cost_basis` row still covers the other buy's lot,
+  23370235163310797 at 8.332500 USDG. It was written after that sell, yet
+  the sell is not in it. [The cost replay](#the-cost-replay) lists ways a
+  basis can lack a recorded fill.
+- The chain holds none of TSLA at any address of the book, and `positions`
+  holds none.
+
+The row's cost cannot be replayed, because the recorded buy (#94285)
+carries no fill. The tool cannot say what the row should be, and it does not
+change it.
+
+The trade is booked past such a row only when the row **provably cannot
+reach the attested book**. Every one of the following must hold
+(`staleBasisVerdict`):
+
+1. **The chain holds none.** Every address of the book was read at the
+   pinned block (the account, the Trencher vault and, when the grant names
+   one, the class vault), and each read 0.
+2. **The seed cannot carry it.** Admission seeds the new book's basis only
+   for a symbol that `positions` shows held: `raw_balance <> '0'`, in
+   `planAttestedSeed` and in the ordinary seed, `seedBasisForChild`. So no
+   `positions` row may be held for the token, or under any name the token has
+   gone by. That includes another token under the same symbol, because the
+   seed would hand it this cost. In addition, the tool calls admission's own
+   `planAttestedSeed` on the snapshot's read, and that seed must carry none of
+   those names.
+3. **It does not outlive admission.** Every stale row is spelled exactly as
+   the grant spells the account (see below for why).
+4. **The fill walk does not go below zero** (`fills-exceed-chain`).
+
+If any of these fails, the trade is refused as `basis-without-position`, and
+the sentence says which one failed. A `positions` row that holds `0` under
+the name is not held, as the seed reads it. It does not refuse, but the note
+says the dashboard shows the cost beside it (below).
+
+When the trade books, the plan says so. `evidence.holding.staleBasis` holds:
+
+- the rows, each with its own spelling of the account;
+- the names checked;
+- what the seed carries under them (nothing);
+- every `positions` row under them;
+- the spelling the first mirror pass deletes by;
+- a note, also printed at the console, saying the rows are not booked or
+  changed, and why they cannot reach the new book.
+
+All of it is in the `previewDigest`. The apply compares the holdings again
+inside its transaction: every basis row with its spelling, quantity, cost
+and time, every position, and the seed's answer. A row that changed,
+re-spelled or went away refuses the apply (`cas`, `(holdings)` or
+`(spellings)`), and so does a new position under the name. Through the CLI,
+the recomputed preview's digest is no longer the confirmed one, so the apply
+refuses earlier (`confirm-mismatch`).
+
+**What happens to the row after admission.** The tool never writes
+`cost_basis`, so the row stays exactly as it is until the following steps
+change it:
+
+1. **Approval and registration.** Admission's evidence digests every
+   `cost_basis` row of the account, so the approval binds the row as it is.
+   Registration (`registerAttestedGapSource`) copies it to
+   `ledger_snapshot_archive` and leaves it in place. It also archives and
+   **deletes the tenant's `mirror_state` cursors**.
+2. **The first spawn.** Both seeds read it (`seedBasisForChild`, and
+   `completeAttestedSeed` from `planAttestedSeed`). Both skip it, because no
+   `positions` row under its symbol is held (condition 2). The new book holds
+   no basis for the token.
+3. **The first mirror pass after the new book's worker arms.** The worker
+   writes its `agents` row under `grant.smartAccount`, exactly as the grant
+   spells it (`store.ts ensureAgent`). The mirror's snapshot step then runs
+   `DELETE FROM cost_basis WHERE agent_id = <that spelling>` and inserts only
+   the book's own rows (`ledger-mirror.ts`).
+   - The delete is skipped only when the pass reads the child as rebuilt. That
+     happens only when a `mirror_state` cursor no longer matches the book
+     (its row is gone, or another row is there), and registration removed
+     every cursor. So this pass is not a rebuilt one, and the row is
+     deleted. That is why condition 3 requires the grant's spelling: the
+     delete matches case and all, and a row under another spelling would
+     survive it.
+   - A pass that runs before the worker has written its `agents` row does not
+     touch the snapshot tables.
+   - `ledger-mirror.test.ts` holds each of these cases.
+
+Until that pass, and indefinitely if the tenant is never run, the row is
+read exactly as it is today:
+
+- **Seeds.** Filtered by held symbols, so it is not seeded (above).
+- **Dashboard, public agent and token pages, portfolio** (`desk-positions.ts`,
+  `read-agent.ts`, `read-token.ts`, `portfolio.ts`). Each joins basis to a
+  `positions` row with the same agent and symbol. So the cost shows only
+  beside a `positions` row under its name that holds `0`, and the note names
+  any such row.
+- **The owner's report export** (`reports.ts portfolioTable`). For the book
+  the agent is not running (its newest equity mark is of the other mode), the
+  export lists that book's `cost_basis` rows with no position, as "not
+  valued". So a live stale row appears there only while the newest equity
+  mark is paper.
+- **Realised and unrealised P&L, hold time.** Realised P&L comes from
+  `trades.realized_pnl_usdg`. Unrealised P&L comes from the positions joins
+  above. Hold time (`hold-time.ts`) reads `trades`. None of them reads this
+  row on its own. `basis-usdg.ts` only converts units.
+- **The automatic paper lane.** It counts a live basis with a quantity as an
+  open live row, and holds such a tenant for an operator (`openRows`). That
+  makes the lane more cautious, not less.
+- **The class P&L repair.** Its delete of a stale shared basis
+  (`MERRYMEN_REPAIR_CLASS_PNL`, `orchestrator.ts`) covers class positions
+  only, so it does not apply here.
+
 ### What a refusal says
 
 In any other case the trade and its USDG leg are `unresolved`, and so is the
@@ -240,7 +361,7 @@ which names the check that refused:
 | `basis-differs` | The basis quantity is not the chain's: for example, a fill the lost book never booked to it |
 | `position-stale`, `basis-stale` | A row was written before the last booked trade in the token |
 | `held-unrecorded` | The chain holds the token and the snapshot holds none |
-| `basis-without-position` | The chain and the positions hold none, but a basis still covers a quantity. Admission seeds a basis only for a symbol that `positions` shows held (`planAttestedSeed`), so a reviewed decision can weigh that this basis would not reach the new book |
+| `basis-without-position` | The chain and the positions hold none, but a basis still covers a quantity, and it cannot be shown that the basis will not reach the new book. One of these failed: every book address read 0; no `positions` row held (`raw_balance <> '0'`) for the token or under any name it has gone by, another token's included; `planAttestedSeed` carries none of those names; the rows spelled as the grant spells the account. Where all of them hold, the trade books and the basis is named instead ([A basis left over a token nobody holds](#a-basis-left-over-a-token-nobody-holds)) |
 | `fills-exceed-chain` | The fill walk went below zero |
 | `fills-unproven` | The token is held, and its fills could not be walked back to where its basis opened |
 | `basis-cost-differs` | The basis's cost is not what the walked fills give: for example, a buy and a sell the lost book never booked to it |
@@ -273,12 +394,16 @@ Two consequences need a reviewer's eye:
   must equal what the replayed fills give: a cost that cannot be replayed
   refuses. Still check the positions, basis and floors on the dashboard at
   `exits-only`, before `trade`.
+- **A basis left over a token nobody holds stays in Postgres** until the
+  first mirror pass after the new book's worker arms deletes it (see
+  [A basis left over a token nobody holds](#a-basis-left-over-a-token-nobody-holds)).
+  Its note in the preview says why it cannot reach the new book.
 
 ## The three tenants held on 2026-10-06
 
 | Tenant | Line | Shape | Expected |
 |---|---|---|---|
-| `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row, if Postgres's position and cost basis in the token hold what the chain does. Otherwise `unresolved`: escalate for a basis decision |
+| `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher buy of TSLA whose row is missing (op `0x73578ec3…` in tx `0xdb99af5b…`, block 63838886), and its USDG leg out of the account (log 13). Postgres records the other TSLA buy with no fill (#94285) and one sell of both lots (#101069). A live TSLA basis still covers the other lot, and nothing holds TSLA on chain or in `positions` | The 2026-10-07 preview, run by a build without the stale-basis check: `BLOCKED` on `basis-without-position` (its fill walk `unproven`, not `exceeds`). Expected with this build: `session-trade` + `operation-leg` → one `trades` row, with the TSLA basis named in `evidence.holding.staleBasis` and its note, neither booked nor changed. This holds if the basis row is spelled exactly as the grant spells the account and no `positions` row under TSLA is held. Otherwise `basis-without-position` names which check failed: escalate for a basis decision |
 | `0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5` | 1 op, 0 transfers | An operation with no USDG leg | `session-no-movement` books the reconciler's row. A root-key `owner-operation` blocks: escalate |
 | `0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d` | 0 ops, 1 transfer | A lone USDG transfer | `deposit` → one `flows` row. Outbound, or from a hosted account or vault, blocks |
 
@@ -575,18 +700,25 @@ it was applied.
 
 ```sh
 node --import tsx --test worker/src/chain-gap-booking.test.ts worker/src/chain-gap-booking-cli.test.ts \
-  worker/src/ledger-resume.test.ts worker/src/orchestrator-ledger-resume.integration.test.ts
+  worker/src/ledger-resume.test.ts worker/src/orchestrator-ledger-resume.integration.test.ts \
+  worker/src/ledger-mirror.test.ts
 ```
 
 These tests are in the ordinary `npm test` glob. The fixtures are Shogun's
 own public receipts (the Trencher sell and the enable-mode buy of
 2026-10-04, and a root-key operation of 2026-10-03), plus synthetic
-operations and deposits.
+operations and deposits. Shogun's TSLA shape from the 2026-10-07 preview is
+a fixture too. Its amounts, trade ids, block and times are the preview's
+own, and the parts of each hash the preview did not print are synthetic.
+`ledger-mirror.test.ts` holds what the first mirror pass after an attested
+registration does to a basis the new book never had.
 
-The opt-in real-Postgres test needs two things: a disposable **loopback**
+The opt-in real-Postgres tests also cover the stale-basis case. There,
+admission's own seed runs inside the read-only snapshot, and the apply
+compares the named basis again. They need two things: a disposable **loopback**
 server in `MERRYMEN_TEST_PG_URL`, and the `pg` driver resolvable. `NODE_PATH`
-works, because the test loads the driver with `require`. The test creates its
-own database and drops it, and never reads `DATABASE_URL`:
+works, because the tests load the driver with `require`. Each test creates
+its own database and drops it, and never reads `DATABASE_URL`:
 
 ```sh
 MERRYMEN_TEST_PG_URL=postgres://postgres@127.0.0.1:<port>/postgres \
