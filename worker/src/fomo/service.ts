@@ -193,6 +193,13 @@ export interface FomoServiceDeps {
    * refused rather than stored to do nothing. runtime.ts: true on Postgres.
    */
   liveFeed?: boolean;
+  /**
+   * The operator's tail switch (contract.ts fomoTailsOn, MERRYMEN_FOMO_TAILS).
+   * False: fomo_tail_trader refuses (`tails-disabled`) and stores nothing,
+   * because nothing would route, be carried or be told; stopping a tail still
+   * works, and research status says the stored ones are on hold. Absent: on.
+   */
+  tailsEnabled?: boolean;
 }
 
 /**
@@ -893,6 +900,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   const log = deps.log ?? (() => {});
   const selfNames = deps.selfNames ?? [];
   const liveFeed = deps.liveFeed === true;
+  const tailsEnabled = deps.tailsEnabled !== false;
   const msOr = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
   const readDeadline = { invoke: msOr(deps.readDeadlineMs?.invoke, READ_DEADLINE_MS.invoke), background: msOr(deps.readDeadlineMs?.background, READ_DEADLINE_MS.background) };
   const invokeDeadlineMs = (budgetMs: number | undefined): number => invokeDeadlineOf(readDeadline.invoke, budgetMs);
@@ -2913,6 +2921,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       funnel: funnel.map((f) => ({ stage: f.stage, detail: f.detail ? sanitizeText(f.detail, 200) : null, atMs: f.atMs })),
       watches: watches.map((w) => ({ tokenKey: w.tokenKey, symbol: w.label.symbol ? sanitizeText(w.label.symbol, 24) : null, expiresAtMs: w.expiresAtMs })),
       tails: tails.map((t) => ({ userId: t.userId, handle: tailHandle(t.handle), expiresAtMs: t.expiresAtMs, consider: t.consider })),
+      ...(tails.length > 0 && !tailsEnabled ? { tailsOff: true } : {}),
       jobs: jobs.map((j) => ({ id: j.id, kind: j.kind, status: jobStatusAt(j.status, j.deadlineMs, ic.now), deadlineMs: j.deadlineMs, createdAtMs: j.createdAtMs, delivered: j.deliveredAtMs !== null })),
       request: request ? { requestId: request.requestId, tool: request.tool, status: request.status, createdAtMs: request.createdAtMs } : null,
       cohort: cohort.size !== null && cohort.version !== null ? { size: cohort.size, version: cohort.version, target: cohort.target, shortfallReason: cohort.shortfallReason } : null,
@@ -2995,18 +3004,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   async function toolTail(ic: Inv, args: ToolArgs["fomo_tail_trader"]): Promise<FomoEnvelope<TailData>> {
     const a = new Answer();
     a.requested = { trader: args.trader.kind, hours: args.hours, consider: args.consider };
+    // Refused before anything is read or stored: a tail nothing would tell is not a tail.
+    const refuse = (reason: string, message: string): FomoEnvelope<TailData> =>
+      finish<TailData>(ic, a, { cls: "profile", mode: "cached-ok", subject: null, data: null, rows: 0, essential: [], status: "unavailable", reason, message });
+    if (!tailsEnabled) {
+      return refuse("tails-disabled", "Tailing is switched off on this service right now, so I haven't started one; I can still answer Fomo questions.");
+    }
     if (!liveFeed) {
-      return finish<TailData>(ic, a, {
-        cls: "profile",
-        mode: "cached-ok",
-        subject: null,
-        data: null,
-        rows: 0,
-        essential: [],
-        status: "failed",
-        reason: "tail-needs-live-feed",
-        message: "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.",
-      });
+      return refuse("tail-needs-live-feed", "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.");
     }
     const r = await resolveTrader(ic.cc, a, args.trader, "cached-ok");
     if (!r.ok) return fromFail(ic, a, "profile", "cached-ok", r);

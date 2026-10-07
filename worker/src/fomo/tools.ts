@@ -526,6 +526,8 @@ export interface ResearchStatusData {
   watches: { tokenKey: string; symbol: string | null; expiresAtMs: number }[];
   /** The owner's active tails (fomo_tail_trader). Absent from older producers. */
   tails?: { userId: string; handle: string | null; expiresAtMs: number; consider: boolean }[];
+  /** True when tails are stored but the operator switched tails off (MERRYMEN_FOMO_TAILS=0): nothing is told about them. */
+  tailsOff?: boolean;
   /**
    * The owner's recent research jobs. `status` is the stored status, except
    * that a job still queued or running past its deadline reads "expired":

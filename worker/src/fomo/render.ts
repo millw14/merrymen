@@ -641,7 +641,11 @@ function bodyStatus(env: FomoEnvelope<ResearchStatusData>, audience: Audience, n
   out.push(`Data status: ${sanitizeText(d.health.detail, 200)}`);
   out.push(`Watching ${plural(d.watches.length, "coin", "coins")}${d.watches.length ? `: ${d.watches.slice(0, 5).map((w) => w.symbol ?? "a coin").join(", ")}` : ""}.`);
   const tails = Array.isArray(d.tails) ? d.tails : [];
-  if (tails.length) out.push(`Tailing on Fomo: ${tails.slice(0, 3).map((t) => `${who(t.handle, t.userId)} until ${utcClock(t.expiresAtMs)}${t.consider ? " (their buys go to my normal review)" : ""}`).join(", ")}.`);
+  if (tails.length && d.tailsOff === true) {
+    out.push(`Tailing on Fomo is switched off right now, so I'm not telling you about ${tails.slice(0, 3).map((t) => who(t.handle, t.userId)).join(", ")}; each tail still ends on time.`);
+  } else if (tails.length) {
+    out.push(`Tailing on Fomo: ${tails.slice(0, 3).map((t) => `${who(t.handle, t.userId)} until ${utcClock(t.expiresAtMs)}${t.consider ? " (their buys go to my normal review)" : ""}`).join(", ")}.`);
+  }
   if (d.cohort) out.push(`Followed cohort: ${d.cohort.size} of ${d.cohort.target} traders (version ${d.cohort.version})${d.cohort.shortfallReason ? `; short because ${sanitizeText(d.cohort.shortfallReason, 120)}` : ""}.`);
   const running = d.jobs.filter((j) => jobPending(j, now));
   if (running.length) out.push(`${plural(running.length, "deeper research job is", "deeper research jobs are")} in progress.`);

@@ -441,7 +441,10 @@ the confirm card and the Stop and +1h button handling are a separate change.
   any audience but the owner. Resolving the trader is free when Merrymen already knows
   the handle, otherwise one 250-credit search, never the 2,500-credit profile route.
   Stopping makes no provider call. An install without the hosted live feed
-  (self-hosted, `liveFeed` false) refuses with `tail-needs-live-feed`.
+  (self-hosted, `liveFeed` false) refuses with `tail-needs-live-feed`, and with the
+  switch off (`MERRYMEN_FOMO_TAILS=0`) the service refuses with `tails-disabled`; both
+  are status `unavailable`, store nothing, read nothing, and are said to the owner as
+  they are (never "Tailing X until…", never as a failed read).
 - **Permissions.** Data access is all a tail needs to be stored and to notify: the
   alerts come from events the shared feed has already stored, at no cost. Routing
   research for the trader's coins, and putting their buys in front of the follow review,
@@ -499,8 +502,10 @@ the confirm card and the Stop and +1h button handling are a separate change.
   trigger.
 - **Privacy.** A tail is the owner's private state: research status lists it for the
   owner, and a group is never told about one.
-- **Kill switch.** `MERRYMEN_FOMO_TAILS=0` (orchestrator and children) stops tail
-  routing, the tails block and the notices. Stored tails stay stored and expire.
+- **Kill switch.** `MERRYMEN_FOMO_TAILS=0` (orchestrator and children, read by one
+  function, `contract.ts fomoTailsOn`) stops tail routing, the tails block and the
+  notices, and the service refuses new tails (`tails-disabled`). Stored tails stay stored
+  and expire; the owner can still stop them, and research status says they are on hold.
 
 ## Publication
 
@@ -581,7 +586,7 @@ answers use one call on the existing house model.
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
 | `MERRYMEN_TG_GROUPS_ROUTER=0` | worker children | turns off the group router (docs/tg-groups.md "What a line wants"): lines no rule knew go to the persona |
-| `MERRYMEN_FOMO_TAILS=0` | orchestrator and worker children | turns tails off: no tail routing, no tails block in child files, no tail notices. Stored tails stay stored and expire on their own |
+| `MERRYMEN_FOMO_TAILS=0` | orchestrator and worker children | turns tails off: `fomo_tail_trader` refuses (`tails-disabled`), no tail routing, no tails block in child files, no tail notices. Stored tails stay stored, can be stopped, and expire on their own |
 | `MERRYMEN_TENANT` | set by the orchestrator in each child | not a secret; the child checks `fomo.json` belongs to it. IPC never trusts it: the orchestrator stamps the tenant itself. |
 
 Surface limits:

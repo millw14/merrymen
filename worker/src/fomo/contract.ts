@@ -40,6 +40,16 @@ import type {
 /** The tenant id a self-hosted install uses everywhere a tenant is required. */
 export const SELF_HOSTED_TENANT = "self";
 
+/**
+ * THE OPERATOR'S TAIL SWITCH (docs/fomo.md "Tailing a trader"), read the same
+ * way by every process: `MERRYMEN_FOMO_TAILS=0` turns tails off. The
+ * orchestrator's pass (routing, the tails block), its service (fomo_tail_trader
+ * refuses to store one) and each child's notices all ask this one function.
+ */
+export function fomoTailsOn(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env.MERRYMEN_FOMO_TAILS !== "0";
+}
+
 /** Per-tenant Fomo permissions, resolved from TRUSTED settings by the hosting process. */
 export interface FomoAccess {
   dataAccess: boolean;

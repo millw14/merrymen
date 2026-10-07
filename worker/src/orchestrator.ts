@@ -214,7 +214,7 @@ import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
 import type { FomoBudget } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
-import type { FomoAccess, FomoService } from "./fomo/contract";
+import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
 import type { FomoClient } from "./fomo/provider";
 import { SYSTEM_TIMERS } from "./fomo/stream";
 import {
@@ -10970,7 +10970,8 @@ async function fomoRuntimeNow(boot: FomoBoot): Promise<FomoRuntimeHandle | null>
   try {
     const db = await makePgDb(process.env.DATABASE_URL!);
     const { createFomoRuntime } = await import("./fomo/runtime");
-    const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits });
+    // The operator's tail switch: off, the service refuses to store a tail as well as the pass carrying none.
+    const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits, tailsEnabled: fomoTailsOn() });
     fomoRuntime = {
       db,
       service: rt.service,
@@ -11085,9 +11086,10 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       budget: fomoBudgetPort(rt.backgroundBudget, FOMO_FLEET_PAYER),
       log,
       // The operator's tail switch (docs/fomo.md "Tailing a trader"): =0 stops
-      // tail routing and the tails block in child files. The children read the
-      // same variable for their notices.
-      knobs: { tailsEnabled: process.env.MERRYMEN_FOMO_TAILS !== "0" },
+      // tail routing and the tails block in child files; the service (above)
+      // refuses new tails, and the children read the same switch for their
+      // notices (contract.ts fomoTailsOn).
+      knobs: { tailsEnabled: fomoTailsOn() },
     });
     // THE SAME ROSTER AS THE ROOM'S AND X'S: only who this replica speaks for.
     const roster: RosterMember[] = [];

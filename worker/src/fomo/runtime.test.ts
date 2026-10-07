@@ -51,6 +51,9 @@ describe("createFomoRuntime", () => {
     const self = await createFomoRuntime({ db: d, dialect: "sqlite", apiKey: null, access, now: () => NOW });
     const refused = await self.service.invoke(ctx("t1"), "fomo_tail_trader", { trader: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b" });
     assert.equal(refused.reason, "tail-needs-live-feed");
+    const switchedOff = await createFomoRuntime({ db: d, dialect: "sqlite", apiKey: null, access, now: () => NOW, liveFeed: true, tailsEnabled: false });
+    assert.equal((await switchedOff.service.invoke(ctx("t0"), "fomo_tail_trader", { trader: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b" })).reason, "tails-disabled");
+    assert.equal((await store.activeTails(d, "0xowner", NOW)).length, 0);
     const hosted = await createFomoRuntime({ db: d, dialect: "sqlite", apiKey: null, access, now: () => NOW, liveFeed: true });
     const stored = await hosted.service.invoke(ctx("t2"), "fomo_tail_trader", { trader: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b" });
     assert.equal(stored.status, "ok", "a user id needs no provider: stored even without a key");

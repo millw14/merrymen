@@ -153,7 +153,7 @@ function routeOf(p: string): string {
 }
 
 async function harness(
-  opts: { key?: boolean; access?: FomoAccess; budget?: FomoBudgetConfig; background?: FomoBudgetConfig; db?: Db; raw?: DatabaseSync; latencyMs?: number; liveFeed?: boolean } = {},
+  opts: { key?: boolean; access?: FomoAccess; budget?: FomoBudgetConfig; background?: FomoBudgetConfig; db?: Db; raw?: DatabaseSync; latencyMs?: number; liveFeed?: boolean; tailsEnabled?: boolean } = {},
 ): Promise<Harness> {
   const raw = opts.raw ?? new DatabaseSync(":memory:");
   const db = opts.db ?? wrapSqlite(raw);
@@ -186,6 +186,7 @@ async function harness(
     now: () => clock.now,
     log: (l) => logs.push(l),
     ...(opts.liveFeed !== undefined ? { liveFeed: opts.liveFeed } : {}),
+    ...(opts.tailsEnabled !== undefined ? { tailsEnabled: opts.tailsEnabled } : {}),
   });
   let n = 0;
   const ctx = (over: Partial<FomoInvokeContext> = {}): FomoInvokeContext => ({
@@ -702,13 +703,38 @@ describe("tails", () => {
   it("needs the hosted live feed: refused on an install without it, with nothing read or stored", async () => {
     const h = await harness();
     const env = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3 });
-    assert.equal(env.status, "failed");
+    assert.equal(env.status, "unavailable");
     assert.equal(env.reason, "tail-needs-live-feed");
     assert.match(env.message ?? "", /hosted service/);
     assert.equal(h.calls.length, 0);
     assert.equal(rows(h.raw, "fomo_tails"), 0);
     const off = await harness({ liveFeed: false });
     assert.equal((await off.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo" })).reason, "tail-needs-live-feed");
+    assert.equal(
+      renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }).split("\n")[0],
+      "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.",
+      "said as it is, never as a failed read",
+    );
+  });
+
+  it("MERRYMEN_FOMO_TAILS=0: refused as switched off, nothing read or stored; stopping still works and status says they are on hold", async () => {
+    const on = await harness({ liveFeed: true });
+    await on.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
+    const h = await harness({ liveFeed: true, tailsEnabled: false, db: on.db, raw: on.raw });
+    const env = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3, consider: true });
+    assert.equal(env.status, "unavailable");
+    assert.equal(env.reason, "tails-disabled");
+    assert.equal(env.data, null);
+    assert.equal(h.calls.length, 0, "not even the handle is resolved");
+    assert.deepEqual((await store.activeTails(h.db, OWNER, NOW)).map((t) => t.userId), [KALEO], "nothing new stored");
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW });
+    assert.match(text, /^Tailing is switched off on this service right now, so I haven't started one/);
+    assert.doesNotMatch(text, /^Tailing CryptoKaleo|until \d\d:\d\d UTC|couldn't read/, "never 'Tailing X until', never a failed read");
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    assert.equal(status.data?.tailsOff, true);
+    assert.match(renderEnvelope(status, { audience: "owner", maxChars: 4000, now: NOW }), /Tailing on Fomo is switched off right now, so I'm not telling you about trader 1f08e6ab…; each tail still ends on time\./);
+    assert.equal((await h.invoke<UntailData>("fomo_untail_trader", { all: true })).data?.removed, 1, "a stored tail can always be stopped");
+    assert.equal((await on.invoke<ResearchStatusData>("fomo_get_research_status", {})).data?.tailsOff, undefined);
   });
 
   it("a known handle is free; an unknown one costs exactly one search, never the profile route", async () => {

@@ -175,7 +175,7 @@ import {
   type FomoLiveFacts,
 } from "./fomo-child";
 import { processBrokerPort } from "./fomo/broker";
-import type { FomoBroker } from "./fomo/contract";
+import { fomoTailsOn, type FomoBroker } from "./fomo/contract";
 import { createTailNotifier } from "./fomo/tail-notifier";
 import { createTgFomoPort } from "./tg-fomo-port";
 import { shadowBrainEnabledFor } from "./brain-enabled";
@@ -907,7 +907,7 @@ async function main() {
     readiness: () => fomoChild.followReadiness(),
     assessmentOf: (tokenKey) => fomoChild.latestAssessment(tokenKey),
     holds: (tokenKey) => fomoChild.holds(tokenKey),
-    enabled: () => !fomoOff && process.env.MERRYMEN_FOMO_TAILS !== "0",
+    enabled: () => !fomoOff && fomoTailsOn(),
     log: (line) => console.log(line),
   });
   /** What the follow path reads at the moment of asking: settings, pause, rail, grant limits, this tick's prices. */
