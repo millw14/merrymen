@@ -21,16 +21,17 @@ import { createRequire } from "node:module";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { CASH } from "../../packages/core/src/index";
-import { translateQuery, translateSchema, type Db } from "./db";
+import { translateQuery, translateSchema, wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
-import { MIRROR_STATE_DDL } from "./ledger-mirror";
+import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { CHAIN_REFUSAL, knownChainFacts } from "./ledger-resume";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
-import { BOOKINGS_TABLE, BookingRefused, readBookingSnapshot } from "./chain-gap-booking";
-import { connectBooking, main, type PgClient } from "./chain-gap-booking-cli";
+import { applyBooking, BOOKINGS_TABLE, BookingRefused, readBookingSnapshot, type BookingPlan, type StaleBasis } from "./chain-gap-booking";
+import { connectBooking, main, pgClientDb, type PgClient } from "./chain-gap-booking-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 const loadPg = async () => createRequire(import.meta.url)("pg") as unknown;
@@ -59,7 +60,8 @@ const TXS = [
   ] },
   { tx: DEP_TX, block: BLOCK + 50n, logs: [[USDG, [TR, topic(`0x${"d0".repeat(20)}`), topic(ACCOUNT)], `0x${word(20_000_000n)}`, "0x0"]] },
 ] as Array<{ tx: string; block: bigint; logs: Array<[string, string[], string, string]> }>;
-const rpc: RpcCall = async (method, params) => {
+/** A chain of these transactions, on which the account holds `held` of COIN (and no other address any). */
+const chainOf = (txs: typeof TXS, held: bigint): RpcCall => async (method, params) => {
   const blockOf = (b: bigint) => ({ number: `0x${b.toString(16)}`, hash: h32(`block ${b}`), timestamp: `0x${(AT + Math.floor(Number(b - BLOCK) / 10)).toString(16)}` });
   const logsOf = (t: (typeof TXS)[number]) => t.logs.map(([address, topics, data, logIndex]) => ({ address, topics, data, logIndex, blockNumber: `0x${t.block.toString(16)}`, transactionHash: t.tx }));
   if (method === "eth_chainId") return "0x1237";
@@ -67,20 +69,21 @@ const rpc: RpcCall = async (method, params) => {
   if (method === "eth_getBlockByNumber") return blockOf(BigInt(params[0] as string));
   if (method === "eth_getLogs") {
     const f = params[0] as { address: string; fromBlock: string; toBlock: string; topics: Array<string | null> };
-    return TXS.filter((t) => t.block >= BigInt(f.fromBlock) && t.block <= BigInt(f.toBlock)).flatMap(logsOf)
+    return txs.filter((t) => t.block >= BigInt(f.fromBlock) && t.block <= BigInt(f.toBlock)).flatMap(logsOf)
       .filter((l) => l.address === f.address.toLowerCase() && f.topics.every((x, i) => x === null || x.toLowerCase() === l.topics[i]));
   }
   if (method === "eth_getTransactionReceipt") {
-    const t = TXS.find((x) => x.tx === params[0])!;
+    const t = txs.find((x) => x.tx === params[0])!;
     return { status: "0x1", blockNumber: `0x${t.block.toString(16)}`, blockHash: blockOf(t.block).hash, from: `0x${"d0".repeat(20)}`, to: EP, logs: logsOf(t) };
   }
   if (method === "eth_call") {
-    // decimals() is 18; the account still holds what the buy brought it.
     const data = (params[0] as { data: string }).data;
-    return data.startsWith("0x70a08231") ? `0x${word(data.endsWith(ACCOUNT.slice(2)) ? 1_500_000_000_000_000_000n : 0n)}` : `0x${word(18n)}`;
+    return data.startsWith("0x70a08231") ? `0x${word(data.endsWith(ACCOUNT.slice(2)) ? held : 0n)}` : `0x${word(18n)}`;
   }
   throw new Error(method);
 };
+/** decimals() is 18; the account still holds what the buy brought it. */
+const rpc = chainOf(TXS, 1_500_000_000_000_000_000n);
 
 test("Postgres: preview read-only, apply once, revert — through the operator's shell", { skip: !url, timeout: 60_000 }, async (t) => {
   const target = new URL(url!);
@@ -224,4 +227,165 @@ test("Postgres: preview read-only, apply once, revert — through the operator's
   assert.ok(fromRecorded > 0n, "where the recorded start had it read from a later block");
   await ensureLedgerResumeSchema(db);
   assert.ok(printed.every((l) => !l.includes(scoped.toString())), "the URL is never printed");
+});
+
+/**
+ * A BASIS LEFT OVER A FLAT TOKEN, on Postgres (Shogun's TSLA, in shape): the
+ * session buy above is the one Postgres lacks; it records the other buy with
+ * no fill and one sell of both lots; the live basis still covers the other
+ * lot, written after the sell; the chain holds none. What only Postgres shows:
+ * admission's own seed (planAttestedSeed) asked inside the read-only
+ * REPEATABLE READ snapshot through the shell's SELECT-only gate, each basis
+ * row's spelling read back, the apply's compare-and-set on the named basis,
+ * and the first mirror pass after the new book's worker arms deleting the
+ * basis on Postgres although the grant was re-signed under another
+ * letter-case of the account in between.
+ */
+test("Postgres: a basis left over a flat token is named, not booked, and compared again by the apply", { skip: !url, timeout: 60_000 }, async (t) => {
+  const target = new URL(url!);
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "only a disposable LOCAL PostgreSQL is allowed");
+  const pg = (await loadPg()) as { Client: new (c: { connectionString: string }) => PgClient & { connect(): Promise<void> } };
+  const name = `mm_chaingap_${randomBytes(6).toString("hex")}`;
+  const admin = new pg.Client({ connectionString: target.toString() }); await admin.connect();
+  await admin.query(`CREATE DATABASE ${name}`);
+  const scoped = new URL(target); scoped.pathname = `/${name}`;
+  const clients: PgClient[] = [];
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "mm-chaingap-pg-")));
+  t.after(async () => {
+    await Promise.allSettled(clients.map((c) => c.end()));
+    try { await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); } finally { await admin.end(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+  const setup = new pg.Client({ connectionString: scoped.toString() }); await setup.connect(); clients.push(setup);
+  const db: Db = {
+    prepare(sql) { return {
+      async run(...a) { const r = await setup.query(translateQuery(sql), a); return { changes: r.rowCount ?? 0, lastInsertRowid: 0 }; },
+      async get(...a) { return (await setup.query(translateQuery(sql), a)).rows[0]; },
+      async all(...a) { return (await setup.query(translateQuery(sql), a)).rows; },
+    }; },
+    async exec(sql) { await setup.query(translateSchema(sql)); },
+    async tx() { throw new Error("not here"); },
+  };
+  await applyLedgerSchema(db); await db.exec(MIRROR_STATE_DDL);
+  await setup.query(`CREATE TABLE grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json JSONB NOT NULL, sealed_session_key TEXT, updated_at BIGINT NOT NULL)`);
+  await setup.query("INSERT INTO grants VALUES ($1, 4663, $2, 'SEALED-NEVER-READ', 1)", [TENANT,
+    JSON.stringify({ smartAccount: ACCOUNT, owner: TENANT, chainId: 4663, grantFeatures: ["tradeable-v2"], serialized: "never-read" })]);
+  await setup.query(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, mode)
+    VALUES ($1, $2, $3, 4663, '{}', 1, 9999999999, 'armed', 1, 50, 'live')`, [ACCOUNT, TENANT, `0x${"01".repeat(20)}`]);
+  await setup.query(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, at, epoch, chain_id)
+    VALUES ($1, 'in', 50, $2, 1, 1, 'chain-log', $3, 1, 4663)`, [ACCOUNT, h32("first"), AT - 10 * 86_400]);
+  for (const table of ["trades", "flows", "equity"]) {
+    await setup.query("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ($1, $2, 1, 1, $3)", [TENANT, table, AT - 3600]);
+  }
+  const LOT = "1500000000000000000";
+  // The other buy, its legs and no fill; then one sell of both lots.
+  await setup.query(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch, basis_source)
+    VALUES ($1, 'swap', $1, $2, $3, 3, $4, $5, 'landed', $6, 1, 'receipt')`, [ACCOUNT, USDG, COIN, h32("the other buy"), h32("the other buy tx"), AT + 600]);
+  await setup.query(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, created_at, epoch,
+      fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, basis_source) VALUES ($1, 'swap', $1, $2, $3, 6.5, $4, $5, 'landed', $6, 1, 'sell', 'COIN', $7, 6.5, 'receipt')`,
+  [ACCOUNT, COIN, USDG, h32("the sell"), h32("the sell tx"), AT + 7200, "3000000000000000000"]);
+  // The live basis still covering the other lot, written after that sell.
+  await setup.query("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES ($1, 'live', 'COIN', $2, '3000000', $3)", [ACCOUNT, LOT, AT + 9000]);
+  await ensureLedgerResumeSchema(db);
+  await setup.query(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+      created_at_ms, updated_at_ms, chain_read_from_sec) VALUES ('a1', $1, $2, 4663, $1, $3, '{}', 'r', 'refused', $4, $5, $5, $6)`,
+  [TENANT, ACCOUNT, "e".repeat(64), `${CHAIN_REFUSAL}: operation ${OP} in tx ${OP_TX} at block ${BLOCK}`, (AT + 86_400) * 1000, AT - 4200]);
+
+  const printed: string[] = [];
+  const deps = { connect: (u: string, r: boolean) => connectBooking(u, r, loadPg), rpc: chainOf([TXS[0]!], 0n), nowMs: () => NOW * 1000, out: (l: string) => printed.push(l),
+    source: { test: "pg" }, sleep: async () => {} };
+  const env = { DATABASE_URL: scoped.toString() };
+  const previewTo = async (file: string, code: number) => {
+    assert.equal(await main(["--tenant", TENANT, "--output", path.join(tmp, file)], env, deps), code, printed.join("\n"));
+    return JSON.parse(readFileSync(path.join(tmp, file), "utf8")) as BookingPlan;
+  };
+  const holdingIn = (p: BookingPlan) => p.items.find((i) => i.key === `op:${OP}`)!.evidence.holding as { refusal: string | null; staleBasis?: StaleBasis["evidence"] };
+  const plan = await previewTo("preview.json", 0);
+  assert.equal(plan.verdict, "ready");
+  assert.deepEqual(plan.items.map((i) => [i.key, i.class]), [[`log:${OP_TX}#2`, "operation-leg"], [`op:${OP}`, "session-trade"]]);
+  const stale = holdingIn(plan).staleBasis!;
+  assert.deepEqual(stale.rows, [{ agentId: ACCOUNT, symbol: "COIN", qtyRaw: LOT, costUsdg: "3000000", updatedAt: AT + 9000 }]);
+  assert.deepEqual([stale.seededUnderNames, stale.heldUnderNames, stale.deletedAs], [[], [], ACCOUNT]);
+  assert.match(stale.note!, /It is not booked here and not changed\. It cannot reach the attested book/);
+  assert.ok(printed.some((l) => l.startsWith(`  note: ${COIN}: Postgres's live cost basis under COIN`)), printed.join("\n"));
+
+  // A HELD POSITION UNDER ITS NAME, another token's: admission's own seed, asked on Postgres, would carry the basis. Refused.
+  await setup.query(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+    VALUES ($1, 'COIN', $2, '5', '1', 2, 0, 'pool', 3, $3)`, [ACCOUNT, `0x${"0b".repeat(20)}`, AT + 9000]);
+  const held = await previewTo("held.json", 2);
+  const refused = holdingIn(held);
+  assert.deepEqual([held.verdict, refused.refusal, refused.staleBasis?.seededUnderNames], ["blocked", "basis-without-position", [{ symbol: "COIN", qtyRaw: LOT, costUsdg: "3000000" }]]);
+  await setup.query("DELETE FROM positions");
+
+  // THE BASIS MOVED SINCE THE REVIEW: the apply's own compare-and-set refuses the reviewed plan, and the shell's recomputed digest is not the reviewed one.
+  await setup.query("UPDATE cost_basis SET cost_usdg = '3000001'");
+  const writer = await connectBooking(scoped.toString(), false, loadPg); clients.push(writer);
+  await assert.rejects(applyBooking(pgClientDb(writer, { readOnly: false }), plan, { confirm: plan.previewDigest, backupRef: "pg-local-drill", dialect: "postgres", nowMs: NOW * 1000 }),
+    (e: unknown) => e instanceof BookingRefused && e.code === "cas" && /\(holdings\)/.test(e.message));
+  await assert.rejects(main(["--tenant", TENANT, "--apply", "--confirm", plan.previewDigest, "--backup-ref", "pg-local-drill", "--output", path.join(tmp, "moved.json")], env, deps),
+    (e: unknown) => e instanceof BookingRefused && e.code === "confirm-mismatch");
+  assert.equal(Number((await setup.query("SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = $1", [OP])).rows[0]!.n), 0, "nothing written");
+
+  // As reviewed again, it applies: the trade, and the basis exactly as it was.
+  await setup.query("UPDATE cost_basis SET cost_usdg = '3000000'");
+  assert.equal(await main(["--tenant", TENANT, "--apply", "--confirm", plan.previewDigest, "--backup-ref", "pg-local-drill", "--output", path.join(tmp, "apply.json")], env, deps), 0,
+    printed.join("\n"));
+  const trade = (await setup.query("SELECT fill_side, fill_qty_raw, buy_token FROM trades WHERE user_op_hash = $1", [OP])).rows;
+  assert.deepEqual(trade.map((r) => [r.fill_side, r.fill_qty_raw, r.buy_token]), [["buy", LOT, COIN]]);
+  assert.deepEqual((await setup.query("SELECT agent_id, mode, symbol, qty_raw, cost_usdg, updated_at FROM cost_basis")).rows.map((r) => ({ ...r, updated_at: Number(r.updated_at) })),
+    [{ agent_id: ACCOUNT, mode: "live", symbol: "COIN", qty_raw: LOT, cost_usdg: "3000000", updated_at: AT + 9000 }]);
+
+  // ── AND THEN, ON POSTGRES, WHAT BECOMES OF IT: the owner re-signs under another letter-case of the account before the first worker arms ──
+  //
+  // Registration removes the tenant's cursors; the grant is re-signed with the account upper-cased; the new book's worker registers under that
+  // spelling (store.ts ensureAgent); and the first mirror pass after it arms, on this Postgres, deletes the stale basis whatever letter-case it
+  // was left under. Rows of other accounts — a neighbour sharing all but the last nibble, in two letter-cases, and strings this account is a
+  // prefix of or that are a prefix of it — are not touched, in any snapshot table.
+  const RESIGNED = `0x${ACCOUNT.slice(2).toUpperCase()}`, MIXED = `0x${"a4A4".repeat(10)}`;
+  const OTHERS = [`0x${"a4".repeat(19)}a5`, `0x${"A4".repeat(19)}A5`, `${ACCOUNT}ff`, ACCOUNT.slice(0, -1)];
+  const snapshotRow = async (account: string, symbol: string) => {
+    await setup.query(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, price_source, value_usdg, updated_at)
+      VALUES ($1, $2, $3, '1', '1', 2, 0, 'pool', 2, $4)`, [account, symbol, `0x${symbol}`, AT]);
+    await setup.query("INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at) VALUES ($1, 'live', $2, '1', '1000000', $3)", [account, symbol, AT]);
+    await setup.query("INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at) VALUES ($1, 'live', $2, 1500, 'entry', 'entry', $3)", [account, symbol, AT]);
+    await setup.query("INSERT INTO class_positions (agent_id, token, symbol, state) VALUES ($1, $2, $3, 'open')", [account, `0x${symbol}`, symbol]);
+  };
+  // Leftovers of the same account under a third spelling, and the other accounts' rows.
+  await snapshotRow(MIXED, "OLD");
+  for (const other of OTHERS) await snapshotRow(other, "THEIRS");
+  const snapshots = async () => {
+    const out: Record<string, string[]> = {};
+    for (const table of ["positions", "cost_basis", "position_floors", "class_positions"]) {
+      out[table] = (await setup.query(`SELECT agent_id, symbol FROM ${table}`)).rows.map((r) => `${r.agent_id} ${r.symbol}`).sort();
+    }
+    return out;
+  };
+  await setup.query("DELETE FROM mirror_state WHERE tenant = $1", [TENANT]);
+  await setup.query("UPDATE grants SET grant_json = jsonb_set(grant_json, '{smartAccount}', to_jsonb($1::text)) WHERE tenant = $2", [RESIGNED, TENANT]);
+  // The orchestrator's side of the shared ledger, on this connection: the mirror's transactions as PgDb runs them.
+  const shared: Db = {
+    prepare: db.prepare,
+    exec: db.exec,
+    async tx<T>(fn: (d: Db) => Promise<T>): Promise<T> {
+      await setup.query("BEGIN");
+      try { const out = await fn(shared); await setup.query("COMMIT"); return out; } catch (e) { await setup.query("ROLLBACK"); throw e; }
+    },
+  };
+  const book = wrapSqlite(new DatabaseSync(":memory:"));
+  await applyLedgerSchema(book);
+  const before = await snapshots();
+  const early = await mirrorTenant({ tenant: TENANT, child: book, shared, nowSec: NOW });
+  assert.equal(early.failed, undefined, JSON.stringify(early.failed));
+  assert.deepEqual(await snapshots(), before, "before the worker arms the pass deletes nothing");
+  const reread = (await setup.query("SELECT grant_json->>'smartAccount' AS a FROM grants WHERE tenant = $1", [TENANT])).rows[0]!.a as string;
+  assert.equal(reread, RESIGNED);
+  await book.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at)
+    VALUES (?, ?, ?, 4663, '{}', ?, ?)`).run(reread, TENANT, `0x${"01".repeat(20)}`, NOW - 60, NOW + 14 * 86_400);
+  const armed = await mirrorTenant({ tenant: TENANT, child: book, shared, nowSec: NOW });
+  assert.equal(armed.failed, undefined, JSON.stringify(armed.failed));
+  assert.equal(armed.restarted, undefined, "registration removed the cursors, so the pass is not a rebuilt one");
+  const after = await snapshots();
+  for (const table of Object.keys(after)) {
+    assert.deepEqual(after[table], OTHERS.map((o) => `${o} THEIRS`).sort(), `${table}: every letter-case of the account replaced by the new book's (none); the others kept`);
+  }
+  assert.deepEqual((await setup.query("SELECT symbol FROM cost_basis WHERE lower(agent_id) = lower($1)", [RESIGNED])).rows, [], "nothing left for a later seed to carry");
 });

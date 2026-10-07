@@ -1259,9 +1259,34 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         // Replace rather than merge: a closed position is GONE at the source,
         // and an upsert alone would leave it on the dashboard forever.
+        //
+        // THE ACCOUNT IN ANY LETTER-CASE, here and in the three snapshot
+        // deletes below. The child registers under the grant's spelling as it
+        // stands at spawn (store.ts ensureAgent), and an owner who re-signs
+        // can change that spelling without changing the account. The seeds
+        // read the basis and the held positions in any case (orchestrator.ts
+        // seedBasisForChild and ledger-resume.ts planAttestedSeed:
+        // `lower(agent_id) = lower(?)`), so a delete that matched only the new
+        // spelling left the old rows to be read as this account's for ever: a
+        // closed position the seeds read as held, and with it a basis the book
+        // no longer has (chain-gap-booking.ts staleBasisVerdict rests on this
+        // pass removing one).
+        // An equality on both sides lowered, never a pattern, so another
+        // account is never matched, whatever it shares with this one. Only the
+        // rows deleted change; each rebuilt-child guard is exactly as it was.
+        //
+        // NOT INDEXED, ON PURPOSE. No index serves lower(agent_id) on these
+        // four tables, so each delete reads the whole table; they hold a few
+        // rows per agent, and at today's fleet that is well under a
+        // millisecond. An index would have to be installed by applyLedgerSchema,
+        // which runs on this file's own fifteen-second clock, and CREATE INDEX
+        // IF NOT EXISTS takes a ShareLock on its table before it finds the
+        // index already there: every cycle, on the four tables every tenant's
+        // pass writes, queued behind any open writer and queueing every writer
+        // behind it (mcp/schema.ts describes the same hazard).
         for (const a of agents) {
           if (rebuiltChild && positions.length === 0) continue;
-          await db.prepare(`DELETE FROM positions WHERE agent_id = ?`).run(a.smart_account);
+          await db.prepare(`DELETE FROM positions WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         const ins = db.prepare(
           `INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd,
@@ -1320,7 +1345,11 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         for (const a of agents) {
           if (rebuilt) continue;
-          await db.prepare(`DELETE FROM cost_basis WHERE agent_id = ?`).run(a.smart_account);
+          // Any letter-case of the account, as positions above: a basis left
+          // under a spelling the grant no longer uses is still this account's
+          // to every seed, which would hand it to a later book once the symbol
+          // is held again.
+          await db.prepare(`DELETE FROM cost_basis WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         // UPSERT, because the delete above is now conditional. Without the
         // delete a rebuilt child re-inserting the rows it does still have would
@@ -1351,7 +1380,7 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         for (const a of agents) {
           if (rebuilt) continue;
-          await db.prepare(`DELETE FROM position_floors WHERE agent_id = ?`).run(a.smart_account);
+          await db.prepare(`DELETE FROM position_floors WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         const ins = db.prepare(
           `INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at)
@@ -1395,7 +1424,7 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         for (const a of agents) {
           if (rebuilt) continue;
-          await db.prepare(`DELETE FROM class_positions WHERE agent_id = ?`).run(a.smart_account);
+          await db.prepare(`DELETE FROM class_positions WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         const ins = db.prepare(
           `INSERT INTO class_positions

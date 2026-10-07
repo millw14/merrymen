@@ -209,7 +209,7 @@ export function targetDigest(databaseUrl: string): string {
 
 /** The code that produced a preview, by file digest: an apply by different code recomputes a different digest and refuses. */
 export function sourceFingerprint(here = path.dirname(fileURLToPath(import.meta.url))): Record<string, string> {
-  const files = ["chain-gap-booking.ts", "chain-gap-booking-cli.ts", "ledger-resume.ts", "asset-movements.ts", "basis.ts", "chain-capital.ts", "fills.ts",
+  const files = ["chain-gap-booking.ts", "chain-gap-booking-cli.ts", "ledger-resume.ts", "asset-movements.ts", "basis.ts", "basis-seed.ts", "chain-capital.ts", "fills.ts",
     "inflight-reconcile.ts", "custody.ts", "distinct-flows.ts", "paper-boundary.ts", "token-label.ts", "../../packages/core/src/capital-classify.ts",
     "../../packages/core/src/grant.ts", "../../packages/core/src/trencher-vault.ts",
     // How an owner operation is read, and the scanner inputs that reading shares: admission re-derives owner records with them.
