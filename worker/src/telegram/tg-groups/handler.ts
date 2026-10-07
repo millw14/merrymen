@@ -89,6 +89,7 @@ import {
   isTradeTalk,
   selfNamesOf,
   type BotSelf,
+  type DeskIntent,
   type SmallTalk,
 } from "./detect";
 import { admitThought, deskCaption, deskMissLine, deskQuestionEvidence, deskQuestionIntent, thinkWithModel } from "./desk";
@@ -131,6 +132,7 @@ import type {
   TgPublicFact,
   TgRoom,
 } from "./types";
+import { readSubject } from "./understand";
 import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
 // ─── The numbers ───────────────────────────────────────────────────────────
@@ -1802,6 +1804,44 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return false;
   };
 
+  /** How many of the room's latest lines say which coins are being talked about. */
+  const KNOWN_COIN_LINES = 30;
+
+  /**
+   * THE COINS THIS CHAT KNOWS BY NAME, for reading an opinion ask: the ones
+   * it holds, the ones posted here, the $tags said here lately and the coins
+   * the desk already read here. "what do you think about pepe" after a room
+   * full of $PEPE is about the coin; in a room that never said it, it may be
+   * anything (detect.ts deskAskOf, understand.ts).
+   */
+  const knownCoinNames = (chatId: number): string[] => {
+    const names = new Set<string>();
+    try {
+      for (const n of portNow()?.heldNames() ?? []) if (typeof n === "string") names.add(n);
+    } catch {
+      /* no held names is no context */
+    }
+    const stored = store.room(chatId);
+    if (!stored) return [...names];
+    const room = freshView(stored, clock());
+    for (const c of room.coins) if (c.name) names.add(c.name);
+    for (const l of room.lines.slice(-KNOWN_COIN_LINES)) {
+      for (const tag of extractCashtags(l.text)) names.add(tag);
+      if (l.own && l.deskAsk?.kind === "coin" && "query" in l.deskAsk) names.add(l.deskAsk.query);
+    }
+    return [...names];
+  };
+
+  /** A line's desk ask, read with what this chat already knows. */
+  const deskIntentOf = (text: string, chatId: number): DeskIntent | null =>
+    deskAskOf(text, selfNamesOf(selfNow()), { knownCoins: knownCoinNames(chatId) });
+
+  /** The same, with a loose opinion ask (nothing yet says it is a coin) left out: for decisions that cannot wait for the conversation to settle it. */
+  const firmDeskIntentOf = (text: string, chatId: number): DeskIntent | null => {
+    const intent = deskIntentOf(text, chatId);
+    return intent?.kind === "coin" && intent.loose ? null : intent;
+  };
+
   /**
    * SMALL TALK SAID TO IT, a room's welcome included. detect.ts reads a line
    * that is small talk and nothing more ("hey there merryman", "thanks
@@ -2055,9 +2095,23 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           return r;
         }
       }
+      // AN OPINION ASK THAT NOTHING YET MARKS AS A COIN ("what do you think
+      // about sex"): the conversation settles it, once, through the group's
+      // model (understand.ts). A topic is the persona's to answer below; a
+      // coin, or no answer at all, keeps the desk's read.
+      const researchable = !request && dec.mood !== "private-ask" && !isInjection(j.line.text);
+      let intent = deskIntentOf(j.line.text, chatId);
+      if (researchable && intent?.kind === "coin" && intent.loose && d.desk && coinFactsOn()) {
+        stageOf(chatId, "read: coin or topic");
+        const reading = await readSubject({ model: modelNow(), gate, chatId, room: store.room(chatId), trigger: j.line, name: intent.name });
+        if (reading === "topic") {
+          log("[tg-groups] an opinion ask read as a topic, not a coin");
+          intent = null;
+        }
+      }
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
-      const deskAsk = !request && dec.mood !== "private-ask" && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
+      const deskAsk = researchable ? deskAskFor(j, context, coinQuestion, intent) : null;
       if (deskAsk) {
         const allowed = deskRoom(chatId);
         const note = deskAsk.kind === "coin" && "address" in deskAsk && context?.address === deskAsk.address ? deskNoteFor(context.memo) : undefined;
@@ -2071,9 +2125,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         })());
         return null;
       }
-      if (!request && dec.mood !== "private-ask" && !isInjection(j.line.text)
-        && (deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "discussion"
-          || (deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "analysis" && deskQuestionIntent(j.line.text) !== "overview"))) {
+      if (researchable && (intent?.kind === "discussion" || (intent?.kind === "analysis" && deskQuestionIntent(j.line.text) !== "overview"))) {
         const sent = await deskClarify(chatId, replyOpts, j);
         if (!sent) { releaseReply(chatId, messageId); return whyLost(); }
         return null;
@@ -2446,7 +2498,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         if (/^[\p{L}][\p{L}\p{N}._-]{1,23}$/u.test(head) && coinFactsOn()) return { kind: "coin", query: head };
       }
       if (!line?.own) {
-        const intent = deskAskOf(text, selfNamesOf(selfNow()));
+        // A loose opinion ask up the chain was never settled as a coin: it lends no subject.
+        const intent = firmDeskIntentOf(text, j.msg.chatId);
         if (intent?.kind === "market") return { kind: "market" };
         if (intent?.kind === "comparison" && coinFactsOn()) return { kind: "comparison", queries: intent.names };
         if (intent?.kind === "coin" && coinFactsOn()) return { kind: "coin", query: intent.name };
@@ -2475,9 +2528,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    */
   const deskNoteFor = (memo: TgCoinMemo | undefined): string | undefined => publicCoinStatus(memo, clock());
 
-  const deskAskFor = (j: LineJob, context: { address: string; memo?: TgCoinMemo } | null, coinQuestion: boolean): TgDeskAsk | null => {
+  const deskAskFor = (
+    j: LineJob,
+    context: { address: string; memo?: TgCoinMemo } | null,
+    coinQuestion: boolean,
+    intent: DeskIntent | null = deskIntentOf(j.line.text, j.msg.chatId),
+  ): TgDeskAsk | null => {
     if (!d.desk) return null;
-    const intent = deskAskOf(j.line.text, selfNamesOf(selfNow()));
     if (deskQuestionIntent(j.line.text) === "comparison" && (extractCaHits(j.line.text).length > 2 || extractCashtags(j.line.text).length > 2)) return null;
     if (intent?.kind === "comparison") return coinFactsOn() ? { kind: "comparison", queries: intent.names } : null;
     if (intent?.kind === "coin") {
@@ -2886,8 +2943,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // find the coin by name; the coin flow's "drop the ca" is for a cashtag
       // dropped in the room, or when there is no desk.
       const deskTicker = j.addressed !== null && !asked && cas.length === 0 && !foreignMint && cashtags.length > 0 && deskNow() !== null && coinFactsOn()
-        && deskAskOf(text, selfNamesOf(selfNow()))?.kind === "coin";
-      const researchIntent = deskAskOf(text, selfNamesOf(selfNow()));
+        && deskIntentOf(text, j.msg.chatId)?.kind === "coin";
+      const researchIntent = deskIntentOf(text, j.msg.chatId);
       const deskResearch = j.addressed !== null && deskNow() !== null && coinFactsOn() && !foreignMint && otherChain.length === 0 && !isInjection(text)
         && (deskQuestionIntent(text) === "comparison" || (cas.length === 1 && researchIntent?.kind === "coin"
           && (deskQuestionIntent(text) !== "overview" || isReadOnlyTradeQuestion(text) || /\b(?:chart|analy[sz]e|analysis|read[- ]only|research)\b/iu.test(text))));
@@ -2980,7 +3037,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // Frustration about an unanswered research question deserves the read,
     // while distress, protected-trait abuse, privacy and injection retain priority.
     if (j.addressed !== null && dec.act === "roast" && !signals.distress && !signals.privateAsk && !signals.injection && signals.insult !== "hateful"
-      && deskAskFor(j, coinContext(j), asksAboutCoin(text, selfNamesOf(selfNow()))) !== null) {
+      && deskAskFor(j, coinContext(j), asksAboutCoin(text, selfNamesOf(selfNow())), firmDeskIntentOf(text, chatId)) !== null) {
       dec = { act: "answer", mood: "normal" };
     }
     if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
@@ -3295,7 +3352,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Public research starts beside a busy chatter queue. Bookkeeping and
         // reply admission still happen synchronously. Nomination admission
         // belongs to the port; financial execution stays on the trading side.
-        const research = fomoAsk || (!!d.desk && (coin || (addressed !== null && (deskAskOf(text, selfNamesOf(me)) !== null
+        const research = fomoAsk || (!!d.desk && (coin || (addressed !== null && (deskIntentOf(text, chatId) !== null
           || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text)))));
         if (research) track(processLine(job));
         else enqueue(chatId, () => processLine(job), { force: addressed !== null });

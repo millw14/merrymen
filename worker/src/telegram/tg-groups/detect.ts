@@ -1660,9 +1660,24 @@ export function lineMood(text: string): ReactionMood | null {
  * name, or a read/discussion with no subject that the handler binds to the
  * coin or question it follows. A discussion needs that context; it cannot
  * silently become a market read. Null: not a desk ask.
+ *
+ * `loose`: the name came only from an opinion ask ("what do you think about
+ * X", "thoughts on X") with nothing saying X is a coin — no $tag, no ticker
+ * capitals, no trading word, not a coin this chat knows. People ask that
+ * about anything ("what do you think about sex"), so the handler settles it
+ * from the conversation before the desk looks X up (understand.ts).
  */
-export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
+export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string; loose?: true } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
   | { kind: "discussion"; topic: "lore" | "explanation" | "setup" };
+
+/** What the conversation already says, for reading a desk ask. */
+export interface DeskAskContext {
+  /**
+   * Coins this chat knows by name: ones it holds, ones posted here, $tags said
+   * here recently, ones the desk already read here. Any case, "$" or not.
+   */
+  knownCoins?: readonly string[];
+}
 
 /** Words that sit where a coin's name would and are not one. */
 const DESK_STOP: ReadonlySet<string> = new Set([
@@ -1699,7 +1714,7 @@ const DESK_COIN_STRONG: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:entry|entries|stop|stops|targets?|setup|invalidation|risk|liquidity|volume|rsi|ema|vwap|scalp|scalping|timeframe)\s+(?:on|for|of)\s+${NAME}`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:entry|targets?|stop|invalidation|scalp|scalping|setup)\b`, "u"),
   new RegExp(String.raw`\bwhat if\s+${NAME}\s+(?:breaks?|loses?|reclaims?|holds?)\b`, "u"),
-  new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of)|analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
+  new RegExp(String.raw`\b(?:analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:a\s+)?(?:good|decent|nice|solid|bad|safe)\s+(?:entry|buy|play|bag|hold)\b`, "u"),
   new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|bullish|bearish|a hold)\b`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:chart|analysis|levels)\b`, "u"),
@@ -1717,6 +1732,15 @@ const DESK_COIN_WEAK: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:what(?:'s|s| is)|tell me|explain)\s+(?:the\s+)?(?:lore|story|origin|narrative|background)\s+(?:of|behind|for|about)\s+${NAME}`, "u"),
   new RegExp(String.raw`\bwhat(?:'s|s| is)\s+${NAME}\s+(?:all\s+)?about\b`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}(?:'s)?\s+(?:lore|story|origin|narrative|background)\b`, "u"),
+];
+/**
+ * Asking its opinion: how people ask about a coin AND about anything else
+ * ("what do you think about sex", "thoughts on pizza"). The name is a coin
+ * with a trading word elsewhere in the line, written as a ticker, or known
+ * in this chat; otherwise it is `loose` and the conversation decides.
+ */
+const DESK_COIN_OPINION: readonly RegExp[] = [
+  new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of))\s+${NAME}`, "u"),
 ];
 /** Coin nouns make the named subject explicit; ordinary people's stories do not. */
 const DESK_COIN_STORY = new RegExp(String.raw`\b(?:what(?:'s|s| is)|explain|describe|tell me about)\s+(?:the\s+)?(?:coin|token)\s+${NAME}`, "u");
@@ -1759,12 +1783,18 @@ const DESK_SETUP = /\b(?:scalp|scalping|stops?|stop[- ]?loss|take[- ]?profit|tar
  * and story/rewrite requests are a context-dependent "discussion".
  * The name is a search key and nothing else (rule 1).
  */
-export function deskAskOf(text: string, selfNames: readonly string[] = []): DeskIntent | null {
+export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: DeskAskContext = {}): DeskIntent | null {
   if (typeof text !== "string" || !text.trim()) return null;
   const raw = unnamed(text, selfNames);
   const t = norm(raw);
   if (!t || COIN_STOP.test(t)) return null;
   const self = new Set(selfNames.map((n) => norm(String(n ?? ""))));
+  const known = new Set(
+    (Array.isArray(ctx?.knownCoins) ? ctx.knownCoins : [])
+      .filter((n): n is string => typeof n === "string")
+      .map((n) => norm(n).replace(/^\$+/u, ""))
+      .filter((n) => n.length >= 2),
+  );
   const ok = (name: string | undefined): string | null => {
     const n = (name ?? "").replace(/[._-]+$/u, "");
     if (n.length < 2 || DESK_STOP.has(n) || self.has(n) || /^\p{N}+$/u.test(n)) return null;
@@ -1806,7 +1836,7 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   }
   // The EARLIEST name any pattern finds: "check out cashcat, i think good
   // entry?" names cashcat, not the "think" before "good entry".
-  const found: { at: number; name: string }[] = [];
+  const found: { at: number; name: string; loose?: true }[] = [];
   const scan = (re: RegExp) => {
     for (const m of t.matchAll(new RegExp(re.source, "gu"))) {
       const n = ok(m[1]);
@@ -1817,12 +1847,26 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   scan(DESK_COIN_STORY);
   const cue = DESK_TRADING_CUE.test(t);
   // A weakly-asked name counts beside a trading word, or written as a ticker:
-  // "how is CASHCAT looking" is a coin, "how is grandma looking" is not.
+  // "how is CASHCAT looking" is a coin, "how is grandma looking" is not. A
+  // coin this chat already knows is one too: "how is pepe looking" after
+  // $PEPE was the talk of the room.
   const shouted = (name: string) => name.length >= 3 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name.toUpperCase())}(?![\\p{L}\\p{N}])`, "u").test(text);
   const weakBefore = found.length;
   DESK_COIN_WEAK.forEach(scan);
-  if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name)));
-  if (found.length) return { kind: "coin", name: found.sort((a, b) => a.at - b.at)[0]!.name };
+  if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name) || known.has(f.name)));
+  // An opinion ask names a coin only with a trading word BESIDE the name (the
+  // name itself is no cue: "what do you think about sending it"), as a ticker,
+  // or known here. Otherwise it is loose, and never outranks a firm name.
+  const cueBeside = (name: string) =>
+    DESK_TRADING_CUE.test(t.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name)}(?![\\p{L}\\p{N}])`, "gu"), " "));
+  const opinionBefore = found.length;
+  DESK_COIN_OPINION.forEach(scan);
+  for (const f of found.slice(opinionBefore)) if (!cueBeside(f.name) && !shouted(f.name) && !known.has(f.name)) f.loose = true;
+  if (found.length) {
+    const byAt = found.sort((a, b) => a.at - b.at);
+    const firm = byAt.find((f) => !f.loose);
+    return firm ? { kind: "coin", name: firm.name } : { kind: "coin", name: byAt[0]!.name, loose: true };
+  }
   if (DESK_LORE.test(t)) return { kind: "discussion", topic: "lore" };
   if (DESK_EXPLAIN.test(t) || DESK_EXPLAIN_SHORT.test(t)) return { kind: "discussion", topic: "explanation" };
   const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
