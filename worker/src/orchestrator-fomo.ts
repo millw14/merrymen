@@ -53,7 +53,7 @@
 import type { Db } from "./db";
 import { sanitizeText } from "./research/news";
 import { postingAccounts } from "./xpost/store";
-import type { ChildFomoFile, ChildSignal, FomoAccess, FomoService } from "./fomo/contract";
+import type { ChildFomoFile, ChildSignal, ChildTail, ChildTailEvent, FomoAccess, FomoService } from "./fomo/contract";
 import {
   canonicalUserId,
   COHORT_TARGET,
@@ -112,12 +112,14 @@ import {
 } from "./fomo/publish";
 import {
   activePositionDeps,
+  activeTails,
   activeWatches,
   claimNextResearch,
   deadLetter,
   enqueueResearch,
   ensureFomoSchema,
   eventsForToken,
+  eventsForTrader,
   finishResearch,
   fleetCount,
   FOMO_LIMITS,
@@ -140,6 +142,7 @@ import {
   publicationsInState,
   putTraderEvidence,
   recentActiveTokens,
+  recentlyEndedTails,
   recentAssessments,
   recentPublications,
   recordGap,
@@ -151,7 +154,9 @@ import {
   setTenantRoute,
   subjectPublicationCount,
   sweepJobs,
+  tailedUserIds,
   tenantKey,
+  tenantsTailing,
   tenantsWatching,
   traderEvidence,
   transitionPublication,
@@ -173,6 +178,7 @@ import type {
   CohortVersion,
   FollowAssessment,
   FomoHealthState,
+  FomoTail,
   PublicationKind,
   RankingWindow,
   ResultStatus,
@@ -218,6 +224,13 @@ export interface FomoPassKnobs {
   enrichPerRefresh: number;
   /** A trader's measured evidence is reused this long before it is read again. */
   traderEvidenceTtlMs: number;
+  /**
+   * Owners' tails (store.ts fomo_tails) route research, add their coins and
+   * (consider only) their buys to that owner's file, and carry the tails block
+   * the child's notices read. Off (orchestrator.ts: MERRYMEN_FOMO_TAILS=0):
+   * none of the three; stored tails stay stored.
+   */
+  tailsEnabled: boolean;
 }
 
 export const FOMO_PASS_DEFAULTS: Readonly<FomoPassKnobs> = Object.freeze({
@@ -229,12 +242,15 @@ export const FOMO_PASS_DEFAULTS: Readonly<FomoPassKnobs> = Object.freeze({
   publishDrafts: true,
   enrichPerRefresh: 20,
   traderEvidenceTtlMs: 3 * 24 * HOUR,
+  tailsEnabled: true,
 });
 
 /** Signals one child file may carry (the contract's bound). */
 export const MAX_CHILD_SIGNALS = 40;
 /** Cohort and dependency events per signal (the contract's bound). */
 export const MAX_SIGNAL_TRIGGERS = 25;
+/** Events per tail in a child file (the contract's bound). */
+const CHILD_TAIL_EVENTS = 20;
 /**
  * The breadth window: a signal's triggers are the cohort's events on the coin
  * in the last half hour, and a routed coin with nothing newer is forgotten.
@@ -266,6 +282,16 @@ const COHORT_SIGNAL_SCAN = 60;
 const DEPENDENCY_SIGNAL_SCAN = 20;
 /** Robinhood Chain coins with a recent thesis from anyone, per pass: open-ended discovery, so few. */
 const THESIS_SIGNAL_SCAN = 10;
+/** Coins one tailed trader touched, per tail, in one owner's file. */
+export const TAIL_SIGNAL_SCAN = 10;
+/** A tail's events in the child file reach back at most this far (and never before the tail began). */
+export const TAIL_EVENT_WINDOW_MS = 2 * HOUR;
+/** A tail that ended is carried this long, so its end summary can be sent. */
+export const TAIL_ENDED_KEEP_MS = 15 * MIN;
+/** Events read per tail before the kind filter and the 20-event bound. */
+const TAIL_EVENT_SCAN = 60;
+/** Events read to tally a whole ended tail (a floor past this, said so). */
+const TAIL_TOTALS_SCAN = 500;
 /** Robinhood Chain token keys, for the thesis read's prefix. */
 const ROBINHOOD_KEY_PREFIX = "eip155:4663:";
 /** A replica that is not the leader asks for the lease this often. */
@@ -934,6 +960,9 @@ export function mergeHeldTokens(...maps: ReadonlyArray<ReadonlyMap<string, reado
  *                 HELD_FRESH_MS, plus `local` (this replica's own book, in
  *                 case its write of this pass has not landed), for routable
  *                 owners only
+ *   tailed        tailed trader → the routable owners tailing them now
+ *                 (≤ FOMO_LIMITS.tailedTradersFleet traders; none with
+ *                 `tails: false`)
  *
  * For the leader's routing and research priority ONLY. A child's file reads
  * its own owner's rows, never this snapshot.
@@ -943,6 +972,7 @@ export async function fleetInterest(
   now: number,
   cohort: CohortVersion | null,
   local: ReadonlyMap<string, readonly string[]> = new Map(),
+  opts: { tails?: boolean } = {},
 ): Promise<InterestSnapshot> {
   const fresh = { freshSinceMs: now - ROUTE_STALE_MS };
   // ONLY OPTED-IN TENANTS ARE INTERESTED IN ANYTHING. routedTenants already
@@ -961,13 +991,41 @@ export async function fleetInterest(
     const who = tenants.filter((t) => routable.has(t)).sort();
     if (who.length > 0) heldTokens.set(key, who);
   }
+  // A tail routes to ITS OWN owners only, and only while they are routable:
+  // an owner with monitoring and follow off is told from the stored feed (the
+  // child file's tails block) but asks for no research.
+  const tailed = new Map<string, string[]>();
+  if (opts.tails !== false) {
+    for (const userId of await tailedUserIds(db, now, FOMO_LIMITS.tailedTradersFleet)) {
+      const who = (await tenantsTailing(db, userId, now)).filter((t) => routable.has(t));
+      if (who.length > 0) tailed.set(userId, who);
+    }
+  }
   return {
     cohort: new Set((cohort?.members ?? []).map((m) => m.trader.userId)),
     dependencies,
     watchedTokens,
     heldTokens,
     monitoringTenants: [...routable].sort(),
+    tailed,
   };
+}
+
+/**
+ * WHOSE EVENTS ONE OWNER'S TAILS ADD AS FOLLOW TRIGGERS, and from when: only a
+ * tail the owner asked to have considered, only from when it began (and
+ * inside the breadth window), and never a cohort member the cohort marks not
+ * followable (a tail does not widen what the cohort refuses). Every other
+ * tail adds its coins to the file and nothing to a review's breadth.
+ */
+export function tailTriggerSince(tails: readonly FomoTail[], cohort: CohortVersion | null, now: number): Map<string, number> {
+  const unfollowable = new Set((cohort?.members ?? []).filter((m) => m.followable === false).map((m) => m.trader.userId));
+  const out = new Map<string, number>();
+  for (const t of tails) {
+    if (!t.consider || unfollowable.has(t.userId) || t.expiresAtMs <= now) continue;
+    out.set(t.userId, Math.max(t.createdAtMs, now - SIGNAL_WINDOW_MS));
+  }
+  return out;
 }
 
 // ── the pass ────────────────────────────────────────────────────────────────
@@ -1399,7 +1457,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     // From the shared store, so an owner on another replica is interested
     // exactly as one here is (fleetInterest); this replica's own book is
     // folded in too in case this pass's write has not landed yet.
-    interest = await fleetInterest(db, now, await cohortNow(now), deps.heldTokens());
+    interest = await fleetInterest(db, now, await cohortNow(now), deps.heldTokens(), { tails: knobs.tailsEnabled });
     interestAt = now;
   };
 
@@ -1806,6 +1864,10 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
    *   held              THIS owner's held set (fomo_held_tokens, plus this
    *                     replica's own reading of the book)
    *   watched           THIS owner's unexpired watches
+   *   tailed            coins THIS owner's tailed traders touched since each
+   *                     tail began (≤ TAIL_SIGNAL_SCAN per tail), at discovery
+   *                     priority like dependencies: a tail asks for a look,
+   *                     not for precedence over the cohort
    *
    * Nothing of any other owner's: no other owner's holdings, watches or
    * dependencies reach the file, as a coin, a reason or a trigger. A coin
@@ -1843,6 +1905,16 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     for (const [key, tenants] of deps.heldTokens()) if (tenants.map(tenantKey).includes(tenant)) held.add(key);
     for (const key of held) add(key, "position-protection", "held", null, now, null);
     for (const w of await activeWatches(db, tenant, now)) add(w.tokenKey, "interactive", "watched", w.createdAtMs, w.createdAtMs, w.label);
+    // THIS TENANT'S OWN TAILS. Their coins at discovery priority; their buys
+    // count as triggers only for a tail the owner asked to have considered,
+    // only from when it began, and never for a cohort member the cohort marks
+    // not followable (a tail does not widen what the cohort already refuses).
+    const tails = knobs.tailsEnabled ? await activeTails(db, tenant, now) : [];
+    for (const t of tails) {
+      const since = Math.max(t.createdAtMs, now - SIGNAL_WINDOW_MS);
+      for (const a of await recentActiveTokens(db, since, TAIL_SIGNAL_SCAN, { userIds: [t.userId] })) add(a.tokenKey, "discovery", "tailed", null, a.newestAt, null);
+    }
+    const tailTriggers = tailTriggerSince(tails, ctx.cohort, now);
 
     const ordered = [...cand.entries()]
       .sort((x, y) => PRIORITY_ORDER[x[1].priority] - PRIORITY_ORDER[y[1].priority] || y[1].lastSeenAt - x[1].lastSeenAt || (x[0] < y[0] ? -1 : 1))
@@ -1862,8 +1934,12 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       const { events, dossier } = await tokenData(ctx, key);
       // A coin known only from activity takes its label from the newest event that named it.
       const named = events.find((e) => e.tokenLabel.symbol || e.tokenLabel.name)?.tokenLabel ?? null;
+      const tailedBuyer = (e: StoredTraderEvent): boolean => {
+        const since = tailTriggers.get(e.trader.userId);
+        return since !== undefined && e.observedAt >= since;
+      };
       const triggers = events
-        .filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId))
+        .filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId) || tailedBuyer(e))
         .slice(0, MAX_SIGNAL_TRIGGERS)
         .map(asTraderEvent);
       const oldestTrigger = triggers.length > 0 ? Math.min(...triggers.map((e) => e.observedAt)) : null;
@@ -1892,6 +1968,62 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         lensRefs: refs,
       });
     }
+    return out;
+  };
+
+  /**
+   * THIS OWNER'S TAILS FOR ITS FILE: the active ones and those that ended in
+   * the last TAIL_ENDED_KEEP_MS, each with the tailed trader's buys, sells and
+   * theses from the shared store (never another owner's tails, never a
+   * provider call). An ended tail also carries its whole tally for the end
+   * summary.
+   */
+  const tailsBlockFor = async (tenant: string, now: number): Promise<ChildTail[]> => {
+    const active = await activeTails(db, tenant, now);
+    const ended = await recentlyEndedTails(db, tenant, now - TAIL_ENDED_KEEP_MS, now);
+    const out: ChildTail[] = [];
+    const one = async (t: FomoTail, isEnded: boolean): Promise<ChildTail> => {
+      const until = isEnded ? t.expiresAtMs : now;
+      const since = Math.max(t.createdAtMs, until - TAIL_EVENT_WINDOW_MS);
+      const kept = (await eventsForTrader(db, t.userId, since, TAIL_EVENT_SCAN)).filter(
+        (e): e is StoredTraderEvent & { kind: ChildTailEvent["kind"] } => (e.kind === "buy" || e.kind === "sell" || e.kind === "thesis") && e.observedAt <= until,
+      );
+      let totals: ChildTail["totals"] = null;
+      if (isEnded) {
+        const all = (await eventsForTrader(db, t.userId, t.createdAtMs, TAIL_TOTALS_SCAN)).filter((e) => e.observedAt <= t.expiresAtMs);
+        const coins = new Set<string>();
+        const tally = { buys: 0, sells: 0, theses: 0 };
+        for (const e of all) {
+          if (e.kind === "buy") tally.buys++;
+          else if (e.kind === "sell") tally.sells++;
+          else if (e.kind === "thesis") tally.theses++;
+          else continue;
+          if (e.token) coins.add(e.token.key);
+        }
+        totals = { ...tally, coins: coins.size, capped: all.length >= TAIL_TOTALS_SCAN };
+      }
+      return {
+        userId: t.userId,
+        handle: t.handle,
+        createdAt: t.createdAtMs,
+        expiresAt: t.expiresAtMs,
+        ended: isEnded,
+        consider: t.consider,
+        events: kept.slice(0, CHILD_TAIL_EVENTS).map((e) => ({
+          eventKey: e.eventKey,
+          kind: e.kind,
+          token: e.token,
+          label: sanitizedLabel(e.tokenLabel),
+          at: e.sourceEventAt ?? e.observedAt,
+          observedAt: e.observedAt,
+          positionValueUsd: typeof e.positionValueUsd === "number" && Number.isFinite(e.positionValueUsd) && e.positionValueUsd >= 0 ? e.positionValueUsd : null,
+          text: e.text === null ? null : sanitizeText(e.text, 500) || null,
+        })),
+        totals,
+      };
+    };
+    for (const t of active) out.push(await one(t, false));
+    for (const t of ended) out.push(await one(t, true));
     return out;
   };
 
@@ -1954,6 +2086,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         // the child to keep reading; this overwrites them with nothing.
         const monitored = access.dataAccess && (access.monitoring || access.follow);
         if (!monitored) firstTracked.delete(tenant);
+        // Tails need only data access: the notices read stored events, at no cost.
+        const tails = knobs.tailsEnabled && access.dataAccess ? await tailsBlockFor(tenant, now) : [];
         const file: ChildFomoFile = {
           version: 1,
           writtenAt: now,
@@ -1961,6 +2095,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
           access,
           health: healthFor(access, c),
           signals: monitored ? await signalsFor(tenant, c) : [],
+          ...(tails.length > 0 ? { tails } : {}),
         };
         if (deps.stillOurs && !deps.stillOurs(tenant)) continue;
         deps.writeChildFile(deps.childHome(tenant), file);

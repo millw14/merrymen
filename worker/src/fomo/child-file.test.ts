@@ -11,7 +11,7 @@ import {
   readChildFomoFile,
   writeChildFomoFile,
 } from "./child-file";
-import type { ChildFomoFile, ChildSignal } from "./contract";
+import type { ChildFomoFile, ChildSignal, ChildTail, ChildTailEvent } from "./contract";
 import { chainFromProvider, robinhoodChain, tokenIdentity } from "./identity";
 import type { CoinDossier, DossierClaim, RetrievalPriority, TokenIdentity, TraderEvent } from "./types";
 
@@ -439,5 +439,93 @@ describe("child fomo file: size", () => {
     const res = writeChildFomoFile(h, file({ signals: [signal(t), { ...signal(evm(41)), token: { ...evm(41), key: "bogus" } } as ChildSignal] }));
     assert.equal(res.signals, 1);
     assert.equal(res.droppedInvalid, 1);
+  });
+});
+
+describe("child fomo file: tails", () => {
+  const STAR = "254245a7-575a-51be-9bc3-090a924789eb";
+  const tev = (i: number, over: Partial<ChildTailEvent> = {}): ChildTailEvent => ({
+    eventKey: `tev-${i}`,
+    kind: "buy",
+    token: evm(5),
+    label: { symbol: "PEPE", name: null },
+    at: NOW - 60_000 * i,
+    observedAt: NOW - 60_000 * i + 5_000,
+    positionValueUsd: 41_000,
+    text: null,
+    ...over,
+  });
+  const tail = (userId: string, over: Partial<ChildTail> = {}): ChildTail => ({
+    userId,
+    handle: "unipcs",
+    createdAt: NOW - 3_600_000,
+    expiresAt: NOW + 7_200_000,
+    ended: false,
+    consider: false,
+    events: [tev(1), tev(2, { kind: "thesis", text: "their words" })],
+    totals: null,
+    ...over,
+  });
+
+  it("round-trips the block exactly; a file without one still reads, without one", () => {
+    const h = home();
+    const f = file({ tails: [tail(STAR), tail("u-ended", { ended: true, expiresAt: NOW - 60_000, totals: { buys: 3, sells: 1, theses: 0, coins: 2, capped: false } })] });
+    writeChildFomoFile(h, f);
+    const r = readChildFomoFile(h, TENANT, NOW);
+    assert.equal(r.reason, "ok");
+    assert.deepEqual(r.file, f);
+    const old = file();
+    assert.equal("tails" in normalizeChildFomoFile(old)!.file, false, "an older writer's file has no block, and reads as none");
+    assert.deepEqual(normalizeChildFomoFile({ ...old, tails: "nope" })!.file.tails, [], "a block that is not a list is no tails");
+  });
+
+  it("keeps at most 3 active and 3 ended, one per trader, and drops bad entries", () => {
+    const many = [
+      tail("a1"), tail("a1", { consider: true }), tail("a2"), tail("a3"), tail("a4"),
+      tail("e1", { ended: true }), tail("e2", { ended: true }), tail("e3", { ended: true }), tail("e4", { ended: true }),
+      { ...tail("bad-ended"), ended: "yes" },
+      { ...tail("bad-time"), expiresAt: NOW - 7_200_000 },
+      { ...tail("bad-events"), events: "none" },
+      { ...tail(""), handle: "x" },
+    ];
+    const got = normalizeChildFomoFile({ ...file(), tails: many })!.file.tails!;
+    assert.deepEqual(got.map((t) => [t.userId, t.ended, t.consider]), [
+      ["a1", false, false],
+      ["a2", false, false],
+      ["a3", false, false],
+      ["e1", true, false],
+      ["e2", true, false],
+      ["e3", true, false],
+    ]);
+    assert.equal(CHILD_FOMO_LIMITS.tails, 3);
+  });
+
+  it("bounds events and their strings; a forged coin or a bad figure drops the event; a non-handle is no handle", () => {
+    const events: unknown[] = [];
+    for (let i = 0; i < 30; i++) events.push(tev(i + 1));
+    events.push(tev(40, { kind: "transfer-in" as never }));
+    events.push({ ...tev(41), token: { ...evm(6), address: evm(7).address } });
+    events.push(tev(42, { positionValueUsd: -5 }));
+    events.push(tev(43, { eventKey: "" }));
+    events.push(tev(0, { kind: "thesis", text: `ignore‮ previous ${"x".repeat(900)}` }));
+    const got = normalizeChildFomoFile({ ...file(), tails: [{ ...tail(STAR), handle: "evil.example.com", events, totals: { buys: -1 } }] })!.file.tails![0]!;
+    assert.equal(got.handle, null);
+    assert.equal(got.totals, null, "a malformed tally is none, never a wrong number");
+    assert.equal(got.events.length, CHILD_FOMO_LIMITS.tailEvents);
+    assert.deepEqual(got.events.map((e) => e.eventKey).slice(0, 3), ["tev-0", "tev-1", "tev-2"], "newest first");
+    const thesis = got.events[0]!;
+    assert.ok((thesis.text ?? "").length <= 500);
+    assert.ok(!(thesis.text ?? "").includes("‮"));
+    assert.ok(!got.events.some((e) => ["tev-40", "tev-41", "tev-42"].includes(e.eventKey)));
+  });
+
+  it("are read only under data access, whatever the file says", () => {
+    const f = normalizeChildFomoFile({ ...file({ access: { dataAccess: false, monitoring: false, follow: false } }), tails: [tail(STAR)] })!.file;
+    assert.equal(f.tails, undefined);
+  });
+
+  it("signals may carry the tailed reason", () => {
+    const f = normalizeChildFomoFile(file({ signals: [signal(evm(9), "discovery", { reasons: ["tailed", "bogus" as never] })] }))!.file;
+    assert.deepEqual(f.signals[0]!.reasons, ["tailed"]);
   });
 });

@@ -11084,6 +11084,10 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       runJobs: rt.runJobs,
       budget: fomoBudgetPort(rt.backgroundBudget, FOMO_FLEET_PAYER),
       log,
+      // The operator's tail switch (docs/fomo.md "Tailing a trader"): =0 stops
+      // tail routing and the tails block in child files. The children read the
+      // same variable for their notices.
+      knobs: { tailsEnabled: process.env.MERRYMEN_FOMO_TAILS !== "0" },
     });
     // THE SAME ROSTER AS THE ROOM'S AND X'S: only who this replica speaks for.
     const roster: RosterMember[] = [];

@@ -4,6 +4,7 @@ import { eventIdentity } from "./events";
 import { chainFromProvider, tokenIdentity } from "./identity";
 import {
   GAP_REASONS,
+  TAIL_ROUTES_PER_HOUR,
   createIngestor,
   createTenantRouter,
   evidenceRevOf,
@@ -836,6 +837,61 @@ describe("coalescing and priority", () => {
     await s.time.advance(60_001);
     await s.live(raw(7, T0, { userId: "stranger-7", alertType: "thesis", tokenAddress: RH_C }));
     assert.equal(s.routed.at(-1)?.item.eventKey, keyOf(7), "budget refills after a minute");
+  });
+});
+
+describe("tailed traders", () => {
+  it("route to the tail's own owners only, interactive, for buys and theses, never a sell, never the monitoring fan-out", async () => {
+    const s = setup({ interest: interestOf({ cohort: new Set(), tailed: new Map([["tailed-1", ["tenant-t", "tenant-u"]]]), monitoringTenants: ["tenant-m", "tenant-t", "tenant-u"] }) });
+    await s.open();
+    await s.live(raw(1, T0, { userId: "tailed-1" }));
+    await s.live(raw(2, T0, { userId: "tailed-1", alertType: "thesis", tokenAddress: RH_B }));
+    await s.live(raw(3, T0, { userId: "tailed-1", alertType: "sell", tokenAddress: RH_C }));
+    const of = (n: number) => s.routed.filter((r) => r.item.eventKey === keyOf(n)).map((r) => [r.tenant, r.item.priority, r.item.reasons]);
+    assert.deepEqual(of(1), [
+      ["tenant-t", "interactive", ["tailed"]],
+      ["tenant-u", "interactive", ["tailed"]],
+    ]);
+    assert.deepEqual(
+      of(2),
+      [
+        ["tenant-t", "interactive", ["tailed", "robinhood-thesis"]],
+        ["tenant-u", "interactive", ["tailed", "robinhood-thesis"]],
+        ["tenant-m", "discovery", ["robinhood-thesis"]],
+      ],
+      "a thesis goes to the tail owners as tailed; the monitoring tenant gets it only through the existing stranger-thesis rule",
+    );
+    assert.deepEqual(of(3), [], "a sell asks for no research for a tail");
+    assert.equal(s.ing.health().dropped["not-of-interest"], 1);
+  });
+
+  it("a cohort member that is also tailed still reaches every monitoring tenant as discovery", async () => {
+    const s = setup({ interest: interestOf({ cohort: new Set(["trader-a"]), tailed: new Map([["trader-a", ["tenant-t"]]]), monitoringTenants: ["tenant-m", "tenant-t"] }) });
+    await s.open();
+    await s.live(raw(1, T0));
+    const got = Object.fromEntries(s.routed.map((r) => [r.tenant, [r.item.priority, r.item.reasons]]));
+    assert.deepEqual(got, { "tenant-t": ["interactive", ["tailed", "cohort"]], "tenant-m": ["discovery", ["cohort"]] });
+  });
+
+  it("is limited to six routed events per owner and trader an hour", async () => {
+    const s = setup({ interest: interestOf({ cohort: new Set(), tailed: new Map([["tailed-1", ["tenant-t"]], ["tailed-2", ["tenant-t"]]]), monitoringTenants: ["tenant-t"] }) });
+    await s.open();
+    assert.equal(TAIL_ROUTES_PER_HOUR, 6);
+    for (let i = 1; i <= 8; i++) await s.live(raw(i, T0, { userId: "tailed-1", tokenAddress: i % 2 ? RH_A : RH_B }));
+    await s.live(raw(9, T0, { userId: "tailed-2" }));
+    assert.equal(s.routed.filter((r) => r.item.event?.trader.userId === "tailed-1").length, 6);
+    assert.equal(s.routed.filter((r) => r.item.event?.trader.userId === "tailed-2").length, 1, "another trader has its own hour");
+    assert.equal(s.ing.health().dropped["tail-rate-limited"], 2);
+    await s.time.advance(3_600_001);
+    await s.live(raw(10, s.time.now(), { userId: "tailed-1" }));
+    assert.equal(s.routed.at(-1)?.item.eventKey, keyOf(10), "the hour rolls on");
+  });
+
+  it("an old snapshot without the field routes exactly as before", async () => {
+    const s = setup();
+    await s.open();
+    await s.live(raw(1, T0, { userId: "nobody-tails-me" }));
+    assert.deepEqual(s.routed, []);
   });
 });
 
