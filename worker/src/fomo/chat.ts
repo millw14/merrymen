@@ -30,7 +30,19 @@
 
 import type { FomoBroker } from "./contract";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./intent";
-import { evidenceForModel, FOMO_ATTRIBUTION, FOMO_CHAT_RULES, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE, renderAnswer } from "./render";
+import {
+  evidenceForModel,
+  FOMO_ATTRIBUTION,
+  FOMO_CAPABILITIES_GROUP,
+  FOMO_CAPABILITIES_OWNER,
+  FOMO_CHAT_RULES,
+  FOMO_GROUP_OFF,
+  FOMO_GROUP_ON,
+  GROUP_DM_DEFLECTION,
+  groupScrub,
+  NOT_PERMISSION_LINE,
+  renderAnswer,
+} from "./render";
 import { applyPlan, applyResult, deserialize, serialize, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
 import type { TokenThesesData, TraderActivityData } from "./tools";
@@ -89,12 +101,20 @@ const DEFAULT_MAX_CHARS = 3_500;
 /** Statuses that mean a lookup actually returned something real. */
 const ANSWERED: ReadonlySet<ResultStatus> = new Set(["ok", "empty", "partial", "capped", "stale"]);
 
-const TRADER_INTENTS: ReadonlySet<string> = new Set(["trader-holdings", "trader-activity", "trader-context", "rankings-traders"]);
+/**
+ * One trader's holdings, trades or profile. The public leaderboard is not
+ * here: a group hears it, handles and P&L included (Milla, 2026-10-07).
+ */
+const TRADER_INTENTS: ReadonlySet<string> = new Set(["trader-holdings", "trader-activity", "trader-context"]);
 const OWNER_ONLY_INTENTS: ReadonlySet<string> = new Set(["research-status", "why-skipped", "health", "watch", "unwatch"]);
 
-/** A group may hear coin-level aggregates only; anything about a trader (or the owner's own state) goes to a DM. */
+/** A group may hear coin-level aggregates and the public leaderboard; anything about one trader (or the owner's own state) goes to a DM. */
 function groupMustDeflect(plan: FomoQuestionPlan): boolean {
   if (TRADER_INTENTS.has(plan.intent) || OWNER_ONLY_INTENTS.has(plan.intent)) return true;
+  // The leaderboard cut to the traders Merrymen watches ("top traders we
+  // watch") IS the watch list, and who it follows is never a room's.
+  if (plan.intent === "rankings-traders" && plan.cohortScope) return true;
+  if (plan.toolCalls.some((c) => c.tool === "fomo_get_rankings" && c.args.board === "traders" && c.args.cohort_only === true)) return true;
   if (plan.subjects.some((s) => s.kind === "trader")) return true;
   return plan.toolCalls.some((c) => typeof c.args.trader === "string" || c.tool === "fomo_get_trader_context" || c.tool === "fomo_get_trader_activity");
 }
@@ -142,6 +162,15 @@ function failedEnvelope(tool: FomoToolName, now: number, i: number): FomoEnvelop
   };
 }
 
+/** Whether the broker has a provider key behind it; a broker that throws has none it can use. */
+function brokerConfigured(broker: FomoBroker): boolean {
+  try {
+    return broker.configured() === true;
+  } catch {
+    return false;
+  }
+}
+
 async function remember(broker: FomoBroker, key: string, memory: SubjectMemory): Promise<void> {
   try {
     await broker.memory.set(key, serialize(memory));
@@ -169,6 +198,13 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
   const plan = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
   if (!plan) return { handled: false };
+
+  // ANSWERED BY CODE, NOTHING LOOKED UP OR REMEMBERED: what it can do with
+  // Fomo, and, in a group, whether research is on here at all. A group never
+  // hears the owner's own research state; that answer is a direct message's.
+  const said = (text: string): AnswerFomoResult => ({ handled: true, text, plan, envelopes: [], toolsCalled: [], analysis: false, clarification: false });
+  if (plan.intent === "capabilities") return said(audience === "group" ? FOMO_CAPABILITIES_GROUP : FOMO_CAPABILITIES_OWNER);
+  if (audience === "group" && plan.intent === "health") return said(brokerConfigured(broker) ? FOMO_GROUP_ON : FOMO_GROUP_OFF);
 
   // 3. Record what was asked about BEFORE any lookup.
   const step = applyPlan(memory, plan, now);

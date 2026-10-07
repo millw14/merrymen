@@ -63,6 +63,8 @@ export const FOMO_INTENTS = [
   "health",
   "watch",
   "unwatch",
+  // What it can do with Fomo: answered from a fixed list (fomo/chat.ts), never remembered.
+  "capabilities",
 ] as const;
 export type FomoIntent = (typeof FOMO_INTENTS)[number];
 
@@ -97,6 +99,7 @@ export const SUBJECT_SLOTS: Readonly<Record<FomoIntent, { token: number; trader:
   health: { token: 0, trader: 0 },
   watch: { token: 1, trader: 0 },
   unwatch: { token: 1, trader: 0 },
+  capabilities: { token: 0, trader: 0 },
 };
 
 // ── The memory ───────────────────────────────────────────────────────────

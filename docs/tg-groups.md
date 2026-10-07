@@ -49,7 +49,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    balances, limits or wallet P&L, in digits or words. Deterministic factual
    replies may report public indexed coin metrics with their source and
    observation time, or calculate from numbers explicitly supplied in the
-   question. A market desk read may cite public market figures only when
+   question. Fomo research lines are code-written and pass the gate as
+   `research`: every clause but the money clause, so a board's market caps
+   and Fomo's public leaderboard P&L (third parties' published figures, in
+   short form, beside the source line) reach the room. A market desk read may cite public market figures only when
    every figure in it is one the brief code measured for that answer contains
    (Market analysis); the desk is never handed the owner's book, so it has
    none of the owner's figures to cite. Hypothetical arithmetic is never
@@ -327,7 +330,14 @@ to someone in distress goes out shushed or not.
   owner"); whether it trades on paper or for real; the display names of
   memecoins it currently holds (no sizes); the verdicts it gave on coins in
   this chat; this chat's memory summary and notes on the people in it; the
-  last 30 lines of the chat.
+  last 30 lines of the chat, with what the line it answers replies to
+  (quoted short) and whom its own lines answered; and, where Fomo research
+  is wired, that the feature exists and is answered only by the research
+  lane.
+* Follows the thread: when someone reacts to its own line with confusion or
+  disbelief ("are you serious?"), it looks again at what they said before,
+  owns a misreading in a few words and answers what they meant, instead of
+  doubling down.
 * Does not know (never in its prompt): anything in rule 3.
 * Other people's words are quoted inside a fenced block marked as untrusted
   data; instructions inside them are ignored.
@@ -399,10 +409,21 @@ one-liner from a model that was given no data.
 **When.** Only a line said to it (`deskAskOf`, detect.ts):
 
 * a coin named by one cashtag, or by a phrase that asks for a read on it
-  ("thoughts on X", "X good entry", "is X a buy", "chart on X"); a phrase
+  ("X good entry", "is X a buy", "chart on X", "levels on X"); a phrase
   that could name anything ("check out X", "how is X looking", "is X ready")
-  counts only beside a trading word or with X written as a ticker in
-  capitals, so "check out bob" and "is dinner ready" are not coins;
+  counts only beside a trading word, with X written as a ticker in
+  capitals, or with X a coin this chat knows, so "check out bob" and "is
+  dinner ready" are not coins;
+* an opinion ask ("what do you think about X", "thoughts on X", "take on X",
+  "wdyt about X") is how people ask about anything, so X is a coin only with
+  a trading word beside it, written as a ticker, or known here: one it holds,
+  one posted here, a `$X` said in the last 30 lines, or one the desk already
+  read here. Otherwise the conversation settles it (`understand.ts`): one
+  closed question to the group model through the same gate and allowance,
+  COIN or TOPIC, with the last eight lines as fenced context. A topic goes to
+  the persona ("what do you think about sex" is never "drop the CA"); a coin,
+  or no answer (no model, the allowance spent, an unclear reply), keeps the
+  desk's name search;
 * the market's own words with a question or request ("how's the market",
   "market update"), or "what's pumping / moving", "any setups"; "what's up /
   hot" only beside a trading word;
@@ -1231,6 +1252,10 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | Same CA posted again | A bare repost answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing. An addressed factual follow-up uses ordinary answer pacing and the public research port without another nomination |
 | "wdyt about this pine" as a reply to a coin post or its own acknowledgement | Resolves that group's coin and returns dated public research, with an honest unavailable answer by the deadline. A pending lookup is shared; other conversation stays responsive. No second nomination. "gm gm", "don't touch this one" or a reply that does not call it: chatter. Never a distress post's coin |
 | "wdyt?" / "is it good?" said to it | An unambiguous remembered coin gets a factual quick-screen take; otherwise it asks for the CA. It never claims a buy without a recorded fill |
+| "what do you think about sex" / "thoughts on pizza?" said to it, nothing marking a coin | One COIN-or-TOPIC question to the group model with the last lines as context; a topic is the persona's to answer, never "drop the CA". A $tag, ticker capitals, a trading word or a coin this chat knows makes it a coin with no question |
+| "are you serious?" under its own odd reply | Sees which of its lines it is answering; owns a misreading in a few words instead of "yeah i am" |
+| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form, and the source line. Never who it follows; one trader's holdings stay in a DM |
+| "what can you do with fomo" / "is fomo working?" | A fixed list of what a room can ask / whether Fomo research is on here; no lookup |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |

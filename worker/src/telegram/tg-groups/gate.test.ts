@@ -1025,6 +1025,38 @@ describe("money: no figure about money in any line", () => {
   ]);
 });
 
+describe("research: a code-written Fomo line may carry a published figure, and nothing else changes", () => {
+  // The leaderboard and a board's market caps, as tg-fomo-port.ts hands them on.
+  passes([
+    ["research", "Top traders on Fomo, last 24h, by money made on closed trades (source-reported, not a skill measure):"],
+    ["research", "1. CryptoKaleo +$151.4k"],
+    ["research", "2. frankdegods -$4.2k"],
+    ["research", "1. PONS on robinhood, market cap $2.1M"],
+    ["research", "Source stats, 24h, all sizes: 12 buys / 3 sells, 5 unique buyers, net +$12.3k (source-reported)."],
+    ["research", "Source: Fomo via fomoapi (independent; not affiliated with Fomo Family)"],
+  ]);
+  // Only the money clause is lifted: a handle, a link, an address, a cashtag,
+  // advice, a claim, the owner's book or a slur in a research line is refused
+  // as anywhere else.
+  refuses("handle", [["research", "1. @CryptoKaleo +$151.4k"]]);
+  refuses("link", [["research", "1. CryptoKaleo +$151.4k fomo.family/u/kaleo"]]);
+  refuses("address", [["research", "1. PONS 0x39dbed3a00000000000000000000000000000c0d, market cap $2.1M"]]);
+  refuses("cashtag", [["research", "1. $PONS on robinhood, market cap $2.1M"]]);
+  refuses("advice", [["research", "1. PONS on robinhood, market cap $2.1M, you should buy it"]]);
+  refuses("claim", [["research", "i bought it at $2.1M"]]);
+  refuses("private", [["research", "my pnl is +$151.4k"], ["research", "Top traders by realised P&L:"]]);
+  refuses("alert", [["research", "🚨 1. PONS market cap $2.1M"]]);
+  // A long run of digits is still an id, money or not: groups get money in short form.
+  refuses("private", [["research", "1. CryptoKaleo +$151,383,000"]]);
+  it("the same research line may be said again, like a template", () => {
+    const line = "1. CryptoKaleo +$151.4k";
+    assert.equal(reason(line, { kind: "research", recentOwn: [line] }), "ok");
+  });
+  it("every other kind still refuses the same figure", () => {
+    for (const kind of ALL_KINDS) assert.notEqual(reason("1. CryptoKaleo +$151.4k", { kind }), "ok", kind);
+  });
+});
+
 describe("figures: a coin line holds no number at all", () => {
   const lines = [
     "top 3 holders own it",
