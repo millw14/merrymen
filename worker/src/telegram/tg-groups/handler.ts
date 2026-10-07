@@ -126,6 +126,7 @@ import type {
   TgDeskPort,
   TgDeskThought,
   TgFomoPort,
+  TgFomoRequest,
   TgGroupFactsPort,
   TgLine,
   TgPerson,
@@ -2360,7 +2361,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * carries no source line: the room has had its post about where the data
    * comes from (Milla, 2026-10-07). Null when nothing sayable is left.
    */
-  const fomoSayable = (text: string): string | null => {
+  const fomoSayable = (text: string, tail?: string): string | null => {
     const agentName = selfNow()?.name ?? "";
     const lines = text.split("\n").map((l) => l.trim()).filter((l) => l !== "");
     const kept: string[] = [];
@@ -2374,18 +2375,35 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       kept.push(v.text);
     }
     if (refused) log(`[tg-groups] research lines dropped by the gate (${refused})`);
+    // A tail line (the owner's "sent the trade moves … to your DM") keeps the
+    // last slot; refused by the gate, it is dropped and the answer still goes.
+    const last = tail !== undefined ? admitTgLine(tail, { agentName, kind: "research", recentOwn: [] }) : null;
+    const end = last?.ok ? last.text : null;
     const out: string[] = [];
-    let used = 0;
+    let used = end ? end.length + 1 : 0;
     for (const l of kept) {
-      if (out.length >= FOMO_MAX_LINES || used + l.length + 1 > FOMO_MAX_CHARS) break;
+      if (out.length >= FOMO_MAX_LINES - (end ? 1 : 0) || used + l.length + 1 > FOMO_MAX_CHARS) break;
       out.push(l);
       used += l.length + 1;
     }
-    return out.length ? out.join("\n") : null;
+    if (!out.length) return null;
+    return [...out, ...(end ? [end] : [])].join("\n");
+  };
+
+  /** How often the owner's moves go out per room and kind of answer. */
+  const MOVES_EVERY_MS = 30 * MIN;
+  const movesAt = new Map<string, number>();
+  const movesDue = (chatId: number, kind: string): boolean => {
+    const at = movesAt.get(`${chatId}:${kind}`);
+    return at === undefined || clock() - at >= MOVES_EVERY_MS;
+  };
+  const movesSaid = (chatId: number, kind: string): void => {
+    if (movesAt.size > 512) movesAt.delete(movesAt.keys().next().value!);
+    movesAt.set(`${chatId}:${kind}`, clock());
   };
 
   /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
-  const readFomo = async (port: TgFomoPort, q: { text: string; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+  const readFomo = async (port: TgFomoPort, q: { text: string; request?: TgFomoRequest; owner?: boolean; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
     if (ms <= 0) return "timeout";
     const ask = { ...q, timeoutMs: ms };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2410,7 +2428,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * whether it is still wanted are all checked again right before the send.
    * "not-research": the research did not take it, and the caller goes on.
    */
-  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts): Promise<"sent" | "not-research" | Quiet> => {
+  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest): Promise<"sent" | "not-research" | Quiet> => {
     const port = fomoNow();
     if (!port) return "not-research";
     const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
@@ -2446,7 +2464,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // The bot's own names go with the line: an addressed line almost always
     // carries "@thisbot", which the research must not read as a trader.
     const selfNames = selfNamesOf(selfNow());
-    const r = await readFomo(port, { text: j.line.text, chatId, ...(j.threadId !== undefined ? { threadId: j.threadId } : {}), ...(selfNames.length ? { selfNames } : {}) }, replyByMs - RESEARCH_SEND_MS - clock());
+    // The owner is the trusted sender id, never a line sent through a chat (j.isOwner excludes `via`).
+    const owner = j.isOwner === true;
+    const r = await readFomo(port, {
+      text: j.line.text,
+      ...(request ? { request } : {}),
+      ...(owner ? { owner } : {}),
+      chatId,
+      ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
+      ...(selfNames.length ? { selfNames } : {}),
+    }, replyByMs - RESEARCH_SEND_MS - clock());
     if (r === null) {
       fomoRefund(slot);
       return "not-research";
@@ -2465,7 +2492,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     // A deflection is still an answer about research: a follow-up here goes back to it.
     rememberFomo(chatId, j.threadId);
-    const text = fomoSayable(r.text) ?? FOMO_UNSAYABLE;
+    // HER MOVES: the commands go to her DM first, and the room hears that they
+    // went only when the DM landed (never a claim that is not true), at most
+    // once per room and kind in MOVES_EVERY_MS.
+    let movesLine: string | undefined;
+    if (owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(r.text) !== null) {
+      stageOf(chatId, "research: owner moves");
+      if (await dmOwner(r.moves.dm)) {
+        movesSaid(chatId, r.moves.kind);
+        movesLine = r.moves.room;
+        log("[tg-groups] owner moves sent to the DM");
+      }
+    }
+    const text = fomoSayable(r.text, movesLine) ?? FOMO_UNSAYABLE;
     return send(text);
   };
 

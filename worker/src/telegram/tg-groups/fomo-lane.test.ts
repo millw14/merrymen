@@ -79,13 +79,13 @@ class FakePort implements TgCoinsPort {
 
 /** A research port that records what it was asked and answers from a script. */
 class SpyFomo implements TgFomoPort {
-  asks: Array<{ text: string; chatId: number; threadId?: number; timeoutMs?: number }> = [];
+  asks: Array<{ text: string; chatId: number; threadId?: number; timeoutMs?: number; owner?: boolean }> = [];
   forgot: number[] = [];
   answer: (q: { text: string }) => TgFomoAnswer | null | Promise<TgFomoAnswer | null> = () => ({
     text: "PONS on robinhood in the last 24h: 1 distinct buyer and 0 sellers observed (large positions only; a floor, not a census).",
     deflect: false,
   });
-  async ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number }): Promise<TgFomoAnswer | null> {
+  async ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number; owner?: boolean }): Promise<TgFomoAnswer | null> {
     this.asks.push({ ...q });
     return this.answer(q);
   }
@@ -183,6 +183,53 @@ afterEach(async () => {
 const FORBIDDEN_IN_ROOM = [/@[A-Za-z0-9_]{2,}/, /0x[0-9a-fA-F]{6,}/, /https?:\/\//i, /\b[a-z0-9-]+\.(?:io|com|family|xyz)\b/i, /\$[A-Za-z]/];
 
 describe("the group research lane", () => {
+  const MOVES = { kind: "coins" as const, room: "sent the trade moves for these to your DM.", dm: "<b>Your moves on these coins</b>:\n• <code>watch PONS on fomo</code>" };
+  const board = (): TgFomoAnswer => ({ text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood, market cap $2.1M", deflect: false, moves: MOVES });
+
+  it("the owner's board: her moves go to her DM first, then the room hears they went", async () => {
+    fomo!.answer = board;
+    make();
+    const m = msg("pine what's trending on fomo?", { fromId: OWNER, fromFirstName: "Milla" });
+    await said(m);
+    assert.equal(fomo!.asks[0]!.owner, true, "the port is told the owner asked");
+    const dm = tg.calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === OWNER);
+    assert.equal(dm.length, 1);
+    assert.match(String(dm[0]!.body.text), /watch PONS on fomo/);
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 1);
+    assert.deepEqual(room[0]!.split("\n").slice(-1), [MOVES.room]);
+    // Within half an hour the same kind of answer carries no second DM.
+    clock += 2 * MIN;
+    await said(msg("pine what's trending on fomo now?", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(tg.calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === OWNER).length, 1);
+    assert.ok(!tg.texts(CHAT)[1]!.includes(MOVES.room));
+  });
+
+  it("a stranger's board carries no moves, and the port is not told an owner asked", async () => {
+    fomo!.answer = board;
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    assert.notEqual(fomo!.asks[0]!.owner, true);
+    assert.equal(tg.calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === OWNER).length, 0);
+    assert.ok(!tg.texts(CHAT)[0]!.includes(MOVES.room));
+  });
+
+  it("her DM unreachable: the room never hears a 'sent to your DM' that did not happen", async () => {
+    fomo!.answer = board;
+    const fetchFn = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      if (url.endsWith("/sendMessage") && body.chat_id === OWNER) return { ok: true, status: 403, json: async () => ({ ok: false, description: "Forbidden: bot can't initiate conversation" }) };
+      return fetchFn(url, init);
+    };
+    make();
+    await said(msg("pine what's trending on fomo?", { fromId: OWNER, fromFirstName: "Milla" }));
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 1);
+    assert.ok(!room[0]!.includes(MOVES.room));
+    assert.match(room[0]!, /PONS on robinhood/);
+  });
+
   it("an addressed research ask reaches the port with the trusted chat id, and the gated answer is the reply", async () => {
     make();
     const m = msg("pine what are fomo traders buying?");

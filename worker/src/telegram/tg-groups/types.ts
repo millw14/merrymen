@@ -412,9 +412,42 @@ export interface TgDeskThinkRequest {
  *   deflect: true     a question about a trader or the owner's own research
  *                     state, which a group never hears; `text` says so
  */
+/**
+ * A research question a model chose for an addressed group line (route.ts),
+ * already checked by code. The port turns it into one of a fixed set of
+ * questions the deterministic planner answers; the only free text in it is a
+ * ticker code found in the line itself.
+ */
+export type TgFomoRequest =
+  | { kind: "leaderboard"; window?: "24h" | "7d" | "30d" | "all" }
+  | { kind: "board"; board: "trending" | "graduated" | "most-held" }
+  | { kind: "coin"; symbol: string; aspect: "theses" | "buyers" | "sellers" | "activity" | "research" }
+  | { kind: "crowd"; side: "buy" | "sell"; window?: "24h" | "7d" | "30d" }
+  | { kind: "small-coins" }
+  | { kind: "about" }
+  | { kind: "status" }
+  /** One trader: never answered in a room (the owner's goes to her DM, handler.ts). */
+  | { kind: "trader" };
+
+/**
+ * WHAT THE OWNER CAN DO WITH AN ANSWER she asked for in a group: the
+ * commands, for her DM, and the line the room hears once her DM has them.
+ * Written by code from the answer's own rows, never by a model.
+ */
+export interface TgFomoMoves {
+  /** Paced per room and kind (handler.ts). */
+  kind: "traders" | "coins" | "coin";
+  /** Said in the room after the answer, only when the DM went through. */
+  room: string;
+  /** HTML for her DM. */
+  dm: string;
+}
+
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
+  /** Only when the owner asked (`owner` on the ask): her next moves. */
+  moves?: TgFomoMoves;
 }
 
 export interface TgFomoPort {
@@ -424,7 +457,17 @@ export interface TgFomoPort {
    * (selfNamesOf), so the line's "@thisbot" addresses the bot instead of
    * naming a trader the room would be deflected for.
    */
-  ask(q: { text: string; chatId: number; threadId?: number; timeoutMs?: number; selfNames?: readonly string[] }): Promise<TgFomoAnswer | null>;
+  ask(q: {
+    text: string;
+    /** A model's checked choice (route.ts): asked as its fixed question instead of the line's words. */
+    request?: TgFomoRequest;
+    /** The asker is the owner (trusted sender id, never through a chat): her moves come back too. */
+    owner?: boolean;
+    chatId: number;
+    threadId?: number;
+    timeoutMs?: number;
+    selfNames?: readonly string[];
+  }): Promise<TgFomoAnswer | null>;
   /** The owner's chat-wide forget: drop this chat's research subject memory. Never throws. */
   forget?(chatId: number): Promise<void>;
 }

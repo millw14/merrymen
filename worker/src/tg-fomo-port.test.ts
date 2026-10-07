@@ -40,9 +40,13 @@ import { createTgGroups, type TgGroups } from "./telegram/tg-groups/handler";
 import { __resetMemoryPassThrottleForTest } from "./telegram/tg-groups/memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
 import type { CoinLook, NominateResult, TgCoinsPort, TrencherReadiness } from "./telegram/tg-groups/types";
+import { classifyFomoQuestion } from "./fomo/intent";
+import { isMutationTool } from "./fomo/tools";
 import {
   createTgFomoPort,
   groupWords,
+  ownerMoves,
+  requestText,
   tgGroupConversationKey,
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
@@ -317,6 +321,97 @@ describe("createTgFomoPort", () => {
     assert.equal(await port.ask({ text: "what are fomo traders buying?", chatId: 0 }), null);
     assert.equal(await port.ask({ text: "what are fomo traders buying?", chatId: Number.NaN }), null);
     assert.equal(s.calls.length, 0);
+  });
+});
+
+describe("a model's checked choice, asked as the planner's own question", () => {
+  // Every request plans exactly the intended read, and never a write: the model reaches the provider only through these.
+  const cases: Array<[Parameters<typeof requestText>[0], string, Record<string, unknown>]> = [
+    [{ kind: "leaderboard" }, "fomo_get_rankings", { board: "traders", window: "24h" }],
+    [{ kind: "leaderboard", window: "7d" }, "fomo_get_rankings", { board: "traders", window: "7d" }],
+    [{ kind: "leaderboard", window: "30d" }, "fomo_get_rankings", { board: "traders", window: "30d" }],
+    [{ kind: "leaderboard", window: "all" }, "fomo_get_rankings", { board: "traders", window: "all" }],
+    [{ kind: "board", board: "trending" }, "fomo_get_rankings", { board: "trending-tokens" }],
+    [{ kind: "board", board: "graduated" }, "fomo_get_rankings", { board: "graduated-tokens" }],
+    [{ kind: "board", board: "most-held" }, "fomo_get_rankings", { board: "most-held-tokens" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "theses" }, "fomo_get_token_theses", { token: "PONS" }],
+    [{ kind: "coin", symbol: "pons", aspect: "buyers" }, "fomo_get_token_activity", { token: "PONS", side: "buy" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "sellers" }, "fomo_get_token_activity", { token: "PONS", side: "sell" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "activity" }, "fomo_get_token_activity", { token: "PONS" }],
+    [{ kind: "coin", symbol: "PONS", aspect: "research" }, "fomo_research_coin", { token: "PONS", depth: "standard" }],
+    [{ kind: "crowd", side: "buy" }, "fomo_get_token_activity", { side: "buy" }],
+    [{ kind: "crowd", side: "sell", window: "7d" }, "fomo_get_token_activity", { side: "sell", window: "7d" }],
+    [{ kind: "small-coins" }, "fomo_find_opportunities", {}],
+    [{ kind: "status" }, "fomo_get_research_status", {}],
+  ];
+  for (const [r, tool, args] of cases) {
+    it(`${JSON.stringify(r)} → ${tool} ${JSON.stringify(args)}`, () => {
+      const plan = classifyFomoQuestion(requestText(r)!, { memory: null, now: NOW });
+      assert.ok(plan, requestText(r)!);
+      assert.deepEqual(plan.toolCalls.map((c) => [c.tool, c.args]), [[tool, args]]);
+      assert.ok(!plan.toolCalls.some((c) => isMutationTool(c.tool)));
+    });
+  }
+  it("'about' is the fixed capabilities answer, and a trader or a ticker that is not one has no question", () => {
+    assert.equal(classifyFomoQuestion(requestText({ kind: "about" })!, { memory: null, now: NOW })?.intent, "capabilities");
+    assert.equal(requestText({ kind: "trader" }), null);
+    assert.equal(requestText({ kind: "coin", symbol: "not a ticker!", aspect: "theses" }), null);
+  });
+
+  it("a trader request is deflected before anything is planned or spent", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true });
+    assert.equal(s.calls.length, 0);
+  });
+
+  it("a request is answered from its fixed question, whatever the line said", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "yo who's cooking on that app today", request: { kind: "leaderboard" }, chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.match(a.text, /^Top traders on Fomo, last 24h/);
+    assert.equal(s.calls[0]!.tool, "fomo_get_rankings");
+    assert.equal(a.moves, undefined, "no moves unless the owner asked");
+  });
+});
+
+describe("the owner's moves", () => {
+  it("after the trader board: the questions that open each trader's book, for her DM; the room hears only that it went", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "who's the top trader on fomo today?", owner: true, chatId: GROUP });
+    assert.ok(a?.moves);
+    assert.equal(a.moves.kind, "traders");
+    assert.match(a.moves.dm, /<code>what is trader CryptoKaleo holding<\/code>/);
+    assert.match(a.moves.dm, /<code>what has trader frankdegods bought this week<\/code>/);
+    assert.ok(admitTgLine(a.moves.room, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
+    assert.doesNotMatch(a.moves.room, /CryptoKaleo|frankdegods|tail/i, "the room line names nobody");
+    // Every suggested question plans the intended read when she types it.
+    assert.equal(classifyFomoQuestion("what is trader CryptoKaleo holding", { memory: null, now: NOW })?.intent, "trader-holdings");
+    assert.equal(classifyFomoQuestion("what has trader frankdegods bought this week", { memory: null, now: NOW })?.intent, "trader-activity");
+  });
+
+  it("after a coin board: /buy only where /buy resolves, the CA to post for a review on Robinhood Chain, watch and theses", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, buyable: (sym) => sym === "PONS" });
+    const a = await port.ask({ text: "what's trending on fomo?", owner: true, chatId: GROUP });
+    assert.ok(a?.moves);
+    assert.equal(a.moves.kind, "coins");
+    assert.match(a.moves.dm, /<code>\/buy PONS 5<\/code>/);
+    assert.match(a.moves.dm, /<code>0x39dbed3a00000000000000000000000000000c0d<\/code>/i);
+    assert.match(a.moves.dm, /<code>watch PONS on fomo<\/code>/);
+    assert.match(a.moves.dm, /FU2O<\/b> \(solana\)\n• not tradeable from here/);
+    assert.doesNotMatch(a.moves.dm, /\/buy FU2O|\/buy CACHE/, "never /buy for a coin /buy would refuse");
+    assert.equal(classifyFomoQuestion("watch PONS on fomo", { memory: null, now: NOW })?.intent, "watch");
+  });
+
+  it("nothing for a stranger, a deflection or an answer with no usable row", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    assert.equal((await port.ask({ text: "what's trending on fomo?", chatId: GROUP }))?.moves, undefined);
+    assert.equal((await port.ask({ text: "what is @CryptoKaleo holding on fomo?", owner: true, chatId: GROUP }))?.moves, undefined);
+    assert.equal(ownerMoves({ handled: false }), null);
   });
 });
 
