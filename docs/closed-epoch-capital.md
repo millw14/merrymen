@@ -83,12 +83,46 @@ It then proposes:
 
 | Proposal | When | Row |
 |---|---|---|
-| file a flow | a `capital-in` or `capital-out` movement before epoch 1 closed, with no row for its `tx#log` in any epoch and no applied receipt | `flows`: `source 'chain-log'`, the stored `agent_id` spelling, `epoch 1`, `chain_id`, `tx_hash`, `block_number`, `log_index`, `at` = block time |
+| file a flow | a `capital-in` or `capital-out` movement before epoch 1 closed, that the owner made ([below](#who-moved-it)), with no row for its `tx#log` in any epoch and no applied receipt | `flows`: `source 'chain-log'`, the stored `agent_id` spelling, `epoch 1`, `chain_id`, `tx_hash`, `block_number`, `log_index`, `at` = block time |
 | quarantine a flow | an epoch-1 row that is not a receipt: one with no transaction (`inferred`, a legacy row), or one with a transaction and no log index that twins a movement being filed (a `transfer-intent`) | moved to `flows_quarantine` with `run_id` = the repair id and `replaced_by` = the filed `tx#log` list |
 | clear a live basis and floor | a symbol admission would seed a live basis for (`planAttestedSeed`), whose token the chain shows the book does not hold at all | the `cost_basis` and `position_floors` rows deleted by exact primary key and exact contents |
 
 An energy purchase (`reserve-out`) already filed as the worker's
 `energy-buy` row counts as present. Any other is refused.
+
+### Who moved it
+
+The classifier reads a USDG movement with nothing paired in its transaction
+as capital, whoever caused it. Filed into a closed epoch, it becomes the
+owner's capital for good. So the tool files a movement only where its own
+receipt shows the owner made it (`capitalProvenance`). The preview lists the
+account's operations in each movement's transaction (`signers`): who signed
+each, whether it succeeded, and whether the movement's log ran inside it.
+
+- **Out** is filed only from inside the execution of a successful operation
+  of the account signed by the owner's root key. USDG that left with no
+  operation of the account in the transaction was an allowance someone
+  spent. `chain-gap-booking` refuses that too: nobody can be said to have
+  chosen it. USDG that left outside the root-key operation's execution, or
+  inside one that failed, is not the owner's either. Both are refused with
+  `out-not-owner`.
+- **In or out** is never filed from a transaction where the agent acted.
+  That means an operation of the account that the root key did not sign (a
+  session key's, another validator's, or one whose validator is not read,
+  such as one at another entry point). It also means a trades row that
+  names the transaction and answers no root-key operation in it. Such a
+  movement is a leg of the agent's own trade or transfer, even when its
+  pair is missing from the receipt. This includes a session key's transfer
+  home: the chain does not show that the owner chose it. Refused with
+  `capital-in-session-op`.
+- **In** needs no operation. An owner's deposit is a plain transfer in
+  (`0xc8ab6c45…#0` carries none).
+
+A `reserve-out` is not asked: this tool never files one, and only keeps
+the worker's own `energy-buy` row. 0x0e1ca0's pair passes: the deposit
+carries no operation, and the sweep's USDG log `#7` runs inside the root-key
+operation `0x0a223e56…`. That operation is answered by the reconciler's
+`swap` row.
 
 ### Refusals
 
@@ -118,6 +152,8 @@ One refusal blocks the whole tenant. Each is named:
 | `carry-in-epoch-1` | an `epoch-carry` row in epoch 1 |
 | `unexplained-row` | an epoch-1 row with a transaction that answers no capital movement |
 | `outbound-only` | after the repair, epoch 1 would hold a withdrawal and no capital in |
+| `out-not-owner` | a `capital-out` movement did not run inside a successful operation that the owner's root key signed: no operation of the account in its transaction (an allowance spent), or USDG out outside that operation's execution or inside a failed one ([above](#who-moved-it)) |
+| `capital-in-session-op` | a `capital-in` or `capital-out` movement is in a transaction where the agent acted: an operation of the account that the root key did not sign, or a trades row that names the transaction and answers no root-key operation in it. It is a trade's or a transfer's leg, never filed as capital ([above](#who-moved-it)) |
 | `operation-unanswered`, `transfer-unanswered`, `fact-undated`, `admission-unread` | admission would still find something from before epoch 1 closed. An owner's root-key operation is named `owner-operation`: **this tool books no operation** |
 | `positions-ambiguous`, `class-vault-held`, `live-position-disagrees` | the stale-basis check cannot decide (below) |
 | `home-book-present`, `home-unproved` | a basis or floor would be cleared, and admission's drain of the tenant's home could put it back, or nothing proves it could not ([below](#a-clear-only-where-admissions-drain-cannot-undo-it)) |

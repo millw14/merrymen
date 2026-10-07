@@ -51,7 +51,10 @@
  * positions, paper_book, journal, events, fee_accruals or risk_periods; write
  * any row in an epoch other than the one it proved; move a row between
  * epochs; book an operation (an owner's root-key operation is the owner's,
- * and no row here may misattribute it as the agent's); book an in-kind
+ * and no row here may misattribute it as the agent's); file as capital a
+ * movement the owner did not make — USDG out anywhere but inside the owner's
+ * root-key operation, or anything in a transaction where a session key
+ * acted (capitalProvenance); book an in-kind
  * movement (review only, capital-classify.ts asset-out); move a peak; run
  * for a tenant that is not held on a chain refusal with a quiet book
  * (chain-gap-booking.ts holdOf); print or save a secret.
@@ -648,6 +651,8 @@ export interface MovementReport {
   direction: "in" | "out" | "self"; amountRaw: string; counterparty: string;
   /** Null when its receipt could not be read: then it is unclassified and the plan is blocked. */
   classification: { kind: Classification["kind"]; rule: string; why: string; pairedToken: string | null } | null;
+  /** The account's operations in its transaction, from the same receipt (signersOf): who signed each, and whether this log ran inside it. Null when unread. */
+  signers: Signer[] | null;
   /** The classifier's own input (another hosted account is internal), and whether it is the grant's owner or the signed-in tenant. */
   counterpartyKnownAccount: boolean; counterpartyIsOwner: boolean;
   /** The epoch its time places it in, against the proved boundary: the epoch asked for, or "later". Null when undated. */
@@ -737,6 +742,95 @@ function usdgMovementOf(l: RawChainLog, who: string): { tx: string; logIndex: nu
   const from = `0x${lower(l.topics[1]).slice(-40)}`, to = `0x${lower(l.topics[2]).slice(-40)}`;
   if (from !== who && to !== who) return null;
   return { tx: lower(l.transactionHash), logIndex: Number(BigInt(l.logIndex)), block: BigInt(l.blockNumber).toString(), from, to, amount: BigInt(l.data) };
+}
+
+/** One operation of the account in a movement's transaction, as its receipt shows it. */
+export interface Signer {
+  userOpHash: string; entryPoint: string;
+  /** The validator its nonce names (asset-movements.ts validatorOfNonce); null when unread, or at an entry point whose nonce is not read. */
+  validator: "root" | "permission" | "secondary" | null;
+  success: boolean;
+  /** The movement's own USDG log ran inside this operation's execution (segmentReceipt). */
+  carriesLog: boolean;
+}
+
+/**
+ * THE ACCOUNT'S OPERATIONS IN ONE TRANSACTION. PURE. Every UserOperationEvent
+ * of the account in the receipt, with the validator its nonce names, whether
+ * it succeeded, and whether the USDG log at `logIndex` ran inside its
+ * execution (between its BeforeExecution and its own event: segmentReceipt).
+ * One at another entry point is listed with no validator: nothing here reads
+ * its nonce, so nothing here says the owner signed it.
+ */
+export function signersOf(logs: readonly RawChainLog[], account: string, logIndex: number): Signer[] {
+  const { segments, foreign } = segmentReceipt(logs);
+  const carries = (xs: readonly RawChainLog[]) => xs.some((x) => lower(x.address) === USDG && typeof x.logIndex === "string" && Number(BigInt(x.logIndex)) === logIndex);
+  return [
+    ...segments.filter((s) => s.op.sender === account).map((s): Signer => ({ userOpHash: s.op.userOpHash, entryPoint: s.op.entryPoint, validator: validatorOfNonce(s.op.nonce),
+      success: s.op.success, carriesLog: carries(s.logs) })),
+    ...foreign.filter((op) => op.sender === account).map((op): Signer => ({ userOpHash: op.userOpHash, entryPoint: op.entryPoint, validator: null, success: op.success, carriesLog: false })),
+  ];
+}
+
+const saidSigner = (s: Signer) => `${s.userOpHash.slice(0, 10)}… (${s.validator === null ? "validator unread" : `${s.validator} validator`}${s.success ? "" : ", failed"}` +
+  `${s.carriesLog ? ", this log inside it" : ""})`;
+
+/**
+ * WHO CHOSE A CAPITAL MOVEMENT. PURE. The classifier reads a USDG movement
+ * with nothing paired in its transaction as capital whoever caused it; filed
+ * into a closed epoch it is the owner's for good. So a movement is filed as
+ * capital only where its own receipt says the owner moved it:
+ *
+ *  - OUT only inside the execution of a successful operation of the account
+ *    signed by the owner's root key. USDG that left with no operation of the
+ *    account in the transaction was an allowance spent (chain-gap-booking.ts
+ *    refuses the same: "not a withdrawal anybody can be said to have
+ *    chosen"); USDG that left outside the root-key operation's execution, or
+ *    inside a failed one, is no more the owner's. `out-not-owner`.
+ *  - IN or OUT never in a transaction carrying an operation of the account
+ *    the root key did not sign (a session key's, another validator's, one
+ *    whose validator is unread), nor one a trades row names without
+ *    answering a root-key operation in it: that is the agent acting, a
+ *    trade's leg or its transfer, booked beside its own row — even with its
+ *    pair missing from the receipt, it is no owner's capital. A session
+ *    key's transfer home is refused too: the chain does not say the owner
+ *    chose it. `capital-in-session-op`.
+ *
+ * A capital-in needs no operation: an owner's deposit is a plain transfer in
+ * (0x0e1ca0's c8ab…#0 carries none). A reserve-out is never filed here (only
+ * the worker's own 'energy-buy' row is kept), so it is not asked. Every
+ * reason that applies is returned; none means the movement may be filed.
+ */
+export function capitalProvenance(m: Pick<MovementReport, "key" | "txHash" | "direction" | "amountRaw" | "signers">,
+  trades: ReadonlyArray<{ id: number; kind: string; userOpHash: string | null; txHash: string | null }>): Refusal[] {
+  const what = `${m.key} (USDG ${m.direction} ${usdg6(m.amountRaw)})`;
+  if (m.signers === null) return [{ code: "movement-unread", why: `${what}: its receipt could not be read, so who moved it cannot be said` }];
+  const out: Refusal[] = [];
+  const notRoot = m.signers.filter((s) => s.validator !== "root");
+  const rootOps = new Set(m.signers.filter((s) => s.validator === "root").map((s) => s.userOpHash));
+  const rows = trades.filter((t) => t.txHash === m.txHash || (t.userOpHash !== null && m.signers!.some((s) => s.userOpHash === t.userOpHash)));
+  const agentRows = rows.filter((t) => t.userOpHash === null || !rootOps.has(t.userOpHash));
+  if (notRoot.length || agentRows.length) {
+    out.push({ code: "capital-in-session-op", why: `${what} is in a transaction where the agent acted, not the owner's root key: ` +
+      [...(notRoot.length ? [`the account's operation(s) ${notRoot.map(saidSigner).join(", ")}`] : []),
+        ...(agentRows.length ? [`trades row(s) ${agentRows.map((t) => `#${t.id} (kind '${t.kind}')`).join(", ")} naming it and answering no root-key operation in it`] : [])].join("; ") +
+      ". A leg of the agent's own trade or transfer is not capital the owner moved, even with its pair missing from the receipt — never filed here, a reviewed decision" });
+  }
+  if (m.direction === "out" && !m.signers.some((s) => s.validator === "root" && s.success && s.carriesLog)) {
+    out.push({ code: "out-not-owner", why: m.signers.length === 0
+      ? `${what}: USDG left the account in a transaction that carried no operation of the account (an allowance was spent): not a withdrawal anybody can be said to have chosen ` +
+        "(chain-gap-booking.ts refuses the same) — never filed as the owner's capital out"
+      : `${what} did not run inside a successful operation the owner's root key signed (the account's operations in its transaction: ${m.signers.map(saidSigner).join(", ")}): ` +
+        "only the owner's own key withdraws — never filed as the owner's capital out" });
+  }
+  return out;
+}
+
+/** What filed the row says of who moved it, for the reviewer's line. */
+function provenanceSaid(m: MovementReport): string {
+  const root = (m.signers ?? []).find((s) => s.validator === "root" && s.success && s.carriesLog);
+  if (root) return `inside the owner's root-key operation ${root.userOpHash.slice(0, 10)}…`;
+  return m.signers?.length ? `beside the owner's root-key operation(s) ${m.signers.map((s) => `${s.userOpHash.slice(0, 10)}…`).join(", ")}` : "no operation of the account in its transaction";
 }
 
 /** The epoch-1 receipt sources: what a chain movement is filed as. epoch-carry is evidence too, but it is no receipt (flow-evidence.ts). */
@@ -905,14 +999,16 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     const inReceipt = e?.receipt?.logs.find((x) => Number(BigInt(x.logIndex)) === m.logIndex && lower(x.address) === USDG && BigInt(x.data || "0x0") === m.amount
       && lower(x.topics?.[1]) === lower(addressTopic(m.from)) && lower(x.topics?.[2]) === lower(addressTopic(m.to)));
     let classification: MovementReport["classification"] = null;
+    let signers: MovementReport["signers"] = null;
     if (!bad && inReceipt) {
       const [leg] = legsFromReceipt([inReceipt]);
       const c = classifyUsdgMovement({ account: account!, usdg: leg!, txLegs: legsFromReceipt(e!.receipt!.logs), usdgToken: USDG, knownAccounts, custodyAddresses, reserveTokens });
       classification = { kind: c.kind, rule: c.evidence.rule, why: c.why, pairedToken: c.pairedToken ?? null };
+      signers = signersOf(e!.receipt!.logs, account!, m.logIndex);
     }
     movements.push({
       key: `log:${m.tx}#${m.logIndex}`, txHash: m.tx, logIndex: m.logIndex, block: m.block, blockHash: e?.block?.hash ?? null, at: !bad ? txTime(m.tx) : null,
-      direction, amountRaw: m.amount.toString(), counterparty, classification, counterpartyKnownAccount: knownAccounts.includes(counterparty),
+      direction, amountRaw: m.amount.toString(), counterparty, classification, signers, counterpartyKnownAccount: knownAccounts.includes(counterparty),
       counterpartyIsOwner: counterparty === grant?.owner || counterparty === booking.tenant, epochByTime: null,
       answeredBy: {
         flows: snap.flows.rows.filter((f) => lower(f.txHash) === m.tx && f.logIndex === m.logIndex).map((f) => ({ id: f.id, epoch: f.epoch, source: f.source })),
@@ -1037,7 +1133,12 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
   for (const m of capital) {
     const kind = m.classification!.kind;
     const direction = kind === "capital-in" ? "in" : "out";
-    const twins = snap.flows.rows.filter((f) => lower(f.txHash) === m.txHash && f.logIndex === m.logIndex && (f.chainId === chainId || f.chainId === null));
+    // WHO CHOSE IT, before anything else: a movement the owner did not make is never filed as the owner's capital (capitalProvenance).
+    if (kind !== "reserve-out") {
+      const notOwners = capitalProvenance(m, snap.trades);
+      if (notOwners.length) { for (const r of notOwners) refuse(r.code, r.why); continue; }
+    }
+    const twins =snap.flows.rows.filter((f) => lower(f.txHash) === m.txHash && f.logIndex === m.logIndex && (f.chainId === chainId || f.chainId === null));
     const quarantined = snap.quarantine.rows.filter((q) => lower(q.txHash) === m.txHash && q.logIndex === m.logIndex);
     const applied = [...snap.gapBookings.filter((b) => b.state === "applied" && b.evidenceKey === m.key).map((b) => `chain_gap_bookings ${b.bookingId}`),
       ...snap.repairs.filter((r) => r.state === "applied" && r.evidenceKey === m.key).map((r) => `${REPAIRS_TABLE} ${r.repairId}`)];
@@ -1068,7 +1169,8 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
     if (applied.length) { refuse("receipt-without-row", `${m.key} has an applied receipt (${applied.join(", ")}) and no flows row: a receipt whose row is gone is a reviewed decision`); continue; }
     if (!admitCapitalFlow({ mode, source: "chain-log", txHash: m.txHash }).admit) { refuse("paper-boundary", `the paper boundary refuses ${m.key}`); continue; }
     if (!agentId || chainId === null) continue;
-    inserts.push({ key: m.key, amountRaw: m.amountRaw, movement: `USDG ${direction} ${usdg6(m.amountRaw)} ${direction === "in" ? "from" : "to"} ${m.counterparty} (${m.classification!.rule})`,
+    inserts.push({ key: m.key, amountRaw: m.amountRaw,
+      movement: `USDG ${direction} ${usdg6(m.amountRaw)} ${direction === "in" ? "from" : "to"} ${m.counterparty} (${m.classification!.rule}; ${provenanceSaid(m)})`,
       row: { agent_id: agentId, direction, amount_usdg: Number(BigInt(m.amountRaw)) / 1e6, tx_hash: m.txHash, block_number: Number(m.block), log_index: m.logIndex,
         source: "chain-log", epoch: P, chain_id: chainId, at: m.at! } });
   }

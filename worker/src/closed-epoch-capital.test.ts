@@ -30,12 +30,12 @@ import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { ensureLedgerResumeSchema, LEDGER_IMPORT_SCHEMA } from "./ledger-import";
 import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed, readPgEvidence, resumePreconditions } from "./ledger-resume";
 import { flowDuplicateReport } from "./distinct-flows";
-import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
+import { CASH, ENTRYPOINT, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused, BOOKINGS_TABLE, canonical, gapChainOf } from "./chain-gap-booking";
 import {
-  applyClosedEpoch, CLOSED_EPOCH_APPLY_FORMAT, classifyEvent, closedEpochLines, homeOfEvidence, parseRepairReport, planClosedEpoch, readClosedEpochChain, readClosedEpochSnapshot,
-  readRepairReceipts, REPAIRS_TABLE, retainedHomeVerdict, revertClosedEpoch, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
+  applyClosedEpoch, capitalProvenance, CLOSED_EPOCH_APPLY_FORMAT, classifyEvent, closedEpochLines, homeOfEvidence, parseRepairReport, planClosedEpoch, readClosedEpochChain,
+  readClosedEpochSnapshot, readRepairReceipts, REPAIRS_TABLE, retainedHomeVerdict, revertClosedEpoch, signersOf, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
 } from "./closed-epoch-capital";
 import { heldResetEvent } from "./held-reset";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
@@ -63,6 +63,7 @@ const DEPOSIT_AT = 1789515138, SWEEP_AT = 1789592963;
 const EPOCH2_AT = 1789593711;
 const USDG = String(CASH.USDG).toLowerCase();
 const EP = "0x0000000071727de22e5e9d8baf0edac6f37da032";
+const ENTRYPOINT_V06 = ENTRYPOINT.v06.toLowerCase();
 const UOE = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
 const BEFORE = "0xbb47ee3e183a558b1a2ff0874b079f3fc5478b7454eacf2bfc5af2ff5878f972";
 const TR = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -605,6 +606,131 @@ describe("operations, and what admission would still find", () => {
     const recoverOp = p.ops.find((o) => o.txHash === recover)!;
     assert.deepEqual(recoverOp.inKind.map((k) => [k.token, k.direction, k.amountRaw]), [["0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec", "out", "12397031985369"]]);
     assert.deepEqual(p.proposals, { inserts: [], quarantines: [], clears: [] });
+  });
+});
+
+describe("who chose a capital movement: only the owner's own is filed as capital", () => {
+  /** Nothing written: no flow, both live basis rows still there. */
+  const untouchedBooks = (b: Books) => assert.deepEqual([rows(b.raw, "SELECT COUNT(*) AS n FROM flows")[0]!.n, rows(b.raw, "SELECT COUNT(*) AS n FROM cost_basis")[0]!.n], [0, 2]);
+  /** The first session-key operation's transaction that sent the account's USDG out (0x6d0930cb…#28, 5 USDG, answered by a 'swap' row), and one that brought USDG in (a sell). */
+  const sessionTx = (direction: "out" | "in") => REAL.find((t) => OPS.some((o) => !o.root && o.tx === t.tx)
+    && t.logs.some((l) => l[0].toLowerCase() === USDG && l[1][0] === TR && l[1][direction === "out" ? 1 : 2] === topic(ACCOUNT)))!;
+  /** That transaction with the account's token legs on the other side taken away: the USDG leg is left with nothing paired, which the classifier reads as capital. */
+  const unpaired = (t: ModelTx, direction: "out" | "in"): ModelTx => ({ ...t,
+    logs: t.logs.filter((l) => !(l[0].toLowerCase() !== USDG && l[1][0] === TR && l[1][direction === "out" ? 2 : 1] === topic(ACCOUNT))) });
+
+  it("the owner's own pair: the deposit carries no operation of the account, the sweep runs inside the owner's root-key operation — both filed, and the preview says so", async () => {
+    const p = await preview(await books(), fakeRpc().rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    const deposit = p.movements.find((m) => m.key === `log:${DEPOSIT_TX}#0`)!, sweep = p.movements.find((m) => m.key === `log:${SWEEP_TX}#7`)!;
+    assert.deepEqual(deposit.signers, []);
+    assert.deepEqual(sweep.signers, [{ userOpHash: SWEEP_OP, entryPoint: EP, validator: "root", success: true, carriesLog: true }]);
+    assert.deepEqual([capitalProvenance(deposit, p.trades), capitalProvenance(sweep, p.trades)], [[], []], "the sweep's reconciler 'swap' row answers the root-key operation");
+    assert.deepEqual(p.proposals.inserts.map((i) => i.movement), [
+      `USDG in 145.499004 from ${FUNDER} (no-pair-external; no operation of the account in its transaction)`,
+      `USDG out 144.818530 to ${FUNDER} (no-pair-external; inside the owner's root-key operation ${SWEEP_OP.slice(0, 10)}…)`,
+    ]);
+    // Every session trade's own USDG leg names its permission-validator operation.
+    const trade = p.movements.find((m) => m.txHash === sessionTx("out").tx && m.direction === "out")!;
+    assert.deepEqual(trade.signers!.map((s) => [s.validator, s.success, s.carriesLog]), [["permission", true, true]]);
+  });
+
+  it("out-not-owner: the sweep's USDG leg as a third party's transferFrom, with no operation of the account in the transaction (an allowance spent), is never filed as a withdrawal", async () => {
+    // The reviewer's probe: the sweep transaction rewritten as an allowance spend carrying only the USDG log #7.
+    const txs = REAL.map((t) => (t.tx !== SWEEP_TX ? t : { ...t, from: addr(0xbad), to: USDG, logs: t.logs.filter((l) => l[0].toLowerCase() === USDG) }));
+    const b = await books();
+    const p = await preview(b, fakeRpc({ txs }).rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.equal(p.ops.filter((o) => o.txHash === SWEEP_TX).length, 0);
+    assert.deepEqual(p.movements.find((m) => m.key === `log:${SWEEP_TX}#7`)!.signers, []);
+    assert.match(p.refusals.find((r) => r.code === "out-not-owner")!.why,
+      new RegExp(`^log:${SWEEP_TX}#7 \\(USDG out 144\\.818530\\): USDG left the account in a transaction that carried no operation of the account \\(an allowance was spent\\)`));
+    // The reconciler's 'swap' row still names the transaction, and no root-key operation in it answers that row.
+    assert.match(p.refusals.find((r) => r.code === "capital-in-session-op")!.why, /trades row\(s\) #\d+ \(kind 'swap'\) naming it and answering no root-key operation in it/);
+    assert.ok(!p.proposals.inserts.some((i) => i.key.startsWith(`log:${SWEEP_TX}#`)), "never proposed");
+    await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "not-ready");
+    untouchedBooks(b);
+    // With no trades row naming it either, the allowance spend alone refuses.
+    const c = await books();
+    c.raw.prepare("DELETE FROM trades WHERE tx_hash = ?").run(SWEEP_TX);
+    const alone = await preview(c, fakeRpc({ txs }).rpc);
+    assert.equal(alone.verdict, "blocked");
+    assert.ok(codes(alone).includes("out-not-owner") && !codes(alone).includes("capital-in-session-op"), codes(alone).join(","));
+    assert.ok(!alone.proposals.inserts.some((i) => i.key === `log:${SWEEP_TX}#7`));
+  });
+
+  it("out-not-owner: USDG out beside the owner's root-key operation but outside its execution, or inside one that failed, is not the owner's withdrawal", async () => {
+    // The USDG log moved ahead of BeforeExecution: in the transaction, not in the operation.
+    const outside = REAL.map((t) => (t.tx !== SWEEP_TX ? t : { ...t, logs: t.logs.map((l) => (l[0].toLowerCase() === USDG ? [l[0], l[1], l[2], "0x4"] as FixtureLog : l)) }));
+    const o = await preview(await books(), fakeRpc({ txs: outside }).rpc);
+    assert.equal(o.verdict, "blocked");
+    assert.deepEqual(o.movements.find((m) => m.key === `log:${SWEEP_TX}#4`)!.signers!.map((s) => [s.userOpHash, s.validator, s.success, s.carriesLog]), [[SWEEP_OP, "root", true, false]]);
+    assert.match(o.refusals.find((r) => r.code === "out-not-owner")!.why, /did not run inside a successful operation the owner's root key signed .*root validator\)\)/);
+    assert.ok(!codes(o).includes("capital-in-session-op"), codes(o).join(","));
+    assert.ok(!o.proposals.inserts.some((i) => i.key === `log:${SWEEP_TX}#4`));
+    // The root-key operation's own event says it failed: whatever its receipt carries is not a withdrawal it made.
+    const failed = REAL.map((t) => (t.tx !== SWEEP_TX ? t : { ...t, logs: t.logs.map((l) => (l[0] === EP && l[1][0] === UOE
+      ? [l[0], l[1], `${l[2].slice(0, 66)}${word(0n)}${l[2].slice(130)}`, l[3]] as FixtureLog : l)) }));
+    const f = await preview(await books(), fakeRpc({ txs: failed }).rpc);
+    assert.equal(f.ops.find((x) => x.userOpHash === SWEEP_OP)!.success, false);
+    assert.deepEqual(f.movements.find((m) => m.key === `log:${SWEEP_TX}#7`)!.signers!.map((s) => [s.validator, s.success, s.carriesLog]), [["root", false, true]]);
+    assert.ok(codes(f).includes("out-not-owner") && !codes(f).includes("capital-in-session-op"), codes(f).join(","));
+    assert.ok(!f.proposals.inserts.some((i) => i.key === `log:${SWEEP_TX}#7`));
+  });
+
+  it("capital-in-session-op: a session trade's USDG out with its token leg missing is the agent's, not a withdrawal — refused, and the apply writes nothing", async () => {
+    // The reviewer's second probe: 0x6d0930cb…'s MU-in leg removed, its 'swap' row kept.
+    const target = sessionTx("out");
+    assert.ok(target.tx.startsWith("0x6d0930cb"), target.tx);
+    const txs = REAL.map((t) => (t.tx !== target.tx ? t : unpaired(t, "out")));
+    const b = await books();
+    const p = await preview(b, fakeRpc({ txs }).rpc);
+    assert.deepEqual(p.ops.filter((o) => o.txHash === target.tx).map((o) => [o.validator, o.answeredBy.map((t) => t.kind)]), [["permission", ["swap"]]]);
+    const leg = p.movements.find((m) => m.txHash === target.tx && m.direction === "out")!;
+    assert.equal(leg.classification!.kind, "capital-out", "the classifier alone would call it capital");
+    assert.equal(p.verdict, "blocked");
+    assert.match(p.refusals.find((r) => r.code === "capital-in-session-op")!.why,
+      new RegExp(`^${leg.key} \\(USDG out 5\\.000000\\) is in a transaction where the agent acted, not the owner's root key: the account's operation\\(s\\) 0x[0-9a-f]{8}… \\(permission validator, this log inside it\\)`));
+    assert.ok(codes(p).includes("out-not-owner"), "nor did it run inside a root-key operation");
+    assert.ok(!p.proposals.inserts.some((i) => i.key === leg.key), "never proposed");
+    assert.equal(p.predicted.epochNetAfter, "680474", "epoch 1's net is the owner's pair alone, never driven by a trade's leg");
+    await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "not-ready");
+    untouchedBooks(b);
+  });
+
+  it("capital-in-session-op: a session trade's USDG in with its token leg missing is not a deposit either", async () => {
+    const target = sessionTx("in");
+    const txs = REAL.map((t) => (t.tx !== target.tx ? t : unpaired(t, "in")));
+    const p = await preview(await books(), fakeRpc({ txs }).rpc);
+    const leg = p.movements.find((m) => m.txHash === target.tx && m.direction === "in")!;
+    assert.equal(leg.classification!.kind, "capital-in", "the classifier alone would call it a deposit");
+    assert.equal(p.verdict, "blocked");
+    assert.deepEqual([...new Set(codes(p))], ["capital-in-session-op"], "an inbound movement needs no root-key operation, but none beside a session key's");
+    assert.ok(!p.proposals.inserts.some((i) => i.key === leg.key));
+  });
+
+  it("capital-in-session-op: a trades row naming the deposit's transaction, answering no root-key operation in it, says the agent acted there", async () => {
+    const b = await books();
+    const id = Number(b.raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, tx_hash, status, created_at, epoch) VALUES (?, 'swap', ?, 145.499004, ?, 'landed', ?, 1)`)
+      .run(SPELLED, SPELLED, DEPOSIT_TX, DEPOSIT_AT + 30).lastInsertRowid);
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.match(p.refusals.find((r) => r.code === "capital-in-session-op")!.why, new RegExp(`^log:${DEPOSIT_TX}#0 \\(USDG in 145\\.499004\\) .*trades row\\(s\\) #${id} \\(kind 'swap'\\)`));
+    assert.ok(!p.proposals.inserts.some((i) => i.key === `log:${DEPOSIT_TX}#0`));
+  });
+
+  it("signersOf and capitalProvenance, read directly: an operation of the account at another entry point has no validator anybody read, and an unread receipt proves nothing", () => {
+    const op = h32("foreign op");
+    const foreign = [{ address: ENTRYPOINT_V06, topics: [UOE, op, topic(ACCOUNT), topic(addr(0))], data: `0x${word(0n)}${word(1n)}${word(1n)}${word(1n)}`, logIndex: "0x3",
+      blockNumber: "0x1", transactionHash: h32("t") }];
+    const signers = signersOf(foreign as never, ACCOUNT, 1);
+    assert.deepEqual(signers, [{ userOpHash: op, entryPoint: ENTRYPOINT_V06, validator: null, success: true, carriesLog: false }]);
+    const base = { key: "log:x#1", txHash: h32("t"), amountRaw: "1000000" };
+    assert.deepEqual(capitalProvenance({ ...base, direction: "in", signers }, []).map((r) => r.code), ["capital-in-session-op"]);
+    assert.match(capitalProvenance({ ...base, direction: "in", signers }, [])[0]!.why, /\(validator unread\)/);
+    assert.deepEqual(capitalProvenance({ ...base, direction: "out", signers }, []).map((r) => r.code), ["capital-in-session-op", "out-not-owner"]);
+    assert.deepEqual(capitalProvenance({ ...base, direction: "in", signers: null }, []).map((r) => r.code), ["movement-unread"]);
+    assert.deepEqual(capitalProvenance({ ...base, direction: "in", signers: [] }, []), [], "a plain transfer in is an owner's deposit");
   });
 });
 
