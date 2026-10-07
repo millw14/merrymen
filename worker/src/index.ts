@@ -10962,6 +10962,26 @@ async function main() {
           `${intent.kind} ${revertVerdict.rule} — not retried again until the next arm, because retrying cannot fix it`,
         );
       }
+      // WHAT THE REVERT COST, AND WHO PAID IT. A reverted operation still burns
+      // gas, and the executor hands over the receipt's per-operation cost and
+      // payer with the revert (executor.ts perOperationGasProof). This row used
+      // to be written without any of it, and one gasless reverted row is enough
+      // for the board to withhold the agent's whole P&L for the run
+      // (web book-performance.ts gasAt: an "unrecorded" cost). The payer comes
+      // from the receipt, not the sponsorship setting; the price is this
+      // moment's, like a landed trade's. No proof (an older bundler) writes the
+      // row as before, for the receipt backfill to complete.
+      const revertProof = onChain ? e.gasProof : undefined;
+      let revertGas: ReturnType<typeof gasFields> = null;
+      if (revertProof) {
+        let priced: number | null = null;
+        if (revertProof.gasPayer === "owner" && revertProof.gasWei > 0n) {
+          const eth = await ethPrice8();
+          const cost = priceGas(revertProof.gasWei, eth.price8, eth.reason);
+          priced = cost.usdg === null ? null : usdgNum(cost.usdg);
+        }
+        revertGas = gasFields(revertProof, priced);
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -10971,6 +10991,8 @@ async function main() {
         // Resolves the pre-broadcast row in place when there is one — a revert
         // has a hash; a failure before submit does not, and inserts.
         ...(onChain ? { user_op_hash: e.userOpHash } : {}),
+        ...(revertProof ? { tx_hash: revertProof.txHash } : {}),
+        ...(revertGas ?? {}),
         // REVERTED MEANS THE CHAIN REVERTED IT. Everything reaching this line
         // without `onChain` never got there: no operation was submitted (the
         // branch above returns when one was), so this is a build, an encode or a
