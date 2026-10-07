@@ -262,6 +262,7 @@ import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
+import { ethPrice8FromFeed, ethUsdFeed, priceGasAt, type EthFeed } from "./eth-feed";
 import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
@@ -3589,7 +3590,34 @@ async function main() {
         return null;
       }
     },
+    async getBlockTime(blockNumber) {
+      try {
+        return Number((await client.getBlock({ blockNumber })).timestamp);
+      } catch {
+        return null;
+      }
+    },
   });
+  /**
+   * A COST SETTLED AFTER THE FACT, PRICED AT THE MOMENT IT WAS BURNED.
+   *
+   * The resolver and the orphan sweep both write gas they learn about late,
+   * and both wrote it unpriced: the live path's price is the pool's NOW, which
+   * is not what an hour-old operation cost. Unpriced owner gas withholds the
+   * agent's whole P&L on the board. The Chainlink round in force at the op's
+   * own block is what it did cost (eth-feed.ts priceGasAt), and it is written
+   * WITH the row, into the same journal entry, never patched in later.
+   * Only the owner's cost: a sponsored op cost the owner nothing.
+   */
+  async function recoveredGasUsdg(
+    chain: ReconcileChain,
+    gas: { gasWei: bigint; gasPayer: "owner" | "sponsor" },
+    blockNumber: bigint | null | undefined,
+  ): Promise<number | null> {
+    if (gas.gasPayer !== "owner" || gas.gasWei <= 0n || blockNumber === null || blockNumber === undefined || !chain.getBlockTime) return null;
+    const at = await chain.getBlockTime(blockNumber);
+    return at === null ? null : priceGasAt(ethFeed(), gas.gasWei, at);
+  }
   /**
    * SETTLE OPS WE SUBMITTED AND LOST TRACK OF.
    *
@@ -3717,8 +3745,9 @@ async function main() {
         }
         // An install's gas is its entire expense. Both payer and cost must be
         // recorded before its submitted recovery row can become terminal.
+        const recoveredUsdg = await recoveredGasUsdg(chain, r, r.blockNumber);
         const wrote = row.kind === KEY_INSTALL_KIND
-          ? await settleKeyInstall({ addTrade }, agentId, { userOpHash: r.userOpHash, success: r.success,
+          ? await settleKeyInstall({ addTrade, priceGas: async () => recoveredUsdg }, agentId, { userOpHash: r.userOpHash, success: r.success,
               proof: { txHash: r.txHash as `0x${string}`, gasWei: r.gasWei, gasUnits: r.gasUnits, gasPayer: r.gasPayer } })
           : await addTrade({
           agent_id: agentId,
@@ -3734,7 +3763,7 @@ async function main() {
           user_op_hash: r.userOpHash,
           tx_hash: r.txHash,
           status: r.success ? "landed" : "reverted",
-          ...gasFields(r),
+          ...gasFields(r, recoveredUsdg),
           ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
         });
         if (!wrote) continue;
@@ -3986,6 +4015,8 @@ async function main() {
         // op can only ever over-count spend, never under-count — the safe
         // direction.
         const sym = o.acquired ? symbolOfToken(o.acquired.token as `0x${string}`) : null;
+        // ITS GAS, from the event that found it, priced at its own block.
+        const orphanGas = o.gas ? gasFields(o.gas, await recoveredGasUsdg(chain, o.gas, o.blockNumber)) : null;
         const wrote = await addTrade({
           agent_id: agentId,
           kind: "swap",
@@ -3995,6 +4026,7 @@ async function main() {
           tx_hash: o.txHash,
           status: "landed",
           basis_source: "receipt",
+          ...(orphanGas ?? {}),
           // The legs, when the receipt named them without ambiguity. These were
           // NULL on every reconciled row, so the position such a row opened had
           // no token on its trade and no cost anywhere — see below.
@@ -5430,6 +5462,13 @@ async function main() {
    */
   let ethPriceCache: { price8: bigint; atSec: number } | null = null;
   const ETH_PRICE_TTL_SEC = 300;
+  /** The Chainlink ETH/USD feed on the current mainnet client (eth-feed.ts). Rebuilt if the client is. */
+  let ethFeedCache: { client: unknown; feed: EthFeed } | null = null;
+  function ethFeed(): EthFeed {
+    const client = mainnetClient();
+    if (ethFeedCache?.client !== client) ethFeedCache = { client, feed: ethUsdFeed(client) };
+    return ethFeedCache.feed;
+  }
   /**
    * What a unit of gas costs right now, in wei. Null when the chain would not say.
    *
@@ -5478,10 +5517,27 @@ async function main() {
         ethPriceCache = { price8: q.price8, atSec: now };
         return { price8: q.price8 };
       }
-      return { price8: null, reason: refused[0]?.reason ?? "the WETH/USDG pool did not pass the price guards" };
+      return await ethFromFeed(now, refused[0]?.reason ?? "the WETH/USDG pool did not pass the price guards");
     } catch (e) {
-      return { price8: null, reason: e instanceof Error ? e.message : String(e) };
+      return await ethFromFeed(now, e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * THE FALLBACK WHEN THE POOL IS REFUSED: Chainlink's ETH/USD round, if it is
+   * recent (eth-feed.ts). Every tick the WETH/USDG pool failed its guards used
+   * to leave that tick's trades with unpriced gas — and unpriced gas withholds
+   * the agent's whole P&L on the board. The pool stays first: it is what every
+   * WETH-routed memecoin is valued through, and one figure should price both.
+   * Both refusals are kept in the reason when neither answers.
+   */
+  async function ethFromFeed(now: number, poolReason: string): Promise<{ price8: bigint | null; reason?: string }> {
+    const fed = await ethPrice8FromFeed(ethFeed(), now).catch(() => ({ price8: null, reason: "the Chainlink ETH/USD feed did not answer" }));
+    if (fed.price8 !== null) {
+      ethPriceCache = { price8: fed.price8, atSec: now };
+      return { price8: fed.price8 };
+    }
+    return { price8: null, reason: `${poolReason}; ${fed.reason ?? "the Chainlink ETH/USD feed did not answer"}` };
   }
 
   async function mergePoolPrices(prices: Map<string, PriceQuote>, agentId: string): Promise<void> {

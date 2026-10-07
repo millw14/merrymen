@@ -83,6 +83,12 @@ export interface ReconcileChain {
   }): Promise<RawLog[]>;
   /** The receipt's logs, for reading the op's USDG leg. Null if not found. */
   getReceiptLogs(txHash: Hex): Promise<readonly ReceiptLog[] | null>;
+  /**
+   * A block's timestamp, unix seconds — when a settled-late operation's gas was
+   * burned, so it can be priced at that moment (eth-feed.ts priceGasAt).
+   * Optional: a chain without it leaves recovered gas unpriced, as before.
+   */
+  getBlockTime?(blockNumber: bigint): Promise<number | null>;
 }
 
 export interface OrphanOp {
@@ -122,6 +128,15 @@ export interface OrphanOp {
   validator: "root" | "permission" | "secondary" | null;
   /** The block its UserOperationEvent is in, when the log carried one. */
   blockNumber: bigint | null;
+  /**
+   * WHAT IT COST AND WHO PAID, from the same UserOperationEvent: actualGasCost,
+   * actualGasUsed, and its paymaster (zero = the account paid). Read and then
+   * thrown away before this field existed, so every op this sweep recorded
+   * landed with no gas at all — which the board reads as an unrecorded cost
+   * and withholds the agent's P&L for. Null only when the event did not carry
+   * both figures.
+   */
+  gas: { gasWei: bigint; gasUnits: bigint; gasPayer: "owner" | "sponsor" } | null;
   /**
    * AN OWNER'S OPERATION, READ (owner-operations.ts). Set only for a root op
    * whose receipt was read, and only when the caller asked (`owner`). A root
@@ -416,11 +431,17 @@ export async function findOrphanOps(opts: {
     let userOpHash: string;
     let success: boolean;
     let nonce: bigint | null;
+    let gas: OrphanOp["gas"];
     try {
       const decoded = decodeEventLog({ abi: ENTRYPOINT_ABI, topics: raw.topics as [Hex, ...Hex[]], data: raw.data });
       userOpHash = String(decoded.args.userOpHash).toLowerCase();
       success = Boolean(decoded.args.success);
       nonce = typeof decoded.args.nonce === "bigint" ? decoded.args.nonce : null;
+      // The same reading resolveSubmittedOps takes of the same event.
+      gas = typeof decoded.args.actualGasCost === "bigint" && typeof decoded.args.actualGasUsed === "bigint"
+        ? { gasWei: decoded.args.actualGasCost, gasUnits: decoded.args.actualGasUsed,
+            gasPayer: /^0x0{40}$/i.test(String(decoded.args.paymaster)) ? "owner" : "sponsor" }
+        : null;
     } catch {
       continue; // not a UserOperationEvent we can read — skip
     }
@@ -465,7 +486,7 @@ export async function findOrphanOps(opts: {
         });
       }
     }
-    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired, nonce, validator, blockNumber, owner });
+    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired, nonce, validator, blockNumber, gas, owner });
   }
   return orphans;
 }
