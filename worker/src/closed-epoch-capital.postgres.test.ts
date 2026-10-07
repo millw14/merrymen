@@ -35,9 +35,9 @@ import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused, gapChainOf } from "./chain-gap-booking";
 import { OWNER_OPERATION_COLUMNS, ownerOperationOf, ownerOperationRow } from "./owner-operations";
-import { CliError, type PgClient } from "./chain-gap-booking-cli";
+import { CliError, pgClientDb, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
-import { connectClosedEpoch, main, pgWriteDb } from "./closed-epoch-capital-cli";
+import { connectClosedEpoch, main } from "./closed-epoch-capital-cli";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 const loadPg = async () => createRequire(import.meta.url)("pg") as unknown;
@@ -165,9 +165,10 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
   // THE SERVER HOLDS THE READ-ONLY CONNECTION TO IT, whatever the shell lets through.
   const ro = await connectClosedEpoch(scoped.toString(), true, loadPg); clients.push(ro);
   await assert.rejects(ro.query("INSERT INTO events (agent_id, message) VALUES ('x', 'y')"), /read-only transaction/);
-  // A COMMIT ENDING A TRANSACTION THAT HAD ALREADY FAILED: the server answers it with ROLLBACK's tag, and the write connection says nothing committed.
+  // A COMMIT ENDING A TRANSACTION THAT HAD ALREADY FAILED: the server answers it with ROLLBACK's tag, and the write connection (the booking
+  // tool's, which the apply and the revert take) says nothing committed.
   const rw = await connectClosedEpoch(scoped.toString(), false, loadPg); clients.push(rw);
-  await assert.rejects(pgWriteDb(rw).tx(async (w) => {
+  await assert.rejects(pgClientDb(rw, { readOnly: false }).tx(async (w) => {
     await w.prepare("INSERT INTO events (agent_id, message) VALUES (?, ?)").run("x", "tag-probe");
     try { await w.prepare("SELECT 1 / 0 AS z").get(); } catch { /* swallowed: the transaction is aborted */ }
   }), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");

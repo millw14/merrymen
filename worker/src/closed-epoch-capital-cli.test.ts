@@ -30,11 +30,9 @@ import { CHAIN_REFUSAL } from "./ledger-resume";
 import { CASH } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused } from "./chain-gap-booking";
-import { CliError, failureLine, sourceFingerprint, type PgClient } from "./chain-gap-booking-cli";
+import { CliError, sourceFingerprint, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
-import {
-  closedEpochSourceFingerprint, commitRolledBack, CommitOutcomeUnknown, createClosedEpochRpc, main, parseClosedEpochArgs, pgWriteDb,
-} from "./closed-epoch-capital-cli";
+import { closedEpochSourceFingerprint, createClosedEpochRpc, failureLine, main, parseClosedEpochArgs } from "./closed-epoch-capital-cli";
 
 const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-closed-epoch-cli-")));
 const handles: DatabaseSync[] = [];
@@ -57,8 +55,15 @@ const word = (n: bigint) => n.toString(16).padStart(64, "0");
 const h32 = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
 const DEPOSIT_TX = h32("the deposit"), SWEEP_TX = h32("the sweep"), SWEEP_OP = h32("the sweep op");
 
-/** Postgres's dialect, answered by sqlite: $n placeholders, the read-only transaction held to query_only, SERIALIZABLE said, the catalogue answered. */
-type StandIn = { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown }; commitAnsweredRollback?: boolean; afterCommit?: () => void };
+/**
+ * Postgres's dialect, answered by sqlite: $n placeholders, the read-only transaction held to query_only, the level a BEGIN named said back
+ * (`level` overrides what the write transaction says), the catalogue answered. `conflictOn`: a statement the server fails with 40001 (the
+ * agent row moved after the snapshot). `commitTag`: the tag a COMMIT that took effect is answered with.
+ */
+type StandIn = { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown }; commitAnsweredRollback?: boolean; afterCommit?: () => void;
+  level?: string; conflictOn?: RegExp; commitTag?: string };
+/** A driver's error with a SQLSTATE, its message carrying the URL (as a real one can): the shell must never print it. */
+const pgError = (code: string | undefined, message = `server said no on ${DATABASE_URL}`) => Object.assign(new Error(message), code === undefined ? {} : { code });
 function pgOverSqlite(raw: DatabaseSync, said: string[], o: StandIn = {}): PgClient {
   let readOnly = false, serializable = false;
   const empty = { rows: [], rowCount: 0 };
@@ -67,8 +72,10 @@ function pgOverSqlite(raw: DatabaseSync, said: string[], o: StandIn = {}): PgCli
       said.push(sql);
       if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") { raw.exec("BEGIN"); raw.exec("PRAGMA query_only = ON"); readOnly = true; return empty; }
       if (sql === "BEGIN ISOLATION LEVEL SERIALIZABLE") { raw.exec("BEGIN"); serializable = true; return empty; }
-      if (/current_setting\('transaction_read_only'\)/.test(sql)) return { rows: [{ ro: readOnly ? "on" : "off", iso: readOnly ? "repeatable read" : "read committed" }], rowCount: 1 };
-      if (/current_setting\('transaction_isolation'\)/.test(sql)) return { rows: [{ iso: serializable ? "serializable" : "read committed" }], rowCount: 1 };
+      if (/current_setting\('transaction_read_only'\)/.test(sql)) {
+        return { rows: [{ ro: readOnly ? "on" : "off", iso: readOnly ? "repeatable read" : serializable ? o.level ?? "serializable" : "read committed" }], rowCount: 1 };
+      }
+      if (o.conflictOn?.test(sql)) throw pgError("40001", "could not serialize access due to concurrent update");
       if (/FROM information_schema\.tables WHERE table_schema = current_schema\(\)/.test(sql)) {
         const rows = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<Record<string, unknown>>).map((r) => ({ ...r }));
         return { rows, rowCount: rows.length };
@@ -92,7 +99,7 @@ function pgOverSqlite(raw: DatabaseSync, said: string[], o: StandIn = {}): PgCli
         raw.exec("COMMIT"); serializable = false;
         o.afterCommit?.();
         if (o.loseCommitAck) throw new Error("Connection terminated unexpectedly");
-        return empty;
+        return o.commitTag === undefined ? empty : { ...empty, command: o.commitTag };
       }
       if (sql === "ROLLBACK") { raw.exec("ROLLBACK"); serializable = false; if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; } return empty; }
       const stmt = raw.prepare(sql.replace(/\$(\d+)/g, "?$1"));
@@ -217,76 +224,7 @@ describe("the chain transport", () => {
   });
 });
 
-describe("the write connection", () => {
-  it("is SERIALIZABLE, proved; a commit the server refuses is rethrown as itself, and one whose answer never came is an unknown outcome", async () => {
-    const said: string[] = [];
-    const client = (o: { iso?: string; commit?: () => never } = {}): PgClient => ({
-      async query(sql) {
-        said.push(sql);
-        if (sql === "COMMIT" && o.commit) o.commit();
-        return { rows: [{ iso: o.iso ?? "serializable" }], rowCount: 1 };
-      },
-      async end() {},
-    });
-    assert.equal(await pgWriteDb(client()).tx(async () => 7), 7);
-    assert.deepEqual(said.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)/.test(s)), ["BEGIN ISOLATION LEVEL SERIALIZABLE", "COMMIT"]);
-    await assert.rejects(pgWriteDb(client({ iso: "read committed" })).tx(async () => 1), (e: unknown) => (e as CliError).code === "serializable-not-established");
-    assert.equal(said.at(-1), "ROLLBACK");
-    const refused = Object.assign(new Error("could not serialize access"), { code: "40001" });
-    await assert.rejects(pgWriteDb(client({ commit: () => { throw refused; } })).tx(async () => 1), (e: unknown) => e === refused);
-    await assert.rejects(pgWriteDb(client({ commit: () => { throw new Error("Connection terminated unexpectedly"); } })).tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown);
-    await assert.rejects(pgWriteDb(client()).tx(async (db) => db.exec("CREATE TABLE x (y)")), /never inside it/);
-  });
-
-  it("an error answering COMMIT is a rollback only when its SQLSTATE proves one; a transport error, a terminated backend, a connection exception or a timeout is an unknown outcome", async () => {
-    const failing = (error: unknown): PgClient => ({
-      async query(sql) {
-        if (sql === "COMMIT") throw error;
-        return { rows: [{ iso: "serializable" }], rowCount: 1 };
-      },
-      async end() {},
-    });
-    const coded = (code: string, message = "server said no") => Object.assign(new Error(message), { code });
-    // ROLLED BACK, PROVED: transaction rollback (class 40 but 40003, what a SERIALIZABLE commit refuses with) and a deferred constraint (class 23).
-    for (const code of ["40001", "40P01", "40002", "40000", "23505", "23503", "23514"]) {
-      const e = coded(code);
-      assert.equal(commitRolledBack(e), true, code);
-      await assert.rejects(pgWriteDb(failing(e)).tx(async () => 1), (got: unknown) => got === e, code);
-    }
-    // NOT PROVED: each may have arrived after the commit was durable.
-    const unknown: Array<[string, unknown]> = [
-      ["EPIPE (five letters, like a SQLSTATE)", coded("EPIPE", "write EPIPE")], ["ECONNRESET", coded("ECONNRESET", "read ECONNRESET")],
-      ["ETIMEDOUT", coded("ETIMEDOUT")], ["57P01 admin shutdown", coded("57P01", "terminating connection due to administrator command")],
-      ["57P02 crash shutdown", coded("57P02")], ["57P03 cannot connect now", coded("57P03")],
-      ["08006 connection failure", coded("08006")], ["08003 connection does not exist", coded("08003")], ["08007 transaction resolution unknown", coded("08007")],
-      ["08P01 protocol violation", coded("08P01")], ["57014 statement timeout or cancel", coded("57014", "canceling statement due to statement timeout")],
-      ["53100 disk full", coded("53100")], ["XX000 internal error", coded("XX000")], ["not a SQLSTATE: lowercase", coded("40p01")],
-      ["40003 statement completion unknown: class 40, but it says only that it does not know", coded("40003", "statement completion unknown")],
-      ["no code: the connection ended", new Error("Connection terminated unexpectedly")], ["no code: a read timeout", new Error("Query read timeout")],
-      ["a numeric code", Object.assign(new Error("n"), { code: 40001 })], ["a thrown string", "socket hang up"], ["null", null],
-    ];
-    for (const [what, e] of unknown) {
-      assert.equal(commitRolledBack(e), false, what);
-      await assert.rejects(pgWriteDb(failing(e)).tx(async () => 1), (got: unknown) => got instanceof CommitOutcomeUnknown, what);
-    }
-  });
-
-  it("a COMMIT the server answers with ROLLBACK's tag rolled back; COMMIT's own tag, or none said, committed; any other tag is an unknown outcome", async () => {
-    const tagged = (command: unknown): PgClient => ({
-      async query(sql) {
-        if (sql === "COMMIT") return { rows: [], rowCount: null, ...(command === undefined ? {} : { command }) } as Awaited<ReturnType<PgClient["query"]>>;
-        return { rows: [{ iso: "serializable" }], rowCount: 1 };
-      },
-      async end() {},
-    });
-    await assert.rejects(pgWriteDb(tagged("ROLLBACK")).tx(async () => 1), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
-    assert.equal(await pgWriteDb(tagged("COMMIT")).tx(async () => 7), 7);
-    assert.equal(await pgWriteDb(tagged(undefined)).tx(async () => 7), 7, "a client that does not say a tag (these stand-ins) is read as COMMIT's answer");
-    for (const odd of [null, "", "commit", "BEGIN", "SELECT"]) {
-      await assert.rejects(pgWriteDb(tagged(odd)).tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown, String(odd));
-    }
-  });
-
+describe("the source fingerprint", () => {
   it("the source fingerprint reads every file the plan depends on", () => {
     const f = closedEpochSourceFingerprint();
     assert.ok(Object.keys(f).length >= 20);
@@ -394,47 +332,113 @@ describe("whole runs through the shell", () => {
     assert.match(printed[0]!, /no receipts — nothing was applied under it/);
   });
 
-  it("a COMMIT answered by a broken pipe, a reset, a terminated backend or 40003 keeps the report and says to read the receipts; one refused with a serialization failure, or answered with ROLLBACK's tag, writes nothing and leaves no file", async () => {
-    for (const [what, error] of [["EPIPE", Object.assign(new Error("write EPIPE"), { code: "EPIPE" })], ["ECONNRESET", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })],
-      ["57P01", Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" })],
+  /** A fresh tenant, previewed: its database and the digest to confirm. */
+  const reviewed = async () => {
+    const raw = await shared();
+    const preview = path.join(dir, `preview-${Math.random().toString(16).slice(2)}.json`);
+    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview], env, run(raw, [], [])), 0);
+    return { raw, digest: (JSON.parse(readFileSync(preview, "utf8")) as { previewDigest: string }).previewDigest };
+  };
+  const applyArgs = (digest: string, output: string) => ["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", output];
+  const count = (raw: DatabaseSync, sql: string, ...a: unknown[]) => Number(raw.prepare(sql).get(...(a as never[]))!.n);
+
+  it("the apply and the revert take the booking tool's write connection: SERIALIZABLE, proved by the server before anything runs; at any other level nothing runs", async () => {
+    const { raw, digest } = await reviewed();
+    const said: string[] = [];
+    const applied = path.join(dir, "write-connection-apply.json");
+    assert.equal(await main(applyArgs(digest, applied), env, run(raw, said, [])), 0);
+    const begin = said.indexOf("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    assert.ok(begin >= 0 && /current_setting\('transaction_read_only'\) AS ro, current_setting\('transaction_isolation'\) AS iso/.test(said[begin + 1]!), said.join("\n"));
+    assert.ok(said.indexOf("COMMIT") > begin);
+    said.length = 0;
+    assert.equal(await main(["--revert", applied, "--output", path.join(dir, "write-connection-revert.json")], env, run(raw, said, [])), 0);
+    assert.ok(/AS ro, current_setting\('transaction_isolation'\) AS iso/.test(said[said.indexOf("BEGIN ISOLATION LEVEL SERIALIZABLE") + 1]!), said.join("\n"));
+    // A server that does not grant SERIALIZABLE: refused before the lock, nothing written, no report left.
+    const other = await reviewed();
+    const refused = path.join(dir, "write-connection-level.json");
+    const atLevel: string[] = [];
+    await assert.rejects(main(applyArgs(other.digest, refused), env, run(other.raw, atLevel, [], { level: "read committed" })),
+      (e: unknown) => e instanceof CliError && e.code === "serializable-not-established");
+    assert.equal(existsSync(refused), false);
+    assert.equal(atLevel.some((s) => /^UPDATE agents/.test(s)), false, "not even the lock");
+    assert.equal(count(other.raw, "SELECT COUNT(*) AS n FROM flows"), 0);
+  });
+
+  it("a COMMIT answered by a broken pipe, a reset, a terminated backend, 40003, no code or a tag neither COMMIT's nor ROLLBACK's keeps the report and says to read the receipts", async () => {
+    const errors: Array<[string, unknown]> = [["EPIPE", pgError("EPIPE", "write EPIPE")], ["ECONNRESET", pgError("ECONNRESET", "read ECONNRESET")],
+      ["57P01", pgError("57P01", "terminating connection due to administrator command")], ["no code", new Error("Connection terminated unexpectedly")],
       // Class 40, but "statement completion unknown" (a pooler can answer so): the commit may have landed.
-      ["40003", Object.assign(new Error("statement completion unknown"), { code: "40003" })]] as const) {
-      const raw = await shared();
+      ["40003", pgError("40003", "statement completion unknown")]];
+    for (const [what, error] of [...errors, ["tagged SELECT", null] as [string, unknown]]) {
+      const { raw, digest } = await reviewed();
       const printed: string[] = [];
-      const preview = path.join(dir, `commit-${what}-preview.json`);
-      assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview], env, run(raw, [], printed)), 0);
-      const digest = (JSON.parse(readFileSync(preview, "utf8")) as { previewDigest: string }).previewDigest;
       const id = "5b2d3f4a-6c7e-4f80-9a1b-2c3d4e5f6a7b";
-      const applied = path.join(dir, `commit-${what}-apply.json`);
-      await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", applied], env,
-        run(raw, [], printed, { commitFails: { committed: true, error }, repairId: id })), (e: unknown) => (e as CliError).code === "apply-outcome-unknown", what);
+      const applied = path.join(dir, `commit-${what.replace(/ /g, "-")}-apply.json`);
+      const how: StandIn = error === null ? { commitTag: "SELECT" } : { commitFails: { committed: true, error } };
+      await assert.rejects(main(applyArgs(digest, applied), env, run(raw, [], printed, { ...how, repairId: id })),
+        (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown", what);
       assert.equal((JSON.parse(readFileSync(applied, "utf8")) as { repairId: string }).repairId, id, `${what}: the report is kept`);
       assert.ok(printed.some((l) => l.startsWith("outcome unknown:") && l.includes(`--revert-repair ${id} --dry-run`)), what);
-      assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ?`).get(id)!.n, 4, `${what}: it had committed, and the receipts say so`);
+      assert.equal(count(raw, `SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE} WHERE repair_id = ?`, id), 4, `${what}: it had committed, and the receipts say so`);
+      assert.ok(printed.every((l) => !/s3cret|operator@|db\.internal/.test(l)), what);
     }
-    const raw = await shared();
-    const printed: string[] = [];
-    const preview = path.join(dir, "commit-40001-preview.json");
-    assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--output", preview], env, run(raw, [], printed)), 0);
-    const digest = (JSON.parse(readFileSync(preview, "utf8")) as { previewDigest: string }).previewDigest;
-    const refused = Object.assign(new Error("could not serialize access due to read/write dependencies among transactions"), { code: "40001" });
-    const applied = path.join(dir, "commit-40001-apply.json");
-    await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", applied], env,
-      run(raw, [], printed, { commitFails: { committed: false, error: refused } })), (e: unknown) => e === refused);
-    assert.equal(existsSync(applied), false, "a proved rollback leaves no report to mistake for an apply");
-    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
-    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis").get()!.n, 1);
+  });
 
+  it("a COMMIT whose answer proves a rollback writes nothing and leaves no file: a conflict (class 40) says to run it again, a deferred constraint is itself, ROLLBACK's tag is commit-answered-rollback", async () => {
+    for (const code of ["40001", "40P01"]) {
+      const { raw, digest } = await reviewed();
+      const printed: string[] = [];
+      const applied = path.join(dir, `commit-${code}-apply.json`);
+      const failure = await main(applyArgs(digest, applied), env, run(raw, [], printed, { commitFails: { committed: false, error: pgError(code) } }))
+        .then(() => assert.fail(`${code}: applied`), (e: unknown) => e);
+      assert.ok(failure instanceof BookingRefused && failure.code === "conflict", `${code}: ${String(failure)}`);
+      assert.match(failureLine(failure), new RegExp(`^refused \\(conflict\\): Postgres rolled the apply back for a conflict with another transaction \\(SQLSTATE ${code}`));
+      assert.match(failureLine(failure), /nothing was written — run the same command again, with a new --output/);
+      assert.equal(existsSync(applied), false, `${code}: a proved rollback leaves no report to mistake for an apply`);
+      assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0, code);
+      assert.equal(count(raw, "SELECT COUNT(*) AS n FROM cost_basis"), 1, code);
+      assert.ok(!printed.some((l) => /^outcome unknown|^APPLIED/.test(l)), code);
+      // Run again, as it says: it applies.
+      assert.equal(await main(applyArgs(digest, path.join(dir, `commit-${code}-again.json`)), env, run(raw, [], [])), 0, code);
+      assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 2, code);
+    }
+    // A deferred constraint refused at COMMIT (class 23): rethrown as itself, never a conflict to run again; the failure line is this tool's own.
+    const { raw, digest } = await reviewed();
+    const constraint = pgError("23514");
+    const deferred = path.join(dir, "commit-23514-apply.json");
+    await assert.rejects(main(applyArgs(digest, deferred), env, run(raw, [], [], { commitFails: { committed: false, error: constraint } })), (e: unknown) => e === constraint);
+    assert.equal(failureLine(constraint), "closed-epoch-failed: nothing was applied or reverted unless an APPLIED, a REVERTED or an outcome unknown line was printed. Use --help for invocation.");
+    assert.equal(existsSync(deferred), false);
     // COMMIT answered with ROLLBACK's tag: the server ended a transaction that had already failed. Nothing committed, no report left, no receipts instruction.
     const tagged = path.join(dir, "commit-rollback-tag-apply.json");
-    printed.length = 0;
-    await assert.rejects(main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", digest, "--backup-ref", "bk-commit", "--output", tagged], env,
-      run(raw, [], printed, { commitAnsweredRollback: true })), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+    const printed: string[] = [];
+    await assert.rejects(main(applyArgs(digest, tagged), env, run(raw, [], printed, { commitAnsweredRollback: true })),
+      (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
     assert.equal(existsSync(tagged), false);
     assert.ok(!printed.some((l) => l.startsWith("outcome unknown:")));
-    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows").get()!.n, 0);
-    assert.equal(raw.prepare(`SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE}`).get()!.n, 0);
-    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cost_basis").get()!.n, 1);
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0);
+    assert.equal(count(raw, `SELECT COUNT(*) AS n FROM ${REPAIRS_TABLE}`), 0);
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM cost_basis"), 1);
+  });
+
+  it("a conflict inside the transaction (the agent row moved after its snapshot) rolls the apply or the revert back, writes nothing, and says to run it again", async () => {
+    const { raw, digest } = await reviewed();
+    const said: string[] = [];
+    const applied = path.join(dir, "lock-conflict-apply.json");
+    await assert.rejects(main(applyArgs(digest, applied), env, run(raw, said, [], { conflictOn: /^UPDATE agents SET epoch = epoch/ })),
+      (e: unknown) => e instanceof BookingRefused && e.code === "conflict" && /rolled the apply back .*SQLSTATE 40001, a serialization failure/.test(e.message));
+    assert.equal(existsSync(applied), false);
+    assert.equal(said.includes("COMMIT"), false);
+    assert.equal(said.at(-1), "ROLLBACK");
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0);
+    assert.equal(await main(applyArgs(digest, applied), env, run(raw, [], [])), 0);
+    const reverted = path.join(dir, "lock-conflict-revert.json");
+    await assert.rejects(main(["--revert", applied, "--output", reverted], env, run(raw, [], [], { conflictOn: /^UPDATE agents SET epoch = epoch/ })),
+      (e: unknown) => e instanceof BookingRefused && e.code === "conflict" && /rolled the revert back/.test(e.message) && !/confirm-mismatch/.test(e.message));
+    assert.equal(existsSync(reverted), false);
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 2, "nothing changed");
+    assert.equal(await main(["--revert", applied, "--output", reverted], env, run(raw, [], [])), 0, "run again, it reverts");
+    assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0);
   });
 
   it("a revert that committed says so whatever happens after: its report not written, or its console line broken; it never removes the report", async () => {

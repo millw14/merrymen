@@ -446,13 +446,19 @@ Applying again finds nothing to do (`refused (nothing-to-do)`).
 
 ### If the apply's outcome is unknown
 
-If the commit was sent and no answer proved it rolled back, the tool says
-`outcome unknown: …` and keeps the report file. Two answers prove a
-rollback, as in the booking tool. One is an error answering `COMMIT` with a
-SQLSTATE in class 40 other than `40003` (a serialization failure or a
-deadlock), or in class 23 (a deferred constraint). That error is rethrown.
-The other is a `COMMIT` the server answered with the `ROLLBACK` tag, because
-the transaction had already failed. That one is
+The apply and the revert run on the booking tool's own write connection, so
+a `COMMIT`'s answer is read by its rule. If the commit was sent and no
+answer proved it rolled back, the tool says `outcome unknown: …` and keeps
+the report file. Two answers prove a rollback. One is an error answering
+`COMMIT` with a SQLSTATE in class 40 other than `40003` (a serialization
+failure or a deadlock), or in class 23 (a deferred constraint). A class 40
+one is a conflict with another transaction, said as
+`refused (conflict): Postgres rolled the apply back for a conflict with another transaction (SQLSTATE 40001, a serialization failure): nothing was written — run the same command again, with a new --output; …`.
+Run the same command again: if the books moved meanwhile, it refuses with
+`confirm-mismatch`, and you preview again. The same refusal comes when the
+agent row moved after the transaction's snapshot. A class 23 one is
+rethrown. The other answer is a `COMMIT` the server answered with the
+`ROLLBACK` tag, because the transaction had already failed. That one is
 `commit-answered-rollback`. Either way, no report file is left. Any other
 error is an unknown outcome, because each can arrive after the commit was
 made durable. That includes a dropped or reset connection (`EPIPE`,
@@ -533,7 +539,8 @@ Either way the receipts read `reverted`. Check them with
 `--revert-repair <repair id> --dry-run`, or run the revert again with a new
 `--output`, which says `ALREADY REVERTED`. A revert whose `COMMIT` answer
 proved nothing fails with `revert-outcome-unknown`, and the same check says
-whether it took.
+whether it took. A revert that Postgres rolls back for a conflict says
+`refused (conflict)` and changed nothing: run it again.
 
 After admission, there is no revert:
 narrow the rollout and escalate. The last resort is the backup named in the

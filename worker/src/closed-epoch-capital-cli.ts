@@ -22,21 +22,26 @@
  *                                     --dry-run, only say what the receipts hold.
  *
  * Its pieces are chain-gap-booking-cli.ts's, imported unchanged where they
- * fit: the read-only Postgres wall (pgClientDb), the target digest, the report
- * files (O_EXCL|O_NOFOLLOW, 0600, fsynced) and the failure line (fixed codes,
- * so neither DATABASE_URL nor the RPC URL is ever printed). Its own: a
+ * fit: the read-only Postgres wall and the SERIALIZABLE write connection
+ * (pgClientDb), which reads a COMMIT's answer by the booking tool's own rule
+ * (only an answer that proves a rollback says nothing was written, anything
+ * else is CommitOutcomeUnknown, and a conflict rollback is said as one to run
+ * again: conflictRefusal), the target digest, and the report files
+ * (O_EXCL|O_NOFOLLOW, 0600, fsynced). Its own: a
  * narrower transport (balanceOf at a block number, nothing else through
- * eth_call), a SERIALIZABLE write connection that tells a refused commit
- * from one whose answer never came, and its own connection names.
+ * eth_call), its own connection names, and its own failure line (fixed codes,
+ * so neither DATABASE_URL nor the RPC URL is ever printed).
  */
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fsyncSync, openSync, readFileSync, realpathSync, rmSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { translateQuery, translateSchema, type Db } from "./db";
 import type { RpcCall } from "./chain-capital";
 import { BALANCE_OF_CALL, BLOCK_QUANTITY, BookingRefused, canonical } from "./chain-gap-booking";
-import { CliError, createBookingRpc, createReportFile, DEFAULT_RPC, failureLine, finishReportFile, pgClientDb, sourceFingerprint, targetDigest, type PgClient } from "./chain-gap-booking-cli";
+import {
+  CliError, CommitOutcomeUnknown, conflictRefusal, conflictRolledBack, createBookingRpc, createReportFile, DEFAULT_RPC, failureLine as bookingFailureLine, finishReportFile,
+  pgClientDb, sourceFingerprint, targetDigest, type PgClient,
+} from "./chain-gap-booking-cli";
 import {
   applyClosedEpoch, closedEpochLines, parseRepairReport, planClosedEpoch, readClosedEpochChain, readClosedEpochSnapshot, readRepairReceipts, REPAIR_ID, revertClosedEpoch,
   type ClosedEpochPlan, type RepairApplyReport, type RepairRevertReport,
@@ -128,94 +133,15 @@ export function createClosedEpochRpc(url: string, fetchImpl: typeof fetch = fetc
 }
 
 // ── Postgres ─────────────────────────────────────────────────────────────────
-
-/** The commit was sent and no answer proved it rolled back: whether it took is for the receipts to say. */
-export class CommitOutcomeUnknown extends Error {
-  constructor() { super("commit-outcome-unknown"); this.name = "CommitOutcomeUnknown"; }
-}
-
-/**
- * THE ERRORS AN ANSWER TO COMMIT CAN CARRY THAT PROVE NOTHING WAS COMMITTED
- * (chain-gap-booking-cli's rule, the same pattern): a SQLSTATE the server
- * raised while committing, before the commit record, having rolled the
- * transaction back.
- *
- *   class 40, transaction rollback: 40001 serialization_failure (what a
- *   SERIALIZABLE commit refuses with), 40P01 deadlock_detected, 40002
- *   transaction_integrity_constraint_violation. NOT 40003
- *   statement_completion_unknown, which says just that it does not know.
- *   class 23, integrity constraint violation: a deferred constraint, checked
- *   at commit.
- *
- * Nothing else proves it. A connection that dropped or was reset (EPIPE,
- * ECONNRESET, no code at all), a backend terminated or a server shutting
- * down or starting (57P01, 57P02, 57P03), a connection exception (class 08,
- * 08007 "transaction resolution unknown" among them), a cancelled or
- * timed-out statement (57014), a resource or internal error, and 40003: each
- * can arrive after the commit was made durable, and is CommitOutcomeUnknown.
- */
-export function commitRolledBack(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null | undefined)?.code;
-  return typeof code === "string" && /^(?:40(?!003)[0-9A-Z]{3}|23[0-9A-Z]{3})$/.test(code);
-}
-
-/**
- * The core's Db over ONE node-postgres connection for the apply and the
- * revert: `?` placeholders as db.ts translates them, and every transaction
- * BEGIN ISOLATION LEVEL SERIALIZABLE, proved by asking the server — so the
- * compare-and-set's reads and the writes are one unit (a 40001 rolls back
- * and writes nothing). A COMMIT refused with a SQLSTATE that proves a
- * rollback (commitRolledBack) is rethrown as itself. A COMMIT the server
- * answered with ROLLBACK's command tag (it ended a transaction that had
- * already failed: nothing committed) is "commit-answered-rollback", as in
- * chain-gap-booking-cli. Any other failure of the COMMIT — a dropped
- * connection, a terminated backend, a timeout, 40003, or an answer whose tag
- * is neither COMMIT nor ROLLBACK — is CommitOutcomeUnknown, which the shell
- * never reads as "nothing happened": it keeps the apply report and says to
- * read the receipts.
- */
-export function pgWriteDb(client: PgClient): Db {
-  const coerce = (ps: unknown[]) => ps.map((p) => (typeof p === "bigint" ? p.toString() : p === undefined ? null : p));
-  const scoped = (inTx: boolean): Db => ({
-    prepare(sql) {
-      const text = translateQuery(sql);
-      return {
-        async run(...ps) { const r = await client.query(text, coerce(ps)); return { changes: r.rowCount ?? 0, lastInsertRowid: 0 }; },
-        async get(...ps) { return (await client.query(text, coerce(ps))).rows[0]; },
-        async all(...ps) { return (await client.query(text, coerce(ps))).rows; },
-      };
-    },
-    async exec(sql) {
-      if (inTx) throw new Error("DDL runs before the transaction, never inside it");
-      await client.query(translateSchema(sql));
-    },
-    async tx(fn) {
-      if (inTx) throw new Error("nested transactions are not supported");
-      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-      let out: Awaited<ReturnType<typeof fn>>;
-      try {
-        const s = (await client.query("SELECT current_setting('transaction_isolation') AS iso")).rows[0];
-        if (s?.iso !== "serializable") throw new CliError("serializable-not-established");
-        out = await fn(scoped(true));
-      } catch (e) {
-        try { await client.query("ROLLBACK"); } catch { /* the original error wins */ }
-        throw e;
-      }
-      let answer: Awaited<ReturnType<PgClient["query"]>> & { command?: unknown };
-      try {
-        answer = await client.query("COMMIT");
-      } catch (e) {
-        if (commitRolledBack(e)) throw e;
-        throw new CommitOutcomeUnknown();
-      }
-      // node-postgres's `command` is the tag the server answered with. A stand-in that does not say one is read as COMMIT's own answer.
-      if (answer.command === "ROLLBACK") throw new CliError("commit-answered-rollback");
-      if (answer.command !== undefined && answer.command !== "COMMIT") throw new CommitOutcomeUnknown();
-      return out;
-    },
-  });
-  return scoped(false);
-}
+//
+// The apply and the revert run on the booking tool's own write connection,
+// pgClientDb(client, { readOnly: false }): BEGIN ISOLATION LEVEL
+// SERIALIZABLE, proved by asking the server before anything runs, and a
+// COMMIT's answer read by its rule. A SQLSTATE that proves a rollback is
+// rethrown as itself (class 40 but 40003, class 23), ROLLBACK's tag is
+// "commit-answered-rollback", and anything else (a dropped connection, a
+// terminated backend, a timeout, 40003, another tag) is CommitOutcomeUnknown —
+// that module's class, which is the one this shell catches.
 
 /** node-postgres, as the booking tool connects (connectBooking), under this tool's own names in pg_stat_activity. */
 export async function connectClosedEpoch(url: string, readOnly: boolean, loadPg: () => Promise<unknown> = () => import(/* webpackIgnore: true */ "pg" as string)): Promise<PgClient> {
@@ -344,7 +270,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     try {
       const client = await full.connect(env.DATABASE_URL, false);
       try {
-        r = await revertClosedEpoch(pgWriteDb(client), { repairId, ...(report ? { report } : {}), nowMs: full.nowMs(), dialect: "postgres" });
+        r = await revertClosedEpoch(pgClientDb(client, { readOnly: false }), { repairId, ...(report ? { report } : {}), nowMs: full.nowMs(), dialect: "postgres" });
       } finally { await client.end().catch(() => {}); }
     } catch (e) {
       // Nothing committed (the COMMIT was never sent, or its answer proved a rollback), or no answer came: this run's report describes nothing either way.
@@ -354,6 +280,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
         say(`outcome unknown: the revert's commit was sent and no answer proved it rolled back — run --revert-repair ${repairId} --dry-run to see whether its receipts read 'reverted'`);
         throw new CliError("revert-outcome-unknown");
       }
+      if (conflictRolledBack(e)) throw conflictRefusal(e, "revert");
       throw e;
     }
     // COMMITTED: the receipts read 'reverted' whatever happens to this run's report or its console line now, so nothing below removes the report.
@@ -388,7 +315,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     if (plan.verdict === "nothing-to-do") throw new BookingRefused("nothing-to-do", "the preview finds nothing to file, quarantine or clear for this tenant (already applied?)");
     const client = await full.connect(env.DATABASE_URL, false);
     try {
-      const report = await applyClosedEpoch(pgWriteDb(client), plan, {
+      const report = await applyClosedEpoch(pgClientDb(client, { readOnly: false }), plan, {
         confirm: options.confirm, backupRef: options.backupRef, dialect: "postgres", nowMs: full.nowMs(), repairId,
         persist: (r) => writeOpenReport(fd, r),
       });
@@ -411,11 +338,20 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     if (phase === "reported") throw new CliError("applied-but-not-printed");
     try { closeSync(fd); } catch { /* already closed */ }
     rmSync(options.output, { force: true });
+    // Rolled back for a conflict with another transaction: nothing was written, and the same command can simply run again.
+    if (conflictRolledBack(e)) throw conflictRefusal(e, "apply");
     throw e;
   }
 }
 
-export { failureLine };
+/**
+ * What the console may say about a failure: this tool's own refusal sentence, or a fixed code (the booking tool's forms), and otherwise
+ * this tool's own line — never a driver's or a node's message, which can carry DATABASE_URL or the RPC URL.
+ */
+export function failureLine(e: unknown): string {
+  if (e instanceof BookingRefused || e instanceof CliError) return bookingFailureLine(e);
+  return "closed-epoch-failed: nothing was applied or reverted unless an APPLIED, a REVERTED or an outcome unknown line was printed. Use --help for invocation.";
+}
 
 function invokedDirectly(): boolean {
   try { return !!process.argv[1] && realpathSync(path.resolve(process.argv[1])) === fileURLToPath(import.meta.url); }
