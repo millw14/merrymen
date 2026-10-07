@@ -204,15 +204,19 @@ export const DRILL_TABLES = validateDrillTables([
   // None of them touches created_at.
   { table: "trades", stamp: "created_at", kind: "presence-only",
     why: "A submitted trade is resolved in place (status, tx hash, fill, gas) without moving created_at." },
-  // Inserted by store.ts insertFlowWithJournal, accounting-repair.ts and the
-  // mirror, and deleted only by accounting-repair.ts's quarantine — but
+  // Inserted by store.ts insertFlowWithJournal, accounting-repair.ts,
+  // chain-gap-booking.ts, closed-epoch-capital.ts (stamped with the BLOCK's
+  // time, and a revert re-inserts a quarantined row under its old id and
+  // `at`) and the mirror; deleted only by accounting-repair.ts's and
+  // closed-epoch-capital.ts's quarantine and by the two tools' reverts — but
   // store.ts's SQLITE_ALTERS, which applyLedgerSchema runs against the shared
   // database on every orchestrator boot, rewrite tx_hash to lowercase and
   // fill a NULL chain_id in place. `at` stays.
   { table: "flows", stamp: "at", kind: "presence-only",
     why: "Boot-time normalisation lowercases tx_hash and fills chain_id in place without moving at." },
-  // accounting-repair.ts's quarantine step only: INSERT … SELECT, stamped
-  // with the repair's own now. Never updated or deleted.
+  // accounting-repair.ts's and closed-epoch-capital.ts's quarantine steps:
+  // INSERT … SELECT, stamped with the repair's own now. Never updated or
+  // deleted, a closed-epoch revert included (it keeps the row as history).
   { table: "flows_quarantine", stamp: "quarantined_at", kind: "append" },
   // store.ts (each mark, and writePaperOpening) and the mirror's
   // `INSERT … ON CONFLICT DO NOTHING`. Never updated or deleted.
@@ -253,11 +257,14 @@ export const DRILL_TABLES = validateDrillTables([
     why: "The mirror rewrites each row with the child's own stamp, which can predate the write here." },
   // paper-checkpoint.ts restorePaperCheckpoint renormalises a child's qty_raw
   // without updated_at, and the mirror's upsert carries that unchanged child
-  // stamp here with the new quantity.
+  // stamp here with the new quantity. closed-epoch-capital.ts deletes a live
+  // row by its exact contents, and its revert re-inserts it with its old stamp.
   { table: "cost_basis", stamp: "updated_at", kind: "presence-only",
     why: "A child's basis is renormalised without moving updated_at, and the mirror copies the child's stamp." },
   // The mirror upserts with the child's own `at`, and basis-seed.ts re-seeds
   // a rebuilt child's floors carrying the `at` it read from here.
+  // closed-epoch-capital.ts deletes a live floor by its exact contents, and
+  // its revert re-inserts it with its old `at`.
   { table: "position_floors", stamp: "at", kind: "presence-only",
     why: "The mirror upserts with the child's own at, and a re-seeded floor carries a historical at." },
   // The mirror's upsert sets state, quantities and proceeds and never

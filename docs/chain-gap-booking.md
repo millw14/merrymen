@@ -71,7 +71,10 @@ The `unresolved` class covers these cases:
 - A USDG transfer of the account sits outside its operation's execution.
 - The fact is not yet 64 blocks deep, or it landed before the current
   accounting epoch opened. The current epoch has no trade, flow or equity
-  row yet, so its opening cannot be dated.
+  row yet, so its opening cannot be dated. An owner's capital that arrived
+  and left inside a **closed** epoch is filed into that epoch by the
+  closed-epoch repair ([closed-epoch-capital.md](closed-epoch-capital.md)),
+  deposit and withdrawal together. Run it first, then preview here again.
 - The fact landed after admission's chain refusal of the tenant, or within a
   minute before it. Admission never found it missing from the book a worker
   would run on. Let admission refuse the tenant again, then preview again.
@@ -280,7 +283,7 @@ Two consequences need a reviewer's eye:
 |---|---|---|---|
 | `0x8e93bad5a60a266b4283855ceffa0979720aed72` (Shogun, account `0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487`) | 1 op + 1 USDG transfer | A Trencher trade whose row is missing: the operation, and its USDG leg between the vault and the account | `session-trade` + `operation-leg` → one `trades` row, if Postgres's position and cost basis in the token hold what the chain does. Otherwise `unresolved`: escalate for a basis decision |
 | `0x4b6dcd559c82ea897c34dacfb785fb0c8f85d4c5` | 1 op, 0 transfers | An operation with no USDG leg | `session-no-movement` books the reconciler's row. A root-key `owner-operation` blocks: escalate |
-| `0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d` | 0 ops, 1 transfer | A lone USDG transfer | `deposit` → one `flows` row. Outbound, or from a hosted account or vault, blocks |
+| `0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d` | 0 ops, 1 transfer | A lone USDG transfer | The preview of 2026-10-07 found it `unresolved`: the deposit (2026-09-15) landed before epoch 2 opened (2026-09-16 21:21:51), and the owner's root-key sweep took it all back at 21:09:23. File both into closed epoch 1 with [closed-epoch-capital.md](closed-epoch-capital.md), then preview here again: `NOTHING-MISSING` is expected |
 
 The preview settles which shape each tenant is in. These are expectations, not
 results.
