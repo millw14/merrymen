@@ -338,7 +338,7 @@ const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
  * milliseconds (autonomy-funnel.ts beatSec, ledger-resume.ts's own stamp).
  * Normalised per value, never by a guess across rows.
  */
-const unixSec = (v: unknown): number | null => {
+export const unixSec = (v: unknown): number | null => {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -353,7 +353,7 @@ const iso = (sec: number | null): string => (sec === null ? "never" : new Date(s
  * usual "a missing table is none" catch cannot be used in the snapshot or the
  * apply, which are each one transaction. Found by a real Postgres, not sqlite.
  */
-async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
+export async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
   const rows = (await db.prepare(dialect === "postgres"
     ? "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema()"
     : "SELECT name FROM sqlite_master WHERE type = 'table'").all()) as Array<Record<string, unknown>>;
@@ -361,7 +361,7 @@ async function existingTables(db: Db, dialect: Dialect): Promise<Set<string>> {
 }
 
 /** A table's columns, asked of the catalogue for the same reason (existingTables). Only for a table it says exists. */
-async function existingColumns(db: Db, dialect: Dialect, table: string): Promise<Set<string>> {
+export async function existingColumns(db: Db, dialect: Dialect, table: string): Promise<Set<string>> {
   const rows = (await db.prepare(dialect === "postgres"
     ? "SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?"
     : "SELECT name FROM pragma_table_info(?)").all(table)) as Array<Record<string, unknown>>;
@@ -378,7 +378,7 @@ async function existingColumns(db: Db, dialect: Dialect, table: string): Promise
  * chain refusal, minted a generation or archived a home: nothing of their
  * evidence, and no reason's text beyond the prefix test.
  */
-async function readAdmissionState(db: Db, tables: ReadonlySet<string>, tenant: string, account: string): Promise<AdmissionState> {
+export async function readAdmissionState(db: Db, tables: ReadonlySet<string>, tenant: string, account: string): Promise<AdmissionState> {
   const approvals: ApprovalFact[] = tables.has("ledger_resume_approvals")
     ? ((await db.prepare(`SELECT approval_id, state, reason, generation, archive_path, created_at_ms, updated_at_ms FROM ledger_resume_approvals
         WHERE tenant = ?`).all(tenant)) as Array<Record<string, unknown>>).map((r) => ({
@@ -536,7 +536,7 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  * The recorded fills by digest: a row's fill repaired in place moves no count
  * or maximum id, and the holding was judged on it.
  */
-function casFacts(s: BookingSnapshot) {
+export function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
     epochOpenedAt: s.epochOpenedAt, known: s.known, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
     admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills) };
@@ -670,7 +670,7 @@ export function gapChainOf(rpc: RpcCall, sleep: (ms: number) => Promise<void> = 
  * (rpc-error.ts's `retryable`), at 1s, 2s, 4s, 8s. Anything else, or the last
  * failure, is the caller's to treat as unread.
  */
-async function patiently<T>(call: () => Promise<T>, sleep: (ms: number) => Promise<void>): Promise<T> {
+export async function patiently<T>(call: () => Promise<T>, sleep: (ms: number) => Promise<void>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try { return await call(); }
     catch (e) {
@@ -1541,7 +1541,7 @@ export interface ApplyReport {
 }
 
 /** A row as stored, reduced to the columns that were written, plus its id: what a revert compares against. */
-function storedRow(r: Record<string, unknown>, columns: readonly string[]): Record<string, unknown> {
+export function storedRow(r: Record<string, unknown>, columns: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(["id", ...columns].map((c) => {
     const v = r[c];
     return [c, v === undefined ? null : typeof v === "bigint" ? Number(v) : v];
@@ -1552,7 +1552,7 @@ function storedRow(r: Record<string, unknown>, columns: readonly string[]): Reco
  * NULL, a number equals the same number however it came back (node-postgres
  * returns BIGINT as a string unless told otherwise), anything else as text.
  */
-function sameRow(a: Record<string, unknown>, b: Record<string, unknown>, columns: readonly string[]): boolean {
+export function sameRow(a: Record<string, unknown>, b: Record<string, unknown>, columns: readonly string[]): boolean {
   return columns.every((c) => {
     const x = a[c] ?? null, y = b[c] ?? null;
     if (x === null || y === null) return x === null && y === null;
