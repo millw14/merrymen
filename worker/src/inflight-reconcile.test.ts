@@ -8,6 +8,7 @@
  *     counts exactly as the live path would have counted it.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, toHex, type Hex } from "viem";
 import { acquiredLegOf, addressTopic, DROP_PROOF_CONFIRMATIONS, findDroppedOps, findOrphanOps, findSoleAcquisition, pickAcquiredLeg, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
@@ -25,7 +26,19 @@ const ROUTER = "0x00000000000000000000000000000000000f0011" as const;
 const USDG = "0x00000000000000000000000000000000000d6000" as const;
 const STOCK = "0x00000000000000000000000000000000005704c0" as const;
 
-function opLog(userOpHash: Hex, success: boolean, txHash: Hex): RawLog {
+/**
+ * The agent's own operations are signed by its SESSION KEY: Kernel v3 packs
+ * the validator into the nonce, and a permission op's top bytes are mode 0x00,
+ * vType 0x02 (asset-movements.ts validatorOfNonce). These fixtures used to
+ * carry nonce 1 — mode 0, vType 0, which is the ROOT validator, the owner's
+ * own key — and that did not matter while the sweep never asked who signed.
+ * It asks now: a root op is never an agent trade. So an agent op here carries
+ * a session-key nonce, and an owner op says so (ROOT_NONCE).
+ */
+const SESSION_NONCE = (0x0002d5cb71d8n << 208n) | 1n;
+const ROOT_NONCE = (0x845adb2c711129d4f3966735ed98a9f09fc4ce57n << 64n) | 1n;
+
+function opLog(userOpHash: Hex, success: boolean, txHash: Hex, nonce = SESSION_NONCE, blockNumber?: bigint): RawLog {
   const topics = encodeEventTopics({
     abi: EP_ABI,
     eventName: "UserOperationEvent",
@@ -34,9 +47,9 @@ function opLog(userOpHash: Hex, success: boolean, txHash: Hex): RawLog {
   // Non-indexed fields, in order: nonce, success, actualGasCost, actualGasUsed.
   const data = encodeAbiParameters(
     [{ type: "uint256" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }],
-    [1n, success, 0n, 0n],
+    [nonce, success, 0n, 0n],
   );
-  return { topics: topics as readonly Hex[], data, transactionHash: txHash };
+  return { topics: topics as readonly Hex[], data, transactionHash: txHash, ...(blockNumber === undefined ? {} : { blockNumber: toHex(blockNumber) }) };
 }
 
 function transfer(token: string, from: string, to: string, value: bigint): ReceiptLog {
@@ -667,5 +680,92 @@ describe("findDroppedOps", () => {
   it("an event for ANOTHER SENDER under the rival's hash is not ours and proves nothing", async () => {
     const { chain } = chainOf([event(rival, NONCE, deep, "0x00000000000000000000000000000000000acc02")]);
     assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+});
+
+/**
+ * WHO SIGNED IT, on real receipts (testdata/owner-operations-receipts.json,
+ * read from the public chain). The 0x4b6dcd account's root-key operations —
+ * an invalidateNonce, its vault's sweep(USDG), its recoverFunds — and its
+ * session key's enable-mode sell, all as the sweep finds them at arm.
+ */
+describe("findOrphanOps: the owner's own key is not the agent", () => {
+  type FixtureLog = [string, string[], string, string];
+  const FX = JSON.parse(readFileSync(new URL("./testdata/owner-operations-receipts.json", import.meta.url), "utf8")) as
+    Record<string, { tx: string; block: string; logs: FixtureLog[] }>;
+  const A4B = "0xa96bf429888e1aab4255762d17d29c53f6a0370d" as `0x${string}`;
+  const VAULT = "0xc8776faff15212c359b23bae531ff3ac7d760e0f";
+  const USDG_REAL = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+  const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
+  const UOE = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
+  const names = ["invalidateNonce", "vaultSweep", "recoverFunds", "sessionEnable"] as const;
+  /** The chain as the sweep reads it: each receipt's own UserOperationEvent, and the receipt behind it. */
+  const realChain = (only: readonly string[] = names, head = 80_000_000n): ReconcileChain => ({
+    async getBlockNumber() { return head; },
+    async getLogs() {
+      return only.map((n) => {
+        const f = FX[n]!;
+        const [, topics, data, logIndex] = f.logs.find(([, t]) => t[0] === UOE)!;
+        return { topics: topics as Hex[], data: data as Hex, transactionHash: f.tx as Hex, blockNumber: f.block as Hex, logIndex: logIndex as Hex };
+      });
+    },
+    async getReceiptLogs(tx) {
+      const f = names.map((n) => FX[n]!).find((x) => x.tx === tx.toLowerCase());
+      return f ? f.logs.map(([address, topics, data, logIndex]) => ({ address, topics, data, logIndex })) : null;
+    },
+  });
+
+  it("each root op carries validator 'root', its block, an owner reading, and NO fill; the session op is exactly what it was", async () => {
+    const orphans = await findOrphanOps({ chain: realChain(), smartAccount: A4B, usdgToken: USDG_REAL, knownOpHashes: new Set(), lookbackBlocks: 5_000_000n,
+      owner: { custody: [VAULT], chainId: 4663 } });
+    const by = new Map(orphans.map((o) => [o.txHash, o]));
+    const invalidate = by.get(FX.invalidateNonce!.tx)!, sweep = by.get(FX.vaultSweep!.tx)!, recover = by.get(FX.recoverFunds!.tx)!, session = by.get(FX.sessionEnable!.tx)!;
+    for (const o of [invalidate, sweep, recover]) {
+      assert.equal(o.validator, "root");
+      assert.equal(o.acquired, null, "never a fill for the owner's own key");
+      assert.ok(o.owner, "read as an owner operation");
+    }
+    assert.equal(invalidate.owner!.disposition, "acknowledged");
+    assert.equal(sweep.owner!.disposition, "acknowledged");
+    assert.deepEqual(sweep.owner!.covers, [`${FX.vaultSweep!.tx}:13`]);
+    assert.equal(recover.owner!.disposition, "review");
+    assert.equal(recover.blockNumber, 78267605n);
+    assert.equal(recover.notionalUsdg6, 348_368488n, "the notional is still read, and still never booked for it");
+    // THE SESSION KEY'S OP, BYTE FOR BYTE AS BEFORE: its notional, and its fill.
+    assert.equal(session.validator, "permission");
+    assert.equal(session.owner, null);
+    assert.equal(session.notionalUsdg6, 5_370997n);
+    assert.equal(session.attributed, true);
+    assert.deepEqual(session.acquired, { token: NVDA, qtyRaw: 23352952409412407n, side: "sell" });
+  });
+
+  it("without the owner's book a root op still gets no fill, and carries no reading (the reconciler leaves it for the next arm)", async () => {
+    const [o] = await findOrphanOps({ chain: realChain(["recoverFunds"]), smartAccount: A4B, usdgToken: USDG_REAL, knownOpHashes: new Set(), lookbackBlocks: 5_000_000n });
+    assert.equal(o!.validator, "root");
+    assert.equal(o!.owner, null);
+    assert.equal(o!.acquired, null);
+  });
+
+  it("a root op recorded already (its hash among the known) is not found again", async () => {
+    const orphans = await findOrphanOps({ chain: realChain(["recoverFunds", "sessionEnable"]), smartAccount: A4B, usdgToken: USDG_REAL, lookbackBlocks: 5_000_000n,
+      knownOpHashes: new Set(["0x04f8241f6d02241469b9c2bc2d2f8cc4cca719eb5c6d54f3a77077c7e41ab3a7"]), owner: { custody: [VAULT], chainId: 4663 } });
+    assert.deepEqual(orphans.map((o) => o.validator), ["permission"]);
+  });
+
+  it("a reverted root op is still skipped: it moved nothing", async () => {
+    const tx = h(0x5e);
+    const chain = fakeChain([opLog(h(0x5f), false, tx, ROOT_NONCE)], {});
+    assert.deepEqual(await findOrphanOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, knownOpHashes: new Set(), lookbackBlocks: 1000n, owner: { custody: [], chainId: 4663 } }), []);
+  });
+
+  it("a synthetic root buy is no fill either, though its receipt is the cleanest one-token buy there is", async () => {
+    const tx = h(0x6e);
+    const chain = fakeChain([opLog(h(0x6f), true, tx, ROOT_NONCE, 900n)], { [tx.toLowerCase()]: [transfer(USDG, ACCOUNT, ROUTER, 5_000000n), transfer(STOCK, ROUTER, ACCOUNT, 42n)] });
+    const [o] = await findOrphanOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, knownOpHashes: new Set(), lookbackBlocks: 1000n, owner: { custody: [], chainId: 4663 } });
+    assert.equal(o!.validator, "root");
+    assert.equal(o!.acquired, null);
+    assert.equal(o!.blockNumber, 900n);
+    // These hand-built logs carry no positions, so the owner reading is unread: null, and so never booked.
+    assert.equal(o!.owner, null);
   });
 });

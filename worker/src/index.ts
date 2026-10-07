@@ -106,7 +106,8 @@ import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
-import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { DROP_PROOF_CONFIRMATIONS, findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { ownerOperationRow, ownerOperationsNotice, type OwnerOperationReading } from "./owner-operations";
 import { holdAtCaps } from "./budget-seed";
 import { resumeFrom } from "./deposit-log";
 import { scanAndBookDepositWindow } from "./deposit-scan";
@@ -541,6 +542,7 @@ import {
   lastChainLogBlock,
   recentDecisions,
   recentTradeTxHashes,
+  tradeOpsInTx,
   getAgentEpoch,
   getAgentFinancials,
   getRiskPeriodPeak,
@@ -559,6 +561,7 @@ import {
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
   listOpHashes,
+  recordOwnerOperation,
   listSubmittedOps,
   opsSignedWithNonce,
   initStore,
@@ -3834,6 +3837,8 @@ async function main() {
     agentId: string,
     client: ReturnType<typeof createPublicClient>,
     smartAccount: `0x${string}`,
+    /** The grant's custody contracts and chain: the book an owner's operation is read over (owner-operations.ts). */
+    ownerBook: { custody: readonly string[]; chainId: number },
   ): Promise<void> => {
     try {
       // Convert the 24h cap window to a block span without hardcoding a block
@@ -3884,6 +3889,7 @@ async function main() {
         onLogs: (logs, complete, scannedTo) => {
           authoritative = { logs, complete, scannedTo };
         },
+        owner: ownerBook,
       });
 
       // ── SHADOW MODE ──────────────────────────────────────────────────────
@@ -3921,7 +3927,60 @@ async function main() {
       }
       if (orphans.length === 0) return;
 
+      /** What this arm recorded as the owner's own, for one event after the loop. */
+      const ownerRecorded: OwnerOperationReading[] = [];
+      let ownerHead: bigint | null | undefined;
+      let ownerEpoch: number | undefined;
       for (const o of orphans) {
+        // ── THE OWNER'S OWN KEY IS NOT THE AGENT ─────────────────────────────
+        //
+        // An operation the ROOT validator signed (the owner's sudo key, proved
+        // from the nonce in the EntryPoint's own event) is a withdrawal, a
+        // revocation or a vault sweep the owner chose. Booked as a 'swap' it
+        // was counted toward the caps, shown on every tape, journaled as a fill,
+        // and its USDG leg hidden from the deposit scanner (which skips a
+        // transaction the ledger holds as a trade). It is recorded in
+        // owner_operations instead, and nothing else is written for it: never a
+        // trades row, a fill, a basis or a flow — its capital legs stay the
+        // deposit scanner's. Only a proved root takes this branch; a session
+        // key, a secondary validator or an unreadable nonce keeps the 'swap'
+        // below, the conservative over-count.
+        //
+        // Recorded only when its receipt was read and it is 64 blocks deep;
+        // otherwise it is left for the next arm, which finds it again. Either
+        // way it is never booked as the agent's. The record is one insert with
+        // a unique identity, so a crash on either side of it replays nothing.
+        if (o.validator === "root") {
+          if (!o.owner) {
+            // No reading: the receipt was not read, or it could not be read as
+            // one (owner-operations.ts ownerOperationOf: e.g. an amount that is
+            // not one quantity). Either way nothing is vouched for.
+            console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… was signed by the owner's own key and its receipt could not be read as an owner operation — ` +
+              "not recorded this arm, and never booked as a trade");
+            continue;
+          }
+          if (ownerHead === undefined) ownerHead = await chain.getBlockNumber().catch(() => null);
+          if (o.blockNumber === null || ownerHead === null || ownerHead - o.blockNumber < DROP_PROOF_CONFIRMATIONS) {
+            console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… was signed by the owner's own key and is not yet ` +
+              `${DROP_PROOF_CONFIRMATIONS} blocks deep — recorded at a later arm, never booked as a trade`);
+            continue;
+          }
+          const block = await client.getBlock({ blockNumber: o.blockNumber }).catch(() => null);
+          if (!block) {
+            console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… was signed by the owner's own key and its block could not be read — ` +
+              "not recorded this arm, and never booked as a trade");
+            continue;
+          }
+          if (ownerEpoch === undefined) ownerEpoch = await getAgentEpoch(agentId);
+          const recorded = await recordOwnerOperation(ownerOperationRow(o.owner, {
+            agentId, chainId: ownerBook.chainId, blockNumber: o.blockNumber, blockTime: Number(block.timestamp), recordedEpoch: ownerEpoch,
+          }));
+          if (recorded === "inserted") ownerRecorded.push(o.owner);
+          else if (recorded === "failed") {
+            console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… (the owner's own key) could not be recorded — found again at the next arm, never booked as a trade`);
+          }
+          continue;
+        }
         // 'swap' is the dominant and the SAFE default kind: it counts toward the
         // cap (unlike 'vault-withdraw', the only exempted kind), so a reconciled
         // op can only ever over-count spend, never under-count — the safe
@@ -3990,6 +4049,11 @@ async function main() {
                 `reconciliation row — spend for it stays uncounted; will retry next arm`,
         );
       }
+      // ONE EVENT for what this arm recorded as the owner's own: what they are
+      // not (trades, or anything a limit counts), and what is left to decide —
+      // a token that arrived or left under the owner's key (owner-operations.ts).
+      const ownerNotice = ownerOperationsNotice(ownerRecorded, (t) => symbolOfToken(t as `0x${string}`) ?? null);
+      if (ownerNotice) await addEvent(agentId, ownerNotice.level, ownerNotice.text);
     } catch (e) {
       // Never block arming on a reconciliation failure — the running process is
       // still protected by recordTrade's in-session fail-closed path.
@@ -4183,6 +4247,12 @@ async function main() {
           toBlock: head,
           knownKeys: await knownFlowKeys(agentId, Number(from)),
           tradeTxHashes: await recentTradeTxHashes(agentId),
+          // THE OWNER'S OWN OPERATION BUNDLED BESIDE A TRADE: its USDG leg is
+          // the owner's deposit or withdrawal, and the transaction-wide skip
+          // above would hide it for good. The scanner asks which operations
+          // the trade rows of such a transaction are, and lets through only a
+          // root operation of this account none of them is (deposit-log.ts).
+          tradeOpsInTx: (txHash) => tradeOpsInTx(agentId, txHash),
           // FROM THE GRANT, so the flow classifier knows a class buy is a trade
           // and not a withdrawal. `tradeTxHashes` usually masks this — but it is
           // recency-bounded and reads the local ledger, so it fails exactly when
@@ -7480,7 +7550,7 @@ async function main() {
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
-    if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);
+    if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`, { custody: custodyAddressesOf(grant), chainId: grant.chainId });
     // THE ENERGY BUY'S BALANCE PIN, seeded from the ledger — after the resolver
     // above, which ratchets it for any purchase it just settled. A restart after
     // a landed purchase must not let the next ask read a node still behind that
