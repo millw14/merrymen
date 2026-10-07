@@ -531,11 +531,18 @@ function myRead(a: FollowAssessment | null): string {
   return `My read: ${base}${reason ? ` (${reason})` : ""}.`;
 }
 
-function readinessLine(tail: ChildTail, r: FollowReadiness | null): string {
+/**
+ * What following does with this event. Only a BUY is ever a trigger
+ * (orchestrator-fomo.ts tailedBuyer), so a thesis notice on a considered tail
+ * says a thesis alone is never a signal rather than "their buy is one signal".
+ */
+function readinessLine(tail: ChildTail, r: FollowReadiness | null, kind: "buy" | "thesis"): string {
   if (!tail.consider) return "You asked me to tell you only; I won't trade on it.";
   if (!r) return "You asked me to consider their buys, but I can't tell right now whether following can act, so this only informs you.";
   if (r.mode !== "off" && r.blockers.length === 0) {
-    return "Their buy is one signal into my normal review; I only enter if my own checks and the Brain agree, inside your scout budget.";
+    return kind === "thesis"
+      ? "A thesis alone is never a signal; only their buys go into my normal review, and I only enter if my own checks and the Brain agree, inside your scout budget."
+      : "Their buy is one signal into my normal review; I only enter if my own checks and the Brain agree, inside your scout budget.";
   }
   const words = [...new Set(r.blockers.map((b) => BLOCKER_WORDS[b]).filter(Boolean))];
   return `You asked me to consider their buys, but following can't act right now (${words.join("; ") || "following is off"}), so this only informs you.`;
@@ -612,7 +619,7 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
         `👀 <b>${name}</b> posted a thesis on <b>${coin}</b> on Fomo · ${at}${more}`,
         words ? `Their words, unverified: “${esc(words)}”` : "Their thesis had no words I can show.",
         myRead(ev.token ? i.assessmentOf(ev.token.key) : null),
-        readinessLine(tail, i.readiness),
+        readinessLine(tail, i.readiness, "thesis"),
         esc(TAIL_COVERAGE),
         tailEnds,
       ].join("\n"),
@@ -657,7 +664,7 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
       ...(position ? [position] : []),
       thesisLine,
       myRead(assessment),
-      readinessLine(tail, i.readiness),
+      readinessLine(tail, i.readiness, "buy"),
       esc(TAIL_COVERAGE),
       tailEnds,
     ].join("\n"),

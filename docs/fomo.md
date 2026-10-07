@@ -520,7 +520,9 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   the reason in plain words: no reader, no chain on the alert, the tail's two reads
   spent, or no time left), Merrymen's
   read from its assessment, what following would do (tell only; one signal into the
-  normal review; or, when it cannot act, the reason in plain words: following off, not
+  normal review, which a thesis notice words as "a thesis alone is never a signal; only
+  their buys go into my normal review", since only buys are ever triggers; or, when it
+  cannot act, the reason in plain words: following off, not
   the fast Trencher strategy, scout budget off, entries paused, no Trencher vault (every
   follow entry is a vault-custody entry), live follow not enabled, trading held), the
   coverage floor and when the tail ends. Their words are sanitised, clipped to 280

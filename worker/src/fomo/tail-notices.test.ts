@@ -214,6 +214,18 @@ describe("what a notice says", () => {
     for (const b of Object.keys(BLOCKER_WORDS)) assert.ok(BLOCKER_WORDS[b as keyof typeof BLOCKER_WORDS].length > 5);
   });
 
+  it("a thesis is never a trigger: a considered tail's thesis notice never says 'their buy is one signal' (review 2026-10-07)", () => {
+    const html = pass(input([tail([ev(1, { kind: "thesis", text: "x" })], { consider: true })], { readiness: CAN_ACT })).notices[0]!.html;
+    assert.match(html, /posted a thesis on <b>PONS<\/b>/);
+    assert.doesNotMatch(html, /Their buy is one signal/);
+    assert.match(html, /A thesis alone is never a signal; only their buys go into my normal review/);
+    // Tell-only and blocked read right for a thesis already, and are unchanged.
+    const tell = pass(input([tail([ev(1, { kind: "thesis", text: "x" })], { consider: false })])).notices[0]!.html;
+    assert.match(tell, /You asked me to tell you only/);
+    const blocked = pass(input([tail([ev(1, { kind: "thesis", text: "x" })], { consider: true })], { readiness: { mode: "paper", blockers: ["paused"] } })).notices[0]!.html;
+    assert.match(blocked, /following can't act right now \(entries are paused\)/);
+  });
+
   it("a sell is a reason to re-check, never an exit to copy; holding it is said", () => {
     const sell = ev(1, { kind: "sell", positionValueUsd: null });
     const r = pass(input([tail([sell])], { holds: (k) => k === coin(1).key }));
