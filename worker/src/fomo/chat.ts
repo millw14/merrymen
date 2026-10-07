@@ -111,6 +111,10 @@ const OWNER_ONLY_INTENTS: ReadonlySet<string> = new Set(["research-status", "why
 /** A group may hear coin-level aggregates and the public leaderboard; anything about one trader (or the owner's own state) goes to a DM. */
 function groupMustDeflect(plan: FomoQuestionPlan): boolean {
   if (TRADER_INTENTS.has(plan.intent) || OWNER_ONLY_INTENTS.has(plan.intent)) return true;
+  // The leaderboard cut to the traders Merrymen watches ("top traders we
+  // watch") IS the watch list, and who it follows is never a room's.
+  if (plan.intent === "rankings-traders" && plan.cohortScope) return true;
+  if (plan.toolCalls.some((c) => c.tool === "fomo_get_rankings" && c.args.board === "traders" && c.args.cohort_only === true)) return true;
   if (plan.subjects.some((s) => s.kind === "trader")) return true;
   return plan.toolCalls.some((c) => typeof c.args.trader === "string" || c.tool === "fomo_get_trader_context" || c.tool === "fomo_get_trader_activity");
 }

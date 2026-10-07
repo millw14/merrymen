@@ -197,7 +197,7 @@ describe("createTgFomoPort", () => {
   it("a trader question is deflected before anything is looked up", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    for (const q of ["what is @CryptoKaleo holding on fomo?", "what has @frankdegods bought on fomo this week?"]) {
+    for (const q of ["what is @CryptoKaleo holding on fomo?", "what has @frankdegods bought on fomo this week?", "who's the top of our watched traders on fomo today"]) {
       const a = await port.ask({ text: q, chatId: GROUP });
       assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true }, q);
     }

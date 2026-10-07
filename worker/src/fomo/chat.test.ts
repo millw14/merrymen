@@ -348,6 +348,22 @@ describe("answerFomoQuestion", () => {
     }
   });
 
+  it("in a group: the leaderboard cut to the traders Merrymen watches is the watch list, so it is deflected with no lookup", async () => {
+    const s = await setup();
+    s.serve.set("/v2/leaderboard/24h", () => json(fixture("leaderboard-24h")));
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    for (const t of ["who are the top traders we watch?", "top traders in our cohort on fomo", "who's the top of our watched traders on fomo today"]) {
+      const r = await s.ask(t, g);
+      assert.ok(r.handled, t);
+      assert.equal(r.text, GROUP_DM_DEFLECTION, t);
+    }
+    assert.equal(s.brokerCalls.length, 0);
+    // The owner still gets it.
+    const owner = await s.ask("who are the top traders we watch?");
+    assert.ok(owner.handled);
+    assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", cohort_only: true }]]);
+  });
+
   it("what it can do with Fomo is a fixed answer: no lookup, nothing remembered, a room's version gate-safe", async () => {
     const s = await setup();
     const owner = await s.ask("what can you do with fomo");

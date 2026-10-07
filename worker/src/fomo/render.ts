@@ -195,6 +195,16 @@ function who(h: string | null | undefined, userId: string): string {
   return /^[A-Za-z0-9_.-]{1,40}$/.test(s) ? s : `trader ${userId.slice(0, 8)}…`;
 }
 
+/**
+ * A trader as a group hears them: the public Fomo handle, or no name at all.
+ * Never who()'s owner-side fallback, which is a piece of the provider's
+ * internal user id.
+ */
+function publicHandle(h: string | null | undefined): string {
+  const s = h ? sanitizeText(h, 40).replace(/^@/, "") : "";
+  return /^[A-Za-z0-9_.-]{1,40}$/.test(s) ? s : "an unnamed trader";
+}
+
 function trader(t: { handle: string | null; userId: string }): string {
   return `${who(t.handle, t.userId)} on Fomo`;
 }
@@ -323,6 +333,8 @@ function isTraderTool(tool: FomoToolName): boolean {
 export function needsDirectMessage(env: FomoEnvelope): boolean {
   if (isTraderTool(env.tool) || env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
   if (env.subject?.kind === "trader") return true;
+  // A leaderboard cut to Merrymen's watched traders names the watch list itself (chat.ts deflects it first).
+  if (env.tool === "fomo_get_rankings" && (env.data as RankingsData | null)?.board === "traders" && env.coverage.requested.cohortOnly === true) return true;
   if (env.tool === "fomo_get_token_theses" && (env.data as TokenThesesData | null)?.trader) return true;
   return false;
 }
@@ -512,7 +524,7 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
       // "P&L" and "profit" are words the group gate keeps for its own book: plain words instead.
       const scope = windowWords(d.window);
       const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades (provider-reported, not a skill measure):`];
-      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS)) out.push(`${r.rank ?? "–"}. ${who(r.trader.handle, r.trader.userId)} ${signedMoney(r.pnlUsd, audience)}`);
+      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS)) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
       return out;
     }
     const out = [`Top traders by provider-reported ${d.window ?? ""} realised P&L (not a skill measure):`];
