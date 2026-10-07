@@ -28,8 +28,11 @@ export type SubjectReading = "coin" | "topic";
 /** The lines before it that the question quotes, and how much of each. */
 const CONTEXT_LINES = 8;
 const LINE_CHARS = 200;
-/** One word back: a short box, well inside the reply deadline. */
-const READ_TIMEOUT_MS = 8_000;
+/**
+ * One word back, so a short box: it runs before the desk's look and read,
+ * inside the same 30 s research deadline (handler.ts RESEARCH_REPLY_MS).
+ */
+const READ_TIMEOUT_MS = 5_000;
 const READ_TOKENS = 16;
 
 export const SUBJECT_SYSTEM = [
