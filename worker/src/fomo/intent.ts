@@ -391,7 +391,12 @@ const BUYERS = /\bbuyers\b|\bwho (?:is |are |has been |have been |was |were )?(?
 const HOLDERS = /\bholders\b|\bwho (?:is |are )?(?:holding|holds)\b|\b(?:which|what) (?:traders|wallets|people|of (?:our|the|these|those) (?:\d{1,4} )?traders) (?:still )?(?:hold|holds|holding|own|owns)\b/;
 const GLOBAL_FLOW = /\bwhat (?:are|have|did|is) (?:the )?(?:top |best |smart |our (?:\d{1,4} )?|fomo |watched |other )?(?:traders|people|wallets|whales|users|everyone|smart money)(?: \S+){0,4}? (?:been )?(?:buying|selling|trading|aping|bought|sold|into|accumulating)\b|^(?:are|is|have|has) (?:the |our |any )?(?:\d{1,4} )?(?:traders|people|wallets|whales)(?: \S+){0,4}? (?:been )?(?:buying|selling|trading|aping|accumulating|dumping)\b/;
 
-const RANK_TRADERS = /\b(?:top|best|leading|biggest|most profitable|highest earning|winning|hottest|smartest|top performing|best performing|strongest|richest) (?:\d{1,3} )?(?:fomo )?(?:traders|trader|performers|wallets|earners|winners|accounts)\b|\b(?:trader|traders) (?:leaderboard|rankings?|board)\b|\bleaderboard\b|\brank(?:ed|ing|ings)? (?:of )?(?:the )?traders\b|\bwho (?:is|are) (?:the )?(?:top|best|leading) (?:\d{1,3} )?(?:traders?|performers?)\b/;
+/**
+ * Ranking traders. "Who" asks about people, so "who's the top on fomo today"
+ * and "who's #1 on fomo" are the leaderboard without the word "trader";
+ * "who's the top coin" is not.
+ */
+const RANK_TRADERS = /\b(?:top|best|leading|biggest|most profitable|highest earning|winning|hottest|smartest|top performing|best performing|strongest|richest) (?:\d{1,3} )?(?:fomo )?(?:traders|trader|performers|wallets|earners|winners|accounts)\b|\b(?:trader|traders) (?:leaderboard|rankings?|board)\b|\bleaderboard\b|\brank(?:ed|ing|ings)? (?:of )?(?:the )?traders\b|\bwho (?:is|are) (?:the )?(?:top|best|leading) (?:\d{1,3} )?(?:traders?|performers?)\b|\bwho (?:is|are) (?:the )?(?:top|best|leading|number one|#1|no 1|winning|on top|killing it|up the most|printing)(?! (?:\d{1,3} )?(?:fomo )?(?:coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)/;
 const RANK_TOKENS = /\btrending\b|\b(?:top|hot|hottest|popular|most popular|most held|graduated|newly graduated|most bought|most traded|biggest) (?:\d{1,3} )?(?:fomo )?(?:coins|tokens|memecoins|memes|tickers)\b|\bmost[- ]held\b|\bgraduat(?:ed|ing|ions?)\b/;
 
 const SMALL_COINS = /\b(?:smaller|small|low ?cap|lower ?cap|micro ?cap|microcap|lowcap|tiny|early|earlier|new|newer|under the radar|overlooked|hidden|emerging|undiscovered|lesser known|up and coming) (?:\S+ ){0,2}?(?:coins|tokens|caps|gems|plays|names|projects|memecoins|memes|tickers)\b/;

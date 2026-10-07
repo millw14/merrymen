@@ -114,8 +114,41 @@ describe("renderEnvelope", () => {
     const e = env("fomo_get_trader_context", "ok", ctx, { subject: { kind: "trader", trader: ctx.trader } });
     assert.equal(renderEnvelope(e, G), GROUP_DM_DEFLECTION);
     assert.match(renderEnvelope(e, O), /frankdegods on Fomo/);
-    const board: RankingsData = { board: "traders", window: "24h", basis: "x", traders: [{ rank: 1, trader: ctx.trader, pnlUsd: 10, volumeUsd: null, trades: null, inCohort: null }], tokens: [] };
-    assert.equal(renderEnvelope(env("fomo_get_rankings", "ok", board, { subject: { kind: "market" } }), G), GROUP_DM_DEFLECTION);
+  });
+
+  it("gives a group Fomo's public leaderboard: handles and short P&L, a few rows, never who Merrymen follows", () => {
+    const row = (rank: number, handle: string, pnlUsd: number, inCohort: boolean) =>
+      ({ rank, trader: { userId: `${rank}dcf7c78-2537-522a-8307-3f9970c081be`, handle, displayName: null, verified: null }, pnlUsd, volumeUsd: null, trades: null, inCohort });
+    const board: RankingsData = {
+      board: "traders", window: "24h", basis: "x", tokens: [],
+      traders: [row(1, "frankdegods", 151_383, true), row(2, "pepe_maxi", -4_210.5, false), row(3, "c", 999_950, false), row(4, "d", 12, false), row(5, "e", 1, false)],
+    };
+    const e = env("fomo_get_rankings", "ok", board, { subject: { kind: "market" } });
+    const group = renderEnvelope(e, G);
+    assert.notEqual(group, GROUP_DM_DEFLECTION);
+    assert.deepEqual(group.split("\n"), [
+      "Top traders on Fomo, last 24h, by money made on closed trades (provider-reported, not a skill measure):",
+      "1. frankdegods +$151.4k",
+      "2. pepe_maxi -$4.2k",
+      "3. c +$1M",
+      "4. d +$12",
+      FOMO_ATTRIBUTION,
+    ]);
+    assert.doesNotMatch(group, /followed|@/);
+    // The owner keeps exact figures, the window and who is followed.
+    const owner = renderEnvelope(e, O);
+    assert.match(owner, /1\. frankdegods \+\$151,383 \(followed\)/);
+    assert.match(owner, /5\. e \+\$1/);
+  });
+
+  it("gives a group a board's market caps in short form", () => {
+    const board: RankingsData = {
+      board: "trending-tokens", window: null, basis: "x", traders: [],
+      tokens: [{ rank: 1, token: T, label: { symbol: "PONS", name: "Pons" }, holders: null, priceUsd: null, change24hPct: null, marketCapUsd: 2_080_000, volume24hUsd: null, executionAvailability: "unknown" as never }],
+    };
+    const e = env("fomo_get_rankings", "ok", board, { subject: { kind: "market" } });
+    assert.match(renderEnvelope(e, G), /\n1\. PONS on robinhood, market cap \$2\.1M\n/);
+    assert.match(renderEnvelope(e, O), /\n1\. \$PONS on robinhood, market cap \$2\.08M\n/);
   });
 
   it("empty is not 'nobody traded', failed is not empty, and each status reads differently", () => {

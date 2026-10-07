@@ -2350,12 +2350,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   /**
    * WHAT OF A RESEARCH ANSWER A ROOM MAY HEAR: each line through the group
-   * line gate on its own (the strictest gate a code-built line takes: no
-   * handles, addresses, links, cashtags, money figures, advice, claims,
-   * private state or plumbing), refused lines DROPPED, never repaired. The
-   * port's source line ("Source: …") is the attribution: when it is refused
-   * nothing is sent, because unattributed research is not said in a room.
-   * Null when nothing sayable is left.
+   * line gate on its own, as a `research` line (no @handles, addresses,
+   * links, cashtags, advice, claims, private state or plumbing; the published
+   * figures a code-built board carries, a leaderboard's P&L or a coin's
+   * market cap, may stand beside its source), refused lines DROPPED, never
+   * repaired. The port's source line ("Source: …") is the attribution: when
+   * it is refused nothing is sent, because unattributed research is not said
+   * in a room. Null when nothing sayable is left.
    */
   const fomoSayable = (text: string): string | null => {
     const agentName = selfNow()?.name ?? "";
@@ -2365,7 +2366,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const kept: string[] = [];
     let refused = 0;
     for (const [i, l] of lines.entries()) {
-      const v = admitTgLine(l, { agentName, kind: "answer", recentOwn: [] });
+      const v = admitTgLine(l, { agentName, kind: "research", recentOwn: [] });
       if (!v.ok) {
         refused += 1;
         continue;

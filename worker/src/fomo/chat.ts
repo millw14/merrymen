@@ -89,10 +89,14 @@ const DEFAULT_MAX_CHARS = 3_500;
 /** Statuses that mean a lookup actually returned something real. */
 const ANSWERED: ReadonlySet<ResultStatus> = new Set(["ok", "empty", "partial", "capped", "stale"]);
 
-const TRADER_INTENTS: ReadonlySet<string> = new Set(["trader-holdings", "trader-activity", "trader-context", "rankings-traders"]);
+/**
+ * One trader's holdings, trades or profile. The public leaderboard is not
+ * here: a group hears it, handles and P&L included (Milla, 2026-10-07).
+ */
+const TRADER_INTENTS: ReadonlySet<string> = new Set(["trader-holdings", "trader-activity", "trader-context"]);
 const OWNER_ONLY_INTENTS: ReadonlySet<string> = new Set(["research-status", "why-skipped", "health", "watch", "unwatch"]);
 
-/** A group may hear coin-level aggregates only; anything about a trader (or the owner's own state) goes to a DM. */
+/** A group may hear coin-level aggregates and the public leaderboard; anything about one trader (or the owner's own state) goes to a DM. */
 function groupMustDeflect(plan: FomoQuestionPlan): boolean {
   if (TRADER_INTENTS.has(plan.intent) || OWNER_ONLY_INTENTS.has(plan.intent)) return true;
   if (plan.subjects.some((s) => s.kind === "trader")) return true;

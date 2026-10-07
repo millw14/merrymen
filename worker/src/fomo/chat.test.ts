@@ -318,7 +318,7 @@ describe("answerFomoQuestion", () => {
   it("in a group: a trader question is deflected with no lookup; owner-only intents too", async () => {
     const s = await setup();
     const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
-    for (const t of ["what is @CryptoKaleo holding?", "show me the leading traders this week", "keep an eye on $PONS for me on fomo", "research status on fomo"]) {
+    for (const t of ["what is @CryptoKaleo holding?", "keep an eye on $PONS for me on fomo", "research status on fomo"]) {
       const r = await s.ask(t, g);
       assert.ok(r.handled, t);
       assert.equal(r.text, GROUP_DM_DEFLECTION, t);
@@ -329,6 +329,23 @@ describe("answerFomoQuestion", () => {
     assert.ok(coin.handled);
     assert.ok(!/frankdegods|CryptoKaleo|0x39db|\$PONS|their words/.test(coin.text), coin.text);
     assert.equal(s.brokerCalls[0]!.opts.groupId, "-100123");
+  });
+
+  it("in a group: the public leaderboard is answered, handles and short P&L, never who Merrymen follows", async () => {
+    const s = await setup();
+    s.serve.set("/v2/leaderboard/24h", () => json(fixture("leaderboard-24h")));
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    for (const t of ["who's the top trader on fomo today?", "who's the top on fomo today"]) {
+      s.brokerCalls.length = 0;
+      const r = await s.ask(t, g);
+      assert.ok(r.handled, t);
+      assert.notEqual(r.text, GROUP_DM_DEFLECTION, t);
+      assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", window: "24h" }]], t);
+      assert.match(r.text, /^Top traders on Fomo, last 24h, by money made on closed trades/, t);
+      assert.match(r.text, /\n1\. CryptoKaleo \+\$151\.4k\n2\. frankdegods -\$4\.2k\n/, t);
+      assert.ok(!/followed|@|0x[0-9a-f]{6}/i.test(r.text), r.text);
+      assert.ok(r.text.endsWith(FOMO_ATTRIBUTION), t);
+    }
   });
 
   it("a failed lookup is reported as failed, never as a successful one, and leaves memory unresolved", async () => {

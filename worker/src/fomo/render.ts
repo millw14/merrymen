@@ -15,10 +15,12 @@
  *      never "empty".
  *   4. The attribution line.
  *
- * GROUP AUDIENCE. Telegram groups get coin-level aggregates only: no handles,
- * no addresses, no links, no cashtags, no quoted third-party text. A question
- * about a trader is deflected to a direct message. A final scrub runs over
- * the whole group text as a second line of defence.
+ * GROUP AUDIENCE. Telegram groups get coin-level aggregates: no addresses, no
+ * links, no cashtags, no quoted third-party text, money in short form. The one
+ * exception for names is Fomo's public leaderboard, whose handles a group
+ * hears with their P&L (never as @mentions, never who Merrymen follows). A
+ * question about one trader is deflected to a direct message. A final scrub
+ * runs over the whole group text as a second line of defence.
  *
  * NO PERMALINKS. Nothing here writes a URL. The provider supplies no verified
  * links in the envelope, and Merrymen never invents one.
@@ -95,6 +97,41 @@ function signedUsd(n: number | null | undefined): string {
   if (!finite(n)) return "unknown";
   return n > 0 ? `+${usd(n)}` : usd(n);
 }
+
+/**
+ * Money said in a group: short ("$48.2k", "$2.1M"), so a figure fits a chat
+ * line and no long run of digits reads as an id to the group gate.
+ */
+function compactUsd(n: number | null | undefined): string {
+  if (!finite(n)) return "unknown";
+  const a = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+  const units: ReadonlyArray<[number, string]> = [[1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  for (const [i, [size, suffix]] of units.entries()) {
+    if (a < size) continue;
+    const v = Math.round((a / size) * 10) / 10;
+    // 999,950 rounds to 1000k: say it in the next unit up.
+    if (v >= 1000 && i > 0) return `${sign}$${Math.round((a / units[i - 1]![0]) * 10) / 10}${units[i - 1]![1]}`;
+    return `${sign}$${v}${suffix}`;
+  }
+  if (a >= 1) return `${sign}$${Math.round(a)}`;
+  if (a === 0) return "$0";
+  return `${sign}$${a.toPrecision(2)}`;
+}
+
+/** Money for the audience: exact for the owner, short for a group. */
+function money(n: number | null | undefined, audience: Audience): string {
+  return audience === "group" ? compactUsd(n) : usd(n);
+}
+
+function signedMoney(n: number | null | undefined, audience: Audience): string {
+  if (!finite(n)) return "unknown";
+  const s = money(n, audience);
+  return n > 0 ? `+${s}` : s;
+}
+
+/** Rows of a board a group hears: the handler's line cap leaves room for a header, these and the source. */
+const GROUP_BOARD_ROWS = 4;
 
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -251,11 +288,14 @@ function isTraderTool(tool: FomoToolName): boolean {
   return tool === "fomo_get_trader_context" || tool === "fomo_get_trader_activity";
 }
 
-/** True when an envelope can only be answered with trader identities (deflected in groups). */
+/**
+ * True when an envelope can only be answered with one trader's identity, or
+ * the owner's own research (deflected in groups). The public leaderboard is
+ * not: a group hears it, handles and all (bodyRankings).
+ */
 export function needsDirectMessage(env: FomoEnvelope): boolean {
   if (isTraderTool(env.tool) || env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
   if (env.subject?.kind === "trader") return true;
-  if (env.tool === "fomo_get_rankings" && (env.data as RankingsData | null)?.board === "traders") return true;
   if (env.tool === "fomo_get_token_theses" && (env.data as TokenThesesData | null)?.trader) return true;
   return false;
 }
@@ -422,10 +462,14 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
   if (d.breadth) out.push(`Breadth (Merrymen's reading): ${d.breadth.reading}, ${plural(d.breadth.distinctBuyers, "buyer", "buyers")} across ${plural(d.breadth.buyEvents, "buy", "buys")}${d.breadth.repeatAdds ? `, ${d.breadth.repeatAdds} repeat adds` : ""}.`);
   if (d.stats?.window24h) {
     const w = d.stats.window24h;
-    out.push(`Provider stats, 24h, all sizes: ${w.buys ?? "?"} buys / ${w.sells ?? "?"} sells, ${w.uniqueBuyers ?? "?"} unique buyers, net ${signedUsd(w.netVolumeUsd)} (provider-reported).`);
+    out.push(`Provider stats, 24h, all sizes: ${w.buys ?? "?"} buys / ${w.sells ?? "?"} sells, ${w.uniqueBuyers ?? "?"} unique buyers, net ${signedMoney(w.netVolumeUsd, audience)} (provider-reported).`);
   }
   if (audience === "owner") for (const e of d.events.slice(0, 5)) out.push(eventLine(e, audience, now, true));
   return out;
+}
+
+function windowWords(w: string | null | undefined): string {
+  return w === "all" ? "all time" : w ? `last ${w}` : "";
 }
 
 function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): string[] {
@@ -433,6 +477,17 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
   if (!d) return [];
   if (d.board === "traders") {
     if (!d.traders.length) return ["The leaderboard returned no rows for that scope."];
+    if (audience === "group") {
+      // THE ONE PLACE A GROUP HEARS TRADERS NAMED (Milla's call, 2026-10-07):
+      // Fomo's own public leaderboard, its handles and its provider-reported
+      // P&L. Never who Merrymen follows, and never a trader's holdings or
+      // trades, which stay in a direct message.
+      // "P&L" and "profit" are words the group gate keeps for its own book: plain words instead.
+      const scope = windowWords(d.window);
+      const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades (provider-reported, not a skill measure):`];
+      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS)) out.push(`${r.rank ?? "–"}. ${who(r.trader.handle, r.trader.userId)} ${signedMoney(r.pnlUsd, audience)}`);
+      return out;
+    }
     const out = [`Top traders by provider-reported ${d.window ?? ""} realised P&L (not a skill measure):`];
     for (const r of d.traders.slice(0, 10)) out.push(`${r.rank ?? "–"}. ${who(r.trader.handle, r.trader.userId)} ${signedUsd(r.pnlUsd)}${r.inCohort ? " (followed)" : ""}`);
     return out;
@@ -440,7 +495,9 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
   const name = d.board === "trending-tokens" ? "Trending" : d.board === "graduated-tokens" ? "Newly graduated" : "Most held";
   if (!d.tokens.length) return [`The ${name.toLowerCase()} board returned no rows for that scope.`];
   const out = [`${name} on Fomo (board position is popularity, not quality):`];
-  for (const r of d.tokens.slice(0, 10)) out.push(`${r.rank ?? "–"}. ${coin(r.token, r.label, audience, false)}, market cap ${finite(r.marketCapUsd) ? usd(r.marketCapUsd) : "unknown"}`);
+  for (const r of d.tokens.slice(0, audience === "group" ? GROUP_BOARD_ROWS : 10)) {
+    out.push(`${r.rank ?? "–"}. ${coin(r.token, r.label, audience, false)}, market cap ${finite(r.marketCapUsd) ? money(r.marketCapUsd, audience) : "unknown"}`);
+  }
   return out;
 }
 
@@ -456,7 +513,7 @@ function bodyOpportunities(env: FomoEnvelope<OpportunitiesData>, audience: Audie
     if (r.signals.newThesis) sig.push("new thesis");
     if (r.signals.boards.length) sig.push(`on ${r.signals.boards.join(" and ")} board`);
     if (finite(r.signals.latestBuyAt)) sig.push(`latest buy ${ago(now, r.signals.latestBuyAt)}`);
-    out.push(`${i + 1}. ${coin(r.token, r.label, audience, false)}: ${sig.join(", ") || "board listing only"}; market cap ${r.marketCapKnown ? usd(r.marketCapUsd) : "unknown"}; ${r.routeNote ?? "research only"}.`);
+    out.push(`${i + 1}. ${coin(r.token, r.label, audience, false)}: ${sig.join(", ") || "board listing only"}; market cap ${r.marketCapKnown ? money(r.marketCapUsd, audience) : "unknown"}; ${r.routeNote ?? "research only"}.`);
   });
   out.push("Research leads, not buy signals.");
   return out;
