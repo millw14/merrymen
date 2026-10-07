@@ -210,7 +210,8 @@ export function conflictRolledBack(e: unknown): boolean {
   const code = (e as { code?: unknown } | null | undefined)?.code;
   return typeof code === "string" && /^40(?!003)[0-9A-Z]{3}$/.test(code);
 }
-function conflictRefusal(e: unknown, what: "apply" | "revert"): BookingRefused {
+/** A conflict rollback (conflictRolledBack) of an apply or a revert on this write connection, as the refusal said for it: run it again. */
+export function conflictRefusal(e: unknown, what: "apply" | "revert"): BookingRefused {
   const code = String((e as { code: string }).code);
   const kind = code === "40001" ? ", a serialization failure" : code === "40P01" ? ", a deadlock" : "";
   return new BookingRefused("conflict", `Postgres rolled the ${what} back for a conflict with another transaction (SQLSTATE ${code}${kind}): nothing was written — ` +
@@ -245,6 +246,10 @@ function conflictRefusal(e: unknown, what: "apply" | "revert"): BookingRefused {
  * transaction that had already failed) is "commit-answered-rollback"; any
  * other failure of the COMMIT is CommitOutcomeUnknown, which the shell never
  * reads as "nothing happened".
+ *
+ * Not the booking's alone: another repair tool's apply and revert take this
+ * same write connection ({ readOnly: false }), so every COMMIT's answer is
+ * read by one rule (CommitOutcomeUnknown, conflictRolledBack, conflictRefusal).
  */
 export function pgClientDb(client: PgClient, o: { readOnly: boolean }): Db {
   const coerce = (ps: unknown[]) => ps.map((p) => (typeof p === "bigint" ? p.toString() : p === undefined ? null : p));

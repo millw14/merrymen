@@ -30,9 +30,10 @@ import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, resumePreconditions } fr
 import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import {
-  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, digestOf, factsStillMissing, gapChainOf, holdingVerdict, microUsdg, parseApplyReport, planBooking, planLines,
-  readBookingReceipts, readBookingSnapshot, readChainEvidence, replayBasis, revertBooking, stampCommitOutcome, staleBasisVerdict, TRADE_COLUMNS, walkFills, type ApplyReport,
-  type BookingPlan, type Holdings, type RecordedFill, type StaleBasis,
+  APPLY_FORMAT, applyBooking, BOOKINGS_TABLE, BookingRefused, canonical, commitEvidence, currentXact, digestOf, factsStillMissing, gapChainOf, holdingVerdict, isServerXact,
+  microUsdg, noReceiptRefusal, parseApplyReport, planBooking, planLines, readBookingReceipts, readBookingSnapshot, readChainEvidence, replayBasis, revertBooking,
+  stampCommitOutcome, staleBasisVerdict, TRADE_COLUMNS, walkFills, xactStatusOf, type ApplyReport, type BookingPlan, type Holdings, type RecordedFill, type StaleBasis,
+  type XactStatus,
 } from "./chain-gap-booking";
 
 // ── the public chain, as read ────────────────────────────────────────────────
@@ -692,11 +693,38 @@ describe("apply and revert", () => {
     const seal = (xact: unknown) => { const { reportDigest: _d, ...body } = { ...report, xact }; return JSON.stringify({ ...body, reportDigest: digestOf(body) }); };
     for (const ok of [{ id: "741", system: "7693842931899834703" }, { id: "18446744073709551615", system: "-1" }, { id: "5", system: null }]) {
       assert.deepEqual(parseApplyReport(seal(ok)).xact, ok);
+      assert.equal(isServerXact(ok), true, JSON.stringify(ok));
     }
     for (const bad of [null, "741", {}, { id: "741" }, { id: 741, system: null }, { id: "0", system: null }, { id: "07", system: null }, { id: "741", system: 7 },
       { id: "741", system: "x" }, { id: "741", system: null, extra: 1 }, { id: "1".repeat(21), system: null }]) {
       assert.throws(() => parseApplyReport(seal(bad)), (e: unknown) => (e as BookingRefused).code === "report" && /xact/.test((e as Error).message), JSON.stringify(bad));
+      assert.equal(isServerXact(bad), false, JSON.stringify(bad));
     }
+  });
+
+  it("the server's word on an apply's transaction is read by one rule, for any tool whose apply names it: no receipt is not-committed only when it aborted", async () => {
+    const every: XactStatus[] = ["aborted", "committed", "committed-after-snapshot", "in-progress", "forgotten", "other-server", "unrecorded", "unreadable"];
+    assert.deepEqual(every.map((status) => commitEvidence(false, { status })),
+      ["not-committed", "committed-no-receipt", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"]);
+    assert.deepEqual(every.map((status) => commitEvidence(true, { status })),
+      ["contradicted", "receipts", "receipts", "contradicted", "receipts", "receipts", "receipts", "receipts"]);
+    // A revert's refusal: the codes and the rule shared, the words the tool's own around the server's.
+    const said = { notCommitted: (why: string) => `never committed: ${why}`, noReceipt: (why: string) => `not proved: ${why}` };
+    for (const status of every) {
+      const e = noReceiptRefusal({ status, why: "the server's word" }, said);
+      assert.deepEqual([e instanceof BookingRefused, e.code, e.message],
+        [true, ...(status === "aborted" ? ["not-committed", "never committed: the server's word"] : ["no-receipt", "not proved: the server's word"])], status);
+    }
+    // Another tool's report: no transaction named, or null, is unrecorded; sqlite names none, and cannot be asked of one.
+    const b = await books();
+    assert.equal(await currentXact(b.db, "sqlite"), null);
+    for (const report of [{}, { xact: null }]) assert.equal((await xactStatusOf(b.db, report, "sqlite")).status, "unrecorded");
+    assert.equal((await xactStatusOf(b.db, { xact: { id: "741", system: "7693842931899834703" } }, "sqlite")).status, "unreadable");
+    // ...and its report, sealed as this one is, carries its commit's outcome the same way.
+    const { reportDigest: _d, ...body } = { format: "another.repair.apply.v1", repairId: "r-1", actions: [{ action: "insert-flow" }], reportDigest: "" };
+    const stamped = stampCommitOutcome({ ...body, reportDigest: digestOf(body) }, "unknown");
+    const { reportDigest, ...sealed } = stamped;
+    assert.deepEqual([stamped.commitOutcome, stamped.repairId, reportDigest], ["unknown", "r-1", digestOf(sealed)]);
   });
 });
 

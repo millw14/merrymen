@@ -1762,11 +1762,14 @@ export interface ApplyReport {
   reportDigest: string;
 }
 
-/** The same report, saying `outcome` of its commit, sealed again: every other field, and so what a revert compares, unchanged. */
-export function stampCommitOutcome(report: ApplyReport, outcome: CommitOutcome): ApplyReport {
+/**
+ * The same report, saying `outcome` of its commit, sealed again: every other field, and so what a revert compares, unchanged. Any
+ * report sealed as this one is (reportDigest the digestOf every other field) can carry it: another repair tool's apply report too.
+ */
+export function stampCommitOutcome<R extends { reportDigest: string; commitOutcome?: CommitOutcome }>(report: R, outcome: CommitOutcome): R & { commitOutcome: CommitOutcome } {
   const { reportDigest: _digest, commitOutcome: _was, ...rest } = report;
   const body = { ...rest, commitOutcome: outcome };
-  return { ...body, reportDigest: digestOf(body) };
+  return { ...body, reportDigest: digestOf(body) } as unknown as R & { commitOutcome: CommitOutcome };
 }
 
 /** A row as stored, reduced to the columns that were written, plus its id: what a revert compares against. */
@@ -1877,7 +1880,7 @@ export async function applyBooking(db: Db, plan: BookingPlan, o: {
           canonical(admission), appliedAtMs);
     }
     // Which transaction this is, as the server names it: what a receipts check asks the server about if the COMMIT's answer is lost.
-    const xact = o.dialect === "postgres" ? await currentXact(tx) : null;
+    const xact = await currentXact(tx, o.dialect);
     const body = { format: APPLY_FORMAT, bookingId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef, appliedAtMs,
       admission, rows, target: plan.target, ...(xact ? { xact } : {}) };
     const report: ApplyReport = { ...body, format: APPLY_FORMAT, reportDigest: digestOf(body) };
@@ -1908,11 +1911,7 @@ export function parseApplyReport(text: string): ApplyReport {
     throw new BookingRefused("report", "the apply report's commitOutcome is neither \"unknown\" nor \"committed\"");
   }
   if (r.target !== undefined && (typeof r.target !== "string" || !r.target)) throw new BookingRefused("report", "the apply report's target does not name a database");
-  const x = r.xact as Partial<ServerXact> | undefined;
-  if (x !== undefined && (!x || typeof x !== "object" || Object.keys(x).sort().join(",") !== "id,system" || typeof x.id !== "string" || !XID.test(x.id)
-    || (x.system !== null && (typeof x.system !== "string" || !SYSTEM_ID.test(x.system))))) {
-    throw new BookingRefused("report", "the apply report's xact does not name a transaction and a server");
-  }
+  if (r.xact !== undefined && !isServerXact(r.xact)) throw new BookingRefused("report", "the apply report's xact does not name a transaction and a server");
   return r;
 }
 
@@ -1939,6 +1938,12 @@ function receiptsMatch(receipts: ReadonlyArray<Record<string, unknown>>, report:
     && Number(r.applied_at_ms) === report.appliedAtMs && String(r.admission_json) === canonical(report.admission));
 }
 // ── what became of the apply's transaction, as the server says ─────────────
+//
+// Not the booking's alone: any repair tool whose apply writes its receipts
+// inside its own transaction names that transaction in its report the same
+// way (currentXact, isServerXact) and asks the server after it the same way
+// (xactStatusOf), and so reads no receipt by the same rule (commitEvidence,
+// noReceiptRefusal), in its own words.
 
 /** A 64-bit transaction id, epoch and all, as pg_current_xact_id() and txid_current() print it. */
 const XID = /^[1-9][0-9]{0,19}$/;
@@ -1946,6 +1951,13 @@ const XID = /^[1-9][0-9]{0,19}$/;
 const SYSTEM_ID = /^-?[0-9]{1,20}$/;
 /** The server's system identifier, or NULL where the role may not run pg_control_system() (the CASE never calls it then). */
 const SYSTEM_SQL = "CASE WHEN has_function_privilege('pg_control_system()', 'EXECUTE') THEN (SELECT system_identifier::text FROM pg_control_system()) END";
+
+/** A report's `xact` as currentXact records one: a transaction id, and the server's identifier or null. Any other shape names nothing. */
+export function isServerXact(x: unknown): x is ServerXact {
+  const v = x as Partial<ServerXact> | null | undefined;
+  return !!v && typeof v === "object" && Object.keys(v).sort().join(",") === "id,system" && typeof v.id === "string" && XID.test(v.id)
+    && (v.system === null || (typeof v.system === "string" && SYSTEM_ID.test(v.system)));
+}
 
 /**
  * The transaction-status functions this server has: pg_current_xact_id,
@@ -1959,9 +1971,12 @@ async function xactFunctions(db: Db): Promise<{ current: string; type: string; s
   return null;
 }
 
-/** The apply's own transaction, from inside it: its id and the server's identifier (ServerXact). Null on a server without the functions. */
-async function currentXact(tx: Db): Promise<ServerXact | null> {
-  const f = await xactFunctions(tx);
+/**
+ * The apply's own transaction, from inside it, before its report is handed over (so before the COMMIT is sent): its id and the
+ * server's identifier (ServerXact). Null where no server can be asked: sqlite, or a Postgres without the functions.
+ */
+export async function currentXact(tx: Db, dialect: Dialect): Promise<ServerXact | null> {
+  const f = dialect === "postgres" ? await xactFunctions(tx) : null;
   if (!f) return null;
   const r = (await tx.prepare(`SELECT ${f.current}::text AS id, ${SYSTEM_SQL} AS system`).get()) as Record<string, unknown> | undefined;
   const id = String(r?.id ?? ""), system = r?.system === null || r?.system === undefined ? null : String(r.system);
@@ -2005,7 +2020,7 @@ async function currentXact(tx: Db): Promise<ServerXact | null> {
  * had ended when the snapshot was taken.
  */
 export type XactStatus = "aborted" | "committed" | "committed-after-snapshot" | "in-progress" | "forgotten" | "other-server" | "unrecorded" | "unreadable";
-async function xactStatusOf(db: Db, report: ApplyReport, dialect: Dialect): Promise<{ status: XactStatus; why: string }> {
+export async function xactStatusOf(db: Db, report: { xact?: ServerXact | null }, dialect: Dialect): Promise<{ status: XactStatus; why: string }> {
   const x = report.xact;
   if (!x) return { status: "unrecorded", why: "the report names no transaction (it was applied on sqlite, or by a build before the apply recorded one), so the server cannot be asked" };
   const f = dialect === "postgres" ? await xactFunctions(db) : null;
@@ -2037,19 +2052,51 @@ async function xactStatusOf(db: Db, report: ApplyReport, dialect: Dialect): Prom
 }
 
 /**
- * NO RECEIPT OF THE BOOKING IS VISIBLE: a revert has nothing to take. Only
- * the server's word that the apply's transaction aborted makes that
- * not-committed; anything else (a transaction still open or committing, one
- * committed after the snapshot, too old, another server, no id) is
- * no-receipt, which the receipts check settles.
+ * WHAT THE RECEIPTS AND THE SERVER SAY TOGETHER of an apply that wrote its
+ * receipts inside its own transaction and named that transaction
+ * (currentXact). PURE: whether any receipt of it is visible, and what the
+ * server says became of the transaction (xactStatusOf), in; out:
+ *
+ *   receipts              some are visible: they decide, once the caller
+ *                         has checked them against the report.
+ *   contradicted          some are visible, yet the server says the
+ *                         transaction aborted or is still open: refuse, to
+ *                         escalate.
+ *   not-committed         none is visible, and the server says it aborted:
+ *                         the only proof that it never committed.
+ *   committed-no-receipt  none is visible, yet the server says it committed
+ *                         before this read began: another database on that
+ *                         server, or the receipts removed. Unknown: escalate.
+ *   unknown               none is visible, and nothing proves it never
+ *                         committed (still open or committing, committed
+ *                         after this read's snapshot, too old, another
+ *                         server, no id): read again.
  */
+export type CommitEvidence = "receipts" | "contradicted" | "not-committed" | "committed-no-receipt" | "unknown";
+export function commitEvidence(visible: boolean, x: { status: XactStatus }): CommitEvidence {
+  if (visible) return x.status === "aborted" || x.status === "in-progress" ? "contradicted" : "receipts";
+  return x.status === "aborted" ? "not-committed" : x.status === "committed" ? "committed-no-receipt" : "unknown";
+}
+
+/**
+ * NO RECEIPT IS VISIBLE, SO A REVERT HAS NOTHING TO TAKE: refused
+ * not-committed only on the server's word that the apply's transaction
+ * aborted (commitEvidence), and no-receipt otherwise, which the tool's
+ * receipts check settles. The codes and the rule are shared; `said` puts
+ * each tool's own words around the server's (`why`).
+ */
+export function noReceiptRefusal(x: { status: XactStatus; why: string }, said: { notCommitted: (why: string) => string; noReceipt: (why: string) => string }): BookingRefused {
+  return commitEvidence(false, x) === "not-committed" ? new BookingRefused("not-committed", said.notCommitted(x.why)) : new BookingRefused("no-receipt", said.noReceipt(x.why));
+}
+
+/** NO RECEIPT OF THE BOOKING IS VISIBLE (noReceiptRefusal), said of the booking. */
 function noReceipt(report: ApplyReport, x: { status: XactStatus; why: string }): BookingRefused {
-  if (x.status === "aborted") {
-    return new BookingRefused("not-committed", `this database holds no receipt of booking ${report.bookingId} and ${x.why}: that apply never committed, ` +
-      "so nothing was written and there is nothing to revert — preview the tenant again");
-  }
-  return new BookingRefused("no-receipt", `no receipt of booking ${report.bookingId} is visible here, and that alone does not prove its apply never committed: ${x.why}. ` +
-    "Nothing changed. Keep the apply report, and see whether it committed with the receipts check (--revert <report> --dry-run)");
+  return noReceiptRefusal(x, {
+    notCommitted: (why) => `this database holds no receipt of booking ${report.bookingId} and ${why}: that apply never committed, ` +
+      "so nothing was written and there is nothing to revert — preview the tenant again",
+    noReceipt: (why) => `no receipt of booking ${report.bookingId} is visible here, and that alone does not prove its apply never committed: ${why}. ` +
+      "Nothing changed. Keep the apply report, and see whether it committed with the receipts check (--revert <report> --dry-run)",
+  });
 }
 
 /** A booked row now: exactly as the report wrote it, changed, or gone. Compared as a revert compares it. */
@@ -2086,10 +2133,11 @@ export interface BookingReceipts {
  * for an apply whose COMMIT went unanswered (the shell's --revert <report>
  * --dry-run). First the booking's receipts, checked against the report as a
  * revert checks them. With none, what the server says became of the apply's
- * transaction (xactStatusOf): only "aborted" is not-committed, and anything
- * else is unknown. With every receipt 'applied', each booked row against the
- * report, as a revert compares it: one changed or gone is diverged. Changes
- * nothing; on the shell's read-only connection.
+ * transaction (xactStatusOf, read by commitEvidence): only "aborted" is
+ * not-committed, and anything else is unknown. With every receipt
+ * 'applied', each booked row against the report, as a revert compares it:
+ * one changed or gone is diverged. Changes nothing; on the shell's read-only
+ * connection.
  *
  * Receipts that match the report while the server says its transaction
  * aborted, or is still open, contradict each other: refused, to escalate.
@@ -2105,15 +2153,16 @@ export async function readBookingReceipts(db: Db, report: ApplyReport, o: { dial
       appliedAtMs: Number(r.applied_at_ms), revertedAtMs: r.reverted_at_ms === null || r.reverted_at_ms === undefined ? null : Number(r.reverted_at_ms) })),
     rows, writesPerformed: 0,
   });
-  if (!receipts.length) {
-    if (xact.status === "aborted") return result("not-committed", `no receipt holds it, and ${xact.why}: nothing was written`);
-    if (xact.status === "committed") {
-      return result("unknown", `${xact.why}, yet this database holds no receipt of it: DATABASE_URL may name another database on that server, or the receipts were removed — escalate`);
-    }
+  const evidence = commitEvidence(receipts.length > 0, xact);
+  if (evidence === "not-committed") return result("not-committed", `no receipt holds it, and ${xact.why}: nothing was written`);
+  if (evidence === "committed-no-receipt") {
+    return result("unknown", `${xact.why}, yet this database holds no receipt of it: DATABASE_URL may name another database on that server, or the receipts were removed — escalate`);
+  }
+  if (evidence === "unknown") {
     return result("unknown", `no receipt of it is visible${tables.has(BOOKINGS_TABLE) ? "" : " (this database has no receipts table)"}, and that alone does not prove it never committed: ${xact.why}`);
   }
   if (!receiptsMatch(receipts, report)) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
-  if (xact.status === "aborted" || xact.status === "in-progress") {
+  if (evidence === "contradicted") {
     throw new BookingRefused("receipts", `the booking's receipts say it committed, but ${xact.why}: the report and the database disagree — escalate`);
   }
   const states = new Set(receipts.map((r) => String(r.state)));
