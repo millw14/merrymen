@@ -500,8 +500,13 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   tail (Stop, its end, `MERRYMEN_FOMO_TAILS=0`), and its trader never becomes a 14-day
   dependency fanned out to every monitoring owner. `following.ts`, sizing, the early book, the Trencher
   review, `take()` and policy are untouched: one buyer is at most a probe (≤ 2.5 USDG),
-  only if Merrymen's own checks and the Brain agree, inside the scout budget, on paper
-  unless `MERRYMEN_FOMO_FOLLOW_LIVE` allows live, and nothing at all with following off.
+  and a considered tail's buy counts as a buyer like a cohort trader's, so beside
+  another buyer (a cohort trader, or a second considered tail) it is breadth for a
+  normal follow entry within the same ceiling. All of it only if Merrymen's own checks
+  and the Brain agree, inside the scout budget, on paper unless
+  `MERRYMEN_FOMO_FOLLOW_LIVE` allows live, and nothing at all with following off. The
+  card's live line says exactly this (a probe on its own, a normal entry beside
+  another buyer), never that every entry would be a small probe.
   A sell is a reason for an independent re-check, never an exit to copy.
 - **Notices.** Code-written, sent by the Telegram notifier only past its own gates
   (Telegram on, notifications on, a linked owner), link previews off, with Stop and +1h

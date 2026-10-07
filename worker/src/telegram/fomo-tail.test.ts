@@ -52,6 +52,15 @@ describe("what following would do with their buy", () => {
     assert.match(tailReadinessLine({ mode: "paper", blockers: [] }), /on paper/);
   });
 
+  it("live: never promises every entry is a small probe; a considered buy beside another buyer can be a normal entry (review 2026-10-07)", () => {
+    const live = tailReadinessLine({ mode: "live", blockers: [] });
+    assert.doesNotMatch(live, /any entry would be a small live probe/);
+    assert.match(live, /^Following is on with real money/);
+    assert.match(live, /On its own it can lead at most to a small probe; with another buyer I track on the same coin it can lead to a normal follow entry\./);
+    assert.match(live, /inside your scout budget and per-trade limits/);
+    assert.doesNotMatch(live, /\bcopy/i);
+  });
+
   it("a refused consider press says why", () => {
     assert.match(considerRefusedNote({ mode: "paper", blockers: [] }, false), /wasn't on the card/);
     assert.match(considerRefusedNote(null, true), /can't tell right now/);

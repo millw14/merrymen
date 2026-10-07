@@ -49,13 +49,20 @@ export function blockerWords(r: FollowReadiness): string {
   return [...new Set((r.blockers ?? []).map((b) => BLOCKER_WORDS[b]).filter(Boolean))].join("; ") || "following is off";
 }
 
-/** What following would do with their buy, for the card: off, paper, live, or what is in the way. */
+/**
+ * What following would do with their buy, for the card: off, paper, live, or
+ * what is in the way. The live line never promises "a probe": a considered
+ * buy counts in the unchanged review like a cohort trader's (following.ts
+ * cohortFlow counts distinct buyers), so alone it can lead at most to a
+ * probe, but beside another buyer it is breadth for a normal follow entry
+ * (review 2026-10-07). She grants consider on what this says.
+ */
 export function tailReadinessLine(r: FollowReadiness | null | undefined): string {
   if (!r) return "I can't tell right now whether following could act on their buys, so this tail can only tell you.";
   if (r.mode === "off") return "Following is off, so this tail can only tell you; nothing of theirs reaches a trade.";
   if (r.blockers.length > 0) return `Following can't act right now (${blockerWords(r)}), so this tail can only tell you.`;
   return r.mode === "live"
-    ? "Following is on with real money: with “consider their buys”, each buy is one signal into my normal review, and any entry would be a small live probe inside your scout budget."
+    ? "Following is on with real money: with “consider their buys”, each buy counts like one of my tracked traders' buys in my normal review. On its own it can lead at most to a small probe; with another buyer I track on the same coin it can lead to a normal follow entry. Either is sized by my normal rules, inside your scout budget and per-trade limits."
     : "Following is on, on paper: with “consider their buys”, each buy is one signal into my normal review, and any entry would be a paper trade.";
 }
 
