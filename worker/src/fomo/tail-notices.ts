@@ -53,6 +53,12 @@ export const TAIL_NOTICE_LIMITS = Object.freeze({
   /** One notice per (trader, coin, kind) in this window. */
   coalesceMs: 5 * MIN,
   noticesPerTail: 30,
+  /**
+   * Notices one notifier pass sends (tail-notifier.ts): the first this many,
+   * oldest first; the rest are left unclaimed for the next pass (15 s later),
+   * so a burst never floods the owner's DM or holds up the notifier loop.
+   */
+  noticesPerPass: 4,
   /** A buy waits this long after it was observed for an assessment of its coin. */
   buyWaitsForReadMs: 3 * MIN,
   thesisReadsPerTail: 2,

@@ -13,10 +13,12 @@
  *      with one `fomo_get_token_theses {token, chain, trader, limit: 3}` call
  *      as the owner from the DM surface, 8 s each. A claimed read whose answer
  *      a crash lost is never made again;
- *   3. returns the notices, each with `claim()`: the log with that notice
+ *   3. returns the first 4 notices due (TAIL_NOTICE_LIMITS.noticesPerPass),
+ *      each with `claim()`: the log with that notice and every one before it
  *      recorded, written and read back. The caller sends a notice only after
  *      its claim returned true, so a crash between the two loses a notice and
- *      never repeats one (at most once).
+ *      never repeats one (at most once). The rest are claimed by nobody and
+ *      are due again on the next pass.
  *
  * Nothing here decides who receives a notice (the Telegram notifier's own
  * gates do: Telegram on, notifications on, a linked owner) and nothing here
@@ -29,6 +31,7 @@ import {
   emptyTailLog,
   parseTailLog,
   serializeTailLog,
+  TAIL_NOTICE_LIMITS,
   tailNotices,
   tailThesisReads,
   type TailNotice,
@@ -169,9 +172,11 @@ export function createTailNotifier(deps: TailNotifierDeps): TailNotifier {
             remember(`${want.userId}|${want.tokenKey}`, b ? await readThesis(b, want.userId, want.token) : "failed");
           }
         }
-        // 3. The notices, each with its own claim.
+        // 3. The notices, each with its own claim; at most a few a pass. A
+        // notice's claim records it and those before it only, so the ones
+        // left out stay unclaimed and come back on the next pass.
         const { notices } = tailNotices(input(sent));
-        return notices.map((n) => ({
+        return notices.slice(0, TAIL_NOTICE_LIMITS.noticesPerPass).map((n) => ({
           html: n.html,
           kind: n.kind,
           keyboard: n.buttons.length > 0 ? [n.buttons.map((x) => ({ text: x.text, callbackData: x.data }))] : [],

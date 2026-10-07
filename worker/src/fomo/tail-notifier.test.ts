@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import { FOMO_STATE_KEYS, type DurableStatePort } from "../fomo-child";
 import type { BrokerCallOptions, ChildTail, ChildTailEvent, FomoBroker } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
-import { parseTailLog } from "./tail-notices";
+import { parseTailLog, TAIL_NOTICE_LIMITS } from "./tail-notices";
 import { createTailNotifier, TAIL_THESIS_READ_TIMEOUT_MS, type TailNotifierDeps } from "./tail-notifier";
 import type { FomoEnvelope, FomoToolName } from "./types";
 
@@ -108,6 +108,27 @@ describe("the tail notifier", () => {
     const again: string[] = [];
     await sendAll(notifier({ port, tails }), again);
     assert.deepEqual(again, []);
+  });
+
+  it("sends at most four a pass, oldest first; the rest stay unclaimed and come on the next pass", async () => {
+    const { s, port } = store();
+    // Six coins, so six notices: none coalesces with another.
+    const tails = [tail([1, 2, 3, 4, 5, 6].map((n) => ev(n, { kind: "sell" })))];
+    assert.equal(TAIL_NOTICE_LIMITS.noticesPerPass, 4);
+    const first = await notifier({ port, tails }).next();
+    assert.equal(first.length, 4);
+    const sent: string[] = [];
+    for (const x of first) {
+      assert.equal(await x.claim(), true);
+      sent.push(x.html);
+    }
+    assert.deepEqual(sent.map((h) => /<b>(C\d)<\/b>/.exec(h)?.[1]), ["C1", "C2", "C3", "C4"]);
+    const stored = parseTailLog(s.map.get(FOMO_STATE_KEYS.tailNotified)!)!;
+    assert.equal(Object.keys(stored.sent).filter((k) => k.startsWith("g:")).length, 4, "the stored claims cover the four sent, not the two left");
+    const second = await notifier({ port, tails }).next();
+    assert.deepEqual(second.map((x) => /<b>(C\d)<\/b>/.exec(x.html)?.[1]), ["C5", "C6"], "the rest, the next pass");
+    for (const x of second) assert.equal(await x.claim(), true);
+    assert.deepEqual(await notifier({ port, tails }).next(), []);
   });
 
   it("a claim that cannot be confirmed is not a send", async () => {

@@ -481,7 +481,9 @@ the confirm card and the Stop and +1h button handling are a separate change.
 - **Notices.** Code-written, sent by the Telegram notifier only past its own gates
   (Telegram on, notifications on, a linked owner), link previews off, with Stop and +1h
   buttons (`ftl:stop:<userId>`, `ftl:ext:<userId>`). One per trader, coin and kind per 5
-  minutes; a buy waits up to 3 minutes for Merrymen's assessment of the coin. A buy
+  minutes, and at most 4 per notifier pass (oldest first; the rest stay unclaimed and
+  go on the next pass, 15 seconds later); a buy waits up to 3 minutes for Merrymen's
+  assessment of the coin. A buy
   notice carries their position after it (never called their buy), their thesis as
   "their words, unverified" (stream text when there is some, otherwise one
   `fomo_get_token_theses` read of that trader on that coin, 1,250 credits), Merrymen's
