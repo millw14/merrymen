@@ -430,7 +430,9 @@ stop concurrent signals from overspending.
 
 An owner can ask Merrymen to **tail** one Fomo trader for a few hours: to be told, in
 their own Telegram DM, about that trader's buys, sells and theses that Fomo's live feed
-records, with Merrymen's own read of each coin. It is not copy trading. The backend is
+records, with Merrymen's own read of each coin where research runs for that owner
+(monitoring or follow on; with both off, the default, there is no read, and the card,
+the answer and each notice say so). It is not copy trading. The backend is
 `worker/src/fomo/store.ts`, `tools.ts`, `service.ts`, `ingest.ts`,
 `orchestrator-fomo.ts`, `tail-notices.ts` and `tail-notifier.ts`; what the owner types
 and presses is `packages/core/src/tail-request.ts` (her words, read by code),
@@ -518,7 +520,9 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   buttons (`ftl:stop:<userId>`, `ftl:ext:<userId>`). One per trader, coin and kind per 5
   minutes, and at most 4 per notifier pass (oldest first; the rest stay unclaimed and
   go on the next pass, 15 seconds later); a buy waits up to 3 minutes for Merrymen's
-  assessment of the coin. A buy
+  assessment of the coin, except where her coins are not researched at all (monitoring
+  and follow off: `FomoChild.tailsResearched`), when it goes at once and "my read"
+  says "none; with monitoring and following off I don't research their coins". A buy
   notice carries their position after it (never called their buy), their thesis as
   "their words, unverified" (stream text when there is some, otherwise one
   `fomo_get_token_theses` read of that trader on that coin, 1,250 credits; without one,
@@ -610,7 +614,8 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   for her (ten minutes, the one pending slot, bound to her chat and id) and the card
   says: "Tail X on Fomo for N hours (until HH:MM UTC)?"; what she gets (each buy, sell
   or thesis the live feed shows from them, with their thesis when there is one and my
-  read of the coin, with Stop and +1h buttons); the coverage line; what following would
+  read of the coin, with Stop and +1h buttons; with monitoring and following off, no
+  read, and it says why); the coverage line; what following would
   do now (`fomo-child.ts followReadiness`: off, paper, live, or what is in the way, in
   the notices' own words); when her words asked me to take the trade too ("if you like
   it, take it"), that a tail never skips my normal review; and the clamp. Nothing is

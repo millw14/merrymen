@@ -94,6 +94,18 @@ export interface TailCardInput {
   readiness: FollowReadiness | null;
   /** Her "all Telegram messages" is off: the card says no notice will be sent, instead of what she'd get. */
   muted?: boolean;
+  /**
+   * Her coins get my own read (data access with monitoring or follow on).
+   * False: the card promises no read, and says why. Absent: yes.
+   */
+  research?: boolean;
+}
+
+/** What she gets, said on the card: with or without my own read of the coin. */
+function whatYouGet(research: boolean): string {
+  return research
+    ? "What you'll get, here: each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one and my read of the coin, with Stop and +1h buttons."
+    : "What you'll get, here: each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one, with Stop and +1h buttons. With monitoring and following off I don't research their coins, so I won't give my own read of them.";
 }
 
 /** The card's text (HTML). Its buttons: buttons.ts tailConfirmKeyboard, consider only when canConsider. */
@@ -104,9 +116,7 @@ export function tailCardText(c: TailCardInput): string {
   if (c.clamped) lines.push(`You asked for more than ${TAIL_MAX_HOURS} hours; a tail runs ${TAIL_MAX_HOURS} at most.`);
   lines.push(
     "",
-    c.muted
-      ? esc(TAIL_MUTED_LINE)
-      : "What you'll get, here: each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one and my read of the coin, with Stop and +1h buttons.",
+    c.muted ? esc(TAIL_MUTED_LINE) : esc(whatYouGet(c.research !== false)),
     esc(TAIL_COVERAGE_LINE),
     "",
     esc(tailReadinessLine(c.readiness)),

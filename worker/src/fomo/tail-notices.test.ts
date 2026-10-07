@@ -14,6 +14,7 @@ import {
   BLOCKER_WORDS,
   emptyTailLog,
   NO_READ_WORDS,
+  NO_RESEARCH_READ,
   parseTailLog,
   serializeTailLog,
   TAIL_CAP_REACHED_LINE,
@@ -160,6 +161,20 @@ describe("which notices are due", () => {
     assert.match(read.notices[0]!.html, /My read: watching, not entering yet \(the price moved before I could quote it\)\./);
     const late = pass(input([tail([fresh])], { assessmentOf: none, now: NOW + 3 * MIN }));
     assert.match(late.notices[0]!.html, /My read: I haven't assessed this coin yet\./);
+  });
+
+  it("research off (monitoring and follow off): a buy never waits for a read that cannot come, and 'my read' says why (review 2026-10-07)", () => {
+    const fresh = ev(1, { at: NOW - MIN, observedAt: NOW - MIN });
+    const r = pass(input([tail([fresh])], { assessmentOf: () => null, researched: false }));
+    assert.equal(r.notices.length, 1, "sent at once, no three-minute hold");
+    assert.ok(r.notices[0]!.html.includes(NO_RESEARCH_READ));
+    assert.doesNotMatch(r.notices[0]!.html, /I haven't assessed this coin yet/);
+    // A thesis notice says the same.
+    const thesis = pass(input([tail([ev(2, { kind: "thesis", text: "x" })])], { researched: false })).notices[0]!.html;
+    assert.ok(thesis.includes(NO_RESEARCH_READ));
+    // Research on (or unsaid): it still waits, as before.
+    assert.deepEqual(pass(input([tail([fresh])], { assessmentOf: () => null })).notices, []);
+    assert.deepEqual(pass(input([tail([fresh])], { assessmentOf: () => null, researched: true })).notices, []);
   });
 
   it("never tells an event at or before the log's floor", () => {

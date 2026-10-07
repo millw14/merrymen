@@ -39,6 +39,14 @@ describe("the tail's confirm card", () => {
     assert.ok(plain(tailListText([{ handle: "unipcs", expiresAtMs: T0, consider: false }], false, { muted: true })).includes(TAIL_MUTED_LINE));
   });
 
+  it("research off: the card promises no read of the coin and says why; on (or unsaid), it does (review 2026-10-07)", () => {
+    const off = plain(tailCardText({ handle: "unipcs", hours: 3, clamped: false, take: false, nowMs: T0, readiness: null, research: false }));
+    assert.doesNotMatch(off, /my read of the coin/);
+    assert.match(off, /With monitoring and following off I don't research their coins, so I won't give my own read of them\./);
+    assert.match(plain(tailCardText({ handle: "unipcs", hours: 3, clamped: false, take: false, nowMs: T0, readiness: null, research: true })), /and my read of the coin/);
+    assert.match(plain(tailCardText({ handle: "unipcs", hours: 3, clamped: false, take: false, nowMs: T0, readiness: null })), /and my read of the coin/);
+  });
+
   it("a handle that is not a plain one is never shown", () => {
     const card = tailCardText({ handle: "<b>x</b>", hours: 3, clamped: false, take: false, nowMs: T0, readiness: null });
     assert.match(card, /Tail that trader on Fomo/);

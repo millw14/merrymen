@@ -905,6 +905,7 @@ async function main() {
     broker: () => fomoBroker,
     tails: () => fomoChild.tails(),
     readiness: () => fomoChild.followReadiness(),
+    researched: () => fomoChild.tailsResearched(),
     assessmentOf: (tokenKey) => fomoChild.latestAssessment(tokenKey),
     holds: (tokenKey) => fomoChild.holds(tokenKey),
     enabled: () => !fomoOff && fomoTailsOn(),

@@ -55,6 +55,8 @@ export interface TailNotifierDeps {
   tails(): readonly ChildTail[];
   /** fomo-child.ts FomoChild.followReadiness(); null when unknown. */
   readiness(): FollowReadiness | null;
+  /** fomo-child.ts FomoChild.tailsResearched(): whether her coins get my own read at all. Absent or throwing: yes. */
+  researched?(): boolean;
   assessmentOf(tokenKey: string): FollowAssessment | null;
   holds?(tokenKey: string): boolean;
   /** The operator's switch: false (MERRYMEN_FOMO_TAILS=0) sends nothing and reads nothing. Absent: on. */
@@ -179,6 +181,7 @@ export function createTailNotifier(deps: TailNotifierDeps): TailNotifier {
           log: l,
           now: at,
           readiness: safe(() => deps.readiness(), null),
+          researched: safe(() => (deps.researched ? deps.researched() !== false : true), true),
           assessmentOf: (k) => safe(() => deps.assessmentOf(k), null),
           holds: (k) => safe(() => deps.holds?.(k) === true, false),
           thesisRead: (userId, tokenKey) => reads.get(`${userId}|${tokenKey}`),

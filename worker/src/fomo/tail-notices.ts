@@ -26,7 +26,9 @@
  *                 renewal or +1h of a capped tail says only its summary is
  *                 left (tailCapSpent; the cap carries on with the tail)
  *   patient       a buy waits up to 3 minutes for an assessment of its coin,
- *                 so "my read" is a read, not a placeholder
+ *                 so "my read" is a read, not a placeholder; never when her
+ *                 coins are not researched at all (monitoring and follow
+ *                 off), when "my read" says so instead
  *   honest        coverage is said every time: the feed shows only larger
  *                 positions, the fleet watches it for Robinhood Chain (a
  *                 notice names each event's own chain), and no alert is not
@@ -270,6 +272,13 @@ export interface TailNoticeInput {
   now: number;
   /** What following would do with a buy right now (fomo-child.ts followReadiness); null when unknown. */
   readiness: FollowReadiness | null;
+  /**
+   * Whether her coins get my own read at all (fomo-child.ts tailsResearched:
+   * data access with monitoring or follow on). False: a buy never waits for
+   * an assessment that cannot come, and "my read" says why there is none.
+   * Absent: yes.
+   */
+  researched?: boolean;
   /** The child's latest assessment of a coin (by token key), or null. */
   assessmentOf(tokenKey: string): FollowAssessment | null;
   /** Whether the owner holds the coin now. Unknown is "no". */
@@ -543,7 +552,11 @@ const STATE_WORDS: Readonly<Record<ResearchState, string>> = {
   RESEARCH_ONLY: "research only",
 };
 
-function myRead(a: FollowAssessment | null): string {
+/** Said in place of a read when her coins are not researched at all (monitoring and follow off). */
+export const NO_RESEARCH_READ = "My read: none; with monitoring and following off I don't research their coins.";
+
+function myRead(a: FollowAssessment | null, researched: boolean): string {
+  if (!researched) return NO_RESEARCH_READ;
   if (!a) return "My read: I haven't assessed this coin yet.";
   const base = STATE_WORDS[a.state] ?? "no read yet";
   const reason = a.state === "PROBE_CANDIDATE" || a.state === "ENTRY_CANDIDATE" ? undefined : a.reasonCodes.map((c) => REASON_WORDS[c]).find(Boolean);
@@ -637,7 +650,7 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
       html: [
         `👀 <b>${name}</b> posted a thesis on <b>${coin}</b> on Fomo · ${at}${more}`,
         words ? `Their words, unverified: “${esc(words)}”` : "Their thesis had no words I can show.",
-        myRead(ev.token ? i.assessmentOf(ev.token.key) : null),
+        myRead(ev.token ? i.assessmentOf(ev.token.key) : null, i.researched !== false),
         readinessLine(tail, i.readiness, "thesis"),
         esc(TAIL_COVERAGE),
         tailEnds,
@@ -646,10 +659,13 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
   }
 
   // A buy: wait (briefly) for my read of the coin, and for their thesis.
+  // Never for a read that cannot come: with her coins not researched at all
+  // (monitoring and follow off), there is nothing to wait for.
+  const researched = i.researched !== false;
   const tokenKey = ev.token?.key ?? null;
   const assessment = tokenKey ? i.assessmentOf(tokenKey) : null;
   const age = i.now - ev.observedAt;
-  if (!(assessment && assessment.createdAt >= ev.observedAt) && age < TAIL_NOTICE_LIMITS.buyWaitsForReadMs && !tail.ended) return null;
+  if (researched && !(assessment && assessment.createdAt >= ev.observedAt) && age < TAIL_NOTICE_LIMITS.buyWaitsForReadMs && !tail.ended) return null;
   let thesisLine: string;
   let coveredThesis: ChildTailEvent | undefined;
   const stream = streamThesis(tail, ev);
@@ -682,7 +698,7 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
       `👀 <b>${name}</b> bought <b>${coin}</b> on Fomo (${esc(chainWords(ev))}) · ${at}${more}`,
       ...(position ? [position] : []),
       thesisLine,
-      myRead(assessment),
+      myRead(assessment, researched),
       readinessLine(tail, i.readiness, "buy"),
       esc(TAIL_COVERAGE),
       tailEnds,

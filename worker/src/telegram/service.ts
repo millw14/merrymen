@@ -1319,7 +1319,17 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           considerOffered: canConsider(readiness),
           expiresAt: now() + TAIL_CONFIRM_TTL_SEC,
         });
-        return tailCardText({ handle, hours: cmd.hours, clamped: cmd.clamped, take: cmd.take === true, nowMs: Date.now(), readiness, muted: cfg.telegramNotifyEnabled !== true });
+        return tailCardText({
+          handle,
+          hours: cmd.hours,
+          clamped: cmd.clamped,
+          take: cmd.take === true,
+          nowMs: Date.now(),
+          readiness,
+          muted: cfg.telegramNotifyEnabled !== true,
+          // My own read of their coins comes only where research runs (the child's tailsResearched gate).
+          research: cfg.fomoDataAccess === true && (cfg.fomoMonitoringEnabled === true || cfg.fomoFollowEnabled === true),
+        });
       },
       start: async (p, considerAsked) => {
         const b = brokerNow();

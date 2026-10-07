@@ -804,12 +804,15 @@ describe("tails", () => {
     assert.deepEqual([followed.data?.routable, followed.data?.following], [true, true]);
     assert.match(renderEnvelope(followed, { audience: "owner", maxChars: 2000, now: NOW }), /one signal into my normal review/);
     assert.match(renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }), /tell you only/);
+    // Tell-only with monitoring and follow off: no read of the coin will come, and it is said (review 2026-10-07).
+    assert.match(renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }), /Monitoring and following are both off, so I won't have my own read of their coins/);
+    assert.doesNotMatch(renderEnvelope(followed, { audience: "owner", maxChars: 2000, now: NOW }), /won't have my own read/);
     const monitorOnly = await harness({ liveFeed: true });
     const watched = await monitorOnly.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
     assert.deepEqual([watched.data?.routable, watched.data?.following], [true, false]);
     assert.match(renderEnvelope(watched, { audience: "owner", maxChars: 2000, now: NOW }), /Following is off, so their buys only reach my research, never a trade/);
     const offBoth = await h.invoke<TailData>("fomo_tail_trader", { trader: FRANK, consider: true });
-    assert.match(renderEnvelope(offBoth, { audience: "owner", maxChars: 2000, now: NOW }), /Monitoring and following are both off, so I'll only tell you/);
+    assert.match(renderEnvelope(offBoth, { audience: "owner", maxChars: 2000, now: NOW }), /Monitoring and following are both off, so I'll only tell you, without my own read of their coins/);
     const noAccess = await harness({ liveFeed: true, access: { dataAccess: false, monitoring: true, follow: true } });
     assert.equal((await noAccess.invoke<TailData>("fomo_tail_trader", { trader: KALEO })).status, "not-authorized");
     assert.equal(rows(noAccess.raw, "fomo_tails"), 0);

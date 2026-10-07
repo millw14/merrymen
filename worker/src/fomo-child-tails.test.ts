@@ -162,6 +162,17 @@ describe("FomoChild tail accessors", () => {
     assert.deepEqual(rig({ tails: [TAIL], live: { settings: undefined as never } }).child.tails(), [], "a live read that throws is no tails");
   });
 
+  it("tailsResearched(): my own read comes only with data access and monitoring or follow, from her settings now and the file (review 2026-10-07)", () => {
+    const on = rig({ tails: [TAIL], settings: { monitoring: true, follow: false }, fileAccess: { dataAccess: true, monitoring: true, follow: false } });
+    assert.equal(on.child.tailsResearched(), true, "no tick needed");
+    on.settings.monitoring = false;
+    assert.equal(on.child.tailsResearched(), false, "her setting, read now");
+    assert.equal(rig({ tails: [TAIL], settings: { monitoring: false, follow: false } }).child.tailsResearched(), false, "the defaults: no research");
+    assert.equal(rig({ tails: [TAIL], settings: { follow: true }, fileAccess: { dataAccess: true, monitoring: false, follow: false } }).child.tailsResearched(), false, "the file narrows it");
+    assert.equal(rig({ tails: [TAIL], off: true }).child.tailsResearched(), false);
+    assert.equal(rig({ tails: [TAIL], settings: { dataAccess: false } }).child.tailsResearched(), false);
+  });
+
   it("holds(): a held Robinhood coin by its token key, as of the last tick", () => {
     const r = rig();
     r.tick([{ token: COIN.toUpperCase().replace("0X", "0x") }]);

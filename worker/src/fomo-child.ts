@@ -2935,7 +2935,27 @@ export class FomoChild {
    * tails (the reader's own bounds).
    */
   tails(): ChildTail[] {
-    if (this.isOff()) return [];
+    const access = this.tailAccess();
+    if (!access?.dataAccess) return [];
+    return (this.tailFile?.tails ?? []).map((t) => ({ ...t, events: t.events.map((e) => ({ ...e, label: { ...e.label } })), totals: t.totals ? { ...t.totals } : null }));
+  }
+
+  /**
+   * WHETHER HER TAILED COINS GET MY OWN READ AT ALL: research runs only with
+   * data access and monitoring or follow on (the tick's assessAll gate, and
+   * the orchestrator's: an owner with both off gets `signals: []`). False:
+   * a buy notice never waits three minutes for an assessment that cannot
+   * come, and says plainly why there is no read. From her settings read now
+   * and the tails' own file read; Fomo off here, or unknown, is false.
+   */
+  tailsResearched(): boolean {
+    const a = this.tailAccess();
+    return !!a && a.dataAccess && (a.monitoring || a.follow);
+  }
+
+  /** The tails' own file read (refreshed at most every fileReadEveryMs) narrowed by her settings now; null when Fomo is off here or her settings cannot be read. */
+  private tailAccess(): FomoAccess | null {
+    if (this.isOff()) return null;
     const now = this.now();
     if (now - this.tailFileReadAt >= FOMO_CHILD.fileReadEveryMs) {
       this.tailFileReadAt = now;
@@ -2947,15 +2967,12 @@ export class FomoChild {
         this.tailFile = null;
       }
     }
-    let owner: FomoAccess;
     try {
       const s = this.deps.live().settings;
-      owner = { dataAccess: s.dataAccess, monitoring: s.monitoring, follow: s.follow };
+      return effectiveAccess({ dataAccess: s.dataAccess, monitoring: s.monitoring, follow: s.follow }, this.tailFile?.access ?? null);
     } catch {
-      return [];
+      return null;
     }
-    if (!effectiveAccess(owner, this.tailFile?.access ?? null).dataAccess) return [];
-    return (this.tailFile?.tails ?? []).map((t) => ({ ...t, events: t.events.map((e) => ({ ...e, label: { ...e.label } })), totals: t.totals ? { ...t.totals } : null }));
   }
 
   /** Whether this agent holds a Robinhood coin now (by token key), as of the last tick. Unknown is no. */

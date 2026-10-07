@@ -209,6 +209,10 @@ async function withDm(
     telegramMaxActionUsdg: 25,
     // Her "all Telegram messages" on, as by default (core settings.ts).
     telegramNotifyEnabled: true,
+    // Research runs for her coins (a tail's "my read"): data access and monitoring on.
+    fomoDataAccess: true,
+    fomoMonitoringEnabled: true,
+    fomoFollowEnabled: false,
     customTokens: [],
     ...(opts.llm ? { groqApiKey: "gsk_test_not_a_real_key", groqModel: "test-model" } : {}),
   };
@@ -823,6 +827,19 @@ describe("a Fomo tail in the owner's DM: the card, and nothing until she presses
       const again = await ask(h, "/tail CryptoKaleo 3h");
       assert.match(again, /What you'll get, here/);
       assert.ok(!again.includes(TAIL_MUTED_LINE));
+    });
+  });
+
+  it("monitoring and following off (the defaults): the card promises no read of the coin, and the tell-only answer says why (review 2026-10-07)", async () => {
+    await withDm({ liveFeed: true, readiness: () => FOLLOW_OFF }, async (h) => {
+      h.cfg.fomoMonitoringEnabled = false;
+      h.fx.access.monitoring = false;
+      const card = await ask(h, "/tail CryptoKaleo 2h");
+      assert.doesNotMatch(card, /my read of the coin/);
+      assert.match(card, /With monitoring and following off I don't research their coins, so I won't give my own read of them\./);
+      const done = await pressLastCard(h, "tell");
+      assert.match(done, /You asked me to tell you only/);
+      assert.match(done, /Monitoring and following are both off, so I won't have my own read of their coins/);
     });
   });
 

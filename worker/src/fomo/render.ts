@@ -739,10 +739,14 @@ function bodyTail(env: FomoEnvelope<TailData | UntailData | ExtendTailData>, aud
       ? `Tailing ${name} on Fomo until ${utcClock(d.expiresAtMs)} (${hours} h).`
       : `Still tailing ${name} on Fomo, now until ${utcClock(d.expiresAtMs)} (${hours} h).`,
   ];
-  if (!d.consider) out.push("You asked me to tell you only; I won't trade on it.");
-  else if (d.following) out.push("Their buys are one signal into my normal review; I only enter if my own checks and the Brain agree, inside your scout budget. I never copy their trades.");
+  if (!d.consider) {
+    out.push("You asked me to tell you only; I won't trade on it.");
+    // No research at all: "my read of the coin" (the card's promise when
+    // research runs) will not come, and she is told so here, once.
+    if (!d.routable) out.push("Monitoring and following are both off, so I won't have my own read of their coins; I'll tell you what they do, and their thesis when I can find it.");
+  } else if (d.following) out.push("Their buys are one signal into my normal review; I only enter if my own checks and the Brain agree, inside your scout budget. I never copy their trades.");
   else if (d.routable) out.push("Following is off, so their buys only reach my research, never a trade; I'll tell you what they do.");
-  else out.push("Monitoring and following are both off, so I'll only tell you; nothing of theirs reaches a trade review.");
+  else out.push("Monitoring and following are both off, so I'll only tell you, without my own read of their coins; nothing of theirs reaches a trade review.");
   out.push(TAIL_COVERAGE_LINE);
   return out;
 }

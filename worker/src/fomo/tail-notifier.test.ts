@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import { FOMO_STATE_KEYS, type DurableStatePort } from "../fomo-child";
 import type { BrokerCallOptions, ChildTail, ChildTailEvent, FomoBroker } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
-import { emptyTailLog, parseTailLog, TAIL_NOTICE_LIMITS, tailNotices } from "./tail-notices";
+import { emptyTailLog, NO_RESEARCH_READ, parseTailLog, TAIL_NOTICE_LIMITS, tailNotices } from "./tail-notices";
 import { createTailNotifier, TAIL_THESIS_READ_TIMEOUT_MS, type TailNotifierDeps } from "./tail-notifier";
 import type { FomoEnvelope, FomoToolName } from "./types";
 
@@ -200,5 +200,15 @@ describe("the tail notifier", () => {
     s.readable = false;
     assert.equal(await notifier({ port, tails: [long] }).capSpent(UNI), null, "unknown is not said");
     assert.equal(await notifier({ port, tails: [long], enabled: () => false }).capSpent(UNI), null);
+  });
+
+  it("passes whether her coins are researched: off, a fresh buy goes at once, saying why there is no read (review 2026-10-07)", async () => {
+    const { port } = store();
+    const fresh = tail([ev(1, { at: NOW - MIN, observedAt: NOW - MIN })]);
+    assert.deepEqual(await notifier({ port, tails: [fresh] }).next(), [], "research on (unsaid): it waits for my read");
+    const due = await notifier({ port, tails: [fresh], researched: () => false }).next();
+    assert.equal(due.length, 1);
+    assert.ok(due[0]!.html.includes(NO_RESEARCH_READ));
+    assert.equal((await notifier({ port: store().port, tails: [fresh], researched: () => { throw new Error("x"); } }).next()).length, 0, "unknown: as before, it waits");
   });
 });
