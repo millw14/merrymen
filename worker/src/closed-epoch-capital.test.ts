@@ -30,7 +30,7 @@ import { PAPER_CHECKPOINT_SCHEMA } from "./paper-checkpoint";
 import { ensureLedgerResumeSchema } from "./ledger-import";
 import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed, resumePreconditions } from "./ledger-resume";
 import { flowDuplicateReport } from "./distinct-flows";
-import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER } from "../../packages/core/src/index";
+import { CASH, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused, BOOKINGS_TABLE, gapChainOf } from "./chain-gap-booking";
 import {
@@ -50,6 +50,7 @@ const TENANT = "0x0e1ca00202df6e686ac2317e10ed8ee8ae5e320d";
 const ACCOUNT = "0x88e47214b5a0ca488cdabb4c9c28c3b71441ba78";
 /** How the grant and the agents row spell it (the booking preview's agentId). */
 const SPELLED = "0x88e47214B5a0cA488cDABB4c9C28c3B71441BA78";
+const SPELLED_GRANT = SPELLED;
 const CLASS_VAULT = "0xc730419217884328b7944b2504423e1a3a078c17";
 const FUNDER = "0x472e130cafb21f110dac968f23ba0d621c325849";
 const MU = "0xff080c8ce2e5feadaca0da81314ae59d232d4afd", USAR = "0xd917b029c761d264c6a312bbbcda868658ef86a6", STEAK = "0xbeeff033f34c046626b8d0a041844c5d1a5409dd";
@@ -160,13 +161,15 @@ interface Books { raw: DatabaseSync; db: Db }
  * valuations (the last at 21:15:00, after the sweep: witness W1); `reset`
  * writes runPaperReset's line beside the paper opening (W3).
  */
-async function books(o: { marks?: number[]; reset?: number | null; mode?: string; floors?: boolean } = {}): Promise<Books> {
+async function books(o: { marks?: number[]; reset?: number | null; mode?: string; floors?: boolean; rows?: string } = {}): Promise<Books> {
+  /** How every row spells the account; the grant always spells it SPELLED (EIP-55), as the real one does. */
+  const SPELLED = o.rows ?? SPELLED_GRANT;
   const raw = new DatabaseSync(":memory:"); handles.push(raw);
   const db = wrapSqlite(raw);
   await applyLedgerSchema(db); await db.exec(MIRROR_STATE_DDL); await db.exec(PAPER_CHECKPOINT_SCHEMA);
   raw.exec("CREATE TABLE grants(tenant TEXT PRIMARY KEY, grant_json TEXT NOT NULL, updated_at INTEGER NOT NULL, row_version INTEGER NOT NULL)");
   raw.prepare("INSERT INTO grants VALUES (?, ?, 1000, 1)").run(TENANT, JSON.stringify({
-    smartAccount: SPELLED, owner: TENANT, chainId: 4663, serialized: "never-read", grantFeatures: ["tradeable-v2", GRANT_PONS_CLASS], ponsClassVaultAddress: CLASS_VAULT,
+    smartAccount: SPELLED_GRANT, owner: TENANT, chainId: 4663, serialized: "never-read", grantFeatures: ["tradeable-v2", GRANT_PONS_CLASS], ponsClassVaultAddress: CLASS_VAULT,
   }));
   raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, epoch, hwm_usdg, hwm_withdrawn_usdg, mode, beat_at)
     VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 2, 145.579752, 0, ?, ?)`).run(SPELLED, TENANT, addr(1), o.mode ?? "paper", BEAT_AT);
@@ -715,5 +718,88 @@ describe("revert, decided by what the database recorded", () => {
     assert.equal((await revert(b, report, false)).outcome, "reverted");
     assert.deepEqual(rows(b.raw, "SELECT COUNT(*) AS n FROM flows")[0]!.n, 0);
     await assert.rejects(revertClosedEpoch(b.db, { repairId: "00000000-0000-4000-8000-000000000000", nowMs: NOW * 1000, dialect: "sqlite" }), refusedWith("receipts", /no receipts/));
+  });
+});
+
+describe("every other refusal, by name", () => {
+  const flow = (b: Books, o: { source: string; epoch?: number; tx?: string | null; log?: number | null; direction?: string; amount?: number }) =>
+    b.raw.prepare(`INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 4663, ?)`)
+      .run(SPELLED, o.direction ?? "in", o.amount ?? 1, o.tx ?? null, o.log ?? null, o.source, o.epoch ?? 1, DEPOSIT_AT + 300);
+
+  it("custody-capital: the class vault moved USDG with an address outside the book", async () => {
+    const block = 64100000n;
+    const outside: ModelTx = { tx: h32("into the vault"), block, blockHash: h32("vault block"), timestamp: timeOf(block), from: FUNDER, to: USDG, status: "0x1",
+      logs: [[USDG, [TR, topic(FUNDER), topic(CLASS_VAULT)], `0x${word(5n)}`, "0x0"]] };
+    const p = await preview(await books(), fakeRpc({ txs: [...REAL, outside], balances: { [USDG]: { [CLASS_VAULT]: 5n } } }).rpc);
+    assert.deepEqual(codes(p), ["custody-capital"]);
+    assert.deepEqual(p.custody.map((c) => [c.address, c.movements, c.outside]), [[CLASS_VAULT, 1, [`${outside.tx}#0`]]]);
+    const unbalanced = await preview(await books(), fakeRpc({ balances: { [USDG]: { [CLASS_VAULT]: 5n } } }).rpc);
+    assert.deepEqual(codes(unbalanced), ["custody-coverage"]);
+  });
+
+  it("identity-quarantined-before: a log a repair once quarantined is a reviewed decision, not a re-filing", async () => {
+    const b = await books();
+    b.raw.prepare(`INSERT INTO flows_quarantine (original_id, agent_id, epoch, direction, amount_usdg, tx_hash, block_number, log_index, source, at, run_id, quarantined_at, reason)
+      VALUES (77, ?, 1, 'in', 145.499004, ?, 64045884, 0, 'chain-log', 1, 'old-run', 1, 'test')`).run(SPELLED, DEPOSIT_TX);
+    assert.ok(codes(await preview(b, fakeRpc().rpc)).includes("identity-quarantined-before"));
+  });
+
+  it("out-of-scope-reserve: an energy purchase with no worker-written energy-buy row is not filed into a closed epoch", async () => {
+    const reserve = MERRYMEN_TOKEN.address.toLowerCase(), seller = addr(0x9001);
+    const top: ModelTx = { tx: h32("a second deposit"), block: 64100000n, blockHash: h32("b1"), timestamp: timeOf(64100000n), from: FUNDER, to: USDG, status: "0x1",
+      logs: [[USDG, [TR, topic(FUNDER), topic(ACCOUNT)], `0x${word(1_000_000n)}`, "0x0"]] };
+    const energy: ModelTx = { tx: h32("an energy buy"), block: 64100100n, blockHash: h32("b2"), timestamp: timeOf(64100100n), from: addr(0x4337), to: EP, status: "0x1",
+      logs: [[USDG, [TR, topic(ACCOUNT), topic(seller)], `0x${word(1_000_000n)}`, "0x0"], [reserve, [TR, topic(seller), topic(ACCOUNT)], `0x${word(77n)}`, "0x1"]] };
+    const p = await preview(await books(), fakeRpc({ txs: [...REAL, top, energy] }).rpc);
+    assert.equal(p.movements.find((m) => m.txHash === energy.tx)!.classification!.kind, "reserve-out");
+    assert.ok(codes(p).includes("out-of-scope-reserve"), codes(p).join(","));
+  });
+
+  it("unexplained-receipt and carry-in-epoch-1: epoch 1 rows the chain's capital set does not hold", async () => {
+    const trade = OPS.find((o) => !o.root)!;
+    const r = await books();
+    flow(r, { source: "chain-log", tx: trade.tx, log: 999 });
+    assert.ok(codes(await preview(r, fakeRpc().rpc)).includes("unexplained-receipt"));
+    const c = await books();
+    flow(c, { source: "epoch-carry" });
+    assert.ok(codes(await preview(c, fakeRpc().rpc)).includes("carry-in-epoch-1"));
+  });
+
+  it("operation-unanswered and transfer-unanswered: a session trade with no trades row is the booking tool's, and blocks here", async () => {
+    const b = await books();
+    const trade = REAL.find((t) => t.tx.startsWith("0xaf532ad9"))!;
+    b.raw.prepare("DELETE FROM trades WHERE tx_hash = ?").run(trade.tx);
+    const p = await preview(b, fakeRpc().rpc);
+    assert.ok(codes(p).includes("operation-unanswered") && codes(p).includes("transfer-unanswered"), codes(p).join(","));
+    assert.match(p.refusals.find((r) => r.code === "operation-unanswered")!.why, /a permission validator/);
+  });
+
+  it("fact-undated: a fact admission names whose receipt cannot be read", async () => {
+    const p = await preview(await books(), fakeRpc({ failReceipts: [DEPOSIT_TX] }).rpc);
+    assert.ok(codes(p).includes("movement-unread") && codes(p).includes("fact-undated"), codes(p).join(","));
+  });
+
+  it("identity-index, open-approval and an RPC on another chain refuse outright", async () => {
+    const i = await books();
+    i.raw.exec("DROP INDEX flows_chain_identity");
+    assert.ok(codes(await preview(i, fakeRpc().rpc)).includes("identity-index"));
+    const a = await books();
+    a.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, created_at_ms, updated_at_ms)
+      VALUES ('open', ?, ?, 4663, ?, ?, '{}', 'r', 'approved', ?, ?)`).run(TENANT, ACCOUNT, TENANT, "f".repeat(64), REFUSED_AT_MS - 10, REFUSED_AT_MS - 10);
+    const q = await preview(a, fakeRpc().rpc);
+    assert.ok(q.refusals.some((r) => r.code === "open-approval" && r.why.includes(`MERRYMEN_RESUME_REVOKE=${TENANT}:${"f".repeat(64)}`)));
+    assert.ok(codes(await preview(await books(), fakeRpc({ chainId: 46630 }).rpc)).includes("rpc-chain"));
+  });
+
+  it("the grant's own spelling decides what admission seeds: rows spelled lowercase, the grant EIP-55 — floors are not seeded, and are cleared all the same", async () => {
+    const b = await books({ rows: ACCOUNT });
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "ready", closedEpochLines(p).join("\n"));
+    assert.deepEqual([p.holdings.seedBefore.basis.map((x) => x.symbol), p.holdings.seedBefore.floors], [["MU", "USAR"], []], "planAttestedSeed reads floors by the grant's exact spelling");
+    assert.deepEqual(p.proposals.inserts.map((i) => i.row.agent_id), [ACCOUNT, ACCOUNT], "filed under the rows' one spelling");
+    assert.deepEqual(p.proposals.clears.map((c) => c.kind), ["clear-live-basis", "clear-live-floor", "clear-live-basis", "clear-live-floor"]);
+    await apply(b, p);
+    assert.deepEqual(await planAttestedSeed(b.db, SPELLED), { basis: [], floors: [] });
+    assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM position_floors")[0]!.n, 0);
   });
 });
