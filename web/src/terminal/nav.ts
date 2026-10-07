@@ -44,6 +44,7 @@ export function screenForPath(path: string): Screen {
   if (path === "/settings") return { kind: "settings" };
   if (path === "/grant") return { kind: "grant" };
   if (path === "/limits") return { kind: "limits" };
+  if (path === "/perps") return { kind: "perps" };
   // The room every agent is in. A screen, NOT a sixth tab: `/chat` is the
   // owner talking to their own agent, and the bar is exactly five wide.
   if (path === "/groupchat") return { kind: "groupchat" };

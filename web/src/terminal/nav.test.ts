@@ -71,6 +71,12 @@ describe("the five tabs", () => {
 });
 
 describe("routing", () => {
+  it("perps is a view with a refreshable route, not a sixth navigation tab", () => {
+    assert.deepEqual(screenForPath("/perps"), { kind: "perps" });
+    assert.equal(pathForScreen({ kind: "perps" }), "/perps");
+    assert.ok(existsSync(join(ROOT, "web/src/app/(app)/perps/page.tsx")));
+    assert.equal(TABS.length, 5);
+  });
   it("every tab round-trips through its path", () => {
     for (const t of TABS) {
       const path = pathForScreen({ kind: "tab", tab: t.id });

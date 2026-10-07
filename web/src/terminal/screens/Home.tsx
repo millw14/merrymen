@@ -18,6 +18,7 @@ import {
 import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
 import { usd, usdParts } from "@/lib/format";
+import { TradingModeToggle } from "../TradingModeToggle";
 
 export function Home({
   tokens,
@@ -32,6 +33,7 @@ export function Home({
   onSearch,
   onDesk,
   onGroupChat,
+  onPerps,
   hasAgent,
   read,
   retired = null,
@@ -54,6 +56,8 @@ export function Home({
    * caller with no room — and every existing test — is unaffected.
    */
   onGroupChat?: () => void;
+  /** Switches the view to the owner's perpetuals screen. */
+  onPerps?: () => void;
   /**
    * Has the SERVER said this owner has an agent?
    *
@@ -135,6 +139,7 @@ export function Home({
     <div className="home-page">
       <header className="top home-overview">
         <div className="home-heading"><h1 className="top-title">Home</h1>{room && onGroupChat && <button type="button" className="icon-btn" aria-label="Group chat" title="Group chat" onClick={onGroupChat}><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></button>}</div>
+        {onPerps && <div className="home-mode-row"><TradingModeToggle mode="spot" onChange={(next) => { if (next === "perps") onPerps(); }} /><span>Switch your trading view</span></div>}
 
         {mine ? (
           <button type="button" className="hero" onClick={onDesk}>

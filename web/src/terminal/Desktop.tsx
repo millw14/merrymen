@@ -33,6 +33,7 @@ import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
+import { TradingModeToggle } from "./TradingModeToggle";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -51,7 +52,8 @@ export function DesktopHeader({
   hasAgent = true,
   onScreen,
   onTab,
-}: Actions & { hasAgent?: boolean; mine: LiveMine }) {
+  mode,
+}: Actions & { hasAgent?: boolean; mine: LiveMine; mode: "spot" | "perps" }) {
   const accountMenu = useRef<HTMLDetailsElement>(null);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
   // The desktop's way into the group chat; hidden where the install has no room.
@@ -74,13 +76,13 @@ export function DesktopHeader({
         <LogoMark size={15} />
         <span>merrymen</span>
       </button>
-      <button
-        className="desktop-search"
-        onClick={() => onScreen({ kind: "search" })}
-      >
-        <Search size={17} />
-        <span>Search tokens or agents</span>
-      </button>
+      <div className="desktop-mode-controls">
+        <button className="desktop-search" onClick={() => onScreen({ kind: "search" })} aria-label="Search tokens or agents">
+          <Search size={17} />
+          <span>Search tokens or agents</span>
+        </button>
+        <TradingModeToggle compact mode={mode} onChange={(next) => onScreen(next === "perps" ? { kind: "perps" } : { kind: "tab", tab: "home" })} />
+      </div>
       <div className="desktop-header-account">
         {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
         <Link className="desktop-settings-link" href="/settings">Settings</Link>

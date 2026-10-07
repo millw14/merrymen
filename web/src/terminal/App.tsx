@@ -47,6 +47,7 @@ import { pathForScreen, screenForPath, TABS } from "./nav";
 import { Feed } from "./screens/Feed";
 import { GroupChat } from "./screens/GroupChat";
 import { Home } from "./screens/Home";
+import { PerpsScreen } from "./PerpsScreen";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
 import Wallet from "./screens/Wallet";
@@ -77,6 +78,8 @@ import { SoundToggle } from "./SoundToggle";
 import { ticksOf } from "./ticker";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
+import "./trading-mode-toggle.css";
+import "./perps-mode.css";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -310,6 +313,9 @@ export function App() {
     }
     if (desktop && next === "feed") {
       setSidebarSection("feed");
+      // A route-backed Perps view must leave that view when the wordmark's
+      // Feed action is chosen; the old desktop detail pages had no such mode.
+      if (screen.kind === "perps") setScreen({ kind: "tab", tab: "feed" });
       return;
     }
     setTab(next);
@@ -453,7 +459,7 @@ export function App() {
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} mode={screen.kind === "perps" ? "perps" : "spot"} onScreen={openScreen} onTab={goTab} />}
       {desktop && (
         <DesktopSidebar
           reads={live.reads}
@@ -520,9 +526,11 @@ export function App() {
             onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
             onGroupChat={() => openScreen({ kind: "groupchat" })}
+            onPerps={() => openScreen({ kind: "perps" })}
             hasAgent={account?.status.exists === true}
           />
         )}
+        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} perps={mine?.perps} hasAgent={account?.status.exists === true} onSpot={() => goTab("home")} onSettings={() => openScreen({ kind: "settings" })} />}
         {screen.kind === "tab" && screen.tab === "feed" && (
           <Feed
             read={live.reads.theses}

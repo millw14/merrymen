@@ -1,0 +1,87 @@
+.terminal-host .trading-mode-toggle {
+  --mode-inset: 3px;
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: none;
+  width: 190px;
+  padding: var(--mode-inset);
+  border: 1px solid #52656883;
+  border-radius: 999px;
+  background: #07151bed;
+  box-shadow: inset 0 1px 4px #0008, 0 0 0 1px #0003;
+}
+.terminal-host .trading-mode-toggle .trading-mode-glide {
+  position: absolute;
+  z-index: -1;
+  top: var(--mode-inset);
+  bottom: var(--mode-inset);
+  left: var(--mode-inset);
+  width: calc((100% - 2 * var(--mode-inset)) / 2);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #b6f473, #68b99b);
+  box-shadow: 0 0 15px #9eef8380, inset 0 1px 0 #fff8;
+  transition: transform 420ms cubic-bezier(.19, 1, .22, 1), background 320ms ease, box-shadow 320ms ease;
+}
+.terminal-host .trading-mode-toggle .trading-mode-glide[data-mode="perps"] {
+  transform: translateX(100%);
+  background: linear-gradient(135deg, #ad88ff, #5cd5fc);
+  box-shadow: 0 0 18px #986aff91, inset 0 1px 0 #fff8;
+}
+.terminal-host .trading-mode-toggle button {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  min-height: 35px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #aebdbd;
+  font: 700 12px/1 inherit;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: color 250ms ease, transform 250ms ease;
+}
+.terminal-host .trading-mode-toggle button.is-active { color: #071617; }
+.terminal-host .trading-mode-toggle button:hover { transform: translateY(-1px); }
+.terminal-host .trading-mode-toggle button:focus-visible { outline: 2px solid #b0edfc; outline-offset: -2px; }
+.terminal-host .trading-mode-toggle.is-compact { width: 164px; }
+.terminal-host .trading-mode-toggle.is-compact button { min-height: 31px; font-size: 11px; }
+.terminal-host .desktop-mode-controls {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-right: 10px;
+}
+.terminal-host .desktop-mode-controls .desktop-search {
+  flex: 1 1 auto;
+  min-width: 42px;
+  margin: 0 10px 0 20px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.terminal-host .home-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 16px;
+}
+.terminal-host .home-mode-row > span {
+  font-size: 11px;
+  color: var(--faint, #9ba8a7);
+  letter-spacing: .04em;
+}
+@media (min-width: 1100px) and (max-width: 1470px) {
+  .terminal-host .desktop-mode-controls .desktop-search span { display: none; }
+  .terminal-host .desktop-mode-controls .desktop-search { flex: 0 0 42px; width: 42px; padding: 10px; justify-content: center; }
+}
+@media (max-width: 1099px) {
+  .terminal-host .desktop-mode-controls { display: none; }
+  .terminal-host .home-mode-row > span { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .trading-mode-toggle .trading-mode-glide,
+  .terminal-host .trading-mode-toggle button { transition: none; }
+}
