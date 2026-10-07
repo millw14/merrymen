@@ -1138,7 +1138,7 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
       const notOwners = capitalProvenance(m, snap.trades);
       if (notOwners.length) { for (const r of notOwners) refuse(r.code, r.why); continue; }
     }
-    const twins =snap.flows.rows.filter((f) => lower(f.txHash) === m.txHash && f.logIndex === m.logIndex && (f.chainId === chainId || f.chainId === null));
+    const twins = snap.flows.rows.filter((f) => lower(f.txHash) === m.txHash && f.logIndex === m.logIndex && (f.chainId === chainId || f.chainId === null));
     const quarantined = snap.quarantine.rows.filter((q) => lower(q.txHash) === m.txHash && q.logIndex === m.logIndex);
     const applied = [...snap.gapBookings.filter((b) => b.state === "applied" && b.evidenceKey === m.key).map((b) => `chain_gap_bookings ${b.bookingId}`),
       ...snap.repairs.filter((r) => r.state === "applied" && r.evidenceKey === m.key).map((r) => `${REPAIRS_TABLE} ${r.repairId}`)];
