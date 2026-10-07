@@ -78,6 +78,23 @@ export function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] 
   return out;
 }
 
+/**
+ * THE PER-ACCOUNT HALF OF WHAT THE LIVE SCANNER CLASSIFIES WITH: the
+ * account's custody contracts and the chain's energy reserve tokens. The
+ * scanner passes nothing else of its own (no hosted-account, venue or system
+ * list: index.ts scanChainFlows), so a reader that must agree with the
+ * scanner about which USDG leg is capital asks this, and two readers cannot
+ * name different inputs for the same transfer. owner-operations.ts is the
+ * other caller: what it leaves to "the scanner's flow" must be exactly what
+ * the scanner books.
+ */
+export function scannerClassifyContext(o: { custodyAddresses?: readonly string[]; chainId?: number }): {
+  custodyAddresses: readonly string[] | undefined;
+  reserveTokens: readonly string[];
+} {
+  return { custodyAddresses: o.custodyAddresses, reserveTokens: energyReserveTokens(o.chainId ?? MERRYMEN_TOKEN.chainId) };
+}
+
 /** The ERC-20 event. `value` is not indexed, so it is read from `data`. */
 const TRANSFER_ABI = parseAbi([
   "event Transfer(address indexed from, address indexed to, uint256 value)",
@@ -301,6 +318,7 @@ export async function findTransferFlows(opts: {
     legsByTx.set(k, legsFromReceiptLogs(receipt));
   }
 
+  const context = scannerClassifyContext({ custodyAddresses: opts.custodyAddresses, chainId: opts.chainId });
   for (const c of candidates) {
     const legs = legsByTx.get(c.txHash.toLowerCase()) ?? [];
     const usdgLeg: TransferLeg = {
@@ -321,11 +339,13 @@ export async function findTransferFlows(opts: {
       // pairs with nothing, falls to `no-pair-external`, and a trade is booked
       // as a withdrawal — corrupting the denominator of every P&L figure.
       // See ClassifyInput.custodyAddresses.
-      custodyAddresses: opts.custodyAddresses,
+      custodyAddresses: context.custodyAddresses,
       // The energy reserve on this chain. Its purchase classifies `reserve-out`,
       // which the condition below deliberately does NOT book: the worker is its
-      // one live booker. See the header.
-      reserveTokens: energyReserveTokens(opts.chainId ?? MERRYMEN_TOKEN.chainId),
+      // one live booker. See the header. Both from scannerClassifyContext, the
+      // one place the scanner's inputs are named (an owner operation's record
+      // leaves a leg to "the scanner's flow" on exactly these).
+      reserveTokens: context.reserveTokens,
     });
 
     // EXACTLY capital-in or capital-out. Never widen this to `reserve-out`:
