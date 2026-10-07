@@ -662,6 +662,23 @@ DM cannot be reached. At most six of these per 10 minutes. Anyone else gets
 the room's deflection, which, made before any lookup, spends none of the
 room's research answers, and her DM is never touched.
 
+**A tail** ("pine can you tail unipcs trades for the next 3 hours, inform me of his
+thesis and if you like the trade as well, take it"). Read by code before the router
+(and before the desk; the Fomo lane does not take it), where the research lane is
+wired: `parseTailRequest` (`packages/core/src/tail-request.ts`) finds the trader and
+the hours, and "copy", "mirror" and "follow" are never a tail. Her line (her sender
+id, never through a chat) goes to her DM as the tail's confirm card
+(`TgOwnerPort.proposeTail`, which gets only what code read, never the line; docs/fomo.md
+"Asking for a tail"), and nothing starts until she presses a button there; "take it"
+only adds the card's note that a tail never skips the normal review (rule 1). The
+room hears "sent it to your DMs 🤫" (or "dm me /start first"), never the trader, the
+hours or the word "tail" (rule 3). Anyone else's tail line gets "only my owner can do
+that 🙃", once an hour per person, and nothing else. When the router picks
+`fomo_tail` (a line the code could not read, such as "can you follow that trader for
+a bit"), code reads the line again: her line that names no trader gets the `/tail`
+usage in her DM, anyone else's the owner-only line. The pick itself never names
+anyone. The handoff runs off the chat queue.
+
 **Cost.** One call of the allowance, through the same gate. A research pick
 replaces the persona's call; a chat pick costs one more. Routing only ever
 spends the first half of the day's allowance and of this chat's hour (at
@@ -1293,6 +1310,12 @@ there (Which groups it talks in).
 * The owner's `/groups` typed in a group is answered in their DM, as when
   they type it there, and the room hears nothing; from anyone else it gets
   "only my owner can do that 🙃".
+* `/tail`, `/untail` and `/tails` (docs/fomo.md "Asking for a tail") typed in a
+  group by the owner go to her DM like any command (the tail's confirm card,
+  where nothing starts until she presses), and the room hears "sent it to your
+  DMs 🤫". From anyone else, allowlisted or not, the room gets "only my owner
+  can do that 🙃" and no DM is written. A late `/untail` runs (it only stops
+  something); a late `/tail` is held.
 * `/name`, `/remember`, `/forget`, `/soul` need an allowlisted sender in a
   group (today any member of an allowlisted group can run them). `/soul` is
   also a private read (answered in their DM), and `/forget` in a group is the
@@ -1342,6 +1365,10 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "what can you do with fomo" / "is fomo working?" | A fixed list of what a room can ask / whether Fomo research is on here; no lookup |
 | "i'm sorry, who's been winning the most lately" / "what are people over there offloading this week" | No rule knew it: the router picks the leaderboard / the crowd's sells for this week, and the research answers it as the fixed question |
 | The owner: "do you know unipcs on fomo" / "who is trader unipcs on fomo?" | One trader: looked up read-only and sent to her DM; the room hears "sent it to your DMs" and never the name. Anyone else: "That one is for a direct message, not the group." |
+| The owner: "pine can you tail unipcs trades for the next 3 hours … take it" / "pine stop tailing unipcs" | Read by code: her DM gets the tail's confirm card (or the stop's answer); the room hears "sent it to your DMs 🤫", never the trader or "tail". Nothing starts until she presses in her DM; "take it" grants nothing |
+| Anyone else: "pine tail @unipcs for 2h" / "/tail unipcs" | "only my owner can do that 🙃" (once an hour per person), nothing else; her DM is never touched |
+| The router picks a tail for a line naming no trader ("can you shadow that trader for a bit?") | Her line: the `/tail` usage in her DM; anyone else's: the owner-only line |
+| "pine copy unipcs's trades" / "pine mirror @unipcs" / "pine track $pons" | Never a tail: the line goes on as before |
 | "trending" / "$pons" in reply to its own "top traders today, or what's trending?" / "which coin?" | Read in the light of that line: Fomo's trending board / that coin's theses, not a market read or a chart |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |

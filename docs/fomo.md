@@ -430,15 +430,21 @@ stop concurrent signals from overspending.
 
 An owner can ask Merrymen to **tail** one Fomo trader for a few hours: to be told, in
 their own Telegram DM, about that trader's buys, sells and theses that Fomo's live feed
-records, with Merrymen's own read of each coin. It is not copy trading. This section is
-the backend (`worker/src/fomo/store.ts`, `tools.ts`, `service.ts`, `ingest.ts`,
-`orchestrator-fomo.ts`, `tail-notices.ts`, `tail-notifier.ts`); the Telegram commands,
-the confirm card and the Stop and +1h button handling are a separate change.
+records, with Merrymen's own read of each coin. It is not copy trading. The backend is
+`worker/src/fomo/store.ts`, `tools.ts`, `service.ts`, `ingest.ts`,
+`orchestrator-fomo.ts`, `tail-notices.ts` and `tail-notifier.ts`; what the owner types
+and presses is `packages/core/src/tail-request.ts` (her words, read by code),
+`worker/src/telegram/{interpreter,executor,buttons,fomo-tail,service}.ts` and, for a
+group line, `tg-groups/handler.ts` (below, "Asking for a tail").
 
 - **Tools.** `fomo_tail_trader {trader, hours 1–12 (default 3), consider (default
-  false)}` and `fomo_untail_trader {trader}` or `{all: true}` (exactly one). Owner-only
-  mutations: never offered to a model loop or over MCP, and refused by the service for
-  any audience but the owner. Resolving the trader is free when Merrymen already knows
+  false)}`, `fomo_untail_trader {trader}` or `{all: true}` (exactly one), and
+  `fomo_extend_tail {trader, hours 1–12 (default 1)}`, which only ever moves a
+  running tail's end later, never past 12 hours from now, and never revives an ended
+  one (`store.ts extendTail`; `fomo_tail_trader` with a shorter span would cut a
+  longer tail). Owner-only mutations: never offered to a model loop (the DM
+  classifier's enum, `toolSpecs`, the chat loop's Fomo tools) or over MCP, and refused
+  by the service for any audience but the owner. Resolving the trader is free when Merrymen already knows
   the handle, otherwise one 250-credit search, never the 2,500-credit profile route.
   Stopping makes no provider call. An install without the hosted live feed
   (self-hosted, `liveFeed` false) refuses with `tail-needs-live-feed`, and with the
@@ -522,8 +528,72 @@ the confirm card and the Stop and +1h button handling are a separate change.
   owner, and a group is never told about one.
 - **Kill switch.** `MERRYMEN_FOMO_TAILS=0` (orchestrator and children, read by one
   function, `contract.ts fomoTailsOn`) stops tail routing, the tails block and the
-  notices, and the service refuses new tails (`tails-disabled`). Stored tails stay stored
-  and expire; the owner can still stop them, and research status says they are on hold.
+  notices, and the service refuses new tails and extensions (`tails-disabled`). Stored
+  tails stay stored and expire; the owner can still stop them, and research status says
+  they are on hold.
+
+### Asking for a tail
+
+Only the linked owner, in her own DM (chat id = sender id = owner id, the trusted ids
+Telegram sends, never anything said), can start, stop or list tails. Anyone else, in a
+DM or a group, is told "Only my owner can set up a tail." and nothing is called.
+
+- **Commands.** `/tail NAME [hours]` (1–12, 3 when unsaid; more than 12 is cut to 12
+  and the card says so), `/untail [NAME|all]` (bare is all) and `/tails` (what runs,
+  until when, tell-only or considered). `/tail` and `/untail` are mutations to the
+  interpreter, `/tails` a private read. The classifier's enum has none of them, and a
+  kind it does not know becomes chat, so a model can never start or stop a tail.
+- **Her words.** In her own DM, before the research planner and the classifier, her
+  line is read by code (`parseTailRequest`): "can you tail unipcs trades for the next 3
+  hours …", "keep tabs on trader cupsey for a couple hours", "stop tailing unipcs",
+  "untail all". It becomes the `/tail` or `/untail` it means. "copy", "copytrade",
+  "mirror" and "follow" a trader are never a tail (they keep their old meaning), nor
+  is a coin ("watch PONS on fomo", "track $PONS", "track PONS"), a thing of hers
+  ("track my order", "stop monitoring the price"), a pronoun ("tail him") or the bot's
+  own name. Anyone else's words, and every line where Fomo is off in the process, go on
+  exactly as before.
+- **The confirm card.** `/tail` first resolves the trader read-only
+  (`fomo_resolve_subject`: our own record, else one 250-credit search). Not found: "I
+  couldn't find a Fomo trader called X." Two accounts answering to the handle: up to
+  three, and a request for the exact one. Otherwise a `fomo-tail` action is parked
+  for her (ten minutes, the one pending slot, bound to her chat and id) and the card
+  says: "Tail X on Fomo for N hours (until HH:MM UTC)?"; what she gets (each buy, sell
+  or thesis the live feed shows from them, with their thesis when there is one and my
+  read of the coin, with Stop and +1h buttons); the coverage line; what following would
+  do now (`fomo-child.ts followReadiness`: off, paper, live, or what is in the way, in
+  the notices' own words); when her words asked me to take the trade too ("if you like
+  it, take it"), that a tail never skips my normal review; and the clamp. Nothing is
+  stored until she presses.
+- **Its buttons.** "👀 Tell me only" always; "👀 + consider their buys" only when
+  following could act (paper or live, no blockers); "✖ No". A press is checked like
+  every confirm (her nonce, this exact action, not expired, still the linked owner in
+  her own DM), and consider is checked again against followReadiness at the press: a
+  stale or forged consider press (`mm:c:` on a card that never offered it) stores a
+  tell-only tail and says why. A `mm:c:` press on any other question is refused. A
+  typed `/confirm` is tell-only. The card becomes the tool's answer ("Tailing X on Fomo
+  until …"). An expired card, No, or anyone else's press starts nothing.
+- **Stop and +1h** under each running-tail notice (`ftl:stop:<userId>`,
+  `ftl:ext:<userId>`) act on the stored tail as it is now, so a notice from before a
+  restart still works (they are taken before the backlog rule, like the groups' own
+  buttons). Only her press in her own DM counts. Stop is `fomo_untail_trader`; +1h is
+  `fomo_extend_tail {hours: 1}`. A short toast answers the press ("Stopped", "+1h",
+  "Extended to the 12-hour limit", "That tail has ended.") and a plain line follows as
+  a reply to the notice, so the notice keeps what it told her.
+- **Backlog.** A `/tail` that waited out an outage is held, like an order; a late
+  `/untail` runs, since it only stops something.
+- **Asked in a group.** Groups never order trades and never hear a trader or a tail
+  (docs/tg-groups.md rules 1 and 3). Her addressed line is read by code the same way,
+  where the research lane is wired, and only what code read (trader, hours, clamp,
+  take, or a stop) goes to her DM through `TgOwnerPort.proposeTail`, which checks her
+  id and the allowlist again, proves her DM with a typing action, and runs the `/tail`
+  or `/untail` it means there: the same card and buttons. The room hears only "sent it
+  to your DMs 🤫" (or "dm me /start first"). Anyone else's tail line gets the owner-only
+  line, at most once an hour per person, and nothing else. The group router's
+  `fomo_tail` pick goes the same way, reading the line in code; her line that names no
+  trader gets the `/tail` usage in her DM. `/tail` typed in a group by her goes to her
+  DM like any command; by anyone else, the owner-only line and no DM.
+- **Discovery.** After the trader board, her DM moves (never the room) carry
+  `/tail <handle> 3h` beside the two book questions (`tg-fomo-port.ts ownerMoves`).
 
 ## Publication
 
