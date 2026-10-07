@@ -14703,6 +14703,10 @@ async function main() {
     fomo: () => fomoBroker,
     fomoGroupPort: () => tgFomoPort,
     fomoOff,
+    // A tail's confirm card (docs/fomo.md "Tailing a trader"): what following
+    // would do with a buy now, read-only, so "+ consider their buys" is
+    // offered and honoured only when it could act. Nothing where Fomo is off.
+    fomoFollowReadiness: () => (fomoOff ? null : fomoChild.followReadiness()),
     kill: () => {
       try {
         const grant = loadGrantFile();

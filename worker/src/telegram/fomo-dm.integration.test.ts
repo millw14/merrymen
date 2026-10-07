@@ -29,6 +29,7 @@ import { after, describe, it, mock } from "node:test";
 
 import type { BrokerCallOptions, FomoAccess, FomoBroker } from "../fomo/contract";
 import type { FomoToolName } from "../fomo/types";
+import type { FollowReadiness } from "../fomo-child";
 import type { TelegramState } from "./state";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-fomo-dm-"));
@@ -75,7 +76,7 @@ function blankState(over: Partial<TelegramState> = {}): TelegramState {
 }
 
 /** The research side: a real service over fixtures, behind the real in-process broker, with a spy in front. */
-async function fomoFixture() {
+async function fomoFixture(o: { liveFeed?: boolean; search?: Rec } = {}) {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await fstore.ensureFomoSchema(db, "sqlite");
@@ -85,7 +86,7 @@ async function fomoFixture() {
     provider.push(u.pathname);
     const p = u.pathname;
     if (p === "/v2/tokens/search") return fjson(fixture("tokens-search"));
-    if (p === "/v2/search") return fjson(fixture("search"));
+    if (p === "/v2/search") return fjson(o.search ?? fixture("search"));
     if (p === "/v2/alerts") {
       const b = fixture("alerts");
       const shift = Date.now() - 60_000 - ALERTS_NEWEST;
@@ -107,7 +108,7 @@ async function fomoFixture() {
     now: () => Date.now(),
   });
   const access: FomoAccess = { dataAccess: true, monitoring: false, follow: false };
-  const service = createFomoService({ db, dialect: "sqlite", client, access: async () => ({ ...access }), budget, now: () => Date.now() });
+  const service = createFomoService({ db, dialect: "sqlite", client, access: async () => ({ ...access }), budget, now: () => Date.now(), ...(o.liveFeed ? { liveFeed: true } : {}) });
   const direct = createDirectBroker(service, TENANT, { now: () => Date.now() });
   const calls: { tool: FomoToolName; args: Rec; opts: BrokerCallOptions }[] = [];
   const cleared: string[] = [];
@@ -154,6 +155,10 @@ interface Harness {
   /** The message_id Telegram gave each sendMessage, in order. */
   sentIds: (chat: number) => number[];
   sentTo: (chat: number) => string[];
+  /** The raw body of the last sendMessage to a chat (its reply_markup included). */
+  lastBody: (chat: number) => Record<string, unknown> | undefined;
+  /** A live button press by `from` on message `messageId` of chat `chat`. */
+  press: (data: string, messageId: number, from?: number, chat?: number) => void;
   /** Tick the mocked clock until `done()` or `ms` have passed. */
   until: (done: () => boolean, ms?: number) => Promise<void>;
   advance: (ms: number) => Promise<void>;
@@ -174,6 +179,12 @@ async function withDm(
     /** The owner never pressed /start: Telegram refuses anything sent to her DM. */
     dmBlocked?: boolean;
     allowlist?: number[];
+    /** The hosted live feed (tails need it). */
+    liveFeed?: boolean;
+    /** A /v2/search body instead of the fixture's. */
+    search?: Rec;
+    /** What following would do with a buy now (the child's followReadiness). */
+    readiness?: () => FollowReadiness | null;
   },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
@@ -229,7 +240,7 @@ async function withDm(
     }
     return ok(true);
   }) as typeof fetch;
-  const fx = await fomoFixture();
+  const fx = await fomoFixture({ ...(opts.liveFeed ? { liveFeed: true } : {}), ...(opts.search ? { search: opts.search } : {}) });
   const groupHome = opts.groupPick ? mkdtempSync(path.join(os.tmpdir(), "merrymen-fomo-group-")) : null;
   const groupStore = groupHome ? new TgGroupsStore(path.join(groupHome, "tg-groups.json"), emptyTgGroupsState(), { debounceMs: 60_000 }) : null;
   if (groupStore) {
@@ -284,6 +295,14 @@ async function withDm(
     },
     sentTo: (chat) => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).map((c) => plain(String(c.body.text))),
     sentIds: (chat) => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).map((c) => Number(c.body.__message_id)),
+    lastBody: (chat) => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).at(-1)?.body,
+    press: (data, messageId, from = OWNER, chat = from) => {
+      const id = updateId++;
+      queue.push({
+        update_id: id,
+        callback_query: { id: `cb${id}`, data, from: { id: from }, message: { message_id: messageId, chat: { id: chat }, date: Math.floor(Date.now() / 1000) } },
+      });
+    },
     until: async (done, ms = 20_000) => {
       for (let t = 0; t < ms && !done(); t += 250) {
         mock.timers.tick(250);
@@ -311,6 +330,7 @@ async function withDm(
     kill: () => ({ ok: true }),
     ...(opts.broker === "absent" ? {} : { fomo: () => (opts.broker === "null" ? null : fx.broker) }),
     ...(opts.fomoOff ? { fomoOff: true } : {}),
+    ...(opts.readiness ? { fomoFollowReadiness: opts.readiness } : {}),
     ...(groupStore
       ? {
           tgGroupsStore: groupStore,
@@ -696,3 +716,164 @@ describe("the owner's group ask about one trader, answered in her DM", () => {
     });
   });
 });
+
+/** The inline keyboard under a sent message, flat. */
+function buttonsOf(body: Record<string, unknown> | undefined): { text: string; callback_data: string }[] {
+  const m = body?.reply_markup as { inline_keyboard?: { text: string; callback_data: string }[][] } | undefined;
+  return (m?.inline_keyboard ?? []).flat();
+}
+const edits = (h: Harness) => h.calls.filter((c) => c.method === "editMessageText").map((c) => plain(String(c.body.text)));
+const toasts = (h: Harness) => h.calls.filter((c) => c.method === "answerCallbackQuery").map((c) => String(c.body.text ?? ""));
+const KALEO_ID = "1f08e6ab-5c73-5443-9225-bfc496cde51f";
+const READY: FollowReadiness = { mode: "paper", blockers: [] };
+const FOLLOW_OFF: FollowReadiness = { mode: "off", blockers: ["follow-off"] };
+
+/** Ask for a tail, and press one of the card's buttons. */
+async function tailAndPress(h: Harness, line: string, which: "tell" | "consider" | "no" | { forged: "consider" }): Promise<string> {
+  await ask(h, line);
+  return pressLastCard(h, which);
+}
+
+describe("a Fomo tail in the owner's DM: the card, and nothing until she presses", () => {
+  it("/tail resolves read-only and shows the card; with following able to act, consider is offered and honoured", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      h.fx.access.follow = true;
+      const card = await ask(h, "/tail CryptoKaleo 2h");
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"], "read-only first");
+      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0, "nothing is stored by asking");
+      assert.match(card, /^👀 Tail CryptoKaleo on Fomo for 2 hours \(until \d\d:\d\d UTC\)\?/);
+      assert.match(card, /each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one and my read of the coin/);
+      assert.match(card, /only shows larger positions.*no alert is not proof they didn't trade/s);
+      assert.match(card, /Following is on, on paper/);
+      assert.doesNotMatch(card, /\bcopy/i);
+      assert.deepEqual(buttonsOf(h.lastBody(OWNER)).map((b) => b.text), ["👀 Tell me only", "👀 + consider their buys", "✖ No"]);
+      const done = await pressLastCard(h, "consider");
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: KALEO_ID, hours: 2, consider: true });
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+      assert.match(done, /^Tailing CryptoKaleo on Fomo until \d\d:\d\d UTC \(2 h\)\./);
+      assert.match(done, /one signal into my normal review/);
+      assert.doesNotMatch(done, /tell you only/);
+    });
+  });
+
+  it("tell only: stored without consider; No: nothing stored", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      const no = await tailAndPress(h, "/tail CryptoKaleo", "no");
+      assert.match(no, /cancelled/);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_tail_trader"));
+      const tell = await tailAndPress(h, "/tail CryptoKaleo", "tell");
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: KALEO_ID, hours: 3, consider: false });
+      assert.match(tell, /You asked me to tell you only/);
+      assert.equal(Number((h.fx.raw.prepare("SELECT consider FROM fomo_tails").get() as { consider: number }).consider), 0);
+    });
+  });
+
+  it("following can't act: no consider button, the reason on the card, and a forged consider press is tell-only with a note", async () => {
+    await withDm({ liveFeed: true, readiness: () => FOLLOW_OFF }, async (h) => {
+      const card = await ask(h, "/tail CryptoKaleo 2h");
+      assert.match(card, /Following is off, so this tail can only tell you/);
+      assert.deepEqual(buttonsOf(h.lastBody(OWNER)).map((b) => b.text), ["👀 Tell me only", "✖ No"]);
+      const done = await pressLastCard(h, { forged: "consider" });
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: KALEO_ID, hours: 2, consider: false });
+      assert.match(done, /Tailing CryptoKaleo/);
+      assert.match(done, /Following can't act right now \(following is off\), so I've set this up to tell you only\./);
+    });
+  });
+
+  it("a stale consider press (following stopped being able to act after the card) is tell-only with a note", async () => {
+    let readiness: FollowReadiness = READY;
+    await withDm({ liveFeed: true, readiness: () => readiness }, async (h) => {
+      await ask(h, "/tail CryptoKaleo 2h");
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 3);
+      readiness = { mode: "paper", blockers: ["paused"] };
+      const done = await pressLastCard(h, "consider");
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: KALEO_ID, hours: 2, consider: false });
+      assert.match(done, /Following can't act right now \(entries are paused\)/);
+    });
+  });
+
+  it("more than 12 hours: clamped to 12, and the card says so", async () => {
+    await withDm({ liveFeed: true, readiness: () => FOLLOW_OFF }, async (h) => {
+      const card = await ask(h, "/tail CryptoKaleo 30");
+      assert.match(card, /for 12 hours/);
+      assert.match(card, /You asked for more than 12 hours; a tail runs 12 at most\./);
+    });
+  });
+
+  it("an expired card starts nothing", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      await ask(h, "/tail CryptoKaleo");
+      await h.advance(10 * 60_000 + 2_000);
+      const done = await pressLastCard(h, "consider");
+      assert.match(done, /expired/);
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_tail_trader"));
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+    });
+  });
+
+  it("anyone else: the owner-only line, no lookup; and they cannot press her card", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      assert.equal(await ask(h, "/tail CryptoKaleo 2h", FRIEND), "Only my owner can set up a tail.");
+      assert.equal(await ask(h, "/untail all", FRIEND), "Only my owner can set up a tail.");
+      assert.equal(await ask(h, "/tails", FRIEND), "Only my owner can set up a tail.");
+      assert.equal(h.fx.calls.length, 0);
+      await ask(h, "/tail CryptoKaleo 2h");
+      const body = h.lastBody(OWNER)!;
+      const consider = buttonsOf(body).find((b) => /consider/.test(b.text))!.callback_data;
+      h.press(consider, Number(body.__message_id), FRIEND, OWNER);
+      await h.until(() => toasts(h).length > 0);
+      assert.match(toasts(h)[0]!, /nothing waiting for you/);
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_tail_trader"));
+    });
+  });
+
+  it("a trader Fomo doesn't know, or two that answer to the handle: said plainly, nothing parked", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      assert.equal(await ask(h, "/tail unipcs 3h"), "I couldn't find a Fomo trader called unipcs.");
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 0);
+    });
+    const row = (fixture("search").results as Rec[])[0]!;
+    const twin = { ...row, handle: "cryptokaleo", userId: "2b08e6ab-5c73-5443-9225-bfc496cde51f", displayName: "Kaleo Fan" };
+    await withDm({ liveFeed: true, readiness: () => READY, search: { results: [row, twin] } }, async (h) => {
+      const r = await ask(h, "/tail CryptoKaleo");
+      assert.match(r, /^More than one Fomo trader answers to CryptoKaleo: CryptoKaleo \(K A L E O\), cryptokaleo \(Kaleo Fan\)\. Which one\?/);
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 0);
+    });
+  });
+
+  it("/tails lists what runs; /untail stops it; the bot's own name is never a trader", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      assert.match(await ask(h, "/tails"), /^You aren't tailing anyone on Fomo\./);
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.match(await ask(h, "/tails"), /Tailing on Fomo\n• CryptoKaleo until \d\d:\d\d UTC \(tell only\)/);
+      assert.match(await ask(h, "/untail CryptoKaleo"), /^Stopped tailing CryptoKaleo\./);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+      assert.match(await ask(h, "/untail all"), /^You weren't tailing anyone\./);
+      assert.match(await ask(h, "/tail pine 2h"), /^usage: \/tail <trader>/);
+    });
+  });
+
+  it("no live feed on this install: the press says so, and nothing is stored", async () => {
+    await withDm({ readiness: () => READY }, async (h) => {
+      const done = await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.match(done, /Tailing needs Fomo's live feed/);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+    });
+  });
+});
+
+/** Press a button on the last card sent to her DM. */
+async function pressLastCard(h: Harness, which: "tell" | "consider" | "no" | { forged: "consider" }): Promise<string> {
+  const body = h.lastBody(OWNER)!;
+  const kb = buttonsOf(body);
+  const nonce = /^mm:[ycn]:([a-z2-7]{10})$/.exec(kb[0]?.callback_data ?? "")?.[1];
+  assert.ok(nonce, "the last message is a card");
+  const data =
+    typeof which === "object" ? `mm:c:${nonce}` : which === "tell" ? `mm:y:${nonce}` : which === "consider" ? kb.find((b) => /consider/.test(b.text))!.callback_data : `mm:n:${nonce}`;
+  const before = edits(h).length;
+  h.press(data, Number(body.__message_id));
+  await h.until(() => edits(h).length > before);
+  return edits(h).at(-1)!;
+}
