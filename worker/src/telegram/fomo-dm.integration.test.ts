@@ -877,3 +877,56 @@ async function pressLastCard(h: Harness, which: "tell" | "consider" | "no" | { f
   await h.until(() => edits(h).length > before);
   return edits(h).at(-1)!;
 }
+
+/** A /v2/search body with one trader called unipcs. */
+const UNIPCS_ID = "3c08e6ab-5c73-5443-9225-bfc496cde51f";
+const unipcsSearch = (): Rec => ({ results: [{ ...(fixture("search").results as Rec[])[0]!, handle: "unipcs", userId: UNIPCS_ID, displayName: "uni" }] });
+const MILLA = "can you tail unipcs trades for the next 3 hours, inform me of his thesis and if you like the trade as well, take it";
+
+describe("a Fomo tail asked for in words, in the owner's DM", () => {
+  it("Milla's line: the same card /tail unipcs 3h gives, saying a tail never skips my review; nothing bought, nothing stored by asking", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
+      const card = await ask(h, MILLA);
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"], "read-only first; never the research planner's trader read");
+      assert.match(card, /^👀 Tail unipcs on Fomo for 3 hours \(until \d\d:\d\d UTC\)\?/);
+      assert.match(card, /You asked me to take the trade if I like it: a tail never skips my normal review\./);
+      assert.deepEqual(buttonsOf(h.lastBody(OWNER)).map((b) => b.text), ["👀 Tell me only", "👀 + consider their buys", "✖ No"]);
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+      const done = await pressLastCard(h, "tell");
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: UNIPCS_ID, hours: 3, consider: false });
+      assert.match(done, /^Tailing unipcs on Fomo until/);
+      assert.equal(h.llm.length, 0, "no model read her words");
+      // Her words, and the card, are in her DM history like any turn.
+      const turns = await recentChatTurns(OWNER, 6);
+      assert.ok(turns.some((t) => t.role === "user" && t.content === MILLA));
+    });
+  });
+
+  it("'keep tabs on trader X for a couple hours' is a tail, not a profile question; 'stop tailing X' stops it", async () => {
+    await withDm({ liveFeed: true, readiness: () => FOLLOW_OFF, search: unipcsSearch() }, async (h) => {
+      const card = await ask(h, "keep tabs on trader unipcs for a couple hours");
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"]);
+      assert.match(card, /for 2 hours/);
+      await pressLastCard(h, "tell");
+      assert.match(await ask(h, "stop tailing unipcs"), /^Stopped tailing unipcs\./);
+      assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: "unipcs" });
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+    });
+  });
+
+  it("copy, mirror and follow are never a tail; nor is anyone else's line; nor any line where Fomo is off", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
+      for (const line of ["copy unipcs trades for 3 hours", "mirror @unipcs", "follow unipcs for 3 hours"]) {
+        await ask(h, line);
+      }
+      await ask(h, MILLA, FRIEND);
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_resolve_subject" || c.tool === "fomo_tail_trader"), JSON.stringify(h.fx.calls.map((c) => c.tool)));
+      assert.ok(!h.sentTo(FRIEND).some((t) => /Tail unipcs/.test(t)));
+      assert.ok(!h.sentTo(OWNER).some((t) => /Tail unipcs/.test(t)));
+    });
+    await withDm({ fomoOff: true, liveFeed: true, readiness: () => READY }, async (h) => {
+      assert.match(await ask(h, MILLA), /pick an AI provider/);
+      assert.deepEqual(h.fx.calls, []);
+    });
+  });
+});

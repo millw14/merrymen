@@ -25,7 +25,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
-import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode } from "../../../packages/core/src/index";
+import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths } from "../home";
@@ -148,6 +148,12 @@ import type { HeldGroupEntry } from "./held-groups";
  * As slash commands they still return the exact report.
  */
 const ANSWER_KINDS: ReadonlySet<string> = new Set(["chat", "status", "positions", "pnl", "trades", "why"]);
+
+/**
+ * Her tail line also asks me to take the trade ("if you like it, take it").
+ * That grants nothing: the card says a tail never skips my normal review.
+ */
+const TAIL_TAKE = /\b(?:take|buy|ape|enter|grab)\s+(?:it|them|that|in|the trade|the position|a position)\b|\bget in\b/i;
 
 /** Buttons a command asked to have under its reply. */
 interface ReplyExtras {
@@ -1812,6 +1818,24 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const t = msg.text.trim();
         if (/^(yes|y|yep|yeah|ok|okay|sure|do it|confirm|go ahead|please do)[.!\s]*$/i.test(t)) cmd = { kind: "confirm" };
         else if (/^(no|n|nope|cancel|never ?mind|don'?t|leave it)[.!\s]*$/i.test(t)) cmd = { kind: "cancel" };
+      }
+    }
+    if (!cmd && deps.fomoOff !== true && fomoOwnerDm(msg) && !msg.text.trim().startsWith("/")) {
+      // HER TAIL IN WORDS ("can you tail unipcs trades for the next 3 hours"),
+      // read by code (packages/core tail-request.ts) and run as the /tail or
+      // /untail it means, card and all: nothing starts until she presses a
+      // button on it. Before the research planner, which would read "keep tabs
+      // on trader X" as a profile question, and the classifier, whose closed
+      // enum has no tail. Hers only, in her own DM, by trusted ids: anyone
+      // else's words go on below exactly as before, and "copy", "mirror" and
+      // "follow" a trader are never a tail.
+      const t = parseTailRequest(msg.text, fomoSelfNames(cfg));
+      if (t) {
+        cmd =
+          t.kind === "start"
+            ? { kind: "tail", handle: t.handle, hours: t.hours, clamped: t.clamped, ...(TAIL_TAKE.test(msg.text) ? { take: true } : {}) }
+            : { kind: "untail", handle: t.handle };
+        await pushHistory(msg.chatId, "user", msg.text);
       }
     }
     if (!cmd && msg.chatId === msg.fromId && !msg.text.trim().startsWith("/")) {
