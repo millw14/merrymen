@@ -5513,7 +5513,10 @@ async function main() {
         nowSec: now,
       });
       const q = quotes.get("WETH");
-      if (q && q.price8 > 0n) {
+      // The pool's own TWAP only. The reader can answer a pool with no oracle
+      // off our sampled series (spot-sampler.ts); for ETH itself the feed
+      // below is the better fallback than a few minutes of our readings.
+      if (q && q.source === "pool" && q.price8 > 0n) {
         ethPriceCache = { price8: q.price8, atSec: now };
         return { price8: q.price8 };
       }
