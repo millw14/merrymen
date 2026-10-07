@@ -578,6 +578,36 @@ describe("buildPrompt", () => {
     assert.match(prompt, /If they ask what you think, give your own take/);
   });
 
+  it("follows the thread: the → line says what it replies to, its own lines whom they answered", () => {
+    // The exchange that went wrong: "are you serious?" under its own coin
+    // reply read as a fresh question, and it answered "yeah i am".
+    const ask = line(7, "mami", "So what do you think about sex");
+    const own = { ...line(99, "Pine Stoat", "there's more than one coin with that name on robinhood chain. drop the CA of the one you mean", true), replyTo: ask.messageId };
+    const trigger = { ...line(7, "mami", "Are you serious ?"), replyTo: own.messageId };
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [ask, own, trigger] }), trigger, senderName: "mami" }))!;
+    assert.match(p.prompt, /\[you\] \(to mami\) there's more than one coin with that name/);
+    assert.match(p.prompt, /→ mami \(replying to your line «there's more than one coin with that name on robinhood chain\. drop the CA of the one you mean»\): Are you serious \?/);
+    assert.match(p.system, /FOLLOW THE THREAD/);
+    assert.match(p.system, /if you misread them, own it in a few words and answer what they actually meant\. Never double down on a misreading\./);
+  });
+
+  it("names whose line the → line replies to, quoted short and fence-safe", () => {
+    const first = line(5, "ann", `wen moon <b>${"x".repeat(300)}</b>`);
+    const trigger = { ...line(6, "bob", "lol same"), replyTo: first.messageId };
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [first, trigger] }), trigger }))!;
+    const note = /→ bob \(replying to ann: «([^»]*)»\): lol same/.exec(p.prompt);
+    assert.ok(note, "the reply is named");
+    assert.ok(note![1]!.length <= 101, "quoted short");
+    assert.ok(!/[<>]/.test(note![1]!), "nothing in the quote can open or close a fence");
+  });
+
+  it("a line that replies to nothing it can see carries no note", () => {
+    const trigger = { ...line(6, "bob", "lol same"), replyTo: 123_456 };
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [trigger] }), trigger }))!;
+    assert.match(p.prompt, /→ bob: lol same/);
+    assert.doesNotMatch(p.prompt, /replying to/);
+  });
+
   it("without the owner's name it says 'my owner'", () => {
     const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ ownerName: null }))!;
     assert.match(p.system, /say "my owner"/);
