@@ -593,6 +593,16 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   a stop with no tail word that names someone she is not tailing ("stop tracking pons",
   a lower-case coin) also goes on to the planner; one local read
   (`fomo_get_research_status`) decides, never a provider call.
+- **Where a tail cannot work.** Telegram asks first (`fomoTailsState` in
+  `worker/src/index.ts`: the switch and the hosted live feed). With
+  `MERRYMEN_FOMO_TAILS=0`, or self-hosted (no live feed), `/tail` answers the service's
+  own refusal straight away ("Tailing is switched off on this service right now…" /
+  "Tailing needs Fomo's live feed…"): no search is spent, no card is shown, nothing is
+  parked. Her words asking for a tail, in her DM or her group line, go on to research
+  exactly as before; with the switch off a stop is still read, so a stored tail can be
+  stopped. The trader board's moves offer no `/tail`. With 3 tails running, a `/tail`
+  for a fourth trader is refused before the lookup too (one local read of her tails);
+  renewing one of the three is not.
 - **The confirm card.** `/tail` first resolves the trader read-only
   (`fomo_resolve_subject`: our own record, else one 250-credit search). Not found: "I
   couldn't find a Fomo trader called X." Two accounts answering to the handle: up to
@@ -634,7 +644,8 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   trader gets the `/tail` usage in her DM. `/tail` typed in a group by her goes to her
   DM like any command; by anyone else, the owner-only line and no DM.
 - **Discovery.** After the trader board, her DM moves (never the room) carry
-  `/tail <handle> 3h` beside the two book questions (`tg-fomo-port.ts ownerMoves`).
+  `/tail <handle> 3h` beside the two book questions (`tg-fomo-port.ts ownerMoves`),
+  only where a tail can work (`tailsAvailable`).
 
 ## Publication
 

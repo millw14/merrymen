@@ -435,6 +435,18 @@ describe("the owner's moves", () => {
     assert.deepEqual(parseSlash("/tail CryptoKaleo 3h"), { kind: "tail", handle: "CryptoKaleo", hours: 3, clamped: false });
   });
 
+  it("where a tail cannot work (switched off, or no live feed here), the trader moves offer no /tail (review 2026-10-07)", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, tailsAvailable: () => false });
+    const a = await port.ask({ text: "who's the top trader on fomo today?", owner: true, chatId: GROUP });
+    assert.ok(a?.moves);
+    assert.match(a.moves.dm, /<code>what is trader CryptoKaleo holding<\/code>/, "the book questions stay");
+    assert.doesNotMatch(a.moves.dm, /\/tail/);
+    const throwing = createTgFomoPort(() => s.broker, { now: () => s.clock.now, tailsAvailable: () => { throw new Error("x"); } });
+    const b = await throwing.ask({ text: "who's the top trader on fomo today?", owner: true, chatId: GROUP + 1 });
+    assert.doesNotMatch(b?.moves?.dm ?? "", /\/tail/, "unknown is no offer");
+  });
+
   it("after a coin board: /buy only where /buy resolves, the CA to post for a review on Robinhood Chain, watch and theses", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, buyable: (sym) => sym === "PONS" });

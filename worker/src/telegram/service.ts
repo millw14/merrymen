@@ -76,7 +76,7 @@ import { FOMO_ATTRIBUTION, renderEnvelope } from "../fomo/render";
 import type { ResearchStatusData } from "../fomo/tools";
 import type { FomoEnvelope } from "../fomo/types";
 import type { FollowReadiness } from "../fomo-child";
-import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText } from "./fomo-tail";
+import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText, type FomoTailsState } from "./fomo-tail";
 import type { ExtendTailData } from "../fomo/tools";
 import { TAIL_CAP_SPENT_LINE } from "../fomo/tail-notices";
 import { resolveLlm } from "../llm";
@@ -250,6 +250,17 @@ export interface TelegramServiceDeps {
    * send. Read-only. Absent, null or throwing: not said.
    */
   fomoTailCapSpent?: (userId: string) => Promise<boolean | null>;
+  /**
+   * WHETHER A TAIL CAN WORK HERE AT ALL (index.ts: the same switch the
+   * notices read, and the hosted live feed): "on"; "switched-off"
+   * (MERRYMEN_FOMO_TAILS=0); "no-live-feed" (self-hosted: only the hosted
+   * service has Fomo's live feed). Not "on": /tail says so up front, with no
+   * search spent and no card; her words asking for one go on to research as
+   * before; the trader board offers no /tail. Stopping a stored tail still
+   * works with the switch off. Absent or throwing: "on" (the service still
+   * refuses at the press).
+   */
+  fomoTailsState?: () => FomoTailsState;
   /** Injectable for tests. */
   now?: () => number;
   /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
@@ -997,6 +1008,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const OWNER_ASKS_WINDOW_MS = 10 * 60_000;
   const OWNER_ASKS_MAX = 6;
   ownerPort = {
+    tailsState: () => (deps.fomoOff === true ? "no-live-feed" : tailsState()),
     research: async (q): Promise<TgOwnerOutcome> => {
       try {
         const cfg = groupCfg();
@@ -1198,6 +1210,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
   };
   const TAIL_UNAVAILABLE_TEXT = "Tailing a Fomo trader isn't available here: Fomo research isn't set up for this agent.";
+  /** deps.fomoTailsState, never throwing: unknown is "on", and the service decides at the press. */
+  const tailsState = (): FomoTailsState => {
+    try {
+      const st = deps.fomoTailsState?.();
+      return st === "switched-off" || st === "no-live-feed" ? st : "on";
+    } catch {
+      return "on";
+    }
+  };
   /**
    * Whether she is tailing a trader by this handle now: one local read
    * (fomo_get_research_status, never a provider call). Unknown (no broker, a
@@ -1230,6 +1251,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   /** The bot's own names, lower-cased without "@": never a trader to tail. */
   const selfLower = (cfg: ResolvedConfig): string[] => fomoSelfNames(cfg).map((n) => n.replace(/^@+/, "").toLowerCase());
 
+  /** The service's own words for a tail it would refuse (fomo/service.ts toolTail), said before any lookup. */
+  const TAIL_OFF_TEXT: Record<Exclude<FomoTailsState, "on">, string> = {
+    "switched-off": "Tailing is switched off on this service right now, so I haven't set up a tail; I can still answer Fomo questions.",
+    "no-live-feed": "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.",
+  };
+  /** At most this many tails run at once (fomo/store.ts FOMO_LIMITS.activeTailsPerTenant). */
+  const TAIL_ACTIVE_MAX = 3;
+
   /**
    * /tail, /untail and /tails for ONE sender (executor.ts CommandDeps.fomoTails).
    * `owner` from trusted ids only: the linked owner, in her own DM; the
@@ -1251,8 +1280,24 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       propose: async (cmd) => {
         const b = brokerNow();
         if (!b) return esc(TAIL_UNAVAILABLE_TEXT);
+        // A tail this service would refuse is refused HERE, before the
+        // trader is resolved: no search spent, no card, nothing parked.
+        const st = tailsState();
+        if (st !== "on") return esc(TAIL_OFF_TEXT[st]);
         const asked = tailHandle(cmd.handle);
         if (!asked || selfLower(cfg).includes(asked.toLowerCase())) return esc(TAIL_USAGE);
+        // Three running and this is none of them: the store would refuse it
+        // at the press, so say so now (one local read, never a provider call).
+        // A read that does not answer goes on: the store still decides.
+        try {
+          const status = await b.call("fomo_get_research_status", {}, tailOpts(msg.chatId));
+          const running = (status.data as ResearchStatusData | null)?.tails;
+          if (Array.isArray(running) && running.length >= TAIL_ACTIVE_MAX && !running.some((t) => typeof t.handle === "string" && t.handle.toLowerCase() === asked.toLowerCase())) {
+            return esc(`You already have ${TAIL_ACTIVE_MAX} tails running, the most there can be; stop one first (/tails lists them, /untail <trader> stops one).`);
+          }
+        } catch {
+          // the store's own cap still holds at the press
+        }
         const env = await b.call("fomo_resolve_subject", { query: asked, kind: "trader" }, tailOpts(msg.chatId));
         if (env.status === "needs-clarification") {
           const cands = env.candidates.flatMap((c) => (c.subject.kind === "trader" ? [{ handle: c.subject.trader.handle, displayName: c.subject.trader.displayName }] : []));
@@ -1963,7 +2008,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // pons": a coin in lower case reads like a handle) goes on below too,
       // as it did before tails existed: only a local read decides that, no
       // provider call.
-      const t = parseTailRequest(msg.text, fomoSelfNames(cfg));
+      //
+      // WHERE A TAIL CANNOT WORK (tailsState): self-hosted, her words go on
+      // exactly as before tails existed; with the switch off, a start goes on
+      // as before too, and only a stop is still read, so stored tails can be
+      // stopped.
+      const st = tailsState();
+      const parsed = st === "no-live-feed" ? null : parseTailRequest(msg.text, fomoSelfNames(cfg));
+      const t = parsed && (st === "on" || parsed.kind !== "start") ? parsed : null;
       if (t && (t.kind !== "stop" || t.handle === null || saysTail(msg.text) || (await tailRunsFor(msg.chatId, t.handle)))) {
         cmd =
           t.kind === "start"

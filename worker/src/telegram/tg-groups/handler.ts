@@ -2227,10 +2227,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // trader X on fomo?" as a profile question); it is handled right after
       // that lane, before the desk and the router: her line goes to her DM as
       // the confirm card, anyone else's gets the owner-only line (tailLine).
-      const tailAsk =
-        fomoNow() !== null && dec.mood !== "private-ask" && j.addressed !== null && !isInjection(j.line.text)
+      //
+      // Where a tail cannot work (TgOwnerPort.tailsState: switched off, or no
+      // live feed on this install), a start is no tail and goes on to the
+      // research lane as before; with the switch off a stop still is one.
+      const tailsHere = tailsStateNow();
+      const tailParsed =
+        fomoNow() !== null && tailsHere !== "no-live-feed" && dec.mood !== "private-ask" && j.addressed !== null && !isInjection(j.line.text)
           ? parseTailRequest(j.line.text, selfNamesOf(selfNow()))
           : null;
+      const tailAsk = tailParsed && (tailsHere === "on" || tailParsed.kind !== "start") ? tailParsed : null;
       if (j.fomo === true && !tailAsk && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
         const r = await fomoAnswer(chatId, j, replyOpts);
         if (r === "sent") return null;
@@ -2706,6 +2712,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       return d.owner?.() ?? null;
     } catch {
       return null;
+    }
+  };
+  /** Whether a tail can work here (TgOwnerPort.tailsState); absent or throwing: "on". */
+  const tailsStateNow = (): "on" | "switched-off" | "no-live-feed" => {
+    try {
+      const st = ownerNow()?.tailsState?.();
+      return st === "switched-off" || st === "no-live-feed" ? st : "on";
+    } catch {
+      return "on";
     }
   };
   /** The text of the line this one replies to, when Telegram quoted it. */

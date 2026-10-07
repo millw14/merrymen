@@ -24,6 +24,13 @@ import { esc } from "./api";
 
 const HOUR_MS = 3_600_000;
 
+/**
+ * Whether a tail can work in this process at all: "on"; "switched-off"
+ * (MERRYMEN_FOMO_TAILS=0, contract.ts fomoTailsOn); "no-live-feed"
+ * (self-hosted: only the hosted service has Fomo's live feed).
+ */
+export type FomoTailsState = "on" | "switched-off" | "no-live-feed";
+
 /** A Fomo handle as it may be shown and parked: a plain handle, or null. */
 export function tailHandle(raw: unknown): string | null {
   const h = typeof raw === "string" ? raw.trim().replace(/^@/, "") : "";

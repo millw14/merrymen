@@ -14653,10 +14653,21 @@ async function main() {
     () => {},
   );
   // Telegram groups reach the research through this port only (coin-level aggregates, audience "group").
+  /**
+   * WHETHER A FOMO TAIL CAN WORK IN THIS PROCESS (docs/fomo.md "Tailing a
+   * trader"): the operator's switch (the same fomoTailsOn the notices read)
+   * and Fomo's live feed, which only the hosted service has (the hosted
+   * broker is the orchestrator's Postgres runtime, liveFeed on; self-hosted
+   * is the local sqlite one, liveFeed off). Telegram asks this before it
+   * resolves a trader or shows a card, so nothing is spent on a tail the
+   * service would refuse.
+   */
+  const fomoTailsState = (): "on" | "switched-off" | "no-live-feed" => (!isHostedMode() ? "no-live-feed" : !fomoTailsOn() ? "switched-off" : "on");
   const tgFomoPort = createTgFomoPort(() => fomoBroker, {
     // The owner's moves offer /buy only where /buy would resolve: the same
     // ticker shape /buy parses and the same watch-set resolution it uses.
     buyable: (symbol) => /^[A-Za-z]{1,6}$/.test(symbol) && resolveOrderToken(symbol, watchTokens).kind === "token",
+    tailsAvailable: () => !fomoOff && fomoTailsState() === "on",
   });
 
   // Kept for the SIGTERM handler below, which stops the poll on the way out.
@@ -14709,6 +14720,7 @@ async function main() {
     fomoFollowReadiness: () => (fomoOff ? null : fomoChild.followReadiness()),
     // A renewal or +1h of a tail whose 30 notices are spent says so (read-only).
     fomoTailCapSpent: (userId) => (fomoOff ? Promise.resolve(null) : fomoTailNotifier.capSpent(userId)),
+    fomoTailsState,
     kill: () => {
       try {
         const grant = loadGrantFile();

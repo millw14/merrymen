@@ -952,4 +952,22 @@ describe("a Fomo tail asked for in the room (docs/fomo.md \"Tailing a trader\")"
     await said(msg(MILLA, { fromId: OWNER, fromFirstName: "Milla" }));
     assert.deepEqual(tails, []);
   });
+
+  it("where a tail cannot work (switched off, no live feed), her start line is no tail and goes on to research; with the switch off a stop still is one (review 2026-10-07)", async () => {
+    let state: "on" | "switched-off" | "no-live-feed" = "no-live-feed";
+    make({ owner: () => ({ ...ownerPort(), tailsState: () => state }) });
+    await said(msg("pine keep tabs on trader unipcs on fomo for a couple hours", { fromId: OWNER, fromFirstName: "Milla", messageId: 970 } as Partial<TgMessage>));
+    assert.deepEqual(tails, [], "no card, no search");
+    assert.ok(fomo!.asks.length + routeCalls + chatCalls > 0, `the line went on as before tails existed (${fomo!.asks.length}/${routeCalls}/${chatCalls})`);
+    clock += 3 * MIN;
+    await said(msg("pine stop tailing unipcs", { fromId: OWNER, fromFirstName: "Milla", messageId: 971 } as Partial<TgMessage>));
+    assert.deepEqual(tails, [], "no tails can exist here: nothing to stop");
+    state = "switched-off";
+    clock += 3 * MIN;
+    await said(msg("pine tail @unipcs for 2h", { fromId: OWNER, fromFirstName: "Milla", messageId: 972 } as Partial<TgMessage>));
+    assert.deepEqual(tails, []);
+    clock += 3 * MIN;
+    await said(msg("pine stop tailing unipcs", { fromId: OWNER, fromFirstName: "Milla", messageId: 973 } as Partial<TgMessage>));
+    assert.deepEqual(tails, [{ tail: { kind: "stop", handle: "unipcs" }, fromId: OWNER }], "a stored tail can still be stopped");
+  });
 });

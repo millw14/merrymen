@@ -680,6 +680,9 @@ usage in her DM, anyone else's the owner-only line. The pick itself never names
 anyone. The handoff runs off the chat queue. A stop is read as narrowly as a start
 (docs/fomo.md "A stop is as narrow as a start"): "pine stop tracking $PONS" is no tail
 stop at all, and "pine stop tailing him" stops nothing and asks her which, in her DM.
+Where a tail cannot work (`MERRYMEN_FOMO_TAILS=0`, or no live feed on a self-hosted
+install: `TgOwnerPort.tailsState`), her start line is no tail and goes on to the
+research lane as before; with the switch off a stop is still read.
 
 **Cost.** One call of the allowance, through the same gate. A research pick
 replaces the persona's call; a chat pick costs one more. Routing only ever

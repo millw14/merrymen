@@ -188,6 +188,8 @@ async function withDm(
     readiness?: () => FollowReadiness | null;
     /** Whether a tail's 30 notices are spent (the child's tail notifier). */
     capSpent?: (userId: string) => Promise<boolean | null>;
+    /** Whether a tail can work here (index.ts fomoTailsState). */
+    tailsState?: () => "on" | "switched-off" | "no-live-feed";
   },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
@@ -335,6 +337,7 @@ async function withDm(
     ...(opts.fomoOff ? { fomoOff: true } : {}),
     ...(opts.readiness ? { fomoFollowReadiness: opts.readiness } : {}),
     ...(opts.capSpent ? { fomoTailCapSpent: opts.capSpent } : {}),
+    ...(opts.tailsState ? { fomoTailsState: opts.tailsState } : {}),
     ...(groupStore
       ? {
           tgGroupsStore: groupStore,
@@ -743,8 +746,8 @@ describe("a Fomo tail in the owner's DM: the card, and nothing until she presses
     await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
       h.fx.access.follow = true;
       const card = await ask(h, "/tail CryptoKaleo 2h");
-      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"], "read-only first");
-      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_research_status", "fomo_resolve_subject"], "read-only first: her running tails (local), then the trader");
+      for (const c of h.fx.calls) assert.equal(c.opts.audience, "owner");
       assert.equal(count(h.fx.raw, "fomo_tails"), 0, "nothing is stored by asking");
       assert.match(card, /^👀 Tail CryptoKaleo on Fomo for 2 hours \(until \d\d:\d\d UTC\)\?/);
       assert.match(card, /each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one and my read of the coin/);
@@ -859,11 +862,58 @@ describe("a Fomo tail in the owner's DM: the card, and nothing until she presses
     });
   });
 
-  it("no live feed on this install: the press says so, and nothing is stored", async () => {
+  it("no live feed on this install: /tail says so up front, with no lookup, no provider request and no card (review 2026-10-07)", async () => {
+    await withDm({ readiness: () => READY, tailsState: () => "no-live-feed" }, async (h) => {
+      const r = await ask(h, "/tail CryptoKaleo 2h");
+      assert.equal(r, "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.");
+      assert.deepEqual(h.fx.calls, [], "nothing resolved: no 250-credit search");
+      assert.deepEqual(h.fx.provider, []);
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 0, "no card, nothing parked");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+      // Her words go on to research as before tails existed, never a card.
+      const words = await ask(h, "keep tabs on trader CryptoKaleo for a couple hours");
+      assert.doesNotMatch(words, /^👀 Tail /);
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 0);
+    });
+    // Unknown here (no state given): the service still refuses at the press.
     await withDm({ readiness: () => READY }, async (h) => {
       const done = await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
       assert.match(done, /Tailing needs Fomo's live feed/);
       assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+    });
+  });
+
+  it("MERRYMEN_FOMO_TAILS=0: /tail is refused up front with no search; a start in words goes on as before; a stored tail can still be stopped (review 2026-10-07)", async () => {
+    let state: "on" | "switched-off" = "on";
+    await withDm({ liveFeed: true, readiness: () => READY, tailsState: () => state }, async (h) => {
+      await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 1);
+      state = "switched-off";
+      const n = h.fx.calls.length;
+      const p = h.fx.provider.length;
+      assert.equal(await ask(h, "/tail CryptoKaleo 3h"), "Tailing is switched off on this service right now, so I haven't set up a tail; I can still answer Fomo questions.");
+      assert.equal(h.fx.calls.length, n, "no lookup");
+      assert.equal(h.fx.provider.length, p, "no provider request");
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 0, "no card");
+      const words = await ask(h, "keep tabs on trader CryptoKaleo for a couple hours");
+      assert.doesNotMatch(words, /^👀 Tail /, "not a tail card");
+      assert.match(await ask(h, "stop tailing CryptoKaleo"), /^Stopped tailing CryptoKaleo\./, "a stored tail can still be stopped");
+      assert.equal(count(h.fx.raw, "fomo_tails"), 0);
+    });
+  });
+
+  it("three tails running: a fourth is refused before any lookup; renewing one of them is not (review 2026-10-07)", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      for (const [i, handle] of ["alpha1", "beta22", "gamma3"].entries()) {
+        await fstore.addTail(h.fx.db, { tenant: TENANT, userId: `0000000${i}-5c73-5443-9225-bfc496cde51f`, handle, consider: false, nowMs: Date.now(), expiresAtMs: Date.now() + 3_600_000, createdVia: "telegram-dm" });
+      }
+      const r = await ask(h, "/tail CryptoKaleo 2h");
+      assert.match(r, /^You already have 3 tails running, the most there can be; stop one first/);
+      assert.ok(!h.fx.calls.some((c) => c.tool === "fomo_resolve_subject"), "no search spent");
+      assert.deepEqual(h.fx.provider, []);
+      assert.equal(buttonsOf(h.lastBody(OWNER)).length, 0);
+      await ask(h, "/tail beta22 2h");
+      assert.ok(h.fx.calls.some((c) => c.tool === "fomo_resolve_subject"), "one of hers is a renewal, not a fourth");
     });
   });
 });
@@ -891,7 +941,7 @@ describe("a Fomo tail asked for in words, in the owner's DM", () => {
   it("Milla's line: the same card /tail unipcs 3h gives, saying a tail never skips my review; nothing bought, nothing stored by asking", async () => {
     await withDm({ liveFeed: true, readiness: () => READY, search: unipcsSearch() }, async (h) => {
       const card = await ask(h, MILLA);
-      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"], "read-only first; never the research planner's trader read");
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_research_status", "fomo_resolve_subject"], "read-only first; never the research planner's trader read");
       assert.match(card, /^👀 Tail unipcs on Fomo for 3 hours \(until \d\d:\d\d UTC\)\?/);
       assert.match(card, /You asked me to take the trade if I like it: a tail never skips my normal review\./);
       assert.deepEqual(buttonsOf(h.lastBody(OWNER)).map((b) => b.text), ["👀 Tell me only", "👀 + consider their buys", "✖ No"]);
@@ -909,7 +959,7 @@ describe("a Fomo tail asked for in words, in the owner's DM", () => {
   it("'keep tabs on trader X for a couple hours' is a tail, not a profile question; 'stop tailing X' stops it", async () => {
     await withDm({ liveFeed: true, readiness: () => FOLLOW_OFF, search: unipcsSearch() }, async (h) => {
       const card = await ask(h, "keep tabs on trader unipcs for a couple hours");
-      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"]);
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_research_status", "fomo_resolve_subject"]);
       assert.match(card, /for 2 hours/);
       await pressLastCard(h, "tell");
       assert.match(await ask(h, "stop tailing unipcs"), /^Stopped tailing unipcs\./);
@@ -1046,9 +1096,11 @@ describe("a Fomo tail asked for in a group, carded in the owner's DM", () => {
       h.sayInGroup(`pine ${MILLA}`);
       await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
       assert.ok(!h.llm.includes("group-route"), "read by code, not routed by the model");
-      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_resolve_subject"], "read-only, as her DM's /tail");
-      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
-      assert.equal(h.fx.calls[0]!.opts.surface, "telegram-dm");
+      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_research_status", "fomo_resolve_subject"], "read-only, as her DM's /tail");
+      for (const c of h.fx.calls) {
+        assert.equal(c.opts.audience, "owner");
+        assert.equal(c.opts.surface, "telegram-dm");
+      }
       const dm = h.sentTo(OWNER);
       assert.equal(dm.length, 1);
       assert.match(dm[0]!, /^You asked in a group, so here it is privately\.\n\n👀 Tail unipcs on Fomo for 3 hours/);

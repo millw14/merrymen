@@ -517,6 +517,13 @@ export interface TgOwnerPort {
    * The room hears only where it went. Never throws.
    */
   proposeTail?(q: { tail: TgTailAsk | null; fromId: number }): Promise<TgOwnerOutcome>;
+  /**
+   * Whether a tail can work here at all (telegram/fomo-tail.ts
+   * FomoTailsState): not "on", her start line is no tail and goes on to the
+   * research lane as before; with the switch off a stop is still read, so
+   * stored tails can be stopped. Absent: "on". Never throws.
+   */
+  tailsState?(): "on" | "switched-off" | "no-live-feed";
 }
 
 /**
