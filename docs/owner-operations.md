@@ -210,7 +210,9 @@ leaves nothing to a flow that is never booked.
 
 The trade-row lookup is asked only for such a leg. To find one, the scanner now
 reads the receipt of each trade's transaction in its window that moved USDG of
-the account; before, it read none of them. An unreadable one refuses the scan
+the account; before, it read none of them. It only places their logs, and
+decodes their amounts only for a leg it lets through, so a malformed Transfer
+elsewhere in the bundle stops nothing. An unreadable one refuses the scan
 pass, as an unreadable receipt always did for any other transaction: the
 cursor stays, and the window is read again.
 
