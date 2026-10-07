@@ -810,6 +810,49 @@ describe("admission's drain of the tenant's home: a clear only where it holds (r
     await assert.rejects(apply(b, p), (e: unknown) => e instanceof BookingRefused && e.code === "cas" && /\(homeAtAnchor\)/.test(e.message));
     assert.deepEqual({ flows: allFlows(b.raw), tables: snapshotTables(b.raw) }, before);
   });
+
+  it("the anchor is the newest approval NOT revoked: a revoked one after the chain refusal, binding no book, does not vouch for the home the refusal found", async () => {
+    // The chain refusal's evidence found the old book (present, unblocked); an approval approved after it, on evidence binding no book, then
+    // revoked: it decided nothing (holdOf skips it too), so what it bound is not what admission's drain met.
+    const b = await books({ home: "present" });
+    const absent = anchorEvidence("absent");
+    b.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+        created_at_ms, updated_at_ms) VALUES ('f00dfeed', ?, ?, 4663, ?, ?, ?, 'r2', 'revoked', 'revoked by the operator', ?, ?)`)
+      .run(TENANT, ACCOUNT, TENANT, absent.digest, absent.json, REFUSED_AT_MS + 60_000, REFUSED_AT_MS + 120_000);
+    const snap = await readClosedEpochSnapshot(b.db, { tenant: TENANT, dialect: "sqlite", nowSec: NOW, epoch: 1 });
+    assert.deepEqual(snap.booking.admission.approvals.map((a) => [a.approvalId, a.state]), [["f00dfeed", "revoked"], ["8d1c4c6b", "refused"]],
+      "the revoked approval is the tenant's newest row");
+    const p = await preview(b, fakeRpc().rpc);
+    assert.equal(p.verdict, "blocked");
+    assert.deepEqual(codes(p), ["home-book-present"], closedEpochLines(p).join("\n"));
+    assert.match(p.refusals[0]!.why, /approval 8d1c4c6b…\) found the old book in the tenant's home/);
+    assert.deepEqual([p.holdings.home.atAnchor?.approvalId, p.holdings.home.atAnchor?.state, p.holdings.home.atAnchor?.chainRefusal, p.holdings.home.atAnchor?.book,
+      p.holdings.home.durable], ["8d1c4c6b", "refused", true, "present", false]);
+  });
+
+  it("the anchor's evidence is read by its id AND the tenant: another tenant's row under the same id is never read, whatever its text names", async () => {
+    // approval_id is the table's primary key, so on the schema as created one id is one row; the tenant in the read is what keeps it so on
+    // a table that lost its key (a restore without constraints). Here the key is dropped and another tenant's row under the anchor's id is
+    // put FIRST, where a read by the id alone meets it: its own evidence, or one naming this tenant and account, binding no book.
+    for (const text of ["its own", "this tenant's"] as const) {
+      const b = await books({ home: "present" });
+      b.raw.exec("ALTER TABLE ledger_resume_approvals RENAME TO approvals_keyed");
+      b.raw.exec("CREATE TABLE ledger_resume_approvals AS SELECT * FROM approvals_keyed WHERE 0");
+      const other = anchorEvidence("absent", text === "its own" ? { tenant: FUNDER } : {});
+      b.raw.prepare(`INSERT INTO ledger_resume_approvals (approval_id, tenant, smart_account, chain_id, owner, evidence_digest, evidence_json, preview_run, state, reason,
+          created_at_ms, updated_at_ms) VALUES ('8d1c4c6b', ?, ?, 4663, ?, ?, ?, 'r', 'refused', ?, ?, ?)`)
+        .run(FUNDER, ACCOUNT, FUNDER, other.digest, other.json, `${CHAIN_REFUSAL}: another tenant`, REFUSED_CREATED_MS, REFUSED_AT_MS);
+      b.raw.exec("INSERT INTO ledger_resume_approvals SELECT * FROM approvals_keyed");
+      b.raw.exec("DROP TABLE approvals_keyed");
+      assert.deepEqual(rows(b.raw, "SELECT tenant FROM ledger_resume_approvals WHERE approval_id = '8d1c4c6b'").map((r) => r.tenant), [FUNDER, TENANT],
+        `${text}: two rows under the anchor's id, the other tenant's first`);
+      const p = await preview(b, fakeRpc().rpc);
+      assert.equal(p.verdict, "blocked", text);
+      assert.deepEqual(codes(p), ["home-book-present"], `${text}: ${closedEpochLines(p).join("\n")}`);
+      assert.deepEqual([p.holdings.home.atAnchor?.approvalId, p.holdings.home.atAnchor?.book, p.holdings.home.atAnchor?.unproved, p.holdings.home.durable],
+        ["8d1c4c6b", "present", null, false], text);
+    }
+  });
 });
 
 describe("every hosted account, compared again at the apply", () => {
