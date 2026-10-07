@@ -964,12 +964,16 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     ["how does fomo work", "platform"],
     ["can you use fomo?", "platform"],
     ["what is fomo saying about pepe?", "platform"],
+    // Missed on 2026-10-07 18:58, before the model ever saw them.
+    ["shogun who's on top fomo today?", "platform"],
+    ["i'm sorry who's the top trader on fomo today", "platform"],
   ];
   for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
   const no = [
     "i have fomo lol", "pure fomo in on that one", "fomo into it?", "don't fomo", "pine fomo'd so hard", "pine thoughts on pepe?",
     "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
     "is fomo on robinhood", "i bought it with fomo lol",
+    "that's what fomo does lol", "i have fomo who cares", "pure fomo who's buying this", "top fomo moment lol",
   ];
   for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
 });

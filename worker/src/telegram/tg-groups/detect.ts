@@ -1884,7 +1884,9 @@ export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: 
  * in", "pure fomo lol" and "fomo into it" are how people feel, and stay chat.
  */
 const FOMO_PLATFORM =
-  /\b(?:on|from|via|through|using|inside|in the|with|about) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b/u;
+  /\b(?:on|from|via|through|using|inside|in the|with|about) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b|\btop (?:of |on )?(?:the )?fomo\b/u;
+/** A question word near the start, after a few words of preamble: "i'm sorry who's the top trader on fomo". */
+const FOMO_WH_EARLY = /^(?:[\p{L}']+\s+){0,3}(?:who|who's|whos|what|what's|whats|which|how|hows|how's)\b/u;
 /**
  * The feature itself: what Fomo is, whether it works, what it can do ("what
  * is fomo?", "is fomo working", "is fomo on?", "fomo help"). Answered by code
@@ -1919,7 +1921,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
   // Names out, and whatever punctuation they leave in front ("@", ",").
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
   if (!t || COIN_STOP.test(t)) return null;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames);
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t);
   if (!asked) return null;
   if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
   if (FOMO_THESES.test(t)) return { kind: "theses" };
