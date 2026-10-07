@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import { toEventSelector, type Hex } from "viem";
 import { addressTopic, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { TRANSFER_TOPIC, findTransferFlows, flowKey, resumeFrom } from "./deposit-log";
+import { ENTRYPOINT } from "../../packages/core/src/index";
+import { ownerOperationOf } from "./owner-operations";
 
 /**
  * WHY THIS FILE EXISTS. `FlowSource` declared 'chain-log' from the beginning and
@@ -425,5 +427,141 @@ describe("an energy purchase is not capital to the scanner", () => {
     assert.equal(booking.length, 1, "one booking condition");
     assert.match(booking[0]!, /^if \(v\.kind === "capital-in" \|\| v\.kind === "capital-out"\) \{/);
     assert.doesNotMatch(src.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, ""), /kind === "reserve-out"/);
+  });
+});
+
+/**
+ * THE OWNER'S OWN OPERATION, BUNDLED BESIDE THE AGENT'S TRADE.
+ *
+ * A bundler can put the owner's root-key withdrawal and the agent's swap in
+ * one handleOps transaction (the shape asset-movements.test.ts reads op by
+ * op). The ledger holds that transaction as a trade, and the trade skip used
+ * to hide every USDG log in it — so the owner's withdrawal, which its owner
+ * record leaves to this scanner, was never booked, and contributions and the
+ * peak stayed wrong. Each receipt here is EntryPoint v0.7's: validation,
+ * BeforeExecution, then each operation's execution followed by its own
+ * UserOperationEvent carrying its nonce.
+ */
+describe("the owner's own operation bundled beside a trade", () => {
+  const EP = String(ENTRYPOINT.v07).toLowerCase();
+  const UOE = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
+  const BEFORE = "0xbb47ee3e183a558b1a2ff0874b079f3fc5478b7454eacf2bfc5af2ff5878f972";
+  const OWNER = "0x00000000000000000000000000000000000000a2";
+  const POOL = "0x00000000000000000000000000000000000000b1";
+  const PAYMASTER = "0x00000000000000000000000000000000000000d7";
+  const OTHER_ACCOUNT = "0x00000000000000000000000000000000000000a9";
+  const TSLA = "0x322f0929c4625ed5bad873c95208d54e1c003b2d";
+  const PEPE = "0x0000000000000000000000000000000000000ee0";
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  const ROOT = (0x845adb2c711129d4f3966735ed98a9f09fc4ce57n << 64n) | 6n;
+  const SESSION = (0x02n << 240n) | (0x3ca1cec8n << 208n) | 12n;
+  const ROOT_OP = `0x${"a1".repeat(32)}`, SESSION_OP = `0x${"b2".repeat(32)}`;
+  const TX = `0x${"7b".repeat(32)}`;
+  const w = (n: bigint) => n.toString(16).padStart(64, "0");
+  type Draft = { address: string; topics: string[]; data: string };
+  const tr = (token: string, from: string, to: string, amount: bigint): Draft =>
+    ({ address: token.toLowerCase(), topics: [TRANSFER_TOPIC, addressTopic(from), addressTopic(to)], data: `0x${w(amount)}` });
+  const before = (): Draft => ({ address: EP, topics: [BEFORE], data: "0x" });
+  const op = (hash: string, nonce: bigint, o: { sender?: string; success?: boolean } = {}): Draft => ({
+    address: EP, topics: [UOE, hash, addressTopic(o.sender ?? ACCT), addressTopic(ZERO)], data: `0x${w(nonce)}${w(o.success === false ? 0n : 1n)}${w(0n)}${w(0n)}`,
+  });
+
+  /** One transaction, its logs at positions 0.., served as eth_getLogs (hex) and as viem's receipt (numeric positions). */
+  function bundle(drafts: Draft[], o: { positions?: boolean; unreadable?: boolean } = {}): ReconcileChain {
+    const logs = drafts.map((d, i) => ({ ...d, transactionHash: TX, blockNumber: "0x258", logIndex: `0x${i.toString(16)}` }));
+    return {
+      getBlockNumber: async () => 1000n,
+      async getReceiptLogs() {
+        if (o.unreadable) return null;
+        return logs.map((l) => ({ address: l.address, topics: l.topics, data: l.data, ...(o.positions === false ? {} : { logIndex: Number(BigInt(l.logIndex)) }) }));
+      },
+      async getLogs(args) {
+        return logs
+          .filter((l) => l.address === args.address.toLowerCase() &&
+            args.topics.every((want, i) => want === null || want === undefined || String(want).toLowerCase() === String(l.topics[i]).toLowerCase()))
+          .map((l) => ({ topics: l.topics as Hex[], data: l.data as Hex, transactionHash: l.transactionHash as Hex, blockNumber: l.blockNumber as Hex, logIndex: l.logIndex as Hex }));
+      },
+    };
+  }
+  /** The scan of a window holding that one transaction, which the ledger holds as a trade. */
+  const scanTrade = (chain: ReconcileChain, trades: ReadonlySet<string> | null | undefined, asked: string[] = [], knownKeys = new Set<string>()) =>
+    findTransferFlows({
+      chain, smartAccount: ACCT, usdgToken: USDG, fromBlock: 0n, toBlock: 1000n, knownKeys, tradeTxHashes: new Set([TX]),
+      ...(trades === undefined ? {} : { tradeOpsInTx: async (tx: string) => { asked.push(tx); return trades; } }),
+    });
+  const flowsOf = (fl: Awaited<ReturnType<typeof findTransferFlows>>) => fl.map((f) => [f.direction, f.amountUsdg6, f.logIndex]);
+
+  // The owner withdraws 348.368488 USDG (log 1); the agent sells TSLA for 25 USDG (logs 3, 4).
+  const WITHDRAW_BESIDE_SELL = [
+    before(), tr(USDG, ACCT, OWNER, 348_368_488n), op(ROOT_OP, ROOT),
+    tr(TSLA, ACCT, POOL, 13n * 10n ** 18n), tr(USDG, POOL, ACCT, 25_000_000n), op(SESSION_OP, SESSION),
+  ];
+
+  it("the owner's withdrawal is booked; the trade's own USDG leg is never classified — and without the lookup, the old skip hides both", async () => {
+    const asked: string[] = [];
+    const flows = await scanTrade(bundle(WITHDRAW_BESIDE_SELL), new Set([SESSION_OP]), asked);
+    assert.deepEqual(flowsOf(flows), [["out", 348_368_488n, 1]]);
+    assert.deepEqual(asked, [TX], "asked once, for the owner's leg only");
+    assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL), undefined), [], "the transaction-wide skip, as it was");
+    assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL), new Set([SESSION_OP]), [], new Set([`${TX}#1`])), [], "a leg already booked is not booked again");
+  });
+
+  it("the scanner books exactly the legs the owner record leaves to it, on the whole receipt's legs", async () => {
+    // The same withdrawal beside a BUY: the PEPE the trade brought in pairs with
+    // the owner's USDG across the bundle, so the classifier reads a trade, not
+    // capital. The record says so too (no flow, review), so nothing is left to a
+    // flow that is never booked — the two readers agree in both shapes.
+    const WITHDRAW_BESIDE_BUY = [
+      before(), tr(USDG, ACCT, OWNER, 5_000_000n), op(ROOT_OP, ROOT),
+      tr(USDG, ACCT, POOL, 25_000_000n), tr(PEPE, POOL, ACCT, 400n * 10n ** 18n), op(SESSION_OP, SESSION),
+    ];
+    for (const drafts of [WITHDRAW_BESIDE_SELL, WITHDRAW_BESIDE_BUY]) {
+      const chain = bundle(drafts);
+      const reading = ownerOperationOf({ receiptLogs: (await chain.getReceiptLogs(TX as Hex))!, userOpHash: ROOT_OP, txHash: TX, account: ACCT, custody: [], usdg: USDG, chainId: 4663 });
+      assert.ok(reading);
+      const leftToFlow = reading.usdgLegs.filter((l) => l.answeredBy === "flow").map((l) => l.logIndex);
+      assert.deepEqual((await scanTrade(chain, new Set([SESSION_OP]))).map((f) => f.logIndex), leftToFlow);
+    }
+  });
+
+  it("the asset-movements bundle (an owner sweep of TSLA beside an agent buy): the owner moved no USDG, so nothing is booked and the lookup is never asked", async () => {
+    const asked: string[] = [];
+    const flows = await scanTrade(bundle([
+      before(), tr(TSLA, ACCT, OWNER, 13n * 10n ** 18n), op(ROOT_OP, ROOT),
+      tr(USDG, ACCT, POOL, 25_000_000n), tr(PEPE, POOL, ACCT, 400n * 10n ** 18n), op(SESSION_OP, SESSION),
+    ]), new Set([SESSION_OP]), asked);
+    assert.deepEqual(flows, []);
+    assert.deepEqual(asked, []);
+  });
+
+  it("a trade's own USDG and validation's are never let through, even where they would read as capital", async () => {
+    const asked: string[] = [];
+    const flows = await scanTrade(bundle([
+      tr(USDG, ACCT, PAYMASTER, 1_000_000n), // validation: a paymaster's charge, nobody's execution
+      before(), tr(USDG, ACCT, OWNER, 5_000_000n), op(SESSION_OP, SESSION), // the agent's own transfer out
+    ]), new Set([SESSION_OP]), asked);
+    assert.deepEqual(flows, []);
+    assert.deepEqual(asked, []);
+  });
+
+  it("a root operation the ledger holds as a trade row (a misbooked 'swap'), or a transaction with a row naming no operation, stays skipped: that leg is a peak decision for hwm-repair", async () => {
+    assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL), new Set([SESSION_OP, ROOT_OP])), []);
+    assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL), null), []);
+  });
+
+  it("only a SUCCESSFUL root operation of THIS account: a revert's logs and another account's root operation stay skipped", async () => {
+    assert.deepEqual(await scanTrade(bundle([
+      before(), tr(USDG, ACCT, OWNER, 5_000_000n), op(ROOT_OP, ROOT, { success: false }),
+      tr(TSLA, ACCT, POOL, 1n), tr(USDG, POOL, ACCT, 1_000_000n), op(SESSION_OP, SESSION),
+    ]), new Set([SESSION_OP])), []);
+    assert.deepEqual(await scanTrade(bundle([
+      before(), tr(USDG, OTHER_ACCOUNT, ACCT, 5_000_000n), op(ROOT_OP, ROOT, { sender: OTHER_ACCOUNT }),
+      tr(TSLA, ACCT, POOL, 1n), tr(USDG, POOL, ACCT, 1_000_000n), op(SESSION_OP, SESSION),
+    ]), new Set([SESSION_OP])), []);
+  });
+
+  it("a receipt with no log positions cannot place the leg, so it stays skipped; an unreadable one refuses the pass, as for any other", async () => {
+    assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL, { positions: false }), new Set([SESSION_OP])), []);
+    await assert.rejects(() => scanTrade(bundle(WITHDRAW_BESIDE_SELL, { unreadable: true }), new Set([SESSION_OP])), /could not be read/);
   });
 });

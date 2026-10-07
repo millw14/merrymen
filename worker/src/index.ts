@@ -542,6 +542,7 @@ import {
   lastChainLogBlock,
   recentDecisions,
   recentTradeTxHashes,
+  tradeOpsInTx,
   getAgentEpoch,
   getAgentFinancials,
   getRiskPeriodPeak,
@@ -3951,7 +3952,10 @@ async function main() {
         // a unique identity, so a crash on either side of it replays nothing.
         if (o.validator === "root") {
           if (!o.owner) {
-            console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… was signed by the owner's own key and its receipt could not be read — ` +
+            // No reading: the receipt was not read, or it could not be read as
+            // one (owner-operations.ts ownerOperationOf: e.g. an amount that is
+            // not one quantity). Either way nothing is vouched for.
+            console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… was signed by the owner's own key and its receipt could not be read as an owner operation — ` +
               "not recorded this arm, and never booked as a trade");
             continue;
           }
@@ -4243,6 +4247,12 @@ async function main() {
           toBlock: head,
           knownKeys: await knownFlowKeys(agentId, Number(from)),
           tradeTxHashes: await recentTradeTxHashes(agentId),
+          // THE OWNER'S OWN OPERATION BUNDLED BESIDE A TRADE: its USDG leg is
+          // the owner's deposit or withdrawal, and the transaction-wide skip
+          // above would hide it for good. The scanner asks which operations
+          // the trade rows of such a transaction are, and lets through only a
+          // root operation of this account none of them is (deposit-log.ts).
+          tradeOpsInTx: (txHash) => tradeOpsInTx(agentId, txHash),
           // FROM THE GRANT, so the flow classifier knows a class buy is a trade
           // and not a withdrawal. `tradeTxHashes` usually masks this — but it is
           // recency-bounded and reads the local ledger, so it fails exactly when

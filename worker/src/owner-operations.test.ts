@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { CASH } from "../../packages/core/src/index";
-import { isRootSuccessOf, ownerOperationOf, ownerOperationRow, ownerOperationsNotice, type OwnerReceiptLog } from "./owner-operations";
+import { isRootSuccessOf, ownerOperationOf, ownerOperationRow, ownerOperationsNotice, rootExecutionLogs, type OwnerReceiptLog } from "./owner-operations";
 
 type FixtureLog = [address: string, topics: string[], data: string, logIndex: string];
 interface Fixture { tx: string; block: string; blockHash: string; timestamp: number; from: string; to: string; status: string; logs: FixtureLog[] }
@@ -206,6 +206,45 @@ describe("the shapes no fixture carried", () => {
     const r = synth([before(1), transfer(USDG, VAULT, VAULT, 5n, 2), transfer(USDG, VAULT, EOA, 0n, 3), event(ROOT_NONCE)], [VAULT]);
     assert.equal(r?.disposition, "acknowledged");
     assert.deepEqual(r?.usdgLegs, []);
+  });
+});
+
+describe("an amount that cannot be read", () => {
+  it("a Transfer whose data is not one quantity (none, '0x', more than 64 digits, not hex) leaves the receipt unread — null, never an amount of zero: admission reads amounts by the same rule", () => {
+    const leg = (data: string): OwnerReceiptLog => ({ ...transfer(USDG, ACCOUNT, EOA, 0n, 2), data });
+    for (const data of ["", "0x", `0x${"0".repeat(65)}`, "0xzz"]) {
+      assert.equal(synth([before(1), leg(data), event(ROOT_NONCE)]), null, JSON.stringify(data));
+    }
+    // Anywhere in the receipt: another token's, outside the execution.
+    assert.equal(synth([{ ...transfer(COIN, EOA, ROUTER, 0n, 0), data: "0x" }, before(1), event(ROOT_NONCE)]), null);
+    // One quantity reads, however short, in either case.
+    assert.equal(synth([before(1), leg("0x0"), event(ROOT_NONCE)])?.disposition, "acknowledged");
+    assert.deepEqual(synth([before(1), { ...transfer(USDG, ACCOUNT, EOA, 0n, 2), data: `0x${word(0xabcn).toUpperCase()}` }, event(ROOT_NONCE)])?.usdgLegs.map((l) => l.amountRaw), ["2748"]);
+  });
+});
+
+describe("which logs an owner operation executed (the deposit scanner's question about a trade's bundle)", () => {
+  const ev = (sender: string, hash: string, nonce: bigint, success: bigint, i: number): OwnerReceiptLog => ({
+    address: EP, topics: [UOE, hash, topic(sender), topic(`0x${"0".repeat(40)}`)], data: `0x${word(nonce)}${word(success)}${word(1000n)}${word(50n)}`, logIndex: `0x${i.toString(16)}`,
+  });
+  const SESSION_NONCE = (2n << 240n) | 12n;
+  const ROOT_OP = `0x${"a1".repeat(32)}`, SESSION_OP = `0x${"b2".repeat(32)}`, REVERTED_OP = `0x${"c3".repeat(32)}`, OTHER_OP = `0x${"d4".repeat(32)}`;
+  const receipt = [
+    transfer(USDG, ACCOUNT, EOA, 1n, 0), // validation: nobody's execution
+    before(1),
+    transfer(USDG, ACCOUNT, EOA, 2n, 2), ev(ACCOUNT, ROOT_OP, ROOT_NONCE, 1n, 3), // the owner's own
+    transfer(USDG, ACCOUNT, ROUTER, 3n, 4), transfer(COIN, ROUTER, ACCOUNT, 4n, 5), ev(ACCOUNT, SESSION_OP, SESSION_NONCE, 1n, 6), // the agent's trade
+    transfer(USDG, ROUTER, ACCOUNT, 5n, 7), ev(ACCOUNT, REVERTED_OP, ROOT_NONCE, 0n, 8), // a root op that reverted
+    transfer(USDG, EOA, ACCOUNT, 6n, 9), ev(EOA, OTHER_OP, ROOT_NONCE, 1n, 10), // another account's root op
+  ];
+
+  it("maps each log a successful root operation of the account executed to its hash: never a session key's, a revert's, another account's, or validation's", () => {
+    assert.deepEqual([...rootExecutionLogs(receipt, ACCOUNT, TX)!], [[2, ROOT_OP]]);
+    assert.deepEqual([...rootExecutionLogs(receipt, ACCOUNT.toUpperCase().replace(/^0X/, "0x"), TX)!], [[2, ROOT_OP]], "the account in any spelling");
+  });
+
+  it("null when a log carries no position: nothing can be told from its neighbours", () => {
+    assert.equal(rootExecutionLogs(receipt.map((l, i) => (i === 4 ? { ...l, logIndex: undefined } : l)), ACCOUNT, TX), null);
   });
 });
 

@@ -237,6 +237,19 @@ describe("a USDG log of the account that moves nothing", () => {
     assert.equal(r.status, "clean", r.status === "missing" ? JSON.stringify(r.found) : "");
   });
 
+  it("a USDG log whose amount cannot be read ('0x', or no data) is NOT an amount of zero: the reading vouches for nothing, and the operation and the log both stay missing", async () => {
+    // (synthetic() names a transaction by its name's length: these two are unused lengths.)
+    for (const [name, data] of [["emptyDataLeg", "0x"], ["missingDataLeg", ""]] as const) {
+      const tx = synthetic(name, [[A4B, EOA, 0n]]);
+      FX[name]!.logs[1]![2] = data;
+      const r = await check(chainOf([name]), A4B, { ...none, ownerRecords: new Map([[SYNTH_OP, tx]]) });
+      assert.equal(r.status, "missing", name);
+      if (r.status === "missing") {
+        assert.deepEqual(r.found.map((f) => [f.kind, f.kind === "transfer" ? f.amountRaw : f.userOpHash]), [["transfer", null], ["operation", SYNTH_OP]], name);
+      }
+    }
+  });
+
   it("a self-transfer BESIDE a real withdrawal does not answer the withdrawal: that capital leg still needs its flow", async () => {
     const tx = synthetic("selfAndOut", [[A4B, A4B, 5_000_000n], [A4B, EOA, 7_000_000n]]);
     const r = await check(chainOf(["selfAndOut"]), A4B, { ...none, ownerRecords: new Map([[SYNTH_OP, tx]]) });

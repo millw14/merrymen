@@ -16,7 +16,9 @@
  *  - and, because the deposit scanner skips any USDG log in a transaction the
  *    ledger already holds as a trade (deposit-log.ts tradeTxHashes), an owner's
  *    withdrawal so recorded was never booked as the capital-out flow it is, and
- *    the peak never came down with it.
+ *    the peak never came down with it. (The scanner now lets the owner's own
+ *    execution past that skip when a bundle carries it beside the agent's
+ *    trade: rootExecutionLogs below, deposit-log.ts findTransferFlows.)
  *
  * WHAT THIS FILE DOES: READ ONE OPERATION, NOTHING ELSE. Pure: it takes a
  * receipt's logs and says whether this account's operation in it was signed by
@@ -185,16 +187,21 @@ function normalise(logs: readonly OwnerReceiptLog[], txHash: string): RawChainLo
   return out;
 }
 
-/** A Transfer log (exactly three topics: ERC-721 shares the first word and has four), decoded; null otherwise. */
+/** A Transfer log's shape: its signature, and exactly three topics (ERC-721 shares the first word and has four). */
+const isTransfer = (l: RawChainLog) => lower(l.topics?.[0]) === TRANSFER_TOPIC && l.topics.length === 3;
+
+/**
+ * ONE QUANTITY, as admission reads a Transfer's amount (ledger-resume.ts
+ * hexQuantity): 0x and one to 64 hex digits. Empty data ('0x', or none) is
+ * NOT an amount of zero: no ERC-20 writes it, and admission names such a log
+ * "amount unread". ownerOperationOf vouches for no receipt that holds one.
+ */
+const QUANTITY = /^0x[0-9a-f]{1,64}$/i;
+
+/** A Transfer log, decoded; null for any other log. Only after ownerOperationOf has refused a receipt with an unreadable amount. */
 function transferOf(l: RawChainLog): { token: string; from: string; to: string; amount: bigint; logIndex: number } | null {
-  if (lower(l.topics?.[0]) !== TRANSFER_TOPIC || l.topics.length !== 3) return null;
-  let amount: bigint;
-  try {
-    amount = BigInt(l.data && l.data !== "0x" ? l.data : "0x0");
-  } catch {
-    return null;
-  }
-  return { token: lower(l.address), from: addressOfTopic(l.topics[1]!), to: addressOfTopic(l.topics[2]!), amount, logIndex: Number(BigInt(l.logIndex)) };
+  if (!isTransfer(l)) return null;
+  return { token: lower(l.address), from: addressOfTopic(l.topics[1]!), to: addressOfTopic(l.topics[2]!), amount: BigInt(l.data), logIndex: Number(BigInt(l.logIndex)) };
 }
 
 /**
@@ -221,6 +228,12 @@ export function ownerOperationOf(o: {
   if (!HASH.test(txHash) || !HASH.test(userOpHash)) return null;
   const logs = normalise(o.receiptLogs, txHash);
   if (!logs) return null;
+  // AN AMOUNT THAT CANNOT BE READ IS NOT AN AMOUNT OF ZERO. Any Transfer in
+  // the receipt whose data is not one quantity, by the rule admission reads
+  // amounts with: not vouched for, so the reconciler records nothing (the
+  // next arm finds it again) and admission answers nothing (the operation
+  // stays missing). Fail closed on both sides, by one rule.
+  if (logs.some((l) => isTransfer(l) && !QUANTITY.test(l.data))) return null;
   const account = lower(o.account);
   const usdg = lower(o.usdg);
   const custody = new Set(o.custody.map(lower).filter((a) => a !== account));
@@ -325,6 +338,31 @@ export function ownerOperationOf(o: {
     covers: covers.sort(),
     tokenMoves: tokenMoves.sort((a, b) => a.logIndex - b.logIndex),
   };
+}
+
+/**
+ * WHICH LOGS OF A RECEIPT AN OWNER OPERATION OF `account` EXECUTED: every log
+ * inside the execution of a successful root-validator operation of the
+ * account (the segment ownerOperationOf reads; segmentReceipt segments
+ * EntryPoint v0.7 only), by its position, mapped to that operation's hash.
+ * PURE. Null when a log has no position, so no log can be told apart from its
+ * neighbours.
+ *
+ * The deposit scanner asks this of a transaction the ledger holds as a trade
+ * (deposit-log.ts findTransferFlows): a bundle can carry the owner's own
+ * withdrawal beside the agent's swap, and only the owner's execution, never
+ * the trade's or validation's, is let past the trade skip.
+ */
+export function rootExecutionLogs(receiptLogs: readonly OwnerReceiptLog[], account: string, txHash: string): Map<number, string> | null {
+  const logs = normalise(receiptLogs, lower(txHash));
+  if (!logs) return null;
+  const me = lower(account);
+  const out = new Map<number, string>();
+  for (const s of segmentReceipt(logs).segments) {
+    if (s.op.sender !== me || !s.op.success || validatorOfNonce(s.op.nonce) !== "root") continue;
+    for (const l of s.logs) out.set(Number(BigInt(l.logIndex)), s.op.userOpHash);
+  }
+  return out;
 }
 
 /**

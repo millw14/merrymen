@@ -53,6 +53,10 @@ import { addressTopic, getLogsAdaptive, type RawLog, type ReconcileChain } from 
 // accounting backfill cannot reach different answers about the same transfer.
 import { classifyUsdgMovement, energyReserveTokens, MERRYMEN_TOKEN, type TransferLeg } from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
+// Which logs of a trade's transaction are the owner's own execution (a root
+// operation bundled beside the agent's swap), read off the receipt as the
+// owner record reads it.
+import { rootExecutionLogs } from "./owner-operations";
 
 /**
  * Every ERC-20 Transfer in a receipt, as classification legs.
@@ -158,6 +162,29 @@ export async function findTransferFlows(opts: {
    * trade rows with transaction hashes.
    */
   tradeTxHashes: Set<string>;
+  /**
+   * THE TRADE ROWS OF ONE OF THOSE TRANSACTIONS, BY OPERATION: the
+   * user-operation hashes the ledger's trade rows for `txHash` carry, or null
+   * when any of them carries none (store.ts tradeOpsInTx).
+   *
+   * A bundle can carry the owner's own root-key operation beside the agent's
+   * trade, and the transaction-wide skip above then hid the owner's deposit or
+   * withdrawal for good: the record of that operation leaves its capital leg
+   * to this scanner (owner-operations.ts), and contributions and the peak were
+   * wrong without it. So in a trade's transaction ONE kind of log is let
+   * through to the receipt classifier: a USDG log the receipt places inside
+   * the execution of a successful ROOT operation of this account
+   * (owner-operations.ts rootExecutionLogs) that no trade row of the
+   * transaction is. Everything else in it — the trade's own execution,
+   * validation, another account's operation, a session key's — stays skipped,
+   * so a trade's own USDG legs are never classified here at all. A
+   * transaction with a trade row that names no operation stays wholly
+   * skipped: that row could be the root operation's.
+   *
+   * Asked only for such a log. Absent: every log of a trade's transaction
+   * stays skipped, as before.
+   */
+  tradeOpsInTx?: (txHash: string) => Promise<ReadonlySet<string> | null>;
   /** Other accounts this system controls — a movement between them is internal. */
   knownAccounts?: readonly string[];
   /** Trading venues. A WEAK signal: a venue with no paired leg is ambiguous, never a trade. */
@@ -226,8 +253,12 @@ export async function findTransferFlows(opts: {
     );
   }
 
-  /** A USDG movement that touches this account, before the receipt decides what it IS. */
-  const candidates: (TransferFlow & { from: string; to: string })[] = [];
+  /**
+   * A USDG movement that touches this account, before the receipt decides what
+   * it IS. `inTradeTx`: its transaction is one the ledger holds as a trade, so
+   * it is classified only if the receipt shows it is the owner's own (below).
+   */
+  const candidates: (TransferFlow & { from: string; to: string; inTradeTx: boolean })[] = [];
   const seen = new Set<string>();
   for (const l of raw) {
     const blockNumber = num(l.blockNumber);
@@ -261,8 +292,11 @@ export async function findTransferFlows(opts: {
     if (from === to) continue;
     if (value === 0n) continue;
     // A SECONDARY skip, kept because it is free and sometimes right, but it is
-    // no longer what decides the question. See the classification below.
-    if (tradeTxHashes.has(l.transactionHash.toLowerCase())) continue;
+    // no longer what decides the question. See the classification below. With
+    // `tradeOpsInTx` the owner's own execution in a trade's bundle is kept for
+    // the receipt to decide (see that option); nothing else in it ever is.
+    const inTradeTx = tradeTxHashes.has(l.transactionHash.toLowerCase());
+    if (inTradeTx && !opts.tradeOpsInTx) continue;
 
     const mine = smartAccount.toLowerCase();
     if (to !== mine && from !== mine) continue; // neither leg is ours
@@ -274,6 +308,7 @@ export async function findTransferFlows(opts: {
       logIndex,
       from,
       to,
+      inTradeTx,
     });
   }
 
@@ -301,6 +336,8 @@ export async function findTransferFlows(opts: {
   // stale — see capital-classify.ts.
   const out: TransferFlow[] = [];
   const legsByTx = new Map<string, TransferLeg[]>();
+  /** For a trade's transaction: which of its logs a root operation of this account executed (owner-operations.ts rootExecutionLogs). */
+  const rootByTx = new Map<string, Map<number, string> | null>();
   for (const c of candidates) {
     const k = c.txHash.toLowerCase();
     if (legsByTx.has(k)) continue;
@@ -316,10 +353,29 @@ export async function findTransferFlows(opts: {
       );
     }
     legsByTx.set(k, legsFromReceiptLogs(receipt));
+    if (c.inTradeTx) rootByTx.set(k, rootExecutionLogs(receipt, smartAccount, c.txHash));
   }
 
   const context = scannerClassifyContext({ custodyAddresses: opts.custodyAddresses, chainId: opts.chainId });
   for (const c of candidates) {
+    if (c.inTradeTx) {
+      // THE OWNER'S OWN EXECUTION IN A TRADE'S BUNDLE, AND NOTHING ELSE. A log
+      // the receipt cannot place (no positions), or places anywhere but a
+      // successful root operation of this account, stays skipped as every log
+      // of a trade's transaction always was. So does a root operation the
+      // ledger holds as a trade row of this transaction (a misbooked 'swap'
+      // from before owner records), and every log of a transaction with a row
+      // that names no operation: booking such a leg moves a peak, which is a
+      // reviewed hwm-repair decision, not this scanner's. What is let through
+      // is classified below exactly like any other leg, on the whole
+      // receipt's legs — the classifier and inputs the owner record judged it
+      // by (owner-operations.ts ownerOperationOf), so the scanner books
+      // exactly the legs that record leaves to it.
+      const op = rootByTx.get(c.txHash.toLowerCase())?.get(c.logIndex);
+      if (op === undefined) continue;
+      const trades = await opts.tradeOpsInTx!(c.txHash);
+      if (trades === null || trades.has(op)) continue;
+    }
     const legs = legsByTx.get(c.txHash.toLowerCase()) ?? [];
     const usdgLeg: TransferLeg = {
       token: usdgToken.toLowerCase(),

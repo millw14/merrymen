@@ -2539,6 +2539,30 @@ export async function recentTradeTxHashes(agentId: string, limit = 2000): Promis
 }
 
 /**
+ * THE OPERATIONS THE LEDGER'S TRADE ROWS IN ONE TRANSACTION ARE: their
+ * user-operation hashes, lowercased — or null when any row in it carries none,
+ * since such a row could be any operation of the transaction. Every row of the
+ * transaction, whatever its status or age (no recency bound: a misbooked
+ * root-key 'swap' row must be found however many rows came after it).
+ *
+ * The deposit scanner asks this only of a trade's transaction whose receipt
+ * shows the owner's own root operation moving USDG of the account
+ * (deposit-log.ts findTransferFlows, `tradeOpsInTx`), so it is rare and never
+ * on the trading path.
+ */
+export async function tradeOpsInTx(agentId: string, txHash: string): Promise<Set<string> | null> {
+  const rows = (await getDb()
+    .prepare(`SELECT user_op_hash FROM trades WHERE agent_id = ? AND LOWER(tx_hash) = ?`)
+    .all(agentId, txHash.toLowerCase())) as { user_op_hash: string | null }[];
+  const ops = new Set<string>();
+  for (const r of rows) {
+    if (!r.user_op_hash) return null;
+    ops.add(r.user_op_hash.toLowerCase());
+  }
+  return ops;
+}
+
+/**
  * Total gas paid on landed operations, in wei.
  *
  * Reported SEPARATELY rather than folded into equity, deliberately. Gas leaves

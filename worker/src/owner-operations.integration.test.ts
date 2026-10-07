@@ -20,7 +20,7 @@ import type { Hex } from "viem";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-owner-ops-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { closeStoreForTest, initStore, getOpsToday, getSpentTodayUsdg, listOpHashes, recentTradeTxHashes, recordOwnerOperation } = await import("./store");
+const { closeStoreForTest, initStore, getOpsToday, getSpentTodayUsdg, listOpHashes, recentTradeTxHashes, recordOwnerOperation, tradeOpsInTx } = await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 const { ownerOperationOf, ownerOperationRow } = await import("./owner-operations");
@@ -112,5 +112,37 @@ describe("recording the owner's operations", () => {
     assert.deepEqual(flows.map((x) => [x.direction, x.amountUsdg6, x.logIndex]), [["out", 348_368488n, 8]]);
     // THE OLD SUPPRESSION, for contrast: a 'swap' row carrying this tx hid the withdrawal, and the peak never came down.
     assert.deepEqual(await scan(new Set([f.tx])), []);
+  });
+
+  it("BUNDLED BESIDE A TRADE: the ledger's trade row in the same transaction no longer hides the owner's leg — unless that row IS this operation, or names none", async () => {
+    const f = FX.recoverFunds!;
+    const usdgLog = f.logs.find(([address, topics]) => address === USDG && topics[0]?.startsWith("0xddf252ad"))!;
+    const chain = {
+      async getBlockNumber() { return BigInt(f.block); },
+      async getLogs(a: { topics: (Hex | Hex[] | null)[] }) {
+        return a.topics[1] ? [{ topics: usdgLog[1] as Hex[], data: usdgLog[2] as Hex, transactionHash: f.tx as Hex, blockNumber: f.block as Hex, logIndex: usdgLog[3] as Hex }] : [];
+      },
+      async getReceiptLogs() { return receipt("recoverFunds"); },
+    };
+    const scan = async () => findTransferFlows({ chain, smartAccount: ACCOUNT as `0x${string}`, usdgToken: USDG as `0x${string}`,
+      fromBlock: BigInt(f.block), toBlock: BigInt(f.block), knownKeys: new Set(), tradeTxHashes: await recentTradeTxHashes(ACCOUNT),
+      tradeOpsInTx: (tx) => tradeOpsInTx(ACCOUNT, tx), custodyAddresses: [VAULT], chainId: 4663 });
+    const trade = (opHash: string | null) => raw((db) => {
+      db.prepare("DELETE FROM trades").run();
+      db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, tx_hash, status) VALUES (?, 'swap', 'x', 1, ?, ?, 'landed')")
+        .run(ACCOUNT, opHash, f.tx.toUpperCase().replace(/^0X/, "0x"));
+    });
+    // The agent's trade, sharing the bundle: another operation.
+    trade(`0x${"5e".repeat(32)}`);
+    assert.equal((await recentTradeTxHashes(ACCOUNT)).has(f.tx), true, "the transaction is a trade's");
+    assert.deepEqual([...(await tradeOpsInTx(ACCOUNT, f.tx.toUpperCase().replace(/^0X/, "0x")))!], [`0x${"5e".repeat(32)}`], "by the transaction in any spelling");
+    assert.deepEqual((await scan()).map((x) => [x.direction, x.amountUsdg6, x.logIndex]), [["out", 348_368488n, 8]]);
+    // A misbooked 'swap' row of this very operation: still skipped (booking it moves a peak: hwm-repair's decision).
+    trade(OPS.recoverFunds.toUpperCase().replace(/^0X/, "0x"));
+    assert.deepEqual(await scan(), []);
+    // A row that names no operation could be this one: skipped.
+    trade(null);
+    assert.deepEqual(await scan(), []);
+    raw((db) => db.prepare("DELETE FROM trades").run());
   });
 });
