@@ -33,7 +33,7 @@
  * in code here. See types.ts.
  */
 import { describeLlmFailure, isLlmProviderFailure } from "../../llm-failure";
-import { llmText, resolveLlm, type LlmCreds } from "../../llm";
+import { llmText, llmToolCall, resolveLlm, type LlmCreds, type ToolSpec } from "../../llm";
 import type { ResolvedConfig } from "../../settings";
 import { stripThinkingBlock } from "../interpreter";
 import { utcDay, utcHour, type TgGroupsStore } from "./store";
@@ -485,4 +485,30 @@ export async function callText(m: TgModel, system: string, prompt: string, maxTo
   const budget = Math.max(MIN_TOKENS, typeof maxTokens === "number" && Number.isFinite(maxTokens) ? Math.floor(maxTokens) : 0);
   const out = await llmText(m.creds, { system, prompt, maxTokens: budget });
   return stripThinkingBlock(out);
+}
+
+/**
+ * A closed choice the model must make by calling one tool: the tool's JSON
+ * Schema is the menu. Re-exported here so the rest of tg-groups describes a
+ * choice without reaching the model client (one door: boundary.test.ts).
+ */
+export interface TgChoiceSpec {
+  name: string;
+  description: string;
+  /** JSON Schema of the arguments. Keep `required` minimal: some providers validate it server-side. */
+  schema: Record<string, unknown>;
+}
+
+/**
+ * ONE FORCED CHOICE. The model answers by calling `spec` with arguments,
+ * which come back as an object for code to validate; nothing it writes is
+ * sent anywhere. {} when it answered in words instead. Throws what the
+ * client throws (a malformed reply included); run it inside
+ * `TgModelGate.run`, which classifies and swallows.
+ */
+export async function callChoice(m: TgModel, system: string, prompt: string, spec: TgChoiceSpec, maxTokens: number): Promise<Record<string, unknown>> {
+  const budget = Math.max(MIN_TOKENS, typeof maxTokens === "number" && Number.isFinite(maxTokens) ? Math.floor(maxTokens) : 0);
+  const tool: ToolSpec = { name: spec.name, description: spec.description, schema: spec.schema };
+  const out = await llmToolCall(m.creds, { system, messages: [{ role: "user", content: prompt }], tool, maxTokens: budget });
+  return out && typeof out === "object" && !Array.isArray(out) ? out : {};
 }
