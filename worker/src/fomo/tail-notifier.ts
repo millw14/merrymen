@@ -31,6 +31,7 @@ import {
   emptyTailLog,
   parseTailLog,
   serializeTailLog,
+  tailCapSpent,
   TAIL_NOTICE_LIMITS,
   tailNotices,
   tailThesisReads,
@@ -79,6 +80,13 @@ export interface TailNoticeToSend {
 
 export interface TailNotifier {
   next(): Promise<TailNoticeToSend[]>;
+  /**
+   * Whether her tail of this trader has already sent all the notices a tail
+   * may (tail-notices.ts tailCapSpent), so a renewal or +1h can say only its
+   * end summary is left. One durable read; false for no such tail; null when
+   * the log cannot be read. Read-only: claims nothing, sends nothing.
+   */
+  capSpent(userId: string): Promise<boolean | null>;
 }
 
 export function createTailNotifier(deps: TailNotifierDeps): TailNotifier {
@@ -128,6 +136,20 @@ export function createTailNotifier(deps: TailNotifierDeps): TailNotifier {
   };
 
   return {
+    async capSpent(userId: string): Promise<boolean | null> {
+      try {
+        if (deps.enabled && deps.enabled() !== true) return null;
+        const tail = deps.tails().find((t) => t.userId === userId);
+        if (!tail) return false;
+        const r = await deps.durable.read(key);
+        if (r.kind === "unknown") return null;
+        if (r.kind === "absent") return false;
+        const parsed = parseTailLog(r.text);
+        return parsed ? tailCapSpent(parsed, tail) : null;
+      } catch {
+        return null;
+      }
+    },
     async next(): Promise<TailNoticeToSend[]> {
       try {
         if (deps.enabled && deps.enabled() !== true) return [];

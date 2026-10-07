@@ -19,7 +19,12 @@
  *   in the tail   an event whose own time is before the tail began is never
  *                 told (a late recovery of an old trade is not news of the tail)
  *   bounded       at most 30 notices per tail, 2 thesis reads per tail and 1
- *                 per (tail, coin); the end summary is said once per tail
+ *                 per (tail, coin); the end summary is said once per tail.
+ *                 The cap is SAID, never a silence she could read as "no
+ *                 trades": the 30th notice says it is the last, the end
+ *                 summary says its counts include trades not told, and a
+ *                 renewal or +1h of a capped tail says only its summary is
+ *                 left (tailCapSpent; the cap carries on with the tail)
  *   patient       a buy waits up to 3 minutes for an assessment of its coin,
  *                 so "my read" is a read, not a placeholder
  *   honest        coverage is said every time: the feed shows only larger
@@ -82,6 +87,13 @@ export const TAIL_NOTICE_LIMITS = Object.freeze({
   /** Serialised log, in characters: inside the durable store's 15 KB wire limit with room. */
   logChars: 12_000,
 });
+
+/** Said on the notice that reaches the cap: the next silence is the cap, not the trader. */
+export const TAIL_CAP_REACHED_LINE = `That's ${TAIL_NOTICE_LIMITS.noticesPerTail} notices on this tail, the most I send for one tail; from here I'll only send its end summary.`;
+/** Said in a capped tail's end summary. */
+export const TAIL_CAP_SUMMARY_LINE = `I stopped sending notices after ${TAIL_NOTICE_LIMITS.noticesPerTail}, so the counts above include trades I didn't tell you about.`;
+/** Said when a tail whose cap is spent is renewed or made longer (it carries on with the tail). */
+export const TAIL_CAP_SPENT_LINE = `This tail has already sent its ${TAIL_NOTICE_LIMITS.noticesPerTail} notices, the most I send for one tail, so only its end summary is left.`;
 
 /** The coverage floor, said with every notice: the tool answer's line (render.ts TAIL_COVERAGE_LINE), word for word. */
 export const TAIL_COVERAGE = TAIL_COVERAGE_LINE;
@@ -174,6 +186,11 @@ const readKey = (tailKey: string, tokenKey: string): string => `r:${h(`${tailKey
 const endKey = (tailKey: string, expiresAt: number): string => `e:${h(`${tailKey}|${expiresAt}`)}`;
 const coinKey = (e: ChildTailEvent): string => e.token?.key ?? "no-coin";
 const NOTICE_KINDS: ReadonlySet<string> = new Set(["buy", "sell", "thesis"]);
+
+/** Whether this tail has sent all the notices a tail may (its count carries on when it is continued or made longer). */
+export function tailCapSpent(log: TailSentLog, tail: ChildTail): boolean {
+  return (log.perTail[tailKeyOf(tail)]?.notices ?? 0) >= TAIL_NOTICE_LIMITS.noticesPerTail;
+}
 
 function clone(log: TailSentLog): TailSentLog {
   return { v: 2, floor: log.floor, sent: { ...log.sent }, anchors: { ...log.anchors }, perTail: Object.fromEntries(Object.entries(log.perTail).map(([k, v]) => [k, { ...v }])) };
@@ -406,7 +423,9 @@ export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: T
     // Recorded before the snapshot below: the claim of this notice covers it.
     recordGroup(log, d.group, d.ev.at, i.now);
     if (text.coveredThesis) recordGroup(log, groupKey(d.tail.userId, coinKey(text.coveredThesis), "thesis"), text.coveredThesis.at, i.now);
-    push({ key: d.group, tailUserId: d.tail.userId, kind: d.ev.kind as TailNotice["kind"], html: text.html, buttons: buttonsFor(d.tail, i.now) });
+    // The last notice the cap allows says so, in the same claimed message (no extra send, no replay).
+    const html = p.notices === TAIL_NOTICE_LIMITS.noticesPerTail ? `${text.html}\n${esc(TAIL_CAP_REACHED_LINE)}` : text.html;
+    push({ key: d.group, tailUserId: d.tail.userId, kind: d.ev.kind as TailNotice["kind"], html, buttons: buttonsFor(d.tail, i.now) });
     return true;
   });
   for (const tail of i.tails) {
@@ -415,7 +434,7 @@ export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: T
     const ek = endKey(tailKey, tail.expiresAt);
     if (log.sent[ek] !== undefined) continue;
     log.sent[ek] = i.now;
-    push({ key: ek, tailUserId: tail.userId, kind: "end", html: endSummary(tail), buttons: [] });
+    push({ key: ek, tailUserId: tail.userId, kind: "end", html: endSummary(tail, tailCapSpent(log, tail)), buttons: [] });
   }
   return { notices, log };
 }
@@ -672,12 +691,19 @@ function noticeFor(i: TailNoticeInput, d: Due, log: TailSentLog): Written | null
   };
 }
 
-function endSummary(tail: ChildTail): string {
+/** `capped`: the tail sent all the notices a tail may, so the counts include trades not told. */
+function endSummary(tail: ChildTail, capped: boolean): string {
   const name = esc(who(tail));
   const t = tail.totals;
   const counts = t
     ? `The feed showed ${t.buys} ${t.buys === 1 ? "buy" : "buys"}, ${t.sells} ${t.sells === 1 ? "sell" : "sells"} and ${t.theses} ${t.theses === 1 ? "thesis" : "theses"} across ${t.coins} ${t.coins === 1 ? "coin" : "coins"}${t.capped ? " (at least: I counted the first 500)" : ""}.`
     : "I couldn't count what the feed showed for it.";
   // The span is said: a tail continued after it ended sums from its first start.
-  return [`Tail on <b>${name}</b> (from ${clock(tail.createdAt)}) ended at ${clock(tail.expiresAt)}.`, counts, "Anything I entered came as a normal trade receipt.", esc(TAIL_COVERAGE)].join("\n");
+  return [
+    `Tail on <b>${name}</b> (from ${clock(tail.createdAt)}) ended at ${clock(tail.expiresAt)}.`,
+    counts,
+    ...(capped ? [esc(TAIL_CAP_SUMMARY_LINE)] : []),
+    "Anything I entered came as a normal trade receipt.",
+    esc(TAIL_COVERAGE),
+  ].join("\n");
 }

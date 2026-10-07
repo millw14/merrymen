@@ -43,6 +43,7 @@ const { createDirectBroker } = await import("../fomo/broker");
 const { FomoBudget, MemoryAllowance } = await import("../fomo/budget");
 const { createFomoClient } = await import("../fomo/provider");
 const { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } = await import("../fomo/render");
+const { TAIL_CAP_SPENT_LINE } = await import("../fomo/tail-notices");
 const { createFomoService, runPendingJobs } = await import("../fomo/service");
 const fstore = await import("../fomo/store");
 const { recentChatTurns } = await import("../store");
@@ -185,6 +186,8 @@ async function withDm(
     search?: Rec;
     /** What following would do with a buy now (the child's followReadiness). */
     readiness?: () => FollowReadiness | null;
+    /** Whether a tail's 30 notices are spent (the child's tail notifier). */
+    capSpent?: (userId: string) => Promise<boolean | null>;
   },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
@@ -331,6 +334,7 @@ async function withDm(
     ...(opts.broker === "absent" ? {} : { fomo: () => (opts.broker === "null" ? null : fx.broker) }),
     ...(opts.fomoOff ? { fomoOff: true } : {}),
     ...(opts.readiness ? { fomoFollowReadiness: opts.readiness } : {}),
+    ...(opts.capSpent ? { fomoTailCapSpent: opts.capSpent } : {}),
     ...(groupStore
       ? {
           tgGroupsStore: groupStore,
@@ -989,6 +993,21 @@ describe("a running tail's Stop and +1h buttons", () => {
       assert.equal(await pressNotice(h, `ftl:ext:${KALEO_ID}`), "That tail has ended.");
       assert.equal(count(h.fx.raw, "fomo_tails"), 0, "an ended tail is never revived by +1h");
       assert.equal(await pressNotice(h, `ftl:stop:${KALEO_ID}`), "That tail had already stopped.");
+    });
+  });
+
+  it("a tail whose 30 notices are spent says so on +1h and on renewal, never promising notices the cap won't send (review 2026-10-07)", async () => {
+    let spent = false;
+    await withDm({ liveFeed: true, readiness: () => READY, capSpent: async (u) => (u === KALEO_ID ? spent : false) }, async (h) => {
+      const first = await tailAndPress(h, "/tail CryptoKaleo 2h", "tell");
+      assert.ok(!first.includes(TAIL_CAP_SPENT_LINE), "a fresh tail has its notices");
+      spent = true;
+      assert.equal(await pressNotice(h, `ftl:ext:${KALEO_ID}`), "+1h");
+      await h.until(() => /now\./.test(h.sentTo(OWNER).at(-1) ?? ""));
+      assert.ok(h.sentTo(OWNER).at(-1)!.endsWith(TAIL_CAP_SPENT_LINE), h.sentTo(OWNER).at(-1));
+      const renewed = await tailAndPress(h, "/tail CryptoKaleo 3h", "tell");
+      assert.match(renewed, /^Still tailing CryptoKaleo/);
+      assert.ok(renewed.endsWith(TAIL_CAP_SPENT_LINE), renewed);
     });
   });
 

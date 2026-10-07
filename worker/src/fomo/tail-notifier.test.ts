@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import { FOMO_STATE_KEYS, type DurableStatePort } from "../fomo-child";
 import type { BrokerCallOptions, ChildTail, ChildTailEvent, FomoBroker } from "./contract";
 import { robinhoodChain, tokenIdentity } from "./identity";
-import { parseTailLog, TAIL_NOTICE_LIMITS } from "./tail-notices";
+import { emptyTailLog, parseTailLog, TAIL_NOTICE_LIMITS, tailNotices } from "./tail-notices";
 import { createTailNotifier, TAIL_THESIS_READ_TIMEOUT_MS, type TailNotifierDeps } from "./tail-notifier";
 import type { FomoEnvelope, FomoToolName } from "./types";
 
@@ -179,5 +179,26 @@ describe("the tail notifier", () => {
     assert.deepEqual(await notifier({ port, tails: [tail([ev(1)])] }).next(), []);
     assert.equal(parseTailLog(s.map.get(FOMO_STATE_KEYS.tailNotified)!)?.floor, NOW, "everything before now counts as told: at most once");
     assert.deepEqual(await notifier({ port, tails: [tail([ev(1)])] }).next(), []);
+  });
+
+  it("capSpent: whether her tail of a trader has sent its 30 notices, read-only; false for no tail; null when unknown (review 2026-10-07)", async () => {
+    const { s, port } = store();
+    const t = tail([]);
+    const n = notifier({ port, tails: [t] });
+    assert.equal(await n.capSpent(UNI), false, "no log yet");
+    // A log whose tail has told all 30: written as the notifier would have.
+    const events = Array.from({ length: 40 }, (_, i) => ev(i + 1, { at: NOW - 100 * MIN + i * MIN, observedAt: NOW - 100 * MIN + i * MIN }));
+    const long = tail(events, { createdAt: NOW - 2 * HOUR });
+    const told = tailNotices({ tails: [long], log: emptyTailLog(0), now: NOW, readiness: null, assessmentOf: () => null, thesisRead: () => null, canRead: false }).notices;
+    assert.equal(told.length, TAIL_NOTICE_LIMITS.noticesPerTail);
+    s.map.set(FOMO_STATE_KEYS.tailNotified, JSON.stringify(told.at(-1)!.logAfter));
+    const writes = s.ops.filter((o) => o.startsWith("write:")).length;
+    assert.equal(await notifier({ port, tails: [long] }).capSpent(UNI), true);
+    assert.equal(await notifier({ port, tails: [long] }).capSpent("someone-else"), false, "no tail of theirs");
+    assert.equal(await notifier({ port, tails: [{ ...long, createdAt: NOW - 30 * MIN }] }).capSpent(UNI), false, "a new tail (a new start) has its own count");
+    assert.equal(s.ops.filter((o) => o.startsWith("write:")).length, writes, "read-only");
+    s.readable = false;
+    assert.equal(await notifier({ port, tails: [long] }).capSpent(UNI), null, "unknown is not said");
+    assert.equal(await notifier({ port, tails: [long], enabled: () => false }).capSpent(UNI), null);
   });
 });

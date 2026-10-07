@@ -16,8 +16,11 @@ import {
   NO_READ_WORDS,
   parseTailLog,
   serializeTailLog,
+  TAIL_CAP_REACHED_LINE,
+  TAIL_CAP_SUMMARY_LINE,
   TAIL_COVERAGE,
   TAIL_NOTICE_LIMITS,
+  tailCapSpent,
   tailNotices,
   tailThesisReads,
   theirWords,
@@ -126,6 +129,26 @@ describe("which notices are due", () => {
     assert.equal(r.notices.length, TAIL_NOTICE_LIMITS.noticesPerTail);
     assert.equal(TAIL_NOTICE_LIMITS.noticesPerTail, 30);
     assert.deepEqual(tailNotices(input([long], { log: r.notices.at(-1)!.logAfter })).notices, [], "capped for good");
+  });
+
+  it("the cap is said, never a silence: the 30th notice says it is the last, the summary says its counts include trades not told (review 2026-10-07)", () => {
+    const events = Array.from({ length: 40 }, (_, i) => ev(i, { token: coin(100 + i), at: NOW - 100 * MIN + i * MIN, observedAt: NOW - 100 * MIN + i * MIN }));
+    const long = tail(events, { createdAt: NOW - 2 * HOUR });
+    const r = pass(input([long], { thesisRead: () => null }));
+    assert.ok(r.notices.at(-1)!.html.endsWith(`\n${TAIL_CAP_REACHED_LINE}`), "the 30th says so, in the same claimed message");
+    assert.ok(r.notices.slice(0, -1).every((n) => !n.html.includes(TAIL_CAP_REACHED_LINE)), "only the 30th");
+    const log = r.notices.at(-1)!.logAfter;
+    assert.equal(tailCapSpent(log, long), true);
+    assert.equal(tailCapSpent(emptyTailLog(), long), false);
+    // The tail ends: its summary says the counts include trades not told.
+    const ended = { ...long, events: [], ended: true, expiresAt: NOW - MIN, totals: { buys: 40, sells: 0, theses: 0, coins: 40, capped: false } };
+    const end = tailNotices(input([ended], { log })).notices;
+    assert.equal(end.length, 1);
+    assert.ok(end[0]!.html.includes(TAIL_CAP_SUMMARY_LINE));
+    assert.match(TAIL_CAP_SUMMARY_LINE, /^I stopped sending notices after 30, so the counts above include trades I didn't tell you about\.$/);
+    // An uncapped tail's summary does not.
+    const plain = tailNotices(input([{ ...ended, createdAt: NOW - 3 * HOUR }])).notices[0]!.html;
+    assert.ok(!plain.includes(TAIL_CAP_SUMMARY_LINE));
   });
 
   it("a buy waits up to three minutes for my read of the coin, then goes with what there is", () => {

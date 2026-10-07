@@ -471,6 +471,11 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   one query (`store.ts tailOwners`). Per tail: 10 coins in
   the child file, 20 events in its tails block, 30 notices, 2 thesis reads (1 per coin),
   and 6 routed research events per owner and trader an hour (buys and theses only).
+  The notice cap is said, never a silence she could read as "no trades": the 30th
+  notice ends "That's 30 notices on this tail, the most I send for one tail; from here
+  I'll only send its end summary.", the end summary of a capped tail says its counts
+  include trades not told, and renewing it or pressing +1h (its count carries on) says
+  only its end summary is left (`tail-notifier.ts capSpent`, a read of the sent log).
 - **Storage.** `fomo_tails` (tenant, provider user id, display handle, `consider`,
   created, expires, created via). An ended row is kept a day for the end summary, then
   pruned. Which notices were told is the owner's durable state

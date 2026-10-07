@@ -78,6 +78,7 @@ import type { FomoEnvelope } from "../fomo/types";
 import type { FollowReadiness } from "../fomo-child";
 import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText } from "./fomo-tail";
 import type { ExtendTailData } from "../fomo/tools";
+import { TAIL_CAP_SPENT_LINE } from "../fomo/tail-notices";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, TAIL_USAGE, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
@@ -242,6 +243,13 @@ export interface TelegramServiceDeps {
    * Read-only. Absent, throwing or null: unknown, and a tail only tells.
    */
   fomoFollowReadiness?: () => FollowReadiness | null;
+  /**
+   * Whether her tail of this trader has already sent its 30 notices
+   * (fomo/tail-notifier.ts capSpent): a renewal or +1h of it then says only
+   * its end summary is left, never a promise of notices the cap will not
+   * send. Read-only. Absent, null or throwing: not said.
+   */
+  fomoTailCapSpent?: (userId: string) => Promise<boolean | null>;
   /** Injectable for tests. */
   now?: () => number;
   /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
@@ -1211,6 +1219,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const PROVIDER_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
   /** A tail tool's answer for her DM, as Telegram HTML (the renderer's own owner words). */
   const tailAnswer = (env: FomoEnvelope): string => esc(renderEnvelope(env, { audience: "owner", maxChars: 2_000, now: Date.now() }));
+  /** The cap line for a tail she renewed or made longer whose 30 notices are spent, or "". */
+  const tailCapNote = async (userId: string): Promise<string> => {
+    try {
+      return (await deps.fomoTailCapSpent?.(userId)) === true ? `\n\n${esc(TAIL_CAP_SPENT_LINE)}` : "";
+    } catch {
+      return "";
+    }
+  };
   /** The bot's own names, lower-cased without "@": never a trader to tail. */
   const selfLower = (cfg: ResolvedConfig): string[] => fomoSelfNames(cfg).map((n) => n.replace(/^@+/, "").toLowerCase());
 
@@ -1271,7 +1287,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const text = tailAnswer(env);
         if (env.status !== "ok") return text;
         console.log(`[telegram] fomo tail started from the owner's DM (${consider ? "consider" : "tell only"})`);
-        return considerAsked && !consider ? `${text}\n\n${esc(considerRefusedNote(readiness, p.considerOffered))}` : text;
+        // A tail continued inside 15 minutes of its end keeps its notice count (docs/fomo.md "caps carry on").
+        const capped = await tailCapNote(p.userId);
+        return `${considerAsked && !consider ? `${text}\n\n${esc(considerRefusedNote(readiness, p.considerOffered))}` : text}${capped}`;
       },
       stop: async (handle) => {
         const b = brokerNow();
@@ -2587,7 +2605,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           ? ext.expiresAtMs <= ext.previousExpiresAtMs ? "Already as long as a tail runs (12 h)" : ext.capped ? "Extended to the 12-hour limit" : "+1h"
           : env.status === "empty" ? "That tail has ended." : "Couldn't extend it right now.";
     await answerCallbackQuery(opts, cb.id, toast);
-    const text = tailAnswer(env);
+    const text = `${tailAnswer(env)}${ext ? await tailCapNote(ext.trader.userId) : ""}`;
     const sent = await sendMessage(opts, cb.chatId, text, { replyToMessageId: cb.messageId, disablePreview: true });
     if (sent.ok) await pushHistory(cb.chatId, "assistant", stripThinkingBlock(text.replace(/<[^>]+>/g, "")));
     console.log(`[telegram] fomo tail ${parsed.action === "stop" ? "stop" : "+1h"} pressed: ${env.status}`);

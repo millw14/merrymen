@@ -14707,6 +14707,8 @@ async function main() {
     // would do with a buy now, read-only, so "+ consider their buys" is
     // offered and honoured only when it could act. Nothing where Fomo is off.
     fomoFollowReadiness: () => (fomoOff ? null : fomoChild.followReadiness()),
+    // A renewal or +1h of a tail whose 30 notices are spent says so (read-only).
+    fomoTailCapSpent: (userId) => (fomoOff ? Promise.resolve(null) : fomoTailNotifier.capSpent(userId)),
     kill: () => {
       try {
         const grant = loadGrantFile();
