@@ -288,7 +288,8 @@ describe("brokerFailureEnvelope", () => {
   });
 
   it("lists every registered tool", () => {
-    assert.equal(FOMO_TOOL_NAMES.length, 11);
+    assert.equal(FOMO_TOOL_NAMES.length, 13);
+    assert.ok(FOMO_TOOL_NAMES.includes("fomo_tail_trader") && FOMO_TOOL_NAMES.includes("fomo_untail_trader"));
     for (const t of FOMO_TOOL_NAMES) assert.ok(isFomoToolName(t));
     assert.equal(isFomoToolName("fomo_place_order"), false);
     assert.equal(isFomoToolName("__proto__"), false);

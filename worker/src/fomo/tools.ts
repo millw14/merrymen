@@ -21,9 +21,10 @@
  * `kind`, `request_id`, `days` and `max_market_cap_usd`, which only these
  * tools take), so a plan always validates.
  *
- * MUTATIONS ARE A SEPARATE REGISTRY. `fomo_watch_coin` and `fomo_unwatch_coin`
- * write the owner's state; `toolSpecs` never offers them to a model loop, and
- * the service refuses them for any audience but the owner.
+ * MUTATIONS ARE A SEPARATE REGISTRY. `fomo_watch_coin`, `fomo_unwatch_coin`,
+ * `fomo_tail_trader` and `fomo_untail_trader` write the owner's state;
+ * `toolSpecs` never offers them to a model loop, and the service refuses them
+ * for any audience but the owner.
  */
 
 import type { ToolSpec } from "../llm";
@@ -79,6 +80,8 @@ export const TOOL_LIMITS = {
   rankings: { max: 50, default: 10 },
   opportunities: { max: 25, default: 10 },
   watchDays: { min: 1, max: 30, default: 7 },
+  /** A tail's length in whole hours (store.ts FOMO_LIMITS.tailMinMs..tailMaxMs). */
+  tailHours: { min: 1, max: 12, default: 3 },
 } as const;
 
 export const READ_TOOL_NAMES: readonly FomoReadToolName[] = [
@@ -92,7 +95,7 @@ export const READ_TOOL_NAMES: readonly FomoReadToolName[] = [
   "fomo_research_coin",
   "fomo_get_research_status",
 ];
-export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin"];
+export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader"];
 export const TOOL_NAMES: readonly FomoToolName[] = [...READ_TOOL_NAMES, ...MUTATION_TOOL_NAMES];
 
 export function isFomoToolName(v: unknown): v is FomoToolName {
@@ -196,6 +199,18 @@ export interface UnwatchArgs {
   token: TokenRef;
   chain: string | null;
 }
+export interface TailArgs {
+  trader: TraderRef;
+  /** Whole hours, TOOL_LIMITS.tailHours. */
+  hours: number;
+  /** The owner asked for the trader's buys to be considered by the normal follow review; never a copy. */
+  consider: boolean;
+}
+/** Exactly one of the two: one trader, or every active tail. */
+export interface UntailArgs {
+  trader: TraderRef | null;
+  all: boolean;
+}
 
 export interface ToolArgs {
   fomo_resolve_subject: ResolveArgs;
@@ -209,6 +224,8 @@ export interface ToolArgs {
   fomo_get_research_status: ResearchStatusArgs;
   fomo_watch_coin: WatchArgs;
   fomo_unwatch_coin: UnwatchArgs;
+  fomo_tail_trader: TailArgs;
+  fomo_untail_trader: UntailArgs;
 }
 
 export type ValidateResult<A> = { ok: true; args: A } | { ok: false; reason: string };
@@ -507,6 +524,8 @@ export interface ResearchStatusData {
   } | null;
   funnel: { stage: FunnelStage; detail: string | null; atMs: number }[];
   watches: { tokenKey: string; symbol: string | null; expiresAtMs: number }[];
+  /** The owner's active tails (fomo_tail_trader). Absent from older producers. */
+  tails?: { userId: string; handle: string | null; expiresAtMs: number; consider: boolean }[];
   /**
    * The owner's recent research jobs. `status` is the stored status, except
    * that a job still queued or running past its deadline reads "expired":
@@ -533,6 +552,35 @@ export interface WatchData {
   removed: boolean | null;
   expiresAtMs: number | null;
   activeWatches: number;
+}
+
+/** A tail started or renewed (fomo_tail_trader). Owner only. */
+export interface TailData {
+  action: "tail";
+  trader: { userId: string; handle: string | null };
+  /** False when an active tail was renewed (it kept its start; its hours and consider may have changed). */
+  created: boolean;
+  expiresAtMs: number;
+  consider: boolean;
+  activeTails: number;
+  /**
+   * Whether the owner's monitoring or follow setting is on. Alerts need
+   * neither (they come from the stored feed at no cost); routing research
+   * for the trader's coins, and putting their buys in front of the follow
+   * review, happen only when this is true.
+   */
+  routable: boolean;
+}
+
+/** A tail stopped (fomo_untail_trader). Owner only. */
+export interface UntailData {
+  action: "untail";
+  /** The trader asked about, or null for "all". */
+  trader: { userId: string; handle: string | null } | null;
+  all: boolean;
+  /** Tails stopped by this call (0 when there was none). */
+  removed: number;
+  activeTails: number;
 }
 
 /** Re-exported so renderers need only this module for the payload contract. */
@@ -1062,6 +1110,54 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
       if (!c.ok) return c;
       const o = c.obj;
       return collect<UnwatchArgs>({ token: tokenArg(o.token, true) as Field<TokenRef>, chain: chainArg(o.chain) });
+    },
+  },
+
+  fomo_tail_trader: {
+    description:
+      "Owner only: for 1 to 12 hours (default 3), tell the owner about one Fomo trader's buys, sells and theses that the live feed records. " +
+      "Tailing is not copy trading: with consider, their buys are one signal into the normal follow review, never an order.",
+    schema: schema(
+      {
+        trader: S.trader,
+        hours: { type: "integer", minimum: TOOL_LIMITS.tailHours.min, maximum: TOOL_LIMITS.tailHours.max },
+        consider: { type: "boolean", description: "Let the normal follow review consider their buys (never copies them)." },
+      },
+      ["trader"],
+    ),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["trader", "hours", "consider"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const hours: Field<number> =
+        o.hours === undefined
+          ? okv(TOOL_LIMITS.tailHours.default)
+          : intIn(o.hours, TOOL_LIMITS.tailHours.min, TOOL_LIMITS.tailHours.max) !== null
+            ? okv(o.hours as number)
+            : bad("hours-out-of-range");
+      const consider: Field<boolean> = o.consider === undefined ? okv(false) : typeof o.consider === "boolean" ? okv(o.consider) : bad("consider-invalid");
+      return collect<TailArgs>({ trader: traderArg(o.trader, true) as Field<TraderRef>, hours, consider });
+    },
+  },
+
+  fomo_untail_trader: {
+    description: "Owner only: stop tailing one Fomo trader (trader), or every tail (all). Exactly one of the two.",
+    schema: schema({ trader: S.trader, all: { type: "boolean", enum: [true] } }),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["trader", "all"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      if (o.all !== undefined && o.all !== true) return { ok: false, reason: "all-must-be-true" };
+      const all = o.all === true;
+      if (all && o.trader !== undefined) return { ok: false, reason: "trader-or-all-not-both" };
+      if (!all && o.trader === undefined) return { ok: false, reason: "trader-or-all-required" };
+      return collect<UntailArgs>({ trader: traderArg(o.trader, false), all: okv(all) });
     },
   },
 };

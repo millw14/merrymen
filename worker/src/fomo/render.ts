@@ -35,10 +35,12 @@ import type {
   ResearchCoinData,
   ResearchStatusData,
   ResolveData,
+  TailData,
   TokenActivityData,
   TokenThesesData,
   TraderActivityData,
   TraderContextData,
+  UntailData,
   WatchData,
   ActivityEventView,
   ClaimView,
@@ -340,6 +342,7 @@ function isTraderTool(tool: FomoToolName): boolean {
  */
 export function needsDirectMessage(env: FomoEnvelope): boolean {
   if (isTraderTool(env.tool) || env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
+  if (env.tool === "fomo_tail_trader" || env.tool === "fomo_untail_trader") return true;
   if (env.subject?.kind === "trader") return true;
   // A leaderboard cut to Merrymen's watched traders names the watch list itself (chat.ts deflects it first).
   if (env.tool === "fomo_get_rankings" && (env.data as RankingsData | null)?.board === "traders" && env.coverage.requested.cohortOnly === true) return true;
@@ -637,6 +640,8 @@ function bodyStatus(env: FomoEnvelope<ResearchStatusData>, audience: Audience, n
   }
   out.push(`Data status: ${sanitizeText(d.health.detail, 200)}`);
   out.push(`Watching ${plural(d.watches.length, "coin", "coins")}${d.watches.length ? `: ${d.watches.slice(0, 5).map((w) => w.symbol ?? "a coin").join(", ")}` : ""}.`);
+  const tails = Array.isArray(d.tails) ? d.tails : [];
+  if (tails.length) out.push(`Tailing on Fomo: ${tails.slice(0, 3).map((t) => `${who(t.handle, t.userId)} until ${utcClock(t.expiresAtMs)}${t.consider ? " (their buys go to my normal review)" : ""}`).join(", ")}.`);
   if (d.cohort) out.push(`Followed cohort: ${d.cohort.size} of ${d.cohort.target} traders (version ${d.cohort.version})${d.cohort.shortfallReason ? `; short because ${sanitizeText(d.cohort.shortfallReason, 120)}` : ""}.`);
   const running = d.jobs.filter((j) => jobPending(j, now));
   if (running.length) out.push(`${plural(running.length, "deeper research job is", "deeper research jobs are")} in progress.`);
@@ -684,6 +689,46 @@ function bodyWatch(env: FomoEnvelope<WatchData>, audience: Audience): string[] {
   return [d.removed ? `Stopped watching ${name}.` : `You were not watching ${name}.`];
 }
 
+/** A wall-clock time an owner reads: "14:05 UTC". */
+function utcClock(ms: number): string {
+  if (!finite(ms)) return "an unknown time";
+  const d = new Date(ms);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
+
+/** What the live feed can show, said with every tail (docs/fomo.md "Tailing a trader"). */
+export const TAIL_COVERAGE_LINE =
+  "Fomo's live feed only shows larger positions (about $3k and up) on Robinhood Chain; no alert is not proof they didn't trade.";
+
+/**
+ * A tail started, renewed or stopped. OWNER ONLY: a group is deflected before
+ * this (needsDirectMessage), and the service refuses the tools for any other
+ * audience anyway. Never says "copy": a tail tells, and at most adds one
+ * signal to the normal review.
+ */
+function bodyTail(env: FomoEnvelope<TailData | UntailData>, audience: Audience, now: number): string[] {
+  const d = env.data;
+  if (!d || audience !== "owner") return [];
+  if (d.action === "untail") {
+    if (d.all) return [d.removed > 0 ? `Stopped all ${plural(d.removed, "tail", "tails")}.` : "You weren't tailing anyone."];
+    const name = d.trader ? who(d.trader.handle, d.trader.userId) : "that trader";
+    return [d.removed > 0 ? `Stopped tailing ${name}.` : `You weren't tailing ${name}.`];
+  }
+  const name = who(d.trader.handle, d.trader.userId);
+  if (env.status !== "ok") return [env.message ? sanitizeText(env.message, 200) : `Could not tail ${name}.`];
+  const hours = Math.max(1, Math.round((d.expiresAtMs - now) / 3_600_000));
+  const out = [
+    d.created
+      ? `Tailing ${name} on Fomo until ${utcClock(d.expiresAtMs)} (${hours} h).`
+      : `Still tailing ${name} on Fomo, now until ${utcClock(d.expiresAtMs)} (${hours} h).`,
+  ];
+  if (!d.consider) out.push("You asked me to tell you only; I won't trade on it.");
+  else if (d.routable) out.push("Their buys are one signal into my normal review; I only enter if my own checks and the Brain agree, inside your scout budget. I never copy their trades.");
+  else out.push("Monitoring and following are both off, so I'll only tell you; nothing of theirs reaches a trade review.");
+  out.push(TAIL_COVERAGE_LINE);
+  return out;
+}
+
 function body(env: FomoEnvelope, audience: Audience, now: number): string[] {
   switch (env.tool) {
     case "fomo_resolve_subject":
@@ -707,6 +752,9 @@ function body(env: FomoEnvelope, audience: Audience, now: number): string[] {
     case "fomo_watch_coin":
     case "fomo_unwatch_coin":
       return bodyWatch(env as FomoEnvelope<WatchData>, audience);
+    case "fomo_tail_trader":
+    case "fomo_untail_trader":
+      return bodyTail(env as FomoEnvelope<TailData | UntailData>, audience, now);
   }
 }
 

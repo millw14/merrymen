@@ -62,6 +62,12 @@ export interface FomoRuntimeOptions {
   budget?: Partial<FomoBudgetConfig>;
   /** Our agents' names, so a thesis that cites us is not independent support. */
   selfNames?: readonly string[];
+  /**
+   * Whether this install has the hosted fleet's live feed, which tails are
+   * told from (service.ts FomoServiceDeps.liveFeed). Defaults to the hosted
+   * dialect: Postgres is the fleet's store, sqlite a self-hosted install's.
+   */
+  liveFeed?: boolean;
 }
 
 export interface FomoRuntime {
@@ -144,6 +150,7 @@ export async function createFomoRuntime(opts: FomoRuntimeOptions): Promise<FomoR
     now,
     log,
     selfNames: opts.selfNames,
+    liveFeed: opts.liveFeed ?? opts.dialect === "postgres",
   });
   return {
     service,

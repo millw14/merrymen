@@ -46,6 +46,17 @@ describe("createFomoRuntime", () => {
     assert.equal(blank.client, null);
   });
 
+  it("tails need the hosted live feed: off by default on sqlite (self-hosted), on when the host says so", async () => {
+    const { db: d } = db();
+    const self = await createFomoRuntime({ db: d, dialect: "sqlite", apiKey: null, access, now: () => NOW });
+    const refused = await self.service.invoke(ctx("t1"), "fomo_tail_trader", { trader: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b" });
+    assert.equal(refused.reason, "tail-needs-live-feed");
+    const hosted = await createFomoRuntime({ db: d, dialect: "sqlite", apiKey: null, access, now: () => NOW, liveFeed: true });
+    const stored = await hosted.service.invoke(ctx("t2"), "fomo_tail_trader", { trader: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b" });
+    assert.equal(stored.status, "ok", "a user id needs no provider: stored even without a key");
+    assert.equal((await store.activeTails(d, "0xowner", NOW)).length, 1);
+  });
+
   it("with a key: reads go through the injected fetch, and credits are charged in the shared store", async () => {
     const { db: d } = db();
     const sent: string[] = [];
