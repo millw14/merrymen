@@ -463,6 +463,49 @@ describe("claim: a trade it never made, in chatter", () => {
   ]);
 });
 
+describe("progress: a persona line never claims progress nothing is making", () => {
+  // Live 2026-10-07: "do it" → "give me a sec" → "done?" → "yeah here we go",
+  // and nothing was ever sent. The persona has no lookup running, ever.
+  const STALLS = [
+    "give me a sec", "yeah here we go", "one sec", "on it", "on it 🫡", "yep on it, one sec", "pulling it now", "pulling it up now", "fetching it",
+    "coming up", "coming right up", "just a moment", "lemme check", "lemme pull that", "brb with it", "sent it", "here you go", "here it is",
+    "working on it", "hold on, grabbing it", "hang tight", "hold on 🙏", "i'm pulling the board now", "ok gimme a min", "bet, i'll keep tabs on him",
+    "i'll let you know when it moves", "say less, pulling it", "gimme 2 mins", "i'll grab that for you", "1 sec", "sure thing, one sec",
+    "done, sent it above", "here we go 👀", "ok here you go", "i'm checking it out now", "gonna pull the theses", "let me look it up", "will ping you",
+    "posted it above", "i'll keep tabs on him for you",
+  ];
+  const NOT_STALLS = [
+    "nah i'm not sold on it", "i'd sleep on it", "here we go again lol", "hold on to your bags", "hang on to that one", "keep an eye out ngl",
+    "on it like a car bonnet? nah", "i can't verify that one, drop the robinhood chain CA", "ask me what's trending on fomo", "top traders today, or what's trending?",
+    "which coin?", "which coin? i can pull its theses", "lol what", "that's a good one", "say more 👀", "i'll think about that one", "no idea, honestly",
+    "you tell me lol", "good question, no idea", "beats me 🤷", "want me to pull the fomo board for robinhood chain coins?", "the dev sent it to the moon",
+    "they posted it everywhere lol", "my owner checks it every morning", "who's on it", "trending isn't the same as good", "hold up, you bought the top?",
+    "can't pull that up from here, ask me what's trending on fomo", "one of the best calls today", "a sec ago it was green", "give me a break lol",
+    "hang on, are you serious?", "took 0.5 seconds lol", "drop the CA and i'll pull the chart", "trending on robinhood chain, or everywhere?",
+    "nothing came through on my end, ask me what's trending on fomo on robinhood",
+  ];
+  for (const kind of ["answer", "banter", "roast"] as const) {
+    it(`${kind}: every stall, fetch, delivery and promise is refused as progress`, () => {
+      for (const line of STALLS) assert.equal(reason(line, { kind }), "progress", `${kind}: ${line}`);
+    });
+    it(`${kind}: lines that only sound like one are not`, () => {
+      for (const line of NOT_STALLS) assert.notEqual(reason(line, { kind }), "progress", `${kind}: ${line}`);
+    });
+  }
+  it("a persona line with no kind is held to it too", () => {
+    assert.equal(admitTgLine("give me a sec", { agentName: "Pine Stoat", recentOwn: [] } as unknown as TgGateCtx).ok, false);
+  });
+  it("code-written lines are not: the coin flow's ack while its look runs, a fixed template, research", () => {
+    for (const kind of ["coin", "fixed", "research", "kind"] as const) assert.equal(reason("on it, gimme a sec", { kind }), "ok", kind);
+    assert.equal(reason("sent it to your DMs 🤫", { kind: "fixed" }), "ok");
+  });
+  it("the live line under the offer is refused; the honest line after a lost answer is not", () => {
+    assert.equal(reason("give me a sec", { kind: "answer" }), "progress");
+    assert.equal(reason("yeah here we go", { kind: "answer" }), "progress");
+    assert.equal(reason("didn't come through on my end, ask me for it plainly", { kind: "answer" }), "ok");
+  });
+});
+
 describe("too-long", () => {
   refuses("too-long", [
     ["banter", "a".repeat(TG_LINE_MAX + 1)],

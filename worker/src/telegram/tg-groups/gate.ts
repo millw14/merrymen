@@ -502,6 +502,44 @@ const TRADE_CLAIM: readonly RegExp[] = [
 /** Line kinds with no trade facts behind them: where TRADE_CLAIM applies. Research reports other people's trades, never its own. */
 const CLAIM_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast", "research"]);
 
+/**
+ * PROGRESS NOTHING IS MAKING. The persona never has a lookup running: Fomo
+ * research, the desk and her DM handoff are lanes that answer for
+ * themselves, and nothing the persona says starts one. So a persona line may
+ * not stall ("give me a sec", "one sec", "hang tight"), claim it is fetching
+ * ("on it", "pulling it now", "lemme check"), deliver what never came ("here
+ * we go", "here you go", "sent it") or promise to come back ("i'll let you
+ * know", "i'll keep tabs on him"). Live 2026-10-07: "do it" → "give me a sec"
+ * → "done?" → "yeah here we go", and nothing was ever sent. Code-written
+ * lines are not judged by it: the coin flow's "on it, gimme a sec" is said
+ * while its look really runs, and "drop the CA and i'll pull the chart" is
+ * what the desk does with a CA.
+ */
+const PROGRESS_FILLER = String.raw`(?:(?:ok(?:ay)?|k|kk|yep|yup|yeah|ya|yea|sure|bet|aight|alright|got (?:it|you|u|ya)|say less|np|cool|done|and|so)[\s,!.…]*)*`;
+/** A clause opens at the start or after punctuation, never after a digit's decimal point ("took 0.5 seconds"). */
+const PROGRESS_START = String.raw`(?:^|(?<!\p{N})[.!?,;:—–…]\s*)`;
+const PROGRESS_STALL = String.raw`(?:(?:give|gimme|giv) (?:me |us )?(?:a |one |a few |half a |\d+ )?(?:sec|secs|second|seconds|min|mins|minute|minutes|moment|tick|bit)|(?:one|a|just a|half a|\d+) (?:sec|secs|second|seconds|min|mins|minute|moment|tick)|bear with me|be right back|on it|working on it|coming (?:right )?up|here (?:we|you|ya) go|here it (?:is|comes)|there (?:you|ya) go)`;
+const PROGRESS: readonly RegExp[] = [
+  // A stall or a delivery, as a whole clause: "give me a sec", "yep on it 🫡", "yeah here we go". Not "here we go again", "on it like".
+  new RegExp(String.raw`${PROGRESS_START}${PROGRESS_FILLER}${PROGRESS_STALL}(?! again| to\b| on to\b| of\b| with\b)(?:\s*(?:$|[.!?,;:—–…]|\p{Extended_Pictographic}|\s(?:lol|ngl|fr|tbh|bro|fren|boss)\b))`, "u"),
+  // "hold on" / "hang tight" only as the whole line or before a stall: "hang on, are you serious?" is not one.
+  new RegExp(String.raw`^${PROGRESS_FILLER}(?:hold|hang) (?:on|tight)(?:\s*(?:$|[.!…]|\p{Extended_Pictographic})|,?\s+(?:lemme|let me|grabbing|pulling|getting|checking|fetching|one sec|a sec))`, "u"),
+  U(/\bbrb\b/),
+  // Doing it right now.
+  U(/\b(?:i'?m|im|i am|currently|rn i'?m) (?:pulling|fetching|grabbing|getting|loading|checking|looking (?:it |that |them )?up|looking into|digging|running|sending|posting|dropping|searching|scanning|compiling|putting (?:it |that )?together)\b/),
+  new RegExp(String.raw`(?:^|[.!?,;:—–…]\s*|\b(?:now|ok|yep|yeah)\s+)(?:pulling|fetching|grabbing|loading|sending|posting|dropping|checking) (?:it|that|them|those|this|the (?:board|list|theses|thesis|chart|leaderboard|data|numbers|info|rankings?|coins?|traders?))(?: (?:up|in|over|out|now|rn|for (?:you|u)))*\s*(?:$|[.!?,;:—–…]|\p{Extended_Pictographic})`, "u"),
+  // About to.
+  U(/\b(?:let me|lemme|i'?ll|ill|i will|gonna|going to|about to|bout to) (?:go |just |quickly |quick )?(?:pull|fetch|grab|load|check|look (?:it |that |them |this )?up|look into|dig (?:in|into|up)|run|send|post|drop|find|search|get (?:it|that|them|those|this|you|u|back to))\b/),
+  // Later.
+  U(/\b(?:i'?ll|ill|i will|will) (?:let (?:you|u|ya) know|ping (?:you|u|ya)|update (?:you|u|ya)|report back|get back to (?:you|u|ya)|keep (?:you|u|ya) posted|keep (?:an eye|tabs|watch) on|watch (?:it|that|them|him|her)|track (?:it|that|them|him|her)|follow (?:it|that|them|him|her))\b/),
+  // Done.
+  new RegExp(String.raw`${PROGRESS_START}${PROGRESS_FILLER}(?:just )?(?:sent|posted|dropped|pulled|shared) (?:it|that|them|those|the (?:board|list|theses|thesis|chart|leaderboard|data|numbers|info|rankings?))(?: (?:up|over|in|above|below|here|for (?:you|u)))*\s*(?:$|[.!?,;:—–…]|\p{Extended_Pictographic}|\s(?:lol|ngl|fr|tbh)\b)`, "u"),
+];
+/** "drop the CA and i'll pull the chart": what the desk does with a CA, not a promise of the persona's own. */
+const PROGRESS_IDIOM = U(/\b(?:drop|post|paste|share|send)(?: me)? (?:the |its |a |their )?(?:robinhood chain |rh )?(?:ca|contract(?: address)?|address)\b[^.!?]*/g);
+/** The persona's own lines. Never a template the coin flow says while its look runs ("coin"), never code ("fixed", "research"), never a kind line. */
+const PROGRESS_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast"]);
+
 /** Markup or a transcript label: judged after the link clause, so "pump [.] fun" is logged as the link it is. */
 function markupRefusal(r: Readings, names: readonly string[]): boolean {
   if (r.cased.some((t) => MARKUP.test(t.replace(/<3+/g, " ")))) return true;
@@ -1421,8 +1459,8 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
  *
  * Reason codes (stable, log-only): empty · pass · hidden-chars · meta · dodge ·
  * too-long · secret · address · link · handle · cashtag · hateful · selfharm · threat ·
- * sexual · profanity · appearance · money · figures · alert · advice · claim · accuse ·
- * private · ops · human · emoji · paper-unsaid · repeat.
+ * sexual · profanity · appearance · money · figures · alert · advice · claim · progress ·
+ * accuse · private · ops · human · emoji · paper-unsaid · repeat.
  *
  * Ordered so the reason names the most specific and most serious fault: a
  * secret before an address (a key is also hex), a slur before a word list.
@@ -1487,6 +1525,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
   if ((kind === null || FIGURE_KINDS.has(kind)) && r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if ((kind === null || CLAIM_KINDS.has(kind)) && r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
+  if ((kind === null || PROGRESS_KINDS.has(kind)) && r.low.some((t) => PROGRESS.some((re) => re.test(t.replace(PROGRESS_IDIOM, " "))))) return refuse("progress");
   if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
