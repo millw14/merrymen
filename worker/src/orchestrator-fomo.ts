@@ -1954,10 +1954,15 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         const w = tailTriggers.get(e.trader.userId);
         return w !== undefined && e.observedAt >= w.observedSince && inTail(e, w.eventSince);
       };
-      const triggers = events
-        .filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId) || tailedBuyer(e))
-        .slice(0, MAX_SIGNAL_TRIGGERS)
-        .map(asTraderEvent);
+      const kept = events.filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId) || tailedBuyer(e)).slice(0, MAX_SIGNAL_TRIGGERS);
+      const triggers = kept.map(asTraderEvent);
+      // THE TRIGGERS ONLY HER TAIL ADMITTED (a buy by a tailed trader who is
+      // neither in the cohort nor one of her own position dependencies), by
+      // event key. The child keeps them out of the position dependencies an
+      // entry reports (fomo-child.ts reportDependencies): a tailed trader must
+      // never become a 14-day, fleet-wide dependency that outlives the hours
+      // she consented to, Stop, expiry and MERRYMEN_FOMO_TAILS=0.
+      const tailTriggerKeys = kept.filter((e) => !cohortIds.has(e.trader.userId) && !ownDeps.has(e.trader.userId)).map((e) => e.eventKey);
       const oldestTrigger = triggers.length > 0 ? Math.min(...triggers.map((e) => e.observedAt)) : null;
       const firstSeenAt = Math.min(c.firstSeenAt ?? Number.POSITIVE_INFINITY, oldestTrigger ?? Number.POSITIVE_INFINITY, tracked.get(key) ?? now);
       let lens: string | null = null;
@@ -1976,6 +1981,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         priority: c.priority,
         reasons: [...c.reasons].sort(),
         triggers,
+        ...(tailTriggerKeys.length > 0 ? { tailTriggerKeys } : {}),
         // A coin tracked for a holding with no cohort activity yet was first
         // seen when it first went into this tenant's file.
         firstSeenAt,

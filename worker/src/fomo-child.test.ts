@@ -709,6 +709,39 @@ describe("the entry gate", () => {
     }
   });
 
+  it("a trigger only her considered tail admitted is never a position dependency: not reported, not on the position (review 2026-10-07)", () => {
+    // One cohort buyer and one tailed buyer: both count in the review (the
+    // follow path is unchanged), but only the cohort trader keeps routing
+    // after the fill. A tailed trader must not become a 14-day, fleet-wide
+    // dependency that outlives Stop, the tail's end and MERRYMEN_FOMO_TAILS=0.
+    const t1 = tok(coin(1));
+    const tailed = ev(t1, 7, { sourceEventAt: T0 - 30_000 });
+    const cohort = ev(t1, 1, { sourceEventAt: T0 - 60_000 });
+    const h = harness({ signals: [signal(t1, { reasons: ["cohort", "tailed"], triggers: [tailed, cohort], tailTriggerKeys: [tailed.eventKey] })] });
+    h.tick();
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    h.child.settleEntry(g, "paper", "d-1");
+    const deps = h.reports().filter((r): r is Extract<BrokerReport, { kind: "position-dependency" }> => r.kind === "position-dependency");
+    assert.deepEqual(deps.map((d) => d.userId), [cohort.trader.userId], "the cohort trader keeps routing; the tailed one does not");
+    assert.deepEqual(h.child.ledger.positions("paper")[0]!.traders, [cohort.trader.userId.toLowerCase()]);
+  });
+
+  it("a considered tail's single-buyer probe fills on paper and reports no position dependency at all (review 2026-10-07)", () => {
+    const t1 = tok(coin(1));
+    const tailed = ev(t1, 7, { sourceEventAt: T0 - 30_000 });
+    const h = harness({ signals: [signal(t1, { reasons: ["tailed"], triggers: [tailed], tailTriggerKeys: [tailed.eventKey] })] });
+    h.tick();
+    const a = stateOf(h.assessmentsReported(), coin(1));
+    assert.equal(a!.state, "PROBE_CANDIDATE", "one buyer is at most a probe: the review is unchanged");
+    const g = h.child.gateEntry(h.entry(coin(1), 2));
+    assert.equal(g.kind, "follow");
+    h.child.settleEntry(g, "paper", "d-1");
+    assert.equal(h.child.ledger.positions("paper")[0]!.everHeld, true, "it filled");
+    assert.deepEqual(h.reports().filter((r) => r.kind === "position-dependency"), []);
+    assert.deepEqual(h.child.ledger.positions("paper")[0]!.traders, []);
+  });
+
   it("an entry no follow nomination reached passes untouched", () => {
     const h = harness();
     h.tick();

@@ -499,12 +499,20 @@ function signalOf(v: unknown): ChildSignal | null {
   const reasons: Reason[] = [];
   for (const r of v.reasons) if (isIn(REASONS, r) && !reasons.includes(r)) reasons.push(r);
   const lens = lensOf(v.lens);
+  const triggers = triggersOf(v.triggers, token.key);
+  // Only keys of this signal's own (kept) triggers, each once: a key naming
+  // nothing here, or anything that is not a string, is dropped.
+  const own = new Set(triggers.map((e) => e.eventKey));
+  const tailTriggerKeys = Array.isArray(v.tailTriggerKeys)
+    ? [...new Set(v.tailTriggerKeys.filter((k): k is string => typeof k === "string" && own.has(k)))].slice(0, CHILD_FOMO_LIMITS.triggers)
+    : [];
   return {
     token,
     label: labelOf(v.label),
     priority: v.priority,
     reasons,
-    triggers: triggersOf(v.triggers, token.key),
+    triggers,
+    ...(tailTriggerKeys.length > 0 ? { tailTriggerKeys } : {}),
     firstSeenAt,
     dossier: dossierOf(v.dossier, token.key),
     lens,

@@ -847,6 +847,31 @@ describe("tails", () => {
     r.pass.stop();
   });
 
+  it("marks the triggers only a considered tail admitted, so the child never makes the trader a position dependency; untailed, the trader adds nothing (review 2026-10-07)", async () => {
+    const db = await freshDb();
+    const Z1 = rh("77");
+    await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
+    await tail(db, T1, STAR, { consider: true, handle: "starboy" });
+    // A tailed cohort member is admitted by the cohort anyway: its buy stays an ordinary trigger.
+    await tail(db, T1, KALEO, { consider: true, handle: "CryptoKaleo" });
+    await store.insertEvents(db, [event(1, STAR, Z1, T0 - 5 * MIN), event(2, KALEO, Z1, T0 - 4 * MIN)]);
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring } });
+    await r.run([T1]);
+    const sig = r.last(T1).signals.find((x) => x.token.key === Z1)!;
+    assert.deepEqual(new Set(sig.triggers.map((e) => e.eventKey)), new Set([`ev:${uuid(1)}`, `ev:${uuid(2)}`]), "both count in the review, as before");
+    assert.deepEqual(sig.tailTriggerKeys, [`ev:${uuid(1)}`], "only the buy the tail alone admitted is marked");
+    // Untailed: the trader's buys are no trigger, and they are nobody's
+    // dependency (no fleet fan-out).
+    await store.removeTail(db, T1, STAR);
+    await r.run([T1], T0 + MIN);
+    const after = r.last(T1).signals.find((x) => x.token.key === Z1);
+    assert.ok(!after || !after.triggers.some((e) => e.trader.userId === STAR), "no trigger of theirs after the tail");
+    assert.equal(after?.tailTriggerKeys, undefined);
+    const i = await fleetInterest(db, T0 + MIN, null);
+    assert.equal(i.dependencies.has(STAR), false);
+    r.pass.stop();
+  });
+
   it("an owner with monitoring and follow off is still told (the tails block) but gets no signals", async () => {
     const db = await freshDb();
     await tail(db, T1, STAR, { consider: true });

@@ -492,7 +492,13 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
 - **Not copy trading: the follow path is unchanged.** A tail with `consider` off adds
   no breadth to any review. With `consider` on, the trader's buys since the tail began
   (buys only: never their sells or theses) count as triggers in that owner's file, as a
-  cohort member's do, unless the cohort marks them not followable. `following.ts`, sizing, the early book, the Trencher
+  cohort member's do, unless the cohort marks them not followable. The file marks
+  the buys only the tail admitted (`ChildSignal.tailTriggerKeys`: the trader is
+  neither in the cohort nor one of her position dependencies), and an entry they led
+  to never reports that trader as a position dependency (`fomo-child.ts
+  reportDependencies`) or keeps them on the position: a tail's influence ends with the
+  tail (Stop, its end, `MERRYMEN_FOMO_TAILS=0`), and its trader never becomes a 14-day
+  dependency fanned out to every monitoring owner. `following.ts`, sizing, the early book, the Trencher
   review, `take()` and policy are untouched: one buyer is at most a probe (≤ 2.5 USDG),
   only if Merrymen's own checks and the Brain agree, inside the scout budget, on paper
   unless `MERRYMEN_FOMO_FOLLOW_LIVE` allows live, and nothing at all with following off.

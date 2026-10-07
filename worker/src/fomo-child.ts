@@ -1902,7 +1902,18 @@ interface Tracked {
   assessment: FollowAssessment;
   until: number;
   triggers: TraderEvent[];
+  /**
+   * Keys of the triggers only a considered tail admitted (contract.ts
+   * ChildSignal.tailTriggerKeys): never a position dependency, so a tail's
+   * trader stops mattering when the tail does.
+   */
+  tailKeys: string[];
   strength: DossierStrength | null;
+}
+
+/** The triggers an entry may report as position dependencies: never one only a tail admitted. */
+function dependencyTriggers(tracked: Tracked): TraderEvent[] {
+  return tracked.triggers.filter((e) => !tracked.tailKeys.includes(e.eventKey));
 }
 
 export class FomoChild {
@@ -2317,6 +2328,7 @@ export class FomoChild {
       assessment: a,
       until: hint.expiresAt + FOMO_CHILD.trackedGraceMs,
       triggers: s.triggers.filter((e) => a.triggerEventKeys.includes(e.eventKey)),
+      tailKeys: (s.tailTriggerKeys ?? []).filter((k) => a.triggerEventKeys.includes(k)),
       strength: dossierStrength(s.dossier),
     });
     const res = book.offer(address, {
@@ -2757,16 +2769,23 @@ export class FomoChild {
       setupExpiresAt: a?.setupExpiresAt ?? null,
       horizonEndsAt: horizon !== null ? now + horizon : null,
       strengthAtEntry: tracked?.strength ?? null,
-      traders: [...new Set((tracked?.triggers ?? []).map((e) => lower(e.trader.userId)).filter(Boolean))].slice(0, FOMO_CHILD.dependencyMaxTraders),
+      traders: [...new Set((tracked ? dependencyTriggers(tracked) : []).map((e) => lower(e.trader.userId)).filter(Boolean))].slice(0, FOMO_CHILD.dependencyMaxTraders),
       entryId,
     };
   }
 
-  /** The triggering traders' activity keeps routing while the position is open (bounded, expiring). */
+  /**
+   * The triggering traders' activity keeps routing while the position is open
+   * (bounded, expiring). Never a trader only her tail admitted: that one's
+   * buys counted in the review while she asked, and a 14-day dependency
+   * would keep them triggering her follow review, and route their every
+   * event to every monitoring owner, long after Stop, the tail's end or
+   * MERRYMEN_FOMO_TAILS=0.
+   */
   private reportDependencies(token: string, tracked: Tracked | null, now: number): void {
     const broker = this.deps.broker();
     if (!broker || !tracked) return;
-    const users = [...new Set(tracked.triggers.filter((e) => e.kind === "buy").map((e) => e.trader.userId).filter((u) => typeof u === "string" && u.length > 0))].slice(
+    const users = [...new Set(dependencyTriggers(tracked).filter((e) => e.kind === "buy").map((e) => e.trader.userId).filter((u) => typeof u === "string" && u.length > 0))].slice(
       0,
       FOMO_CHILD.dependencyMaxTraders,
     );

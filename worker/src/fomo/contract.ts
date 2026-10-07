@@ -242,6 +242,15 @@ export interface ChildSignal {
    * cohort member marked not followable).
    */
   triggers: TraderEvent[];
+  /**
+   * Event keys, each one of `triggers`, of the buys ONLY a considered tail
+   * admitted (the tailed trader is neither in the cohort nor one of this
+   * owner's position dependencies). They count in the review like any
+   * trigger, but an entry never reports their trader as a position
+   * dependency (fomo-child.ts reportDependencies): a tail's influence ends
+   * with the tail. Absent: none (and in files from older writers).
+   */
+  tailTriggerKeys?: string[];
   /** When Merrymen first saw cohort activity on this token. */
   firstSeenAt: number;
   /** The latest shared dossier for the token, when one has been built. */

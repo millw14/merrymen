@@ -528,4 +528,18 @@ describe("child fomo file: tails", () => {
     const f = normalizeChildFomoFile(file({ signals: [signal(evm(9), "discovery", { reasons: ["tailed", "bogus" as never] })] }))!.file;
     assert.deepEqual(f.signals[0]!.reasons, ["tailed"]);
   });
+
+  it("a signal's tail-only trigger keys: only keys of its own triggers, each once, strings only; none is no field (review 2026-10-07)", () => {
+    const t = evm(9);
+    const a = event(t, 1);
+    const b = event(t, 2);
+    const f = normalizeChildFomoFile(
+      file({ signals: [signal(t, "discovery", { triggers: [a, b], tailTriggerKeys: [a.eventKey, a.eventKey, "ev:not-here", 7 as never] })] }),
+    )!.file;
+    assert.deepEqual(f.signals[0]!.tailTriggerKeys, [a.eventKey]);
+    const none = normalizeChildFomoFile(file({ signals: [signal(t, "discovery", { triggers: [a], tailTriggerKeys: ["ev:not-here"] })] }))!.file;
+    assert.equal("tailTriggerKeys" in none.signals[0]!, false);
+    const junk = normalizeChildFomoFile(file({ signals: [signal(t, "discovery", { triggers: [a], tailTriggerKeys: "x" as never })] }))!.file;
+    assert.equal("tailTriggerKeys" in junk.signals[0]!, false);
+  });
 });
