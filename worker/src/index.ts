@@ -14634,7 +14634,11 @@ async function main() {
     () => {},
   );
   // Telegram groups reach the research through this port only (coin-level aggregates, audience "group").
-  const tgFomoPort = createTgFomoPort(() => fomoBroker);
+  const tgFomoPort = createTgFomoPort(() => fomoBroker, {
+    // The owner's moves offer /buy only where /buy would resolve: the same
+    // ticker shape /buy parses and the same watch-set resolution it uses.
+    buyable: (symbol) => /^[A-Za-z]{1,6}$/.test(symbol) && resolveOrderToken(symbol, watchTokens).kind === "token",
+  });
 
   // Kept for the SIGTERM handler below, which stops the poll on the way out.
   const telegramPoll = startTelegram({

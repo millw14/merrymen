@@ -1705,6 +1705,74 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "yesterday", "yesterdays", "tomorrow", "week", "weeks", "month", "months", "days", "year", "years", "quarter", "quarters", "earlier", "previous", "prior", "past", "before", "then", "session",
 ]);
 
+/**
+ * A NAME A MODEL CHOSE, CHECKED BY THE DESK'S OWN RULE (route.ts): at least two
+ * characters, not one of the desk's stop words, not this bot, not a number.
+ * The cleaned name, or null.
+ */
+export function deskNameOk(name: unknown, selfNames: readonly string[] = []): string | null {
+  if (typeof name !== "string") return null;
+  const n = norm(name).replace(/^[$@]+/u, "").replace(/[._-]+$/u, "");
+  if (n.length < 2 || DESK_STOP.has(n) || /^\p{N}+$/u.test(n)) return null;
+  const self = new Set(selfNames.map((s) => norm(String(s ?? "")).replace(/^@+/u, "")));
+  return self.has(n) ? null : n;
+}
+
+/** Words it takes, names gone, before a line without a question mark is worth one routing call. */
+const ROUTE_MIN_WORDS = 3;
+/**
+ * A word from what the router can serve: Fomo, traders and their standing,
+ * coins and their boards, the crowd buying or selling, the market. Never what
+ * a line means (the model reads that); only whether it could be one of those
+ * at all, so "how was your weekend" never pays for a routing call.
+ */
+const ROUTE_CUE =
+  /\b(?:fomo|traders?|trading|top|best|winning|winners?|leading|leaders?|leaderboards?|ranks?|ranking|rankings|goat|whales?|smart money|degens?|trending|hot|graduat\w*|launch\w*|coins?|tokens?|tickers?|memes?|memecoins?|markets?|charts?|price|pump\w*|dump\w*|moon\w*|runners?|gems?|alpha|plays?|calls?|thesis|theses|hold|holds|holding|held|holders|bags?|bought|buy\w*|sold|sell\w*|ape[ds]?|aping|offload\w*|loading|loaded|accumulat\w*|exit\w*|profits?|gains?|pnl|p&l|made|making|rekt|wallets?|tail\w*|track\w*|monitor\w*|keep tabs|cooked|legit|rug\w*|entry|send\w*)\b/u;
+
+/**
+ * Asking about something by name, with no cue word: "what's up with pons",
+ * "what are people saying about pons", "anyone know what unipcs is up to",
+ * "why is everyone into pons". The name itself is the model's to read.
+ */
+const ROUTE_ASKS_ABOUT =
+  /\b(?:up with|up to|saying about|said about|heard (?:of|about)|happening with|going on with|been doing|(?:do|d|did) (?:you|u|ya) know|anyone know|(?:everyone|everybody|people|y'?all|they|whales?) (?:is |are |r )?(?:so |all )?into)\b/u;
+
+/**
+ * IS THIS LINE WORTH ONE ROUTING CALL (handler.ts)? A question mark, or three
+ * words once its names and handles are gone, and a word from what the router
+ * serves (ROUTE_CUE) or a $tag: "lol", "ok bro", a lone emoji and banter
+ * ("how was your weekend?") are the persona's without asking anyone.
+ */
+export function routeWorthy(text: unknown, selfNames: readonly string[] = [], knownCoins: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames));
+  const words = wordsOf(t);
+  if (words.length === 0) return false;
+  if (!/[?？]/u.test(text) && words.length < ROUTE_MIN_WORDS) return false;
+  if (ROUTE_CUE.test(t) || ROUTE_ASKS_ABOUT.test(t) || DESK_TRADING_CUE.test(t) || /(?:^|[^\p{L}\p{N}_])\$[A-Za-z]/u.test(text)) return true;
+  // A coin this chat already knows, named plainly: "what's up with pons lately".
+  return knownCoins.some((c) => {
+    const n = typeof c === "string" ? norm(c).replace(/^\$+/u, "") : "";
+    return n.length >= 2 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(n)}(?![\\p{L}\\p{N}])`, "u").test(t);
+  });
+}
+
+/** Laughter, an ack or an emoji: a reaction, not a question, whatever it replies to. */
+const REACTION_ONLY = /^(?:l+o+l+|lmf?a+o+|ha(?:ha)+h?|he(?:he)+|facts|true|same|fr|ikr|nice|bet|k|ok|okay|word|based|real|wow|damn|crazy|insane)$/u;
+
+/**
+ * A REACTION AND NOTHING ELSE: "lol", "facts", "🔥", "😂😂". Not a short
+ * answer ("pons", "trending", "yes"): a reply to its own Fomo question is
+ * routed however short it is (handler.ts), but a reaction never is.
+ */
+export function reactionOnly(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return true;
+  if (/\$[A-Za-z]/u.test(text)) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0) return true;
+  return words.every((w) => REACTION_ONLY.test(w));
+}
+
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
 const DESK_TRADING_CUE =
   /\b(?:entry|entries|chart|charts|ta|buy|buying|sell|selling|ape|aping|bag|coin|token|price|pump|pumping|dump|dumping|send|sending|ca|liq|liquidity|volume|mcap|fdv|holders|bullish|bearish|dip|setup|levels?|support|resistance|breakout|analysis|analy[sz]e|legit|rug|runner|moon|mooning|cooked)\b/u;
@@ -1884,7 +1952,9 @@ export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: 
  * in", "pure fomo lol" and "fomo into it" are how people feel, and stay chat.
  */
 const FOMO_PLATFORM =
-  /\b(?:on|from|via|through|using|inside|in the|with|about) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b/u;
+  /\b(?:on|from|via|through|using|inside|in the|with|about) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b|\btop (?:of |on )?(?:the )?fomo\b/u;
+/** A question word near the start, after a few words of preamble: "i'm sorry who's the top trader on fomo". */
+const FOMO_WH_EARLY = /^(?:[\p{L}']+\s+){0,3}(?:who|who's|whos|what|what's|whats|which|how|hows|how's)\b/u;
 /**
  * The feature itself: what Fomo is, whether it works, what it can do ("what
  * is fomo?", "is fomo working", "is fomo on?", "fomo help"). Answered by code
@@ -1919,7 +1989,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
   // Names out, and whatever punctuation they leave in front ("@", ",").
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
   if (!t || COIN_STOP.test(t)) return null;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames);
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t);
   if (!asked) return null;
   if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
   if (FOMO_THESES.test(t)) return { kind: "theses" };

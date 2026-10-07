@@ -1028,7 +1028,7 @@ describe("money: no figure about money in any line", () => {
 describe("research: a code-written Fomo line may carry a published figure, and nothing else changes", () => {
   // The leaderboard and a board's market caps, as tg-fomo-port.ts hands them on.
   passes([
-    ["research", "Top traders on Fomo, last 24h, by money made on closed trades (source-reported, not a skill measure):"],
+    ["research", "Top traders on Fomo, last 24h, by money made on closed trades:"],
     ["research", "1. CryptoKaleo +$151.4k"],
     ["research", "2. frankdegods -$4.2k"],
     ["research", "1. PONS on robinhood, market cap $2.1M"],

@@ -502,6 +502,7 @@ answers use one call on the existing house model.
 | `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
+| `MERRYMEN_TG_GROUPS_ROUTER=0` | worker children | turns off the group router (docs/tg-groups.md "What a line wants"): lines no rule knew go to the persona |
 | `MERRYMEN_TENANT` | set by the orchestrator in each child | not a secret; the child checks `fomo.json` belongs to it. IPC never trusts it: the orchestrator stamps the tenant itself. |
 
 Surface limits:
@@ -515,8 +516,16 @@ Surface limits:
   profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
   `research` (every clause but money), with money in short form ($151.4k) and four rows a
   board. "What can you do with fomo" and "is fomo working?" are answered by code with no
-  lookup: a fixed list, and whether research is on here. The attribution reads "via
-  fomoapi" there, because the gate refuses "API" and domains.
+  lookup: a fixed list, and whether research is on here. Group answers carry no
+  attribution line and no skill caveat (Milla, 2026-10-07: the room has had a post about
+  the source); owner answers keep both. When the owner asks in a group, her moves for the
+  rows (the DM questions to ask next, and `/buy SYM` only for a Robinhood Chain coin her
+  `/buy` resolves) go to her DM, and the room hears only that they went. A line no rule
+  reads is routed by the group model to a closed menu (docs/tg-groups.md); a Fomo pick
+  runs as a fixed question through the same planner. The owner's ask about one trader by
+  name (routed, or planned and deflected in the room) is answered read-only in her DM
+  (`AnswerFomoInput.readOnly`) as one of three fixed questions (profile, holdings, this
+  week's trades), at most six per 10 minutes.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.

@@ -52,7 +52,8 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    question. Fomo research lines are code-written and pass the gate as
    `research`: every clause but the money clause, so a board's market caps
    and Fomo's public leaderboard P&L (third parties' published figures, in
-   short form, beside the source line) reach the room. A market desk read may cite public market figures only when
+   short form, under a header naming Fomo; the room has had a post about the
+   source, so group answers carry no source line) reach the room. A market desk read may cite public market figures only when
    every figure in it is one the brief code measured for that answer contains
    (Market analysis); the desk is never handed the owner's book, so it has
    none of the owner's figures to cite. Hypothetical arithmetic is never
@@ -598,6 +599,86 @@ verdict and source line are never lost. With no chart, the same text goes as a m
 coin it cannot find, two coins it cannot tell apart, or a feed it cannot read
 gets a fixed line asking for the CA or a minute — never a guess.
 
+## What a line wants, when no rule knew (the router)
+
+The rules above read the shapes people usually use. People do not always
+use them ("i'm sorry who's the top trader", "do you know unipcs on fomo",
+"what are the whales dumping lately"), and every line no rule took used to
+go to the persona, which shrugged. `route.ts` asks the group model once, at
+exactly that point and nowhere earlier: of the things it can do, which one
+does this line want?
+
+**When.** Only for a line said to it, with an ordinary mood (not a private
+ask, an injection or a question about the bot), that nothing above took
+(Fomo lane, public facts, the desk, a coin), that was not read as an
+ordinary topic, that has a question mark or three words once names are
+gone, and that has a word from what the router serves (Fomo, traders,
+winning, top, coins, boards, buying or selling, the market, a `$tag`), an
+ask about something by name ("what's X up to", "what are people saying
+about X", "why is everyone into X") or a coin this chat already knows.
+Banter ("how was your weekend?") and lines the rules already answer never
+pay for it. One exception runs earlier: a reply to one of its own Fomo lines
+(a research answer, or the persona asking "top traders today, or what's
+trending?", recognised by message, never by its words) is routed before the
+desk, however short, because what "pons" or "trending" means there is in
+the line it answers. A reaction under it ("lol", "🔥") is not, and a desk
+read that happens to say "trending up" keeps its own follow-ups.
+
+**The menu** is one forced tool call (`callChoice`): chat, the Fomo
+leaderboard, a Fomo board, one coin on Fomo (theses, buyers, sellers, a
+research dive, what is going on), what Fomo's traders are buying or
+selling, small coins on Fomo, one Fomo trader by name (who they are, what
+they hold, what they traded), a tail, what Fomo is, a market read, a coin
+read. It lists only what this agent can serve (no Fomo actions without
+Fomo, no reads without the desk). Nothing on it trades (rule 1). The model
+sees `$PONS` as `cashtag:PONS` and `@unipcs` as `handle:unipcs`: the sign is
+what tells a coin from a person, and the router writes nothing anyone sees.
+
+**Checked by code.** A coin or trader the model names counts only when it is
+written in the line as a whole word (a coin may also come from the line it
+replies to); never the bot's own names, a stop word or a number. A coin is
+never an `@name` and a trader never a `$tag`. The time
+window and the buy or sell side are read from the line's own words, never
+from the model. A Fomo pick reaches the research only as a fixed question
+code writes (`tg-fomo-port.ts requestText`), planned by the same
+deterministic planner. Anything else (no model, an answer in words, an
+unknown action, a made-up name) is the persona's answer, exactly as before.
+
+**One trader by name.** The owner's own ask (her sender id, never through a
+chat) is answered in her DM, whether the router read it ("do you know
+unipcs on fomo") or the planner did ("who is trader unipcs on fomo?",
+"what is @x holding on fomo?", which the room would otherwise only hear
+deflected): `service.ts` checks her id and the allowlist again, proves the
+DM with a typing action before any lookup, and asks one fixed question
+read-only ("who is trader X on fomo?", "what is trader X holding on
+fomo?", or "what has trader X been trading on fomo this week?"; nothing can
+be watched or changed from a room). Only that question and its answer enter
+her DM history, and her DM's research subject changes only once the answer
+was delivered (a failed send leaves her last subject as it was). An ask
+superseded by a newer line of hers, or forgotten, while the lookup runs is
+not answered and writes nothing. The room hears "sent it to your DMs" and never the name, or
+"dm me /start first" (once an hour, counted only once it was said) when her
+DM cannot be reached. At most six of these per 10 minutes. Anyone else gets
+the room's deflection, which, made before any lookup, spends none of the
+room's research answers, and her DM is never touched.
+
+**Cost.** One call of the allowance, through the same gate. A research pick
+replaces the persona's call; a chat pick costs one more. Routing only ever
+spends the first half of the day's allowance and of this chat's hour (at
+least 20 and 4 are always kept), checked at the moment the allowance is
+taken, so lines arriving together cannot spend the kept half between them.
+It runs only when the reply deadline still leaves 8 s for the answer (a box
+of at most 4 s, slot wait included, and at least 1.5 s for the call
+itself, and it waits for a slot only as long as one could still be used).
+Five calls in a row that ran and gave no choice (a timeout, a provider
+error, an answer in words) rest it for 10 minutes; a pick code refused,
+and a call that never ran (a busy slot), do not count. The log
+says which kind of pick it was (`[tg-groups] route fomo:leaderboard`), never
+the line.
+
+`MERRYMEN_TG_GROUPS_ROUTER=0` turns it off; lines go to the persona as
+before.
+
 ## The coin flow
 
 A CA is `0x` + exactly 40 hex characters, found anywhere in the visible text
@@ -1089,6 +1170,9 @@ so a held child's forget reaches the stored copy too. Hosted, the
 orchestrator also sets it for one child whose group memory could not be
 restored at spawn (see Storage and the ferry).
 
+`MERRYMEN_TG_GROUPS_ROUTER=0` turns off only the router (What a line wants):
+lines no rule knew go straight to the persona.
+
 `MERRYMEN_TG_GROUPS_DESK=0` turns off only the market desk: market and coin
 questions go back to the voice and the public snapshot.
 `MERRYMEN_TG_GROUPS_BRAIN=1` lets desk reads use Brain (needs
@@ -1254,8 +1338,11 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "wdyt?" / "is it good?" said to it | An unambiguous remembered coin gets a factual quick-screen take; otherwise it asks for the CA. It never claims a buy without a recorded fill |
 | "what do you think about sex" / "thoughts on pizza?" said to it, nothing marking a coin | One COIN-or-TOPIC question to the group model with the last lines as context; a topic is the persona's to answer, never "drop the CA". A $tag, ticker capitals, a trading word or a coin this chat knows makes it a coin with no question |
 | "are you serious?" under its own odd reply | Sees which of its lines it is answering; owns a misreading in a few words instead of "yeah i am" |
-| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form, and the source line. Never who it follows; one trader's holdings stay in a DM |
+| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form; no source line or skill caveat (the room has had a post about both). Never who it follows; one trader's holdings stay in a DM |
 | "what can you do with fomo" / "is fomo working?" | A fixed list of what a room can ask / whether Fomo research is on here; no lookup |
+| "i'm sorry, who's been winning the most lately" / "what are people over there offloading this week" | No rule knew it: the router picks the leaderboard / the crowd's sells for this week, and the research answers it as the fixed question |
+| The owner: "do you know unipcs on fomo" / "who is trader unipcs on fomo?" | One trader: looked up read-only and sent to her DM; the room hears "sent it to your DMs" and never the name. Anyone else: "That one is for a direct message, not the group." |
+| "trending" / "$pons" in reply to its own "top traders today, or what's trending?" / "which coin?" | Read in the light of that line: Fomo's trending board / that coin's theses, not a market read or a chart |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |
