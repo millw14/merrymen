@@ -172,6 +172,11 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
         30,
       );
       assert.equal(watches.filter((w) => w.ok).length, 25);
+      const tails = await both(
+        (db, i) => S.addTail(db, { tenant: i % 2 ? A : a, userId: `t-${i}`, handle: `h${i}`, consider: i % 3 === 0, nowMs: T0, expiresAtMs: T0 + 3 * HOUR, createdVia: "telegram-dm" }),
+        8,
+      );
+      assert.equal(tails.filter((t) => t.ok).length, 3, "the tail cap holds across pools and tenant spellings");
       const deps = await both(
         (db, i) => S.addPositionDep(db, { tenant: A, userId: `u-${i}`, tokenKey: TOKEN.key, reason: "held", nowMs: T0, expiresAtMs: T0 + DAY }),
         34,
@@ -259,6 +264,15 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       assert.equal(await S.removeWatch(db, A, (await S.activeWatches(db, A, T0))[0]!.tokenKey), true);
       assert.deepEqual(await S.tenantsWatching(db, "k:none", T0), []);
       assert.equal((await S.watchedTokenKeys(db, T0, 100)).length, 24);
+      // tails
+      const tailed = await S.activeTails(db, A, T0);
+      assert.equal(tailed.length, 3);
+      assert.equal(typeof tailed[0]!.consider, "boolean", "consider reads back as a boolean from a BIGINT");
+      assert.deepEqual(await S.tenantsTailing(db, tailed[0]!.userId, T0), [a]);
+      assert.equal((await S.tailedUserIds(db, T0, 10)).length, 3);
+      assert.deepEqual(await S.recentlyEndedTails(db, A, T0 + 3 * HOUR - MIN, T0 + 3 * HOUR).then((r) => r.length), 3);
+      assert.equal(await S.removeTail(db, A, tailed[0]!.userId), true);
+      assert.equal(await S.removeAllTails(db, A, T0), 2);
       assert.equal(await S.setTenantRoute(db, A, { dataAccess: true, monitoring: true, follow: false }, T0), true);
       assert.deepEqual(await S.routedTenants(db, "monitoring"), [a]);
       assert.deepEqual(await S.routedTenants(db, "follow"), []);
