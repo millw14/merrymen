@@ -122,7 +122,7 @@ const microOf = (usdg: number) => BigInt(Math.round(usdg * 1e6));
  * the constraint and double the deposit. The plan's account string comes from
  * that column, which is what makes this deterministic across runs.
  */
-async function verifyInserted(
+export async function verifyInserted(
   db: Db,
   account: string,
   chainId: number,
@@ -485,7 +485,7 @@ function correctIndexDefinition(definition: unknown): boolean {
     "tx_hash is not null and log_index is not null";
 }
 
-async function inspectChainIdentityIndex(db: Db, dialect?: IndexDialect): Promise<{ dialect: IndexDialect; valid: boolean }> {
+export async function inspectChainIdentityIndex(db: Db, dialect?: IndexDialect): Promise<{ dialect: IndexDialect; valid: boolean }> {
   if (dialect !== "postgres") {
     try {
       const row = await db.prepare(

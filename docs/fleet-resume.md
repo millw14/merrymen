@@ -322,6 +322,19 @@ Public chain data only; look each one up as printed. Then:
    tool cannot classify something, or a trade's cost basis does not reflect
    it, the tool reports it as unresolved and does not book it. Escalate
    those to Milla and Codex.
+
+   **If it is unresolved because it landed before the current accounting
+   epoch opened** (`not booked: it landed before accounting epoch N
+   opened`), it belongs to a closed epoch. An owner's deposit and withdrawal
+   inside closed epoch 1 are filed there, as a pair, by the closed-epoch
+   repair, [docs/closed-epoch-capital.md](closed-epoch-capital.md): preview,
+   review, backup, apply, the same as the booking tool. It proves epoch 1 was
+   still open after the last movement and closed before the next epoch's
+   first row, quarantines any stand-in in the same transaction, and deletes a
+   live cost basis admission would seed for a token the chain shows the
+   account no longer holds. Then preview the tenant here again; book with the
+   booking tool anything that landed after the epoch closed. An owner's
+   root-key operation is never booked by either tool.
 4. **If a later refusal superseded the chain refusal** (for another reason,
    such as `the evidence changed since the preview`), the tool refuses:
    `… refused for another reason) is not a chain refusal …`. Preview the
