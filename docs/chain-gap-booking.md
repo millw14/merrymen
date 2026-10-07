@@ -663,6 +663,12 @@ prints `APPLIED`, then exits with `applied-report-not-marked-committed`. The
 booking committed. The report still says `unknown` and is still what
 `--revert` takes.
 
+If the `APPLIED` line itself cannot be printed (the terminal, or the pipe
+the console writes to, is gone), the tool exits with
+`applied-but-not-printed`. The booking committed, and the report, marked
+`committed`, is kept. If the report could not be marked either, the code is
+`applied-report-not-marked-committed`, as above.
+
 The first apply creates `chain_gap_bookings`. This is additive DDL, like the
 resume tables.
 
@@ -707,7 +713,8 @@ OUTCOME UNKNOWN for booking <id>: the COMMIT was sent and no answer proved it ro
   2. Take it back: node --import tsx worker/src/chain-gap-booking-cli.ts --revert <output> --output /absolute/new-revert-report.json
 ```
 
-It exits with `apply-outcome-unknown`. Run command 1 first. It opens a
+It exits with `apply-outcome-unknown`, even if the console fails while
+printing those lines. Run command 1 first. It opens a
 read-only connection and, in one read-only snapshot, reads the booking's
 receipts and asks the server what became of the apply's transaction
 (`pg_xact_status` on the report's `xact` id). It checks the receipts against
@@ -869,13 +876,21 @@ minted anything did not rely on the rows, so it does not block a revert.
 
 Running it a second time prints `ALREADY REVERTED` and changes nothing.
 
+Once a revert has committed, nothing that fails afterwards reads as
+"nothing happened". `reverted-but-report-not-written`: the revert committed,
+but its report could not be written, and none is left. Run the same
+`--revert` again with a new `--output` for one: it says `ALREADY REVERTED`.
+`reverted-but-not-printed`: the revert committed and its report was
+written, but the `REVERTED` line could not be printed.
+
 A revert that Postgres rolls back for a conflict says `refused (conflict)`
 and changed nothing: run it again. If its `COMMIT` is sent and no answer
 proves a rollback (the same rule as the apply's), it prints
 `OUTCOME UNKNOWN for the revert of booking <id>`, leaves no revert report and
-exits with `revert-outcome-unknown`. Run the same `--revert` again with a new
-`--output`. If the first one committed, the second prints `ALREADY REVERTED`
-and changes nothing. Otherwise it reverts. To only look, run
+exits with `revert-outcome-unknown`, even if that line cannot be printed.
+Run the same `--revert` again with a new `--output`. If the first one
+committed, the second prints `ALREADY REVERTED` and changes nothing.
+Otherwise it reverts. To only look, run
 `--revert <apply report> --dry-run` as in
 [If the apply's outcome is unknown](#if-the-applys-outcome-is-unknown). It
 prints `COMMITTED, THEN REVERTED` once the revert has committed.
@@ -911,9 +926,14 @@ registration does to a basis the new book never had.
 lost answer after the commit took effect (`EPIPE`, `ECONNRESET`, `57P01`,
 `57P02`, `57P03`, `08006`, `08007`, `57014`, `40003`, no code), or one
 tagged neither `COMMIT` nor `ROLLBACK`, keeps the report, and the receipts
-settle it. A proven rollback (`40001`, `40P01`,
-`40002`, `23505`, `23514`, `ROLLBACK`'s tag) leaves no report and writes
-nothing. Its stand-in server hands out transaction ids and answers
+settle it. A proven rollback (`40001`, `40P01`, `40002`, `23505`, `23514`,
+`ROLLBACK`'s tag) leaves no report and writes nothing. A console that
+breaks once the outcome is settled cannot unsay it: the run exits with the
+code that names the outcome (`applied-but-not-printed`,
+`applied-report-not-marked-committed`, `apply-outcome-unknown`,
+`reverted-but-not-printed`, `revert-outcome-unknown`), never
+`booking-failed`. The apply report is kept, and so is a committed revert's
+report. Its stand-in server hands out transaction ids and answers
 `pg_xact_status`, so the check is shown saying `STILL UNKNOWN`, never
 `NOT COMMITTED`, for a transaction in progress, forgotten, committed with
 no receipt, on another server or an unreadable one, an id the server has

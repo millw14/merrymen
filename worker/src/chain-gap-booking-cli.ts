@@ -474,6 +474,8 @@ async function computePlan(tenant: string, env: NodeJS.ProcessEnv, deps: Require
 
 export async function main(args: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env, deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  /** A line said once the outcome is settled (committed, or unknown): a console that fails cannot replace the error that says which. */
+  const say = (line: string) => { try { out(line); } catch { /* the CliError thrown next still says it */ } };
   const options = parseBookingArgs(args);
   if ("help" in options) { out(HELP); return 0; }
   if (!env.DATABASE_URL) throw new CliError("database-url-required");
@@ -518,7 +520,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       closeSync(fd); rmSync(options.output, { force: true });
       if (e instanceof CommitOutcomeUnknown) {
         // A revert is safe to run again: one that committed answers ALREADY REVERTED and changes nothing.
-        out(`OUTCOME UNKNOWN for the revert of booking ${report.bookingId}: its COMMIT was sent and no answer proved it rolled back. ` +
+        say(`OUTCOME UNKNOWN for the revert of booking ${report.bookingId}: its COMMIT was sent and no answer proved it rolled back. ` +
           `Run the same --revert again with a new --output: it reverts, or says ALREADY REVERTED if this one committed. To only look: ` +
           `${SELF} --revert ${options.report} --dry-run --output /absolute/new-receipts-report.json`);
         throw new CliError("revert-outcome-unknown");
@@ -526,15 +528,16 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       if (conflictRolledBack(e)) throw conflictRefusal(e, "revert");
       throw e;
     }
-    // Committed: the revert stands whatever happens to its report now.
+    // Committed: the revert stands whatever happens to its report or its console line now.
     try { finishReportFile(fd, options.output, r); }
     catch {
       rmSync(options.output, { force: true });
-      out(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} booking ${r.bookingId}, but its report could not be written to ${options.output}: ` +
+      say(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} booking ${r.bookingId}, but its report could not be written to ${options.output}: ` +
         "run the same --revert again for one (it says ALREADY REVERTED)");
       throw new CliError("reverted-but-report-not-written");
     }
-    out(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} booking ${r.bookingId} — tenant ${r.tenant}: ${r.rows.length} row(s); report ${options.output}`);
+    try { out(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} booking ${r.bookingId} — tenant ${r.tenant}: ${r.rows.length} row(s); report ${options.output}`); }
+    catch { throw new CliError("reverted-but-not-printed"); }
     return 0;
   }
 
@@ -574,9 +577,9 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       // The COMMIT may have taken effect: the report stays, saying "unknown", and the receipts (or the server's word on its transaction) settle it.
       close();
       const xact = persisted?.xact ? ` Its transaction is ${persisted.xact.id}.` : "";
-      out(`OUTCOME UNKNOWN for booking ${bookingId}: the COMMIT was sent and no answer proved it rolled back, so it may have committed. ` +
+      say(`OUTCOME UNKNOWN for booking ${bookingId}: the COMMIT was sent and no answer proved it rolled back, so it may have committed. ` +
         `${options.output} holds its apply report, written and fsynced before the COMMIT, with commitOutcome "unknown": keep it, both commands below take it.${xact}`);
-      for (const line of recoveryLines(options.output)) out(line);
+      for (const line of recoveryLines(options.output)) say(line);
       throw new CliError("apply-outcome-unknown");
     }
     // Nothing committed: the COMMIT was never sent, or its answer proved a rollback. The report describes nothing.
@@ -585,16 +588,19 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     if (conflictRolledBack(e)) throw conflictRefusal(e, "apply");
     throw e;
   }
-  // COMMITTED, and the COMMIT acknowledged: nothing below removes the report, it only says so.
-  let finalized = true;
+  // COMMITTED, and the COMMIT acknowledged: nothing below removes the report, it only says so, and a console that fails does not unsay it.
+  let finalized = true, printed = true;
   try { replaceReportFile(options.output, stampCommitOutcome(report, "committed")); } catch { finalized = false; }
-  out(`APPLIED booking ${report.bookingId} — ${report.rows.length} row(s) for tenant ${report.tenant} under backup ${report.backupRef}; ` +
-    `the apply report (what --revert takes) is ${options.output}. Preview the tenant again with MERRYMEN_RESUME_PREVIEW before approving it.`);
+  try {
+    out(`APPLIED booking ${report.bookingId} — ${report.rows.length} row(s) for tenant ${report.tenant} under backup ${report.backupRef}; ` +
+      `the apply report (what --revert takes) is ${options.output}. Preview the tenant again with MERRYMEN_RESUME_PREVIEW before approving it.`);
+  } catch { printed = false; }
   if (!finalized) {
-    out(`  ${options.output} is still the report written before the COMMIT (commitOutcome "unknown"), and could not be marked "committed": ` +
+    say(`  ${options.output} is still the report written before the COMMIT (commitOutcome "unknown"), and could not be marked "committed": ` +
       "the COMMIT was acknowledged, the receipts hold it, and it is still what --revert takes.");
     throw new CliError("applied-report-not-marked-committed");
   }
+  if (!printed) throw new CliError("applied-but-not-printed");
   return 0;
 }
 

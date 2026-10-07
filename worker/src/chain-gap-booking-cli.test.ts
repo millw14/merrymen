@@ -751,6 +751,54 @@ describe("through the shell: an apply's report outlives a COMMIT whose answer is
     assert.ok(again.printed[0]!.startsWith("ALREADY REVERTED booking"), again.printed.join("\n"));
   });
 
+  it("a console that breaks once the outcome is settled cannot unsay it: each failure names the outcome, never 'nothing was applied', and the report is kept", async () => {
+    /** The shell's run with a console that breaks (EPIPE) at the first line `from` matches, and stays broken. */
+    const brokenAt = (r: ReturnType<typeof runner>, from: RegExp) => {
+      let broken = false;
+      const out = (l: string) => {
+        if (broken || from.test(l)) { broken = true; throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" }); }
+        r.printed.push(l);
+      };
+      return (args: string[]) => main(args, env, { ...r.deps, out });
+    };
+    const fails = async (run: Promise<number>, code: string) => {
+      const e = await run.then(() => assert.fail(`${code}: exited 0`), (x: unknown) => x);
+      assert.ok(e instanceof CliError && e.code === code, `${code}: ${String(e)}`);
+      assert.equal(failureLine(e), `${code}. Use --help for invocation.`);
+    };
+    // Committed and acknowledged; the APPLIED line cannot be printed.
+    const first = await reviewed();
+    const applied = file("unprinted");
+    await fails(brokenAt(runner(first.raw), /^APPLIED /)(applyArgs(first.digest, applied)), "applied-but-not-printed");
+    assert.equal(flows(first.raw), 1, "it committed");
+    assert.equal(parseApplyReport(readFileSync(applied, "utf8")).commitOutcome, "committed", "its report kept, marked committed");
+    // ...and its report could not be marked committed either: that is the code, and the line after it is lost quietly.
+    const second = await reviewed();
+    const unmarked = file("unprinted-unmarked");
+    writeFileSync(`${unmarked}.committed.tmp`, "someone else's");
+    await fails(brokenAt(runner(second.raw), /^APPLIED /)(applyArgs(second.digest, unmarked)), "applied-report-not-marked-committed");
+    assert.equal(flows(second.raw), 1);
+    assert.equal(parseApplyReport(readFileSync(unmarked, "utf8")).commitOutcome, "unknown");
+    // The COMMIT's answer lost, and not one OUTCOME UNKNOWN line can be printed: still apply-outcome-unknown, the report kept.
+    const third = await reviewed();
+    const unknown = file("unprinted-unknown");
+    const lost = runner(third.raw, { write: commitAnswered("lost", pgError("ECONNRESET")) });
+    await fails(brokenAt(lost, /^OUTCOME UNKNOWN /)(applyArgs(third.digest, unknown)), "apply-outcome-unknown");
+    assert.equal(lost.printed.some((l) => /OUTCOME UNKNOWN|Did it commit/.test(l)), false, "none of it printed");
+    assert.equal(flows(third.raw), 1);
+    assert.equal(parseApplyReport(readFileSync(unknown, "utf8")).commitOutcome, "unknown");
+    // A committed revert whose REVERTED line cannot be printed: reverted-but-not-printed, its report kept, its receipts reverted.
+    const reverted = file("revert");
+    await fails(brokenAt(runner(first.raw), /^REVERTED /)(["--revert", applied, "--output", reverted]), "reverted-but-not-printed");
+    assert.equal((JSON.parse(readFileSync(reverted, "utf8")) as { outcome: string }).outcome, "reverted");
+    assert.equal(flows(first.raw), 0);
+    assert.equal((await lookAt(first.raw, applied)).view.verdict, "reverted");
+    // A revert whose COMMIT's answer was lost, its OUTCOME UNKNOWN line unprinted: still revert-outcome-unknown.
+    await fails(brokenAt(runner(third.raw, { write: commitAnswered("lost", pgError("57P01")) }), /^OUTCOME UNKNOWN /)(["--revert", unknown, "--output", file("revert")]),
+      "revert-outcome-unknown");
+    assert.equal(flows(third.raw), 0, "it took effect");
+  });
+
   it("the report names its database: a look or a revert pointed at another is refused before it connects, never read as 'not committed'", async () => {
     const { raw, digest } = await reviewed();
     const out = file("applied");
