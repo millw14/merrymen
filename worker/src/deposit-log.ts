@@ -55,8 +55,9 @@ import { classifyUsdgMovement, energyReserveTokens, MERRYMEN_TOKEN, type Transfe
 import type { ReceiptLog } from "./fills";
 // Which logs of a trade's transaction are the owner's own execution (a root
 // operation bundled beside the agent's swap), read off the receipt as the
-// owner record reads it.
-import { rootExecutionLogs } from "./owner-operations";
+// owner record reads it; and whether that receipt's amounts can be read at
+// all, by the rule the owner record refuses a receipt by.
+import { rootExecutionLogs, transferAmountsReadable } from "./owner-operations";
 
 /**
  * Every ERC-20 Transfer in a receipt, as classification legs.
@@ -179,7 +180,10 @@ export async function findTransferFlows(opts: {
    * validation, another account's operation, a session key's — stays skipped,
    * so a trade's own USDG legs are never classified here at all. A
    * transaction with a trade row that names no operation stays wholly
-   * skipped: that row could be the root operation's.
+   * skipped: that row could be the root operation's. So does one whose
+   * receipt holds a Transfer with an amount that cannot be read
+   * (owner-operations.ts transferAmountsReadable): that leg is refused and
+   * logged, and the pass goes on.
    *
    * Asked only for such a log. Absent: every log of a trade's transaction
    * stays skipped, as before.
@@ -345,6 +349,8 @@ export async function findTransferFlows(opts: {
   };
   /** For a trade's transaction: which of its logs a root operation of this account executed (owner-operations.ts rootExecutionLogs). */
   const rootByTx = new Map<string, Map<number, string> | null>();
+  /** Trades' transactions whose receipt holds a Transfer with an amount that cannot be read (owner-operations.ts transferAmountsReadable). */
+  const unreadableAmounts = new Set<string>();
   for (const c of candidates) {
     const k = c.txHash.toLowerCase();
     if (receipts.has(k)) continue;
@@ -361,11 +367,15 @@ export async function findTransferFlows(opts: {
     }
     receipts.set(k, receipt);
     // A TRADE'S TRANSACTION IS ONLY PLACED HERE: which of its logs the
-    // owner's own execution holds. Its amounts are decoded only for a leg let
-    // through below, so a trade's receipt can refuse this pass for nothing
-    // but being unreadable, as before when it was never read at all.
-    if (c.inTradeTx) rootByTx.set(k, rootExecutionLogs(receipt, smartAccount, c.txHash));
-    else legsOf(k);
+    // owner's own execution holds, and whether every Transfer in it carries a
+    // readable amount. Neither decodes an amount, and its amounts are decoded
+    // only for a leg let through below, after that check has passed — so a
+    // trade's receipt can refuse this pass for nothing but being unreadable,
+    // as before when it was never read at all.
+    if (c.inTradeTx) {
+      rootByTx.set(k, rootExecutionLogs(receipt, smartAccount, c.txHash));
+      if (!transferAmountsReadable(receipt)) unreadableAmounts.add(k);
+    } else legsOf(k);
   }
 
   const context = scannerClassifyContext({ custodyAddresses: opts.custodyAddresses, chainId: opts.chainId });
@@ -383,10 +393,33 @@ export async function findTransferFlows(opts: {
       // receipt's legs — the classifier and inputs the owner record judged it
       // by (owner-operations.ts ownerOperationOf), so the scanner books
       // exactly the legs that record leaves to it.
-      const op = rootByTx.get(c.txHash.toLowerCase())?.get(c.logIndex);
+      const k = c.txHash.toLowerCase();
+      const op = rootByTx.get(k)?.get(c.logIndex);
       if (op === undefined) continue;
       const trades = await opts.tradeOpsInTx!(c.txHash);
       if (trades === null || trades.has(op)) continue;
+      // AN AMOUNT THAT CANNOT BE READ, ANYWHERE IN THE RECEIPT, REFUSES THIS
+      // TRANSACTION ALONE. Those legs are what the leg is classified on, and
+      // the owner record vouches for no such receipt (ownerOperationOf is
+      // null by the same rule), so it leaves nothing to this scanner: booking
+      // the leg would move a peak on a reading the record refused. The
+      // decoder used to throw here instead (BigInt of '0x'), which refused
+      // every pass, every tick, for a receipt that never changes, so no later
+      // deposit or withdrawal of the account was booked; and an amount it
+      // could read but the record does not (empty data as zero, or more than
+      // a word) was booked from a receipt the record refused. Now the leg is
+      // not booked and the refusal is logged, one line per leg; the operation
+      // stays unrecorded (the reconciler records nothing for it), so
+      // admission names it missing and holds the tenant until it is
+      // reviewed. The cursor moves on past it.
+      if (unreadableAmounts.has(k)) {
+        opts.log?.(
+          `not booked: ${c.txHash}#${c.logIndex} is the owner's own operation ${op} in a trade's transaction, but a Transfer ` +
+            `in that receipt has an amount that cannot be read — this transaction is refused, as the owner record refuses it ` +
+            `(the operation stays unrecorded, so admission names it missing); the rest of the window is booked`,
+        );
+        continue;
+      }
     }
     const legs = legsOf(c.txHash.toLowerCase());
     const usdgLeg: TransferLeg = {

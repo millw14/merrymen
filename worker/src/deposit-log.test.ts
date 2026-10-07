@@ -484,10 +484,12 @@ describe("the owner's own operation bundled beside a trade", () => {
     };
   }
   /** The scan of a window holding that one transaction, which the ledger holds as a trade. */
-  const scanTrade = (chain: ReconcileChain, trades: ReadonlySet<string> | null | undefined, asked: string[] = [], knownKeys = new Set<string>()) =>
+  const scanTrade = (chain: ReconcileChain, trades: ReadonlySet<string> | null | undefined, asked: string[] = [], knownKeys = new Set<string>(),
+    log?: (m: string) => void) =>
     findTransferFlows({
       chain, smartAccount: ACCT, usdgToken: USDG, fromBlock: 0n, toBlock: 1000n, knownKeys, tradeTxHashes: new Set([TX]),
       ...(trades === undefined ? {} : { tradeOpsInTx: async (tx: string) => { asked.push(tx); return trades; } }),
+      ...(log ? { log } : {}),
     });
   const flowsOf = (fl: Awaited<ReturnType<typeof findTransferFlows>>) => fl.map((f) => [f.direction, f.amountUsdg6, f.logIndex]);
 
@@ -572,5 +574,85 @@ describe("the owner's own operation bundled beside a trade", () => {
   it("a receipt with no log positions cannot place the leg, so it stays skipped; an unreadable one refuses the pass, as for any other", async () => {
     assert.deepEqual(await scanTrade(bundle(WITHDRAW_BESIDE_SELL, { positions: false }), new Set([SESSION_OP])), []);
     await assert.rejects(() => scanTrade(bundle(WITHDRAW_BESIDE_SELL, { unreadable: true }), new Set([SESSION_OP])), /could not be read/);
+  });
+
+  /**
+   * AN AMOUNT THAT CANNOT BE READ, IN A BUNDLE WHOSE OWNER LEG IS LET THROUGH.
+   * The let-through leg is classified on the whole receipt's legs, and a
+   * Transfer whose data is not one quantity anywhere in it, even in another
+   * sender's operation, used to throw out of the decoder: the whole pass was
+   * refused, every tick, so every later deposit and withdrawal of the tenant
+   * went unbooked for good. The owner record vouches for no such receipt
+   * (ownerOperationOf is null), so the scanner refuses that one transaction by
+   * the same rule, says so, and goes on.
+   */
+  describe("a Transfer whose amount cannot be read, beside an owner's leg that is let through", () => {
+    const DEPOSIT_TX = `0x${"d0".repeat(32)}`;
+    const deposit = { address: USDG.toLowerCase(), topics: [TRANSFER_TOPIC, addressTopic(OTHER), addressTopic(ACCT)], data: `0x${w(7_000_000n)}` };
+    /** The bundle, then a plain 7 USDG deposit in a later transaction of the same window. */
+    const withLaterDeposit = (chain: ReconcileChain): ReconcileChain => ({
+      getBlockNumber: () => chain.getBlockNumber(),
+      async getReceiptLogs(tx) {
+        return String(tx).toLowerCase() === DEPOSIT_TX ? [{ ...deposit, logIndex: 0 }] : chain.getReceiptLogs(tx);
+      },
+      async getLogs(args) {
+        const match = args.address.toLowerCase() === deposit.address &&
+          args.topics.every((want, i) => want === null || want === undefined || String(want).toLowerCase() === deposit.topics[i]!.toLowerCase());
+        return [...(await chain.getLogs(args)),
+          ...(match ? [{ topics: deposit.topics as Hex[], data: deposit.data as Hex, transactionHash: DEPOSIT_TX as Hex, blockNumber: "0x259" as Hex, logIndex: "0x0" as Hex }] : [])];
+      },
+    });
+    /** WITHDRAW_BESIDE_SELL with one more operation, another account's, whose PEPE Transfer carries `data` (undefined: none at all). */
+    const withMalformed = (data: string | undefined): Draft[] =>
+      [...WITHDRAW_BESIDE_SELL, { ...tr(PEPE, POOL, OTHER_ACCOUNT, 1n), data: data as string }, op(`0x${"c3".repeat(32)}`, ROOT, { sender: OTHER_ACCOUNT })];
+
+    for (const [name, data] of [
+      ["0x (no amount at all)", "0x"],
+      ["empty", ""],
+      ["absent", undefined],
+      ["more than one word", `0x1${"0".repeat(64)}`],
+      ["not hex", "0xzz"],
+    ] as const) {
+      it(`${name}: the owner's leg in that transaction is not booked, the refusal is logged, and the pass goes on to the later deposit`, async () => {
+        const lines: string[] = [];
+        const chain = withLaterDeposit(bundle(withMalformed(data)));
+        const flows = await scanTrade(chain, new Set([SESSION_OP]), [], new Set(), (m) => lines.push(m));
+        assert.deepEqual(flowsOf(flows), [["in", 7_000_000n, 0]], "the later deposit is booked; the owner's 348.368488 out is not");
+        assert.equal(flows[0]!.txHash, DEPOSIT_TX);
+        const refused = lines.filter((m) => m.includes(`${TX}#1`));
+        assert.equal(refused.length, 1, `one refusal line for the owner's leg: ${JSON.stringify(lines)}`);
+        assert.match(refused[0]!, /not booked/);
+        assert.match(refused[0]!, /amount/);
+        // THE OWNER RECORD READS THE SAME RECEIPT THE SAME WAY: it vouches for
+        // nothing, so the operation stays unrecorded and admission names it.
+        const receipt = (await chain.getReceiptLogs(TX as Hex))!;
+        assert.equal(ownerOperationOf({ receiptLogs: receipt, userOpHash: ROOT_OP, txHash: TX, account: ACCT, custody: [], usdg: USDG, chainId: 4663 }), null);
+      });
+    }
+
+    it("a malformed amount inside the owner's own execution refuses that transaction the same way", async () => {
+      const lines: string[] = [];
+      const drafts: Draft[] = [
+        before(), tr(USDG, ACCT, OWNER, 348_368_488n), { ...tr(PEPE, ACCT, OWNER, 1n), data: "0x" }, op(ROOT_OP, ROOT),
+        tr(TSLA, ACCT, POOL, 13n * 10n ** 18n), tr(USDG, POOL, ACCT, 25_000_000n), op(SESSION_OP, SESSION),
+      ];
+      const flows = await scanTrade(withLaterDeposit(bundle(drafts)), new Set([SESSION_OP]), [], new Set(), (m) => lines.push(m));
+      assert.deepEqual(flowsOf(flows), [["in", 7_000_000n, 0]]);
+      assert.equal(lines.filter((m) => m.includes(`${TX}#1`) && /not booked/.test(m)).length, 1);
+    });
+
+    it("well-formed, the same window books both: the refusal is the malformed amount's alone", async () => {
+      const lines: string[] = [];
+      const flows = await scanTrade(withLaterDeposit(bundle(withMalformed(`0x${w(1n)}`))), new Set([SESSION_OP]), [], new Set(), (m) => lines.push(m));
+      assert.deepEqual(flowsOf(flows), [["out", 348_368_488n, 1], ["in", 7_000_000n, 0]]);
+      assert.deepEqual(lines.filter((m) => /not booked/.test(m)), []);
+    });
+
+    it("with no owner leg let through, the receipt is only placed: nothing is refused or logged for it", async () => {
+      const lines: string[] = [];
+      const flows = await scanTrade(withLaterDeposit(bundle(withMalformed("0x"))), new Set([SESSION_OP, ROOT_OP]), [], new Set(), (m) => lines.push(m));
+      assert.deepEqual(flowsOf(flows), [["in", 7_000_000n, 0]]);
+      assert.deepEqual(lines.filter((m) => m.includes(TX)), []);
+    });
   });
 });

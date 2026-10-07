@@ -188,7 +188,7 @@ function normalise(logs: readonly OwnerReceiptLog[], txHash: string): RawChainLo
 }
 
 /** A Transfer log's shape: its signature, and exactly three topics (ERC-721 shares the first word and has four). */
-const isTransfer = (l: RawChainLog) => lower(l.topics?.[0]) === TRANSFER_TOPIC && l.topics.length === 3;
+const isTransfer = (l: { topics: readonly string[] }) => lower(l.topics?.[0]) === TRANSFER_TOPIC && l.topics.length === 3;
 
 /**
  * ONE QUANTITY, as admission reads a Transfer's amount (ledger-resume.ts
@@ -197,6 +197,23 @@ const isTransfer = (l: RawChainLog) => lower(l.topics?.[0]) === TRANSFER_TOPIC &
  * "amount unread". ownerOperationOf vouches for no receipt that holds one.
  */
 const QUANTITY = /^0x[0-9a-f]{1,64}$/i;
+
+/**
+ * DOES EVERY TRANSFER IN THIS RECEIPT CARRY ONE READABLE AMOUNT? False when
+ * any log of the Transfer shape (anywhere in the receipt, whoever's operation
+ * it sits in) has data that is not one quantity: no data, '0x', more than a
+ * word, or not hex. PURE, and it decodes nothing, so it cannot throw on the
+ * very log it is asked about.
+ *
+ * THE ONE RULE BOTH READERS OF AN OWNER'S RECEIPT REFUSE BY. ownerOperationOf
+ * vouches for no such receipt, and the deposit scanner books no owner leg let
+ * through in a trade's transaction whose receipt fails it (deposit-log.ts
+ * findTransferFlows): the leg is classified on the whole receipt's legs, so a
+ * receipt the record will not read is one the scanner must not book from.
+ */
+export function transferAmountsReadable(logs: readonly { topics: readonly string[]; data?: string | null }[]): boolean {
+  return !logs.some((l) => Array.isArray(l.topics) && isTransfer(l) && !QUANTITY.test(String(l.data ?? "0x")));
+}
 
 /** A Transfer log, decoded; null for any other log. Only after ownerOperationOf has refused a receipt with an unreadable amount. */
 function transferOf(l: RawChainLog): { token: string; from: string; to: string; amount: bigint; logIndex: number } | null {
@@ -232,8 +249,9 @@ export function ownerOperationOf(o: {
   // the receipt whose data is not one quantity, by the rule admission reads
   // amounts with: not vouched for, so the reconciler records nothing (the
   // next arm finds it again) and admission answers nothing (the operation
-  // stays missing). Fail closed on both sides, by one rule.
-  if (logs.some((l) => isTransfer(l) && !QUANTITY.test(l.data))) return null;
+  // stays missing). Fail closed on both sides, by one rule — and the deposit
+  // scanner by the same one (transferAmountsReadable).
+  if (!transferAmountsReadable(logs)) return null;
   const account = lower(o.account);
   const usdg = lower(o.usdg);
   const custody = new Set(o.custody.map(lower).filter((a) => a !== account));
