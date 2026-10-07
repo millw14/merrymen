@@ -67,6 +67,13 @@ The `unresolved` class covers these cases:
   energy purchase books a flow beside its row, and that is two writers' work.
 - The operation moved several tokens.
 - USDG left the account in a transaction with no operation of the account.
+- A capital leg (a deposit or withdrawal) of an owner's operation that an
+  owner record answers, with no flow. The record answers the operation only:
+  it leaves every capital leg to the deposit scanner's flow, and the scanner
+  never booked this one (one that landed outside every window a running worker
+  scanned, during downtime for one, is never seen). This tool books no owner's
+  capital leg: a flow for it moves the account's capital and its peaks, a
+  reviewed `hwm-repair` decision ([owner-operations.md](owner-operations.md)).
 - USDG arrived from another hosted account or from the account's own vault.
 - A USDG transfer of the account sits outside its operation's execution.
 - The fact is not yet 64 blocks deep, or it landed before the current

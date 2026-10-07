@@ -63,28 +63,49 @@ flow or peak. It records the op only when:
 If any of these is missing, it leaves the op for the next arm. Either way the
 op is never booked as the agent's.
 
-The record is one `INSERT … ON CONFLICT (chain_id, user_op_hash) DO NOTHING`. It
-returns `'inserted'`, then `'present'`, or `'failed'`, and never falls back to a
-trades row. A crash on either side replays nothing: the record moves no money,
-and a second insert changes nothing. `listOpHashes` includes recorded owner
+The record is one `INSERT … ON CONFLICT (chain_id, LOWER(agent_id),
+user_op_hash) DO NOTHING`. It returns `'inserted'`, then `'present'`, or
+`'failed'`, and never falls back to a trades row. A crash on either side
+replays nothing: the record moves no money, and a second insert changes
+nothing. `listOpHashes` includes recorded owner
 operations, so a later arm does not find them again.
 
-The owner gets one event per arm:
+The owner gets one event per arm. It says only what the book does:
 
 - "recorded N operation(s) your own key signed … not agent trades: they count
   toward no trading limit".
-- For a token that left: "a withdrawal in kind, not a loss".
-- For a token that arrived: its cost is recovered from the receipt if USDG was
-  paid for it in that transaction. A token that arrived with no USDG paid has
-  no cost on record, so stop-loss and take-profit cannot act on it. (The live
-  tick's `recoverReceiptBasis` replays a token's Transfer history without
-  asking who signed; `receipt-basis-recovery.test.ts` pins that.)
+- For USDG in or out of the account: it is capital, not performance, and is
+  **left to the deposit scanner** to book as a deposit or withdrawal. The
+  notice does not say it is booked: the scanner books only a leg it reads (see
+  [Behaviour to sign off](#behaviour-to-sign-off)).
+- For a token that left: "a withdrawal in kind, not a trade". No flow records
+  a withdrawal in kind, so the book sees its value leave with no withdrawal
+  beside it, and the operation is kept for review. The notice no longer says
+  "not a loss".
+- For a token that arrived: its cost **can** be recovered from the receipt on
+  a later tick if USDG was paid for it in that transaction. A token that
+  arrived with no USDG paid has no cost on record, so stop-loss and
+  take-profit cannot act on it. (The live tick's `recoverReceiptBasis` replays
+  a token's Transfer history without asking who signed;
+  `receipt-basis-recovery.test.ts` pins that.)
 
 ## The record
 
 `owner_operations` is in `store.ts SQLITE_SCHEMA`. It reaches Postgres through
 `translateSchema`. It is append-only, and its identity, `(chain_id,
-user_op_hash)`, is unique in both databases.
+LOWER(agent_id), user_op_hash)`, is unique in both databases
+(`owner_operations_account_identity`).
+
+**The identity is per account.** Postgres holds every tenant's records in one
+table. The first cut keyed them on `(chain_id, user_op_hash)` alone, so another
+tenant's child could record this tenant's operation hash under its own account
+first. Its mirror would copy that row (it is that tenant's own account), and
+this tenant's genuine record would then never land: first row wins. With the
+account in the key, the two rows are different records, and neither answers
+the other's admission. Every schema run drops the first cut's index
+(`DROP INDEX IF EXISTS owner_operations_identity`, in `SQLITE_ALTERS`). That
+is safe on a populated table: the per-account index is strictly weaker, so it
+builds over any rows the old one admitted, and no row moves.
 
 | column | meaning |
 |---|---|
@@ -100,12 +121,16 @@ user_op_hash)`, is unique in both databases.
 
 **Disposition.** A record is `acknowledged` only when nothing is left to decide:
 
-1. Every USDG leg of the account is either:
+1. Every USDG leg of the account is one of:
    - capital-in or capital-out by the scanner's own classifier and inputs
      (`deposit-log.ts scannerClassifyContext`), left for the scanner's flow;
-     or
    - internal by the custody-transfer rule, which the record answers and lists
-     in `covers`.
+     in `covers`;
+   - a leg that moves nothing (a self-transfer, or an amount of zero), kind
+     `no-movement`, which the record also answers and lists in `covers`. No
+     flow writer books such a log, and admission reads every USDG log of the
+     account. Left out of `covers`, an `acknowledged` operation whose only
+     movement is a self-transfer would hold its tenant for good.
 2. No USDG moves between a custody contract and the outside.
 3. No USDG log of the account sits outside the operation's execution.
 4. No other token moves at any book address.
@@ -141,33 +166,67 @@ Children have no `DATABASE_URL`, so the mirror carries the record up
 
 - A child ledger written before the table would fail a log-table read. Any
   failed table withholds an anchor, a drain, a retirement and the fleet
-  checkpoint.
-- An id cursor would have to join the continuity proof, which the
-  persistent-home import cannot satisfy.
+  checkpoint. Here such a ledger is zero rows: no failure and no cursor.
+- A log table's cursor is in the continuity proof and the handover's final
+  cursor, which the persistent-home import cannot satisfy. This cursor is in
+  neither, because rewinding it can neither duplicate nor lose a record: every
+  insert is `ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO
+  NOTHING`.
 
-So it copies by identity. It keeps a `created_at` watermark opened 300 seconds
-behind itself, inserts with `ON CONFLICT DO NOTHING`, and commits the rows and
-the watermark in one transaction. A child without the table is zero rows: no
-failure and no cursor. A tenant that has records gains an `owner_operations`
-row in `mirror_state`. That is expected: admission's evidence binds every
-cursor row, so the tenant's digest changes once, when its first record
-arrives. The continuity proof and the handover format
-(`ledger-import.ts` SPECS) are unchanged. Postgres keeps what a rebuilt or
-imported child has lost.
+**The cursor is the child's own `id`, with a witness, and no clock in it.**
+`mirror_state.last_id` is the child id of the last row a pass settled, and
+`last_stamp` is that row's `created_at` (the log tables' convention). A
+child's `AUTOINCREMENT` id only grows within one ledger, whatever its clock
+does. So a record written after the child's clock stepped back is still after
+the cursor. (The first cut kept a `created_at` watermark opened 300 seconds
+behind itself. A clock that stepped back by more than that skipped every
+record in between, for good.)
 
-**The tenant is the mirror's.** Each row is stamped with the pass's tenant. It
-is copied only when all of these hold:
+A rebuilt or imported child is told apart by the witness. When the row at
+`last_id` is gone, or carries another `created_at`, the pass reads from id 0
+again, and the inserts absorb what Postgres already has. That re-read is not
+reported as `restarted`, and it holds no drain, anchor or checkpoint. A cursor
+with no witness (an earlier build's watermark) is not trusted either: the pass
+reads from id 0.
 
-- its `agent_id` is the account the orchestrator knows for that tenant (the
-  caller's argument; the fleet checkpoint passes its roster's; otherwise the
-  shared `grants` row);
-- its hashes are full lowercase hashes;
-- its validator is root.
+**The bound.** A rebuilt child that already holds a row at exactly `last_id`,
+created in exactly the witnessed second, is taken for the old ledger, and its
+rows at lower ids are not re-read. For that, a new ledger has to record as
+many owner operations as the old one before the mirror's first pass over it
+(the orchestrator mirrors every 15 seconds, and an imported book starts with
+none), the last in the same second. A record missed that way is absent from Postgres, so
+admission names its operation and holds the tenant. That fails closed, and
+nothing is booked from it.
 
-Anything else is skipped and counted (`owner_operations_foreign`). With no
-account to check against, nothing is copied or advanced
-(`owner_operations_unattributed`). The counts line prints both apart from the
-rows that arrived.
+The rows and the cursor commit in one transaction. The cursor's `updated_at`
+says when the tenant's book was last written (`lastMirrorPassAt`). It moves
+only when a pass inserts a record or passes rows no pass had passed. It never
+moves on a pass that read nothing, or on a re-read after a rewind that found
+nothing new. A tenant that has records gains an `owner_operations` row in
+`mirror_state`. That is expected: admission's evidence binds every cursor row,
+so the tenant's digest changes once, when its first record arrives. The
+continuity proof and the handover format (`ledger-import.ts` SPECS) are
+unchanged. Postgres keeps what a rebuilt or imported child has lost.
+
+**The tenant is the mirror's.** Each row is stamped with the pass's tenant.
+The account is the one the tenant's own grant names
+(`ledger-mirror.ts tenantGrantAccount`: the shared `grants` table, exactly one
+row, a full address). A caller that names an account (the fleet checkpoint,
+its roster's) must agree with the grant wherever there is one. Each row read is
+then exactly one of:
+
+| row | what happens | counted as |
+|---|---|---|
+| a full root record under the tenant's account | copied, stamped with the tenant, or already there | `owner_operations`, `owner_operations_already_mirrored` |
+| a full root record under **another** account | never copied under this tenant. The cursor passes it and it is counted once, on that pass. Foreign is decided against the grant's account alone, which no child writes, and a tenant keeps its account across a grant replacement, so no later pass would copy it | `owner_operations_foreign` |
+| not a full lowercase hash pair, or not root | never copied by any account. The cursor passes it and it is counted once | `owner_operations_invalid` |
+
+With no account to check against (no grant, or the caller's account and the
+grant's disagree), nothing is copied and the cursor does not move. Every row
+read is counted on every such pass (`owner_operations_unattributed`), and the
+first pass that can name the account copies it. So a stale account can never
+turn a genuine record foreign, and no row is skipped silently. The counts line
+prints all three apart from the rows that arrived.
 
 ## How admission uses it
 
@@ -175,6 +234,12 @@ rows that arrived.
 mirror stamped for this tenant, account and chain. It asks the catalogue first
 (`to_regclass`), so a missing table means no answers, never an aborted
 statement. A `review` record is never loaded.
+
+**Only for the tenant's own account.** The records are loaded only when the
+tenant's own grant row, read the way the mirror reads it
+(`tenantGrantAccount`), names exactly the account admission asked about. No
+grant, two grant rows, or a grant naming another account loads none, and every
+root operation stays missing (fail closed).
 
 `chainGapCheck` then re-derives each candidate (`ownerAnswersFor`). It reads
 from the chain, never the row, and a record answers the operation only when all
@@ -186,23 +251,47 @@ of these hold:
    receipt is not even read.
 3. Its receipt, read now and re-derived over the grant's custody and chain,
    comes out `acknowledged`.
-4. Every leg the re-derived reading covers is a USDG log the check read, and
-   its counterparty, by the log's own topics, is a custody address.
+4. Every leg the re-derived reading covers is a USDG log the check read. By
+   that log's own topics and data, either its counterparty is a custody
+   address, or it moves nothing (from the account to itself, or an amount of
+   zero).
 
 If a receipt cannot be read, the check is `unavailable` and it retries. An
 owner-answered operation does **not** answer the other USDG legs of its
 transaction. A capital leg still needs its flow, and only the re-derived
-custody-internal covers are held by the record.
+covers are held by the record.
 
-Admission is never loosened by this. `resumePreconditions` counts owner records
-as live operations, so the tenant is read on chain. It also includes the table
-in the one-spelling check. The evidence binds a tenant's records where there
-are any. Every other tenant's digest is byte for byte what it was.
+**What this changes in admission, and why it is chain-proved.** Admission now
+answers two things it did not before, and nothing else:
+
+- a root operation with no trade row, when its acknowledged record is the
+  tenant's own and its receipt re-derives `acknowledged` today (steps 1 to 3);
+- the USDG logs of the account that such a record covers: custody-internal
+  legs, and legs that move nothing (step 4).
+
+Each is proved from public chain data at admission time: the EntryPoint's own
+event for who signed it and whether it succeeded, and the receipt and the logs
+admission itself read for what it moved. The row only says which operation to
+look at. A capital leg is still answered only by its flow, so a deposit or
+withdrawal under the owner's key still holds the tenant until the scanner books
+it. A token that arrived or left keeps the record at `review`, which answers
+nothing.
+
+Elsewhere admission is stricter, not looser. `resumePreconditions` counts owner
+records as live operations, so the tenant is read on chain. It also includes
+the table in the one-spelling check. The evidence binds a tenant's records
+where there are any. Every other tenant's digest is byte for byte what it was.
 
 The chain-gap booking tool reads the records exactly as admission does. It
 binds them into its digest and compare-and-set, and shows the record and the
 re-derived reading beside an `owner-operation` fact as evidence. It still never
-books an owner operation.
+books an owner operation. A USDG leg of an operation that an owner record
+answers, with no flow, is `unresolved` with the reason in full: the record
+answers the operation only, it leaves the capital leg to the deposit scanner's
+flow, and the scanner never booked it (one that landed outside every window a
+running worker scanned, during downtime for one, is never seen). Booking that
+flow moves the account's capital and its peaks: a reviewed `hwm-repair`
+decision, not this tool's.
 
 ## Behaviour to sign off
 
@@ -241,10 +330,18 @@ books an owner operation.
 - Secondary-validator (vType `0x01`) operations keep the `'swap'` booking.
 - Owner records are not in the persistent-home handover. Postgres keeps the
   mirrored copy, and admission fails closed if one is lost.
-- Every outstanding chain-gap booking preview recomputes to a new digest:
-  `ledger-resume.ts`, `inflight-reconcile.ts` and the new
-  `owner-operations.ts` are in its fingerprint, and `known.ownerOps` is in its
-  compare-and-set. Preview again after this deploys.
+- Every outstanding chain-gap booking preview recomputes to a new digest. Its
+  fingerprint (`chain-gap-booking-cli.ts sourceFingerprint`) now covers, beside
+  `ledger-resume.ts` and `inflight-reconcile.ts`:
+  - `owner-operations.ts`, the owner reading;
+  - `deposit-log.ts`, whose `scannerClassifyContext` that reading classifies
+    with;
+  - `ledger-mirror.ts` and `db.ts`, for `tenantGrantAccount` and
+    `tablePresent`, which decide whether admission loads owner records at all.
+
+  `known.ownerOps` and `ownerRecords` are in its compare-and-set. Preview again
+  after this deploys. `store.ts` is still not in the fingerprint: the record's
+  identity there decides what the mirror can write, not what a preview reads.
 
 ## The audit: which trades rows are an owner's own operation
 
@@ -375,6 +472,11 @@ None of this is in this change.
   operation, and Postgres positions and live basis not to hold it.
 - **A reviewed booking-tool class that writes an `owner_operations` row**, for
   operations no arm recorded.
+- **A reviewed path for an owner's capital leg the scanner never saw** (a
+  deposit or withdrawal under the owner's key that landed while no worker
+  ran). Admission holds such a tenant on the leg, and the booking tool names
+  it, but booking its flow moves the peaks, so it is an `hwm-repair`
+  decision.
 - **A bounded per-tick EntryPoint sweep** over the deposit-scan window, so owner
   operations in long sessions are recorded.
 - **Recording on the paper rail at arm.** It is read-only on chain and moves no
@@ -402,10 +504,14 @@ The tests are under `worker/src/`.
 - `owner-operations.integration.test.ts`: a real ledger. Recorded once; counted
   by no limit; the withdrawal's leg is booked by the scanner.
 - `mirror-owner-operations.test.ts`, `ledger-safeguard.test.ts` and
-  `ledger-import.test.ts`: the mirror, the fleet checkpoint, the handover.
+  `ledger-import.test.ts`: the mirror (the id cursor and its witness, a clock
+  that stepped back, foreign, invalid and unattributed rows, another tenant's
+  child unable to pre-empt a record), the fleet checkpoint, the handover.
 - `owner-operations-admission.test.ts` and
   `orchestrator-ledger-resume.integration.test.ts`: admission, end to end.
 - `chain-gap-booking.test.ts`: the booking tool.
 - `owner-op-audit.test.ts` and `owner-op-audit.postgres.test.ts`: the audit,
-  and Postgres 17.
+  and Postgres 17 (the per-account expression index, the migration off the
+  first cut's index on a populated table, the pre-emption, and the grant
+  gate on JSONB).
 - `energy-buy-wiring.test.ts`: source pins on the root branch.

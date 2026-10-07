@@ -420,12 +420,23 @@ const usdg6 = (raw: string) => {
  * acknowledged; 'warn' when any needs review, naming each token that arrived
  * or left. `symbolOf` names a token the worker knows, or null.
  *
- * WHAT IT MAY CLAIM ABOUT A BASIS. A token the owner's key brought in gets no
- * basis from this record — but the live tick's receipt recovery
- * (receipt-basis-recovery.ts) replays a token's own Transfer history whoever
- * signed it, so a purchase paid in USDG in the same receipt can still get its
- * cost from that receipt. Only a token that arrived with no USDG paid has no
- * cost on record. The text says exactly that, never "no rule can exit it".
+ * IT CLAIMS ONLY WHAT THE BOOK DOES. Each sentence is something the worker
+ * does or does not do, never a promise about a reader it does not control:
+ *
+ *  - USDG in or out is capital, not performance, but it is the deposit
+ *    scanner that books it as a deposit or withdrawal, and only a leg it
+ *    reads (one that landed while no worker ran can be outside its window).
+ *    So the text says it is left to the scanner, not that it is booked.
+ *  - A token that LEFT is a withdrawal in kind that no flow records
+ *    (asset-movements.ts: review only): the book sees its value go with no
+ *    withdrawal beside it until it is reviewed. The text says that, never
+ *    "not a loss".
+ *  - A token the owner's key brought in gets no basis from this record. The
+ *    live tick's receipt recovery (receipt-basis-recovery.ts) replays a
+ *    token's own Transfer history whoever signed it, so a purchase paid in
+ *    USDG in the same receipt CAN still get its cost from that receipt; only
+ *    a token that arrived with no USDG paid has no cost on record. The text
+ *    says "can", never "will", and never "no rule can exit it".
  */
 export function ownerOperationsNotice(readings: readonly OwnerOperationReading[], symbolOf: (token: string) => string | null = () => null): {
   level: "ok" | "warn"; text: string;
@@ -434,18 +445,22 @@ export function ownerOperationsNotice(readings: readonly OwnerOperationReading[]
   const name = (t: string) => symbolOf(t) ?? `${t.slice(0, 10)}…`;
   const review = readings.filter((r) => r.disposition === "review");
   const capital = readings.flatMap((r) => r.usdgLegs.filter((l) => l.answeredBy === "flow"));
-  const head = `recorded ${readings.length} operation(s) your own key signed (the owner's root key) — not agent trades: they count toward no trading ` +
-    "limit and do not appear as trades" +
-    (capital.length ? `; the USDG they moved in or out of the account (${capital.map((l) => usdg6(l.amountRaw)).join(", ")} USDG) is your capital, not performance` : "");
+  const head = `recorded ${readings.length} operation(s) your own key signed (the owner's root key) — not agent trades: they count toward no trading limit ` +
+    "and do not appear as trades" +
+    (capital.length ? `; the USDG they moved in or out of the account (${capital.map((l) => usdg6(l.amountRaw)).join(", ")} USDG) is your capital, ` +
+      "not performance, and is left to the deposit scanner to book as a deposit or withdrawal" : "");
   if (!review.length) return { level: "ok", text: head };
   const arrived = [...new Set(review.flatMap((r) => r.tokenMoves.filter((m) => m.direction !== "departed").map((m) => m.token)))];
   const departed = [...new Set(review.flatMap((r) => r.tokenMoves.filter((m) => m.direction !== "arrived").map((m) => m.token)))];
   const parts: string[] = [];
   if (arrived.length) {
-    parts.push(`your own key brought ${arrived.map(name).join(", ")} into the account. If you paid USDG for it in that transaction, I will recover its cost ` +
-      "from the receipt; a token that arrived without a USDG payment has no cost on record, so stop-loss and take-profit cannot act on it");
+    parts.push(`your own key brought ${arrived.map(name).join(", ")} into the account. If you paid USDG for it in that transaction, its cost can be recovered ` +
+      "from that receipt on a later tick; a token that arrived without a USDG payment has no cost on record, so stop-loss and take-profit cannot act on it");
   }
-  if (departed.length) parts.push(`${departed.map(name).join(", ")} left the account under your own key: a withdrawal in kind, not a loss`);
+  if (departed.length) {
+    parts.push(`${departed.map(name).join(", ")} left the account under your own key: a withdrawal in kind, not a trade. No flow records a withdrawal ` +
+      "in kind, so your book sees its value leave with no withdrawal beside it, and it is kept for review");
+  }
   const other = review.some((r) => r.reasons.some((x) => x !== "token-arrived" && x !== "token-departed"));
   if (other) parts.push("one of them moved USDG in a way I cannot read as a plain deposit or withdrawal, and it is kept for review");
   return { level: "warn", text: `${head}. ${parts.join(". ")}` };

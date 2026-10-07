@@ -467,8 +467,8 @@ async function setOwnerOperationsMark(db: Db, tenant: string, lastId: number, st
  * last_id, created in exactly the witnessed second, is taken for the old
  * ledger, and its rows at lower ids are not re-read. That needs a new ledger
  * to record as many owner operations as the old one before the mirror's first
- * pass over it (passes run every few seconds; an imported book starts with
- * none), the last in the same second. A record so missed is absent from
+ * pass over it (orchestrator.ts mirrors every RECONCILE_MS, 15 seconds; an
+ * imported book starts with none), the last in the same second. A record so missed is absent from
  * Postgres, so admission names its operation and holds the tenant: fail
  * closed, and nothing is booked from it.
  *

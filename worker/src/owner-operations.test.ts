@@ -239,17 +239,21 @@ describe("the record and the notice", () => {
     assert.equal(ack.review_reason, null);
   });
 
-  it("the owner is told these are their own operations, that count toward no limit; a departure is a withdrawal in kind; an arrival's basis is said honestly", () => {
+  it("the owner is told these are their own operations, that count toward no limit — and only what the book does with the rest", () => {
     const ok = ownerOperationsNotice([read("invalidateNonce", "0x496e7211db25d250d9142105ab5024debcf05519c734d83191145af8eac09ffa", A4B)!])!;
     assert.equal(ok.level, "ok");
     assert.match(ok.text, /not agent trades: they count toward no trading limit/);
     const recover = ownerOperationsNotice([read("recoverFunds", "0x04f8241f6d02241469b9c2bc2d2f8cc4cca719eb5c6d54f3a77077c7e41ab3a7", A4B)!], (t) => (t === NVDA ? "NVDA" : null))!;
     assert.equal(recover.level, "warn");
-    assert.match(recover.text, /NVDA left the account under your own key: a withdrawal in kind, not a loss/);
-    assert.match(recover.text, /348\.368488 USDG\) is your capital, not performance/);
+    // A departure: a withdrawal in kind, which no flow records — never "not a loss".
+    assert.match(recover.text, /NVDA left the account under your own key: a withdrawal in kind, not a trade\. No flow records a withdrawal in kind/);
+    assert.match(recover.text, /kept for review/);
+    assert.doesNotMatch(recover.text, /not a loss/);
+    // Its capital leg: left to the scanner, never said to be booked.
+    assert.match(recover.text, /348\.368488 USDG\) is your capital, not performance, and is left to the deposit scanner to book as a deposit or withdrawal/);
     const buy = ownerOperationsNotice([synth([before(1), transfer(COIN, EOA, ACCOUNT, 42n, 2), event(ROOT_NONCE)])!])!;
-    assert.match(buy.text, /If you paid USDG for it in that transaction, I will recover its cost from the receipt/);
-    assert.doesNotMatch(buy.text, /no rule can exit/);
+    assert.match(buy.text, /If you paid USDG for it in that transaction, its cost can be recovered from that receipt on a later tick/);
+    assert.doesNotMatch(buy.text, /I will recover|no rule can exit/);
     assert.equal(ownerOperationsNotice([]), null);
   });
 });

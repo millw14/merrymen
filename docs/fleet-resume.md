@@ -287,9 +287,10 @@ line before it, and in the next preview's `lastRefusal`:
   operation); `(reverted)` when the EntryPoint recorded it as failing. An
   operation the owner's own key (the root validator) signed is also answered
   by its **owner record** (`owner_operations`, mirrored from the child that
-  recorded it at arm), but only when the chain proves it. The operation's own
-  log must say root, success and this account, and its receipt, read again,
-  must re-derive as `acknowledged` over the grant's custody. A session key's
+  recorded it at arm), but only for the account the tenant's own grant names,
+  and only when the chain proves it. The operation's own log must say root,
+  success and this account, and its receipt, read again, must re-derive as
+  `acknowledged` over the grant's custody. A session key's
   operation is never answered that way. A `review` record (a token arrived or
   left in kind, USDG that is not plain capital) answers nothing, and that
   operation is named here. The owner's USDG deposit or withdrawal in that
@@ -639,7 +640,9 @@ Each refuses on its own; none fails open.
    userOpHash, or, for one the owner's own key signed, by an acknowledged
    owner record that the chain re-derives ([owner-operations.md](owner-operations.md#how-admission-uses-it)).
    A transfer is held by a trade row in its transaction, a flow with its
-   tx#log, or a custody leg that such an owner record covers. Any owner
+   tx#log, or a leg that such an owner record covers: custody-internal, or one
+   that moves nothing (a self-transfer, or an amount of zero), each checked
+   against its own log. Any owner
    record makes the tenant one that is read on chain. Then the read runs again,
    immediately before registration,
    from that read's head to the head then (phase step 5). The 26-hour bound
