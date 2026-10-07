@@ -697,7 +697,10 @@ export interface OpReport {
    * the check could not be run.
    */
   admission: "trades-row" | "owner-record" | "missing" | null;
-  /** A root-key operation answered by a 'swap' row: an owner's operation recorded as an agent trade (the validator-blind reconciler). */
+  /**
+   * A root-key operation answered by a 'swap' row: an owner's operation recorded as an agent trade, as the in-flight reconciler booked
+   * every operation it found with no row until it recorded the owner's apart (docs/owner-operations.md). Such rows stay where they are.
+   */
   ownerOperationRecordedAsTrade: boolean;
   /** For a root-key operation: what else it moved across the book's edge, in kind. Review only, never a booking. */
   inKind: Array<{ token: string; direction: "in" | "out"; amountRaw: string; counterparty: string; logIndex: number }>;
@@ -1317,8 +1320,10 @@ export function planClosedEpoch(snap: ClosedEpochSnapshot, chain: ClosedEpochCha
       admission, ownerOperationRecordedAsTrade, inKind });
     if (ownerOperationRecordedAsTrade) {
       warnings.push(`operation ${op.userOpHash} (tx ${tx}) was signed by the owner's root key and is answered by trades row(s) ${answeredBy.filter((t) => t.kind === "swap").map((t) => `#${t.id} (kind 'swap', ${t.amountUsdg} USDG, epoch ${t.epoch}, written ${iso(t.createdAt)})`).join(", ")}: ` +
-        "an owner operation recorded as an agent trade by the validator-blind in-flight reconciler (index.ts reconcileInFlightAtArm). Left in place: it is what answers the operation for admission, " +
-        "and a later audit that removes it re-holds this tenant");
+        "an owner operation recorded as an agent trade, as the in-flight reconciler (index.ts reconcileInFlightAtArm) booked every operation it found with no row " +
+        "until it recorded the owner's apart in owner_operations (docs/owner-operations.md). Left in place: it is what answers the operation for admission, and the " +
+        "read-only owner-operations audit (owner-op-audit-cli.ts) lists it. Removing it while admission's chain read still reaches it re-holds this tenant, unless " +
+        "an owner record admission takes answers the operation instead: an acknowledged one, which an operation that also moved another token never is");
     }
     if (inKind.length && epochByTime === P) {
       warnings.push(`operation ${op.userOpHash} (root key) also moved ${inKind.map((k) => `${k.direction} ${k.amountRaw} of ${k.token}`).join(", ")} in kind: review only, never a flow ` +

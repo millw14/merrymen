@@ -322,9 +322,12 @@ Everything a reviewer would otherwise check by hand:
   answer it (kind, amount, epoch, when written), the owner records Postgres
   holds for it, the owner reading re-derived from a root-key operation's
   receipt, and what admission's check answered it by. An owner's root-key
-  operation answered by a `'swap'` row is flagged: an owner operation recorded as an
-  agent trade by the in-flight reconciler. **It is left in place**; a later
-  audit that removes it re-holds the tenant;
+  operation answered by a `'swap'` row is flagged: the in-flight reconciler
+  recorded it as an agent trade, before it recorded owner operations apart.
+  **It is left in place**: it is what answers the operation for admission.
+  The owner-operations audit lists such rows. Removing one while
+  admission's chain read still reaches it re-holds the tenant, unless an
+  owner record admission takes answers the operation instead;
 - what a root-key operation moved in kind (review only: never a flow);
 - fee accruals and risk periods (untouched);
 - positions, live and paper basis, live floors, class positions, what
@@ -569,12 +572,18 @@ point is before that reads it `missing-in-fork`, as for `flows_quarantine`.
 
 These need their own reviewed decisions:
 
-- The in-flight reconciler books any operation it finds with no row as an
-  agent `'swap'`, whatever its validator (`index.ts`
-  `reconcileInFlightAtArm`). An owner's sweep found after an arm becomes a
-  fake agent trade counted toward the day's caps. 0x0e1ca0's sweep is very
-  likely one; 0x4b6dcd's root-key operations may be. Fix it, and audit the
-  existing rows.
+- The `'swap'` rows the in-flight reconciler booked for owner operations
+  before it recorded them apart. It used to book every operation it found
+  with no row as an agent `'swap'`, whatever its validator (`index.ts`
+  `reconcileInFlightAtArm`). It now records an operation the owner's root
+  key signed in `owner_operations`, and writes no trades row for it
+  ([owner-operations.md](owner-operations.md)). The rows booked before that
+  stay, and still count as agent trades. 0x0e1ca0's sweep row is one. The
+  read-only owner-operations audit (`worker/src/owner-op-audit-cli.ts`)
+  lists them. Reclassifying them is a separate reviewed change. For
+  0x0e1ca0, removing its row while admission's chain read still reaches
+  the sweep would re-hold the tenant: the sweep also moved MU, USAR and
+  steakUSDG, so an owner record for it is `review` and answers nothing.
 - A seed that is chain-gated and mode-aware (`planAttestedSeed`,
   `seedBasisForChild`) for the fleet.
 - `hwm-repair` before any live re-arm: for 0x0e1ca0 the effective peak is
