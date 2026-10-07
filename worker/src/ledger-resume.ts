@@ -94,6 +94,7 @@ import { ensureLedgerResumeSchema } from "./ledger-import";
 import { validRiskPeriod, readRiskPeriod } from "./risk-period";
 import { getLogsAdaptive, addressTopic, type RawLog } from "./inflight-reconcile";
 import { CASH, ENTRYPOINT, chainForId } from "../../packages/core/src/index";
+import { isRootSuccessOf, ownerOperationOf, type OwnerReceiptLog } from "./owner-operations";
 
 export const RESUME_PREVIEW_ENV = "MERRYMEN_RESUME_PREVIEW";
 export const RESUME_APPROVE_ENV = "MERRYMEN_RESUME_APPROVE";
@@ -290,6 +291,20 @@ export async function readPgEvidence(db: Db, o: { tenant: string; account: strin
   const net = (await db.prepare("SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net FROM flows WHERE LOWER(agent_id) = ?").get(account)) as Record<string, unknown>;
   tables.flowsNet = Number(net.net).toFixed(6);
   for (const table of SNAPSHOT_SUMMARY) tables[table] = await snapshotDigest(db, table, account);
+  // THE OWNER RECORDS ADMISSION MAY ANSWER ON, bound only where there are
+  // any, so every other tenant's evidence (and digest) is byte for byte what
+  // it was before the table existed — the chainHeldSince precedent below.
+  // Not FINANCIAL: a record moves no money and is no accounting history.
+  if (await ownerOperationsPresent(db)) {
+    const owned = ((await db.prepare(`SELECT id, chain_id, user_op_hash, tx_hash, disposition FROM owner_operations
+        WHERE LOWER(tenant) = ? AND LOWER(agent_id) = ?`).all(o.tenant.toLowerCase(), account)) as Array<Record<string, unknown>>);
+    if (owned.length > 0) {
+      tables.ownerOperations = {
+        n: String(owned.length), maxId: n(Math.max(...owned.map((r) => Number(r.id)))),
+        digest: hash(owned.map((r) => `${n(r.chain_id)}|${String(r.user_op_hash).toLowerCase()}|${String(r.tx_hash).toLowerCase()}|${String(r.disposition)}`).sort().join("\n")),
+      };
+    }
+  }
   const mirrorState = ((await db.prepare("SELECT table_name, last_id, last_stamp FROM mirror_state WHERE tenant = ? ORDER BY table_name").all(o.tenant.toLowerCase())) as
     Array<Record<string, unknown>>).map((r) => [String(r.table_name), n(r.last_id), n(r.last_stamp)]);
   let ledgerImport: unknown = null;
@@ -472,8 +487,10 @@ export async function resumePreconditions(db: Db, o: {
     if (!report.clean) refusals.push("the flows hold duplicate or conflicting copies (distinct-flows report)");
   } else if (flowCount > 0) refusals.push("flows are on record with no agent registration to name their run");
   // ONE SPELLING. Every financial row, and the registration, under one exact string.
+  // And every owner record: admission reads them by this account too.
+  const ownerTable = await ownerOperationsPresent(db);
   const spellings = new Set<string>();
-  for (const table of ["trades", ...FINANCIAL, "risk_periods"]) {
+  for (const table of ["trades", ...FINANCIAL, "risk_periods", ...(ownerTable ? ["owner_operations"] : [])]) {
     try {
       for (const r of (await db.prepare(`SELECT DISTINCT agent_id FROM ${table} WHERE LOWER(agent_id) = ?`).all(account)) as Array<Record<string, unknown>>) spellings.add(String(r.agent_id));
     } catch (e) {
@@ -540,8 +557,11 @@ export async function resumePreconditions(db: Db, o: {
   // lacks may be a live trade. Read as paper, an approval would admit it with
   // no chain read, on that book, and supersede the refusal the booking tool
   // books on. Read on chain, an approval refuses again until it is booked.
+  // AN OWNER'S OPERATION IS A LIVE OPERATION TOO: the account was used on
+  // chain, so it is read on chain (never looser), whatever the trades say.
   const liveOps = Number(((await db.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id) = ?
-      AND ((user_op_hash IS NOT NULL AND user_op_hash <> '') OR status IN ('landed', 'submitted', 'sent', 'pending', 'reverted', 'dropped'))`).get(account)) as Record<string, unknown>).n);
+      AND ((user_op_hash IS NOT NULL AND user_op_hash <> '') OR status IN ('landed', 'submitted', 'sent', 'pending', 'reverted', 'dropped'))`).get(account)) as Record<string, unknown>).n)
+    + (ownerTable ? Number(((await db.prepare("SELECT COUNT(*) AS n FROM owner_operations WHERE LOWER(agent_id) = ?").get(account)) as Record<string, unknown>).n) : 0);
   const hold = await readChainHold(db, o.tenant);
   const chainHeld = hold.held;
   const paper = agent?.mode === "paper" && liveOps === 0 && flowCount === 0 && o.liveIntent !== true && !chainHeld;
@@ -1571,6 +1591,38 @@ export interface GapChain {
   getBlockNumber(): Promise<bigint>;
   getBlockTimestamp(block: bigint): Promise<number>;
   getLogs(args: { address: `0x${string}`; fromBlock: bigint; toBlock: bigint; topics: (Hex | Hex[] | null)[] }): Promise<RawLog[]>;
+  /**
+   * One transaction's receipt logs, or null when it has none: read only for an
+   * operation an owner record would answer, so the record is re-derived from
+   * the chain before it answers anything (ownerAnswersFor). Optional: a chain
+   * without it answers no operation through an owner record — fail closed.
+   */
+  getReceiptLogs?(txHash: string): Promise<readonly OwnerReceiptLog[] | null>;
+}
+
+/**
+ * An operation an owner record answers, as verified against the chain: its
+ * transaction, and the custody-internal USDG legs of the account the record
+ * itself answers (`tx:logIndex`). Nothing else in that transaction.
+ */
+export interface OwnerAnswer { txHash: string; covers: ReadonlySet<string> }
+
+/**
+ * IS THERE AN owner_operations TABLE? Asked of the catalogue, never learned
+ * from a failed statement: in a Postgres transaction a failed read aborts the
+ * rest (the booking tool's snapshot is one), and on the first boot after a
+ * deploy the shared DDL may not have run yet. to_regclass answers NULL for an
+ * absent table on Postgres; SQLite has no such function, and its catalogue is
+ * asked instead. Absent means no owner record answers anything: fail closed.
+ */
+export async function ownerOperationsPresent(db: Pick<Db, "prepare">): Promise<boolean> {
+  try {
+    const row = (await db.prepare("SELECT to_regclass('owner_operations') AS t").get()) as { t?: unknown } | undefined;
+    return row?.t !== null && row?.t !== undefined;
+  } catch (e) {
+    if (!/no such function: to_regclass/i.test(String((e as Error)?.message ?? ""))) throw e;
+    return !!(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'owner_operations'").get());
+  }
 }
 /**
  * ONE THING ON CHAIN THAT POSTGRES LACKS, named by public chain data only: an
@@ -1639,19 +1691,37 @@ const factOrder = (f: MissingChainFact) => [f.block === null ? -1n : BigInt(f.bl
  * the same transaction (its leg, booked with it even where its row kept no tx
  * hash). One log read as both from and to the account (a self-transfer) is
  * one movement, not two.
+ *
+ * AND AN OWNER'S OWN OPERATION, ONLY AS THE CHAIN PROVES IT. An operation
+ * with no trade row is held by an owner record only when `ownerAnswers` (the
+ * record, re-derived from its receipt: ownerAnswersFor) names it in the same
+ * transaction AND the log's own data says root, success, and this account
+ * (owner-operations.ts isRootSuccessOf) — so a session key's operation is
+ * never answered by one, whatever a row claims. Such an operation does NOT
+ * answer the USDG legs of its transaction: a capital leg still needs its
+ * flow, and only the custody-internal legs the record itself covers are held
+ * by it.
  */
 export function chainFactsPostgresLacks(o: {
   account: string;
   opLogs: readonly RawLog[]; outLogs: readonly RawLog[]; inLogs: readonly RawLog[];
   known: { ops: ReadonlySet<string>; txs: ReadonlySet<string>; flows: ReadonlySet<string> };
+  ownerAnswers?: ReadonlyMap<string, OwnerAnswer>;
 }): MissingChainFact[] {
   const found: MissingChainFact[] = [];
   const bookedTxs = new Set<string>();
+  /** tx:log of every USDG leg an answered owner operation's own record covers. */
+  const ownerCovered = new Set<string>();
   const index = (l: RawLog) => (l.logIndex === undefined ? null : Number(BigInt(l.logIndex)));
   for (const l of o.opLogs) {
     const opHash = String(l.topics[1] ?? "").toLowerCase();
     const tx = String(l.transactionHash).toLowerCase();
     if (o.known.ops.has(opHash)) { bookedTxs.add(tx); continue; }
+    const owner = o.ownerAnswers?.get(opHash);
+    if (owner && owner.txHash === tx && isRootSuccessOf({ topics: l.topics, data: String(l.data ?? "") }, o.account)) {
+      for (const c of owner.covers) if (c.startsWith(`${tx}:`)) ownerCovered.add(c);
+      continue;
+    }
     // success is the second word of the event's data (nonce, success, cost, used).
     const data = String(l.data ?? "").replace(/^0x/, "");
     const word = /^[0-9a-fA-F]{256}$/.test(data) ? BigInt(`0x${data.slice(64, 128)}`) : null;
@@ -1664,7 +1734,7 @@ export function chainFactsPostgresLacks(o: {
     const tx = String(l.transactionHash).toLowerCase();
     const i = index(l);
     if (o.known.txs.has(tx) || bookedTxs.has(tx)) continue;
-    if (i !== null && o.known.flows.has(`${tx}:${i}`)) continue;
+    if (i !== null && (o.known.flows.has(`${tx}:${i}`) || ownerCovered.has(`${tx}:${i}`))) continue;
     if (i !== null) {
       if (seen.has(`${tx}:${i}`)) continue;
       seen.add(`${tx}:${i}`);
@@ -1770,7 +1840,14 @@ export function chainRefusal(found: readonly MissingChainFact[], landedAfterFirs
  */
 export async function chainGapCheck(o: {
   chain: GapChain; account: string; usdg: string;
-  known: { ops: ReadonlySet<string>; txs: ReadonlySet<string>; flows: ReadonlySet<string> };
+  /**
+   * `ownerRecords`: acknowledged root records Postgres holds for the tenant,
+   * account and chain (knownChainFacts), userOpHash -> tx. Each answers its
+   * operation only after ownerAnswersFor re-derives it from the receipt with
+   * `ownerContext` (the grant's custody and chain); without both, none does.
+   */
+  known: { ops: ReadonlySet<string>; txs: ReadonlySet<string>; flows: ReadonlySet<string>; ownerRecords?: ReadonlyMap<string, string> };
+  ownerContext?: { custody: readonly string[]; chainId: number };
   maxSpan?: bigint; log?: (line: string) => void;
 } & ({ sinceSec: number; fromBlock?: undefined } | { fromBlock: bigint; sinceSec?: undefined })): Promise<GapResult> {
   try {
@@ -1807,7 +1884,10 @@ export async function chainGapCheck(o: {
     const out = await getLogsAdaptive(reader, { address: o.usdg as `0x${string}`, topics: [TRANSFER_TOPIC, account] }, from, head, span, o.log);
     const into = await getLogsAdaptive(reader, { address: o.usdg as `0x${string}`, topics: [TRANSFER_TOPIC, null, account] }, from, head, span, o.log);
     if (!ops.complete || !out.complete || !into.complete) return { status: "unavailable", why: "the log read did not cover the whole window" };
-    const found = chainFactsPostgresLacks({ account: o.account, opLogs: ops.logs, outLogs: out.logs, inLogs: into.logs, known: o.known });
+    const ownerAnswers = await ownerAnswersFor({ chain: o.chain, account: o.account, usdg: o.usdg, opLogs: ops.logs, usdgLogs: [...out.logs, ...into.logs],
+      known: o.known, ownerContext: o.ownerContext });
+    if (ownerAnswers === "unavailable") return { status: "unavailable", why: "an owner operation's receipt could not be read" };
+    const found = chainFactsPostgresLacks({ account: o.account, opLogs: ops.logs, outLogs: out.logs, inLogs: into.logs, known: o.known, ownerAnswers });
     const started = fromSec === undefined ? {} : { fromSec };
     if (found.length) {
       return { status: "missing", ops: found.filter((f) => f.kind === "operation").length, transfers: found.filter((f) => f.kind === "transfer").length,
@@ -1820,8 +1900,76 @@ export async function chainGapCheck(o: {
   }
 }
 
-/** What Postgres holds for the account that a chain log could be: trade hashes, trade transactions, flow logs. */
-export async function knownChainFacts(db: Db, account: string): Promise<{ ops: Set<string>; txs: Set<string>; flows: Set<string> }> {
+/**
+ * WHICH OWNER RECORDS ANSWER AN OPERATION, AS THE CHAIN SAYS NOW.
+ *
+ * A record is written by the tenant's child, and nothing a child wrote may
+ * decide admission beyond the record's existence. So for each operation the
+ * chain shows with no trade row, a record answers it only when ALL of these
+ * hold, each read from the chain, never the row:
+ *
+ *   - the record names this operation in this same transaction;
+ *   - the operation's own log says root, success and this account
+ *     (isRootSuccessOf): a session key's operation is never answered;
+ *   - its receipt, read now, is re-derived by the same reading the reconciler
+ *     used (owner-operations.ts ownerOperationOf) over the grant's custody
+ *     and chain, and comes out 'acknowledged' — not what the row says;
+ *   - every leg that re-derived reading covers is a USDG log of the account
+ *     this check read, whose counterparty, by that log's own topics, is a
+ *     custody address of the grant.
+ *
+ * Only the re-derived covers are returned. A receipt that cannot be read
+ * makes the whole check 'unavailable' (it retries); a reading that is not
+ * acknowledged, or a cover that does not check, leaves the operation missing.
+ */
+export async function ownerAnswersFor(o: {
+  chain: GapChain; account: string; usdg: string; opLogs: readonly RawLog[]; usdgLogs: readonly RawLog[];
+  known: { ops: ReadonlySet<string>; ownerRecords?: ReadonlyMap<string, string> };
+  ownerContext?: { custody: readonly string[]; chainId: number };
+}): Promise<Map<string, OwnerAnswer> | "unavailable"> {
+  const answers = new Map<string, OwnerAnswer>();
+  const records = o.known.ownerRecords;
+  if (!records?.size || !o.ownerContext || !o.chain.getReceiptLogs) return answers;
+  const account = o.account.toLowerCase();
+  const custody = new Set(o.ownerContext.custody.map((c) => c.toLowerCase()).filter((c) => c !== account));
+  for (const l of o.opLogs) {
+    const hash = String(l.topics[1] ?? "").toLowerCase();
+    const tx = String(l.transactionHash).toLowerCase();
+    if (o.known.ops.has(hash) || answers.has(hash) || records.get(hash) !== tx) continue;
+    if (!isRootSuccessOf({ topics: l.topics, data: String(l.data ?? "") }, account)) continue;
+    let logs: readonly OwnerReceiptLog[] | null;
+    try { logs = await o.chain.getReceiptLogs(tx); } catch { return "unavailable"; }
+    if (!logs) return "unavailable";
+    const reading = ownerOperationOf({ receiptLogs: logs, userOpHash: hash, txHash: tx, account, custody: [...custody], usdg: o.usdg, chainId: o.ownerContext.chainId });
+    if (!reading || reading.disposition !== "acknowledged" || reading.txHash !== tx) continue;
+    const covers = new Set<string>();
+    let sound = true;
+    for (const c of reading.covers) {
+      const at = Number(c.slice(c.lastIndexOf(":") + 1));
+      const log = o.usdgLogs.find((u) => String(u.transactionHash).toLowerCase() === tx && u.logIndex !== undefined && Number(BigInt(u.logIndex)) === at);
+      const from = log ? topicAddress(log.topics[1]) : null, to = log ? topicAddress(log.topics[2]) : null;
+      const counterparty = from === account ? to : to === account ? from : null;
+      if (!c.startsWith(`${tx}:`) || counterparty === null || !custody.has(counterparty)) { sound = false; break; }
+      covers.add(c);
+    }
+    if (sound) answers.set(hash, { txHash: tx, covers });
+  }
+  return answers;
+}
+
+/**
+ * What Postgres holds for the account that a chain log could be: trade hashes, trade transactions, flow logs.
+ *
+ * AND, given the tenant and its chain, the owner records that may answer an
+ * operation (ownerAnswersFor decides whether they do): acknowledged root
+ * records the MIRROR stamped with this tenant, under this account, on this
+ * chain — userOpHash -> tx. A 'review' record is never loaded, so its
+ * operation stays missing. The table is asked of the catalogue first
+ * (ownerOperationsPresent): absent, there are none.
+ */
+export async function knownChainFacts(db: Db, account: string, owner?: { tenant: string; chainId: number }): Promise<{
+  ops: Set<string>; txs: Set<string>; flows: Set<string>; ownerRecords: Map<string, string>;
+}> {
   const a = account.toLowerCase();
   const trades = (await db.prepare("SELECT user_op_hash, tx_hash FROM trades WHERE LOWER(agent_id) = ? AND (user_op_hash IS NOT NULL OR tx_hash IS NOT NULL)").all(a)) as
     Array<Record<string, unknown>>;
@@ -1832,7 +1980,16 @@ export async function knownChainFacts(db: Db, account: string): Promise<{ ops: S
     if (typeof t.tx_hash === "string" && t.tx_hash) txs.add(t.tx_hash.toLowerCase());
   }
   for (const f of flows) if (typeof f.tx_hash === "string" && f.log_index !== null && f.log_index !== undefined) fl.add(`${f.tx_hash.toLowerCase()}:${Number(f.log_index)}`);
-  return { ops, txs, flows: fl };
+  const ownerRecords = new Map<string, string>();
+  if (owner && (await ownerOperationsPresent(db))) {
+    const rows = (await db.prepare(`SELECT user_op_hash, tx_hash FROM owner_operations
+        WHERE LOWER(tenant) = ? AND LOWER(agent_id) = ? AND chain_id = ? AND validator = 'root' AND disposition = 'acknowledged'`)
+      .all(owner.tenant.toLowerCase(), a, owner.chainId)) as Array<Record<string, unknown>>;
+    for (const r of rows) {
+      if (typeof r.user_op_hash === "string" && typeof r.tx_hash === "string") ownerRecords.set(r.user_op_hash.toLowerCase(), r.tx_hash.toLowerCase());
+    }
+  }
+  return { ops, txs, flows: fl, ownerRecords };
 }
 
 /**
@@ -1855,6 +2012,12 @@ export function resumeChainFor(chainId: number, env: NodeJS.ProcessEnv = process
         method: "eth_getLogs",
         params: [{ address: a.address, fromBlock: `0x${a.fromBlock.toString(16)}`, toBlock: `0x${a.toBlock.toString(16)}`, topics: a.topics }],
       } as never)) as RawLog[];
+    },
+    // The raw RPC receipt, hex positions as the chain gave them: only for an
+    // operation an owner record would answer (ownerAnswersFor).
+    async getReceiptLogs(txHash) {
+      const r = (await client.request({ method: "eth_getTransactionReceipt", params: [txHash] } as never)) as { logs?: unknown } | null;
+      return r && Array.isArray(r.logs) ? (r.logs as OwnerReceiptLog[]) : null;
     },
   };
 }
