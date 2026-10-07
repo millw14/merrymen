@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { translateQuery, translateSchema, type Db } from "./db";
 import type { RpcCall } from "./chain-capital";
 import { BALANCE_OF_CALL, BLOCK_QUANTITY, BookingRefused, canonical } from "./chain-gap-booking";
-import { CliError, createBookingRpc, createReportFile, DEFAULT_RPC, failureLine, finishReportFile, pgClientDb, targetDigest, type PgClient } from "./chain-gap-booking-cli";
+import { CliError, createBookingRpc, createReportFile, DEFAULT_RPC, failureLine, finishReportFile, pgClientDb, sourceFingerprint, targetDigest, type PgClient } from "./chain-gap-booking-cli";
 import {
   applyClosedEpoch, closedEpochLines, parseRepairReport, planClosedEpoch, readClosedEpochChain, readClosedEpochSnapshot, readRepairReceipts, REPAIR_ID, revertClosedEpoch,
   type ClosedEpochPlan, type RepairApplyReport, type RepairRevertReport,
@@ -235,14 +235,23 @@ export async function connectClosedEpoch(url: string, readOnly: boolean, loadPg:
   return client;
 }
 
-/** The code that produced a preview, by file digest: an apply by different code recomputes a different digest and refuses. */
+/**
+ * The code that produced a preview, by file digest: an apply by different code recomputes a different digest and refuses.
+ *
+ * EVERY FILE THE BOOKING TOOL'S OWN PREVIEW BINDS (chain-gap-booking-cli.ts sourceFingerprint), then this tool's. Its snapshot, hold,
+ * admission check and owner reading are this tool's too (readBookingSnapshot, holdOf, chainGapCheck, ownerOperationOf), so whatever
+ * decides them there decides them here, among them which owner records admission loads (ledger-mirror.ts, db.ts) and how one is read
+ * (owner-operations.ts, deposit-log.ts). Taken from that function, so a file it comes to bind is bound here as well.
+ */
 export function closedEpochSourceFingerprint(here = path.dirname(fileURLToPath(import.meta.url))): Record<string, string> {
   const files = ["closed-epoch-capital.ts", "closed-epoch-capital-cli.ts", "chain-gap-booking.ts", "chain-gap-booking-cli.ts", "ledger-resume.ts", "asset-movements.ts",
     "chain-capital.ts", "inflight-reconcile.ts", "rpc-error.ts", "custody.ts", "distinct-flows.ts", "paper-boundary.ts", "accounting-repair.ts", "accounting-reconstruction.ts",
     "accounting-scope.ts", "basis-seed.ts", "held-reset.ts", "../../packages/core/src/capital-classify.ts", "../../packages/core/src/flow-evidence.ts",
     "../../packages/core/src/grant.ts", "../../packages/core/src/trencher-vault.ts", "../../packages/core/src/tokens.ts", "../../packages/core/src/energy.ts",
-    "../../packages/core/src/chain.ts"];
-  return Object.fromEntries(files.map((f) => [f, createHash("sha256").update(readFileSync(path.resolve(here, f))).digest("hex")]));
+    "../../packages/core/src/chain.ts",
+    // The owner reading this tool re-derives itself (planClosedEpoch), with the scanner inputs it classifies by.
+    "owner-operations.ts", "deposit-log.ts"];
+  return { ...sourceFingerprint(here), ...Object.fromEntries(files.map((f) => [f, createHash("sha256").update(readFileSync(path.resolve(here, f))).digest("hex")])) };
 }
 
 // ── report files ─────────────────────────────────────────────────────────────

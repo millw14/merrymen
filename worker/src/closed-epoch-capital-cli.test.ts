@@ -30,7 +30,7 @@ import { CHAIN_REFUSAL } from "./ledger-resume";
 import { CASH } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused } from "./chain-gap-booking";
-import { CliError, failureLine, type PgClient } from "./chain-gap-booking-cli";
+import { CliError, failureLine, sourceFingerprint, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
 import {
   closedEpochSourceFingerprint, commitRolledBack, CommitOutcomeUnknown, createClosedEpochRpc, main, parseClosedEpochArgs, pgWriteDb,
@@ -292,6 +292,11 @@ describe("the write connection", () => {
     assert.ok(Object.keys(f).length >= 20);
     assert.ok(Object.values(f).every((d) => /^[0-9a-f]{64}$/.test(d)));
     assert.ok("closed-epoch-capital.ts" in f && "chain-gap-booking.ts" in f && "accounting-repair.ts" in f && "../../packages/core/src/capital-classify.ts" in f);
+    // EVERYTHING THE BOOKING TOOL'S PREVIEW BINDS, by the same digest: its snapshot, hold, admission check and owner reading are this
+    // tool's, so an edit to which owner records admission loads, or how one is read, moves this digest too.
+    const booking = sourceFingerprint();
+    for (const [file, digest] of Object.entries(booking)) assert.equal(f[file], digest, file);
+    for (const file of ["owner-operations.ts", "deposit-log.ts", "ledger-mirror.ts", "db.ts", "basis.ts", "fills.ts", "token-label.ts"]) assert.ok(file in f, file);
   });
 });
 

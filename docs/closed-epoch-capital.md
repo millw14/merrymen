@@ -347,6 +347,13 @@ with block hashes and times, classifications, operations, the coverage proof,
 balances) and every proposal. It does not cover the time, the head or the
 pinned block.
 
+The code is every file the booking tool's own preview binds
+(`chain-gap-booking-cli.ts` `sourceFingerprint`), and this tool's files.
+The snapshot, the hold, admission's check and the owner reading are the
+booking tool's, so a change to any of them, such as which owner records
+admission loads, changes this digest too. A preview from an earlier build
+does not apply: preview again on the deployed build.
+
 ## Before you start
 
 - **The tenant is held** on admission's chain refusal, out of
