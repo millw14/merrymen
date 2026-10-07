@@ -141,6 +141,8 @@ export function valuationMultiplierFor(source: PriceQuote["source"], uiMultiplie
     // than a v3 one — no oracle behind it — is enforced elsewhere, by keeping it
     // inside the scout ceiling; it is not a question about units.)
     case "v4":
+    // A sampled price is a v3 pool's own spot, averaged: USD per whole ERC-20.
+    case "sampled":
       return UI_MULTIPLIER_ONE;
     default: {
       const never: never = source;
@@ -308,9 +310,15 @@ export async function readPositions(
  *
  * Skipping is conservative in both directions: a fee not charged, and a
  * drawdown measured from the last peak that a feed or a pool stood behind.
+ *
+ * A SAMPLED MARK IS HELD TO THE SAME RULE. It is a coin new enough that its
+ * pool keeps no oracle, averaged over minutes by us rather than by the pool —
+ * the same volatility, and after a restart the same discontinuity, since an
+ * empty series values the holding off one spot reading until it refills
+ * (venues/spot-sampler.ts). No peak or fee is set off it.
  */
 export function curveMarkedSymbols(positions: readonly Position[]): string[] {
-  return positions.filter((p) => p.priceSource === "curve").map((p) => p.symbol);
+  return positions.filter((p) => p.priceSource === "curve" || p.priceSource === "sampled").map((p) => p.symbol);
 }
 
 /** May this book's equity set a new high-water mark? */

@@ -57,12 +57,28 @@ export type UnpriceableCause =
   | "zero-price"
   | "curve-priced"
   | "v4-priced"
+  | "sampled-priced"
+  | "sampling"
   | "feed-priced"
   | "unknown-source"
   | "not-watched";
 
 /** The quote fields this needs. Typed from `PriceQuote` so a new SOURCE breaks the build. */
-type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
+type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source" | "sampled">;
+
+/**
+ * What else the CALLER accepts for an entry, beyond a pool quote.
+ *
+ * `sampled`: a price from the worker's own series of a pool too new to keep an
+ * oracle (venues/spot-sampler.ts). Accepted only where the caller can say the
+ * buy is bounded without the scout budget — a fast Trencher entry into its
+ * vault, which the contract caps at $5 a buy and $25 a day, or a paper book —
+ * and even then only once the series is READY. Absent means pool only, which
+ * is what every caller written before it asks.
+ */
+export interface EntryEvidence {
+  sampled?: boolean;
+}
 
 /**
  * The gate and its explanation, from ONE expression.
@@ -85,6 +101,7 @@ type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
 export function unpriceableCause(
   quote: QuoteEvidence | undefined,
   requirePoolSource: boolean,
+  accept: EntryEvidence = {},
 ): UnpriceableCause | null {
   if (!quote) return "no-quote";
   if (quote.stale) return "stale-price";
@@ -97,6 +114,10 @@ export function unpriceableCause(
       return "curve-priced";
     case "v4":
       return "v4-priced";
+    case "sampled":
+      if (!accept.sampled) return "sampled-priced";
+      // A series still filling values a holding; it has not yet earned a buy.
+      return quote.sampled?.ready === true ? null : "sampling";
     case "chainlink":
     case "broker":
       return "feed-priced";
@@ -130,8 +151,9 @@ export function unpriceableCause(
 export function priceability(
   quote: QuoteEvidence | undefined,
   requirePoolSource: boolean,
+  accept: EntryEvidence = {},
 ): { priceable: boolean; unpriceable?: UnpriceableCause } {
-  const cause = unpriceableCause(quote, requirePoolSource);
+  const cause = unpriceableCause(quote, requirePoolSource, accept);
   return cause === null ? { priceable: true } : { priceable: false, unpriceable: cause };
 }
 
@@ -171,6 +193,8 @@ const UNPRICEABLE_WHY: Record<UnpriceableCause, string> = {
   "zero-price": "its quote came back at zero",
   "curve-priced": "priced off its bonding curve, which has no oracle — enough to value it, not to buy it",
   "v4-priced": "priced off a v4 pool, which has no oracle — enough to value it, not to buy it",
+  "sampled-priced": "its pool is too new for an oracle — our own price readings can value it, not buy it here",
+  "sampling": "its pool is too new for an oracle, and our own price readings of it are still filling in",
   "feed-priced": "the only price under this symbol is a stock feed, not this token's own market",
   // BOTH AXES, because the check is both. The site tests symbol AND address,
   // and the symbol is the conjunct that fails on the ordinary path: discovery

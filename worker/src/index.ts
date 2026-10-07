@@ -5302,6 +5302,14 @@ async function main() {
   // map each tick and read by the scout ceiling — deliberately NOT reachable
   // from an intent, so a strategy can't declare its own target priceable.
   let lastUnpriceable: Set<string> = new Set();
+  /**
+   * The subset of `lastUnpriceable` priced off our own sampled series of a pool
+   * too new to keep an oracle (venues/spot-sampler.ts). Unpriceable for every
+   * buy the scout budget bounds, EXCEPT a fast Trencher vault entry — which the
+   * contract caps at $5 a buy and $25 a day — and a paper buy, which spends
+   * nothing. See scoutContextFor.
+   */
+  let lastSampled: Set<string> = new Set();
   let lastQuarantinedUsdg = 0n;
   /** Has a tick computed `lastQuarantinedUsdg` yet? Before that its 0 is a default, not a reading (the follow ceiling reads it). */
   let lastQuarantinedKnown = false;
@@ -5941,7 +5949,11 @@ async function main() {
           // the same line `lastUnpriceable` draws for the scout budget below.
           // The verdict and its explanation come from one call so they cannot
           // disagree — they did, and the owner read the disagreement.
-          ...priceability(quote, true),
+          ...priceability(quote, true, {
+            // A ready sampled series may open a VAULT entry (capped on chain)
+            // or a paper one; nothing else here (strategies/trencher.ts).
+            sampled: autonomous || paperActive(),
+          }),
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           // An early pool may not report 24h volume: absent, never 0.
           fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, ...(p.volume24hUsd !== null ? { volume24hUsd: p.volume24hUsd } : {}) });
@@ -8139,6 +8151,22 @@ async function main() {
     return rows?.find((r) => r.token === token.toLowerCase())?.symbol ?? undefined;
   }
 
+  /**
+   * A SAMPLED COIN IN A TRENCHER VAULT ENTRY IS BOUNDED ALREADY. Its price came
+   * from our own series of a pool too new for an oracle, which is why every
+   * other buy of it stays inside the scout budget (default $0). A fast Trencher
+   * entry into its vault does not: the vault contract caps it at $5 a buy and
+   * $25 a day, and strategies/trencher.ts only offers it once the series is
+   * ready. A paper buy spends nothing. Only the sampled coins leave the set — a
+   * curve, v4 or unpriced coin is budgeted exactly as before.
+   */
+  function scoutUnpriceableFor(intent: TradeIntent): ReadonlySet<string> {
+    const bounded = intent.kind === "swap" && (intent.custody === "trencher" || paperActive());
+    return bounded && lastSampled.size > 0
+      ? new Set([...lastUnpriceable].filter((a) => !lastSampled.has(a)))
+      : lastUnpriceable;
+  }
+
   async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
     // ── BOTH VENUES, NOT JUST THE POOL ONE ────────────────────────────────
     //
@@ -8190,7 +8218,7 @@ async function main() {
     const { isClassBuy, buyUnpriceable } = scoutFlagsFor(intent, {
       vault: active.limits.ponsClassVault,
       cash: CASH.USDG as `0x${string}`,
-      lastUnpriceable,
+      lastUnpriceable: scoutUnpriceableFor(intent),
     });
     return {
       limits: {
@@ -11801,7 +11829,9 @@ async function main() {
       ...watchTokens
         .filter((t) => {
           const q = market.prices.get(t.symbol);
-          return !q || q.source === "curve" || q.source === "v4";
+          // A sampled price is a thinner claim than a pool's own oracle, and
+          // outside a vault entry it is budgeted like one (lastSampled).
+          return !q || q.source === "curve" || q.source === "v4" || q.source === "sampled";
         })
         .map((t) => t.address.toLowerCase()),
       // CLASS TOKENS ARE NEVER IN watchTokens — they postdate the grant, which
@@ -11816,6 +11846,9 @@ async function main() {
       // reader of the set and keeps the two answers consistent.
       ...classBook.tokens,
     ]);
+    lastSampled = new Set(
+      watchTokens.filter((t) => market.prices.get(t.symbol)?.source === "sampled").map((t) => t.address.toLowerCase()),
+    );
     // The scout BUDGET must count curve-marked holdings too.
     //
     // Keeping them in `lastUnpriceable` above preserves the scout GATE, but the
@@ -12786,7 +12819,8 @@ async function main() {
                 const c = basisBySymbol.get(pp.symbol);
                 return c === null || c === undefined ? null : Number(c);
               })(),
-              priceSource: pp.priceSource === "pool" ? "pool" : "chainlink",
+              // A sampled price is a pool's own spot, averaged by us: a pool price.
+              priceSource: pp.priceSource === "pool" || pp.priceSource === "sampled" ? "pool" : "chainlink",
               quarantined: false,
             })),
             // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
