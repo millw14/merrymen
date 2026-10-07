@@ -1066,10 +1066,9 @@ export interface HoldingVerdict {
  * (side and quantity null), the chain holds a buy Postgres never recorded
  * (what this tool books), and Postgres records one sell of both lots
  * together, which took the book flat; yet the live basis still covers one
- * lot, written after that sell. The sell never reached it, by one of the
- * ways a basis can lack a recorded fill (holdingVerdict). Its cost cannot be
- * replayed (a buy carries no fill), and nothing here can say what it should
- * be.
+ * lot, and was written after that sell (holdingVerdict lists ways a basis
+ * can lack a recorded fill). Its cost cannot be replayed (a buy carries no
+ * fill), and nothing here can say what it should be.
  *
  * IT IS PASSED OVER ONLY WHERE IT PROVABLY CANNOT REACH THE NEW BOOK, and
  * then it is not booked, not changed, and named: its rows in the evidence
