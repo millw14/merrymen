@@ -315,8 +315,14 @@ change it:
      deleted. That is why condition 3 requires the grant's spelling: the
      delete matches case and all, and a row under another spelling would
      survive it.
-   - A pass that runs before the worker has written its `agents` row does not
-     touch the snapshot tables.
+   - A pass that runs before the worker has written its `agents` row deletes
+     nothing; it only upserts the new book's own seeded rows, so the stale
+     row is untouched.
+   - The deletion assumes the grant is not re-signed under a different
+     letter-case spelling of the account between the apply and the first
+     spawn. If that happens, the row stays inert (the seeds filter by held
+     symbols, and the web pages join on the exact `agent_id`), and the next
+     preview or admission refuses the tenant on its spellings.
    - `ledger-mirror.test.ts` holds each of these cases.
 
 Until that pass, and indefinitely if the tenant is never run, the row is

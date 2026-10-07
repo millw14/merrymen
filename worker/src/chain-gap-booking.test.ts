@@ -1314,9 +1314,10 @@ describe("Shogun's TSLA: a basis left over a flat token (staleBasisVerdict)", ()
       "is left over a token the book does not hold: the chain held none of it at the pinned block at any address of the book, and no position under TSLA is held\\. " +
       "It is not booked here and not changed\\. It cannot reach the attested book: admission seeds a basis only for a symbol positions shows held, and its own " +
       `seed, asked on this read \\(planAttestedSeed\\), carries none of it; and the first mirror pass after the new book's worker arms deletes every cost_basis ` +
-      `row spelled ${ACCOUNT}, as this one is, keeping only the new book's own .* Until then it is read only as it is today, and acts on nothing: no page ` +
+      `row spelled ${ACCOUNT}, as this one is, keeping only the new book's own .* Until that pass it is read only as it is today, and acts on nothing: no page ` +
       "that values a holding shows it, since each joins basis to a positions row under its name and there is none; and the owner's report export lists it, " +
       "as not valued, only while the agent's newest equity mark is paper$"));
+    assert.match(stale.note!, /so that pass is not a rebuilt one\)\. That assumes the grant is not re-signed under a different letter-case spelling of the account between the apply and the first spawn; if it is, the row stays inert .* and the next preview or admission refuses the tenant on its spellings\. Until that pass/);
     assert.ok(p.warnings.includes(stale.note!), "and said at the console");
     assert.ok(planLines(p).some((l) => l === `  note: ${stale.note}`));
     assert.ok(p.warnings.some((w) => new RegExp(`^${TSLA}: none of it is held, on chain or in the snapshot, .*trade #94285 .* records no fill`).test(w)), p.warnings.join("\n"));
@@ -1378,6 +1379,23 @@ describe("Shogun's TSLA: a basis left over a flat token (staleBasisVerdict)", ()
     cases[cases.length - 1]![1](exceeds);
     const ex = holdingOf(await shogunPlan(exceeds));
     assert.deepEqual([ex.refusal, ex.staleBasis?.note === null], ["fills-exceed-chain", false]);
+  });
+
+  it("another token under TSLA whose raw_balance is \"00\" or \" 0\" is held, as the seed's text comparison reads it (raw_balance <> '0'), never as a number: refused", async () => {
+    for (const raw of ["00", " 0"]) {
+      const what = JSON.stringify(raw);
+      const b = await shogun();
+      position(b, addr(0x7e57a), raw);
+      const p = await shogunPlan(b);
+      assert.equal(p.verdict, "blocked", what);
+      assert.equal(buy(p).proposal, null, what);
+      assert.equal(holdingOf(p).refusal, "basis-without-position", what);
+      assert.ok(buy(p).why.includes(`Postgres's positions hold TSLA (${addr(0x7e57a)}) at ${raw}, under a name ${TSLA} has gone by`), `${what}: ${buy(p).why}`);
+      const stale = holdingOf(p).staleBasis!;
+      assert.deepEqual(stale.heldUnderNames.map((x) => [x.symbol, x.token, x.rawBalance]), [["TSLA", addr(0x7e57a), raw]], `${what}: held under the name`);
+      // planAttestedSeed's own SQL agrees: it would carry the basis into the new book.
+      assert.deepEqual(stale.seededUnderNames, [{ symbol: "TSLA", qtyRaw: OTHER.toString(), costUsdg: CASH.toString() }], what);
+    }
   });
 
   it("a positions row under TSLA that holds 0 is not held, as the seed reads it: the trade books, and the note says the dashboard shows the cost beside it until the first mirror pass", async () => {

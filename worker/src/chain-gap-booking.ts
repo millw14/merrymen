@@ -564,7 +564,10 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  * that woke between the preview and the apply — a heartbeat, a mirrored row,
  * a new approval, a mode change — moves one of these, and the apply refuses.
  * The recorded fills by digest: a row's fill repaired in place moves no count
- * or maximum id, and the holding was judged on it.
+ * or maximum id, and the holding was judged on it. `holdings.seeded` is
+ * defence in depth: planAttestedSeed's basis is a pure function of the
+ * positions and live cost_basis rows `holdings` already carries, read on the
+ * same snapshot.
  */
 function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
@@ -1100,7 +1103,12 @@ export interface HoldingVerdict {
  *                          registerAttestedGapSource), and only a cursor
  *                          the book no longer matches (its row gone, or
  *                          another there) reads as one. A row under another
- *                          spelling would survive it.
+ *                          spelling would survive it. This assumes the
+ *                          grant is not re-signed under a different
+ *                          letter-case spelling between the apply and the
+ *                          first spawn; if it is, the row stays inert and
+ *                          the next preview or admission refuses on
+ *                          spellings.
  *
  * Until that pass the row stays what it is today, and nothing that acts on
  * a basis can reach it: both seeds filter by held symbols, and every page
@@ -1176,7 +1184,9 @@ export function staleBasisVerdict(o: { token: string; names: ReadonlySet<string>
     `${names.join(", ")} is held. It is not booked here and not changed. It cannot reach the attested book: admission seeds a basis only for a symbol ` +
     "positions shows held, and its own seed, asked on this read (planAttestedSeed), carries none of it; and the first mirror pass after the new book's worker " +
     `arms deletes every cost_basis row spelled ${o.grantSpelling}, as this one is, keeping only the new book's own (registration removed the lost book's cursors, ` +
-    "so that pass is not a rebuilt one). Until then it is read only as it is today, and acts on nothing: " + (beside.length
+    "so that pass is not a rebuilt one). That assumes the grant is not re-signed under a different letter-case spelling of the account between the apply " +
+    "and the first spawn; if it is, the row stays inert (both seeds filter by held symbols, and every page joins on the exact agent_id), and the next " +
+    "preview or admission refuses the tenant on its spellings. Until that pass it is read only as it is today, and acts on nothing: " + (beside.length
     ? `the dashboard shows this cost beside the positions row(s) under ${beside.join(", ")} that hold 0`
     : "no page that values a holding shows it, since each joins basis to a positions row under its name and there is none") +
     "; and the owner's report export lists it, as not valued, only while the agent's newest equity mark is paper";

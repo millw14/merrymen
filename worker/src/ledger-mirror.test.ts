@@ -847,7 +847,8 @@ describe("an empty child is not a flat book", () => {
  * pass with nothing to compare a cursor against cannot read the book as
  * rebuilt, and once the worker has armed (its agents row) that pass replaces
  * the agent's cost_basis with the book's own — a basis the book never had is
- * gone. Before the worker arms the snapshot is not touched, and a row under
+ * gone. A pass before the worker arms deletes nothing; it only upserts the
+ * new book's own seeded rows, so the stale row is untouched. And a row under
  * another spelling of the account is never matched by the delete.
  */
 describe("a stale shared basis after an attested registration", () => {
@@ -863,7 +864,7 @@ describe("a stale shared basis after an attested registration", () => {
     const shared = mem(DEST);
     await shared.prepare(STALE).run("0xagent");
     const book = newBook();
-    // Before its worker arms there is no agents row, and the snapshot is left as registration left it.
+    // Before its worker arms there is no agents row: the pass deletes nothing; it only upserts the new book's own seeded rows (none here), so the stale row is untouched.
     await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
     assert.equal(await count(shared, "cost_basis"), 1, "untouched before the worker arms");
     book.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent', 'Shogun', 1)");
