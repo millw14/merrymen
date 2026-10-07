@@ -21,6 +21,7 @@ import {
   addressedSmallTalk,
   asksAboutCoin,
   asksHowItIs,
+  consents,
   deskNameOk,
   extractCaHits,
   extractCas,
@@ -42,6 +43,7 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  offerShaped,
   reactionOnly,
   routeWorthy,
   selfNamesOf,
@@ -1027,5 +1029,27 @@ describe("reactionOnly", () => {
   it("laughter, acks and emoji are reactions; a short answer is not", () => {
     for (const t of ["lol", "LMAO", "hahaha", "facts", "🔥", "😂😂", "lol ok", "@pinebot lol"]) assert.equal(reactionOnly(t, ["pinebot"]), true, t);
     for (const t of ["pons", "$pons", "trending", "yes", "top traders", "the second one"]) assert.equal(reactionOnly(t), false, t);
+  });
+});
+
+describe("consents and offerShaped: a yes under its own offer (live 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  it("a plain yes, however it is said, names in or out", () => {
+    for (const t of ["do it", "yes", "go", "send it", "pls", "sure", "yep", "yes pls", "ok", "bet", "go ahead", "yes do it", "pull it", "ya", "shogun do it", "@Merrymanme_bot yes please", "ok do it!", "yes.", "k", "yeah go for it"]) {
+      assert.equal(consents(t, self), true, t);
+    }
+  });
+  it("a question, a reaction, a no, or a yes with something of its own is not", () => {
+    for (const t of ["lol", "lol ok", "no", "nah", "do it?", "send it?", "what about pons", "done?", "yes but on solana", "", "ok ok ok ok ok ok ok"]) {
+      assert.equal(consents(t, self), false, t);
+    }
+    assert.equal(consents(undefined), false);
+  });
+  it("its own line offering rather than asking", () => {
+    for (const t of ["i can pull the fomo board for robinhood chain coins if you want, just say the word", "want me to pull its theses", "lmk which coin", "should i check the leaderboard"]) {
+      assert.equal(offerShaped(t), true, t);
+    }
+    for (const t of ["half the traders in here have fomo rn lol", "top traders today, or what's trending?", "i can't say", "which coin?"]) assert.equal(offerShaped(t), false, t);
+    assert.equal(offerShaped(null), false);
   });
 });

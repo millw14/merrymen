@@ -70,6 +70,7 @@ import {
   addressedHow,
   addressedSmallTalk,
   asksAboutCoin,
+  consents,
   deskAskOf,
   extractCaHits,
   extractCas,
@@ -88,6 +89,7 @@ import {
   isQuestionToRoom,
   isShush,
   isTradeTalk,
+  offerShaped,
   reactionOnly,
   routeWorthy,
   selfNamesOf,
@@ -160,7 +162,7 @@ const ROUTE_LEAVES_MS = 8 * SEC;
 /** How long a reply to its own Fomo line is read in that line's light. */
 const FOMO_THREAD_MS = 2 * 60 * MIN;
 /** The persona asking back which Fomo board or coin was meant. */
-const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|graduated|most held)\b/iu;
+const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|leaderboard|graduated|most held|robinhood)\b/iu;
 /** A routing call with less time than this is not worth making. */
 const ROUTE_MIN_BOX_MS = 1_500;
 /** The allowance routing never touches: the day's (at least 20, or a tenth) and this chat's hour. */
@@ -634,6 +636,12 @@ interface SpeakOpts {
   stillWanted?: () => boolean;
   /** An ambient line waits like someone who has been reading (pacing.ts typingDelayMs). */
   ambient?: boolean;
+  /**
+   * The line it answers is in a Fomo research thread (a research ask, or a
+   * reply to one of its Fomo lines): the persona's answer joins that thread,
+   * so a reply to it is read in its light (repliesToOwnFomo), by message.
+   */
+  researchThread?: boolean;
   /** Told why, when nothing is sent (see Quiet). */
   miss?: (why: Quiet) => void;
   accountAnswer?: (chatId: number) => Quiet | AnswerSlot;
@@ -687,8 +695,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const repliedTo = new Lru<string, true>(LRU_MAX);
   /** Its own Fomo lines (research answers, and the persona asking which one they meant), by message: when said. */
   const fomoLines = new Lru<string, number>(LRU_MAX);
-  const markFomoLine = (chatId: number, messageId: number | undefined): void => {
-    if (isMsgId(messageId)) fomoLines.set(msgKey(chatId, messageId), clock());
+  /** Of those, the persona's own (an ask-back, an offer, a line in a research thread): "ok" and "bet" under one are a yes. */
+  const personaFomoLines = new Lru<string, true>(LRU_MAX);
+  const markFomoLine = (chatId: number, messageId: number | undefined, persona = false): void => {
+    if (!isMsgId(messageId)) return;
+    fomoLines.set(msgKey(chatId, messageId), clock());
+    if (persona) personaFomoLines.set(msgKey(chatId, messageId), true);
   };
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
@@ -1389,8 +1401,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // A migrated chat has no message the old reply id means.
     recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
     // The persona asking which Fomo board or coin was meant: the answer to it
-    // is read in its light (repliesToOwnFomo).
-    if (intent.kind === "answer" && fomoNow() !== null && /[?？]/u.test(text) && FOMO_ASK_BACK.test(text)) markFomoLine(sent.chatId, sent.messageId);
+    // is read in its light (repliesToOwnFomo). So is its offer ("i can pull
+    // the fomo board for robinhood chain coins if you want"), and anything it
+    // says inside a research thread: a yes under it goes to the router with
+    // the line it answers (live 2026-10-07: "do it" under such an offer got
+    // "give me a sec", and nothing came).
+    if (intent.kind === "answer" && fomoNow() !== null && (o.researchThread === true || (FOMO_ASK_BACK.test(text) && (/[?？]/u.test(text) || offerShaped(text))))) {
+      markFomoLine(sent.chatId, sent.messageId, true);
+    }
     log(`[tg-groups] said ${intent.kind}`);
     return sent;
   };
@@ -2278,6 +2296,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // "trending" for the market, however short it is.
       const routable = researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic";
       const fomoThread = routable && repliesToOwnFomo(j);
+      // Whatever the persona says to a line in a research thread stays in it.
+      if (j.fomo === true || fomoThread) replyOpts = { ...replyOpts, researchThread: true };
       if (fomoThread && (await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
@@ -2741,7 +2761,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // keeps its own follow-ups, bound to the coin it read.
     const at = fomoLines.get(msgKey(j.msg.chatId, q.messageId));
     if (at === undefined || clock() - at > FOMO_THREAD_MS) return false;
-    return !reactionOnly(j.line.text, selfNamesOf(me));
+    if (!reactionOnly(j.line.text, selfNamesOf(me))) return true;
+    // "ok" and "bet" under its own ask or offer are a yes, not a reaction;
+    // under a research answer they stay a reaction.
+    return personaFomoLines.get(msgKey(j.msg.chatId, q.messageId)) === true && consents(j.line.text, selfNamesOf(me));
+  };
+  /**
+   * When this line replies to one of its own lines: the person's line that
+   * one answered (this chat's lines only), so route.ts can tell a name its
+   * own offer invented from one a person wrote first.
+   */
+  const askedBefore = (j: LineJob): string | null => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return null;
+    const room = store.room(j.msg.chatId);
+    const own = room?.lines.find((l) => l.own && l.messageId === q.messageId);
+    const asked = own && isMsgId(own.replyTo) ? room!.lines.find((l) => !l.own && l.messageId === own.replyTo) : undefined;
+    return asked && typeof asked.text === "string" && asked.text.trim() ? asked.text.slice(0, 400) : null;
   };
   const routeLabel = (r: TgRoute): string => (r.action === "fomo" ? `fomo:${r.request.kind}` : r.action);
   /** "not-wanted", told apart as act's whyLost does. */
@@ -2773,7 +2810,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         trigger: j.line,
         timeoutMs: box,
         reserve,
-        ctx: { line: j.line.text, replied: repliedText(j), selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
+        ctx: { line: j.line.text, replied: repliedText(j), asked: askedBefore(j), selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
       });
       routeBreaker.note(why);
       // Counts and kinds only: never the line, a name or a coin.

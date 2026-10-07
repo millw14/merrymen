@@ -971,3 +971,149 @@ describe("a Fomo tail asked for in the room (docs/fomo.md \"Tailing a trader\")"
     assert.deepEqual(tails, [{ tail: { kind: "stop", handle: "unipcs" }, fromId: OWNER }], "a stored tail can still be stopped");
   });
 });
+
+describe("live 2026-10-07: a yes under its own offer, and no fake progress (d2 reversed)", () => {
+  const SHOGUN: BotSelf = { id: 999999, username: "Merrymanme_bot", name: "Shogun" };
+  const BOARD = "Trending on Fomo (board position is popularity, not quality):\n1. ETAC on solana, market cap $874.6k\n2. CATE on solana, market cap $57.2M";
+  const OFFER = "i can pull the fomo board for robinhood chain coins if you want, just say the word";
+  /** What the model is scripted to pick (routing) and to write (the persona), in order. */
+  let picks: Array<Record<string, unknown> | string>;
+  let replies: string[];
+  let routePrompts: string[];
+  let personaPrompts: string[];
+  beforeEach(() => {
+    picks = [];
+    replies = [];
+    routePrompts = [];
+    personaPrompts = [];
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    store.update(CHAT, (r) => { r.ownerName = "Milla"; });
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tools?: unknown; messages: Array<{ role: string; content: string }> };
+      const user = body.messages.find((m) => m.role === "user")?.content ?? "";
+      if (body.tools) {
+        routePrompts.push(user);
+        const pick = picks.shift() ?? { action: "chat" };
+        const message = typeof pick === "string" ? { content: pick } : { tool_calls: [{ function: { name: "route", arguments: JSON.stringify(pick) } }] };
+        return { ok: true, json: async () => ({ choices: [{ message }] }) };
+      }
+      personaPrompts.push(user);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: replies.shift() ?? "PASS" } }] }) };
+    }) as never;
+    // As the real planner: a routed board answers; "what about robinhood coins on fomo" plans nothing.
+    fomo!.answer = (q) => (q.request ? { text: BOARD, deflect: false } : /trending/.test(q.text) ? { text: BOARD, deflect: false } : null);
+  });
+  const mine = (text: string, over: Partial<TgMessage> = {}): TgMessage => msg(text, { fromId: OWNER, fromFirstName: "Milla", ...over });
+  const lastOwn = (): { id: number; text: string } => {
+    const l = (store.room(CHAT)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+    return { id: l.messageId, text: l.text };
+  };
+  const under = (text: string, own: { id: number; text: string }, over: Partial<TgMessage> = {}): TgMessage =>
+    mine(text, { replyTo: { messageId: own.id, fromId: SHOGUN.id, fromIsBot: true, text: own.text }, ...over });
+
+  it("23:01-23:03 replayed: the offer is marked, 'do it' runs the offered board, and 'give me a sec' is never said", async () => {
+    make({ self: () => SHOGUN });
+    await said(mine("shogun what's trending on fomo?"));
+    const board = lastOwn();
+    assert.match(board.text, /Trending on Fomo/);
+    picks.push({ action: "chat" });
+    replies.push(OFFER);
+    clock += 2 * MIN;
+    await said(under("what about robinhood coins on fomo", board));
+    const offer = lastOwn();
+    assert.equal(offer.text, OFFER, "the persona's offer, as live");
+    const before = routePrompts.length;
+    picks.push({ action: "fomo_board", board: "trending" });
+    replies.push("give me a sec");
+    clock += 20 * SEC;
+    await said(under("do it", offer));
+    assert.equal(routePrompts.length - before, 1, "'do it' under its own offer is routed");
+    assert.match(routePrompts.slice(-1)[0]!, /the → line replies to: «i can pull the fomo board for robinhood chain coins/);
+    const routed = fomo!.asks.slice(-1)[0]!.request;
+    assert.equal(routed?.kind, "board");
+    assert.equal(routed?.kind === "board" ? routed.board : null, "trending");
+    assert.match(lastOwn().text, /Trending on Fomo/);
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /give me a sec|here we go/, t);
+  });
+
+  it("the persona's stall and fake delivery never reach the room: each is answered from a template", async () => {
+    make({ self: () => SHOGUN });
+    for (const [i, stall] of ["give me a sec", "yeah here we go", "on it 🫡", "pulling it up now", "lemme check real quick", "i'll let you know when it's in"].entries()) {
+      replies.push(stall);
+      clock += 3 * MIN;
+      await said(msg(`shogun how was your weekend honestly ${"!".repeat(i + 1)}`, { fromId: 5_000 + i, fromFirstName: "Ann" }));
+    }
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 6, "each still answered");
+    for (const t of room) assert.doesNotMatch(t, /give me a sec|here we go|on it|pulling it|lemme check|let you know/, t);
+  });
+
+  it("'ok' and 'bet' under its own ask or offer are a yes; 'lol' is still a reaction; 'ok' under a research answer is not routed", async () => {
+    make({ self: () => SHOGUN });
+    await said(mine("shogun what's trending on fomo?"));
+    const board = lastOwn();
+    for (const [i, yes] of ["ok", "bet", "lol"].entries()) {
+      picks.push({ action: "chat" });
+      replies.push(["want me to pull the most held coins on fomo?", "want the graduated board on fomo?", "want fomo's small coins?"][i]!);
+      clock += 5 * MIN;
+      await said(under(`and the others on fomo ${"?".repeat(i + 1)}`, board));
+      const offer = lastOwn();
+      const before = routePrompts.length;
+      picks.push({ action: "fomo_board", board: "most_held" });
+      clock += 20 * SEC;
+      await said(under(yes, offer));
+      assert.equal(routePrompts.length - before, yes === "lol" ? 0 : 1, yes);
+    }
+    picks.length = 0;
+    const before = routePrompts.length;
+    clock += 5 * MIN;
+    await said(under("ok", board, { fromId: ANN, fromFirstName: "Ann" }));
+    assert.equal(routePrompts.length - before, 0, "an ack under the board itself costs nothing");
+  });
+
+  it("a trader its offer names counts only when the person wrote it first", async () => {
+    make({ self: () => SHOGUN });
+    await said(mine("shogun what's trending on fomo?"));
+    const board = lastOwn();
+    picks.push({ action: "chat" });
+    replies.push("want me to look up unipcs on fomo?");
+    clock += 2 * MIN;
+    await said(under("is unipcs any good on fomo", board));
+    const offer = lastOwn();
+    picks.push({ action: "fomo_trader", trader: "unipcs" });
+    clock += 20 * SEC;
+    await said(under("yes", offer));
+    assert.ok(logs.includes("[tg-groups] route fomo-trader"), "unipcs: she wrote it first");
+    // Its own invention: nobody wrote "frank".
+    picks.push({ action: "chat" });
+    replies.push("want me to look up frank on fomo?");
+    clock += 5 * MIN;
+    await said(under("who's good on fomo lately", board));
+    const offer2 = lastOwn();
+    picks.push({ action: "fomo_trader", trader: "frank" });
+    clock += 20 * SEC;
+    await said(under("yes", offer2));
+    assert.equal(logs.filter((l) => l === "[tg-groups] route invalid").length, 1, "frank is refused: no person wrote it");
+  });
+
+  it("a yes under its own offer to keep tabs on someone is never a tail", async () => {
+    let proposed = 0;
+    make({ self: () => SHOGUN, owner: () => ({ research: async () => "sent", proposeTail: async () => { proposed++; return "sent"; } }) as never });
+    await said(mine("shogun what's trending on fomo?"));
+    const board = lastOwn();
+    picks.push({ action: "chat" });
+    replies.push("want me to keep an eye on the fomo board?");
+    clock += 2 * MIN;
+    await said(under("is unipcs any good on fomo", board));
+    const offer = lastOwn();
+    picks.push({ action: "fomo_tail" });
+    replies.push("lol fair");
+    clock += 20 * SEC;
+    await said(under("do it", offer));
+    assert.equal(proposed, 0, "nothing reaches her DM as a tail");
+    assert.ok(logs.includes("[tg-groups] route chat"));
+  });
+});

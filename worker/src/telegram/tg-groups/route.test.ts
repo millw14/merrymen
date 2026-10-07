@@ -387,3 +387,59 @@ describe("the router's second fixes (re-review, 2026-10-07)", () => {
     assert.deepEqual(await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf(trigger.text) }), { route: null, why: "no-answer" });
   });
 });
+
+describe("a yes under its own line (live 2026-10-07)", () => {
+  const OFFER = "i can pull the fomo board for robinhood chain coins if you want, just say the word";
+  it("the system tells the model a yes picks what its own line offered, and chat when it offered nothing", () => {
+    assert.match(ROUTE_SYSTEM, /When the → line says yes to something \[you\] offered or asked in the line it replies to/);
+    assert.match(ROUTE_SYSTEM, /pick the action that line of yours offered, with the coin, board or trader it named\. If it offered nothing on this list, chat\./);
+    assert.match(ROUTE_SYSTEM, /a trader only from the → line or, when it says yes to your own line, from that line/);
+    const noFomo = routeSystem({ fomo: false, desk: true, coins: true });
+    assert.match(noFomo, /with the coin it named/);
+    assert.doesNotMatch(noFomo, /trader/);
+  });
+
+  it("'do it' under its offer of the board: the board, read from the offer", () => {
+    assert.deepEqual(
+      parseRoute({ action: "fomo_board", board: "trending" }, ctxOf("do it", { replied: OFFER, asked: "what about robinhood coins on fomo" })),
+      { action: "fomo", request: { kind: "board", board: "trending" } },
+    );
+  });
+
+  it("a trader its offer names counts only when the person wrote it first; one it made up never does", () => {
+    const offer = "want me to look up unipcs on fomo?";
+    assert.deepEqual(
+      parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("yes", { replied: offer, asked: "is unipcs any good on fomo" })),
+      { action: "fomo-trader", handle: "unipcs", about: "profile" },
+    );
+    assert.equal(parseRoute({ action: "fomo_trader", trader: "frank" }, ctxOf("yes", { replied: "want me to look up frank on fomo?", asked: "who's good on fomo lately" })), null, "the persona invented frank");
+    assert.equal(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("yes", { replied: offer, asked: null })), null, "no person's line behind the offer");
+    assert.equal(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("yes", { replied: null, asked: "is unipcs any good on fomo" })), null, "nor a name only the person wrote, with no offer");
+  });
+
+  it("a yes is never a tail: a tail's trader and hours are read only from the line", () => {
+    for (const yes of ["do it", "yes pls", "ok", "shogun go ahead"]) {
+      assert.deepEqual(parseRoute({ action: "fomo_tail" }, ctxOf(yes, { replied: "want me to keep tabs on unipcs for a few hours?", asked: "is unipcs any good" })), { action: "chat" }, yes);
+    }
+    assert.deepEqual(parseRoute({ action: "fomo_tail" }, ctxOf("can you tail unipcs for 3 hours")), { action: "fomo-tail" });
+  });
+
+  it("readRoute checks against the person's line as the model could see it", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "tg-route-yes-"));
+    const store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => T0, debounceMs: 60_000 });
+    store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
+    try {
+      const gate = new TgModelGate(store, { perDay: 100, now: () => T0, log: () => {} });
+      const model: TgModel = { creds: { provider: "openai", transport: "openai", baseUrl: "https://llm.test/v1", apiKey: "k-test", model: "fake", vision: false }, label: "openai/fake", source: "dedicated" };
+      globalThis.fetch = (async () => ({ ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "route", arguments: JSON.stringify({ action: "fomo_trader", trader: "unipcs" }) } }] } }] }) })) as never;
+      const trigger = line(3, "Milla", "yes");
+      const asked = `${"x ".repeat(150)}is unipcs any good`;
+      const r = await readRoute({ model, gate, chatId: CHAT, room: null, trigger, ctx: ctxOf("yes", { replied: "want me to look up unipcs?", asked }) });
+      assert.deepEqual(r, { route: null, why: "invalid" }, "a name past what the model was shown never grounds a pick");
+    } finally {
+      globalThis.fetch = realFetch;
+      store.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

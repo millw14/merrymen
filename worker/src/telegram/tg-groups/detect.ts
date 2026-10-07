@@ -1773,6 +1773,52 @@ export function reactionOnly(text: unknown, selfNames: readonly string[] = []): 
   return words.every((w) => REACTION_ONLY.test(w));
 }
 
+/** One word or phrase of yes. */
+const CONSENT_WORD =
+  /^(?:ok|okay|k+|kk|bet|word|sure|yes+|yeah+|yea+|ya+|yah|yep|yup|ye|y|go|go ahead|go for it|do it|do that|send it|send|run it|pull it|pull it up|show me|hit me|pls|plz|please|please do|ofc|of course|absolutely|definitely|for sure|lets go|let's go|lfg|aight|alright|why not|sounds good)$/u;
+const CONSENT_MAX_WORDS = 6;
+
+/**
+ * YES, AND NOTHING ELSE: "do it", "yes pls", "ok", "bet", "send it", "go
+ * ahead". Read only under its own offer or ask-back (handler.ts
+ * repliesToOwnFomo), where "ok" and "bet" are a yes and not a reaction; what
+ * the yes is to is in the line it answers, and the router reads it there.
+ * Never a question ("do it?", "send it?" ask something of their own).
+ */
+export function consents(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return false;
+  if (/[?？]/u.test(text)) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0 || words.length > CONSENT_MAX_WORDS) return false;
+  // Greedy: the longest phrase of yes at each step ("go ahead", "do it", "yes").
+  let i = 0;
+  while (i < words.length) {
+    let took = 0;
+    for (let n = Math.min(3, words.length - i); n >= 1; n--) {
+      if (CONSENT_WORD.test(words.slice(i, i + n).join(" "))) {
+        took = n;
+        break;
+      }
+    }
+    if (!took) return false;
+    i += took;
+  }
+  return true;
+}
+
+/**
+ * ITS OWN LINE OFFERING, rather than asking: "i can pull the fomo board for
+ * robinhood chain coins if you want, just say the word", "want me to pull its
+ * theses". The persona is told to ask, never offer (voice.ts), but a line of
+ * its own that does is still answered by what it offered: a yes under it is
+ * routed like an answer to its question (handler.ts).
+ */
+const OWN_OFFER =
+  /\b(?:if (?:you|u|ya) (?:want|wanna|like)|want me to|wanna see|should i|shall i|say the word|lmk|let me know|i can (?:pull|get|show|grab|check|look up|fetch|dig|run|post|drop|send|find))\b/u;
+export function offerShaped(text: unknown): boolean {
+  return typeof text === "string" && OWN_OFFER.test(norm(text));
+}
+
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
 const DESK_TRADING_CUE =
   /\b(?:entry|entries|chart|charts|ta|buy|buying|sell|selling|ape|aping|bag|coin|token|price|pump|pumping|dump|dumping|send|sending|ca|liq|liquidity|volume|mcap|fdv|holders|bullish|bearish|dip|setup|levels?|support|resistance|breakout|analysis|analy[sz]e|legit|rug|runner|moon|mooning|cooked)\b/u;

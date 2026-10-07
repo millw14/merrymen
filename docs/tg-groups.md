@@ -642,6 +642,22 @@ desk, however short, because what "pons" or "trending" means there is in
 the line it answers. A reaction under it ("lol", "🔥") is not, and a desk
 read that happens to say "trending up" keeps its own follow-ups.
 
+**A yes under its own line.** Its own Fomo lines include the persona's
+offers ("i can pull the fomo board for robinhood chain coins if you want",
+recognised by `offerShaped`) and anything the persona says inside a research
+thread, marked by message id. A yes under one of the persona's own lines
+("do it", "yes pls", "send it", and there also "ok" and "bet", which are
+otherwise reactions: `consents`) goes to the router, which is told: when the
+line says yes to something its own line offered or asked, pick what that
+line offered, with the coin, board or trader it named, and chat if it
+offered nothing on the menu. Code still grounds every name: a trader named
+only by the persona's offer counts when the person's line that the offer
+answered named it too (`RouteCtx.asked`), never a name the persona made up.
+A yes is never a tail (a tail's trader and hours are read only from the
+line), so a `fomo_tail` pick on a yes is chat. "ok" under a research answer
+itself stays a reaction. Live 2026-10-07: "do it" under such an offer got
+"give me a sec" and nothing ever came.
+
 **The menu** is one forced tool call (`callChoice`): chat, the Fomo
 leaderboard, a Fomo board, one coin on Fomo (theses, buyers, sellers, a
 research dive, what is going on), what Fomo's traders are buying or
