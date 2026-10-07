@@ -24,9 +24,10 @@ import { ensureLedgerResumeSchema } from "./ledger-import";
 import { CHAIN_REFUSAL } from "./ledger-resume";
 import { CASH } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
-import { BookingRefused, BOOKINGS_TABLE } from "./chain-gap-booking";
+import { BookingRefused, BOOKINGS_TABLE, digestOf, parseApplyReport } from "./chain-gap-booking";
 import {
-  CliError, createBookingRpc, createReportFile, failureLine, finishReportFile, main, parseBookingArgs, pgClientDb, targetDigest, type PgClient,
+  CliError, commitRolledBack, CommitOutcomeUnknown, conflictRolledBack, createBookingRpc, createReportFile, failureLine, finishReportFile, main, parseBookingArgs, pgClientDb,
+  replaceReportFile, targetDigest, type PgClient,
 } from "./chain-gap-booking-cli";
 
 const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-chain-gap-cli-")));
@@ -44,15 +45,54 @@ const topic = (a: string) => `0x${a.replace(/^0x/, "").padStart(64, "0")}`;
 const h32 = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
 const DEPOSIT_TX = h32("the lone deposit");
 
-/** Postgres's dialect, answered by sqlite: $n placeholders, the read-only transaction held to query_only. */
-function pgOverSqlite(raw: DatabaseSync, said: string[]): PgClient {
-  let readOnly = false;
+/**
+ * The server behind the stand-in, shared by every connection to one sqlite
+ * database as a server's are: the transaction ids it hands a write
+ * transaction, what became of each (pg_xact_status's answers: a COMMIT
+ * marks it committed, a ROLLBACK aborted), its system identifier and its
+ * version. A test rewrites them to play what sqlite cannot: a transaction
+ * the server has not yet ended ("in progress"), one it no longer remembers
+ * (deleted), another server, or one without the functions.
+ */
+interface StandInServer { next: number; status: Map<string, string>; system: string | null; version: string; endedAfterSnapshot: Set<string> }
+const servers = new WeakMap<DatabaseSync, StandInServer>();
+function serverOf(raw: DatabaseSync): StandInServer {
+  let s = servers.get(raw);
+  if (!s) servers.set(raw, s = { next: 740, status: new Map(), system: "7693842931899834703", version: "170000", endedAfterSnapshot: new Set() });
+  return s;
+}
+
+/**
+ * Postgres's dialect, answered by sqlite: $n placeholders, the read-only
+ * transaction held to query_only, the isolation a BEGIN named reported back
+ * (`level` overrides what the write transaction's reports), COMMIT's tag, and
+ * the transaction-status functions, from serverOf(raw).
+ */
+function pgOverSqlite(raw: DatabaseSync, said: string[], o: { level?: string } = {}): PgClient {
+  let readOnly = false, iso = "read committed", xid: string | null = null;
+  const server = serverOf(raw);
+  const ended = (how: "committed" | "aborted") => { if (xid !== null) server.status.set(xid, how); xid = null; };
   const empty = { rows: [], rowCount: 0 };
   return {
     async query(sql, params = []) {
       said.push(sql);
-      if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") { raw.exec("BEGIN"); raw.exec("PRAGMA query_only = ON"); readOnly = true; return empty; }
-      if (/current_setting\('transaction_read_only'\)/.test(sql)) return { rows: [{ ro: readOnly ? "on" : "off", iso: readOnly ? "repeatable read" : "read committed" }], rowCount: 1 };
+      if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") { raw.exec("BEGIN"); raw.exec("PRAGMA query_only = ON"); readOnly = true; iso = "repeatable read"; return empty; }
+      if (sql === "BEGIN ISOLATION LEVEL SERIALIZABLE") {
+        raw.exec("BEGIN"); iso = o.level ?? "serializable";
+        xid = String(++server.next); server.status.set(xid, "in progress");
+        return empty;
+      }
+      if (/current_setting\('transaction_read_only'\)/.test(sql)) return { rows: [{ ro: readOnly ? "on" : "off", iso }], rowCount: 1 };
+      // The server's transaction-status functions (chain-gap-booking.ts xactFunctions, currentXact, xactStatusOf).
+      if (sql === "SELECT current_setting('server_version_num') AS v") return { rows: [{ v: server.version }], rowCount: 1 };
+      if (/^SELECT pg_current_xact_id\(\)::text AS id, CASE WHEN has_function_privilege\('pg_control_system\(\)', 'EXECUTE'\)/.test(sql)) {
+        return { rows: [{ id: xid, system: server.system }], rowCount: 1 };
+      }
+      if (/^WITH x AS \(SELECT \$1::xid8 AS id, pg_current_snapshot\(\) AS s\)[\s\S]*pg_xact_status\(x\.id\)[\s\S]*pg_visible_in_snapshot\(x\.id, x\.s\)/.test(sql)) {
+        const id = String(params[0]), seen = BigInt(id) <= BigInt(server.next), status = seen ? server.status.get(id) ?? null : null;
+        const visible = (status === "committed" || status === "aborted") && !server.endedAfterSnapshot.has(id);
+        return { rows: [{ system: server.system, seen, status, visible }], rowCount: 1 };
+      }
       // Postgres's catalogue, from sqlite's.
       if (/FROM information_schema\.tables WHERE table_schema = current_schema\(\)/.test(sql)) {
         const rows = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<Record<string, unknown>>).map((r) => ({ ...r }));
@@ -62,8 +102,9 @@ function pgOverSqlite(raw: DatabaseSync, said: string[]): PgClient {
         const rows = (raw.prepare("SELECT name FROM pragma_table_info(?)").all(params[0] as string) as Array<Record<string, unknown>>).map((r) => ({ ...r }));
         return { rows, rowCount: rows.length };
       }
-      if (sql === "BEGIN" || sql === "COMMIT") { raw.exec(sql); return empty; }
-      if (sql === "ROLLBACK") { raw.exec("ROLLBACK"); if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; } return empty; }
+      if (sql === "BEGIN") { raw.exec(sql); return empty; }
+      if (sql === "COMMIT") { raw.exec(sql); iso = "read committed"; ended("committed"); return { ...empty, command: "COMMIT" }; }
+      if (sql === "ROLLBACK") { raw.exec("ROLLBACK"); iso = "read committed"; ended("aborted"); if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; } return empty; }
       const stmt = raw.prepare(sql.replace(/\$(\d+)/g, "?$1"));
       if (/^\s*(SELECT|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
         const rows = (stmt.all(...(params as never[])) as Array<Record<string, unknown>>).map((r) => ({ ...r }));
@@ -123,7 +164,11 @@ describe("arguments", () => {
     assert.deepEqual(parseBookingArgs(["--tenant", TENANT, "--apply", "--confirm", d, "--backup-ref", "bk-1", "--output", out]),
       { mode: "apply", tenant: TENANT, output: out, confirm: d, backupRef: "bk-1" });
     assert.deepEqual(parseBookingArgs(["--revert", out, "--output", `${out}.r`]), { mode: "revert", report: out, output: `${out}.r` });
+    // --revert with --dry-run only reads the booking's receipts.
+    assert.deepEqual(parseBookingArgs(["--revert", out, "--dry-run", "--output", `${out}.c`]), { mode: "receipts", report: out, output: `${out}.c` });
+    assert.deepEqual(parseBookingArgs(["--dry-run", "--revert", out, "--output", `${out}.c`]), { mode: "receipts", report: out, output: `${out}.c` });
     for (const bad of [
+      ["--revert", out, "--dry-run", "--apply", "--output", out], ["--revert", out, "--dry-run", "--confirm", d, "--output", out], ["--revert", out, "--dry-run"],
       [], ["--tenant", TENANT], ["--tenant", TENANT, "--output", "relative.json"], ["--tenant", "0x1234", "--output", out],
       ["--tenant", TENANT, "--output", out, "--confirm", d], ["--tenant", TENANT, "--output", out, "--backup-ref", "bk"],
       ["--tenant", TENANT, "--output", out, "--apply", "--confirm", d], ["--tenant", TENANT, "--output", out, "--apply", "--backup-ref", "bk"],
@@ -242,9 +287,17 @@ describe("one whole run: preview, a refused apply, the apply, a second apply, th
 
     const applied = path.join(dir, "apply.json");
     printed.length = 0;
+    said.length = 0;
     assert.equal(await main(["--tenant", TENANT, "--apply", "--confirm", plan.previewDigest, "--backup-ref", "bk-2026-10-06", "--output", applied], env, deps), 0);
     assert.ok(printed.some((l) => /^APPLIED booking [0-9a-f-]{36} — 1 row\(s\) for tenant/.test(l)), printed.join("\n"));
     assert.equal(statSync(applied).mode & 0o777, 0o600);
+    // The booking id said before anything was read, the write transaction SERIALIZABLE, and the report marked committed once the COMMIT was answered.
+    const appliedReport = JSON.parse(readFileSync(applied, "utf8")) as { bookingId: string; commitOutcome: string };
+    assert.ok(printed[0]!.startsWith(`booking ${appliedReport.bookingId}: its apply report is written to ${applied} before the COMMIT is sent`), printed[0]);
+    assert.equal(appliedReport.commitOutcome, "committed");
+    assert.equal(existsSync(`${applied}.committed.tmp`), false);
+    assert.deepEqual(said.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)/.test(s)),
+      ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "ROLLBACK", "BEGIN ISOLATION LEVEL SERIALIZABLE", "COMMIT"]);
     const flow = raw.prepare("SELECT agent_id, direction, amount_usdg, tx_hash, log_index, source, epoch, chain_id, at FROM flows WHERE tx_hash = ?").get(DEPOSIT_TX);
     assert.deepEqual({ ...flow }, { agent_id: ACCOUNT, direction: "in", amount_usdg: 9, tx_hash: DEPOSIT_TX, log_index: 2, source: "chain-log", epoch: 3, chain_id: 4663, at: DEPOSIT_AT });
     assert.equal(raw.prepare(`SELECT backup_ref FROM ${BOOKINGS_TABLE}`).get()!.backup_ref, "bk-2026-10-06");
@@ -262,6 +315,7 @@ describe("one whole run: preview, a refused apply, the apply, a second apply, th
     assert.ok(printed.some((l) => /^REVERTED booking .* 1 row\(s\)/.test(l)));
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?").get(DEPOSIT_TX)!.n, 0);
     assert.equal(JSON.parse(readFileSync(reverted, "utf8")).outcome, "reverted");
+    assert.deepEqual(said.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)/.test(s)).slice(-2), ["BEGIN ISOLATION LEVEL SERIALIZABLE", "COMMIT"], "the revert is SERIALIZABLE too");
     // A forged report reverts nothing.
     const forged = path.join(dir, "forged.json");
     writeFileSync(forged, readFileSync(applied, "utf8").replace('"bk-2026-10-06"', '"bk-other"'));
@@ -270,5 +324,506 @@ describe("one whole run: preview, a refused apply, the apply, a second apply, th
 
   it("without DATABASE_URL nothing runs", async () => {
     await assert.rejects(main(["--tenant", TENANT, "--output", path.join(dir, "n.json")], {}, {}), (e: unknown) => (e as CliError).code === "database-url-required");
+  });
+});
+
+// ── the write transaction and what its COMMIT's answer proves ────────────────
+
+const ISO_CHECK = "SELECT current_setting('transaction_read_only') AS ro, current_setting('transaction_isolation') AS iso";
+/** A driver's error, its message carrying the URL (as a real one can): the shell must never print it. */
+const pgError = (code: unknown) => Object.assign(new Error(`connection to ${DATABASE_URL} failed`), code === undefined ? {} : { code });
+/** SQLSTATEs that prove the transaction rolled back at COMMIT: class 40 but 40003, and class 23 (a deferred constraint). */
+const ROLLED_BACK = ["40001", "40P01", "40002", "40000", "23505", "23503", "23514", "23P01", "23000"];
+/**
+ * What does not: a dropped or reset connection, a terminated backend or a server going down or starting, a connection exception (08007
+ * "transaction resolution unknown" among them), a cancelled or timed-out statement, 40003 "statement completion unknown", a resource or
+ * internal error, no code at all — and codes that only look like SQLSTATEs (EPIPE is five capitals), a lowercase one, a number.
+ */
+const UNKNOWN: unknown[] = ["EPIPE", "ECONNRESET", "ETIMEDOUT", "57P01", "57P02", "57P03", "08000", "08003", "08006", "08007", "57014", "40003", "53100", "53300", "XX000",
+  "25P02", undefined, "40p01", 40001, "4000", "400011"];
+
+describe("the write transaction: SERIALIZABLE, and what a COMMIT's answer proves", () => {
+  /** A connection that answers every statement, reports `level`, and answers COMMIT as `commit` does. */
+  const scripted = (commit: () => Promise<{ rows: Record<string, unknown>[]; rowCount: number | null; command?: string }>, level = "serializable") => {
+    const said: string[] = [];
+    const client: PgClient = {
+      async query(sql) {
+        said.push(sql);
+        if (sql === "COMMIT") return commit();
+        if (sql === ISO_CHECK) return { rows: [{ ro: "off", iso: level }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+      async end() {},
+    };
+    return { said, db: pgClientDb(client, { readOnly: false }) };
+  };
+  const committed = async () => ({ rows: [], rowCount: null, command: "COMMIT" });
+
+  it("begins SERIALIZABLE and proves it before the work runs; at any other level nothing runs and it rolls back", async () => {
+    const ok = scripted(committed);
+    assert.equal(await ok.db.tx(async (tx) => { await tx.prepare("SELECT 1").get(); return 7; }), 7);
+    assert.deepEqual(ok.said, ["BEGIN ISOLATION LEVEL SERIALIZABLE", ISO_CHECK, "SELECT 1", "COMMIT"]);
+    for (const level of ["read committed", "repeatable read"]) {
+      const other = scripted(committed, level);
+      let ran = false;
+      await assert.rejects(other.db.tx(async () => { ran = true; }), (e: unknown) => e instanceof CliError && e.code === "serializable-not-established", level);
+      assert.equal(ran, false, level);
+      assert.deepEqual(other.said, ["BEGIN ISOLATION LEVEL SERIALIZABLE", ISO_CHECK, "ROLLBACK"], level);
+    }
+  });
+
+  it("a COMMIT refused with class 40 (but 40003) or class 23 is rethrown as itself: it rolled back", async () => {
+    for (const code of ROLLED_BACK) {
+      assert.equal(commitRolledBack(pgError(code)), true, code);
+      const s = scripted(async () => { throw pgError(code); });
+      await assert.rejects(s.db.tx(async () => 1), (e: unknown) => !(e instanceof CommitOutcomeUnknown) && (e as { code?: string }).code === code, code);
+      assert.equal(conflictRolledBack(pgError(code)), code.startsWith("40"), `${code}: only class 40 is a conflict to run again`);
+    }
+  });
+
+  it("every other COMMIT failure is an unknown outcome — never 'nothing happened'", async () => {
+    for (const code of UNKNOWN) {
+      assert.equal(commitRolledBack(pgError(code)), false, String(code));
+      assert.equal(conflictRolledBack(pgError(code)), false, String(code));
+      const s = scripted(async () => { throw pgError(code); });
+      await assert.rejects(s.db.tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown, String(code));
+    }
+    for (const thrown of [null, undefined, "a string", 40001]) {
+      assert.equal(commitRolledBack(thrown), false, String(thrown));
+      await assert.rejects(scripted(async () => { throw thrown; }).db.tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown, String(thrown));
+    }
+  });
+
+  it("a COMMIT the server answered with ROLLBACK's tag (a transaction already failed) is a rollback, not a commit", async () => {
+    const s = scripted(async () => ({ rows: [], rowCount: null, command: "ROLLBACK" }));
+    await assert.rejects(s.db.tx(async () => 1), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+  });
+
+  it("a COMMIT answered with any other tag is an unknown outcome, never a rollback; COMMIT's own tag, or none said, is the commit", async () => {
+    for (const odd of [null, "", "commit", "rollback", "BEGIN", "SELECT"]) {
+      const s = scripted(async () => ({ rows: [], rowCount: null, command: odd as string }));
+      await assert.rejects(s.db.tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown, String(odd));
+      assert.equal(s.said.at(-1), "COMMIT", `${String(odd)}: nothing is sent after the COMMIT`);
+    }
+    assert.equal(await scripted(committed).db.tx(async () => 7), 7);
+    assert.equal(await scripted(async () => ({ rows: [], rowCount: null })).db.tx(async () => 7), 7, "a client that says no tag (these stand-ins) is read as COMMIT's answer");
+  });
+
+  it("before the COMMIT, any failure — a dropped connection too — rolls back and is never an unknown outcome: the COMMIT was never sent", async () => {
+    for (const code of [...UNKNOWN, ...ROLLED_BACK]) {
+      const s = scripted(committed);
+      await assert.rejects(s.db.tx(async () => { throw pgError(code); }), (e: unknown) => !(e instanceof CommitOutcomeUnknown) && (e as { code?: unknown }).code === code, String(code));
+      assert.equal(s.said.includes("COMMIT"), false, String(code));
+      assert.equal(s.said.at(-1), "ROLLBACK", String(code));
+    }
+  });
+});
+
+describe("through the shell: an apply's report outlives a COMMIT whose answer is lost, and only a proven rollback removes it", () => {
+  const BOOKING_ID = "0b0c1d2e-3f40-4152-8364-758697a8b9ca";
+  const env = { DATABASE_URL };
+  type Wrap = (c: PgClient) => PgClient;
+  /** A run over one sqlite database; `write` wraps the write connection (the read-only one is always plain), `level` is what it reports. */
+  const runner = (raw: DatabaseSync, o: { write?: Wrap; level?: string } = {}) => {
+    const said: string[] = [], printed: string[] = [];
+    const deps = {
+      connect: async (_u: string, readOnly: boolean) => {
+        const c = pgOverSqlite(raw, said, { level: o.level });
+        return readOnly || !o.write ? c : o.write(c);
+      },
+      rpc: chain, nowMs: () => NOW * 1000, out: (l: string) => printed.push(l), source: { "chain-gap-booking.ts": "fixed" }, sleep: async () => {}, bookingId: () => BOOKING_ID,
+    };
+    return { said, printed, deps, run: (args: string[]) => main(args, env, deps) };
+  };
+  /** COMMIT answered by `error`: after it took effect ("lost": the answer never came), or in place of it ("refused": rolled back). Or with ROLLBACK's tag. */
+  const commitAnswered = (how: "lost" | "refused" | "rollback-tag", error?: unknown): Wrap => (c) => ({
+    async query(sql, params) {
+      if (sql !== "COMMIT") return c.query(sql, params);
+      if (how === "lost") { await c.query("COMMIT"); throw error; }
+      await c.query("ROLLBACK");
+      if (how === "rollback-tag") return { rows: [], rowCount: null, command: "ROLLBACK" };
+      throw error;
+    },
+    end: () => c.end(),
+  });
+  /** The agent row moved after the write transaction's snapshot: locking it fails with 40001, as Postgres's first-updater-wins does. */
+  const lockConflict: Wrap = (c) => ({
+    async query(sql, params) { if (/^UPDATE agents SET epoch = epoch/.test(sql)) throw pgError("40001"); return c.query(sql, params); },
+    end: () => c.end(),
+  });
+  let n = 0;
+  const file = (tag: string) => path.join(dir, `${tag}-${++n}.json`);
+  const flows = (raw: DatabaseSync) => Number(raw.prepare("SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?").get(DEPOSIT_TX)!.n);
+  const receipts = (raw: DatabaseSync) => (raw.prepare(`SELECT name FROM sqlite_master WHERE name = '${BOOKINGS_TABLE}'`).get()
+    ? (raw.prepare(`SELECT state FROM ${BOOKINGS_TABLE}`).all() as Array<{ state: string }>).map((r) => r.state) : []);
+  /** A fresh database, previewed: its digest. */
+  const reviewed = async () => {
+    const raw = await shared();
+    const previewFile = file("preview");
+    assert.equal(await runner(raw).run(["--tenant", TENANT, "--output", previewFile]), 0);
+    return { raw, digest: (JSON.parse(readFileSync(previewFile, "utf8")) as { previewDigest: string }).previewDigest };
+  };
+  const applyArgs = (digest: string, output: string) => ["--tenant", TENANT, "--apply", "--confirm", digest, "--backup-ref", "bk-2026-10-06", "--output", output];
+  const noSecret = (printed: string[]) => assert.ok(printed.every((l) => !/s3cret|operator@|db\.internal/.test(l)), printed.join("\n"));
+
+  it("a COMMIT that took effect and whose answer was lost keeps the report, says OUTCOME UNKNOWN with both commands, and the receipts settle it", async () => {
+    for (const code of ["EPIPE", "ECONNRESET", "57P01", "57P02", "57P03", "08006", "08007", "57014", "40003", undefined]) {
+      const { raw, digest } = await reviewed();
+      const apply = runner(raw, { write: commitAnswered("lost", pgError(code)) });
+      const out = file("lost");
+      await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown", String(code));
+      assert.equal(flows(raw), 1, `${code}: it committed`);
+      assert.deepEqual(receipts(raw), ["applied"], String(code));
+      // The report: kept, whole, verifying, saying its outcome is unknown — and the booking the receipts hold.
+      const report = parseApplyReport(readFileSync(out, "utf8"));
+      assert.deepEqual([report.bookingId, report.commitOutcome, report.rows.length], [BOOKING_ID, "unknown", 1], String(code));
+      assert.equal(statSync(out).mode & 0o777, 0o600);
+      const said = apply.printed.join("\n");
+      assert.ok(said.includes(`OUTCOME UNKNOWN for booking ${BOOKING_ID}: the COMMIT was sent and no answer proved it rolled back`), said);
+      assert.ok(said.includes(`--revert ${out} --dry-run --output /absolute/new-receipts-report.json`), said);
+      assert.ok(said.includes(`--revert ${out} --output /absolute/new-revert-report.json`), said);
+      assert.equal(apply.printed.some((l) => l.startsWith("APPLIED")), false);
+      noSecret(apply.printed);
+      // Did it commit? Read only: yes.
+      const look = runner(raw), lookOut = file("receipts");
+      assert.equal(await look.run(["--revert", out, "--dry-run", "--output", lookOut]), 0);
+      assert.ok(look.printed[0]!.startsWith(`COMMITTED booking ${BOOKING_ID} — tenant ${TENANT}: 1 receipt(s) 'applied'`), look.printed.join("\n"));
+      const view = JSON.parse(readFileSync(lookOut, "utf8")) as { verdict: string; writesPerformed: number; receipts: Array<{ state: string }> };
+      assert.deepEqual([view.verdict, view.writesPerformed, view.receipts.map((r) => r.state)], ["applied", 0, ["applied"]]);
+      assert.deepEqual(look.said.filter((s) => !/^\s*(SELECT|WITH)\b/i.test(s)), ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "ROLLBACK"], "the look writes nothing");
+    }
+    // ...and the report it kept is what --revert takes.
+    const { raw, digest } = await reviewed();
+    const out = file("lost");
+    await assert.rejects(runner(raw, { write: commitAnswered("lost", pgError("ECONNRESET")) }).run(applyArgs(digest, out)), (e: unknown) => (e as CliError).code === "apply-outcome-unknown");
+    const back = runner(raw);
+    assert.equal(await back.run(["--revert", out, "--output", file("revert")]), 0);
+    assert.ok(back.printed[0]!.startsWith(`REVERTED booking ${BOOKING_ID}`), back.printed.join("\n"));
+    assert.equal(flows(raw), 0);
+    const after = runner(raw);
+    assert.equal(await after.run(["--revert", out, "--dry-run", "--output", file("receipts")]), 0);
+    assert.ok(after.printed[0]!.startsWith("COMMITTED, THEN REVERTED booking"), after.printed.join("\n"));
+  });
+
+  it("the connection lost before the COMMIT reached the server: the same OUTCOME UNKNOWN, and once the server has ended the transaction it says never committed", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("unsent");
+    const apply = runner(raw, { write: commitAnswered("refused", pgError("ECONNRESET")) });
+    await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => (e as CliError).code === "apply-outcome-unknown");
+    assert.equal(flows(raw), 0);
+    assert.deepEqual(receipts(raw), []);
+    const kept = parseApplyReport(readFileSync(out, "utf8"));
+    assert.equal(kept.commitOutcome, "unknown");
+    // The report names the apply's own transaction and server, read inside it before the COMMIT; the console names the transaction too.
+    assert.deepEqual(kept.xact, { id: String(serverOf(raw).next), system: serverOf(raw).system });
+    assert.ok(apply.printed.some((l) => l.includes(`Its transaction is ${kept.xact!.id}.`)), apply.printed.join("\n"));
+    assert.ok(apply.printed.some((l) => l.includes("STILL UNKNOWN (no receipt yet, and no such word from the server)")), apply.printed.join("\n"));
+    const look = runner(raw), lookOut = file("receipts");
+    assert.equal(await look.run(["--revert", out, "--dry-run", "--output", lookOut]), 0);
+    assert.ok(look.printed[0]!.startsWith(`NOT COMMITTED booking ${BOOKING_ID} — tenant ${TENANT}: no receipt holds it, and the server says its transaction ` +
+      `${kept.xact!.id} ended without committing: nothing was written; preview the tenant again`), look.printed.join("\n"));
+    const view = JSON.parse(readFileSync(lookOut, "utf8")) as { verdict: string; transaction: unknown };
+    assert.deepEqual([view.verdict, view.transaction], ["not-committed", { id: kept.xact!.id, status: "aborted" }]);
+    // A revert of it is refused by name, changing nothing; and the apply, run again, books it.
+    await assert.rejects(runner(raw).run(["--revert", out, "--output", file("revert")]), (e: unknown) => e instanceof BookingRefused && e.code === "not-committed");
+    assert.equal(await runner(raw).run(applyArgs(digest, file("again"))), 0);
+    assert.equal(flows(raw), 1);
+  });
+
+  /** The receipts check of `report`: its exit code, its line, and what it wrote. */
+  const lookAt = async (raw: DatabaseSync, report: string) => {
+    const r = runner(raw), o = file("receipts");
+    const code = await r.run(["--revert", report, "--dry-run", "--output", o]);
+    return { code, line: r.printed[0]!, view: JSON.parse(readFileSync(o, "utf8")) as { verdict: string; why: string; transaction: { id: string | null; status: string };
+      rows: Array<{ evidenceKey: string; now: string }>; writesPerformed: number } };
+  };
+  /** The same report with `change` applied, sealed again under its own digest: what a report of another server, or an earlier build, reads as. */
+  const resealed = (report: string, change: (r: Record<string, unknown>) => void) => {
+    const { reportDigest: _d, ...body } = JSON.parse(readFileSync(report, "utf8")) as Record<string, unknown>;
+    change(body);
+    const copy = file("resealed");
+    writeFileSync(copy, JSON.stringify({ ...body, reportDigest: digestOf(body) }));
+    return copy;
+  };
+
+  it("no receipt, without the server's word that the transaction aborted, is STILL UNKNOWN — never NOT COMMITTED — and a revert refuses no-receipt", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("open");
+    await assert.rejects(runner(raw, { write: commitAnswered("refused", pgError("ECONNRESET")) }).run(applyArgs(digest, out)),
+      (e: unknown) => (e as CliError).code === "apply-outcome-unknown");
+    const id = parseApplyReport(readFileSync(out, "utf8")).xact!.id, server = serverOf(raw);
+    const stillUnknown = async (report: string, status: string, why: RegExp, revertWhy = why) => {
+      const { code, line, view } = await lookAt(raw, report);
+      assert.equal(code, 2, line);
+      assert.ok(line.startsWith(`STILL UNKNOWN booking ${BOOKING_ID} — tenant ${TENANT}: `) && line.includes(`Keep ${report}: if it committed, it is what --revert takes`), line);
+      assert.match(view.why, why);
+      assert.doesNotMatch(line, /7693842931899834703|-4242/, "no server's identifier on the console");
+      assert.deepEqual([view.verdict, view.transaction.status, view.writesPerformed], ["unknown", status, 0]);
+      await assert.rejects(runner(raw).run(["--revert", report, "--output", file("revert")]),
+        (e: unknown) => e instanceof BookingRefused && e.code === "no-receipt" && /does not prove its apply never committed/.test(e.message) && revertWhy.test(e.message), status);
+    };
+    // The server has not ended it: its COMMIT still on the way, or the dead session not yet noticed.
+    server.status.set(id, "in progress");
+    await stillUnknown(out, "in-progress", new RegExp(`its transaction ${id} is still open on the server`));
+    // Too old for the server to remember; or committed, with no receipt here (another database on that server, or receipts removed).
+    server.status.delete(id);
+    await stillUnknown(out, "forgotten", /no longer remembers/);
+    server.status.set(id, "committed");
+    await stillUnknown(out, "committed", /committed before this read began, yet this database holds no receipt of it: .* — escalate/, /committed before this read began/);
+    // Committed only after this read's snapshot was taken: its receipts are not in what it sees. Read again.
+    server.endedAfterSnapshot.add(id);
+    await stillUnknown(out, "committed-after-snapshot", new RegExp(`its transaction ${id} committed after this read began, so its receipts are not in what this read sees: read again`));
+    server.endedAfterSnapshot.clear();
+    // Aborted — but on another server, or one whose identity cannot be read: its ids mean nothing here.
+    server.status.set(id, "aborted");
+    server.system = "-4242";
+    await stillUnknown(out, "other-server", /this is not the server the apply ran on \(its system identifier is not the report's\)/);
+    server.system = null;
+    await stillUnknown(out, "other-server", /could not be read at the apply or here/);
+    server.system = "7693842931899834703";
+    // An id this server has not reached is never asked about (pg_xact_status refuses one in the future, aborting the snapshot).
+    await stillUnknown(resealed(out, (r) => { r.xact = { id: "98765432109", system: server.system }; }), "in-progress", /had not ended when this read began/);
+    // ...and a report that names no transaction (an earlier build) proves nothing either.
+    await stillUnknown(resealed(out, (r) => { delete r.xact; }), "unrecorded", /names no transaction/);
+    // The server's word that it aborted, on this server: NOT COMMITTED, and a revert refuses not-committed.
+    const settled = await lookAt(raw, out);
+    assert.deepEqual([settled.code, settled.view.verdict, settled.view.transaction.status], [0, "not-committed", "aborted"]);
+    await assert.rejects(runner(raw).run(["--revert", out, "--output", file("revert")]), (e: unknown) => e instanceof BookingRefused && e.code === "not-committed");
+    assert.equal(flows(raw), 0, "nothing changed");
+  });
+
+  it("a server without the transaction-status functions: the report names no transaction, and no receipt is STILL UNKNOWN", async () => {
+    const { raw, digest } = await reviewed();
+    serverOf(raw).version = "90624";
+    const out = file("old-server");
+    await assert.rejects(runner(raw, { write: commitAnswered("refused", pgError("ECONNRESET")) }).run(applyArgs(digest, out)),
+      (e: unknown) => (e as CliError).code === "apply-outcome-unknown");
+    assert.equal(parseApplyReport(readFileSync(out, "utf8")).xact, undefined);
+    const { code, view } = await lookAt(raw, out);
+    assert.deepEqual([code, view.verdict, view.transaction], [2, "unknown", { id: null, status: "unrecorded" }]);
+  });
+
+  it("COMMITTED only when every booked row is still as booked: a row changed or gone is DIVERGED; receipts the server contradicts are refused", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("applied");
+    assert.equal(await runner(raw).run(applyArgs(digest, out)), 0);
+    const key = `log:${DEPOSIT_TX}#2`;
+    const standing = await lookAt(raw, out);
+    assert.deepEqual([standing.code, standing.view.verdict, standing.view.rows.map((r) => [r.evidenceKey, r.now])], [0, "applied", [[key, "as-booked"]]]);
+    assert.ok(standing.line.startsWith(`COMMITTED booking ${BOOKING_ID} — tenant ${TENANT}: 1 receipt(s) 'applied', and each of its 1 row(s) exactly as booked`), standing.line);
+    // Changed since: the receipts still say 'applied', the row does not.
+    raw.prepare("UPDATE flows SET amount_usdg = 10 WHERE tx_hash = ?").run(DEPOSIT_TX);
+    const changed = await lookAt(raw, out);
+    assert.equal(changed.code, 2);
+    assert.ok(changed.line.startsWith(`COMMITTED, BUT ITS ROWS DIVERGED booking ${BOOKING_ID} — tenant ${TENANT}: it committed, but 1 of its 1 row(s) are no longer as booked (${key} changed)`),
+      changed.line);
+    assert.deepEqual([changed.view.verdict, changed.view.rows.map((r) => r.now)], ["diverged", ["changed"]]);
+    await assert.rejects(runner(raw).run(["--revert", out, "--output", file("revert")]), (e: unknown) => e instanceof BookingRefused && e.code === "cas");
+    raw.prepare("UPDATE flows SET amount_usdg = 9 WHERE tx_hash = ?").run(DEPOSIT_TX);
+    assert.equal((await lookAt(raw, out)).view.verdict, "applied");
+    // The server says the transaction aborted, yet its receipts are here: the two disagree, refused to escalate.
+    const id = parseApplyReport(readFileSync(out, "utf8")).xact!.id;
+    for (const status of ["aborted", "in progress"]) {
+      serverOf(raw).status.set(id, status);
+      await assert.rejects(runner(raw).run(["--revert", out, "--dry-run", "--output", file("receipts")]),
+        (e: unknown) => e instanceof BookingRefused && e.code === "receipts" && /the report and the database disagree/.test(e.message), status);
+    }
+    serverOf(raw).status.set(id, "committed");
+    // Gone since.
+    raw.prepare("DELETE FROM flows WHERE tx_hash = ?").run(DEPOSIT_TX);
+    const gone = await lookAt(raw, out);
+    assert.deepEqual([gone.code, gone.view.verdict, gone.view.rows.map((r) => r.now)], [2, "diverged", ["gone"]]);
+    assert.match(gone.line, new RegExp(`\\(${key.replace(/[#$]/g, "\\$&")} gone\\)`));
+  });
+
+  it("a COMMIT whose answer proves a rollback (class 40 but 40003, class 23) leaves no report and writes nothing; a conflict says to run it again", async () => {
+    for (const code of ["40001", "40P01", "40002", "23505", "23514"]) {
+      const { raw, digest } = await reviewed();
+      const apply = runner(raw, { write: commitAnswered("refused", pgError(code)) });
+      const out = file("refused");
+      const failure = await apply.run(applyArgs(digest, out)).then(() => assert.fail(`${code}: applied`), (e: unknown) => e);
+      if (code.startsWith("40")) {
+        assert.ok(failure instanceof BookingRefused && failure.code === "conflict", code);
+        assert.match(failureLine(failure), new RegExp(`^refused \\(conflict\\): Postgres rolled the apply back for a conflict with another transaction \\(SQLSTATE ${code}`));
+        assert.match(failureLine(failure), /nothing was written — run the same command again/);
+      } else {
+        assert.ok(!(failure instanceof CommitOutcomeUnknown) && (failure as { code?: string }).code === code, code);
+        assert.match(failureLine(failure), /^booking-failed: nothing was applied unless an APPLIED or an OUTCOME UNKNOWN line was printed/);
+      }
+      assert.doesNotMatch(failureLine(failure), /s3cret|operator|db\.internal/);
+      assert.equal(existsSync(out), false, `${code}: no report of a booking that does not exist`);
+      assert.equal(flows(raw), 0, code);
+      assert.deepEqual(receipts(raw), [], code);
+      assert.equal(apply.printed.some((l) => /OUTCOME UNKNOWN|^APPLIED/.test(l)), false, code);
+      // Run again, as it says: it applies.
+      assert.equal(await runner(raw).run(applyArgs(digest, file("retry"))), 0, code);
+      assert.equal(flows(raw), 1, code);
+    }
+  });
+
+  it("a COMMIT answered with ROLLBACK's tag leaves no report and writes nothing", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("tag");
+    await assert.rejects(runner(raw, { write: commitAnswered("rollback-tag") }).run(applyArgs(digest, out)),
+      (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
+    assert.equal(existsSync(out), false);
+    assert.equal(flows(raw), 0);
+  });
+
+  it("a COMMIT that took effect, answered with a tag that is neither COMMIT's nor ROLLBACK's, keeps the report and says OUTCOME UNKNOWN; the receipts settle it", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("odd-tag");
+    const apply = runner(raw, { write: (c) => ({
+      async query(sql, params) { const r = await c.query(sql, params); return sql === "COMMIT" ? { ...r, command: "SELECT" } : r; },
+      end: () => c.end(),
+    }) });
+    await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+    assert.equal(flows(raw), 1, "it committed");
+    assert.equal(parseApplyReport(readFileSync(out, "utf8")).commitOutcome, "unknown");
+    assert.ok(apply.printed.some((l) => l.startsWith(`OUTCOME UNKNOWN for booking ${BOOKING_ID}`)), apply.printed.join("\n"));
+    const { code, line, view } = await lookAt(raw, out);
+    assert.deepEqual([code, view.verdict], [0, "applied"], line);
+  });
+
+  it("a serialization failure inside the transaction (the agent row moved after its snapshot) rolls back, writes nothing, and says to run again", async () => {
+    const { raw, digest } = await reviewed();
+    const apply = runner(raw, { write: lockConflict });
+    const out = file("lock");
+    await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => e instanceof BookingRefused && e.code === "conflict" && /SQLSTATE 40001/.test(e.message));
+    assert.equal(existsSync(out), false);
+    assert.equal(flows(raw), 0);
+    assert.equal(apply.said.includes("COMMIT"), false);
+    assert.equal(apply.said.at(-1), "ROLLBACK");
+  });
+
+  it("a server that does not grant SERIALIZABLE runs nothing: refused, no report, nothing written", async () => {
+    const { raw, digest } = await reviewed();
+    const apply = runner(raw, { level: "read committed" });
+    const out = file("level");
+    await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => e instanceof CliError && e.code === "serializable-not-established");
+    assert.equal(existsSync(out), false);
+    assert.equal(flows(raw), 0);
+    assert.equal(apply.said.some((s) => /^UPDATE agents/.test(s)), false, "not even the lock");
+  });
+
+  it("a report that cannot be marked committed after an acknowledged COMMIT stays, saying unknown, and is still what --revert takes", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("unmarked");
+    writeFileSync(`${out}.committed.tmp`, "someone else's");
+    const apply = runner(raw);
+    await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => e instanceof CliError && e.code === "applied-report-not-marked-committed");
+    assert.ok(apply.printed.some((l) => l.startsWith(`APPLIED booking ${BOOKING_ID}`)), apply.printed.join("\n"));
+    assert.equal(flows(raw), 1);
+    assert.equal(parseApplyReport(readFileSync(out, "utf8")).commitOutcome, "unknown");
+    assert.equal(readFileSync(`${out}.committed.tmp`, "utf8"), "someone else's", "never written through");
+    assert.equal(await runner(raw).run(["--revert", out, "--output", file("revert")]), 0);
+    assert.equal(flows(raw), 0);
+  });
+
+  it("an empty or cut-short report — an apply that died before its COMMIT — is named as one that never sent it", async () => {
+    const raw = await shared();
+    for (const text of ["", '{"format":"merrymen.chain-gap-booking.apply.v1","bookingId":"0b0c']) {
+      const cut = file("cut");
+      writeFileSync(cut, text);
+      await assert.rejects(runner(raw).run(["--revert", cut, "--dry-run", "--output", file("receipts")]),
+        (e: unknown) => e instanceof BookingRefused && e.code === "report-unfinished" && /never sent its COMMIT/.test(e.message));
+    }
+  });
+
+  it("a revert whose COMMIT's answer was lost says so, keeps no report, and runs again safely; a conflict rolls it back and says to run again", async () => {
+    const { raw, digest } = await reviewed();
+    const applied = file("apply");
+    assert.equal(await runner(raw).run(applyArgs(digest, applied)), 0);
+    const conflicted = file("revert");
+    await assert.rejects(runner(raw, { write: lockConflict }).run(["--revert", applied, "--output", conflicted]),
+      (e: unknown) => e instanceof BookingRefused && e.code === "conflict" && /rolled the revert back/.test(e.message));
+    assert.equal(existsSync(conflicted), false);
+    assert.equal(flows(raw), 1, "nothing changed");
+    const lost = runner(raw, { write: commitAnswered("lost", pgError("57P01")) });
+    const lostOut = file("revert");
+    await assert.rejects(lost.run(["--revert", applied, "--output", lostOut]), (e: unknown) => e instanceof CliError && e.code === "revert-outcome-unknown");
+    assert.equal(existsSync(lostOut), false);
+    assert.ok(lost.printed[0]!.startsWith(`OUTCOME UNKNOWN for the revert of booking ${BOOKING_ID}`), lost.printed.join("\n"));
+    assert.ok(lost.printed[0]!.includes(`--revert ${applied} --dry-run --output`));
+    assert.equal(flows(raw), 0, "it took effect");
+    const again = runner(raw);
+    assert.equal(await again.run(["--revert", applied, "--output", file("revert")]), 0);
+    assert.ok(again.printed[0]!.startsWith("ALREADY REVERTED booking"), again.printed.join("\n"));
+  });
+
+  it("a console that breaks once the outcome is settled cannot unsay it: each failure names the outcome, never 'nothing was applied', and the report is kept", async () => {
+    /** The shell's run with a console that breaks (EPIPE) at the first line `from` matches, and stays broken. */
+    const brokenAt = (r: ReturnType<typeof runner>, from: RegExp) => {
+      let broken = false;
+      const out = (l: string) => {
+        if (broken || from.test(l)) { broken = true; throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" }); }
+        r.printed.push(l);
+      };
+      return (args: string[]) => main(args, env, { ...r.deps, out });
+    };
+    const fails = async (run: Promise<number>, code: string) => {
+      const e = await run.then(() => assert.fail(`${code}: exited 0`), (x: unknown) => x);
+      assert.ok(e instanceof CliError && e.code === code, `${code}: ${String(e)}`);
+      assert.equal(failureLine(e), `${code}. Use --help for invocation.`);
+    };
+    // Committed and acknowledged; the APPLIED line cannot be printed.
+    const first = await reviewed();
+    const applied = file("unprinted");
+    await fails(brokenAt(runner(first.raw), /^APPLIED /)(applyArgs(first.digest, applied)), "applied-but-not-printed");
+    assert.equal(flows(first.raw), 1, "it committed");
+    assert.equal(parseApplyReport(readFileSync(applied, "utf8")).commitOutcome, "committed", "its report kept, marked committed");
+    // ...and its report could not be marked committed either: that is the code, and the line after it is lost quietly.
+    const second = await reviewed();
+    const unmarked = file("unprinted-unmarked");
+    writeFileSync(`${unmarked}.committed.tmp`, "someone else's");
+    await fails(brokenAt(runner(second.raw), /^APPLIED /)(applyArgs(second.digest, unmarked)), "applied-report-not-marked-committed");
+    assert.equal(flows(second.raw), 1);
+    assert.equal(parseApplyReport(readFileSync(unmarked, "utf8")).commitOutcome, "unknown");
+    // The COMMIT's answer lost, and not one OUTCOME UNKNOWN line can be printed: still apply-outcome-unknown, the report kept.
+    const third = await reviewed();
+    const unknown = file("unprinted-unknown");
+    const lost = runner(third.raw, { write: commitAnswered("lost", pgError("ECONNRESET")) });
+    await fails(brokenAt(lost, /^OUTCOME UNKNOWN /)(applyArgs(third.digest, unknown)), "apply-outcome-unknown");
+    assert.equal(lost.printed.some((l) => /OUTCOME UNKNOWN|Did it commit/.test(l)), false, "none of it printed");
+    assert.equal(flows(third.raw), 1);
+    assert.equal(parseApplyReport(readFileSync(unknown, "utf8")).commitOutcome, "unknown");
+    // A committed revert whose REVERTED line cannot be printed: reverted-but-not-printed, its report kept, its receipts reverted.
+    const reverted = file("revert");
+    await fails(brokenAt(runner(first.raw), /^REVERTED /)(["--revert", applied, "--output", reverted]), "reverted-but-not-printed");
+    assert.equal((JSON.parse(readFileSync(reverted, "utf8")) as { outcome: string }).outcome, "reverted");
+    assert.equal(flows(first.raw), 0);
+    assert.equal((await lookAt(first.raw, applied)).view.verdict, "reverted");
+    // A revert whose COMMIT's answer was lost, its OUTCOME UNKNOWN line unprinted: still revert-outcome-unknown.
+    await fails(brokenAt(runner(third.raw, { write: commitAnswered("lost", pgError("57P01")) }), /^OUTCOME UNKNOWN /)(["--revert", unknown, "--output", file("revert")]),
+      "revert-outcome-unknown");
+    assert.equal(flows(third.raw), 0, "it took effect");
+  });
+
+  it("the report names its database: a look or a revert pointed at another is refused before it connects, never read as 'not committed'", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("applied");
+    assert.equal(await runner(raw).run(applyArgs(digest, out)), 0);
+    assert.equal(parseApplyReport(readFileSync(out, "utf8")).target, targetDigest(DATABASE_URL));
+    let connected = 0;
+    const elsewhere = { DATABASE_URL: DATABASE_URL.replace("/railway", "/staging") };
+    for (const args of [["--revert", out, "--dry-run", "--output", file("receipts")], ["--revert", out, "--output", file("revert")]]) {
+      await assert.rejects(main(args, elsewhere, { ...runner(raw).deps, connect: async () => { connected++; throw new Error("connected"); } }),
+        (e: unknown) => e instanceof BookingRefused && e.code === "target" && /applied to another database/.test(e.message), args.join(" "));
+      assert.equal(existsSync(args.at(-1)!), false);
+    }
+    assert.equal(connected, 0);
+    assert.equal(flows(raw), 1, "nothing changed");
+  });
+
+  it("replacing a report is whole or nothing: the path holds the old report or the new one, never a cut-short one", () => {
+    const target = file("whole");
+    finishReportFile(createReportFile(target), target, { v: 1 });
+    replaceReportFile(target, { v: 2 });
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { v: 2 });
+    assert.equal(statSync(target).mode & 0o777, 0o600);
+    assert.equal(existsSync(`${target}.committed.tmp`), false);
+    writeFileSync(`${target}.committed.tmp`, "x");
+    assert.throws(() => replaceReportFile(target, { v: 3 }), (e: unknown) => (e as CliError).code === "report-exists-or-unsafe");
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { v: 2 }, "the old one, whole");
   });
 });
