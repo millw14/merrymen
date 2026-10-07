@@ -725,6 +725,7 @@ describe("tails", () => {
       consider: false,
       activeTails: 1,
       routable: true,
+      following: false,
     });
     assert.equal(known.subject?.kind, "trader");
     const unknown = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", consider: true });
@@ -772,7 +773,16 @@ describe("tails", () => {
     assert.equal(env.status, "ok", "stored: alerts come from the stored feed at no cost");
     assert.equal(env.data?.routable, false);
     const follow = await harness({ liveFeed: true, access: { dataAccess: true, monitoring: false, follow: true } });
-    assert.equal((await follow.invoke<TailData>("fomo_tail_trader", { trader: KALEO })).data?.routable, true);
+    const followed = await follow.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
+    assert.deepEqual([followed.data?.routable, followed.data?.following], [true, true]);
+    assert.match(renderEnvelope(followed, { audience: "owner", maxChars: 2000, now: NOW }), /one signal into my normal review/);
+    assert.match(renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }), /tell you only/);
+    const monitorOnly = await harness({ liveFeed: true });
+    const watched = await monitorOnly.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
+    assert.deepEqual([watched.data?.routable, watched.data?.following], [true, false]);
+    assert.match(renderEnvelope(watched, { audience: "owner", maxChars: 2000, now: NOW }), /Following is off, so their buys only reach my research, never a trade/);
+    const offBoth = await h.invoke<TailData>("fomo_tail_trader", { trader: FRANK, consider: true });
+    assert.match(renderEnvelope(offBoth, { audience: "owner", maxChars: 2000, now: NOW }), /Monitoring and following are both off, so I'll only tell you/);
     const noAccess = await harness({ liveFeed: true, access: { dataAccess: false, monitoring: true, follow: true } });
     assert.equal((await noAccess.invoke<TailData>("fomo_tail_trader", { trader: KALEO })).status, "not-authorized");
     assert.equal(rows(noAccess.raw, "fomo_tails"), 0);
@@ -839,7 +849,7 @@ describe("tails", () => {
     assert.match(text, /no alert is not proof they didn't trade/);
     assert.doesNotMatch(text, /cop(y|ies)\b(?! their)/i);
     const considered = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 2, consider: true });
-    assert.match(renderEnvelope(considered, { audience: "owner", maxChars: 2000, now: NOW }), /^Still tailing CryptoKaleo[^]*one signal into my normal review[^]*never copy their trades/);
+    assert.match(renderEnvelope(considered, { audience: "owner", maxChars: 2000, now: NOW }), /^Still tailing CryptoKaleo[^]*Following is off, so their buys only reach my research/);
     assert.equal(renderEnvelope(told, { audience: "group", maxChars: 2000, now: NOW }), "I'll answer that in a direct message.");
     const stop = await h.invoke<UntailData>("fomo_untail_trader", { trader: "CryptoKaleo" });
     assert.match(renderEnvelope(stop, { audience: "owner", maxChars: 2000, now: NOW }), /^Stopped tailing CryptoKaleo\./);

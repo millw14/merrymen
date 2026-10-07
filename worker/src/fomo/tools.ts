@@ -570,6 +570,8 @@ export interface TailData {
    * review, happen only when this is true.
    */
   routable: boolean;
+  /** Whether the owner's follow setting is on: without it a considered buy reaches research, never a trade review. */
+  following: boolean;
 }
 
 /** A tail stopped (fomo_untail_trader). Owner only. */

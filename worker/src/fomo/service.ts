@@ -3016,6 +3016,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const trader = { userId: r.trader.userId, handle };
     const subject: ResolvedSubject = { kind: "trader", trader: { ...r.trader, handle } };
     const routable = ic.access?.monitoring === true || ic.access?.follow === true;
+    const following = ic.access?.follow === true;
     const res = await store.addTail(db, {
       tenant,
       userId: r.trader.userId,
@@ -3031,7 +3032,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         cls: "profile",
         mode: "cached-ok",
         subject,
-        data: { action: "tail", trader, created: false, expiresAtMs: ic.now, consider: args.consider, activeTails: active, routable },
+        data: { action: "tail", trader, created: false, expiresAtMs: ic.now, consider: args.consider, activeTails: active, routable, following },
         rows: 0,
         essential: [],
         status: "failed",
@@ -3047,7 +3048,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       cls: "profile",
       mode: "cached-ok",
       subject,
-      data: { action: "tail", trader, created: res.created, expiresAtMs: res.tail.expiresAtMs, consider: res.tail.consider, activeTails: active, routable },
+      data: { action: "tail", trader, created: res.created, expiresAtMs: res.tail.expiresAtMs, consider: res.tail.consider, activeTails: active, routable, following },
       rows: 1,
       essential: [],
       status: "ok",
