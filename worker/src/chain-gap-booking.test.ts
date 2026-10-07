@@ -644,17 +644,59 @@ describe("apply and revert", () => {
     assert.deepEqual([back.verdict, back.writesPerformed, back.receipts.map((r) => [r.state, r.revertedAtMs])], ["reverted", 0, [["reverted", (NOW + 60) * 1000], ["reverted", (NOW + 60) * 1000]]]);
   });
 
-  it("an apply that never committed: no receipt, so the look says not-committed and a revert refuses by name; a report the receipts contradict is refused", async () => {
+  it("no receipt on sqlite proves nothing: the look says unknown and a revert refuses no-receipt — sqlite cannot say what became of a transaction", async () => {
     const { b, p } = await ready();
     const report = await apply(b.db, p);
+    assert.equal(report.xact, undefined, "sqlite names no transaction");
     const never = { ...report, bookingId: "never-committed" };
     const fresh = await books();
-    assert.equal((await readBookingReceipts(fresh.db, never, { dialect: "sqlite" })).verdict, "not-committed", "no receipts table at all");
-    assert.equal((await readBookingReceipts(b.db, never, { dialect: "sqlite" })).verdict, "not-committed");
+    for (const [db, why] of [[fresh.db, /no receipt of it is visible \(this database has no receipts table\)/], [b.db, /no receipt of it is visible, and that alone does not prove/]] as const) {
+      const look = await readBookingReceipts(db, never, { dialect: "sqlite" });
+      assert.deepEqual([look.verdict, look.transaction, look.receipts, look.rows, look.writesPerformed], ["unknown", { id: null, status: "unrecorded" }, [], [], 0]);
+      assert.match(look.why, why);
+    }
     await assert.rejects(revertBooking(b.db, never, { nowMs: NOW * 1000, dialect: "sqlite" }),
-      (e: unknown) => (e as BookingRefused).code === "not-committed" && /holds no receipt of booking never-committed: that apply never committed here/.test((e as Error).message));
+      (e: unknown) => (e as BookingRefused).code === "no-receipt" && /no receipt of booking never-committed is visible here, and that alone does not prove/.test((e as Error).message));
+    // A report naming a transaction, read where no server can be asked: unreadable, still unknown.
+    const named = { ...never, xact: { id: "741", system: "7693842931899834703" } };
+    assert.deepEqual((await readBookingReceipts(b.db, named, { dialect: "sqlite" })).transaction, { id: "741", status: "unreadable" });
+    await assert.rejects(revertBooking(b.db, named, { nowMs: NOW * 1000, dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "no-receipt");
     assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM trades WHERE user_op_hash = ?", SELL_OP)[0]!.n, 1, "nothing changed");
     await assert.rejects(readBookingReceipts(b.db, { ...report, appliedAtMs: report.appliedAtMs + 1 }, { dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "receipts");
+  });
+
+  it("the look says applied only while every booked row is exactly as written: changed or gone is diverged, as a revert would refuse it", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const look = () => readBookingReceipts(b.db, report, { dialect: "sqlite" });
+    const standing = await look();
+    assert.equal(standing.verdict, "applied");
+    assert.deepEqual(standing.rows.map((r) => r.now), report.rows.map(() => "as-booked"));
+    const trade = report.rows.find((r) => r.table === "trades")!, other = report.rows.find((r) => r !== trade)!;
+    b.raw.prepare("UPDATE trades SET reject_rule = 'edited by hand' WHERE id = ?").run(trade.id);
+    const changed = await look();
+    assert.equal(changed.verdict, "diverged");
+    assert.deepEqual(changed.rows.map((r) => [r.evidenceKey, r.now]), report.rows.map((r) => [r.evidenceKey, r === trade ? "changed" : "as-booked"]));
+    assert.match(changed.why, new RegExp(`1 of its ${report.rows.length} row\\(s\\) are no longer as booked \\(${trade.evidenceKey.replace(/[#$]/g, "\\$&")} changed\\)`));
+    await assert.rejects(revertBooking(b.db, report, { nowMs: (NOW + 60) * 1000, dialect: "sqlite" }), (e: unknown) => (e as BookingRefused).code === "cas");
+    b.raw.prepare("UPDATE trades SET reject_rule = NULL WHERE id = ?").run(trade.id);
+    assert.equal((await look()).verdict, "applied", "as booked again");
+    b.raw.prepare(`DELETE FROM ${other.table} WHERE id = ?`).run(other.id);
+    assert.deepEqual((await look()).rows.map((r) => r.now), report.rows.map((r) => (r === other ? "gone" : "as-booked")));
+    assert.equal(rows(b.raw, `SELECT COUNT(*) AS n FROM ${BOOKINGS_TABLE} WHERE state = 'applied'`)[0]!.n, report.rows.length, "the look changed nothing");
+  });
+
+  it("a report's transaction names an id and a server, or nothing: any other shape is not a report", async () => {
+    const { b, p } = await ready();
+    const report = await apply(b.db, p);
+    const seal = (xact: unknown) => { const { reportDigest: _d, ...body } = { ...report, xact }; return JSON.stringify({ ...body, reportDigest: digestOf(body) }); };
+    for (const ok of [{ id: "741", system: "7693842931899834703" }, { id: "18446744073709551615", system: "-1" }, { id: "5", system: null }]) {
+      assert.deepEqual(parseApplyReport(seal(ok)).xact, ok);
+    }
+    for (const bad of [null, "741", {}, { id: "741" }, { id: 741, system: null }, { id: "0", system: null }, { id: "07", system: null }, { id: "741", system: 7 },
+      { id: "741", system: "x" }, { id: "741", system: null, extra: 1 }, { id: "1".repeat(21), system: null }]) {
+      assert.throws(() => parseApplyReport(seal(bad)), (e: unknown) => (e as BookingRefused).code === "report" && /xact/.test((e as Error).message), JSON.stringify(bad));
+    }
   });
 });
 

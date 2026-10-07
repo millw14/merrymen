@@ -123,7 +123,9 @@
  * records a receipt per row, and hands the caller its report to keep before
  * the commit (so a commit whose answer is lost still has one: the shell
  * marks it commitOutcome "unknown" until the COMMIT is acknowledged, and the
- * receipts say which it was). Idempotent by (account, epoch, userOpHash or
+ * receipts say which it was — or, with none visible, the server's word on
+ * the transaction the report names: only "aborted" means it never
+ * committed). Idempotent by (account, epoch, userOpHash or
  * tx#log): a receipt is unique per key while applied, and a second apply finds
  * nothing missing. Revert takes the apply report, proves each row is still
  * exactly as written and the tenant was not admitted on them, and removes
@@ -1730,6 +1732,16 @@ export interface AppliedRow { table: "trades" | "flows"; id: number; evidenceKey
  */
 export const COMMIT_OUTCOMES = ["unknown", "committed"] as const;
 export type CommitOutcome = (typeof COMMIT_OUTCOMES)[number];
+/**
+ * THE APPLY'S OWN TRANSACTION, AS THE SERVER NAMES IT, read inside it after
+ * every receipt and before the report is handed over (so before the COMMIT
+ * is sent): its 64-bit id (pg_current_xact_id, or txid_current before
+ * PostgreSQL 13) and the server's system identifier (pg_control_system;
+ * null where the role may not read it). A receipts check asks the server
+ * what became of that id (pg_xact_status): only "aborted", on the server
+ * whose identifier the report holds, proves the apply never committed.
+ */
+export interface ServerXact { id: string; system: string | null }
 export interface ApplyReport {
   format: typeof APPLY_FORMAT; bookingId: string; tenant: string; account: string; chainId: number; epoch: number;
   previewDigest: string; backupRef: string; appliedAtMs: number;
@@ -1740,11 +1752,13 @@ export interface ApplyReport {
   /**
    * The database it was applied to, as the plan names it (the shell's
    * targetDigest: host, port and name). A look at the receipts, or a revert,
-   * pointed at another database would read "no receipt" as "never
-   * committed"; the shell refuses that first. Absent from a report of an
-   * earlier build.
+   * pointed at another database would find no receipt; the shell refuses
+   * that first. It binds the URL's spelling, not the server: `xact` binds
+   * the server. Absent from a report of an earlier build.
    */
   target?: string;
+  /** Postgres only: absent from sqlite's report and from an earlier build's, whose missing receipts then prove nothing. */
+  xact?: ServerXact;
   reportDigest: string;
 }
 
@@ -1792,7 +1806,8 @@ function sameRow(a: Record<string, unknown>, b: Record<string, unknown>, columns
  * `persist`, last, still inside the transaction: it is handed the finished
  * report after every receipt is written and before the caller's COMMIT is
  * sent, so the shell writes and fsyncs the report there and a commit never
- * exists without one. If it throws, the transaction rolls back.
+ * exists without one. If it throws, the transaction rolls back. On Postgres
+ * the report names the transaction itself (ServerXact), read just before.
  */
 export async function applyBooking(db: Db, plan: BookingPlan, o: {
   confirm: string; backupRef: string; dialect: Dialect; nowMs: number; bookingId?: string; persist?: (report: ApplyReport) => void | Promise<void>;
@@ -1861,8 +1876,10 @@ export async function applyBooking(db: Db, plan: BookingPlan, o: {
         .run(bookingId, plan.tenant, account, epoch, chainId, r.evidenceKey, r.table, r.id, canonical(r.row), r.rowDigest, plan.previewDigest, o.backupRef,
           canonical(admission), appliedAtMs);
     }
+    // Which transaction this is, as the server names it: what a receipts check asks the server about if the COMMIT's answer is lost.
+    const xact = o.dialect === "postgres" ? await currentXact(tx) : null;
     const body = { format: APPLY_FORMAT, bookingId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef, appliedAtMs,
-      admission, rows, target: plan.target };
+      admission, rows, target: plan.target, ...(xact ? { xact } : {}) };
     const report: ApplyReport = { ...body, format: APPLY_FORMAT, reportDigest: digestOf(body) };
     await o.persist?.(report);
     return report;
@@ -1891,6 +1908,11 @@ export function parseApplyReport(text: string): ApplyReport {
     throw new BookingRefused("report", "the apply report's commitOutcome is neither \"unknown\" nor \"committed\"");
   }
   if (r.target !== undefined && (typeof r.target !== "string" || !r.target)) throw new BookingRefused("report", "the apply report's target does not name a database");
+  const x = r.xact as Partial<ServerXact> | undefined;
+  if (x !== undefined && (!x || typeof x !== "object" || Object.keys(x).sort().join(",") !== "id,system" || typeof x.id !== "string" || !XID.test(x.id)
+    || (x.system !== null && (typeof x.system !== "string" || !SYSTEM_ID.test(x.system))))) {
+    throw new BookingRefused("report", "the apply report's xact does not name a transaction and a server");
+  }
   return r;
 }
 
@@ -1916,44 +1938,194 @@ function receiptsMatch(receipts: ReadonlyArray<Record<string, unknown>>, report:
     && String(r.account) === report.account && String(r.tenant) === report.tenant && String(r.preview_digest) === report.previewDigest
     && Number(r.applied_at_ms) === report.appliedAtMs && String(r.admission_json) === canonical(report.admission));
 }
-/** No receipt holds the booking: its transaction never committed in this database (the receipts are written in it, and never deleted). */
-const notCommitted = (report: ApplyReport) => new BookingRefused("not-committed",
-  `this database holds no receipt of booking ${report.bookingId}: that apply never committed here, so nothing was written and there is nothing to revert ` +
-  "(an apply whose commit outcome was unknown rolled back) — preview the tenant again");
+// ── what became of the apply's transaction, as the server says ─────────────
+
+/** A 64-bit transaction id, epoch and all, as pg_current_xact_id() and txid_current() print it. */
+const XID = /^[1-9][0-9]{0,19}$/;
+/** pg_control_system()'s system_identifier: a uint64 that Postgres hands back as a signed BIGINT. */
+const SYSTEM_ID = /^-?[0-9]{1,20}$/;
+/** The server's system identifier, or NULL where the role may not run pg_control_system() (the CASE never calls it then). */
+const SYSTEM_SQL = "CASE WHEN has_function_privilege('pg_control_system()', 'EXECUTE') THEN (SELECT system_identifier::text FROM pg_control_system()) END";
+
+/**
+ * The transaction-status functions this server has: pg_current_xact_id,
+ * pg_xact_status and the pg_snapshot ones from PostgreSQL 13; the txid_
+ * ones they replaced from 10 (txid_status arrived in 10); none before.
+ */
+async function xactFunctions(db: Db): Promise<{ current: string; type: string; status: string; snapshot: string; xmax: string; visible: string } | null> {
+  const v = Number(((await db.prepare("SELECT current_setting('server_version_num') AS v").get()) as Record<string, unknown> | undefined)?.v);
+  if (v >= 130000) return { current: "pg_current_xact_id()", type: "xid8", status: "pg_xact_status", snapshot: "pg_current_snapshot()", xmax: "pg_snapshot_xmax", visible: "pg_visible_in_snapshot" };
+  if (v >= 100000) return { current: "txid_current()", type: "bigint", status: "txid_status", snapshot: "txid_current_snapshot()", xmax: "txid_snapshot_xmax", visible: "txid_visible_in_snapshot" };
+  return null;
+}
+
+/** The apply's own transaction, from inside it: its id and the server's identifier (ServerXact). Null on a server without the functions. */
+async function currentXact(tx: Db): Promise<ServerXact | null> {
+  const f = await xactFunctions(tx);
+  if (!f) return null;
+  const r = (await tx.prepare(`SELECT ${f.current}::text AS id, ${SYSTEM_SQL} AS system`).get()) as Record<string, unknown> | undefined;
+  const id = String(r?.id ?? ""), system = r?.system === null || r?.system === undefined ? null : String(r.system);
+  if (!XID.test(id) || (system !== null && !SYSTEM_ID.test(system))) {
+    throw new BookingRefused("xact", "the server did not name the apply's own transaction by a transaction id; nothing was written");
+  }
+  return { id, system };
+}
+
+/**
+ * WHAT THE SERVER SAYS BECAME OF THE APPLY'S TRANSACTION:
+ *
+ *   aborted                   it ended without committing: final.
+ *   committed                 it committed before this read's snapshot, so
+ *                             its receipts are in that snapshot if this is
+ *                             their database.
+ *   committed-after-snapshot  it committed after this read's snapshot was
+ *                             taken, so its receipts are not in it: read
+ *                             again.
+ *   in-progress               still open (the apply paused, its COMMIT not
+ *                             yet through, or its session not yet ended by
+ *                             the server); or at or above this snapshot's
+ *                             xmax, so not ended when it was taken (it may
+ *                             have ended since), or not reached by this
+ *                             server at all.
+ *   forgotten                 too old for the server to say.
+ *   other-server              the report's server identifier is not this
+ *                             server's, or either could not be read: its
+ *                             transaction ids mean nothing here.
+ *   unrecorded                the report names no transaction (sqlite, or
+ *                             an earlier build).
+ *   unreadable                this database cannot be asked (not Postgres,
+ *                             or before PostgreSQL 10).
+ *
+ * Read in the caller's transaction, by one statement that cannot fail on
+ * any id: the status is asked only of an id below the snapshot's xmax (one
+ * at or above it may be in the future, which pg_xact_status refuses with an
+ * error that would abort the caller's transaction). pg_xact_status reads
+ * the commit log and the running transactions as they are now, not as the
+ * snapshot saw them; pg_visible_in_snapshot says whether the transaction
+ * had ended when the snapshot was taken.
+ */
+export type XactStatus = "aborted" | "committed" | "committed-after-snapshot" | "in-progress" | "forgotten" | "other-server" | "unrecorded" | "unreadable";
+async function xactStatusOf(db: Db, report: ApplyReport, dialect: Dialect): Promise<{ status: XactStatus; why: string }> {
+  const x = report.xact;
+  if (!x) return { status: "unrecorded", why: "the report names no transaction (it was applied on sqlite, or by a build before the apply recorded one), so the server cannot be asked" };
+  const f = dialect === "postgres" ? await xactFunctions(db) : null;
+  if (!f) return { status: "unreadable", why: "this database cannot say what became of a transaction (it is not PostgreSQL 10 or later)" };
+  const r = ((await db.prepare(`WITH x AS (SELECT ?::${f.type} AS id, ${f.snapshot} AS s)
+      SELECT ${SYSTEM_SQL} AS system, x.id < ${f.xmax}(x.s) AS seen, CASE WHEN x.id < ${f.xmax}(x.s) THEN ${f.status}(x.id) END AS status,
+        ${f.visible}(x.id, x.s) AS visible FROM x`).get(x.id)) ?? {}) as Record<string, unknown>;
+  const yes = (v: unknown) => v === true || v === 1 || v === "t" || v === "true";
+  const system = r.system === null || r.system === undefined ? null : String(r.system);
+  if (x.system === null || system === null) {
+    return { status: "other-server", why: "the server's identity (pg_control_system's system identifier) could not be read at the apply or here, so its transaction id cannot be tied to this server" };
+  }
+  // Not printed: a server's fingerprint has no place on a console. The report file holds the apply's.
+  if (system !== x.system) return { status: "other-server", why: "this is not the server the apply ran on (its system identifier is not the report's): its transaction ids say nothing of that apply" };
+  if (!yes(r.seen)) {
+    // At or above the snapshot's xmax: no transaction that high had ended when it was taken. The apply's own reads here while it is open
+    // and nothing newer has ended (a quiet server), and so does one that committed after the snapshot on such a server.
+    return { status: "in-progress", why: `its transaction ${x.id} had not ended when this read began: it may be still open on the server (the apply still running, ` +
+      "its COMMIT not yet through, or its session not yet ended), may have ended since, or this server has not reached that id — read again" };
+  }
+  switch (r.status) {
+    case "aborted": return { status: "aborted", why: `the server says its transaction ${x.id} ended without committing` };
+    case "committed": return yes(r.visible)
+      ? { status: "committed", why: `the server says its transaction ${x.id} committed before this read began` }
+      : { status: "committed-after-snapshot", why: `the server says its transaction ${x.id} committed after this read began, so its receipts are not in what this read sees: read again` };
+    case "in progress": return { status: "in-progress", why: `its transaction ${x.id} is still open on the server: the apply may still be running, its COMMIT not yet through, or its session not yet ended` };
+    default: return { status: "forgotten", why: `the server no longer remembers what became of its transaction ${x.id} (too old)` };
+  }
+}
+
+/**
+ * NO RECEIPT OF THE BOOKING IS VISIBLE: a revert has nothing to take. Only
+ * the server's word that the apply's transaction aborted makes that
+ * not-committed; anything else (a transaction still open or committing, one
+ * committed after the snapshot, too old, another server, no id) is
+ * no-receipt, which the receipts check settles.
+ */
+function noReceipt(report: ApplyReport, x: { status: XactStatus; why: string }): BookingRefused {
+  if (x.status === "aborted") {
+    return new BookingRefused("not-committed", `this database holds no receipt of booking ${report.bookingId} and ${x.why}: that apply never committed, ` +
+      "so nothing was written and there is nothing to revert — preview the tenant again");
+  }
+  return new BookingRefused("no-receipt", `no receipt of booking ${report.bookingId} is visible here, and that alone does not prove its apply never committed: ${x.why}. ` +
+    "Nothing changed. Keep the apply report, and see whether it committed with the receipts check (--revert <report> --dry-run)");
+}
+
+/** A booked row now: exactly as the report wrote it, changed, or gone. Compared as a revert compares it. */
+async function bookedRowNow(db: Db, tables: ReadonlySet<string>, r: AppliedRow): Promise<"as-booked" | "changed" | "gone"> {
+  const columns = r.table === "trades" ? TRADE_COLUMNS : FLOW_COLUMNS;
+  if (!tables.has(r.table)) return "gone";
+  const now = (await db.prepare(`SELECT id, ${columns.join(", ")} FROM ${r.table} WHERE id = ?`).get(r.id)) as Record<string, unknown> | undefined;
+  return !now ? "gone" : sameRow(now, r.row, ["id", ...columns]) ? "as-booked" : "changed";
+}
 
 export interface BookingReceipts {
   format: typeof RECEIPTS_FORMAT; mode: "receipts"; bookingId: string; tenant: string; account: string;
   /**
-   * not-committed: no receipt (its transaction rolled back); applied: it
-   * committed and its rows stand; reverted: it committed and was taken back;
-   * partly-reverted: receipts in both states, which one revert transaction
-   * never leaves.
+   * applied: it committed, and every booked row is exactly as the report
+   * wrote it. diverged: it committed and every receipt says 'applied', but a
+   * booked row has changed or is gone, so the rows do not stand as written.
+   * reverted: it committed and was taken back. partly-reverted: receipts in
+   * both states, which one revert transaction never leaves. not-committed:
+   * no receipt, and the server says the apply's transaction aborted.
+   * unknown: no receipt, and nothing proves it never committed: keep the
+   * report and read again (`why` says what the server said).
    */
-  verdict: "not-committed" | "applied" | "reverted" | "partly-reverted";
+  verdict: "applied" | "diverged" | "reverted" | "partly-reverted" | "not-committed" | "unknown";
+  why: string;
+  transaction: { id: string | null; status: XactStatus };
   receipts: Array<{ evidenceKey: string; table: string; rowId: number; state: string; appliedAtMs: number; revertedAtMs: number | null }>;
+  /** Each booked row as it is now, when every receipt says 'applied'; otherwise empty. */
+  rows: Array<{ table: string; id: number; evidenceKey: string; now: "as-booked" | "changed" | "gone" }>;
   writesPerformed: 0;
 }
 
 /**
- * DID THE APPLY COMMIT? Read only, for an apply whose COMMIT went
- * unanswered (the shell's --revert <report> --dry-run): the booking's
- * receipts, checked against the report as a revert checks them. Changes
+ * DID THE APPLY COMMIT, AND DO ITS ROWS STAND? Read only, in one snapshot,
+ * for an apply whose COMMIT went unanswered (the shell's --revert <report>
+ * --dry-run). First the booking's receipts, checked against the report as a
+ * revert checks them. With none, what the server says became of the apply's
+ * transaction (xactStatusOf): only "aborted" is not-committed, and anything
+ * else is unknown. With every receipt 'applied', each booked row against the
+ * report, as a revert compares it: one changed or gone is diverged. Changes
  * nothing; on the shell's read-only connection.
+ *
+ * Receipts that match the report while the server says its transaction
+ * aborted, or is still open, contradict each other: refused, to escalate.
  */
 export async function readBookingReceipts(db: Db, report: ApplyReport, o: { dialect: Dialect }): Promise<BookingReceipts> {
-  const result = (verdict: BookingReceipts["verdict"], receipts: ReadonlyArray<Record<string, unknown>>): BookingReceipts => ({
-    format: RECEIPTS_FORMAT, mode: "receipts", bookingId: report.bookingId, tenant: report.tenant, account: report.account, verdict,
+  const tables = await existingTables(db, o.dialect);
+  const receipts = tables.has(BOOKINGS_TABLE) ? await receiptsOf(db, report) : [];
+  const xact = await xactStatusOf(db, report, o.dialect);
+  const result = (verdict: BookingReceipts["verdict"], why: string, rows: BookingReceipts["rows"] = []): BookingReceipts => ({
+    format: RECEIPTS_FORMAT, mode: "receipts", bookingId: report.bookingId, tenant: report.tenant, account: report.account, verdict, why,
+    transaction: { id: report.xact?.id ?? null, status: xact.status },
     receipts: receipts.map((r) => ({ evidenceKey: String(r.evidence_key), table: String(r.table_name), rowId: Number(r.row_id), state: String(r.state),
       appliedAtMs: Number(r.applied_at_ms), revertedAtMs: r.reverted_at_ms === null || r.reverted_at_ms === undefined ? null : Number(r.reverted_at_ms) })),
-    writesPerformed: 0,
+    rows, writesPerformed: 0,
   });
-  const tables = await existingTables(db, o.dialect);
-  if (!tables.has(BOOKINGS_TABLE)) return result("not-committed", []);
-  const receipts = await receiptsOf(db, report);
-  if (!receipts.length) return result("not-committed", []);
+  if (!receipts.length) {
+    if (xact.status === "aborted") return result("not-committed", `no receipt holds it, and ${xact.why}: nothing was written`);
+    if (xact.status === "committed") {
+      return result("unknown", `${xact.why}, yet this database holds no receipt of it: DATABASE_URL may name another database on that server, or the receipts were removed — escalate`);
+    }
+    return result("unknown", `no receipt of it is visible${tables.has(BOOKINGS_TABLE) ? "" : " (this database has no receipts table)"}, and that alone does not prove it never committed: ${xact.why}`);
+  }
   if (!receiptsMatch(receipts, report)) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
+  if (xact.status === "aborted" || xact.status === "in-progress") {
+    throw new BookingRefused("receipts", `the booking's receipts say it committed, but ${xact.why}: the report and the database disagree — escalate`);
+  }
   const states = new Set(receipts.map((r) => String(r.state)));
-  return result(states.size === 1 && states.has("applied") ? "applied" : states.size === 1 && states.has("reverted") ? "reverted" : "partly-reverted", receipts);
+  if (states.size !== 1) return result("partly-reverted", "its receipts are in more than one state, which one revert never leaves: escalate");
+  if (states.has("reverted")) return result("reverted", "it committed, and every receipt says it was reverted");
+  if (!states.has("applied")) throw new BookingRefused("receipts", "the booking's receipts are in a state this tool never writes");
+  const rows: BookingReceipts["rows"] = [];
+  for (const r of report.rows) rows.push({ table: r.table, id: r.id, evidenceKey: r.evidenceKey, now: await bookedRowNow(db, tables, r) });
+  const moved = rows.filter((r) => r.now !== "as-booked");
+  return moved.length
+    ? result("diverged", `it committed, but ${moved.length} of its ${rows.length} row(s) are no longer as booked (${moved.map((r) => `${r.evidenceKey} ${r.now}`).join(", ")})`, rows)
+    : result("applied", `it committed, and each of its ${rows.length} row(s) is exactly as booked`, rows);
 }
 
 /**
@@ -2028,7 +2200,11 @@ export function admittedSince(was: AdmissionState, is: AdmissionState & { inUse:
  * binding them into an attested book, an approval given on evidence that
  * holds them, or a worker writing the tenant's book. Then the rows go and the
  * receipts say 'reverted', keeping each row in full. A second revert of the
- * same report is `already-reverted`, changing nothing.
+ * same report is `already-reverted`, changing nothing. With no receipt of
+ * the booking visible it refuses not-committed only when the server says
+ * the apply's transaction aborted, and no-receipt otherwise (noReceipt): an
+ * apply whose transaction is still open or committing is never called
+ * "never committed".
  */
 export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: number; dialect: Dialect }): Promise<RevertReport> {
   const result = (outcome: RevertReport["outcome"]): RevertReport => {
@@ -2040,9 +2216,9 @@ export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: num
     // Asked of the catalogue, never learned from a failed read: one failure
     // aborts a Postgres transaction (existingTables says why).
     const tables = await existingTables(tx, o.dialect);
-    if (!tables.has(BOOKINGS_TABLE)) throw new BookingRefused("receipts", "no booking receipts exist in this database");
-    const receipts = await receiptsOf(tx, report);
-    if (!receipts.length) throw notCommitted(report);
+    const receipts = tables.has(BOOKINGS_TABLE) ? await receiptsOf(tx, report) : [];
+    // None visible: "never committed" only on the server's word that the apply's transaction aborted (noReceipt).
+    if (!receipts.length) throw noReceipt(report, await xactStatusOf(tx, report, o.dialect));
     if (!receiptsMatch(receipts, report)) throw new BookingRefused("receipts", "the booking's receipts in the database do not match the report");
     if (receipts.every((r) => r.state === "reverted")) return result("already-reverted");
     if (!receipts.every((r) => r.state === "applied")) throw new BookingRefused("receipts", "the booking is partly reverted; nothing changed");
@@ -2056,9 +2232,7 @@ export async function revertBooking(db: Db, report: ApplyReport, o: { nowMs: num
     const stood = admittedSince(report.admission, { ...now, inUse });
     if (stood) throw new BookingRefused(stood.code, `${stood.why}; nothing changed`);
     for (const r of report.rows) {
-      const columns = r.table === "trades" ? TRADE_COLUMNS : FLOW_COLUMNS;
-      const now = (await tx.prepare(`SELECT id, ${columns.join(", ")} FROM ${r.table} WHERE id = ?`).get(r.id)) as Record<string, unknown> | undefined;
-      if (!now || !sameRow(now, r.row, ["id", ...columns])) throw new BookingRefused("cas", `${r.evidenceKey}: the row is no longer exactly as booked; nothing changed`);
+      if ((await bookedRowNow(tx, tables, r)) !== "as-booked") throw new BookingRefused("cas", `${r.evidenceKey}: the row is no longer exactly as booked; nothing changed`);
       const gone = await tx.prepare(`DELETE FROM ${r.table} WHERE id = ?`).run(r.id);
       if (Number(gone.changes) !== 1) throw new BookingRefused("cas", `${r.evidenceKey}: the row could not be removed; nothing changed`);
       const marked = await tx.prepare(`UPDATE ${BOOKINGS_TABLE} SET state = 'reverted', reverted_at_ms = ? WHERE booking_id = ? AND evidence_key = ? AND state = 'applied'`)

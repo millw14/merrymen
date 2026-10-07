@@ -26,7 +26,11 @@
  * that proves a rollback (commitRolledBack) removes the report. Anything else
  * — a dropped connection, a terminated backend, a timeout — keeps it, says
  * OUTCOME UNKNOWN, and prints the two commands that settle it. The report
- * names its database (target), and both refuse any other.
+ * names its database (target), and both refuse any other. It also names the
+ * apply's own transaction and server (xact), read inside the transaction
+ * before the COMMIT: no receipt is NOT COMMITTED only when the server says
+ * that transaction aborted, and STILL UNKNOWN otherwise (still open, committed
+ * after the check's snapshot, another server), never "nothing happened".
  *
  * WHAT CROSSES THE CONSOLE: the plan's lines (tenant, account, hashes, blocks,
  * amounts — public chain data and the classes), the digest and the refusal.
@@ -59,7 +63,7 @@ The preview reads Postgres read-only and the chain; it writes only its own repor
 --apply recomputes the preview and writes exactly its proposed rows in one SERIALIZABLE transaction, only when the digest is the one you confirm.
 Its report is written before the COMMIT; if the COMMIT's answer is lost, the report is kept and the tool says OUTCOME UNKNOWN.
 --revert removes one applied booking's rows, only if each is still exactly as written and nothing stood on them since (no admission, approval or worker).
---revert with --dry-run only reads that booking's receipts: whether its apply committed, and whether it was reverted.
+--revert with --dry-run only reads: whether its apply committed (its receipts, or the server's word on its transaction), and whether its rows stand.
 Neither DATABASE_URL nor the RPC URL is printed or saved.
 `;
 
@@ -404,14 +408,17 @@ const SELF = "node --import tsx worker/src/chain-gap-booking-cli.ts";
 function recoveryLines(report: string): string[] {
   return [
     `  1. Did it commit? Read only: ${SELF} --revert ${report} --dry-run --output /absolute/new-receipts-report.json`,
-    "     COMMITTED (receipts 'applied'): its rows stand; go on to step 5 of docs/chain-gap-booking.md, or take it back with 2.",
-    "     NOT COMMITTED (no receipt): nothing was written; preview the tenant again.",
+    "     COMMITTED (receipts 'applied', every row as booked): its rows stand; go on to step 5 of docs/chain-gap-booking.md, or take it back with 2.",
+    "     NOT COMMITTED (no receipt, and the server says its transaction ended without committing): nothing was written; preview the tenant again.",
+    "     STILL UNKNOWN (no receipt yet, and no such word from the server): keep the report and run 1 again; it settles once the server ends that transaction.",
     `  2. Take it back: ${SELF} --revert ${report} --output /absolute/new-revert-report.json`,
   ];
 }
 /**
- * The report names the database it was applied to: a look at the receipts or a revert anywhere else would read "no receipt" as "never
- * committed". A report of an earlier build names none, and its revert is decided by the receipts alone, as before.
+ * The report names the database it was applied to by its URL (host, port and name): a look at the receipts or a revert anywhere else
+ * would find no receipt, so it is refused before it connects. That binds the spelling, not the server; the server is bound by the
+ * report's xact (its system identifier), which decides whether "no receipt" can ever be NOT COMMITTED. A report of an earlier build names
+ * neither, and its revert is decided by the receipts alone.
  */
 function sameDatabase(report: ApplyReport, databaseUrl: string): void {
   if (report.target !== undefined && report.target !== targetDigest(databaseUrl)) {
@@ -425,14 +432,17 @@ function unfinishedReport(): BookingRefused {
     "(the report is written in full and fsynced before the COMMIT is sent), so nothing was written: preview the tenant again");
 }
 function receiptsLine(v: BookingReceipts, report: string, output: string): string {
-  const n = `${v.receipts.length} receipt(s)`;
+  const n = `${v.receipts.length} receipt(s)`, said = `0 database writes; report ${output}`;
   switch (v.verdict) {
-    case "applied": return `COMMITTED booking ${v.bookingId} — tenant ${v.tenant}: ${n} 'applied', its rows stand. Go on to step 5 of docs/chain-gap-booking.md, ` +
-      `or take it back with ${SELF} --revert ${report} --output /absolute/new-revert-report.json. 0 database writes; report ${output}`;
-    case "reverted": return `COMMITTED, THEN REVERTED booking ${v.bookingId} — tenant ${v.tenant}: ${n} 'reverted', nothing of it stands. 0 database writes; report ${output}`;
-    case "not-committed": return `NOT COMMITTED booking ${v.bookingId} — tenant ${v.tenant}: no receipt, so that apply rolled back and wrote nothing; preview the tenant again. ` +
-      `0 database writes; report ${output}`;
-    default: return `booking ${v.bookingId} — tenant ${v.tenant}: ${n} in more than one state, which one revert never leaves: escalate. 0 database writes; report ${output}`;
+    case "applied": return `COMMITTED booking ${v.bookingId} — tenant ${v.tenant}: ${n} 'applied', and each of its ${v.rows.length} row(s) exactly as booked: its rows stand. ` +
+      `Go on to step 5 of docs/chain-gap-booking.md, or take it back with ${SELF} --revert ${report} --output /absolute/new-revert-report.json. ${said}`;
+    case "diverged": return `COMMITTED, BUT ITS ROWS DIVERGED booking ${v.bookingId} — tenant ${v.tenant}: ${v.why}. They do not stand as booked, and a --revert ` +
+      `refuses: escalate. ${said}`;
+    case "reverted": return `COMMITTED, THEN REVERTED booking ${v.bookingId} — tenant ${v.tenant}: ${n} 'reverted', nothing of it stands. ${said}`;
+    case "not-committed": return `NOT COMMITTED booking ${v.bookingId} — tenant ${v.tenant}: ${v.why}; preview the tenant again. ${said}`;
+    case "unknown": return `STILL UNKNOWN booking ${v.bookingId} — tenant ${v.tenant}: ${v.why}. Keep ${report}: if it committed, it is what --revert takes. ` +
+      `Run this check again in a minute. ${said}`;
+    default: return `booking ${v.bookingId} — tenant ${v.tenant}: ${n} in more than one state, which one revert never leaves: escalate. ${said}`;
   }
 }
 
@@ -478,7 +488,8 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
     const fd = createReportFile(options.output);
     finishReportFile(fd, options.output, view);
     out(receiptsLine(view, options.report, options.output));
-    return view.verdict === "partly-reverted" ? 2 : 0;
+    // Settled and standing as the receipts say: 0. Still unknown, diverged, or partly reverted: 2, so nothing scripted reads it as settled.
+    return view.verdict === "applied" || view.verdict === "reverted" || view.verdict === "not-committed" ? 0 : 2;
   }
 
   if (options.mode === "revert") {
@@ -534,6 +545,8 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
   out(`booking ${bookingId}: its apply report is written to ${options.output} before the COMMIT is sent. ` +
     `If this process dies, see whether it committed with ${SELF} --revert ${options.output} --dry-run --output /absolute/new-receipts-report.json`);
   let report: ApplyReport;
+  // What persist wrote (assigned inside the transaction, so typed by assertion: the compiler does not follow the callback).
+  let persisted = undefined as ApplyReport | undefined;
   try {
     const plan = await computePlan(options.tenant, env, full);
     for (const line of planLines(plan)) out(line);
@@ -543,15 +556,16 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       report = await applyBooking(pgClientDb(client, { readOnly: false }), plan, {
         confirm: options.confirm, backupRef: options.backupRef, dialect: "postgres", nowMs: full.nowMs(), bookingId,
         // Inside the transaction, every receipt written, the COMMIT not yet sent: the whole report, fsynced, saying its outcome is unknown.
-        persist: (r) => { open = false; finishReportFile(fd, options.output, stampCommitOutcome(r, "unknown")); },
+        persist: (r) => { open = false; persisted = r; finishReportFile(fd, options.output, stampCommitOutcome(r, "unknown")); },
       });
     } finally { await client.end().catch(() => {}); }
   } catch (e) {
     if (e instanceof CommitOutcomeUnknown) {
-      // The COMMIT may have taken effect: the report stays, saying "unknown", and the receipts settle it.
+      // The COMMIT may have taken effect: the report stays, saying "unknown", and the receipts (or the server's word on its transaction) settle it.
       close();
+      const xact = persisted?.xact ? ` Its transaction is ${persisted.xact.id}.` : "";
       out(`OUTCOME UNKNOWN for booking ${bookingId}: the COMMIT was sent and no answer proved it rolled back, so it may have committed. ` +
-        `${options.output} holds its apply report, written and fsynced before the COMMIT, with commitOutcome "unknown": keep it, both commands below take it.`);
+        `${options.output} holds its apply report, written and fsynced before the COMMIT, with commitOutcome "unknown": keep it, both commands below take it.${xact}`);
       for (const line of recoveryLines(options.output)) out(line);
       throw new CliError("apply-outcome-unknown");
     }

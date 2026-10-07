@@ -626,7 +626,11 @@ refuses to run at any other level), the apply:
    records the tenant's admission state at that moment (`admission_json`):
    its approvals, attestations, heartbeat and mirror cursor. The revert is
    decided against this;
-6. writes the **apply report** to `--output` and fsyncs it, with
+6. asks the server which transaction this is: its id
+   (`pg_current_xact_id()`, or `txid_current()` before PostgreSQL 13) and
+   the server's system identifier (`pg_control_system()`). Both go in the
+   report as `xact`;
+7. writes the **apply report** to `--output` and fsyncs it, with
    `"commitOutcome": "unknown"`. Only then is the `COMMIT` sent.
 
 Receipts are unique per (account, epoch, `op:<userOpHash>` or
@@ -694,46 +698,101 @@ timed-out statement (`57014`). The tool then keeps the report, which still
 says `"commitOutcome": "unknown"`, and prints:
 
 ```
-OUTCOME UNKNOWN for booking <id>: the COMMIT was sent and no answer proved it rolled back, so it may have committed. …
+OUTCOME UNKNOWN for booking <id>: the COMMIT was sent and no answer proved it rolled back, so it may have committed. … Its transaction is <xid>.
   1. Did it commit? Read only: node --import tsx worker/src/chain-gap-booking-cli.ts --revert <output> --dry-run --output /absolute/new-receipts-report.json
-     COMMITTED (receipts 'applied'): its rows stand; go on to step 5 of docs/chain-gap-booking.md, or take it back with 2.
-     NOT COMMITTED (no receipt): nothing was written; preview the tenant again.
+     COMMITTED (receipts 'applied', every row as booked): its rows stand; go on to step 5 of docs/chain-gap-booking.md, or take it back with 2.
+     NOT COMMITTED (no receipt, and the server says its transaction ended without committing): nothing was written; preview the tenant again.
+     STILL UNKNOWN (no receipt yet, and no such word from the server): keep the report and run 1 again; it settles once the server ends that transaction.
   2. Take it back: node --import tsx worker/src/chain-gap-booking-cli.ts --revert <output> --output /absolute/new-revert-report.json
 ```
 
 It exits with `apply-outcome-unknown`. Run command 1 first. It opens a
-read-only connection and reads the booking's receipts in one read-only
-snapshot. It checks them against the report as a revert would, and writes
-its answer to its own `--output`. It changes nothing in the database. The
-report names the database it was applied to (`target`: host, port and name,
-as the preview digest binds them). If `DATABASE_URL` names another database,
-the check and the revert refuse with `target` before they connect. They
-never read another database's missing receipts as "never committed". The
-check prints one of:
+read-only connection and, in one read-only snapshot, reads the booking's
+receipts and asks the server what became of the apply's transaction
+(`pg_xact_status` on the report's `xact` id). It checks the receipts against
+the report as a revert would, and writes its answer to its own `--output`.
+It changes nothing in the database. The report names the database it was
+applied to (`target`: host, port and name, as the preview digest binds
+them). If `DATABASE_URL` names another database, the check and the revert
+refuse with `target` before they connect.
 
-- `COMMITTED booking <id> …`: the rows stand. Carry on from step 5, or take
-  the booking back with command 2.
-- `NOT COMMITTED booking <id> …`: no receipt exists, so the transaction
-  rolled back and nothing was written. Preview the tenant again. A
-  `--revert` of this report is refused with `not-committed`.
+**No receipt is not proof that the apply never committed.** The connection
+can fail while the `COMMIT` is on its way, and the server may still be
+committing, or the apply's session may still be open, when the check takes
+its snapshot. The receipts appear moments later. So the check says
+`NOT COMMITTED` only when the server says the apply's transaction ended
+without committing (`aborted`), on the server whose system identifier the
+report holds. Anything else with no receipt is `STILL UNKNOWN`. The check
+prints one of:
+
+- `COMMITTED booking <id> …`: every receipt says `applied`, and each booked
+  row is still exactly as the report wrote it. The rows stand. Carry on from
+  step 5, or take the booking back with command 2.
+- `COMMITTED, BUT ITS ROWS DIVERGED booking <id> …`: every receipt says
+  `applied`, but a booked row has changed or is gone (`rows[].now` in its
+  report says which: `changed` or `gone`). The rows do not stand as booked,
+  and a `--revert` refuses (`cas`). Escalate. It exits 2.
+- `NOT COMMITTED booking <id> …`: no receipt, and the server says the
+  transaction ended without committing. Nothing was written. Preview the
+  tenant again. A `--revert` of this report is refused with `not-committed`.
+- `STILL UNKNOWN booking <id> …`: no receipt is visible, and the server has
+  not said the transaction aborted. **Keep the report**: if the booking
+  committed, it is the only thing `--revert` takes. It exits 2.
+  `transaction.status` in its report says what the server said, and `why`
+  explains it:
+  - `in-progress`: the transaction is still open, or had not ended when the
+    check began. The apply may still be running or its `COMMIT` still
+    going through, or the server has not yet noticed that the apply's
+    session is gone. Run the check again in a minute. If it stays
+    `in-progress`, look in `pg_stat_activity` for an
+    `application_name` of `merrymen-chain-gap-apply`. The server ends that
+    session when its connection is found dead. Ending it yourself
+    (`pg_terminate_backend`) rolls the transaction back if it has not
+    committed, and the check then says `NOT COMMITTED`.
+  - `committed-after-snapshot`: it committed after the check took its
+    snapshot. Run the check again: it says `COMMITTED`.
+  - `committed`: it committed before the snapshot, yet this database holds
+    no receipt of it. `DATABASE_URL` names another database on that server,
+    or the receipts were removed. Escalate.
+  - `forgotten`: the transaction is too old for the server to remember.
+  - `other-server`: this server's system identifier is not the report's,
+    or one of them could not be read. The id means nothing here.
+  - `unrecorded`: the report names no transaction (an earlier build).
 - `COMMITTED, THEN REVERTED booking <id> …`: it committed and has since been
   reverted.
+
+Receipts that match the report while the server says the transaction
+aborted, or is still open, contradict each other. The check refuses
+(`receipts`): escalate.
+
+What binds the check to the right server is the report's `target` (host,
+port and database name) and the server's system identifier. A physical
+copy of the server (a promoted replica, a restored volume snapshot) keeps
+the identifier. On a copy taken before the apply committed, the booking is
+not in that copy, and its `NOT COMMITTED` is true of the copy only. Run the
+check against the server the apply ran on.
 
 If the process died during the apply, the same check applies to its
 `--output`. An empty or cut-short report means the apply never sent its
 `COMMIT`, because the report is written in full and fsynced first. The check
 says so (`refused (report-unfinished)`). Then nothing was written. If you
-want to see the receipts without the tool, use the booking id from the first
-line, in a read-only transaction:
+want to look without the tool, use the booking id from the first line and
+the `xact` id from the report, in a read-only transaction:
 
 ```sql
 BEGIN READ ONLY;
 SELECT evidence_key, table_name, row_id, state, applied_at_ms, reverted_at_ms
   FROM chain_gap_bookings WHERE booking_id = '<id>' ORDER BY evidence_key;
+SELECT pg_xact_status('<xact.id>'::xid8),
+       (SELECT system_identifier::text FROM pg_control_system());
 ROLLBACK;
 ```
 
-No rows means it never committed.
+No rows alone does not mean it never committed. Only `aborted`, with the
+report's `xact.system` as the system identifier, means that. A
+`pg_xact_status` error saying the id is "in the future" means this server
+has not reached that id: it is not the server the apply ran on, or it is a
+copy of it from before.
 
 ## 5. Preview the tenant again (admission's preview)
 
@@ -782,8 +841,12 @@ at `SERIALIZABLE`, the revert:
 
 - verifies the report against its own digest and against the receipts. The
   report's apply time and admission state must be the ones the receipts
-  hold. If no receipt holds the booking, it refuses with `not-committed`:
-  that apply never committed, so there is nothing to revert;
+  hold. If no receipt of the booking is visible, it changes nothing and
+  refuses. It says `not-committed` only when the server says the apply's
+  transaction ended without committing, so there is nothing to revert.
+  Otherwise it says `no-receipt`: the apply may still be open or
+  committing. Keep the report and run the check in
+  [If the apply's outcome is unknown](#if-the-applys-outcome-is-unknown);
 - refuses if any row is no longer exactly as written;
 - refuses if anything has relied on the rows since the apply. It compares
   what the database records now with the receipts' `admission_json`, and
@@ -848,7 +911,13 @@ lost answer after the commit took effect (`EPIPE`, `ECONNRESET`, `57P01`,
 `57P02`, `57P03`, `08006`, `08007`, `57014`, `40003`, no code) keeps the
 report, and the receipts settle it. A proven rollback (`40001`, `40P01`,
 `40002`, `23505`, `23514`, `ROLLBACK`'s tag) leaves no report and writes
-nothing.
+nothing. Its stand-in server hands out transaction ids and answers
+`pg_xact_status`, so the check is shown saying `STILL UNKNOWN`, never
+`NOT COMMITTED`, for a transaction in progress, forgotten, committed with
+no receipt, on another server or an unreadable one, an id the server has
+not reached, and a report with no id. It also shows `DIVERGED` for a
+booked row changed or gone, and refuses receipts that the server
+contradicts.
 
 The opt-in real-Postgres tests also cover the stale-basis case. There,
 admission's own seed runs inside the read-only snapshot, and the apply
@@ -857,8 +926,13 @@ the server. They check that it is `SERIALIZABLE` as the server reports it,
 and that it gets a real `40001` when the agent row moves after its snapshot.
 They fail the `COMMIT` with a deferred constraint (`23514`) and with
 serializable write skew (`40001`), and answer it with `ROLLBACK`'s tag. They
-terminate the backend as the `COMMIT` is sent, and lose the answer after a
-real commit. They need two things: a disposable **loopback**
+terminate the backend as the `COMMIT` is sent (`NOT COMMITTED` on the
+server's word that it aborted), and lose the answer after a real commit.
+They pause the apply just before its `COMMIT` and run the check and a
+revert: `STILL UNKNOWN` and `no-receipt`. They let the `COMMIT` through
+between the check's snapshot and its question to the server
+(`committed-after-snapshot`). They also change and delete a booked row
+(`DIVERGED`). They need two things: a disposable **loopback**
 server in `MERRYMEN_TEST_PG_URL`, and the `pg` driver resolvable. `NODE_PATH`
 works, because the tests load the driver with `require`. Each test creates
 its own database and drops it, and never reads `DATABASE_URL`:
