@@ -13,6 +13,7 @@ import { strategyName } from "../strategy";
 import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
 import { unrankedShort } from "@/lib/rank-pnl";
 import { performanceOf, staleSince } from "../agent-performance";
+import { boardOrder, type BoardRow } from "../board-order";
 import { useNow } from "../clock";
 import { shortDateTime } from "@/lib/format";
 
@@ -22,12 +23,6 @@ type WindowId = "24H" | "7D" | "30D" | "ALL";
 const WINDOWS: { id: WindowId; points: number }[] = [
   { id: "ALL", points: Number.POSITIVE_INFINITY },
 ];
-
-interface Row {
-  agent: LiveAgent;
-  rank: number;
-  ret: number | null;
-}
 
 export function Board({
   compact = false,
@@ -57,10 +52,7 @@ export function Board({
 }) {
   const [win, setWin] = useState<WindowId>("ALL");
   const [showAll, setShowAll] = useState(false);
-  const rows = useMemo(
-    () => rank(agents, theses, mine, win),
-    [agents, theses, mine, win],
-  );
+  const rows = useMemo(() => boardOrder(agents), [agents]);
 
   const mineSlug = mine?.slug;
   const folded = typeof retired === "number" && Number.isFinite(retired) ? retired : 0;
@@ -97,7 +89,7 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure, so a book that has not traded shows No trades yet rather than a flat return, and trades no valuation includes yet show Awaiting first valuation. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure, so a book that has not traded shows No trades yet rather than a flat return, and trades no valuation includes yet show Awaiting first valuation. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked. Below the ranked live returns, every other agent that shows a return is listed by it, highest first, paper included, and then those with no return to show.</p></details>
       )}
       {/* STALENESS, AND ONLY STALENESS. When no agent has been valued for a
           while, every figure below is older than it looks, and the time a
@@ -159,7 +151,7 @@ function Rank({
   nowSec,
   onProfile,
 }: {
-  row: Row;
+  row: BoardRow;
   you: boolean;
   nowSec: number;
   onProfile: (slug: string) => void;
@@ -250,37 +242,3 @@ export function tradeLine(agent: LiveAgent): string {
   return "No trades yet";
 }
 
-function rank(
-  agents: LiveAgent[],
-  theses: Thesis[],
-  mine: LiveMine | null,
-  win: WindowId,
-): Row[] {
-  const spec = WINDOWS.find((w) => w.id === win) ?? WINDOWS[2]!;
-
-  const score = (a: LiveAgent): number | null => a.pnlBps;
-
-  const order = (list: { slug: string; ret: number | null }[]) =>
-    [...list]
-      .sort(
-        (a, b) =>
-          (b.ret ?? Number.NEGATIVE_INFINITY) -
-          (a.ret ?? Number.NEGATIVE_INFINITY),
-      )
-      .map((r, i) => [r.slug, i + 1] as const);
-
-  const nowScores = agents.map((a) => ({ slug: a.slug, ret: score(a) }));
-  const nowRank = new Map(order(nowScores));
-
-  return agents
-    .map((agent) => {
-      const ret = nowScores.find((s) => s.slug === agent.slug)?.ret ?? null;
-      const r = nowRank.get(agent.slug) ?? 0;
-      return {
-        agent,
-        rank: r,
-        ret,
-      };
-    })
-    .sort((a, b) => a.rank - b.rank);
-}
