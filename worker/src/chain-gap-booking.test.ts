@@ -782,6 +782,10 @@ describe("only a held tenant is booked (holdOf)", () => {
         VALUES (?, 'X', ?, '1', '1', 1, 0, 'pool', 1, ?)`).run(ACCOUNT, addr(0x99), NOW)],
       // No count or maximum id moves: only the fills' own digest sees it.
       ["a recorded fill repaired in place", (b) => b.raw.prepare("UPDATE trades SET fill_side = 'buy', fill_qty_raw = '1', basis_source = 'receipt' WHERE user_op_hash = ?").run(BUY_OP)],
+      // The deposit's sender registers as a hosted account of its own (while the chain is read, say): the classifier now reads that
+      // transfer as internal, never a deposit, and nothing of this tenant's rows moved. Only the fleet's accounts, by digest, see it.
+      ["the deposit's sender registered as a hosted account", (b) => b.raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps,
+        granted_at, expires_at, status, epoch, hwm_usdg, mode) VALUES (?, ?, ?, 4663, '{}', 1, 9999999999, 'armed', 1, 0, 'paper')`).run(addr(0xd0d0), addr(0xd0d1), addr(1))],
     ];
     for (const [what, wake] of wakes) {
       const b = await books();
@@ -789,9 +793,17 @@ describe("only a held tenant is booked (holdOf)", () => {
       const p = await preview(b, fakeRpc({ txs: [fromFixture(CHAIN.buy), dep] }).rpc);
       assert.equal(p.verdict, "ready", what);
       wake(b);
-      await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "cas" && /\((admission|agents|holdings|fills)\)/.test((e as Error).message), what);
+      await assert.rejects(applyNow(b.db, p), (e: unknown) => (e as BookingRefused).code === "cas" && /\((admission|agents|holdings|fills|knownAccounts)\)/.test((e as Error).message), what);
       assert.equal(rows(b.raw, "SELECT COUNT(*) AS n FROM flows WHERE tx_hash = ?", dep.tx)[0]!.n, 0, what);
     }
+    // Read again after that registration, the same transfer is internal, and nothing is booked for it.
+    const b = await books();
+    const dep = depositAt(SELL_BLOCK + 1_000n);
+    const rpc = fakeRpc({ txs: [fromFixture(CHAIN.buy), dep] }).rpc;
+    wakes.at(-1)![1](b);
+    const again = await preview(b, rpc);
+    assert.equal(again.verdict, "blocked");
+    assert.match(again.items.find((i) => i.key === `log:${dep.tx}#4`)!.why, /reads it as internal: the counterparty 0x0{36}d0d0 is another account this system controls/);
   });
 });
 

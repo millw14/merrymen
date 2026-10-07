@@ -591,11 +591,19 @@ export async function readBookingSnapshot(db: Db, o: { tenant: string; dialect: 
  * defence in depth: planAttestedSeed's basis is a pure function of the
  * positions and live cost_basis rows `holdings` already carries, read on the
  * same snapshot.
+ *
+ * `knownAccounts` is every hosted account, by digest: the classifier reads a
+ * transfer from one as internal, never as a deposit (planBooking's
+ * classifyUsdgMovement), so a registration between the preview's read and
+ * the apply — during a long chain read, say — can turn the counterparty of a
+ * transfer the plan books as an owner's deposit into another hosted account.
+ * By digest, not the list, so the plan and its report never carry the
+ * fleet's other accounts.
  */
 function casFacts(s: BookingSnapshot) {
   return { grant: s.grant, agents: s.agents.map(({ smartAccount, epoch, chainId, mode }) => ({ smartAccount, epoch, chainId, mode })), spellings: s.spellings,
     epochOpenedAt: s.epochOpenedAt, known: s.known, ownerRecords: s.ownerRecords, ledger: s.ledger, openApproval: s.openApproval, admitted: s.admitted, booked: s.booked,
-    admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills) };
+    admission: s.admission, holdings: s.holdings, fills: digestOf(s.fills), knownAccounts: digestOf([...s.knownAccounts].sort(byText)) };
 }
 
 // ── the hold ─────────────────────────────────────────────────────────────────
