@@ -145,7 +145,8 @@ like any other movement the owner made ([above](#who-moved-it)). Nothing
 here writes an owner record or a trades row for it. The preview shows,
 for each operation, the owner records Postgres holds, the reading
 re-derived from its receipt, and what admission's check answered it by
-(`admission`: `trades-row`, `owner-record` or `missing`).
+(`admission`: `trades-row`, `owner-record` or `missing`, or null for an
+operation outside the window that check read).
 
 A record admission does not take answers nothing here either. That is a
 `review` record, one on another chain or for another tenant, one naming
