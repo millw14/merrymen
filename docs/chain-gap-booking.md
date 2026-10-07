@@ -693,9 +693,10 @@ With those, nothing was written and no report is left. Anything else is an
 unknown outcome, because it can arrive after the commit was made durable.
 That includes a dropped or reset connection (`EPIPE`, `ECONNRESET`, no code),
 a terminated backend or a server shutting down or starting (`57P01`,
-`57P02`, `57P03`), a connection exception (class `08`), and a cancelled or
-timed-out statement (`57014`). The tool then keeps the report, which still
-says `"commitOutcome": "unknown"`, and prints:
+`57P02`, `57P03`), a connection exception (class `08`), a cancelled or
+timed-out statement (`57014`), and an answer tagged neither `COMMIT` nor
+`ROLLBACK`. The tool then keeps the report, which still says
+`"commitOutcome": "unknown"`, and prints:
 
 ```
 OUTCOME UNKNOWN for booking <id>: the COMMIT was sent and no answer proved it rolled back, so it may have committed. … Its transaction is <xid>.
@@ -908,8 +909,9 @@ registration does to a basis the new book never had.
 
 `chain-gap-booking-cli.test.ts` holds each answer a `COMMIT` can get. A
 lost answer after the commit took effect (`EPIPE`, `ECONNRESET`, `57P01`,
-`57P02`, `57P03`, `08006`, `08007`, `57014`, `40003`, no code) keeps the
-report, and the receipts settle it. A proven rollback (`40001`, `40P01`,
+`57P02`, `57P03`, `08006`, `08007`, `57014`, `40003`, no code), or one
+tagged neither `COMMIT` nor `ROLLBACK`, keeps the report, and the receipts
+settle it. A proven rollback (`40001`, `40P01`,
 `40002`, `23505`, `23514`, `ROLLBACK`'s tag) leaves no report and writes
 nothing. Its stand-in server hands out transaction ids and answers
 `pg_xact_status`, so the check is shown saying `STILL UNKNOWN`, never

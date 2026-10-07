@@ -399,6 +399,16 @@ describe("the write transaction: SERIALIZABLE, and what a COMMIT's answer proves
     await assert.rejects(s.db.tx(async () => 1), (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
   });
 
+  it("a COMMIT answered with any other tag is an unknown outcome, never a rollback; COMMIT's own tag, or none said, is the commit", async () => {
+    for (const odd of [null, "", "commit", "rollback", "BEGIN", "SELECT"]) {
+      const s = scripted(async () => ({ rows: [], rowCount: null, command: odd as string }));
+      await assert.rejects(s.db.tx(async () => 1), (e: unknown) => e instanceof CommitOutcomeUnknown, String(odd));
+      assert.equal(s.said.at(-1), "COMMIT", `${String(odd)}: nothing is sent after the COMMIT`);
+    }
+    assert.equal(await scripted(committed).db.tx(async () => 7), 7);
+    assert.equal(await scripted(async () => ({ rows: [], rowCount: null })).db.tx(async () => 7), 7, "a client that says no tag (these stand-ins) is read as COMMIT's answer");
+  });
+
   it("before the COMMIT, any failure — a dropped connection too — rolls back and is never an unknown outcome: the COMMIT was never sent", async () => {
     for (const code of [...UNKNOWN, ...ROLLED_BACK]) {
       const s = scripted(committed);
@@ -658,6 +668,21 @@ describe("through the shell: an apply's report outlives a COMMIT whose answer is
       (e: unknown) => e instanceof CliError && e.code === "commit-answered-rollback");
     assert.equal(existsSync(out), false);
     assert.equal(flows(raw), 0);
+  });
+
+  it("a COMMIT that took effect, answered with a tag that is neither COMMIT's nor ROLLBACK's, keeps the report and says OUTCOME UNKNOWN; the receipts settle it", async () => {
+    const { raw, digest } = await reviewed();
+    const out = file("odd-tag");
+    const apply = runner(raw, { write: (c) => ({
+      async query(sql, params) { const r = await c.query(sql, params); return sql === "COMMIT" ? { ...r, command: "SELECT" } : r; },
+      end: () => c.end(),
+    }) });
+    await assert.rejects(apply.run(applyArgs(digest, out)), (e: unknown) => e instanceof CliError && e.code === "apply-outcome-unknown");
+    assert.equal(flows(raw), 1, "it committed");
+    assert.equal(parseApplyReport(readFileSync(out, "utf8")).commitOutcome, "unknown");
+    assert.ok(apply.printed.some((l) => l.startsWith(`OUTCOME UNKNOWN for booking ${BOOKING_ID}`)), apply.printed.join("\n"));
+    const { code, line, view } = await lookAt(raw, out);
+    assert.deepEqual([code, view.verdict], [0, "applied"], line);
   });
 
   it("a serialization failure inside the transaction (the agent row moved after its snapshot) rolls back, writes nothing, and says to run again", async () => {

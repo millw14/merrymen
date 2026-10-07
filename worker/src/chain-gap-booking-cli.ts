@@ -22,10 +22,11 @@
  *   --revert <apply report> --dry-run read only: did that apply commit, and does
  *                                     it stand? Its receipts, against the report.
  *
- * A COMMIT WHOSE ANSWER NEVER CAME is not "nothing happened": only a SQLSTATE
- * that proves a rollback (commitRolledBack) removes the report. Anything else
- * — a dropped connection, a terminated backend, a timeout — keeps it, says
- * OUTCOME UNKNOWN, and prints the two commands that settle it. The report
+ * A COMMIT WHOSE ANSWER NEVER CAME is not "nothing happened": only an answer
+ * that proves a rollback (a SQLSTATE commitRolledBack names, or ROLLBACK's
+ * tag) removes the report. Anything else — a dropped connection, a
+ * terminated backend, a timeout, any other tag — keeps it, says OUTCOME
+ * UNKNOWN, and prints the two commands that settle it. The report
  * names its database (target), and both refuse any other. It also names the
  * apply's own transaction and server (xact), read inside the transaction
  * before the COMMIT: no receipt is NOT COMMITTED only when the server says
@@ -244,8 +245,9 @@ export function conflictRefusal(e: unknown, what: "apply" | "revert"): BookingRe
  * A COMMIT refused with a SQLSTATE that proves a rollback (commitRolledBack)
  * is rethrown as itself, and one the server answered with ROLLBACK's tag (a
  * transaction that had already failed) is "commit-answered-rollback"; any
- * other failure of the COMMIT is CommitOutcomeUnknown, which the shell never
- * reads as "nothing happened".
+ * other failure of the COMMIT, and an answer tagged neither COMMIT nor
+ * ROLLBACK, is CommitOutcomeUnknown, which the shell never reads as "nothing
+ * happened".
  *
  * Not the booking's alone: another repair tool's apply and revert take this
  * same write connection ({ readOnly: false }), so every COMMIT's answer is
@@ -297,7 +299,10 @@ export function pgClientDb(client: PgClient, o: { readOnly: boolean }): Db {
         if (commitRolledBack(e)) throw e;
         throw new CommitOutcomeUnknown();
       }
-      if (answer.command !== undefined && answer.command !== "COMMIT") throw new CliError("commit-answered-rollback");
+      // node-postgres's `command` is the tag the server answered with. ROLLBACK's proves the transaction ended without committing; any
+      // other but COMMIT's proves nothing either way. A stand-in that says no tag is read as COMMIT's own answer.
+      if (answer.command === "ROLLBACK") throw new CliError("commit-answered-rollback");
+      if (answer.command !== undefined && answer.command !== "COMMIT") throw new CommitOutcomeUnknown();
       return out;
     },
   });
