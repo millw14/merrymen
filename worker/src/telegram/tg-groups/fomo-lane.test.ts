@@ -1220,3 +1220,21 @@ describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the
     assert.deepEqual(tg.texts(CHAT), ["Fomo research is rationed right now."]);
   });
 });
+
+describe("short list asks with no question mark reach the research (2026-10-07)", () => {
+  it("'pine trending on fomo' and 'pine robinhood chain coins on fomo' are asked in their own words; the planner decides", async () => {
+    fomo!.answer = (q) => (/trending on fomo/.test(q.text) ? { text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood", deflect: false, status: "ok" } : null);
+    make();
+    await said(msg("pine trending on fomo"));
+    clock += 3 * MIN;
+    await said(msg("pine robinhood chain coins on fomo", { fromId: ANN + 1 }));
+    assert.deepEqual(fomo!.asks.map((a) => [a.text, a.request]), [["pine trending on fomo", undefined], ["pine robinhood chain coins on fomo", undefined]]);
+    assert.match(tg.texts(CHAT)[0]!, /Trending on Fomo/);
+  });
+  it("chatter that only mentions it is not asked", async () => {
+    make();
+    await said(msg("pine top fomo moment lol"));
+    await said(msg("pine the top coins on fomo are trash", { fromId: ANN + 1 }));
+    assert.deepEqual(fomo!.asks, []);
+  });
+});

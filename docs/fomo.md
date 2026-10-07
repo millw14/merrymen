@@ -756,7 +756,10 @@ Surface limits:
   per model answer, because the poll loop is serial. The model loop never starts deep
   research; that comes only from the planner on explicit owner wording.
 - **Telegram groups:** 6 research answers per chat and 30 per agent per 10 minutes.
-  Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
+  An addressed line reaches the research when it names the platform in a question or a
+  request, or as a short list ask with no question mark ("trending on fomo", "robinhood
+  chain coins on fomo", "top traders on fomo today": list words and the platform, nothing
+  else, so "top fomo moment lol" stays chat); the planner still decides. Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
   leaderboard (Milla's call, 2026-10-07): its handles and their provider-reported money
   made on closed trades, never who Merrymen follows. One trader's holdings, trades or
   profile, and the owner's own research state, stay in a DM. Lines pass the group gate as

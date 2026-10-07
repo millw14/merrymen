@@ -973,6 +973,13 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     // Missed on 2026-10-07 18:58, before the model ever saw them.
     ["shogun who's on top fomo today?", "platform"],
     ["i'm sorry who's the top trader on fomo today", "platform"],
+    // Short list asks with no question mark (2026-10-07: the room typed them like this).
+    ["pine trending on fomo", "platform"],
+    ["robinhood chain coins on fomo", "platform"],
+    ["top robinhood coins on fomo", "platform"],
+    ["@pinebot top traders on fomo today", "platform"],
+    ["solana memecoins on fomo pls", "platform"],
+    ["the leaderboard on fomo", "platform"],
   ];
   for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
   const no = [
@@ -980,6 +987,7 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
     "is fomo on robinhood", "i bought it with fomo lol",
     "that's what fomo does lol", "i have fomo who cares", "pure fomo who's buying this", "top fomo moment lol",
+    "the top coins on fomo are trash", "bought the top on fomo lol", "on fomo", "coins on fomo got me rekt lol", "fomo coins",
   ];
   for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
 });

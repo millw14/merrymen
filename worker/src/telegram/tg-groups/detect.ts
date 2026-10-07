@@ -2026,6 +2026,19 @@ const FOMO_TRADER_FLOW =
 /** Asking for something, without a question mark: "show me…", "check…", "pull up…". */
 const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|u))\s+)*(?:show|tell|check|give|list|pull|find|research|look|dig|get|fetch|what|whats|what's|who|whos|who's|which|how|is|are|any)\b/u;
 
+/**
+ * A SHORT LIST ASK with no question mark: "trending on fomo", "robinhood
+ * chain coins on fomo", "top traders on fomo today". The whole line is list
+ * words and the platform, so "top fomo moment lol" and "fomo traders are
+ * wild" stay chat; the planner still decides what, if anything, it plans.
+ */
+const LIST_MOD = String.raw`(?:top|best|hottest|biggest|trending|new|newest|fresh|small|early|graduated|most held|robinhood(?: chain)?|rh|solana|sol|base|eth(?:ereum)?|bsc|bnb)`;
+const LIST_NOUN = String.raw`(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|traders|whales|leaderboard|boards?|theses)`;
+const FOMO_LIST_ASK = new RegExp(
+  String.raw`^(?:(?:the|any|some|latest|current)\s+)?(?:(?:${LIST_MOD}\s+){1,3}${LIST_NOUN}?|${LIST_NOUN})\s*(?:on|from|in) (?:the )?fomo(?:\s+(?:today|rn|right now|now|this week|lately|atm))?(?:\s+(?:pls|please))?[.!]*$`,
+  "u",
+);
+
 export type FomoAsk = { kind: "platform" } | { kind: "theses" } | { kind: "trader-flow" };
 
 /**
@@ -2045,7 +2058,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
   // Names out, and whatever punctuation they leave in front ("@", ",").
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
   if (!t || COIN_STOP.test(t)) return null;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t);
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t) || FOMO_LIST_ASK.test(t);
   if (!asked) return null;
   if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
   if (FOMO_THESES.test(t)) return { kind: "theses" };
