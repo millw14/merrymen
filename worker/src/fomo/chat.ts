@@ -30,7 +30,19 @@
 
 import type { FomoBroker } from "./contract";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./intent";
-import { evidenceForModel, FOMO_ATTRIBUTION, FOMO_CHAT_RULES, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE, renderAnswer } from "./render";
+import {
+  evidenceForModel,
+  FOMO_ATTRIBUTION,
+  FOMO_CAPABILITIES_GROUP,
+  FOMO_CAPABILITIES_OWNER,
+  FOMO_CHAT_RULES,
+  FOMO_GROUP_OFF,
+  FOMO_GROUP_ON,
+  GROUP_DM_DEFLECTION,
+  groupScrub,
+  NOT_PERMISSION_LINE,
+  renderAnswer,
+} from "./render";
 import { applyPlan, applyResult, deserialize, serialize, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
 import type { TokenThesesData, TraderActivityData } from "./tools";
@@ -146,6 +158,15 @@ function failedEnvelope(tool: FomoToolName, now: number, i: number): FomoEnvelop
   };
 }
 
+/** Whether the broker has a provider key behind it; a broker that throws has none it can use. */
+function brokerConfigured(broker: FomoBroker): boolean {
+  try {
+    return broker.configured() === true;
+  } catch {
+    return false;
+  }
+}
+
 async function remember(broker: FomoBroker, key: string, memory: SubjectMemory): Promise<void> {
   try {
     await broker.memory.set(key, serialize(memory));
@@ -173,6 +194,13 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
   const plan = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
   if (!plan) return { handled: false };
+
+  // ANSWERED BY CODE, NOTHING LOOKED UP OR REMEMBERED: what it can do with
+  // Fomo, and, in a group, whether research is on here at all. A group never
+  // hears the owner's own research state; that answer is a direct message's.
+  const said = (text: string): AnswerFomoResult => ({ handled: true, text, plan, envelopes: [], toolsCalled: [], analysis: false, clarification: false });
+  if (plan.intent === "capabilities") return said(audience === "group" ? FOMO_CAPABILITIES_GROUP : FOMO_CAPABILITIES_OWNER);
+  if (audience === "group" && plan.intent === "health") return said(brokerConfigured(broker) ? FOMO_GROUP_ON : FOMO_GROUP_OFF);
 
   // 3. Record what was asked about BEFORE any lookup.
   const step = applyPlan(memory, plan, now);

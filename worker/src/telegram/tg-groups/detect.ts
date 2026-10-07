@@ -1884,7 +1884,14 @@ export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: 
  * in", "pure fomo lol" and "fomo into it" are how people feel, and stay chat.
  */
 const FOMO_PLATFORM =
-  /\b(?:on|from|via|through|using|inside|in the) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b/u;
+  /\b(?:on|from|via|through|using|inside|in the|with|about) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b/u;
+/**
+ * The feature itself: what Fomo is, whether it works, what it can do ("what
+ * is fomo?", "is fomo working", "is fomo on?", "fomo help"). Answered by code
+ * (fomo/chat.ts), so a room asking about it is never told "no clue".
+ */
+const FOMO_ITSELF =
+  /^(?:so |ok |yo |hey )?what(?:'s| is|s) (?:the )?fomo(?: app| thing| research)?(?: all about| about)?[?？!. ]*$|\bhow (?:does|do) (?:the )?fomo(?: app| research| thing)? work\b|\b(?:is|does) (?:the )?fomo(?: \S+)? (?:still )?(?:working|work|up|down|ok|okay|alive|connected|live|running|broken|healthy|online|offline)\b|\b(?:is|does) (?:the )?fomo(?: \S+)? (?:still )?(?:not )?(?:on|set|set up|enabled|active|configured|turned on|switched on)[?？!. ]*$|\bfomo (?:status|health|help|commands|features)\b|\bcan (?:you|u|ya) (?:use|access|read|see|search|look at|talk about|help with) (?:the )?fomo[?？!. ]*$|\btell me about (?:the )?fomo[?？!. ]*$|\b(?:is|are|does) (?:the )?fomo (?:crowd |community |people )?(?:saying|say|think|thinking)\b|\bfomo (?:says|thinks)\b/u;
 /** Written cases for and against a coin: the research's own word, singular or plural. */
 const FOMO_THESES = /\btheses\b|\bthesis (?:on|for|about|behind|of)\b/u;
 /** Traders, as a group, buying or selling: "what are the top traders buying", "are traders selling pepe". */
@@ -1914,7 +1921,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
   if (!t || COIN_STOP.test(t)) return null;
   const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames);
   if (!asked) return null;
-  if (FOMO_PLATFORM.test(t)) return { kind: "platform" };
+  if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
   if (FOMO_THESES.test(t)) return { kind: "theses" };
   if (FOMO_TRADER_FLOW.test(t)) return { kind: "trader-flow" };
   return null;

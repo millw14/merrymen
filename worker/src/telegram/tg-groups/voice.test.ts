@@ -601,6 +601,19 @@ describe("buildPrompt", () => {
     assert.ok(!/[<>]/.test(note![1]!), "nothing in the quote can open or close a fence");
   });
 
+  it("knows Fomo research exists only where it is wired, and points a missed question at it instead of denying it", () => {
+    const off = buildPrompt({ kind: "answer", mood: "normal" }, ctx())!;
+    assert.doesNotMatch(off.system, /FOMO/);
+    const on = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ fomo: true }))!;
+    assert.match(on.system, /FOMO: you can look things up on Fomo \(Fomo Family, a social-trading app/);
+    assert.match(on.system, /never say you can't, don't know it or don't track it/);
+    assert.match(on.system, /"who's the top trader on fomo today\?"/);
+    assert.match(on.system, /Never make up who is on top, what is trending or what anyone holds\./);
+    assert.ok(!/\p{N}/u.test(on.system), "the persona still holds no digit to repeat");
+    const fomoLine = on.system.split("\n").find((l) => l.startsWith("FOMO:"))!;
+    assert.doesNotMatch(fomoLine, /fomo\.family|@|\$/, "nothing the gate would refuse for the model to echo");
+  });
+
   it("a line that replies to nothing it can see carries no note", () => {
     const trigger = { ...line(6, "bob", "lol same"), replyTo: 123_456 };
     const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [trigger] }), trigger }))!;

@@ -33,7 +33,7 @@
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion } from "./fomo/chat";
 import { classifyFomoQuestion } from "./fomo/intent";
-import { FOMO_ATTRIBUTION, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { TgFomoAnswer, TgFomoPort } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
@@ -58,8 +58,8 @@ export const TG_FOMO_NOT_PERMISSION = "This is research, not a signal to buy or 
  */
 export const TG_FOMO_DEFLECTION = "That one is for a direct message, not the group.";
 
-/** Said for a research question when no research is reachable from this agent. */
-export const TG_FOMO_UNAVAILABLE = "Fomo research isn't available here right now.";
+/** Said for a research question when no research is reachable from this agent: the same words as "is fomo working?" off. */
+export const TG_FOMO_UNAVAILABLE = FOMO_GROUP_OFF;
 
 export interface TgFomoPortOptions {
   /** Milliseconds. */

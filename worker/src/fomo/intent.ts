@@ -315,6 +315,8 @@ const FOMO_PLATFORM: readonly RegExp[] = [
   /\bfomo's (?:leaderboard|top|traders?|data|feed|trending|theses|users?|rankings?|community|app)\b/,
   /\bfomo\.family\b|\bfomoapi\b/,
   /\b(?:is|does) (?:the )?fomo(?: \S+)? (?:still )?(?:working|work|up|down|ok|okay|alive|connected|live|running|broken|healthy|online|offline)\b/,
+  // Fomo as the one speaking: "what is fomo saying about PEPE", "fomo thinks".
+  /\b(?:is|are|does) (?:the )?fomo (?:crowd |community |people )?(?:saying|say|think|thinking)\b|\bfomo (?:says|thinks)\b/,
 ];
 
 const COHORT = /\bour (?:\d{1,4} )?(?:traders|cohort|trader list|watched traders|tracked traders)\b|\btraders (?:that |who )?(?:we|you) (?:watch|monitor|track|follow|are watching|are tracking|are monitoring)\b|\b(?:watched|tracked|monitored) traders\b|\bcohort\b/;
@@ -326,7 +328,27 @@ const HEALTH: readonly RegExp[] = [
   /\bfomo (?:is )?not working\b/,
   /\b(?:status|health) (?:of|for) (?:the )?fomo\b/,
   /\b(?:are you|is it|are we) (?:still )?(?:connected to|receiving|getting data from|reading from|hooked up to|seeing) (?:the )?fomo\b/,
+  // Its switch, at the end of the question: "is fomo on?", "is fomo not set?" ("is fomo on robinhood" asks something else).
+  /\b(?:is|does) (?:the )?fomo(?: (?:feed|api|data|stream|connection|integration|app|research))? (?:still )?(?:not )?(?:on|set|set up|enabled|active|configured|turned on|switched on)$/,
 ];
+
+/**
+ * WHAT IT CAN DO WITH FOMO, OR WHAT FOMO IS: "what can you do with fomo",
+ * "what is fomo", "how does fomo work", "can you use fomo?". A fixed answer
+ * (fomo/chat.ts), so a question about the feature never spends a lookup and
+ * never leaves the model to guess what Fomo is. Every shape names Fomo.
+ */
+const CAPABILITIES: readonly RegExp[] = [
+  /\bwhat (?:can|could|do|does|will|would) (?:you|u|ya|it|the bot|merrymen)(?: \S+){0,2}? (?:do|help with|offer|show|look up|find|tell me|answer|check|pull|see|read)\b(?: \S+){0,3}? (?:with|on|about|from|using|via|in|inside|for) (?:the )?fomo\b/,
+  /\bhow (?:can|could|do|does) (?:you|u|ya|it|the bot|merrymen) (?:use|work with|help with|look up|read|check) (?:the )?fomo\b/,
+  /\bhow (?:do|does|can|could) (?:i|we) (?:use|ask about|look up|check) (?:the )?fomo\b/,
+  /^(?:so |ok |yo |hey )?what (?:is|are) (?:the )?fomo(?: app| family| platform| thing| research| integration| feature| lookups?)?(?: all about| about)?$/,
+  /\bcan (?:you|u|ya) (?:use|access|read|see|search|do stuff on|do things on|do anything (?:on|with)|look at|talk about|help with) (?:the )?fomo$/,
+  /\bwhat do (?:you|u|ya) know about (?:the )?fomo$|\btell me about (?:the )?fomo(?: app| research| thing)?$/,
+  /\bfomo (?:help|commands|features|capabilities)\b/,
+];
+/** "How does fomo work": asked before the health check, whose "does fomo work" it contains. */
+const HOW_IT_WORKS = /\bhow (?:does|do) (?:the )?fomo(?: app| research| integration| feature| lookups?| thing)? work\b/;
 
 const UNWATCH = /\b(?:stop|quit|cease|pause) (?:watching|monitoring|tracking)\b|\bunwatch\b|\b(?:remove|drop|take) (?:\S+ ){0,4}?(?:off|from) (?:the |your |my |our )?watch ?list\b|\bno longer (?:watch|monitor|track)\b|\bdo not (?:watch|monitor|track) (?:it|this|that)\b/;
 const WATCH = /^(?:(?:please|pls|plz|ok|okay|yes|yeah|then|so|now|go ahead and|can you|could you|will you|would you)\s+)*(?:start )?(?:watch|monitor|track)\b(?! (?:list|record))|\badd (?:\S+ ){0,4}?to (?:the |your |my |our )?watch ?list\b|\bput (?:\S+ ){0,4}?on (?:the |your |my |our )?watch ?list\b|\bkeep (?:an |a close )?eye on\b|\bstart (?:watching|monitoring|tracking)\b/;
@@ -871,6 +893,7 @@ function detectIntent(s: Signals): Detected | null {
   const tradersWord = TRADERS_WORD.test(c);
   const theses = THESES.test(c) && !OWN_THESES.test(c);
   const saying = any(SAYING, c);
+  if (HOW_IT_WORKS.test(c)) return { intent: "capabilities", inherent: true };
   if (any(HEALTH, c)) return { intent: "health", inherent: true };
   if (UNWATCH.test(c)) return { intent: "unwatch", inherent: false };
   if (WATCH.test(c)) return { intent: "watch", inherent: false };
@@ -919,6 +942,8 @@ function detectIntent(s: Signals): Detected | null {
   }
   if (ANALYSIS.test(c) || RESEARCH_VERB.test(c)) return { intent: "research-coin", inherent: false };
   if (TOKEN_ACTIVITY.test(c)) return { intent: "token-activity", inherent: tradersWord };
+  // Last, so a real lookup in the same words ("what can you find on fomo about the PONS sellers") wins.
+  if (any(CAPABILITIES, c)) return { intent: "capabilities", inherent: true };
   return null;
 }
 
@@ -1305,6 +1330,7 @@ const SUBJECT_NEEDS: Readonly<Record<FomoIntent, Need>> = {
   health: { token: 0, trader: 0 },
   watch: { token: 1, trader: 0 },
   unwatch: { token: 1, trader: 0 },
+  capabilities: { token: 0, trader: 0 },
 };
 
 // ── Tool calls ───────────────────────────────────────────────────────────
@@ -1398,6 +1424,8 @@ function buildCalls(intent: FomoIntent, resolved: readonly SubjectQuery[], o: Ca
       return token ? [call("fomo_watch_coin", { ...token })] : null;
     case "unwatch":
       return token ? [call("fomo_unwatch_coin", { ...token })] : null;
+    case "capabilities":
+      return [];
   }
 }
 

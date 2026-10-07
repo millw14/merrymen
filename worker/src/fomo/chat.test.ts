@@ -15,7 +15,7 @@ import { FomoBudget, MemoryAllowance } from "./budget";
 import { answerFomoQuestion, type AnswerFomoInput, type FomoComposeInput } from "./chat";
 import type { BrokerCallOptions, FomoBroker } from "./contract";
 import { createFomoClient } from "./provider";
-import { FOMO_ATTRIBUTION, GROUP_DM_DEFLECTION, NOT_PERMISSION_LINE } from "./render";
+import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_CAPABILITIES_OWNER, FOMO_GROUP_OFF, FOMO_GROUP_ON, GROUP_DM_DEFLECTION, NOT_PERMISSION_LINE } from "./render";
 import { createFomoService, type FomoInvokeContext, type FomoServiceExt } from "./service";
 import * as store from "./store";
 import { deserialize } from "./subject-memory";
@@ -346,6 +346,38 @@ describe("answerFomoQuestion", () => {
       assert.ok(!/followed|@|0x[0-9a-f]{6}/i.test(r.text), r.text);
       assert.ok(r.text.endsWith(FOMO_ATTRIBUTION), t);
     }
+  });
+
+  it("what it can do with Fomo is a fixed answer: no lookup, nothing remembered, a room's version gate-safe", async () => {
+    const s = await setup();
+    const owner = await s.ask("what can you do with fomo");
+    assert.ok(owner.handled);
+    assert.equal(owner.text, FOMO_CAPABILITIES_OWNER);
+    assert.equal(owner.plan.intent, "capabilities");
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    const group = await s.ask("what is fomo?", g);
+    assert.ok(group.handled);
+    assert.equal(group.text, FOMO_CAPABILITIES_GROUP);
+    assert.doesNotMatch(group.text, /@|\$[A-Za-z]|fomo\.family/);
+    assert.equal(s.brokerCalls.length, 0);
+    assert.equal(s.provider.length, 0);
+    assert.equal(await s.service.memoryGet(OWNER, "conv-1"), null, "nothing remembered");
+  });
+
+  it("in a group, 'is fomo working?' says whether research is on here, never the owner's own research state", async () => {
+    const s = await setup();
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
+    const on = await s.ask("is fomo working?", g);
+    assert.ok(on.handled);
+    assert.equal(on.text, FOMO_GROUP_ON);
+    const off = await s.ask("is fomo not set?", { ...g, broker: { ...s.broker, configured: () => false } });
+    assert.ok(off.handled);
+    assert.equal(off.text, FOMO_GROUP_OFF);
+    assert.equal(s.brokerCalls.length, 0, "no research status is read for a room");
+    // The owner still gets the real status.
+    const owner = await s.ask("is fomo working?");
+    assert.ok(owner.handled);
+    assert.deepEqual(s.brokerCalls.map((c) => c.tool), ["fomo_get_research_status"]);
   });
 
   it("a failed lookup is reported as failed, never as a successful one, and leaves memory unresolved", async () => {

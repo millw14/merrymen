@@ -1260,6 +1260,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.trigger ? { trigger: o.trigger } : {}),
       ...(o.senderName ? { senderName: o.senderName } : {}),
       ...(o.coinName ? { coinName: o.coinName } : {}),
+      // Fomo research is wired here: the persona knows the feature exists, so a question that missed the research lane is pointed at it, never denied.
+      ...(fomoNow() !== null ? { fomo: true } : {}),
       nowMs: clock(),
       rand,
     };

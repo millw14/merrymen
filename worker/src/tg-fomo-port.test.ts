@@ -28,7 +28,7 @@ import { createDirectBroker } from "./fomo/broker";
 import { FomoBudget, MemoryAllowance } from "./fomo/budget";
 import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import { createFomoClient } from "./fomo/provider";
-import { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } from "./fomo/render";
+import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_GROUP_ON, NOT_PERMISSION_LINE } from "./fomo/render";
 import { createFomoService } from "./fomo/service";
 import * as fstore from "./fomo/store";
 import type { FomoToolName } from "./fomo/types";
@@ -512,5 +512,21 @@ describe("a group research question, end to end", () => {
     assert.equal(trending.length, 2);
     assert.match(trending[1]!, /\n1\. PONS on robinhood, market cap \$2\.1M\n/);
     assert.ok(trending[1]!.endsWith(TG_FOMO_SOURCE));
+
+    // The lines the room actually asked on 2026-10-07, answered by code with no lookup.
+    const looked = s.calls.length;
+    clock += 120_000;
+    s.clock.now += 120_000;
+    groups.onMessage(msg("pine what can you do with fomo"));
+    await groups.drain();
+    clock += 120_000;
+    s.clock.now += 120_000;
+    groups.onMessage(msg("pine is fomo working"));
+    await groups.drain();
+    const said = tg.texts(GROUP);
+    assert.equal(said.length, 4);
+    assert.equal(said[2], FOMO_CAPABILITIES_GROUP);
+    assert.equal(said[3], FOMO_GROUP_ON);
+    assert.equal(s.calls.length, looked, "neither cost a lookup");
   });
 });
