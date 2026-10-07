@@ -558,6 +558,9 @@ prints one of:
   - `unrecorded`: the report names no transaction, or no report was given.
 - `COMMITTED, THEN REVERTED repair <id> …`: it committed and has since been
   reverted. It exits 0.
+- `repair <id> … in more than one state …`: some receipts say `applied` and
+  some `reverted`, which one revert transaction never leaves. Escalate. It
+  exits 2.
 
 Receipts that match the report while the server says the transaction
 aborted, or is still open, contradict each other. The check refuses
