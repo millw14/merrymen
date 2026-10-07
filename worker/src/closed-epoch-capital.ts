@@ -94,9 +94,9 @@ import { hasChainIdentityIndex, inspectChainIdentityIndex, verifyInserted } from
 import { heldResetEvent } from "./held-reset";
 import { ownerOperationOf, type OwnerOperationReading } from "./owner-operations";
 import {
-  admittedSince, ANCHOR_MARGIN_SEC, BACKUP_REF, BALANCE_OF_SELECTOR, BOOKING_CONFIRMATIONS, BOOKINGS_TABLE, BookingRefused, canonical, casFacts, digestOf,
-  existingColumns, existingTables, factsStillMissing, FLOW_COLUMNS, gapChainOf, holdOf, patiently, readAdmissionState, readBookingSnapshot, sameRow,
-  storedRow, unixSec, type AdmissionState, type BookingSnapshot, type ChainEvidence, type Dialect, type FlowProposal, type TxEvidence,
+  admittedSince, ANCHOR_MARGIN_SEC, BACKUP_REF, BALANCE_OF_SELECTOR, BOOKING_CONFIRMATIONS, BOOKINGS_TABLE, BookingRefused, canonical, casFacts, currentXact, digestOf,
+  existingColumns, existingTables, factsStillMissing, FLOW_COLUMNS, gapChainOf, holdOf, isServerXact, patiently, readAdmissionState, readBookingSnapshot, sameRow,
+  storedRow, unixSec, type AdmissionState, type BookingSnapshot, type ChainEvidence, type Dialect, type FlowProposal, type ServerXact, type TxEvidence,
 } from "./chain-gap-booking";
 
 export const CLOSED_EPOCH_FORMAT = "merrymen.closed-epoch-capital.v1";
@@ -1528,6 +1528,19 @@ export interface RepairApplyReport {
   admission: AdmissionState;
   fingerprints: { before: Fingerprints; after: Fingerprints };
   actions: RepairActionRecord[];
+  /**
+   * The database it was applied to, as the plan names it (the shell's targetDigest: host, port and name, which the preview digest
+   * binds). A look at its receipts, or a revert, pointed at another database would find no receipt there; the shell refuses that before
+   * it connects. It binds the URL's spelling, not the server: `xact` binds the server.
+   */
+  target: string;
+  /**
+   * THE APPLY'S OWN TRANSACTION, AS THE SERVER NAMES IT (chain-gap-booking.ts currentXact): its id and the server's system identifier,
+   * read inside it after every receipt and before the report is handed over, so before the COMMIT is sent. What the receipts check asks
+   * the server about when no receipt is visible: only its word that this transaction aborted proves the apply never committed. Absent on
+   * sqlite and on a server without the transaction-status functions, whose missing receipts then prove nothing.
+   */
+  xact?: ServerXact;
   reportDigest: string;
 }
 
@@ -1553,7 +1566,9 @@ const floorPreimage = (f: FloorRow) => ({ agent_id: f.agentId, mode: f.mode, sym
  * stale basis and floors are deleted by exact pre-image; then the
  * postconditions; then one receipt per action. `persist` is handed the
  * report BEFORE the commit (the CLI writes and fsyncs its file there), so a
- * commit is never without its report.
+ * commit is never without its report; the report names the database
+ * (target) and, on Postgres, the transaction itself (xact, read just
+ * before), which is what settles a commit whose answer is lost.
  */
 export async function applyClosedEpoch(db: Db, plan: ClosedEpochPlan, o: {
   confirm: string; backupRef: string; dialect: Dialect; nowMs: number; repairId?: string; persist?: (report: RepairApplyReport) => void | Promise<void>;
@@ -1705,10 +1720,12 @@ export async function applyClosedEpoch(db: Db, plan: ClosedEpochPlan, o: {
         .run(repairId, plan.tenant, account, epoch, chainId, a.action, a.evidenceKey, a.table, a.rowKey, canonical(a.row), a.rowDigest, plan.previewDigest, o.backupRef,
           canonical(admission), canonical(fingerprints), appliedAtMs);
     }
+    // Which transaction this is, as the server names it: what the receipts check asks the server about if the COMMIT's answer is lost.
+    const xact = await currentXact(tx, o.dialect);
     const body = { format: CLOSED_EPOCH_APPLY_FORMAT, repairId, tenant: plan.tenant, account, chainId, epoch, previewDigest: plan.previewDigest, backupRef: o.backupRef,
-      appliedAtMs, admission, fingerprints, actions };
+      appliedAtMs, admission, fingerprints, actions, target: plan.target, ...(xact ? { xact } : {}) };
     const report: RepairApplyReport = { ...body, format: CLOSED_EPOCH_APPLY_FORMAT, reportDigest: digestOf(body) };
-    // THE REPORT BEFORE THE COMMIT: a commit is never without it.
+    // THE REPORT BEFORE THE COMMIT, naming its database and its own transaction: a commit is never without it.
     await o.persist?.(report);
     return report;
   });
@@ -1728,6 +1745,8 @@ export function parseRepairReport(text: string): RepairApplyReport {
     || r.actions.some((a) => digestOf(a.row) !== a.rowDigest) || !Number.isSafeInteger(r.appliedAtMs)) {
     throw new BookingRefused("report", "the apply report's actions do not verify");
   }
+  if (typeof r.target !== "string" || !r.target) throw new BookingRefused("report", "the apply report does not name the database it was applied to (target)");
+  if (r.xact !== undefined && !isServerXact(r.xact)) throw new BookingRefused("report", "the apply report's xact does not name a transaction and a server");
   return r;
 }
 

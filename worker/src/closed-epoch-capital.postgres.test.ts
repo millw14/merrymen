@@ -35,7 +35,7 @@ import { ensureLedgerResumeSchema } from "./ledger-import";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused, gapChainOf } from "./chain-gap-booking";
 import { OWNER_OPERATION_COLUMNS, ownerOperationOf, ownerOperationRow } from "./owner-operations";
-import { CliError, pgClientDb, type PgClient } from "./chain-gap-booking-cli";
+import { CliError, pgClientDb, targetDigest, type PgClient } from "./chain-gap-booking-cli";
 import { REPAIRS_TABLE } from "./closed-epoch-capital";
 import { connectClosedEpoch, main } from "./closed-epoch-capital-cli";
 
@@ -205,6 +205,11 @@ test("Postgres: preview read-only, apply once (SERIALIZABLE), revert exactly —
   const applied = path.join(tmp, "apply.json");
   assert.equal(await main(["--tenant", TENANT, "--epoch", "1", "--apply", "--confirm", plan.previewDigest, "--backup-ref", "pg-local-drill", "--output", applied], env, deps), 0, printed.join("\n"));
   const report = JSON.parse(readFileSync(applied, "utf8")) as { repairId: string; actions: Array<{ action: string; evidenceKey: string }> };
+  // THE REPORT NAMES THIS DATABASE AND THE APPLY'S OWN TRANSACTION, as the server names it, read inside it before the COMMIT.
+  const named = JSON.parse(readFileSync(applied, "utf8")) as { target: string; xact: { id: string; system: string | null } };
+  assert.equal(named.target, targetDigest(scoped.toString()));
+  assert.equal(named.xact.system, String((await setup.query("SELECT system_identifier::text AS s FROM pg_control_system()")).rows[0]!.s));
+  assert.equal((await setup.query("SELECT pg_xact_status($1::xid8) AS s", [named.xact.id])).rows[0]!.s, "committed");
   const flows = (await setup.query("SELECT direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at FROM flows ORDER BY id")).rows;
   assert.deepEqual(flows.map((f) => [f.direction, Number(f.amount_usdg), f.tx_hash, Number(f.block_number), Number(f.log_index), f.source, Number(f.epoch), Number(f.chain_id), Number(f.at)]), [
     ["in", 145.499004, DEPOSIT_TX, 64045884, 0, "chain-log", 1, 4663, DEPOSIT_AT], ["out", 144.81853, SWEEP_TX, 64819173, 7, "chain-log", 1, 4663, SWEEP_AT]]);

@@ -30,8 +30,8 @@ import { CHAIN_REFUSAL } from "./ledger-resume";
 import { CASH } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
 import { BookingRefused } from "./chain-gap-booking";
-import { CliError, sourceFingerprint, type PgClient } from "./chain-gap-booking-cli";
-import { REPAIRS_TABLE } from "./closed-epoch-capital";
+import { CliError, sourceFingerprint, targetDigest, type PgClient } from "./chain-gap-booking-cli";
+import { parseRepairReport, REPAIRS_TABLE } from "./closed-epoch-capital";
 import { closedEpochSourceFingerprint, createClosedEpochRpc, failureLine, main, parseClosedEpochArgs } from "./closed-epoch-capital-cli";
 
 const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-closed-epoch-cli-")));
@@ -61,19 +61,49 @@ const DEPOSIT_TX = h32("the deposit"), SWEEP_TX = h32("the sweep"), SWEEP_OP = h
  * agent row moved after the snapshot). `commitTag`: the tag a COMMIT that took effect is answered with.
  */
 type StandIn = { loseCommitAck?: boolean; commitFails?: { committed: boolean; error: unknown }; commitAnsweredRollback?: boolean; afterCommit?: () => void;
-  level?: string; conflictOn?: RegExp; commitTag?: string };
+  beforeCommit?: () => void | Promise<void>; level?: string; conflictOn?: RegExp; commitTag?: string };
 /** A driver's error with a SQLSTATE, its message carrying the URL (as a real one can): the shell must never print it. */
 const pgError = (code: string | undefined, message = `server said no on ${DATABASE_URL}`) => Object.assign(new Error(message), code === undefined ? {} : { code });
+/**
+ * The server behind the stand-in, shared by every connection to one sqlite database as a server's are: the transaction ids it hands a
+ * write transaction, what became of each (pg_xact_status's answers: a COMMIT marks it committed, a ROLLBACK aborted), its system
+ * identifier and its version. A test rewrites them to play what sqlite cannot: a transaction the server has not yet ended ("in progress"),
+ * one it no longer remembers (deleted), one that ended after a read's snapshot, another server.
+ */
+interface StandInServer { next: number; status: Map<string, string>; system: string | null; version: string; endedAfterSnapshot: Set<string> }
+const servers = new WeakMap<DatabaseSync, StandInServer>();
+function serverOf(raw: DatabaseSync): StandInServer {
+  let s = servers.get(raw);
+  if (!s) servers.set(raw, s = { next: 950, status: new Map(), system: "7693842931899834703", version: "170000", endedAfterSnapshot: new Set() });
+  return s;
+}
+
 function pgOverSqlite(raw: DatabaseSync, said: string[], o: StandIn = {}): PgClient {
-  let readOnly = false, serializable = false;
+  let readOnly = false, serializable = false, xid: string | null = null;
+  const server = serverOf(raw);
+  const ended = (how: "committed" | "aborted") => { if (xid !== null) server.status.set(xid, how); xid = null; };
   const empty = { rows: [], rowCount: 0 };
   return {
     async query(sql, params = []) {
       said.push(sql);
       if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") { raw.exec("BEGIN"); raw.exec("PRAGMA query_only = ON"); readOnly = true; return empty; }
-      if (sql === "BEGIN ISOLATION LEVEL SERIALIZABLE") { raw.exec("BEGIN"); serializable = true; return empty; }
+      if (sql === "BEGIN ISOLATION LEVEL SERIALIZABLE") {
+        raw.exec("BEGIN"); serializable = true;
+        xid = String(++server.next); server.status.set(xid, "in progress");
+        return empty;
+      }
       if (/current_setting\('transaction_read_only'\)/.test(sql)) {
         return { rows: [{ ro: readOnly ? "on" : "off", iso: readOnly ? "repeatable read" : serializable ? o.level ?? "serializable" : "read committed" }], rowCount: 1 };
+      }
+      // The server's transaction-status functions (chain-gap-booking.ts currentXact, xactStatusOf), from serverOf(raw).
+      if (sql === "SELECT current_setting('server_version_num') AS v") return { rows: [{ v: server.version }], rowCount: 1 };
+      if (/^SELECT pg_current_xact_id\(\)::text AS id, CASE WHEN has_function_privilege\('pg_control_system\(\)', 'EXECUTE'\)/.test(sql)) {
+        return { rows: [{ id: xid, system: server.system }], rowCount: 1 };
+      }
+      if (/^WITH x AS \(SELECT \$1::xid8 AS id, pg_current_snapshot\(\) AS s\)[\s\S]*pg_xact_status\(x\.id\)[\s\S]*pg_visible_in_snapshot\(x\.id, x\.s\)/.test(sql)) {
+        const id = String(params[0]), seen = BigInt(id) <= BigInt(server.next), status = seen ? server.status.get(id) ?? null : null;
+        const visible = (status === "committed" || status === "aborted") && !server.endedAfterSnapshot.has(id);
+        return { rows: [{ system: server.system, seen, status, visible }], rowCount: 1 };
       }
       if (o.conflictOn?.test(sql)) throw pgError("40001", "could not serialize access due to concurrent update");
       if (/FROM information_schema\.tables WHERE table_schema = current_schema\(\)/.test(sql)) {
@@ -92,16 +122,24 @@ function pgOverSqlite(raw: DatabaseSync, said: string[], o: StandIn = {}): PgCli
         rowCount: 1 } : empty;
       }
       if (sql === "COMMIT") {
+        await o.beforeCommit?.();
         // A failed COMMIT: the server either made it durable and the answer was lost, or refused it and rolled back.
-        if (o.commitFails) { raw.exec(o.commitFails.committed ? "COMMIT" : "ROLLBACK"); serializable = false; throw o.commitFails.error; }
+        if (o.commitFails) {
+          raw.exec(o.commitFails.committed ? "COMMIT" : "ROLLBACK"); serializable = false; ended(o.commitFails.committed ? "committed" : "aborted");
+          throw o.commitFails.error;
+        }
         // A transaction that had already failed: Postgres ends it, and answers COMMIT with ROLLBACK's tag (node-postgres's `command`).
-        if (o.commitAnsweredRollback) { raw.exec("ROLLBACK"); serializable = false; return { ...empty, command: "ROLLBACK" }; }
-        raw.exec("COMMIT"); serializable = false;
+        if (o.commitAnsweredRollback) { raw.exec("ROLLBACK"); serializable = false; ended("aborted"); return { ...empty, command: "ROLLBACK" }; }
+        raw.exec("COMMIT"); serializable = false; ended("committed");
         o.afterCommit?.();
         if (o.loseCommitAck) throw new Error("Connection terminated unexpectedly");
         return o.commitTag === undefined ? empty : { ...empty, command: o.commitTag };
       }
-      if (sql === "ROLLBACK") { raw.exec("ROLLBACK"); serializable = false; if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; } return empty; }
+      if (sql === "ROLLBACK") {
+        raw.exec("ROLLBACK"); serializable = false; ended("aborted");
+        if (readOnly) { raw.exec("PRAGMA query_only = OFF"); readOnly = false; }
+        return empty;
+      }
       const stmt = raw.prepare(sql.replace(/\$(\d+)/g, "?$1"));
       if (/^\s*(SELECT|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
         const rows = (stmt.all(...(params as never[])) as Array<Record<string, unknown>>).map((r) => ({ ...r }));
@@ -439,6 +477,25 @@ describe("whole runs through the shell", () => {
     assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 2, "nothing changed");
     assert.equal(await main(["--revert", applied, "--output", reverted], env, run(raw, [], [])), 0, "run again, it reverts");
     assert.equal(count(raw, "SELECT COUNT(*) AS n FROM flows"), 0);
+  });
+
+  it("the apply report names its database and its own transaction, on disk before the COMMIT is sent; a revert pointed at another database is refused before it connects", async () => {
+    const { raw, digest } = await reviewed();
+    const applied = path.join(dir, "named-apply.json");
+    let beforeCommit: unknown;
+    assert.equal(await main(applyArgs(digest, applied), env, run(raw, [], [], { beforeCommit: () => { beforeCommit = JSON.parse(readFileSync(applied, "utf8")); } })), 0);
+    const report = parseRepairReport(readFileSync(applied, "utf8"));
+    assert.equal(report.target, targetDigest(DATABASE_URL));
+    assert.ok(report.xact && /^[1-9][0-9]*$/.test(report.xact.id), JSON.stringify(report.xact));
+    assert.deepEqual([report.xact!.system, serverOf(raw).status.get(report.xact!.id)], [serverOf(raw).system, "committed"], "the apply's own transaction, as the server names it");
+    assert.deepEqual(beforeCommit, JSON.parse(readFileSync(applied, "utf8")), "the whole report was on disk before the COMMIT was sent");
+    // Pointed at another database (by host, port and name): refused before it connects, nothing changed, no file.
+    let connected = 0;
+    const elsewhere = { DATABASE_URL: DATABASE_URL.replace("/railway", "/staging") };
+    const out = path.join(dir, "named-revert-elsewhere.json");
+    await assert.rejects(main(["--revert", applied, "--output", out], elsewhere, { ...run(raw, [], []), connect: async () => { connected++; throw new Error("connected"); } }),
+      (e: unknown) => e instanceof BookingRefused && e.code === "target" && /applied to another database/.test(e.message));
+    assert.deepEqual([connected, existsSync(out), count(raw, "SELECT COUNT(*) AS n FROM flows")], [0, false, 2], "nothing read, written or changed");
   });
 
   it("a revert that committed says so whatever happens after: its report not written, or its console line broken; it never removes the report", async () => {

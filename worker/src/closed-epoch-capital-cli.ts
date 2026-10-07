@@ -197,6 +197,18 @@ function closeOpenReport(fd: number, file: string): void {
 
 // ── the run ──────────────────────────────────────────────────────────────────
 
+/**
+ * The report names the database it was applied to by its URL (host, port and name: the target the preview digest binds). A revert, or a
+ * look at its receipts, anywhere else would find no receipt, so it is refused before it connects. That binds the spelling, not the
+ * server; the server is bound by the report's xact (its system identifier), which decides whether no receipt can ever be NOT COMMITTED.
+ */
+function sameDatabase(report: RepairApplyReport, databaseUrl: string): void {
+  if (report.target !== targetDigest(databaseUrl)) {
+    throw new BookingRefused("target", "the apply report was applied to another database (by host, port and name) than DATABASE_URL names: nothing was read or " +
+      "written — point DATABASE_URL at the database it was applied to");
+  }
+}
+
 export interface ClosedEpochCliDeps {
   connect?: (url: string, readOnly: boolean) => Promise<PgClient>;
   rpc?: RpcCall;
@@ -263,6 +275,7 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       let text: string;
       try { text = readFileSync(options.report, "utf8"); } catch { throw new CliError("report-unreadable"); }
       report = parseRepairReport(text);
+      sameDatabase(report, env.DATABASE_URL);
     }
     const repairId = report?.repairId ?? (options as { repairId: string }).repairId;
     const fd = createReportFile(options.output);

@@ -32,7 +32,7 @@ import { CHAIN_REFUSAL, chainGapCheck, knownChainFacts, planAttestedSeed, readPg
 import { flowDuplicateReport } from "./distinct-flows";
 import { CASH, ENTRYPOINT, GRANT_PONS_CLASS, GRANT_TRENCHER, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { RpcCall } from "./chain-capital";
-import { BookingRefused, BOOKINGS_TABLE, canonical, gapChainOf } from "./chain-gap-booking";
+import { BookingRefused, BOOKINGS_TABLE, canonical, digestOf, gapChainOf } from "./chain-gap-booking";
 import {
   applyClosedEpoch, capitalProvenance, CLOSED_EPOCH_APPLY_FORMAT, classifyEvent, closedEpochLines, homeOfEvidence, parseRepairReport, planClosedEpoch, readClosedEpochChain,
   readClosedEpochSnapshot, readRepairReceipts, REPAIRS_TABLE, retainedHomeVerdict, revertClosedEpoch, signersOf, staleBasisPlan, type ClosedEpochPlan, type RepairApplyReport,
@@ -1220,6 +1220,26 @@ describe("revert, decided by what the database recorded", () => {
       .run(SPELLED, h32("a later deposit"), NOW);
     await assert.rejects(revert(n.b, n.report), refusedWith("moved"));
     assert.equal(allFlows(n.b.raw).length, flows.length + 1, "nothing changed");
+  });
+
+  it("a report names its database and, on Postgres, its own transaction: one naming no database, or a transaction in any other shape, is not a report", async () => {
+    const { report } = await applied();
+    assert.equal(report.target, TARGET, "the plan's target, which the preview digest binds");
+    assert.equal(report.xact, undefined, "sqlite names no transaction");
+    const seal = (change: (r: Record<string, unknown>) => void) => {
+      const { reportDigest: _d, ...body } = JSON.parse(JSON.stringify(report)) as Record<string, unknown>;
+      change(body);
+      return JSON.stringify({ ...body, reportDigest: digestOf(body) });
+    };
+    for (const ok of [{ id: "741", system: "7693842931899834703" }, { id: "18446744073709551615", system: "-1" }, { id: "5", system: null }]) {
+      assert.deepEqual(parseRepairReport(seal((r) => { r.xact = ok; })).xact, ok);
+    }
+    for (const bad of [null, "741", {}, { id: "741" }, { id: 741, system: null }, { id: "0", system: null }, { id: "741", system: 7 }, { id: "741", system: null, extra: 1 }]) {
+      assert.throws(() => parseRepairReport(seal((r) => { r.xact = bad; })), refusedWith("report", /xact/), JSON.stringify(bad));
+    }
+    for (const target of [undefined, "", 7]) {
+      assert.throws(() => parseRepairReport(seal((r) => { if (target === undefined) delete r.target; else r.target = target; })), refusedWith("report", /target/), String(target));
+    }
   });
 
   it("a report that does not verify reverts nothing; the receipts alone (a lost report) revert exactly", async () => {

@@ -436,7 +436,12 @@ the confirmed digest. Then, in **one `SERIALIZABLE` transaction**:
    answered before the boundary, nothing seeded for a flat token, one spelling.
 9. It records one receipt per action in `closed_epoch_repairs`, with the
    tenant's admission state and the before/after fingerprints.
-10. It writes the apply report to `--output` and fsyncs it, **before** the
+10. It asks the server which transaction this is: its id
+    (`pg_current_xact_id()`, or `txid_current()` before PostgreSQL 13) and
+    the server's system identifier (`pg_control_system()`). Both go in the
+    report as `xact`, beside the database the plan was made for (`target`:
+    host, port and name, as the preview digest binds them).
+11. It writes the apply report to `--output` and fsyncs it, **before** the
     commit.
 
 The first apply creates `closed_epoch_repairs` (additive DDL). Receipts are
@@ -505,6 +510,10 @@ or, without the report (the receipts hold everything):
 node --import tsx worker/src/closed-epoch-capital-cli.ts \
   --revert-repair <repair id> --output /absolute/private-dir/<tenant>-revert.json
 ```
+
+With the report, it first checks that `DATABASE_URL` names the database the
+report was applied to (`target`). If it names another, it refuses with
+`target` before it connects, and nothing is read or written.
 
 In one transaction, the revert:
 
