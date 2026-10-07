@@ -41,6 +41,7 @@ import { __resetMemoryPassThrottleForTest } from "./telegram/tg-groups/memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
 import type { CoinLook, NominateResult, TgCoinsPort, TrencherReadiness } from "./telegram/tg-groups/types";
 import { classifyFomoQuestion } from "./fomo/intent";
+import { parseSlash } from "./telegram/interpreter";
 import { isMutationTool } from "./fomo/tools";
 import {
   createTgFomoPort,
@@ -429,6 +430,9 @@ describe("the owner's moves", () => {
     // Every suggested question plans the intended read when she types it.
     assert.equal(classifyFomoQuestion("what is trader CryptoKaleo holding", { memory: null, now: NOW })?.intent, "trader-holdings");
     assert.equal(classifyFomoQuestion("what has trader frankdegods bought this week", { memory: null, now: NOW })?.intent, "trader-activity");
+    // And a tail, in her DM only: the command parses to the tail it names.
+    assert.match(a.moves.dm, /<code>\/tail CryptoKaleo 3h<\/code>/);
+    assert.deepEqual(parseSlash("/tail CryptoKaleo 3h"), { kind: "tail", handle: "CryptoKaleo", hours: 3, clamped: false });
   });
 
   it("after a coin board: /buy only where /buy resolves, the CA to post for a review on Robinhood Chain, watch and theses", async () => {

@@ -191,8 +191,13 @@ export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean 
       const lines = ["<b>Your moves on these Fomo traders</b> (ask me here):"];
       for (const h of handles) {
         const e = escHtml(h);
-        lines.push(`• <code>what is trader ${e} holding</code> · <code>what has trader ${e} bought this week</code>`);
+        // /tail asks first (a confirm card in this DM), then tells her what
+        // they buy, sell or post for those hours (docs/fomo.md "Tailing a
+        // trader"). DM only: the room hears none of this.
+        const tail = h.length >= 2 ? ` · <code>/tail ${e} 3h</code>` : "";
+        lines.push(`• <code>what is trader ${e} holding</code> · <code>what has trader ${e} bought this week</code>${tail}`);
       }
+      lines.push("/tail asks you first, then tells you here what they buy, sell or post for those hours.");
       return { kind: "traders", room: "sent the trade moves for these to your DM.", dm: lines.join("\n") };
     }
     const coins = d.tokens.map((t) => coinOf(t.token, t.label)).filter((c): c is MoveCoin => c !== null).slice(0, MOVES_ROWS);
