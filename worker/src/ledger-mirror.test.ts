@@ -838,6 +838,58 @@ describe("an empty child is not a flat book", () => {
   });
 });
 
+/**
+ * WHAT HAPPENS TO A STALE SHARED BASIS ONCE A TENANT IS ADMITTED ON A NEW
+ * BOOK (chain-gap-booking.ts staleBasisVerdict rests on this). Registration
+ * (ledger-import.ts registerAttestedGapSource) archives and DELETES the
+ * tenant's mirror_state rows and leaves the snapshot tables as they were; the
+ * new book starts empty and gets only what the seeds put in. So the first
+ * pass with nothing to compare a cursor against cannot read the book as
+ * rebuilt, and once the worker has armed (its agents row) that pass replaces
+ * the agent's cost_basis with the book's own — a basis the book never had is
+ * gone. Before the worker arms the snapshot is not touched, and a row under
+ * another spelling of the account is never matched by the delete.
+ */
+describe("a stale shared basis after an attested registration", () => {
+  const STALE = "INSERT INTO cost_basis VALUES (?, 'live', 'TSLA', '23370235163310797', '8332500', 1790028733)";
+  /** A new, empty book: no rows at all until its worker arms and writes its agents row. */
+  const newBook = () => {
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(SRC);
+    return raw;
+  };
+
+  it("THE FIRST PASS AFTER THE WORKER ARMS DELETES IT: no cursor survived registration, so the book is not read as rebuilt", async () => {
+    const shared = mem(DEST);
+    await shared.prepare(STALE).run("0xagent");
+    const book = newBook();
+    // Before its worker arms there is no agents row, and the snapshot is left as registration left it.
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(await count(shared, "cost_basis"), 1, "untouched before the worker arms");
+    book.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent', 'Shogun', 1)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(r.restarted, undefined, "nothing to rewind: registration removed the cursors");
+    assert.equal(r.failed, undefined);
+    assert.equal(await count(shared, "cost_basis"), 0, "the basis the new book never had is gone");
+  });
+
+  it("but a row spelled otherwise than the worker's account survives that pass, and a cursor left behind would read the book as rebuilt and keep it", async () => {
+    const spelled = mem(DEST);
+    await spelled.prepare(STALE).run("0xAGENT");
+    const book = newBook();
+    book.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent', 'Shogun', 1)");
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared: spelled });
+    assert.equal(await count(spelled, "cost_basis"), 1, "the delete matches the account exactly as the worker spells it");
+
+    const cursor = mem(DEST);
+    await cursor.prepare(STALE).run("0xagent");
+    await cursor.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ('0xten', 'trades', 9, 100, 100)").run();
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared: cursor });
+    assert.ok(r.restarted, "a lost book's cursor past the new book's ids reads as a rebuild");
+    assert.equal(await count(cursor, "cost_basis"), 1, "and a rebuilt book's pass deletes no basis");
+  });
+});
+
 describe("a rebuilt child does not empty the book it has merely forgotten", () => {
   it("KEEPS THE SHARED POSITIONS WHEN THE REBUILT CHILD HAS NONE YET", async () => {
     // Positions are re-derived from the chain every tick, so this heals itself
