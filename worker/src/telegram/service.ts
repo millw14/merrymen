@@ -76,7 +76,7 @@ import { FOMO_ATTRIBUTION, renderEnvelope } from "../fomo/render";
 import type { ResearchStatusData } from "../fomo/tools";
 import type { FomoEnvelope } from "../fomo/types";
 import type { FollowReadiness } from "../fomo-child";
-import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText, type FomoTailsState } from "./fomo-tail";
+import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText, tailCardText, tailHandle, tailListText, TAIL_MUTED_LINE, type FomoTailsState } from "./fomo-tail";
 import type { ExtendTailData } from "../fomo/tools";
 import { TAIL_CAP_SPENT_LINE } from "../fomo/tail-notices";
 import { resolveLlm } from "../llm";
@@ -1319,7 +1319,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           considerOffered: canConsider(readiness),
           expiresAt: now() + TAIL_CONFIRM_TTL_SEC,
         });
-        return tailCardText({ handle, hours: cmd.hours, clamped: cmd.clamped, take: cmd.take === true, nowMs: Date.now(), readiness });
+        return tailCardText({ handle, hours: cmd.hours, clamped: cmd.clamped, take: cmd.take === true, nowMs: Date.now(), readiness, muted: cfg.telegramNotifyEnabled !== true });
       },
       start: async (p, considerAsked) => {
         const b = brokerNow();
@@ -1334,7 +1334,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         console.log(`[telegram] fomo tail started from the owner's DM (${consider ? "consider" : "tell only"})`);
         // A tail continued inside 15 minutes of its end keeps its notice count (docs/fomo.md "caps carry on").
         const capped = await tailCapNote(p.userId);
-        return `${considerAsked && !consider ? `${text}\n\n${esc(considerRefusedNote(readiness, p.considerOffered))}` : text}${capped}`;
+        // Her "all Telegram messages" is off at the press: said, never worked around.
+        const muted = cfg.telegramNotifyEnabled !== true ? `\n\n${esc(TAIL_MUTED_LINE)}` : "";
+        return `${considerAsked && !consider ? `${text}\n\n${esc(considerRefusedNote(readiness, p.considerOffered))}` : text}${capped}${muted}`;
       },
       stop: async (handle) => {
         const b = brokerNow();
@@ -1350,7 +1352,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const d = env.data as ResearchStatusData | null;
         if (!d) return esc("I couldn't read your tails right now. Try again in a minute.");
         const rows = (Array.isArray(d.tails) ? d.tails : []).map((t) => ({ handle: t.handle, expiresAtMs: t.expiresAtMs, consider: t.consider === true }));
-        return tailListText(rows, d.tailsOff === true, { which: which === true });
+        return tailListText(rows, d.tailsOff === true, { which: which === true, muted: cfg.telegramNotifyEnabled !== true });
       },
     };
   };
@@ -2657,7 +2659,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           ? ext.expiresAtMs <= ext.previousExpiresAtMs ? "Already as long as a tail runs (12 h)" : ext.capped ? "Extended to the 12-hour limit" : "+1h"
           : env.status === "empty" ? "That tail has ended." : "Couldn't extend it right now.";
     await answerCallbackQuery(opts, cb.id, toast);
-    const text = `${tailAnswer(env)}${ext ? await tailCapNote(ext.trader.userId) : ""}`;
+    const text = `${tailAnswer(env)}${ext ? await tailCapNote(ext.trader.userId) : ""}${ext && cfg.telegramNotifyEnabled !== true ? `\n\n${esc(TAIL_MUTED_LINE)}` : ""}`;
     const sent = await sendMessage(opts, cb.chatId, text, { replyToMessageId: cb.messageId, disablePreview: true });
     if (sent.ok) await pushHistory(cb.chatId, "assistant", stripThinkingBlock(text.replace(/<[^>]+>/g, "")));
     console.log(`[telegram] fomo tail ${parsed.action === "stop" ? "stop" : "+1h"} pressed: ${env.status}`);

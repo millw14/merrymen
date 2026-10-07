@@ -73,6 +73,16 @@ export function tailReadinessLine(r: FollowReadiness | null | undefined): string
     : "Following is on, on paper: with “consider their buys”, each buy is one signal into my normal review, and any entry would be a paper trade.";
 }
 
+/**
+ * HER "ALL TELEGRAM MESSAGES" IS OFF (settings telegramNotifyEnabled): the
+ * notifier sends nothing at all, tail notices and end summaries included
+ * (telegram/notifier.ts returns before them). Said, never worked around: the
+ * setting is hers and silences even the warnings about her money, so a tail
+ * must not promise notices it will not send, and must not send them past it.
+ */
+export const TAIL_MUTED_LINE =
+  "Your “all Telegram messages” setting is off (Settings → Advanced settings → Telegram controls), so I won't send you any of these notices, the end summary included, until you turn it back on.";
+
 export interface TailCardInput {
   handle: string;
   hours: number;
@@ -82,6 +92,8 @@ export interface TailCardInput {
   take: boolean;
   nowMs: number;
   readiness: FollowReadiness | null;
+  /** Her "all Telegram messages" is off: the card says no notice will be sent, instead of what she'd get. */
+  muted?: boolean;
 }
 
 /** The card's text (HTML). Its buttons: buttons.ts tailConfirmKeyboard, consider only when canConsider. */
@@ -92,7 +104,9 @@ export function tailCardText(c: TailCardInput): string {
   if (c.clamped) lines.push(`You asked for more than ${TAIL_MAX_HOURS} hours; a tail runs ${TAIL_MAX_HOURS} at most.`);
   lines.push(
     "",
-    "What you'll get, here: each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one and my read of the coin, with Stop and +1h buttons.",
+    c.muted
+      ? esc(TAIL_MUTED_LINE)
+      : "What you'll get, here: each buy, sell or thesis Fomo's live feed shows from them, with their thesis when there is one and my read of the coin, with Stop and +1h buttons.",
     esc(TAIL_COVERAGE_LINE),
     "",
     esc(tailReadinessLine(c.readiness)),
@@ -148,6 +162,8 @@ export interface TailListOpts {
    * nothing has been stopped.
    */
   which?: boolean;
+  /** Her "all Telegram messages" is off: the list says these tails tell her nothing until it is on. */
+  muted?: boolean;
 }
 
 /** /tails: what runs now, plainly. */
@@ -170,6 +186,7 @@ export function tailListText(rows: readonly TailListRow[], tailsOff: boolean, op
     ...ask,
     "👀 <b>Tailing on Fomo</b>",
     ...named.map((r) => `• ${esc(r.name)} until ${tailClock(r.expiresAtMs)}${r.consider ? " (their buys go to my normal review)" : " (tell only)"}`),
+    ...(opts.muted ? [esc(TAIL_MUTED_LINE)] : []),
     esc("/untail <trader> stops one, /untail all stops them all."),
   ].join("\n");
 }

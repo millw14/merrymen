@@ -614,7 +614,13 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   do now (`fomo-child.ts followReadiness`: off, paper, live, or what is in the way, in
   the notices' own words); when her words asked me to take the trade too ("if you like
   it, take it"), that a tail never skips my normal review; and the clamp. Nothing is
-  stored until she presses.
+  stored until she presses. With her "all Telegram messages" off
+  (`telegramNotifyEnabled`), the notifier sends nothing at all, tail notices and end
+  summaries included, so the card says that in place of what she'd get ("Your “all
+  Telegram messages” setting is off …, so I won't send you any of these notices, the
+  end summary included, until you turn it back on."), and so do the press's answer, a
+  +1h and `/tails`. The setting is hers and silences even the warnings about her money:
+  a tail never sends past it.
 - **Its buttons.** "👀 Tell me only" always; "👀 + consider their buys" only when
   following could act (paper or live, no blockers); "✖ No". A press is checked like
   every confirm (her nonce, this exact action, not expired, still the linked owner in

@@ -44,6 +44,7 @@ const { FomoBudget, MemoryAllowance } = await import("../fomo/budget");
 const { createFomoClient } = await import("../fomo/provider");
 const { FOMO_ATTRIBUTION, NOT_PERMISSION_LINE } = await import("../fomo/render");
 const { TAIL_CAP_SPENT_LINE } = await import("../fomo/tail-notices");
+const { TAIL_MUTED_LINE } = await import("./fomo-tail");
 const { createFomoService, runPendingJobs } = await import("../fomo/service");
 const fstore = await import("../fomo/store");
 const { recentChatTurns } = await import("../store");
@@ -206,6 +207,8 @@ async function withDm(
     telegramAgentEnabled: false,
     telegramCapabilities: [],
     telegramMaxActionUsdg: 25,
+    // Her "all Telegram messages" on, as by default (core settings.ts).
+    telegramNotifyEnabled: true,
     customTokens: [],
     ...(opts.llm ? { groqApiKey: "gsk_test_not_a_real_key", groqModel: "test-model" } : {}),
   };
@@ -798,6 +801,28 @@ describe("a Fomo tail in the owner's DM: the card, and nothing until she presses
       const done = await pressLastCard(h, "consider");
       assert.deepEqual(h.fx.calls.at(-1)!.args, { trader: KALEO_ID, hours: 2, consider: false });
       assert.match(done, /Following can't act right now \(entries are paused\)/);
+    });
+  });
+
+  it("her 'all Telegram messages' off: the card, the press, +1h and /tails say no notice will reach her, never what she'd get (review 2026-10-07)", async () => {
+    await withDm({ liveFeed: true, readiness: () => READY }, async (h) => {
+      h.cfg.telegramNotifyEnabled = false;
+      const card = await ask(h, "/tail CryptoKaleo 2h");
+      assert.ok(card.includes(TAIL_MUTED_LINE), card);
+      assert.doesNotMatch(card, /What you'll get, here/);
+      assert.match(TAIL_MUTED_LINE, /won't send you any of these notices, the end summary included, until you turn it back on/);
+      const done = await pressLastCard(h, "tell");
+      assert.match(done, /^Tailing CryptoKaleo/);
+      assert.ok(done.endsWith(TAIL_MUTED_LINE), done);
+      assert.ok((await ask(h, "/tails")).includes(TAIL_MUTED_LINE));
+      h.press(`ftl:ext:${KALEO_ID}`, 77_000);
+      await h.until(() => /now\./.test(h.sentTo(OWNER).at(-1) ?? ""));
+      assert.ok(h.sentTo(OWNER).at(-1)!.endsWith(TAIL_MUTED_LINE));
+      // On again: the card says what she'll get, and nothing about the setting.
+      h.cfg.telegramNotifyEnabled = true;
+      const again = await ask(h, "/tail CryptoKaleo 3h");
+      assert.match(again, /What you'll get, here/);
+      assert.ok(!again.includes(TAIL_MUTED_LINE));
     });
   });
 

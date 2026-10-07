@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { TAIL_COVERAGE_LINE } from "../fomo/render";
-import { canConsider, considerRefusedNote, tailAmbiguousText, tailCardText, tailListText, tailReadinessLine } from "./fomo-tail";
+import { canConsider, considerRefusedNote, tailAmbiguousText, tailCardText, tailListText, tailReadinessLine, TAIL_MUTED_LINE } from "./fomo-tail";
 
 const T0 = Date.UTC(2026, 9, 7, 15, 5);
 const plain = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
@@ -27,6 +27,16 @@ describe("the tail's confirm card", () => {
     assert.match(able, /only enter if my own checks and the Brain agree/);
     const unable = plain(tailCardText({ handle: "unipcs", hours: 3, clamped: false, take: true, nowMs: T0, readiness: { mode: "off", blockers: ["follow-off"] } }));
     assert.match(unable, /a tail never skips my normal review, and right now following can't act on it/);
+  });
+
+  it("her 'all Telegram messages' off: the card says no notice will be sent instead of what she'd get (review 2026-10-07)", () => {
+    const muted = plain(tailCardText({ handle: "unipcs", hours: 3, clamped: false, take: false, nowMs: T0, readiness: null, muted: true }));
+    assert.ok(muted.includes(TAIL_MUTED_LINE));
+    assert.doesNotMatch(muted, /What you'll get, here/);
+    const on = plain(tailCardText({ handle: "unipcs", hours: 3, clamped: false, take: false, nowMs: T0, readiness: null, muted: false }));
+    assert.match(on, /What you'll get, here/);
+    assert.ok(!on.includes(TAIL_MUTED_LINE));
+    assert.ok(plain(tailListText([{ handle: "unipcs", expiresAtMs: T0, consider: false }], false, { muted: true })).includes(TAIL_MUTED_LINE));
   });
 
   it("a handle that is not a plain one is never shown", () => {
