@@ -514,7 +514,14 @@ export interface TgFomoAnswer {
   theses?: TgThesesMaterial;
   /** Only when the owner asked (`owner` on the ask): her next moves. */
   moves?: TgFomoMoves;
-  /** A deflection made before anything was looked up: it spends none of the room's research answers. */
+  /**
+   * It bought nothing from the provider: a deflection made before anything
+   * was looked up, or an answer whose every read was a kept copy (or refused
+   * before any call). It spends none of the room's research answers, unless
+   * the handler then made a paraphrase call for it (handler.ts fomoAnswer):
+   * only answers that read from the provider, or called the model, count
+   * toward the room's six per ten minutes.
+   */
   free?: boolean;
   /**
    * How the lookups behind it went, from the research's own envelopes:

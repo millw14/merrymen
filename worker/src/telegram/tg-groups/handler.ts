@@ -2660,7 +2660,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * HOW OFTEN THE RESEARCH MAY BE ASKED, like the desk's looks: each ask can
    * spend the owner's research credits, so a chat gets at most FOMO_PER_CHAT
    * and the agent FOMO_PER_AGENT in any ten minutes. An ask the research does
-   * not take (not a research question) gives its slot back.
+   * not take (not a research question) gives its slot back, and so does an
+   * answer that bought nothing (TgFomoAnswer.free: every read a kept copy, no
+   * paraphrase call): only answers that read from the provider count.
    */
   const FOMO_WINDOW_MS = 10 * MIN;
   const FOMO_PER_CHAT = 6;
@@ -2877,6 +2879,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // D5): one checked call inside what is left of the deadline, kept for
     // half an hour; anything short of that is the code digest (r.text).
     let body = r.text;
+    // Whether the paraphrase made (or may have made) a model call: such an answer keeps its slot.
+    let thesesFree = true;
     if (!r.deflect && r.theses) {
       const stopWording = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
       const worded = await wordTheses({
@@ -2898,7 +2902,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // Counts and kinds only: never a phrase, a coin or a sample.
       log(`[tg-groups] theses ${worded.why}${worded.dropped ? ` (${worded.dropped} phrase(s) dropped)` : ""}`);
       if (worded.lines) body = worded.lines.join("\n");
+      if (worded.why === "worded" || worded.why === "dropped" || worded.why === "no-answer") thesesFree = false;
     }
+    // AN ANSWER THAT BOUGHT NOTHING (every read a kept copy, no paraphrase
+    // call) gives its slot back: the room's six per ten minutes bound what is
+    // spent, and a re-ask or a board cut from the same read spends nothing.
+    if (!r.deflect && r.free === true && thesesFree) refund();
     // HER MOVES: the commands go to her DM first, and the room hears that they
     // went only when the DM landed (never a claim that is not true), at most
     // once per room and kind in MOVES_EVERY_MS.

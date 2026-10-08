@@ -1388,6 +1388,71 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     }
   });
 
+  it("22:58-23:05 at live times in one room: kept copies give their slot back, so 23:04 is answered and 23:05 is not 'enough lookups' (review r2)", async () => {
+    const BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
+    const EARNED = "CryptoKaleo on trades opened or closed in the last 24h (source-reported, realised to date): made the most on ROO +$4.2k; lost the most on plumber -$10.9k.";
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const w = await world();
+    const at = (h: number, m: number, sec = 0) => Date.UTC(2026, 9, 7, h, m, sec);
+    let now = Date.UTC(2026, 9, 7, 22, 59) - 60_000;
+    const step = async (when: number, text: string, under?: { id: number; text: string }) => {
+      const out = await w.say(text, under, when - now);
+      now = when;
+      return out;
+    };
+    const read = (): number => w.s.provider.length;
+    const board = await step(at(22, 58), "shogun what's trending on fomo?");
+    assert.match(board, /^Trending on Fomo/, board);
+    let before = read();
+    const again = await step(at(22, 59), "I said what's trending on fomo", w.lastOwn());
+    assert.match(again, /^Trending on Fomo/, again);
+    assert.equal(read(), before, "the re-ask is the kept copy");
+    const theses = await step(at(23, 0), "what are the theses on $PONS?", w.lastOwn());
+    assert.match(theses, /^What traders on Fomo are saying about PONS/, theses);
+    before = read();
+    const about = await step(at(23, 0, 30), "tell me what it's about from thesis", w.lastOwn());
+    assert.match(about, /^What traders on Fomo are saying about PONS/, about);
+    assert.equal(read(), before, "the theses again: the kept copy, no paid refresh from a room (D8)");
+    const hood = await step(at(23, 1), "what about robinhood coins on fomo", w.lastOwn());
+    assert.match(hood, /^Trending on Fomo, Robinhood Chain only/, hood);
+    w.picks.push({ action: "fomo_board", board: "trending", chain: "robinhood" });
+    const sendIt = await step(at(23, 3, 30), "send it?", w.lastOwn());
+    assert.match(sendIt, /^Trending on Fomo, Robinhood Chain only/, sendIt);
+    assert.equal(read(), before, "the board cut to a chain and asked again: the same read");
+    // 23:04: the headline case of decision 1, in her own sequence.
+    const best = await step(at(23, 4), "@Merrymanme_bot who's the best trader on fomo today and what did he make money on");
+    assert.notEqual(best, BUSY);
+    assert.ok(best.split("\n").includes(EARNED), best);
+    assert.match(best, /^Top traders on Fomo, last 24h/, best);
+    w.picks.push({ action: "fomo_coin", coin: "merrymen", aspect: "theses" });
+    const merrymen = await step(at(23, 5), "fetch the thesis for merrymen on fomo", w.lastOwn());
+    assert.ok(merrymen.length > 0);
+    assert.ok(!merrymen.includes(BUSY), merrymen);
+    for (const t of w.tg.texts(GROUP)) for (const l of t.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
+  });
+
+  it("a room's six answers per ten minutes are spent by reads, never by kept copies: seven re-asks of one board, then a new read still answers (review r2)", async () => {
+    const BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
+    const w = await world();
+    const first = await w.say("shogun what's trending on fomo?", undefined, 60_000, OWNER_ID + 1);
+    assert.match(first, /^Trending on Fomo/);
+    const reads = w.s.provider.length;
+    for (let i = 0; i < 7; i++) {
+      const again = await w.say("shogun what's trending on fomo?", undefined, 20_000, OWNER_ID + 2 + i);
+      assert.match(again, /^Trending on Fomo/, `re-ask ${i + 1}: ${again}`);
+    }
+    assert.equal(w.s.provider.length, reads, "every re-ask was the kept copy");
+    const traders = await w.say("shogun who are the top traders on fomo today?", undefined, 20_000, OWNER_ID + 20);
+    assert.notEqual(traders, BUSY);
+    assert.match(traders, /^Top traders on Fomo/, traders);
+    // Reads still count: four more fresh reads make six in the window, and the seventh is told the room has had enough.
+    const outs: string[] = [];
+    for (const [i, q] of ["shogun who are the top traders on fomo this week?", "shogun who are the top traders on fomo this month?", "shogun who are the top traders on fomo of all time?", "shogun what are the theses on $PONS?", "shogun what is trader CryptoKaleo holding on fomo?"].entries()) {
+      outs.push(await w.say(q, undefined, 20_000, OWNER_ID + 30 + i));
+    }
+    assert.deepEqual(outs.map((o) => o === BUSY), [false, false, false, false, true], outs.join("\n---\n"));
+  });
+
   it("after a board, 'the second one', '#1' and 'he' are its rows, answered in the room; a 'he' after several asks which (WP8b)", async () => {
     const w = await world();
     await w.say("shogun who are the top traders on fomo today?");

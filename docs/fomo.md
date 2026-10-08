@@ -791,6 +791,11 @@ Surface limits:
   per model answer, because the poll loop is serial. The model loop never starts deep
   research; that comes only from the planner on explicit owner wording.
 - **Telegram groups:** 6 research answers per chat and 30 per agent per 10 minutes.
+  Only answers that read from the provider (or call the group model for a thesis
+  paraphrase) count: an answer whose every read was a kept copy, a deflection made
+  before any lookup, or a refusal made before any call gives its slot back
+  (`TgFomoAnswer.free`), so a re-ask, or a board cut to a chain from the same read, does
+  not use up the room's answers. A failed read keeps its slot.
   An addressed line reaches the research when it names the platform in a question or a
   request, or as a short list ask with no question mark ("trending on fomo", "robinhood
   chain coins on fomo", "top traders on fomo today": list words and the platform, nothing

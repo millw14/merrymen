@@ -852,7 +852,10 @@ and sells in the window and their positions; or their winners and losers,
 all provider-reported and in short money. Never whether Merrymen watches or
 follows them, and no P&L figures from Merrymen's own watched-trader record
 (whether a room saw them would say who it watches). Each is a lookup and
-spends one of the room's research answers. Nothing about a trader goes to
+spends one of the room's research answers when it reads from the provider;
+only answers that read from the provider (or call the model for a thesis
+paraphrase) count toward the six per ten minutes, so a re-ask or a board cut
+from a kept copy costs the room nothing. Nothing about a trader goes to
 her DM any more: the DM handoff (`TgOwnerPort.research`) was retired with
 this decision; her moves after a board, and her tail card, still go there.
 

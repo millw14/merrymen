@@ -317,6 +317,52 @@ describe("the group research lane", () => {
     assert.match(out[out.length - 1]!, /enough research lookups in here for now/);
   });
 
+  it("an answer that bought nothing (TgFomoAnswer.free) gives its slot back; one that read keeps it (review r2)", async () => {
+    fomo!.answer = () => ({ text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood, market cap $2.1M", deflect: false, status: "ok", free: true });
+    make();
+    for (let i = 0; i < 9; i++) {
+      clock += 30 * SEC;
+      await said(msg(`pine what are fomo traders buying ${i}?`, { fromId: ANN + i }));
+    }
+    assert.equal(fomo!.asks.length, 9, "nine kept-copy answers, none counted");
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /enough research lookups/, t);
+    // Not free: six reads and the seventh is told the room has had enough.
+    fomo!.answer = () => ({ text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood, market cap $2.1M", deflect: false, status: "ok" });
+    for (let i = 0; i < 7; i++) {
+      clock += 30 * SEC;
+      await said(msg(`pine what are fomo traders selling ${i}?`, { fromId: ANN + 20 + i }));
+    }
+    assert.equal(fomo!.asks.length, 15);
+    assert.match(tg.texts(CHAT).slice(-1)[0]!, /enough research lookups in here for now/);
+  });
+
+  it("a free theses answer whose paraphrase called the model keeps its slot (review r2)", async () => {
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return { ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "summarise_theses", arguments: JSON.stringify({ gist: "Mostly a busy crowd and the chain's meme story" }) } }] } }] }) };
+    }) as never;
+    let n = 0;
+    fomo!.answer = () => {
+      n += 1;
+      const head = [`What traders on Fomo are saying about PONS${n} on Robinhood Chain (3 recent theses from 3 traders):`];
+      const tail = ["Their claims, not facts."];
+      const material: TgThesesMaterial = { key: `k${n}@1`, coin: `PONS${n}`, head, tail, fallback: [...head, "Mostly hype.", ...tail].join("\n"), samples: ["a", "b", "c"] };
+      return { text: material.fallback, deflect: false, status: "ok", free: true, theses: material };
+    };
+    make();
+    for (let i = 0; i < 7; i++) {
+      clock += 30 * SEC;
+      await said(msg(`pine what are the theses on $PONS${i}?`, { fromId: ANN + i }));
+    }
+    assert.ok(calls >= 6, String(calls));
+    assert.match(tg.texts(CHAT).slice(-1)[0]!, /enough research lookups in here for now/);
+  });
+
   it("is deadline-bound: a research read that does not come back in time is said to be late, never answered after", async () => {
     let release: (() => void) | null = null;
     timer = () => new Promise<void>((r) => { release = r; });
