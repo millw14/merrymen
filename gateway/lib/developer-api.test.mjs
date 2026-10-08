@@ -399,6 +399,15 @@ test("a key lists the rate its account's plan gives it, not the one stored when 
   assert.equal((await f.call("/plan", { tier: "loaf", confirm: true }, s.session)).json.plan.id, "loaf");
   assert.deepEqual((await f.call("/keys", undefined, s.session)).json.keys.map(k => k.rate_per_min), [120]);
   assert.equal((await f.call("/test", { key: minted.json.key }, s.session)).json.rate_per_min, 120, "the list and the key test agree");
+  const next = await f.call("/keys", { name: "Second app" }, s.session);
+  assert.deepEqual([next.status, next.json.rate_per_min], [201, 120], "a key minted on a paid plan is answered with the plan's rate, not the 30 it stores");
+
+  // Under enforce, the same: one per-account rate, whichever key asks.
+  const e = await fixture({ mode: "enforce" }), es = await e.onboard();
+  await e.grant(400_000);
+  assert.equal((await e.call("/plan", { tier: "loaf", confirm: true }, es.session)).json.plan.id, "loaf");
+  const enforced = await e.call("/keys", { name: "App" }, es.session);
+  assert.deepEqual([enforced.status, enforced.json.rate_per_min], [201, 120]);
 });
 test("with billing off, a key is minted without an account, exactly as before billing", async () => {
   // Gateway and site deploy separately. A gateway on billing off, behind a

@@ -7,7 +7,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createBilling, isPlatformFailure, openLedger, parseBillingConfig, quotaHeaders, replayLedger, upgradeRaw } from "./billing.mjs";
@@ -956,6 +956,32 @@ test("usage is saved atomically, survives a restart, is broken down by key, and 
   await f.billing.flush();
   const pruned = JSON.parse(await readFile(usageFile, "utf8"));
   assert.deepEqual(Object.keys(pruned.windows), [`${OWNER}|${START + 2 * P}`]);
+});
+
+test("usage.json is replaced by a rename, never written in place: a failed write leaves the last save whole", async () => {
+  const f = await fixture();
+  await f.account();
+  const usageFile = path.join(f.dir, "usage.json");
+  f.billing.reserve({ owner: OWNER, keyId: "k" });
+  await f.billing.flush();
+  const first = await stat(usageFile);
+  const saved = await readFile(usageFile, "utf8");
+  f.billing.reserve({ owner: OWNER, keyId: "k" });
+  await f.billing.flush();
+  assert.notEqual((await stat(usageFile)).ino, first.ino, "a new file renamed over the old one");
+  const second = await readFile(usageFile, "utf8");
+  assert.notEqual(second, saved);
+  // The next write cannot be made (its temp path is taken by a directory):
+  // the file a restart reads is still the whole last save, not a torn one.
+  await mkdir(`${usageFile}.tmp`);
+  f.billing.reserve({ owner: OWNER, keyId: "k" });
+  await f.billing.flush();
+  assert.equal(await readFile(usageFile, "utf8"), second);
+  assert.match(f.logs.join("\n"), /could not write usage\.json/);
+  // And the count is not lost: it is written once the path is free.
+  await rm(`${usageFile}.tmp`, { recursive: true });
+  await f.billing.flush();
+  assert.equal(JSON.parse(await readFile(usageFile, "utf8")).windows[`${OWNER}|${START}`].total, 3);
 });
 
 test("an unreadable usage.json starts the counts empty and says so", async () => {

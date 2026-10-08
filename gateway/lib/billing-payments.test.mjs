@@ -182,6 +182,17 @@ test("each transfer that is not a payment is refused with its reason, and nothin
   assert.equal(f.view().credit_raw, "0");
 });
 
+test("the start block itself is open: a transfer mined in it is credited, one block earlier is not", async () => {
+  const f = await fixture({ startBlock: 100 });
+  const before = f.pay({ blockNumber: 99 });
+  const first = f.pay({ blockNumber: 100 });
+  f.settleChain();
+  assert.deepEqual([(await f.submit(before)).status, (await f.submit(before)).json.error.reason], [422, "before_start_block"]);
+  const r = await f.submit(first);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual([r.json.payment.block_number, r.json.credit_tokens], [100, "100000"]);
+});
+
 test("refusals that need no chain read: a malformed hash, no account, no treasury, billing off", async () => {
   const f = await fixture();
   for (const bad of ["", "0x1234", `0x${"g".repeat(64)}`, `${"a".repeat(66)}`, 42, null]) {
