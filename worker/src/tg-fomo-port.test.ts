@@ -284,6 +284,17 @@ describe("createTgFomoPort", () => {
     for (const l of who!.text.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, l);
   });
 
+  it("'new launches on fomo on robinhood chain?' is the newly graduated board on that chain, never the trending one (review r4)", async () => {
+    // The provider's graduated board, with the trending fixture's coins (PONS on Robinhood Chain among them).
+    const s = await setup({ trending: () => ({ ...fixture("token-board-trending"), board: "graduated" }) });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "shogun new launches on fomo on robinhood chain?", chatId: GROUP, selfNames: ["shogun"] });
+    assert.ok(a && !a.deflect);
+    assert.deepEqual(s.calls.map((c) => [c.tool, c.args.board, c.args.chain]), [["fomo_get_rankings", "graduated-tokens", "robinhood"]]);
+    assert.match(a.text, /^Newly graduated on Fomo/, a.text);
+    assert.doesNotMatch(a.text, /^Trending/, a.text);
+  });
+
   it("after a trader board, 'what's #1 trending' and 'the number one coin' are no row of it", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });

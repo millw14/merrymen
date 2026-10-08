@@ -733,6 +733,20 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     for (const [q, args] of want) assert.deepEqual(callsOf(q), [["fomo_get_rankings", args]], q);
   });
 
+  it("new, newest or latest launches on a chain are the newly graduated board, never the trending one (review r4)", () => {
+    const want: Array<[string, Record<string, unknown>]> = [
+      ["new launches on fomo on robinhood chain?", { chain: "robinhood", board: "graduated-tokens" }],
+      ["newest coins on fomo on robinhood?", { chain: "robinhood", board: "graduated-tokens" }],
+      ["fresh launches on robinhood on fomo", { chain: "robinhood", board: "graduated-tokens" }],
+      ["hot robinhood coins on fomo?", { chain: "robinhood", board: "trending-tokens" }],
+      ["trending new launches on fomo on base", { chain: "base", board: "trending-tokens" }],
+    ];
+    for (const [q, args] of want) assert.deepEqual(callsOf(q), [["fomo_get_rankings", args]], q);
+    // "latest" also asks for a fresh read; the board is still the graduated one.
+    assert.equal(plan("latest launches on fomo on base?")!.toolCalls[0]!.args.board, "graduated-tokens");
+    assert.equal(plan("what are the latest coins on fomo on solana")!.toolCalls[0]!.args.board, "graduated-tokens");
+  });
+
   it("a chain the line leaves out is no chain at all: the board on every chain", () => {
     for (const q of [
       "what's trending on fomo other than robinhood coins",

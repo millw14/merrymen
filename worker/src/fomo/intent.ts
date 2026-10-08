@@ -1590,8 +1590,20 @@ const ASK_RANK_WINDOW = "Trader rankings cover 24h, 7d, 30d or all time. Which w
 const ASK_WATCH = "Which coin should I watch? Send its ticker or contract address.";
 const ASK_UNWATCH = "Which coin should I stop watching? Send its ticker or contract address.";
 
+/**
+ * Which coin board a line asks for. Launches and recency ("new launches on
+ * robinhood", "newest coins on base", "latest launches") are the newly
+ * graduated board, unless the line also says trending, hot or popular: the
+ * trending board answered "new launches on fomo on robinhood chain?" with
+ * the chain's popular coins, a different question (review r4). A recency
+ * word counts only before a list noun: "and the latest?" is a re-ask.
+ */
+const LAUNCH_WORDS = /\blaunch(?:es|ed)?\b|\b(?:newest|newly|latest|fresh|freshest)\s+(?:\S+\s+){0,2}?(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|listings|ones)\b/;
 function boardOf(c: string): RankingBoard {
-  return /\bgraduat/.test(c) ? "graduated-tokens" : /\bmost[- ]held\b/.test(c) ? "most-held-tokens" : "trending-tokens";
+  if (/\bgraduat/.test(c)) return "graduated-tokens";
+  if (/\bmost[- ]held\b/.test(c)) return "most-held-tokens";
+  if (LAUNCH_WORDS.test(c) && !/\b(?:trending|hot|hottest|popular)\b/.test(c)) return "graduated-tokens";
+  return "trending-tokens";
 }
 
 /** Intents whose answer is a list of trades, where a side filter means something. */

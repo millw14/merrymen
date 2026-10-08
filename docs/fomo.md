@@ -862,7 +862,9 @@ Surface limits:
   CACHE (31st)." (positions in words: the gate reads "#12" as a handle), or "None of the
   top 100 trending coins are on Robinhood Chain, the chain I trade." (again with how many
   rows could not be placed on a chain, which may be that chain's). The owner's DM answer gets the same
-  line under its ten rows. Fomo's trader board has no chain filter: asked for one, the
+  line under its ten rows. Launches and recency ("new launches on robinhood chain",
+  "newest coins on base", "latest launches") are the newly graduated board, on a chain
+  or not, unless the line also says trending, hot or popular. Fomo's trader board has no chain filter: asked for one, the
   board says "Fomo's trader board covers every chain; it can't be narrowed to one." The
   crowd ("what are fomo traders buying?") also names the feed page's top three coins by
   distinct buyers (sellers, for selling), as counts, never who. "What can you do with fomo" and "is fomo working?" are answered by code with no
