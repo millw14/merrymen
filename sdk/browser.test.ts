@@ -14,7 +14,9 @@ import {
   type LocalAccount, type PrepareMerrymanOptions, type StoredGrant, type PartnerEnrollmentClaim,
 } from "./browser";
 import { partnerEnrollmentMessage } from "../packages/core/src/partner-enrollment";
+import { carriesOwnerKey } from "../packages/core/src/hosted";
 import { prepareAgentGrant } from "../web/src/lib/session";
+import { checkCanonicalWall } from "../web/src/lib/canonical-wall";
 import { createPartnerEnrollmentService } from "../web/src/lib/partner-enrollment";
 import { FilePartnerStore } from "../web/src/lib/partner-store";
 import { PartnerError } from "../web/src/lib/partner-bridge";
@@ -202,5 +204,71 @@ describe("prepareMerryman", () => {
     const trench = await withStubChain(ACCOUNT, () => prepareAgentGrant(owner, { caps: CAPS, onStatus: () => {}, trencherFactory: TRENCHER_FACTORY }));
     assert.equal(trench.trencherFactoryAddress, TRENCHER_FACTORY);
     await assert.rejects(activate(trench, owner), partnerCode("bad_request"));
+  });
+
+  it("produces a grant partner activation accepts and stores unmodified", async () => {
+    // The default mainnet mint is the fullest grant the SDK makes: it seals the
+    // platform class vault, so its vault fields are what activation must accept.
+    const a = attempt();
+    const grant = await a.grant;
+    assert.ok(grant.ponsClassVaultAddress && grant.ponsClassVaultFactoryAddress, "the class vault was sealed");
+    const { result, stored } = await activate(grant, a.owner);
+    assert.equal(result.connection.status, "linked");
+    assert.equal(result.smartAccount, ACCOUNT);
+    assert.deepEqual(stored, {
+      ...grant,
+      owner: grant.owner.toLowerCase(),
+      smartAccount: grant.smartAccount.toLowerCase(),
+      sessionKeyAddress: grant.sessionKeyAddress.toLowerCase(),
+    });
+  });
+
+  it("seals the caps it was given into the wall, not only into the metadata", async () => {
+    const wide = { perTradeUsdg: 25, dailyUsdg: 25, expiryDays: 30, maxDrawdownPct: 100, maxOpsPerDay: 1 };
+    const [narrow, broad] = [await attempt().grant, await attempt({ caps: wide }).grant];
+    assert.deepEqual(narrow.caps, CAPS);
+    assert.deepEqual(broad.caps, wide);
+    assert.equal(broad.expiresAt - broad.grantedAt, wide.expiryDays * 86_400);
+    assert.deepEqual(checkCanonicalWall({ ...broad }), { ok: true });
+    // The server rebuilds the wall from the grant's caps: claiming the other
+    // grant's caps over this signed wall does not match it.
+    assert.equal(checkCanonicalWall({ ...narrow, caps: wide }).ok, false);
+    assert.equal(checkCanonicalWall({ ...broad, caps: CAPS }).ok, false);
+  });
+
+  it("signs for mainnet by default and for the testnet when asked, and activation keeps that chain", async () => {
+    assert.equal((await attempt().grant).chainId, 4663);
+    const testnet = attempt({ chainId: 46630 });
+    const grant = await testnet.grant;
+    assert.equal(grant.chainId, 46630);
+    const { result } = await activate(grant, testnet.owner);
+    assert.equal(result.chainId, 46630);
+  });
+
+  it("reports progress through onStatus, and the last status precedes the owner's one signature", async () => {
+    const a = attempt();
+    await a.grant;
+    assert.equal(a.log[0], "status:deriving your smart account…");
+    assert.deepEqual(a.log.slice(-2), ["status:sealing the permission grant…", "sign:typed-data"]);
+    assert.ok(a.log.every((entry) => entry !== "status:"), "every status has text");
+    // onStatus is optional.
+    const quiet = wallet();
+    await withStubChain(ACCOUNT, () => prepareMerryman({ owner: quiet.owner, caps: CAPS }));
+    assert.deepEqual(quiet.log, ["sign:typed-data"]);
+  });
+
+  it("asks the owner wallet only to sign, and never emits an owner key", async () => {
+    // The owner here is a signer with no key behind it that the SDK could reach.
+    const a = attempt();
+    const grant = await a.grant;
+    assert.deepEqual(a.log.filter((entry) => entry.startsWith("sign:")), ["sign:typed-data"], "one permission signature, nothing else");
+    assert.equal(grant.owner, a.owner.address);
+    assert.equal(grant.demoOwnerPrivateKey, undefined);
+    assert.equal(carriesOwnerKey(grant), false);
+    const emitted = JSON.stringify([grant, a.log]).toLowerCase();
+    assert.ok(!emitted.includes(a.key.slice(2).toLowerCase()), "the owner key appears nowhere in the grant or statuses");
+    assert.notEqual(grant.sessionKeyAddress.toLowerCase(), a.owner.address.toLowerCase());
+    // An address alone is not a signer: refused before anything is read or shown.
+    await refusedUpFront({ owner: { address: a.owner.address } }, /explicit wallet signer/);
   });
 });
