@@ -80,7 +80,8 @@ export const THESES_SYSTEM = [
   "gist: one short sentence on what most of it is about.",
   "for: up to three short points they make in its favour.",
   "against: up to three short worries they raise.",
-  "waiting_on: up to two things they say holders are waiting for, never an airdrop or a claim.",
+  "waiting_on: up to two things they say holders are waiting for, never a claim.",
+  "In every list and the gist: never an airdrop, a giveaway, a holder snapshot or rewards to holders.",
   "Leave a list empty rather than invent anything.",
 ].join("\n");
 
@@ -193,6 +194,15 @@ const OUT_ADVICE = new RegExp(
  */
 const WAIT_CLAIM =
   /\bclaim(?:s|able|ing)?\b|\bsnapshots?\b|\bgive\s*-?\s*aways?\b|\bdistribut\w*|\brewards?\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
+/**
+ * The airdrop story without the word, in ANY slot (OUT_LURE has the word):
+ * "holders get a giveaway soon", "rewards for holders", "the holder
+ * snapshot". A coin's "giveaway meme" stays, and so does the bare
+ * "distribution" ("worries about the token distribution" is supply
+ * concentration); a claim stays a waiting-on-only drop (WAIT_CLAIM).
+ */
+const OUT_HANDOUT =
+  /\bsnapshots?\b|\bgive\s*-?\s*aways?\b(?!\s+memes?\b)|\brewards?\b|\breward\s+distribution\b|\bdistribut\w*\s+(?:to|among|for)\s+holders\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
 const WAITING_LABEL = "Waiting on: ";
 
 /**
@@ -240,7 +250,7 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   const bare = coin ? p.replace(coin, " ") : p;
   if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || FIGURE_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p) || namesSomeone(bare, m)) return null;
   if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p) || OUT_ADVICE.test(p)) return null;
-  if (label === WAITING_LABEL && WAIT_CLAIM.test(p)) return null;
+  if (OUT_HANDOUT.test(p) || (label === WAITING_LABEL && WAIT_CLAIM.test(p))) return null;
   const w = words(p);
   for (let i = 0; i + COPY_RUN <= w.length; i++) if (runs.has(w.slice(i, i + COPY_RUN).join(" "))) return null;
   const v = admitTgLine(`${label}${p}.`, { agentName, kind: "answer", recentOwn: [] });

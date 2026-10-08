@@ -223,6 +223,20 @@ describe("checkWording", () => {
     assert.equal(good.dropped, 0, "the good fixture keeps every phrase");
   });
 
+  it("the airdrop story without the word is dropped in every slot, not only what is waited on (review r3)", () => {
+    for (const x of ["holders get a giveaway soon", "rewards for holders", "the holder snapshot", "a reward distribution to holders", "the dev sending tokens to holders", "tokens dropped to holders"]) {
+      const w = checkWording({ for: [x], against: [x] }, MATERIAL, "Shogun").wording;
+      assert.deepEqual([...w.forIt, ...w.against], [], x);
+    }
+    for (const g of ["Mostly about the holder snapshot and token distribution", "Mostly about the giveaway for holders"]) {
+      assert.equal(checkWording({ gist: g }, MATERIAL, "Shogun").wording.gist, null, g);
+    }
+    // Supply concentration and a coin's giveaway meme stay.
+    assert.deepEqual(checkWording({ against: ["worries about the token distribution"] }, MATERIAL, "Shogun").wording.against, ["worries about the token distribution"]);
+    assert.equal(checkWording({ gist: "Mostly the PS5 giveaway meme and gamers piling in" }, { ...MATERIAL, coin: "PS5" }, "Shogun").wording.gist, "Mostly the PS5 giveaway meme and gamers piling in");
+    assert.match(THESES_SYSTEM, /In every list and the gist: never an airdrop, a giveaway, a holder snapshot or rewards to holders/);
+  });
+
   it("a crime laid at the dev's or the team's door is never said back; a worry stays (review r2)", () => {
     const accusing = {
       gist: "Mostly a fight over whether the dev stole the liquidity",

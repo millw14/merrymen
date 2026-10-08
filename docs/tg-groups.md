@@ -1417,9 +1417,11 @@ halves, quarters, dozens, doubled, tripled, halved and "bil": "half the
 supply", "price doubled since launch", "a bil market cap"; "the second wave
 of buyers" is no figure), no
 $, @, # or link, no quotation mark, no five-word run shared with any sample,
-nothing about instructions, nothing waited on that is a claim, a holder
-snapshot, a giveaway, a reward distribution or tokens sent to holders (the
-airdrop story without the word), no crime or misconduct laid at anyone's
+nothing about instructions, nothing waited on that is a claim, and in no
+phrase (the gist, for, against or waited on) a holder snapshot, a giveaway,
+rewards or a reward distribution, or tokens sent or dropped to holders (the
+airdrop story without the word; a coin's "giveaway meme" and "worries about
+the token distribution" stay), no crime or misconduct laid at anyone's
 door (theft, a stolen or pulled pool, walking or making off with the money,
 laundering, wash trading, manipulation, insider trading, a cash grab, lying
 or liars, dumping or selling on followers or holders, a criminal: worries
