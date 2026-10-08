@@ -117,6 +117,7 @@ let gateway: ChildProcess;
 let gatewayOrigin = "";
 let gatewayLog = "";
 
+/** A port free when probed; startGateway says why that is not enough. */
 function freePort(): Promise<number> {
   return new Promise(resolve => {
     const probe = createServer().listen(0, "127.0.0.1", () => {
@@ -140,6 +141,72 @@ function reapOnSignal(signal: NodeJS.Signals) {
   // Then die of the signal as this process would have, unless something else
   // (a test runner running files in-process) is there to handle it.
   if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+}
+
+/** Kill the current gateway and wait until it has gone. */
+async function stopGateway() {
+  const child = gateway;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise(resolve => child.once("exit", resolve));
+  child.kill();
+  await exited;
+}
+
+/**
+ * Spawn server.mjs and return once 127.0.0.1:<port> answers as this file's
+ * gateway. freePort()'s port was free when probed, not necessarily when the
+ * gateway binds it: another test file in a parallel run (partner-cross.test.mjs
+ * probes ports the same way) can take it in between. On Linux the gateway then
+ * exits with EADDRINUSE. On macOS it binds the wildcard address beside the
+ * other socket and still reports "listening", while 127.0.0.1:<port> reaches
+ * the other server. So a start counts only once the port answers /meta with
+ * this partner's own key id, and a lost port is retried on a fresh one.
+ */
+async function startGateway(dataDir: string) {
+  let lost = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const port = await freePort();
+    gatewayOrigin = `http://127.0.0.1:${port}`;
+    gatewayLog = "";
+    const child = gateway = spawn(process.execPath, [fileURLToPath(new URL("../../../gateway/server.mjs", import.meta.url))], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        // Only what the deployment sets: nothing from this process leaks in (no KV, no keys).
+        PATH: process.env.PATH,
+        NODE_ENV: "test", // unread by the gateway; Next's ProcessEnv type requires it
+        PORT: String(port),
+        MERRYMEN_DATA_DIR: dataDir,
+        MERRYMEN_PARTNER_KEYS: JSON.stringify([{ keyId: PARTNER.keyId, appId: APP_ID, name: APP_NAME,
+          hash: hashSecret(GATEWAY_SECRET, PARTNER.secret), scopes: ["read:agents", "write:agents", "chat:agents"], status: "active" }]),
+        MERRYMEN_PARTNER_BRIDGE_SECRET: BRIDGE_SECRET,
+        MERRYMEN_PARTNER_APP_ORIGIN: webOrigin,
+        MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused-by-partner-routes",
+        MERRYMEN_GATEWAY_SECRET: GATEWAY_SECRET,
+        // Partner routes never read the chain; nothing listens here.
+        MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9",
+      },
+    });
+    child.stderr!.on("data", chunk => { gatewayLog += chunk; });
+    lost = await new Promise<string>((resolve, reject) => {
+      let out = "";
+      const timer = setTimeout(() => reject(new Error(`gateway did not start: ${out}${gatewayLog}`)), 10_000);
+      child.stdout!.on("data", chunk => { out += chunk; if (out.includes("listening")) { clearTimeout(timer); resolve(""); } });
+      // "close", not "exit": by then the crash report on stderr has been read.
+      child.once("close", code => {
+        clearTimeout(timer);
+        if (gatewayLog.includes("EADDRINUSE")) resolve(`port ${port} was taken before the gateway bound it`);
+        else reject(new Error(`gateway exited ${code}: ${out}${gatewayLog}`));
+      });
+    });
+    if (lost) continue;
+    const answer = await fetch(`${gatewayOrigin}/partner/v1/meta`, { headers: { authorization: `Bearer ${PARTNER.key}` }, signal: AbortSignal.timeout(5_000) })
+      .then(async r => r.status === 200 ? String((await r.json()).key_id) : `HTTP ${r.status} ${(await r.text()).slice(0, 200)}`)
+      .catch((error: unknown) => String(error));
+    if (answer === PARTNER.keyId) return;
+    lost = `127.0.0.1:${port} did not answer as this file's gateway: ${answer}`;
+    await stopGateway();
+  }
+  throw new Error(`no gateway after 3 ports; the last one: ${lost}\n${gatewayLog}`);
 }
 
 before(async () => {
@@ -197,44 +264,13 @@ before(async () => {
 
   const dataDir = mkdtempSync(join(tmpdir(), "merrymen-partner-e2e-gateway-"));
   cleanup.push(dataDir);
-  const port = await freePort();
-  gatewayOrigin = `http://127.0.0.1:${port}`;
-  gateway = spawn(process.execPath, [fileURLToPath(new URL("../../../gateway/server.mjs", import.meta.url))], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      // Only what the deployment sets: nothing from this process leaks in (no KV, no keys).
-      PATH: process.env.PATH,
-      NODE_ENV: "test", // unread by the gateway; Next's ProcessEnv type requires it
-      PORT: String(port),
-      MERRYMEN_DATA_DIR: dataDir,
-      MERRYMEN_PARTNER_KEYS: JSON.stringify([{ keyId: PARTNER.keyId, appId: APP_ID, name: APP_NAME,
-        hash: hashSecret(GATEWAY_SECRET, PARTNER.secret), scopes: ["read:agents", "write:agents", "chat:agents"], status: "active" }]),
-      MERRYMEN_PARTNER_BRIDGE_SECRET: BRIDGE_SECRET,
-      MERRYMEN_PARTNER_APP_ORIGIN: webOrigin,
-      MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused-by-partner-routes",
-      MERRYMEN_GATEWAY_SECRET: GATEWAY_SECRET,
-      // Partner routes never read the chain; nothing listens here.
-      MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9",
-    },
-  });
-  gateway.stderr!.on("data", chunk => { gatewayLog += chunk; });
-  await new Promise<void>((resolve, reject) => {
-    let out = "";
-    const timer = setTimeout(() => reject(new Error(`gateway did not start: ${out}${gatewayLog}`)), 10_000);
-    gateway.stdout!.on("data", chunk => { out += chunk; if (out.includes("listening")) { clearTimeout(timer); resolve(); } });
-    gateway.once("exit", code => { clearTimeout(timer); reject(new Error(`gateway exited ${code}: ${out}${gatewayLog}`)); });
-  });
+  await startGateway(dataDir);
 });
 
 after(async () => {
   const failures: unknown[] = [];
   const attempt = async (fn: () => unknown) => { try { await fn(); } catch (error) { failures.push(error); } };
-  await attempt(() => {
-    if (!gateway || gateway.exitCode !== null || gateway.signalCode !== null) return;
-    const exited = new Promise(resolve => gateway.once("exit", resolve));
-    gateway.kill();
-    return exited;
-  });
+  await attempt(stopGateway);
   await attempt(() => web && new Promise<void>(resolve => { web.closeAllConnections(); web.close(() => resolve()); }));
   await attempt(() => store?.close());
   // See partner-store.test.ts: SQLite can still be clearing its -shm file after close().
