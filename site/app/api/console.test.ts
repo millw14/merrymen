@@ -34,7 +34,7 @@ const view = (over: Record<string, unknown> = {}) => normalizeAccount({
 })!;
 const html = <P extends object>(type: React.FunctionComponent<P>, props: P) => renderToStaticMarkup(createElement(type, props));
 const noop = () => {}, run = async () => {};
-const panel = (state: AccountState, plans: PlansView = live()) => html(AccountPanel, { address: WALLET, plans, state, keys: [{ key_id: 'key_a', name: 'Prism backend', status: 'active' }], busy: '', run, defaultName: 'Prism backend', onAccount: noop, reload: run, onSignedOut: noop });
+const panel = (state: AccountState, plans: PlansView = live()) => html(AccountPanel, { address: WALLET, plans, state, keys: [{ key_id: 'key_a', name: 'Prism backend', status: 'active' }], busy: '', run, defaultName: 'Prism backend', onAccount: noop, onPlans: noop, reload: run, onSignedOut: noop });
 /** Copy that must never appear: burn, price or yield stories, fiat, and refunds nobody gets. */
 const BANNED = /burn|buyback|buy back|deflation|circulation|supports the token|worth|best value|\$\s?\d|USD|price (goes|rises)|returns|refund/i;
 
@@ -67,6 +67,9 @@ test('the payment panel asks for the amount due rounded up, from the signed-in w
   assert.match(page, /Send only from 0x1111…1111\. A transfer from any other wallet, an exchange, a smart account or a swap cannot be credited/);
   assert.match(page, /Already sent\? Paste the transaction hash\./);
   assert.match(page, /Paying moves MERRYMEN out of your wallet\. Merry Circle tiers and hosted energy follow the balance you hold\./);
+  // Named for assistive technology: the panel is a region with its heading, and each Copy says what it copies.
+  assert.match(page, /<section class="dev-pay" aria-labelledby="dev-pay-title"><h3 id="dev-pay-title">Pay 40,000 MERRYMEN<\/h3>/);
+  assert.match(page, /aria-label="Copy amount"/); assert.match(page, /aria-label="Copy Merrymen payments wallet address"/);
   // The usage meter, per-key use and history.
   assert.match(page, /120 of 1,000 requests/); assert.match(page, /Prism backend/); assert.match(page, /aria-valuenow="120"/);
   assert.match(page, /Choose a plan/); assert.match(page, /Payment received/); assert.match(page, /\+60,000/);
@@ -137,7 +140,7 @@ test('account loading tells a missing account from a gateway without accounts, a
 });
 
 test('nothing the console imports reads a server secret', () => {
-  for (const file of ['./DeveloperConsole.tsx', './AccountPanel.tsx', './PlansSection.tsx', './developer-client.ts', '../../lib/developer-billing.ts']) {
+  for (const file of ['./DeveloperConsole.tsx', './AccountPanel.tsx', './PlansSection.tsx', './developer-client.ts', '../../lib/developer-billing.ts', '../../lib/pending-payments.ts']) {
     const source = readFileSync(new URL(file, import.meta.url), 'utf8');
     // DeveloperConsole's sample code mentions process.env.MERRYMEN_API_KEY as text for the reader's backend; that is not a read.
     assert.ok(!/from ["'][^"']*developer-gateway["']|process\.env\.(?!MERRYMEN_API_KEY\b)/.test(source), file);
@@ -146,7 +149,7 @@ test('nothing the console imports reads a server secret', () => {
 
 test('the billing sources carry no invisible or bidirectional characters', () => {
   // Written as \u escapes where they are matched; a literal one reads differently than it runs.
-  for (const file of ['./DeveloperConsole.tsx', './AccountPanel.tsx', './PlansSection.tsx', './developer-client.ts', '../../lib/developer-billing.ts', '../../lib/developer-gateway.ts', './developer/[action]/route.ts']) {
+  for (const file of ['./DeveloperConsole.tsx', './AccountPanel.tsx', './PlansSection.tsx', './developer-client.ts', '../../lib/developer-billing.ts', '../../lib/pending-payments.ts', '../../lib/developer-gateway.ts', './developer/[action]/route.ts']) {
     assert.ok(!/[\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/.test(readFileSync(new URL(file, import.meta.url), 'utf8')), file);
   }
 });
