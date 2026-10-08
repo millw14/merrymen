@@ -3531,12 +3531,16 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return env;
     }
     ic.access = access;
+    // A pushback ("there has to be theses", "check again"): a held "nothing
+    // here" is read again, and nothing else changes. Never a forced refresh,
+    // so a copy with something in it keeps its window, a room's included (D8).
+    if (ctx?.retryEmpty === true) ic.cc.retryEmpty = true;
     // A room's "now" is an ordinary read (D8): the answer says what it served, and how old it is.
     const asked = v.args as { freshness?: unknown };
     if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
       asked.freshness = "prefer-fresh";
       ic.cc.noReuse = true;
-      // ...and a pushback ("check again") never gets a held "nothing here" again.
+      // ...and a room's explicit "now" or "recheck" never gets a held "nothing here" again.
       ic.cc.retryEmpty = true;
     }
     let env: FomoEnvelope;

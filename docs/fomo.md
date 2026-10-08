@@ -174,7 +174,9 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   4,190 theses, and a room was told "no theses" three times from that copy): an empty
   thesis page is reused for at most 2 min on any surface (`service.ts EMPTY_HOLD_MS`,
   `ReadSpec.empty`), and never when the asker pushed back ("there has to be thesis",
-  "check again", `ChargeContext.retryEmpty`). An empty page the provider marks not
+  "check again"). A pushback is carried as its own flag (`BrokerCallOptions.retryEmpty`
+  to `ChargeContext.retryEmpty`), never as a forced refresh: a copy with something in it
+  keeps its window, a room's two hours included (D8). An empty page the provider marks not
   available, or one under a count it still holds, is said as "Fomo didn't return the
   theses on X just now (it lists N). Ask me again in a minute.", never "no theses"; an
   empty page is logged by its shape only (available, count, source, served from).

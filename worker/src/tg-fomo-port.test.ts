@@ -1629,6 +1629,39 @@ describe("a group research question, end to end", () => {
     s.clock.now += 5 * 60_000;
     await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP, fresh: true });
     assert.equal(thesisReads, 1, "a room never forces a paid refresh of a copy with theses in it (D8)");
+    // Past the class's own 30 minutes, inside the room's two hours (review on #306).
+    s.clock.now += 36 * 60_000;
+    const later = await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP, fresh: true });
+    assert.equal(thesisReads, 1, "a pushback never drops the room's two-hour window for a copy with theses in it");
+    assert.match(later!.text, /From a copy fetched 41 min ago\./, later!.text);
+    assert.ok(s.calls.every((c) => c.args.freshness !== "force-refresh"), "a pushback is never asked as a forced refresh");
+    assert.ok(s.calls.slice(1).every((c) => c.opts.retryEmpty === true));
+  });
+
+  it("the trader board keeps the room's hour on a pushback (review on #306)", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const boards = () => s.provider.filter((p) => p.startsWith("/v2/leaderboard/") && !p.startsWith("/v2/leaderboard/tokens/")).length;
+    await port.ask({ text: "who's the top trader on fomo?", chatId: GROUP });
+    assert.equal(boards(), 1);
+    // Past the board's own 15 minutes, inside the room's hour.
+    s.clock.now += 21 * 60_000;
+    const again = await port.ask({ text: "who's the top trader on fomo?", chatId: GROUP, fresh: true });
+    assert.equal(boards(), 1, "the room's copy, not a paid new board");
+    assert.match(again!.text, /From a copy fetched 21 min ago\./, again!.text);
+  });
+
+  it("'there has to be thesis' after a full answer keeps the room's window, through the handler (review on #306)", async () => {
+    let thesisReads = 0;
+    const r = await room({ theses: () => { thesisReads += 1; return fixture("theses-token"); } });
+    await r.say("pine what are people saying about $PONS on fomo?");
+    // 32 minutes on, the same ask is the room's copy; 14 minutes after that, a pushback on it.
+    const second = await r.say("pine what are people saying about $PONS on fomo?", { advanceMs: 32 * 60_000 });
+    assert.match(second.join("\n"), /What traders on Fomo are saying about PONS/);
+    const out = await r.say("pine there has to be thesis.", { advanceMs: 14 * 60_000 });
+    assert.ok(r.asks.slice(-1)[0]?.fresh === true, "read as a pushback");
+    assert.equal(thesisReads, 1, "a 46-minute-old page with theses in it is never bought again for a pushback");
+    assert.match(out.join("\n"), /What traders on Fomo are saying about PONS/);
   });
 
   /**

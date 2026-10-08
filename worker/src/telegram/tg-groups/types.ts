@@ -565,8 +565,8 @@ export interface TgFomoPort {
     /**
      * The asker pushed back on the last research answer ("there has to be
      * theses", "check again"): read again rather than serve a held "nothing
-     * here" (fomo/chat.ts forceFresh; a room still never forces a paid
-     * refresh of a copy with something in it).
+     * here" (fomo/chat.ts retryEmpty). Never a forced refresh: a copy with
+     * something in it keeps its window, the room's two hours included.
      */
     fresh?: boolean;
     chatId: number;

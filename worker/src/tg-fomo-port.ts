@@ -705,7 +705,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           maxChars,
           selfNames,
           ...(wanted ? { wanted } : {}),
-          ...(q.fresh === true ? { forceFresh: true } : {}),
+          ...(q.fresh === true ? { retryEmpty: true } : {}),
           sayableHandle: sayableTraderHandle,
         }).finally(() => bounded.done());
         if (!r.handled) {
