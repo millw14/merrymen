@@ -101,7 +101,10 @@ const CHAIN_WORDS: Readonly<Record<TgFomoChain, string>> = { robinhood: "robinho
 const onChain = (c: unknown): string => (typeof c === "string" && Object.hasOwn(CHAIN_WORDS, c) ? ` on ${CHAIN_WORDS[c as TgFomoChain]}` : "");
 
 /** A leaderboard row in the planner's own rank words (intent.ts ROW_RANK). */
-const ROW_WORDS: Readonly<Record<number, string>> = { 1: "top", 2: "second best", 3: "third best", 4: "fourth best" };
+const ROW_WORDS: Readonly<Record<number, string>> = {
+  1: "top", 2: "second best", 3: "third best", 4: "fourth best", 5: "fifth best",
+  6: "sixth best", 7: "seventh best", 8: "eighth best", 9: "ninth best", 10: "tenth best",
+};
 /** What about that row, in words the planner reads as that one-trader question (intent.ts rowAskOf). */
 const ROW_ABOUT: Readonly<Record<string, string>> = {
   earnings: " and what did he make money on?",

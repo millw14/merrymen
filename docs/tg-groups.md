@@ -821,7 +821,11 @@ and then that trader's answer: what they made or lost money on ("CryptoKaleo
 on trades opened or closed in the last 24h (source-reported, realised to
 date): made the most on ROO +$4.2k; lost the most on plumber -$10.9k."),
 what they hold, or what they traded. A row the board does not have is said
-("That board has no 3rd trader."). A Fomo pick reaches the research only as a fixed question
+("That board has no 3rd trader."). Ranks run to the board's tenth row ("the
+5th best trader", "the sixth best trader", "#7"); a rank past it ("the 11th
+best trader") or one relative to someone ("the best trader after kaleo") is
+no row: the room hears the board alone, never the 1st row's answer, and its
+"he" is never a trader remembered from before. A Fomo pick reaches the research only as a fixed question
 code writes (`tg-fomo-port.ts requestText`), planned by the same
 deterministic planner. Anything else (no model, an answer in words, an
 unknown action, a made-up name) is the persona's answer, exactly as before.

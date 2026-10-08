@@ -196,9 +196,12 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   robinhood coins are down" is the owner's book). A shouted ticker stays a coin ("SOL
   coins on fomo?"). One row of the trader leaderboard asked in the same breath as the
   board ("who's the best trader on fomo today and what did he make money on", "what is
-  the second best trader on fomo holding") plans the leaderboard with `rowAsk` (rank 1-4,
+  the second best trader on fomo holding") plans the leaderboard with `rowAsk` (rank 1-10,
   and earnings, holdings, trades or profile): its "he" is that row, never a "which
-  trader?" question, and "the first trader to buy it" is not a rank. "Who made the most on
+  trader?" question, and "the first trader to buy it" is not a rank. A rank past the
+  tenth ("the 11th best trader") or relative to someone ("the best trader after X") plans
+  the board alone, never row 1, and its "he" is never a remembered trader. Only a 1st-row
+  board is `singular`: after "the 5th best trader", a bare "he" asks which row. "Who made the most on
   fomo today" is the leaderboard. "What did trader X make money on" plans their trades
   with `earnings` (never "take profit", a sell, and never the owner's own book).
 - **Follow-ups:** the resolved coin, chain, trader, window and dossier revision carry

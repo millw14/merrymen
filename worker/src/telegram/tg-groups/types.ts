@@ -481,7 +481,8 @@ export type TgFomoChain = "robinhood" | "solana" | "base" | "ethereum" | "bsc";
  * what about that trader. Read by code from the line, never from a model.
  */
 export interface TgBoardRow {
-  rank: 1 | 2 | 3 | 4;
+  /** 1 to 10: the rows a trader board read carries by default. */
+  rank: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
   about: TgTraderAbout;
 }
 

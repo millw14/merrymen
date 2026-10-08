@@ -594,7 +594,7 @@ describe("a model's checked choice, asked as the planner's own question", () => 
   });
 
   it("a leaderboard row is asked as one rank and one trader's question, which plans that row of the board", () => {
-    for (const rank of [1, 2, 3, 4] as const) {
+    for (const rank of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const) {
       for (const about of ["earnings", "holdings", "trades", "profile"] as const) {
         for (const [window, w] of [[undefined, "24h"], ["7d", "7d"], ["30d", "30d"], ["all", "all"]] as const) {
           const q = requestText({ kind: "leaderboard", ...(window ? { window } : {}), row: { rank, about } })!;
@@ -605,7 +605,8 @@ describe("a model's checked choice, asked as the planner's own question", () => 
         }
       }
     }
-    assert.equal(requestText({ kind: "leaderboard", row: { rank: 9 as never, about: "trades" } }), "who are the top traders on fomo in the last 24h?");
+    // A rank past the tenth (review r3: never row 1 instead) asks for the board alone.
+    assert.equal(requestText({ kind: "leaderboard", row: { rank: 11 as never, about: "trades" } }), "who are the top traders on fomo in the last 24h?");
   });
 
   it("'about' is the fixed capabilities answer, and a handle or a ticker that is not one has no question", () => {

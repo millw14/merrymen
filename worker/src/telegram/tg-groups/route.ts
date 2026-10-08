@@ -418,9 +418,18 @@ function groundedChain(model: unknown, ctx: RouteCtx): TgFomoChain | undefined {
  * most") plus a one-trader question in the rest of the line ("what did he
  * make money on", "what's he holding"). A model never sets it.
  */
-const ROW_RANK_WORDS = String.raw`(top|best|#1|number one|no\.? ?1|leading|winning|(?:second|2nd|third|3rd|fourth|4th) (?:best|top|place)|#[234]|number (?:two|three|four)|no\.? ?[234])`;
-const ROW_RANK = new RegExp(String.raw`\b(?:the )?${ROW_RANK_WORDS} (?:fomo )?(?:trader|performer|wallet|account|guy)\b(?!s)`, "u");
-const ROW_WHO = new RegExp(String.raw`\bwho(?:'s| is| was) (?:the )?${ROW_RANK_WORDS}(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memes?|tickers?|plays?|picks?)\b)(?=[\s?!.,]|$)|\bwho(?:'s| has| is)?(?: been)? (?:made|making|won|winning|printed|printing|earned|earning) the most\b`, "u");
+const ROW_RANK_WORDS = String.raw`(top|best|#1|number one|no\.? ?1|leading|winning|(?:second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|seventh|7th|eighth|8th|ninth|9th|tenth|10th) (?:best|top|place)|#(?:10|[2-9])|number (?:two|three|four|five|six|seven|eight|nine|ten|10|[2-9])|no\.? ?(?:10|[2-9]))`;
+/** Never a rank word right after another ordinal or number ("the 11th best trader"): no row, never row 1 (rule 5). */
+const NOT_AFTER_ORDINAL = String.raw`(?<!(?:\d+(?:st|nd|rd|th)?|\bfirst|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|\p{L}+teenth|\p{L}+ieth|#\d+)[ -])`;
+const ROW_RANK = new RegExp(String.raw`\b(?:the )?${NOT_AFTER_ORDINAL}${ROW_RANK_WORDS} (?:fomo )?(?:trader|performer|wallet|account|guy)\b(?!s)`, "u");
+const ROW_WHO = new RegExp(String.raw`\bwho(?:'s| is| was) (?:the )?${NOT_AFTER_ORDINAL}${ROW_RANK_WORDS}(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memes?|tickers?|plays?|picks?)\b)(?=[\s?!.,]|$)|\bwho(?:'s| has| is)?(?: been)? (?:made|making|won|winning|printed|printing|earned|earning) the most\b`, "u");
+/** "The best trader after X", "behind X", "outside the top 3": not that row, and never row 1 (X himself). */
+const ROW_RELATIVE = /^\s*(?:after|behind|below|beneath|under|outside|beyond|besides|other than|except|apart from|but not)\b/u;
+const ROW_RANK_NUMBERS: Readonly<Record<string, TgBoardRow["rank"]>> = {
+  second: 2, "2nd": 2, two: 2, third: 3, "3rd": 3, three: 3, fourth: 4, "4th": 4, four: 4, fifth: 5, "5th": 5, five: 5,
+  sixth: 6, "6th": 6, six: 6, seventh: 7, "7th": 7, seven: 7, eighth: 8, "8th": 8, eight: 8, ninth: 9, "9th": 9, nine: 9,
+  tenth: 10, "10th": 10, ten: 10, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10,
+};
 const ROW_EARNINGS = /\b(?:make|makes|made|making|earn|earns|earned|earning) (?:\S+ ){0,2}?(?:money|bank|bread|profits?|gains)\b|\b(?:win|wins|won|lose|loses|lost) (?:\S+ ){0,2}?money\b|\bwhat (?:did|has|have|does|do) (?:he|she|they|it) (?:make|made|earn|earned|win|won|lose|lost|print|printed)(?: \S+){0,3}? (?:on|from|off|with)\b|\b(?:profited|printed|cashed in) (?:on|from|off)\b/u;
 const ROW_HOLDINGS = /\b(?:holding|holds|hold|holdings|bags?|portfolio|positions?|sitting on)\b/u;
 const ROW_TRADES = /\b(?:buy|buys|buying|bought|sell|sells|selling|sold|trades|trading|traded|aped|aping|moves|been up to)\b/u;
@@ -435,12 +444,13 @@ export function rowIn(text: unknown): TgBoardRow | undefined {
   if (ROW_WATCHED.test(t)) return undefined;
   const m = ROW_RANK.exec(t) ?? ROW_WHO.exec(t);
   if (!m) return undefined;
+  if (ROW_RELATIVE.test(t.slice(m.index + m[0].length))) return undefined;
   const rest = `${t.slice(0, m.index)} ${t.slice(m.index + m[0].length)}`;
   if (ROW_CROWD.test(rest) || /@[a-z0-9_]{2,}|\$[a-z]/u.test(rest)) return undefined;
   const about: TgTraderAbout | null = ROW_EARNINGS.test(rest) ? "earnings" : ROW_HOLDINGS.test(rest) ? "holdings" : ROW_TRADES.test(rest) ? "trades" : ROW_PROFILE.test(rest) ? "profile" : null;
   if (!about) return undefined;
-  const w = m[1] ?? "";
-  const rank: TgBoardRow["rank"] = /^(?:second|2nd)\b|#2|\btwo\b|no\.? ?2/u.test(w) ? 2 : /^(?:third|3rd)\b|#3|\bthree\b|no\.? ?3/u.test(w) ? 3 : /^(?:fourth|4th)\b|#4|\bfour\b|no\.? ?4/u.test(w) ? 4 : 1;
+  const w = (m[1] ?? "").replace(/^(?:#|number |no\.? ?)/u, "").split(" ")[0] ?? "";
+  const rank: TgBoardRow["rank"] = Object.hasOwn(ROW_RANK_NUMBERS, w) ? ROW_RANK_NUMBERS[w]! : 1;
   return { rank, about };
 }
 

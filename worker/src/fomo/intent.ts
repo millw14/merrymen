@@ -118,9 +118,12 @@ export interface FomoQuestionPlan {
   singular?: true;
 }
 
+export type FomoRowRank = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+
 /** Which row of the trader leaderboard, and what about that trader. */
 export interface FomoRowAsk {
-  rank: 1 | 2 | 3 | 4;
+  /** 1 to 10: the rows a trader board read carries by default. */
+  rank: FomoRowRank;
   about: "earnings" | "trades" | "holdings" | "profile";
   /** A trades ask's side ("what did the best trader sell"), read like a named trader's. */
   side?: "buy" | "sell";
@@ -466,8 +469,20 @@ const RANK_EARNERS = new RegExp(String.raw`\bwho (?:has |is )?(?:made|makes|maki
  * #1" / "who made the most". "First" alone is not here: "the first trader to
  * buy it" asks who was earliest, not who ranks first. Group 1 is the rank.
  */
-const ROW_RANK = /\b(?:the )?(top|best|#1|number one|no 1|leading|winning|most profitable|highest earning|(?:second|2nd|third|3rd|fourth|4th) (?:best|top|place|ranked)|#[234]|number (?:two|three|four)|no [234]) (?:fomo )?(?:trader|performer|wallet|earner|account)\b(?!s)/;
-const ROW_WHO = new RegExp(String.raw`\bwho (?:is|was) (?:the )?(top|best|#1|number one|no 1|leading|winning|on top|(?:second|2nd|third|3rd|fourth|4th) (?:best|top|place)|#[234]|number (?:two|three|four)|no [234])(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)|\bwho (?:has |is )?(made|makes|won|printed|earned) the most\b${EARNERS_NOT_ON_SUBJECT}`);
+const ROW_ORDINAL = String.raw`(?:second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|seventh|7th|eighth|8th|ninth|9th|tenth|10th)`;
+const ROW_NUMBER = String.raw`(?:#(?:10|[2-9])|number (?:two|three|four|five|six|seven|eight|nine|ten|10|[2-9])|no (?:10|[2-9]))`;
+/**
+ * Never a rank word right after another ordinal or number: "the 11th best
+ * trader" or "the twentieth top trader" is no row this board reads, and never
+ * its 1st row (rule 5).
+ */
+const NOT_AFTER_ORDINAL = String.raw`(?<!(?:\d+(?:st|nd|rd|th)?|\bfirst|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|\w+teenth|\w+ieth|#\d+)[ -])`;
+const ROW_RANK = new RegExp(String.raw`\b(?:the )?${NOT_AFTER_ORDINAL}(top|best|#1|number one|no 1|leading|winning|most profitable|highest earning|${ROW_ORDINAL} (?:best|top|place|ranked)|${ROW_NUMBER}) (?:fomo )?(?:trader|performer|wallet|earner|account)\b(?!s)`);
+const ROW_WHO = new RegExp(String.raw`\bwho (?:is|was) (?:the )?${NOT_AFTER_ORDINAL}(top|best|#1|number one|no 1|leading|winning|on top|${ROW_ORDINAL} (?:best|top|place)|${ROW_NUMBER})(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)|\bwho (?:has |is )?(made|makes|won|printed|earned) the most\b${EARNERS_NOT_ON_SUBJECT}`);
+/** "The best trader after X", "behind", "below", "outside the top 3": not that row, and never row 1 (X himself). */
+const ROW_RELATIVE = /^\s*(?:after|behind|below|beneath|under|outside|beyond|besides|other than|except|apart from|but not)\b/;
+/** A rank this board does not read ("the 11th best trader", "the twentieth top trader"): a row asked for, but none of its ten. */
+const ROW_PAST_BOARD = /\b(?:\d+(?:st|nd|rd|th)|eleventh|twelfth|\w+teenth|\w+ieth|#\d{2,}) (?:best|top|place|ranked|most profitable|highest earning|leading) (?:fomo )?(?:trader|performer|wallet|earner|account)\b(?!s)/;
 /**
  * What they made or lost money on: "what did he make money on", "made a
  * profit on", "what did he win on". Never "how much" (that is the board's
@@ -492,11 +507,32 @@ export function traderPnlAsk(text: unknown): boolean {
   return TRADER_PNL.test(words(text).map((w) => w.canon).join(" "));
 }
 
-function rowRank(word: string): FomoRowAsk["rank"] {
-  if (/^(?:second|2nd)\b|#2|\btwo\b|no 2/.test(word)) return 2;
-  if (/^(?:third|3rd)\b|#3|\bthree\b|no 3/.test(word)) return 3;
-  if (/^(?:fourth|4th)\b|#4|\bfour\b|no 4/.test(word)) return 4;
-  return 1;
+/** The rank a ROW_RANK / ROW_WHO rank word names: "second best" 2, "#7" 7, "number ten" 10, "best" or "top" 1; null past 10. */
+function rowRank(word: string): FomoRowRank | null {
+  const w = word.replace(/^(?:#|number |no )/, "").split(" ")[0] ?? "";
+  const n = Object.hasOwn(ROW_NUMBERS, w) ? ROW_NUMBERS[w]! : /^\d+$/.test(w) ? Number(w) : 1;
+  return Number.isSafeInteger(n) && n >= 1 && n <= 10 ? (n as FomoRowRank) : null;
+}
+
+/**
+ * THE SINGULAR RANK PHRASE in a line ("the best trader", "who's #3", "the
+ * 5th best trader"), with its rank: never one right after another ordinal,
+ * nor one followed by "after X" / "behind X" (rule 5: no row, rather than
+ * the wrong one).
+ */
+/** A singular row asked for that rankPhraseOf refuses (past the 10th, or "after X"): its "he" is that unread row, never anyone remembered. */
+function rankRefusedIn(c: string): boolean {
+  if (ROW_PAST_BOARD.test(c)) return true;
+  const m = ROW_RANK.exec(c) ?? ROW_WHO.exec(c);
+  return !!m && rankPhraseOf(c) === null;
+}
+
+function rankPhraseOf(c: string): { m: RegExpExecArray; rank: FomoRowRank } | null {
+  const m = ROW_RANK.exec(c) ?? ROW_WHO.exec(c);
+  if (!m) return null;
+  if (ROW_RELATIVE.test(c.slice(m.index + m[0].length))) return null;
+  const rank = rowRank(m[1] ?? m[2] ?? "");
+  return rank === null ? null : { m, rank };
 }
 
 /**
@@ -507,8 +543,9 @@ function rowRank(word: string): FomoRowAsk["rank"] {
  */
 function rowAskOf(c: string, ex: Extracted): FomoRowAsk | null {
   if (ex.traders.length > 0 || ex.tokens.length > 0) return null;
-  const m = ROW_RANK.exec(c) ?? ROW_WHO.exec(c);
-  if (!m) return null;
+  const phrase = rankPhraseOf(c);
+  if (!phrase) return null;
+  const { m, rank } = phrase;
   const rest = `${c.slice(0, m.index)} ${c.slice(m.index + m[0].length)}`;
   if (CROWD.test(rest)) return null;
   const about: FomoRowAsk["about"] | null = EARNINGS.test(rest)
@@ -522,7 +559,7 @@ function rowAskOf(c: string, ex: Extracted): FomoRowAsk | null {
           : null;
   if (!about) return null;
   const side = about === "trades" ? sideOf(rest) : null;
-  return { rank: rowRank(m[1] ?? m[2] ?? ""), about, ...(side === "buy" || side === "sell" ? { side } : {}) };
+  return { rank, about, ...(side === "buy" || side === "sell" ? { side } : {}) };
 }
 /**
  * A ROW OF THE BOARD THE CONVERSATION WAS JUST SHOWN: "the second one", "the
@@ -1232,7 +1269,10 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   // row of the board. Its "he" is that row, never a remembered trader and
   // never a trader to ask "which one?" about.
   const rowAsk = rowAskOf(c, ex);
-  let traderDeixis = !rowAsk && (TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader);
+  // "Who's the 11th best trader … what's he holding", "the best trader after X … what's he
+  // holding": a row no read here places. Its "he" is never a remembered trader (rule 5).
+  const rowUnread = !rowAsk && ex.traders.length === 0 && ex.tokens.length === 0 && rankRefusedIn(c);
+  let traderDeixis = !rowAsk && !rowUnread && (TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader);
   // A ROW OF THE BOARD THIS CONVERSATION WAS JUST SHOWN ("what's the second
   // one holding", "#3?", or "he" after "who's the best trader"): that row's
   // trader, by the user id the provider's board gave, as if named here. A
@@ -1367,7 +1407,8 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     toolCalls: clarification ? [] : toolCalls,
     ...(rowAsk && intent === "rankings-traders" ? { rowAsk: { ...rowAsk } } : {}),
     ...(detected?.earnings && intent === "trader-activity" ? { earnings: true as const } : {}),
-    ...(intent === "rankings-traders" && (rowAsk || ROW_RANK.test(c) || ROW_WHO.test(c)) ? { singular: true as const } : {}),
+    // Only the 1st row: after "who's the 5th best trader", a bare "he" asks which row, never row 1.
+    ...(intent === "rankings-traders" && (rowAsk ? rowAsk.rank === 1 : rankPhraseOf(c)?.rank === 1) ? { singular: true as const } : {}),
   });
   const ask = (question: string) => plan(question, []);
   if (askWhichRow) return ask(askWhichRow);

@@ -791,6 +791,39 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     assert.deepEqual(plan("who's the top trader on fomo of all time? tell me about him")!.rowAsk, { rank: 1, about: "profile" });
   });
 
+  it("the 5th to 10th row is that row, a rank past the board's is none, and never the 1st row (review r3)", () => {
+    assert.deepEqual(plan("who is the 5th best trader on fomo today and what is he holding?")!.rowAsk, { rank: 5, about: "holdings" });
+    assert.deepEqual(plan("who is the fifth best trader on fomo today and what is he holding?")!.rowAsk, { rank: 5, about: "holdings" });
+    assert.deepEqual(plan("who is the sixth best trader on fomo today and what did he buy")!.rowAsk, { rank: 6, about: "trades", side: "buy" });
+    assert.deepEqual(plan("who is the 10th best trader on fomo and what is he holding")!.rowAsk, { rank: 10, about: "holdings" });
+    assert.deepEqual(plan("what is the #7 trader on fomo holding")!.rowAsk, { rank: 7, about: "holdings" });
+    assert.deepEqual(plan("who's number eight on fomo this week and what has he been trading?")!.rowAsk, { rank: 8, about: "trades" });
+    // Past the tenth, or relative to someone: no row at all, never row 1.
+    for (const q of [
+      "who is the 11th best trader on fomo today and what is he holding?",
+      "who is the twentieth best trader on fomo and what is he holding?",
+      "who is the 15th top trader on fomo and what did he buy",
+      "who is the best trader after cryptokaleo on fomo and what is he holding?",
+      "what is the best trader behind kaleo on fomo holding",
+      "the top trader outside the top 3 on fomo, what's he holding?",
+    ]) {
+      const p = plan(q);
+      assert.ok(!p?.rowAsk || p.rowAsk.rank !== 1, `${q}: never row 1`);
+      assert.equal(p?.rowAsk, undefined, q);
+    }
+    // Its "he" is that unread row: never the trader remembered from before.
+    for (const q of ["who is the 11th best trader on fomo today and what is he holding?", "who is the best trader after cryptokaleo on fomo and what is he holding?"]) {
+      const p = classifyFomoQuestion(q, { memory: MEMORIES.trader!, now: NOW })!;
+      assert.equal(p.intent, "rankings-traders", q);
+      assert.equal(p.rowAsk, undefined, q);
+      assert.deepEqual(p.toolCalls.map((c) => c.tool), ["fomo_get_rankings"], q);
+    }
+    // The singular board is only the 1st row's: after "the 5th best trader", "he" asks which row.
+    assert.equal(plan("who's the 5th best trader on fomo today")!.singular, undefined);
+    assert.equal(plan("who's the 5th best trader on fomo today and what's he holding")!.singular, undefined);
+    assert.equal(plan("who's the best trader on fomo today")!.singular, true);
+  });
+
   it("a row ask needs one rank, one trader's question, and nobody named", () => {
     const noRow = (q: string) => assert.equal(plan(q)?.rowAsk, undefined, q);
     // The plural board and its crowd.

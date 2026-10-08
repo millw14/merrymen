@@ -210,6 +210,27 @@ describe("a row of the leaderboard, and ordinals that are never names", () => {
     for (const t of ["top traders today, what are they buying", "who's the best trader on fomo", "who's the top trader and what are people buying", "who's the top trader, is @unipcs on it"]) assert.equal(rowIn(t), undefined, t);
   });
 
+  it("rowIn: the 5th to the 10th row is that row; past it, or 'after X', no row and never the 1st (review r3)", () => {
+    assert.deepEqual(rowIn("who is the 5th best trader on fomo today and what is he holding?"), { rank: 5, about: "holdings" });
+    assert.deepEqual(rowIn("who is the fifth best trader today and what is he holding"), { rank: 5, about: "holdings" });
+    assert.deepEqual(rowIn("who is the sixth best trader today and what did he buy"), { rank: 6, about: "trades" });
+    assert.deepEqual(rowIn("who is the 10th best trader and what is he holding"), { rank: 10, about: "holdings" });
+    assert.deepEqual(rowIn("who's #7 today and what's he holding"), { rank: 7, about: "holdings" });
+    assert.deepEqual(rowIn("who's number nine this week and what did he make money on"), { rank: 9, about: "earnings" });
+    for (const t of [
+      "who is the 11th best trader today and what is he holding?",
+      "who is the twentieth best trader and what did he buy",
+      "who is the best trader after cryptokaleo and what is he holding?",
+      "what is the top trader behind kaleo holding",
+    ]) assert.equal(rowIn(t), undefined, t);
+    // The router's leaderboard pick then carries no row: the board alone.
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who is the 11th best trader today and what is he holding?")), { action: "fomo", request: { kind: "leaderboard", window: "24h" } });
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who is the sixth best trader today and what did he buy")), {
+      action: "fomo",
+      request: { kind: "leaderboard", window: "24h", row: { rank: 6, about: "trades" } },
+    });
+  });
+
   it("the leaderboard pick carries the row from the line, never from the model", () => {
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who's been winning the most today and what did he make money on")), {
       action: "fomo",
