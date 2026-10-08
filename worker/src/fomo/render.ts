@@ -614,7 +614,12 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
     out.push(`No matching records were returned for ${name} ${scope}. That is not proof they did not trade: the feed only shows positions above roughly $3,000.`);
     return out;
   }
-  out.push(`${name} ${scope}: ${plural(c.buys, "buy", "buys")} and ${plural(c.sells, "sell", "sells")} in the feed${c.transfers ? `, plus ${plural(c.transfers, "transfer", "transfers")} (not purchases)` : ""}.`);
+  // A side asked counts only that side: the feed was read for it alone, so "0 buys" under a sells
+  // question would be a false figure about a named trader (rule 5).
+  const tally = d.side === "buy" ? plural(c.buys, "buy", "buys")
+    : d.side === "sell" ? plural(c.sells, "sell", "sells")
+      : `${plural(c.buys, "buy", "buys")} and ${plural(c.sells, "sell", "sells")}`;
+  out.push(`${name} ${scope}: ${tally} in the feed${c.transfers ? `, plus ${plural(c.transfers, "transfer", "transfers")} (not purchases)` : ""}.`);
   const group = audience === "group";
   // A room hears trades and transfers only: a thesis, a perp, a listing or "other" has no verb of its own,
   // and would be printed as one ("• thesis PONS…", "• other PONS…") under a buy or sell question.

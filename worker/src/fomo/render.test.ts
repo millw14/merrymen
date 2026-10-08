@@ -166,6 +166,32 @@ describe("renderEnvelope", () => {
     assert.match(renderEnvelope(e, O), /frankdegods on Fomo in the last 7d: 1 buy/);
   });
 
+  it("a sells question counts only sells, and a buys question only buys: never '0 buys' when they bought (review r3)", () => {
+    const base: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "24h", side: "sell", sources: ["positions", "feed"],
+      positions: [
+        { tradeId: "t1", token: T, label: { symbol: "PONS", name: null }, status: "open", costBasisUsd: 3_000, realizedPnlUsd: 0, unrealizedPnlUsd: 0, boughtAmount: 1, soldAmount: 0, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 3_600_000, closedAt: null, source: "captured" },
+      ],
+      fills: [],
+      // The feed was read for sells alone: the buy they made is filtered out before counting.
+      events: [],
+      counts: { buys: 0, sells: 0, transfers: 0, other: 0 },
+    };
+    const sells = env("fomo_get_trader_activity", "ok", base, { subject: { kind: "trader", trader: base.trader } });
+    const g = renderEnvelope(sells, G);
+    assert.match(g, /^frankdegods in the last 24h: 0 sells in the feed\.$/m);
+    assert.doesNotMatch(g, /buys?/);
+    assert.match(renderEnvelope(sells, O), /frankdegods on Fomo in the last 24h: 0 sells in the feed\./);
+    assert.doesNotMatch(renderEnvelope(sells, O), /0 buys/);
+    const buys = env("fomo_get_trader_activity", "ok", { ...base, side: "buy", counts: { buys: 1, sells: 0, transfers: 0, other: 0 } }, { subject: { kind: "trader", trader: base.trader } });
+    assert.match(renderEnvelope(buys, G), /^frankdegods in the last 24h: 1 buy in the feed\.$/m);
+    assert.doesNotMatch(renderEnvelope(buys, G), /sells?/);
+    // No side asked: both counts, as before.
+    const both = env("fomo_get_trader_activity", "ok", { ...base, side: null, counts: { buys: 1, sells: 0, transfers: 0, other: 0 } }, { subject: { kind: "trader", trader: base.trader } });
+    assert.match(renderEnvelope(both, G), /^frankdegods in the last 24h: 1 buy and 0 sells in the feed\.$/m);
+  });
+
   it("what one trader made or lost money on: realised to date, highest first, a received-only position never a win", () => {
     const pos = (symbol: string, realized: number | null, o: Partial<TraderActivityData["positions"][number]> = {}): TraderActivityData["positions"][number] => ({
       tradeId: symbol, token: T, label: { symbol, name: null }, status: "closed", costBasisUsd: 1_000, realizedPnlUsd: realized, unrealizedPnlUsd: 0,

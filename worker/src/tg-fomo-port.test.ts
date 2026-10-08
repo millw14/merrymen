@@ -244,7 +244,7 @@ describe("createTgFomoPort", () => {
     const asks: Array<[string, string, Record<string, unknown>, RegExp]> = [
       ["who is trader CryptoKaleo on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest held by CryptoKaleo: PONS on robinhood \$3\.1k, FU2O on solana \$13\./],
       ["what is @CryptoKaleo holding on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins/],
-      ["what has @CryptoKaleo bought on fomo this week?", "fomo_get_trader_activity", { trader: "CryptoKaleo", side: "buy", window: "7d" }, /^CryptoKaleo in the last 7d: \d+ buys? and 0 sells in the feed\./],
+      ["what has @CryptoKaleo bought on fomo this week?", "fomo_get_trader_activity", { trader: "CryptoKaleo", side: "buy", window: "7d" }, /^CryptoKaleo in the last 7d: \d+ buys? in the feed\./],
       ["what did trader CryptoKaleo make money on on fomo today?", "fomo_get_trader_activity", { trader: "CryptoKaleo", window: "24h", limit: 50 }, /^CryptoKaleo on trades opened or closed in the last 24h \(source-reported, realised to date\): made the most on ROO \+\$4\.2k; lost the most on plumber -\$10\.9k\./],
     ];
     for (const owner of [true, false]) {
