@@ -687,7 +687,10 @@ the owner's worker and grant in place.
 **When partner calls fail.** Partners see only the error code and a
 `request_id`; the gateway logs the rest, one line per non-2xx bridge answer,
 starting `[gateway] partner bridge: <METHOD> <route> <request_id> key <keyId>`.
-Grep for the partner's `request_id`. What the line ends with:
+Grep for the partner's `request_id`. No line means the runtime answered with a
+2xx, or the gateway refused the request itself (an unknown or revoked key, a
+missing scope, a rate limit, an oversize body), which it does not log. What the
+line ends with:
 
 | Log line ends with | Partner sees | Meaning and fix |
 | --- | --- | --- |

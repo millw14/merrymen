@@ -418,14 +418,16 @@ Errors use one envelope:
 {"error":{"code":"forbidden_scope","message":"...","request_id":"req_..."}}
 ```
 
-Preserve `request_id` when reporting failures: it is the ID the operator's
-logs record for the request. Missing, unrecognized-format and holder
-credentials return 404; a correctly formatted partner key with an unknown ID or
-incorrect secret returns 401. Revoked keys return 401 `key_revoked`, and
-missing scopes return 403 `forbidden_scope`. Other expected cases include
-invalid input (400/422), unavailable authorization or conflicting identities
-(403/409), rate limits (429), and an unavailable hosted runtime or storage
-(503). Check the code rather than matching prose.
+Preserve `request_id` when reporting failures. For a request the hosted runtime
+refused or could not answer, the gateway logs a line with this ID. Refusals the
+gateway makes itself (key, scope, rate limit, body size, unknown route) are not
+logged; report those with their code and time. Missing, unrecognized-format
+and holder credentials return 404; a correctly formatted partner key with an
+unknown ID or incorrect secret returns 401. Revoked keys return 401
+`key_revoked`, and missing scopes return 403 `forbidden_scope`. Other expected
+cases include invalid input (400/422), unavailable authorization or conflicting
+identities (403/409), rate limits (429), and an unavailable hosted runtime or
+storage (503). Check the code rather than matching prose.
 
 A body over 32 KiB (256 KiB for `/activate`) is refused with HTTP 413
 `bad_request`, which carries a `request_id` like any other error. Past 4 MiB
