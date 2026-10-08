@@ -184,6 +184,39 @@ export function normalizeAccount(input: unknown): AccountView | null {
 export const renewalBy = (view: AccountView): string | null =>
   view.due_raw !== null && view.due_for === "renewal" && view.plan.id !== "free" && view.plan.ends_at !== null ? view.plan.ends_at : null;
 
+export type DueCheck = { ok: true } | { ok: false; account: AccountView | null; message: string };
+/**
+ * GET /account read again at the moment of paying, against the view the
+ * payment panel was drawn from. The amount and what it pays for (starting a
+ * plan, an upgrade, a renewal) were read when the page loaded. A payment
+ * credited from a phone or another browser, a plan chosen on another device,
+ * or an operator's adjustment makes them wrong since, and the transfer is not
+ * returned: it would sit as credit for a period nobody asked to pay for yet.
+ *
+ * So the plan, the selection, the period, the credit and what is due for must
+ * all be as drawn, and the amount the same. One change is not a change: an
+ * upgrade costs less with every second of its period that passes, and the
+ * amount on the button still covers it (the gateway only ever asks less as
+ * the period runs), so a fall of up to 1% is paid as shown rather than
+ * refused on every click. Anything else refuses, with the fresh view to show,
+ * except another wallet's account (this browser signed in elsewhere), which
+ * this page does not show.
+ */
+export function stillDue(answer: unknown, shown: AccountView): DueCheck {
+  const fresh = normalizeAccount(answer);
+  if (!fresh) return { ok: false, account: null, message: "Your account could not be read just now, so nothing was sent. Try again shortly." };
+  if (fresh.account.id !== shown.account.id || fresh.account.wallet !== shown.account.wallet) {
+    return { ok: false, account: null, message: "This browser is now signed in with another wallet, so nothing was sent. Reload the page to continue." };
+  }
+  const was = amountToSend(shown.due_raw), now = amountToSend(fresh.due_raw);
+  if (now === null) return { ok: false, account: fresh, message: "Nothing is due now: your account changed since this page loaded, so nothing was sent." };
+  const same = fresh.plan.id === shown.plan.id && fresh.plan.selected === shown.plan.selected && fresh.plan.starts_at === shown.plan.starts_at
+    && fresh.plan.ends_at === shown.plan.ends_at && fresh.credit_raw === shown.credit_raw && fresh.due_for === shown.due_for;
+  const decayed = fresh.due_for === "upgrade" && was !== null && now < was && (was - now) * 100n <= was;
+  if (same && (now === was || decayed)) return { ok: true };
+  return { ok: false, account: fresh, message: "What is due changed since this page loaded, so nothing was sent. Check the amount and pay again." };
+}
+
 export type PreviewEffect ="activate_now" | "upgrade_now" | "at_renewal" | "waiting_for_payment" | "cancel_renewal";
 export interface PlanPreview { effect: PreviewEffect; charge_now_raw: string; due_raw: string | null; starts_at: string | null; ends_at: string | null }
 export function normalizePreview(input: unknown): PlanPreview | null {

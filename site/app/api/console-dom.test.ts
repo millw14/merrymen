@@ -41,6 +41,9 @@ import { MAX_PENDING, PENDING_KEY } from '../../lib/pending-payments';
 const WALLET = '0x1111111111111111111111111111111111111111';
 const TREASURY = '0x3333333333333333333333333333333333333333';
 const ROTATED = '0x4444444444444444444444444444444444444444';
+const OTHER_WALLET = '0x2222222222222222222222222222222222222222';
+/** Crumbs, started by a payment just now, running to 7 Nov. */
+const RUNNING = { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-08T00:00:00.000Z', ends_at: '2026-11-07T00:00:00.000Z', selected: 'crumbs', renews_on_next_request: false };
 const HASH_A = '0x' + 'aa'.repeat(32), HASH_B = '0x' + 'bb'.repeat(32), HASH_C = '0x' + 'cc'.repeat(32), HASH_D = '0x' + 'dd'.repeat(32);
 const DUE = 100_000n * UNIT;
 /** Long waits one test may fire. The most any test here needs is MAX_PENDING × (POLL_MAX_CHECKS − 1) = 195. */
@@ -413,6 +416,43 @@ test('Pay reads the payment details again: a rotated treasury, a pause or anothe
   const page = await mount();
   await click(payButton(page.container));
   assert.equal(sent.length, 1); assert.deepEqual(saved(), [HASH_A]);
+  await drain(page.container, [HASH_A]);
+  await page.unmount();
+});
+
+test('Pay reads the account again: a payment, a plan change or a sign-in made elsewhere since the page loaded sends nothing', async () => {
+  const accountReads = () => calls.filter(c => c.method === 'GET' && c.action === 'account').length;
+  for (const [why, later, words] of [
+    // Paid from a phone after this tab loaded: the 100,000 now due is the next period's renewal, 30 days early.
+    ['credited elsewhere', { status: 200, body: accountJson({ plan: RUNNING, due_for: 'renewal' }) }, /What is due changed since this page loaded, so nothing was sent/],
+    ['paid in full elsewhere', { status: 200, body: accountJson({ credit_raw: DUE.toString(), credit_tokens: '100000', due_raw: null, due_tokens: null }) }, /Nothing is due now: your account changed since this page loaded, so nothing was sent/],
+    ['moved to Feast elsewhere', { status: 200, body: accountJson({ plan: { ...accountJson().plan, selected: 'feast' }, due_raw: (1_000_000n * UNIT).toString(), due_tokens: '1000000' }) }, /What is due changed since this page loaded/],
+    ['another wallet signed in', { status: 200, body: accountJson({ account: { id: 'acct_2', name: 'Other', wallet: OTHER_WALLET, created_at: null } }) }, /signed in with another wallet, so nothing was sent/],
+    ['unreadable', { status: 503, body: { error: { code: 'billing_unavailable', message: 'Billing is unavailable' } } }, /could not be read just now, so nothing was sent/],
+  ] as const) {
+    sent = []; calls = [];
+    // The page loaded with Crumbs selected and 100,000 due to start it; by the click the account has moved on.
+    routes['GET account'] = (_, call) => call === 1 ? { status: 200, body: accountJson() } : later;
+    const page = await mount();
+    assert.equal(canPay(page.container), true, why); assert.match(text(page.container), /Due: 100,000 MERRYMEN/, why);
+    await click(payButton(page.container));
+    assert.equal(sent.length, 0, why); assert.match(text(page.container), words, why);
+    assert.equal(accountReads(), 2, `${why}: read again at the click`);
+    // What is due now is what the page shows now; an account this tab is not signed in as is not shown.
+    if (why === 'credited elsewhere') { assert.match(text(page.container), /To renew on 7 Nov 2026: 100,000 MERRYMEN/); assert.doesNotMatch(text(page.container), /Due: 100,000/); }
+    if (why === 'paid in full elsewhere') { assert.equal(canPay(page.container), false); assert.match(text(page.container), /Nothing due/); }
+    if (why === 'moved to Feast elsewhere') assert.match(text(page.container), /Pay 1,000,000 MERRYMEN with wallet/);
+    if (why === 'another wallet signed in' || why === 'unreadable') assert.match(text(page.container), /Due: 100,000 MERRYMEN/);
+    await page.unmount();
+  }
+  // An upgrade's price falls with the time left in the period: a click a few seconds later still pays what the button said.
+  const upgrade = (due: bigint) => ({ status: 200, body: accountJson({ plan: { ...RUNNING, selected: 'loaf' }, due_raw: due.toString(), due_tokens: String(due / UNIT), due_for: 'upgrade' }) });
+  routes['GET account'] = (_, call) => call === 1 ? upgrade(200_000n * UNIT) : upgrade(199_990n * UNIT);
+  sent = []; calls = [];
+  const page = await mount();
+  await click(payButton(page.container));
+  assert.equal(sent.length, 1); assert.equal(accountReads(), 2);
+  assert.equal(BigInt('0x' + String((sent[0] as { data: string }).data).slice(74)), 200_000n * UNIT, 'the amount shown is the amount sent');
   await drain(page.container, [HASH_A]);
   await page.unmount();
 });

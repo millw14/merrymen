@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { EXPLORER } from "../../lib/chain";
 import {
   TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount, renewalBy,
-  normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, stillPayable, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
+  normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, stillDue, stillPayable, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
   type AccountView, type Eip1193, type PayCheck, type PlanPreview, type PlansView, type WatchEnd,
 } from "../../lib/developer-billing";
 import { MAX_PENDING, PENDING_KEY, forgetPayment, pendingPayments, rememberPayment } from "../../lib/pending-payments";
@@ -70,6 +70,9 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
   const [watches, setWatches] = useState<Watch[]>([]);
   useEffect(() => { setName(defaultName); }, [defaultName]);
   const ready = state.kind === "ready";
+  // The account as the payment panel was last drawn from it: what a click agreed to.
+  const drawn = useRef<AccountView | null>(null);
+  drawn.current = state.kind === "ready" ? state.view : null;
   // The list as of the latest change, for the checks a click makes between renders.
   const current = useRef(watches);
   current.current = watches;
@@ -116,14 +119,26 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
   // Several payments share the gateway's per-wallet budget for checks: each waits longer the more are checked at once.
   const spread = useRef(1);
   spread.current = Math.max(1, watches.filter(w => w.phase === "checking").length);
-  /** What must still hold at the click, read now rather than trusted from when the panel was drawn. */
+  /**
+   * What must still hold at the click, read now rather than trusted from when
+   * the panel was drawn: the treasury and the payments switch (GET /plans),
+   * and what is due and what for (GET /account), which a payment or a plan
+   * change from another device, or Merrymen, may have changed since.
+   */
   const confirmPayable = useCallback(async (treasury: string) => {
     if (adopt().length) throw new Error("A payment from another tab of this browser is being checked below. Wait for it before paying again: paying now sends a second payment.");
-    let answer: unknown = null;
-    try { answer = await request("plans"); } catch { /* Unreadable: refused just below. */ }
-    const fresh = stillPayable(answer, treasury);
+    const shown = drawn.current;
+    const [plansAnswer, accountAnswer] = await Promise.all([
+      request("plans").catch(() => null),
+      // Unreadable is refused below; an ended session signs the console out, as anywhere else.
+      request("account").catch((e: { code?: unknown }) => { if (e?.code === "signed_out") throw e; return null; }),
+    ]);
+    const fresh = stillPayable(plansAnswer, treasury), due = shown ? stillDue(accountAnswer, shown) : null;
     if (fresh.plans) onPlans(fresh.plans);
+    if (due && !due.ok && due.account) callbacks.current.onAccount(due.account);
     if (!fresh.ok) throw new Error(fresh.message);
+    if (!due) throw new Error("Your account could not be read just now, so nothing was sent. Try again shortly.");
+    if (!due.ok) throw new Error(due.message);
   }, [adopt, onPlans]);
 
   if (state.kind === "unsupported") return null;
@@ -309,7 +324,7 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, c
       onPay={() => run("pay", async () => {
         const provider = ethereum();
         if (!provider) { await recheck(); return; }
-        // The treasury, the payments switch and this browser's other payments, as they are now.
+        // The treasury, the payments switch, what is due and what for, and this browser's other payments, as they are now.
         await confirmPayable(treasury);
         let hash: string;
         try { hash = await payWithWallet({ provider, wallet, treasury, amount }); } catch (e) { await recheck(); throw new Error(walletError(e)); }

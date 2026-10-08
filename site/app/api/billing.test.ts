@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import {
   FALLBACK_PLANS, POLL_GIVE_UP_MS, POLL_MAX_CHECKS, ROBINHOOD_CHAIN, TOKEN, UNIT, amountToSend, balanceOfCalldata, ceilToWholeToken, chainIdOf, formatTokens, historyLabel, nextPollDelay,
-  normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, renewalBy, stillPayable, switchToRobinhood,
+  normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, renewalBy, stillDue, stillPayable, switchToRobinhood,
   endMessage, tokensToRaw, transferCalldata, txHash, waitingMessage, walletError, watchPayment, type Eip1193,
 } from '../../lib/developer-billing';
 
@@ -256,6 +256,53 @@ test('the account view keeps exact amounts and drops what it cannot read', () =>
   for (const c of ['\u061c', '\u180e', '\u200b', '\u200f', '\u202a', '\u202e', '\u2060', '\u2064', '\u2066', '\u2069', '\ufeff']) {
     assert.equal(normalizeAccount(account({ account: { id: 'acct_1', name: `Pr${c}ism`, wallet: WALLET } }))!.account.name, 'Prism', c.codePointAt(0)!.toString(16));
   }
+});
+
+test('a wallet payment goes ahead only if a fresh read of the account still asks for what the page shows', () => {
+  const shown = normalizeAccount(account({ due_for: 'activation' }))!;
+  const fresh = (over: Record<string, unknown>) => stillDue(account({ due_for: 'activation', ...over }), shown);
+  const refused = (answer: ReturnType<typeof stillDue>) => answer.ok ? '' : answer.message;
+  /** The account a refusal hands back to show, if any. */
+  const back = (answer: ReturnType<typeof stillDue>) => answer.ok ? undefined : answer.account;
+  assert.equal(stillDue(account({ due_for: 'activation' }), shown).ok, true);
+  // Usage and history move all the time and say nothing about what is due.
+  assert.equal(fresh({ usage: { used: 900, limit: 1000, resets_at: null, by_key: [] }, history: [] }).ok, true);
+  const running = { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-08T00:00:00.000Z', ends_at: '2026-11-07T00:00:00.000Z', selected: 'crumbs' };
+  for (const [why, over] of [
+    // Paid from a phone: the same 40,000 is now the next period's renewal, 30 days early.
+    ['activated elsewhere', { plan: running, credit_raw: '0', credit_tokens: '0', due_for: 'renewal' }],
+    ['framing alone', { due_for: 'upgrade' }],
+    ['another plan chosen', { plan: { id: 'free', name: 'Free', starts_at: null, ends_at: null, selected: 'loaf' }, due_raw: (340_000n * UNIT).toString() }],
+    ['part paid elsewhere', { credit_raw: (70_000n * UNIT).toString(), due_raw: (30_000n * UNIT).toString() }],
+    // Same amount, but a payment and an operator debit moved the credit: the account is not as the page drew it.
+    ['credit moved, amount not', { credit_raw: (61_000n * UNIT).toString() }],
+    ['the price was edited', { due_raw: (41_000n * UNIT).toString() }],
+  ] as const) {
+    const answer = fresh(over);
+    assert.equal(answer.ok, false, why); assert.match(refused(answer), /What is due changed since this page loaded, so nothing was sent/, why);
+    assert.equal(back(answer)?.account.id, 'acct_1', `${why}: the fresh account comes back to show`);
+  }
+  const paid = fresh({ credit_raw: (100_000n * UNIT).toString(), due_raw: null, due_tokens: null });
+  assert.equal(paid.ok, false); assert.match(refused(paid), /Nothing is due now/); assert.equal(back(paid)?.due_raw, null);
+  // Another tab of this browser signed in with another wallet: its account is not shown in this one.
+  const other = stillDue(account({ due_for: 'activation', account: { id: 'acct_2', name: 'Other', wallet: OTHER } }), shown);
+  assert.equal(other.ok, false); assert.equal(back(other), null); assert.match(refused(other), /signed in with another wallet, so nothing was sent/);
+  for (const unreadable of [null, {}, 'Bad gateway', { error: { code: 'account_missing' } }]) {
+    const answer = stillDue(unreadable, shown);
+    assert.equal(answer.ok, false); assert.equal(back(answer), null); assert.match(refused(answer), /could not be read just now, so nothing was sent/);
+  }
+  // An upgrade costs less as its period runs out, by the second: the amount on the button still covers it, so a
+  // small fall is paid as shown instead of refusing every click. A fall past 1%, a rise, or any other change refuses.
+  const upgrade = (due: bigint, over: Record<string, unknown> = {}) => account({ plan: running, credit_raw: '0', credit_tokens: '0', due_raw: due.toString(), due_for: 'upgrade', ...over });
+  const quoted = normalizeAccount(upgrade(200_000n * UNIT))!;
+  assert.equal(stillDue(upgrade(199_990n * UNIT + 5n), quoted).ok, true, 'rounds up to 199,991');
+  assert.equal(stillDue(upgrade(198_000n * UNIT), quoted).ok, true, 'exactly 1%');
+  assert.equal(stillDue(upgrade(197_999n * UNIT), quoted).ok, false, 'past 1%');
+  assert.equal(stillDue(upgrade(200_001n * UNIT), quoted).ok, false, 'never more than shown');
+  assert.equal(stillDue(upgrade(199_990n * UNIT, { credit_raw: '1', credit_tokens: undefined }), quoted).ok, false, 'credit moved');
+  // Only an upgrade falls with time: an activation or renewal that costs less was changed by something.
+  const renewal = (due: bigint) => account({ plan: running, credit_raw: '0', credit_tokens: '0', due_raw: due.toString(), due_for: 'renewal' });
+  assert.equal(stillDue(renewal(99_990n * UNIT), normalizeAccount(renewal(100_000n * UNIT))!).ok, false);
 });
 
 test('history is newest first whatever order it arrives in, and a long one keeps its latest 50', () => {

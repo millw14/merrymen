@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   FALLBACK_PLANS, UNIT, amountToSend, endMessage, historyLabel, normalizeAccount, normalizePlans, normalizePreview, paymentOutcome, paymentsReady,
-  previewSentence, renewalBy, waitingMessage, type PaymentOutcome, type WatchEnd,
+  previewSentence, renewalBy, stillDue, waitingMessage, type PaymentOutcome, type WatchEnd,
 } from '../../lib/developer-billing';
 import { loadAccount } from './AccountPanel';
 import { testSummary } from './DeveloperConsole';
@@ -76,6 +76,9 @@ test('the console reads the gateway\'s billing answers as a developer must see t
     assert.equal(previewSentence(preview, plans.plans[1], 'Free'), 'Crumbs starts as soon as 100,000 MERRYMEN arrives. Confirm, then pay below.');
     const chosen = normalizeAccount((await billing.choosePlan(OWNER, { tier: 'crumbs', confirm: true })).json)!;
     assert.equal(chosen.plan.selected, 'crumbs'); assert.equal(amountToSend(chosen.due_raw), 100_000n * UNIT);
+    // Pay reads GET /account again at the click: with nothing in between, the payment goes ahead.
+    const drawn = normalizeAccount(billing.accountView(OWNER).json)!;
+    assert.deepEqual(stillDue(billing.accountView(OWNER).json, drawn), { ok: true });
 
     // POST /payments, a hash not on chain yet: keep checking.
     let outcome = read(await billing.submitPayment(OWNER, '0x' + '9'.repeat(64)));
@@ -95,6 +98,9 @@ test('the console reads the gateway\'s billing answers as a developer must see t
     // Already the next period's price is "due": for renewal, which the console must not read as owed now.
     assert.deepEqual([after?.due_raw, after?.due_for], [(100_000n * UNIT).toString(), 'renewal']);
     assert.equal(renewalBy(after!), after?.plan.ends_at, 'owed when this period ends, not now');
+    // A tab still showing the activation as due would now pay for the next period, 30 days early: refused.
+    const stale = stillDue(billing.accountView(OWNER).json, drawn);
+    assert.equal(stale.ok, false); assert.equal(!stale.ok && stale.account?.due_for, 'renewal');
     assert.deepEqual(after?.history.map(h => historyLabel(h, plans.plans)), ['Crumbs started', 'Payment received'], 'newest first');
     assert.equal(after?.history[1].tx_hash, hash);
     assert.equal(endMessage(outcome as Ended, OWNER), 'Payment credited.');
@@ -118,6 +124,17 @@ test('the console reads the gateway\'s billing answers as a developer must see t
     // /meta, as the key test shows it: the plan's shared rate and this period's requests.
     const meta = billing.meta(OWNER, new Date(START).toISOString());
     assert.equal(testSummary({ name: 'Prism', rate_per_min: meta.rate_per_min, billing: meta.billing }), '200 OK · Prism · 60 requests/minute · 0 of 50,000 requests used');
+
+    // An upgrade's price falls by the second as its period runs: a click seconds after the page drew it still pays
+    // what the button said, and a page left open for days is refused and shown the new amount.
+    assert.equal((await billing.choosePlan(OWNER, { tier: 'loaf', confirm: true })).status, 200, said());
+    const quoted = normalizeAccount(billing.accountView(OWNER).json)!;
+    assert.equal(quoted.due_for, 'upgrade', said());
+    clock.t += 10_000;
+    assert.notEqual(normalizeAccount(billing.accountView(OWNER).json)!.due_raw, quoted.due_raw, 'the price fell');
+    assert.deepEqual(stillDue(billing.accountView(OWNER).json, quoted), { ok: true });
+    clock.t += 3 * 86_400_000;
+    assert.equal(stillDue(billing.accountView(OWNER).json, quoted).ok, false);
   } finally {
     globalThis.fetch = oldFetch;
     await billing.close(); await off.close(); await rpc.close();
