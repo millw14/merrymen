@@ -3790,7 +3790,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // A NEW LINE WHILE AN EARLIER ASK WENT UNANSWERED ("bro??", "you good?",
     // "you ignored me"): an answer the router may read as "ask it again"
     // (act(): reask), however small the talk.
-    if (j.reaskable && j.addressed !== null && (dec.act === "smalltalk" || (dec.act === "answer" && dec.mood === "normal")) && !signals.distress && !signals.injection) {
+    if (j.reaskable && j.addressed !== null && ((dec.act === "smalltalk" && dec.what === "hail") || (dec.act === "answer" && dec.mood === "normal")) && !signals.distress && !signals.injection) {
       dec = { act: "answer", mood: "normal" };
     }
     if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
