@@ -613,6 +613,27 @@ describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D
     assert.doesNotMatch(text, FORBIDDEN);
   });
 
+  it("every shape the room's digest can take passes the gate as research", () => {
+    const row = (text: string, i: number): Row => ({ id: `th-s${i}`, text, likes: i, isDev: false, userId: `u${i}`, handle: `h${i}`, ts: "2026-10-04T15:00:00Z" });
+    const sets: string[][] = [
+      ["lfg", "to the moon fr"],
+      ["update coming next week, cant wait for it"],
+      ["roadmap drops friday, team is building", "launch next week they say"],
+      ["dev sold a chunk, careful this could rug", "overvalued for its liquidity"],
+      ["still early, strong community, chart breaking out", "listing soon, robinhood app could list it"],
+      ["still early, strong community", "could rug, dev sold", "roadmap and a launch coming, holders adding"],
+    ];
+    for (const texts of sets) {
+      const rows = texts.map(row);
+      const data = { ...richData(rows), stance: { supporting: 0, opposing: 0, neutral: rows.length } };
+      const text = renderEnvelope(env("fomo_get_token_theses", "ok", data), G);
+      for (const l of text.split("\n")) {
+        const v = admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] });
+        assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
+      }
+    }
+  });
+
   it("the owner keeps the counts and her excerpts, with 'no clear lean' for what matched no cue", () => {
     const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses()), O);
     assert.match(text, /Merrymen's reading: 1 supporting, 1 opposing, 1 no clear lean\./);

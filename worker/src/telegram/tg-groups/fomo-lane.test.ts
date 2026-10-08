@@ -24,6 +24,7 @@ import type { ResolvedConfig } from "../../settings";
 import type { FetchLike, TgMessage } from "../api";
 import type { StateRef, TelegramState } from "../state";
 import type { BotSelf } from "./detect";
+import { admitTgLine } from "./gate";
 import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
@@ -1302,6 +1303,13 @@ describe("a refusal or a failure is said plainly in the room (WP10, D10)", () =>
       const out = tg.texts(CHAT);
       assert.equal(out[out.length - 1], "couldn't reach fomo just now, try again in a bit.", status);
       assert.doesNotMatch(out.join("\n"), /direct message/);
+    }
+  });
+
+  it("both room lines pass the gate as research, the kind the room's research lines are judged as", () => {
+    for (const l of [ROOM_LINE, "couldn't reach fomo just now, try again in a bit."]) {
+      const v = admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] });
+      assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
     }
   });
 
