@@ -1770,9 +1770,24 @@ export function routeWorthy(text: unknown, selfNames: readonly string[] = [], kn
  * you sure", "that's wrong", "look again", "try again". Read only beside its
  * own research answer (handler.ts), where it means "read it again", never
  * "say the same thing".
+ *
+ * THE WHOLE LINE IS THE PUSHBACK, give or take a filler ("bro", "pls",
+ * "hmm") and punctuation. A pushback inside other words is banter: "not
+ * right now", "i bought the wrong one lol", "try again later", "there are
+ * some whales buying", "are you sure we should buy" would otherwise have the
+ * room re-post a research answer (and pay for a new page) or ask which coin
+ * (review on #306). A real correction inside a longer line is the planner's
+ * (intent.ts CORRECTION_STRONG) when the router sends it there.
  */
-const PUSHBACK =
-  /\b(?:there (?:has|have|got) to be|there must be|has to be some|must be some|there (?:are|is) (?:def(?:initely)? |for sure |surely )?(?:some|theses|thesis|a thesis)|check again|look again|try again|search again|re-?check|recheck|refresh|are (?:you|u) sure|(?:you|u) sure|that'?s (?:wrong|not right|not true|cap)|not (?:right|true)|wrong (?:one|coin)?|impossible|no way)\b/u;
+const PB_FILL = String.raw`(?:hey|yo|bro|but|so|ok|okay|hmm+|nah|no|wait|pls|please|man|fam|lol|bruh)`;
+/** What a theses pushback may name: "there has to be thesis on $pons", "there must be some on it". */
+const PB_ABOUT = String.raw`(?: (?:on|for|about) (?:it|this(?: coin| one)?|that(?: coin| one)?|\$?[\p{L}\p{N}]{2,24}))?`;
+const PB_THESES = String.raw`(?: theses| thesis| a thesis)`;
+const PB_CORE =
+  String.raw`(?:(?:are|r) (?:you|u) sure|(?:you|u) sure|(?:check|look|try|search) (?:it |that )?again|re-?check(?: it| that)?|refresh(?: it| that)?|that'?s (?:wrong|not right|not true|cap)` +
+  String.raw`|there (?:has|have|got) to be(?: some| any)?(?:${PB_THESES}${PB_ABOUT})?|there must be(?: some| any)?(?:${PB_THESES}${PB_ABOUT})?|has to be some|must be some` +
+  String.raw`|there(?: are|'s| is) (?:def(?:initely)? |for sure |surely )?(?:some|theses|thesis|a thesis)${PB_ABOUT})`;
+const PUSHBACK = new RegExp(String.raw`^[ ,.!?:;-]*(?:${PB_FILL}[ ,.!?]*)*${PB_CORE}(?:[ ,.!?]+(?:${PB_FILL}|${PB_CORE}))*[ .!?]*$`, "u");
 
 export function pushbackOf(text: unknown, selfNames: readonly string[] = []): boolean {
   if (typeof text !== "string" || !text.trim()) return false;

@@ -1631,6 +1631,87 @@ describe("a group research question, end to end", () => {
     assert.equal(thesisReads, 1, "a room never forces a paid refresh of a copy with theses in it (D8)");
   });
 
+  /**
+   * One room through the real handler, port, planner and service, with no
+   * group model: lines from Milla or anyone, in reply to one of its own lines
+   * or not, each `advanceMs` after the last (review on #306).
+   */
+  async function room(caps: SetupCaps = {}) {
+    const s = await setup(caps);
+    let clock = NOW;
+    s.clock.now = clock;
+    store?.close();
+    store = new TgGroupsStore(path.join(home, "tg-groups-room.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    store.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+    store.setStatus(GROUP, "approved", 4242);
+    store.update(GROUP, (r) => { r.helloSaid = true; });
+    const tg = new FakeTg();
+    let tstate = { ownerId: 4242 } as unknown as TelegramState;
+    const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+    const inner = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    // What the handler asked the port, and with what.
+    const asks: Array<{ text: string; fresh: boolean }> = [];
+    const port: typeof inner = { ...inner, ask: (q) => (asks.push({ text: q.text, fresh: q.fresh === true }), inner.ask(q)) };
+    const logs: string[] = [];
+    groups?.stop();
+    await groups?.drain();
+    groups = createTgGroups({
+      opts: () => ({ token: "123:TOKEN", fetchFn: tg.fetchFn }),
+      store,
+      getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [4242] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => coins,
+      fomo: () => port,
+      self: () => ({ id: 999, username: "pinebot", name: "Pine" }),
+      privacyOff: () => false,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-1",
+      now: () => clock,
+      rand: () => 0.99,
+      env: {},
+      hosted: true,
+      sleep: async (ms) => { clock += Math.max(0, ms); },
+      timer: () => new Promise(() => {}),
+      log: (l) => logs.push(l),
+    });
+    let id = 900;
+    const lastOwn = (): { id: number; text: string } => {
+      const l = (store.room(GROUP)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+      return { id: l.messageId, text: l.text };
+    };
+    const say = async (text: string, o: { under?: { id: number; text: string }; fromId?: number; advanceMs?: number } = {}): Promise<string[]> => {
+      clock += o.advanceMs ?? 0;
+      s.clock.now = clock;
+      const before = tg.texts(GROUP).length;
+      const fromId = o.fromId ?? 4242;
+      groups!.onMessage({
+        updateId: id, chatId: GROUP, fromId, fromFirstName: fromId === 4242 ? "Milla" : "Ann", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++,
+        dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens",
+        ...(o.under ? { replyTo: { messageId: o.under.id, fromId: 999, fromIsBot: true, text: o.under.text } } : {}),
+      } as TgMessage);
+      await groups!.drain();
+      return tg.texts(GROUP).slice(before);
+    };
+    return { s, tg, asks, logs, lastOwn, say };
+  }
+
+  it("banter under a theses answer is never a pushback: no second thesis read, no re-posted answer, no 'which coin' (review on #306)", async () => {
+    const r = await room();
+    const first = await r.say("pine what are people saying about $PONS on fomo?");
+    assert.match(first.join("\n"), /What traders on Fomo are saying about PONS/);
+    const answer = r.lastOwn();
+    for (const line of ["not right now", "i bought the wrong one lol"]) {
+      const calls = r.s.calls.length;
+      const out = await r.say(line, { under: answer, fromId: 5151, advanceMs: 2 * 60_000 });
+      assert.equal(r.s.calls.length, calls, `${line}: nothing looked up`);
+      for (const t of out) {
+        assert.doesNotMatch(t, /What traders on Fomo are saying/, `${line}: ${t}`);
+        assert.doesNotMatch(t, /Which coin did you mean/, `${line}: ${t}`);
+      }
+    }
+  });
+
   it("a board that never reached the room is never 'the second one' (review on #303)", async () => {
     const s = await setup();
     let clock = NOW;

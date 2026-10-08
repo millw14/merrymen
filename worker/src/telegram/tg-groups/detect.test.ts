@@ -1142,13 +1142,24 @@ describe("metaLineOf: a line about its own silence (live 2026-10-07)", () => {
 
 describe("pushbackOf (the AUTON incident, 2026-10-08)", () => {
   it("pushing back on an answer: read it again", () => {
-    for (const t of ["there has to be thesis.", "there must be some", "check again", "pine look again pls", "are you sure?", "u sure", "that's wrong", "that’s not right", "try again", "refresh it", "recheck", "there are definitely theses"]) {
+    for (const t of [
+      "there has to be thesis.", "there must be some", "check again", "pine look again pls", "are you sure?", "u sure", "that's wrong", "that’s not right", "try again", "refresh it", "recheck", "there are definitely theses",
+      "pine, check again", "@pinebot are you sure?", "bro there has to be thesis on $PONS", "hmm are you sure? check again", "lol that's cap",
+    ]) {
       assert.equal(pushbackOf(t, ["pine"]), true, t);
     }
   });
   it("an ordinary line is not one", () => {
     for (const t of ["what are people saying about pons", "thanks", "lol", "how's the market", "send it", "has to be the dev", "i'm sure it'll pump"]) {
       assert.equal(pushbackOf(t), false, t);
+    }
+  });
+  it("a pushback inside other words is banter, never one (review on #306)", () => {
+    for (const t of [
+      "not right now", "i bought the wrong one lol", "wrong chain", "no way i'm selling", "try again later", "there are some whales buying", "refresh my memory, what's pons",
+      "are you sure we should buy", "there must be some mistake", "check again tomorrow", "u sure you're not rugging us", "impossible", "no way", "that one's wrong lol",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), false, t);
     }
   });
 });
