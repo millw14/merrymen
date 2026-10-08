@@ -70,6 +70,14 @@ export interface PoolPrice {
    * limit — is not it, and never becomes a spot price.
    */
   historyShort: boolean;
+  /**
+   * Another fee tier of the SAME pair holding more cash, whose own oracle said
+   * its history is too short (historyShort). readPoolPrice prices the deepest
+   * pool that answers a TWAP; this is the deeper market beside it, read too,
+   * so a quiet dust tier with an oracle cannot hide a busy new pool on the
+   * same pair (readRoutedPrice turns it into a spotAlternative).
+   */
+  shortHistoryDeeper?: PoolPrice;
   /** TWAP, cash per whole token, 8dp — use for valuation and safety. */
   price8: bigint;
   /** Spot, same units — use for execution sizing only. */
@@ -335,32 +343,7 @@ export async function bestCashPool(
     twapWindowSec?: number;
   },
 ): Promise<CashPool | null> {
-  const pools = await Promise.all(
-    FEE_TIERS.map(async (fee) => {
-      try {
-        const pool = (await client.readContract({
-          address: UNISWAP.v3Factory as `0x${string}`,
-          abi: FACTORY_ABI,
-          functionName: "getPool",
-          args: [args.token, args.cash, fee],
-        })) as `0x${string}`;
-        if (!pool || /^0x0{40}$/i.test(pool)) return null;
-        const cashInPool = (await client.readContract({
-          address: args.cash,
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [pool],
-        })) as bigint;
-        return { fee, pool, cashInPool };
-      } catch {
-        return null;
-      }
-    }),
-  );
-
-  const live = pools
-    .flatMap((p): CashPool[] => (p && p.cashInPool > 0n ? [p] : []))
-    .sort((a, b) => (b.cashInPool > a.cashInPool ? 1 : b.cashInPool < a.cashInPool ? -1 : 0));
+  const live = await liveCashPools(client, args);
   if (live.length <= 1) return live[0] ?? null;
 
   // ── THE DEEPEST THAT CAN ANSWER, WHEN THERE IS A CHOICE ─────────────────
@@ -389,6 +372,75 @@ export async function bestCashPool(
   return live[0]!;
 }
 
+/** Every fee tier's pool for the pair that holds any cash, deepest cash first. */
+async function liveCashPools(
+  client: PublicClient,
+  args: { token: `0x${string}`; cash: `0x${string}` },
+): Promise<CashPool[]> {
+  const pools = await Promise.all(
+    FEE_TIERS.map(async (fee) => {
+      try {
+        const pool = (await client.readContract({
+          address: UNISWAP.v3Factory as `0x${string}`,
+          abi: FACTORY_ABI,
+          functionName: "getPool",
+          args: [args.token, args.cash, fee],
+        })) as `0x${string}`;
+        if (!pool || /^0x0{40}$/i.test(pool)) return null;
+        const cashInPool = (await client.readContract({
+          address: args.cash,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [pool],
+        })) as bigint;
+        return { fee, pool, cashInPool };
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return pools
+    .flatMap((p): CashPool[] => (p && p.cashInPool > 0n ? [p] : []))
+    .sort((a, b) => (b.cashInPool > a.cashInPool ? 1 : b.cashInPool < a.cashInPool ? -1 : 0));
+}
+
+/**
+ * WHICH POOL THE PRICE READ USES, and the deeper short-history pool beside it.
+ *
+ * bestCashPool's order — the deepest pool that answers a TWAP — with two
+ * differences, for the price read alone (the depth readers keep bestCashPool):
+ *
+ *  - A PROBE THAT FAILED ON THE WAY IS A FAILED READ. A timeout or a rate
+ *    limit on one pool's observe() used to move the choice to the next pool,
+ *    and with sampling that can be a busy single-slot pool whose spot then
+ *    replaced a working TWAP for a tick. Now the whole read answers null, and
+ *    the caller keeps the route it had (pool-prices.ts).
+ *  - THE DEEPER MARKET IS REPORTED. A pool holding more cash whose own oracle
+ *    said "OLD" (its history is shorter than the window) is passed over for a
+ *    shallower one that answers — and returned as `shortDeeper`, so a dust
+ *    tier with a quiet oracle cannot hide a busy new pool on the same pair.
+ */
+async function chooseCashPool(
+  client: PublicClient,
+  args: { token: `0x${string}`; cash: `0x${string}`; twapWindowSec: number },
+): Promise<{ best: CashPool | null; shortDeeper: CashPool | null }> {
+  const live = await liveCashPools(client, args);
+  if (live.length <= 1) return { best: live[0] ?? null, shortDeeper: null };
+  let shortDeeper: CashPool | null = null;
+  for (const p of live) {
+    try {
+      await client.readContract({ address: p.pool, abi: POOL_ABI, functionName: "observe", args: [[args.twapWindowSec, 0]] });
+      return { best: p, shortDeeper };
+    } catch (e) {
+      if (!revertedOld(e)) return { best: null, shortDeeper: null };
+      shortDeeper ??= p;
+    }
+  }
+  // Every pool's history is short: the deepest is the market, read as such.
+  return { best: live[0]!, shortDeeper: null };
+}
+
 export async function readPoolPrice(
   client: PublicClient,
   args: {
@@ -401,9 +453,23 @@ export async function readPoolPrice(
 ): Promise<PoolPrice | null> {
   const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
 
-  const best = await bestCashPool(client, { token: args.token, cash: args.cash, twapWindowSec: windowSec });
-  if (!best) return null;
+  const choice = await chooseCashPool(client, { token: args.token, cash: args.cash, twapWindowSec: windowSec });
+  if (!choice.best) return null;
+  const read = await readPoolAt(client, choice.best, args, windowSec);
+  if (read && choice.shortDeeper) {
+    const deeper = await readPoolAt(client, choice.shortDeeper, args, windowSec);
+    if (deeper?.historyShort) read.shortHistoryDeeper = deeper;
+  }
+  return read;
+}
 
+/** One pool's TWAP, spot and in-range depth, read as readPoolPrice reads its choice. */
+async function readPoolAt(
+  client: PublicClient,
+  best: CashPool,
+  args: { token: `0x${string}`; tokenDecimals: number; cashDecimals: number },
+  windowSec: number,
+): Promise<PoolPrice | null> {
   try {
     const [token0, slot0, liquidity] = await Promise.all([
       client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "token0" }) as Promise<`0x${string}`>,
@@ -526,6 +592,8 @@ export interface RoutedPrice {
   price18?: bigint;
   /** The token's own pool on this route (the leg that is not WETH/USDG). */
   pool?: `0x${string}`;
+  /** That pool's oracle ring size, on a TWAP route: one means the "TWAP" was a quiet pool's single observation, extrapolated. */
+  poolCardinality?: number;
   /**
    * On a TWAP route only, and only for a caller that asked (`allowSpot`): a
    * DEEPER route through a pool with no oracle history yet. The TWAP route is
@@ -635,6 +703,7 @@ export async function readRoutedPrice(
           divergenceBps: direct.divergenceBps,
           twapWindowSec: windowSec,
           pool: direct.pool,
+          poolCardinality: direct.oracleCardinality,
         }
       : null;
 
@@ -663,6 +732,7 @@ export async function readRoutedPrice(
       divergenceBps: Math.max(leg.divergenceBps, wethLeg.divergenceBps),
       twapWindowSec: windowSec,
       pool: leg.pool,
+      poolCardinality: leg.oracleCardinality,
     };
     if (wethRoute.price8 <= 0n) return directRoute;
     if (!directRoute) return wethRoute;
@@ -709,65 +779,69 @@ function spotRoute(
   wethLeg: PoolPrice | null,
   tokenDecimals: number,
 ): RoutedPrice | null {
-  // ONLY A POOL WHOSE OWN ORACLE SAID ITS HISTORY IS TOO SHORT (historyShort).
-  // A price8 of zero is also what a TWAP reads for a coin cheaper than 8dp can
-  // carry, and what an observe() that failed on the way leaves behind —
-  // neither means the pool has no history, and treating them so would trade a
-  // TWAP for a spot price.
-  const directSpot: RoutedPrice | null =
-    direct && direct.historyShort && direct.spot8 > 0n
-      ? {
-          price8: direct.spot8,
-          // Cash is USDG, so cash per token at 18dp is already USD at 18dp.
-          price18: direct.spot18,
-          spot8: direct.spot8,
-          route: "direct",
-          liquidityUsdg: cashRawToUsdg(direct.liquidityCashRaw, direct.cashDecimals, 100_000_000n),
-          divergenceBps: 0,
-          twapWindowSec: 0,
-          pool: direct.pool,
-          spotOnly: {
-            pool: direct.pool,
-            tokenIsToken0: direct.tokenIsToken0,
-            tokenDecimals,
-            cashDecimals: direct.cashDecimals,
-            cashUsd8: 100_000_000n,
-            oracleCardinality: direct.oracleCardinality,
-            otherLegDepthUsdg: null,
-          },
-        }
-      : null;
-  let wethSpot: RoutedPrice | null = null;
-  if (leg && wethLeg && leg.historyShort && leg.spot18 > 0n && wethLeg.price8 > 0n) {
-    const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
+  // ONLY A POOL WHOSE OWN ORACLE SAID ITS HISTORY IS TOO SHORT (historyShort):
+  // the pool the read chose, or a deeper tier of the same pair it passed over
+  // for one that answers (shortHistoryDeeper). A price8 of zero is also what a
+  // TWAP reads for a coin cheaper than 8dp can carry, and what an observe()
+  // that failed on the way leaves behind — neither means the pool has no
+  // history, and treating them so would trade a TWAP for a spot price.
+  const shortOf = (p: PoolPrice | null): PoolPrice[] =>
+    p ? [...(p.historyShort ? [p] : []), ...(p.shortHistoryDeeper?.historyShort ? [p.shortHistoryDeeper] : [])] : [];
+  const candidates: RoutedPrice[] = [];
+  for (const d of shortOf(direct)) {
+    if (d.spot8 <= 0n) continue;
+    candidates.push({
+      price8: d.spot8,
+      // Cash is USDG, so cash per token at 18dp is already USD at 18dp.
+      price18: d.spot18,
+      spot8: d.spot8,
+      route: "direct",
+      liquidityUsdg: cashRawToUsdg(d.liquidityCashRaw, d.cashDecimals, 100_000_000n),
+      divergenceBps: 0,
+      twapWindowSec: 0,
+      pool: d.pool,
+      spotOnly: {
+        pool: d.pool,
+        tokenIsToken0: d.tokenIsToken0,
+        tokenDecimals,
+        cashDecimals: d.cashDecimals,
+        cashUsd8: 100_000_000n,
+        oracleCardinality: d.oracleCardinality,
+        otherLegDepthUsdg: null,
+      },
+    });
+  }
+  if (wethLeg && wethLeg.price8 > 0n) {
     const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
-    const price8 = combineLegs(leg.spot18, wethLeg.price8);
-    if (price8 > 0n) {
-      wethSpot = {
+    for (const l of shortOf(leg)) {
+      if (l.spot18 <= 0n) continue;
+      const price8 = combineLegs(l.spot18, wethLeg.price8);
+      if (price8 <= 0n) continue;
+      const legDepthUsdg = cashRawToUsdg(l.liquidityCashRaw, l.cashDecimals, wethLeg.price8);
+      candidates.push({
         price8,
-        price18: (leg.spot18 * wethLeg.price8) / 100_000_000n,
-        spot8: combineLegs(leg.spot18, wethLeg.spot8),
+        price18: (l.spot18 * wethLeg.price8) / 100_000_000n,
+        spot8: combineLegs(l.spot18, wethLeg.spot8),
         route: "weth",
         liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
         // The WETH/USDG leg still has an oracle, and its divergence still counts.
         divergenceBps: wethLeg.divergenceBps,
         twapWindowSec: 0,
-        pool: leg.pool,
+        pool: l.pool,
         spotOnly: {
-          pool: leg.pool,
-          tokenIsToken0: leg.tokenIsToken0,
+          pool: l.pool,
+          tokenIsToken0: l.tokenIsToken0,
           tokenDecimals,
-          cashDecimals: leg.cashDecimals,
+          cashDecimals: l.cashDecimals,
           cashUsd8: wethLeg.price8,
-          oracleCardinality: leg.oracleCardinality,
+          oracleCardinality: l.oracleCardinality,
           otherLegDepthUsdg: wethDepthUsdg,
         },
-      };
+      });
     }
   }
-  if (!directSpot) return wethSpot;
-  if (!wethSpot) return directSpot;
-  return wethSpot.liquidityUsdg > directSpot.liquidityUsdg ? wethSpot : directSpot;
+  // Deeper wins; ties go to the first built — direct, one hop.
+  return candidates.reduce<RoutedPrice | null>((best, c) => (!best || c.liquidityUsdg > best.liquidityUsdg ? c : best), null);
 }
 
 /**

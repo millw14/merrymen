@@ -88,6 +88,8 @@ interface CacheEntry {
   /** The raw route, unjudged. null = no pool found at all. */
   routed: RoutedPrice | null;
   fetchedAt: number;
+  /** When the route's spotAlternative was last read whole — it can be carried past a refresh that failed to read it, up to MAX_ROUTE_AGE_SEC. */
+  altFetchedAt?: number;
 }
 
 export interface PoolPriceReader {
@@ -153,24 +155,24 @@ export function spotOf(r: RoutedPrice): RoutedPrice | null {
 /**
  * WHETHER A CURRENT TWAP ROUTE STANDS when a refresh can only find a spot one.
  *
- * Kept (the refresh treated as a failed read, ageing toward MAX_ROUTE_AGE_SEC):
- *  - the spot route is on ANOTHER pool and is not deeper — it came back only
- *    because the TWAP pool's read failed this time (a rate limit, a timeout);
- *    were it deeper, the TWAP route would have carried it as an alternative.
- *  - it is the SAME pool and that pool keeps a real oracle ring (cardinality
- *    over 1) whose window just came up short — a ring overrun by a burst of
- *    swaps looks exactly like this, and a TWAP must not be traded for a spot
- *    price on it.
- * Taken at once: the same pool with a single observation. That pool can only
- *  have "answered" before by extrapolating one quiet observation; its first
- *  swap ends that, and its spot is now the truth — keeping the old reading
- *  would freeze a pre-trade price, depth and divergence for minutes.
+ * A TWAP ON A REAL ORACLE RING STANDS, against any spot route, until
+ * MAX_ROUTE_AGE_SEC retires it: a ring overrun by a burst of swaps, or a read
+ * of it that failed, comes back exactly like this, on its own pool or another
+ * tier's — and a TWAP must not be traded for a spot price on either. Two
+ * exceptions, taken at once:
+ *  - the spot route is the deeper market the TWAP route already carried as its
+ *    alternative (spotAlternative) — known, read and sampled before;
+ *  - the TWAP pool keeps a single observation. It could only have "answered"
+ *    by extrapolating one quiet observation; its next swap ends that, and
+ *    keeping the old reading would freeze a pre-trade price for minutes.
+ * An unknown ring size is treated as a real one.
  */
 export function keepTwapOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
   const prev = previous?.routed;
   if (!prev || prev.spotOnly || !routed.spotOnly || nowSec - previous!.fetchedAt > MAX_ROUTE_AGE_SEC) return false;
-  const samePool = !!prev.pool && prev.pool.toLowerCase() === routed.spotOnly.pool.toLowerCase();
-  return samePool ? routed.spotOnly.oracleCardinality > 1 : routed.liquidityUsdg <= prev.liquidityUsdg;
+  const known = prev.spotAlternative?.spotOnly?.pool;
+  if (known && known.toLowerCase() === routed.spotOnly.pool.toLowerCase()) return false;
+  return (prev.poolCardinality ?? 2) > 1;
 }
 
 /** Human-readable provenance for a sampled price, beside `describeRoute`. */
@@ -227,8 +229,24 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
           if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
+          // AN ALTERNATIVE THAT WAS NOT READ IS NOT GONE. A refresh of the same
+          // TWAP pool that came back without the deeper market it carried — a
+          // rate limit on that pool, a failed WETH leg — keeps the one it had,
+          // re-read below like any spot route, until MAX_ROUTE_AGE_SEC. Dropping
+          // it threw away its series and left a held coin refused too-thin.
+          let altFetchedAt = routed?.spotAlternative ? nowSec : undefined;
+          let carried = false;
+          const prevAlt = previous?.routed && !previous.routed.spotOnly ? previous.routed.spotAlternative : undefined;
+          if (routed && !routed.spotOnly && !routed.spotAlternative && prevAlt && !!routed.pool && previous!.routed!.pool?.toLowerCase() === routed.pool.toLowerCase()
+            && nowSec - (previous!.altFetchedAt ?? previous!.fetchedAt) <= MAX_ROUTE_AGE_SEC) {
+            routed = { ...routed, spotAlternative: prevAlt };
+            altFetchedAt = previous!.altFetchedAt ?? previous!.fetchedAt;
+            carried = true;
+          }
           if (routed) {
-            cache.set(key, { routed, fetchedAt: nowSec });
+            cache.set(key, { routed, fetchedAt: nowSec, ...(altFetchedAt !== undefined ? { altFetchedAt } : {}) });
+            // A carried alternative was not read this time: it is re-read below.
+            if (carried) return;
             // The full read's spot IS this tick's reading — of the spot route,
             // or of the deeper oracle-less alternative riding a TWAP route. A
             // route with neither needs no series: its pool keeps its own.
