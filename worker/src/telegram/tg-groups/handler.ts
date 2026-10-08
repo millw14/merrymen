@@ -2462,7 +2462,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // A line from someone whose earlier ask went unanswered is always worth
       // it: the router may re-run that ask (reask).
       const unanswered = j.reaskable && askStateOf(j.reaskable) === "lost" && !j.reaskable.reasked ? j.reaskable : null;
-      if (routable && !fomoThread && !routedOnce && (unanswered || routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId)))) {
+      // A Fomo follow-up the planner could not read that names a chain ("shogun on base?"): the router
+      // reads it, and grounds the chain from the line itself (route.ts groundedChain).
+      const fomoChain = j.fomo === true && chainIn(j.line.text) !== undefined;
+      if (routable && !fomoThread && !routedOnce && (unanswered || fomoChain || routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId)))) {
         const routed = await routeLine(chatId, j, replyOpts, persona, unanswered ? { reask: true, reaskOf: unanswered.job.line.text } : {});
         if (routed === "taken") return null;
       }
@@ -4143,7 +4146,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const named = fomoHere && fomoAskOf(text, selfNamesOf(me)) !== null;
         const desked = fomoHere && !named ? deskIntentOf(text, chatId) : null;
         const trendingAsk = desked?.kind === "market" && desked.trending === true;
-        const fomoAsk = fomoHere && (named || trendingAsk || (fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
+        // A market ask naming a venue ("what's trending in the market", "on robinhood chain") stays
+        // with the desk, even right after a Fomo answer (D1): never a Fomo follow-up.
+        const venueMarket = desked?.kind === "market" && desked.trending !== true;
+        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
         // A complaint with nothing of theirs open asks which question; one
         // replying to its answer to their open ask has that ask read again by
         // the router (act()). A new line while an earlier one went

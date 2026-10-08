@@ -2080,9 +2080,11 @@ const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|
  * wild" stay chat; the planner still decides what, if anything, it plans.
  */
 const LIST_MOD = String.raw`(?:top|best|hottest|biggest|trending|new|newest|fresh|small|early|graduated|most held|robinhood(?: chain)?|rh|solana|sol|base|eth(?:ereum)?|bsc|bnb)`;
-const LIST_NOUN = String.raw`(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|traders|whales|leaderboard|boards?|theses)`;
+const LIST_NOUN = String.raw`(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|traders|whales|leaderboard|boards?|theses|ones)`;
+/** A chain before the platform: "trending on base on fomo", "solana ones on fomo". */
+const LIST_CHAIN = String.raw`(?:(?:on|in) (?:the )?(?:robinhood(?: chain)?|base|solana|sol|eth(?:ereum)?|bsc|bnb)\s+)?`;
 const FOMO_LIST_ASK = new RegExp(
-  String.raw`^(?:(?:the|any|some|latest|current)\s+)?(?:(?:${LIST_MOD}\s+){1,3}${LIST_NOUN}?|${LIST_NOUN})\s*(?:on|from|in) (?:the )?fomo(?:\s+(?:today|rn|right now|now|this week|lately|atm))?(?:\s+(?:pls|please))?[.!]*$`,
+  String.raw`^(?:(?:the|any|some|latest|current)\s+)?(?:(?:${LIST_MOD}\s+){1,3}${LIST_NOUN}?|${LIST_NOUN})\s*${LIST_CHAIN}(?:on|from|in) (?:the )?fomo(?:\s+(?:today|rn|right now|now|this week|lately|atm))?(?:\s+(?:pls|please))?[.!]*$`,
   "u",
 );
 
@@ -2122,7 +2124,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
  * nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain)\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb)\b/u;
 const FOLLOW_UP_MAX_WORDS = 10;
 /**
  * A ROW OF THE BOARD IT JUST SAID, or the trader it just named: "the second

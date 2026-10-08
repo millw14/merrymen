@@ -1032,6 +1032,38 @@ describe("live 2026-10-07: a yes under its own offer, and no fake progress (d2 r
     assert.equal(logs.filter((l) => l === "[tg-groups] route invalid").length, 1, "frank is refused: no person wrote it");
   });
 
+  it("after a board, a chain on its own ('and on solana?', 'solana ones?', 'on base?') is the board on that chain; 'the base case' and 'based' stay chat", async () => {
+    make({ self: () => SHOGUN });
+    const SOL = "Trending on Fomo, Solana only (board position is popularity, not quality):\n1. ETAC on solana, market cap $874.6k";
+    // As the real planner with the Fomo conversation remembered: a chain alone re-asks the board; a bare name before "on base?" is no plan.
+    fomo!.answer = (q) => (q.request ? { text: q.request.kind === "board" && q.request.chain ? SOL : BOARD, deflect: false } : /trending on fomo/.test(q.text) ? { text: BOARD, deflect: false } : /solana/.test(q.text) ? { text: SOL, deflect: false } : null);
+    await said(mine("shogun what's trending on fomo?"));
+    for (const t of ["@Merrymanme_bot and on solana?", "shogun solana ones?"]) {
+      clock += MIN;
+      const before = fomo!.asks.length;
+      await said(mine(t));
+      assert.equal(fomo!.asks.length - before, 1, t);
+      assert.equal(fomo!.asks.slice(-1)[0]!.text, t);
+      assert.equal(lastOwn().text, SOL, t);
+    }
+    assert.equal(routePrompts.length, 0, "the planner read both: nothing routed");
+    // "on base?" with a bare leading name: the planner refuses it, the router reads it once.
+    picks.push({ action: "fomo_board", board: "trending", chain: "base" });
+    clock += MIN;
+    await said(mine("shogun on base?"));
+    assert.equal(routePrompts.length, 1);
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "board", board: "trending", chain: "base" });
+    // Not a chain: the persona's.
+    for (const t of ["shogun what's the base case for pons?", "shogun lol based"]) {
+      clock += MIN;
+      replies.push("ngl depends who you ask");
+      const asked = fomo!.asks.filter((a) => a.request).length;
+      await said(mine(t));
+      assert.equal(fomo!.asks.filter((a) => a.request).length, asked, t);
+      assert.notEqual(lastOwn().text, SOL, t);
+    }
+  });
+
   it("a yes under its own offer to keep tabs on someone is never a tail", async () => {
     let proposed = 0;
     make({ self: () => SHOGUN, owner: () => ({ proposeTail: async () => { proposed++; return "sent" as const; } }) });
@@ -1162,6 +1194,42 @@ describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the
     assert.deepEqual(fomo!.asks[1]!.request, { kind: "board", board: "trending" });
     assert.deepEqual(desk!.asks, []);
     assert.deepEqual(tg.texts(CHAT), [BOARD, BOARD]);
+  });
+
+  it("right after a Fomo answer, a market ask naming a venue stays with the desk; 'what about robinhood chain?' is still Fomo's", async () => {
+    const REFUSED = "fomo lookups for this room are used up for now, try again after 21:00 UTC.";
+    fomo!.answer = (q) => (q.request?.kind === "board" || /trending on fomo|about robinhood chain/.test(q.text) ? { text: BOARD, deflect: false, status: "ok" } : { text: REFUSED, deflect: false, status: "budget-limited" });
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    for (const [i, t] of ["pine what's trending in the market", "pine what's trending on robinhood chain"].entries()) {
+      clock += MIN;
+      await said(msg(t, { fromId: ANN + 1 + i }));
+    }
+    assert.equal(fomo!.asks.length, 1, "Fomo is asked nothing new");
+    assert.deepEqual(desk!.asks, [{ kind: "market" }, { kind: "market" }]);
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /used up|enough research lookups/, t);
+    // A follow-up with no market words is still a Fomo follow-up.
+    clock += MIN;
+    await said(msg("pine what about robinhood chain?", { fromId: ANN + 5 }));
+    assert.equal(fomo!.asks.length, 2);
+    assert.equal(fomo!.asks[1]!.text, "pine what about robinhood chain?");
+  });
+
+  it("with the room's research slots spent, a venue market ask after a Fomo answer still gets the desk, never 'enough lookups'", async () => {
+    fomo!.answer = () => ({ text: "PONS: 1 buyer", deflect: false, status: "ok" });
+    make();
+    for (let i = 0; i < 6; i++) {
+      clock += 30 * SEC;
+      await said(msg(`pine what are fomo traders buying ${i}?`, { fromId: ANN + i }));
+    }
+    const asked = fomo!.asks.length;
+    for (const [i, t] of ["pine what's trending in the market", "pine what's trending on robinhood chain"].entries()) {
+      clock += 30 * SEC;
+      await said(msg(t, { fromId: ANN + 10 + i }));
+    }
+    assert.equal(fomo!.asks.length, asked);
+    assert.deepEqual(desk!.asks, [{ kind: "market" }, { kind: "market" }]);
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /enough research lookups|used up/, t);
   });
 
   it("an explicit 'what's trending on fomo' is still asked in its own words, with no fallback", async () => {

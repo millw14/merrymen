@@ -533,8 +533,13 @@ one-liner from a model that was given no data.
   budget refusal, research unavailable or failed, nothing sayable), inside
   the same 30 s deadline, with nothing of Fomo's said. Fomo's board covers
   every chain; one the line names ("what's trending on solana", "on base")
-  cuts it to that chain (`chainIn`). A venue word keeps it on the desk:
-  "what's trending on robinhood chain", "what's trending in the market";
+  cuts it to that chain (`chainIn`), and one it leaves out or dismisses
+  ("besides solana", "other than robinhood coins", "solana is dead") cuts it
+  to none: every chain, with the Robinhood Chain line. A venue word keeps it
+  on the desk: "what's trending on robinhood chain", "what's trending in the
+  market", even right after a Fomo answer (never a Fomo follow-up). After a
+  board, a chain alone ("and on solana?", "solana ones?", "on base?") is that
+  board on that chain; the router reads one the planner cannot;
 * a bare "do a quick analysis" — bound to the coin it replies
   under, else a desk ask up the reply chain, else what this topic last asked
   within 15 minutes, else the market. A specific entry, stop, target or other

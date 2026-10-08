@@ -952,6 +952,19 @@ describe("isPrivateAsk: who it follows, copies or watches is the owner's configu
   }
 });
 
+describe("a chain on its own is a Fomo follow-up, and a list ask may name a chain before the platform (review 2026-10-08)", () => {
+  const names = ["pine", "shogun"];
+  for (const t of ["shogun on base?", "solana ones?", "and on solana?", "what about eth?", "robinhood ones?"]) {
+    it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, names), true));
+  }
+  for (const t of ["shogun lol based", "shogun basically yes"]) {
+    it(`not a follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, names), false));
+  }
+  for (const t of ["shogun trending on base on fomo", "shogun solana ones on fomo", "robinhood ones on fomo"]) {
+    it(`list ask: ${t}`, () => assert.deepEqual(fomoAskOf(t, names), { kind: "platform" }));
+  }
+});
+
 describe("fomoAskOf: an addressed social-trading research ask, conservatively", () => {
   const names = ["pine", "pinebot"];
   const yes: Array<[string, string]> = [
