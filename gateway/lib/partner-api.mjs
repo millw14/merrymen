@@ -153,7 +153,7 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
         try {
           // The request_id goes along so the bridge's log line matches the partner's report.
           const result = await forward({ key: g.key, method, path: route, body, requestId: g.rid });
-          if (result.json?.error) result.json.error.request_id = g.rid;
+          if (result.json?.error && typeof result.json.error === "object") result.json.error.request_id = g.rid;
           return result;
         } catch {
           return partnerError(503, "upstream_unavailable", "Agent runtime is temporarily unavailable", g.rid);

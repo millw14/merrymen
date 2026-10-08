@@ -102,3 +102,38 @@ test("every agent operation enforces its distinct scope before forwarding", asyn
     assert.equal(forwards, before + 1);
   }
 });
+test("the runtime refusing the gateway is not relayed as the partner's own refusal", async () => {
+  // A bridge-secret mismatch or a non-hosted web app used to reach the partner as
+  // "your key is wrong" and "no such endpoint", for a key that is fine.
+  for (const [status, error] of [[401, { code: "unauthorized", message: "Invalid gateway request" }], [404, { code: "not_found", message: "Hosted API only" }]]) {
+    const b = bridge(() => Response.json({ error }, { status }));
+    const answer = await b.forward({ key, method: "POST", path: "/agents", body: "{}" });
+    assert.equal(answer.status, 503); assert.equal(answer.json.error.code, "upstream_unavailable");
+    assert.match(b.lines[0], /refused this gateway, not the partner.*MERRYMEN_PARTNER_BRIDGE_SECRET/);
+  }
+  // The runtime's refusals of the partner's own input pass through, and are logged.
+  for (const [status, error] of [[401, { code: "invalid_signature", message: "The owner signature could not be verified" }], [404, { code: "not_found", message: "No such agent" }]]) {
+    const b = bridge(() => Response.json({ error }, { status }));
+    assert.deepEqual((await b.forward({ key, method: "GET", path: "/agents/pa_1" })), { status, json: { error } });
+    assert.match(b.lines[0], new RegExp(`HTTP ${status} ${error.code}`));
+  }
+  // Not the runtime's envelope: a proxy's {"error":"Forbidden"}, or a refusal with no error at all.
+  for (const json of [{ error: "Forbidden" }, { message: "Forbidden" }]) {
+    const b = bridge(() => Response.json(json, { status: 403 }));
+    assert.equal((await b.forward({ key, method: "GET", path: "/agents" })).json.error.code, "upstream_invalid_response");
+  }
+  // And partner-api never throws stamping a request_id onto a string error.
+  const api = createPartnerApi({ partners: { verify: async () => ({ ok: true, key }), allows: () => true },
+    store: { rateHit: async () => true }, forward: async () => ({ status: 403, json: { error: "Forbidden" } }) });
+  assert.equal((await api.handle({ method: "GET", pathname: "/partner/v1/agents" })).status, 403);
+});
+test("a busy runtime's Retry-After reaches the partner; nothing else rides along", async () => {
+  const busy = { error: { code: "conversation_busy", message: "Try again shortly", retry_after: 3 } };
+  const b = bridge(() => Response.json(busy, { status: 409, headers: { "retry-after": "3", "set-cookie": "x=1" } }));
+  assert.deepEqual(await b.forward({ key, method: "POST", path: "/agents/pa_1/messages", body: "{}" }),
+    { status: 409, json: busy, headers: { "retry-after": "3" } });
+  for (const value of ["Wed, 21 Oct 2026 07:28:00 GMT", "3\r\nx-forged: 1", "-1"]) {
+    const odd = { status: 409, headers: new Map([["content-type", "application/json"], ["retry-after", value]]), text: async () => JSON.stringify(busy) };
+    assert.equal((await bridge(() => odd).forward({ key, method: "GET", path: "/agents" })).headers, undefined, value);
+  }
+});

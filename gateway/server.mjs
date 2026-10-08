@@ -153,7 +153,8 @@ function respond(res, r) {
     res.writeHead(r.status, { "content-type": r.contentType || "application/json", ...cors });
     return res.end(r.text);
   }
-  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...cors });
+  // `headers` is set by the partner bridge alone, for a relayed Retry-After.
+  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...r.headers, ...cors });
   res.end(JSON.stringify(r.json ?? {}));
 }
 

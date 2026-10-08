@@ -20,16 +20,32 @@ const clean = (value, fallback) => String(value ?? fallback).replace(/[^\x20-\x7
  * answer into an opaque 503 and log nothing, which is how a production-wide
  * 403 from the web app's cross-site block stayed hidden for a week.
  *
- * The code separates the two failures without revealing either:
- *   upstream_unavailable       no complete answer: refused, DNS, timeout, redirect
+ * The code separates the failures without revealing any of them:
+ *   upstream_unavailable       no complete answer (refused, DNS, timeout,
+ *                              redirect), or the runtime refused this gateway
+ *                              itself rather than the partner (see `ours`)
  *   upstream_invalid_response  the web app answered, but not with its JSON
  *                              envelope: a middleware refusal, a proxy page
  * Both stay 503, the status the contract tells partners to back off on.
  *
- * Logged: method, route, request_id, key id, upstream status, content-type and
- * the fetch error's name and cause. Never a body, a header value or a secret;
+ * Every answer that is not a 2xx is logged: method, route, request_id, key id,
+ * upstream status, then the runtime's error code or the content-type, or the
+ * fetch error's name and cause. Never a body, a header value or a secret;
  * those live only in the request, which no fetch error repeats.
  */
+const isObject = v => !!v && typeof v === "object" && !Array.isArray(v);
+/**
+ * THE RUNTIME REFUSING THE GATEWAY, NOT THE PARTNER. A request is forwarded
+ * only after the gateway has accepted the partner's key, so these answers are
+ * about the bridge: a 401 `unauthorized` comes only from the runtime's check of
+ * this bridge's signature (MERRYMEN_PARTNER_BRIDGE_SECRET differs between the
+ * two services, their clocks disagree, or its nonce store failed), and "Hosted
+ * API only" from a web app not running in hosted mode. Relayed, they read as
+ * the contract's "your key is wrong" and "no such endpoint" to a partner whose
+ * key is fine. The runtime's own refusals of a partner's input use other codes.
+ */
+const ours = (status, error) => (status === 401 && error.code === "unauthorized") ||
+  (status === 404 && error.message === "Hosted API only");
 export function createPartnerBridge({ secret, origin = "https://app.merrymen.dev", fetchImpl = fetch, log = console.error } = {}) {
   const target = new URL(origin);
   if (target.username || target.password || target.pathname !== "/" || target.search || target.hash ||
@@ -44,7 +60,7 @@ export function createPartnerBridge({ secret, origin = "https://app.merrymen.dev
       log(`${where} not sent: MERRYMEN_PARTNER_BRIDGE_SECRET is unset or under 32 bytes`);
       return failure("upstream_unavailable", "Agent runtime is not configured");
     }
-    let status, type, text;
+    let status, type, text, retryAfter;
     try {
       const response = await fetchImpl(`${target.origin}/api/partner${path}`, {
         method, headers: { ...headers, "content-type": "application/json" },
@@ -52,6 +68,7 @@ export function createPartnerBridge({ secret, origin = "https://app.merrymen.dev
       });
       ({ status } = response);
       type = response.headers.get("content-type");
+      retryAfter = response.headers.get("retry-after");
       text = await response.text();
     } catch (err) {
       const cause = clean(err?.cause?.code ?? err?.cause?.message, "no cause");
@@ -60,12 +77,24 @@ export function createPartnerBridge({ secret, origin = "https://app.merrymen.dev
     }
     let json;
     try { json = JSON.parse(text); } catch { /* Reported below. */ }
-    if (!json || typeof json !== "object") {
+    const ok = status >= 200 && status < 300;
+    // The runtime's envelope: an object, and on a refusal an `error` object with
+    // a code. `{"error":"Forbidden"}` from a proxy used to pass, then throw where
+    // partner-api stamps the request_id, as an opaque 503 that logged nothing.
+    if (!isObject(json) || (json.error === undefined ? !ok : !(isObject(json.error) && typeof json.error.code === "string"))) {
       log(`${where} answered HTTP ${status} ${clean(type, "without a content-type")}, not the runtime's JSON`);
       return failure("upstream_invalid_response", "Agent runtime returned an unexpected response");
     }
-    // Relayed as the runtime wrote it; a server-side failure is still worth a line.
-    if (status >= 500) log(`${where} answered HTTP ${status} ${clean(json.error?.code, "without an error code")}`);
-    return { status, json };
+    if (ok) return { status, json };
+    if (ours(status, json.error)) {
+      log(`${where} answered HTTP ${status} ${clean(json.error.code, "-")}: the runtime refused this gateway, not the partner. Check MERRYMEN_PARTNER_BRIDGE_SECRET and the clocks on both services, and that the web app runs in hosted mode`);
+      return failure("upstream_unavailable", "Agent runtime is temporarily unavailable");
+    }
+    // Relayed as the runtime wrote it, and still worth a line: a partner's
+    // report quotes the request_id, and this is where that id is found.
+    log(`${where} answered HTTP ${status} ${clean(json.error.code, "-")}`);
+    // A busy conversation or enrollment says when to come back. Delay-seconds
+    // only, the one form the runtime writes, so nothing else rides along.
+    return { status, json, ...(/^\d{1,5}$/.test(retryAfter ?? "") ? { headers: { "retry-after": retryAfter } } : {}) };
   };
 }
