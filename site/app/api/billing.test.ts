@@ -112,6 +112,17 @@ test('the account and chain are read again at the click, and a mismatch sends no
   assert.equal(await payWithWallet({ provider: blind.provider, wallet: WALLET, treasury: TREASURY, amount: UNIT }), HASH);
   const odd = wallet({ ...fine, eth_sendTransaction: () => ({ hash: HASH }) });
   await assert.rejects(payWithWallet({ provider: odd.provider, wallet: WALLET, treasury: TREASURY, amount: UNIT }), /paste the hash/);
+  // A send that fails may still have gone out: the page never says "nothing was sent" for it, and never says "try again".
+  for (const error of [{ code: -32603, message: 'Internal JSON-RPC error.' }, new Error('Request expired (WalletConnect relay)'), { code: -32000, message: 'timeout' }]) {
+    const w = wallet({ ...fine, eth_sendTransaction: () => { throw error; } });
+    const said = await payWithWallet({ provider: w.provider, wallet: WALLET, treasury: TREASURY, amount: UNIT }).then(() => 'sent', walletError);
+    assert.match(said, /cannot tell whether the payment was sent.*paste its hash below instead of paying again/, JSON.stringify(error)); assert.doesNotMatch(said, /Nothing was sent|try again/i);
+  }
+  // A refusal before signing is known: nothing left the wallet.
+  for (const [code, words] of [[4001, /You cancelled/], [-32002, /already waiting/], [4100, /not connected this page/]] as const) {
+    const w = wallet({ ...fine, eth_sendTransaction: () => { throw Object.assign(new Error('no'), { code }); } });
+    assert.match(await payWithWallet({ provider: w.provider, wallet: WALLET, treasury: TREASURY, amount: UNIT }).then(() => 'sent', walletError), words, String(code));
+  }
   // A treasury the page should never have been given stops before the wallet is asked anything.
   const none = wallet(fine);
   await assert.rejects(payWithWallet({ provider: none.provider, wallet: WALLET, treasury: '0x0000000000000000000000000000000000000000', amount: UNIT }));

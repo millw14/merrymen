@@ -283,7 +283,12 @@ const codeOf = (e: unknown): unknown => {
   const err = e as { code?: unknown; data?: { originalError?: { code?: unknown } } } | null;
   return err?.data?.originalError?.code ?? err?.code;
 };
-/** A wallet's refusal, said in words. Raw provider errors are not shown: they read as a crash. */
+/**
+ * A wallet's refusal, said in words. Raw provider errors are not shown: they
+ * read as a crash. "Nothing was sent" is said only where that is known: the
+ * fallback here covers connecting, switching and reading, and a failed send
+ * arrives as a SendUncertain with its own words.
+ */
 export function walletError(e: unknown): string {
   switch (codeOf(e)) {
     case 4001: return "You cancelled in your wallet.";
@@ -294,7 +299,10 @@ export function walletError(e: unknown): string {
   return e instanceof PaymentRefused ? e.message : "Your wallet could not complete that. Nothing was sent; try again, or pay manually below.";
 }
 export class PaymentRefused extends Error {}
-
+/** eth_sendTransaction failed after the wallet may have broadcast it: the page cannot know whether money left. */
+export class SendUncertain extends PaymentRefused {}
+/** Codes a wallet answers before anything is signed: the user declined, the account or chain is not connected, or a request is already open. */
+const NOT_SENT = new Set<unknown>([4001, 4100, 4900, 4901, -32002]);
 /**
  * Switch the wallet to Robinhood Chain, adding it when the wallet does not
  * know it (4902). A switch can return without switching, so the chain is
@@ -325,7 +333,13 @@ export async function payWithWallet({ provider, wallet, treasury, amount }: { pr
     if (typeof answer === "string" && /^0x[0-9a-fA-F]{1,64}$/.test(answer)) balance = BigInt(answer);
   } catch { /* The wallet will refuse an unaffordable transfer itself; this check only saves a failed transaction's gas. */ }
   if (balance !== null && balance < amount) throw new PaymentRefused(`This wallet holds ${formatTokens(balance, { decimals: 2 })} MERRYMEN; this payment needs ${formatTokens(amount, { decimals: 0, round: "up" })}.`);
-  const hash = await provider.request({ method: "eth_sendTransaction", params: [{ from: wallet, to: TOKEN.address, value: "0x0", data, chainId: CHAIN_HEX }] });
+  let hash: unknown;
+  try { hash = await provider.request({ method: "eth_sendTransaction", params: [{ from: wallet, to: TOKEN.address, value: "0x0", data, chainId: CHAIN_HEX }] }); } catch (e) {
+    if (NOT_SENT.has(codeOf(e))) throw e;
+    // An internal error, a relay timeout or a broadcast timeout can come after the user approved and the
+    // wallet sent. "Try again" there is a second payment, and the first one's hash is not on this page.
+    throw new SendUncertain("Your wallet reported an error, so this page cannot tell whether the payment was sent. Check your wallet's activity: if it shows this transfer, paste its hash below instead of paying again.");
+  }
   const tx = txHash(hash);
   if (!tx) throw new PaymentRefused("Your wallet did not return a transaction hash. If it sent one, paste the hash below.");
   return tx;
