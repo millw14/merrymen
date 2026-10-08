@@ -1423,10 +1423,13 @@ checks every phrase, in plain ASCII only (an invisible, lookalike, fullwidth
 or accented letter drops it) and read as the gate reads a line (letters
 spelled out one by one, "h a l f", are the word): its length, no digit
 outside the coin's name and no
-number word (a multiple in words, "tenfold" or "a ten bagger", included, and
-halves, quarters, dozens, doubled, tripled, halved and "bil": "half the
-supply", "price doubled since launch", "a bil market cap"; "the second wave
-of buyers" is no figure), no
+number word (a multiple in words, "tenfold", "a ten bagger", "a tenbagger"
+or "a multibagger", included, and halves, quarters, dozens, a sixth to a
+thousandth, doubled, tripled, halved, "bil", any "-illion" ("a zillion"),
+"k", single digits, and a bill or a yard market cap: "half the supply",
+"price doubled since launch", "a bil market cap", "a few k holders"; "the
+second wave of buyers", "fits the bill" and "the market structure bill" are
+no figure), no
 $, @, # or link, no quotation mark, no five-word run shared with any sample,
 nothing about instructions, nothing in the first person or naming the agent,
 Merrymen, this room or the room's own owner, admin, mod, bot or desk ("the

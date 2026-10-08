@@ -136,14 +136,18 @@ function runsOf(samples: readonly string[]): Set<string> {
 }
 
 const NUMBER_WORDS =
-  /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|hundreds|thousand|thousands|million|millions|billion|billions|trillion|percent|percentage|double|triple|tenx|hundredx|[0-9]+x|(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|many|n)fold|quadruple[ds]?|quintuple[ds]?|baggers?)\b/i;
+  /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|hundreds|thousand|thousands|million|millions|billion|billions|trillion|percent|percentage|double|triple|tenx|hundredx|[0-9]+x|(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|many|n)fold|quadruple[ds]?|quintuple[ds]?|\w*baggers?)\b/i;
 /**
  * A FIGURE IN WORDS that NUMBER_WORDS leaves out and the `answer` gate kind
  * does not check (its QUANTITY clause is for coin, buy and fade lines): half
  * the supply, a quarter of it, a dozen wallets, doubled since launch, a bil
- * market cap. "The second wave of buyers" and "first real meme" are no figure.
+ * market cap, a sixth or a hundredth, a zillion, "a few k holders", single
+ * digits, a bill or a yard market cap (NUMBER_WORDS has a tenbagger and a
+ * multibagger). "The second wave of buyers", "first real meme", "fits the
+ * bill" and "the market structure bill" are no figure.
  */
-const FIGURE_WORDS = /\b(?:half|halves|halved|halving|quarters?|dozens?|twice|thrice|(?:third|fourth|fifth|tenth)s?|double[ds]?|doubling|triple[ds]?|tripling|bils?|billi|mils?|bn)\b/i;
+const FIGURE_WORDS =
+  /\b(?:half|halves|halved|halving|quarters?|dozens?|twice|thrice|(?:third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|hundredth|thousandth)s?|double[ds]?|doubling|triple[ds]?|tripling|bils?|billi|mils?|bn|[a-z]*illions?|k|single[\s-]digits?|(?:bill|yard)s?\s+(?:market\s*caps?|mcaps?|mc|fdv|caps?))\b/i;
 const MARKUP = /[@$#"“”«»„]|https?:|www\.|t\.me|\.(?:com|net|org|io|xyz|gg|fun|app|me|co|ai)\b/i;
 const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disregard)\b/i;
 /**

@@ -175,6 +175,9 @@ describe("checkWording", () => {
     for (const x of [
       "aiming for a bil market cap", "price doubled since launch", "half the supply sits in a few wallets", "a quarter of supply is with the dev",
       "a dozen wallets hold most of it", "it tripled overnight", "the price halved this week", "doubling every day", "twice the volume of last week", "a third of holders sold",
+      // Slang (review r4).
+      "a tenbagger in the making", "a multibagger from here", "aiming for a bill market cap", "aiming for a yard market cap", "a few k holders already",
+      "expects a zillion holders", "expects a hundredth of the float to move", "a sixth of supply is with the dev", "single digit holders own the float", "a gazillion buyers incoming",
     ]) {
       const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
       assert.equal(w.gist, null, x);
@@ -184,6 +187,8 @@ describe("checkWording", () => {
     const fair = ["the second wave of buyers", "a few wallets hold a big share", "the first real meme on the chain", "the story could unfold slowly"];
     const kept = checkWording({ for: fair.slice(0, 2), against: fair.slice(2) }, MATERIAL, "Shogun").wording;
     assert.deepEqual([...kept.forIt, ...kept.against], fair);
+    const fairer = ["waiting on the crypto market structure bill", "fits the bill as a meme", "the community took over"];
+    assert.deepEqual(checkWording({ for: fairer }, MATERIAL, "Shogun").wording.forIt, fairer);
   });
 
   it("a phrase in the agent's voice is dropped: its name, Merrymen, the first person, this group", () => {
