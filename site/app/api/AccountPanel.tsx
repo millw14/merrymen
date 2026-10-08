@@ -273,6 +273,8 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, c
   const [balance, setBalance] = useState<bigint | null>(null);
   const [pasted, setPasted] = useState("");
   const [copied, setCopied] = useState("");
+  // The renewal date the developer chose to pay ahead for: a new period's renewal starts folded again.
+  const [aheadFor, setAheadFor] = useState<string | null>(null);
   const recheck = useCallback(async () => {
     const provider = ethereum();
     const next = await checkWallet(provider, wallet).catch((): PayCheck => ({ ok: false, reason: "not_connected", message: `Connect ${short(wallet)} in your wallet to pay from this page.` }));
@@ -305,10 +307,20 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, c
       : `${waiting.count === 1 ? "Your payment is" : `${waiting.count} payments are`} not credited yet. Check ${waiting.count === 1 ? "it" : "them"} again below, or forget ${waiting.count === 1 ? "it" : "them"}, before paying again: paying now sends a second payment.`}</p>
     {paste}
   </section>;
+  const later = <p className="dev-billing-note">Your plan runs until {renewBy && formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now is used to renew it when this period ends.</p>;
+  // A renewal is not owed until the period ends, and right after a payment starts a plan the gateway already reports the
+  // next period's price: drawn as a payment, it is a second one of the same size under the first one's receipt. Paying
+  // ahead stays possible, as a step of its own.
+  if (renewBy && aheadFor !== renewBy) return <section className="dev-pay" aria-labelledby="dev-pay-title">
+    <h3 id="dev-pay-title">Renewal on {formatDate(renewBy)}: {tokens} MERRYMEN</h3>
+    {later}
+    <div className="dev-pay-wallet"><button className="dev-secondary" disabled={!!busy} onClick={() => setAheadFor(renewBy)}>Pay ahead for the next period</button></div>
+    {paste}
+  </section>;
   return <section className="dev-pay" aria-labelledby="dev-pay-title">
     {renewBy
       ? <><h3 id="dev-pay-title">Renew for the next period: {tokens} MERRYMEN</h3>
-        <p className="dev-billing-note">Your plan runs until {formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now is used to renew it when this period ends.</p></>
+        {later}<div className="dev-pay-wallet"><button className="dev-textlink" disabled={!!busy} onClick={() => setAheadFor(null)}>Not now</button></div></>
       : <h3 id="dev-pay-title">Pay {tokens} MERRYMEN</h3>}
     <dl className="dev-pay-details">
       <div><dt>Amount</dt><dd><code>{tokens} MERRYMEN</code><button type="button" aria-label="Copy amount" onClick={() => copy("amount", (amount / 10n ** 18n).toString())}>{copied === "amount" ? "Copied ✓" : "Copy"}</button></dd></div>

@@ -457,6 +457,30 @@ test('Pay reads the account again: a payment, a plan change or a sign-in made el
   await page.unmount();
 });
 
+test('just after a payment starts a plan, the next period is not offered as a payment: paying ahead is a step of its own', async () => {
+  // The gateway credits the payment, starts Crumbs and at once reports the next period's 100,000 as due, for renewal.
+  const renewing = accountJson({ plan: RUNNING, due_for: 'renewal' });
+  routes['POST payments'] = () => ({ status: 200, body: { already: false, ...renewing } });
+  // Read at load and again at the first click as it was drawn; from then on, as the credit left it.
+  routes['GET account'] = (_, call) => ({ status: 200, body: call <= 2 ? accountJson() : renewing });
+  const page = await mount();
+  await click(payButton(page.container));
+  assert.equal(sent.length, 1); assert.match(statusOf(page.container, HASH_A), /^Credited Payment credited\./);
+  assert.equal(canPay(page.container), false, 'no second payment of the same size is offered under the first one\'s receipt');
+  assert.match(text(page.container), /To renew on 7 Nov 2026: 100,000 MERRYMEN/);
+  assert.match(text(page.container), /runs until 7 Nov 2026 either way, and nothing is owed before then/);
+  assert.doesNotMatch(text(page.container), /Pay 100,000 MERRYMEN/);
+  // Paying ahead stays possible, on purpose.
+  await click(buttonFor(page.container, /^Pay ahead for the next period$/));
+  assert.equal(canPay(page.container), true); assert.match(text(page.container), /Renew for the next period: 100,000 MERRYMEN/);
+  await click(buttonFor(page.container, /^Not now$/));
+  assert.equal(canPay(page.container), false);
+  await click(buttonFor(page.container, /^Pay ahead for the next period$/));
+  await click(payButton(page.container));
+  assert.equal(sent.length, 2, 'the second payment was asked for'); assert.match(statusOf(page.container, HASH_B), /^Credited/);
+  await page.unmount();
+});
+
 test('Review change only previews; only Confirm sends confirm:true', async () => {
   routes['GET account'] = () => ({ status: 200, body: accountJson({ plan: { id: 'free', name: 'Free', starts_at: null, ends_at: null, selected: 'free', renews_on_next_request: false }, due_raw: null, due_tokens: null }) });
   routes['POST plan'] = body => body?.confirm === true

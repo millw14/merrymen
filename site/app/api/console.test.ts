@@ -97,7 +97,9 @@ test('no payment panel without a live treasury, and nothing at all to pay when b
   const running = { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'crumbs', renews_on_next_request: false };
   const renewal = panel({ kind: 'ready', view: view({ plan: running, credit_raw: '0', due_raw: (100_000n * UNIT).toString(), due_for: 'renewal' }) });
   assert.match(renewal, /To renew on 31 Oct 2026: 100,000 MERRYMEN/); assert.doesNotMatch(renewal, /Due: |Pay 100,000 MERRYMEN/);
-  assert.match(renewal, /Renew for the next period: 100,000 MERRYMEN<\/h3>/); assert.match(renewal, /runs until 31 Oct 2026 either way, and nothing is owed before then/);
+  assert.match(renewal, /Renewal on 31 Oct 2026: 100,000 MERRYMEN<\/h3>/); assert.match(renewal, /runs until 31 Oct 2026 either way, and nothing is owed before then/);
+  // Folded: paying ahead is a step of its own, and a hash sent from elsewhere can still be added.
+  assert.match(renewal, /Pay ahead for the next period/); assert.ok(!renewal.includes(TREASURY)); assert.match(renewal, /Already sent\? Paste the transaction hash\./);
   // Activation is due now, as is a renewal once the plan has lapsed to Free.
   for (const due_for of ['activation', 'renewal', undefined]) {
     const now = panel({ kind: 'ready', view: view({ credit_raw: '0', due_raw: (100_000n * UNIT).toString(), due_for }) });
