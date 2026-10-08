@@ -550,7 +550,7 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     const record = store.recordForget.bind(store);
     const person = store.forgetPerson.bind(store);
     store.recordForget = () => true;
-    store.forgetPerson = () => {};
+    store.forgetPerson = () => 0;
     for (let i = 1; i <= 2_000; i++) await groups.forgetMe(CHAT, 900_000 + i, undefined, { late: true });
     store.recordForget = record;
     store.forgetPerson = person;
