@@ -181,7 +181,7 @@ test("the allowlist names plain identifiers once each, and covers the ledger, au
   }
   const names = DRILL_TABLES.map((t) => t.table);
   for (const must of ["trades", "flows", "equity", "decisions", "fee_accruals", "risk_periods", "mirror_state", "paper_checkpoints", "grants", "tenant_settings", "fleet_recovery_health", "recovery_reply_offsets", "announcements",
-    "agent_account", "mcp_connections", "mcp_tokens", "mcp_proposals", "notify_deliveries", "announcement_attempts", "chain_gap_bookings", "closed_epoch_repairs"]) {
+    "agent_account", "mcp_connections", "mcp_tokens", "mcp_proposals", "notify_deliveries", "announcement_attempts", "chain_gap_bookings", "closed_epoch_repairs", "gas_repairs"]) {
     assert.ok(names.includes(must), `${must} is allowlisted`);
   }
   assert.ok(Object.isFrozen(DRILL_TABLES));
@@ -221,7 +221,7 @@ test("every allowlisted table has a kind read from its writers, and only a prese
     assert.ok(PRESENCE_ONLY.includes(must), `${must} is presence-only`);
   }
   // The repair tools' receipts: a revert marks each one reverted in place, under the same applied_at_ms.
-  for (const receipts of ["chain_gap_bookings", "closed_epoch_repairs"]) {
+  for (const receipts of ["chain_gap_bookings", "closed_epoch_repairs", "gas_repairs"]) {
     assert.ok(PRESENCE_ONLY.includes(receipts), `${receipts} is presence-only`);
     assert.equal(DRILL_TABLES.find((t) => t.table === receipts).stamp, "applied_at_ms");
   }

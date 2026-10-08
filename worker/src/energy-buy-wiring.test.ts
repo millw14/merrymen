@@ -375,7 +375,7 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(t, /const flows = await reconcileFlowsOrRetry\(/);
     assert.match(
       t,
-      /if \(flows === "held"\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: true,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{\s*equityUsdg,\s*cashUsdg: balances\.cashUsdg,\s*expectedCashUsdg: await heldCashBaseline\(agentId\),\s*\}\),\s*\}\);\s*\}/,
+      /if \(flows === "held"\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: true,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{\s*(?:\/\/[^\n]*\n\s*)*equityUsdg: peakEquityUsdg,\s*cashUsdg: balances\.cashUsdg,\s*expectedCashUsdg: await heldCashBaseline\(agentId\),\s*\}\),\s*\}\);\s*\}/,
     );
     assert.ok(t.indexOf('if (flows === "held") {') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
     // The breaker's lift moves after the mark, from the mark on either side of the accrual.

@@ -142,6 +142,25 @@ describe("findOrphanOps", () => {
     const orphans = await findOrphanOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, knownOpHashes: new Set(), lookbackBlocks: 1000n });
     assert.equal(orphans.length, 1);
   });
+
+  it("KEEPS WHAT THE OP COST AND WHO PAID — the event says, and the row needs it", async () => {
+    // Discarded before: every orphan landed with no gas, and the board reads
+    // one such row as an unrecorded cost and withholds the agent's P&L.
+    const gasLog = (hash: Hex, tx: Hex, paymaster: `0x${string}`): RawLog => ({
+      ...opLog(hash, true, tx),
+      topics: encodeEventTopics({ abi: EP_ABI, eventName: "UserOperationEvent", args: { userOpHash: hash, sender: ACCOUNT, paymaster } }) as readonly Hex[],
+      data: encodeAbiParameters([{ type: "uint256" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }], [SESSION_NONCE, true, 7_000_000_000_000n, 180_000n]),
+    });
+    const owned = h(0x51), sponsored = h(0x52), txA = h(0x61), txB = h(0x62);
+    const chain = fakeChain(
+      [gasLog(owned, txA, "0x0000000000000000000000000000000000000000"), gasLog(sponsored, txB, "0x00000000000000000000000000000000000000aa")],
+      { [txA.toLowerCase()]: [transfer(USDG, ACCOUNT, ROUTER, 1_000000n)], [txB.toLowerCase()]: [transfer(USDG, ACCOUNT, ROUTER, 1_000000n)] },
+    );
+    const orphans = await findOrphanOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, knownOpHashes: new Set(), lookbackBlocks: 1000n });
+    const by = new Map(orphans.map((o) => [o.userOpHash, o.gas]));
+    assert.deepEqual(by.get(owned.toLowerCase()), { gasWei: 7_000_000_000_000n, gasUnits: 180_000n, gasPayer: "owner" });
+    assert.deepEqual(by.get(sponsored.toLowerCase()), { gasWei: 7_000_000_000_000n, gasUnits: 180_000n, gasPayer: "sponsor" });
+  });
 });
 
 /**
