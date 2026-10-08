@@ -1416,9 +1416,16 @@ number word (a multiple in words, "tenfold" or "a ten bagger", included), no
 $, @, # or link, no quotation mark, no five-word run shared with any sample,
 nothing about instructions, nothing waited on that is a claim, a holder
 snapshot, a giveaway, a reward distribution or tokens sent to holders (the
-airdrop story without the word), no crime laid at anyone's door
-(theft, a stolen or pulled pool, laundering, a criminal: worries stay
-worries, "fears it could collapse"), no trade advice in its voice (a trade
+airdrop story without the word), no crime or misconduct laid at anyone's
+door (theft, a stolen or pulled pool, walking or making off with the money,
+laundering, wash trading, manipulation, insider trading, a cash grab, lying
+or liars, dumping or selling on followers or holders, a criminal: worries
+stay worries, "fears it could collapse"; never the bare "lies" or "lying",
+so "the value lies in…" stays), no name of a person or account (a
+capitalised word past the first that is not the header's coin, chain or
+Fomo, nor a venue, chain, coin or common acronym such as Robinhood,
+Telegram, AI or SOL; a first word only when it is an acronym such as "CZ"),
+no trade advice in its voice (a trade
 verb opening the phrase or a clause, "get some before the listing", "still
 early, join in", one someone urges, "holders say get some", or "worth
 grabbing"; "fears early buyers sell before the unlock" is a worry and stays),

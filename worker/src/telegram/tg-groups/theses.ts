@@ -20,7 +20,8 @@
  * this room (never a pick or a position in its voice), no lure (an airdrop,
  * a presale, free tokens, someone to message; nothing waited on is a claim),
  * no crime laid at anyone's door (OUT_ACCUSE: theft, a stolen or pulled
- * pool, laundering, a criminal), no trade advice in its voice (OUT_ADVICE),
+ * pool, laundering, wash trading, lying, a criminal), no name of a person or
+ * account (namesSomeone), no trade advice in its voice (OUT_ADVICE),
  * and the group gate as an `answer` line,
  * never as `research`
  * (research admits "going to 10m" and "100x"; an answer does not, and its
@@ -149,7 +150,10 @@ const OUT_LURE =
   /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b/i;
 /**
  * A CRIME LAID AT SOMEONE'S DOOR, said back to a room: theft, a stolen or
- * pulled pool, laundering, a criminal, a predator. Theses are claims about
+ * pulled pool, walking off with the money, laundering, wash trading or
+ * manipulation, lying, a cash grab, dumping on followers, a criminal, a
+ * predator. Never the bare "lies" or "lying" ("the value lies in…", "lying
+ * low"). Theses are claims about
  * identifiable people (a coin's dev, its team), and worries stay worries
  * (THESES_SYSTEM): the gate's accusation clause knows rug, scam, honeypot,
  * ponzi, fraud and a dev dumping, not these. Kept here, not in the shared
@@ -159,7 +163,7 @@ const OUT_LURE =
  * vault") costs one phrase.
  */
 const OUT_ACCUSE =
-  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|ran\s+(?:off|away)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool))\b/i;
+  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
 /**
  * TRADE ADVICE IN THE AGENT'S VOICE: a trade verb opening the phrase or one
  * of its clauses ("get some before the listing", "still early, join in"), or
@@ -184,6 +188,31 @@ const WAIT_CLAIM =
   /\bclaim(?:s|able|ing)?\b|\bsnapshots?\b|\bgive\s*-?\s*aways?\b|\bdistribut\w*|\brewards?\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
 const WAITING_LABEL = "Waiting on: ";
 
+/**
+ * NAMES OF PEOPLE OR ACCOUNTS (THESES_SYSTEM forbids them; code makes sure):
+ * a capitalised word that is not the phrase's first is someone's name, unless
+ * the digest's header says it (the coin, its chain, Fomo) or it is a venue,
+ * a chain, a coin or a common acronym. The first word may be sentence case
+ * ("Mostly hype", "Strong community"); an acronym there may still be a name
+ * ("CZ shilled it"). A false drop costs one phrase.
+ */
+const NAME_OK: ReadonlySet<string> = new Set(
+  ("robinhood solana base ethereum binance coinbase twitter x telegram discord ai us usa uk eu nft nfts defi lp cex dex eth btc sol bnb bsc evm " +
+    "ath og kol kols ct tg ui ux api ca dev devs fomo chain " +
+    "monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december").split(" "),
+);
+function namesSomeone(bare: string, m: TgThesesMaterial): boolean {
+  const head = new Set(m.head.flatMap((l) => l.match(/[\p{L}\p{N}]+/gu) ?? []).map((w) => w.toLowerCase()));
+  const ws = bare.match(/[\p{L}\p{N}]+(?:['’][\p{L}]+)?/gu) ?? [];
+  return ws.some((raw, i) => {
+    const w = raw.replace(/['’]s$/iu, "");
+    if (!/^\p{Lu}/u.test(w)) return false;
+    const low = w.toLowerCase();
+    if (NAME_OK.has(low) || head.has(low)) return false;
+    return i > 0 || /^\p{Lu}{2,}$/u.test(w) || /\p{Ll}\p{Lu}/u.test(w);
+  });
+}
+
 const escRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** The agent's full name as a word of its own; never its aliases ("Will" would drop "holders will wait"). */
 function namesAgent(p: string, agentName: string): boolean {
@@ -202,7 +231,7 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   if (!p || p.length > cap) return null;
   const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${escRe(m.coin)}(?![\\p{L}\\p{N}])`, "giu") : null;
   const bare = coin ? p.replace(coin, " ") : p;
-  if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p)) return null;
+  if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p) || namesSomeone(bare, m)) return null;
   if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p) || OUT_ADVICE.test(p)) return null;
   if (label === WAITING_LABEL && WAIT_CLAIM.test(p)) return null;
   const w = words(p);

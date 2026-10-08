@@ -254,6 +254,25 @@ describe("checkWording", () => {
     assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
   });
 
+  it("misconduct and named people are never said back: wash trading, lying, walking off with the money, '<name> dumped on his followers' (review r3)", () => {
+    for (const x of [
+      "worries the dev is wash trading the volume", "worries insiders are manipulating the chart", "the dev lied about the partnership",
+      "fears the team walked away with the money", "the team is a bunch of liars", "a cash grab by the team", "Ansem dumped on his followers",
+      "a caller sold on his followers", "the devs made off with the funds", "the team vanished with the treasury", "fears insider trading by the team",
+      "Elon Musk backs it", "CZ shilled it", "hyped by Ansem and friends", "a call from McAfee",
+    ]) {
+      const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
+      assert.equal(w.gist, null, x);
+      assert.deepEqual([...w.forIt, ...w.against, ...w.waitingOn], [], x);
+    }
+    // Venues, chains, acronyms, the header's own words and a sentence-case first word stay; so do "lies in" and "lying low".
+    const fair = ["hopes the Robinhood app picks it up", "rides the AI narrative", "Strong community on Telegram", "a cheaper bet than SOL memes", "the value lies in the meme", "the dev is lying low for now"];
+    const kept = checkWording({ for: fair.slice(0, 3), against: fair.slice(3) }, MATERIAL, "Shogun").wording;
+    assert.deepEqual([...kept.forIt, ...kept.against], fair);
+    assert.equal(checkWording({ gist: "Mostly the idea that it's the meme of Robinhood Chain on Fomo" }, MATERIAL, "Shogun").wording.gist, "Mostly the idea that it's the meme of Robinhood Chain on Fomo");
+    assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
+  });
+
   it("over the room's caps, waiting-on gives way first and the closing lines stay", () => {
     const { wording } = checkWording(GOOD, MATERIAL, "Shogun");
     const five = thesesLines(MATERIAL, wording, 5, "Shogun", 700)!;
