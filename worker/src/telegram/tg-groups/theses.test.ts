@@ -365,6 +365,16 @@ describe("checkWording", () => {
     assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
   });
 
+  it("a domain spelled out with any ending is never said back: 'ponsfi dot bet', 'pons dot vip' (review r4)", () => {
+    for (const x of ["a dashboard at ponsfi dot bet", "the site is pons dot vip", "check pons dot meme for the roadmap"]) {
+      const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
+      assert.equal(w.gist, null, x);
+      assert.deepEqual([...w.forIt, ...w.against, ...w.waitingOn], [], x);
+    }
+    const fair = ["rides the polkadot narrative", "a dotted line to the listing", "holders connect the dots"];
+    assert.deepEqual(checkWording({ for: fair }, MATERIAL, "Shogun").wording.forIt, fair);
+  });
+
   it("an invisible, lookalike or fullwidth letter, or a word spelled out letter by letter, gets past no clause (review r4)", () => {
     for (const x of [
       "ha\u200blf the supply sits with the dev", "h\u0430lf the supply sits with the dev", "\uff48\uff41\uff4c\uff46 the supply sits with the dev",

@@ -17,7 +17,8 @@
  * is dropped) and read as the gate reads a line (letters spelled out one by
  * one joined): its length cap, no digit (the coin's own name aside) and no number word,
  * no $, @, # or link, no quotation mark, no five-word run shared with any
- * sample (never a quote, not even a paraphrase that is one), nothing about
+ * sample (never a quote, not even a paraphrase that is one), no domain
+ * spelled out ("pons dot vip"), nothing about
  * instructions, nothing in the first person or naming the agent, Merrymen or
  * this room (never a pick or a position in its voice), no lure (an airdrop,
  * a presale, free tokens, someone to message; nothing waited on is a claim),
@@ -149,6 +150,13 @@ const NUMBER_WORDS =
 const FIGURE_WORDS =
   /\b(?:half|halves|halved|halving|quarters?|dozens?|twice|thrice|(?:third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|hundredth|thousandth)s?|double[ds]?|doubling|triple[ds]?|tripling|bils?|billi|mils?|bn|[a-z]*illions?|k|single[\s-]digits?|(?:bill|yard)s?\s+(?:market\s*caps?|mcaps?|mc|fdv|caps?))\b/i;
 const MARKUP = /[@$#"“”«»„]|https?:|www\.|t\.me|\.(?:com|net|org|io|xyz|gg|fun|app|me|co|ai)\b/i;
+/**
+ * A domain spelled out with any ending ("ponsfi dot bet", "pons dot vip"):
+ * MARKUP knows a written dot and the gate a list of endings; a paraphrase of
+ * theses never needs "dot <word>". "Polkadot", "dotted" and "connects the
+ * dots" stay; "a dot com era vibe" is a false drop that costs one phrase.
+ */
+const SPELLED_DOMAIN = /(?<![\p{L}\p{N}])dot\s+\p{L}{2,}(?![\p{L}\p{N}])/iu;
 const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disregard)\b/i;
 /**
  * A phrase in the first person, or about Merrymen or this room, would be said
@@ -312,7 +320,7 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   const reads = [p, ...tgLineReadings(p)];
   const bareReads = coin ? [bare, ...tgLineReadings(bare)] : reads;
   const any = (rs: readonly string[], ...res: RegExp[]): boolean => res.some((re) => rs.some((r) => re.test(r)));
-  if (any(bareReads, /\p{N}/u, NUMBER_WORDS, FIGURE_WORDS) || any(reads, MARKUP, ABOUT_ITSELF) || namesSomeone(bare, m)) return null;
+  if (any(bareReads, /\p{N}/u, NUMBER_WORDS, FIGURE_WORDS) || any(reads, MARKUP, SPELLED_DOMAIN, ABOUT_ITSELF) || namesSomeone(bare, m)) return null;
   if (any(reads, SELF_REF, SECOND_PERSON, OUT_LURE, OUT_ACCUSE, OUT_ADVICE) || namesAgent(p, agentName)) return null;
   if (any(reads, OUT_HANDOUT) || (label === WAITING_LABEL && any(reads, WAIT_CLAIM))) return null;
   const w = words(p);

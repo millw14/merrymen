@@ -1430,7 +1430,8 @@ thousandth, doubled, tripled, halved, "bil", any "-illion" ("a zillion"),
 "price doubled since launch", "a bil market cap", "a few k holders"; "the
 second wave of buyers", "fits the bill" and "the market structure bill" are
 no figure), no
-$, @, # or link, no quotation mark, no five-word run shared with any sample,
+$, @, # or link, no domain spelled out with any ending ("ponsfi dot bet";
+a sample that spells one out is never read either), no quotation mark, no five-word run shared with any sample,
 nothing about instructions, nothing in the first person or naming the agent,
 Merrymen, this room or the room's own owner, admin, mod, bot or desk ("the
 group's bot is holding a bag", "the owner here is heavy in it"; "contract

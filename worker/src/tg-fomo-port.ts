@@ -383,6 +383,8 @@ const AT_THE_READER =
  */
 const LURE =
   /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\bfollow\s+(?:the\s+|their\s+|its\s+|his\s+|her\s+)?\S+\s+on\s+(?:x|twitter|telegram|tg)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
+/** A site's name spelled out ("ponsfi dot bet", "pons dot vip"): a link the model could rebuild, never a view. */
+const SPELLED_DOMAIN = /[\p{L}\p{N}_-]\s+dot\s+\p{L}{2,}(?![\p{L}\p{N}])/iu;
 /** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
 const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
 /**
@@ -415,7 +417,7 @@ export function thesesSample(text: unknown): string | null {
   // characters gone, spelled-out letters joined), so "frее tоkens" with
   // Cyrillic letters or "instruc\u200btions" is the row it is (review r4).
   const reads = [s, ...tgLineReadings(s)];
-  if ([INJECTION_SHAPED, AT_THE_READER, LURE, ABOUT_MERRYMEN].some((re) => reads.some((r) => re.test(r)))) return null;
+  if ([INJECTION_SHAPED, AT_THE_READER, LURE, ABOUT_MERRYMEN, SPELLED_DOMAIN].some((re) => reads.some((r) => re.test(r)))) return null;
   if (s.length > THESES_SAMPLE_CHARS) s = `${s.slice(0, THESES_SAMPLE_CHARS - 1).replace(/\s+\S*$/, "")}…`;
   return s;
 }
