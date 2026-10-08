@@ -2810,7 +2810,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return [...out, ...(age ? [age] : []), ...(end ? [end] : [])].join("\n");
   };
 
-  /** A coin's theses as the group model worded them, by coin and copy, for half an hour (theses.ts). */
+  /** A coin's theses as the group model worded them, by coin, copy and the theses read, for half an hour (theses.ts). */
   const thesesWordings = new ThesesWordings();
 
   /** How often the owner's moves go out per room and kind of answer. */

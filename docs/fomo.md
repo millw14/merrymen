@@ -888,7 +888,8 @@ Surface limits:
   what a person does ("Ansem is backing it"; a name in lowercase is not caught by code and
   rests on the prompt alone), no account to follow, no trade advice in its voice) and by the
   gate as an `answer` line, dropped and never repaired; the digest is said whenever that
-  cannot be. One call per coin and copy, from the half of the room's model allowance kept
+  cannot be. One call per coin, copy and theses read (a window cut from the same copy is
+  other theses and gets its own wording), from the half of the room's model allowance kept
   for what is nice to have, kept 30 minutes; `MERRYMEN_TG_THESES_MODEL=0` turns it off.
   The owner's own thesis answers keep the counts, with "no clear lean" for "neutral", and
   her quoted excerpts. A read that failed, could not be reached or was refused is said

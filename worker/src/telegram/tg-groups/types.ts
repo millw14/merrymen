@@ -500,7 +500,10 @@ export interface TgBoardRow {
  * model only inside a fence; nothing from them is ever sent as written.
  */
 export interface TgThesesMaterial {
-  /** The coin and the copy it was read from: the same key is the same theses. */
+  /**
+   * The coin, the copy it was read from and a digest of the samples: a
+   * window or a limit cut from the same copy is other theses, so another key.
+   */
   key: string;
   /** The coin's display name, the one run of digits a phrase may hold. */
   coin: string;

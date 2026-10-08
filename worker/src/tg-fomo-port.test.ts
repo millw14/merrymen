@@ -41,6 +41,8 @@ import type { ResolvedConfig } from "./settings";
 import type { FetchLike, TgMessage } from "./telegram/api";
 import type { StateRef, TelegramState } from "./telegram/state";
 import { admitTgLine } from "./telegram/tg-groups/gate";
+import { TgModelGate, type TgModel } from "./telegram/tg-groups/model";
+import { THESES_SPEC, ThesesWordings, wordTheses } from "./telegram/tg-groups/theses";
 import { createTgGroups, type TgGroups } from "./telegram/tg-groups/handler";
 import { __resetMemoryPassThrottleForTest } from "./telegram/tg-groups/memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
@@ -1055,6 +1057,46 @@ describe("a coin's theses: the code digest, and material for the group model's p
     for (const l of lines) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, l);
   });
 
+  it("a wording is kept per coin, copy AND theses read: 'the last hour' never hears the wording of all of them (review r4)", async () => {
+    const s = await setup({ theses: RICH });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const all = (await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP }))!.theses!;
+    s.clock.now += 2 * 60_000;
+    const hour = (await port.ask({ text: "what are traders saying about $PONS in the last hour on fomo", chatId: GROUP - 1 }))!.theses!;
+    s.clock.now += 60_000;
+    const again = (await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP - 2 }))!.theses!;
+    assert.equal(s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length, 1, "one copy of the page serves all three");
+    assert.notDeepEqual(hour.samples, all.samples);
+    assert.notEqual(hour.key, all.key, "the hour's theses are not all of them");
+    assert.equal(again.key, all.key, "the same theses from the same copy, in another room, are the same material");
+    // Through the paraphrase: the hour's ask makes its own call; the plain re-ask reuses the first wording.
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      const args = { gist: "Mostly the idea that it's the meme of the chain", against: ["worries about the dev's wallet"] };
+      return { ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: THESES_SPEC.name, arguments: JSON.stringify(args) } }] } }] }) };
+    }) as never;
+    const home2 = mkdtempSync(path.join(tmpdir(), "tg-theses-key-"));
+    const st = new TgGroupsStore(path.join(home2, "tg-groups.json"), emptyTgGroupsState(), { now: () => NOW, debounceMs: 60_000 });
+    try {
+      const kept = new ThesesWordings();
+      const model: TgModel = { creds: { provider: "openai", transport: "openai", baseUrl: "https://llm.test/v1", apiKey: "k-test", model: "fake", vision: false }, label: "openai/fake", source: "dedicated" };
+      const word = (material: typeof all, chatId: number) =>
+        wordTheses({ model, gate: new TgModelGate(st, { perDay: 100, now: () => NOW, log: () => {} }), chatId, material, agentName: "Shogun", env: {}, boxMs: 6_000, maxLines: 6, maxChars: 700, now: NOW, kept });
+      for (const id of [GROUP, GROUP - 1, GROUP - 2]) st.ensureRoom(id, { title: "frens", kind: "supergroup" });
+      assert.equal((await word(all, GROUP)).why, "worded");
+      assert.notEqual((await word(hour, GROUP - 1)).why, "kept", "the hour's theses are worded on their own, never the first wording");
+      assert.equal(calls, 2);
+      assert.equal((await word(again, GROUP - 2)).why, "kept");
+      assert.equal(calls, 2);
+    } finally {
+      globalThis.fetch = realFetch;
+      st.close();
+      rmSync(home2, { recursive: true, force: true });
+    }
+  });
+
   it("the material: at most twelve cleaned samples of at most 160 characters, one per family, no dev post, no injection or lure", async () => {
     const s = await setup({ theses: RICH });
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
@@ -1062,7 +1104,7 @@ describe("a coin's theses: the code digest, and material for the group model's p
     const m = a!.theses!;
     assert.ok(m, "a coin's theses carry material");
     assert.equal(m.coin, "PONS");
-    assert.match(m.key, /^eip155:4663:0x39dbed3a0+c0d@\d+$/);
+    assert.match(m.key, /^eip155:4663:0x39dbed3a0+c0d@\d+#[0-9a-f]{16}$/);
     assert.equal(m.fallback, a!.text);
     assert.deepEqual(m.head, [a!.text.split("\n")[0]]);
     assert.match(m.tail[0]!, /^Their claims, not facts/);

@@ -1480,8 +1480,10 @@ line. A phrase that fails is dropped, never repaired; the worded lines sit
 between the digest's header and its closing lines, which always stay, within
 the room's six lines and 700 characters. No model, under 1.5 s of the reply
 deadline left, the router's reserve reached, an answer in words, a late or
-failed call, or nothing passing: the code digest. One call per coin and copy
-(the coin and when its theses were read), kept 30 minutes, so "tell me what
+failed call, or nothing passing: the code digest. One call per coin, copy
+and theses read (the coin, when its theses were read, and which samples the
+model reads: "the last hour" cut from the same copy is other theses, and is
+never said in the wording of all of them), kept 30 minutes, so "tell me what
 it's about from the theses" right after costs no call. Logs carry counts
 only.
 

@@ -40,6 +40,8 @@
  * or its phrases do not pass.
  */
 
+import { createHash } from "node:crypto";
+
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion, type AnswerFomoResult } from "./fomo/chat";
 import { contentFree } from "./fomo/digest";
@@ -523,7 +525,12 @@ export function thesesMaterial(r: AnswerFomoResult, text: string): TgThesesMater
     if (s && !samples.includes(s)) samples.push(s);
   }
   if (samples.length < THESES_SAMPLES_MIN) return null;
-  return { key: `${d.token.key}@${Math.trunc(at)}`, coin, head: lines.slice(0, h + 1), tail: lines.slice(t), fallback: text, samples };
+  // Keyed by the coin, the copy AND the samples read: the window and limit are
+  // applied after the cached page is read, so "the last hour" and "all of it"
+  // share a copy but not their theses, and a wording of one is never said
+  // under the other's header (review r4).
+  const read = createHash("sha256").update(samples.join("\n")).digest("hex").slice(0, 16);
+  return { key: `${d.token.key}@${Math.trunc(at)}#${read}`, coin, head: lines.slice(0, h + 1), tail: lines.slice(t), fallback: text, samples };
 }
 
 /** "tg-group:<chatId>:<threadId|0>": per room and forum topic, from the trusted update. */

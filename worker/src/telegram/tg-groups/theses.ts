@@ -33,8 +33,9 @@
  * accusation, alert, advice and link clauses all apply). A phrase that
  * fails is DROPPED, never repaired; nothing left means the code digest.
  *
- * WHAT IT COSTS. One call per coin and copy (TgThesesMaterial.key: the coin
- * and when its theses were read), through TgModelGate with the router's
+ * WHAT IT COSTS. One call per coin, copy and theses read (TgThesesMaterial.key:
+ * the coin, when its theses were read, and which of them the model reads, so
+ * "the last hour" never hears the wording of all of them), through TgModelGate with the router's
  * reserve, so it only spends the half of the room's allowance kept for what
  * is nice to have; the worded digest is kept for thirty minutes, so "tell me
  * what it's about from thesis" right after costs no call; a call that gave
