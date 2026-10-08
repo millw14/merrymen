@@ -660,6 +660,7 @@ test("reads never append: views, previews, meta and the settle check leave the l
   f.billing.hasAccount(OWNER);
   for (const tier of Object.keys(PLANS)) assert.equal((await f.plan(tier, false)).status, 200);
   await f.billing.flush();
+  await f.billing.tail(); // queued behind anything a read might have started
   assert.equal(await f.raw(), before);
   assert.equal(f.view().plan.id, "free", "projected, not applied");
 });
