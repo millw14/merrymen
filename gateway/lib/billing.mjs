@@ -21,7 +21,9 @@
  *     are refused, while reads and metering continue on what came before.
  * A torn last line (a write that died part-way) is cut before the next append
  * so it can never swallow the record after it, and a failed append refuses
- * further writes until that repair has run.
+ * further writes until that repair has run. The operator CLI appends to the
+ * same file, so each repair-and-append holds billing.jsonl.lock: neither
+ * process takes a line the other is still writing for a torn one.
  *
  * Records: {id, type, at} plus
  *   account     {account_id, owner, name}
@@ -97,7 +99,8 @@
  * metered), after key and scope checks:
  *   billing.nextPlanFor(owner, keyCreatedAt) -> {id, name, requests, rpm, starts_at, ends_at}
  *                                       the plan the request is served on once a due charge is
- *                                       made (pure); rpm is per ACCOUNT: bucket it by owner
+ *                                       made (pure). Under enforce rpm is per ACCOUNT: bucket it
+ *                                       by owner; under observe each key keeps its own bucket
  *   await billing.prepare(owner)        settles first when one is due (2 s, then fail open)
  *   billing.planFor(owner, keyCreatedAt) the plan as it stands, before any due charge
  *   billing.reserve({owner, keyId, keyCreatedAt}) synchronous, counts the request:
@@ -108,7 +111,8 @@
  *   billing.meta(owner, keyCreatedAt) -> {billing|null, rate_per_min|null, headers} for /meta
  *   quotaHeaders(...) and isPlatformFailure(...) are exported.
  *
- * Operations: tail() picks up the CLI's lines (every 10 s on its own),
+ * Operations: tail() picks up the CLI's lines (every 10 s on its own, and
+ * settle() does the same before it charges),
  * reconcile({all, dryRun}) re-verifies recent payments (every 5 min), flush()
  * writes usage.json, close() stops the timers, drains the queue and flushes.
  */
