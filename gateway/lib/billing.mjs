@@ -56,6 +56,10 @@
  *   keyRegistry    async () => Map of partner keys (lib/partners.mjs loadRegistry),
  *                  for the Free window anchor
  *   timers         false in tests: no 10 s tail/flush or 5 min reconcile timers
+ *   readTimeoutMs  per chain read (10 s); give createPaymentsClient the same timeoutMs
+ *   settleWaitMs   how long prepare() waits for a settle (2 s)
+ *   readOnly       the operator CLI's view: no write probe, no config line, no timers
+ *   writeLine      (file, line) => Promise, the append itself; tests inject failures here
  * The returned object has `mode` (effective, after the durability and ledger
  * checks), `enforced`, `paymentsReady` and `blocked` (null, or why billing
  * writes are refused).
