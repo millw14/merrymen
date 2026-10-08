@@ -236,6 +236,24 @@ describe("checkWording", () => {
     }
   });
 
+  it("trade advice in its voice is never said back: a trade verb opening a phrase or a clause, or one someone urges (review r3)", () => {
+    for (const x of [
+      "get some before the listing", "sell before the unlock", "exit before the unlock", "still early, join in", "worth grabbing a small bag",
+      "accumulate under the radar", "hop in before the crowd", "just ape it", "load up while it is quiet", "take profits into strength",
+      "worth buying the dip", "holders tell people to get in now",
+    ]) {
+      const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
+      assert.equal(w.gist, null, x);
+      assert.deepEqual([...w.forIt, ...w.against, ...w.waitingOn], [], x);
+    }
+    assert.equal(checkWording({ gist: "Holders say get some while it is cheap" }, MATERIAL, "Shogun").wording.gist, null);
+    // A worry or a fact that names a trade is no advice, and stays.
+    const fair = ["fears early buyers sell before the unlock", "worries holders exit before the unlock", "new buyers keep showing up", "a sell-off after the unlock", "getting listed on a big exchange", "buybacks from the team"];
+    const kept = checkWording({ for: fair.slice(0, 3), against: fair.slice(3) }, MATERIAL, "Shogun").wording;
+    assert.deepEqual([...kept.forIt, ...kept.against], fair);
+    assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
+  });
+
   it("over the room's caps, waiting-on gives way first and the closing lines stay", () => {
     const { wording } = checkWording(GOOD, MATERIAL, "Shogun");
     const five = thesesLines(MATERIAL, wording, 5, "Shogun", 700)!;

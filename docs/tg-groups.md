@@ -1418,7 +1418,11 @@ nothing about instructions, nothing waited on that is a claim, a holder
 snapshot, a giveaway, a reward distribution or tokens sent to holders (the
 airdrop story without the word), no crime laid at anyone's door
 (theft, a stolen or pulled pool, laundering, a criminal: worries stay
-worries, "fears it could collapse"), and the gate as an `answer`
+worries, "fears it could collapse"), no trade advice in its voice (a trade
+verb opening the phrase or a clause, "get some before the listing", "still
+early, join in", one someone urges, "holders say get some", or "worth
+grabbing"; "fears early buyers sell before the unlock" is a worry and stays),
+and the gate as an `answer`
 line. A phrase that fails is dropped, never repaired; the worded lines sit
 between the digest's header and its closing lines, which always stay, within
 the room's six lines and 700 characters. No model, under 1.5 s of the reply

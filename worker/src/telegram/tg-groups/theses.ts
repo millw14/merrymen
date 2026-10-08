@@ -20,7 +20,8 @@
  * this room (never a pick or a position in its voice), no lure (an airdrop,
  * a presale, free tokens, someone to message; nothing waited on is a claim),
  * no crime laid at anyone's door (OUT_ACCUSE: theft, a stolen or pulled
- * pool, laundering, a criminal), and the group gate as an `answer` line,
+ * pool, laundering, a criminal), no trade advice in its voice (OUT_ADVICE),
+ * and the group gate as an `answer` line,
  * never as `research`
  * (research admits "going to 10m" and "100x"; an answer does not, and its
  * accusation, alert, advice and link clauses all apply). A phrase that
@@ -160,6 +161,20 @@ const OUT_LURE =
 const OUT_ACCUSE =
   /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|ran\s+(?:off|away)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool))\b/i;
 /**
+ * TRADE ADVICE IN THE AGENT'S VOICE: a trade verb opening the phrase or one
+ * of its clauses ("get some before the listing", "still early, join in"), or
+ * one someone says or urges ("holders say get some while it is cheap"), or
+ * "worth grabbing". The gate's `answer` kind skips its coin advice clause,
+ * and its own advice clause has no bare imperative. A worry that names a
+ * trade ("fears early buyers sell before the unlock", "worries holders exit
+ * before the unlock") is not one, and stays.
+ */
+const TRADE_VERB = String.raw`(?:buy|sell|grab|ape|load(?:\s+up)?|accumulate|stack|scoop|exit|bail|dump|take\s+profits?|get\s+(?:some|in|on|a\s+bag|it)|hop\s+(?:in|on)|jump\s+(?:in|on)|join(?:\s+(?:in|us|me))?)`;
+const OUT_ADVICE = new RegExp(
+  String.raw`(?:^|[,;:—–]\s*|\b(?:say|says|saying|said|tell|tells|telling|urge|urges|urging)\s+(?:(?:you|people|holders|everyone)\s+)?(?:to\s+)?)(?:(?:just|go|so|now|still)\s+)*${TRADE_VERB}\b|\bworth\s+(?:buying|grabbing|aping|getting|accumulating|a\s+(?:bag|punt|buy))\b`,
+  "i",
+);
+/**
  * What holders wait on is never a claim ("the token claim opening"), nor the
  * airdrop story told without the word: a holder snapshot, a giveaway, a
  * reward distribution, tokens sent to holders (fomo/digest.ts never says one).
@@ -188,7 +203,7 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${escRe(m.coin)}(?![\\p{L}\\p{N}])`, "giu") : null;
   const bare = coin ? p.replace(coin, " ") : p;
   if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p)) return null;
-  if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p)) return null;
+  if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p) || OUT_ADVICE.test(p)) return null;
   if (label === WAITING_LABEL && WAIT_CLAIM.test(p)) return null;
   const w = words(p);
   for (let i = 0; i + COPY_RUN <= w.length; i++) if (runs.has(w.slice(i, i + COPY_RUN).join(" "))) return null;
