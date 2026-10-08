@@ -1000,6 +1000,13 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     ["@pinebot top traders on fomo today", "platform"],
     ["solana memecoins on fomo pls", "platform"],
     ["the leaderboard on fomo", "platform"],
+    // A coin's theses as the room's Fomo help says to ask, with no question mark (review r2).
+    ["pine theses on $PONS", "theses"],
+    ["pine theses on PONS on fomo", "platform"],
+    ["pine fomo theses on $PONS", "platform"],
+    ["pine thesis for $PONS", "theses"],
+    ["@pinebot theses on $PONS", "theses"],
+    ["thesis about pons please", "theses"],
   ];
   for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
   const no = [
@@ -1008,6 +1015,8 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     "is fomo on robinhood", "i bought it with fomo lol",
     "that's what fomo does lol", "i have fomo who cares", "pure fomo who's buying this", "top fomo moment lol",
     "the top coins on fomo are trash", "bought the top on fomo lol", "on fomo", "coins on fomo got me rekt lol", "fomo coins",
+    // Saying something about theses, not asking for them (review r2).
+    "my thesis on pons is simple", "theses on pons are mid lol", "thesis on $PONS: it goes to 10m", "theses on pons and pepe are trash",
   ];
   for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
 });

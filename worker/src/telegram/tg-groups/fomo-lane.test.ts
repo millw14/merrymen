@@ -1298,6 +1298,39 @@ describe("short list asks with no question mark reach the research (2026-10-07)"
     assert.deepEqual(fomo!.asks.map((a) => [a.text, a.request]), [["pine trending on fomo", undefined], ["pine robinhood chain coins on fomo", undefined]]);
     assert.match(tg.texts(CHAT)[0]!, /Trending on Fomo/);
   });
+  it("'@pinebot theses on $PONS' with no question mark, as the room's Fomo help puts it, is the coin's theses, never the desk's coin read (review r2)", async () => {
+    const PONS = { key: "eip155:4663:0x39dbed3a00000000000000000000000000000c0d", chain: { namespace: "eip155", networkId: 4663, slug: "robinhood" }, address: "0x39dbed3a00000000000000000000000000000c0d" };
+    for (const line of ["@pinebot theses on $PONS", "pine thesis for $PONS", "pine fomo theses on $PONS", "pine theses on PONS on fomo"]) {
+      const calls: Array<[string, Record<string, unknown>]> = [];
+      const broker = {
+        call: async (tool: string, args: Record<string, unknown>) => {
+          calls.push([tool, { ...args }]);
+          return {
+            requestId: "r", tool, status: "empty", subject: { kind: "token", token: PONS, label: { symbol: "PONS", name: "Pons" } }, candidates: [],
+            data: { token: PONS, label: { symbol: "PONS", name: "Pons" }, trader: null, theses: [], stance: { supporting: 0, opposing: 0, neutral: 0 }, families: 0, uniqueAuthors: 0, chainFilterHonoured: true },
+            evidence: [],
+            freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: clock, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: clock, lastRefreshOutcome: "ok", cacheAgeMs: 0, servedFrom: "live" },
+            coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] },
+            usage: { providerCalls: 2, cacheHits: 0, creditsCharged: 1500, creditsRemaining: null }, dossierRevision: null, reason: null, message: null,
+          };
+        },
+        memory: { get: async () => null, set: async () => {}, clear: async () => {} },
+        report: async () => {},
+        configured: () => true,
+      };
+      const port = createTgFomoPort(() => broker as never, { now: () => clock });
+      desk!.asks.length = 0;
+      make({ fomo: () => port });
+      const before = tg.texts(CHAT).length;
+      clock += 3 * MIN;
+      await said(msg(line, { fromId: ANN + before }));
+      assert.deepEqual(calls.map(([tool, args]) => [tool, args.token]), [["fomo_get_token_theses", "PONS"]], line);
+      assert.deepEqual(desk!.asks, [], `${line}: never the desk's coin read`);
+      assert.match(tg.texts(CHAT).slice(before).join("\n"), /^No theses were returned for PONS on robinhood\. That is Fomo's record/, line);
+      groups.stop();
+      await groups.drain();
+    }
+  });
   it("chatter that only mentions it is not asked", async () => {
     make();
     await said(msg("pine top fomo moment lol"));

@@ -2088,6 +2088,15 @@ const FOMO_LIST_ASK = new RegExp(
   "u",
 );
 
+/**
+ * A COIN'S THESES ASKED FOR WITH NO QUESTION MARK, the whole line and nothing
+ * else: "theses on $PONS", "thesis for pons on fomo", "fomo theses on PONS",
+ * the way the room's own Fomo help puts it (fomo/render.ts
+ * FOMO_CAPABILITIES_GROUP). "my thesis on pons is simple", "theses on pons
+ * are mid lol" and "thesis on $PONS: it goes to 10m" say something, and stay chat.
+ */
+const FOMO_THESES_ASK = /^(?:fomo\s+)?(?:theses|thesis) (?:on|for|about) \$?[\p{L}\p{N}][\p{L}\p{N}_.-]{0,30}(?: (?:on|from) (?:the )?fomo)?(?:\s+(?:pls|please))?[.!]*$/u;
+
 export type FomoAsk = { kind: "platform" } | { kind: "theses" } | { kind: "trader-flow" };
 
 /**
@@ -2107,7 +2116,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
   // Names out, and whatever punctuation they leave in front ("@", ",").
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
   if (!t || COIN_STOP.test(t)) return null;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t) || FOMO_LIST_ASK.test(t);
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t) || FOMO_LIST_ASK.test(t) || FOMO_THESES_ASK.test(t);
   if (!asked) return null;
   if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
   if (FOMO_THESES.test(t)) return { kind: "theses" };
