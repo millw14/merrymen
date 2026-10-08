@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { FilePartnerStore } from "./partner-store";
 import { createPartnerService } from "./partner-service";
 import { verifyPartnerRequest } from "./partner-bridge";
+import { PartnerRuntimeError } from "./partner-runtime";
 // Exercise the actual gateway signer against the app verifier.
 import { signPartnerRequest } from "../../../gateway/lib/partner-bridge.mjs";
 
@@ -28,7 +29,8 @@ after(() => {
   if (failures.length) throw failures[0];
 });
 
-function fixture() {
+type ServiceDeps = Parameters<typeof createPartnerService>[0];
+function fixture(overrides: Partial<ServiceDeps> = {}) {
   const home = mkdtempSync(join(tmpdir(), "merrymen-partner-service-"));
   const store = new FilePartnerStore(home, undefined, () => secret);
   fixtures.push({ home, store });
@@ -41,6 +43,7 @@ function fixture() {
       await Promise.resolve();
       return { reply: `Received ${message}`, generation: "model", runtime };
     },
+    ...overrides,
   });
   const call = async (method: string, path: string, body?: unknown, selectedKey = key) => {
     const raw = body === undefined ? "" : JSON.stringify(body);
@@ -123,6 +126,29 @@ test("chat is grounded to the consented tenant, serialized and idempotent; disco
   assert.equal((await call("GET", `${path}/messages`)).status, 409);
   assert.equal((await call("POST", `${path}/messages`, { message: "status", request_id: "request_2" })).status, 409);
   assert.equal(replies(), 1);
+});
+
+test("runtime refusals reach the partner with their own status and code, never as a generic outage", async () => {
+  const { store, call } = fixture({
+    readRuntime: async () => { throw new PartnerRuntimeError(503, "runtime_unavailable", "The agent's current permission could not be read."); },
+    reply: async () => { throw new PartnerRuntimeError(400, "invalid_message", "Send a message between 1 and 2000 characters."); },
+  });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const detail = await call("GET", `/agents/${created.body.id}`);
+  assert.equal(detail.status, 503);
+  assert.equal(detail.body.error.code, "runtime_unavailable");
+  const chat = await call("POST", `/agents/${created.body.id}/messages`, { message: "hello", request_id: "request_1" });
+  assert.equal(chat.status, 400);
+  assert.equal(chat.body.error.code, "invalid_message");
+  // Anything that is not a partner-facing answer still becomes a generic 503.
+  const leaky = fixture({ readRuntime: async () => { throw new Error("postgres://user:password@internal"); } });
+  const other = await leaky.call("POST", "/agents", { external_user_id: "user-2" });
+  await leaky.store.bindAuthorized(other.body.id, key.appId, tenant, ["read:agents"]);
+  const hidden = await leaky.call("GET", `/agents/${other.body.id}`);
+  assert.equal(hidden.status, 503);
+  assert.equal(hidden.body.error.code, "upstream_unavailable");
+  assert.doesNotMatch(JSON.stringify(hidden.body), /password/);
 });
 
 test("key chat scope cannot substitute for owner consent", async () => {

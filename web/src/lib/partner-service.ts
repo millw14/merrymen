@@ -6,6 +6,8 @@ import type { createPartnerEnrollmentService } from "./partner-enrollment";
 
 type Runtime = Awaited<ReturnType<typeof readPartnerRuntime>>;
 export function partnerFailure(error: unknown): Response {
+  // PartnerRuntimeError is a PartnerError: its status and code are answers too.
+  // Anything else may carry internal detail and becomes a generic 503.
   const known = error instanceof PartnerError || error instanceof PartnerStoreError;
   return Response.json({ error: { code: known ? error.code : "upstream_unavailable",
     message: known ? error.message : "Agent service is temporarily unavailable",

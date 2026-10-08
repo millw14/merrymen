@@ -9,6 +9,7 @@ import { mintSession, SESSION_COOKIE } from "./auth";
 import { generateAgentReply, type AgentReply } from "./agent-chat";
 import { fitChatState } from "./chat-state";
 import { ledgerChatReply } from "./chat-ledger-facts";
+import { PartnerError } from "./partner-bridge";
 import type { FeedResponse } from "../app/api/feed/route";
 import type { AgentStatus } from "../app/api/grants/route";
 import type { SettingsView } from "../app/api/settings/route";
@@ -34,9 +35,15 @@ export interface PartnerRuntime {
   ledger_available: boolean;
 }
 
-export class PartnerRuntimeError extends Error {
-  constructor(public status: number, public code: string, message: string) {
-    super(message);
+/**
+ * A PartnerError, so partnerFailure answers with this status and code. As a
+ * bare Error every runtime refusal (a 400 for a bad message, 503
+ * runtime_unavailable) reached the partner as a generic upstream_unavailable.
+ * Messages here are written for partners and never carry provider details.
+ */
+export class PartnerRuntimeError extends PartnerError {
+  constructor(status: number, code: string, message: string) {
+    super(status, code, message);
     this.name = "PartnerRuntimeError";
   }
 }
