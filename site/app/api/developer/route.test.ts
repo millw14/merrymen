@@ -37,13 +37,13 @@ test('portal proxy enforces origin, uses a server-only credential, and hides ses
 });
 
 /** Runs `fn` with these env values (undefined removes one), restoring fetch and env after. */
-async function withEnv(env: Record<string, string | undefined>, fn: (urls: string[]) => Promise<void>) {
+async function withEnv(env: Record<string, string | undefined>, fn: (urls: string[], sent: Headers[]) => Promise<void>, answer = async () => Response.json({ address: '0x123', keys: [] })) {
   const oldFetch = globalThis.fetch, old = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
-  const urls: string[] = [];
-  globalThis.fetch = async url => { urls.push(String(url)); return Response.json({ address: '0x123', keys: [] }); };
+  const urls: string[] = [], sent: Headers[] = [];
+  globalThis.fetch = async (url, init) => { urls.push(String(url)); sent.push(new Headers(init?.headers)); return answer(); };
   const set = (values: Record<string, string | undefined>) => { for (const [k, v] of Object.entries(values)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
   const quiet = console.error; console.error = () => {};
-  try { set(env); await fn(urls); } finally { globalThis.fetch = oldFetch; console.error = quiet; set(old); }
+  try { set(env); await fn(urls, sent); } finally { globalThis.fetch = oldFetch; console.error = quiet; set(old); }
 }
 const keys = () => GET(new NextRequest('https://merrymen.dev/api/developer/keys'), { params: Promise.resolve({ action: 'keys' }) });
 const secret = 'test-only-portal-credential-32-bytes';
@@ -62,6 +62,25 @@ test('the gateway origin can be overridden, only to an https origin or a local o
       assert.match((await refused.json()).error.message, /temporarily unavailable/);
     });
   }
+});
+
+test('logout revokes the session on the gateway, and clears the cookie even when that fails', async () => {
+  const logout = (origin = 'https://merrymen.dev') => POST(new NextRequest('https://merrymen.dev/api/developer/logout', { method: 'POST',
+    headers: { origin, cookie: 'mm_developer=live-session', 'x-forwarded-for': '203.0.113.7' } }), { params: Promise.resolve({ action: 'logout' }) });
+  await withEnv({ MERRYMEN_DEVELOPER_PORTAL_SECRET: secret, MERRYMEN_DEVELOPER_GATEWAY_ORIGIN: undefined }, async (urls, sent) => {
+    const response = await logout();
+    assert.equal(response.status, 200); assert.match(response.headers.get('set-cookie')!, /mm_developer=;.*Max-Age=0/);
+    assert.deepEqual(urls, ['https://ai.merrymen.dev/developer/v1/logout']);
+    assert.equal(sent[0].get('x-developer-session'), 'live-session');
+    assert.equal(sent[0].get('authorization'), `Bearer ${secret}`);
+    assert.equal(sent[0].get('x-developer-ip'), '203.0.113.7');
+    // A cross-site page cannot sign a developer out, on either side.
+    assert.equal((await logout('https://evil.example')).status, 403); assert.equal(urls.length, 1);
+  }, async () => Response.json({ signed_out: true }));
+  await withEnv({ MERRYMEN_DEVELOPER_PORTAL_SECRET: secret }, async urls => {
+    const response = await logout();
+    assert.equal(urls.length, 1); assert.equal(response.status, 200); assert.match(response.headers.get('set-cookie')!, /Max-Age=0/);
+  }, async () => { throw new TypeError('fetch failed'); });
 });
 
 test('a portal secret under 32 bytes fails closed before anything is sent', async () => {

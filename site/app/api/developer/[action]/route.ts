@@ -37,6 +37,16 @@ async function handle(req: NextRequest, context: { params: Promise<{ action: str
   }
   if (req.method === "POST" && (req.headers.get("origin") !== new URL(req.url).origin || ["cross-site", "same-site"].includes(req.headers.get("sec-fetch-site") || ""))) return fail("Open the developer page to perform this action.", 403);
   if (action === "logout" && req.method === "POST") {
+    // Revoke the session on the gateway first, so a copied cookie stops working
+    // too. Best effort: the cookie is cleared whatever happens, and a failure
+    // only leaves the token to expire on its own, as every token used to.
+    const session = req.cookies.get(COOKIE)?.value, target = session ? gateway() : null;
+    if (session && target) {
+      try {
+        await fetch(`${target.origin}/developer/v1/logout`, { method: "POST", body: "{}", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(5_000),
+          headers: { "content-type": "application/json", authorization: `Bearer ${target.secret}`, "x-developer-session": session, "x-developer-ip": clientIp(req) } });
+      } catch { /* Best effort; see above. */ }
+    }
     const response = NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     response.cookies.set(COOKIE, "", { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/api/developer", maxAge: 0 });
     return response;
