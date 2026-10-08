@@ -35,6 +35,8 @@ const endpoints = [
 
 /** The key form's footnote: the rate limit that actually applies to these keys. */
 export function keyLimits(plans: PlansView, account: AccountState): string {
+  // An account answered but the plans did not: billing may be on, so the per-key rate of the static table is not known to hold.
+  if (plans.source === "fallback" && account.kind === "ready") return "Up to 5 active keys · Create, read and chat scopes · Plan limits could not be loaded just now";
   if (plans.billing.mode === "off") return "Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes";
   // With billing on, a wallet's keys share one plan; before an account exists, that plan is Free.
   const id = account.kind === "ready" ? account.view.plan.id : "free", plan = plans.plans.find(p => p.id === id);

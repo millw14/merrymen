@@ -145,8 +145,11 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
   const waiting: Waiting = open.length === 0 ? null : { count: open.length, checking: open.some(w => w.phase === "checking") };
   return <div className="dev-billing">
     <AccountSummary view={view} plans={plans} keys={keys} />
-    {on ? <PlanChooser view={view} plans={plans} busy={busy} run={run} onAccount={onAccount} reload={reload} />
-      : <p className="dev-billing-note">Paid plans are coming soon. Your account is ready, and every key you create belongs to it.</p>}
+    {plans.source === "fallback"
+      // The account answered but the plans did not: whether billing is on is unknown here, so neither "coming soon" nor a plan list.
+      ? <p className="dev-billing-note">Plan details could not be loaded just now. Reload the page to choose a plan or pay; nothing is lost meanwhile.</p>
+      : on ? <PlanChooser view={view} plans={plans} busy={busy} run={run} onAccount={onAccount} reload={reload} />
+        : <p className="dev-billing-note">Paid plans are coming soon. Your account is ready, and every key you create belongs to it.</p>}
     {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} busy={busy} run={run} waiting={waiting}
       confirmPayable={confirmPayable} onSent={hash => follow(hash, true)} onPasted={hash => follow(hash, false)} />}
     {due !== null && on && treasury === null && <p className="dev-billing-note">Payments are not open yet, so nothing can be paid here. Nothing is lost: your selection waits.</p>}

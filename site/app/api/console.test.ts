@@ -88,6 +88,10 @@ test('no payment panel without a live treasury, and nothing at all to pay when b
   assert.match(panel({ kind: 'ready', view: view() }, live('observe', { treasury: null })), /Payments are not open yet/);
   const off = panel({ kind: 'ready', view: view() }, live('off'));
   assert.match(off, /Paid plans are coming soon/); assert.doesNotMatch(off, /Choose a plan|Pay 40,000|requests used/i);
+  // The plans fell back while the account answered: billing may be on, so neither "coming soon" nor a way to pay, and no per-key rate.
+  const unknown = panel({ kind: 'ready', view: view() }, FALLBACK_PLANS);
+  assert.match(unknown, /Plan details could not be loaded just now\. Reload the page to choose a plan or pay/); assert.doesNotMatch(unknown, /coming soon|Payments are not open/);
+  assert.equal(keyLimits(FALLBACK_PLANS, { kind: 'ready', view: view() }), 'Up to 5 active keys · Create, read and chat scopes · Plan limits could not be loaded just now');
   // Nothing due, nothing to pay.
   assert.doesNotMatch(panel({ kind: 'ready', view: view({ due_raw: null }) }), /Pay |Paste the transaction hash/);
   // A shortfall is said plainly.
