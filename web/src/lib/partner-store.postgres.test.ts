@@ -134,6 +134,26 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       assert.deepEqual((await second.list("ordered")).map(c => c.id), [...made, ...twins]);
     });
 
+    await t.test("a stored row holding a lone surrogate escape cannot break its app's list", async () => {
+      // Written before text had to be well-formed: the escape is valid JSON text
+      // to JSON.parse, but Postgres json refuses it, and the list used to cast
+      // every row's record to jsonb to sort it.
+      let now = 1_800_000_100;
+      const clocked = new SqlPartnerStore(async () => databases[0], "postgres", () => now, secret);
+      const older = (await clocked.create(create("lone-surrogate", "user-1"))).connection;
+      now += 1;
+      const legacy = (await clocked.create(create("lone-surrogate", "user-2"))).connection;
+      const record = JSON.stringify({ ...legacy, name: JSON.parse('"Robin \\ud800"') });
+      assert.match(record, /\\ud800/);
+      await databases[0].prepare("UPDATE partner_connections SET record_json = ? WHERE id = ?").run(record, legacy.id);
+      await assert.rejects(databases[0].prepare("SELECT (record_json::jsonb ->> 'createdAt') AS at FROM partner_connections WHERE id = ?").get(legacy.id), /json/i);
+      const listed = await second.list("lone-surrogate");
+      assert.deepEqual(listed.map(c => c.id).sort(), [older.id, legacy.id].sort());
+      assert.equal(listed.find(c => c.id === legacy.id)!.name.isWellFormed(), false, "the row reads back as it was stored");
+      await assert.rejects(clocked.create(create("lone-surrogate", `user-${JSON.parse('"\\udc00"')}`)),
+        (e: unknown) => e instanceof PartnerStoreError && e.code === "invalid_input");
+    });
+
     await t.test("one-time consent and unique owner binding hold under concurrent transactions", async () => {
       const pending = await first.create(create("bind-race"));
       const results = await Promise.allSettled([

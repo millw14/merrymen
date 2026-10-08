@@ -59,10 +59,11 @@ export function createPartnerService(deps: {
       requirePartnerScope(partner, "write:agents");
       const body = objectBody(raw);
       onlyFields(body, ["external_user_id", "name"]);
-      if (typeof body.external_user_id !== "string" || !/^[^\s\x00-\x1f\x7f]{1,128}$/.test(body.external_user_id)) {
+      // Well-formed, like every text the store keeps (partnerText): a lone surrogate is not an identifier.
+      if (typeof body.external_user_id !== "string" || !/^[^\s\x00-\x1f\x7f]{1,128}$/.test(body.external_user_id) || !body.external_user_id.isWellFormed()) {
         throw new PartnerError(400, "bad_request", "external_user_id must be an opaque identifier of 1–128 characters");
       }
-      if (body.name !== undefined && (typeof body.name !== "string" || body.name.trim().length < 1 || body.name.length > 64 || /[\x00-\x1f\x7f]/.test(body.name))) {
+      if (body.name !== undefined && (typeof body.name !== "string" || body.name.trim().length < 1 || body.name.length > 64 || /[\x00-\x1f\x7f]/.test(body.name) || !body.name.isWellFormed())) {
         throw new PartnerError(400, "bad_request", "name must contain 1–64 characters");
       }
       const scopes = ["read:agents", ...(partner.scopes.includes("chat:agents") ? ["chat:agents"] : [])];

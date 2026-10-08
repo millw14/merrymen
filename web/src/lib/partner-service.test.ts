@@ -95,6 +95,24 @@ test("create is repeatable and never accepts caller-supplied ownership or privat
   assert.equal((await call("POST", "/agents", { external_user_id: "u2" }, { ...key, scopes: ["read:agents"] })).status, 403);
 });
 
+test("an identifier, name or message that is not well-formed text is refused at the edge, before any write or model call", async () => {
+  const { store, call, replies } = fixture();
+  const lone = JSON.parse('"\\ud800"') as string;
+  for (const body of [{ external_user_id: `user-${lone}` }, { external_user_id: "user-2", name: `Robin ${lone}` }]) {
+    const refused = await call("POST", "/agents", body);
+    assert.equal(refused.status, 400, JSON.stringify(body));
+    assert.equal(refused.body.error.code, "bad_request");
+  }
+  assert.deepEqual((await call("GET", "/agents")).body, { data: [] });
+  const created = await call("POST", "/agents", { external_user_id: "user-1", name: "Robin 😀" });
+  assert.equal(created.status, 202);
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const chat = await call("POST", `/agents/${created.body.id}/messages`, { message: `hello ${lone}`, request_id: "request_lone" });
+  assert.equal(chat.status, 400);
+  assert.equal(chat.body.error.code, "bad_request");
+  assert.equal(replies(), 0);
+});
+
 test("pending agents cannot chat; other apps cannot read or activate their connections", async () => {
   const { call } = fixture();
   const created = await call("POST", "/agents", { external_user_id: "user-1" });

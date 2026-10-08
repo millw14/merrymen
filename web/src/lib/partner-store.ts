@@ -127,9 +127,14 @@ const LINE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
 const LINE_CONTROLS = new RegExp(LINE_CONTROL.source, "g");
 const CONTROL = /[\u0000-\u001f]/;
 
-/** The store's text rule, exported so a caller can refuse before paying for work the store would then reject. */
+/**
+ * The store's text rule, exported so a caller can refuse before paying for work
+ * the store would then reject. Well-formed too: a lone surrogate is not text,
+ * JSON.stringify writes it as an escape that Postgres refuses in any json value,
+ * and a stored one broke every list of its app.
+ */
 export function partnerText(value: unknown, max: number, multiline = false): value is string {
-  return typeof value === "string" && !!value.trim() && value.length <= max && !(multiline ? LINE_CONTROL : CONTROL).test(value);
+  return typeof value === "string" && !!value.trim() && value.length <= max && value.isWellFormed() && !(multiline ? LINE_CONTROL : CONTROL).test(value);
 }
 function textField(value: string, max: number, label: string, multiline = false): string {
   if (!partnerText(value, max, multiline)) throw new PartnerStoreError(400, "invalid_input", `invalid ${label}`);
@@ -140,10 +145,11 @@ function textField(value: string, max: number, label: string, multiline = false)
  * A model reply made storable instead of refused: the model's output is not the
  * partner's input, so it must never come back as the partner's 400. Disallowed
  * controls are dropped (tabs and line breaks kept) and an over-long reply is cut
- * on a character boundary, marked with an ellipsis. "" when nothing is left.
+ * on a character boundary, marked with an ellipsis. A lone surrogate becomes
+ * U+FFFD. "" when nothing is left.
  */
 export function fitPartnerReply(reply: string): string {
-  const clean = String(reply ?? "").replace(LINE_CONTROLS, "").trim();
+  const clean = String(reply ?? "").toWellFormed().replace(LINE_CONTROLS, "").trim();
   if (clean.length <= PARTNER_REPLY_MAX) return clean;
   let end = PARTNER_REPLY_MAX - 1;
   // Never keep half of a surrogate pair: the stored JSON would carry a lone one.
@@ -362,9 +368,13 @@ export class SqlPartnerStore implements PartnerStore {
   async revoke(partnerId: string, id: string) { return this.revokeWhere(id, "partner_id", partnerId); }
   async list(partnerId: string) {
     // Oldest first, then id: the ids are random, so ordering by them alone made
-    // WHICH 100 a large app saw arbitrary. createdAt lives only in record_json;
-    // reading it there needs no schema change and covers every existing row.
-    const createdAt = this.dialect === "postgres" ? "(record_json::jsonb ->> 'createdAt')::bigint" : "json_extract(record_json, '$.createdAt')";
+    // WHICH 100 a large app saw arbitrary. createdAt lives only in record_json,
+    // read there with no schema change. On Postgres it is matched as text, not
+    // cast to json: rows stored before text had to be well-formed may hold a
+    // lone surrogate escape, which json refuses, and one such row failed the
+    // whole list. Only the top-level key can match: inside a JSON string every
+    // quote is escaped, so `"createdAt":` cannot occur there.
+    const createdAt = this.dialect === "postgres" ? `substring(record_json from '"createdAt":([0-9]+)')::bigint` : "json_extract(record_json, '$.createdAt')";
     return (await (await this.reader()).prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? ORDER BY ${createdAt}, id LIMIT 100`).all(partnerId)).map(row => connectionOf(row)!);
   }
   async consumeNonce(nonce: string, expiresAt: number): Promise<boolean> {

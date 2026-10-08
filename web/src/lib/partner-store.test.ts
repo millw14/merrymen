@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import {
-  activatedBy, FilePartnerStore, getPartnerStore, ONBOARDING_TTL_SECONDS, PARTNER_HISTORY_EXCHANGES,
-  PartnerStoreError, type PartnerCreate,
+  activatedBy, FilePartnerStore, fitPartnerReply, getPartnerStore, ONBOARDING_TTL_SECONDS, PARTNER_HISTORY_EXCHANGES,
+  partnerText, PartnerStoreError, type PartnerCreate,
 } from "./partner-store";
 
 const A = "0x00000000000000000000000000000000000000a1" as const;
@@ -80,6 +80,23 @@ test("list returns the oldest connections first, then by id, before its limit", 
   const page = await store.list("partner-a");
   assert.equal(page.length, 100);
   assert.deepEqual(page.slice(0, 10).map(c => c.id), [...made, ...twins], "a full page keeps the same oldest connections");
+});
+
+test("text that is not well-formed is refused, and a model reply carrying a lone surrogate is repaired", async () => {
+  const { store } = fixture();
+  const lone = JSON.parse('"Robin \\ud800"') as string;
+  assert.equal(lone.isWellFormed(), false);
+  for (const bad of [{ name: lone }, { externalUserId: `user-${JSON.parse('"\\udc00"')}` }, { partnerName: lone }]) {
+    await assert.rejects(store.create({ ...input("user-bad"), ...bad }), (e: unknown) => e instanceof PartnerStoreError && e.status === 400 && e.code === "invalid_input");
+  }
+  assert.deepEqual(await store.list("partner-a"), []);
+  assert.equal(partnerText(lone, 64), false);
+  assert.equal(partnerText("Robin 😀", 64), true, "a surrogate PAIR is ordinary text");
+  const pending = await store.create(input());
+  await store.bind(pending.token!, A, ["chat:agent"]);
+  await assert.rejects(store.appendExchange(pending.connection.id, { requestId: "lone", message: lone, reply: "ok" }), /invalid message/);
+  assert.equal(fitPartnerReply(`Reply ${lone} done 😀`), "Reply Robin \ufffd done 😀");
+  assert.equal((await store.appendExchange(pending.connection.id, { requestId: "fitted", message: "hi", reply: fitPartnerReply(lone) })).exchange.reply, "Robin \ufffd");
 });
 
 test("token binding is single-use even with concurrent different tenants", async () => {
