@@ -1412,7 +1412,10 @@ With a model, one forced choice (`summarise_theses`: a gist, up to three
 points for, three worries, two things waited on) reads at most twelve cleaned
 samples, one per family, at most 160 characters each, fenced as data. Code
 checks every phrase: its length, no digit outside the coin's name and no
-number word (a multiple in words, "tenfold" or "a ten bagger", included), no
+number word (a multiple in words, "tenfold" or "a ten bagger", included, and
+halves, quarters, dozens, doubled, tripled, halved and "bil": "half the
+supply", "price doubled since launch", "a bil market cap"; "the second wave
+of buyers" is no figure), no
 $, @, # or link, no quotation mark, no five-word run shared with any sample,
 nothing about instructions, nothing waited on that is a claim, a holder
 snapshot, a giveaway, a reward distribution or tokens sent to holders (the
