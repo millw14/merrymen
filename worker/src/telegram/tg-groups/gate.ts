@@ -391,6 +391,16 @@ function readingsOf(text: string): Readings {
 
 const some = (readings: readonly string[], re: RegExp): boolean => readings.some((t) => re.test(t));
 
+/**
+ * Every lowercased reading the gate's vocabulary clauses read (accents and
+ * invisible characters gone, lookalikes folded, letters spelled out one by
+ * one joined), for a caller with clauses of its own (theses.ts), so "h a l f"
+ * or "ha​lf" is judged as the word the room will read.
+ */
+export function tgLineReadings(text: string): string[] {
+  return readingsOf(typeof text === "string" ? text : "").low;
+}
+
 // ── model talk ──────────────────────────────────────────────────────────────
 
 /** The model's "nothing to say": the word alone, or PASS in capitals opening the line. */

@@ -12,8 +12,10 @@
  * answers with ONE FORCED CHOICE: a gist, up to three points for, three
  * against, two things holders wait on.
  *
- * NOTHING IT WRITES IS SENT UNCHECKED. Code checks every phrase on its own:
- * its length cap, no digit (the coin's own name aside) and no number word,
+ * NOTHING IT WRITES IS SENT UNCHECKED. Code checks every phrase on its own,
+ * in plain ASCII only (an invisible, lookalike, fullwidth or accented letter
+ * is dropped) and read as the gate reads a line (letters spelled out one by
+ * one joined): its length cap, no digit (the coin's own name aside) and no number word,
  * no $, @, # or link, no quotation mark, no five-word run shared with any
  * sample (never a quote, not even a paraphrase that is one), nothing about
  * instructions, nothing in the first person or naming the agent, Merrymen or
@@ -38,7 +40,7 @@
  * of the reply deadline, or no model, or the switch off: the code digest,
  * with no call. Logs carry counts only.
  */
-import { admitTgLine } from "./gate";
+import { admitTgLine, tgLineReadings } from "./gate";
 import { callChoice, type TgChoiceSpec, type TgModel, type TgModelGate, type TgModelReserve } from "./model";
 import type { TgThesesMaterial } from "./types";
 
@@ -218,6 +220,12 @@ const WAIT_CLAIM =
 const OUT_HANDOUT =
   /\bsnapshots?\b|\bgive\s*-?\s*aways?\b(?!\s+memes?\b)|\b(?:giv(?:e|es|ing|en)|gave)\s+(?:\w+\s+){0,3}?away\b(?!\s+memes?\b)|\bhand(?:s|ed|ing)?\s*-?\s*outs?\b|\bfree\s+mints?\b|\bholder\s+bonus(?:es)?\b|\bstimmy\b|\brewards?\b|\breward\s+distribution\b|\bdistribut\w*\s+(?:to|among|for)\s+holders\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
 const WAITING_LABEL = "Waiting on: ";
+/**
+ * Anything but plain printable ASCII, a curly apostrophe or a dash: the
+ * paraphrase is English by design, and every clause here is spelled in ASCII.
+ * A false drop ("café") costs one phrase.
+ */
+const PLAIN_TEXT_NOT = /[^\x20-\x7e‘’–—]/u;
 
 /**
  * NAMES OF PEOPLE OR ACCOUNTS (THESES_SYSTEM forbids them; code makes sure):
@@ -260,11 +268,20 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   if (typeof raw !== "string") return null;
   const p = raw.replace(/\s+/g, " ").trim().replace(/^[-•*·]\s*/, "").replace(/[\s.;,:!]+$/, "");
   if (!p || p.length > cap) return null;
+  // Plain text only (review r4): an invisible, lookalike, fullwidth or accented
+  // letter, or one of another script, reads as a word no clause below matches,
+  // and the gate then shows the room the word itself ("ha​lf" is "half").
+  if (PLAIN_TEXT_NOT.test(p)) return null;
   const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${escRe(m.coin)}(?![\\p{L}\\p{N}])`, "giu") : null;
   const bare = coin ? p.replace(coin, " ") : p;
-  if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || FIGURE_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p) || namesSomeone(bare, m)) return null;
-  if (SELF_REF.test(p) || SECOND_PERSON.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p) || OUT_ADVICE.test(p)) return null;
-  if (OUT_HANDOUT.test(p) || (label === WAITING_LABEL && WAIT_CLAIM.test(p))) return null;
+  // Every clause reads the phrase as the gate does, so letters spelled out one
+  // by one ("h a l f", "l-a-u-n-d-e-r-i-n-g") are the word they spell.
+  const reads = [p, ...tgLineReadings(p)];
+  const bareReads = coin ? [bare, ...tgLineReadings(bare)] : reads;
+  const any = (rs: readonly string[], ...res: RegExp[]): boolean => res.some((re) => rs.some((r) => re.test(r)));
+  if (any(bareReads, /\p{N}/u, NUMBER_WORDS, FIGURE_WORDS) || any(reads, MARKUP, ABOUT_ITSELF) || namesSomeone(bare, m)) return null;
+  if (any(reads, SELF_REF, SECOND_PERSON, OUT_LURE, OUT_ACCUSE, OUT_ADVICE) || namesAgent(p, agentName)) return null;
+  if (any(reads, OUT_HANDOUT) || (label === WAITING_LABEL && any(reads, WAIT_CLAIM))) return null;
   const w = words(p);
   for (let i = 0; i + COPY_RUN <= w.length; i++) if (runs.has(w.slice(i, i + COPY_RUN).join(" "))) return null;
   const v = admitTgLine(`${label}${p}.`, { agentName, kind: "answer", recentOwn: [] });

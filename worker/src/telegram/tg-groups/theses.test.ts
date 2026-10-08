@@ -339,6 +339,22 @@ describe("checkWording", () => {
     assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
   });
 
+  it("an invisible, lookalike or fullwidth letter, or a word spelled out letter by letter, gets past no clause (review r4)", () => {
+    for (const x of [
+      "ha\u200blf the supply sits with the dev", "h\u0430lf the supply sits with the dev", "\uff48\uff41\uff4c\uff46 the supply sits with the dev",
+      "b\u057dy before the listing", "the team is laun\u200bdering money", "h a l f the supply sits with the dev", "the dev is l-a-u-n-d-e-r-i-n-g money",
+      "b u y before the listing", "a f\u0072ee min\u0074 for holders soon \ud83d\ude80", "the caf\u00e9 meme crowd",
+    ]) {
+      const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
+      assert.equal(w.gist, null, x);
+      assert.deepEqual([...w.forIt, ...w.against, ...w.waitingOn], [], x);
+    }
+    // Plain words, a curly apostrophe and a dash stay.
+    const fair = ["worries about the dev\u2019s wallet", "a busy crowd \u2013 raids every day", "thin liquidity for its size"];
+    assert.deepEqual(checkWording({ against: fair }, MATERIAL, "Shogun").wording.against, fair);
+    assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
+  });
+
   it("over the room's caps, waiting-on gives way first and the closing lines stay", () => {
     const { wording } = checkWording(GOOD, MATERIAL, "Shogun");
     const five = thesesLines(MATERIAL, wording, 5, "Shogun", 700)!;

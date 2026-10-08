@@ -1413,8 +1413,13 @@ digest (fomo/digest.ts: what they argue for and against, what most of it is
 about, what holders wait on, "Their claims, not facts; newest 25 of 41.").
 With a model, one forced choice (`summarise_theses`: a gist, up to three
 points for, three worries, two things waited on) reads at most twelve cleaned
-samples, one per family, at most 160 characters each, fenced as data. Code
-checks every phrase: its length, no digit outside the coin's name and no
+samples, one per family, at most 160 characters each, fenced as data (a
+sample is read as the gate reads a line, lookalike letters folded and
+invisible characters gone, before its lure and instruction checks). Code
+checks every phrase, in plain ASCII only (an invisible, lookalike, fullwidth
+or accented letter drops it) and read as the gate reads a line (letters
+spelled out one by one, "h a l f", are the word): its length, no digit
+outside the coin's name and no
 number word (a multiple in words, "tenfold" or "a ten bagger", included, and
 halves, quarters, dozens, doubled, tripled, halved and "bil": "half the
 supply", "price doubled since launch", "a bil market cap"; "the second wave

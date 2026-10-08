@@ -50,7 +50,7 @@ import { deserialize, serialize } from "./fomo/subject-memory";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
-import { admitTgLine } from "./telegram/tg-groups/gate";
+import { admitTgLine, tgLineReadings } from "./telegram/tg-groups/gate";
 import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgThesesMaterial } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
@@ -402,7 +402,12 @@ export function thesesSample(text: unknown): string | null {
     .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, "$1")
     .replace(/^[\s,.;:!?-]+/, "")
     .trim();
-  if (!s || contentFree(s) || INJECTION_SHAPED.test(s) || AT_THE_READER.test(s) || LURE.test(s) || ABOUT_MERRYMEN.test(s)) return null;
+  if (!s || contentFree(s)) return null;
+  // Read as the group gate reads a line (lookalikes folded, invisible
+  // characters gone, spelled-out letters joined), so "frее tоkens" with
+  // Cyrillic letters or "instruc\u200btions" is the row it is (review r4).
+  const reads = [s, ...tgLineReadings(s)];
+  if ([INJECTION_SHAPED, AT_THE_READER, LURE, ABOUT_MERRYMEN].some((re) => reads.some((r) => re.test(r)))) return null;
   if (s.length > THESES_SAMPLE_CHARS) s = `${s.slice(0, THESES_SAMPLE_CHARS - 1).replace(/\s+\S*$/, "")}…`;
   return s;
 }
