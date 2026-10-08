@@ -11,7 +11,7 @@ import { getActionSelector } from "@zerodev/sdk";
 import { buildWallPolicies, derivationOf, type StoredGrant } from "@merrymen/core";
 import { makePgDb } from "../../../worker/src/db";
 import { partnerGrantDigest } from "../../../packages/core/src/partner-enrollment";
-import { SqlPartnerStore, PartnerStoreError, PARTNER_HISTORY_EXCHANGES, type PartnerConnection } from "./partner-store";
+import { SqlPartnerStore, PartnerStoreError, PARTNER_HISTORY_EXCHANGES, PARTNER_LOCK_HOLDERS, type PartnerConnection } from "./partner-store";
 import { createPartnerEnrollmentService, type PartnerEnrollmentDependencies } from "./partner-enrollment";
 import { createPartnerService } from "./partner-service";
 import type { PartnerPrincipal } from "./partner-bridge";
@@ -256,25 +256,69 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       });
     });
 
-    await t.test("more holders than pool connections finish: nested statements reuse the lock's connection", async () => {
-      // pg pools ten connections. If a holder's own reads or writes asked the
-      // pool for a second one, ten holders would wait on each other for ever.
+    await t.test("more lock requests than pool connections finish, though each holder also draws on the pool", async () => {
+      // pg pools ten connections, and a holder pins one for its whole turn. Its
+      // own store calls reuse that one, but the ledger reads it makes inside
+      // (grants and feed routes, chat facts) draw from the same memoized pool.
+      // Ten holders each waiting for an eleventh would hang the replica for ever.
       const ids = await Promise.all(Array.from({ length: 12 }, async (_, i) => {
         const pending = await first.create(create("pool", `user-${i}`));
         await first.bind(pending.token!, `0x${(i + 1).toString(16).padStart(40, "0")}`, SCOPES);
         return pending.connection.id;
       }));
-      let inside = 0;
-      const tenHeld = barrier();
+      let inside = 0, most = 0;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const results = await Promise.race([Promise.all(ids.map(id => first.withConversationLock(id, async () => {
-        if (++inside === 10) tenHeld.release();
-        await tenHeld.promise;
-        assert.equal((await first.byId("pool", id))?.status, "linked");
-        return (await first.appendExchange(id, { requestId: "pool-turn", message: "hello", reply: "hi" })).created;
+        most = Math.max(most, ++inside);
+        try {
+          await delay(200); // every admitted holder has pinned its connection before any asks for another
+          assert.equal((await databases[0].prepare("SELECT 1 AS one").get() as { one: number }).one, 1, "a ledger read, on the pool");
+          assert.equal((await first.byId("pool", id))?.status, "linked");
+          return (await first.appendExchange(id, { requestId: "pool-turn", message: "hello", reply: "hi" })).created;
+        } finally { inside--; }
       }))), new Promise<"deadlocked">(resolve => { timer = setTimeout(() => resolve("deadlocked"), 15_000); })]).finally(() => clearTimeout(timer));
-      assert.notEqual(results, "deadlocked", "lock holders waited on the pool for a second connection");
+      assert.notEqual(results, "deadlocked", "lock holders waited on each other for a pool connection");
       assert.ok((results as boolean[]).every(Boolean));
+      assert.ok(most <= PARTNER_LOCK_HOLDERS, `${most} holders at once`);
+    });
+
+    await t.test("requests queued behind one conversation take no holder slot from the others", async () => {
+      const [busy, other] = await Promise.all(["user-1", "user-2"].map(async (user, i) => {
+        const pending = await first.create(create("slots", user));
+        await first.bind(pending.token!, i ? B : A, SCOPES);
+        return pending.connection.id;
+      }));
+      const entered = barrier(), release = barrier();
+      const holder = first.withConversationLock(busy, async () => { entered.release(); await release.promise; });
+      await entered.promise;
+      // More transport retries of the held conversation than there are slots.
+      const retries = Array.from({ length: PARTNER_LOCK_HOLDERS + 1 }, () => first.withConversationLock(busy, async () => "retry"));
+      await delay(100);
+      try {
+        assert.equal(await Promise.race([first.withConversationLock(other, async () => "other"), delay(2000).then(() => "starved")]), "other");
+      } finally { release.release(); }
+      await holder;
+      assert.deepEqual(await Promise.all(retries), Array(PARTNER_LOCK_HOLDERS + 1).fill("retry"));
+    });
+
+    await t.test("a lock's wait bound covers checking a connection out of a saturated pool", async () => {
+      const pending = await first.create(create("saturated"));
+      await first.bind(pending.token!, A, SCOPES);
+      const impatient = new SqlPartnerStore(async () => databases[1], "postgres", undefined, secret, { conversation: 300, enrollment: 300 });
+      assert.equal((await impatient.byId("saturated", pending.connection.id))?.status, "linked");
+      // Other work holds every connection of this replica's pool for two seconds.
+      const sleepers = Promise.all(Array.from({ length: 10 }, () => databases[1].prepare("SELECT pg_sleep(2)").get()));
+      await delay(200);
+      let ran = false;
+      const started = Date.now();
+      await assert.rejects(impatient.withConversationLock(pending.connection.id, async () => { ran = true; }),
+        (e: unknown) => e instanceof PartnerStoreError && e.code === "conversation_busy" && e.retryAfter! > 0);
+      assert.ok(Date.now() - started < 1500, `answered busy at its bound, not once a connection came free (${Date.now() - started}ms)`);
+      await sleepers;
+      await delay(100);
+      assert.equal(ran, false, "the abandoned attempt let go without running anything once it got a connection");
+      assert.equal(await impatient.withConversationLock(pending.connection.id, async () => "free again"), "free again");
+      assert.equal(ran, false);
     });
 
     await t.test("enrollment locks serialize wallet ownership across replicas", async () => {

@@ -97,10 +97,23 @@ type LockKind = "conversation" | "enrollment";
  * How long a request waits for another holding its lock: a transport retry of a
  * chat still being generated, or two activations for one owner. The wait holds
  * no pooled connection, and both bounds sit well inside the gateway's 45-second
- * upstream timeout. Past it the answer is <kind>_busy with a retry hint.
+ * upstream timeout. Past it the answer is <kind>_busy with a retry hint. The
+ * bound covers the whole wait: the queue, a holder slot, and checking the
+ * lock's connection out of the pool.
  */
 export const PARTNER_LOCK_WAIT_MS: Readonly<Record<LockKind, number>> = { conversation: 20_000, enrollment: 10_000 };
 const LOCK_CLASS: Readonly<Record<LockKind, number>> = { conversation: 1_297_692_083, enrollment: 1_297_692_084 };
+/**
+ * Partner locks held at once per Postgres pool, in this process; more wait
+ * their turn, bounded and holding nothing. A holder pins one pooled connection
+ * for its turn (a whole model call), and the ledger reads it makes inside (the
+ * grants and feed routes and chat facts, through withReadDb) draw more from
+ * the same memoized DATABASE_URL pool: pg's default ten, which openPgDb leaves
+ * as is. Ten holders each waiting for an eleventh connection hung every
+ * database user on the replica. Half the pool stays free for those reads and
+ * everything else.
+ */
+export const PARTNER_LOCK_HOLDERS = 5;
 const BUSY_RETRY_AFTER_SECONDS = 2;
 const NONCE_RETENTION_SECONDS = 10 * 60;
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -204,6 +217,38 @@ CREATE TABLE IF NOT EXISTS partner_exchanges (
 );
 CREATE INDEX IF NOT EXISTS partner_exchanges_history ON partner_exchanges (connection_id, ordinal);
 `;
+
+/** Partner locks per Db in this process: each lock's queue tail, and the holder slots taken and awaited. */
+interface LockGate { tails: Map<string, Promise<void>>; held: number; waiting: Array<() => void> }
+const gates = new WeakMap<Db, LockGate>();
+function gateOf(db: Db): LockGate {
+  let gate = gates.get(db);
+  if (!gate) gates.set(db, gate = { tails: new Map(), held: 0, waiting: [] });
+  return gate;
+}
+/** True once `p` settles, either way, false if `deadline` passes first. */
+async function settlesBy(p: Promise<unknown>, deadline: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([p.then(() => true, () => true), new Promise<boolean>(r => { timer = setTimeout(() => r(false), Math.max(0, deadline - Date.now())); })]);
+  } finally { clearTimeout(timer); }
+}
+/** A holder slot by `deadline`, or false. A released slot passes straight to the next waiter. */
+async function takeSlot(gate: LockGate, limit: number, deadline: number): Promise<boolean> {
+  if (gate.held < limit) { gate.held++; return true; }
+  let grant!: () => void;
+  const granted = new Promise<void>(r => { grant = r; });
+  gate.waiting.push(grant);
+  if (await settlesBy(granted, deadline)) return true;
+  const at = gate.waiting.indexOf(grant);
+  if (at < 0) return true; // handed over just as the wait ran out: it is ours to release
+  gate.waiting.splice(at, 1);
+  return false;
+}
+function releaseSlot(gate: LockGate): void {
+  const next = gate.waiting.shift();
+  if (next) next(); else gate.held--;
+}
 
 /** The external_user_id column of a revoked connection that has been reconnected; its record keeps the real one. */
 const RETIRED = "\u001fretired:";
@@ -445,28 +490,56 @@ export class SqlPartnerStore implements PartnerStore {
    * enrollment_busy after its single-use signature had been spent. Waiting
    * inside a transaction would hold a pooled connection per waiter instead.
    *
-   * withAdvisoryLock queues callers in this process and retries a session lock
-   * across replicas, holding a connection only while it holds the lock. Every
-   * nested read and write runs on that one pinned connection (so ten holders
-   * can never sit on every pool slot waiting for an eleventh), and each write
-   * commits as its own short transaction: nothing holds a transaction open
-   * through a model call, and a nonce consumed under the lock stays consumed
-   * whatever fails after it. SQLite takes the same in-process queue.
+   * In order, all within one deadline: queue behind this process's earlier
+   * caller for the same lock; take one of PARTNER_LOCK_HOLDERS slots (so a
+   * retry waiting on its own conversation holds none); then withAdvisoryLock,
+   * which retries a session lock across replicas, holding a connection only
+   * while it holds the lock. Its checkout from a saturated pool has no deadline
+   * of its own, so it is raced against this one: an attempt still waiting at
+   * the deadline is answered busy, and lets go at once if it ever gets in.
+   *
+   * Every nested partner-store read and write runs on the pinned connection,
+   * and each write commits as its own short transaction: nothing holds a
+   * transaction open through a model call, and a nonce consumed under the lock
+   * stays consumed whatever fails after it. SQLite takes the same queue; it
+   * has no pool to protect, so no slots.
    */
   private async withLock<T>(kind: LockKind, id: string, fn: () => Promise<T>): Promise<T> {
     if (this.context.getStore()) throw new Error("nested partner locks are not supported");
+    const deadline = Date.now() + this.waits[kind];
     const key = createHash("sha256").update(id).digest().readInt32BE();
-    let entered = false;
+    const db = await this.database();
+    const gate = gateOf(db), name = `${kind}:${key}`;
+    const ahead = gate.tails.get(name) ?? Promise.resolve();
+    let leave!: () => void;
+    const left = new Promise<void>(r => { leave = r; });
+    // The next caller's turn: once the one ahead is done AND this one has left.
+    const tail = ahead.then(() => left);
+    gate.tails.set(name, tail);
+    // Cast, not annotated: the lock callback moves it on, out of the compiler's sight.
+    let slot = false, state = "waiting" as "waiting" | "entered" | "abandoned";
     try {
-      return await withAdvisoryLock(await this.database(), LOCK_CLASS[kind], key, db => {
-        entered = true;
-        return this.context.run({ db, transaction: false }, fn);
-      }, this.waits[kind]);
+      if (!await settlesBy(ahead, deadline)) throw new LockBusyError();
+      if (!(slot = await takeSlot(gate, this.dialect === "postgres" ? PARTNER_LOCK_HOLDERS : Infinity, deadline))) throw new LockBusyError();
+      const attempt = withAdvisoryLock(db, LOCK_CLASS[kind], key, locked => {
+        if (state === "abandoned") throw new LockBusyError();
+        state = "entered";
+        return this.context.run({ db: locked, transaction: false }, fn);
+      }, Math.max(0, deadline - Date.now()));
+      if (!await settlesBy(attempt, deadline) && state === "waiting") {
+        state = "abandoned";
+        throw new LockBusyError();
+      }
+      return await attempt;
     } catch (error) {
-      if (!entered && error instanceof LockBusyError) {
+      if (state !== "entered" && error instanceof LockBusyError) {
         throw new PartnerStoreError(409, `${kind}_busy`, `another ${kind} request is still in progress for this agent; retry shortly`, BUSY_RETRY_AFTER_SECONDS);
       }
       throw error;
+    } finally {
+      if (slot) releaseSlot(gate);
+      leave();
+      if (gate.tails.get(name) === tail) gate.tails.delete(name);
     }
   }
 }
