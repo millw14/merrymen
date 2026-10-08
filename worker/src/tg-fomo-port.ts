@@ -128,7 +128,11 @@ export function requestText(r: TgFomoRequest): string | null {
     case "leaderboard": {
       const when = r.window === "7d" ? "this week" : r.window === "30d" ? "this month" : r.window === "all" ? "of all time" : "in the last 24h";
       const row = r.row;
-      if (row && Object.hasOwn(ROW_WORDS, row.rank) && Object.hasOwn(ROW_ABOUT, row.about)) return `who is the ${ROW_WORDS[row.rank]} trader on fomo ${when}${ROW_ABOUT[row.about]}`;
+      if (row && Object.hasOwn(ROW_WORDS, row.rank) && Object.hasOwn(ROW_ABOUT, row.about)) {
+        // A trades ask keeps its side ("and what has he been selling?"), which the planner reads as the row's.
+        const about = row.about === "trades" && (row.side === "sell" || row.side === "buy") ? ` and what has he been ${row.side === "sell" ? "selling" : "buying"}?` : ROW_ABOUT[row.about];
+        return `who is the ${ROW_WORDS[row.rank]} trader on fomo ${when}${about}`;
+      }
       return `who are the top traders on fomo ${when}?`;
     }
     case "board": {
@@ -169,8 +173,11 @@ export function requestText(r: TgFomoRequest): string | null {
       switch (r.about) {
         case "holdings":
           return `what is trader ${h} holding on fomo?`;
-        case "trades":
-          return `what has trader ${h} been trading on fomo ${whenWords(r.window, "this week")}?`;
+        case "trades": {
+          // The side the line named ("what did X sell"), which the planner reads as that side.
+          const verb = r.side === "sell" ? "selling" : r.side === "buy" ? "buying" : "trading";
+          return `what has trader ${h} been ${verb} on fomo ${whenWords(r.window, "this week")}?`;
+        }
         case "earnings":
           return `what did trader ${h} make money on on fomo ${whenWords(r.window, "this week")}?`;
         default:

@@ -85,7 +85,7 @@ interface Setup {
   clock: { now: number };
 }
 
-interface SetupCaps { groupHourlyCredits?: number; tenantDailyCredits?: number; thesisCost?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec }
+interface SetupCaps { groupHourlyCredits?: number; tenantDailyCredits?: number; thesisCost?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec; moreAlerts?: () => Rec[] }
 
 async function setup(caps: SetupCaps = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
@@ -101,6 +101,7 @@ async function setup(caps: SetupCaps = {}): Promise<Setup> {
     if (p === "/v2/search") return json(caps.search ? caps.search() : fixture("search"));
     if (p === "/v2/alerts") {
       const b = fixture("alerts");
+      if (caps.moreAlerts) b.alerts = [...(b.alerts as Rec[]), ...caps.moreAlerts()];
       const shift = clock.now - 60_000 - ALERTS_NEWEST;
       for (const a of b.alerts as Rec[]) {
         if (typeof a.ts === "number") a.ts += shift;
@@ -345,6 +346,9 @@ describe("createTgFomoPort", () => {
       [{ kind: "trader", handle: "@unipcs", about: "holdings" }, "fomo_get_trader_context", { trader: "unipcs" }, false],
       [{ kind: "trader", handle: "unipcs", about: "trades" }, "fomo_get_trader_activity", { trader: "unipcs", window: "7d" }, false],
       [{ kind: "trader", handle: "unipcs", about: "trades", window: "24h" }, "fomo_get_trader_activity", { trader: "unipcs", window: "24h" }, false],
+      // The side the line named (review r4).
+      [{ kind: "trader", handle: "unipcs", about: "trades", side: "sell" }, "fomo_get_trader_activity", { trader: "unipcs", window: "7d", side: "sell" }, false],
+      [{ kind: "trader", handle: "unipcs", about: "trades", side: "buy", window: "24h" }, "fomo_get_trader_activity", { trader: "unipcs", window: "24h", side: "buy" }, false],
       [{ kind: "trader", handle: "unipcs", about: "earnings" }, "fomo_get_trader_activity", { trader: "unipcs", window: "7d", limit: 50 }, true],
       [{ kind: "trader", handle: "unipcs", about: "earnings", window: "30d" }, "fomo_get_trader_activity", { trader: "unipcs", window: "30d", limit: 50 }, true],
       [{ kind: "trader", handle: "unipcs", about: "earnings", window: "all" }, "fomo_get_trader_activity", { trader: "unipcs", window: "all", limit: 50 }, true],
@@ -704,6 +708,13 @@ describe("a model's checked choice, asked as the planner's own question", () => 
     }
     // A rank past the tenth (review r3: never row 1 instead) asks for the board alone.
     assert.equal(requestText({ kind: "leaderboard", row: { rank: 11 as never, about: "trades" } }), "who are the top traders on fomo in the last 24h?");
+    // A trades row keeps the side its line named (review r4).
+    for (const rank of [1, 2, 6] as const) {
+      for (const side of ["sell", "buy"] as const) {
+        const q = requestText({ kind: "leaderboard", row: { rank, about: "trades", side } })!;
+        assert.deepEqual(classifyFomoQuestion(q, { memory: null, now: NOW })?.rowAsk, { rank, about: "trades", side }, q);
+      }
+    }
   });
 
   it("'about' is the fixed capabilities answer, and a handle or a ticker that is not one has no question", () => {
@@ -1772,6 +1783,22 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     assert.match(bob, /^frankdegods/, bob);
     assert.doesNotMatch(bob, /CryptoKaleo/, bob);
     assert.ok(w.logs.includes("[tg-groups] route fomo:trader"));
+  });
+
+  it("a routed 'what did X sell this week?' names X's sales, never only the buys (review r4)", async () => {
+    const kaleo = (fixture("search").results as Rec[])[0]!;
+    // frankdegods' three buys in the feed, and one sale.
+    const buy = (fixture("alerts").alerts as Rec[])[0]!;
+    const sale = { ...buy, id: "249318d0-70af-4acb-a607-b126dd4db4a3", eventId: "249318d0-70af-4acb-a607-b126dd4db4a3", tradeId: "b323b5ca-c769-4b07-a422-833c4cafbe1f", alertType: "sell", text: "frankdegods sold $PONS ($4K size)", ts: (buy.ts as number) - 1_000 };
+    const w = await world({ search: () => ({ results: [{ ...kaleo, handle: "frankdegods", userId: "6dcf7c78-2537-522a-8307-3f9970c081be", displayName: "frank" }] }), moreAlerts: () => [sale] });
+    w.picks.push({ action: "fomo_trader", trader: "frankdegods", about: "trades" });
+    const sold = await w.say("shogun what did frankdegods sell this week?", undefined, 60_000, OWNER_ID + 1);
+    assert.equal(w.routePrompts.length, 1);
+    const act = w.s.calls.filter((c) => c.tool === "fomo_get_trader_activity");
+    assert.deepEqual(act.map((c) => [c.args.side, c.args.window]), [["sell", "7d"]]);
+    assert.match(sold, /^frankdegods in the last 7d: 1 sell in the feed\./, sold);
+    assert.match(sold, /frankdegods sold PONS/, sold);
+    assert.doesNotMatch(sold, /\bbuys?\b|bought/, sold);
   });
 
   it("23:04 'who's the best trader on fomo today and what did he make money on': the board and his winners and losers, in the room, for her and for anyone", async () => {

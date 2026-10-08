@@ -443,10 +443,11 @@ export type TgFomoRequest =
   | { kind: "status" }
   /**
    * One Fomo trader by the handle the line itself wrote (route.ts
-   * groundedTrader), and what about them; answered in the room. The window
-   * is read from the line's words, never a model's.
+   * groundedTrader), and what about them; answered in the room. The window,
+   * and a trades ask's side ("what did X sell"), are read from the line's
+   * words, never a model's.
    */
-  | { kind: "trader"; handle: string; about: TgTraderAbout; window?: "24h" | "7d" | "30d" | "all" };
+  | { kind: "trader"; handle: string; about: TgTraderAbout; window?: "24h" | "7d" | "30d" | "all"; side?: "buy" | "sell" };
 
 /**
  * WHAT THE OWNER CAN DO WITH AN ANSWER she asked for in a group: the
@@ -485,6 +486,8 @@ export interface TgBoardRow {
   /** 1 to 10: the rows a trader board read carries by default. */
   rank: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
   about: TgTraderAbout;
+  /** A trades ask's side, read from the line's words (route.ts rowIn); none: both sides. */
+  side?: "buy" | "sell";
 }
 
 /**

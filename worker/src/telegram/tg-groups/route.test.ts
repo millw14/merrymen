@@ -200,7 +200,7 @@ describe("a row of the leaderboard, and ordinals that are never names", () => {
   it("rowIn: one rank and one trader's question, read from the words", () => {
     assert.deepEqual(rowIn("who's been winning the most today and what did he make money on"), { rank: 1, about: "earnings" });
     assert.deepEqual(rowIn("who's the best trader on fomo today and what did he make money on"), { rank: 1, about: "earnings" });
-    assert.deepEqual(rowIn("who's #1 on fomo and what's he buying"), { rank: 1, about: "trades" });
+    assert.deepEqual(rowIn("who's #1 on fomo and what's he buying"), { rank: 1, about: "trades", side: "buy" });
     assert.deepEqual(rowIn("what's the second best trader holding"), { rank: 2, about: "holdings" });
     // The trader Merrymen watches is a watch-list question, never a row of the public board.
     assert.equal(rowIn("who's the best trader we follow and what is he holding"), undefined);
@@ -218,7 +218,7 @@ describe("a row of the leaderboard, and ordinals that are never names", () => {
   it("rowIn: the 5th to the 10th row is that row; past it, or 'after X', no row and never the 1st (review r3)", () => {
     assert.deepEqual(rowIn("who is the 5th best trader on fomo today and what is he holding?"), { rank: 5, about: "holdings" });
     assert.deepEqual(rowIn("who is the fifth best trader today and what is he holding"), { rank: 5, about: "holdings" });
-    assert.deepEqual(rowIn("who is the sixth best trader today and what did he buy"), { rank: 6, about: "trades" });
+    assert.deepEqual(rowIn("who is the sixth best trader today and what did he buy"), { rank: 6, about: "trades", side: "buy" });
     assert.deepEqual(rowIn("who is the 10th best trader and what is he holding"), { rank: 10, about: "holdings" });
     assert.deepEqual(rowIn("who's #7 today and what's he holding"), { rank: 7, about: "holdings" });
     assert.deepEqual(rowIn("who's number nine this week and what did he make money on"), { rank: 9, about: "earnings" });
@@ -232,7 +232,7 @@ describe("a row of the leaderboard, and ordinals that are never names", () => {
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who is the 11th best trader today and what is he holding?")), { action: "fomo", request: { kind: "leaderboard", window: "24h" } });
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who is the sixth best trader today and what did he buy")), {
       action: "fomo",
-      request: { kind: "leaderboard", window: "24h", row: { rank: 6, about: "trades" } },
+      request: { kind: "leaderboard", window: "24h", row: { rank: 6, about: "trades", side: "buy" } },
     });
   });
 
@@ -465,7 +465,19 @@ describe("the router's fixes (review, 2026-10-07)", () => {
     assert.deepEqual((ROUTE_SPEC.schema as { properties: Record<string, unknown> }).properties.about, { type: "string", enum: ["profile", "holdings", "trades", "earnings"] });
     assert.equal(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("do you know unipcs on fomo", { fomo: false })), null, "no research here: nothing to answer it");
     assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "holdings" }, ctxOf("what's unipcs sitting on")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "holdings" } });
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "trades" }, ctxOf("what has unipcs been aping")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "trades" } });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "trades" }, ctxOf("what has unipcs been aping")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "trades", side: "buy" } });
+    // The side the line names (review r4): "what did X sell" is the sales, never the buys; none named, or both, is both.
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "frankdegods", about: "trades" }, ctxOf("what did frankdegods sell this week?")), {
+      action: "fomo",
+      request: { kind: "trader", handle: "frankdegods", about: "trades", window: "7d", side: "sell" },
+    });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "frankdegods", about: "trades", side: "sell" }, ctxOf("what has frankdegods been trading lately")), {
+      action: "fomo",
+      request: { kind: "trader", handle: "frankdegods", about: "trades" },
+    }, "never a model's side");
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "frankdegods", about: "trades" }, ctxOf("what did frankdegods buy and sell")), { action: "fomo", request: { kind: "trader", handle: "frankdegods", about: "trades" } });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "frankdegods", about: "holdings" }, ctxOf("what is frankdegods holding after he sold")), { action: "fomo", request: { kind: "trader", handle: "frankdegods", about: "holdings" } });
+    assert.deepEqual(rowIn("who's the best trader on fomo and what has he been selling"), { rank: 1, about: "trades", side: "sell" });
     assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "wallet" }, ctxOf("unipcs?")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } });
   });
 

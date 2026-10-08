@@ -855,11 +855,14 @@ a new board.
 data may be answered in a group). Answered in the room, for anyone who
 asks, the owner included, whether the router read it ("do you know unipcs
 on fomo", a `fomo_trader` pick with `about` profile, holdings, trades or
-earnings, and the window read from the line's words) or the planner did
+earnings, and the window, and a trades ask's side, read from the line's
+words: "what did frankdegods sell this week?" is his sales, never his buys)
+or the planner did
 ("who is trader unipcs on fomo?", "what is @x holding on fomo?", "what did
 trader x make money on this week?"). A routed pick is asked as one fixed,
 read-only question ("who is trader X on fomo?", "what is trader X holding on
-fomo?", "what has trader X been trading on fomo this week?", "what did
+fomo?", "what has trader X been trading on fomo this week?", or "been
+selling" / "been buying" for a side the line named, "what did
 trader X make money on on fomo this week?"); nothing can be watched or
 changed from a room. The room hears the trader by their public handle,
 without the `@`: what they hold and its value, the largest few; their buys

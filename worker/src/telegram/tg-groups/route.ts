@@ -330,13 +330,18 @@ export function windowIn(text: string): "24h" | "7d" | "30d" | "all" | undefined
   return undefined;
 }
 
-/** The side the line's own words name; else the model's; else buying. */
-function sideIn(text: string, model: unknown): "buy" | "sell" {
+/** The side the line's own words name; undefined when it names none, or both. */
+export function sideNamed(text: string): "buy" | "sell" | undefined {
   const t = typeof text === "string" ? text.normalize("NFKC").toLowerCase() : "";
   const sell = /\b(?:sell|sells|selling|sold|sellers?|dump|dumps|dumping|dumped|exit|exits|exiting|exited|offload\w*|unload\w*)\b/u.test(t);
   const buy = /\b(?:buy|buys|buying|bought|buyers?|ape|apes|aping|aped|accumulat\w*|load|loads|loading|loaded)\b/u.test(t);
   if (sell !== buy) return sell ? "sell" : "buy";
-  return model === "sell" ? "sell" : "buy";
+  return undefined;
+}
+
+/** The side the line's own words name; else the model's; else buying. */
+function sideIn(text: string, model: unknown): "buy" | "sell" {
+  return sideNamed(text) ?? (model === "sell" ? "sell" : "buy");
 }
 
 /** A list of coins (or the chain itself) after a short chain name: "hood coins", "sol memes", "base chain". */
@@ -451,7 +456,9 @@ export function rowIn(text: unknown): TgBoardRow | undefined {
   if (!about) return undefined;
   const w = (m[1] ?? "").replace(/^(?:#|number |no\.? ?)/u, "").split(" ")[0] ?? "";
   const rank: TgBoardRow["rank"] = Object.hasOwn(ROW_RANK_NUMBERS, w) ? ROW_RANK_NUMBERS[w]! : 1;
-  return { rank, about };
+  // A trades ask keeps the side its words name ("and what has he been selling"), never a model's.
+  const side = about === "trades" ? sideNamed(rest) : undefined;
+  return { rank, about, ...(side ? { side } : {}) };
 }
 
 const ASPECTS: ReadonlySet<string> = new Set(["theses", "buyers", "sellers", "activity", "research"]);
@@ -510,7 +517,9 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
       if (!handle) return null;
       const about: TgTraderAbout = o.about === "holdings" ? "holdings" : o.about === "trades" ? "trades" : o.about === "earnings" ? "earnings" : "profile";
       const window = windowIn(line);
-      return fomo({ kind: "trader", handle, about, ...(window ? { window } : {}) });
+      // "What did X sell": the side the line's words name, never the model's (none: both sides).
+      const side = about === "trades" ? sideNamed(line) : undefined;
+      return fomo({ kind: "trader", handle, about, ...(window ? { window } : {}), ...(side ? { side } : {}) });
     }
     case "fomo_tail":
       // The trader and the hours are read by code from the line itself
