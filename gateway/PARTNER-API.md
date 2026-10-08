@@ -505,7 +505,9 @@ connections. Older keys without `appId` use their `keyId` as their app ID; prese
 that exact value for their first rotation. A CLI revocation reaches the running
 gateway within 30 seconds. Keep `MERRYMEN_GATEWAY_SECRET` stable: it also
 underlies stored partner key hashes and the developer portal's session key, so
-rotating it invalidates every partner key and signs every developer out.
+rotating it invalidates every partner key and signs every developer out. To sign
+every developer out without touching partner keys (a leaked session cookie),
+rotate `MERRYMEN_DEVELOPER_PORTAL_SECRET` on the gateway and the site together.
 
 The gateway forwards authenticated requests to hosted web using a dedicated
 `MERRYMEN_PARTNER_BRIDGE_SECRET` (at least 32 bytes), configured identically on

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { verifyMessage } from "viem";
 import { makeKey, hashSecret, loadRegistry, writeRecord } from "./partners.mjs";
 
@@ -29,8 +29,16 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   // A subkey, so the gateway secret itself never MACs attacker-shaped data here.
   // The colon keeps it apart from every other HMAC over that secret: holder
   // tokens and nonces MAC base64url (no colon) and partner hashes MAC `mmp:…`.
-  const sessionKey = gatewaySecret && Buffer.byteLength(gatewaySecret) >= 32
-    ? createHmac("sha256", gatewaySecret).update("merrymen:developer-session:v1").digest() : null;
+  //
+  // THE PORTAL SECRET IS MIXED IN, AS A HASH, so rotating it still signs every
+  // developer out, as it did when it was the key itself: the kill switch for a
+  // leaked session cookie that does not also void every partner key, which
+  // rotating the gateway secret would. Knowing it alone still forges nothing;
+  // the derivation needs the gateway secret too.
+  const sessionKey = gatewaySecret && Buffer.byteLength(gatewaySecret) >= 32 && portalSecret
+    ? createHmac("sha256", gatewaySecret)
+      .update(`merrymen:developer-session:v1:${createHash("sha256").update(portalSecret).digest("hex")}`).digest()
+    : null;
   const macOf = encoded => createHmac("sha256", sessionKey).update(`developer-v1:${encoded}`).digest("base64url");
   // WHERE A REVOCATION LIVES DECIDES HOW LONG A SESSION MAY. A durable store
   // remembers a logout across restarts, so its sessions survive a deploy. The

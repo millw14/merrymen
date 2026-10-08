@@ -70,6 +70,29 @@ test("the portal's own secret cannot mint a session or a challenge", async () =>
   const keyless = createDeveloperApi({ portalSecret, gatewaySecret: "", partners: f.partners, store: createStore() });
   assert.equal((await keyless.handle({ method: "POST", path: "/challenge", body: JSON.stringify({ address: f.wallet.address }), authorization: `Bearer ${portalSecret}` })).status, 503);
 });
+test("rotating the portal secret signs every developer out, and leaves partner keys working", async () => {
+  // The kill switch for a leaked session cookie: before sessions moved to a
+  // gateway-derived key, rotating the portal secret did this; it must still.
+  const store = createStore();
+  Object.defineProperty(store, "durable", { value: true }); // KV: sessions survive restarts, so only the key can end them
+  const partners = createPartners({ secret: gatewaySecret });
+  const partnerApi = createPartnerApi({ partners, store });
+  const wallet = privateKeyToAccount(generatePrivateKey());
+  const api = secret => createDeveloperApi({ portalSecret: secret, gatewaySecret, partners, partnerApi, store });
+  const call = (target, secret, path, body, session) => target.handle({ method: body === undefined ? "GET" : "POST", path,
+    body: body === undefined ? undefined : JSON.stringify(body), session, authorization: `Bearer ${secret}`, ip: wallet.address });
+  const before = api(portalSecret);
+  const challenge = await call(before, portalSecret, "/challenge", { address: wallet.address });
+  const { session } = (await call(before, portalSecret, "/verify", { challenge: challenge.json.challenge, signature: await wallet.signMessage({ message: challenge.json.message }) })).json;
+  const minted = await call(before, portalSecret, "/keys", { name: "Survives rotation" }, session);
+  assert.equal(minted.status, 201);
+  assert.equal((await call(api(portalSecret), portalSecret, "/keys", undefined, session)).status, 200, "an unrotated restart keeps the session");
+  const rotated = "rotated-portal-secret-with-at-least-32-bytes";
+  const after = api(rotated);
+  const refused = await call(after, rotated, "/keys", undefined, session);
+  assert.equal(refused.status, 401); assert.equal(refused.json.error.code, "signed_out");
+  assert.equal((await partners.verify(minted.json.key)).ok, true, "partner keys do not depend on the portal secret");
+});
 test("logout revokes that session on the gateway, not just the site's cookie", async () => {
   const f = fixture();
   const first = await f.login(), second = await f.login();
