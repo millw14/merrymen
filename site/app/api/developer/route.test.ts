@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { NextRequest } from 'next/server';
 import { GET, POST } from './[action]/route';
 
@@ -89,4 +90,13 @@ test('a portal secret under 32 bytes fails closed before anything is sent', asyn
       assert.equal((await keys()).status, 503); assert.deepEqual(urls, []);
     });
   }
+});
+
+test('the console links to repository docs on main, not on a feature branch', () => {
+  // The reference link pointed at codex/embedded-partner-api, which stops
+  // matching the deployed API the moment main moves on (or the branch goes).
+  const source = readFileSync(new URL('../DeveloperConsole.tsx', import.meta.url), 'utf8');
+  const links = [...source.matchAll(/github\.com\/millw14\/merrymen\/(?:blob|tree)\/([^/"'`]+)/g)].map(m => m[1]);
+  assert.ok(links.length > 0, 'the console should link to the reference');
+  assert.deepEqual([...new Set(links)], ['main']);
 });
