@@ -2325,7 +2325,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           if (feed.data.chainFilterHonoured === false) a.note("The provider ignored the chain filter; rows on other chains were removed.");
         }
         essential.push(feed);
-        a.note("Whole-feed reads cover the latest page of the feed only.");
+        // Said only when the page provably stops inside the window, in words a room keeps ("left out", "floor").
+        if (feed.data && feedPageCutShort(feed.data, since)) a.note("The feed's newest page does not reach back over the whole window; older trades are left out, so these counts are a floor.");
       }
     }
     const merged = dedupeEvents([...local, ...rest]);

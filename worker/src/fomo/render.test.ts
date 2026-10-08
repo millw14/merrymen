@@ -578,9 +578,9 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
       topTokens: [{ token: T, label: { symbol: "PONS", name: null }, buyers: 5, sellers: 1 }, { token: solToken(1), label: { symbol: "ROO", name: null }, buyers: 1, sellers: 0 }],
     };
     const g = renderEnvelope(env("fomo_get_token_activity", "ok", act, { subject: { kind: "market" } }), G);
-    assert.match(g, /\nMost bought on Fomo in the last 24h: PONS on robinhood \(5 buyers\), ROO on solana \(1 buyer\)\./);
+    assert.match(g, /\nMost bought in the newest Fomo trades read: PONS on robinhood \(5 buyers\), ROO on solana \(1 buyer\)\./);
     const sold = renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, side: "sell", topTokens: [{ ...act.topTokens![0]!, sellers: 2 }] }, { subject: { kind: "market" } }), G);
-    assert.match(sold, /\nMost sold on Fomo in the last 24h: PONS on robinhood \(2 sellers\)\./);
+    assert.match(sold, /\nMost sold in the newest Fomo trades read: PONS on robinhood \(2 sellers\)\./);
   });
 });
 

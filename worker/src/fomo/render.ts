@@ -374,12 +374,27 @@ function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string |
       && !(audience === "group" && SKILL_CAVEAT.test(n))
       && !(traderNote && (WATCH_WORDS.test(n) || /\bP&L\b/.test(n))),
   );
-  for (const n of keep.slice(0, 3)) parts.push(traderNote ? roomNote(n) : n);
+  // Every room note in the gate's words: "The provider ignored the chain filter" would cost the whole limits line.
+  for (const n of keep.slice(0, 3)) {
+    const note = audience === "group" ? roomNote(n) : n;
+    // A room's line has the gate's caps (gate.ts TG_LINE_MAX, TG_LINE_MAX_SENTENCES): a note that would push
+    // the whole limits line over them is left out, so the line is never refused whole.
+    if (audience === "group" && !fitsRoomLine([...parts, note].join(" "))) continue;
+    parts.push(note);
+  }
   return parts.length ? parts.join(" ") : null;
 }
 
+/** The group gate's caps on one line (tg-groups/gate.ts TG_LINE_MAX and TG_LINE_MAX_SENTENCES). */
+const ROOM_LINE_MAX = 280;
+const ROOM_LINE_SENTENCES = 3;
+function fitsRoomLine(line: string): boolean {
+  const sentences = line.split(/(?<=[.!?…。！？])\s+/u).filter((p) => /[\p{L}\p{N}]/u.test(p)).length;
+  return Array.from(line).length <= ROOM_LINE_MAX && sentences <= ROOM_LINE_SENTENCES;
+}
+
 /**
- * A trader read's limit in words the group gate admits: "provider" alone it
+ * A read's limit in words the group gate admits: "provider" alone it
  * reads as plumbing and "portfolio" as the owner's book, so a room would
  * lose the whole line, the floor it states included.
  */
@@ -699,7 +714,8 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
   if (!d.token && d.topTokens?.length) {
     const most = d.side === "sell" ? "Most sold" : "Most bought";
     const n = (c: (typeof d.topTokens)[number]) => (d.side === "sell" ? plural(c.sellers, "seller", "sellers") : plural(c.buyers, "buyer", "buyers"));
-    out.push(`${most} on Fomo ${scope}: ${d.topTokens.map((c) => `${coin(c.token, c.label, audience, false)} (${n(c)})`).join(", ")}.`);
+    // Ranked from the feed page read, never "in the last 24h": one page can stop well inside the window.
+    out.push(`${most} in the newest Fomo trades read: ${d.topTokens.map((c) => `${coin(c.token, c.label, audience, false)} (${n(c)})`).join(", ")}.`);
   }
   if (d.breadth) out.push(`Breadth (Merrymen's reading): ${d.breadth.reading}, ${plural(d.breadth.distinctBuyers, "buyer", "buyers")} across ${plural(d.breadth.buyEvents, "buy", "buys")}${d.breadth.repeatAdds ? `, ${d.breadth.repeatAdds} repeat adds` : ""}.`);
   if (d.stats?.window24h) {

@@ -82,7 +82,7 @@ interface Setup {
   clock: { now: number };
 }
 
-async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean } = {}): Promise<Setup> {
+async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean } = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await fstore.ensureFomoSchema(db, "sqlite");
@@ -101,6 +101,8 @@ async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; 
         if (typeof a.ts === "number") a.ts += shift;
         if (typeof a.execTs === "number") a.execTs += shift;
       }
+      // One page, two minutes deep, with more said to exist: it cannot cover a day.
+      if (caps.feedCutShort) Object.assign(b, { hasMore: true, newestTs: clock.now - 60_000, oldestTs: clock.now - 120_000 });
       return json(b);
     }
     if (p.startsWith("/v2/thesis/token/")) return json(caps.theses ? caps.theses() : fixture("theses-token"));
@@ -648,8 +650,33 @@ describe("a board on one chain or every chain, as a room hears it", () => {
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
     const a = await port.ask({ text: "what are fomo traders buying?", chatId: GROUP });
     assert.ok(a && !a.deflect);
-    assert.match(a.text, /\nMost bought on Fomo in the last 24h: [A-Z0-9]+ on [a-z]+ \(\d+ buyers?\)/);
+    assert.match(a.text, /\nMost bought in the newest Fomo trades read: [A-Z0-9]+ on [a-z]+ \(\d+ buyers?\)/);
+    assert.doesNotMatch(a.text, /Most bought on Fomo in the last/, "never a window the one page read may not cover");
     sayable(a.text);
+  });
+
+  it("a chain-cut crowd answer keeps its limits line in a room: Fomo ignored the chain filter, never 'the provider'", async () => {
+    // The alerts page carries a Solana row on a chain=robinhood read.
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "what are fomo traders selling on robinhood?", chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.equal(s.calls.at(-1)!.args.chain, "robinhood");
+    assert.match(a.text, /Fomo ignored the chain filter; rows on other chains were removed\./, a.text);
+    assert.doesNotMatch(a.text, /\bprovider\b/i, a.text);
+    for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, `refused: ${l}`);
+  });
+
+  it("a whole-feed page that stops inside the window says its counts are a floor, in words a room keeps", async () => {
+    const cut = await setup({ feedCutShort: true });
+    const a = await createTgFomoPort(() => cut.broker, { now: () => cut.clock.now }).ask({ text: "what are fomo traders buying?", chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.match(a.text, /The feed's newest page does not reach back over the whole window; older trades are left out, so these counts are a floor\./, a.text);
+    sayable(a.text);
+    // A page that reaches back over the window (the fixture says no more exist) says nothing of the kind.
+    const whole = await setup();
+    const b = await createTgFomoPort(() => whole.broker, { now: () => whole.clock.now }).ask({ text: "what are fomo traders buying?", chatId: GROUP });
+    assert.doesNotMatch(b!.text, /newest page does not reach back/, b!.text);
   });
 
   it("her moves after a board with Solana on top start with the Robinhood Chain coins she can act on", async () => {
