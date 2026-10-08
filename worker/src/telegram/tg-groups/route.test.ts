@@ -211,6 +211,21 @@ describe("a row of the leaderboard, and ordinals that are never names", () => {
     assert.equal(rowIn("best trader ur tracking on fomo what's he holding"), undefined);
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who are the traders you're tracking on fomo")), { action: "chat" });
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who are the traders u r following")), { action: "chat" });
+    // Whichever Fomo read the model picks (review r4): never the feed's crowd, a board, small coins, a coin or one trader's profile.
+    for (const [pick, line] of [
+      [{ action: "fomo_crowd", side: "buy" }, "what coins are the watched traders buying on fomo"],
+      [{ action: "fomo_crowd" }, "the traders u follow, what are they buying on fomo?"],
+      [{ action: "fomo_crowd" }, "what are your traders buying on fomo?"],
+      [{ action: "fomo_small_coins" }, "what small coins are the tracked traders into"],
+      [{ action: "fomo_board", board: "trending" }, "what's trending among the traders you watch"],
+      [{ action: "fomo_trader", trader: "frankdegods" }, "is frankdegods one of the traders you watch on fomo?"],
+      [{ action: "fomo_trader", trader: "frankdegods" }, "is frankdegods one of the watched traders on fomo?"],
+      [{ action: "fomo_coin", coin: "PONS", aspect: "buyers" }, "are the watched traders buying $PONS"],
+    ] as Array<[Record<string, unknown>, string]>) assert.deepEqual(parseRoute(pick, ctxOf(line)), { action: "chat" }, line);
+    // The same picks on lines about the public feed or one trader stay research.
+    assert.deepEqual(parseRoute({ action: "fomo_crowd", side: "buy" }, ctxOf("what are fomo traders buying")), { action: "fomo", request: { kind: "crowd", side: "buy" } });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "frankdegods" }, ctxOf("is frankdegods any good on fomo")), { action: "fomo", request: { kind: "trader", handle: "frankdegods", about: "profile" } });
+    assert.deepEqual(parseRoute({ action: "fomo_about" }, ctxOf("what can you do with the traders you watch on fomo")), { action: "fomo", request: { kind: "about" } });
     assert.deepEqual(rowIn("who’s the top guy on fomo today, tell me about him"), { rank: 1, about: "profile" });
     for (const t of ["top traders today, what are they buying", "who's the best trader on fomo", "who's the top trader and what are people buying", "who's the top trader, is @unipcs on it"]) assert.equal(rowIn(t), undefined, t);
   });

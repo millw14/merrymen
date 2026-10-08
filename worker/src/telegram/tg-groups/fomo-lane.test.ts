@@ -686,6 +686,22 @@ describe("the router after review (2026-10-07)", () => {
   const replyToBot = (text: string, [id, quoted]: [number, string], over: Partial<TgMessage> = {}): TgMessage =>
     msg(text, { replyTo: { messageId: id, fromId: BOT.id, fromIsBot: true, text: quoted }, ...over });
 
+  it("a watch-list question the router reads as the crowd or one trader is never answered with the feed or a profile (review r4)", async () => {
+    make();
+    for (const [p, line] of [
+      [{ action: "fomo_crowd", side: "buy" }, "pine what coins are the watched traders buying on fomo"],
+      [{ action: "fomo_trader", trader: "frankdegods" }, "pine is frankdegods one of the watched traders on fomo?"],
+      [{ action: "fomo_crowd" }, "pine what are your traders buying on fomo?"],
+    ] as Array<[Record<string, unknown>, string]>) {
+      pick = p;
+      clock += 3 * MIN;
+      await said(msg(line, { fromId: ANN + Math.floor(clock / MIN) % 50 }));
+    }
+    assert.equal(routeCalls, 3, "each was routed");
+    assert.deepEqual(fomo!.asks.filter((a) => a.request), [], "no request reached the research");
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /on Fomo holds|Trending on Fomo|buyers/, t);
+  });
+
   it("banter never pays for a routing call", async () => {
     make();
     await said(msg("pine how was your weekend honestly"));

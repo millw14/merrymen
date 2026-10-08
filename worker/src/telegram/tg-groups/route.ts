@@ -441,8 +441,12 @@ const ROW_TRADES = /\b(?:buy|buys|buying|bought|sell|sells|selling|sold|trades|t
 const ROW_PROFILE = /\b(?:tell me (?:more )?about (?:him|her|them)|who (?:is|'s) (?:he|she)|(?:his|her) (?:profile|stats|track record|record))\b/u;
 const ROW_CROWD = /\b(?:people|traders|everyone|everybody|whales|wallets|others)\b/u;
 
-/** The trader(s) Merrymen watches ("the best trader we follow", "a watched trader"): a watch-list question, never a row of the public board. */
-const ROW_WATCHED = /\btraders? (?:that |who )?(?:we|you|u|ya)(?:'re| are| r|re)? (?:watch|watching|monitor|monitoring|track|tracking|follow|following)\b|\btraders? (?:that |who )?ur (?:watching|monitoring|tracking|following)\b|\b(?:watched|tracked|monitored) traders?\b/u;
+/**
+ * The trader(s) Merrymen watches ("the best trader we follow", "a watched
+ * trader", "your traders"): a watch-list question, never a row of the public
+ * board, the whole feed's crowd or one trader's profile (parseRoute).
+ */
+const ROW_WATCHED = /\btraders? (?:that |who )?(?:we|you|u|ya)(?:'re| are| r|re)? (?:watch|watching|monitor|monitoring|track|tracking|follow|following)\b|\btraders? (?:that |who )?ur (?:watching|monitoring|tracking|following)\b|\b(?:watched|tracked|monitored) traders?\b|\b(?:your|ur) (?:fomo )?traders\b/u;
 
 export function rowIn(text: unknown): TgBoardRow | undefined {
   const t = typeof text === "string" ? text.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'") : "";
@@ -475,13 +479,18 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
   // A complaint names no window or side of its own: its earlier question does.
   const line = [ctx?.line, ctx?.reaskOf].filter((t): t is string => typeof t === "string").join("\n");
   const fomo = (request: TgFomoRequest): TgRoute | null => (ctx.fomo ? { action: "fomo", request } : null);
+  // "Who are the traders you're tracking", "what are the watched traders buying", "is X one of the
+  // traders you watch": the watch list, never answered with the public board, the whole feed's crowd,
+  // small coins, a coin or one trader's profile, whichever Fomo read the model picks (review r4). The
+  // earlier question a complaint re-asks counts too: its watch-list intent is never lost. A tail is
+  // read by code from the line, and the capabilities line says nothing about who it watches.
+  if (action.startsWith("fomo_") && action !== "fomo_tail" && action !== "fomo_about" && ROW_WATCHED.test(line.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'"))) {
+    return { action: "chat" };
+  }
   switch (action) {
     case "chat":
       return { action: "chat" };
     case "fomo_leaderboard": {
-      // "Who are the traders you're tracking" is the watch list: never answered with the public board.
-      // The earlier question a complaint re-asks counts too: its watch-list intent is never lost.
-      if (ROW_WATCHED.test(line.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'"))) return { action: "chat" };
       const window = windowIn(line);
       // One row of it ("...and what did he make money on"), read from the line's words only.
       const row = rowIn(line);
