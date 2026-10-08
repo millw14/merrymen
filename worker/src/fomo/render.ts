@@ -715,11 +715,15 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
   const subject = d.token ? coin(d.token, d.label, audience) : d.trader ? trader(d.trader) : "this subject";
   const total = d.stance.supporting + d.stance.opposing + d.stance.neutral;
   if (total === 0) {
-    // AN EMPTY READ IS NOT "NONE" WHEN THE PROVIDER SAYS OTHERWISE: it marked
-    // the page not available, or it still counts theses on the coin (the AUTON
-    // incident, 2026-10-08: a room was told a coin with 4,190 theses had none).
-    const held = finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 && !env.coverage.requested.window ? env.coverage.providerTotal : null;
-    if (d.available === false || held !== null) {
+    // AN EMPTY READ IS NOT "NONE" WHEN THE PROVIDER SAYS OTHERWISE: its own
+    // page came back empty while it marked it not available, or still counts
+    // theses on the coin (the AUTON incident, 2026-10-08: a room was told a
+    // coin with 4,190 theses had none). Only the provider's page itself
+    // (pageRows): rows filtered off here (another chain's) are "none", said as
+    // before, and only a coin's own read quotes its count; a trader's route
+    // total is not per trader and coin (review on #306).
+    const held = !d.trader && finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 && !env.coverage.requested.window ? env.coverage.providerTotal : null;
+    if (d.pageRows === 0 && (d.available === false || held !== null)) {
       const count = held !== null ? ` (it lists ${held.toLocaleString("en-US")})` : "";
       const line = `The provider didn't return the theses on ${subject} just now${count}. Ask me again in a minute.`;
       return [audience === "group" ? roomNote(line) : line];

@@ -1533,6 +1533,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       cls: "theses",
       call: (c) => c.thesesByUser(userId, { limit }),
       revive: R.theses,
+      // A trader's empty page is as short-lived as a coin's (review on #306).
+      empty: (d) => d.rows.length === 0,
     }),
     thesesByUserToken: (userId: string, t: TokenIdentity, limit: number): ReadSpec<ThesesPage> => ({
       name: "theses",
@@ -1541,6 +1543,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       cls: "theses",
       call: (c) => c.thesesByUserToken(userId, t.address, { limit }),
       revive: R.theses,
+      empty: (d) => d.rows.length === 0,
     }),
     tokenStats: (t: TokenIdentity): ReadSpec<TokenStats> => {
       const networkId = isRobinhoodToken(t) ? ROBINHOOD_NETWORK_ID : undefined;
@@ -2315,7 +2318,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       cls: "theses",
       mode: args.freshness,
       subject,
-      data: { token, label, trader, theses: shownViews, stance: tv.stance, families: tv.families, uniqueAuthors: tv.authors, chainFilterHonoured: honoured, available: page?.available ?? null },
+      data: { token, label, trader, theses: shownViews, stance: tv.stance, families: tv.families, uniqueAuthors: tv.authors, chainFilterHonoured: honoured, available: page?.available ?? null, pageRows: page ? page.rows.length : null },
       rows: rows.length,
       essential: [section],
     });

@@ -178,10 +178,13 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   read), and never when the asker pushed back ("there has to be thesis",
   "check again"). A pushback is carried as its own flag (`BrokerCallOptions.retryEmpty`
   to `ChargeContext.retryEmpty`), never as a forced refresh: a copy with something in it
-  keeps its window, a room's two hours included (D8). An empty page the provider marks not
-  available, or one under a count it still holds, is said as "Fomo didn't return the
-  theses on X just now (it lists N). Ask me again in a minute.", never "no theses"; an
-  empty page is logged by its shape only (available, count, source, served from).
+  keeps its window, a room's two hours included (D8). A page the provider itself answers
+  empty (`pageRows: 0`) while marking it not available, or under a count it still holds
+  for the coin, is said as "Fomo didn't return the
+  theses on X just now (it lists N). Ask me again in a minute.", never "no theses"; rows
+  Merrymen filtered off (another chain's) are "none" as before, and a trader's read never
+  quotes the coin's count. An empty page is logged by its shape only (available, count,
+  source, served from).
   **A Telegram group reads differently** (decisions D7 and D8, 2026-10-07;
   `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses
   for 2 h, the trader board for 1 h and coin boards for 15 min (the other classes keep

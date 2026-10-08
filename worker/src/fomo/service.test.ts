@@ -2110,6 +2110,28 @@ describe("a held empty thesis page (review on #306)", () => {
     assert.equal(env.freshness.servedFrom, "live");
   });
 
+  it("a trader's empty thesis page is read again after two minutes, like a coin's; pageRows says the provider's page was empty", async () => {
+    const h = await harness();
+    h.routes.set("thesis-user", () => json({ theses: [], available: false }, 200, { "x-credits-cost": "1250" }));
+    const dm = { surface: "telegram-dm" as const };
+    const first = await h.invoke<TokenThesesData>("fomo_get_token_theses", { trader: KALEO }, dm);
+    assert.equal(h.count("/v2/thesis/user/"), 1);
+    assert.equal(first.data?.pageRows, 0);
+    assert.equal(first.data?.available, false);
+    h.clock.now += 11 * 60_000;
+    await h.invoke<TokenThesesData>("fomo_get_token_theses", { trader: KALEO }, dm);
+    assert.equal(h.count("/v2/thesis/user/"), 2, "never kept for the theses class's 30 minutes");
+    // The trader-and-coin route too.
+    await h.invoke("fomo_get_token_theses", { trader: KALEO, token: PONS, chain: "robinhood" }, dm);
+    h.clock.now += 3 * 60_000;
+    await h.invoke("fomo_get_token_theses", { trader: KALEO, token: PONS, chain: "robinhood" }, dm);
+    assert.equal(h.count("/v2/thesis/user/"), 4);
+    // A page with rows reports them before any filter.
+    const full = await harness();
+    const env = await full.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(env.data?.pageRows, 3);
+  });
+
   it("an empty first page under a count is never expanded to a multi-page read", async () => {
     const h = await harness();
     h.routes.set("thesis-token", () => json({ theses: [], available: false, totalAvailable: 4190 }, 200, { "x-credits-cost": "1250" }));

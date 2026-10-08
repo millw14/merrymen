@@ -410,6 +410,13 @@ export interface TokenThesesData {
   chainFilterHonoured: boolean | null;
   /** The provider's own "available" flag on the page: false means it had nothing ready, not that there is nothing. */
   available?: boolean | null;
+  /**
+   * How many rows the provider's own page held, before Merrymen's chain,
+   * author and window filters; null when no page was read. 0 is the
+   * provider answering "nothing here"; rows filtered off here are not that
+   * (render.ts says "didn't return just now" only for the former).
+   */
+  pageRows?: number | null;
 }
 
 export interface CohortActor {
