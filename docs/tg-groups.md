@@ -485,9 +485,10 @@ one-liner from a model that was given no data.
   that board as a fixed request, and the desk's market read answers instead
   when Fomo cannot (the room's research answers spent, a read past 12 s, a
   budget refusal, research unavailable or failed, nothing sayable), inside
-  the same 30 s deadline, with nothing of Fomo's said. A venue word keeps it
-  on the desk: "what's trending on robinhood chain", "what's trending in the
-  market";
+  the same 30 s deadline, with nothing of Fomo's said. Fomo's board covers
+  every chain; one the line names ("what's trending on solana", "on base")
+  cuts it to that chain (`chainIn`). A venue word keeps it on the desk:
+  "what's trending on robinhood chain", "what's trending in the market";
 * a bare "do a quick analysis" — bound to the coin it replies
   under, else a desk ask up the reply chain, else what this topic last asked
   within 15 minutes, else the market. A specific entry, stop, target or other

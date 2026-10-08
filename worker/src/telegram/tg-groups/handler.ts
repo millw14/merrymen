@@ -143,7 +143,7 @@ import type {
   TgTailAsk,
   TgTraderAbout,
 } from "./types";
-import { readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
+import { chainIn, readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
 import { readSubject, type SubjectReading } from "./understand";
 import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
@@ -2348,8 +2348,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // below, inside the same deadline (decision D1, 2026-10-07).
       let trendingFellBack = false;
       if (j.fomo === true && !tailAsk && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
+        // Every chain, unless the line names one ("what's trending on solana"):
+        // then that chain's slice of the board (Milla, 2026-10-07).
+        const onChain = j.trending === true ? chainIn(j.line.text) : undefined;
         const r = j.trending === true
-          ? await fomoAnswer(chatId, j, replyOpts, { kind: "board", board: "trending" }, { fallback: true })
+          ? await fomoAnswer(chatId, j, replyOpts, { kind: "board", board: "trending", ...(onChain ? { chain: onChain } : {}) }, { fallback: true })
           : await fomoAnswer(chatId, j, replyOpts);
         if (r === "sent") return null;
         if (r !== "not-research") {
